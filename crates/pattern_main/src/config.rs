@@ -510,7 +510,7 @@ fn default_routine_model() -> String {
 }
 
 fn default_interactive_model() -> String {
-    "claude-3-5-sonnet-20241022".to_string()
+    "claude-3-7-sonnet-latest".to_string()
 }
 
 fn default_investigative_model() -> String {

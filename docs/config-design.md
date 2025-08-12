@@ -125,7 +125,7 @@ permission = "read_only"
 
 [model]
 provider = "anthropic"
-model = "claude-3-5-sonnet-20241022"
+model = "claude-3-7-sonnet-latest"
 temperature = 0.7
 
 [database]

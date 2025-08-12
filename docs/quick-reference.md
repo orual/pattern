@@ -272,11 +272,11 @@ token = "YOUR_TOKEN"
 prefix = "!"
 
 [models]
-default = "claude-3-5-sonnet-latest"
+default = "claude-3-7-sonnet-latest"
 
 [models.mapping] # need to re-add this with the new system
 routine = "claude-3-5-haiku-latest"
-interactive = "claude-3-5-sonnet-latest"
+interactive = "claude-3-7-sonnet-latest"
 
 [embedding]
 provider = "candle"  # or "openai", "cohere"

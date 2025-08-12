@@ -102,7 +102,7 @@ impl Default for Config {
                 default_model: "claude-3-haiku-20240307".to_string(),
                 tiers: ModelTiers {
                     routine: "claude-3-haiku-20240307".to_string(),
-                    interactive: "claude-3-5-sonnet-20241022".to_string(),
+                    interactive: "claude-3-7-sonnet-latest".to_string(),
                     investigative: "gpt-4".to_string(),
                     critical: "claude-3-opus-20240229".to_string(),
                 },

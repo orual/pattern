@@ -5,8 +5,8 @@ use crate::{
     error::{AgentError, Result},
 };
 use letta::{
-    types::LettaMessageUnion, Block, CreateAgentRequest, CreateMessagesRequest, LettaClient,
-    MessageCreate,
+    Block, CreateAgentRequest, CreateMessagesRequest, LettaClient, MessageCreate,
+    types::LettaMessageUnion,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -423,7 +423,7 @@ impl MultiAgentSystem {
             "anthropic/claude-3-opus-20240229",
             "anthropic/claude-3-sonnet-20240229",
             "anthropic/claude-3-haiku-20240307",
-            "anthropic/claude-3-5-sonnet-20241022",
+            "anthropic/claude-3-7-sonnet-latest",
             // Google models
             "google_ai/gemini-2.0-flash-exp",
             "google_ai/gemini-1.5-pro",
@@ -882,10 +882,13 @@ impl MultiAgentSystem {
             Block::persona(&Self::build_persona(config)),
             Block::human(&format!("User {} from Discord", user_id.0)),
             // Core memories for conversation context
-            letta::types::Block::new("core_memory", format!(
-                "Agent: {}\nDescription: {}\nShared Memory Access: current_state, active_context, bond_evolution",
-                config.name, config.description
-            )),
+            letta::types::Block::new(
+                "core_memory",
+                format!(
+                    "Agent: {}\nDescription: {}\nShared Memory Access: current_state, active_context, bond_evolution",
+                    config.name, config.description
+                ),
+            ),
         ];
 
         // Add shared memory blocks as context
@@ -1080,10 +1083,13 @@ impl MultiAgentSystem {
             Block::persona(&Self::build_persona(config)),
             Block::human(&format!("User {} from Discord", user_id.0)),
             // Core memories for conversation context
-            letta::types::Block::new("core_memory", format!(
-                "Agent: {}\nDescription: {}\nShared Memory Access: current_state, active_context, bond_evolution",
-                config.name, config.description
-            )),
+            letta::types::Block::new(
+                "core_memory",
+                format!(
+                    "Agent: {}\nDescription: {}\nShared Memory Access: current_state, active_context, bond_evolution",
+                    config.name, config.description
+                ),
+            ),
         ];
 
         // Add shared memory blocks as context
@@ -2388,9 +2394,11 @@ mod tests {
 
         assert_eq!(system.agent_configs().len(), 1);
         assert_eq!(system.memory_configs().len(), 1);
-        assert!(system
-            .agent_configs()
-            .contains_key(&AgentType::Entropy.id()));
+        assert!(
+            system
+                .agent_configs()
+                .contains_key(&AgentType::Entropy.id())
+        );
     }
 
     #[tokio::test]

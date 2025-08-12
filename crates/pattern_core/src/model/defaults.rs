@@ -148,7 +148,7 @@ fn init_defaults() -> HashMap<&'static str, ModelDefaults> {
     );
 
     defaults.insert(
-        "claude-3-5-sonnet-20241022",
+        "claude-3-7-sonnet-latest",
         ModelDefaults {
             context_window: 200_000,
             max_output_tokens: Some(8_192),
