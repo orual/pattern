@@ -1,0 +1,59 @@
+[package]
+name = "pattern_db"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SQLite storage backend for Pattern"
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true }
+
+# Database - bundled SQLite for consistent builds and extension support
+# The "sqlite" feature bundles SQLite; "sqlite-unbundled" would use system lib
+sqlx = { version = "0.8", features = [
+    "runtime-tokio",
+    "sqlite",
+    "migrate",
+    "json",
+    "chrono",
+] }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+miette = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Utilities
+chrono = { workspace = true, features = ["serde"] }
+uuid = { workspace = true }
+
+# Loro for CRDT memory blocks
+loro = "1.6"
+
+# Vector search extension - bundles C source, compiles via cc
+sqlite-vec = "0.1.7-alpha.2"
+
+# Pin to match sqlx's bundled sqlite (linkage is semver-exempt per sqlx docs)
+# Required for sqlite3_auto_extension to register sqlite-vec globally
+libsqlite3-sys = "=0.30.1"
+
+# For efficient vector serialization (zero-copy f32 slices to bytes)
+zerocopy = { version = "0.8", features = ["derive"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tempfile = "3"
+
+[features]
+default = ["vector-search"]
+# Enable sqlite-vec for vector search
+vector-search = []

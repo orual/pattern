@@ -1,0 +1,4 @@
+# Development database for sqlx prepare
+dev.db
+dev.db-shm
+dev.db-wal

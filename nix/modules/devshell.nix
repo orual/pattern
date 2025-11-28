@@ -24,6 +24,7 @@
 
           config.pre-commit.devShell # See ./nix/modules/pre-commit.nix
         ];
+        DATABASE_URL = "sqlite:crates/pattern_db/dev.db";
         packages = with pkgsWithUnfree; [
           just
           nixd # Nix language server
@@ -36,6 +37,7 @@
           jujutsu
           git
           gh
+          sqlx-cli
         ];
       };
     };
