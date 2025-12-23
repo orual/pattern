@@ -889,6 +889,109 @@ Architecture:
 - Could add `--auto-vacuum` flag for background maintenance mode
 - SQLite's auto_vacuum pragma is an option but has tradeoffs
 
+## Memory Block Delta Storage (Detailed Design)
+
+### Overview
+
+Incremental update storage for memory blocks to reduce write amplification. The DB layer (pattern_db) stores deltas and provides query primitives; the application layer (pattern_core) handles Loro operations and in-memory caching.
+
+**Key principle**: pattern_db remains Loro-agnostic. It stores blobs and provides efficient "updates since X" queries. pattern_core owns deserialization, merging, and in-memory caching of hot blocks.
+
+### Data Flow
+
+**Write path**:
+1. pattern_core applies update to in-memory Loro doc
+2. Extracts delta blob from Loro
+3. Calls `store_update(block_id, delta, source)`
+4. pattern_db assigns next seq, persists update
+
+**Read path** (cache miss):
+1. `get_checkpoint_and_updates(block_id)` returns checkpoint + all pending updates
+2. pattern_core deserializes checkpoint, applies updates in seq order
+3. Caches result keyed by block_id
+
+**Read path** (cache hit):
+1. `get_updates_since(block_id, last_seq)` returns new updates only
+2. Apply to cached doc, update last_seq
+
+### Schema (replaces basic sketch in Memory Tables section)
+
+**New table** - `memory_block_updates`:
+
+```sql
+CREATE TABLE memory_block_updates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    block_id TEXT NOT NULL REFERENCES memory_blocks(id) ON DELETE CASCADE,
+    seq INTEGER NOT NULL,
+    update_blob BLOB NOT NULL,
+    byte_size INTEGER NOT NULL,
+    source TEXT,  -- 'agent', 'sync', 'migration', 'manual'
+    created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX idx_updates_block_seq ON memory_block_updates(block_id, seq);
+```
+
+**Additions to `memory_blocks`**:
+
+```sql
+ALTER TABLE memory_blocks ADD COLUMN frontier BLOB;
+ALTER TABLE memory_blocks ADD COLUMN last_seq INTEGER NOT NULL DEFAULT 0;
+```
+
+**Additions to `memory_block_checkpoints`**:
+
+```sql
+ALTER TABLE memory_block_checkpoints ADD COLUMN frontier BLOB;
+```
+
+### Query API (pattern_db)
+
+```rust
+// Store a new update, returns assigned seq
+async fn store_update(pool, block_id, update_blob, source) -> DbResult<i64>;
+
+// Get checkpoint + all pending updates for reconstruction
+async fn get_checkpoint_and_updates(pool, block_id) -> DbResult<(Option<Checkpoint>, Vec<Update>)>;
+
+// Get only updates after a given seq (for cache refresh)
+async fn get_updates_since(pool, block_id, after_seq) -> DbResult<Vec<Update>>;
+
+// Check if updates exist without fetching them
+async fn has_updates_since(pool, block_id, after_seq) -> DbResult<bool>;
+
+// Atomic consolidation: delete updates, store new checkpoint
+async fn consolidate_checkpoint(pool, block_id, new_snapshot, new_frontier, up_to_seq) -> DbResult<()>;
+
+// Stats for consolidation decisions
+async fn get_pending_update_stats(pool, block_id) -> DbResult<UpdateStats>;  // count, total_bytes
+```
+
+### Edge Cases & Considerations
+
+**Concurrent writes**: SQLite's single-writer model handles this. `seq` assignment is atomic via `last_seq` update in same transaction as insert.
+
+**Crash recovery**: Updates are durable once `store_update` returns. Worst case: checkpoint is stale, but updates rebuild correct state.
+
+**Consolidation race**: `consolidate_checkpoint` uses `up_to_seq` to only delete updates that were actually merged. New updates arriving during merge are preserved.
+
+**Empty state**: New blocks start with `last_seq = 0`, no checkpoint. First write can be either a full snapshot (checkpoint) or an update—pattern_core decides.
+
+**Orphaned updates**: `ON DELETE CASCADE` cleans up updates when block is deleted.
+
+**Multi-writer**: Rare case (shared blocks). Loro handles merge conflicts; DB just stores the deltas from each writer with their own seqs.
+
+### Out of Scope (for pattern_db)
+
+- **Update compression**: Store raw deltas; Loro's format is already compact.
+- **Automatic consolidation triggers**: pattern_core owns policy; DB just provides primitives.
+- **In-memory caching**: Lives in pattern_core, not pattern_db.
+
+### Migration Path
+
+1. Add migration `0004_memory_updates.sql` with new table and column additions
+2. Existing blocks have `frontier = NULL`, `last_seq = 0` (no pending updates)
+3. No data migration needed—existing `loro_snapshot` remains valid as checkpoint
+
 ## Remaining Open Questions
 
 1. **Default local embedding model** - Which specific model to bundle/recommend?

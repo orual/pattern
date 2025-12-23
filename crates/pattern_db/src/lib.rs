@@ -19,8 +19,10 @@
 
 pub mod connection;
 pub mod error;
+pub mod fts;
 pub mod models;
 pub mod queries;
+pub mod search;
 pub mod vector;
 
 pub use connection::ConstellationDb;
@@ -32,6 +34,15 @@ pub use vector::{
     verify_sqlite_vec,
 };
 
+// Re-export FTS module types
+pub use fts::{FtsContentType, FtsMatch, FtsSearchResult, FtsStats};
+
+// Re-export hybrid search types
+pub use search::{
+    ContentFilter, FusionMethod, HybridSearchBuilder, ScoreBreakdown, SearchContentType,
+    SearchMode, SearchResult,
+};
+
 // Re-export key model types for convenience
 pub use models::{
     // Coordination models
@@ -39,6 +50,8 @@ pub use models::{
     ActivityEventType,
     // Agent models
     Agent,
+    // Source models
+    AgentDataSource,
     AgentGroup,
     AgentStatus,
     AgentSummary,
@@ -49,10 +62,24 @@ pub use models::{
     ConstellationSummary,
     CoordinationState,
     CoordinationTask,
+    DataSource,
+    // Migration models
+    EntityImport,
+    // Event models
+    Event,
     EventImportance,
+    EventOccurrence,
+    // Folder models
+    FilePassage,
+    Folder,
+    FolderAccess,
+    FolderAttachment,
+    FolderFile,
+    FolderPathType,
     GroupMember,
     GroupMemberRole,
     HandoffNote,
+    IssueSeverity,
     MemoryBlock,
     MemoryBlockCheckpoint,
     MemoryBlockType,
@@ -62,9 +89,23 @@ pub use models::{
     Message,
     MessageRole,
     MessageSummary,
+    MigrationAudit,
+    MigrationIssue,
+    MigrationLog,
+    MigrationStats,
+    ModelRoutingConfig,
+    ModelRoutingRule,
     NotableEvent,
+    OccurrenceStatus,
     PatternType,
+    RoutingCondition,
     SharedBlockAttachment,
+    SourceType,
+    // Task models (ADHD)
+    Task,
     TaskPriority,
     TaskStatus,
+    TaskSummary,
+    UserTaskPriority,
+    UserTaskStatus,
 };

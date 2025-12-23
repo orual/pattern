@@ -246,13 +246,15 @@ pub async fn get_archive_summary(pool: &SqlitePool, id: &str) -> DbResult<Option
     let summary = sqlx::query_as!(
         ArchiveSummary,
         r#"
-        SELECT 
+        SELECT
             id as "id!",
             agent_id as "agent_id!",
             summary as "summary!",
             start_position as "start_position!",
             end_position as "end_position!",
             message_count as "message_count!",
+            previous_summary_id,
+            depth as "depth!",
             created_at as "created_at!: _"
         FROM archive_summaries WHERE id = ?
         "#,
@@ -271,13 +273,15 @@ pub async fn get_archive_summaries(
     let summaries = sqlx::query_as!(
         ArchiveSummary,
         r#"
-        SELECT 
+        SELECT
             id as "id!",
             agent_id as "agent_id!",
             summary as "summary!",
             start_position as "start_position!",
             end_position as "end_position!",
             message_count as "message_count!",
+            previous_summary_id,
+            depth as "depth!",
             created_at as "created_at!: _"
         FROM archive_summaries WHERE agent_id = ? ORDER BY start_position
         "#,
@@ -292,8 +296,8 @@ pub async fn get_archive_summaries(
 pub async fn create_archive_summary(pool: &SqlitePool, summary: &ArchiveSummary) -> DbResult<()> {
     sqlx::query!(
         r#"
-        INSERT INTO archive_summaries (id, agent_id, summary, start_position, end_position, message_count, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO archive_summaries (id, agent_id, summary, start_position, end_position, message_count, previous_summary_id, depth, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
         summary.id,
         summary.agent_id,
@@ -301,6 +305,8 @@ pub async fn create_archive_summary(pool: &SqlitePool, summary: &ArchiveSummary)
         summary.start_position,
         summary.end_position,
         summary.message_count,
+        summary.previous_summary_id,
+        summary.depth,
         summary.created_at,
     )
     .execute(pool)

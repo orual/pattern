@@ -50,6 +50,12 @@ pub struct MemoryBlock {
     /// Whether this block is active (false = soft deleted)
     pub is_active: bool,
 
+    /// Loro frontier for version tracking (serialized)
+    pub frontier: Option<Vec<u8>>,
+
+    /// Last assigned sequence number for updates
+    pub last_seq: i64,
+
     /// Creation timestamp
     pub created_at: DateTime<Utc>,
 
@@ -228,6 +234,9 @@ pub struct MemoryBlockCheckpoint {
 
     /// How many updates were consolidated into this checkpoint
     pub updates_consolidated: i64,
+
+    /// Loro frontier at this checkpoint (for version tracking)
+    pub frontier: Option<Vec<u8>>,
 }
 
 /// An archival memory entry.
@@ -272,4 +281,75 @@ pub struct SharedBlockAttachment {
 
     /// When the attachment was created
     pub attached_at: DateTime<Utc>,
+}
+
+/// An incremental update to a memory block.
+///
+/// Updates are Loro deltas stored between checkpoints. On read, the checkpoint
+/// is loaded and updates are applied in seq order to reconstruct current state.
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct MemoryBlockUpdate {
+    /// Auto-incrementing ID
+    pub id: i64,
+
+    /// Block this update belongs to
+    pub block_id: String,
+
+    /// Sequence number within the block (monotonically increasing)
+    pub seq: i64,
+
+    /// Loro update blob (delta)
+    pub update_blob: Vec<u8>,
+
+    /// Size of update_blob in bytes (for consolidation decisions)
+    pub byte_size: i64,
+
+    /// Source of this update
+    pub source: Option<String>,
+
+    /// When this update was created
+    pub created_at: DateTime<Utc>,
+}
+
+/// Update source types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateSource {
+    /// Update from agent action
+    Agent,
+    /// Update from sync with another instance
+    Sync,
+    /// Update from v1->v2 migration
+    Migration,
+    /// Manual update (user/admin)
+    Manual,
+}
+
+impl UpdateSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Sync => "sync",
+            Self::Migration => "migration",
+            Self::Manual => "manual",
+        }
+    }
+}
+
+impl std::fmt::Display for UpdateSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// Statistics about pending updates for a block.
+///
+/// Used for consolidation decisions (e.g., consolidate when count > N or bytes > M).
+#[derive(Debug, Clone, Default)]
+pub struct UpdateStats {
+    /// Number of pending updates
+    pub count: i64,
+    /// Total bytes of all pending updates
+    pub total_bytes: i64,
+    /// Highest seq number (or 0 if no updates)
+    pub max_seq: i64,
 }

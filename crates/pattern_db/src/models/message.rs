@@ -94,6 +94,9 @@ impl std::fmt::Display for MessageRole {
 /// When conversation history grows too long, older messages are compressed
 /// into summaries. The original messages are marked as archived but retained
 /// for search and history purposes.
+///
+/// Summaries can be chained: when multiple summaries accumulate, they can be
+/// summarized again into a higher-level summary (summary of summaries).
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct ArchiveSummary {
     /// Unique identifier
@@ -113,6 +116,14 @@ pub struct ArchiveSummary {
 
     /// Number of messages summarized
     pub message_count: i64,
+
+    /// Previous summary this one extends (for chaining)
+    /// When summarizing summaries, this links to the prior summary
+    /// that was incorporated into this one.
+    pub previous_summary_id: Option<String>,
+
+    /// Depth of summary chain (0 = direct message summary, 1+ = summary of summaries)
+    pub depth: i64,
 
     /// Creation timestamp
     pub created_at: DateTime<Utc>,

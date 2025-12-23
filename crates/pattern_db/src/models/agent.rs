@@ -5,6 +5,104 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use sqlx::types::Json;
 
+// ============================================================================
+// Model Routing Configuration
+// ============================================================================
+
+/// Configuration for dynamic model routing.
+///
+/// Allows agents to switch between models from the same provider
+/// based on rules (cost, latency, capability requirements).
+/// Stored as JSON in the agent's config field.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModelRoutingConfig {
+    /// Fallback models to try if primary fails (in order of preference)
+    #[serde(default)]
+    pub fallback_models: Vec<String>,
+
+    /// Rules for dynamic model selection
+    #[serde(default)]
+    pub rules: Vec<ModelRoutingRule>,
+
+    /// Whether to allow automatic fallback on rate limits
+    #[serde(default = "default_true")]
+    pub fallback_on_rate_limit: bool,
+
+    /// Whether to allow automatic fallback on context length exceeded
+    #[serde(default = "default_true")]
+    pub fallback_on_context_overflow: bool,
+
+    /// Maximum retries before giving up
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_max_retries() -> u32 {
+    2
+}
+
+/// A rule for selecting which model to use.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelRoutingRule {
+    /// Condition that triggers this rule
+    pub condition: RoutingCondition,
+
+    /// Model to use when condition matches
+    pub model: String,
+
+    /// Optional: override other settings when this rule matches
+    pub temperature_override: Option<f32>,
+    pub max_tokens_override: Option<u32>,
+}
+
+/// Conditions for model routing rules.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RoutingCondition {
+    /// Use this model when estimated cost exceeds threshold
+    CostThreshold {
+        /// Maximum cost in USD before switching
+        max_usd: f32,
+    },
+
+    /// Use this model when context length exceeds threshold
+    ContextLength {
+        /// Minimum tokens to trigger this rule
+        min_tokens: u32,
+    },
+
+    /// Use this model for specific tool calls
+    ToolCall {
+        /// Tool names that trigger this rule
+        tools: Vec<String>,
+    },
+
+    /// Use this model during specific time windows (e.g., off-peak for expensive models)
+    TimeWindow {
+        /// Start hour (0-23, UTC)
+        start_hour: u8,
+        /// End hour (0-23, UTC)
+        end_hour: u8,
+    },
+
+    /// Use this model for specific source types
+    Source {
+        /// Source types that trigger this rule
+        sources: Vec<String>,
+    },
+
+    /// Always use this model (useful as a catch-all)
+    Always,
+}
+
+// ============================================================================
+// Agent Models
+// ============================================================================
+
 /// An agent in the constellation.
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct Agent {

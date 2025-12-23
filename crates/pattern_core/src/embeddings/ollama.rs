@@ -157,6 +157,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires running ollama server with all-minilm model"]
     async fn test_ollama_embed() {
         let embedder = OllamaEmbedder::new(
             "all-minilm".to_string(),
@@ -172,6 +173,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ollama_empty_input() {
+        // This test doesn't need a server - it fails before making the request
         let embedder = OllamaEmbedder::new(
             "all-minilm".to_string(),
             "http://localhost:11434".to_string(),
