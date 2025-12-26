@@ -67,10 +67,14 @@ description = "Domain-specific knowledge"
 # config_path = "agents/specialist.toml"  # Load agent config from file
 
 [model]
-provider = "Gemini" # Options: Anthropic, OpenAI, Gemini, Groq, Cohere, Xai, Ollama, DeepSeek
+provider = "Gemini" # Options: Anthropic, OpenAI, OpenRouter, Gemini, Groq, Cohere, Xai, Ollama, DeepSeek
 # Optional: Specify a particular model
 # model = "gemini-2.5-flash"
 # temperature = 0.7
+
+# OpenRouter example
+# provider = "OpenRouter"
+# model = "anthropic/claude-3-opus"  # Use provider/model format for OpenRouter
 
 [database]
 # Uses embedded SQLite by default

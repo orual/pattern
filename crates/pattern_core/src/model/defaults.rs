@@ -611,6 +611,357 @@ fn apply_provider_defaults(model_info: &mut ModelInfo) {
     let provider_lower = model_info.provider.to_lowercase();
 
     match provider_lower.as_str() {
+        "openrouter" => {
+            // OpenRouter models use provider/model format (e.g., "anthropic/claude-3-opus")
+            // Try to extract the underlying provider and model for better defaults
+            // Data sourced from OpenRouter API: https://openrouter.ai/api/v1/models
+            if let Some(slash_idx) = model_info.id.find('/') {
+                let underlying_provider = &model_info.id[..slash_idx];
+                let underlying_model = &model_info.id[slash_idx + 1..];
+
+                // Apply defaults based on underlying provider
+                match underlying_provider.to_lowercase().as_str() {
+                    "anthropic" => {
+                        // Base Claude defaults (claude-3-opus, claude-3-haiku)
+                        model_info.context_window = 200_000;
+                        model_info.max_output_tokens = Some(4_096);
+                        model_info.capabilities = vec![
+                            ModelCapability::TextGeneration,
+                            ModelCapability::FunctionCalling,
+                            ModelCapability::SystemPrompt,
+                            ModelCapability::VisionInput,
+                            ModelCapability::LongContext,
+                        ];
+
+                        // Claude 4.x series - sonnet/opus variants have different contexts
+                        if underlying_model.contains("sonnet-4.5")
+                            || underlying_model.contains("sonnet-4")
+                        {
+                            // claude-sonnet-4.5 and claude-sonnet-4 have 1M context
+                            model_info.context_window = 1_000_000;
+                            model_info.max_output_tokens = Some(64_000);
+                            model_info
+                                .capabilities
+                                .push(ModelCapability::ExtendedThinking);
+                            model_info.capabilities.push(ModelCapability::ComputerUse);
+                            model_info.capabilities.push(ModelCapability::TextEdit);
+                            model_info.capabilities.push(ModelCapability::CodeExecution);
+                        } else if underlying_model.contains("opus-4.5")
+                            || underlying_model.contains("opus-4")
+                        {
+                            // claude-opus-4.5 and claude-opus-4 have 200k context, 32k output
+                            model_info.context_window = 200_000;
+                            model_info.max_output_tokens = Some(32_000);
+                            model_info
+                                .capabilities
+                                .push(ModelCapability::ExtendedThinking);
+                            model_info.capabilities.push(ModelCapability::ComputerUse);
+                            model_info.capabilities.push(ModelCapability::TextEdit);
+                            model_info.capabilities.push(ModelCapability::CodeExecution);
+                        } else if underlying_model.contains("haiku-4.5") {
+                            // claude-haiku-4.5 has 200k context, 64k output
+                            model_info.context_window = 200_000;
+                            model_info.max_output_tokens = Some(64_000);
+                            model_info
+                                .capabilities
+                                .push(ModelCapability::ExtendedThinking);
+                            model_info.capabilities.push(ModelCapability::ComputerUse);
+                            model_info.capabilities.push(ModelCapability::TextEdit);
+                            model_info.capabilities.push(ModelCapability::CodeExecution);
+                        } else if underlying_model.contains("claude-3.7-sonnet")
+                            || underlying_model.contains("3.7-sonnet")
+                        {
+                            // claude-3.7-sonnet has 200k context, 64k output
+                            model_info.context_window = 200_000;
+                            model_info.max_output_tokens = Some(64_000);
+                            model_info
+                                .capabilities
+                                .push(ModelCapability::ExtendedThinking);
+                            model_info.capabilities.push(ModelCapability::ComputerUse);
+                            model_info.capabilities.push(ModelCapability::TextEdit);
+                        } else if underlying_model.contains("claude-3.5-sonnet")
+                            || underlying_model.contains("3.5-sonnet")
+                        {
+                            // claude-3.5-sonnet has 200k context, 8192 output
+                            model_info.context_window = 200_000;
+                            model_info.max_output_tokens = Some(8_192);
+                        } else if underlying_model.contains("claude-3.5-haiku")
+                            || underlying_model.contains("3.5-haiku")
+                        {
+                            // claude-3.5-haiku has 200k context, 8192 output
+                            model_info.context_window = 200_000;
+                            model_info.max_output_tokens = Some(8_192);
+                        }
+                        // claude-3-opus, claude-3-sonnet, claude-3-haiku keep base defaults (200k/4096)
+                    }
+                    "openai" => {
+                        // Base OpenAI defaults
+                        model_info.context_window = 128_000;
+                        model_info.max_output_tokens = Some(4_096);
+                        model_info.capabilities = vec![
+                            ModelCapability::TextGeneration,
+                            ModelCapability::FunctionCalling,
+                            ModelCapability::SystemPrompt,
+                            ModelCapability::VisionInput,
+                            ModelCapability::LongContext,
+                            ModelCapability::JsonMode,
+                        ];
+
+                        if underlying_model.starts_with("o1")
+                            || underlying_model.starts_with("o3")
+                            || underlying_model.starts_with("o4")
+                        {
+                            // o1/o3/o4 reasoning models: 200k context, 100k output
+                            model_info.context_window = 200_000;
+                            model_info.max_output_tokens = Some(100_000);
+                            model_info
+                                .capabilities
+                                .push(ModelCapability::ExtendedThinking);
+                        } else if underlying_model.contains("gpt-4o") {
+                            // gpt-4o variants: 128k context, 16384 output
+                            model_info.context_window = 128_000;
+                            model_info.max_output_tokens = Some(16_384);
+                            if underlying_model.contains(":extended") {
+                                model_info.max_output_tokens = Some(64_000);
+                            }
+                        } else if underlying_model.contains("gpt-4-turbo") {
+                            // gpt-4-turbo: 128k context, 4096 output
+                            model_info.context_window = 128_000;
+                            model_info.max_output_tokens = Some(4_096);
+                        } else if underlying_model == "gpt-4" {
+                            // gpt-4 base: 8191 context, 4096 output, no vision
+                            model_info.context_window = 8_191;
+                            model_info.max_output_tokens = Some(4_096);
+                            model_info.capabilities = vec![
+                                ModelCapability::TextGeneration,
+                                ModelCapability::FunctionCalling,
+                                ModelCapability::SystemPrompt,
+                                ModelCapability::JsonMode,
+                            ];
+                        } else if underlying_model.contains("gpt-5") {
+                            // gpt-5 variants: 400k context (chat variants 128k), 128k output
+                            if underlying_model.contains("-chat") {
+                                model_info.context_window = 128_000;
+                                model_info.max_output_tokens = Some(16_384);
+                            } else {
+                                model_info.context_window = 400_000;
+                                model_info.max_output_tokens = Some(128_000);
+                            }
+                        }
+                    }
+                    "google" => {
+                        // Gemini models default: 1M context, 8192 output
+                        model_info.context_window = 1_048_576;
+                        model_info.max_output_tokens = Some(8_192);
+                        model_info.capabilities = vec![
+                            ModelCapability::TextGeneration,
+                            ModelCapability::FunctionCalling,
+                            ModelCapability::SystemPrompt,
+                            ModelCapability::VisionInput,
+                            ModelCapability::LongContext,
+                            ModelCapability::JsonMode,
+                        ];
+
+                        // Gemini 2.5+ models have 65536 output
+                        if underlying_model.contains("gemini-2.5")
+                            || underlying_model.contains("gemini-3")
+                        {
+                            model_info.max_output_tokens = Some(65_536);
+                            model_info
+                                .capabilities
+                                .push(ModelCapability::ExtendedThinking);
+                        }
+                    }
+                    "meta-llama" => {
+                        // Llama 3.x defaults: 131072 context (from API)
+                        model_info.context_window = 131_072;
+                        model_info.max_output_tokens = Some(16_384);
+                        model_info.capabilities = vec![
+                            ModelCapability::TextGeneration,
+                            ModelCapability::FunctionCalling,
+                            ModelCapability::SystemPrompt,
+                        ];
+
+                        // Llama 3.1-405b has reduced context on OpenRouter
+                        if underlying_model.contains("405b") && !underlying_model.contains(":free")
+                        {
+                            model_info.context_window = 10_000;
+                            model_info.max_output_tokens = None; // varies
+                        }
+                        // Vision models
+                        if underlying_model.contains("vision") {
+                            model_info.capabilities.push(ModelCapability::VisionInput);
+                        }
+                    }
+                    "mistralai" => {
+                        // Mistral defaults: varies significantly by model
+                        model_info.context_window = 131_072;
+                        model_info.max_output_tokens = Some(16_384);
+                        model_info.capabilities = vec![
+                            ModelCapability::TextGeneration,
+                            ModelCapability::FunctionCalling,
+                            ModelCapability::SystemPrompt,
+                        ];
+
+                        if underlying_model.contains("mistral-large") {
+                            // mistral-large: 128k-262k context
+                            model_info.context_window = 128_000;
+                            model_info.max_output_tokens = None; // varies
+                        } else if underlying_model.contains("mixtral-8x22b") {
+                            // mixtral-8x22b: 65536 context
+                            model_info.context_window = 65_536;
+                            model_info.max_output_tokens = None;
+                        } else if underlying_model.contains("mixtral-8x7b") {
+                            // mixtral-8x7b: 32768 context, 16384 output
+                            model_info.context_window = 32_768;
+                            model_info.max_output_tokens = Some(16_384);
+                        } else if underlying_model.contains("devstral") {
+                            // devstral models: up to 262k context
+                            model_info.context_window = 262_144;
+                            model_info.max_output_tokens = Some(65_536);
+                        } else if underlying_model.contains("mistral-medium") {
+                            // mistral-medium-3.x: 131k context
+                            model_info.context_window = 131_072;
+                            model_info.max_output_tokens = None;
+                        }
+                        // pixtral and ministral models support vision
+                        if underlying_model.contains("pixtral")
+                            || underlying_model.contains("ministral")
+                        {
+                            model_info.capabilities.push(ModelCapability::VisionInput);
+                        }
+                    }
+                    "deepseek" => {
+                        // DeepSeek defaults: 163840 context, 65536 output
+                        model_info.context_window = 163_840;
+                        model_info.max_output_tokens = Some(65_536);
+                        model_info.capabilities = vec![
+                            ModelCapability::TextGeneration,
+                            ModelCapability::FunctionCalling,
+                            ModelCapability::SystemPrompt,
+                        ];
+
+                        if underlying_model.contains("deepseek-r1") {
+                            // R1 reasoning models
+                            model_info
+                                .capabilities
+                                .push(ModelCapability::ExtendedThinking);
+                        }
+                        if underlying_model.contains("deepseek-chat") {
+                            // deepseek-chat can output up to full context
+                            model_info.max_output_tokens = Some(163_840);
+                        }
+                    }
+                    "moonshotai" => {
+                        // Moonshot Kimi models: 262144 context
+                        model_info.context_window = 262_144;
+                        model_info.max_output_tokens = Some(65_535);
+                        model_info.capabilities = vec![
+                            ModelCapability::TextGeneration,
+                            ModelCapability::FunctionCalling,
+                            ModelCapability::SystemPrompt,
+                            ModelCapability::LongContext,
+                        ];
+
+                        if underlying_model.contains("thinking") {
+                            model_info
+                                .capabilities
+                                .push(ModelCapability::ExtendedThinking);
+                        }
+                        if underlying_model.contains("kimi-k2-0905") {
+                            // kimi-k2-0905 can output up to full context
+                            model_info.max_output_tokens = Some(262_144);
+                        }
+                    }
+                    "z-ai" => {
+                        // GLM models: ~200k context, 65536 output
+                        model_info.context_window = 202_752;
+                        model_info.max_output_tokens = Some(65_536);
+                        model_info.capabilities = vec![
+                            ModelCapability::TextGeneration,
+                            ModelCapability::FunctionCalling,
+                            ModelCapability::SystemPrompt,
+                            ModelCapability::LongContext,
+                        ];
+
+                        if underlying_model.contains("glm-4.5") {
+                            // glm-4.5: 131k context
+                            model_info.context_window = 131_072;
+                        }
+                        if underlying_model.contains("glm-4.6v")
+                            || underlying_model.contains("glm-4.5v")
+                        {
+                            model_info.capabilities.push(ModelCapability::VisionInput);
+                        }
+                    }
+                    "qwen" => {
+                        // Qwen defaults: varies significantly
+                        model_info.context_window = 32_768;
+                        model_info.max_output_tokens = Some(16_384);
+                        model_info.capabilities = vec![
+                            ModelCapability::TextGeneration,
+                            ModelCapability::FunctionCalling,
+                            ModelCapability::SystemPrompt,
+                        ];
+
+                        if underlying_model.contains("qwen3")
+                            || underlying_model.contains("qwen-plus")
+                            || underlying_model.contains("qwen-turbo")
+                        {
+                            // Qwen3 and newer models have larger contexts
+                            model_info.context_window = 262_144;
+                            model_info.max_output_tokens = Some(32_768);
+                        }
+                        if underlying_model.contains("-vl-")
+                            || underlying_model.contains("vl-max")
+                            || underlying_model.contains("vl-plus")
+                        {
+                            model_info.capabilities.push(ModelCapability::VisionInput);
+                        }
+                        if underlying_model.contains("thinking") {
+                            model_info
+                                .capabilities
+                                .push(ModelCapability::ExtendedThinking);
+                        }
+                    }
+                    "cohere" => {
+                        // Cohere Command models: 128k context, 4000 output
+                        model_info.context_window = 128_000;
+                        model_info.max_output_tokens = Some(4_000);
+                        model_info.capabilities = vec![
+                            ModelCapability::TextGeneration,
+                            ModelCapability::FunctionCalling,
+                            ModelCapability::SystemPrompt,
+                            ModelCapability::LongContext,
+                            ModelCapability::WebSearch,
+                        ];
+
+                        if underlying_model.contains("command-a") {
+                            // command-a: 256k context, 8192 output
+                            model_info.context_window = 256_000;
+                            model_info.max_output_tokens = Some(8_192);
+                        }
+                    }
+                    _ => {
+                        // Generic OpenRouter defaults for unknown providers
+                        model_info.context_window = 32_768;
+                        model_info.max_output_tokens = Some(4_096);
+                        model_info.capabilities = vec![
+                            ModelCapability::TextGeneration,
+                            ModelCapability::SystemPrompt,
+                        ];
+                    }
+                }
+            } else {
+                // No slash in model ID, use generic defaults
+                model_info.context_window = 32_768;
+                model_info.max_output_tokens = Some(4_096);
+                model_info.capabilities = vec![
+                    ModelCapability::TextGeneration,
+                    ModelCapability::SystemPrompt,
+                ];
+            }
+        }
         "anthropic" => {
             model_info.context_window = 200_000;
             model_info.max_output_tokens = Some(4_096);

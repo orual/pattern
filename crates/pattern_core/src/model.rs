@@ -165,7 +165,8 @@ impl ResponseOptions {
 pub enum ModelVendor {
     Anthropic,
     OpenAI,
-    Gemini, // Google's Gemini models
+    OpenRouter, // OpenRouter - routes to multiple providers via OpenAI-compatible API
+    Gemini,     // Google's Gemini models
     Cohere,
     Groq,
     Ollama,
@@ -176,7 +177,12 @@ impl ModelVendor {
     /// Check if this vendor uses OpenAI-compatible API
     pub fn is_openai_compatible(&self) -> bool {
         match self {
-            Self::OpenAI | Self::Cohere | Self::Groq | Self::Ollama | Self::Other => true,
+            Self::OpenAI
+            | Self::OpenRouter
+            | Self::Cohere
+            | Self::Groq
+            | Self::Ollama
+            | Self::Other => true,
             Self::Anthropic | Self::Gemini => false,
         }
     }
@@ -186,6 +192,7 @@ impl ModelVendor {
         match provider.to_lowercase().as_str() {
             "anthropic" => Self::Anthropic,
             "openai" => Self::OpenAI,
+            "openrouter" => Self::OpenRouter,
             "gemini" | "google" => Self::Gemini,
             "cohere" => Self::Cohere,
             "groq" => Self::Groq,
@@ -282,6 +289,9 @@ impl GenAiClient {
         if std::env::var("COHERE_API_KEY").is_ok() {
             available_endpoints.push(AdapterKind::Cohere);
         }
+        if std::env::var("OPENROUTER_API_KEY").is_ok() {
+            available_endpoints.push(AdapterKind::OpenRouter);
+        }
 
         Ok(Self {
             client,
@@ -317,14 +327,23 @@ impl ModelProvider for GenAiClient {
             };
 
             for model in models {
+                // For OpenRouter, we need to prefix model IDs with "openrouter::" so genai
+                // can resolve them to the correct adapter. OpenRouter models use "/" as separator
+                // (e.g., "anthropic/claude-opus-4.5") but genai uses "::" for namespacing.
+                let model_id = if *endpoint == AdapterKind::OpenRouter {
+                    format!("openrouter::{}", model)
+                } else {
+                    model.clone()
+                };
+
                 // Try to resolve the service target - this validates authentication
-                match self.client.resolve_service_target(&model).await {
+                match self.client.resolve_service_target(&model_id).await {
                     Ok(_) => {
                         // Model is accessible, continue
                     }
                     Err(e) => {
                         // Authentication failed for this model, skip it
-                        tracing::debug!("Skipping model {} due to auth error: {}", model, e);
+                        tracing::debug!("Skipping model {} due to auth error: {}", model_id, e);
                         continue;
                     }
                 }
@@ -332,8 +351,8 @@ impl ModelProvider for GenAiClient {
                 // Create basic ModelInfo from provider
                 let model_info = ModelInfo {
                     provider: endpoint.to_string(),
-                    id: model.clone(),
-                    name: model,
+                    id: model_id.clone(),
+                    name: model, // Keep original name for display
                     capabilities: vec![],
                     max_output_tokens: None,
                     cost_per_1k_completion_tokens: None,

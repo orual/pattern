@@ -2,6 +2,49 @@
 
 This document provides examples of Pattern configuration files for common use cases.
 
+1. Copy `pattern.example.toml` to `pattern.toml` (or `~/.config/pattern/config.toml`)
+2. Edit the configuration to match your setup
+3. Set required environment variables for your chosen model provider:
+   - `OPENAI_API_KEY` for OpenAI
+   - `ANTHROPIC_API_KEY` for Anthropic
+   - `GEMINI_API_KEY` for Google Gemini
+   - `OPENROUTER_API_KEY` for OpenRouter
+   - `GROQ_API_KEY` for Groq
+   - `COHERE_API_KEY` for Cohere
+   - etc.
+
+## OpenRouter Setup
+
+OpenRouter provides access to multiple AI providers through a single API. It's especially useful for:
+- Accessing models from multiple providers without managing separate API keys
+- Using models that may not be directly available to you
+- Cost optimization by routing to the best model for your use case
+
+### Configuration
+
+1. Get your API key from [OpenRouter](https://openrouter.ai/keys)
+2. Set the environment variable:
+   ```bash
+   export OPENROUTER_API_KEY=sk-or-v1-your-key-here
+   ```
+3. Configure in `pattern.toml`:
+   ```toml
+   [model]
+   provider = "OpenRouter"
+   model = "anthropic/claude-3-opus"  # Use provider/model format
+   ```
+
+### Model Naming Convention
+
+OpenRouter uses `provider/model-name` format for model IDs:
+- `anthropic/claude-3-opus` - Claude 3 Opus via OpenRouter
+- `openai/gpt-4o` - GPT-4o via OpenRouter
+- `google/gemini-pro` - Gemini Pro via OpenRouter
+- `meta-llama/llama-3.1-70b-instruct` - Llama 3.1 70B via OpenRouter
+- `mistralai/mistral-large` - Mistral Large via OpenRouter
+
+See [OpenRouter Models](https://openrouter.ai/models) for the full list of available models.
+
 ## Single Agent
 
 Basic single-agent configuration (`pattern.toml`):
@@ -345,3 +388,4 @@ export DISCORD_TOKEN="..."
 # Bluesky credentials stored in auth.db via CLI
 # pattern atproto login your.handle.bsky.social
 ```
+See `pattern.example.toml` for examples of all three methods.
