@@ -810,14 +810,13 @@ let rules = vec![
 ];
 ```
 
-## Open Questions
+## Questions
 
 1. **Conflict resolution** - What happens when agent has unsaved Loro edits and disk changes? Options:
-   - Loro wins (lose external changes)
-   - Disk wins (lose agent changes)
-   - Merge (complex, may not always work)
-   - Alert agent and let them decide
+   - resolved above
 
 2. **Block labels** - Using `file:{path}` as label. Should path be relative or absolute? Relative to base_path seems cleaner.
+   - `file:{base_path_hash}:{relative_path}` seems good? doesn't expose the base path, but eliminates collisions/
 
-3. **Multi-agent access** - If two agents load same file, separate blocks or shared? Probably separate (agent-owned), with potential for explicit sharing.
+3. **Multi-agent access** - If two agents load same file, separate blocks or shared? 
+   - Think shared, for simplicity, but equally easy to just have two blocks and keep them synced via subscription

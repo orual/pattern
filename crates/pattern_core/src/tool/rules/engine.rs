@@ -4,7 +4,7 @@
 //! to follow complex workflows, enforce tool dependencies, and optimize performance.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
@@ -69,6 +69,10 @@ pub enum ToolRuleType {
         #[serde(skip_serializing_if = "Option::is_none")]
         scope: Option<String>,
     },
+
+    /// Only allow these operations for multi-operation tools.
+    /// Operations not in this set are hidden from the schema and rejected at execution.
+    AllowedOperations(BTreeSet<String>),
 }
 
 impl ToolRuleType {
@@ -166,6 +170,14 @@ impl ToolRuleType {
                 } else {
                     format!("User approval is required before calling `{}`.", tool_name)
                 }
+            }
+            ToolRuleType::AllowedOperations(ops) => {
+                let ops_list: Vec<_> = ops.iter().cloned().collect();
+                format!(
+                    "available operations for `{}`: {}",
+                    tool_name,
+                    ops_list.join(", ")
+                )
             }
         }
     }
@@ -444,6 +456,33 @@ impl ToolRuleEngine {
         self.state = ToolExecutionState::default();
     }
 
+    /// Check if operation is allowed before execution.
+    /// Returns Ok(()) if allowed, Err(ToolRuleViolation) if not.
+    pub fn check_operation_allowed(
+        &self,
+        tool_name: &str,
+        operation: &str,
+    ) -> Result<(), ToolRuleViolation> {
+        // Find AllowedOperations rule for this tool
+        let rule = self.rules.iter().find(|r| {
+            r.tool_name == tool_name && matches!(r.rule_type, ToolRuleType::AllowedOperations(_))
+        });
+
+        if let Some(rule) = rule {
+            if let ToolRuleType::AllowedOperations(ref allowed) = rule.rule_type {
+                if !allowed.contains(operation) {
+                    return Err(ToolRuleViolation::OperationNotAllowed {
+                        tool: tool_name.to_string(),
+                        operation: operation.to_string(),
+                        allowed: allowed.iter().cloned().collect(),
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     // Private helper methods
 
     fn get_applicable_rules(&self, tool_name: &str) -> Vec<&ToolRule> {
@@ -582,6 +621,17 @@ pub enum ToolRuleViolation {
         tool: String,
         required_start_tools: Vec<String>,
     },
+
+    #[error(
+        "Operation '{operation}' not allowed for tool '{tool}'. Allowed operations: {allowed}",
+        allowed = allowed.join(", ")
+    )]
+    /// Operation not in allowed set for this tool
+    OperationNotAllowed {
+        tool: String,
+        operation: String,
+        allowed: Vec<String>,
+    },
 }
 
 impl ToolRule {
@@ -660,6 +710,17 @@ impl ToolRule {
     /// Create a cooldown rule
     pub fn cooldown(tool_name: String, duration: Duration) -> Self {
         Self::new(tool_name, ToolRuleType::Cooldown(duration)).with_priority(4)
+    }
+
+    /// Create an allowed operations rule
+    pub fn allowed_operations(
+        tool_name: impl Into<String>,
+        operations: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self::new(
+            tool_name.into(),
+            ToolRuleType::AllowedOperations(operations.into_iter().map(Into::into).collect()),
+        )
     }
 }
 
@@ -858,5 +919,75 @@ mod tests {
 
         // Should succeed again
         assert!(engine.can_execute_tool("test_tool").is_ok());
+    }
+
+    #[test]
+    fn test_allowed_operations_rule_type() {
+        use std::collections::BTreeSet;
+
+        let allowed: BTreeSet<String> = ["read", "append"].iter().map(|s| s.to_string()).collect();
+        let rule_type = ToolRuleType::AllowedOperations(allowed.clone());
+
+        let description = rule_type.to_usage_description("file", &[]);
+        assert!(description.contains("file"));
+        assert!(description.contains("read"));
+        assert!(description.contains("append"));
+    }
+
+    #[test]
+    fn test_operation_not_allowed_violation() {
+        let violation = ToolRuleViolation::OperationNotAllowed {
+            tool: "file".to_string(),
+            operation: "delete".to_string(),
+            allowed: vec!["read".to_string(), "write".to_string()],
+        };
+
+        let display = format!("{}", violation);
+        assert!(display.contains("file"));
+        assert!(display.contains("delete"));
+        assert!(display.contains("read"));
+    }
+
+    #[test]
+    fn test_check_operation_allowed() {
+        use std::collections::BTreeSet;
+
+        let allowed: BTreeSet<String> = ["read", "append"].iter().map(|s| s.to_string()).collect();
+        let rules = vec![ToolRule {
+            tool_name: "file".to_string(),
+            rule_type: ToolRuleType::AllowedOperations(allowed),
+            conditions: vec![],
+            priority: 0,
+            metadata: None,
+        }];
+
+        let engine = ToolRuleEngine::new(rules);
+
+        // Allowed operation should pass
+        assert!(engine.check_operation_allowed("file", "read").is_ok());
+        assert!(engine.check_operation_allowed("file", "append").is_ok());
+
+        // Disallowed operation should fail
+        let result = engine.check_operation_allowed("file", "delete");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ToolRuleViolation::OperationNotAllowed {
+                tool,
+                operation,
+                allowed,
+            } => {
+                assert_eq!(tool, "file");
+                assert_eq!(operation, "delete");
+                assert!(allowed.contains(&"read".to_string()));
+            }
+            _ => panic!("Expected OperationNotAllowed"),
+        }
+
+        // Tool without AllowedOperations rule should pass any operation
+        assert!(
+            engine
+                .check_operation_allowed("other_tool", "anything")
+                .is_ok()
+        );
     }
 }

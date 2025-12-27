@@ -224,6 +224,9 @@ pub enum ToolRuleTypeConfig {
         #[serde(skip_serializing_if = "Option::is_none")]
         scope: Option<String>,
     },
+
+    /// Only allow these operations for multi-operation tools.
+    AllowedOperations(std::collections::BTreeSet<String>),
 }
 
 fn default_rule_priority() -> u8 {
@@ -288,6 +291,9 @@ impl ToolRuleTypeConfig {
             ToolRuleTypeConfig::RequiresConsent { scope } => ToolRuleType::RequiresConsent {
                 scope: scope.clone(),
             },
+            ToolRuleTypeConfig::AllowedOperations(ops) => {
+                ToolRuleType::AllowedOperations(ops.clone())
+            }
         };
 
         Ok(runtime_type)
@@ -314,6 +320,9 @@ impl ToolRuleTypeConfig {
             ToolRuleType::RequiresConsent { scope } => ToolRuleTypeConfig::RequiresConsent {
                 scope: scope.clone(),
             },
+            ToolRuleType::AllowedOperations(ops) => {
+                ToolRuleTypeConfig::AllowedOperations(ops.clone())
+            }
         }
     }
 }
