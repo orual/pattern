@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            INSERT INTO oauth_sessions (\n                account_did, session_id, host_url, authserver_url,\n                authserver_token_endpoint, authserver_revocation_endpoint,\n                scopes, dpop_key, dpop_authserver_nonce, dpop_host_nonce,\n                token_iss, token_sub, token_aud, token_scope,\n                refresh_token, access_token, token_type, expires_at,\n                created_at, updated_at\n            ) VALUES (\n                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?\n            )\n            ON CONFLICT (account_did, session_id) DO UPDATE SET\n                host_url = excluded.host_url,\n                authserver_url = excluded.authserver_url,\n                authserver_token_endpoint = excluded.authserver_token_endpoint,\n                authserver_revocation_endpoint = excluded.authserver_revocation_endpoint,\n                scopes = excluded.scopes,\n                dpop_key = excluded.dpop_key,\n                dpop_authserver_nonce = excluded.dpop_authserver_nonce,\n                dpop_host_nonce = excluded.dpop_host_nonce,\n                token_iss = excluded.token_iss,\n                token_sub = excluded.token_sub,\n                token_aud = excluded.token_aud,\n                token_scope = excluded.token_scope,\n                refresh_token = excluded.refresh_token,\n                access_token = excluded.access_token,\n                token_type = excluded.token_type,\n                expires_at = excluded.expires_at,\n                updated_at = excluded.updated_at\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 20
+    },
+    "nullable": []
+  },
+  "hash": "9a1ef956c23877a73a3d14c87e7d71518fea4183a3d35cfb6a4b9fa4da7563a8"
+}

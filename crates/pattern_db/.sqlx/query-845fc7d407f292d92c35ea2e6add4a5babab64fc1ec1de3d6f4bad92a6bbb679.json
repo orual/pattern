@@ -1,0 +1,116 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            id as \"id!\",\n            agent_id as \"agent_id!\",\n            label as \"label!\",\n            description as \"description!\",\n            block_type as \"block_type!: MemoryBlockType\",\n            char_limit as \"char_limit!\",\n            permission as \"permission!: MemoryPermission\",\n            pinned as \"pinned!: bool\",\n            loro_snapshot as \"loro_snapshot!\",\n            content_preview,\n            metadata as \"metadata: _\",\n            embedding_model,\n            is_active as \"is_active!: bool\",\n            frontier,\n            last_seq as \"last_seq!\",\n            created_at as \"created_at!: _\",\n            updated_at as \"updated_at!: _\"\n        FROM memory_blocks WHERE agent_id = ? AND is_active = 1 ORDER BY label\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "agent_id!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "label!",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "description!",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "block_type!: MemoryBlockType",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "char_limit!",
+        "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "permission!: MemoryPermission",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "pinned!: bool",
+        "ordinal": 7,
+        "type_info": "Integer"
+      },
+      {
+        "name": "loro_snapshot!",
+        "ordinal": 8,
+        "type_info": "Blob"
+      },
+      {
+        "name": "content_preview",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "metadata: _",
+        "ordinal": 10,
+        "type_info": "Null"
+      },
+      {
+        "name": "embedding_model",
+        "ordinal": 11,
+        "type_info": "Text"
+      },
+      {
+        "name": "is_active!: bool",
+        "ordinal": 12,
+        "type_info": "Integer"
+      },
+      {
+        "name": "frontier",
+        "ordinal": 13,
+        "type_info": "Blob"
+      },
+      {
+        "name": "last_seq!",
+        "ordinal": 14,
+        "type_info": "Integer"
+      },
+      {
+        "name": "created_at!: _",
+        "ordinal": 15,
+        "type_info": "Text"
+      },
+      {
+        "name": "updated_at!: _",
+        "ordinal": 16,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "845fc7d407f292d92c35ea2e6add4a5babab64fc1ec1de3d6f4bad92a6bbb679"
+}

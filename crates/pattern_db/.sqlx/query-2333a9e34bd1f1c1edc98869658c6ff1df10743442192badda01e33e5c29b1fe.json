@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM memory_block_updates WHERE block_id = ? AND seq <= ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "2333a9e34bd1f1c1edc98869658c6ff1df10743442192badda01e33e5c29b1fe"
+}

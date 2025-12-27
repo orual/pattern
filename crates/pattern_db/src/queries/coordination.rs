@@ -35,6 +35,35 @@ pub async fn get_recent_activity(pool: &SqlitePool, limit: i64) -> DbResult<Vec<
     Ok(events)
 }
 
+/// Get recent activity events since a given timestamp.
+pub async fn get_recent_activity_since(
+    pool: &SqlitePool,
+    since: chrono::DateTime<chrono::Utc>,
+    limit: i64,
+) -> DbResult<Vec<ActivityEvent>> {
+    let events = sqlx::query_as!(
+        ActivityEvent,
+        r#"
+        SELECT
+            id as "id!",
+            timestamp as "timestamp!: _",
+            agent_id,
+            event_type as "event_type!: ActivityEventType",
+            details as "details!: _",
+            importance as "importance: EventImportance"
+        FROM activity_events
+        WHERE timestamp >= ?
+        ORDER BY timestamp DESC
+        LIMIT ?
+        "#,
+        since,
+        limit
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(events)
+}
+
 /// Get recent activity events with minimum importance.
 pub async fn get_recent_activity_by_importance(
     pool: &SqlitePool,

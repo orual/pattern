@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO data_sources (id, name, source_type, config, last_sync_at, sync_cursor, enabled, created_at, updated_at)\n        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": []
+  },
+  "hash": "6e5c6e6b4b7f81d48229cc19928a6c254584fb9515b61179c6dac3fcfd725aba"
+}

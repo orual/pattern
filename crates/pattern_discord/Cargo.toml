@@ -30,6 +30,8 @@ serenity = { workspace = true }
 
 # Core framework
 pattern-core = { path = "../pattern_core" }
+pattern-db = { path = "../pattern_db" }
+pattern-auth = { path = "../pattern_auth" }
 
 # For compact strings
 compact_str = { version = "0.9.0", features = ["serde"] }

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        UPDATE memory_blocks\n        SET loro_snapshot = ?, frontier = ?, updated_at = ?\n        WHERE id = ?\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "9c32099c7a8bdbead47fb356176a14da809183653d637af38686fbdd11778500"
+}

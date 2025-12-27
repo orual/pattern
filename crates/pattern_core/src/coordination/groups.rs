@@ -3,22 +3,20 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
-use pattern_macros::Entity;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use super::types::{CoordinationPattern, GroupMemberRole, GroupState};
 use crate::{
     AgentId, CoreError, Result, UserId,
-    agent::{Agent, AgentRecord},
+    agent::Agent,
     id::{ConstellationId, GroupId, MessageId, RelationId},
     message::{Message, Response},
 };
-
-use super::types::{CoordinationPattern, GroupMemberRole, GroupState};
+use pattern_db::Agent as AgentRecord;
 
 /// A constellation represents a collection of agents working together for a specific user
-#[derive(Debug, Clone, Serialize, Deserialize, Entity)]
-#[entity(entity_type = "constellation")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Constellation {
     /// Unique identifier for this constellation
     pub id: ConstellationId,
@@ -37,18 +35,15 @@ pub struct Constellation {
 
     // Relations
     /// Agents in this constellation with membership metadata
-    #[entity(edge_entity = "constellation_agents")]
     pub agents: Vec<(AgentRecord, ConstellationMembership)>,
 
     /// Groups within this constellation
-    #[entity(relation = "composed_of")]
     pub groups: Vec<GroupId>,
 }
 
 /// Edge entity for constellation membership
 
-#[derive(Debug, Clone, Serialize, Deserialize, Entity)]
-#[entity(entity_type = "constellation_agents", edge = true)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConstellationMembership {
     pub id: RelationId,
     pub in_id: ConstellationId,
@@ -60,8 +55,7 @@ pub struct ConstellationMembership {
 }
 
 /// A group of agents that coordinate together
-#[derive(Debug, Clone, Serialize, Deserialize, Entity)]
-#[entity(entity_type = "group")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentGroup {
     /// Unique identifier for this group
     pub id: GroupId,
@@ -70,7 +64,6 @@ pub struct AgentGroup {
     /// Description of this group's purpose
     pub description: String,
     /// How agents in this group coordinate their actions
-    #[entity(db_type = "object")]
     pub coordination_pattern: CoordinationPattern,
     /// When this group was created
     pub created_at: DateTime<Utc>,
@@ -80,18 +73,15 @@ pub struct AgentGroup {
     pub is_active: bool,
 
     /// Pattern-specific state stored here for now
-    #[entity(db_type = "object")]
     pub state: GroupState,
 
     // Relations
     /// Members of this group with their roles
-    #[entity(edge_entity = "group_members")]
     pub members: Vec<(AgentRecord, GroupMembership)>,
 }
 
 /// Edge entity for group membership
-#[derive(Debug, Clone, Serialize, Deserialize, Entity)]
-#[entity(entity_type = "group_members", edge = true)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupMembership {
     pub id: RelationId,
     pub in_id: AgentId,

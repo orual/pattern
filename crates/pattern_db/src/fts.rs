@@ -67,7 +67,7 @@ pub async fn search_messages(
     let results = if let Some(agent_id) = agent_id {
         sqlx::query_as::<_, (String, Option<String>, f64)>(
             r#"
-            SELECT m.id, m.content, bm25(messages_fts) as rank
+            SELECT m.id, m.content_preview, bm25(messages_fts) as rank
             FROM messages_fts
             JOIN messages m ON messages_fts.rowid = m.rowid
             WHERE messages_fts MATCH ?
@@ -84,7 +84,7 @@ pub async fn search_messages(
     } else {
         sqlx::query_as::<_, (String, Option<String>, f64)>(
             r#"
-            SELECT m.id, m.content, bm25(messages_fts) as rank
+            SELECT m.id, m.content_preview, bm25(messages_fts) as rank
             FROM messages_fts
             JOIN messages m ON messages_fts.rowid = m.rowid
             WHERE messages_fts MATCH ?

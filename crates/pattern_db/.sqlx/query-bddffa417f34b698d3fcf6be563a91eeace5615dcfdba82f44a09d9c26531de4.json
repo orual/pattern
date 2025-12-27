@@ -1,0 +1,110 @@
+{
+  "db_name": "SQLite",
+  "query": "\n                    SELECT\n                        id as \"id!\",\n                        agent_id,\n                        title as \"title!\",\n                        description,\n                        status as \"status!: UserTaskStatus\",\n                        priority as \"priority!: UserTaskPriority\",\n                        due_at as \"due_at: _\",\n                        scheduled_at as \"scheduled_at: _\",\n                        completed_at as \"completed_at: _\",\n                        parent_task_id,\n                        tags as \"tags: _\",\n                        estimated_minutes,\n                        actual_minutes,\n                        notes,\n                        created_at as \"created_at!: _\",\n                        updated_at as \"updated_at!: _\"\n                    FROM tasks WHERE agent_id = ? ORDER BY priority DESC, due_at ASC NULLS LAST\n                    ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "agent_id",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "title!",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "description",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "status!: UserTaskStatus",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "priority!: UserTaskPriority",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "due_at: _",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "scheduled_at: _",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "completed_at: _",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "parent_task_id",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "tags: _",
+        "ordinal": 10,
+        "type_info": "Null"
+      },
+      {
+        "name": "estimated_minutes",
+        "ordinal": 11,
+        "type_info": "Integer"
+      },
+      {
+        "name": "actual_minutes",
+        "ordinal": 12,
+        "type_info": "Integer"
+      },
+      {
+        "name": "notes",
+        "ordinal": 13,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at!: _",
+        "ordinal": 14,
+        "type_info": "Text"
+      },
+      {
+        "name": "updated_at!: _",
+        "ordinal": 15,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true,
+      false,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "bddffa417f34b698d3fcf6be563a91eeace5615dcfdba82f44a09d9c26531de4"
+}

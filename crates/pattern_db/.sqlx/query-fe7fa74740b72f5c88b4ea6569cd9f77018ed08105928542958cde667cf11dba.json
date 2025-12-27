@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS(SELECT 1 FROM memory_block_updates WHERE block_id = ? AND seq > ?) as has_updates",
+  "describe": {
+    "columns": [
+      {
+        "name": "has_updates",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "fe7fa74740b72f5c88b4ea6569cd9f77018ed08105928542958cde667cf11dba"
+}

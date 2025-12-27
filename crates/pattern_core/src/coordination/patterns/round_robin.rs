@@ -111,18 +111,13 @@ impl GroupManager for RoundRobinManager {
             let _ = tx
                 .send(GroupResponseEvent::AgentStarted {
                     agent_id: agent_id.clone(),
-                    agent_name: agent_name.clone(),
+                    agent_name: agent_name.to_string(),
                     role: awm.membership.role.clone(),
                 })
                 .await;
 
             // Process message with streaming
-            match awm
-                .agent
-                .clone()
-                .process_message_stream(message.clone())
-                .await
-            {
+            match awm.agent.clone().process(message.clone()).await {
                 Ok(mut stream) => {
                     use tokio_stream::StreamExt;
 
@@ -174,7 +169,7 @@ impl GroupManager for RoundRobinManager {
                                 let _ = tx
                                     .send(GroupResponseEvent::AgentCompleted {
                                         agent_id: agent_id.clone(),
-                                        agent_name: agent_name.clone(),
+                                        agent_name: agent_name.to_string(),
                                         message_id: Some(message_id),
                                     })
                                     .await;
@@ -268,7 +263,7 @@ mod tests {
 
         let agents: Vec<AgentWithMembership<Arc<dyn crate::agent::Agent>>> = vec![
             AgentWithMembership {
-                agent: Arc::new(create_test_agent("Agent1")) as Arc<dyn crate::agent::Agent>,
+                agent: Arc::new(create_test_agent("Agent1").await) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
                     id: RelationId::generate(),
                     in_id: AgentId::generate(),
@@ -280,7 +275,7 @@ mod tests {
                 },
             },
             AgentWithMembership {
-                agent: Arc::new(create_test_agent("Agent2")) as Arc<dyn crate::agent::Agent>,
+                agent: Arc::new(create_test_agent("Agent2").await) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
                     id: RelationId::generate(),
                     in_id: AgentId::generate(),
@@ -292,7 +287,7 @@ mod tests {
                 },
             },
             AgentWithMembership {
-                agent: Arc::new(create_test_agent("Agent3")) as Arc<dyn crate::agent::Agent>,
+                agent: Arc::new(create_test_agent("Agent3").await) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
                     id: RelationId::generate(),
                     in_id: AgentId::generate(),
@@ -343,7 +338,7 @@ mod tests {
 
         let agents: Vec<AgentWithMembership<Arc<dyn crate::agent::Agent>>> = vec![
             AgentWithMembership {
-                agent: Arc::new(create_test_agent("Agent1")) as Arc<dyn crate::agent::Agent>,
+                agent: Arc::new(create_test_agent("Agent1").await) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
                     id: RelationId::generate(),
                     in_id: AgentId::generate(),
@@ -355,7 +350,7 @@ mod tests {
                 },
             },
             AgentWithMembership {
-                agent: Arc::new(create_test_agent("Agent2")) as Arc<dyn crate::agent::Agent>,
+                agent: Arc::new(create_test_agent("Agent2").await) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
                     id: RelationId::generate(),
                     in_id: AgentId::generate(),
@@ -367,7 +362,7 @@ mod tests {
                 },
             },
             AgentWithMembership {
-                agent: Arc::new(create_test_agent("Agent3")) as Arc<dyn crate::agent::Agent>,
+                agent: Arc::new(create_test_agent("Agent3").await) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
                     id: RelationId::generate(),
                     in_id: AgentId::generate(),

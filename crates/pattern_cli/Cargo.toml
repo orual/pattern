@@ -21,6 +21,8 @@ surreal-remote = ["pattern-core/surreal-remote"]
 # Workspace dependencies
 pattern-core = { path = "../pattern_core" }
 pattern-discord = { path = "../pattern_discord", optional = true }
+pattern-db = { path = "../pattern_db"}
+pattern-auth = { path = "../pattern_auth" }
 genai = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
@@ -52,13 +54,8 @@ rustyline-async = "0.4"
 rpassword = "7.3"
 
 # ATProto dependencies
-atrium-api = { workspace = true }
-atrium-xrpc = { workspace = true }
-atrium-xrpc-client = { version = "0.5.13", features = ["reqwest"] }
-atrium-common = { workspace = true }
-atrium-identity = { workspace = true }
-hickory-resolver = "0.24"
 reqwest = { workspace = true }
+jacquard = "0.9"
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }

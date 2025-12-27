@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO event_occurrences (id, event_id, starts_at, ends_at, status, notes, created_at)\n        VALUES (?, ?, ?, ?, ?, ?, ?)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "d11888becd10ac0943e2c68d84fa5381854d8ea5ac7066ff86feeb53b7d6f684"
+}

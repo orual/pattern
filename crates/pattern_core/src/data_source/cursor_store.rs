@@ -64,7 +64,7 @@ impl DataSourceCursorRecord {
         let result: Option<Self> = db
             .select(("data_source_cursor", id_part))
             .await
-            .map_err(|e| crate::db::DatabaseError::from(e))?;
+            .map_err(|e| crate::db_v1::DatabaseError::from(e))?;
         Ok(result)
     }
 
@@ -79,7 +79,7 @@ impl DataSourceCursorRecord {
             .update(("data_source_cursor", id_part))
             .content(self.clone())
             .await
-            .map_err(|e| crate::db::DatabaseError::from(e))?;
+            .map_err(|e| crate::db_v1::DatabaseError::from(e))?;
         Ok(())
     }
 }

@@ -121,6 +121,20 @@ impl Default for MemoryPermission {
     }
 }
 
+impl MemoryPermission {
+    /// Returns the snake_case string representation matching the database format.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read_only",
+            Self::Partner => "partner",
+            Self::Human => "human",
+            Self::Append => "append",
+            Self::ReadWrite => "read_write",
+            Self::Admin => "admin",
+        }
+    }
+}
+
 impl std::fmt::Display for MemoryPermission {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

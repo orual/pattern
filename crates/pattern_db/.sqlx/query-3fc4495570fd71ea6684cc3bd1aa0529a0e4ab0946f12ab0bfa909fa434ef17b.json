@@ -1,0 +1,128 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            mb.id as \"id!\",\n            mb.agent_id as \"agent_id!\",\n            a.name as \"agent_name\",\n            mb.label as \"label!\",\n            mb.description as \"description!\",\n            mb.block_type as \"block_type!: MemoryBlockType\",\n            mb.char_limit as \"char_limit!\",\n            mb.permission as \"permission!: MemoryPermission\",\n            mb.pinned as \"pinned!: bool\",\n            mb.loro_snapshot as \"loro_snapshot!\",\n            mb.content_preview,\n            mb.metadata as \"metadata: _\",\n            mb.embedding_model,\n            mb.is_active as \"is_active!: bool\",\n            mb.frontier,\n            mb.last_seq as \"last_seq!\",\n            mb.created_at as \"created_at!: _\",\n            mb.updated_at as \"updated_at!: _\",\n            sba.permission as \"attachment_permission!: MemoryPermission\"\n        FROM shared_block_agents sba\n        INNER JOIN memory_blocks mb ON sba.block_id = mb.id\n        LEFT JOIN agents a ON mb.agent_id = a.id\n        WHERE sba.agent_id = ? AND mb.is_active = 1\n        ORDER BY mb.label\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "agent_id!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "agent_name",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "label!",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "description!",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "block_type!: MemoryBlockType",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "char_limit!",
+        "ordinal": 6,
+        "type_info": "Integer"
+      },
+      {
+        "name": "permission!: MemoryPermission",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "pinned!: bool",
+        "ordinal": 8,
+        "type_info": "Integer"
+      },
+      {
+        "name": "loro_snapshot!",
+        "ordinal": 9,
+        "type_info": "Blob"
+      },
+      {
+        "name": "content_preview",
+        "ordinal": 10,
+        "type_info": "Text"
+      },
+      {
+        "name": "metadata: _",
+        "ordinal": 11,
+        "type_info": "Null"
+      },
+      {
+        "name": "embedding_model",
+        "ordinal": 12,
+        "type_info": "Text"
+      },
+      {
+        "name": "is_active!: bool",
+        "ordinal": 13,
+        "type_info": "Integer"
+      },
+      {
+        "name": "frontier",
+        "ordinal": 14,
+        "type_info": "Blob"
+      },
+      {
+        "name": "last_seq!",
+        "ordinal": 15,
+        "type_info": "Integer"
+      },
+      {
+        "name": "created_at!: _",
+        "ordinal": 16,
+        "type_info": "Text"
+      },
+      {
+        "name": "updated_at!: _",
+        "ordinal": 17,
+        "type_info": "Text"
+      },
+      {
+        "name": "attachment_permission!: MemoryPermission",
+        "ordinal": 18,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "3fc4495570fd71ea6684cc3bd1aa0529a0e4ab0946f12ab0bfa909fa434ef17b"
+}

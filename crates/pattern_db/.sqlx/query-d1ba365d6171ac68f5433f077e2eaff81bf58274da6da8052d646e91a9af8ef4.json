@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            agent_id as \"agent_id!\",\n            source_id as \"source_id!\",\n            notification_template\n        FROM agent_data_sources WHERE source_id = ?\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "agent_id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "source_id!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "notification_template",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "d1ba365d6171ac68f5433f077e2eaff81bf58274da6da8052d646e91a9af8ef4"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            INSERT INTO provider_oauth_tokens (\n                provider, access_token, refresh_token, expires_at, scope, session_id,\n                created_at, updated_at\n            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)\n            ON CONFLICT (provider) DO UPDATE SET\n                access_token = excluded.access_token,\n                refresh_token = excluded.refresh_token,\n                expires_at = excluded.expires_at,\n                scope = excluded.scope,\n                session_id = excluded.session_id,\n                updated_at = excluded.updated_at\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "8a29f015851102d856c437fe631b7998f1b9e95dec3e64e33b86323e86189ea2"
+}

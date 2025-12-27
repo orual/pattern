@@ -1,12 +1,10 @@
 use crate::id::{AgentId, EventId, MemoryId, TaskId, UserId};
 use chrono::{DateTime, Utc};
-use pattern_macros::Entity;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// User model with entity support
-#[derive(Debug, Clone, Entity, Serialize, Deserialize)]
-#[entity(entity_type = "user")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
     /// Unique identifier for this user
     pub id: UserId,
@@ -29,16 +27,12 @@ pub struct User {
     pub metadata: HashMap<String, serde_json::Value>,
 
     // Relations
-    #[entity(relation = "owns")]
     pub owned_agent_ids: Vec<AgentId>,
 
-    #[entity(relation = "created")]
     pub created_task_ids: Vec<TaskId>,
 
-    #[entity(relation = "remembers")]
     pub memory_ids: Vec<MemoryId>,
 
-    #[entity(relation = "scheduled")]
     pub scheduled_event_ids: Vec<EventId>,
 }
 

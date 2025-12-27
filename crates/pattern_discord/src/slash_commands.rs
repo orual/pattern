@@ -4,9 +4,10 @@ use miette::IntoDiagnostic;
 use miette::Result;
 use pattern_core::{
     Agent,
-    agent::AgentRecord,
     coordination::groups::{AgentGroup, AgentWithMembership},
-    db::{client::DB, ops},
+    db::ConstellationDatabases,
+    memory::{SearchContentType, SearchOptions},
+    tool::builtin::search_utils::extract_snippet,
 };
 use serenity::{
     builder::{
@@ -124,9 +125,10 @@ pub async fn handle_restart_command(
     ctx: &Context,
     command: &CommandInteraction,
     restart_ch: &tokio::sync::mpsc::Sender<()>,
+    admin_users: Option<&[String]>,
 ) -> Result<()> {
     let user_id = command.user.id.get();
-    if !is_authorized_user(user_id) {
+    if !is_authorized_user(user_id, admin_users) {
         command
             .create_response(
                 &ctx.http,
@@ -251,7 +253,12 @@ pub async fn handle_status_command(
                     );
 
                 // Try to get memory stats
-                if let Ok(memory_blocks) = agent.list_memory_keys().await {
+                if let Ok(memory_blocks) = agent
+                    .runtime()
+                    .memory()
+                    .list_blocks(agent.id().as_str())
+                    .await
+                {
                     embed = embed.field("Memory Blocks", memory_blocks.len().to_string(), true);
                 }
             } else {
@@ -306,9 +313,13 @@ pub async fn handle_status_command(
     Ok(())
 }
 
-pub async fn handle_permit(ctx: &Context, command: &CommandInteraction) -> Result<()> {
+pub async fn handle_permit(
+    ctx: &Context,
+    command: &CommandInteraction,
+    admin_users: Option<&[String]>,
+) -> Result<()> {
     let user_id = command.user.id.get();
-    if !is_authorized_user(user_id) {
+    if !is_authorized_user(user_id, admin_users) {
         command
             .create_response(
                 &ctx.http,
@@ -373,9 +384,13 @@ pub async fn handle_permit(ctx: &Context, command: &CommandInteraction) -> Resul
     Ok(())
 }
 
-pub async fn handle_deny(ctx: &Context, command: &CommandInteraction) -> Result<()> {
+pub async fn handle_deny(
+    ctx: &Context,
+    command: &CommandInteraction,
+    admin_users: Option<&[String]>,
+) -> Result<()> {
     let user_id = command.user.id.get();
-    if !is_authorized_user(user_id) {
+    if !is_authorized_user(user_id, admin_users) {
         command
             .create_response(
                 &ctx.http,
@@ -422,9 +437,13 @@ pub async fn handle_deny(ctx: &Context, command: &CommandInteraction) -> Result<
     Ok(())
 }
 
-pub async fn handle_permits(ctx: &Context, command: &CommandInteraction) -> Result<()> {
+pub async fn handle_permits(
+    ctx: &Context,
+    command: &CommandInteraction,
+    admin_users: Option<&[String]>,
+) -> Result<()> {
     let user_id = command.user.id.get();
-    if !is_authorized_user(user_id) {
+    if !is_authorized_user(user_id, admin_users) {
         command
             .create_response(
                 &ctx.http,
@@ -469,26 +488,13 @@ pub async fn handle_permits(ctx: &Context, command: &CommandInteraction) -> Resu
 }
 // ===== Permission approvals =====
 
-fn is_authorized_user(user_id: u64) -> bool {
-    // Support DISCORD_ADMIN_USERS as comma-separated list
-    if let Ok(v) = std::env::var("DISCORD_ADMIN_USERS") {
-        let ok = v
-            .split(',')
-            .map(|s| s.trim())
-            .any(|s| s == user_id.to_string());
-        if ok {
-            return true;
-        }
-    }
-    // Also support DISCORD_DEFAULT_DM_USER as single or comma-separated
-    if let Ok(v) = std::env::var("DISCORD_DEFAULT_DM_USER") {
-        let ok = v
-            .split(',')
-            .map(|s| s.trim())
-            .any(|s| s == user_id.to_string());
-        if ok {
-            return true;
-        }
+/// Check if a user is authorized.
+/// Uses the provided admin_users list from the bot config.
+/// Config should be loaded once at startup from database or environment.
+fn is_authorized_user(user_id: u64, admin_users: Option<&[String]>) -> bool {
+    if let Some(admins) = admin_users {
+        let user_id_str = user_id.to_string();
+        return admins.iter().any(|s| s == &user_id_str);
     }
     false
 }
@@ -561,24 +567,27 @@ pub async fn handle_memory_command(
         embed = embed.field("Agent", agent.name(), true);
 
         if let Some(block_name) = block_name {
-            // Show specific block
-            match agent.get_memory(block_name).await {
-                Ok(Some(block)) => {
-                    embed = embed.field("Label", block.label.as_str(), true).field(
+            // Show specific block content
+            match agent
+                .runtime()
+                .memory()
+                .get_rendered_content(agent.id().as_str(), block_name)
+                .await
+            {
+                Ok(Some(content)) => {
+                    // Also get metadata for the label
+                    let label = block_name.to_string();
+                    embed = embed.field("Label", &label, true).field(
                         "Size",
-                        format!("{} chars", block.value.len()),
+                        format!("{} chars", content.len()),
                         true,
                     );
 
-                    if let Some(desc) = &block.description {
-                        embed = embed.field("Description", desc, false);
-                    }
-
                     // Handle long content with file attachment
-                    if block.value.len() > 800 {
+                    if content.len() > 800 {
                         // Create file attachment for long content
-                        let filename = format!("{}-{}.txt", agent.name(), block.label);
-                        let attachment = CreateAttachment::bytes(block.value.as_bytes(), &filename);
+                        let filename = format!("{}-{}.txt", agent.name(), label);
+                        let attachment = CreateAttachment::bytes(content.as_bytes(), &filename);
 
                         embed = embed.field("Content", "📎 See attached file", false);
 
@@ -598,7 +607,7 @@ pub async fn handle_memory_command(
                             })?;
                         return Ok(());
                     } else {
-                        embed = embed.field("Content", format!("```\n{}\n```", block.value), false);
+                        embed = embed.field("Content", format!("```\n{}\n```", content), false);
                     }
                 }
                 Ok(None) => {
@@ -614,14 +623,19 @@ pub async fn handle_memory_command(
             }
         } else {
             // List all blocks
-            match agent.list_memory_keys().await {
+            match agent
+                .runtime()
+                .memory()
+                .list_blocks(agent.id().as_str())
+                .await
+            {
                 Ok(blocks) => {
                     if blocks.is_empty() {
                         embed = embed.description("No memory blocks found");
                     } else {
                         let block_list = blocks
                             .iter()
-                            .map(|b| format!("• `{}`", b))
+                            .map(|b| format!("• `{}`", b.label))
                             .collect::<Vec<_>>()
                             .join("\n");
 
@@ -726,8 +740,12 @@ pub async fn handle_archival_command(
 
         if let Some(query) = query {
             // Search archival memory
-            let handle = agent.handle().await;
-            match handle.search_archival_memories(query, 5).await {
+            match agent
+                .runtime()
+                .memory()
+                .search_archival(agent.id().as_str(), query, 5)
+                .await
+            {
                 Ok(results) => {
                     if results.is_empty() {
                         embed = embed.description(format!(
@@ -737,15 +755,27 @@ pub async fn handle_archival_command(
                     } else {
                         embed = embed.field("Results", results.len().to_string(), true);
 
-                        for (i, memory) in results.iter().enumerate().take(3) {
-                            let preview = if memory.value.len() > 200 {
-                                format!("{}...", &memory.value[..200])
-                            } else {
-                                memory.value.clone()
-                            };
+                        for (i, entry) in results.iter().enumerate().take(3) {
+                            // Use extract_snippet for UTF-8 safe truncation
+                            let preview = extract_snippet(&entry.content, query, 200);
+
+                            // Use first line or truncated content as title (UTF-8 safe)
+                            let title = entry
+                                .content
+                                .lines()
+                                .next()
+                                .map(|l| {
+                                    if l.chars().count() > 50 {
+                                        let truncated: String = l.chars().take(50).collect();
+                                        format!("{}...", truncated)
+                                    } else {
+                                        l.to_string()
+                                    }
+                                })
+                                .unwrap_or_else(|| format!("Entry {}", i + 1));
 
                             embed = embed.field(
-                                format!("{}. {}", i + 1, memory.label),
+                                format!("{}. {}", i + 1, title),
                                 format!("```\n{}\n```", preview),
                                 false,
                             );
@@ -766,22 +796,12 @@ pub async fn handle_archival_command(
                 }
             }
         } else {
-            // Show count
-            let handle = agent.handle().await;
-            match handle.count_archival_memories().await {
-                Ok(count) => {
-                    embed = embed
-                        .field("Total Entries", count.to_string(), true)
-                        .footer(CreateEmbedFooter::new(
-                            "Use /archival <agent> <query> to search",
-                        ));
-                }
-                Err(e) => {
-                    embed = embed
-                        .description(format!("Error: {}", e))
-                        .colour(Colour::from_rgb(200, 100, 100));
-                }
-            }
+            // Show a message indicating search is required (no count available in new API)
+            embed = embed
+                .description("Use `/archival <agent> <query>` to search archival memory")
+                .footer(CreateEmbedFooter::new(
+                    "Archival memory contains long-term stored information",
+                ));
         }
     } else {
         embed = embed
@@ -845,23 +865,23 @@ pub async fn handle_context_command(
                 .map(|a| &a.agent)
         })
     } else {
+        // Prefer supervisor-role agent as default, else first
         agents.and_then(|agents| {
-            agents
-                .iter()
-                .find(|a| a.agent.name() == "Pattern")
-                .or_else(|| agents.first())
-                .map(|a| &a.agent)
+            let supervisor = agents.iter().find(|a| {
+                matches!(
+                    a.membership.role,
+                    pattern_core::coordination::types::GroupMemberRole::Supervisor
+                )
+            });
+            supervisor.or_else(|| agents.first()).map(|a| &a.agent)
         })
     };
 
     if let Some(agent) = agent {
         embed = embed.field("Agent", agent.name(), true);
 
-        let handle = agent.handle().await;
-        match handle
-            .search_conversations(None, None, None, None, 100)
-            .await
-        {
+        // Get recent messages from the message store
+        match agent.runtime().messages().get_recent(100).await {
             Ok(messages) => {
                 if messages.is_empty() {
                     embed = embed.description("No messages in context");
@@ -974,6 +994,27 @@ pub async fn handle_search_command(
         .and_then(|opt| opt.value.as_str())
         .unwrap_or("");
 
+    // Check for empty query - FTS5 requires a non-empty search term
+    if query.trim().is_empty() {
+        command
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .embed(
+                            CreateEmbed::new()
+                                .title("Search Query Required")
+                                .description("Please provide a search term. The search uses full-text search to find relevant messages.\n\n**Examples:**\n- `/search query:meeting` - Find messages about meetings\n- `/search query:\"project update\"` - Search for exact phrase\n- `/search query:deadline OR urgent` - Boolean search")
+                                .colour(Colour::from_rgb(255, 165, 0)),
+                        )
+                        .ephemeral(true),
+                ),
+            )
+            .await
+            .ok();
+        return Ok(());
+    }
+
     let agent_name = command
         .data
         .options
@@ -994,12 +1035,15 @@ pub async fn handle_search_command(
                 .map(|a| &a.agent)
         })
     } else {
+        // Prefer supervisor-role agent as default, else first
         agents.and_then(|agents| {
-            agents
-                .iter()
-                .find(|a| a.agent.name() == "Pattern")
-                .or_else(|| agents.first())
-                .map(|a| &a.agent)
+            let supervisor = agents.iter().find(|a| {
+                matches!(
+                    a.membership.role,
+                    pattern_core::coordination::types::GroupMemberRole::Supervisor
+                )
+            });
+            supervisor.or_else(|| agents.first()).map(|a| &a.agent)
         })
     };
 
@@ -1009,43 +1053,45 @@ pub async fn handle_search_command(
                 .field("Agent", agent.name(), true)
                 .field("Query", format!("`{}`", query), true);
 
-        let handle = agent.handle().await;
-        match handle
-            .search_conversations(Some(query), None, None, None, 5)
+        // Use the memory search API with messages-only scope
+        let search_options = SearchOptions::new()
+            .content_types(vec![SearchContentType::Messages])
+            .limit(10);
+
+        match agent
+            .runtime()
+            .memory()
+            .search(agent.id().as_str(), query, search_options)
             .await
         {
-            Ok(messages) => {
-                if messages.is_empty() {
+            Ok(results) => {
+                if results.is_empty() {
                     embed = embed.description(format!("No messages found matching '{}'", query));
                 } else {
-                    embed = embed.field("Results", messages.len().to_string(), true);
+                    embed = embed.field("Results", results.len().to_string(), true);
 
                     // Handle large result sets with file attachment
-                    if messages.len() > 5 {
+                    if results.len() > 5 {
                         // Create file attachment for full search results
                         let mut content_lines = Vec::new();
-                        for (i, msg) in messages.iter().enumerate() {
-                            let role = format!("{:?}", msg.role);
-                            let content = msg
-                                .text_content()
-                                .unwrap_or_else(|| "(no text content)".to_string());
+                        for (i, result) in results.iter().enumerate() {
+                            let content = result.content.as_deref().unwrap_or("(no text content)");
                             content_lines.push(format!(
-                                "{}. [{}] - {}\n{}",
+                                "{}. [Score: {:.2}]\n{}",
                                 i + 1,
-                                role,
-                                msg.created_at.format("%Y-%m-%d %H:%M"),
+                                result.score,
                                 content
                             ));
                         }
 
                         let filename =
-                            format!("{}-search-{}.txt", agent.name(), query.replace(" ", "_"));
+                            format!("{}-search-{}.txt", agent.name(), query.replace(' ', "_"));
                         let content = content_lines.join("\n\n---\n\n");
                         let attachment = CreateAttachment::bytes(content.as_bytes(), &filename);
 
                         embed = embed.field(
                             "Search Results",
-                            "📎 See attached file for full results",
+                            "See attached file for full results",
                             false,
                         );
 
@@ -1065,25 +1111,14 @@ pub async fn handle_search_command(
                             })?;
                         return Ok(());
                     } else {
-                        // Show results inline
-                        for (i, msg) in messages.iter().enumerate().take(5) {
-                            let role = format!("{:?}", msg.role);
-                            let content = msg
-                                .text_content()
-                                .unwrap_or_else(|| "(no text content)".to_string());
-                            let preview = if content.len() > 200 {
-                                format!("{}...", &content[..200])
-                            } else {
-                                content
-                            };
+                        // Show results inline with UTF-8 safe truncation
+                        for (i, result) in results.iter().enumerate().take(5) {
+                            let content = result.content.as_deref().unwrap_or("(no text content)");
+                            // Use extract_snippet for UTF-8 safe preview with query context
+                            let preview = extract_snippet(content, query, 200);
 
                             embed = embed.field(
-                                format!(
-                                    "{}. [{}] - {}",
-                                    i + 1,
-                                    role,
-                                    msg.created_at.format("%Y-%m-%d %H:%M")
-                                ),
+                                format!("{}. [Score: {:.2}]", i + 1, result.score),
                                 preview,
                                 false,
                             );
@@ -1119,35 +1154,46 @@ pub async fn handle_search_command(
 }
 
 /// Handle the /list command
-pub async fn handle_list_command(ctx: &Context, command: &CommandInteraction) -> Result<()> {
+///
+/// Lists all agents from the database. If database access is unavailable,
+/// falls back to showing agents from the current group context.
+pub async fn handle_list_command(
+    ctx: &Context,
+    command: &CommandInteraction,
+    agents: Option<&[AgentWithMembership<Arc<dyn Agent>>]>,
+    dbs: Option<&ConstellationDatabases>,
+) -> Result<()> {
     let mut embed = CreateEmbed::new()
         .title("Available Agents")
         .colour(Colour::from_rgb(100, 200, 150));
 
-    match ops::list_entities::<AgentRecord, _>(&DB).await {
-        Ok(agents) => {
-            if agents.is_empty() {
-                embed = embed.description("No agents found");
-            } else {
-                let agent_list = agents
-                    .iter()
-                    .map(|a| format!("• **{}** - `{}`", a.name, a.id))
-                    .collect::<Vec<_>>()
-                    .join("\n");
+    // Try to query all agents from the database first
+    if let Some(dbs) = dbs {
+        match pattern_db::queries::list_agents(dbs.constellation.pool()).await {
+            Ok(db_agents) => {
+                if db_agents.is_empty() {
+                    embed = embed.description("No agents found in database");
+                } else {
+                    let agent_list = db_agents
+                        .iter()
+                        .map(|a| format!("• **{}** - `{}`", a.name, a.id))
+                        .collect::<Vec<_>>()
+                        .join("\n");
 
-                embed = embed
-                    .field("Agents", agent_list, false)
-                    .footer(CreateEmbedFooter::new(format!(
-                        "Total: {} agents",
-                        agents.len()
-                    )));
+                    embed = embed.field("All Agents", agent_list, false).footer(
+                        CreateEmbedFooter::new(format!("Total: {} agents", db_agents.len())),
+                    );
+                }
+            }
+            Err(e) => {
+                // Database query failed, fall back to group agents
+                tracing::warn!("Failed to query agents from database: {}", e);
+                embed = show_group_agents(embed, agents);
             }
         }
-        Err(e) => {
-            embed = embed
-                .description(format!("Error: {}", e))
-                .colour(Colour::from_rgb(200, 100, 100));
-        }
+    } else {
+        // No database available, show group agents
+        embed = show_group_agents(embed, agents);
     }
 
     command
@@ -1163,4 +1209,34 @@ pub async fn handle_list_command(ctx: &Context, command: &CommandInteraction) ->
         .map_err(|e| miette::miette!("Failed to send list response: {}", e))?;
 
     Ok(())
+}
+
+/// Helper to show agents from the current group context
+fn show_group_agents(
+    mut embed: CreateEmbed,
+    agents: Option<&[AgentWithMembership<Arc<dyn Agent>>]>,
+) -> CreateEmbed {
+    if let Some(agents) = agents {
+        if agents.is_empty() {
+            embed = embed.description("No agents in current group");
+        } else {
+            let agent_list = agents
+                .iter()
+                .map(|a| format!("• **{}** - `{}`", a.agent.name(), a.agent.id()))
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            embed = embed
+                .field("Group Agents", agent_list, false)
+                .footer(CreateEmbedFooter::new(format!(
+                    "Total: {} agents in group",
+                    agents.len()
+                )));
+        }
+    } else {
+        embed = embed
+            .description("No agents available")
+            .colour(Colour::from_rgb(200, 100, 100));
+    }
+    embed
 }

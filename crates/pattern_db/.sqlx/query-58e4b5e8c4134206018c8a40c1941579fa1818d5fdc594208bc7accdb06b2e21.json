@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        UPDATE memory_blocks\n        SET loro_snapshot = ?, content_preview = ?, updated_at = datetime('now')\n        WHERE id = ?\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "58e4b5e8c4134206018c8a40c1941579fa1818d5fdc594208bc7accdb06b2e21"
+}

@@ -7,11 +7,10 @@ use serde_json::json;
 
 use crate::{
     Result,
-    context::AgentHandle,
-    memory::{MemoryPermission, MemoryType},
+    memory::MemoryPermission,
     memory_acl::{MemoryGate, MemoryOp, check as acl_check, consent_reason},
     permission::PermissionScope,
-    tool::{AiTool, ExecutionMeta},
+    tool::{AiTool, ExecutionMeta, ToolRule, ToolRuleType},
 };
 
 /// Operation types for context management
@@ -78,10 +77,31 @@ pub struct ContextOutput {
     pub content: serde_json::Value,
 }
 
-/// Unified tool for managing context
-#[derive(Debug, Clone)]
+// ============================================================================
+// Implementation using ToolContext
+// ============================================================================
+
+use crate::runtime::ToolContext;
+use std::sync::Arc;
+
+/// Tool for managing context using ToolContext
+#[derive(Clone)]
 pub struct ContextTool {
-    pub(crate) handle: AgentHandle,
+    ctx: Arc<dyn ToolContext>,
+}
+
+impl std::fmt::Debug for ContextTool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ContextTool")
+            .field("agent_id", &self.ctx.agent_id())
+            .finish()
+    }
+}
+
+impl ContextTool {
+    pub fn new(ctx: Arc<dyn ToolContext>) -> Self {
+        Self { ctx }
+    }
 }
 
 #[async_trait]
@@ -165,7 +185,6 @@ impl AiTool for ContextTool {
                         "load operation requires 'archival_label' field",
                     )
                 })?;
-                // Name is optional - defaults to archival_label
                 let name = params.name;
                 self.execute_load(archival_label, name, meta).await
             }
@@ -191,6 +210,16 @@ impl AiTool for ContextTool {
 
     fn usage_rule(&self) -> Option<&'static str> {
         Some("the conversation will be continued when called")
+    }
+
+    fn tool_rules(&self) -> Vec<ToolRule> {
+        vec![ToolRule {
+            tool_name: self.name().to_string(),
+            rule_type: ToolRuleType::ContinueLoop,
+            conditions: vec![],
+            priority: 0,
+            metadata: None,
+        }]
     }
 
     fn examples(&self) -> Vec<crate::tool::ToolExample<Self::Input, Self::Output>> {
@@ -234,9 +263,6 @@ impl AiTool for ContextTool {
 }
 
 impl ContextTool {
-    pub fn new(handle: AgentHandle) -> Self {
-        Self { handle }
-    }
     fn can_bypass(&self, meta: &ExecutionMeta, key: &str) -> bool {
         if let Some(grant) = &meta.permission_grant {
             match &grant.scope {
@@ -249,118 +275,151 @@ impl ContextTool {
         }
     }
 
+    /// Convert pattern_db MemoryPermission to core MemoryPermission
+    fn convert_permission(&self, perm: pattern_db::models::MemoryPermission) -> MemoryPermission {
+        use crate::memory::MemoryPermission as CorePerm;
+        match perm {
+            pattern_db::models::MemoryPermission::ReadOnly => CorePerm::ReadOnly,
+            pattern_db::models::MemoryPermission::Partner => CorePerm::Partner,
+            pattern_db::models::MemoryPermission::Human => CorePerm::Human,
+            pattern_db::models::MemoryPermission::Append => CorePerm::Append,
+            pattern_db::models::MemoryPermission::ReadWrite => CorePerm::ReadWrite,
+            pattern_db::models::MemoryPermission::Admin => CorePerm::Admin,
+        }
+    }
+
+    /// Helper to check permission and request consent if needed
+    async fn check_permission(
+        &self,
+        block_name: &str,
+        op: MemoryOp,
+        meta: &ExecutionMeta,
+    ) -> Result<Option<String>> {
+        let agent_id = self.ctx.agent_id();
+
+        // Get block metadata to check permission
+        let current_perm = match self
+            .ctx
+            .memory()
+            .get_block_metadata(agent_id, block_name)
+            .await
+        {
+            Ok(Some(metadata)) => self.convert_permission(metadata.permission),
+            Ok(None) => {
+                return Ok(Some(format!("Memory block '{}' not found", block_name)));
+            }
+            Err(e) => {
+                return Ok(Some(format!("Failed to get block metadata: {:?}", e)));
+            }
+        };
+
+        // Gate by permission, offering consent path when applicable
+        if !self.can_bypass(meta, block_name) {
+            match acl_check(op, current_perm) {
+                MemoryGate::Allow => {}
+                MemoryGate::Deny { reason } => {
+                    return Ok(Some(format!(
+                        "{} — cannot {:?} '{}'",
+                        reason, op, block_name
+                    )));
+                }
+                MemoryGate::RequireConsent { .. } => {
+                    let agent_id_parsed = match agent_id.parse::<crate::AgentId>() {
+                        Ok(id) => id,
+                        Err(_) => {
+                            return Ok(Some(format!("Invalid agent ID format: {}", agent_id)));
+                        }
+                    };
+
+                    let grant = self
+                        .ctx
+                        .permission_broker()
+                        .request(
+                            agent_id_parsed,
+                            "context".to_string(),
+                            PermissionScope::MemoryEdit {
+                                key: block_name.to_string(),
+                            },
+                            Some(consent_reason(block_name, op, current_perm)),
+                            meta.route_metadata.clone(),
+                            std::time::Duration::from_secs(90),
+                        )
+                        .await;
+                    if grant.is_none() {
+                        return Ok(Some(format!(
+                            "{:?} on '{}' requires approval; request timed out or was denied",
+                            op, block_name
+                        )));
+                    }
+                }
+            }
+        }
+
+        Ok(None) // No error
+    }
+
     async fn execute_append(
         &self,
         name: String,
         content: String,
         meta: &ExecutionMeta,
     ) -> Result<ContextOutput> {
-        // Fetch and validate target block (copy needed fields, then drop guard)
-        let (current_type, current_perm) = {
-            let guard = self.handle.memory.get_block(&name).ok_or_else(|| {
-                crate::CoreError::memory_not_found(
-                    &self.handle.agent_id,
-                    &name,
-                    self.handle.memory.list_blocks(),
-                )
-            })?;
-            (guard.memory_type, guard.permission)
-        };
+        let agent_id = self.ctx.agent_id();
 
-        if current_type == MemoryType::Archival {
+        // Check permission before appending
+        if let Some(error_msg) = self.check_permission(&name, MemoryOp::Append, meta).await? {
             return Ok(ContextOutput {
                 success: false,
-                message: Some(format!(
-                    "Block '{}' is not context (type: {:?}). Use `recall` for archival memories.",
-                    name, current_type
-                )),
+                message: Some(error_msg),
                 content: json!({}),
             });
         }
 
-        // Gate by permission, offering consent path when applicable
-        if !self.can_bypass(meta, &name) {
-            match acl_check(MemoryOp::Append, current_perm) {
-                MemoryGate::Allow => {}
-                MemoryGate::Deny { reason } => {
-                    return Ok(ContextOutput {
-                        success: false,
-                        message: Some(format!("{} — cannot append to '{}'", reason, name)),
-                        content: json!({}),
-                    });
-                }
-                MemoryGate::RequireConsent { .. } => {
-                    let grant = crate::permission::broker()
-                        .request(
-                            self.handle.agent_id.clone(),
-                            "context".to_string(),
-                            PermissionScope::MemoryEdit { key: name.clone() },
-                            Some(consent_reason(&name, MemoryOp::Append, current_perm)),
-                            meta.route_metadata.clone(),
-                            std::time::Duration::from_secs(90),
-                        )
-                        .await;
-                    if grant.is_none() {
-                        return Ok(ContextOutput {
-                            success: false,
-                            message: Some(format!(
-                                "Append to '{}' requires approval; request timed out or was denied",
-                                name
-                            )),
-                            content: json!({}),
-                        });
-                    }
-                }
-            }
-        }
+        // Use MemoryStore::append_to_block
+        // Prepend newlines to separate from existing content
+        let content_with_separator = format!("\n\n{}", content);
+        match self
+            .ctx
+            .memory()
+            .append_to_block(agent_id, &name, &content_with_separator)
+            .await
+        {
+            Ok(()) => {
+                // Get the updated block to show preview
+                let preview =
+                    if let Ok(Some(doc)) = self.ctx.memory().get_block(agent_id, &name).await {
+                        let text = doc.text_content();
+                        let char_count = text.chars().count();
+                        let preview_chars = 200;
+                        let content_preview = if text.len() > preview_chars {
+                            format!("...{}", &text[text.len().saturating_sub(preview_chars)..])
+                        } else {
+                            text
+                        };
+                        json!({
+                            "content_preview": content_preview,
+                            "total_chars": char_count,
+                        })
+                    } else {
+                        json!({})
+                    };
 
-        // Perform the append
-        self.handle.memory.alter_block(&name, |_k, mut block| {
-            block.value.push_str("\n\n");
-            block.value.push_str(&content);
-            block.updated_at = chrono::Utc::now();
-            block
-        });
-
-        // Get the updated block to show the new state
-        let updated_block = self
-            .handle
-            .memory
-            .get_block(&name)
-            .map(|block| {
-                let char_count = block.value.chars().count();
-
-                // Show the last part of the content (where the append happened)
-                let preview_chars = 200; // Show last 200 chars
-                let content_preview = if block.value.len() > preview_chars {
-                    format!(
-                        "...{}",
-                        &block.value[block.value.len().saturating_sub(preview_chars)..]
-                    )
-                } else {
-                    block.value.clone()
-                };
-
-                json!({
-                    "content_preview": content_preview,
-                    "total_chars": char_count,
+                Ok(ContextOutput {
+                    success: true,
+                    message: Some(format!(
+                        "Successfully appended {} characters to context section '{}'",
+                        content.len(),
+                        name
+                    )),
+                    content: preview,
                 })
-            })
-            .unwrap_or_else(|| json!({}));
-
-        Ok(ContextOutput {
-            success: true,
-            message: Some(format!(
-                "Successfully appended {} characters to context section '{}'. The section now contains {} total characters.",
-                content.len(),
-                name,
-                updated_block
-                    .get("total_chars")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0)
-            )),
-            content: updated_block,
-        })
+            }
+            Err(e) => Ok(ContextOutput {
+                success: false,
+                message: Some(format!("Failed to append to context '{}': {:?}", name, e)),
+                content: json!({}),
+            }),
+        }
     }
 
     async fn execute_replace(
@@ -370,134 +429,86 @@ impl ContextTool {
         new_content: String,
         meta: &ExecutionMeta,
     ) -> Result<ContextOutput> {
-        // Fetch and validate target block (copy fields, drop guard)
-        let (current_type, current_perm) = match self.handle.memory.get_block(&name) {
-            Some(b) => (b.memory_type, b.permission),
-            None => {
-                return Ok(ContextOutput {
-                    success: false,
-                    message: Some(format!(
-                        "Memory '{}' not found, available blocks follow",
-                        name
-                    )),
-                    content: serde_json::to_value(self.handle.memory.list_blocks())
-                        .unwrap_or(json!({})),
-                });
-            }
-        };
+        let agent_id = self.ctx.agent_id();
 
-        if current_type == MemoryType::Archival {
+        // Check permission before replacing
+        if let Some(error_msg) = self
+            .check_permission(&name, MemoryOp::Overwrite, meta)
+            .await?
+        {
             return Ok(ContextOutput {
                 success: false,
-                message: Some(format!(
-                    "Block '{}' is not context (type: {:?})",
-                    name, current_type
-                )),
+                message: Some(error_msg),
                 content: json!({}),
             });
         }
 
-        // Gate by permission, offering consent path when applicable
-        if !self.can_bypass(meta, &name) {
-            match acl_check(MemoryOp::Overwrite, current_perm) {
-                MemoryGate::Allow => {}
-                MemoryGate::Deny { reason } => {
-                    return Ok(ContextOutput {
-                        success: false,
-                        message: Some(format!("{} — cannot replace in '{}'", reason, name)),
-                        content: json!({}),
-                    });
-                }
-                MemoryGate::RequireConsent { .. } => {
-                    let grant = crate::permission::broker()
-                        .request(
-                            self.handle.agent_id.clone(),
-                            "context".to_string(),
-                            PermissionScope::MemoryEdit { key: name.clone() },
-                            Some(consent_reason(&name, MemoryOp::Overwrite, current_perm)),
-                            meta.route_metadata.clone(),
-                            std::time::Duration::from_secs(90),
-                        )
-                        .await;
-                    if grant.is_none() {
-                        return Ok(ContextOutput {
-                            success: false,
-                            message: Some(format!(
-                                "Replace in '{}' requires approval; request timed out or was denied",
-                                name
-                            )),
-                            content: json!({}),
-                        });
-                    }
-                }
-            }
-        }
+        // Use MemoryStore::replace_in_block
+        match self
+            .ctx
+            .memory()
+            .replace_in_block(agent_id, &name, &old_content, &new_content)
+            .await
+        {
+            Ok(true) => {
+                // Get the updated block to show preview
+                let preview =
+                    if let Ok(Some(doc)) = self.ctx.memory().get_block(agent_id, &name).await {
+                        let text = doc.text_content();
+                        let char_count = text.chars().count();
 
-        // Perform the replacement (and validate old_content presence)
-        if let Some(mut block) = self.handle.memory.get_block_mut(&name) {
-            if !block.value.contains(&old_content) {
-                return Ok(ContextOutput {
-                    success: false,
-                    message: Some(format!(
-                        "Content '{}' not found in context section '{}'",
-                        old_content, name
-                    )),
-                    content: json!({}),
-                });
-            }
-            block.value = block.value.replace(&old_content, &new_content);
-            block.updated_at = chrono::Utc::now();
-        }
+                        // Find where the replacement happened and show context
+                        let preview_chars = 100;
+                        let content_preview = if let Some(pos) = text.find(&new_content) {
+                            let start = pos.saturating_sub(preview_chars);
+                            let end = (pos + new_content.len() + preview_chars).min(text.len());
 
-        // Get the updated block to show the new state
-        let updated_block = self
-            .handle
-            .memory
-            .get_block(&name)
-            .map(|block| {
-                let char_count = block.value.chars().count();
+                            let prefix = if start > 0 { "..." } else { "" };
+                            let suffix = if end < text.len() { "..." } else { "" };
 
-                // Find where the replacement happened and show context around it
-                let preview_chars = 100; // Show 100 chars before and after
-                let content_preview = if let Some(pos) = block.value.find(&new_content) {
-                    let start = pos.saturating_sub(preview_chars);
-                    let end = (pos + new_content.len() + preview_chars).min(block.value.len());
+                            format!("{}{}{}", prefix, &text[start..end], suffix)
+                        } else {
+                            if text.len() > preview_chars * 2 {
+                                format!(
+                                    "...{}",
+                                    &text[text.len().saturating_sub(preview_chars * 2)..]
+                                )
+                            } else {
+                                text
+                            }
+                        };
 
-                    let prefix = if start > 0 { "..." } else { "" };
-                    let suffix = if end < block.value.len() { "..." } else { "" };
-
-                    format!("{}{}{}", prefix, &block.value[start..end], suffix)
-                } else {
-                    // Fallback to showing the end if we can't find the replacement
-                    if block.value.len() > preview_chars * 2 {
-                        format!(
-                            "...{}",
-                            &block.value[block.value.len().saturating_sub(preview_chars * 2)..]
-                        )
+                        json!({
+                            "content_preview": content_preview,
+                            "total_chars": char_count,
+                        })
                     } else {
-                        block.value.clone()
-                    }
-                };
+                        json!({})
+                    };
 
-                json!({
-                    "content_preview": content_preview,
-                    "total_chars": char_count,
+                Ok(ContextOutput {
+                    success: true,
+                    message: Some(format!(
+                        "Successfully replaced content in context section '{}'",
+                        name
+                    )),
+                    content: preview,
                 })
-            })
-            .unwrap_or_else(|| json!({}));
-
-        Ok(ContextOutput {
-            success: true,
-            message: Some(format!(
-                "Successfully replaced content in context section '{}'. The section now contains {} total characters.",
-                name,
-                updated_block
-                    .get("total_chars")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0)
-            )),
-            content: updated_block,
-        })
+            }
+            Ok(false) => Ok(ContextOutput {
+                success: false,
+                message: Some(format!(
+                    "Content '{}' not found in context section '{}'",
+                    old_content, name
+                )),
+                content: json!({}),
+            }),
+            Err(e) => Ok(ContextOutput {
+                success: false,
+                message: Some(format!("Failed to replace in context '{}': {:?}", name, e)),
+                content: json!({}),
+            }),
+        }
     }
 
     async fn execute_archive(
@@ -506,42 +517,32 @@ impl ContextTool {
         archival_label: Option<String>,
         meta: &ExecutionMeta,
     ) -> Result<ContextOutput> {
-        // Check if the block exists and is context
-        let block = match self.handle.memory.get_block(&name) {
-            Some(block) => {
-                // can't archive blocks you don't have admin access for
-                if block.memory_type != MemoryType::Working
-                    && block.memory_type != MemoryType::Core
-                    && !block.pinned
-                {
-                    return Ok(ContextOutput {
-                        success: false,
-                        message: Some(format!(
-                            "Block '{}' is not context (type: {:?})",
-                            name, block.memory_type
-                        )),
-                        content: json!({}),
-                    });
-                } else if block.permission < MemoryPermission::Append
-                    && !self.can_bypass(meta, &name)
-                {
-                    return Ok(ContextOutput {
-                        success: false,
-                        message: Some(format!(
-                            "Not enough permissions to swap out block '{}', requires read_write",
-                            name
-                        )),
-                        content: json!({}),
-                    });
-                }
-                block.clone()
-            }
-            None => {
+        let agent_id = self.ctx.agent_id();
+
+        // Check permission before archiving (requires delete permission on source block)
+        if let Some(error_msg) = self.check_permission(&name, MemoryOp::Delete, meta).await? {
+            return Ok(ContextOutput {
+                success: false,
+                message: Some(error_msg),
+                content: json!({}),
+            });
+        }
+
+        // Get the block content first
+        let block_content = match self.ctx.memory().get_block(agent_id, &name).await {
+            Ok(Some(doc)) => doc.text_content(),
+            Ok(None) => {
                 return Ok(ContextOutput {
                     success: false,
                     message: Some(format!("Memory '{}' not found", name)),
-                    content: serde_json::to_value(self.handle.memory.list_blocks())
-                        .unwrap_or(json!({})),
+                    content: json!({}),
+                });
+            }
+            Err(e) => {
+                return Ok(ContextOutput {
+                    success: false,
+                    message: Some(format!("Failed to get block '{}': {:?}", name, e)),
+                    content: json!({}),
                 });
             }
         };
@@ -550,92 +551,40 @@ impl ContextTool {
         let archival_label = archival_label
             .unwrap_or_else(|| format!("{}_archived_{}", name, chrono::Utc::now().timestamp()));
 
-        // If the archival label already exists, enforce Overwrite ACL (with consent path)
-        if self.handle.memory.contains_block(&archival_label) {
-            if let Some(existing) = self.handle.memory.get_block(&archival_label) {
-                if !self.can_bypass(meta, &archival_label) {
-                    match acl_check(MemoryOp::Overwrite, existing.permission) {
-                        MemoryGate::Allow => {}
-                        MemoryGate::Deny { reason } => {
-                            return Ok(ContextOutput {
-                                success: false,
-                                message: Some(format!(
-                                    "{} — cannot overwrite existing recall memory '{}'",
-                                    reason, archival_label
-                                )),
-                                content: json!({}),
-                            });
-                        }
-                        MemoryGate::RequireConsent { .. } => {
-                            let grant = crate::permission::broker()
-                                .request(
-                                    self.handle.agent_id.clone(),
-                                    "context".to_string(),
-                                    PermissionScope::MemoryEdit {
-                                        key: archival_label.clone(),
-                                    },
-                                    Some(consent_reason(
-                                        &archival_label,
-                                        MemoryOp::Overwrite,
-                                        existing.permission,
-                                    )),
-                                    meta.route_metadata.clone(),
-                                    std::time::Duration::from_secs(90),
-                                )
-                                .await;
-                            if grant.is_none() {
-                                return Ok(ContextOutput {
-                                    success: false,
-                                    message: Some(format!(
-                                        "Overwriting recall memory '{}' requires approval; request timed out or was denied",
-                                        archival_label
-                                    )),
-                                    content: json!({}),
-                                });
-                            }
-                        }
-                    }
+        // Insert to archival memory
+        match self
+            .ctx
+            .memory()
+            .insert_archival(agent_id, &block_content, None)
+            .await
+        {
+            Ok(_id) => {
+                // Delete the original block
+                match self.ctx.memory().delete_block(agent_id, &name).await {
+                    Ok(()) => Ok(ContextOutput {
+                        success: true,
+                        message: Some(format!(
+                            "Archived context '{}' to recall memory '{}'",
+                            name, archival_label
+                        )),
+                        content: json!({}),
+                    }),
+                    Err(e) => Ok(ContextOutput {
+                        success: false,
+                        message: Some(format!(
+                            "Archived to recall but failed to delete original block '{}': {:?}",
+                            name, e
+                        )),
+                        content: json!({}),
+                    }),
                 }
             }
+            Err(e) => Ok(ContextOutput {
+                success: false,
+                message: Some(format!("Failed to archive to recall memory: {:?}", e)),
+                content: json!({}),
+            }),
         }
-
-        // Create the recall memory
-        self.handle
-            .memory
-            .create_block(&archival_label, &block.value)?;
-
-        // Update it to be archival type
-        if let Some(mut archival_block) = self.handle.memory.get_block_mut(&archival_label) {
-            archival_block.memory_type = MemoryType::Archival;
-            archival_block.permission = MemoryPermission::ReadWrite;
-            archival_block.description = Some(format!("Archived from context '{}'", name));
-        }
-
-        // Enforce delete ACL for the original context block
-        match acl_check(MemoryOp::Delete, block.permission) {
-            MemoryGate::Allow => {
-                self.handle.memory.remove_block(&name);
-            }
-            MemoryGate::RequireConsent { .. } | MemoryGate::Deny { .. } => {
-                return Ok(ContextOutput {
-                    success: false,
-                    message: Some(format!(
-                        "Insufficient permission to delete context block '{}' (requires Admin)",
-                        name
-                    )),
-                    content: json!({}),
-                });
-            }
-        }
-
-        Ok(ContextOutput {
-            success: true,
-            message: Some(format!(
-                "Archived context '{}' to recall memory '{}'",
-                name, archival_label
-            )),
-            content: json!({}),
-        })
     }
 
     async fn execute_load(
@@ -644,132 +593,93 @@ impl ContextTool {
         name: Option<String>,
         _meta: &ExecutionMeta,
     ) -> Result<ContextOutput> {
-        // Use archival_label as destination if name not provided
+        use crate::memory::{BlockSchema, BlockType};
+
+        let agent_id = self.ctx.agent_id();
         let destination_name = name.unwrap_or_else(|| archival_label.clone());
 
-        // Support same-label load by converting archival -> working in-memory
-        if destination_name == archival_label {
-            // If present in memory, flip the type
-            if let Some(mut existing_block) = self.handle.memory.get_block_mut(&archival_label) {
-                if existing_block.memory_type == MemoryType::Archival {
-                    existing_block.memory_type = MemoryType::Working;
-                    return Ok(ContextOutput {
-                        success: true,
-                        message: Some(format!(
-                            "Changed recall memory '{}' to working memory",
-                            archival_label
-                        )),
-                        content: json!({}),
-                    });
+        // Search archival to find the content
+        match self
+            .ctx
+            .memory()
+            .search_archival(agent_id, &archival_label, 1)
+            .await
+        {
+            Ok(entries) => {
+                if let Some(entry) = entries.first() {
+                    // Check if destination block exists, create if not
+                    let block_exists = self
+                        .ctx
+                        .memory()
+                        .get_block(agent_id, &destination_name)
+                        .await
+                        .map(|b| b.is_some())
+                        .unwrap_or(false);
+
+                    if !block_exists {
+                        // Create the destination block as Working type
+                        if let Err(e) = self
+                            .ctx
+                            .memory()
+                            .create_block(
+                                agent_id,
+                                &destination_name,
+                                &format!("Loaded from archival: {}", archival_label),
+                                BlockType::Working,
+                                BlockSchema::Text,
+                                10000, // reasonable default char limit
+                            )
+                            .await
+                        {
+                            return Ok(ContextOutput {
+                                success: false,
+                                message: Some(format!(
+                                    "Failed to create destination block '{}': {:?}",
+                                    destination_name, e
+                                )),
+                                content: json!({}),
+                            });
+                        }
+                    }
+
+                    // Update the block with archival content
+                    match self
+                        .ctx
+                        .memory()
+                        .update_block_text(agent_id, &destination_name, &entry.content)
+                        .await
+                    {
+                        Ok(()) => Ok(ContextOutput {
+                            success: true,
+                            message: Some(format!(
+                                "Loaded recall memory '{}' into working memory '{}'",
+                                archival_label, destination_name
+                            )),
+                            content: json!({}),
+                        }),
+                        Err(e) => Ok(ContextOutput {
+                            success: false,
+                            message: Some(format!(
+                                "Found recall memory but failed to load into '{}': {:?}",
+                                destination_name, e
+                            )),
+                            content: json!({}),
+                        }),
+                    }
                 } else {
-                    return Ok(ContextOutput {
-                        success: true,
-                        message: Some(format!(
-                            "Memory '{}' is already working memory",
-                            archival_label
-                        )),
-                        content: json!({}),
-                    });
-                }
-            }
-
-            // Not present in memory: attempt to fetch archival from DB and add as working
-            if let Some(src) = self
-                .handle
-                .get_archival_memory_by_label(&archival_label)
-                .await?
-            {
-                self.handle
-                    .memory
-                    .create_block(&archival_label, &src.value)?;
-                if let Some(mut blk) = self.handle.memory.get_block_mut(&archival_label) {
-                    blk.memory_type = MemoryType::Working;
-                    blk.permission = MemoryPermission::ReadWrite;
-                }
-                return Ok(ContextOutput {
-                    success: true,
-                    message: Some(format!(
-                        "Loaded recall memory '{}' into working memory (same label)",
-                        archival_label
-                    )),
-                    content: json!({}),
-                });
-            } else {
-                return Ok(ContextOutput {
-                    success: false,
-                    message: Some(format!(
-                        "Archival memory '{}' not found for same-label load",
-                        archival_label
-                    )),
-                    content: json!({}),
-                });
-            }
-        }
-
-        // If not in memory, check if it exists as archival
-        let archival_block = match self.handle.memory.get_block(&archival_label) {
-            Some(block) => {
-                if block.memory_type != MemoryType::Archival {
-                    return Ok(ContextOutput {
+                    Ok(ContextOutput {
                         success: false,
-                        message: Some(format!(
-                            "Block '{}' is not recall memory (type: {:?})",
-                            archival_label, block.memory_type
-                        )),
+                        message: Some(format!("Archival memory '{}' not found", archival_label)),
                         content: json!({}),
-                    });
+                    })
                 }
-                block.clone()
             }
-            None => {
-                return Ok(ContextOutput {
-                    success: false,
-                    message: Some(format!(
-                        "Archival memory '{}' not found, available blocks follow",
-                        archival_label
-                    )),
-                    // Note: should filter for the right block type
-                    content: serde_json::to_value(self.handle.memory.list_blocks().truncate(20))
-                        .unwrap_or(json!({})),
-                });
-            }
-        };
-
-        // If destination exists already, block to avoid unintentional overwrite
-        if self.handle.memory.contains_block(&destination_name) {
-            return Ok(ContextOutput {
+            Err(e) => Ok(ContextOutput {
                 success: false,
-                message: Some(format!(
-                    "Working memory '{}' already exists. Use swap or choose a different destination name.",
-                    destination_name
-                )),
+                message: Some(format!("Failed to search for archival memory: {:?}", e)),
                 content: json!({}),
-            });
+            }),
         }
-
-        // Create the context block at destination
-        self.handle
-            .memory
-            .create_block(&destination_name, &archival_block.value)?;
-
-        // Update it to be working type
-        if let Some(mut working_block) = self.handle.memory.get_block_mut(&destination_name) {
-            working_block.memory_type = MemoryType::Working;
-            working_block.permission = MemoryPermission::ReadWrite;
-            working_block.description =
-                Some(format!("Loaded from recall memory '{}'", archival_label));
-        }
-
-        // Important: keep the original archival block intact
-
-        Ok(ContextOutput {
-            success: true,
-            message: Some(format!(
-                "Loaded recall memory '{}' into working memory '{}' (archival retained)",
-                archival_label, destination_name
-            )),
-            content: json!({}),
-        })
     }
 
     async fn execute_swap(
@@ -778,185 +688,135 @@ impl ContextTool {
         archival_label: String,
         meta: &ExecutionMeta,
     ) -> Result<ContextOutput> {
-        // First check both blocks exist and have correct types
-        let core_block = match self.handle.memory.get_block(&archive_name) {
-            Some(block) => {
-                if block.memory_type != MemoryType::Working || block.pinned {
-                    return Ok(ContextOutput {
-                        success: false,
-                        message: Some(format!(
-                            "Block '{}' is not context (type: {:?})",
-                            archive_name, block.memory_type
-                        )),
-                        content: json!({}),
-                    });
-                }
-                block.clone()
-            }
-            None => {
-                return Ok(ContextOutput {
-                    success: false,
-                    message: Some(format!(
-                        "Memory '{}' not found, available blocks follow",
-                        archive_name
-                    )),
-                    // Note: should filter for the right block type
-                    content: serde_json::to_value(self.handle.memory.list_blocks().truncate(20))
-                        .unwrap_or(json!({})),
-                });
-            }
-        };
+        let agent_id = self.ctx.agent_id();
 
-        let archival_block = match self.handle.memory.get_block(&archival_label) {
-            Some(block) => {
-                if block.memory_type == MemoryType::Archival {
-                    return Ok(ContextOutput {
-                        success: false,
-                        message: Some(format!(
-                            "Block '{}' is not recall memory (type: {:?})",
-                            archival_label, block.memory_type
-                        )),
-                        content: json!({}),
-                    });
-                }
-                block.clone()
-            }
-            None => {
-                return Ok(ContextOutput {
-                    success: false,
-                    message: Some(format!("Archival memory '{}' not found", archival_label)),
-                    content: serde_json::to_value(self.handle.memory.list_blocks().truncate(20))
-                        .unwrap_or(json!({})),
-                });
-            }
-        };
-
-        // Perform the swap atomically
-        // First, create a temporary archival block for the context
-        let temp_label = format!(
-            "{}_swap_temp_{}",
-            archive_name,
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-        );
-        self.handle
-            .memory
-            .create_block(&temp_label, &core_block.value)?;
-
-        if let Some(mut temp_block) = self.handle.memory.get_block_mut(&temp_label) {
-            temp_block.memory_type = MemoryType::Archival;
-            temp_block.permission = MemoryPermission::ReadWrite;
-            temp_block.description = Some(format!("Swapped out from context '{}'", archive_name));
+        // Check permission before swapping (requires overwrite permission on the block being replaced)
+        if let Some(error_msg) = self
+            .check_permission(&archive_name, MemoryOp::Overwrite, meta)
+            .await?
+        {
+            return Ok(ContextOutput {
+                success: false,
+                message: Some(error_msg),
+                content: json!({}),
+            });
         }
 
-        // Overwrite requires ACL; allow consent path if configured
-        if !self.can_bypass(meta, &archive_name) {
-            match acl_check(MemoryOp::Overwrite, core_block.permission) {
-                MemoryGate::Allow => {}
-                MemoryGate::Deny { reason } => {
-                    return Ok(ContextOutput {
-                        success: false,
-                        message: Some(format!("{} — cannot swap into '{}'", reason, archive_name)),
-                        content: json!({}),
-                    });
-                }
-                MemoryGate::RequireConsent { .. } => {
-                    let grant = crate::permission::broker()
-                        .request(
-                            self.handle.agent_id.clone(),
-                            "context".to_string(),
-                            PermissionScope::MemoryEdit {
-                                key: archive_name.clone(),
-                            },
-                            Some(consent_reason(
-                                &archive_name,
-                                MemoryOp::Overwrite,
-                                core_block.permission,
-                            )),
-                            meta.route_metadata.clone(),
-                            std::time::Duration::from_secs(90),
-                        )
-                        .await;
-                    if grant.is_none() {
-                        return Ok(ContextOutput {
-                            success: false,
-                            message: Some(format!(
-                                "Swap into '{}' requires approval; request timed out or was denied",
-                                archive_name
-                            )),
-                            content: json!({}),
-                        });
-                    }
-                }
-            }
-        }
-
-        // Update the context with archival content
-        self.handle
-            .memory
-            .update_block_value(&archive_name, archival_block.value.clone())?;
-
-        // Remove the original archival block (enforce delete ACL)
-        match acl_check(MemoryOp::Delete, archival_block.permission) {
-            MemoryGate::Allow => {
-                self.handle.memory.remove_block(&archival_label);
-            }
-            _ => {
+        // Get both blocks' contents
+        let core_block_content = match self.ctx.memory().get_block(agent_id, &archive_name).await {
+            Ok(Some(doc)) => doc.text_content(),
+            Ok(None) => {
                 return Ok(ContextOutput {
                     success: false,
-                    message: Some(format!(
-                        "Insufficient permission to delete recall memory '{}' (requires Admin)",
-                        archival_label
-                    )),
+                    message: Some(format!("Memory '{}' not found", archive_name)),
                     content: json!({}),
                 });
             }
-        }
+            Err(e) => {
+                return Ok(ContextOutput {
+                    success: false,
+                    message: Some(format!("Failed to get block '{}': {:?}", archive_name, e)),
+                    content: json!({}),
+                });
+            }
+        };
 
-        // Rename the temporary archival block to the original archival label
-        // Since we can't rename directly, create new and remove temp
-        self.handle
-            .memory
-            .create_block(&archival_label, &core_block.value)?;
-        if let Some(mut new_archival) = self.handle.memory.get_block_mut(&archival_label) {
-            new_archival.memory_type = MemoryType::Archival;
-            new_archival.permission = MemoryPermission::ReadWrite;
-            new_archival.description = Some(format!("Swapped out from context '{}'", archive_name));
-        }
-        // Best-effort cleanup of temp block
-        self.handle.memory.remove_block(&temp_label);
+        // Search for archival block
+        let archival_content = match self
+            .ctx
+            .memory()
+            .search_archival(agent_id, &archival_label, 1)
+            .await
+        {
+            Ok(entries) => {
+                if let Some(entry) = entries.first() {
+                    entry.content.clone()
+                } else {
+                    return Ok(ContextOutput {
+                        success: false,
+                        message: Some(format!("Archival memory '{}' not found", archival_label)),
+                        content: json!({}),
+                    });
+                }
+            }
+            Err(e) => {
+                return Ok(ContextOutput {
+                    success: false,
+                    message: Some(format!("Failed to search for archival memory: {:?}", e)),
+                    content: json!({}),
+                });
+            }
+        };
 
-        Ok(ContextOutput {
-            success: true,
-            message: Some(format!(
-                "Swapped context '{}' with recall memory '{}'",
-                archive_name, archival_label
-            )),
-            content: json!({}),
-        })
+        // Swap: update core block with archival content
+        match self
+            .ctx
+            .memory()
+            .update_block_text(agent_id, &archive_name, &archival_content)
+            .await
+        {
+            Ok(()) => {
+                // Archive the original core block content
+                match self
+                    .ctx
+                    .memory()
+                    .insert_archival(agent_id, &core_block_content, None)
+                    .await
+                {
+                    Ok(_) => Ok(ContextOutput {
+                        success: true,
+                        message: Some(format!(
+                            "Swapped context '{}' with recall memory '{}'",
+                            archive_name, archival_label
+                        )),
+                        content: json!({}),
+                    }),
+                    Err(e) => Ok(ContextOutput {
+                        success: false,
+                        message: Some(format!(
+                            "Updated core block but failed to archive original: {:?}",
+                            e
+                        )),
+                        content: json!({}),
+                    }),
+                }
+            }
+            Err(e) => Ok(ContextOutput {
+                success: false,
+                message: Some(format!(
+                    "Failed to update block '{}': {:?}",
+                    archive_name, e
+                )),
+                content: json!({}),
+            }),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{UserId, memory::Memory};
+    use crate::memory::{BlockSchema, BlockType, MemoryStore};
+    use crate::tool::builtin::test_utils::create_test_context_with_agent;
 
     #[tokio::test]
     async fn test_context_append() {
-        let memory = Memory::with_owner(&UserId::generate());
+        let (_db, memory, ctx) = create_test_context_with_agent("test-agent").await;
 
-        // Create a context block
+        // Create a block to append to
         memory
-            .create_block("human", "The user is interested in AI.")
+            .create_block(
+                "test-agent",
+                "human",
+                "Initial content.",
+                BlockType::Core,
+                BlockSchema::Text,
+                2000,
+            )
+            .await
             .unwrap();
-        if let Some(mut block) = memory.get_block_mut("human") {
-            block.memory_type = MemoryType::Core;
-            block.permission = MemoryPermission::ReadWrite;
-        }
 
-        let handle = AgentHandle::test_with_memory(memory.clone());
-
-        let tool = ContextTool { handle };
+        let tool = ContextTool::new(ctx);
 
         // Test appending
         let result = tool
@@ -976,12 +836,5 @@ mod tests {
             .unwrap();
 
         assert!(result.success);
-
-        // Verify the append
-        let block = memory.get_block("human").unwrap();
-        assert_eq!(
-            block.value,
-            "The user is interested in AI.\n\nThey work in healthcare."
-        );
     }
 }

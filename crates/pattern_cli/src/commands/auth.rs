@@ -1,200 +1,175 @@
-//! OAuth authentication commands
+//! OAuth authentication commands for model providers (Anthropic, OpenAI, etc.)
+//!
+//! These commands manage OAuth tokens for AI model providers. This is separate
+//! from ATProto authentication (see atproto.rs for Bluesky auth).
+//!
+//! Note: Provider OAuth (e.g., Anthropic) requires browser-based authorization
+//! which is not fully supported in CLI. Use the web UI for initial authentication,
+//! or use API keys directly via environment variables.
 
-use miette::{IntoDiagnostic, Result};
+use miette::Result;
 use owo_colors::OwoColorize;
-use pattern_core::{
-    config::PatternConfig,
-    db::{client::DB, ops},
-    oauth::{OAuthClient, OAuthProvider, OAuthToken, auth_flow::split_callback_code},
-};
-use std::io::{self, Write};
+use pattern_core::config::PatternConfig;
 
-use crate::output::Output;
+use crate::helpers::get_dbs;
+use crate::output::{Output, format_relative_time};
 
-/// Login with OAuth
+/// Login with OAuth for a model provider.
+///
+/// Provider OAuth (Anthropic, OpenAI, etc.) requires browser-based authorization
+/// that cannot be fully handled in CLI. This command shows guidance on how to
+/// authenticate.
 pub async fn login(provider: &str, config: &PatternConfig) -> Result<()> {
     let output = Output::new();
 
-    // Parse provider
-    let provider = match provider {
-        "anthropic" => OAuthProvider::Anthropic,
-        _ => {
-            output.error(&format!("Unknown provider: {}", provider));
+    // Validate provider
+    let provider_lower = provider.to_lowercase();
+    match provider_lower.as_str() {
+        "anthropic" => {}
+        other => {
+            output.error(&format!("Unknown provider: {}", other.bright_red()));
+            output.info("Supported providers:", "anthropic");
             return Ok(());
         }
-    };
+    }
 
-    output.info("Provider:", &provider.to_string().bright_cyan().to_string());
+    output.section(&format!("OAuth Login: {}", provider.bright_cyan()));
 
-    // Create OAuth client
-    let oauth_client = OAuthClient::new(provider.clone());
-
-    // Start device flow
-    output.success("Starting OAuth device flow...");
-    let device_response = oauth_client.start_device_flow().into_diagnostic()?;
-
-    // Display instructions
-    output.success("─────────────────────────────────────────────");
+    // Provider OAuth requires browser-based flow
+    output.print("");
+    output.warning("Provider OAuth requires browser-based authorization.");
+    output.print("");
+    output.status("For Anthropic API access, you have two options:");
+    output.print("");
+    output.list_item("Use an API key via the ANTHROPIC_API_KEY environment variable");
+    output.list_item("Use the Pattern web UI for OAuth authentication (when available)");
+    output.print("");
     output.info(
-        "Authorization URL:",
-        &device_response.verification_uri.bright_yellow().to_string(),
+        "Get API keys at:",
+        "https://console.anthropic.com/settings/keys",
     );
-    output.success("─────────────────────────────────────────────");
-    output.success("Please visit the URL above and authorize the application.");
-    output.info("After authorization, copy the code shown on the page.", "");
-    output.info("", "");
+    output.print("");
 
-    // Prompt for the code
-    print!("Enter the authorization code: ");
-    io::stdout().flush().unwrap();
-
-    let mut code = String::new();
-    io::stdin().read_line(&mut code).into_diagnostic()?;
-    let (code, state) = split_callback_code(code.trim())?;
-
-    // Verify state matches
-    if let Some(pkce) = &device_response.pkce_challenge {
-        if state != pkce.state {
-            output.error("State mismatch - authorization may have been tampered with");
-            return Ok(());
+    // Check if we already have a token stored
+    let dbs = get_dbs(config).await?;
+    match dbs.auth.get_provider_oauth_token(&provider_lower).await {
+        Ok(Some(token)) => {
+            output.success("You already have an OAuth token stored for this provider.");
+            if token.is_expired() {
+                output.warning("However, the token has expired.");
+            } else if token.needs_refresh() {
+                output.warning("The token will expire soon and needs refresh.");
+            }
         }
-
-        // Exchange code for token
-        let token_response = oauth_client
-            .exchange_code(code, pkce)
-            .await
-            .into_diagnostic()?;
-
-        output.success("Authentication successful!");
-
-        // Log token details for debugging
-        tracing::info!(
-            "Received OAuth token response - has refresh_token: {}, expires_in: {} seconds",
-            token_response.refresh_token.is_some(),
-            token_response.expires_in
-        );
-
-        if token_response.refresh_token.is_none() {
-            tracing::warn!(
-                "Anthropic OAuth response did not include a refresh token! Token will expire in {} seconds.",
-                token_response.expires_in
-            );
-            output.warning("Note: No refresh token received. You'll need to re-authenticate when the token expires.");
+        Ok(None) => {
+            output.status("No OAuth token currently stored for this provider.");
         }
-
-        // Store token in database
-        tracing::info!("Storing OAuth token for user: {}", config.user.id);
-        let expires_at =
-            chrono::Utc::now() + chrono::Duration::seconds(token_response.expires_in as i64);
-        let mut token = OAuthToken::new(
-            provider.to_string(),
-            token_response.access_token,
-            token_response.refresh_token,
-            expires_at,
-            config.user.id.clone(),
-        );
-
-        // Set optional fields
-        if let Some(scope) = token_response.scope {
-            token.scope = Some(scope);
+        Err(e) => {
+            output.warning(&format!("Could not check existing tokens: {}", e));
         }
-
-        ops::create_oauth_token(
-            &DB,
-            token.provider,
-            token.access_token,
-            token.refresh_token,
-            token.expires_at,
-            token.owner_id,
-        )
-        .await
-        .into_diagnostic()?;
-
-        output.success(&format!("Token stored for provider: {}", provider));
-        output.info(
-            "You can now use OAuth authentication with this provider.",
-            "",
-        );
-    } else {
-        output.error("No PKCE challenge found - this shouldn't happen");
     }
 
     Ok(())
 }
 
-/// Show authentication status
+/// Show authentication status for all providers.
+///
+/// Lists all stored OAuth tokens and their status (valid, expiring, expired).
 pub async fn status(config: &PatternConfig) -> Result<()> {
     let output = Output::new();
 
-    tracing::info!("Checking OAuth status for user: {}", config.user.id);
+    output.section("Provider OAuth Status");
 
-    output.success("OAuth Authentication Status");
-    output.success("─────────────────────────────────────────────");
+    let dbs = get_dbs(config).await?;
 
-    // Check each provider
-    for provider in &[OAuthProvider::Anthropic] {
-        let token = ops::get_user_oauth_token(&DB, &config.user.id, &provider.to_string())
-            .await
-            .into_diagnostic()?;
-
-        match token {
-            Some(token) => {
-                output.info(
-                    &format!("{}:", provider),
-                    &"authenticated".bright_green().to_string(),
-                );
-
-                if token.needs_refresh() {
-                    output.warning("  Token needs refresh");
-                }
-
-                if token.expires_at != chrono::DateTime::<chrono::Utc>::default() {
-                    let expires_at = token.expires_at;
-                    let remaining = expires_at.signed_duration_since(chrono::Utc::now());
-                    if remaining.num_seconds() > 0 {
-                        output.info(
-                            "  Expires in:",
-                            &format!("{} minutes", remaining.num_minutes()),
-                        );
-                    } else {
-                        output.error("  Token expired");
-                    }
-                }
-            }
-            None => {
-                output.info(
-                    &format!("{}:", provider),
-                    &"not authenticated".bright_red().to_string(),
-                );
-            }
+    let tokens = match dbs.auth.list_provider_oauth_tokens().await {
+        Ok(t) => t,
+        Err(e) => {
+            output.error(&format!("Failed to list tokens: {}", e));
+            return Ok(());
         }
+    };
+
+    if tokens.is_empty() {
+        output.status("No OAuth tokens stored.");
+        output.print("");
+        output.info(
+            "Note:",
+            "Most providers use API keys via environment variables.",
+        );
+        output.info("Example:", "export ANTHROPIC_API_KEY=your-key-here");
+        return Ok(());
+    }
+
+    for token in tokens {
+        output.print("");
+        output.info(
+            "Provider:",
+            &token.provider.bright_cyan().bold().to_string(),
+        );
+
+        // Determine status
+        let status = if token.is_expired() {
+            "EXPIRED".bright_red().bold().to_string()
+        } else if token.needs_refresh() {
+            "NEEDS REFRESH".yellow().to_string()
+        } else {
+            "VALID".bright_green().to_string()
+        };
+
+        output.info("Status:", &status);
+
+        if let Some(expires_at) = token.expires_at {
+            if token.is_expired() {
+                output.info("Expired:", &format_relative_time(expires_at));
+            } else {
+                output.info("Expires:", &format_relative_time(expires_at));
+            }
+        } else {
+            output.info("Expires:", "Never");
+        }
+
+        if let Some(scope) = &token.scope {
+            output.info("Scope:", scope);
+        }
+
+        output.info("Last updated:", &format_relative_time(token.updated_at));
     }
 
     Ok(())
 }
 
-/// Logout (remove stored tokens)
+/// Logout from a provider (remove stored tokens).
+///
+/// Deletes the OAuth token for the specified provider.
 pub async fn logout(provider: &str, config: &PatternConfig) -> Result<()> {
     let output = Output::new();
 
-    // Parse provider
-    let provider = match provider {
-        "anthropic" => OAuthProvider::Anthropic,
-        _ => {
-            output.error(&format!("Unknown provider: {}", provider));
-            return Ok(());
+    let provider_lower = provider.to_lowercase();
+
+    output.section(&format!("OAuth Logout: {}", provider.bright_cyan()));
+
+    let dbs = get_dbs(config).await?;
+
+    // Check if token exists
+    match dbs.auth.get_provider_oauth_token(&provider_lower).await {
+        Ok(Some(_)) => {
+            // Token exists, delete it
+            if let Err(e) = dbs.auth.delete_provider_oauth_token(&provider_lower).await {
+                output.error(&format!("Failed to delete token: {}", e));
+                return Ok(());
+            }
+            output.success(&format!(
+                "Successfully logged out from {}.",
+                provider.bright_green()
+            ));
         }
-    };
-
-    // Delete token from database
-    let count = ops::delete_user_oauth_tokens(&DB, &config.user.id, &provider.to_string())
-        .await
-        .into_diagnostic()?;
-
-    if count > 0 {
-        output.success(&format!("Logged out from {}", provider));
-    } else {
-        output.warning(&format!("No token found for {}", provider));
+        Ok(None) => {
+            output.warning(&format!("No OAuth token found for provider: {}", provider));
+        }
+        Err(e) => {
+            output.error(&format!("Failed to check token: {}", e));
+        }
     }
 
     Ok(())

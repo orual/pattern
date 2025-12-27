@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE memory_blocks SET last_seq = last_seq + 1, updated_at = ? WHERE id = ? RETURNING last_seq",
+  "describe": {
+    "columns": [
+      {
+        "name": "last_seq",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "33de5f8dc8f7f9d19ca30a41505f4f562031150f7804c9f3e8ff6d35d8751148"
+}

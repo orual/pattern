@@ -14,6 +14,7 @@ use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 use futures::StreamExt;
+use pattern_core::db::ConstellationDatabases;
 use pattern_core::message::Message as PatternMessage;
 use pattern_core::realtime::{GroupEventContext, GroupEventSink, tap_group_stream};
 use pattern_core::{
@@ -62,6 +63,9 @@ pub struct DiscordBot {
     /// Bot configuration
     config: DiscordBotConfig,
 
+    /// Database connections for constellation data access
+    dbs: Option<Arc<ConstellationDatabases>>,
+
     /// Buffer for reactions to batch process
     reaction_buffer: Arc<Mutex<VecDeque<BufferedReaction>>>,
     /// Whether we're currently processing a message
@@ -93,126 +97,11 @@ pub struct DiscordBot {
     restart_ch: tokio::sync::mpsc::Sender<()>,
 }
 
-/// Configuration for the Discord bot
-#[derive(Debug, Clone)]
-pub struct DiscordBotConfig {
-    pub token: String,
-    pub prefix: String,
-    pub intents: serenity::all::GatewayIntents,
-    pub allowed_channels: Option<Vec<String>>,
-    pub allowed_guilds: Option<Vec<String>>,
-    pub admin_users: Option<Vec<String>>,
-}
-
-impl DiscordBotConfig {
-    pub fn new(token: impl Into<String>) -> Self {
-        // Admin users: support DISCORD_ADMIN_USERS (comma-separated) and DISCORD_DEFAULT_DM_USER (single or comma-separated)
-        let admin_users = std::env::var("DISCORD_ADMIN_USERS")
-            .ok()
-            .map(|v| {
-                v.split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect::<Vec<_>>()
-            })
-            .or_else(|| {
-                std::env::var("DISCORD_DEFAULT_DM_USER").ok().map(|v| {
-                    v.split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect::<Vec<_>>()
-                })
-            });
-
-        // Allowed channels: support comma-separated list in DISCORD_CHANNEL_ID
-        let allowed_channels = std::env::var("DISCORD_CHANNEL_ID").ok().map(|v| {
-            v.split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect::<Vec<_>>()
-        });
-
-        // Allowed guilds: support comma-separated list in DISCORD_GUILD_IDS (or single DISCORD_GUILD_ID)
-        let allowed_guilds = std::env::var("DISCORD_GUILD_IDS")
-            .ok()
-            .map(|v| {
-                v.split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect::<Vec<_>>()
-            })
-            .or_else(|| std::env::var("DISCORD_GUILD_ID").ok().map(|id| vec![id]));
-
-        Self {
-            token: token.into(),
-            prefix: "!".to_string(),
-            intents: serenity::all::GatewayIntents::default(),
-            allowed_channels,
-            allowed_guilds,
-            admin_users,
-        }
-    }
-
-    /// Create from token and DiscordAppConfig, preferring config over env vars
-    pub fn from_config(
-        token: impl Into<String>,
-        config: &pattern_core::config::DiscordAppConfig,
-    ) -> Self {
-        let mut bot_config = Self {
-            token: token.into(),
-            prefix: "!".to_string(),
-            intents: serenity::all::GatewayIntents::default(),
-            allowed_channels: None,
-            allowed_guilds: None,
-            admin_users: None,
-        };
-
-        // Apply config values, falling back to env vars if not in config
-        bot_config.allowed_channels = config.allowed_channels.clone().or_else(|| {
-            std::env::var("DISCORD_CHANNEL_ID").ok().map(|v| {
-                v.split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect::<Vec<_>>()
-            })
-        });
-
-        bot_config.allowed_guilds = config
-            .allowed_guilds
-            .clone()
-            .or_else(|| {
-                std::env::var("DISCORD_GUILD_IDS").ok().map(|v| {
-                    v.split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect::<Vec<_>>()
-                })
-            })
-            .or_else(|| std::env::var("DISCORD_GUILD_ID").ok().map(|id| vec![id]));
-
-        bot_config.admin_users = config
-            .admin_users
-            .clone()
-            .or_else(|| {
-                std::env::var("DISCORD_ADMIN_USERS").ok().map(|v| {
-                    v.split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect::<Vec<_>>()
-                })
-            })
-            .or_else(|| {
-                std::env::var("DISCORD_DEFAULT_DM_USER").ok().map(|v| {
-                    v.split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect::<Vec<_>>()
-                })
-            });
-
-        bot_config
-    }
-}
+/// Re-export DiscordBotConfig from pattern_auth.
+/// This is the canonical configuration type for the Discord bot.
+/// Use `DiscordBotConfig::from_env()` to load from environment variables,
+/// or `AuthDb::get_discord_bot_config()` to load from the database.
+pub use pattern_auth::DiscordBotConfig;
 
 impl DiscordBot {
     /// Expose read-only access to bot configuration
@@ -227,6 +116,7 @@ impl DiscordBot {
         group_manager: Arc<dyn GroupManager>,
         group_event_sinks: Option<Vec<Arc<dyn GroupEventSink>>>,
         restart_ch: tokio::sync::mpsc::Sender<()>,
+        dbs: Option<Arc<ConstellationDatabases>>,
     ) -> Self {
         Self {
             cli_mode: true,
@@ -234,6 +124,7 @@ impl DiscordBot {
             group: Some(group),
             group_manager: Some(group_manager),
             config,
+            dbs,
             reaction_buffer: Arc::new(Mutex::new(VecDeque::new())),
             is_processing: Arc::new(Mutex::new(false)),
             last_message_time: Arc::new(Mutex::new(std::time::Instant::now())),
@@ -254,6 +145,7 @@ impl DiscordBot {
     pub fn new_full_mode(
         config: DiscordBotConfig,
         restart_ch: tokio::sync::mpsc::Sender<()>,
+        dbs: Arc<ConstellationDatabases>,
     ) -> Self {
         Self {
             cli_mode: false,
@@ -261,6 +153,7 @@ impl DiscordBot {
             group: None,
             group_manager: None,
             config,
+            dbs: Some(dbs),
             reaction_buffer: Arc::new(Mutex::new(VecDeque::new())),
             is_processing: Arc::new(Mutex::new(false)),
             last_message_time: Arc::new(Mutex::new(std::time::Instant::now())),
@@ -313,7 +206,6 @@ impl EventHandler for DiscordEventHandler {
             .await
             .replace(ready.user.id.get());
 
-        // Register slash commands using the new comprehensive implementations
         let commands = crate::slash_commands::create_commands();
 
         for command in commands {
@@ -793,29 +685,50 @@ impl EventHandler for DiscordEventHandler {
                                 .await
                         }
                         "restart" => {
+                            let admin_users = self.bot.config.admin_users.as_deref();
                             crate::slash_commands::handle_restart_command(
-                                &ctx, &command, restart_ch,
+                                &ctx,
+                                &command,
+                                restart_ch,
+                                admin_users,
                             )
                             .await
                         }
                         _ => unreachable!(),
                     }
                 }
-                "list" => crate::slash_commands::handle_list_command(&ctx, &command).await,
+                "list" => {
+                    crate::slash_commands::handle_list_command(
+                        &ctx,
+                        &command,
+                        agents,
+                        self.bot.dbs.as_deref(),
+                    )
+                    .await
+                }
                 "permit" => {
-                    if let Err(e) = crate::slash_commands::handle_permit(&ctx, &command).await {
+                    let admin_users = self.bot.config.admin_users.as_deref();
+                    if let Err(e) =
+                        crate::slash_commands::handle_permit(&ctx, &command, admin_users).await
+                    {
                         warn!("Failed to handle permit: {}", e);
                     }
                     Ok(())
                 }
                 "deny" => {
-                    if let Err(e) = crate::slash_commands::handle_deny(&ctx, &command).await {
+                    let admin_users = self.bot.config.admin_users.as_deref();
+                    if let Err(e) =
+                        crate::slash_commands::handle_deny(&ctx, &command, admin_users).await
+                    {
                         warn!("Failed to handle deny: {}", e);
                     }
                     Ok(())
                 }
                 "permits" => {
-                    if let Err(e) = crate::slash_commands::handle_permits(&ctx, &command).await {
+                    let admin_users = self.bot.config.admin_users.as_deref();
+                    if let Err(e) =
+                        crate::slash_commands::handle_permits(&ctx, &command, admin_users).await
+                    {
                         warn!("Failed to handle permits: {}", e);
                     }
                     Ok(())
@@ -1712,7 +1625,7 @@ impl DiscordBot {
                         // Direct agent call
                         let mut stream = agent
                             .clone()
-                            .process_message_stream(pattern_msg)
+                            .process(pattern_msg)
                             .await
                             .map_err(|e| format!("Failed to process message: {}", e))?;
 

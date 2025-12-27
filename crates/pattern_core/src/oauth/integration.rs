@@ -32,7 +32,7 @@ impl<C: Connection + 'static> OAuthModelProvider<C> {
     pub async fn get_token(&self, provider: &str) -> Result<Option<Arc<OAuthToken>>, CoreError> {
         // Try to get existing token (including expired ones, so we can refresh them)
         let token =
-            crate::db::ops::get_user_oauth_token_any(&self.db, &self.user_id, provider).await?;
+            crate::db_v1::ops::get_user_oauth_token_any(&self.db, &self.user_id, provider).await?;
 
         if let Some(mut token) = token {
             tracing::debug!(
@@ -59,7 +59,7 @@ impl<C: Connection + 'static> OAuthModelProvider<C> {
 
                 // Re-check if token still needs refresh (another thread might have refreshed it)
                 let token_check =
-                    crate::db::ops::get_user_oauth_token_any(&self.db, &self.user_id, provider)
+                    crate::db_v1::ops::get_user_oauth_token_any(&self.db, &self.user_id, provider)
                         .await?;
                 if let Some(fresh_token) = token_check {
                     if !fresh_token.needs_refresh() {
@@ -120,7 +120,7 @@ impl<C: Connection + 'static> OAuthModelProvider<C> {
                             .refresh_token
                             .or_else(|| token.refresh_token.clone());
 
-                        match crate::db::ops::update_oauth_token(
+                        match crate::db_v1::ops::update_oauth_token(
                             &self.db,
                             &token.id,
                             token_response.access_token,
@@ -159,7 +159,7 @@ impl<C: Connection + 'static> OAuthModelProvider<C> {
             }
 
             // Mark token as used
-            crate::db::ops::mark_oauth_token_used(&self.db, &token.id).await?;
+            crate::db_v1::ops::mark_oauth_token_used(&self.db, &token.id).await?;
 
             Ok(Some(Arc::new(token)))
         } else {
@@ -219,7 +219,7 @@ impl<C: Connection + 'static> OAuthModelProvider<C> {
         let expires_at = Utc::now() + chrono::Duration::seconds(token_response.expires_in as i64);
 
         // Store the token
-        let token = crate::db::ops::create_oauth_token(
+        let token = crate::db_v1::ops::create_oauth_token(
             &self.db,
             provider.to_string(),
             token_response.access_token,
@@ -235,7 +235,7 @@ impl<C: Connection + 'static> OAuthModelProvider<C> {
     /// Revoke OAuth tokens for a provider
     pub async fn revoke_oauth(&self, provider: &str) -> Result<usize, CoreError> {
         let count =
-            crate::db::ops::delete_user_oauth_tokens(&self.db, &self.user_id, provider).await?;
+            crate::db_v1::ops::delete_user_oauth_tokens(&self.db, &self.user_id, provider).await?;
         Ok(count)
     }
 }

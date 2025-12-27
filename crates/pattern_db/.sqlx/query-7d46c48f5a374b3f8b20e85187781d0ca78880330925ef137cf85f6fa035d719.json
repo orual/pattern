@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO folder_attachments (folder_id, agent_id, access, attached_at)\n        VALUES (?, ?, ?, ?)\n        ON CONFLICT(folder_id, agent_id) DO UPDATE SET access = excluded.access\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "7d46c48f5a374b3f8b20e85187781d0ca78880330925ef137cf85f6fa035d719"
+}

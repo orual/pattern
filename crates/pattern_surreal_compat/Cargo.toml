@@ -1,0 +1,52 @@
+[package]
+name = "pattern-surreal-compat"
+version = "0.4.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "SurrealDB compatibility layer for Pattern (deprecated, for migration only)"
+
+[dependencies]
+# Core dependencies from pattern_core's db_v1
+surrealdb = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+miette = { workspace = true }
+tracing = { workspace = true }
+compact_str = { version = "0.9.0", features = ["serde", "markup", "smallvec"] }
+dashmap = { version = "6.1.0", features = ["serde"] }
+cid = { workspace = true }
+uuid = { workspace = true }
+schemars = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true }
+rand = { workspace = true }
+ferroid = { workspace = true }
+
+# ATProto dependencies
+atrium-common = { workspace = true }
+atrium-identity = { workspace = true }
+atrium-api = { workspace = true }
+atrium-xrpc = { workspace = true }
+hickory-resolver = "0.24"
+reqwest = { workspace = true }
+
+# Pattern dependencies
+pattern-macros = { path = "../pattern_macros" }
+
+# Export/Import dependencies
+iroh-car = "0.5"
+multihash-codetable = { workspace = true }
+serde_ipld_dagcbor = { workspace = true }
+
+[features]
+default = []
+surreal-remote = ["surrealdb/protocol-ws"]
+
+[lints]
+workspace = true

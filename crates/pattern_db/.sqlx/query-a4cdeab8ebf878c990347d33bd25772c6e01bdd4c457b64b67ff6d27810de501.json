@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO handoff_notes (id, from_agent, to_agent, content, created_at, read_at)\n        VALUES (?, ?, ?, ?, ?, ?)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "a4cdeab8ebf878c990347d33bd25772c6e01bdd4c457b64b67ff6d27810de501"
+}

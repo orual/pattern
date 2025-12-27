@@ -1,5 +1,5 @@
 [package]
-name = "pattern_db"
+name = "pattern-db"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

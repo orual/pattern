@@ -235,3 +235,41 @@ pub enum GroupMemberRole {
     /// Observer (receives messages but doesn't respond)
     Observer,
 }
+
+// ============================================================================
+// Agent ATProto Endpoints
+// ============================================================================
+
+/// Endpoint type constant for Bluesky posting.
+///
+/// Used as the `endpoint_type` value in `AgentAtprotoEndpoint` for standard
+/// Bluesky post/reply functionality.
+pub const ENDPOINT_TYPE_BLUESKY: &str = "bluesky";
+
+/// Links an agent to their ATProto identity for a specific endpoint type.
+///
+/// This enables agents to post to Bluesky or interact with ATProto services
+/// using a specific identity. The DID references a session stored in auth.db.
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct AgentAtprotoEndpoint {
+    /// Agent ID (references agents table)
+    pub agent_id: String,
+
+    /// ATProto DID (e.g., "did:plc:...") - references session in auth.db
+    pub did: String,
+
+    /// Type of endpoint: Use [`ENDPOINT_TYPE_BLUESKY`] for posting, 'bluesky_firehose', etc.
+    pub endpoint_type: String,
+
+    /// Session ID to use (optional, defaults to "_constellation_" if null)
+    pub session_id: Option<String>,
+
+    /// Optional JSON configuration specific to this endpoint
+    pub config: Option<String>,
+
+    /// Creation timestamp (Unix epoch seconds)
+    pub created_at: i64,
+
+    /// Last update timestamp (Unix epoch seconds)
+    pub updated_at: i64,
+}

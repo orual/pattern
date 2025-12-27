@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO coordination_tasks (id, description, assigned_to, status, priority, created_at, updated_at)\n        VALUES (?, ?, ?, ?, ?, ?, ?)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "9627426c9cbdd1ae329c2899c1d64df8d85251ec221384f75a6a447cc6844194"
+}

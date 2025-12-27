@@ -9,9 +9,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::{
-    CoreError, Result, context::AgentHandle, data_source::bluesky::PatternHttpClient, tool::AiTool,
-};
+use crate::runtime::ToolContext;
+use crate::{CoreError, PatternHttpClient, Result, tool::AiTool};
 
 /// Operation types for web interactions
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -119,10 +118,10 @@ struct CachedContent {
 }
 
 /// Web interaction tool
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct WebTool {
     #[allow(dead_code)]
-    pub(crate) handle: AgentHandle,
+    pub(crate) ctx: Arc<dyn ToolContext>,
     client: PatternHttpClient,
     /// Cache URL -> (content, timestamp)
     fetch_cache: Arc<DashMap<String, CachedContent>>,
@@ -130,13 +129,24 @@ pub struct WebTool {
     last_fetch_url: Arc<std::sync::Mutex<Option<String>>>,
 }
 
+impl std::fmt::Debug for WebTool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebTool")
+            .field("ctx", &"Arc<dyn ToolContext>")
+            .field("client", &self.client)
+            .field("fetch_cache", &self.fetch_cache)
+            .field("last_fetch_url", &self.last_fetch_url)
+            .finish()
+    }
+}
+
 impl WebTool {
     /// Create a new web tool
-    pub fn new(handle: AgentHandle) -> Self {
+    pub fn new(ctx: Arc<dyn ToolContext>) -> Self {
         let client = PatternHttpClient::default();
 
         Self {
-            handle,
+            ctx,
             client,
             fetch_cache: Arc::new(DashMap::new()),
             last_fetch_url: Arc::new(std::sync::Mutex::new(None)),

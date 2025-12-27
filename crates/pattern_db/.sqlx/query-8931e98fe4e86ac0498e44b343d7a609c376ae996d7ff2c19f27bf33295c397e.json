@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            id as \"id!\",\n            file_id as \"file_id!\",\n            content as \"content!\",\n            start_line,\n            end_line,\n            chunk_index as \"chunk_index!\",\n            created_at as \"created_at!: _\"\n        FROM file_passages WHERE file_id = ? ORDER BY chunk_index\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "file_id!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "content!",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "start_line",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "end_line",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "chunk_index!",
+        "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "created_at!: _",
+        "ordinal": 6,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "8931e98fe4e86ac0498e44b343d7a609c376ae996d7ff2c19f27bf33295c397e"
+}

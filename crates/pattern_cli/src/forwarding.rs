@@ -36,14 +36,44 @@ impl CliGroupPrinterSink {
 #[async_trait]
 impl GroupEventSink for CliGroupPrinterSink {
     async fn on_event(&self, event: GroupResponseEvent, _ctx: GroupEventContext) {
-        // Reuse the existing CLI printer path
-        crate::chat::print_group_response_event(
-            event,
-            &self.output,
-            &self.agents,
-            self.source_tag.as_deref(),
-        )
-        .await;
+        // Print group response events
+        let tag = self.source_tag.as_deref().unwrap_or("Group");
+        match &event {
+            GroupResponseEvent::Started {
+                pattern,
+                agent_count,
+                ..
+            } => {
+                self.output.status(&format!(
+                    "[{}] Group started: {} pattern, {} agents",
+                    tag, pattern, agent_count
+                ));
+            }
+            GroupResponseEvent::AgentStarted {
+                agent_name, role, ..
+            } => {
+                self.output.status(&format!(
+                    "[{}] {} ({:?}) processing...",
+                    tag, agent_name, role
+                ));
+            }
+            GroupResponseEvent::TextChunk { agent_id, text, .. } => {
+                self.output
+                    .status(&format!("[{}] {}: {}", tag, agent_id, text));
+            }
+            GroupResponseEvent::ToolCallStarted { fn_name, .. } => {
+                self.output
+                    .status(&format!("[{}] Tool call: {}", tag, fn_name));
+            }
+            GroupResponseEvent::Complete { .. } => {
+                self.output
+                    .status(&format!("[{}] Group processing complete", tag));
+            }
+            _ => {
+                // Other events logged at debug level
+                tracing::debug!("Group event: {:?}", event);
+            }
+        }
     }
 }
 

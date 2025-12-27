@@ -1,0 +1,80 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT\n                state as \"state!\",\n                authserver_url as \"authserver_url!\",\n                account_did,\n                scopes as \"scopes!\",\n                request_uri as \"request_uri!\",\n                authserver_token_endpoint as \"authserver_token_endpoint!\",\n                authserver_revocation_endpoint,\n                pkce_verifier as \"pkce_verifier!\",\n                dpop_key as \"dpop_key!\",\n                dpop_nonce as \"dpop_nonce!\",\n                expires_at as \"expires_at!\"\n            FROM oauth_auth_requests\n            WHERE state = ?\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "state!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "authserver_url!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "account_did",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "scopes!",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "request_uri!",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "authserver_token_endpoint!",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "authserver_revocation_endpoint",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "pkce_verifier!",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "dpop_key!",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "dpop_nonce!",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "expires_at!",
+        "ordinal": 10,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "fe8937aedd06658b8f39ee557066545a25c881aadacbd7f2a90d82ebbb5ac96f"
+}

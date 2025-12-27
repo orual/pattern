@@ -199,6 +199,23 @@ pub async fn update_block_content(
     Ok(())
 }
 
+/// Update a memory block's permission.
+pub async fn update_block_permission(
+    pool: &SqlitePool,
+    id: &str,
+    permission: MemoryPermission,
+) -> DbResult<()> {
+    let perm_str = permission.as_str();
+    sqlx::query(
+        "UPDATE memory_blocks SET permission = ?, updated_at = datetime('now') WHERE id = ?",
+    )
+    .bind(perm_str)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Soft-delete a memory block.
 pub async fn deactivate_block(pool: &SqlitePool, id: &str) -> DbResult<()> {
     sqlx::query!(
@@ -633,4 +650,435 @@ pub async fn get_block_version_info(
     .await?;
 
     Ok(result.map(|r| (r.id, r.last_seq)))
+}
+
+// ============================================================================
+// Shared Block Management
+// ============================================================================
+
+use crate::models::SharedBlockAttachment;
+
+/// Create a shared block attachment.
+///
+/// Grants an agent access to a block with specific permissions.
+/// If the attachment already exists, updates the permission and timestamp.
+pub async fn create_shared_block_attachment(
+    pool: &SqlitePool,
+    block_id: &str,
+    agent_id: &str,
+    permission: MemoryPermission,
+) -> DbResult<()> {
+    let now = Utc::now();
+    sqlx::query!(
+        r#"
+        INSERT INTO shared_block_agents (block_id, agent_id, permission, attached_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(block_id, agent_id) DO UPDATE SET
+            permission = excluded.permission,
+            attached_at = excluded.attached_at
+        "#,
+        block_id,
+        agent_id,
+        permission,
+        now,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Delete a shared block attachment.
+///
+/// Removes an agent's access to a shared block.
+pub async fn delete_shared_block_attachment(
+    pool: &SqlitePool,
+    block_id: &str,
+    agent_id: &str,
+) -> DbResult<()> {
+    sqlx::query!(
+        "DELETE FROM shared_block_agents WHERE block_id = ? AND agent_id = ?",
+        block_id,
+        agent_id
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// List all agents a block is shared with.
+///
+/// Returns all shared attachments for a given block.
+pub async fn list_block_shared_agents(
+    pool: &SqlitePool,
+    block_id: &str,
+) -> DbResult<Vec<SharedBlockAttachment>> {
+    let attachments = sqlx::query_as!(
+        SharedBlockAttachment,
+        r#"
+        SELECT
+            block_id as "block_id!",
+            agent_id as "agent_id!",
+            permission as "permission!: MemoryPermission",
+            attached_at as "attached_at!: _"
+        FROM shared_block_agents WHERE block_id = ?
+        "#,
+        block_id
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(attachments)
+}
+
+/// List all blocks shared with an agent.
+///
+/// Returns all shared attachments for a given agent.
+pub async fn list_agent_shared_blocks(
+    pool: &SqlitePool,
+    agent_id: &str,
+) -> DbResult<Vec<SharedBlockAttachment>> {
+    let attachments = sqlx::query_as!(
+        SharedBlockAttachment,
+        r#"
+        SELECT
+            block_id as "block_id!",
+            agent_id as "agent_id!",
+            permission as "permission!: MemoryPermission",
+            attached_at as "attached_at!: _"
+        FROM shared_block_agents WHERE agent_id = ?
+        "#,
+        agent_id
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(attachments)
+}
+
+/// Get a specific shared attachment.
+///
+/// Checks if an agent has access to a specific block and returns the attachment details.
+pub async fn get_shared_block_attachment(
+    pool: &SqlitePool,
+    block_id: &str,
+    agent_id: &str,
+) -> DbResult<Option<SharedBlockAttachment>> {
+    let attachment = sqlx::query_as!(
+        SharedBlockAttachment,
+        r#"
+        SELECT
+            block_id as "block_id!",
+            agent_id as "agent_id!",
+            permission as "permission!: MemoryPermission",
+            attached_at as "attached_at!: _"
+        FROM shared_block_agents WHERE block_id = ? AND agent_id = ?
+        "#,
+        block_id,
+        agent_id
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(attachment)
+}
+
+/// Helper struct for the JOIN result in get_shared_blocks.
+struct SharedBlockRow {
+    id: String,
+    agent_id: String,
+    agent_name: Option<String>,
+    label: String,
+    description: String,
+    block_type: MemoryBlockType,
+    char_limit: i64,
+    permission: MemoryPermission,
+    pinned: bool,
+    loro_snapshot: Vec<u8>,
+    content_preview: Option<String>,
+    metadata: Option<sqlx::types::Json<serde_json::Value>>,
+    embedding_model: Option<String>,
+    is_active: bool,
+    frontier: Option<Vec<u8>>,
+    last_seq: i64,
+    created_at: chrono::DateTime<Utc>,
+    updated_at: chrono::DateTime<Utc>,
+    attachment_permission: MemoryPermission,
+}
+
+/// Check if a requester has access to a specific block and return the permission level.
+///
+/// This is an efficient single-query check that handles both owned and shared blocks.
+/// Returns (block_id, effective_permission):
+/// - If the requester owns the block: returns the block's inherent permission
+/// - If the requester has shared access: returns the shared permission
+/// - If no access: returns None
+pub async fn check_block_access(
+    pool: &SqlitePool,
+    requester_agent_id: &str,
+    owner_agent_id: &str,
+    label: &str,
+) -> DbResult<Option<(String, MemoryPermission)>> {
+    // First check if requester owns the block
+    if requester_agent_id == owner_agent_id {
+        // Owned block - get inherent permission
+        let block = get_block_by_label(pool, owner_agent_id, label).await?;
+        return Ok(block.map(|b| (b.id, b.permission)));
+    }
+
+    // Check for shared access
+    // Join to ensure the block exists and is active
+    let result = sqlx::query!(
+        r#"
+        SELECT mb.id as "id!", sba.permission as "permission!: MemoryPermission"
+        FROM shared_block_agents sba
+        INNER JOIN memory_blocks mb ON sba.block_id = mb.id
+        WHERE sba.agent_id = ?
+          AND mb.agent_id = ?
+          AND mb.label = ?
+          AND mb.is_active = 1
+        "#,
+        requester_agent_id,
+        owner_agent_id,
+        label
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(result.map(|r| (r.id, r.permission)))
+}
+
+/// Get all shared blocks for an agent with full block data.
+///
+/// Returns tuples of (MemoryBlock, MemoryPermission, Option<owner_name>) where the permission
+/// is from the shared_block_agents table. Only returns active blocks.
+/// The owner_name is looked up from the agents table (may be None if agent doesn't exist).
+pub async fn get_shared_blocks(
+    pool: &SqlitePool,
+    agent_id: &str,
+) -> DbResult<Vec<(MemoryBlock, MemoryPermission, Option<String>)>> {
+    let rows = sqlx::query_as!(
+        SharedBlockRow,
+        r#"
+        SELECT
+            mb.id as "id!",
+            mb.agent_id as "agent_id!",
+            a.name as "agent_name",
+            mb.label as "label!",
+            mb.description as "description!",
+            mb.block_type as "block_type!: MemoryBlockType",
+            mb.char_limit as "char_limit!",
+            mb.permission as "permission!: MemoryPermission",
+            mb.pinned as "pinned!: bool",
+            mb.loro_snapshot as "loro_snapshot!",
+            mb.content_preview,
+            mb.metadata as "metadata: _",
+            mb.embedding_model,
+            mb.is_active as "is_active!: bool",
+            mb.frontier,
+            mb.last_seq as "last_seq!",
+            mb.created_at as "created_at!: _",
+            mb.updated_at as "updated_at!: _",
+            sba.permission as "attachment_permission!: MemoryPermission"
+        FROM shared_block_agents sba
+        INNER JOIN memory_blocks mb ON sba.block_id = mb.id
+        LEFT JOIN agents a ON mb.agent_id = a.id
+        WHERE sba.agent_id = ? AND mb.is_active = 1
+        ORDER BY mb.label
+        "#,
+        agent_id
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            let block = MemoryBlock {
+                id: r.id,
+                agent_id: r.agent_id,
+                label: r.label,
+                description: r.description,
+                block_type: r.block_type,
+                char_limit: r.char_limit,
+                permission: r.permission,
+                pinned: r.pinned,
+                loro_snapshot: r.loro_snapshot,
+                content_preview: r.content_preview,
+                metadata: r.metadata,
+                embedding_model: r.embedding_model,
+                is_active: r.is_active,
+                frontier: r.frontier,
+                last_seq: r.last_seq,
+                created_at: r.created_at,
+                updated_at: r.updated_at,
+            };
+            (block, r.attachment_permission, r.agent_name)
+        })
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ConstellationDb;
+    use crate::models::Agent;
+
+    async fn setup_test_db() -> ConstellationDb {
+        ConstellationDb::open_in_memory().await.unwrap()
+    }
+
+    async fn create_test_agent(db: &ConstellationDb, id: &str, name: &str) {
+        use sqlx::types::Json;
+        let agent = Agent {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: None,
+            model_provider: "test".to_string(),
+            model_name: "test-model".to_string(),
+            system_prompt: "Test prompt".to_string(),
+            config: Json(serde_json::json!({})),
+            enabled_tools: Json(vec![]),
+            tool_rules: None,
+            status: crate::models::AgentStatus::Active,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        crate::queries::create_agent(db.pool(), &agent)
+            .await
+            .unwrap();
+    }
+
+    async fn create_test_block(db: &ConstellationDb, id: &str, agent_id: &str) {
+        let block = MemoryBlock {
+            id: id.to_string(),
+            agent_id: agent_id.to_string(),
+            label: "test".to_string(),
+            description: "Test block".to_string(),
+            block_type: MemoryBlockType::Working,
+            char_limit: 1000,
+            permission: MemoryPermission::ReadWrite,
+            pinned: false,
+            loro_snapshot: vec![],
+            content_preview: None,
+            metadata: None,
+            embedding_model: None,
+            is_active: true,
+            frontier: None,
+            last_seq: 0,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        create_block(db.pool(), &block).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_create_and_get_shared_attachment() {
+        let db = setup_test_db().await;
+
+        // Create test agents
+        create_test_agent(&db, "agent1", "Agent 1").await;
+        create_test_agent(&db, "agent2", "Agent 2").await;
+
+        // Create a test block
+        create_test_block(&db, "block1", "agent1").await;
+
+        // Create shared attachment
+        create_shared_block_attachment(db.pool(), "block1", "agent2", MemoryPermission::ReadOnly)
+            .await
+            .unwrap();
+
+        // Get the attachment
+        let attachment = get_shared_block_attachment(db.pool(), "block1", "agent2")
+            .await
+            .unwrap();
+
+        assert!(attachment.is_some());
+        let att = attachment.unwrap();
+        assert_eq!(att.block_id, "block1");
+        assert_eq!(att.agent_id, "agent2");
+        assert_eq!(att.permission, MemoryPermission::ReadOnly);
+    }
+
+    #[tokio::test]
+    async fn test_delete_shared_attachment() {
+        let db = setup_test_db().await;
+
+        // Create test agents
+        create_test_agent(&db, "agent1", "Agent 1").await;
+        create_test_agent(&db, "agent2", "Agent 2").await;
+
+        // Create block and attachment
+        create_test_block(&db, "block1", "agent1").await;
+        create_shared_block_attachment(db.pool(), "block1", "agent2", MemoryPermission::ReadOnly)
+            .await
+            .unwrap();
+
+        // Delete the attachment
+        delete_shared_block_attachment(db.pool(), "block1", "agent2")
+            .await
+            .unwrap();
+
+        // Verify it's gone
+        let attachment = get_shared_block_attachment(db.pool(), "block1", "agent2")
+            .await
+            .unwrap();
+        assert!(attachment.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_list_block_shared_agents() {
+        let db = setup_test_db().await;
+
+        // Create test agents
+        create_test_agent(&db, "agent1", "Agent 1").await;
+        create_test_agent(&db, "agent2", "Agent 2").await;
+        create_test_agent(&db, "agent3", "Agent 3").await;
+
+        // Create block and share with multiple agents
+        create_test_block(&db, "block1", "agent1").await;
+        create_shared_block_attachment(db.pool(), "block1", "agent2", MemoryPermission::ReadOnly)
+            .await
+            .unwrap();
+        create_shared_block_attachment(db.pool(), "block1", "agent3", MemoryPermission::ReadWrite)
+            .await
+            .unwrap();
+
+        // List shared agents
+        let mut agents = list_block_shared_agents(db.pool(), "block1").await.unwrap();
+        agents.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+
+        assert_eq!(agents.len(), 2);
+        assert_eq!(agents[0].agent_id, "agent2");
+        assert_eq!(agents[0].permission, MemoryPermission::ReadOnly);
+        assert_eq!(agents[1].agent_id, "agent3");
+        assert_eq!(agents[1].permission, MemoryPermission::ReadWrite);
+    }
+
+    #[tokio::test]
+    async fn test_list_agent_shared_blocks() {
+        let db = setup_test_db().await;
+
+        // Create test agents
+        create_test_agent(&db, "agent1", "Agent 1").await;
+        create_test_agent(&db, "agent2", "Agent 2").await;
+        create_test_agent(&db, "agent3", "Agent 3").await;
+
+        // Create multiple blocks and share with same agent
+        create_test_block(&db, "block1", "agent1").await;
+        create_test_block(&db, "block2", "agent2").await;
+
+        create_shared_block_attachment(db.pool(), "block1", "agent3", MemoryPermission::ReadOnly)
+            .await
+            .unwrap();
+        create_shared_block_attachment(db.pool(), "block2", "agent3", MemoryPermission::ReadWrite)
+            .await
+            .unwrap();
+
+        // List blocks shared with agent3
+        let mut blocks = list_agent_shared_blocks(db.pool(), "agent3").await.unwrap();
+        blocks.sort_by(|a, b| a.block_id.cmp(&b.block_id));
+
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].block_id, "block1");
+        assert_eq!(blocks[0].permission, MemoryPermission::ReadOnly);
+        assert_eq!(blocks[1].block_id, "block2");
+        assert_eq!(blocks[1].permission, MemoryPermission::ReadWrite);
+    }
 }

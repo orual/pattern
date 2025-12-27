@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT\n                provider as \"provider!\",\n                access_token as \"access_token!\",\n                refresh_token,\n                expires_at,\n                scope,\n                session_id,\n                created_at as \"created_at!\",\n                updated_at as \"updated_at!\"\n            FROM provider_oauth_tokens\n            ORDER BY provider\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "provider!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "access_token!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "refresh_token",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "expires_at",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "scope",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "session_id",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at!",
+        "ordinal": 6,
+        "type_info": "Integer"
+      },
+      {
+        "name": "updated_at!",
+        "ordinal": 7,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "fc7b990239c327d4692c5f6a8891d5c7d9d7ac55c3ada9b4e60d593dd44ef20b"
+}

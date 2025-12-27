@@ -57,7 +57,7 @@ impl AgentSelector for SupervisorSelector {
             return Err(CoreError::CoordinationFailed {
                 group: "unknown".to_string(),
                 pattern: "supervisor".to_string(),
-                participating_agents: agents.iter().map(|a| a.agent.name()).collect(),
+                participating_agents: agents.iter().map(|a| a.agent.name().to_string()).collect(),
                 cause: "No supervisor or matching specialist found in group".to_string(),
             });
         }
@@ -100,16 +100,10 @@ impl AgentSelector for SupervisorSelector {
             batch: None,
             sequence_num: None,
             batch_type: None,
-            embedding: None,
-            embedding_model: None,
         };
 
         // Ask supervisor to decide
-        let mut stream = supervisor
-            .agent
-            .clone()
-            .process_message_stream(supervisor_message)
-            .await?;
+        let mut stream = supervisor.agent.clone().process(supervisor_message).await?;
 
         // Stream response while collecting just enough text to make decision
         use tokio::sync::mpsc;
@@ -119,7 +113,7 @@ impl AgentSelector for SupervisorSelector {
         let (decision_tx, mut decision_rx) = mpsc::channel(1);
 
         // Spawn task to stream events and collect initial text for decision
-        let supervisor_name_clone = supervisor_name.clone();
+        let supervisor_name_clone = supervisor_name.to_string();
         let agent_names: Vec<String> = agents.iter().map(|a| a.agent.name().to_string()).collect();
         tokio::spawn(async move {
             let mut response_text = String::new();

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM discord_bot_config WHERE id = 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "904760a11f305a61ae497e1396815a49e02d9edca60730fb3c8019eeedf92dcc"
+}

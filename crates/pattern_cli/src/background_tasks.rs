@@ -2,112 +2,48 @@
 //!
 //! This module provides background monitoring and periodic activation
 //! for agent groups, particularly those using the sleeptime coordination pattern.
+//!
+//! ## Migration Status
+//!
+//! This module is STUBBED during the pattern_db migration. The following
+//! functionality needs to be reimplemented:
+//!
+//! - print_group_response_event function in chat.rs
+//! - Group state management during background monitoring
+//!
+//! Background monitoring relies on group coordination which is being refactored.
 
-use crate::{chat::print_group_response_event, output::Output};
 use miette::Result;
-use pattern_core::{
-    agent::Agent,
-    coordination::{
-        groups::{AgentGroup, AgentWithMembership, GroupManager},
-        types::CoordinationPattern,
-    },
-    message::{Message, MessageContent},
-};
+use pattern_core::agent::Agent;
 use std::sync::Arc;
+
+use crate::output::Output;
 
 /// Start a background monitoring task for a sleeptime group
 ///
-/// This spawns a task that periodically sends trigger messages to the group
-/// to check if any sleeptime triggers should fire.
+/// NOTE: This is currently STUBBED during the pattern_db migration.
+///
+/// Previously this function:
+/// 1. Extracted check interval from sleeptime coordination pattern
+/// 2. Spawned a background task that periodically sent trigger messages
+/// 3. Processed group responses and updated state
+/// 4. Printed events to the output
+#[allow(unused_variables)]
 pub async fn start_context_sync_monitoring(
-    group: AgentGroup,
-    agents: Vec<AgentWithMembership<Arc<dyn Agent>>>,
-    manager: Arc<dyn GroupManager + Send + Sync>,
+    _group_name: &str,
+    _agents: Vec<Arc<dyn Agent>>,
     output: Output,
 ) -> Result<tokio::task::JoinHandle<()>> {
-    // Extract check interval from the group's coordination pattern
-    let check_interval = match &group.coordination_pattern {
-        CoordinationPattern::Sleeptime { check_interval, .. } => *check_interval,
-        _ => {
-            return Err(miette::miette!(
-                "Context sync monitoring requires a sleeptime coordination pattern"
-            ));
-        }
-    };
+    output.warning("Background monitoring temporarily disabled during database migration");
+    output.status("Reason: Group coordination pattern refactoring in progress");
+    output.status("");
+    output.status("Previous functionality:");
+    output.list_item("Periodically check for sleeptime triggers");
+    output.list_item("Route trigger messages through group manager");
+    output.list_item("Update group state based on responses");
 
-    let group_name = group.name.clone();
-    let mut group = group; // Make group mutable so we can update its state
-
-    // Spawn the background monitoring task
-    let handle = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(check_interval);
-
-        // Skip the first tick so we don't immediately fire on startup
-        interval.tick().await;
-
-        output.info(
-            "Background monitoring started",
-            &format!(
-                "Context sync for group '{}' checking every {:?}",
-                group_name, check_interval
-            ),
-        );
-
-        loop {
-            interval.tick().await;
-
-            // Create a generic trigger check message
-            // The sleeptime manager will customize it for the specific agent being activated
-            let trigger_message = Message::user(MessageContent::from_text(
-                "Context sync check: Review your domain and report any notable patterns or concerns. Provide brief status updates only if intervention is needed.",
-            ));
-
-            // Route the message through the group manager
-            match manager
-                .route_message(&group, &agents, trigger_message)
-                .await
-            {
-                Ok(mut stream) => {
-                    // Process the stream and capture state updates
-                    let agents_clone = agents.clone();
-                    let output_clone = output.clone();
-                    let group_name_clone = group_name.clone();
-
-                    use futures::StreamExt;
-                    use pattern_core::coordination::groups::GroupResponseEvent;
-
-                    // Show which group this is from at the start
-                    output_clone.section(&format!("[Background] {}", group_name_clone));
-
-                    // Process the response stream
-                    while let Some(event) = stream.next().await {
-                        // Check for state updates in Complete event
-                        if let GroupResponseEvent::Complete { state_changes, .. } = &event {
-                            if let Some(new_state) = state_changes {
-                                // Update the group's state for next iteration
-                                group.state = new_state.clone();
-                                tracing::debug!(
-                                    "Updated group state for next iteration: {:?}",
-                                    new_state
-                                );
-                            }
-                        }
-
-                        print_group_response_event(
-                            event,
-                            &output_clone,
-                            &agents_clone,
-                            Some("Background"),
-                        )
-                        .await;
-                    }
-                }
-                Err(e) => {
-                    output.error(&format!("Failed to route context sync message: {}", e));
-                }
-            }
-        }
-    });
-
-    Ok(handle)
+    // Return a no-op handle
+    Ok(tokio::spawn(async {
+        // Do nothing - monitoring is disabled
+    }))
 }

@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            id as \"id!\",\n            name as \"name!\",\n            description,\n            pattern_type as \"pattern_type!: PatternType\",\n            pattern_config as \"pattern_config!: _\",\n            created_at as \"created_at!: _\",\n            updated_at as \"updated_at!: _\"\n        FROM agent_groups WHERE id = ?\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "name!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "description",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "pattern_type!: PatternType",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "pattern_config!: _",
+        "ordinal": 4,
+        "type_info": "Null"
+      },
+      {
+        "name": "created_at!: _",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "updated_at!: _",
+        "ordinal": 6,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "5e3118569a5f56cbfe3b6f954b5dec1d08398b7fc156088f9db2fefe01367e71"
+}

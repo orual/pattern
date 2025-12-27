@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            id as \"id!\",\n            position as \"position!\",\n            role as \"role!: MessageRole\",\n            content_preview as \"content_preview: _\",\n            source,\n            created_at as \"created_at!: _\"\n        FROM messages\n        WHERE agent_id = ? AND is_archived = 0 AND is_deleted = 0\n        ORDER BY position DESC\n        LIMIT ?\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "position!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "role!: MessageRole",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "content_preview: _",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "source",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at!: _",
+        "ordinal": 5,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "d777d9bd8c991487a6b21fa84cf02e6796da1ce57ee74834553aab3abb8b35e1"
+}

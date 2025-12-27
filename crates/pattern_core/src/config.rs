@@ -7,17 +7,36 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncWriteExt;
 
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use crate::context::DEFAULT_BASE_INSTRUCTIONS;
 use crate::{
     Result,
     agent::tool_rules::ToolRule,
     context::compression::CompressionStrategy,
-    data_source::bluesky::BlueskyFilter,
-    db::DatabaseConfig,
+    //data_source::bluesky::BlueskyFilter,
     id::{AgentId, GroupId, MemoryId, UserId},
     memory::{MemoryPermission, MemoryType},
 };
+
+/// Database configuration for SQLite
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatabaseConfig {
+    /// Path to SQLite database file
+    pub path: PathBuf,
+}
+
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        Self {
+            path: dirs::data_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("pattern")
+                .join("constellation.db"),
+        }
+    }
+}
 
 /// Resolve a path relative to a base directory
 /// If the path is absolute, return it as-is
@@ -312,6 +331,39 @@ impl AgentConfig {
     pub fn set_tool_rules(&mut self, rules: &[ToolRule]) {
         self.tool_rules = rules.iter().map(ToolRuleConfig::from_tool_rule).collect();
     }
+
+    /// Convert to database Agent model for persistence
+    pub fn to_db_agent(&self, id: &str) -> pattern_db::models::Agent {
+        use pattern_db::models::{Agent, AgentStatus};
+        use sqlx::types::Json;
+
+        let model = self.model.as_ref();
+
+        Agent {
+            id: id.to_string(),
+            name: self.name.clone(),
+            description: None,
+            model_provider: model
+                .map(|m| m.provider.clone())
+                .unwrap_or_else(|| "anthropic".to_string()),
+            model_name: model
+                .and_then(|m| m.model.clone())
+                .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string()),
+            system_prompt: self.system_prompt.clone().unwrap_or_default(),
+            config: Json(serde_json::to_value(self).unwrap_or_default()),
+            enabled_tools: Json(self.tools.clone()),
+            tool_rules: if self.tool_rules.is_empty() {
+                None
+            } else {
+                Some(Json(
+                    serde_json::to_value(&self.tool_rules).unwrap_or_default(),
+                ))
+            },
+            status: AgentStatus::Active,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
 }
 
 impl AgentConfig {
@@ -443,14 +495,8 @@ impl MemoryBlockConfig {
                 }
             })
         } else {
-            Err(crate::CoreError::ConfigurationError {
-                field: "memory block".to_string(),
-                config_path: "unknown".to_string(),
-                expected: "either 'content' or 'content_path'".to_string(),
-                cause: crate::error::ConfigError::MissingField(
-                    "content or content_path".to_string(),
-                ),
-            })
+            // Empty content is valid - allows declaring blocks with just permission/type
+            Ok(String::new())
         }
     }
 }
@@ -613,8 +659,8 @@ fn default_skip_unavailable() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlueskyConfig {
     /// Default filter for the firehose
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_filter: Option<BlueskyFilter>,
+    //#[serde(default, skip_serializing_if = "Option::is_none")]
+    //pub default_filter: Option<BlueskyFilter>,
 
     /// Whether to automatically connect to firehose on startup
     #[serde(default)]
@@ -871,7 +917,160 @@ pub struct PartialAgentConfig {
     pub model: Option<ModelConfig>,
 }
 
-fn merge_agent_configs(base: AgentConfig, overlay: PartialAgentConfig) -> AgentConfig {
+impl From<&pattern_db::models::Agent> for PartialAgentConfig {
+    fn from(agent: &pattern_db::models::Agent) -> Self {
+        // Try to deserialize from the config JSON field first
+        if let Ok(config) = serde_json::from_value::<PartialAgentConfig>(agent.config.0.clone()) {
+            return config;
+        }
+
+        // Fallback: construct from individual fields
+        PartialAgentConfig {
+            id: Some(AgentId(agent.id.clone())),
+            name: Some(agent.name.clone()),
+            system_prompt: Some(agent.system_prompt.clone()),
+            model: Some(ModelConfig {
+                provider: agent.model_provider.clone(),
+                model: Some(agent.model_name.clone()),
+                temperature: None,
+                settings: HashMap::new(),
+            }),
+            tools: Some(agent.enabled_tools.0.clone()),
+            tool_rules: agent
+                .tool_rules
+                .as_ref()
+                .and_then(|r| serde_json::from_value(r.0.clone()).ok()),
+            ..Default::default()
+        }
+    }
+}
+
+/// Per-agent overrides - highest priority in config cascade
+///
+/// Used when loading an agent with runtime modifications that
+/// shouldn't be persisted to the database.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentOverrides {
+    /// Override model provider
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_provider: Option<String>,
+
+    /// Override model name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
+
+    /// Override system prompt
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+
+    /// Override temperature
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+
+    /// Override tool rules
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_rules: Option<Vec<ToolRuleConfig>>,
+
+    /// Override enabled tools
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled_tools: Option<Vec<String>>,
+
+    /// Override context settings
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<ContextConfigOptions>,
+}
+
+impl AgentOverrides {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_model(mut self, provider: &str, name: &str) -> Self {
+        self.model_provider = Some(provider.to_string());
+        self.model_name = Some(name.to_string());
+        self
+    }
+
+    pub fn with_temperature(mut self, temp: f32) -> Self {
+        self.temperature = Some(temp);
+        self
+    }
+}
+
+/// Fully resolved agent configuration
+///
+/// All fields are concrete (no Options for required values).
+/// Created by resolving the config cascade.
+#[derive(Debug, Clone)]
+pub struct ResolvedAgentConfig {
+    pub id: AgentId,
+    pub name: String,
+    pub model_provider: String,
+    pub model_name: String,
+    pub system_prompt: String,
+    pub persona: Option<String>,
+    pub tool_rules: Vec<ToolRule>,
+    pub enabled_tools: Vec<String>,
+    pub memory_blocks: HashMap<String, MemoryBlockConfig>,
+    pub context: ContextConfigOptions,
+    pub temperature: Option<f32>,
+}
+
+impl ResolvedAgentConfig {
+    /// Resolve from AgentConfig with defaults filled in
+    pub fn from_agent_config(config: &AgentConfig, defaults: &AgentConfig) -> Self {
+        let model = config.model.as_ref().or(defaults.model.as_ref());
+
+        Self {
+            id: config.id.clone().unwrap_or_else(AgentId::generate),
+            name: config.name.clone(),
+            model_provider: model
+                .map(|m| m.provider.clone())
+                .unwrap_or_else(|| "anthropic".to_string()),
+            model_name: model
+                .and_then(|m| m.model.clone())
+                .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string()),
+            system_prompt: config
+                .system_prompt
+                .clone()
+                .unwrap_or(DEFAULT_BASE_INSTRUCTIONS.to_string()),
+            persona: config.persona.clone(),
+            tool_rules: config.get_tool_rules().unwrap_or_default(),
+            enabled_tools: config.tools.clone(),
+            memory_blocks: config.memory.clone(),
+            context: config.context.clone().unwrap_or_default(),
+            temperature: model.and_then(|m| m.temperature),
+        }
+    }
+
+    /// Apply overrides to this resolved config
+    pub fn apply_overrides(mut self, overrides: &AgentOverrides) -> Self {
+        if let Some(ref provider) = overrides.model_provider {
+            self.model_provider = provider.clone();
+        }
+        if let Some(ref name) = overrides.model_name {
+            self.model_name = name.clone();
+        }
+        if let Some(ref prompt) = overrides.system_prompt {
+            self.system_prompt = prompt.clone();
+        }
+        if let Some(temp) = overrides.temperature {
+            self.temperature = Some(temp);
+        }
+        if let Some(ref rules) = overrides.tool_rules {
+            self.tool_rules = rules.iter().filter_map(|r| r.to_tool_rule().ok()).collect();
+        }
+        if let Some(ref tools) = overrides.enabled_tools {
+            self.enabled_tools = tools.clone();
+        }
+        if let Some(ref ctx) = overrides.context {
+            self.context = ctx.clone();
+        }
+        self
+    }
+}
+
+pub fn merge_agent_configs(base: AgentConfig, overlay: PartialAgentConfig) -> AgentConfig {
     AgentConfig {
         id: overlay.id.or(base.id),
         name: overlay.name.unwrap_or(base.name),
@@ -899,17 +1098,9 @@ fn merge_agent_configs(base: AgentConfig, overlay: PartialAgentConfig) -> AgentC
 /// Optional context configuration for agents
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextConfigOptions {
-    /// Maximum messages to keep before compression
+    /// Maximum messages to keep before compression (hard cap)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_messages: Option<usize>,
-
-    /// Maximum age of messages in hours before archival
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_message_age_hours: Option<i64>,
-
-    /// Number of messages that triggers compression
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub compression_threshold: Option<usize>,
 
     /// Compression strategy to use
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -922,6 +1113,32 @@ pub struct ContextConfigOptions {
     /// Whether to enable thinking/reasoning
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enable_thinking: Option<bool>,
+
+    /// Whether to include tool descriptions in context
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_descriptions: Option<bool>,
+
+    /// Whether to include tool schemas in context
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_schemas: Option<bool>,
+
+    /// Limit for activity entries in context
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activity_entries_limit: Option<usize>,
+}
+
+impl Default for ContextConfigOptions {
+    fn default() -> Self {
+        Self {
+            max_messages: None,
+            compression_strategy: None,
+            memory_char_limit: None,
+            enable_thinking: None,
+            include_descriptions: None,
+            include_schemas: None,
+            activity_entries_limit: None,
+        }
+    }
 }
 
 /// Standard config file locations

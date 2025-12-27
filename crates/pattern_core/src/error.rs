@@ -1,8 +1,4 @@
-use crate::{
-    AgentId,
-    db::{DatabaseError, entity::EntityError},
-    embeddings::EmbeddingError,
-};
+use crate::{AgentId, embeddings::EmbeddingError};
 use compact_str::CompactString;
 use miette::{Diagnostic, IntoDiagnostic};
 use serde::{Deserialize, Serialize};
@@ -35,6 +31,13 @@ pub enum CoreError {
         help("Check the agent configuration and ensure all required fields are provided")
     )]
     AgentInitFailed { agent_type: String, cause: String },
+
+    #[error("Agent {agent_id} processing failed: {details}")]
+    #[diagnostic(
+        code(pattern_core::agent_processing),
+        help("Agent encountered an error during stream processing")
+    )]
+    AgentProcessing { agent_id: String, details: String },
 
     #[error("Memory block not found")]
     #[diagnostic(
@@ -109,26 +112,6 @@ pub enum CoreError {
         status: u16,
         headers: Vec<(String, String)>,
         body: String,
-    },
-
-    #[error("Database connection failed")]
-    #[diagnostic(
-        code(pattern_core::database_connection_failed),
-        help("Ensure SurrealDB is running at {connection_string}")
-    )]
-    DatabaseConnectionFailed {
-        connection_string: String,
-        #[source]
-        cause: surrealdb::Error,
-    },
-
-    #[error("Database query failed")]
-    #[diagnostic(code(pattern_core::database_query_failed), help("Query: {query}"))]
-    DatabaseQueryFailed {
-        query: String,
-        table: String,
-        #[source]
-        cause: surrealdb::Error,
     },
 
     #[error("Serialization error")]
@@ -251,105 +234,62 @@ pub enum CoreError {
         #[source]
         cause: std::io::Error,
     },
+
+    #[error("SQLite database error: {0}")]
+    #[diagnostic(
+        code(pattern_core::sqlite_error),
+        help("Check database connection and query")
+    )]
+    SqliteError(#[from] pattern_db::DbError),
+
+    #[error("Authentication database error: {0}")]
+    #[diagnostic(
+        code(pattern_core::auth_error),
+        help("Check auth database connection and credentials")
+    )]
+    AuthError(#[from] pattern_auth::AuthError),
+
+    #[error("Invalid data format: {data_type}")]
+    #[diagnostic(
+        code(pattern_core::invalid_format),
+        help("Check the format of {data_type}: {details}")
+    )]
+    InvalidFormat { data_type: String, details: String },
+
+    #[error("Agent not found: {identifier}")]
+    #[diagnostic(
+        code(pattern_core::agent_not_found),
+        help("No agent exists with identifier: {identifier}")
+    )]
+    AgentNotFound { identifier: String },
+
+    #[error("Group not found: {identifier}")]
+    #[diagnostic(
+        code(pattern_core::group_not_found),
+        help("No group exists with identifier: {identifier}")
+    )]
+    GroupNotFound { identifier: String },
+
+    #[error("No endpoint configured for: {target_type}")]
+    #[diagnostic(
+        code(pattern_core::no_endpoint_configured),
+        help("Register an endpoint for {target_type} using MessageRouter::register_endpoint")
+    )]
+    NoEndpointConfigured { target_type: String },
+
+    #[error("Rate limited: {target} (cooldown: {cooldown_secs}s)")]
+    #[diagnostic(
+        code(pattern_core::rate_limited),
+        help("Wait {cooldown_secs} seconds before sending another message to {target}")
+    )]
+    RateLimited { target: String, cooldown_secs: u64 },
+
+    #[error("Already started: {component}")]
+    #[diagnostic(code(pattern_core::already_started), help("{details}"))]
+    AlreadyStarted { component: String, details: String },
 }
 
 pub type Result<T> = std::result::Result<T, CoreError>;
-
-impl From<DatabaseError> for CoreError {
-    fn from(err: DatabaseError) -> Self {
-        match err {
-            DatabaseError::ConnectionFailed(e) => Self::DatabaseConnectionFailed {
-                connection_string: "embedded".to_string(),
-                cause: e,
-            },
-            DatabaseError::QueryFailed(e) => Self::DatabaseQueryFailed {
-                query: "unknown".to_string(),
-                table: "unknown".to_string(),
-                cause: e,
-            },
-            DatabaseError::QueryFailedContext {
-                query,
-                table,
-                cause,
-            } => Self::DatabaseQueryFailed {
-                query,
-                table,
-                cause,
-            },
-
-            DatabaseError::SerdeProblem(e) => Self::SerializationError {
-                data_type: "database record".to_string(),
-                cause: e,
-            },
-            DatabaseError::NotFound { entity_type, id } => Self::DatabaseQueryFailed {
-                query: format!("SELECT * FROM {} WHERE id = '{}'", entity_type, id),
-                table: entity_type,
-                cause: surrealdb::Error::Db(surrealdb::error::Db::Tx("not found".to_string())),
-            },
-            DatabaseError::EmbeddingError(e) => Self::VectorSearchFailed {
-                collection: "unknown".to_string(),
-                dimension_mismatch: None,
-                cause: e,
-            },
-            DatabaseError::EmbeddingModelMismatch {
-                db_model,
-                config_model,
-            } => Self::ConfigurationError {
-                config_path: "database".to_string(),
-                field: "embedding_model".to_string(),
-                expected: db_model.clone(),
-                cause: ConfigError::InvalidValue {
-                    field: "embedding_model".to_string(),
-                    reason: format!(
-                        "Model mismatch: database has {}, config has {}",
-                        db_model, config_model
-                    ),
-                },
-            },
-            DatabaseError::SchemaVersionMismatch {
-                db_version,
-                code_version,
-            } => Self::DatabaseQueryFailed {
-                query: "schema version check".to_string(),
-                table: "system_metadata".to_string(),
-                cause: surrealdb::Error::Db(surrealdb::error::Db::Tx(format!(
-                    "Schema version mismatch: database v{}, code v{}",
-                    db_version, code_version
-                ))),
-            },
-            DatabaseError::InvalidVectorDimensions { expected, actual } => {
-                Self::VectorSearchFailed {
-                    collection: "unknown".to_string(),
-                    dimension_mismatch: Some((expected, actual)),
-                    cause: EmbeddingError::DimensionMismatch { expected, actual },
-                }
-            }
-            DatabaseError::TransactionFailed(e) => Self::DatabaseQueryFailed {
-                query: "transaction".to_string(),
-                table: "unknown".to_string(),
-                cause: e,
-            },
-            DatabaseError::SurrealJsonValueError { original, help } => Self::DatabaseQueryFailed {
-                query: help,
-                table: "".to_string(),
-                cause: original,
-            },
-            DatabaseError::Other(msg) => Self::DatabaseQueryFailed {
-                query: "unknown".to_string(),
-                table: "unknown".to_string(),
-                cause: surrealdb::Error::Db(surrealdb::error::Db::Tx(msg)),
-            },
-        }
-    }
-}
-
-impl From<EntityError> for CoreError {
-    fn from(err: EntityError) -> Self {
-        // Convert EntityError to DatabaseError, then to CoreError
-        let db_err: DatabaseError = err.into();
-        db_err.into()
-    }
-}
 
 // Helper functions for creating common errors with context
 impl CoreError {
@@ -372,44 +312,6 @@ impl CoreError {
             available_tools: available.to_vec(),
             src: format!("tool: {}", name),
             span: (6, 6 + name.len()),
-        }
-    }
-
-    pub fn database_connection_failed(
-        connection_string: impl Into<String>,
-        cause: surrealdb::Error,
-    ) -> Self {
-        Self::DatabaseConnectionFailed {
-            connection_string: connection_string.into(),
-            cause,
-        }
-    }
-
-    /// Create a DatabaseQueryFailed with explicit context.
-    pub fn database_query_error(
-        operation_or_query: impl Into<String>,
-        table: impl Into<String>,
-        cause: surrealdb::Error,
-    ) -> Self {
-        Self::DatabaseQueryFailed {
-            query: operation_or_query.into(),
-            table: table.into(),
-            cause,
-        }
-    }
-
-    /// Builder-style: attach query/table context to an existing DatabaseQueryFailed.
-    /// Returns self unchanged for other variants.
-    pub fn with_db_context(mut self, query: impl Into<String>, table: impl Into<String>) -> Self {
-        match &mut self {
-            CoreError::DatabaseQueryFailed {
-                query: q, table: t, ..
-            } => {
-                *q = query.into();
-                *t = table.into();
-                self
-            }
-            _ => self,
         }
     }
 

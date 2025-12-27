@@ -382,11 +382,6 @@ pub struct AgentInteraction {
     pub reposted: bool,
 }
 
-#[derive(Debug, Clone)]
-pub struct PatternHttpClient {
-    pub client: reqwest::Client,
-}
-
 impl PatternHttpClient {
     /// Check if a DID should be included based on filter rules
     fn should_fetch_did(did: &str, agent_did: Option<&str>, filter: &BlueskyFilter) -> bool {
@@ -482,45 +477,6 @@ impl PatternHttpClient {
 
         Ok(links_response.linking_records)
     }
-}
-
-impl atrium_xrpc::HttpClient for PatternHttpClient {
-    async fn send_http(
-        &self,
-        request: atrium_xrpc::http::Request<Vec<u8>>,
-    ) -> core::result::Result<
-        atrium_xrpc::http::Response<Vec<u8>>,
-        Box<dyn std::error::Error + Send + Sync + 'static>,
-    > {
-        let response = self.client.execute(request.try_into()?).await?;
-        let mut builder = atrium_xrpc::http::Response::builder().status(response.status());
-        for (k, v) in response.headers() {
-            builder = builder.header(k, v);
-        }
-        builder
-            .body(response.bytes().await?.to_vec())
-            .map_err(Into::into)
-    }
-}
-
-impl Default for PatternHttpClient {
-    fn default() -> Self {
-        Self {
-            client: reqwest::Client::builder()
-                .user_agent(concat!("pattern/", env!("CARGO_PKG_VERSION")))
-                .timeout(std::time::Duration::from_secs(10)) // 10 second timeout for constellation API calls
-                .connect_timeout(std::time::Duration::from_secs(5)) // 5 second connection timeout
-                .build()
-                .unwrap(), // panics for the same reasons Client::new() would: https://docs.rs/reqwest/latest/reqwest/struct.Client.html#panics
-        }
-    }
-}
-
-pub fn atproto_identity_resolver() -> CommonDidResolver<PatternHttpClient> {
-    CommonDidResolver::new(CommonDidResolverConfig {
-        plc_directory_url: DEFAULT_PLC_DIRECTORY_URL.to_string(),
-        http_client: Arc::new(PatternHttpClient::default()),
-    })
 }
 
 /// Hydration state for tracking what data needs fetching

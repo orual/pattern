@@ -2,28 +2,44 @@ mod agent_ops;
 mod background_tasks;
 mod chat;
 mod commands;
-mod data_sources;
+mod coordination_helpers;
 mod discord;
 mod endpoints;
 mod forwarding;
+mod helpers;
 mod message_display;
 mod output;
 mod permission_sink;
 mod slash_commands;
 mod tracing_writer;
 
+// CLI Status - pattern_db (SQLite/sqlx) migration
+//
+// This CLI uses RuntimeContext from pattern_core and pattern_db for database access.
+//
+// Module status:
+// - agent_ops.rs: Agent loading/creation via RuntimeContext - WORKING
+// - chat.rs: Single agent and group chat - WORKING
+// - commands/agent.rs: list/status WORKING, create/export/rules stubbed
+// - commands/group.rs: All commands WORKING (list, create, add-member, status, export)
+// - commands/export.rs: CAR export/import stubbed (needs format implementation)
+// - commands/debug.rs: Memory listing WORKING, some commands stubbed
+// - commands/db.rs: Stats/query stubbed (needs SQLite equivalents)
+
 use clap::{Parser, Subcommand};
-use miette::{IntoDiagnostic, Result};
+use miette::Result;
 use owo_colors::OwoColorize;
-use pattern_core::{
-    config::{self},
-    db::{
-        DatabaseConfig,
-        client::{self},
-    },
-};
+use pattern_core::config::{self};
 use std::path::PathBuf;
 use tracing::info;
+
+// TODO: Database initialization is being migrated from SurrealDB to pattern_db
+// The following imports are no longer needed once migration is complete:
+// use pattern_core::db_v1::{DatabaseConfig, client::{self}};
+//
+// New approach will use:
+// use pattern_db::ConstellationDb;
+// use pattern_core::runtime::RuntimeContext;
 
 #[derive(Parser)]
 #[command(name = "pattern-cli")]
@@ -61,14 +77,6 @@ enum Commands {
         /// Group name to chat with
         #[arg(long, conflicts_with = "agent")]
         group: Option<String>,
-
-        /// Model to use (e.g. gpt-4o, claude-3-haiku)
-        #[arg(long)]
-        model: Option<String>,
-
-        /// Disable tool usage
-        #[arg(long)]
-        no_tools: bool,
 
         /// Run as Discord bot instead of CLI chat
         #[arg(long)]
@@ -372,11 +380,17 @@ enum AtprotoCommands {
         /// App password (will prompt if not provided)
         #[arg(short = 'p', long)]
         app_password: Option<String>,
+        /// Agent to link this identity to (defaults to _constellation_ for shared identity)
+        #[arg(short = 'a', long, default_value = "_constellation_")]
+        agent_id: String,
     },
-    /// Login with OAuth (coming soon)
+    /// Login with OAuth
     OAuth {
         /// Your handle (e.g., alice.bsky.social) or DID
         identifier: String,
+        /// Agent to link this identity to (defaults to _constellation_ for shared identity)
+        #[arg(short = 'a', long, default_value = "_constellation_")]
+        agent_id: String,
     },
     /// Show authentication status
     Status,
@@ -585,7 +599,7 @@ async fn main() -> Result<()> {
     );
 
     // Load configuration
-    let mut config = if let Some(config_path) = &cli.config {
+    let config = if let Some(config_path) = &cli.config {
         info!("Loading config from: {:?}", config_path);
         config::load_config(config_path).await?
     } else {
@@ -593,67 +607,54 @@ async fn main() -> Result<()> {
         config::load_config_from_standard_locations().await?
     };
 
-    // Apply CLI overrides
+    // TODO: Database initialization is being migrated from SurrealDB to pattern_db
+    //
+    // Previous implementation used:
+    // 1. DatabaseConfig::Embedded { path, strict_mode }
+    // 2. client::init_db(config) or client::init_db_with_options(config, force_schema)
+    //
+    // New approach will use:
+    // 1. pattern_db::ConstellationDb::new(path).await
+    // 2. RuntimeContext::builder().db(db).model_provider(model).build().await
+    //
+    // For now, database initialization is STUBBED. Commands that require
+    // database access will display warning messages.
+
     if let Some(db_path) = &cli.db_path {
-        info!("Overriding database path with: {:?}", db_path);
-        config.database = DatabaseConfig::Embedded {
-            path: db_path.to_string_lossy().to_string(),
-            strict_mode: false,
-        };
+        info!(
+            "DB path override requested: {:?} (currently ignored - migration in progress)",
+            db_path
+        );
     }
 
-    // Apply environment variable overrides for Remote database config
-    #[cfg(feature = "surreal-remote")]
-    if let DatabaseConfig::Remote {
-        username, password, ..
-    } = &mut config.database
-    {
-        // Only override if not already set in config
-        if username.is_none() {
-            if let Ok(user) = std::env::var("SURREAL_USER") {
-                info!("Using SURREAL_USER from environment");
-                *username = Some(user);
-            }
-        }
-        if password.is_none() {
-            if let Ok(pass) = std::env::var("SURREAL_PASS") {
-                info!("Using SURREAL_PASS from environment");
-                *password = Some(pass);
-            }
-        }
-    }
-
-    tracing::info!("Using database config: {:?}", config.database);
-
-    // Initialize database
     if cli.force_schema_update {
-        tracing::info!("Forcing schema update...");
-        client::init_db_with_options(config.database.clone(), true).await?;
-    } else {
-        client::init_db(config.database.clone()).await?;
+        tracing::warn!(
+            "Schema update requested but database initialization is stubbed during migration"
+        );
     }
 
-    // Initialize groups from configuration (skip for auth/atproto/config commands to avoid API key issues)
-    let _skip_group_init = matches!(
-        &cli.command,
-        Commands::Auth { .. }
-            | Commands::Config { .. }
-            | Commands::Atproto { .. }
-            | Commands::Db { .. }
-    );
+    // TODO: Uncomment when pattern_db is integrated:
+    // let db = pattern_db::ConstellationDb::new(&config.database.path).await?;
+    // let model_provider = /* create from config */;
+    // let embedding_provider = /* create from config */;
+    // let runtime_ctx = RuntimeContext::builder()
+    //     .db(db)
+    //     .model_provider(model_provider)
+    //     .embedding_provider(embedding_provider)
+    //     .build()
+    //     .await?;
 
-    // if !config.groups.is_empty() && !skip_group_init {
-    //     // Create a heartbeat channel for group initialization
-    //     let (heartbeat_sender, _receiver) = pattern_core::context::heartbeat::heartbeat_channel();
-    //     commands::group::initialize_from_config(&config, heartbeat_sender).await?;
-    // }
+    // Group initialization from config is disabled during migration
+    // Previously this would:
+    // 1. Iterate over config.groups
+    // 2. Create or load each group
+    // 3. Load or create member agents
+    // 4. Set up coordination patterns
 
     match &cli.command {
         Commands::Chat {
             agent,
             group,
-            model,
-            no_tools,
             discord,
         } => {
             let output = crate::output::Output::new();
@@ -682,11 +683,7 @@ async fn main() -> Result<()> {
                     #[cfg(feature = "discord")]
                     {
                         discord::run_discord_bot_with_group(
-                            group_name,
-                            model.clone(),
-                            *no_tools,
-                            &config,
-                            true, // enable_cli
+                            group_name, &config, true, // enable_cli
                         )
                         .await?;
                     }
@@ -696,15 +693,9 @@ async fn main() -> Result<()> {
                         return Ok(());
                     }
                 } else if has_bluesky_config {
-                    chat::chat_with_group_and_jetstream(
-                        group_name,
-                        model.clone(),
-                        *no_tools,
-                        &config,
-                    )
-                    .await?;
+                    chat::chat_with_group_and_jetstream(group_name, &config).await?;
                 } else {
-                    chat::chat_with_group(group_name, model.clone(), *no_tools, &config).await?;
+                    chat::chat_with_group(group_name, &config).await?;
                 }
             } else {
                 // Chat with a single agent
@@ -715,34 +706,20 @@ async fn main() -> Result<()> {
 
                 output.success("Starting chat mode...");
                 output.info("Agent:", &agent.bright_cyan().to_string());
-                if let Some(model_name) = &model {
-                    output.info("Model:", &model_name.bright_yellow().to_string());
-                }
-                if !*no_tools {
-                    output.info("Tools:", &"enabled".bright_green().to_string());
-                } else {
-                    output.info("Tools:", &"disabled".bright_red().to_string());
-                }
 
-                // Try to load existing agent or create new one
-                let agent = agent_ops::load_or_create_agent(
-                    agent,
-                    model.clone(),
-                    !*no_tools,
-                    &config,
-                    heartbeat_sender,
-                    &output,
-                )
-                .await?;
-                chat::chat_with_agent(agent, heartbeat_receiver).await?;
+                // Suppress unused variable warnings (heartbeat handled by RuntimeContext now)
+                let _ = heartbeat_sender;
+                let _ = heartbeat_receiver;
+
+                chat::chat_with_single_agent(agent, &config).await?;
             }
         }
         Commands::Agent { cmd } => match cmd {
-            AgentCommands::List => commands::agent::list().await?,
+            AgentCommands::List => commands::agent::list(&config).await?,
             AgentCommands::Create { name, agent_type } => {
                 commands::agent::create(name, agent_type.as_deref(), &config).await?
             }
-            AgentCommands::Status { name } => commands::agent::status(name).await?,
+            AgentCommands::Status { name } => commands::agent::status(name, &config).await?,
             AgentCommands::Export { name, output } => {
                 commands::agent::export(name, output.as_deref()).await?
             }
@@ -778,96 +755,60 @@ async fn main() -> Result<()> {
             match cmd {
                 DbCommands::Stats => commands::db::stats(&config, &output).await?,
                 DbCommands::Query { sql } => commands::db::query(sql, &output).await?,
-                DbCommands::Migrate { yes } => {
-                    if !yes {
-                        output.warning("⚠️  This will run database migrations!");
-                        output.warning("Make sure you have a backup before proceeding.");
-                        output.info("", "Run with --yes to skip this prompt.");
-
-                        use std::io::{self, Write};
-                        print!("Continue? [y/N]: ");
-                        io::stdout().flush().into_diagnostic()?;
-
-                        let mut input = String::new();
-                        io::stdin().read_line(&mut input).into_diagnostic()?;
-
-                        if !input.trim().eq_ignore_ascii_case("y") {
-                            output.status("Migration cancelled.");
-                            return Ok(());
-                        }
-                    }
-
-                    output.status("Running database migrations...");
-
-                    // Use the database config from PatternConfig
-                    let db_config = if let Some(path) = cli.db_path.clone() {
-                        DatabaseConfig::Embedded {
-                            path: path.to_string_lossy().to_string(),
-                            strict_mode: false,
-                        }
-                    } else {
-                        config.database.clone()
-                    };
-
-                    // Initialize database with force_schema_update = true
-                    client::init_db_with_options(db_config, true).await?;
-
-                    output.success("✓ Migrations completed successfully");
+                DbCommands::Migrate { yes: _ } => {
+                    // TODO: Reimplement for pattern_db (SQLite/sqlx)
+                    //
+                    // Previous implementation:
+                    // 1. Prompted for confirmation
+                    // 2. Called client::init_db_with_options(db_config, true)
+                    // 3. This ran SurrealDB schema migrations
+                    //
+                    // Pattern_db uses sqlx migrations which are handled differently
+                    output.warning(
+                        "Database migrations temporarily disabled during pattern_db migration",
+                    );
+                    output.info("Reason:", "Pattern_db uses sqlx migrations");
+                    output.status("Previous functionality:");
+                    output.list_item("Ran SurrealDB schema updates");
+                    output.list_item("Created new tables and indexes");
+                    output.list_item("Updated existing schemas");
                 }
                 DbCommands::RepairTools => {
-                    output.status("Repairing orphaned tool messages...");
-
-                    // Use the database config from PatternConfig
-                    let db_config = if let Some(path) = cli.db_path.clone() {
-                        DatabaseConfig::Embedded {
-                            path: path.to_string_lossy().to_string(),
-                            strict_mode: false,
-                        }
-                    } else {
-                        config.database.clone()
-                    };
-
-                    // Initialize database connection
-                    client::init_db(db_config).await?;
-
-                    // Use the static DB client
-                    use pattern_core::db::client::DB;
-                    use pattern_core::db::migration::MigrationRunner;
-
-                    // Call the repair function directly
-                    MigrationRunner::repair_orphaned_tool_messages_standalone(&*DB).await?;
-
-                    output.success("✓ Tool message repair completed");
+                    // TODO: Reimplement for pattern_db (SQLite/sqlx)
+                    //
+                    // Previous implementation:
+                    // 1. Initialized SurrealDB connection
+                    // 2. Called MigrationRunner::repair_orphaned_tool_messages_standalone
+                    // 3. Fixed messages with tool roles but no tool_call_id
+                    //
+                    // This repair was specific to SurrealDB schema issues
+                    output.warning("Tool repair temporarily disabled during pattern_db migration");
+                    output.info("Reason:", "SurrealDB-specific repair not needed for SQLite");
+                    output.status("Previous functionality:");
+                    output.list_item("Found orphaned tool messages");
+                    output.list_item("Linked them to their parent tool calls");
+                    output.list_item("Fixed batch assignments");
                 }
                 DbCommands::CleanupBatches { batch_ids } => {
-                    output.status("Cleaning up specific batch IDs...");
-
-                    // Use the database config from PatternConfig
-                    let db_config = if let Some(path) = cli.db_path.clone() {
-                        DatabaseConfig::Embedded {
-                            path: path.to_string_lossy().to_string(),
-                            strict_mode: false,
-                        }
-                    } else {
-                        config.database.clone()
-                    };
-
-                    // Initialize database connection
-                    client::init_db(db_config).await?;
-
-                    // Parse the batch IDs
+                    // TODO: Reimplement for pattern_db (SQLite/sqlx)
+                    //
+                    // Previous implementation:
+                    // 1. Parsed comma-separated batch IDs
+                    // 2. Deleted messages with those artificial batch IDs
+                    // 3. Re-batched affected messages correctly
+                    //
+                    // This cleanup was for fixing bad batching from earlier migrations
                     let ids: Vec<&str> = batch_ids.split(',').map(|s| s.trim()).collect();
-
-                    output.status(&format!("Cleaning up {} batch IDs", ids.len()));
-
-                    // Use the static DB client
-                    use pattern_core::db::client::DB;
-                    use pattern_core::db::migration::MigrationRunner;
-
-                    // Call the cleanup function
-                    MigrationRunner::cleanup_specific_artificial_batches(&*DB, &ids).await?;
-
-                    output.success("✓ Batch cleanup completed");
+                    output
+                        .warning("Batch cleanup temporarily disabled during pattern_db migration");
+                    output.info("Batch IDs requested:", &ids.join(", "));
+                    output.info(
+                        "Reason:",
+                        "SurrealDB-specific cleanup not needed for SQLite",
+                    );
+                    output.status("Previous functionality:");
+                    output.list_item("Deleted messages with artificial batch IDs");
+                    output.list_item("Re-batched affected messages correctly");
                 }
             }
         }
@@ -971,13 +912,20 @@ async fn main() -> Result<()> {
             AtprotoCommands::Login {
                 identifier,
                 app_password,
+                agent_id,
             } => {
-                commands::atproto::app_password_login(identifier, app_password.clone(), &config)
-                    .await?
+                commands::atproto::app_password_login(
+                    identifier,
+                    app_password.clone(),
+                    agent_id,
+                    &config,
+                )
+                .await?
             }
-            AtprotoCommands::OAuth { identifier } => {
-                commands::atproto::oauth_login(identifier, &config).await?
-            }
+            AtprotoCommands::OAuth {
+                identifier,
+                agent_id,
+            } => commands::atproto::oauth_login(identifier, agent_id, &config).await?,
             AtprotoCommands::Status => commands::atproto::status(&config).await?,
             AtprotoCommands::Unlink { identifier } => {
                 commands::atproto::unlink(identifier, &config).await?

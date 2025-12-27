@@ -175,23 +175,6 @@ impl ApiError {
     }
 }
 
-// Conversion implementations
-impl From<pattern_core::db::DatabaseError> for ApiError {
-    fn from(err: pattern_core::db::DatabaseError) -> Self {
-        let handler = JSONReportHandler::new();
-
-        let message = format!("{}", err);
-        let mut json = String::new();
-
-        let err: Box<dyn Diagnostic> = Box::new(err);
-        handler
-            .render_report(&mut json, err.as_ref())
-            .unwrap_or_default();
-
-        Self::Database { message, json }
-    }
-}
-
 impl From<pattern_core::error::CoreError> for ApiError {
     fn from(err: pattern_core::error::CoreError) -> Self {
         let handler = JSONReportHandler::new();

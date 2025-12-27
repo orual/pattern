@@ -1,0 +1,86 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            id as \"id!\",\n            name as \"name!\",\n            description,\n            model_provider as \"model_provider!\",\n            model_name as \"model_name!\",\n            system_prompt as \"system_prompt!\",\n            config as \"config!: _\",\n            enabled_tools as \"enabled_tools!: _\",\n            tool_rules as \"tool_rules: _\",\n            status as \"status!: AgentStatus\",\n            created_at as \"created_at!: _\",\n            updated_at as \"updated_at!: _\"\n        FROM agents ORDER BY name\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "name!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "description",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "model_provider!",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "model_name!",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "system_prompt!",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "config!: _",
+        "ordinal": 6,
+        "type_info": "Null"
+      },
+      {
+        "name": "enabled_tools!: _",
+        "ordinal": 7,
+        "type_info": "Null"
+      },
+      {
+        "name": "tool_rules: _",
+        "ordinal": 8,
+        "type_info": "Null"
+      },
+      {
+        "name": "status!: AgentStatus",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at!: _",
+        "ordinal": 10,
+        "type_info": "Text"
+      },
+      {
+        "name": "updated_at!: _",
+        "ordinal": 11,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "74a65d149577215371d160b91575dc686d143f1c94942428983e8977ab6e0931"
+}

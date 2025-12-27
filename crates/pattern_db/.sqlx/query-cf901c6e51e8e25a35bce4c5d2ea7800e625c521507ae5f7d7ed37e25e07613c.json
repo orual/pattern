@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM shared_block_agents WHERE block_id = ? AND agent_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "cf901c6e51e8e25a35bce4c5d2ea7800e625c521507ae5f7d7ed37e25e07613c"
+}

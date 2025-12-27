@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE coordination_tasks SET assigned_to = ?, updated_at = datetime('now') WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "d65eea21d4c85057778f4a02ac9b3f4029dfd3c50da6d1c54c6d6c1cfd47637c"
+}

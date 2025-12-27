@@ -191,7 +191,7 @@ impl ContentFilter {
 pub struct HybridSearchBuilder<'a> {
     pool: &'a SqlitePool,
     text_query: Option<String>,
-    embedding: Option<Vec<f32>>,
+    embedding: Option<&'a [f32]>,
     filter: ContentFilter,
     limit: i64,
     mode: SearchMode,
@@ -225,7 +225,7 @@ impl<'a> HybridSearchBuilder<'a> {
     }
 
     /// Set the embedding vector for similarity search.
-    pub fn embedding(mut self, embedding: Vec<f32>) -> Self {
+    pub fn embedding(mut self, embedding: &'a [f32]) -> Self {
         self.embedding = Some(embedding);
         self
     }
@@ -267,6 +267,7 @@ impl<'a> HybridSearchBuilder<'a> {
     }
 
     /// Execute the search.
+    #[allow(non_snake_case)]
     pub async fn execute(self) -> DbResult<Vec<SearchResult>> {
         // Resolve Auto mode based on what's provided
         let effective_mode = match self.mode {
@@ -388,6 +389,7 @@ impl<'a> HybridSearchBuilder<'a> {
             .collect())
     }
 
+    #[allow(non_snake_case)]
     async fn execute_hybrid(self) -> DbResult<Vec<SearchResult>> {
         // Run both searches concurrently if we have both inputs
         let (fts_results, vector_results) = match (&self.text_query, &self.embedding) {
@@ -426,6 +428,7 @@ impl<'a> HybridSearchBuilder<'a> {
     }
 
     /// Run FTS search across configured content types.
+    #[allow(non_snake_case)]
     async fn run_fts_search(&self, query: &str) -> DbResult<Vec<(SearchContentType, FtsMatch)>> {
         let agent_id = self.filter.agent_id.as_deref();
         // Fetch more than limit to allow for fusion

@@ -1,0 +1,98 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            id as \"id!\",\n            agent_id as \"agent_id!\",\n            position as \"position!\",\n            batch_id,\n            sequence_in_batch,\n            role as \"role!: MessageRole\",\n            content_json as \"content_json: _\",\n            content_preview,\n            batch_type as \"batch_type: BatchType\",\n            source,\n            source_metadata as \"source_metadata: _\",\n            is_archived as \"is_archived!: bool\",\n            is_deleted as \"is_deleted!: bool\",\n            created_at as \"created_at!: _\"\n        FROM messages\n        WHERE agent_id = ? AND is_deleted = 0\n        ORDER BY position DESC\n        LIMIT ?\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "agent_id!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "position!",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "batch_id",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "sequence_in_batch",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "role!: MessageRole",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "content_json: _",
+        "ordinal": 6,
+        "type_info": "Null"
+      },
+      {
+        "name": "content_preview",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "batch_type: BatchType",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "source",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "source_metadata: _",
+        "ordinal": 10,
+        "type_info": "Null"
+      },
+      {
+        "name": "is_archived!: bool",
+        "ordinal": 11,
+        "type_info": "Integer"
+      },
+      {
+        "name": "is_deleted!: bool",
+        "ordinal": 12,
+        "type_info": "Integer"
+      },
+      {
+        "name": "created_at!: _",
+        "ordinal": 13,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "7c039f7cfdbc0c88fc35fc7d26b4070536a946fc2f5937d7e62bfa15082c4d01"
+}

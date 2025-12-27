@@ -9,6 +9,9 @@ use sqlx::types::Json;
 ///
 /// Messages use Snowflake IDs for absolute ordering across all messages,
 /// with batch tracking for atomic request/response cycles.
+///
+/// The content is stored as JSON to support all MessageContent variants
+/// from the domain layer without data loss.
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct Message {
     /// Unique identifier
@@ -29,20 +32,19 @@ pub struct Message {
     /// Message role
     pub role: MessageRole,
 
-    /// Message content (may be null for tool-only messages)
-    pub content: Option<String>,
+    /// Message content stored as JSON to support all variants:
+    /// - Text(String)
+    /// - Parts(Vec<ContentPart>)
+    /// - ToolCalls(Vec<ToolCall>)
+    /// - ToolResponses(Vec<ToolResponse>)
+    /// - Blocks(Vec<ContentBlock>)
+    pub content_json: Json<serde_json::Value>,
 
-    /// Tool call ID (for tool messages)
-    pub tool_call_id: Option<String>,
+    /// Text preview for FTS and quick access (extracted from content_json)
+    pub content_preview: Option<String>,
 
-    /// Tool name (for tool calls/results)
-    pub tool_name: Option<String>,
-
-    /// Tool arguments as JSON (for tool calls)
-    pub tool_args: Option<Json<serde_json::Value>>,
-
-    /// Tool result as JSON (for tool responses)
-    pub tool_result: Option<Json<serde_json::Value>>,
+    /// Batch type for categorizing message processing cycles (stored as TEXT in SQLite)
+    pub batch_type: Option<BatchType>,
 
     /// Source of the message: 'cli', 'discord', 'bluesky', 'api', etc.
     pub source: Option<String>,
@@ -52,6 +54,10 @@ pub struct Message {
 
     /// Whether this message has been archived (compressed into a summary)
     pub is_archived: bool,
+
+    /// Whether this message has been soft-deleted (tombstone)
+    /// Tombstoned messages should be treated as if they don't exist.
+    pub is_deleted: bool,
 
     /// Creation timestamp
     pub created_at: DateTime<Utc>,
@@ -87,6 +93,21 @@ impl std::fmt::Display for MessageRole {
             Self::Tool => write!(f, "tool"),
         }
     }
+}
+
+/// Batch type for categorizing message processing cycles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(type_name = "TEXT", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub enum BatchType {
+    /// User-initiated interaction
+    UserRequest,
+    /// Inter-agent communication
+    AgentToAgent,
+    /// System-initiated (e.g., scheduled task, sleeptime)
+    SystemTrigger,
+    /// Continuation of previous batch (for long responses)
+    Continuation,
 }
 
 /// An archive summary replacing a range of messages.
@@ -149,4 +170,38 @@ pub struct MessageSummary {
 
     /// Creation timestamp
     pub created_at: DateTime<Utc>,
+}
+
+/// A queued message for agent-to-agent communication.
+///
+/// Used by the MessageRouter to queue messages between agents
+/// when the target agent is not immediately available.
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct QueuedMessage {
+    /// Unique identifier
+    pub id: String,
+
+    /// Target agent ID
+    pub target_agent_id: String,
+
+    /// Source agent ID (if sent by another agent)
+    pub source_agent_id: Option<String>,
+
+    /// Message content
+    pub content: String,
+
+    /// JSON serialized MessageOrigin
+    pub origin_json: Option<String>,
+
+    /// JSON for extra metadata
+    pub metadata_json: Option<String>,
+
+    /// Priority (higher = more urgent)
+    pub priority: i64,
+
+    /// Creation timestamp
+    pub created_at: DateTime<Utc>,
+
+    /// Processing timestamp (NULL until processed)
+    pub processed_at: Option<DateTime<Utc>>,
 }

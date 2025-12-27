@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            agent_id as \"agent_id!\",\n            summary as \"summary!\",\n            messages_covered as \"messages_covered!\",\n            generated_at as \"generated_at!: _\",\n            last_active as \"last_active!: _\"\n        FROM agent_summaries\n        ORDER BY last_active DESC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "agent_id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "summary!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "messages_covered!",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "generated_at!: _",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_active!: _",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "d1937296ca4b349731f0a8b3461e2e25b04ee462efd99a525eaa7f95bb428294"
+}

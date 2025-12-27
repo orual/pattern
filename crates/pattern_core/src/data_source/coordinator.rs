@@ -6,10 +6,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::RwLock;
 
-use crate::context::message_router::AgentMessageRouter;
 use crate::embeddings::EmbeddingProvider;
 use crate::error::Result;
 use crate::memory::MemoryBlock;
+use crate::runtime::router::AgentMessageRouter;
 
 use super::buffer::{BufferConfig, BufferStats};
 use super::traits::{DataSource, StreamEvent};
@@ -440,7 +440,7 @@ impl<E: EmbeddingProvider + Clone + 'static> DataIngestionCoordinator<E> {
         };
 
         // Create origin for this data source
-        let origin = crate::context::message_router::MessageOrigin::DataSource {
+        let origin = crate::runtime::router::MessageOrigin::DataSource {
             source_id: source_id.to_string(),
             source_type,
             item_id: None, // Could extract from item if needed

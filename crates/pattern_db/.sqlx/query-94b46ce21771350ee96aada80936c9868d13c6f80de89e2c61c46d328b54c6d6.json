@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        DELETE FROM queued_messages\n        WHERE processed_at IS NOT NULL\n        AND processed_at < datetime('now', '-' || ? || ' hours')\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "94b46ce21771350ee96aada80936c9868d13c6f80de89e2c61c46d328b54c6d6"
+}

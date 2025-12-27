@@ -13,8 +13,8 @@ mod source;
 mod task;
 
 pub use agent::{
-    Agent, AgentGroup, AgentStatus, GroupMember, GroupMemberRole, ModelRoutingConfig,
-    ModelRoutingRule, PatternType, RoutingCondition,
+    Agent, AgentAtprotoEndpoint, AgentGroup, AgentStatus, ENDPOINT_TYPE_BLUESKY, GroupMember,
+    GroupMemberRole, ModelRoutingConfig, ModelRoutingRule, PatternType, RoutingCondition,
 };
 pub use coordination::{
     ActivityEvent, ActivityEventType, AgentSummary, ConstellationSummary, CoordinationState,
@@ -26,7 +26,7 @@ pub use memory::{
     ArchivalEntry, MemoryBlock, MemoryBlockCheckpoint, MemoryBlockType, MemoryBlockUpdate,
     MemoryGate, MemoryOp, MemoryPermission, SharedBlockAttachment, UpdateSource, UpdateStats,
 };
-pub use message::{ArchiveSummary, Message, MessageRole, MessageSummary};
+pub use message::{ArchiveSummary, BatchType, Message, MessageRole, MessageSummary, QueuedMessage};
 pub use migration::{
     EntityImport, IssueSeverity, MigrationAudit, MigrationIssue, MigrationLog, MigrationStats,
 };

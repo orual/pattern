@@ -6,8 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Result,
-    context::AgentHandle,
-    tool::{AiTool, ExecutionMeta},
+    tool::{AiTool, ExecutionMeta, ToolRule, ToolRuleType},
 };
 
 use super::{MessageTarget, TargetType};
@@ -45,10 +44,31 @@ pub struct SendMessageOutput {
     pub details: Option<String>,
 }
 
-/// Tool for sending messages to various targets
-#[derive(Debug, Clone)]
+// ============================================================================
+// Implementation using ToolContext
+// ============================================================================
+
+use crate::runtime::ToolContext;
+use std::sync::Arc;
+
+/// Tool for sending messages to various targets using ToolContext
+#[derive(Clone)]
 pub struct SendMessageTool {
-    pub handle: AgentHandle,
+    ctx: Arc<dyn ToolContext>,
+}
+
+impl std::fmt::Debug for SendMessageTool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SendMessageTool")
+            .field("agent_id", &self.ctx.agent_id())
+            .finish()
+    }
+}
+
+impl SendMessageTool {
+    pub fn new(ctx: Arc<dyn ToolContext>) -> Self {
+        Self { ctx }
+    }
 }
 
 #[async_trait]
@@ -65,19 +85,10 @@ impl AiTool for SendMessageTool {
     }
 
     async fn execute(&self, params: Self::Input, _meta: &ExecutionMeta) -> Result<Self::Output> {
-        // Get the message router from the handle
-        let router =
-            self.handle
-                .message_router()
-                .ok_or_else(|| crate::CoreError::ToolExecutionFailed {
-                    tool_name: "send_message".to_string(),
-                    cause: "Message router not configured for this agent".to_string(),
-                    parameters: serde_json::to_value(&params).unwrap_or_default(),
-                })?;
+        // Get the message router from the context
+        let router = self.ctx.router();
 
         // Handle agent name resolution if target is agent type
-        let target = params.target.clone();
-
         let (reason, content) = if matches!(params.target.target_type, TargetType::Agent) {
             let split: Vec<_> = params.content.splitn(2, &['\n', '|', '-']).collect();
 
@@ -88,25 +99,70 @@ impl AiTool for SendMessageTool {
             };
             (reason, split.last().unwrap_or(&"").to_string())
         } else {
-            ("send_message_invocation", params.content)
+            ("send_message_invocation", params.content.clone())
         };
+
         // When agent uses send_message tool, origin is the agent itself
-        let origin = crate::context::message_router::MessageOrigin::Agent {
-            agent_id: router.agent_id().clone(),
-            name: router.agent_name().clone(),
+        let origin = crate::runtime::MessageOrigin::Agent {
+            agent_id: router.agent_id().to_string(),
+            name: router.agent_name().to_string(),
             reason: reason.to_string(),
         };
 
-        // Send the message through the router
-        match router
-            .send_message(
-                target,
-                content.clone(),
-                params.metadata.clone(),
-                Some(origin),
-            )
-            .await
-        {
+        // Route based on target type (the new router has specific methods)
+        let result = match params.target.target_type {
+            TargetType::User => {
+                router
+                    .send_to_user(content.clone(), params.metadata.clone(), Some(origin))
+                    .await
+            }
+            TargetType::Agent => {
+                let agent_id = params.target.target_id.as_deref().unwrap_or("unknown");
+                router
+                    .send_to_agent(
+                        agent_id,
+                        content.clone(),
+                        params.metadata.clone(),
+                        Some(origin),
+                    )
+                    .await
+            }
+            TargetType::Group => {
+                let group_id = params.target.target_id.as_deref().unwrap_or("unknown");
+                router
+                    .send_to_group(
+                        group_id,
+                        content.clone(),
+                        params.metadata.clone(),
+                        Some(origin),
+                    )
+                    .await
+            }
+            TargetType::Channel => {
+                let channel_type = params.target.target_id.as_deref().unwrap_or("cli");
+                router
+                    .send_to_channel(
+                        channel_type,
+                        content.clone(),
+                        params.metadata.clone(),
+                        Some(origin),
+                    )
+                    .await
+            }
+            TargetType::Bluesky => {
+                router
+                    .send_to_bluesky(
+                        params.target.target_id.clone(),
+                        content.clone(),
+                        params.metadata.clone(),
+                        Some(origin),
+                    )
+                    .await
+            }
+        };
+
+        // Handle the result
+        match result {
             Ok(created_uri) => {
                 // Generate a message ID for tracking
                 let message_id = format!("msg_{}", chrono::Utc::now().timestamp_millis());
@@ -226,27 +282,39 @@ impl AiTool for SendMessageTool {
     fn usage_rule(&self) -> Option<&'static str> {
         Some("the conversation will end when called")
     }
+
+    fn tool_rules(&self) -> Vec<ToolRule> {
+        vec![ToolRule {
+            tool_name: self.name().to_string(),
+            rule_type: ToolRuleType::ExitLoop,
+            conditions: vec![],
+            priority: 0,
+            metadata: None,
+        }]
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        UserId, context::message_router::AgentMessageRouter, db::client::create_test_db,
-        memory::Memory,
-    };
+    use crate::db::ConstellationDatabases;
+    use crate::tool::builtin::MockToolContext;
+    use std::sync::Arc;
+
+    async fn create_test_context() -> Arc<MockToolContext> {
+        let dbs = Arc::new(
+            ConstellationDatabases::open_in_memory()
+                .await
+                .expect("Failed to create test dbs"),
+        );
+        let memory = Arc::new(crate::memory::MemoryCache::new(Arc::clone(&dbs)));
+        Arc::new(MockToolContext::new("test-agent", memory, dbs))
+    }
 
     #[tokio::test]
     async fn test_send_message_tool() {
-        let db = create_test_db().await.unwrap();
-
-        let memory = Memory::with_owner(&UserId::generate());
-        let mut handle = AgentHandle::test_with_memory(memory).with_db(db.clone());
-
-        let router = AgentMessageRouter::new(handle.agent_id.clone(), handle.name.clone(), db);
-        handle.message_router = Some(router);
-
-        let tool = SendMessageTool { handle };
+        let ctx = create_test_context().await;
+        let tool = SendMessageTool::new(ctx);
 
         // Test sending to user
         let result = tool

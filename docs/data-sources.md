@@ -51,7 +51,7 @@ The data source system provides a flexible way to pipe inputs from various data 
 use pattern_core::{
     agent::DatabaseAgent,
     data_source::{DataIngestionCoordinator, FileDataSource, FileStorageMode},
-    context::message_router::AgentMessageRouter,
+    runtime::router::AgentMessageRouter,
 };
 
 // 1. Create your agent with an embedding provider

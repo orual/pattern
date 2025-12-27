@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "\n                SELECT\n                    t.id as \"id!\",\n                    t.title as \"title!\",\n                    t.status as \"status!: UserTaskStatus\",\n                    t.priority as \"priority!: UserTaskPriority\",\n                    t.due_at as \"due_at: _\",\n                    t.parent_task_id,\n                    (SELECT COUNT(*) FROM tasks WHERE parent_task_id = t.id) as \"subtask_count: i64\"\n                FROM tasks t\n                WHERE t.agent_id = ? AND t.status NOT IN ('completed', 'cancelled')\n                ORDER BY t.priority DESC, t.due_at ASC NULLS LAST\n                ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "title!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "status!: UserTaskStatus",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "priority!: UserTaskPriority",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "due_at: _",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "parent_task_id",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "subtask_count: i64",
+        "ordinal": 6,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      true,
+      true,
+      null
+    ]
+  },
+  "hash": "52335a5535b78369d1ddba7b156ca3a0666dfff1b98bb0a284c128ba6e769e06"
+}

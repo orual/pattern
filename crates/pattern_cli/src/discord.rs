@@ -3,109 +3,37 @@
 //! This module handles Discord bot setup and integration with agent groups,
 //! including endpoint configuration and bot lifecycle management.
 
-#[cfg(feature = "discord")]
-#[cfg(feature = "discord")]
-use crate::{
-    agent_ops::load_model_embedding_providers,
-    chat::{GroupSetup, run_group_chat_loop, setup_group},
-    data_sources::get_bluesky_credentials,
-    endpoints::CliEndpoint,
-    output::Output,
-};
-#[cfg(feature = "discord")]
 use miette::{IntoDiagnostic, Result};
-#[cfg(feature = "discord")]
 use owo_colors::OwoColorize;
-#[cfg(feature = "discord")]
-use pattern_core::{
-    Agent,
-    config::PatternConfig,
-    data_source::{BlueskyFilter, DataSourceBuilder},
-    db::client::DB,
-    tool::builtin::DataSourceTool,
-};
-#[cfg(feature = "discord")]
-use pattern_discord::{
-    bot::{DiscordBot, DiscordBotConfig, DiscordEventHandler},
-    endpoints::DiscordEndpoint,
-};
-#[cfg(feature = "discord")]
-use std::os::unix::process::CommandExt;
-#[cfg(feature = "discord")]
+use pattern_core::{Agent, config::PatternConfig};
 use std::sync::Arc;
 
-/// Set up Discord endpoint for an agent if configured
-#[cfg(feature = "discord")]
-pub async fn setup_discord_endpoint(
-    agent: &Arc<dyn Agent>,
-    cfg: &pattern_core::config::PatternConfig,
-    output: &Output,
-) -> Result<()> {
-    // Check if DISCORD_TOKEN is available
-    let discord_token = match std::env::var("DISCORD_TOKEN") {
-        Ok(token) => token,
-        Err(_) => {
-            // No Discord token configured
-            return Ok(());
-        }
-    };
-
-    output.status("Setting up Discord endpoint...");
-
-    // Create Discord endpoint with config (handles channels and DM users automatically)
-    let discord_endpoint =
-        DiscordEndpoint::with_config(discord_token.clone(), cfg.discord.as_ref());
-
-    // Log the configuration if present
-    if let Some(dc) = &cfg.discord {
-        if let Some(chs) = &dc.allowed_channels {
-            if let Some(first) = chs.first() {
-                output.info("Listen channel:", first);
-            }
-        }
-        if let Some(admins) = &dc.admin_users {
-            if let Some(first) = admins.first() {
-                output.info("Default DM user:", first);
-            }
-        }
-    }
-
-    // Note: Bot reference is not set here, so channel validation will be skipped
-    // This means the endpoint will accept any channel ID
-
-    // Display APP_ID and PUBLIC_KEY if configured (for reference)
-    if let Ok(app_id) = std::env::var("APP_ID") {
-        output.info("Discord App ID:", &app_id);
-    }
-    if let Ok(_) = std::env::var("PUBLIC_KEY") {
-        output.info("Public key:", "✓ Configured");
-    }
-
-    // Register the endpoint
-    agent
-        .register_endpoint("discord".to_string(), Arc::new(discord_endpoint))
-        .await?;
-
-    output.success("Discord endpoint configured");
-
-    Ok(())
-}
+use crate::output::Output;
 
 /// Run a Discord bot for group chat with optional concurrent CLI interface
+///
+/// This function:
+/// 1. Loads Discord config (database first, env fallback, persist if from env)
+/// 2. Loads group from database
+/// 3. Creates RuntimeContext and loads agents
+/// 4. Sets up CLI endpoint on agents if enabled
+/// 5. Builds Discord bot with group coordination
+/// 6. Runs the Discord bot event loop (with optional CLI readline)
 #[cfg(feature = "discord")]
 pub async fn run_discord_bot_with_group(
     group_name: &str,
-    model: Option<String>,
-    no_tools: bool,
     config: &PatternConfig,
     enable_cli: bool,
 ) -> Result<()> {
-    tracing::info!(
-        "run_discord_bot_with_group called with group: {}, discord: true",
-        group_name
-    );
-    use pattern_discord::serenity::{Client, all::GatewayIntents};
+    use pattern_core::id::AgentId;
+    use pattern_discord::serenity::all::GatewayIntents;
+    use pattern_discord::{DiscordBot, DiscordBotConfig, DiscordEventHandler};
     use rustyline_async::Readline;
+
+    use crate::chat::print_response_event;
+    use crate::coordination_helpers;
+    use crate::endpoints::{CliEndpoint, create_group_manager};
+    use crate::helpers::{create_runtime_context_with_dbs, get_dbs, require_group_by_name};
 
     // Create readline and output for concurrent CLI/Discord
     let (rl, writer) = if enable_cli {
@@ -124,294 +52,385 @@ pub async fn run_discord_bot_with_group(
         Output::new()
     };
 
-    // Check if Discord token is available
-    let discord_token = match std::env::var("DISCORD_TOKEN") {
-        Ok(token) => token,
-        Err(_) => {
-            output.error("DISCORD_TOKEN environment variable not set");
-            return Err(miette::miette!("Discord token required to run bot"));
+    output.status(&format!(
+        "Starting Discord bot with group '{}'...",
+        group_name.bright_cyan()
+    ));
+
+    // Open databases
+    let dbs = get_dbs(config).await?;
+
+    // Load config: database first, env fallback, persist if from env
+    let discord_config = match dbs.auth.get_discord_bot_config().await {
+        Ok(Some(config)) => {
+            output.info("Discord config:", "loaded from database");
+            config
         }
+        _ => match DiscordBotConfig::from_env() {
+            Some(config) => {
+                output.info("Discord config:", "loaded from environment");
+                // Persist to database
+                if let Err(e) = dbs.auth.set_discord_bot_config(&config).await {
+                    output.warning(&format!("Could not persist config to database: {}", e));
+                }
+                config
+            }
+            None => {
+                return Err(miette::miette!(
+                    "No Discord configuration found. Set DISCORD_TOKEN or configure in database."
+                ));
+            }
+        },
     };
 
-    // Use shared setup function
-    let group_setup = setup_group(group_name, model, no_tools, config, &output).await?;
+    // Find group in database
+    let db_group = require_group_by_name(&dbs.constellation, group_name).await?;
 
-    let GroupSetup {
-        group,
-        agents_with_membership,
-        supervisor_agent,
-        agent_tools,
-        pattern_manager,
-        constellation_tracker: _,
-        heartbeat_sender: _,
-        heartbeat_receiver,
-    } = group_setup;
+    // Get group members
+    let db_members = pattern_db::queries::get_group_members(dbs.constellation.pool(), &db_group.id)
+        .await
+        .map_err(|e| miette::miette!("Failed to get group members: {}", e))?;
 
-    output.success("Starting Discord bot with group chat...");
-    output.info("Group:", &group.name.bright_cyan().to_string());
-    output.info("Pattern:", &format!("{:?}", group.coordination_pattern));
+    if db_members.is_empty() {
+        output.error(&format!("Group '{}' has no members", group_name));
+        output.info(
+            "Add members with:",
+            "pattern-cli group add-member <group> <agent>",
+        );
+        return Ok(());
+    }
 
-    // Set up data sources if we have a Supervisor agent (similar to jetstream)
-    if let Some(ref pattern_agent) = supervisor_agent {
-        tracing::info!("Discord group mode: Checking for Bluesky config");
-        if config.bluesky.is_some() {
-            tracing::info!("Discord group mode: Bluesky config found, setting up data sources");
-            output.info("Bluesky:", "Setting up data source routing to group...");
+    output.status(&format!(
+        "Loading group '{}' with {} members...",
+        group_name.bright_cyan(),
+        db_members.len()
+    ));
 
-            // Set up data sources with group as target
-            let group_target = pattern_core::tool::builtin::MessageTarget {
-                target_type: pattern_core::tool::builtin::TargetType::Group,
-                target_id: Some(group.id.to_record_id()),
-            };
+    // Create RuntimeContext
+    let ctx = create_runtime_context_with_dbs(dbs.clone()).await?;
 
-            // Get the embedding provider
-            let embedding_provider = if let Ok((_, embedding_provider, _)) =
-                load_model_embedding_providers(None, config, None, true).await
-            {
-                embedding_provider
-            } else {
-                None
-            };
-
-            // Set up data sources synchronously (not in a spawn)
-            let filter = config
-                .bluesky
-                .as_ref()
-                .and_then(|b| b.default_filter.as_ref())
-                .unwrap_or(&BlueskyFilter {
-                    exclude_keywords: vec!["patternstop".to_string()],
-                    ..Default::default()
-                })
-                .clone();
-
-            tracing::info!("Discord: Building data sources with DataSourceBuilder");
-            let data_sources = DataSourceBuilder::new()
-                .with_bluesky_source("bluesky_jetstream".to_string(), filter, true)
-                .build_with_target(
-                    pattern_agent.id(),
-                    pattern_agent.name(),
-                    DB.clone(),
-                    embedding_provider,
-                    Some(pattern_agent.handle().await),
-                    get_bluesky_credentials(&config).await,
-                    group_target,
-                )
-                .await
-                .map_err(|e| miette::miette!("Failed to build data sources: {:?}", e))?;
-
-            tracing::info!(
-                "Discord: Data sources built, monitoring should already be active from agent loading"
-            );
-            output.success("Data sources configured for group");
-
-            // Register endpoints on the data source's router
-            let data_sources_router = data_sources.router();
-
-            // Register the CLI endpoint as default user endpoint
-            data_sources_router
-                .register_endpoint(
-                    "user".to_string(),
-                    Arc::new(CliEndpoint::new(output.clone())),
-                )
-                .await;
-
-            // Register the group endpoint so it can route to the group
-            let group_endpoint = Arc::new(crate::endpoints::GroupCliEndpoint {
-                group: group.clone(),
-                agents: agents_with_membership.clone(),
-                manager: pattern_manager.clone(),
-                output: output.clone(),
-            });
-            data_sources_router
-                .register_endpoint("group".to_string(), group_endpoint)
-                .await;
-
-            // Register DataSourceTool on all agent tool registries
-            let data_source_tool = DataSourceTool::new(Arc::new(data_sources));
-            for tools in &agent_tools {
-                tools.register(data_source_tool.clone());
+    // Load agents for each member
+    let mut agents: Vec<Arc<dyn Agent>> = Vec::new();
+    for member in &db_members {
+        match ctx.load_agent(&member.agent_id).await {
+            Ok(agent) => {
+                output.info("  Loaded:", &agent.name().bright_cyan().to_string());
+                agents.push(agent);
+            }
+            Err(e) => {
+                output.warning(&format!(
+                    "  Could not load agent {}: {}",
+                    member.agent_id, e
+                ));
             }
         }
     }
 
-    // Register Discord endpoint on all agents for Discord responses
-    #[cfg(feature = "discord")]
-    {
-        output.status("Registering Discord endpoint on agents...");
+    if agents.is_empty() {
+        output.error("No agents could be loaded for this group");
+        return Err(miette::miette!("Group has no loadable agents"));
+    }
 
-        // Create Discord endpoint with config (handles channels and DM users automatically)
-        let discord_endpoint = pattern_discord::endpoints::DiscordEndpoint::with_config(
-            discord_token.clone(),
-            config.discord.as_ref(),
-        );
-
-        // Log the configuration if present
-        if let Some(dc) = &config.discord {
-            if let Some(chs) = &dc.allowed_channels {
-                if let Some(first) = chs.first() {
-                    output.info("Discord channel:", first);
-                }
-            }
-            if let Some(admins) = &dc.admin_users {
-                if let Some(first) = admins.first() {
-                    output.info("Discord DM user:", first);
-                }
-            }
+    // Set up CLI endpoint on agents if enabled
+    if enable_cli {
+        let cli_output = output.clone();
+        let cli_endpoint = Arc::new(CliEndpoint::new(cli_output));
+        for agent in &agents {
+            agent
+                .runtime()
+                .router()
+                .register_endpoint("cli".to_string(), cli_endpoint.clone())
+                .await;
         }
+        output.info("CLI endpoint:", "enabled");
+    }
 
-        // Don't create Arc yet, we'll update it with bot reference
-        let mut discord_endpoint_base = discord_endpoint;
+    // Get the first agent's ID for patterns that need a leader
+    let first_agent_id = agents
+        .first()
+        .map(|a| a.id())
+        .unwrap_or_else(AgentId::generate);
 
-        // Create Discord bot config from PatternConfig (with env var fallback)
-        let bot_cfg = if let Some(dc) = &config.discord {
-            DiscordBotConfig::from_config(
-                std::env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN must be set"),
-                dc,
-            )
-        } else {
-            DiscordBotConfig::new(
-                std::env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN must be set"),
-            )
-        };
+    // Build core AgentGroup using shared helpers
+    let group = coordination_helpers::build_agent_group(&db_group, first_agent_id);
 
-        // Create the Discord bot in CLI mode (wrapped in Arc for sharing)
-        // Build forward sinks so CLI can mirror Discord stream (and optional file sink)
-        let sinks =
-            crate::forwarding::build_discord_group_sinks(&output, &agents_with_membership).await;
+    // Build agents with membership using shared helpers
+    let agents_with_membership =
+        coordination_helpers::build_agents_with_membership(agents, &db_group.id, &db_members);
 
-        let (restart_tx, mut restart_rx) = tokio::sync::mpsc::channel(1);
+    // Create the group manager for the pattern type
+    let group_manager = create_group_manager(db_group.pattern_type);
 
-        let bot = Arc::new(DiscordBot::new_cli_mode(
-            bot_cfg,
-            agents_with_membership.clone(),
-            group.clone(),
-            pattern_manager.clone(),
-            Some(sinks),
-            restart_tx.clone(),
-        ));
+    // Create restart channel for the bot
+    let (restart_tx, mut restart_rx) = tokio::sync::mpsc::channel::<()>(1);
 
-        // Connect the bot to the Discord endpoint for timing context
-        discord_endpoint_base = discord_endpoint_base.with_bot(bot.clone());
-        let discord_endpoint = Arc::new(discord_endpoint_base);
+    // Build forward sinks so CLI can mirror Discord stream
+    let sinks =
+        crate::forwarding::build_discord_group_sinks(&output, &agents_with_membership).await;
 
-        // Register on all agents in the group
-        for awm in &agents_with_membership {
-            awm.agent
-                .register_endpoint(
-                    "cli".to_string(),
-                    Arc::new(CliEndpoint::new(output.clone())),
-                )
-                .await?;
-            awm.agent
-                .set_default_user_endpoint(discord_endpoint.clone())
-                .await?;
-        }
-        output.success("✓ Discord endpoint registered on all agents");
+    // Build the Discord bot
+    let bot = Arc::new(DiscordBot::new_cli_mode(
+        discord_config.clone(),
+        agents_with_membership.clone(),
+        group.clone(),
+        group_manager.clone(),
+        Some(sinks),
+        restart_tx.clone(),
+        Some(Arc::new(dbs.clone())),
+    ));
 
-        // Build Discord client
-        let intents = GatewayIntents::GUILD_MESSAGES
-            | GatewayIntents::DIRECT_MESSAGES
-            | GatewayIntents::MESSAGE_CONTENT
-            | GatewayIntents::GUILDS
-            | GatewayIntents::GUILD_MESSAGE_REACTIONS
-            | GatewayIntents::DIRECT_MESSAGE_REACTIONS;
+    // Create event handler
+    let event_handler = DiscordEventHandler::new(bot.clone());
 
-        // Extract bot from Arc - we need to consume it for event_handler
-        // But we already gave it to the endpoint, so we need to clone the Arc's contents
-        let bot_for_handler = DiscordEventHandler::new(bot.clone());
-        let mut client_builder =
-            Client::builder(&discord_token, intents).event_handler(bot_for_handler);
+    // Build serenity client with appropriate intents
+    let intents = GatewayIntents::GUILDS
+        | GatewayIntents::GUILD_MESSAGES
+        | GatewayIntents::DIRECT_MESSAGES
+        | GatewayIntents::MESSAGE_CONTENT
+        | GatewayIntents::GUILD_MESSAGE_REACTIONS
+        | GatewayIntents::DIRECT_MESSAGE_REACTIONS
+        | GatewayIntents::GUILD_MEMBERS;
 
-        // Set application ID if provided
-        if let Ok(app_id) = std::env::var("APP_ID") {
-            if let Ok(app_id_u64) = app_id.parse::<u64>() {
-                client_builder = client_builder.application_id(app_id_u64.into());
-                output.info("App ID:", &format!("Set to {}", app_id));
-            } else {
-                output.warning(&format!("Invalid APP_ID format: {}", app_id));
-            }
-        }
+    output.status("Building Discord client...");
 
-        // If CLI is enabled, spawn Discord bot in background and run CLI in foreground
-        if enable_cli {
-            output.status("Starting Discord bot in background...");
-            output.status("CLI interface available. Type 'quit' or 'exit' to stop both.");
+    let client_builder =
+        pattern_discord::serenity::Client::builder(&discord_config.bot_token, intents)
+            .event_handler(event_handler);
 
-            // Spawn Discord bot in background
-            let discord_handle = tokio::spawn(async move {
-                let mut client = client_builder.await.unwrap();
-                if let Err(why) = client.start().await {
-                    tracing::error!("Discord bot error: {:?}", why);
-                }
-            });
+    // Log configuration
+    if let Some(channels) = &discord_config.allowed_channels {
+        output.info("Allowed channels:", &channels.join(", "));
+    }
+    if let Some(guilds) = &discord_config.allowed_guilds {
+        output.info("Allowed guilds:", &guilds.join(", "));
+    }
 
-            tokio::spawn(async move {
-                restart_rx.recv().await;
-                tracing::info!("restart signal received");
-                let _ = crossterm::terminal::disable_raw_mode();
+    output.success(&format!(
+        "Discord bot ready with group '{}' ({:?} pattern)",
+        group_name.bright_cyan(),
+        db_group.pattern_type
+    ));
 
-                let exe = std::env::current_exe().unwrap();
-                let args: Vec<String> = std::env::args().collect();
+    // Spawn permission listener for CLI feedback
+    let _perm_task = crate::permission_sink::spawn_cli_permission_listener(output.clone());
 
-                let _ = std::process::Command::new(exe).args(&args[1..]).exec();
+    // If CLI is enabled, spawn Discord bot in background and run CLI in foreground
+    if enable_cli {
+        output.status("Starting Discord bot in background...");
+        output.status("CLI interface available. Type 'quit' or 'exit' to stop both.");
 
-                std::process::exit(0);
-            });
-
-            // Run CLI chat loop in foreground
-            if let Some(rl) = rl {
-                run_group_chat_loop(
-                    group.clone(),
-                    agents_with_membership,
-                    pattern_manager,
-                    heartbeat_receiver,
-                    output.clone(),
-                    rl,
-                )
-                .await?;
-            }
-
-            // When CLI exits, also stop Discord bot
-            discord_handle.abort();
-
-            // Force exit the entire process to ensure all spawned tasks are killed
-            // This is a bit heavy-handed but ensures clean shutdown
-            std::process::exit(0);
-        } else {
-            let mut client = client_builder.await.into_diagnostic()?;
-            // Run Discord bot in foreground (blocking)
-            output.status("Discord bot starting... Press Ctrl+C to stop.");
-
-            // Use generic heartbeat processor for Discord-only mode
-            let agents_for_heartbeat: Vec<Arc<dyn Agent>> = agents_with_membership
-                .iter()
-                .map(|awm| awm.agent.clone())
-                .collect();
-
-            let output_clone = output.clone();
-            let heartbeat_handle =
-                tokio::spawn(pattern_core::context::heartbeat::process_heartbeats(
-                    heartbeat_receiver,
-                    agents_for_heartbeat,
-                    move |event, _agent_id, agent_name| {
-                        let output = output_clone.clone();
-                        async move {
-                            output
-                                .status(&format!("💓 Heartbeat continuation from {}:", agent_name));
-                            crate::chat::print_response_event(event, &output);
-                        }
-                    },
-                ));
-
-            // Run Discord bot
+        // Spawn Discord bot in background
+        let discord_handle = tokio::spawn(async move {
+            let mut client = client_builder.await.unwrap();
             if let Err(why) = client.start().await {
-                output.error(&format!("Discord bot error: {:?}", why));
-                heartbeat_handle.abort(); // Clean up heartbeat task
-                return Err(miette::miette!("Failed to run Discord bot"));
+                tracing::error!("Discord bot error: {:?}", why);
             }
+        });
 
-            // Clean up heartbeat task when Discord bot exits
-            heartbeat_handle.abort();
+        // Spawn restart handler
+        tokio::spawn(async move {
+            restart_rx.recv().await;
+            tracing::info!("restart signal received");
+            let _ = crossterm::terminal::disable_raw_mode();
+
+            let exe = std::env::current_exe().unwrap();
+            let args: Vec<String> = std::env::args().collect();
+
+            use std::os::unix::process::CommandExt;
+            let _ = std::process::Command::new(exe).args(&args[1..]).exec();
+
+            std::process::exit(0);
+        });
+
+        // Start heartbeat processor via RuntimeContext
+        let output_clone = output.clone();
+        ctx.start_heartbeat_processor(move |event, _agent_id, agent_name| {
+            let output = output_clone.clone();
+            async move {
+                output.status(&format!("Heartbeat continuation from {}:", agent_name));
+                print_response_event(event, &output);
+            }
+        })
+        .await
+        .map_err(|e| miette::miette!("Failed to start heartbeat processor: {}", e))?;
+
+        // Run CLI chat loop in foreground
+        if let Some(rl) = rl {
+            run_group_chat_loop(
+                group,
+                agents_with_membership,
+                group_manager,
+                output.clone(),
+                rl,
+            )
+            .await?;
+        }
+
+        // When CLI exits, also stop Discord bot
+        discord_handle.abort();
+
+        // Force exit the entire process to ensure all spawned tasks are killed
+        std::process::exit(0);
+    } else {
+        // Discord-only mode (no CLI)
+        let mut client = client_builder
+            .await
+            .map_err(|e| miette::miette!("Failed to create Discord client: {}", e))?;
+
+        output.status("Discord bot starting... Press Ctrl+C to stop.");
+
+        // Start heartbeat processor for Discord-only mode via RuntimeContext
+        let output_clone = output.clone();
+        ctx.start_heartbeat_processor(move |event, _agent_id, agent_name| {
+            let output = output_clone.clone();
+            async move {
+                output.status(&format!("Heartbeat continuation from {}:", agent_name));
+                crate::chat::print_response_event(event, &output);
+            }
+        })
+        .await
+        .map_err(|e| miette::miette!("Failed to start heartbeat processor: {}", e))?;
+
+        // Run the bot with restart handling
+        loop {
+            tokio::select! {
+                result = client.start() => {
+                    match result {
+                        Ok(()) => {
+                            output.status("Discord client stopped normally");
+                            break;
+                        }
+                        Err(e) => {
+                            output.error(&format!("Discord client error: {}", e));
+                            break;
+                        }
+                    }
+                }
+                _ = restart_rx.recv() => {
+                    output.status("Received restart signal, restarting Discord client...");
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Run the CLI chat loop for group interaction (used when enable_cli is true)
+#[cfg(feature = "discord")]
+async fn run_group_chat_loop(
+    group: pattern_core::coordination::groups::AgentGroup,
+    agents_with_membership: Vec<
+        pattern_core::coordination::groups::AgentWithMembership<Arc<dyn Agent>>,
+    >,
+    pattern_manager: Arc<dyn pattern_core::coordination::groups::GroupManager>,
+    output: Output,
+    mut rl: rustyline_async::Readline,
+) -> Result<()> {
+    use pattern_core::message::{Message, MessageContent};
+    use rustyline_async::ReadlineEvent;
+    use tokio_stream::StreamExt;
+
+    loop {
+        let event = rl.readline().await;
+        match event {
+            Ok(ReadlineEvent::Line(line)) => {
+                if line.trim().is_empty() {
+                    continue;
+                }
+
+                // Check for slash commands
+                if line.trim().starts_with('/') {
+                    // Get the default agent (first agent in group for now)
+                    let default_agent = agents_with_membership.first().map(|awm| &awm.agent);
+
+                    match crate::slash_commands::handle_slash_command(
+                        &line,
+                        crate::slash_commands::CommandContext::Group {
+                            group: &group,
+                            agents: &agents_with_membership,
+                            default_agent,
+                        },
+                        &output,
+                    )
+                    .await
+                    {
+                        Ok(should_exit) => {
+                            if should_exit {
+                                output.status("Goodbye!");
+                                break;
+                            }
+                            continue;
+                        }
+                        Err(e) => {
+                            output.error(&format!("Command error: {}", e));
+                            continue;
+                        }
+                    }
+                }
+
+                if line.trim() == "quit" || line.trim() == "exit" {
+                    output.status("Goodbye!");
+                    break;
+                }
+
+                // Add to history
+                rl.add_history_entry(line.clone());
+
+                // Create a message
+                let message = Message {
+                    content: MessageContent::Text(line.clone()),
+                    word_count: line.split_whitespace().count() as u32,
+                    ..Default::default()
+                };
+
+                // Route through the group
+                output.status("Routing message through group...");
+                let output = output.clone();
+                let agents_with_membership = agents_with_membership.clone();
+                let group = group.clone();
+                let pattern_manager = pattern_manager.clone();
+                tokio::spawn(async move {
+                    match pattern_manager
+                        .route_message(&group, &agents_with_membership, message)
+                        .await
+                    {
+                        Ok(stream) => {
+                            // Tee to CLI printer + optional file; sinks handle printing
+                            let sinks = crate::forwarding::build_cli_group_sinks(
+                                &output,
+                                &agents_with_membership,
+                            )
+                            .await;
+                            let ctx = pattern_core::realtime::GroupEventContext {
+                                source_tag: Some("CLI".to_string()),
+                                group_name: Some(group.name.clone()),
+                            };
+                            let mut stream =
+                                pattern_core::realtime::tap_group_stream(stream, sinks, ctx);
+
+                            // Drain without direct printing
+                            while let Some(_event) = stream.next().await {}
+                        }
+                        Err(e) => {
+                            output.error(&format!("Error routing message: {}", e));
+                        }
+                    }
+                });
+            }
+            Ok(ReadlineEvent::Interrupted) => {
+                output.status("CTRL-C");
+                continue;
+            }
+            Ok(ReadlineEvent::Eof) => {
+                output.status("CTRL-D");
+                break;
+            }
+            Err(err) => {
+                output.error(&format!("Error: {:?}", err));
+                break;
+            }
         }
     }
 

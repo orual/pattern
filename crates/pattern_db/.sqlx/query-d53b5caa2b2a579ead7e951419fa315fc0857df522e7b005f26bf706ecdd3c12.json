@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO archival_entries (id, agent_id, content, metadata, chunk_index, parent_entry_id, created_at)\n        VALUES (?, ?, ?, ?, ?, ?, ?)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "d53b5caa2b2a579ead7e951419fa315fc0857df522e7b005f26bf706ecdd3c12"
+}

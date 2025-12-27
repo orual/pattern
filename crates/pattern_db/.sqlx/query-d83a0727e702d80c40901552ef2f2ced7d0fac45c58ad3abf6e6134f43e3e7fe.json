@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        UPDATE events\n        SET title = ?, description = ?, starts_at = ?, ends_at = ?,\n            rrule = ?, reminder_minutes = ?, updated_at = ?\n        WHERE id = ?\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "d83a0727e702d80c40901552ef2f2ced7d0fac45c58ad3abf6e6134f43e3e7fe"
+}

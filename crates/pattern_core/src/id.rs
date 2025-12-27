@@ -3,11 +3,11 @@
 //! This module provides a generic, type-safe ID system with consistent prefixes
 //! and UUID-based uniqueness guarantees.
 
+use jacquard::IntoStatic;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display};
 use std::str::FromStr;
-use surrealdb::RecordId;
 use uuid::Uuid;
 
 /// Trait for types that can be used as ID markers
@@ -70,21 +70,6 @@ macro_rules! define_id_type {
             }
         }
 
-        impl From<$type_name> for ::surrealdb::RecordIdKey {
-            fn from(id: $type_name) -> Self {
-                id.0.into()
-            }
-        }
-
-        impl From<$type_name> for ::surrealdb::RecordId {
-            fn from(value: $type_name) -> Self {
-                ::surrealdb::RecordId::from_table_key(
-                    <$type_name as $crate::id::IdType>::PREFIX,
-                    value.0,
-                )
-            }
-        }
-
         impl std::fmt::Display for $type_name {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 write!(
@@ -96,15 +81,6 @@ macro_rules! define_id_type {
             }
         }
 
-        impl From<&$type_name> for ::surrealdb::RecordId {
-            fn from(id: &$type_name) -> Self {
-                ::surrealdb::RecordId::from_table_key(
-                    <$type_name as $crate::id::IdType>::PREFIX,
-                    &id.0,
-                )
-            }
-        }
-
         impl $type_name {
             pub fn generate() -> Self {
                 $type_name(::uuid::Uuid::new_v4().simple().to_string())
@@ -112,10 +88,6 @@ macro_rules! define_id_type {
 
             pub fn nil() -> Self {
                 $type_name(::uuid::Uuid::nil().simple().to_string())
-            }
-
-            pub fn from_record(record: ::surrealdb::RecordId) -> Self {
-                $type_name(record.key().to_string())
             }
 
             pub fn to_record_id(&self) -> String {
@@ -143,8 +115,100 @@ macro_rules! define_id_type {
 
 define_id_type!(RelationId, "rel");
 
-// Define common ID types using the macro
-define_id_type!(AgentId, "agent");
+/// AgentId is a simple string wrapper for agent identification.
+/// Unlike other ID types, it accepts any string (not just UUIDs) for flexibility.
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize, JsonSchema)]
+#[repr(transparent)]
+pub struct AgentId(pub String);
+
+impl AgentId {
+    /// Create a new AgentId from any string
+    pub fn new(id: impl Into<String>) -> Self {
+        AgentId(id.into())
+    }
+
+    /// Generate a new random AgentId (UUID-based)
+    pub fn generate() -> Self {
+        AgentId(Uuid::new_v4().simple().to_string())
+    }
+
+    /// Create a nil/empty AgentId
+    pub fn nil() -> Self {
+        AgentId(Uuid::nil().simple().to_string())
+    }
+
+    /// Create from a UUID (for Entity macro compatibility)
+    pub fn from_uuid(uuid: Uuid) -> Self {
+        AgentId(uuid.simple().to_string())
+    }
+
+    /// Check if this is a nil ID
+    pub fn is_nil(&self) -> bool {
+        self.0 == Uuid::nil().simple().to_string()
+    }
+
+    /// Get the inner string value
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Convert to record ID string (for database)
+    pub fn to_record_id(&self) -> String {
+        self.0.clone()
+    }
+}
+
+impl Display for AgentId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<String> for AgentId {
+    fn from(s: String) -> Self {
+        AgentId(s)
+    }
+}
+
+impl From<&str> for AgentId {
+    fn from(s: &str) -> Self {
+        AgentId(s.to_string())
+    }
+}
+
+impl From<AgentId> for String {
+    fn from(id: AgentId) -> Self {
+        id.0
+    }
+}
+
+impl AsRef<str> for AgentId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for AgentId {
+    type Err = IdError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(AgentId(s.to_string()))
+    }
+}
+
+impl IdType for AgentId {
+    const PREFIX: &'static str = "agent";
+
+    fn to_key(&self) -> String {
+        self.0.clone()
+    }
+
+    fn from_key(key: &str) -> Result<Self, IdError> {
+        Ok(AgentId(key.to_string()))
+    }
+}
+
+// Other ID types using the macro
 define_id_type!(UserId, "user");
 define_id_type!(ConversationId, "convo");
 define_id_type!(TaskId, "task");
@@ -190,26 +254,8 @@ impl MessageId {
         MessageId(format!("msg_{}", uuid))
     }
 
-    pub fn from_record(record_id: RecordId) -> Self {
-        MessageId(record_id.key().to_string())
-    }
-
     pub fn nil() -> Self {
         MessageId("msg_nil".to_string())
-    }
-}
-
-impl From<MessageId> for RecordId {
-    fn from(value: MessageId) -> Self {
-        // Use the full string as the key - MessageId can be arbitrary
-        RecordId::from_table_key("msg", value.0)
-    }
-}
-
-impl From<&MessageId> for RecordId {
-    fn from(value: &MessageId) -> Self {
-        // Use the full string as the key - MessageId can be arbitrary
-        RecordId::from_table_key("msg", &value.0)
     }
 }
 
@@ -247,36 +293,7 @@ impl JsonSchema for Did {
 /// format because it follows the DID standard (did:plc, did:web)
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
 #[repr(transparent)]
-pub struct Did(pub atrium_api::types::string::Did);
-
-// Did cannot implement Copy because String doesn't implement Copy
-// This is intentional as Did needs to own its string data
-
-impl Did {
-    pub fn to_record_id(&self) -> String {
-        // Return the full string as the record key
-        self.0.to_string()
-    }
-
-    pub fn from_record(record_id: RecordId) -> Self {
-        Did(
-            atrium_api::types::string::Did::new(record_id.key().to_string())
-                .expect("should be valid did"),
-        )
-    }
-}
-
-impl From<Did> for RecordId {
-    fn from(value: Did) -> Self {
-        RecordId::from_table_key(Did::PREFIX, value.0.to_string())
-    }
-}
-
-impl From<&Did> for RecordId {
-    fn from(value: &Did) -> Self {
-        RecordId::from_table_key(Did::PREFIX, &value.0.to_string())
-    }
-}
+pub struct Did(#[serde(borrow)] pub jacquard::types::string::Did<'static>);
 
 impl std::fmt::Display for Did {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -288,25 +305,23 @@ impl FromStr for Did {
     type Err = IdError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Did(atrium_api::types::string::Did::new(s.to_string())
-            .map_err(|_| {
-                IdError::InvalidFormat(format!("Invalid DID format: {}", s))
-            })?))
+        Ok(Did(jacquard::types::string::Did::new(s)
+            .map_err(|_| IdError::InvalidFormat(format!("Invalid DID format: {}", s)))?
+            .into_static()))
     }
 }
 
 impl IdType for Did {
-    const PREFIX: &'static str = "atproto_identity";
+    const PREFIX: &'static str = "";
 
     fn to_key(&self) -> String {
         self.0.to_string()
     }
 
     fn from_key(key: &str) -> Result<Self, IdError> {
-        Ok(Did(atrium_api::types::string::Did::new(key.to_string())
-            .map_err(|_| {
-                IdError::InvalidFormat(format!("Invalid DID format: {}", key))
-            })?))
+        Ok(Did(jacquard::types::string::Did::new(key)
+            .map_err(|_| IdError::InvalidFormat(format!("Invalid DID format: {}", key)))?
+            .into_static()))
     }
 }
 
@@ -321,7 +336,6 @@ define_id_type!(RequestId, "request");
 define_id_type!(GroupId, "group");
 define_id_type!(ConstellationId, "constellation");
 define_id_type!(OAuthTokenId, "oauth");
-define_id_type!(AtprotoIdentityId, "atproto_identity");
 define_id_type!(DiscordIdentityId, "discord_identity");
 
 #[cfg(test)]
@@ -359,14 +373,5 @@ mod tests {
         // All should be different UUIDs
         assert_ne!(agent_id.0, user_id.0);
         assert_ne!(user_id.0, task_id.0);
-    }
-
-    #[test]
-    fn test_record_id_conversion() {
-        let agent_id = AgentId::generate();
-        let record_id: RecordId = agent_id.clone().into();
-
-        assert_eq!(record_id.table(), "agent");
-        assert_eq!(record_id.key().to_string(), agent_id.0);
     }
 }

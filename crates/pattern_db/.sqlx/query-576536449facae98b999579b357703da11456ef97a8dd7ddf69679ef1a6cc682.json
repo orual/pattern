@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            g.id as \"id!\",\n            g.name as \"name!\",\n            g.description,\n            g.pattern_type as \"pattern_type!: PatternType\",\n            g.pattern_config as \"pattern_config!: _\",\n            g.created_at as \"created_at!: _\",\n            g.updated_at as \"updated_at!: _\"\n        FROM agent_groups g\n        INNER JOIN group_members m ON g.id = m.group_id\n        WHERE m.agent_id = ?\n        ORDER BY g.name\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "name!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "description",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "pattern_type!: PatternType",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "pattern_config!: _",
+        "ordinal": 4,
+        "type_info": "Null"
+      },
+      {
+        "name": "created_at!: _",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "updated_at!: _",
+        "ordinal": 6,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "576536449facae98b999579b357703da11456ef97a8dd7ddf69679ef1a6cc682"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO file_passages (id, file_id, content, start_line, end_line, created_at)\n        VALUES (?, ?, ?, ?, ?, ?)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "f803f6ecc8717a291ff302b86e8c14985a6a36603373382e5f0def458c2df071"
+}

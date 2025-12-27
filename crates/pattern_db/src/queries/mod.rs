@@ -2,6 +2,7 @@
 //!
 //! Organized by domain:
 //! - `agent`: Agent CRUD and queries
+//! - `atproto_endpoints`: Agent ATProto identity mapping
 //! - `memory`: Memory block operations
 //! - `message`: Message history operations
 //! - `coordination`: Cross-agent coordination queries
@@ -11,19 +12,23 @@
 //! - `folder`: File access management
 
 mod agent;
+mod atproto_endpoints;
 mod coordination;
 mod event;
 mod folder;
 mod memory;
 mod message;
+mod queue;
 mod source;
 mod task;
 
 pub use agent::*;
+pub use atproto_endpoints::*;
 pub use coordination::*;
 pub use event::*;
 pub use folder::*;
 pub use memory::*;
 pub use message::*;
+pub use queue::*;
 pub use source::*;
 pub use task::*;

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO agent_data_sources (agent_id, source_id, notification_template)\n        VALUES (?, ?, ?)\n        ON CONFLICT(agent_id, source_id) DO UPDATE SET notification_template = excluded.notification_template\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "0d1619bc15ddea885115a196bcecfe58755cd73155a2ffc5e352d8ed1ece5cec"
+}

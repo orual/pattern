@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO agent_summaries (agent_id, summary, messages_covered, generated_at, last_active)\n        VALUES (?, ?, ?, ?, ?)\n        ON CONFLICT(agent_id) DO UPDATE SET\n            summary = excluded.summary,\n            messages_covered = excluded.messages_covered,\n            generated_at = excluded.generated_at,\n            last_active = excluded.last_active\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "47b6010f9be8fbcf03e5677a8fc8b867c383e9ccfafe625f5413b7f2256ae967"
+}

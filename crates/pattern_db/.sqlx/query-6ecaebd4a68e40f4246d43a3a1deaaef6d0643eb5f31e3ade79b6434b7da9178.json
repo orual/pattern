@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            key as \"key!\",\n            value as \"value!: _\",\n            updated_at as \"updated_at!: _\",\n            updated_by\n        FROM coordination_state\n        WHERE key = ?\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "key!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "value!: _",
+        "ordinal": 1,
+        "type_info": "Null"
+      },
+      {
+        "name": "updated_at!: _",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "updated_by",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "6ecaebd4a68e40f4246d43a3a1deaaef6d0643eb5f31e3ade79b6434b7da9178"
+}

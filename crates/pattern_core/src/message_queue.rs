@@ -1,15 +1,13 @@
 use chrono::{DateTime, Utc};
-use pattern_macros::Entity;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::context::message_router::MessageOrigin;
 use crate::id::{QueuedMessageId, WakeupId};
+use crate::runtime::router::MessageOrigin;
 use crate::{AgentId, UserId};
 
 /// A queued message for agent-to-agent or user-to-agent communication
-#[derive(Debug, Clone, Entity, Serialize, Deserialize)]
-#[entity(entity_type = "queue_msg")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueuedMessage {
     /// Unique identifier for this queued message
     pub id: QueuedMessageId,
@@ -47,7 +45,6 @@ pub struct QueuedMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_at: Option<DateTime<Utc>>,
 
-    #[entity(db_type = "object")]
     pub origin: Option<MessageOrigin>,
 }
 
@@ -123,8 +120,7 @@ impl QueuedMessage {
 }
 
 /// A scheduled wakeup for an agent
-#[derive(Debug, Clone, Entity, Serialize, Deserialize)]
-#[entity(entity_type = "wakeup")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduledWakeup {
     /// Unique identifier
     pub id: WakeupId,

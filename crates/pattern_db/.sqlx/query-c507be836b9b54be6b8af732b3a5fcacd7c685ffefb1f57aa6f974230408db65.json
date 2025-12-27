@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            id as \"id!\",\n            period_start as \"period_start!: _\",\n            period_end as \"period_end!: _\",\n            summary as \"summary!\",\n            key_decisions as \"key_decisions: _\",\n            open_threads as \"open_threads: _\",\n            created_at as \"created_at!: _\"\n        FROM constellation_summaries\n        ORDER BY period_end DESC\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "period_start!: _",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "period_end!: _",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "summary!",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "key_decisions: _",
+        "ordinal": 4,
+        "type_info": "Null"
+      },
+      {
+        "name": "open_threads: _",
+        "ordinal": 5,
+        "type_info": "Null"
+      },
+      {
+        "name": "created_at!: _",
+        "ordinal": 6,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "c507be836b9b54be6b8af732b3a5fcacd7c685ffefb1f57aa6f974230408db65"
+}

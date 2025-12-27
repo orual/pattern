@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            id as \"id!\",\n            timestamp as \"timestamp!: _\",\n            event_type as \"event_type!\",\n            description as \"description!\",\n            agents_involved as \"agents_involved: _\",\n            importance as \"importance!: EventImportance\",\n            created_at as \"created_at!: _\"\n        FROM notable_events\n        ORDER BY timestamp DESC\n        LIMIT ?\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "timestamp!: _",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "event_type!",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "description!",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "agents_involved: _",
+        "ordinal": 4,
+        "type_info": "Null"
+      },
+      {
+        "name": "importance!: EventImportance",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at!: _",
+        "ordinal": 6,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "c5c6c7c3f86ee5281ebe3319bcb3ef034b91f9c43dc6e8a56ed577b59fe7225e"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO agent_groups (id, name, description, pattern_type, pattern_config, created_at, updated_at)\n        VALUES (?, ?, ?, ?, ?, ?, ?)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "44a1fd6e1468aa9d209d9ca871ad0b18c229d99b07a50654b5951921932a8012"
+}

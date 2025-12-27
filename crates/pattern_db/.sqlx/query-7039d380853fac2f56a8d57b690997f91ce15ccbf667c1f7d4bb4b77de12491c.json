@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO notable_events (id, timestamp, event_type, description, agents_involved, importance, created_at)\n        VALUES (?, ?, ?, ?, ?, ?, ?)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "7039d380853fac2f56a8d57b690997f91ce15ccbf667c1f7d4bb4b77de12491c"
+}

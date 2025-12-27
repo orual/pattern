@@ -37,6 +37,9 @@ pub use vector::{
 // Re-export FTS module types
 pub use fts::{FtsContentType, FtsMatch, FtsSearchResult, FtsStats};
 
+// Re-export sqlx Json type for convenience
+pub use sqlx::types::Json;
+
 // Re-export hybrid search types
 pub use search::{
     ContentFilter, FusionMethod, HybridSearchBuilder, ScoreBreakdown, SearchContentType,
@@ -50,6 +53,7 @@ pub use models::{
     ActivityEventType,
     // Agent models
     Agent,
+    AgentAtprotoEndpoint,
     // Source models
     AgentDataSource,
     AgentGroup,
@@ -63,6 +67,8 @@ pub use models::{
     CoordinationState,
     CoordinationTask,
     DataSource,
+    // Endpoint type constants
+    ENDPOINT_TYPE_BLUESKY,
     // Migration models
     EntityImport,
     // Event models

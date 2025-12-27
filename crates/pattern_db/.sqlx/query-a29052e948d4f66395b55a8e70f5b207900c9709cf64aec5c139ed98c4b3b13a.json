@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM agent_atproto_endpoints WHERE agent_id = ? AND endpoint_type = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "a29052e948d4f66395b55a8e70f5b207900c9709cf64aec5c139ed98c4b3b13a"
+}

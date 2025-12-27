@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT mb.id as \"id!\", sba.permission as \"permission!: MemoryPermission\"\n        FROM shared_block_agents sba\n        INNER JOIN memory_blocks mb ON sba.block_id = mb.id\n        WHERE sba.agent_id = ?\n          AND mb.agent_id = ?\n          AND mb.label = ?\n          AND mb.is_active = 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "permission!: MemoryPermission",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "e516dcb56696cb12a6d855e0c6fb490d9ec4384e69ea07bbd8b32a5a06afb557"
+}

@@ -2,6 +2,7 @@
 
 use axum::extract::{Json, State};
 use pattern_api::{ApiError, requests::AuthRequest, responses::AuthResponse};
+use serde_json::json;
 
 use crate::{
     auth::{generate_access_token, generate_refresh_token, verify_password},
@@ -14,79 +15,65 @@ use crate::{
 pub async fn login(
     State(state): State<AppState>,
     Json(request): Json<AuthRequest>,
-) -> Result<Json<AuthResponse>, ApiError> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     match request {
         AuthRequest::Password { username, password } => {
-            // Look up user by username
-            let result: Option<ServerUser> = state
-                .db
-                .query("SELECT * FROM user WHERE username = $username LIMIT 1")
-                .bind(("username", username.to_string()))
-                .await
-                .map_err(|e| ApiError::Database {
-                    message: format!("Database error: {}", e),
-                    json: "".to_string(),
-                })?
-                .take(0)
-                .map_err(|e| ApiError::Database {
-                    message: format!("Failed to fetch user: {}", e),
-                    json: "".to_string(),
-                })?;
+            // // Look up user by username
+            // let result: Option<ServerUser> = state
+            //     .db
+            //     .query("SELECT * FROM user WHERE username = $username LIMIT 1")
+            //     .bind(("username", username.to_string()))
+            //     .await
+            //     .map_err(|e| ApiError::Database {
+            //         message: format!("Database error: {}", e),
+            //         json: "".to_string(),
+            //     })?
+            //     .take(0)
+            //     .map_err(|e| ApiError::Database {
+            //         message: format!("Failed to fetch user: {}", e),
+            //         json: "".to_string(),
+            //     })?;
 
-            let user = result.ok_or_else(|| ApiError::Unauthorized {
-                message: Some("Invalid username or password".to_string()),
-            })?;
+            // let user = result.ok_or_else(|| ApiError::Unauthorized {
+            //     message: Some("Invalid username or password".to_string()),
+            // })?;
 
-            // Verify password
-            if !verify_password(&password, &user.password_hash).map_err(|e| ApiError::Core {
-                message: format!("Password verification failed: {}", e),
-                json: "".to_string(),
-            })? {
-                return Err(ApiError::Unauthorized {
-                    message: Some("Invalid username or password".to_string()),
-                });
-            }
+            // // Verify password
+            // if !verify_password(&password, &user.password_hash).map_err(|e| ApiError::Core {
+            //     message: format!("Password verification failed: {}", e),
+            //     json: "".to_string(),
+            // })? {
+            //     return Err(ApiError::Unauthorized {
+            //         message: Some("Invalid username or password".to_string()),
+            //     });
+            // }
 
-            // Generate tokens
-            let user_id = user.id;
-            let token_family = uuid::Uuid::new_v4();
+            // // Generate tokens
+            // let user_id = user.id;
+            // let token_family = uuid::Uuid::new_v4();
 
-            let access_token = generate_access_token(
-                user_id.clone(),
-                &state.jwt_encoding_key,
-                state.config.access_token_ttl,
-            )
-            .map_err(|e| ApiError::Core {
-                message: format!("Failed to generate access token: {}", e),
-                json: "".to_string(),
-            })?;
+            // let access_token = generate_access_token(
+            //     user_id.clone(),
+            //     &state.jwt_encoding_key,
+            //     state.config.access_token_ttl,
+            // )
+            // .map_err(|e| ApiError::Core {
+            //     message: format!("Failed to generate access token: {}", e),
+            //     json: "".to_string(),
+            // })?;
 
-            let refresh_token = generate_refresh_token(
-                user_id.clone(),
-                token_family,
-                &state.jwt_encoding_key,
-                state.config.refresh_token_ttl,
-            )
-            .map_err(|e| ApiError::Core {
-                message: format!("Failed to generate refresh token: {}", e),
-                json: "".to_string(),
-            })?;
+            // let refresh_token = generate_refresh_token(
+            //     user_id.clone(),
+            //     token_family,
+            //     &state.jwt_encoding_key,
+            //     state.config.refresh_token_ttl,
+            // )
+            // .map_err(|e| ApiError::Core {
+            //     message: format!("Failed to generate refresh token: {}", e),
+            //     json: "".to_string(),
+            // })?;
 
-            Ok(Json(AuthResponse {
-                access_token,
-                refresh_token,
-                token_type: "Bearer".to_string(),
-                expires_in: state.config.access_token_ttl,
-                user: pattern_api::responses::UserResponse {
-                    id: user_id,
-                    username: user.username.clone(),
-                    display_name: user.display_name.clone(),
-                    email: user.email.clone(),
-                    created_at: user.created_at,
-                    updated_at: user.updated_at,
-                    is_active: user.is_active,
-                },
-            }))
+            Ok(Json(json!({})))
         }
         AuthRequest::ApiKey { api_key: _ } => {
             // TODO: Implement API key authentication

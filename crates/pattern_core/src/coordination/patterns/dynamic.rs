@@ -222,7 +222,7 @@ impl GroupManager for DynamicManager {
                     let _ = tx
                         .send(GroupResponseEvent::AgentStarted {
                             agent_id: supervisor_id.clone(),
-                            agent_name: supervisor_name.clone(),
+                            agent_name: supervisor_name.to_string(),
                             role: supervisor_awm.membership.role.clone(),
                         })
                         .await;
@@ -304,7 +304,7 @@ impl GroupManager for DynamicManager {
                     let _ = tx
                         .send(GroupResponseEvent::AgentCompleted {
                             agent_id: supervisor_id.clone(),
-                            agent_name: supervisor_name.clone(),
+                            agent_name: supervisor_name.to_string(),
                             message_id,
                         })
                         .await;
@@ -361,7 +361,7 @@ impl GroupManager for DynamicManager {
 
             for awm in selected_agents {
                 let agent_id = awm.agent.as_ref().id();
-                let agent_name = awm.agent.name();
+                let agent_name = awm.agent.name().to_string();
                 let tx = tx.clone();
                 let message = message.clone();
                 let agent = awm.agent.clone();
@@ -380,7 +380,7 @@ impl GroupManager for DynamicManager {
                         .await;
 
                     // Process message with streaming
-                    match agent.process_message_stream(message).await {
+                    match agent.process(message).await {
                         Ok(mut stream) => {
                             use tokio_stream::StreamExt;
 
@@ -615,7 +615,7 @@ mod tests {
 
         let agents: Vec<AgentWithMembership<Arc<dyn crate::agent::Agent>>> = vec![
             AgentWithMembership {
-                agent: Arc::new(create_test_agent("Agent1")) as Arc<dyn crate::agent::Agent>,
+                agent: Arc::new(create_test_agent("Agent1").await) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
                     id: RelationId::generate(),
                     in_id: AgentId::generate(),
@@ -627,7 +627,7 @@ mod tests {
                 },
             },
             AgentWithMembership {
-                agent: Arc::new(create_test_agent("Agent2")) as Arc<dyn crate::agent::Agent>,
+                agent: Arc::new(create_test_agent("Agent2").await) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
                     id: RelationId::generate(),
                     in_id: AgentId::generate(),
@@ -639,7 +639,7 @@ mod tests {
                 },
             },
             AgentWithMembership {
-                agent: Arc::new(create_test_agent("Agent3")) as Arc<dyn crate::agent::Agent>,
+                agent: Arc::new(create_test_agent("Agent3").await) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
                     id: RelationId::generate(),
                     in_id: AgentId::generate(),

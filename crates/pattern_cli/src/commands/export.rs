@@ -1,292 +1,275 @@
+// TODO: CLI Refactoring for pattern_db (SQLite/sqlx) migration
+//!
 //! Export and import commands for agents, groups, and constellations
+//!
+//! This module provides CAR (Content Addressable aRchive) export/import
+//! for agents, including message history and memory blocks.
+//!
+//! ## Migration Status
+//!
+//! ALL FUNCTIONS in this module are STUBBED during the pattern_db migration.
+//! Export/import functionality requires:
+//!
+//! - Agent lookup by name
+//! - Full message history queries
+//! - Memory block queries
+//! - Group and constellation queries
+//! - CAR file serialization/deserialization
+//!
+//! ## Previous SurrealDB Usage
+//!
+//! The module previously used:
+//! - `pattern_core::db_v1::client::DB` for database access
+//! - `pattern_core::db_v1::ops` for entity operations
+//! - `surrealdb::RecordId` for ID handling
+//! - `pattern_core::export::*` for CAR export utilities
+//!   - AgentExporter::export_to_car()
+//!   - AgentExporter::export_group_to_car()
+//!   - AgentExporter::export_constellation_to_car()
+//!   - AgentImporter::import_agent_from_car()
+//!   - AgentImporter::import_group_from_car()
+//!   - AgentImporter::import_constellation_from_car()
+//!
+//! ## Known Issues (before migration)
+//!
+//! - CAR export was not archiving full message history
+//! - Pattern matching issues prevented complete export
+//! - Related to unused CompressionSettings struct
+//!
+//! These issues will be addressed when reimplementing with pattern_db.
 
-use miette::{IntoDiagnostic, Result};
+use miette::Result;
 use owo_colors::OwoColorize;
 use std::path::PathBuf;
-use tokio::fs::File;
 
-use pattern_core::{
-    UserId,
-    agent::AgentRecord,
-    config::PatternConfig,
-    db::{client::DB, ops},
-    export::{AgentExporter, AgentImporter, ExportOptions, ImportOptions},
-};
+use pattern_core::config::PatternConfig;
 
 use crate::output::Output;
 
+// =============================================================================
+// Agent Export - STUBBED
+// =============================================================================
+
+// TODO: Reimplement for pattern_db (SQLite/sqlx)
+//
+// Previous implementation:
+// 1. Found agent by name via get_agent_by_name helper
+// 2. Created AgentExporter with DB connection
+// 3. Called exporter.export_to_car(agent_id, file, options)
+// 4. Displayed manifest stats (CID, message count, memory count, size)
+//
+// Needs: pattern_db::queries::get_agent_by_name() + new CAR export implementation
+
 /// Export an agent to a CAR file
+///
+/// NOTE: Currently STUBBED. Export functionality needs pattern_db queries.
 pub async fn export_agent(
     name: &str,
-    output: Option<PathBuf>,
+    output_path: Option<PathBuf>,
     exclude_embeddings: bool,
-    config: &PatternConfig,
+    _config: &PatternConfig,
 ) -> Result<()> {
-    let output_handler = Output::new();
+    let output = Output::new();
 
-    // Get user from config
-    let user_id = &config.user.id;
+    output.warning(&format!(
+        "Agent export for '{}' temporarily disabled during database migration",
+        name.bright_cyan()
+    ));
 
-    // Find the agent
-    let agent = get_agent_by_name(&DB, user_id, name)
-        .await?
-        .ok_or_else(|| miette::miette!("Agent '{}' not found", name))?;
+    if let Some(path) = output_path {
+        output.info("Requested output:", &path.display().to_string());
+    } else {
+        output.info(
+            "Default output:",
+            &format!("{}.car", name.replace(' ', "-")),
+        );
+    }
 
-    // Determine output filename
-    let output_path =
-        output.unwrap_or_else(|| PathBuf::from(format!("{}.car", name.replace(' ', "-"))));
-
-    output_handler.info(
-        "Exporting",
-        &format!(
-            "agent '{}' to {}",
-            name.bright_cyan(),
-            output_path.display()
-        ),
+    output.info(
+        "Exclude embeddings:",
+        if exclude_embeddings { "yes" } else { "no" },
     );
-
-    // Create exporter
-    let exporter = AgentExporter::new(DB.clone());
-
-    let options = ExportOptions {
-        include_messages: true,
-        chunk_size: 1000,
-        messages_since: None,
-        exclude_embeddings,
-        ..Default::default()
-    };
-
-    let file = File::create(&output_path).await.into_diagnostic()?;
-
-    let manifest = exporter
-        .export_to_car(agent.id, file, options)
-        .await
-        .into_diagnostic()?;
-
-    output_handler.success(&format!("Export complete!"));
-    output_handler.kv("Manifest CID", &manifest.data_cid.to_string());
-    output_handler.kv("Messages", &manifest.stats.message_count.to_string());
-    output_handler.kv("Memories", &manifest.stats.memory_count.to_string());
-    output_handler.kv("Total blocks", &manifest.stats.total_blocks.to_string());
-    output_handler.kv(
-        "Size",
-        &format!("{} bytes", manifest.stats.uncompressed_size),
-    );
+    output.info("Reason:", "Needs pattern_db queries for agent data");
+    output.status("CAR export previously included:");
+    output.list_item("Agent metadata (name, type, instructions)");
+    output.list_item("All memory blocks with permissions");
+    output.list_item("Full message history in chunks");
+    output.list_item("Manifest with stats (CID, counts, size)");
 
     Ok(())
 }
+
+// =============================================================================
+// Group Export - STUBBED
+// =============================================================================
+
+// TODO: Reimplement for pattern_db (SQLite/sqlx)
+//
+// Previous implementation:
+// 1. Found group by name via ops::get_group_by_name
+// 2. Created AgentExporter with DB connection
+// 3. Called exporter.export_group_to_car(group_id, file, options)
+// 4. Displayed manifest stats including member count
+//
+// Needs: pattern_db::queries::get_group_by_name() + new CAR export implementation
 
 /// Export a group to a CAR file
+///
+/// NOTE: Currently STUBBED. Export functionality needs pattern_db queries.
 pub async fn export_group(
     name: &str,
-    output: Option<PathBuf>,
+    output_path: Option<PathBuf>,
     exclude_embeddings: bool,
-    config: &PatternConfig,
+    _config: &PatternConfig,
 ) -> Result<()> {
-    let output_handler = Output::new();
+    let output = Output::new();
 
-    // Get user from config
-    let user_id = &config.user.id;
+    output.warning(&format!(
+        "Group export for '{}' temporarily disabled during database migration",
+        name.bright_cyan()
+    ));
 
-    // Find the group
-    let group = ops::get_group_by_name(&DB, user_id, name)
-        .await
-        .into_diagnostic()?
-        .ok_or_else(|| miette::miette!("Group '{}' not found", name))?;
+    if let Some(path) = output_path {
+        output.info("Requested output:", &path.display().to_string());
+    } else {
+        output.info(
+            "Default output:",
+            &format!("{}.car", name.replace(' ', "-")),
+        );
+    }
 
-    // Determine output filename
-    let output_path =
-        output.unwrap_or_else(|| PathBuf::from(format!("{}.car", name.replace(' ', "-"))));
-
-    output_handler.info(
-        "Exporting",
-        &format!(
-            "group '{}' to {}",
-            name.bright_cyan(),
-            output_path.display()
-        ),
+    output.info(
+        "Exclude embeddings:",
+        if exclude_embeddings { "yes" } else { "no" },
     );
-
-    // Create exporter
-    let exporter = AgentExporter::new(DB.clone());
-
-    let options = ExportOptions {
-        include_messages: true,
-        chunk_size: 1000,
-        messages_since: None,
-        exclude_embeddings,
-        ..Default::default()
-    };
-
-    let file = File::create(&output_path).await.into_diagnostic()?;
-
-    let manifest = exporter
-        .export_group_to_car(group.id, file, options)
-        .await
-        .into_diagnostic()?;
-
-    output_handler.success(&format!("Export complete!"));
-    output_handler.kv("Manifest CID", &manifest.data_cid.to_string());
-    output_handler.kv("Messages", &manifest.stats.message_count.to_string());
-    output_handler.kv("Memories", &manifest.stats.memory_count.to_string());
-    output_handler.kv("Members", &group.members.len().to_string());
+    output.info("Reason:", "Needs pattern_db group queries");
+    output.status("Group CAR export previously included:");
+    output.list_item("Group metadata (name, description, pattern)");
+    output.list_item("All member agents with their data");
+    output.list_item("Membership information (roles, capabilities)");
 
     Ok(())
 }
+
+// =============================================================================
+// Constellation Export - STUBBED
+// =============================================================================
+
+// TODO: Reimplement for pattern_db (SQLite/sqlx)
+//
+// Previous implementation:
+// 1. Got user's constellation via ops::get_or_create_constellation
+// 2. Created AgentExporter with DB connection
+// 3. Called exporter.export_constellation_to_car(constellation_id, file, options)
+// 4. Displayed manifest stats including group and agent counts
+//
+// Needs: pattern_db::queries::get_user_constellation() + new CAR export implementation
 
 /// Export a constellation to a CAR file
+///
+/// NOTE: Currently STUBBED. Export functionality needs pattern_db queries.
 pub async fn export_constellation(
-    output: Option<PathBuf>,
+    output_path: Option<PathBuf>,
     exclude_embeddings: bool,
-    config: &PatternConfig,
+    _config: &PatternConfig,
 ) -> Result<()> {
-    let output_handler = Output::new();
+    let output = Output::new();
 
-    // Get user from config
-    let user_id = &config.user.id;
+    output.warning("Constellation export temporarily disabled during database migration");
 
-    // Get user's constellation
-    let constellation = ops::get_or_create_constellation(&DB, user_id)
-        .await
-        .into_diagnostic()?;
+    if let Some(path) = output_path {
+        output.info("Requested output:", &path.display().to_string());
+    } else {
+        output.info("Default output:", "constellation.car");
+    }
 
-    // Determine output filename
-    let output_path = output.unwrap_or_else(|| PathBuf::from("constellation.car"));
-
-    output_handler.info(
-        "Exporting",
-        &format!("constellation to {}", output_path.display()),
+    output.info(
+        "Exclude embeddings:",
+        if exclude_embeddings { "yes" } else { "no" },
     );
-
-    // Create exporter
-    let exporter = AgentExporter::new(DB.clone());
-
-    let options = ExportOptions {
-        include_messages: true,
-        chunk_size: 1000,
-        messages_since: None,
-        exclude_embeddings,
-        ..Default::default()
-    };
-
-    let file = File::create(&output_path).await.into_diagnostic()?;
-
-    let manifest = exporter
-        .export_constellation_to_car(constellation.id, file, options)
-        .await
-        .into_diagnostic()?;
-
-    output_handler.success(&format!("Export complete!"));
-    output_handler.kv("Manifest CID", &manifest.data_cid.to_string());
-    output_handler.kv("Messages", &manifest.stats.message_count.to_string());
-    output_handler.kv("Memories", &manifest.stats.memory_count.to_string());
-    output_handler.kv("Groups", &constellation.groups.len().to_string());
-    output_handler.kv("Direct Agents", &constellation.agents.len().to_string());
+    output.info("Reason:", "Needs pattern_db constellation queries");
+    output.status("Constellation CAR export previously included:");
+    output.list_item("All groups with members");
+    output.list_item("All direct agents");
+    output.list_item("Full message histories");
+    output.list_item("All memory blocks");
 
     Ok(())
 }
 
+// =============================================================================
+// Import - STUBBED
+// =============================================================================
+
+// TODO: Reimplement for pattern_db (SQLite/sqlx)
+//
+// Previous implementation:
+// 1. Created AgentImporter with DB connection
+// 2. Detected export type from CAR file header
+// 3. Called appropriate import method based on type:
+//    - import_agent_from_car()
+//    - import_group_from_car()
+//    - import_constellation_from_car()
+// 4. Displayed import stats (agents, messages, memories, groups)
+// 5. Showed agent ID mappings (old -> new)
+//
+// Needs: pattern_db queries for entity creation + new CAR import implementation
+
 /// Import from a CAR file
+///
+/// NOTE: Currently STUBBED. Import functionality needs pattern_db queries.
 pub async fn import(
     file_path: PathBuf,
     rename_to: Option<String>,
     preserve_ids: bool,
-    config: &PatternConfig,
+    _config: &PatternConfig,
 ) -> Result<()> {
-    let output_handler = Output::new();
+    let output = Output::new();
 
-    output_handler.info("Importing", &format!("from {}", file_path.display()));
+    output.warning(&format!(
+        "Import from '{}' temporarily disabled during database migration",
+        file_path.display().to_string().bright_cyan()
+    ));
 
-    // Get user from config
-    let user_id = &config.user.id;
-
-    let importer = AgentImporter::new(DB.clone());
-
-    let options = ImportOptions {
-        rename_to,
-        merge_existing: false,
-        preserve_ids,
-        owner_id: user_id.clone(),
-        preserve_timestamps: true,
-        import_messages: true,
-        import_memories: true,
-    };
-
-    let file = File::open(&file_path).await.into_diagnostic()?;
-
-    // Detect the type of export
-    let (export_type, buffer) = AgentImporter::<surrealdb::engine::any::Any>::detect_type(file)
-        .await
-        .into_diagnostic()?;
-
-    // Create a cursor from the buffer for importing
-    let cursor = std::io::Cursor::new(buffer);
-
-    // Import based on detected type
-    let result = match export_type {
-        pattern_core::export::ExportType::Agent => importer
-            .import_agent_from_car(cursor, options)
-            .await
-            .into_diagnostic()?,
-        pattern_core::export::ExportType::Group => importer
-            .import_group_from_car(cursor, options)
-            .await
-            .into_diagnostic()?,
-        pattern_core::export::ExportType::Constellation => importer
-            .import_constellation_from_car(cursor, options)
-            .await
-            .into_diagnostic()?,
-    };
-
-    output_handler.success(&format!("Import complete!"));
-    output_handler.kv("Agents imported", &result.agents_imported.to_string());
-    output_handler.kv("Messages imported", &result.messages_imported.to_string());
-    output_handler.kv("Memories imported", &result.memories_imported.to_string());
-
-    if result.groups_imported > 0 {
-        output_handler.kv("Groups imported", &result.groups_imported.to_string());
+    if let Some(new_name) = rename_to {
+        output.info("Rename to:", &new_name);
     }
-
-    if !result.agent_id_map.is_empty() {
-        println!();
-        output_handler.info("Agent ID mappings", "");
-        for (old_id, new_id) in &result.agent_id_map {
-            output_handler.kv(&format!("  {}", old_id), &new_id.to_string());
-        }
-    }
+    output.info("Preserve IDs:", if preserve_ids { "yes" } else { "no" });
+    output.info("Reason:", "Needs pattern_db queries for entity creation");
+    output.status("CAR import previously supported:");
+    output.list_item("Auto-detection of export type (agent, group, constellation)");
+    output.list_item("Creating/updating agents");
+    output.list_item("Importing memory blocks");
+    output.list_item("Replaying message history");
+    output.list_item("Preserving batch boundaries");
+    output.list_item("ID remapping for conflict resolution");
 
     Ok(())
 }
 
-// Helper function to get agent by name
-pub async fn get_agent_by_name<C: surrealdb::Connection>(
-    db: &surrealdb::Surreal<C>,
-    user_id: &UserId,
-    name: &str,
-) -> Result<Option<AgentRecord>> {
-    let query = r#"
-        SELECT * FROM agent
-        WHERE owner_id = $user_id
-        AND name = $name
-        LIMIT 1
-    "#;
+// =============================================================================
+// Helper Functions - STUBBED
+// =============================================================================
 
-    let mut result = db
-        .query(query)
-        .bind(("user_id", surrealdb::RecordId::from(user_id.clone())))
-        .bind(("name", name.to_string()))
-        .await
-        .into_diagnostic()?;
+// TODO: Reimplement for pattern_db
+//
+// get_agent_by_name() - Find agent record by name
+// This was a common helper used across multiple modules
 
-    use pattern_core::db::DbEntity;
-
-    let db_agents: Vec<<AgentRecord as DbEntity>::DbModel> = result.take(0).into_diagnostic()?;
-
-    if let Some(db_model) = db_agents.into_iter().next() {
-        Ok(Some(
-            AgentRecord::from_db_model(db_model).into_diagnostic()?,
-        ))
-    } else {
-        Ok(None)
-    }
+/// Get agent by name from database
+///
+/// NOTE: Currently STUBBED. Needs pattern_db::queries::get_agent_by_name().
+#[allow(dead_code)]
+pub async fn get_agent_by_name(_agent_name: &str) -> Result<Option<()>> {
+    // Previously this queried SurrealDB:
+    // let query = r#"
+    //     SELECT * FROM agent
+    //     WHERE owner_id = $user_id
+    //     AND name = $name
+    //     LIMIT 1
+    // "#;
+    // let response = DB.query(query).bind(("user_id", user_id)).bind(("name", name)).await?;
+    //
+    // Will be replaced with pattern_db query
+    Ok(None)
 }

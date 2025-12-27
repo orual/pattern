@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM app_password_sessions WHERE did = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "c0eb899ee1edb5fe063e156c8b14484e558924c225faa7a7d9581d69856b5b60"
+}

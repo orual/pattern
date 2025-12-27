@@ -7,9 +7,8 @@ pub type ServerResult<T> = Result<T, ServerError>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
-    #[error("Database error: {0}")]
-    Database(#[from] pattern_core::db::DatabaseError),
-
+    // #[error("Database error: {0}")]
+    // Database(#[from] pattern_core::db_v1::DatabaseError),
     #[error("Core error: {0}")]
     Core(#[from] pattern_core::error::CoreError),
 
@@ -39,7 +38,7 @@ impl IntoResponse for ServerError {
     fn into_response(self) -> Response {
         // Convert to ApiError for consistent error responses
         let api_error = match self {
-            ServerError::Database(e) => ApiError::from(e),
+            // ServerError::Database(e) => ApiError::from(e),
             ServerError::Core(e) => ApiError::from(e),
             ServerError::Api(e) => e,
             ServerError::Jwt(_) => ApiError::Unauthorized {

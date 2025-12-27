@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO memory_blocks (id, agent_id, label, description, block_type, char_limit,\n                                   permission, pinned, loro_snapshot, content_preview, metadata,\n                                   embedding_model, is_active, frontier, last_seq, created_at, updated_at)\n        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 17
+    },
+    "nullable": []
+  },
+  "hash": "c58733c4a72fa2df2779ad53b9c476190d0c9903d324cb49c7f0699759a067f4"
+}

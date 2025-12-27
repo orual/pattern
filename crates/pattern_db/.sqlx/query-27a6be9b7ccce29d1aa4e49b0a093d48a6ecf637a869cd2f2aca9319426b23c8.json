@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE coordination_tasks SET status = ?, updated_at = datetime('now') WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "27a6be9b7ccce29d1aa4e49b0a093d48a6ecf637a869cd2f2aca9319426b23c8"
+}

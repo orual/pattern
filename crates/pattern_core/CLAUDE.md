@@ -6,57 +6,7 @@ Production agents are running. CLI commands will disrupt active agents.
 Core agent framework, memory management, and coordination system for Pattern's multi-agent ADHD support.
 
 ## Current Status
-
-### ✅ Complete Features
-- **Message Batching**: Snowflake IDs, atomic request/response cycles, tool pairing integrity, migration completed
-- **Agent Groups**: Full database operations, CLI integration, all coordination patterns working
-- **Data Sources**: Generic abstraction with file/Discord/Bluesky implementations
-- **Memory System**: MemGPT-style blocks with archival, semantic search, thread-safe access
-- **Tool System**: Multi-operation tools (context, recall, search) with automatic rule bundling
-- **Message Router**: Agent-to-agent messaging with anti-looping protection
-- **Model Configuration**: Comprehensive registry with provider-specific optimizations
-- **Bluesky Post Batching**: Thread-aware batching with 3-second windows, DashMap-based concurrent management
-
-### 🚧 In Progress
-
-- **Memory Block Pass-through**: Router needs to create RELATE edges for attached blocks
-- **MCP Client Integration**: Consume external MCP tools (high priority)
-- **Thread Cache Implementation**: Utilize the CachedThreadContext structure for constellation API caching
-
-### Future Simplifications
-- **Model Provider Refactoring**: Move model provider from DatabaseAgent into AgentContext entirely and remove the RwLock wrapper since ModelProvider methods only need `&self`. This would simplify DatabaseAgent and make the model provider more directly accessible for compression strategies.
-
-## Critical Implementation Notes
-
-### Entity System Sacred Patterns ⚠️
-
-**Edge Entity Pattern - DO NOT CHANGE**:
-The macro looks redundant but it's required. Users should ONLY specify `edge_entity`:
-
-```rust
-// Correct usage:
-#[entity(edge_entity = "agent_memories")]
-pub memories: Vec<(TestMemory, AgentMemoryRelation)>,
-
-// WRONG - don't specify both:
-// #[entity(relation = "agent_memories", edge_entity = "AgentMemoryRelation")]
-```
-
-### Database Patterns (CRITICAL)
-
-1. **SurrealDB Response Handling**:
-   - NEVER try to get `Vec<serde_json::Value>` from a SurrealDB response
-   - ALWAYS print raw response before `.take()` when debugging
-   - Use `unwrap_surreal_value` helper for nested value extraction
-
-2. **Parameterized Queries**:
-   - ALWAYS use parameter binding to prevent SQL injection
-   - Example: `query("SELECT * FROM user WHERE id = $id").bind(("id", user_id))`
-
-3. **Concurrent Memory Access**:
-   - Use `alter_block` for atomic updates
-   - Never hold refs across async boundaries
-   - Extract data and drop locks immediately
+- WIP major rework to sqlite, new memory architecture, jacquard, etc.
 
 ## Tool System Architecture
 
@@ -105,13 +55,11 @@ Following Letta/MemGPT patterns with multi-operation tools:
 
 1. **Agent System** (`agent/`, `context/`)
    - Base `Agent` trait with memory and tool access
-   - DatabaseAgent with SurrealDB persistence
+   - DatabaseAgent using `pattern-db`
    - AgentType enum with feature-gated ADHD variants
 
-2. **Memory System** (`memory.rs`)
-   - Arc<DashMap> for thread-safe concurrent access
-   - Character-limited blocks with overflow handling
-   - Persistent between conversations
+2. **Memory System** (`memory/`)
+   - Loro CRDT based in-memory cache backed by `pattern-db`
 
 3. **Tool System** (`tool/`)
    - Type-safe `AiTool<Input, Output>` trait
@@ -123,10 +71,8 @@ Following Letta/MemGPT patterns with multi-operation tools:
    - Type-erased `Arc<dyn Agent>` for group flexibility
    - Message routing and response aggregation
 
-5. **Database** (`db/`)
-   - SurrealKV embedded database
-   - Entity system with `#[derive(Entity)]` macro
-   - RELATE-based relationships (no foreign keys)
+5. **Database** (`../pattern_db`, `../pattern_auth`)
+   - SQLite embedded databases
 
 6. **Data Sources** (`data_source/`)
    - Generic trait for pull/push consumption

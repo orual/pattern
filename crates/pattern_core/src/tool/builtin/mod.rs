@@ -6,7 +6,7 @@
 mod calculator;
 mod constellation_search;
 mod context;
-pub mod data_source;
+//pub mod data_source;
 mod recall;
 mod search;
 pub mod search_utils;
@@ -16,16 +16,14 @@ mod system_integrity;
 mod test_schemas;
 mod web;
 
-use std::fmt::Debug;
-
 pub use calculator::{CalculatorInput, CalculatorOutput, CalculatorTool};
 pub use constellation_search::{
     ConstellationSearchDomain, ConstellationSearchInput, ConstellationSearchTool,
 };
 pub use context::{ContextInput, ContextOutput, ContextTool, CoreMemoryOperationType};
-pub use data_source::{
-    DataSourceInput, DataSourceOutput, DataSourceTool, register_data_source_tool,
-};
+//pub use data_source::{
+//    DataSourceInput, DataSourceOutput, DataSourceTool, register_data_source_tool,
+//};
 pub use recall::{
     ArchivalMemoryOperationType, ArchivalSearchResult, RecallInput, RecallOutput, RecallTool,
 };
@@ -37,145 +35,12 @@ pub use system_integrity::{SystemIntegrityInput, SystemIntegrityOutput, SystemIn
 pub use web::{WebFormat, WebInput, WebOutput, WebTool};
 
 use crate::{
-    context::AgentHandle,
+    runtime::ToolContext,
     tool::{DynamicTool, DynamicToolAdapter, ToolRegistry},
 };
+use std::sync::Arc;
 
-/// Registry specifically for built-in tools
-#[derive(Clone)]
-pub struct BuiltinTools {
-    recall_tool: Box<dyn DynamicTool>,
-    context_tool: Box<dyn DynamicTool>,
-    search_tool: Box<dyn DynamicTool>,
-    send_message_tool: Box<dyn DynamicTool>,
-    web_tool: Option<Box<dyn DynamicTool>>,
-    calculator_tool: Option<Box<dyn DynamicTool>>,
-}
-
-impl BuiltinTools {
-    /// Create default built-in tools for an agent
-    pub fn default_for_agent(handle: AgentHandle) -> Self {
-        Self {
-            recall_tool: Box::new(DynamicToolAdapter::new(RecallTool {
-                handle: handle.clone(),
-            })),
-            context_tool: Box::new(DynamicToolAdapter::new(ContextTool {
-                handle: handle.clone(),
-            })),
-            search_tool: Box::new(DynamicToolAdapter::new(SearchTool {
-                handle: handle.clone(),
-            })),
-            send_message_tool: Box::new(DynamicToolAdapter::new(SendMessageTool {
-                handle: handle.clone(),
-            })),
-            web_tool: Some(Box::new(DynamicToolAdapter::new(WebTool::new(
-                handle.clone(),
-            )))),
-            calculator_tool: Some(Box::new(DynamicToolAdapter::new(CalculatorTool::new(
-                handle,
-            )))),
-        }
-    }
-
-    /// Register all tools to a registry
-    pub fn register_all(&self, registry: &ToolRegistry) {
-        registry.register_dynamic(self.recall_tool.clone_box());
-        registry.register_dynamic(self.context_tool.clone_box());
-        registry.register_dynamic(self.search_tool.clone_box());
-        registry.register_dynamic(self.send_message_tool.clone_box());
-
-        if let Some(web_tool) = &self.web_tool {
-            registry.register_dynamic(web_tool.clone_box());
-        }
-
-        if let Some(calculator_tool) = &self.calculator_tool {
-            registry.register_dynamic(calculator_tool.clone_box());
-        }
-
-        // Note: DataSourceTool requires external coordinator setup.
-        // Use register_data_source_tool() function directly when you have a coordinator.
-    }
-
-    /// Builder pattern for customization
-    pub fn builder() -> BuiltinToolsBuilder {
-        BuiltinToolsBuilder::default()
-    }
-}
-
-/// Builder for customizing built-in tools
-#[derive(Default)]
-pub struct BuiltinToolsBuilder {
-    recall_tool: Option<Box<dyn DynamicTool>>,
-    context_tool: Option<Box<dyn DynamicTool>>,
-    search_tool: Option<Box<dyn DynamicTool>>,
-    send_message_tool: Option<Box<dyn DynamicTool>>,
-    calculator_tool: Option<Box<dyn DynamicTool>>,
-}
-
-impl BuiltinToolsBuilder {
-    /// Replace the default manage archival memory tool
-    pub fn with_recall_tool(mut self, tool: impl DynamicTool + 'static) -> Self {
-        self.recall_tool = Some(Box::new(tool));
-        self
-    }
-
-    /// Replace the default manage core memory tool
-    pub fn with_context_tool(mut self, tool: impl DynamicTool + 'static) -> Self {
-        self.context_tool = Some(Box::new(tool));
-        self
-    }
-
-    /// Replace the default search tool
-    pub fn with_search_tool(mut self, tool: impl DynamicTool + 'static) -> Self {
-        self.search_tool = Some(Box::new(tool));
-        self
-    }
-
-    /// Replace the default send_message tool
-    pub fn with_send_message_tool(mut self, tool: impl DynamicTool + 'static) -> Self {
-        self.send_message_tool = Some(Box::new(tool));
-        self
-    }
-
-    /// Replace the default calculator tool
-    pub fn with_calculator_tool(mut self, tool: impl DynamicTool + 'static) -> Self {
-        self.calculator_tool = Some(Box::new(tool));
-        self
-    }
-
-    /// Build the tools for a specific agent
-    pub fn build_for_agent(self, handle: AgentHandle) -> BuiltinTools {
-        let defaults = BuiltinTools::default_for_agent(handle);
-        BuiltinTools {
-            recall_tool: self.recall_tool.unwrap_or(defaults.recall_tool),
-            context_tool: self.context_tool.unwrap_or(defaults.context_tool),
-            search_tool: self.search_tool.unwrap_or(defaults.search_tool),
-            send_message_tool: self.send_message_tool.unwrap_or(defaults.send_message_tool),
-            web_tool: defaults.web_tool,
-            calculator_tool: self.calculator_tool.or(defaults.calculator_tool),
-        }
-    }
-}
-
-/// Trait for custom memory backends
-pub trait MemoryBackend: Send + Sync {
-    /// Update a memory block's value
-    fn update_block(&self, label: &str, value: String) -> crate::Result<()>;
-
-    /// Get a memory block's value
-    fn get_block(&self, label: &str) -> crate::Result<Option<String>>;
-
-    /// List all memory block labels
-    fn list_blocks(&self) -> Vec<String>;
-}
-
-/// Trait for custom message sending backends
-#[async_trait::async_trait]
-pub trait MessageSender: Send + Sync {
-    /// Send a message to a target
-    async fn send_message(&self, target: MessageTarget, content: String) -> crate::Result<()>;
-}
-
+// Message target types for send_message tool
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[schemars(inline)]
 pub struct MessageTarget {
@@ -195,5 +60,124 @@ pub enum TargetType {
     Bluesky,
 }
 
+/// Registry specifically for built-in tools
+#[derive(Clone)]
+pub struct BuiltinTools {
+    recall_tool: Box<dyn DynamicTool>,
+    context_tool: Box<dyn DynamicTool>,
+    search_tool: Box<dyn DynamicTool>,
+    send_message_tool: Box<dyn DynamicTool>,
+    web_tool: Box<dyn DynamicTool>,
+    calculator_tool: Box<dyn DynamicTool>,
+}
+
+impl BuiltinTools {
+    /// Create default built-in tools for an agent using ToolContext
+    pub fn default_for_agent(ctx: Arc<dyn ToolContext>) -> Self {
+        Self {
+            recall_tool: Box::new(DynamicToolAdapter::new(RecallTool::new(Arc::clone(&ctx)))),
+            context_tool: Box::new(DynamicToolAdapter::new(ContextTool::new(Arc::clone(&ctx)))),
+            search_tool: Box::new(DynamicToolAdapter::new(SearchTool::new(Arc::clone(&ctx)))),
+            send_message_tool: Box::new(DynamicToolAdapter::new(SendMessageTool::new(Arc::clone(
+                &ctx,
+            )))),
+            web_tool: Box::new(DynamicToolAdapter::new(WebTool::new(Arc::clone(&ctx)))),
+            calculator_tool: Box::new(DynamicToolAdapter::new(CalculatorTool::new(Arc::clone(
+                &ctx,
+            )))),
+        }
+    }
+
+    /// Alias for default_for_agent (for backwards compatibility)
+    pub fn new(ctx: Arc<dyn ToolContext>) -> Self {
+        Self::default_for_agent(ctx)
+    }
+
+    /// Register all tools to a registry
+    pub fn register_all(&self, registry: &ToolRegistry) {
+        registry.register_dynamic(self.recall_tool.clone_box());
+        registry.register_dynamic(self.context_tool.clone_box());
+        registry.register_dynamic(self.search_tool.clone_box());
+        registry.register_dynamic(self.send_message_tool.clone_box());
+        registry.register_dynamic(self.web_tool.clone_box());
+        registry.register_dynamic(self.calculator_tool.clone_box());
+
+        // Note: DataSourceTool requires external coordinator setup.
+        // Use register_data_source_tool() function directly when you have a coordinator.
+    }
+
+    /// Builder pattern for customization
+    pub fn builder() -> BuiltinToolsBuilder {
+        BuiltinToolsBuilder::default()
+    }
+}
+
+/// Builder for customizing built-in tools
+#[derive(Default)]
+pub struct BuiltinToolsBuilder {
+    recall_tool: Option<Box<dyn DynamicTool>>,
+    context_tool: Option<Box<dyn DynamicTool>>,
+    search_tool: Option<Box<dyn DynamicTool>>,
+    send_message_tool: Option<Box<dyn DynamicTool>>,
+    web_tool: Option<Box<dyn DynamicTool>>,
+    calculator_tool: Option<Box<dyn DynamicTool>>,
+}
+
+impl BuiltinToolsBuilder {
+    /// Replace the default recall tool
+    pub fn with_recall_tool(mut self, tool: impl DynamicTool + 'static) -> Self {
+        self.recall_tool = Some(Box::new(tool));
+        self
+    }
+
+    /// Replace the default context tool
+    pub fn with_context_tool(mut self, tool: impl DynamicTool + 'static) -> Self {
+        self.context_tool = Some(Box::new(tool));
+        self
+    }
+
+    /// Replace the default search tool
+    pub fn with_search_tool(mut self, tool: impl DynamicTool + 'static) -> Self {
+        self.search_tool = Some(Box::new(tool));
+        self
+    }
+
+    /// Replace the default send_message tool
+    pub fn with_send_message_tool(mut self, tool: impl DynamicTool + 'static) -> Self {
+        self.send_message_tool = Some(Box::new(tool));
+        self
+    }
+
+    /// Replace the default web tool
+    pub fn with_web_tool(mut self, tool: impl DynamicTool + 'static) -> Self {
+        self.web_tool = Some(Box::new(tool));
+        self
+    }
+
+    /// Replace the default calculator tool
+    pub fn with_calculator_tool(mut self, tool: impl DynamicTool + 'static) -> Self {
+        self.calculator_tool = Some(Box::new(tool));
+        self
+    }
+
+    /// Build the tools for a specific agent using ToolContext
+    pub fn build_for_agent(self, ctx: Arc<dyn ToolContext>) -> BuiltinTools {
+        let defaults = BuiltinTools::default_for_agent(ctx);
+        BuiltinTools {
+            recall_tool: self.recall_tool.unwrap_or(defaults.recall_tool),
+            context_tool: self.context_tool.unwrap_or(defaults.context_tool),
+            search_tool: self.search_tool.unwrap_or(defaults.search_tool),
+            send_message_tool: self.send_message_tool.unwrap_or(defaults.send_message_tool),
+            web_tool: self.web_tool.unwrap_or(defaults.web_tool),
+            calculator_tool: self.calculator_tool.unwrap_or(defaults.calculator_tool),
+        }
+    }
+}
+
+#[cfg(test)]
+mod test_utils;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub use test_utils::{MockToolContext, create_test_agent_in_db, create_test_context_with_agent};

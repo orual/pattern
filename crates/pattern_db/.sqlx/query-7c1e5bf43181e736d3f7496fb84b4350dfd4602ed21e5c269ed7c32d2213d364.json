@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM agent_data_sources WHERE agent_id = ? AND source_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "7c1e5bf43181e736d3f7496fb84b4350dfd4602ed21e5c269ed7c32d2213d364"
+}

@@ -1,0 +1,68 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            id as \"id!\",\n            agent_id as \"agent_id!\",\n            summary as \"summary!\",\n            start_position as \"start_position!\",\n            end_position as \"end_position!\",\n            message_count as \"message_count!\",\n            previous_summary_id,\n            depth as \"depth!\",\n            created_at as \"created_at!: _\"\n        FROM archive_summaries WHERE agent_id = ? ORDER BY start_position\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "agent_id!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "summary!",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "start_position!",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "end_position!",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "message_count!",
+        "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "previous_summary_id",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "depth!",
+        "ordinal": 7,
+        "type_info": "Integer"
+      },
+      {
+        "name": "created_at!: _",
+        "ordinal": 8,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "ef03a83599cdf4c3cc1a9e65bde6745d050befa92964304c3848edef91e9805d"
+}

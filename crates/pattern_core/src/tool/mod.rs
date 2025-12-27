@@ -1,5 +1,12 @@
 pub mod builtin;
 mod mod_utils;
+pub mod rules;
+
+// Re-export rule types at tool module level
+pub use rules::{
+    ExecutionPhase, ToolExecution, ToolExecutionState, ToolRule, ToolRuleEngine, ToolRuleType,
+    ToolRuleViolation,
+};
 
 use async_trait::async_trait;
 use compact_str::{CompactString, ToCompactString};
@@ -93,6 +100,14 @@ pub trait AiTool: Send + Sync + Debug {
         None
     }
 
+    /// Get execution rules for this tool
+    ///
+    /// Tools can declare their execution behavior (continue/exit loop, dependencies, etc.)
+    /// by returning ToolRule values. The tool_name field should match self.name().
+    fn tool_rules(&self) -> Vec<ToolRule> {
+        vec![]
+    }
+
     /// Convert to a genai Tool
     fn to_genai_tool(&self) -> genai::chat::Tool {
         genai::chat::Tool::new(self.name())
@@ -134,6 +149,9 @@ pub trait DynamicTool: Send + Sync + Debug {
 
     /// Get the usage rule for this tool
     fn usage_rule(&self) -> Option<&'static str>;
+
+    /// Get execution rules for this tool
+    fn tool_rules(&self) -> Vec<ToolRule>;
 
     /// Convert to a genai Tool
     fn to_genai_tool(&self) -> genai::chat::Tool {
@@ -228,6 +246,10 @@ where
 
     fn usage_rule(&self) -> Option<&'static str> {
         self.inner.usage_rule()
+    }
+
+    fn tool_rules(&self) -> Vec<ToolRule> {
+        self.inner.tool_rules()
     }
 }
 
@@ -337,17 +359,11 @@ impl ToolRegistry {
             .collect()
     }
 
-    /// Get tool usage rules for all registered tools
-    pub fn get_tool_rules(&self) -> Vec<crate::context::ToolRule> {
+    /// Get tool execution rules for all registered tools
+    pub fn get_tool_rules(&self) -> Vec<ToolRule> {
         self.tools
             .iter()
-            .filter_map(|entry| {
-                let tool = entry.value();
-                tool.usage_rule().map(|rule| crate::context::ToolRule {
-                    tool_name: tool.name().to_string(),
-                    rule: rule.to_string(),
-                })
-            })
+            .flat_map(|entry| entry.value().tool_rules())
             .collect()
     }
 }
