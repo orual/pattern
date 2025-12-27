@@ -44,6 +44,7 @@ pub use types::{
     BlockEditInput, BlockEditOp, BlockInput, BlockOp, FileInput, FileOp, RecallInput, RecallOp,
     SourceInput, SourceOp, ToolOutput,
 };
+use std::sync::Arc;
 
 use crate::{
     runtime::ToolContext,

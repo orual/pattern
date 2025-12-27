@@ -5,14 +5,14 @@
 
 pub mod auth_flow;
 
-#[cfg(feature = "oauth")]
-pub mod middleware;
+//#[cfg(feature = "oauth")]
+//pub mod middleware;
 
-#[cfg(feature = "oauth")]
-pub mod resolver;
+//#[cfg(feature = "oauth")]
+//pub mod resolver;
 
-#[cfg(feature = "oauth")]
-pub mod integration;
+//#[cfg(feature = "oauth")]
+//pub mod integration;
 
 use crate::CoreError;
 use crate::id::{OAuthTokenId, UserId};

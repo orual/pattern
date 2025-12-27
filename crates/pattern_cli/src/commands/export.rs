@@ -1,3 +1,5 @@
+// TODO: CLI Refactoring for pattern_db (SQLite/sqlx) migration
+//!
 //! Export and import commands for agents, groups, and constellations
 //!
 //! This module provides CAR (Content Addressable aRchive) export/import
@@ -244,7 +246,7 @@ pub async fn import(
     file_path: PathBuf,
     rename_to: Option<String>,
     preserve_ids: bool,
-    config: &PatternConfig,
+    _config: &PatternConfig,
 ) -> Result<()> {
     let output = Output::new();
     let db = get_db(config).await?;
@@ -291,6 +293,15 @@ pub async fn import(
             output.list_item(agent_id);
         }
     }
+    output.info("Preserve IDs:", if preserve_ids { "yes" } else { "no" });
+    output.info("Reason:", "Needs pattern_db queries for entity creation");
+    output.status("CAR import previously supported:");
+    output.list_item("Auto-detection of export type (agent, group, constellation)");
+    output.list_item("Creating/updating agents");
+    output.list_item("Importing memory blocks");
+    output.list_item("Replaying message history");
+    output.list_item("Preserving batch boundaries");
+    output.list_item("ID remapping for conflict resolution");
 
     if !result.group_ids.is_empty() {
         output.kv("Groups imported", &result.group_ids.len().to_string());

@@ -85,6 +85,25 @@ pub async fn search_conversations(
         }
         output.status("");
     }
+    if let Some(r) = role {
+        output.info("Role filter:", r);
+    }
+    if let Some(st) = start_time {
+        output.info("Start time:", st);
+    }
+    if let Some(et) = end_time {
+        output.info("End time:", et);
+    }
+    output.info("Limit:", &limit.to_string());
+    output.info(
+        "Reason:",
+        "Needs pattern_db::queries::search_agent_messages()",
+    );
+    output.status("Previous functionality:");
+    output.list_item("Full-text search across messages");
+    output.list_item("Role filtering (system, user, assistant, tool)");
+    output.list_item("Time range filtering");
+    output.list_item("Batch/position/sequence info display");
 
     Ok(())
 }

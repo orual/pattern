@@ -57,6 +57,10 @@ pub async fn list(config: &PatternConfig) -> Result<()> {
 // Agent Status
 // =============================================================================
 
+// =============================================================================
+// Agent Status
+// =============================================================================
+
 /// Show detailed status for an agent
 pub async fn status(name: &str, config: &PatternConfig) -> Result<()> {
     let output = Output::new();
@@ -180,13 +184,15 @@ pub async fn export(name: &str, output_path: Option<&Path>) -> Result<()> {
 // =============================================================================
 
 /// Add a workflow rule to an agent
+///
+/// NOTE: Currently STUBBED. Needs pattern_db agent queries.
 pub async fn add_rule(
     agent_name: &str,
     rule_type: &str,
     tool_name: &str,
-    params: Option<&str>,
-    conditions: Option<&str>,
-    priority: u8,
+    _params: Option<&str>,
+    _conditions: Option<&str>,
+    _priority: u8,
 ) -> Result<()> {
     let output = Output::new();
     let config = crate::helpers::load_config().await?;
@@ -282,6 +288,8 @@ pub async fn add_rule(
 }
 
 /// Remove workflow rules from an agent
+///
+/// NOTE: Currently STUBBED. Needs pattern_db agent queries.
 pub async fn remove_rule(agent_name: &str, tool_name: &str, rule_type: Option<&str>) -> Result<()> {
     let output = Output::new();
     let config = crate::helpers::load_config().await?;
@@ -513,6 +521,7 @@ pub async fn add_memory(
     if pinned {
         output.kv("Pinned", "yes");
     }
+    output.info("Reason:", "Needs pattern_db agent queries");
 
     Ok(())
 }

@@ -3,7 +3,7 @@
 //! These commands manage OAuth tokens for AI model providers. This is separate
 //! from ATProto authentication (see atproto.rs for Bluesky auth).
 
-use miette::{IntoDiagnostic, Result};
+use miette::Result;
 use owo_colors::OwoColorize;
 use pattern_auth::ProviderOAuthToken;
 use pattern_core::config::PatternConfig;
@@ -28,7 +28,7 @@ pub async fn login(provider: &str, config: &PatternConfig) -> Result<()> {
             output.info("Supported providers:", "anthropic");
             return Ok(());
         }
-    };
+    }
 
     output.section(&format!("OAuth Login: {}", provider.bright_cyan()));
 
@@ -39,8 +39,8 @@ pub async fn login(provider: &str, config: &PatternConfig) -> Result<()> {
     // Display instructions
     output.print("");
     output.info(
-        "Authorization URL:",
-        &device_response.verification_uri.bright_yellow().to_string(),
+        "Get API keys at:",
+        "https://console.anthropic.com/settings/keys",
     );
     output.print("");
     output.status("Please visit the URL above and authorize the application.");

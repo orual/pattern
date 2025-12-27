@@ -77,12 +77,16 @@ pub async fn list(config: &PatternConfig) -> Result<()> {
 // Add Member
 // =============================================================================
 
+// =============================================================================
+// Add Member
+// =============================================================================
+
 /// Add an agent to a group
 pub async fn add_member(
     group_name: &str,
     agent_name: &str,
     role: &str,
-    capabilities: Option<&str>,
+    _capabilities: Option<&str>,
     config: &PatternConfig,
 ) -> Result<()> {
     let output = Output::new();

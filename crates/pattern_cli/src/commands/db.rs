@@ -9,6 +9,20 @@ use pattern_core::config::PatternConfig;
 use crate::helpers::get_db;
 use crate::output::Output;
 
+// =============================================================================
+// Database Stats - STUBBED
+// =============================================================================
+
+// TODO: Reimplement for pattern_db (SQLite/sqlx)
+//
+// Previous implementation:
+// 1. Ran COUNT queries for agents, messages, memories, tool calls
+// 2. Queried most active agents by message count
+// 3. Displayed database type and file path
+// 4. Showed file size for embedded databases
+//
+// Needs: pattern_db stats queries
+
 /// Show database statistics
 pub async fn stats(config: &PatternConfig, output: &Output) -> Result<()> {
     let db = get_db(config).await?;
