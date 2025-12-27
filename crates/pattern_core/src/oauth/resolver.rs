@@ -4,26 +4,20 @@
 //! integrate with Pattern's OAuth token storage.
 
 use crate::error::CoreError;
-use crate::id::UserId;
 use genai::ModelIden;
 use genai::ServiceTarget;
 use genai::adapter::AdapterKind;
 use genai::resolver::{AuthData, AuthResolver, Result as ResolverResult, ServiceTargetResolver};
+use pattern_auth::AuthDb;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use surrealdb::{Connection, Surreal};
 
 /// Create an OAuth-aware auth resolver for Pattern
-pub fn create_oauth_auth_resolver<C: Connection + 'static>(
-    db: Arc<Surreal<C>>,
-    user_id: UserId,
-) -> AuthResolver {
+pub fn create_oauth_auth_resolver(auth_db: AuthDb) -> AuthResolver {
     let resolver_fn = move |model_iden: ModelIden| -> Pin<
         Box<dyn Future<Output = ResolverResult<Option<AuthData>>> + Send>,
     > {
-        let db = db.clone();
-        let user_id = user_id.clone();
+        let auth_db = auth_db.clone();
 
         Box::pin(async move {
             // Extract adapter kind from model identifier
@@ -32,8 +26,7 @@ pub fn create_oauth_auth_resolver<C: Connection + 'static>(
             // Only handle Anthropic OAuth for now
             if adapter_kind == AdapterKind::Anthropic {
                 // Use OAuthModelProvider to handle token refresh automatically
-                let provider =
-                    crate::oauth::integration::OAuthModelProvider::new(db.clone(), user_id.clone());
+                let provider = crate::oauth::integration::OAuthModelProvider::new(auth_db.clone());
 
                 match provider.get_token("anthropic").await {
                     Ok(Some(token)) => {
@@ -90,23 +83,23 @@ pub fn create_service_target_resolver() -> ServiceTargetResolver {
 }
 
 /// Builder for creating a genai client with OAuth support
-pub struct OAuthClientBuilder<C: Connection> {
-    db: Arc<Surreal<C>>,
-    user_id: UserId,
+pub struct OAuthClientBuilder {
+    auth_db: AuthDb,
+    #[allow(dead_code)]
     base_url: Option<String>,
 }
 
-impl<C: Connection + 'static> OAuthClientBuilder<C> {
+impl OAuthClientBuilder {
     /// Create a new builder
-    pub fn new(db: Arc<Surreal<C>>, user_id: UserId) -> Self {
+    pub fn new(auth_db: AuthDb) -> Self {
         Self {
-            db,
-            user_id,
+            auth_db,
             base_url: None,
         }
     }
 
     /// Set a custom base URL for the API
+    #[allow(dead_code)]
     pub fn with_base_url(mut self, url: String) -> Self {
         self.base_url = Some(url);
         self
@@ -115,7 +108,7 @@ impl<C: Connection + 'static> OAuthClientBuilder<C> {
     /// Build a genai client with OAuth support
     pub fn build(self) -> Result<genai::Client, CoreError> {
         // Create our OAuth-aware auth resolver
-        let auth_resolver = create_oauth_auth_resolver(self.db.clone(), self.user_id.clone());
+        let auth_resolver = create_oauth_auth_resolver(self.auth_db.clone());
 
         // Create service target resolver
         let target_resolver = create_service_target_resolver();

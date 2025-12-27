@@ -1150,7 +1150,10 @@ impl RuntimeContextBuilder {
     ///
     /// Returns a `CoreError::ConfigurationError` if required fields are missing:
     /// - `dbs`: Database connections are required
-    /// - `model_provider`: Model provider is required
+    ///
+    /// If no model_provider is set, a default GenAiClient is created:
+    /// - With OAuth support if the `oauth` feature is enabled
+    /// - Using standard API key auth otherwise
     pub async fn build(self) -> Result<RuntimeContext> {
         let dbs = self.dbs.ok_or_else(|| CoreError::ConfigurationError {
             field: "dbs".to_string(),
@@ -1159,14 +1162,38 @@ impl RuntimeContextBuilder {
             cause: ConfigError::MissingField("dbs".to_string()),
         })?;
 
-        let model_provider = self
-            .model_provider
-            .ok_or_else(|| CoreError::ConfigurationError {
-                field: "model_provider".to_string(),
-                config_path: "RuntimeContextBuilder".to_string(),
-                expected: "model provider".to_string(),
-                cause: ConfigError::MissingField("model_provider".to_string()),
-            })?;
+        // Create default model provider if not explicitly set
+        let model_provider: Arc<dyn ModelProvider> = match self.model_provider {
+            Some(provider) => provider,
+            None => {
+                #[cfg(feature = "oauth")]
+                {
+                    // Create OAuth-enabled client using auth database
+                    use crate::model::GenAiClient;
+                    use crate::oauth::resolver::OAuthClientBuilder;
+                    use genai::adapter::AdapterKind;
+
+                    let oauth_client = OAuthClientBuilder::new(dbs.auth.clone()).build()?;
+                    let genai_client = GenAiClient::with_endpoints(
+                        oauth_client,
+                        vec![
+                            AdapterKind::Anthropic,
+                            AdapterKind::Gemini,
+                            AdapterKind::OpenAI,
+                            AdapterKind::Groq,
+                            AdapterKind::Cohere,
+                        ],
+                    );
+                    Arc::new(genai_client)
+                }
+                #[cfg(not(feature = "oauth"))]
+                {
+                    // Create standard client using API keys from environment
+                    use crate::model::GenAiClient;
+                    Arc::new(GenAiClient::new().await?)
+                }
+            }
+        };
 
         // Create memory cache with embedding provider if available
         // Apply memory_char_limit if set and we're creating a new cache
@@ -1369,17 +1396,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_builder_requires_model_provider() {
+    async fn test_builder_creates_default_model_provider() {
         let dbs = test_dbs().await;
 
+        // When no model_provider is set, build() should create a default GenAiClient
         let result = RuntimeContext::builder().dbs_owned(dbs).build().await;
 
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            CoreError::ConfigurationError { field, .. } => {
-                assert_eq!(field, "model_provider");
+        // This will succeed (creating default provider) but may fail later
+        // if no API keys are configured - that's expected in test environment
+        // The important thing is it doesn't error on missing model_provider field
+        match result {
+            Ok(ctx) => {
+                // Default provider was created successfully
+                assert!(ctx.model_provider().name().contains("genai"));
             }
-            err => panic!("Expected ConfigurationError, got: {:?}", err),
+            Err(CoreError::ConfigurationError { field, .. }) => {
+                // Should NOT fail due to missing model_provider
+                panic!(
+                    "Should not fail with ConfigurationError for model_provider, got field: {}",
+                    field
+                );
+            }
+            Err(_) => {
+                // Other errors (like no API keys) are acceptable in test environment
+            }
         }
     }
 
