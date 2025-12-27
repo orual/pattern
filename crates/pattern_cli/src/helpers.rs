@@ -170,15 +170,8 @@ pub async fn require_group(config: &PatternConfig, name: &str) -> Result<AgentGr
 pub async fn create_runtime_context(config: &PatternConfig) -> Result<RuntimeContext> {
     let dbs = get_dbs(config).await?;
 
-    let model_provider = Arc::new(
-        GenAiClient::new()
-            .await
-            .map_err(|e| miette::miette!("Failed to create model provider: {}", e))?,
-    );
-
     RuntimeContext::builder()
         .dbs(Arc::new(dbs))
-        .model_provider(model_provider)
         .build()
         .await
         .map_err(|e| miette::miette!("Failed to create runtime context: {}", e))
@@ -190,11 +183,6 @@ pub async fn create_runtime_context(config: &PatternConfig) -> Result<RuntimeCon
 pub async fn create_runtime_context_with_dbs(
     dbs: ConstellationDatabases,
 ) -> Result<RuntimeContext> {
-    let model_provider = Arc::new(
-        GenAiClient::new()
-            .await
-            .map_err(|e| miette::miette!("Failed to create model provider: {}", e))?,
-    );
     // let api_key = std::env::var("OPENAI_API_KEY")
     //     .map_err(|e| miette::miette!("Failed to get OPENAI_API_KEY: {}", e))?;
     // let dimensions = 1536;
@@ -206,7 +194,6 @@ pub async fn create_runtime_context_with_dbs(
 
     RuntimeContext::builder()
         .dbs(Arc::new(dbs))
-        .model_provider(model_provider)
         //.embedding_provider(embedding_provider)
         .build()
         .await

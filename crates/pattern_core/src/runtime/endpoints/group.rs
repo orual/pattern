@@ -13,6 +13,7 @@ use crate::{
 use super::{MessageEndpoint, MessageOrigin};
 
 /// Endpoint for routing messages through agent groups
+#[allow(dead_code)]
 pub struct GroupEndpoint {
     pub group: AgentGroup,
     pub agents: Vec<AgentWithMembership<Arc<dyn Agent>>>,

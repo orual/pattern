@@ -82,6 +82,7 @@ impl BlueskyAgent {
 
 /// Endpoint for sending messages to Bluesky/ATProto
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct BlueskyEndpoint {
     agent: Arc<BlueskyAgent>,
     agent_id: String,
@@ -89,6 +90,7 @@ pub struct BlueskyEndpoint {
     our_did: Did<'static>,
 }
 
+#[allow(dead_code)]
 impl BlueskyEndpoint {
     /// Create a new Bluesky endpoint by loading session from pattern_auth.
     ///
@@ -773,6 +775,7 @@ impl MessageEndpoint for BlueskyEndpoint {
 }
 
 /// Create a Bluesky endpoint for an agent by loading session from databases
+#[allow(dead_code)]
 pub async fn create_bluesky_endpoint_for_agent(
     agent_id: String,
     pattern_db: &pattern_db::connection::ConstellationDb,
