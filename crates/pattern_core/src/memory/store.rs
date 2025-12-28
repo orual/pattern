@@ -157,6 +157,17 @@ pub trait MemoryStore: Send + Sync + fmt::Debug {
     /// Unpinned (ephemeral) blocks only load when referenced by a notification.
     async fn set_block_pinned(&self, agent_id: &str, label: &str, pinned: bool)
     -> MemoryResult<()>;
+
+    /// Change a block's type
+    ///
+    /// Used primarily for archiving blocks (Working -> Archival).
+    /// Core blocks cannot be archived.
+    async fn set_block_type(
+        &self,
+        agent_id: &str,
+        label: &str,
+        block_type: BlockType,
+    ) -> MemoryResult<()>;
 }
 
 /// Block metadata (without loading the full document)

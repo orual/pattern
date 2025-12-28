@@ -5,8 +5,7 @@ mod tests {
     //use crate::tool::builtin::data_source::{DataSourceInput, DataSourceOperation};
     use crate::tool::builtin::send_message::SendMessageInput;
     use crate::tool::builtin::{
-        ArchivalMemoryOperationType, ContextInput, CoreMemoryOperationType, MessageTarget,
-        RecallInput, TargetType,
+        ContextInput, CoreMemoryOperationType, MessageTarget, RecallInput, RecallOp, TargetType,
     };
     use schemars::schema_for;
 
@@ -66,14 +65,14 @@ mod tests {
     }
 
     #[test]
-    fn test_archival_memory_operation_type_schema() {
-        let schema = schema_for!(ArchivalMemoryOperationType);
+    fn test_recall_op_schema() {
+        let schema = schema_for!(RecallOp);
         let json = serde_json::to_string_pretty(&schema).unwrap();
-        println!("ArchivalMemoryOperationType schema:\n{}", json);
+        println!("RecallOp schema:\n{}", json);
 
         // Check if it contains oneOf
         if json.contains("oneOf") {
-            eprintln!("WARNING: ArchivalMemoryOperationType generates oneOf schema!");
+            eprintln!("WARNING: RecallOp generates oneOf schema!");
             eprintln!("This will cause issues with Gemini API");
         }
     }

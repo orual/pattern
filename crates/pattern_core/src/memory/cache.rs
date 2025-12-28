@@ -1035,6 +1035,39 @@ impl MemoryStore for MemoryCache {
 
         Ok(())
     }
+
+    async fn set_block_type(
+        &self,
+        agent_id: &str,
+        label: &str,
+        block_type: BlockType,
+    ) -> MemoryResult<()> {
+        // Get block ID from DB
+        let block =
+            pattern_db::queries::get_block_by_label(self.dbs.constellation.pool(), agent_id, label)
+                .await?;
+
+        let block = block.ok_or_else(|| MemoryError::NotFound {
+            agent_id: agent_id.to_string(),
+            label: label.to_string(),
+        })?;
+
+        // Update in database
+        pattern_db::queries::update_block_type(
+            self.dbs.constellation.pool(),
+            &block.id,
+            block_type.into(),
+        )
+        .await?;
+
+        // Update in cache if loaded
+        if let Some(mut cached) = self.blocks.get_mut(&block.id) {
+            cached.block_type = block_type;
+            cached.last_accessed = Utc::now();
+        }
+
+        Ok(())
+    }
 }
 
 // Additional methods with WriteOptions support
@@ -1069,7 +1102,8 @@ impl MemoryCache {
         }
 
         // Update the text content
-        doc.set_text(new_content)?;
+        // is_system = true because permission was already checked above at cache layer
+        doc.set_text(new_content, true)?;
 
         // Mark dirty and persist
         self.mark_dirty(agent_id, label);
@@ -1112,7 +1146,8 @@ impl MemoryCache {
         }
 
         // Append to the text content
-        doc.append_text(content)?;
+        // is_system = true because permission was already checked above at cache layer
+        doc.append_text(content, true)?;
 
         // Mark dirty and persist
         self.mark_dirty(agent_id, label);
@@ -1165,7 +1200,8 @@ impl MemoryCache {
             return Ok(false); // No replacement occurred
         }
 
-        doc.set_text(&new_content)?;
+        // is_system = true because permission was already checked above at cache layer
+        doc.set_text(&new_content, true)?;
 
         // Mark dirty and persist
         self.mark_dirty(agent_id, label);
@@ -1304,7 +1340,7 @@ mod tests {
         // Load and modify
         let doc = cache.get("agent_1", "scratch").await.unwrap().unwrap();
         // StructuredDocument methods are already thread-safe
-        doc.set_text("Hello, world!").unwrap();
+        doc.set_text("Hello, world!", true).unwrap();
 
         cache.mark_dirty("agent_1", "scratch");
 
@@ -1371,7 +1407,7 @@ mod tests {
         assert_eq!(doc.render(), "");
 
         // Modify and verify
-        doc.set_text("Test content").unwrap();
+        doc.set_text("Test content", true).unwrap();
         assert_eq!(doc.render(), "Test content");
     }
 
@@ -1554,7 +1590,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        doc.set_text("Hello, world!").unwrap();
+        doc.set_text("Hello, world!", true).unwrap();
 
         // Mark dirty and persist
         cache.mark_dirty("agent_1", "content_test");
@@ -1743,8 +1779,11 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        doc.set_text("I am a helpful assistant specializing in Rust programming")
-            .unwrap();
+        doc.set_text(
+            "I am a helpful assistant specializing in Rust programming",
+            true,
+        )
+        .unwrap();
         cache.mark_dirty("agent_1", "persona");
         cache.persist_block("agent_1", "persona").await.unwrap();
 
@@ -1762,8 +1801,11 @@ mod tests {
             .unwrap();
 
         let doc = cache.get_block("agent_1", "notes").await.unwrap().unwrap();
-        doc.set_text("Meeting scheduled for tomorrow about Python development")
-            .unwrap();
+        doc.set_text(
+            "Meeting scheduled for tomorrow about Python development",
+            true,
+        )
+        .unwrap();
         cache.mark_dirty("agent_1", "notes");
         cache.persist_block("agent_1", "notes").await.unwrap();
 
@@ -1955,7 +1997,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        doc.set_text("I specialize in Rust programming and system design")
+        doc.set_text("I specialize in Rust programming and system design", true)
             .unwrap();
         cache.mark_dirty("agent_1", "persona");
         cache.persist_block("agent_1", "persona").await.unwrap();
@@ -2136,7 +2178,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        doc.set_text("Searchable block content").unwrap();
+        doc.set_text("Searchable block content", true).unwrap();
         cache.mark_dirty("agent_1", "test_block");
         cache.persist_block("agent_1", "test_block").await.unwrap();
 

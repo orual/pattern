@@ -128,6 +128,7 @@
 //! ```
 
 mod block;
+mod file_source;
 mod helpers;
 mod manager;
 mod stream;
@@ -140,6 +141,7 @@ pub use block::{
     BlockSourceStatus, ConflictResolution, DataBlock, FileChange, FileChangeType, PermissionRule,
     ReconcileResult, VersionInfo,
 };
+pub use file_source::FileSource;
 pub use helpers::{BlockBuilder, EphemeralBlockCache, NotificationBuilder};
 pub use manager::{BlockEdit, BlockSourceInfo, EditFeedback, SourceManager, StreamSourceInfo};
 pub use stream::{DataStream, StreamStatus};

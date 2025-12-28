@@ -231,6 +231,25 @@ pub async fn update_block_pinned(pool: &SqlitePool, id: &str, pinned: bool) -> D
     Ok(())
 }
 
+/// Update a memory block's type.
+///
+/// Used for archiving blocks (changing Working -> Archival).
+pub async fn update_block_type(
+    pool: &SqlitePool,
+    id: &str,
+    block_type: MemoryBlockType,
+) -> DbResult<()> {
+    let type_str = block_type.as_str();
+    sqlx::query(
+        "UPDATE memory_blocks SET block_type = ?, updated_at = datetime('now') WHERE id = ?",
+    )
+    .bind(type_str)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Soft-delete a memory block.
 pub async fn deactivate_block(pool: &SqlitePool, id: &str) -> DbResult<()> {
     sqlx::query!(

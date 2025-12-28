@@ -228,7 +228,7 @@ fn test_auto_attribution_sets_commit_message() {
     );
 
     // Make a change
-    doc.set_text("hello world").unwrap();
+    doc.set_text("hello world", true).unwrap();
 
     // Set attribution and commit
     doc.auto_attribution("append");

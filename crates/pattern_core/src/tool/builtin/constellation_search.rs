@@ -637,7 +637,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        doc.set_text("I love rust programming and system design")
+        doc.set_text("I love rust programming and system design", true)
             .unwrap();
         ctx.memory().mark_dirty("test-agent", "preferences");
         ctx.memory()
@@ -812,7 +812,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        doc.set_text("Important meeting scheduled for tomorrow")
+        doc.set_text("Important meeting scheduled for tomorrow", true)
             .unwrap();
         ctx.memory().mark_dirty("test-agent", "notes");
         ctx.memory()

@@ -1478,6 +1478,15 @@ mod tests {
         ) -> MemoryResult<()> {
             Ok(())
         }
+
+        async fn set_block_type(
+            &self,
+            _agent_id: &str,
+            _label: &str,
+            _block_type: BlockType,
+        ) -> MemoryResult<()> {
+            Ok(())
+        }
     }
 
     async fn test_dbs() -> crate::db::ConstellationDatabases {

@@ -91,6 +91,18 @@ impl Default for MemoryBlockType {
     }
 }
 
+impl MemoryBlockType {
+    /// Returns the lowercase string representation matching the database format.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Core => "core",
+            Self::Working => "working",
+            Self::Archival => "archival",
+            Self::Log => "log",
+        }
+    }
+}
+
 /// Permission levels for memory operations.
 ///
 /// Ordered from most restrictive to least restrictive.

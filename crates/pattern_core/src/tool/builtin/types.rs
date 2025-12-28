@@ -1,0 +1,215 @@
+// crates/pattern_core/src/tool/builtin/types.rs
+//! Shared input/output types for the v2 tool taxonomy.
+//!
+//! These types support the new tool system (`block`, `block_edit`, `recall`, `source`, `file`)
+//! which will eventually replace the legacy `context` and `recall` tools.
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+/// Operations for the `block` tool (lifecycle management)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockOp {
+    /// Load a block into working context
+    Load,
+    /// Pin block to retain across batches
+    Pin,
+    /// Unpin block (becomes ephemeral)
+    Unpin,
+    /// Change block type to Archival
+    Archive,
+    /// Get block metadata
+    Info,
+}
+
+/// Input for the `block` tool
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BlockInput {
+    /// Operation to perform
+    pub op: BlockOp,
+    /// Block label
+    pub label: String,
+    /// Optional source ID for load operation
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
+}
+
+/// Operations for the `block_edit` tool (content editing)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockEditOp {
+    /// Append content to block
+    Append,
+    /// Find and replace text
+    Replace,
+    /// Apply diff/patch (advanced)
+    Patch,
+    /// Set a specific field (Map/Composite schemas)
+    SetField,
+}
+
+/// Input for the `block_edit` tool
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BlockEditInput {
+    /// Operation to perform
+    pub op: BlockEditOp,
+    /// Block label
+    pub label: String,
+    /// Content for append operation
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    /// Old text for replace operation
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old: Option<String>,
+    /// New text for replace operation
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new: Option<String>,
+    /// Field name for set_field operation
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    /// Value for set_field operation
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
+    /// Patch content for patch operation
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patch: Option<String>,
+}
+
+/// Operations for the `recall` tool (archival entries)
+///
+/// Note: This is part of the v2 tool taxonomy. The legacy `RecallInput` in `recall.rs`
+/// uses `ArchivalMemoryOperationType` which has different operations (Insert, Append, Read, Delete).
+/// This new version is simpler: just Insert and Search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RecallOp {
+    /// Create new archival entry
+    Insert,
+    /// Search archival entries
+    Search,
+}
+
+/// Input for the `recall` tool
+///
+/// This is the new recall input type that replaces the legacy version.
+/// Uses simple Insert/Search operations.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RecallInput {
+    /// Operation to perform
+    pub op: RecallOp,
+    /// Content for insert operation
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    /// Metadata for insert operation
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+    /// Query for search operation
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    /// Limit for search results
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+/// Operations for the `source` tool (data source control)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceOp {
+    /// Pause stream notifications
+    Pause,
+    /// Resume stream notifications
+    Resume,
+    /// Get source status
+    Status,
+    /// List all sources
+    List,
+}
+
+/// Input for the `source` tool
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SourceInput {
+    /// Operation to perform
+    pub op: SourceOp,
+    /// Source ID (required for pause/resume/status on specific source)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
+}
+
+/// Operations for the `file` tool (FileSource operations)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FileOp {
+    /// Load file from disk into block
+    Load,
+    /// Save block content to disk
+    Save,
+    /// Create new file
+    Create,
+    /// Delete file
+    Delete,
+    /// Append to file
+    Append,
+    /// Find/replace in file
+    Replace,
+}
+
+/// Input for the `file` tool
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FileInput {
+    /// Operation to perform
+    pub op: FileOp,
+    /// File path (relative to source base)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Block label (alternative to path for save)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Content for create/append operations
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    /// Old text for replace operation
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old: Option<String>,
+    /// New text for replace operation
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new: Option<String>,
+}
+
+/// Standard output for tool operations
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ToolOutput {
+    /// Whether operation succeeded
+    pub success: bool,
+    /// Human-readable message
+    pub message: String,
+    /// Optional structured data
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+}
+
+impl ToolOutput {
+    pub fn success(message: impl Into<String>) -> Self {
+        Self {
+            success: true,
+            message: message.into(),
+            data: None,
+        }
+    }
+
+    pub fn success_with_data(message: impl Into<String>, data: serde_json::Value) -> Self {
+        Self {
+            success: true,
+            message: message.into(),
+            data: Some(data),
+        }
+    }
+
+    pub fn error(message: impl Into<String>) -> Self {
+        Self {
+            success: false,
+            message: message.into(),
+            data: None,
+        }
+    }
+}

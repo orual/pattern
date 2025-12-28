@@ -3,36 +3,49 @@
 //! This module provides the standard tools that all agents have access to,
 //! including memory management and inter-agent communication.
 
+mod block;
+mod block_edit;
 mod calculator;
 mod constellation_search;
 mod context;
 //pub mod data_source;
+mod file;
 mod recall;
 mod search;
 pub mod search_utils;
 mod send_message;
+mod source;
 mod system_integrity;
 #[cfg(test)]
 mod test_schemas;
+pub mod types;
 mod web;
 
+pub use block::BlockTool;
+pub use block_edit::BlockEditTool;
 pub use calculator::{CalculatorInput, CalculatorOutput, CalculatorTool};
 pub use constellation_search::{
     ConstellationSearchDomain, ConstellationSearchInput, ConstellationSearchTool,
 };
 pub use context::{ContextInput, ContextOutput, ContextTool, CoreMemoryOperationType};
+pub use file::FileTool;
 //pub use data_source::{
 //    DataSourceInput, DataSourceOutput, DataSourceTool, register_data_source_tool,
 //};
-pub use recall::{
-    ArchivalMemoryOperationType, ArchivalSearchResult, RecallInput, RecallOutput, RecallTool,
-};
+pub use recall::RecallTool;
 use schemars::JsonSchema;
 pub use search::{SearchDomain, SearchInput, SearchOutput, SearchTool};
 pub use send_message::SendMessageTool;
 use serde::{Deserialize, Serialize};
+pub use source::SourceTool;
 pub use system_integrity::{SystemIntegrityInput, SystemIntegrityOutput, SystemIntegrityTool};
 pub use web::{WebFormat, WebInput, WebOutput, WebTool};
+
+// V2 tool types (new tool taxonomy)
+pub use types::{
+    BlockEditInput, BlockEditOp, BlockInput, BlockOp, FileInput, FileOp, RecallInput, RecallOp,
+    SourceInput, SourceOp, ToolOutput,
+};
 
 use crate::{
     runtime::ToolContext,
@@ -63,18 +76,25 @@ pub enum TargetType {
 /// Registry specifically for built-in tools
 #[derive(Clone)]
 pub struct BuiltinTools {
+    // Existing tools
     recall_tool: Box<dyn DynamicTool>,
     context_tool: Box<dyn DynamicTool>,
     search_tool: Box<dyn DynamicTool>,
     send_message_tool: Box<dyn DynamicTool>,
     web_tool: Box<dyn DynamicTool>,
     calculator_tool: Box<dyn DynamicTool>,
+
+    // New v2 tools
+    block_tool: Box<dyn DynamicTool>,
+    block_edit_tool: Box<dyn DynamicTool>,
+    source_tool: Box<dyn DynamicTool>,
 }
 
 impl BuiltinTools {
     /// Create default built-in tools for an agent using ToolContext
     pub fn default_for_agent(ctx: Arc<dyn ToolContext>) -> Self {
         Self {
+            // Existing tools
             recall_tool: Box::new(DynamicToolAdapter::new(RecallTool::new(Arc::clone(&ctx)))),
             context_tool: Box::new(DynamicToolAdapter::new(ContextTool::new(Arc::clone(&ctx)))),
             search_tool: Box::new(DynamicToolAdapter::new(SearchTool::new(Arc::clone(&ctx)))),
@@ -85,6 +105,13 @@ impl BuiltinTools {
             calculator_tool: Box::new(DynamicToolAdapter::new(CalculatorTool::new(Arc::clone(
                 &ctx,
             )))),
+
+            // New v2 tools
+            block_tool: Box::new(DynamicToolAdapter::new(BlockTool::new(Arc::clone(&ctx)))),
+            block_edit_tool: Box::new(DynamicToolAdapter::new(BlockEditTool::new(Arc::clone(
+                &ctx,
+            )))),
+            source_tool: Box::new(DynamicToolAdapter::new(SourceTool::new(Arc::clone(&ctx)))),
         }
     }
 
@@ -95,6 +122,7 @@ impl BuiltinTools {
 
     /// Register all tools to a registry
     pub fn register_all(&self, registry: &ToolRegistry) {
+        // Existing tools
         registry.register_dynamic(self.recall_tool.clone_box());
         registry.register_dynamic(self.context_tool.clone_box());
         registry.register_dynamic(self.search_tool.clone_box());
@@ -102,8 +130,15 @@ impl BuiltinTools {
         registry.register_dynamic(self.web_tool.clone_box());
         registry.register_dynamic(self.calculator_tool.clone_box());
 
+        // New v2 tools
+        registry.register_dynamic(self.block_tool.clone_box());
+        registry.register_dynamic(self.block_edit_tool.clone_box());
+        registry.register_dynamic(self.source_tool.clone_box());
+
         // Note: DataSourceTool requires external coordinator setup.
         // Use register_data_source_tool() function directly when you have a coordinator.
+        // Note: FileTool requires an external Arc<FileSource> so cannot be created
+        // with just a ToolContext. It must be registered separately.
     }
 
     /// Builder pattern for customization
@@ -115,12 +150,18 @@ impl BuiltinTools {
 /// Builder for customizing built-in tools
 #[derive(Default)]
 pub struct BuiltinToolsBuilder {
+    // Existing tools
     recall_tool: Option<Box<dyn DynamicTool>>,
     context_tool: Option<Box<dyn DynamicTool>>,
     search_tool: Option<Box<dyn DynamicTool>>,
     send_message_tool: Option<Box<dyn DynamicTool>>,
     web_tool: Option<Box<dyn DynamicTool>>,
     calculator_tool: Option<Box<dyn DynamicTool>>,
+
+    // New v2 tools
+    block_tool: Option<Box<dyn DynamicTool>>,
+    block_edit_tool: Option<Box<dyn DynamicTool>>,
+    source_tool: Option<Box<dyn DynamicTool>>,
 }
 
 impl BuiltinToolsBuilder {
@@ -160,16 +201,40 @@ impl BuiltinToolsBuilder {
         self
     }
 
+    /// Replace the default block tool
+    pub fn with_block_tool(mut self, tool: impl DynamicTool + 'static) -> Self {
+        self.block_tool = Some(Box::new(tool));
+        self
+    }
+
+    /// Replace the default block_edit tool
+    pub fn with_block_edit_tool(mut self, tool: impl DynamicTool + 'static) -> Self {
+        self.block_edit_tool = Some(Box::new(tool));
+        self
+    }
+
+    /// Replace the default source tool
+    pub fn with_source_tool(mut self, tool: impl DynamicTool + 'static) -> Self {
+        self.source_tool = Some(Box::new(tool));
+        self
+    }
+
     /// Build the tools for a specific agent using ToolContext
     pub fn build_for_agent(self, ctx: Arc<dyn ToolContext>) -> BuiltinTools {
         let defaults = BuiltinTools::default_for_agent(ctx);
         BuiltinTools {
+            // Existing tools
             recall_tool: self.recall_tool.unwrap_or(defaults.recall_tool),
             context_tool: self.context_tool.unwrap_or(defaults.context_tool),
             search_tool: self.search_tool.unwrap_or(defaults.search_tool),
             send_message_tool: self.send_message_tool.unwrap_or(defaults.send_message_tool),
             web_tool: self.web_tool.unwrap_or(defaults.web_tool),
             calculator_tool: self.calculator_tool.unwrap_or(defaults.calculator_tool),
+
+            // New v2 tools
+            block_tool: self.block_tool.unwrap_or(defaults.block_tool),
+            block_edit_tool: self.block_edit_tool.unwrap_or(defaults.block_edit_tool),
+            source_tool: self.source_tool.unwrap_or(defaults.source_tool),
         }
     }
 }

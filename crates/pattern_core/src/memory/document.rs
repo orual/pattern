@@ -40,6 +40,18 @@ pub enum DocumentError {
     #[error("Section '{0}' is read-only and cannot be modified by agent")]
     ReadOnlySection(String),
 
+    #[error("Operation '{operation}' not supported for schema {schema}")]
+    InvalidSchemaForOperation { operation: String, schema: String },
+
+    #[error(
+        "Permission denied: {operation} requires {required} permission, but block has {actual}"
+    )]
+    PermissionDenied {
+        operation: String,
+        required: pattern_db::models::MemoryPermission,
+        actual: pattern_db::models::MemoryPermission,
+    },
+
     #[error("{0}")]
     Other(String),
 }
@@ -156,6 +168,42 @@ impl StructuredDocument {
         &self.doc
     }
 
+    /// Check if an operation is allowed based on document permission.
+    /// Returns Ok(()) if allowed, or PermissionDenied error if not.
+    fn check_permission(
+        &self,
+        op: pattern_db::models::MemoryOp,
+        is_system: bool,
+    ) -> Result<(), DocumentError> {
+        if is_system {
+            return Ok(());
+        }
+
+        let gate = pattern_db::models::MemoryGate::check(op, self.permission);
+        if gate.is_allowed() {
+            Ok(())
+        } else {
+            // Determine required permission based on operation
+            let required = match op {
+                pattern_db::models::MemoryOp::Read => {
+                    pattern_db::models::MemoryPermission::ReadOnly
+                }
+                pattern_db::models::MemoryOp::Append => {
+                    pattern_db::models::MemoryPermission::Append
+                }
+                pattern_db::models::MemoryOp::Overwrite => {
+                    pattern_db::models::MemoryPermission::ReadWrite
+                }
+                pattern_db::models::MemoryOp::Delete => pattern_db::models::MemoryPermission::Admin,
+            };
+            Err(DocumentError::PermissionDenied {
+                operation: format!("{:?}", op),
+                required,
+                actual: self.permission,
+            })
+        }
+    }
+
     // ========== Text Operations ==========
 
     /// Get text content
@@ -164,8 +212,11 @@ impl StructuredDocument {
         text.to_string()
     }
 
-    /// Set text content (replaces all)
-    pub fn set_text(&self, content: &str) -> Result<(), DocumentError> {
+    /// Set text content (replaces all).
+    /// If is_system is false, checks that the document has Overwrite permission.
+    pub fn set_text(&self, content: &str, is_system: bool) -> Result<(), DocumentError> {
+        self.check_permission(pattern_db::models::MemoryOp::Overwrite, is_system)?;
+
         let text = self.doc.get_text("content");
         let current_len = text.len_unicode();
 
@@ -180,8 +231,11 @@ impl StructuredDocument {
         Ok(())
     }
 
-    /// Append text to existing content
-    pub fn append_text(&self, content: &str) -> Result<(), DocumentError> {
+    /// Append text to existing content.
+    /// If is_system is false, checks that the document has Append permission.
+    pub fn append_text(&self, content: &str, is_system: bool) -> Result<(), DocumentError> {
+        self.check_permission(pattern_db::models::MemoryOp::Append, is_system)?;
+
         let text = self.doc.get_text("content");
         let pos = text.len_unicode();
         text.insert(pos, content)
@@ -189,16 +243,50 @@ impl StructuredDocument {
         Ok(())
     }
 
-    /// Replace all occurrences of find with replace
-    /// Returns true if at least one replacement was made
-    pub fn replace_text(&self, find: &str, replace: &str) -> Result<bool, DocumentError> {
+    /// Append content to the document based on schema type.
+    /// - Text: appends as text
+    /// - List: pushes item (parses content as JSON, or wraps as string)
+    /// - Log: appends as log entry (parses content as JSON, or wraps as string)
+    /// Returns error for Map/Composite schemas which don't support append.
+    /// If is_system is false, checks that the document has Append permission.
+    pub fn append(&self, content: &str, is_system: bool) -> Result<(), DocumentError> {
+        match &self.schema {
+            BlockSchema::Text => self.append_text(content, is_system),
+            BlockSchema::List { .. } => {
+                // Try to parse as JSON, fall back to string
+                let item = serde_json::from_str(content)
+                    .unwrap_or_else(|_| serde_json::Value::String(content.to_string()));
+                self.push_item(item, is_system)
+            }
+            BlockSchema::Log { .. } => {
+                // Try to parse as JSON, fall back to wrapping in a message object
+                let entry = serde_json::from_str(content)
+                    .unwrap_or_else(|_| serde_json::json!({ "message": content }));
+                self.append_log_entry(entry, is_system)
+            }
+            _ => Err(DocumentError::InvalidSchemaForOperation {
+                operation: "append".to_string(),
+                schema: format!("{:?}", self.schema),
+            }),
+        }
+    }
+
+    /// Replace all occurrences of find with replace.
+    /// Returns true if at least one replacement was made.
+    /// If is_system is false, checks that the document has Overwrite permission.
+    pub fn replace_text(
+        &self,
+        find: &str,
+        replace: &str,
+        is_system: bool,
+    ) -> Result<bool, DocumentError> {
         let current = self.text_content();
         if !current.contains(find) {
             return Ok(false);
         }
 
         let new_content = current.replace(find, replace);
-        self.set_text(&new_content)?;
+        self.set_text(&new_content, is_system)?;
         Ok(true)
     }
 
@@ -455,8 +543,11 @@ impl StructuredDocument {
             .collect()
     }
 
-    /// Push an item to the end of the list
-    pub fn push_item(&self, item: JsonValue) -> Result<(), DocumentError> {
+    /// Push an item to the end of the list.
+    /// If is_system is false, checks that the document has Append permission.
+    pub fn push_item(&self, item: JsonValue, is_system: bool) -> Result<(), DocumentError> {
+        self.check_permission(pattern_db::models::MemoryOp::Append, is_system)?;
+
         let list = self.doc.get_list("items");
         let loro_value = json_to_loro(&item);
         list.push(loro_value)
@@ -464,8 +555,16 @@ impl StructuredDocument {
         Ok(())
     }
 
-    /// Insert an item at a specific index
-    pub fn insert_item(&self, index: usize, item: JsonValue) -> Result<(), DocumentError> {
+    /// Insert an item at a specific index.
+    /// If is_system is false, checks that the document has Append permission.
+    pub fn insert_item(
+        &self,
+        index: usize,
+        item: JsonValue,
+        is_system: bool,
+    ) -> Result<(), DocumentError> {
+        self.check_permission(pattern_db::models::MemoryOp::Append, is_system)?;
+
         let list = self.doc.get_list("items");
         if index > list.len() {
             return Err(DocumentError::Other(format!(
@@ -480,8 +579,11 @@ impl StructuredDocument {
         Ok(())
     }
 
-    /// Delete an item at a specific index
-    pub fn delete_item(&self, index: usize) -> Result<(), DocumentError> {
+    /// Delete an item at a specific index.
+    /// If is_system is false, checks that the document has Delete permission (Admin).
+    pub fn delete_item(&self, index: usize, is_system: bool) -> Result<(), DocumentError> {
+        self.check_permission(pattern_db::models::MemoryOp::Delete, is_system)?;
+
         let list = self.doc.get_list("items");
         if index >= list.len() {
             return Err(DocumentError::Other(format!(
@@ -530,8 +632,11 @@ impl StructuredDocument {
             .collect()
     }
 
-    /// Append a log entry
-    pub fn append_log_entry(&self, entry: JsonValue) -> Result<(), DocumentError> {
+    /// Append a log entry.
+    /// If is_system is false, checks that the document has Append permission.
+    pub fn append_log_entry(&self, entry: JsonValue, is_system: bool) -> Result<(), DocumentError> {
+        self.check_permission(pattern_db::models::MemoryOp::Append, is_system)?;
+
         let list = self.doc.get_list("entries");
         let loro_value = json_to_loro(&entry);
         list.push(loro_value)
@@ -895,30 +1000,30 @@ mod tests {
     #[test]
     fn test_text_document() {
         let doc = StructuredDocument::new_text();
-        doc.set_text("Hello, world!").unwrap();
+        doc.set_text("Hello, world!", true).unwrap();
         assert_eq!(doc.text_content(), "Hello, world!");
     }
 
     #[test]
     fn test_text_append() {
         let doc = StructuredDocument::new_text();
-        doc.set_text("Hello").unwrap();
-        doc.append_text(", world!").unwrap();
+        doc.set_text("Hello", true).unwrap();
+        doc.append_text(", world!", true).unwrap();
         assert_eq!(doc.text_content(), "Hello, world!");
     }
 
     #[test]
     fn test_text_replace() {
         let doc = StructuredDocument::new_text();
-        doc.set_text("Hello, world! Hello again!").unwrap();
+        doc.set_text("Hello, world! Hello again!", true).unwrap();
 
         // Replace all occurrences
-        let replaced = doc.replace_text("Hello", "Hi").unwrap();
+        let replaced = doc.replace_text("Hello", "Hi", true).unwrap();
         assert!(replaced);
         assert_eq!(doc.text_content(), "Hi, world! Hi again!");
 
         // No replacement needed
-        let replaced = doc.replace_text("Goodbye", "Bye").unwrap();
+        let replaced = doc.replace_text("Goodbye", "Bye", true).unwrap();
         assert!(!replaced);
     }
 
@@ -999,14 +1104,14 @@ mod tests {
         assert_eq!(doc.list_len(), 0);
 
         // Push items
-        doc.push_item(JsonValue::String("first".to_string()))
+        doc.push_item(JsonValue::String("first".to_string()), true)
             .unwrap();
-        doc.push_item(JsonValue::String("second".to_string()))
+        doc.push_item(JsonValue::String("second".to_string()), true)
             .unwrap();
         assert_eq!(doc.list_len(), 2);
 
         // Insert at index
-        doc.insert_item(1, JsonValue::String("middle".to_string()))
+        doc.insert_item(1, JsonValue::String("middle".to_string()), true)
             .unwrap();
         assert_eq!(doc.list_len(), 3);
 
@@ -1016,7 +1121,7 @@ mod tests {
         assert_eq!(items[2], JsonValue::String("second".to_string()));
 
         // Delete item
-        doc.delete_item(1).unwrap();
+        doc.delete_item(1, true).unwrap();
         assert_eq!(doc.list_len(), 2);
     }
 
@@ -1041,28 +1146,40 @@ mod tests {
         let doc = StructuredDocument::new(schema);
 
         // Add entries
-        doc.append_log_entry(serde_json::json!({
-            "timestamp": "2025-01-01T00:00:00Z",
-            "message": "First entry"
-        }))
+        doc.append_log_entry(
+            serde_json::json!({
+                "timestamp": "2025-01-01T00:00:00Z",
+                "message": "First entry"
+            }),
+            true,
+        )
         .unwrap();
 
-        doc.append_log_entry(serde_json::json!({
-            "timestamp": "2025-01-01T00:01:00Z",
-            "message": "Second entry"
-        }))
+        doc.append_log_entry(
+            serde_json::json!({
+                "timestamp": "2025-01-01T00:01:00Z",
+                "message": "Second entry"
+            }),
+            true,
+        )
         .unwrap();
 
-        doc.append_log_entry(serde_json::json!({
-            "timestamp": "2025-01-01T00:02:00Z",
-            "message": "Third entry"
-        }))
+        doc.append_log_entry(
+            serde_json::json!({
+                "timestamp": "2025-01-01T00:02:00Z",
+                "message": "Third entry"
+            }),
+            true,
+        )
         .unwrap();
 
-        doc.append_log_entry(serde_json::json!({
-            "timestamp": "2025-01-01T00:03:00Z",
-            "message": "Fourth entry"
-        }))
+        doc.append_log_entry(
+            serde_json::json!({
+                "timestamp": "2025-01-01T00:03:00Z",
+                "message": "Fourth entry"
+            }),
+            true,
+        )
         .unwrap();
 
         // Should get only the 3 most recent (respecting display_limit)
@@ -1087,7 +1204,7 @@ mod tests {
     #[test]
     fn test_snapshot_roundtrip() {
         let doc = StructuredDocument::new_text();
-        doc.set_text("Test content").unwrap();
+        doc.set_text("Test content", true).unwrap();
 
         // Export snapshot
         let snapshot = doc.export_snapshot().unwrap();
@@ -1162,16 +1279,22 @@ mod tests {
 
         let doc = StructuredDocument::new(schema);
 
-        doc.push_item(serde_json::json!({
-            "title": "Task 1",
-            "done": false
-        }))
+        doc.push_item(
+            serde_json::json!({
+                "title": "Task 1",
+                "done": false
+            }),
+            true,
+        )
         .unwrap();
 
-        doc.push_item(serde_json::json!({
-            "title": "Task 2",
-            "done": true
-        }))
+        doc.push_item(
+            serde_json::json!({
+                "title": "Task 2",
+                "done": true
+            }),
+            true,
+        )
         .unwrap();
 
         let rendered = doc.render();

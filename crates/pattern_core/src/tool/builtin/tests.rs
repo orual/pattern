@@ -83,6 +83,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_new_v2_builtin_tools_registration() {
+        let (_db, _memory, ctx) = create_test_context().await;
+
+        let registry = ToolRegistry::new();
+        let builtin = BuiltinTools::new(ctx);
+        builtin.register_all(&registry);
+
+        let tool_names = registry.list_tools();
+
+        // New v2 tools
+        assert!(
+            tool_names.iter().any(|n| n == "block"),
+            "block tool should be registered, found: {:?}",
+            tool_names
+        );
+        assert!(
+            tool_names.iter().any(|n| n == "block_edit"),
+            "block_edit tool should be registered, found: {:?}",
+            tool_names
+        );
+        assert!(
+            tool_names.iter().any(|n| n == "source"),
+            "source tool should be registered, found: {:?}",
+            tool_names
+        );
+
+        // Existing tools still present
+        assert!(
+            tool_names.iter().any(|n| n == "recall"),
+            "recall tool should still be registered"
+        );
+        assert!(
+            tool_names.iter().any(|n| n == "context"),
+            "context tool should still be registered"
+        );
+    }
+
+    #[tokio::test]
     async fn test_context_append_through_registry() {
         let (_db, memory, ctx) = create_test_context().await;
 
@@ -458,6 +496,35 @@ mod tests {
         // Depending on the type mismatch, operation may error earlier; we only assert approval path doesn't deadlock
         // Here we accept either success or explicit type error, but ensure no panic/hang.
         assert!(out.success || out.message.is_some());
+    }
+
+    // ============================================================================
+    // SourceTool Tests
+    // ============================================================================
+
+    #[tokio::test]
+    async fn test_source_tool_list() {
+        use super::super::source::SourceTool;
+        use super::super::types::{SourceInput, SourceOp};
+        use crate::tool::AiTool;
+
+        let (_db, _memory, ctx) = create_test_context().await;
+
+        let tool = SourceTool::new(ctx);
+        let result = tool
+            .execute(
+                SourceInput {
+                    op: SourceOp::List,
+                    source_id: None,
+                },
+                &crate::tool::ExecutionMeta::default(),
+            )
+            .await
+            .unwrap();
+
+        // Should succeed even with no sources (MockToolContext returns None for sources())
+        assert!(result.success);
+        assert!(result.message.contains("sources"));
     }
 
     #[tokio::test]
