@@ -6,17 +6,20 @@
 use miette::{IntoDiagnostic, Result};
 use owo_colors::OwoColorize;
 use pattern_core::{
-    Agent,
+    Agent, PermissionRule,
     agent::ResponseEvent,
     config::PatternConfig,
+    data_source::FileSource,
     messages::{Message, MessageContent},
+    tool::builtin::FileTool,
 };
 use std::sync::Arc;
 
 use crate::{
     endpoints::{CliEndpoint, build_group_cli_endpoint},
     helpers::{
-        create_runtime_context_with_dbs, get_dbs, require_agent_by_name, require_group_by_name,
+        create_runtime_context_with_dbs, get_agent_by_name, get_dbs, require_agent_by_name,
+        require_group_by_name,
     },
     output::Output,
     slash_commands::handle_slash_command,
@@ -100,24 +103,45 @@ pub async fn chat_with_single_agent(agent_name: &str, config: &PatternConfig) ->
 
     // Open databases and find agent using shared helpers
     let dbs = get_dbs(config).await?;
-    let db_agent = require_agent_by_name(&dbs.constellation, agent_name).await?;
+    let (agent, ctx) =
+        if let Ok(Some(db_agent)) = get_agent_by_name(&dbs.constellation, agent_name).await {
+            output.status(&format!("Loading agent '{}'...", agent_name.bright_cyan()));
 
-    output.status(&format!("Loading agent '{}'...", agent_name.bright_cyan()));
+            // Create RuntimeContext using shared helper
+            let ctx = create_runtime_context_with_dbs(dbs).await?;
+            // Load the agent
+            let agent = ctx
+                .load_agent(&db_agent.id)
+                .await
+                .map_err(|e| miette::miette!("Failed to load agent '{}': {}", agent_name, e))?;
 
-    // Create RuntimeContext using shared helper
-    let ctx = create_runtime_context_with_dbs(dbs).await?;
+            output.info("  Loaded:", &agent.name().bright_cyan().to_string());
+            output.info(
+                "  Model:",
+                &format!("{}/{}", db_agent.model_provider, db_agent.model_name),
+            );
 
-    // Load the agent
-    let agent = ctx
-        .load_agent(&db_agent.id)
-        .await
-        .map_err(|e| miette::miette!("Failed to load agent '{}': {}", agent_name, e))?;
+            (agent, ctx)
+        } else {
+            output.status(&format!("Creating agent '{}'...", agent_name.bright_cyan()));
 
-    output.info("  Loaded:", &agent.name().bright_cyan().to_string());
-    output.info(
-        "  Model:",
-        &format!("{}/{}", db_agent.model_provider, db_agent.model_name),
-    );
+            let ctx = create_runtime_context_with_dbs(dbs).await?;
+            let agent = ctx.create_agent(&config.agent).await?;
+            (agent, ctx)
+        };
+
+    let file_source = Arc::new(FileSource::with_rules(
+        "docs",
+        "./docs",
+        vec![PermissionRule {
+            pattern: "**.txt".into(),
+            permission: pattern_core::memory::MemoryPermission::ReadWrite,
+            operations_requiring_escalation: vec![],
+        }],
+    ));
+    let file_tool = FileTool::new(agent.runtime().clone(), file_source.clone());
+    ctx.register_block_source(file_source.clone());
+    agent.runtime().tools().register(file_tool);
 
     // Set up readline
     let (mut rl, writer) = Readline::new(format!("{} ", ">".bright_blue())).into_diagnostic()?;

@@ -41,6 +41,7 @@ use crate::realtime::AgentEventSink;
 use crate::runtime::ToolContext;
 use crate::runtime::{AgentRuntime, RuntimeConfig};
 use crate::tool::ToolRegistry;
+use crate::tool::builtin::BuiltinTools;
 
 /// Configuration for RuntimeContext
 #[derive(Debug, Clone)]
@@ -71,7 +72,7 @@ impl Default for RuntimeContextConfig {
 
 /// Handle for a registered stream source
 struct StreamHandle {
-    source: Box<dyn DataStream>,
+    source: Arc<dyn DataStream>,
     /// The broadcast receiver from start() - can be cloned for subscribers
     receiver: Option<broadcast::Receiver<Notification>>,
 }
@@ -87,7 +88,7 @@ impl std::fmt::Debug for StreamHandle {
 
 /// Handle for a registered block source
 struct BlockHandle {
-    source: Box<dyn DataBlock>,
+    source: Arc<dyn DataBlock>,
     /// The broadcast receiver from start_watch() - can be cloned for monitoring
     receiver: Option<broadcast::Receiver<crate::data_source::FileChange>>,
 }
@@ -291,6 +292,9 @@ impl RuntimeContext {
                 .build()?,
         );
 
+        let builtin_tools = BuiltinTools::new(constellation_runtime.clone());
+        builtin_tools.register_all(&tools);
+
         Ok(Self {
             dbs,
             agents: Arc::new(DashMap::new()),
@@ -486,7 +490,7 @@ impl RuntimeContext {
     ///
     /// Stream sources produce events over time (Bluesky firehose, Discord events, etc.)
     /// and are identified by their source_id.
-    pub fn register_stream(&self, source: Box<dyn DataStream>) {
+    pub fn register_stream(&self, source: Arc<dyn DataStream>) {
         let source_id = source.source_id().to_string();
         self.stream_sources.insert(
             source_id,
@@ -501,7 +505,7 @@ impl RuntimeContext {
     ///
     /// Block sources manage document-oriented data (files, configs, etc.)
     /// with Loro-backed versioning and are identified by their source_id.
-    pub fn register_block_source(&self, source: Box<dyn DataBlock>) {
+    pub fn register_block_source(&self, source: Arc<dyn DataBlock>) {
         let source_id = source.source_id().to_string();
         self.block_sources.insert(
             source_id,
@@ -590,7 +594,7 @@ impl RuntimeContext {
     ///
     /// Removes the source and cleans up all agent subscriptions to it.
     /// Returns the source if it existed.
-    pub fn unregister_stream(&self, source_id: &str) -> Option<Box<dyn DataStream>> {
+    pub fn unregister_stream(&self, source_id: &str) -> Option<Arc<dyn DataStream>> {
         // Remove from main registry
         let handle = self.stream_sources.remove(source_id);
 
@@ -606,7 +610,7 @@ impl RuntimeContext {
     ///
     /// Removes the source and cleans up all agent subscriptions and edit subscribers.
     /// Returns the source if it existed.
-    pub fn unregister_block_source(&self, source_id: &str) -> Option<Box<dyn DataBlock>> {
+    pub fn unregister_block_source(&self, source_id: &str) -> Option<Arc<dyn DataBlock>> {
         // Remove from main registry
         let handle = self.block_sources.remove(source_id);
 
@@ -1280,7 +1284,7 @@ impl RuntimeContext {
             filtered
         } else {
             // Use all tools if no filter specified
-            self.tools.clone()
+            Arc::new(self.tools.deep_clone())
         };
 
         // Build runtime config from resolved settings
@@ -1303,36 +1307,48 @@ impl RuntimeContext {
             runtime_config.context_config.activity_entries_limit = limit;
         }
 
-        // Configure response options if temperature or enable_thinking is set
-        // NOTE: ResponseOptions requires ModelInfo, so we create minimal model info.
-        // The actual model info will be updated when the agent retrieves its response options.
-        let needs_response_opts =
-            resolved.temperature.is_some() || resolved.context.enable_thinking.is_some();
+        if runtime_config.default_response_options.is_none() {
+            let models = self.model_provider.list_models().await?;
+            let requested_model = resolved.model_name.clone();
+            let selected_model = if let Some(requested) = models
+                .iter()
+                .find(|m| {
+                    let model_lower = requested_model.to_lowercase();
+                    m.id.to_lowercase().contains(&model_lower)
+                        || m.name.to_lowercase().contains(&model_lower)
+                })
+                .cloned()
+            {
+                requested
+            } else {
+                models
+                    .iter()
+                    .find(|m| {
+                        m.provider.to_lowercase() == "anthropic" && m.id.contains("claude-haiku")
+                    })
+                    .cloned()
+                    .or_else(|| {
+                        models
+                            .iter()
+                            .find(|m| {
+                                m.provider.to_lowercase() == "gemini"
+                                    && m.id.contains("gemini-2.5-flash")
+                            })
+                            .cloned()
+                    })
+                    .or_else(|| models.clone().into_iter().next())
+                    .expect("should have at least ONE usable model")
+            };
+            let model_info = crate::model::defaults::enhance_model_info(selected_model);
+            runtime_config.set_default_options(crate::model::ResponseOptions::new(model_info));
+        }
 
-        if needs_response_opts {
-            // Get or create default response options
-            if runtime_config.default_response_options.is_none() {
-                let model_info = crate::model::ModelInfo {
-                    id: resolved.model_name.clone(),
-                    name: resolved.model_name.clone(),
-                    provider: resolved.model_provider.clone(),
-                    capabilities: vec![],
-                    context_window: 128000, // Reasonable default
-                    max_output_tokens: Some(8192),
-                    cost_per_1k_prompt_tokens: None,
-                    cost_per_1k_completion_tokens: None,
-                };
-                runtime_config.set_default_options(crate::model::ResponseOptions::new(model_info));
+        if let Some(ref mut opts) = runtime_config.default_response_options {
+            if let Some(temp) = resolved.temperature {
+                opts.temperature = Some(temp as f64);
             }
-
-            // Now apply the settings
-            if let Some(ref mut opts) = runtime_config.default_response_options {
-                if let Some(temp) = resolved.temperature {
-                    opts.temperature = Some(temp as f64);
-                }
-                if let Some(enable) = resolved.context.enable_thinking {
-                    opts.capture_reasoning_content = Some(enable);
-                }
+            if let Some(enable) = resolved.context.enable_thinking {
+                opts.capture_reasoning_content = Some(enable);
             }
         }
 
@@ -1342,20 +1358,26 @@ impl RuntimeContext {
             .agent_name(&resolved.name)
             .memory(self.memory.clone())
             .messages(messages)
-            .tools_shared(tools)
+            .tools_shared(tools.clone())
             .model(self.model_provider.clone())
             .dbs(self.dbs.as_ref().clone())
             .tool_rules(resolved.tool_rules.clone())
             .config(runtime_config)
             .build()?;
 
+        let runtime = Arc::new(runtime);
+
+        // ensure we fall back to having actual tools
+        if tools.list_tools().is_empty() {
+            let builtin_tools = BuiltinTools::new(runtime.clone());
+            builtin_tools.register_all(&tools);
+        }
+
         // Build agent
-        // NOTE: system_prompt is passed as base_instructions to the agent, which
-        // then passes it through to ContextBuilder during prepare_request().
         let mut agent_builder = DatabaseAgent::builder()
             .id(agent_id_typed)
             .name(&resolved.name)
-            .runtime(Arc::new(runtime))
+            .runtime(runtime)
             .model(self.model_provider.clone())
             .model_id(&resolved.model_name)
             .heartbeat_sender(self.heartbeat_sender());

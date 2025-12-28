@@ -321,6 +321,7 @@ impl DataBlock for FileSource {
                 .update_block_text(&owner_str, &label, &content)
                 .await
                 .map_err(|e| memory_err(source_id, "load", e))?;
+
             existing.id
         } else {
             // Create new block
@@ -337,6 +338,10 @@ impl DataBlock for FileSource {
                 .map_err(|e| memory_err(source_id, "load", e))?;
             memory
                 .update_block_text(&owner_str, &label, &content)
+                .await
+                .map_err(|e| memory_err(source_id, "load", e))?;
+            memory
+                .set_block_pinned(&owner_str, &label, true)
                 .await
                 .map_err(|e| memory_err(source_id, "load", e))?;
             id
@@ -413,6 +418,10 @@ impl DataBlock for FileSource {
                 BlockSchema::Text,
                 1024 * 1024, // 1MB char limit
             )
+            .await
+            .map_err(|e| memory_err(source_id, "create", e))?;
+        memory
+            .set_block_pinned(&owner_str, &label, true)
             .await
             .map_err(|e| memory_err(source_id, "create", e))?;
 

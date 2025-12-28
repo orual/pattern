@@ -47,7 +47,7 @@ impl OAuthModelProvider {
                 .map(|e| e.to_string())
                 .unwrap_or_else(|| "never".to_string());
 
-            tracing::debug!(
+            tracing::trace!(
                 "Found OAuth token for provider '{}', expires at: {}, needs refresh: {}",
                 provider,
                 expires_display,
@@ -82,7 +82,7 @@ impl OAuthModelProvider {
 
                 if let Some(fresh_token) = token_check {
                     if !fresh_token.needs_refresh() {
-                        tracing::info!("Token was refreshed by another thread, using fresh token");
+                        tracing::debug!("Token was refreshed by another thread, using fresh token");
                         return Ok(Some(fresh_token));
                     }
                     // Update our local token in case it changed
@@ -94,7 +94,7 @@ impl OAuthModelProvider {
                     .map(|e| e.to_string())
                     .unwrap_or_else(|| "never".to_string());
 
-                tracing::info!(
+                tracing::debug!(
                     "OAuth token for {} needs refresh (expires: {}), attempting refresh...",
                     provider,
                     expires_display
@@ -132,7 +132,7 @@ impl OAuthModelProvider {
                         let new_expires_at = Utc::now()
                             + chrono::Duration::seconds(token_response.expires_in as i64);
 
-                        tracing::info!(
+                        tracing::debug!(
                             "OAuth token refresh successful! New token expires at: {} ({} seconds from now)",
                             new_expires_at,
                             token_response.expires_in

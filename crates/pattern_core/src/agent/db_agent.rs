@@ -269,7 +269,7 @@ impl Agent for DatabaseAgent {
                 // Save metadata for final Complete event
                 last_response_metadata = Some(response.metadata.clone());
 
-                // 4. Stream response events (text, reasoning)
+                // 4. Stream response events (text, reasoning, tool calls)
                 for content in &response.content {
                     match content {
                         crate::messages::MessageContent::Text(text) => {
@@ -285,6 +285,48 @@ impl Agent for DatabaseAgent {
                             })
                             .await;
                         }
+                        crate::messages::MessageContent::Blocks(blocks) => {
+                            // Stream text/thinking chunks from blocks
+                            let mut block_tool_calls = Vec::new();
+                            for block in blocks {
+                                match block {
+                                    crate::messages::ContentBlock::Text { text, .. } => {
+                                        send_event(ResponseEvent::TextChunk {
+                                            text: text.clone(),
+                                            is_final: false,
+                                        })
+                                        .await;
+                                    }
+                                    crate::messages::ContentBlock::Thinking { text, .. } => {
+                                        send_event(ResponseEvent::ReasoningChunk {
+                                            text: text.clone(),
+                                            is_final: false,
+                                        })
+                                        .await;
+                                    }
+                                    crate::messages::ContentBlock::ToolUse {
+                                        id,
+                                        name,
+                                        input,
+                                        ..
+                                    } => {
+                                        block_tool_calls.push(crate::messages::ToolCall {
+                                            call_id: id.clone(),
+                                            fn_name: name.clone(),
+                                            fn_arguments: input.clone(),
+                                        });
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            // Emit ToolCalls event if we found any in blocks
+                            if !block_tool_calls.is_empty() {
+                                send_event(ResponseEvent::ToolCalls {
+                                    calls: block_tool_calls,
+                                })
+                                .await;
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -299,14 +341,20 @@ impl Agent for DatabaseAgent {
                 }
 
                 // 5. Store the response message(s)
-                let response_messages = crate::messages::Message::from_response(
+                let mut response_messages = crate::messages::Message::from_response(
                     &response,
                     &agent_id,
                     Some(batch_id),
                     Some(batch_type),
                 );
 
-                for msg in &response_messages {
+                for msg in &mut response_messages {
+                    // Assign sequence number if not set
+                    if msg.sequence_num.is_none() {
+                        msg.sequence_num = Some(current_sequence_num);
+                        current_sequence_num += 1;
+                    }
+
                     if let Err(e) = agent_self.runtime.store_message(msg).await {
                         let error_msg = format!("Failed to store message: {}", e);
                         // Message storage failures are typically context/build related
@@ -338,18 +386,36 @@ impl Agent for DatabaseAgent {
                 }
 
                 // 6. Extract and execute tool calls
-                let tool_calls: Vec<crate::messages::ToolCall> = response
-                    .content
-                    .iter()
-                    .filter_map(|c| {
-                        if let crate::messages::MessageContent::ToolCalls(calls) = c {
-                            Some(calls.clone())
-                        } else {
-                            None
+                // Tool calls can come in two formats:
+                // 1. MessageContent::ToolCalls - direct tool call list
+                // 2. MessageContent::Blocks with ContentBlock::ToolUse - Anthropic's native format
+                let mut tool_calls: Vec<crate::messages::ToolCall> = Vec::new();
+
+                for content in &response.content {
+                    match content {
+                        crate::messages::MessageContent::ToolCalls(calls) => {
+                            tool_calls.extend(calls.clone());
                         }
-                    })
-                    .flatten()
-                    .collect();
+                        crate::messages::MessageContent::Blocks(blocks) => {
+                            for block in blocks {
+                                if let crate::messages::ContentBlock::ToolUse {
+                                    id,
+                                    name,
+                                    input,
+                                    ..
+                                } = block
+                                {
+                                    tool_calls.push(crate::messages::ToolCall {
+                                        call_id: id.clone(),
+                                        fn_name: name.clone(),
+                                        fn_arguments: input.clone(),
+                                    });
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
 
                 let mut needs_continuation = false;
 
@@ -358,6 +424,14 @@ impl Agent for DatabaseAgent {
 
                     // Execute each tool call
                     for call in &tool_calls {
+                        // Emit ToolCallStarted event
+                        send_event(ResponseEvent::ToolCallStarted {
+                            call_id: call.call_id.clone(),
+                            fn_name: call.fn_name.clone(),
+                            args: call.fn_arguments.clone(),
+                        })
+                        .await;
+
                         // Extract heartbeat request from tool arguments
                         let explicit_heartbeat =
                             crate::context::heartbeat::check_heartbeat_request(&call.fn_arguments);
@@ -385,6 +459,12 @@ impl Agent for DatabaseAgent {
                                     heartbeat_tool_info =
                                         Some((call.fn_name.clone(), call.call_id.clone()));
                                 }
+                                // Emit ToolCallCompleted event with success
+                                send_event(ResponseEvent::ToolCallCompleted {
+                                    call_id: call.call_id.clone(),
+                                    result: Ok(result.response.content.clone()),
+                                })
+                                .await;
                                 tool_responses.push(result.response);
                             }
                             Err(e) => {
@@ -440,17 +520,31 @@ impl Agent for DatabaseAgent {
 
                                         // Mark constraints as done and add original error as response
                                         agent_self.runtime.mark_start_constraints_done(&mut process_state);
+                                        let error_content = format!("Error: {}", e);
+                                        // Emit ToolCallCompleted with error
+                                        send_event(ResponseEvent::ToolCallCompleted {
+                                            call_id: call.call_id.clone(),
+                                            result: Err(error_content.clone()),
+                                        })
+                                        .await;
                                         tool_responses.push(crate::messages::ToolResponse {
                                             call_id: call.call_id.clone(),
-                                            content: format!("Error: {}", e),
+                                            content: error_content,
                                             is_error: Some(true),
                                         });
                                         needs_continuation = true;
                                     } else {
                                         // Attempt 1 or 2: Return error as tool response
+                                        let error_content = format!("Error: {}", e);
+                                        // Emit ToolCallCompleted with error
+                                        send_event(ResponseEvent::ToolCallCompleted {
+                                            call_id: call.call_id.clone(),
+                                            result: Err(error_content.clone()),
+                                        })
+                                        .await;
                                         tool_responses.push(crate::messages::ToolResponse {
                                             call_id: call.call_id.clone(),
-                                            content: format!("Error: {}", e),
+                                            content: error_content,
                                             is_error: Some(true),
                                         });
                                         needs_continuation = true;
@@ -479,9 +573,16 @@ impl Agent for DatabaseAgent {
                                     }
                                 } else {
                                     // Other execution errors: convert to error response
+                                    let error_content = format!("Execution error: {}", e);
+                                    // Emit ToolCallCompleted with error
+                                    send_event(ResponseEvent::ToolCallCompleted {
+                                        call_id: call.call_id.clone(),
+                                        result: Err(error_content.clone()),
+                                    })
+                                    .await;
                                     tool_responses.push(crate::messages::ToolResponse {
                                         call_id: call.call_id.clone(),
-                                        content: format!("Execution error: {}", e),
+                                        content: error_content,
                                         is_error: Some(true),
                                     });
                                 }
