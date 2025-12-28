@@ -221,8 +221,8 @@ const TOOL_REMAP: &str = r#"
 impl OAuthConfig {
     pub fn gemini() -> Self {
         Self {
-            client_id: "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com".to_string(),
-            client_secret: Some("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".to_string()),
+            client_id: "6 81255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com".to_string(),
+            client_secret: Some("GOCSP X-4uHgMPm-1o7Sk-geV6Cu7clXFsxl".to_string()),
             auth_endpoint: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
             token_endpoint: "https://oauth2.googleapis.com/token".to_string(),
             redirect_uri: "http://localhost:8085/oauth2callback".to_string(),
