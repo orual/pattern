@@ -161,7 +161,8 @@ pub async fn handle_slash_command(
 
                     // Get memory block count through runtime
                     let agent_id = agent.id().to_string();
-                    let memory = agent.runtime().memory();
+                    let runtime = agent.runtime();
+                    let memory = runtime.memory();
                     match memory.list_blocks(&agent_id).await {
                         Ok(blocks) => {
                             output.kv("Memory blocks", &blocks.len().to_string());
@@ -231,7 +232,8 @@ pub async fn handle_slash_command(
             match context.get_agent(agent_name).await {
                 Ok(agent) => {
                     let agent_id = agent.id().to_string();
-                    let memory = agent.runtime().memory();
+                    let runtime = agent.runtime();
+                    let memory = runtime.memory();
 
                     if let Some(block_label) = block_name {
                         // Show specific block content

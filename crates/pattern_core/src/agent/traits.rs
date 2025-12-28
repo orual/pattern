@@ -32,7 +32,10 @@ pub trait Agent: Send + Sync + Debug {
     /// - `tools()` - ToolRegistry access
     /// - `router()` - Message routing
     /// - `prepare_request()` - Build model requests
-    fn runtime(&self) -> &AgentRuntime;
+    ///
+    /// Returns Arc to allow callers to use the runtime as Arc<dyn ToolContext>
+    /// for data source operations.
+    fn runtime(&self) -> Arc<AgentRuntime>;
 
     /// Process a message, streaming response events
     ///

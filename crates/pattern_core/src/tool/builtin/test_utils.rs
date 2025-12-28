@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 use crate::ModelProvider;
+use crate::data_source::SourceManager;
 use crate::db::ConstellationDatabases;
 use crate::memory::{MemoryCache, MemoryResult, MemorySearchResult, MemoryStore, SearchOptions};
 use crate::permission::PermissionBroker;
@@ -137,5 +138,10 @@ impl ToolContext for MockToolContext {
             }
             SearchScope::Constellation => self.memory.search_all(query, options).await,
         }
+    }
+
+    fn sources(&self) -> Option<Arc<dyn SourceManager>> {
+        // Mock doesn't have source management
+        None
     }
 }

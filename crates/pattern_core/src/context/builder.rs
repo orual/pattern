@@ -35,6 +35,8 @@ pub struct ContextBuilder<'a> {
     base_instructions: Option<String>,
     tool_rules: Vec<ToolRule>,
     activity_renderer: Option<&'a ActivityRenderer>,
+    /// Block IDs to include for this batch, even if unpinned
+    batch_block_ids: Option<Vec<String>>,
 }
 
 impl<'a> ContextBuilder<'a> {
@@ -57,6 +59,7 @@ impl<'a> ContextBuilder<'a> {
             base_instructions: None,
             tool_rules: Vec::new(),
             activity_renderer: None,
+            batch_block_ids: None,
         }
     }
 
@@ -153,6 +156,19 @@ impl<'a> ContextBuilder<'a> {
         self
     }
 
+    /// Set block IDs to keep loaded for this batch (even if unpinned)
+    ///
+    /// This allows ephemeral (unpinned) Working blocks to be included in context
+    /// for specific notification batches. When a DataStream sends a Notification
+    /// with block_refs, those blocks should be loaded even if they're not pinned.
+    ///
+    /// # Arguments
+    /// * `block_ids` - IDs of blocks to include regardless of pinned status
+    pub fn with_batch_blocks(mut self, block_ids: Vec<String>) -> Self {
+        self.batch_block_ids = Some(block_ids);
+        self
+    }
+
     /// Build the final Request with system prompt, messages, and tools
     ///
     /// # Returns
@@ -230,6 +246,19 @@ impl<'a> ContextBuilder<'a> {
                 data_type: "memory blocks".to_string(),
                 details: format!("Failed to list Working blocks: {}", e),
             })?;
+
+        // Filter Working blocks: only include pinned blocks OR blocks in batch_block_ids
+        let owned_working_blocks: Vec<_> = owned_working_blocks
+            .into_iter()
+            .filter(|b| {
+                b.pinned
+                    || self
+                        .batch_block_ids
+                        .as_ref()
+                        .map(|ids| ids.contains(&b.id))
+                        .unwrap_or(false)
+            })
+            .collect();
 
         // Get shared blocks
         let shared_blocks = self
@@ -499,9 +528,29 @@ mod tests {
     use chrono::Utc;
     use serde_json::Value as JsonValue;
 
-    // Mock MemoryStore for testing
+    /// Configurable mock MemoryStore for testing different block configurations
     #[derive(Debug)]
-    struct MockMemoryStore;
+    struct MockMemoryStore {
+        /// If true, Working blocks are pinned (default behavior)
+        /// If false, returns a mix of pinned and unpinned Working blocks
+        working_blocks_pinned: bool,
+    }
+
+    impl MockMemoryStore {
+        /// Create a new MockMemoryStore with all Working blocks pinned (default)
+        fn new() -> Self {
+            Self {
+                working_blocks_pinned: true,
+            }
+        }
+
+        /// Create a MockMemoryStore with unpinned Working blocks for testing batch_block_ids
+        fn with_unpinned_working_blocks() -> Self {
+            Self {
+                working_blocks_pinned: false,
+            }
+        }
+    }
 
     #[async_trait]
     impl MemoryStore for MockMemoryStore {
@@ -557,19 +606,70 @@ mod tests {
                     created_at: Utc::now(),
                     updated_at: Utc::now(),
                 }]),
-                BlockType::Working => Ok(vec![BlockMetadata {
-                    id: "working-1".to_string(),
-                    agent_id: "test-agent".to_string(),
-                    label: "working_memory".to_string(),
-                    description: "Working context".to_string(),
-                    block_type: BlockType::Working,
-                    schema: BlockSchema::Text,
-                    char_limit: 2000,
-                    permission: pattern_db::models::MemoryPermission::ReadWrite,
-                    pinned: false,
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
-                }]),
+                BlockType::Working => {
+                    if self.working_blocks_pinned {
+                        // Default: single pinned Working block
+                        Ok(vec![BlockMetadata {
+                            id: "working-1".to_string(),
+                            agent_id: "test-agent".to_string(),
+                            label: "working_memory".to_string(),
+                            description: "Working context".to_string(),
+                            block_type: BlockType::Working,
+                            schema: BlockSchema::Text,
+                            char_limit: 2000,
+                            permission: pattern_db::models::MemoryPermission::ReadWrite,
+                            pinned: true,
+                            created_at: Utc::now(),
+                            updated_at: Utc::now(),
+                        }])
+                    } else {
+                        // Unpinned mode: mix of pinned and unpinned blocks for testing filtering
+                        Ok(vec![
+                            // Unpinned block - should be excluded by default
+                            BlockMetadata {
+                                id: "ephemeral-1".to_string(),
+                                agent_id: "test-agent".to_string(),
+                                label: "ephemeral_context".to_string(),
+                                description: "Ephemeral context block".to_string(),
+                                block_type: BlockType::Working,
+                                schema: BlockSchema::Text,
+                                char_limit: 2000,
+                                permission: pattern_db::models::MemoryPermission::ReadWrite,
+                                pinned: false,
+                                created_at: Utc::now(),
+                                updated_at: Utc::now(),
+                            },
+                            // Another unpinned block
+                            BlockMetadata {
+                                id: "ephemeral-2".to_string(),
+                                agent_id: "test-agent".to_string(),
+                                label: "user_profile".to_string(),
+                                description: "User profile block".to_string(),
+                                block_type: BlockType::Working,
+                                schema: BlockSchema::Text,
+                                char_limit: 2000,
+                                permission: pattern_db::models::MemoryPermission::ReadWrite,
+                                pinned: false,
+                                created_at: Utc::now(),
+                                updated_at: Utc::now(),
+                            },
+                            // Pinned block - should always be included
+                            BlockMetadata {
+                                id: "pinned-1".to_string(),
+                                agent_id: "test-agent".to_string(),
+                                label: "pinned_config".to_string(),
+                                description: "Pinned configuration".to_string(),
+                                block_type: BlockType::Working,
+                                schema: BlockSchema::Text,
+                                char_limit: 2000,
+                                permission: pattern_db::models::MemoryPermission::ReadWrite,
+                                pinned: true,
+                                created_at: Utc::now(),
+                                updated_at: Utc::now(),
+                            },
+                        ])
+                    }
+                }
                 _ => Ok(Vec::new()),
             }
         }
@@ -676,11 +776,20 @@ mod tests {
         ) -> MemoryResult<Option<StructuredDocument>> {
             Ok(None)
         }
+
+        async fn set_block_pinned(
+            &self,
+            _agent_id: &str,
+            _label: &str,
+            _pinned: bool,
+        ) -> MemoryResult<()> {
+            Ok(())
+        }
     }
 
     #[tokio::test]
     async fn test_builder_basic() {
-        let memory = MockMemoryStore;
+        let memory = MockMemoryStore::new();
         let config = ContextConfig::default();
 
         let builder = ContextBuilder::new(&memory, &config).for_agent("test-agent");
@@ -701,7 +810,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_builder_requires_agent_id() {
-        let memory = MockMemoryStore;
+        let memory = MockMemoryStore::new();
         let config = ContextConfig::default();
 
         let builder = ContextBuilder::new(&memory, &config);
@@ -713,7 +822,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_builder_with_descriptions() {
-        let memory = MockMemoryStore;
+        let memory = MockMemoryStore::new();
         let mut config = ContextConfig::default();
         config.include_descriptions = true;
 
@@ -729,7 +838,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_builder_without_descriptions() {
-        let memory = MockMemoryStore;
+        let memory = MockMemoryStore::new();
         let mut config = ContextConfig::default();
         config.include_descriptions = false;
 
@@ -747,7 +856,7 @@ mod tests {
     async fn test_builder_with_model_info() {
         use crate::model::{ModelCapability, ModelInfo};
 
-        let memory = MockMemoryStore;
+        let memory = MockMemoryStore::new();
         let config = ContextConfig::default();
 
         let model_info = ModelInfo {
@@ -775,7 +884,7 @@ mod tests {
     async fn test_gemini_message_validation() {
         use crate::model::ModelInfo;
 
-        let memory = MockMemoryStore;
+        let memory = MockMemoryStore::new();
         let config = ContextConfig::default();
 
         let model_info = ModelInfo {
@@ -847,7 +956,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_builder_with_base_instructions() {
-        let memory = MockMemoryStore;
+        let memory = MockMemoryStore::new();
         let config = ContextConfig::default();
 
         let base_instr = "You are a helpful assistant specialized in ADHD support.";
@@ -874,7 +983,7 @@ mod tests {
     async fn test_builder_with_tool_rules() {
         use crate::agent::tool_rules::ToolRule;
 
-        let memory = MockMemoryStore;
+        let memory = MockMemoryStore::new();
         let config = ContextConfig::default();
 
         // Create some test tool rules
@@ -908,7 +1017,7 @@ mod tests {
     async fn test_builder_with_base_instructions_and_tool_rules() {
         use crate::agent::tool_rules::ToolRule;
 
-        let memory = MockMemoryStore;
+        let memory = MockMemoryStore::new();
         let config = ContextConfig::default();
 
         let base_instr = "You are a test agent.";
@@ -941,7 +1050,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_builder_without_base_instructions_or_tool_rules() {
-        let memory = MockMemoryStore;
+        let memory = MockMemoryStore::new();
         let config = ContextConfig::default();
 
         let builder = ContextBuilder::new(&memory, &config).for_agent("test-agent");
@@ -957,5 +1066,154 @@ mod tests {
 
         // Should not have base instructions or tool rules
         assert!(!system.iter().any(|s| s.contains("# Tool Execution Rules")));
+    }
+
+    // ==================== Unpinned Block Filtering Tests ====================
+
+    #[tokio::test]
+    async fn test_unpinned_blocks_excluded_by_default() {
+        let memory = MockMemoryStore::with_unpinned_working_blocks();
+        let config = ContextConfig::default();
+
+        let builder = ContextBuilder::new(&memory, &config).for_agent("test-agent");
+
+        let request = builder.build().await.unwrap();
+
+        let system = request.system.unwrap();
+
+        // Should have: base_instructions, core_memory, pinned_config
+        // Should NOT have: ephemeral_context, user_profile (unpinned)
+
+        // Verify pinned_config is included
+        assert!(
+            system.iter().any(|s| s.contains("<block:pinned_config")),
+            "Pinned Working block should be included"
+        );
+
+        // Verify unpinned blocks are excluded
+        assert!(
+            !system
+                .iter()
+                .any(|s| s.contains("<block:ephemeral_context")),
+            "Unpinned block 'ephemeral_context' should be excluded by default"
+        );
+        assert!(
+            !system.iter().any(|s| s.contains("<block:user_profile")),
+            "Unpinned block 'user_profile' should be excluded by default"
+        );
+
+        // Verify core_memory is still included (always pinned)
+        assert!(
+            system.iter().any(|s| s.contains("<block:core_memory")),
+            "Core memory should always be included"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unpinned_blocks_included_with_batch_block_ids() {
+        let memory = MockMemoryStore::with_unpinned_working_blocks();
+        let config = ContextConfig::default();
+
+        // Include ephemeral-1 in batch_block_ids, but not ephemeral-2
+        let builder = ContextBuilder::new(&memory, &config)
+            .for_agent("test-agent")
+            .with_batch_blocks(vec!["ephemeral-1".to_string()]);
+
+        let request = builder.build().await.unwrap();
+
+        let system = request.system.unwrap();
+
+        // Should have: base_instructions, core_memory, ephemeral_context (via batch_block_ids), pinned_config
+        // Should NOT have: user_profile (unpinned and not in batch_block_ids)
+
+        // Verify ephemeral_context is now included (its ID is in batch_block_ids)
+        assert!(
+            system
+                .iter()
+                .any(|s| s.contains("<block:ephemeral_context")),
+            "Unpinned block 'ephemeral_context' should be included when its ID is in batch_block_ids"
+        );
+
+        // Verify user_profile is still excluded (not in batch_block_ids)
+        assert!(
+            !system.iter().any(|s| s.contains("<block:user_profile")),
+            "Unpinned block 'user_profile' should still be excluded (not in batch_block_ids)"
+        );
+
+        // Verify pinned_config is still included (always included because pinned)
+        assert!(
+            system.iter().any(|s| s.contains("<block:pinned_config")),
+            "Pinned Working block should always be included"
+        );
+
+        // Verify core_memory is still included
+        assert!(
+            system.iter().any(|s| s.contains("<block:core_memory")),
+            "Core memory should always be included"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_batch_block_ids_with_multiple_blocks() {
+        let memory = MockMemoryStore::with_unpinned_working_blocks();
+        let config = ContextConfig::default();
+
+        // Include both unpinned blocks
+        let builder = ContextBuilder::new(&memory, &config)
+            .for_agent("test-agent")
+            .with_batch_blocks(vec!["ephemeral-1".to_string(), "ephemeral-2".to_string()]);
+
+        let request = builder.build().await.unwrap();
+
+        let system = request.system.unwrap();
+
+        // Both unpinned blocks should now be included
+        assert!(
+            system
+                .iter()
+                .any(|s| s.contains("<block:ephemeral_context")),
+            "Unpinned block 'ephemeral_context' should be included"
+        );
+        assert!(
+            system.iter().any(|s| s.contains("<block:user_profile")),
+            "Unpinned block 'user_profile' should be included"
+        );
+        assert!(
+            system.iter().any(|s| s.contains("<block:pinned_config")),
+            "Pinned block should still be included"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_batch_block_ids_with_nonexistent_id() {
+        let memory = MockMemoryStore::with_unpinned_working_blocks();
+        let config = ContextConfig::default();
+
+        // Include an ID that doesn't match any block
+        let builder = ContextBuilder::new(&memory, &config)
+            .for_agent("test-agent")
+            .with_batch_blocks(vec!["nonexistent-block".to_string()]);
+
+        let request = builder.build().await.unwrap();
+
+        let system = request.system.unwrap();
+
+        // Unpinned blocks should still be excluded (nonexistent ID doesn't match)
+        assert!(
+            !system
+                .iter()
+                .any(|s| s.contains("<block:ephemeral_context")),
+            "Unpinned blocks should still be excluded with non-matching batch_block_ids"
+        );
+        assert!(
+            !system.iter().any(|s| s.contains("<block:user_profile")),
+            "Unpinned blocks should still be excluded with non-matching batch_block_ids"
+        );
+
+        // Pinned blocks should still be included
+        assert!(
+            system.iter().any(|s| s.contains("<block:pinned_config")),
+            "Pinned block should still be included"
+        );
     }
 }

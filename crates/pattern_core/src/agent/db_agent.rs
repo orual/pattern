@@ -74,8 +74,8 @@ impl Agent for DatabaseAgent {
         &self.name
     }
 
-    fn runtime(&self) -> &AgentRuntime {
-        &self.runtime
+    fn runtime(&self) -> Arc<AgentRuntime> {
+        self.runtime.clone()
     }
 
     async fn process(
@@ -1468,6 +1468,15 @@ mod tests {
             _label: &str,
         ) -> MemoryResult<Option<StructuredDocument>> {
             Ok(None)
+        }
+
+        async fn set_block_pinned(
+            &self,
+            _agent_id: &str,
+            _label: &str,
+            _pinned: bool,
+        ) -> MemoryResult<()> {
+            Ok(())
         }
     }
 

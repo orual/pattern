@@ -148,6 +148,15 @@ pub trait MemoryStore: Send + Sync + fmt::Debug {
         owner_agent_id: &str,
         label: &str,
     ) -> MemoryResult<Option<StructuredDocument>>;
+
+    // ========== Block Configuration ==========
+
+    /// Set the pinned flag on a block
+    ///
+    /// Pinned blocks are always loaded into agent context while subscribed.
+    /// Unpinned (ephemeral) blocks only load when referenced by a notification.
+    async fn set_block_pinned(&self, agent_id: &str, label: &str, pinned: bool)
+    -> MemoryResult<()>;
 }
 
 /// Block metadata (without loading the full document)

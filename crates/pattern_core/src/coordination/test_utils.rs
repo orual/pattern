@@ -22,7 +22,7 @@ pub(crate) mod test {
     pub struct TestAgent {
         pub id: AgentId,
         pub name: String,
-        runtime: AgentRuntime,
+        runtime: Arc<AgentRuntime>,
         state: std::sync::RwLock<AgentState>,
     }
 
@@ -51,8 +51,8 @@ pub(crate) mod test {
             &self.name
         }
 
-        fn runtime(&self) -> &AgentRuntime {
-            &self.runtime
+        fn runtime(&self) -> Arc<AgentRuntime> {
+            self.runtime.clone()
         }
 
         async fn process(
@@ -96,7 +96,7 @@ pub(crate) mod test {
         TestAgent {
             id,
             name: name.to_string(),
-            runtime,
+            runtime: Arc::new(runtime),
             state: std::sync::RwLock::new(AgentState::Ready),
         }
     }

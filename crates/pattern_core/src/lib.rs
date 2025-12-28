@@ -8,7 +8,7 @@ pub mod agent;
 pub mod config;
 pub mod context;
 pub mod coordination;
-//pub mod data_source;
+pub mod data_source;
 pub mod db;
 pub mod embeddings;
 pub mod error;
@@ -49,6 +49,38 @@ pub use model::ModelCapability;
 pub use model::ModelProvider;
 pub use runtime::{AgentRuntime, RuntimeBuilder, RuntimeConfig};
 pub use tool::{AiTool, DynamicTool, ToolRegistry, ToolResult};
+
+// Data source types
+pub use data_source::{
+    // Helper utilities
+    BlockBuilder,
+    // Manager types
+    BlockEdit,
+    // Core reference types
+    BlockRef,
+    // Schema and status types
+    BlockSchemaSpec,
+    BlockSourceInfo,
+    BlockSourceStatus,
+    // Block source types
+    ConflictResolution,
+    // Core traits
+    DataBlock,
+    DataStream,
+    EditFeedback,
+    EphemeralBlockCache,
+    FileChange,
+    FileChangeType,
+    Notification,
+    NotificationBuilder,
+    PermissionRule,
+    ReconcileResult,
+    SourceManager,
+    StreamCursor,
+    StreamSourceInfo,
+    StreamStatus,
+    VersionInfo,
+};
 /// Re-export commonly used types
 pub mod prelude {
     pub use crate::{

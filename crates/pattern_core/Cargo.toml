@@ -85,6 +85,9 @@ notify = { version = "7.0", optional = true }
 hickory-resolver = "0.24"
 jacquard = "0.9"
 
+# Glob pattern matching
+globset = "0.4"
+
 # Web tool dependencies
 html2md = "0.2"
 scraper = "0.22"

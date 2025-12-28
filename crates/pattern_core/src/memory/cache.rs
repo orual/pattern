@@ -1005,6 +1005,36 @@ impl MemoryStore for MemoryCache {
             None => Ok(None),
         }
     }
+
+    async fn set_block_pinned(
+        &self,
+        agent_id: &str,
+        label: &str,
+        pinned: bool,
+    ) -> MemoryResult<()> {
+        // Get block ID from DB
+        let block =
+            pattern_db::queries::get_block_by_label(self.dbs.constellation.pool(), agent_id, label)
+                .await?;
+
+        let block = block.ok_or_else(|| MemoryError::NotFound {
+            agent_id: agent_id.to_string(),
+            label: label.to_string(),
+        })?;
+
+        // Update in database
+        pattern_db::queries::update_block_pinned(self.dbs.constellation.pool(), &block.id, pinned)
+            .await?;
+
+        // Update in cache if loaded
+        if let Some(mut cached) = self.blocks.get_mut(&block.id) {
+            // Note: CachedBlock doesn't have a pinned field, so we only update the DB.
+            // The metadata will be refreshed on next get_block_metadata call.
+            cached.last_accessed = Utc::now();
+        }
+
+        Ok(())
+    }
 }
 
 // Additional methods with WriteOptions support

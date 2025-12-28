@@ -8,10 +8,13 @@
 //!
 //! Uses DashMap for the agent registry to avoid async locks on access.
 
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use async_trait::async_trait;
 use dashmap::DashMap;
 use pattern_db::ConstellationDb;
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, broadcast};
 use tokio::task::JoinHandle;
 
 use crate::db::ConstellationDatabases;
@@ -23,6 +26,10 @@ use crate::config::{
 };
 use crate::context::heartbeat::{HeartbeatReceiver, HeartbeatSender, heartbeat_channel};
 use crate::context::{ActivityConfig, ActivityLogger, ActivityRenderer};
+use crate::data_source::{
+    BlockEdit, BlockRef, BlockSourceInfo, DataBlock, DataStream, EditFeedback, Notification,
+    ReconcileResult, SourceManager, StreamCursor, StreamSourceInfo, VersionInfo,
+};
 use crate::embeddings::EmbeddingProvider;
 use crate::error::{ConfigError, CoreError, Result};
 use crate::id::AgentId;
@@ -31,6 +38,7 @@ use crate::messages::MessageStore;
 use crate::model::ModelProvider;
 use crate::queue::{QueueConfig, QueueProcessor};
 use crate::realtime::AgentEventSink;
+use crate::runtime::ToolContext;
 use crate::runtime::{AgentRuntime, RuntimeConfig};
 use crate::tool::ToolRegistry;
 
@@ -58,6 +66,38 @@ impl Default for RuntimeContextConfig {
             auto_start_heartbeat: false,
             activity_config: ActivityConfig::default(),
         }
+    }
+}
+
+/// Handle for a registered stream source
+struct StreamHandle {
+    source: Box<dyn DataStream>,
+    /// The broadcast receiver from start() - can be cloned for subscribers
+    receiver: Option<broadcast::Receiver<Notification>>,
+}
+
+impl std::fmt::Debug for StreamHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamHandle")
+            .field("source_id", &self.source.source_id())
+            .field("has_receiver", &self.receiver.is_some())
+            .finish()
+    }
+}
+
+/// Handle for a registered block source
+struct BlockHandle {
+    source: Box<dyn DataBlock>,
+    /// The broadcast receiver from start_watch() - can be cloned for monitoring
+    receiver: Option<broadcast::Receiver<crate::data_source::FileChange>>,
+}
+
+impl std::fmt::Debug for BlockHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BlockHandle")
+            .field("source_id", &self.source.source_id())
+            .field("has_receiver", &self.receiver.is_some())
+            .finish()
     }
 }
 
@@ -140,6 +180,28 @@ pub struct RuntimeContext {
 
     /// Configuration
     config: RuntimeContextConfig,
+
+    // ============================================================================
+    // Data Source Storage
+    // ============================================================================
+    /// Registered stream sources
+    stream_sources: Arc<DashMap<String, StreamHandle>>,
+
+    /// Registered block sources
+    block_sources: Arc<DashMap<String, BlockHandle>>,
+
+    /// Agent stream subscriptions: agent_id -> source_ids
+    stream_subscriptions: Arc<DashMap<String, Vec<String>>>,
+
+    /// Agent block subscriptions: agent_id -> source_ids
+    block_subscriptions: Arc<DashMap<String, Vec<String>>>,
+
+    /// Block edit subscribers: label_pattern -> source_ids
+    block_edit_subscribers: Arc<DashMap<String, Vec<String>>>,
+
+    /// Constellation-scoped runtime for operations without a specific agent owner.
+    /// Used for delete_block, reconcile_blocks, and other constellation-level ops.
+    constellation_runtime: Arc<AgentRuntime>,
 }
 
 impl std::fmt::Debug for RuntimeContext {
@@ -206,10 +268,28 @@ impl RuntimeContext {
         default_config: AgentConfig,
         config: RuntimeContextConfig,
     ) -> Result<Self> {
+        use crate::memory::CONSTELLATION_OWNER;
+        use crate::messages::MessageStore;
+
         let (heartbeat_tx, heartbeat_rx) = heartbeat_channel();
 
         // Create activity renderer with config
         let activity_renderer = ActivityRenderer::new(dbs.clone(), config.activity_config.clone());
+
+        // Create constellation-scoped runtime for operations without a specific agent
+        let constellation_messages =
+            MessageStore::new(dbs.constellation.pool().clone(), CONSTELLATION_OWNER);
+        let constellation_runtime = Arc::new(
+            AgentRuntime::builder()
+                .agent_id(CONSTELLATION_OWNER)
+                .agent_name("Constellation")
+                .memory(memory.clone())
+                .messages(constellation_messages)
+                .tools_shared(tools.clone())
+                .dbs((*dbs).clone())
+                .model(model_provider.clone())
+                .build()?,
+        );
 
         Ok(Self {
             dbs,
@@ -225,6 +305,13 @@ impl RuntimeContext {
             event_sinks: RwLock::new(Vec::new()),
             activity_renderer,
             config,
+            // Data source storage
+            stream_sources: Arc::new(DashMap::new()),
+            block_sources: Arc::new(DashMap::new()),
+            stream_subscriptions: Arc::new(DashMap::new()),
+            block_subscriptions: Arc::new(DashMap::new()),
+            block_edit_subscribers: Arc::new(DashMap::new()),
+            constellation_runtime,
         })
     }
 
@@ -389,6 +476,274 @@ impl RuntimeContext {
     /// Get all event sinks
     pub async fn event_sinks(&self) -> Vec<Arc<dyn AgentEventSink>> {
         self.event_sinks.read().await.clone()
+    }
+
+    // ============================================================================
+    // Data Source Registration
+    // ============================================================================
+
+    /// Register a stream source
+    ///
+    /// Stream sources produce events over time (Bluesky firehose, Discord events, etc.)
+    /// and are identified by their source_id.
+    pub fn register_stream(&self, source: Box<dyn DataStream>) {
+        let source_id = source.source_id().to_string();
+        self.stream_sources.insert(
+            source_id,
+            StreamHandle {
+                source,
+                receiver: None,
+            },
+        );
+    }
+
+    /// Register a block source
+    ///
+    /// Block sources manage document-oriented data (files, configs, etc.)
+    /// with Loro-backed versioning and are identified by their source_id.
+    pub fn register_block_source(&self, source: Box<dyn DataBlock>) {
+        let source_id = source.source_id().to_string();
+        self.block_sources.insert(
+            source_id,
+            BlockHandle {
+                source,
+                receiver: None,
+            },
+        );
+    }
+
+    /// Get stream source IDs
+    pub fn stream_source_ids(&self) -> Vec<String> {
+        self.stream_sources
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
+    /// Get a ToolContext for block source operations.
+    ///
+    /// Looks up the agent by ID and returns its runtime as Arc<dyn ToolContext>.
+    /// Falls back to constellation_runtime for constellation-scoped operations.
+    fn get_tool_context_for_agent(&self, agent_id: &AgentId) -> Result<Arc<dyn ToolContext>> {
+        use crate::memory::CONSTELLATION_OWNER;
+
+        // For constellation-scoped operations, use the constellation runtime
+        if agent_id.as_str() == CONSTELLATION_OWNER {
+            return Ok(self.constellation_runtime.clone() as Arc<dyn ToolContext>);
+        }
+
+        // Look up the agent and get its runtime
+        let agent = self
+            .agents
+            .get(agent_id.as_str())
+            .ok_or_else(|| CoreError::AgentNotFound {
+                identifier: agent_id.to_string(),
+            })?;
+
+        Ok(agent.runtime() as Arc<dyn ToolContext>)
+    }
+
+    /// Find an agent that subscribes to a block source.
+    ///
+    /// Returns the first agent found, or None if no agent subscribes.
+    fn find_agent_for_block_source(&self, source_id: &str) -> Option<AgentId> {
+        for entry in self.block_subscriptions.iter() {
+            if entry.value().contains(&source_id.to_string()) {
+                return Some(AgentId::new(entry.key()));
+            }
+        }
+        None
+    }
+
+    /// Get ToolContext for a block source operation.
+    ///
+    /// Looks up which agent subscribes to the source and uses their runtime.
+    /// Falls back to constellation runtime if no agent subscribes.
+    fn get_tool_context_for_source(&self, source_id: &str) -> Arc<dyn ToolContext> {
+        if let Some(agent_id) = self.find_agent_for_block_source(source_id) {
+            if let Ok(ctx) = self.get_tool_context_for_agent(&agent_id) {
+                return ctx;
+            }
+        }
+        self.constellation_runtime.clone() as Arc<dyn ToolContext>
+    }
+
+    /// Get block source IDs
+    pub fn block_source_ids(&self) -> Vec<String> {
+        self.block_sources
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
+    /// Get the number of registered stream sources
+    pub fn stream_source_count(&self) -> usize {
+        self.stream_sources.len()
+    }
+
+    /// Get the number of registered block sources
+    pub fn block_source_count(&self) -> usize {
+        self.block_sources.len()
+    }
+
+    // ============================================================================
+    // Source Lifecycle
+    // ============================================================================
+
+    /// Start a stream source and store its receiver.
+    ///
+    /// Calls `source.start()` with the appropriate ToolContext and stores
+    /// the broadcast receiver for later subscription.
+    pub async fn start_stream(&self, source_id: &str, owner: AgentId) -> Result<()> {
+        let mut handle =
+            self.stream_sources
+                .get_mut(source_id)
+                .ok_or_else(|| CoreError::DataSourceError {
+                    source_name: source_id.to_string(),
+                    operation: "start".to_string(),
+                    cause: format!("Stream source '{}' not found", source_id),
+                })?;
+
+        // Get ToolContext from agent's runtime
+        let ctx = self.get_tool_context_for_agent(&owner)?;
+
+        // Start the source and store the receiver
+        let receiver = handle.source.start(ctx, owner).await?;
+        handle.receiver = Some(receiver);
+
+        tracing::info!(source_id = %source_id, "Started stream source");
+        Ok(())
+    }
+
+    /// Start watching a block source for file changes.
+    ///
+    /// Calls `source.start_watch()`, stores the receiver, and spawns a
+    /// monitoring task that routes FileChange events to the source's handler.
+    pub async fn start_block_watch(self: &Arc<Self>, source_id: &str) -> Result<()> {
+        // Get the receiver from start_watch
+        let receiver =
+            {
+                let mut handle = self.block_sources.get_mut(source_id).ok_or_else(|| {
+                    CoreError::DataSourceError {
+                        source_name: source_id.to_string(),
+                        operation: "start_watch".to_string(),
+                        cause: format!("Block source '{}' not found", source_id),
+                    }
+                })?;
+
+                let receiver = handle.source.start_watch().await.ok_or_else(|| {
+                    CoreError::DataSourceError {
+                        source_name: source_id.to_string(),
+                        operation: "start_watch".to_string(),
+                        cause: "Source does not support watching".to_string(),
+                    }
+                })?;
+
+                handle.receiver = Some(receiver.resubscribe());
+                receiver
+            };
+
+        // Spawn monitoring task
+        self.spawn_block_watch_task(source_id.to_string(), receiver);
+
+        tracing::info!(source_id = %source_id, "Started block source watching");
+        Ok(())
+    }
+
+    /// Spawn a task that monitors file changes and routes to source handler.
+    fn spawn_block_watch_task(
+        self: &Arc<Self>,
+        source_id: String,
+        mut receiver: broadcast::Receiver<crate::data_source::FileChange>,
+    ) {
+        let ctx = Arc::clone(self);
+        let source_id_clone = source_id.clone();
+
+        let handle = tokio::spawn(async move {
+            loop {
+                match receiver.recv().await {
+                    Ok(change) => {
+                        // Get the source and call its handler
+                        if let Some(handle) = ctx.block_sources.get(&source_id_clone) {
+                            let tool_ctx = ctx.get_tool_context_for_source(&source_id_clone);
+                            if let Err(e) =
+                                handle.source.handle_file_change(&change, tool_ctx).await
+                            {
+                                tracing::error!(
+                                    source_id = %source_id_clone,
+                                    path = ?change.path,
+                                    error = ?e,
+                                    "Error handling file change"
+                                );
+                            }
+                        } else {
+                            tracing::warn!(
+                                source_id = %source_id_clone,
+                                "Source not found for file change"
+                            );
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        tracing::debug!(source_id = %source_id_clone, "Block watch channel closed");
+                        break;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(
+                            source_id = %source_id_clone,
+                            lagged = n,
+                            "Block watch receiver lagged, some events dropped"
+                        );
+                    }
+                }
+            }
+        });
+
+        // Store the task handle for cleanup
+        self.background_tasks
+            .write()
+            .expect("background_tasks lock poisoned")
+            .push(handle.abort_handle());
+    }
+
+    /// Register interest in block edits matching a label pattern.
+    ///
+    /// When a block with a matching label is edited, the source's
+    /// `handle_block_edit` method will be called.
+    ///
+    /// # Pattern Syntax
+    /// - Exact match: `"my_block"`
+    /// - Template: `"user_{id}"` matches `"user_123"`, `"user_abc"`
+    /// - Prefix: `"file:*"` matches `"file:src/main.rs"`
+    pub fn register_edit_subscriber(
+        &self,
+        pattern: impl Into<String>,
+        source_id: impl Into<String>,
+    ) {
+        let pattern = pattern.into();
+        let source_id = source_id.into();
+
+        self.block_edit_subscribers
+            .entry(pattern.clone())
+            .or_default()
+            .push(source_id.clone());
+
+        tracing::debug!(
+            pattern = %pattern,
+            source_id = %source_id,
+            "Registered block edit subscriber"
+        );
+    }
+
+    /// Find sources subscribed to edits for a given block label.
+    fn find_edit_subscribers(&self, block_label: &str) -> Vec<String> {
+        let mut result = Vec::new();
+        for entry in self.block_edit_subscribers.iter() {
+            if label_matches_pattern(block_label, entry.key()) {
+                result.extend(entry.value().clone());
+            }
+        }
+        result
     }
 
     // ============================================================================
@@ -1005,6 +1360,395 @@ impl Drop for RuntimeContext {
 }
 
 // ============================================================================
+// SourceManager Implementation
+// ============================================================================
+
+#[async_trait]
+impl SourceManager for RuntimeContext {
+    // === Stream Source Operations ===
+
+    fn list_streams(&self) -> Vec<String> {
+        self.stream_sources
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
+    fn get_stream_info(&self, source_id: &str) -> Option<StreamSourceInfo> {
+        self.stream_sources
+            .get(source_id)
+            .map(|handle| StreamSourceInfo {
+                source_id: source_id.to_string(),
+                name: handle.source.name().to_string(),
+                block_schemas: handle.source.block_schemas(),
+                status: handle.source.status(),
+                supports_pull: handle.source.supports_pull(),
+            })
+    }
+
+    async fn pause_stream(&self, source_id: &str) -> Result<()> {
+        let handle =
+            self.stream_sources
+                .get(source_id)
+                .ok_or_else(|| CoreError::DataSourceError {
+                    source_name: source_id.to_string(),
+                    operation: "pause".to_string(),
+                    cause: format!("Stream source '{}' not found", source_id),
+                })?;
+        handle.source.pause();
+        Ok(())
+    }
+
+    async fn resume_stream(&self, source_id: &str) -> Result<()> {
+        let handle =
+            self.stream_sources
+                .get(source_id)
+                .ok_or_else(|| CoreError::DataSourceError {
+                    source_name: source_id.to_string(),
+                    operation: "resume".to_string(),
+                    cause: format!("Stream source '{}' not found", source_id),
+                })?;
+        handle.source.resume();
+        Ok(())
+    }
+
+    async fn subscribe_to_stream(
+        &self,
+        agent_id: &AgentId,
+        source_id: &str,
+    ) -> Result<broadcast::Receiver<Notification>> {
+        // Get the source handle
+        let handle =
+            self.stream_sources
+                .get(source_id)
+                .ok_or_else(|| CoreError::DataSourceError {
+                    source_name: source_id.to_string(),
+                    operation: "subscribe".to_string(),
+                    cause: format!("Stream source '{}' not found", source_id),
+                })?;
+
+        // Clone a receiver from the stored one (if stream has been started)
+        let receiver = handle
+            .receiver
+            .as_ref()
+            .ok_or_else(|| CoreError::DataSourceError {
+                source_name: source_id.to_string(),
+                operation: "subscribe".to_string(),
+                cause: "Stream has not been started yet - call start() first".to_string(),
+            })?
+            .resubscribe();
+
+        // Record the subscription
+        self.stream_subscriptions
+            .entry(agent_id.to_string())
+            .or_default()
+            .push(source_id.to_string());
+
+        Ok(receiver)
+    }
+
+    async fn unsubscribe_from_stream(&self, agent_id: &AgentId, source_id: &str) -> Result<()> {
+        // Remove from subscription tracking
+        if let Some(mut subs) = self.stream_subscriptions.get_mut(&agent_id.to_string()) {
+            subs.retain(|s| s != source_id);
+        }
+        Ok(())
+    }
+
+    async fn pull_from_stream(
+        &self,
+        source_id: &str,
+        limit: usize,
+        cursor: Option<StreamCursor>,
+    ) -> Result<Vec<Notification>> {
+        let handle =
+            self.stream_sources
+                .get(source_id)
+                .ok_or_else(|| CoreError::DataSourceError {
+                    source_name: source_id.to_string(),
+                    operation: "pull".to_string(),
+                    cause: format!("Stream source '{}' not found", source_id),
+                })?;
+
+        if !handle.source.supports_pull() {
+            return Err(CoreError::DataSourceError {
+                source_name: source_id.to_string(),
+                operation: "pull".to_string(),
+                cause: "Stream source does not support pull operations".to_string(),
+            });
+        }
+
+        handle.source.pull(limit, cursor).await
+    }
+
+    // === Block Source Operations ===
+
+    fn list_block_sources(&self) -> Vec<String> {
+        self.block_sources
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
+    fn get_block_source_info(&self, source_id: &str) -> Option<BlockSourceInfo> {
+        self.block_sources
+            .get(source_id)
+            .map(|handle| BlockSourceInfo {
+                source_id: source_id.to_string(),
+                name: handle.source.name().to_string(),
+                block_schema: handle.source.block_schema(),
+                permission_rules: handle.source.permission_rules().to_vec(),
+                status: handle.source.status(),
+            })
+    }
+
+    async fn load_block(&self, source_id: &str, path: &Path, owner: AgentId) -> Result<BlockRef> {
+        let handle =
+            self.block_sources
+                .get(source_id)
+                .ok_or_else(|| CoreError::DataSourceError {
+                    source_name: source_id.to_string(),
+                    operation: "load".to_string(),
+                    cause: format!("Block source '{}' not found", source_id),
+                })?;
+
+        // Get ToolContext from agent's runtime
+        let ctx = self.get_tool_context_for_agent(&owner)?;
+        let result = handle.source.load(path, ctx, owner.clone()).await?;
+
+        // Auto-subscribe agent to this block source
+        self.block_subscriptions
+            .entry(owner.to_string())
+            .or_default()
+            .push(source_id.to_string());
+
+        Ok(result)
+    }
+
+    async fn create_block(
+        &self,
+        source_id: &str,
+        path: &Path,
+        content: Option<&str>,
+        owner: AgentId,
+    ) -> Result<BlockRef> {
+        let handle =
+            self.block_sources
+                .get(source_id)
+                .ok_or_else(|| CoreError::DataSourceError {
+                    source_name: source_id.to_string(),
+                    operation: "create".to_string(),
+                    cause: format!("Block source '{}' not found", source_id),
+                })?;
+
+        let ctx = self.get_tool_context_for_agent(&owner)?;
+        let result = handle
+            .source
+            .create(path, content, ctx, owner.clone())
+            .await?;
+
+        // Auto-subscribe agent to this block source
+        self.block_subscriptions
+            .entry(owner.to_string())
+            .or_default()
+            .push(source_id.to_string());
+
+        Ok(result)
+    }
+
+    async fn save_block(&self, source_id: &str, block_ref: &BlockRef) -> Result<()> {
+        let handle =
+            self.block_sources
+                .get(source_id)
+                .ok_or_else(|| CoreError::DataSourceError {
+                    source_name: source_id.to_string(),
+                    operation: "save".to_string(),
+                    cause: format!("Block source '{}' not found", source_id),
+                })?;
+
+        let owner = AgentId::new(&block_ref.agent_id);
+        let ctx = self.get_tool_context_for_agent(&owner)?;
+        handle.source.save(block_ref, ctx).await
+    }
+
+    async fn delete_block(&self, source_id: &str, path: &Path) -> Result<()> {
+        let handle =
+            self.block_sources
+                .get(source_id)
+                .ok_or_else(|| CoreError::DataSourceError {
+                    source_name: source_id.to_string(),
+                    operation: "delete".to_string(),
+                    cause: format!("Block source '{}' not found", source_id),
+                })?;
+
+        let ctx = self.get_tool_context_for_source(source_id);
+        handle.source.delete(path, ctx).await
+    }
+
+    async fn reconcile_blocks(
+        &self,
+        source_id: &str,
+        paths: &[PathBuf],
+    ) -> Result<Vec<ReconcileResult>> {
+        let handle =
+            self.block_sources
+                .get(source_id)
+                .ok_or_else(|| CoreError::DataSourceError {
+                    source_name: source_id.to_string(),
+                    operation: "reconcile".to_string(),
+                    cause: format!("Block source '{}' not found", source_id),
+                })?;
+
+        let ctx = self.get_tool_context_for_source(source_id);
+        handle.source.reconcile(paths, ctx).await
+    }
+
+    async fn block_history(
+        &self,
+        source_id: &str,
+        block_ref: &BlockRef,
+    ) -> Result<Vec<VersionInfo>> {
+        let handle =
+            self.block_sources
+                .get(source_id)
+                .ok_or_else(|| CoreError::DataSourceError {
+                    source_name: source_id.to_string(),
+                    operation: "history".to_string(),
+                    cause: format!("Block source '{}' not found", source_id),
+                })?;
+
+        let owner = AgentId::new(&block_ref.agent_id);
+        let ctx = self.get_tool_context_for_agent(&owner)?;
+        handle.source.history(block_ref, ctx).await
+    }
+
+    async fn rollback_block(
+        &self,
+        source_id: &str,
+        block_ref: &BlockRef,
+        version: &str,
+    ) -> Result<()> {
+        let handle =
+            self.block_sources
+                .get(source_id)
+                .ok_or_else(|| CoreError::DataSourceError {
+                    source_name: source_id.to_string(),
+                    operation: "rollback".to_string(),
+                    cause: format!("Block source '{}' not found", source_id),
+                })?;
+
+        let owner = AgentId::new(&block_ref.agent_id);
+        let ctx = self.get_tool_context_for_agent(&owner)?;
+        handle.source.rollback(block_ref, version, ctx).await
+    }
+
+    async fn diff_block(
+        &self,
+        source_id: &str,
+        block_ref: &BlockRef,
+        from: Option<&str>,
+        to: Option<&str>,
+    ) -> Result<String> {
+        let handle =
+            self.block_sources
+                .get(source_id)
+                .ok_or_else(|| CoreError::DataSourceError {
+                    source_name: source_id.to_string(),
+                    operation: "diff".to_string(),
+                    cause: format!("Block source '{}' not found", source_id),
+                })?;
+
+        let owner = AgentId::new(&block_ref.agent_id);
+        let ctx = self.get_tool_context_for_agent(&owner)?;
+        handle.source.diff(block_ref, from, to, ctx).await
+    }
+
+    // === Block Edit Routing ===
+
+    async fn handle_block_edit(&self, edit: &BlockEdit) -> Result<EditFeedback> {
+        // Find sources interested in this block's label pattern
+        let subscribers = self.find_edit_subscribers(&edit.block_label);
+
+        if subscribers.is_empty() {
+            tracing::debug!(
+                agent_id = %edit.agent_id,
+                block_label = %edit.block_label,
+                "Block edit: no subscribers registered"
+            );
+            return Ok(EditFeedback::Applied { message: None });
+        }
+
+        tracing::debug!(
+            agent_id = %edit.agent_id,
+            block_label = %edit.block_label,
+            subscriber_count = subscribers.len(),
+            "Routing block edit to subscribers"
+        );
+
+        // Route to each subscriber - first rejection wins
+        for source_id in &subscribers {
+            // Try stream sources first
+            if let Some(handle) = self.stream_sources.get(source_id) {
+                let ctx = self.get_tool_context_for_source(source_id);
+                let feedback = handle.source.handle_block_edit(edit, ctx).await?;
+
+                match &feedback {
+                    EditFeedback::Rejected { reason } => {
+                        tracing::debug!(
+                            source_id = %source_id,
+                            reason = %reason,
+                            "Block edit rejected by stream source"
+                        );
+                        return Ok(feedback);
+                    }
+                    EditFeedback::Pending { .. } => {
+                        tracing::debug!(
+                            source_id = %source_id,
+                            "Block edit pending from stream source"
+                        );
+                        return Ok(feedback);
+                    }
+                    EditFeedback::Applied { .. } => {
+                        // Continue to next subscriber
+                    }
+                }
+                continue;
+            }
+
+            // Try block sources
+            if let Some(handle) = self.block_sources.get(source_id) {
+                let ctx = self.get_tool_context_for_source(source_id);
+                let feedback = handle.source.handle_block_edit(edit, ctx).await?;
+
+                match &feedback {
+                    EditFeedback::Rejected { reason } => {
+                        tracing::debug!(
+                            source_id = %source_id,
+                            reason = %reason,
+                            "Block edit rejected by block source"
+                        );
+                        return Ok(feedback);
+                    }
+                    EditFeedback::Pending { .. } => {
+                        tracing::debug!(
+                            source_id = %source_id,
+                            "Block edit pending from block source"
+                        );
+                        return Ok(feedback);
+                    }
+                    EditFeedback::Applied { .. } => {
+                        // Continue to next subscriber
+                    }
+                }
+            }
+        }
+
+        // All subscribers approved
+        Ok(EditFeedback::Applied { message: None })
+    }
+}
+
+// ============================================================================
 // RuntimeContextBuilder
 // ============================================================================
 
@@ -1350,6 +2094,44 @@ async fn process_heartbeats_with_dashmap<F, Fut>(
     tracing::debug!("RuntimeContext: Heartbeat processor task exiting");
 }
 
+/// Pattern matching for block labels.
+///
+/// Supports:
+/// - Exact match: `"my_block"` matches `"my_block"`
+/// - Template variables: `"user_{id}"` matches `"user_123"`, `"user_abc"`
+/// - Wildcard suffix: `"file:*"` matches `"file:src/main.rs"`
+fn label_matches_pattern(label: &str, pattern: &str) -> bool {
+    // Exact match
+    if label == pattern {
+        return true;
+    }
+
+    // Wildcard suffix: "prefix*" matches "prefix..."
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        if label.starts_with(prefix) {
+            return true;
+        }
+    }
+
+    // Template variable: "prefix{var}suffix" matches "prefix...suffix"
+    if pattern.contains('{') {
+        if let Some(open_idx) = pattern.find('{') {
+            if let Some(close_idx) = pattern.find('}') {
+                let prefix = &pattern[..open_idx];
+                let suffix = &pattern[close_idx + 1..];
+
+                if label.starts_with(prefix) && label.ends_with(suffix) {
+                    // Check that there's something between prefix and suffix
+                    let middle_len = label.len().saturating_sub(prefix.len() + suffix.len());
+                    return middle_len > 0;
+                }
+            }
+        }
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1450,7 +2232,7 @@ mod tests {
                 &self.name
             }
 
-            fn runtime(&self) -> &AgentRuntime {
+            fn runtime(&self) -> Arc<AgentRuntime> {
                 unimplemented!("Mock agent")
             }
 

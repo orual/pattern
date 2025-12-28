@@ -3,9 +3,12 @@
 //! Provides tools with access to memory, router, model, and permission broker
 //! without exposing the full AgentRuntime implementation details.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 
 use crate::ModelProvider;
+use crate::data_source::SourceManager;
 use crate::id::AgentId;
 use crate::memory::{MemoryResult, MemorySearchResult, MemoryStore, SearchOptions};
 use crate::permission::PermissionBroker;
@@ -55,4 +58,10 @@ pub trait ToolContext: Send + Sync {
         scope: SearchScope,
         options: SearchOptions,
     ) -> MemoryResult<Vec<MemorySearchResult>>;
+
+    /// Get the source manager for data source operations.
+    ///
+    /// Returns None if source management is not available (e.g., during tests
+    /// or when RuntimeContext is not connected).
+    fn sources(&self) -> Option<Arc<dyn SourceManager>>;
 }

@@ -216,6 +216,21 @@ pub async fn update_block_permission(
     Ok(())
 }
 
+/// Update a memory block's pinned flag.
+///
+/// Pinned blocks are always loaded into agent context while subscribed.
+/// Unpinned (ephemeral) blocks only load when referenced by a notification.
+pub async fn update_block_pinned(pool: &SqlitePool, id: &str, pinned: bool) -> DbResult<()> {
+    sqlx::query!(
+        "UPDATE memory_blocks SET pinned = ?, updated_at = datetime('now') WHERE id = ?",
+        pinned,
+        id
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Soft-delete a memory block.
 pub async fn deactivate_block(pool: &SqlitePool, id: &str) -> DbResult<()> {
     sqlx::query!(

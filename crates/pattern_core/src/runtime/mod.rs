@@ -10,7 +10,7 @@
 
 use async_trait::async_trait;
 use sqlx::SqlitePool;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use crate::ModelProvider;
 use crate::agent::tool_rules::ToolRule;
@@ -61,6 +61,12 @@ pub struct AgentRuntime {
 
     // Configuration
     config: RuntimeConfig,
+
+    /// Weak reference to RuntimeContext for constellation-level operations
+    ///
+    /// Used for source management, cross-agent communication, etc.
+    /// Weak reference avoids reference cycles since RuntimeContext holds agents.
+    runtime_context: Option<Weak<RuntimeContext>>,
 }
 
 impl std::fmt::Debug for AgentRuntime {
@@ -441,6 +447,13 @@ impl ToolContext for AgentRuntime {
             }
         }
     }
+
+    fn sources(&self) -> Option<Arc<dyn crate::data_source::SourceManager>> {
+        self.runtime_context
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .map(|arc| arc as Arc<dyn crate::data_source::SourceManager>)
+    }
 }
 
 /// Builder for constructing an AgentRuntime
@@ -456,6 +469,7 @@ pub struct RuntimeBuilder {
     model: Option<Arc<dyn ModelProvider>>,
     dbs: Option<ConstellationDatabases>,
     config: RuntimeConfig,
+    runtime_context: Option<Weak<RuntimeContext>>,
 }
 
 impl RuntimeBuilder {
@@ -531,6 +545,15 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Set the runtime context (weak reference to avoid cycles)
+    ///
+    /// The runtime context provides access to constellation-level operations
+    /// like source management and cross-agent communication.
+    pub fn runtime_context(mut self, ctx: Weak<RuntimeContext>) -> Self {
+        self.runtime_context = Some(ctx);
+        self
+    }
+
     /// Build the AgentRuntime, validating that all required fields are present
     pub fn build(self) -> Result<AgentRuntime, CoreError> {
         // Validate required fields
@@ -582,6 +605,7 @@ impl RuntimeBuilder {
             model: self.model,
             dbs,
             config: self.config,
+            runtime_context: self.runtime_context,
         })
     }
 }
@@ -661,6 +685,34 @@ pub(crate) mod test_support {
 
         fn mark_dirty(&self, _agent_id: &str, _label: &str) {}
 
+        async fn update_block_text(
+            &self,
+            _agent_id: &str,
+            _label: &str,
+            _new_content: &str,
+        ) -> MemoryResult<()> {
+            Ok(())
+        }
+
+        async fn append_to_block(
+            &self,
+            _agent_id: &str,
+            _label: &str,
+            _content: &str,
+        ) -> MemoryResult<()> {
+            Ok(())
+        }
+
+        async fn replace_in_block(
+            &self,
+            _agent_id: &str,
+            _label: &str,
+            _old: &str,
+            _new: &str,
+        ) -> MemoryResult<bool> {
+            Ok(false)
+        }
+
         async fn insert_archival(
             &self,
             _agent_id: &str,
@@ -700,34 +752,6 @@ pub(crate) mod test_support {
             Ok(Vec::new())
         }
 
-        async fn update_block_text(
-            &self,
-            _agent_id: &str,
-            _label: &str,
-            _new_content: &str,
-        ) -> MemoryResult<()> {
-            Ok(())
-        }
-
-        async fn append_to_block(
-            &self,
-            _agent_id: &str,
-            _label: &str,
-            _content: &str,
-        ) -> MemoryResult<()> {
-            Ok(())
-        }
-
-        async fn replace_in_block(
-            &self,
-            _agent_id: &str,
-            _label: &str,
-            _old: &str,
-            _new: &str,
-        ) -> MemoryResult<bool> {
-            Ok(false)
-        }
-
         async fn list_shared_blocks(
             &self,
             _agent_id: &str,
@@ -742,6 +766,15 @@ pub(crate) mod test_support {
             _label: &str,
         ) -> MemoryResult<Option<StructuredDocument>> {
             Ok(None)
+        }
+
+        async fn set_block_pinned(
+            &self,
+            _agent_id: &str,
+            _label: &str,
+            _pinned: bool,
+        ) -> MemoryResult<()> {
+            Ok(())
         }
     }
 
