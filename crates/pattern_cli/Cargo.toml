@@ -1,5 +1,5 @@
 [package]
-name = "pattern_cli"
+name = "pattern-cli"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -12,10 +12,9 @@ name = "pattern-cli"
 path = "src/main.rs"
 
 [features]
-default = ["oauth", "discord", "surreal-remote"]
+default = ["oauth", "discord",]
 oauth = ["pattern-core/oauth"]
 discord = ["pattern-discord"]
-surreal-remote = ["pattern-core/surreal-remote"]
 
 [dependencies]
 # Workspace dependencies
@@ -33,7 +32,6 @@ miette = { workspace = true, features = ["fancy", "syntect-highlighter"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
-surrealdb = { workspace = true }
 clap = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }

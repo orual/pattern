@@ -2,72 +2,115 @@
 //!
 //! These commands manage OAuth tokens for AI model providers. This is separate
 //! from ATProto authentication (see atproto.rs for Bluesky auth).
-//!
-//! Note: Provider OAuth (e.g., Anthropic) requires browser-based authorization
-//! which is not fully supported in CLI. Use the web UI for initial authentication,
-//! or use API keys directly via environment variables.
 
-use miette::Result;
+use miette::{IntoDiagnostic, Result};
 use owo_colors::OwoColorize;
+use pattern_auth::ProviderOAuthToken;
 use pattern_core::config::PatternConfig;
+use pattern_core::oauth::{OAuthClient, OAuthProvider, auth_flow::split_callback_code};
+use std::io::{self, Write};
 
 use crate::helpers::get_dbs;
 use crate::output::{Output, format_relative_time};
 
 /// Login with OAuth for a model provider.
 ///
-/// Provider OAuth (Anthropic, OpenAI, etc.) requires browser-based authorization
-/// that cannot be fully handled in CLI. This command shows guidance on how to
-/// authenticate.
+/// Starts the OAuth device flow, prompts user to authorize in browser,
+/// then exchanges the callback code for tokens.
 pub async fn login(provider: &str, config: &PatternConfig) -> Result<()> {
     let output = Output::new();
 
-    // Validate provider
-    let provider_lower = provider.to_lowercase();
-    match provider_lower.as_str() {
-        "anthropic" => {}
+    // Parse provider
+    let oauth_provider = match provider.to_lowercase().as_str() {
+        "anthropic" => OAuthProvider::Anthropic,
         other => {
             output.error(&format!("Unknown provider: {}", other.bright_red()));
             output.info("Supported providers:", "anthropic");
             return Ok(());
         }
-    }
+    };
 
     output.section(&format!("OAuth Login: {}", provider.bright_cyan()));
 
-    // Provider OAuth requires browser-based flow
-    output.print("");
-    output.warning("Provider OAuth requires browser-based authorization.");
-    output.print("");
-    output.status("For Anthropic API access, you have two options:");
-    output.print("");
-    output.list_item("Use an API key via the ANTHROPIC_API_KEY environment variable");
-    output.list_item("Use the Pattern web UI for OAuth authentication (when available)");
+    // Create OAuth client and start device flow
+    let oauth_client = OAuthClient::new(oauth_provider);
+    let device_response = oauth_client.start_device_flow().into_diagnostic()?;
+
+    // Display instructions
     output.print("");
     output.info(
-        "Get API keys at:",
-        "https://console.anthropic.com/settings/keys",
+        "Authorization URL:",
+        &device_response.verification_uri.bright_yellow().to_string(),
     );
     output.print("");
+    output.status("Please visit the URL above and authorize the application.");
+    output.status("After authorization, copy the full callback URL or code shown on the page.");
+    output.print("");
 
-    // Check if we already have a token stored
-    let dbs = get_dbs(config).await?;
-    match dbs.auth.get_provider_oauth_token(&provider_lower).await {
-        Ok(Some(token)) => {
-            output.success("You already have an OAuth token stored for this provider.");
-            if token.is_expired() {
-                output.warning("However, the token has expired.");
-            } else if token.needs_refresh() {
-                output.warning("The token will expire soon and needs refresh.");
-            }
-        }
-        Ok(None) => {
-            output.status("No OAuth token currently stored for this provider.");
-        }
-        Err(e) => {
-            output.warning(&format!("Could not check existing tokens: {}", e));
-        }
+    // Prompt for the code
+    print!("Enter the authorization code: ");
+    io::stdout().flush().into_diagnostic()?;
+
+    let mut code_input = String::new();
+    io::stdin().read_line(&mut code_input).into_diagnostic()?;
+    let (code, state) = split_callback_code(code_input.trim()).into_diagnostic()?;
+
+    // Verify state matches PKCE challenge
+    let pkce = device_response
+        .pkce_challenge
+        .ok_or_else(|| miette::miette!("No PKCE challenge found - this shouldn't happen"))?;
+
+    if state != pkce.state {
+        output.error("State mismatch - authorization may have been tampered with");
+        return Ok(());
     }
+
+    // Exchange code for token
+    let token_response = oauth_client
+        .exchange_code(code, &pkce)
+        .await
+        .into_diagnostic()?;
+
+    output.success("Authentication successful!");
+
+    // Log token details
+    tracing::info!(
+        "Received OAuth token - has refresh_token: {}, expires_in: {} seconds",
+        token_response.refresh_token.is_some(),
+        token_response.expires_in
+    );
+
+    if token_response.refresh_token.is_none() {
+        output.warning("Note: No refresh token received. You'll need to re-authenticate when the token expires.");
+    }
+
+    // Calculate expiry and create token for storage
+    let now = chrono::Utc::now();
+    let expires_at = now + chrono::Duration::seconds(token_response.expires_in as i64);
+
+    let token = ProviderOAuthToken {
+        provider: oauth_provider.as_str().to_string(),
+        access_token: token_response.access_token,
+        refresh_token: token_response.refresh_token,
+        expires_at: Some(expires_at),
+        scope: token_response.scope,
+        session_id: None,
+        created_at: now,
+        updated_at: now,
+    };
+
+    // Store token in database
+    let dbs = get_dbs(config).await?;
+    dbs.auth
+        .set_provider_oauth_token(&token)
+        .await
+        .into_diagnostic()?;
+
+    output.success(&format!("Token stored for provider: {}", oauth_provider));
+    output.info(
+        "You can now use OAuth authentication with this provider.",
+        "",
+    );
 
     Ok(())
 }

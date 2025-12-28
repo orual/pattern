@@ -6093,6 +6093,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "pattern-cli"
+version = "0.4.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "clap",
+ "comfy-table",
+ "crossterm 0.28.1",
+ "dialoguer",
+ "dirs 5.0.1",
+ "dotenvy",
+ "futures",
+ "genai",
+ "indicatif",
+ "jacquard",
+ "miette 7.6.0",
+ "owo-colors",
+ "pattern-auth",
+ "pattern-core",
+ "pattern-db",
+ "pattern-discord",
+ "pretty_assertions",
+ "ratatui",
+ "reqwest 0.12.23",
+ "rpassword",
+ "rustyline-async",
+ "serde",
+ "serde_json",
+ "termimad",
+ "tokio",
+ "tokio-stream",
+ "toml 0.8.23",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "pattern-core"
 version = "0.4.0"
 dependencies = [
@@ -6343,46 +6382,6 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
- "uuid",
-]
-
-[[package]]
-name = "pattern_cli"
-version = "0.4.0"
-dependencies = [
- "async-trait",
- "chrono",
- "clap",
- "comfy-table",
- "crossterm 0.28.1",
- "dialoguer",
- "dirs 5.0.1",
- "dotenvy",
- "futures",
- "genai",
- "indicatif",
- "jacquard",
- "miette 7.6.0",
- "owo-colors",
- "pattern-auth",
- "pattern-core",
- "pattern-db",
- "pattern-discord",
- "pretty_assertions",
- "ratatui",
- "reqwest 0.12.23",
- "rpassword",
- "rustyline-async",
- "serde",
- "serde_json",
- "surrealdb",
- "termimad",
- "tokio",
- "tokio-stream",
- "toml 0.8.23",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
  "uuid",
 ]
 
