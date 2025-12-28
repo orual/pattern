@@ -497,12 +497,12 @@ struct DiffHunk {
 
 ### Phase 2 - Watching & Auto-Sync
 
-- [ ] Fork disk_doc on load
-- [ ] Bidirectional subscriptions with auto-save
-- [ ] File watching via `notify` crate
-- [ ] Permission-based subscription setup
-- [ ] `diff` operation with unified format + metadata header
-- [ ] `reload` operation
+- [X] Fork disk_doc on load
+- [X] Bidirectional subscriptions with auto-save
+- [X] File watching via `notify` crate
+- [X] Permission-based subscription setup
+- [X] `diff` operation with unified format + metadata header
+- [X] `reload` operation
 
 ### Phase 3 - Smart Editing
 
@@ -520,7 +520,7 @@ struct DiffHunk {
 
 ## Open Questions
 
-1. **Line endings** - `lines()` handles `\n` and `\r\n`, but trailing newline handling may need care
+1. ~~**Line endings**~~ - RESOLVED: All file reads normalized to Unix (`\n`) via `normalize_line_endings()`. Windows `\r\n` converted on read; writes always use `\n`.
 2. **Large file handling** - May need streaming for very large files
 3. **Binary files** - Currently Text schema only; binary files need different handling
 4. **Subscription lifecycle** - Need to clean up subscriptions when blocks are unloaded

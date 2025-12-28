@@ -44,6 +44,20 @@ fn memory_err(source_id: &str, operation: &str, err: MemoryError) -> CoreError {
     }
 }
 
+/// Normalize line endings to Unix style (`\n`).
+///
+/// Converts `\r\n` (Windows) to `\n`. This ensures consistent behavior
+/// across platforms for diffs, patches, and line-based operations.
+/// Takes ownership to avoid unnecessary allocations when no conversion needed.
+#[inline]
+fn normalize_line_endings(content: String) -> String {
+    if content.contains("\r\n") {
+        content.replace("\r\n", "\n")
+    } else {
+        content
+    }
+}
+
 /// Information about a loaded file tracked by FileSource.
 ///
 /// Contains the forked disk_doc and subscriptions for bidirectional sync.
@@ -525,7 +539,9 @@ impl FileSource {
                             // For modifications, update the disk_doc
                             if matches!(change_type, FileChangeType::Modified) {
                                 // Read the new content synchronously (we're in a sync callback)
-                                if let Ok(content) = std::fs::read_to_string(&path) {
+                                if let Ok(content) =
+                                    std::fs::read_to_string(&path).map(normalize_line_endings)
+                                {
                                     // Update disk_doc with new content
                                     let text = info.disk_doc.get_text("content");
                                     let len = text.len_unicode();
@@ -606,9 +622,6 @@ impl FileSource {
     /// Returns a unified diff with metadata header showing:
     /// - File path
     /// - Disk vs memory comparison
-    ///
-    /// Note: This reads the actual file from disk, not the disk_doc
-    /// (which is kept in sync with memory via subscriptions).
     pub async fn diff(&self, path: &Path) -> Result<String> {
         let abs_path = self.absolute_path(path)?;
         let info = self
@@ -625,13 +638,13 @@ impl FileSource {
 
         // Read actual disk content (not disk_doc which is synced)
         let disk_content =
-            tokio::fs::read_to_string(&abs_path)
-                .await
-                .map_err(|e| CoreError::DataSourceError {
+            normalize_line_endings(tokio::fs::read_to_string(&abs_path).await.map_err(|e| {
+                CoreError::DataSourceError {
                     source_name: self.source_id.clone(),
                     operation: "diff".to_string(),
                     cause: format!("Failed to read file {}: {}", abs_path.display(), e),
-                })?;
+                }
+            })?);
 
         // Build unified diff
         let diff = similar::TextDiff::from_lines(&disk_content, &memory_content);
@@ -660,10 +673,7 @@ impl FileSource {
         Ok(output)
     }
 
-    /// Check if there are unsaved changes (memory differs from actual disk file).
-    ///
-    /// Note: This reads the actual file from disk, not the disk_doc
-    /// (which is kept in sync with memory via subscriptions).
+    /// Check if there are unsaved changes
     pub async fn has_unsaved_changes(&self, path: &Path) -> Result<bool> {
         let abs_path = self.absolute_path(path)?;
         let info = self
@@ -679,33 +689,30 @@ impl FileSource {
 
         // Read actual disk content
         let disk_content =
-            tokio::fs::read_to_string(&abs_path)
-                .await
-                .map_err(|e| CoreError::DataSourceError {
+            normalize_line_endings(tokio::fs::read_to_string(&abs_path).await.map_err(|e| {
+                CoreError::DataSourceError {
                     source_name: self.source_id.clone(),
                     operation: "has_unsaved_changes".to_string(),
                     cause: format!("Failed to read file {}: {}", abs_path.display(), e),
-                })?;
+                }
+            })?);
 
         Ok(memory_content != disk_content)
     }
 
     /// Reload file from disk, discarding any memory changes.
-    ///
-    /// This reads the current disk content and updates both the memory doc
-    /// and disk doc to match.
     pub async fn reload(&self, path: &Path) -> Result<()> {
         let abs_path = self.absolute_path(path)?;
 
         // Read current disk content
         let content =
-            tokio::fs::read_to_string(&abs_path)
-                .await
-                .map_err(|e| CoreError::DataSourceError {
+            normalize_line_endings(tokio::fs::read_to_string(&abs_path).await.map_err(|e| {
+                CoreError::DataSourceError {
                     source_name: self.source_id.clone(),
                     operation: "reload".to_string(),
                     cause: format!("Failed to read file {}: {}", abs_path.display(), e),
-                })?;
+                }
+            })?);
 
         // Get file metadata
         let metadata =
@@ -804,7 +811,22 @@ impl DataBlock for FileSource {
     }
 
     fn required_tools(&self) -> Vec<ToolRule> {
-        vec![]
+        vec![
+            ToolRule {
+                tool_name: "file".into(),
+                rule_type: crate::tool::ToolRuleType::Needed,
+                conditions: vec![],
+                priority: 6,
+                metadata: None,
+            },
+            ToolRule {
+                tool_name: "block_edit".into(),
+                rule_type: crate::tool::ToolRuleType::Needed,
+                conditions: vec![],
+                priority: 6,
+                metadata: None,
+            },
+        ]
     }
 
     fn matches(&self, path: &Path) -> bool {
@@ -844,15 +866,15 @@ impl DataBlock for FileSource {
         let owner_str = owner.to_string();
         let permission = self.permission_for(path);
 
-        // Read file content
+        // Read file content and normalize line endings
         let content =
-            tokio::fs::read_to_string(&abs_path)
-                .await
-                .map_err(|e| CoreError::DataSourceError {
+            normalize_line_endings(tokio::fs::read_to_string(&abs_path).await.map_err(|e| {
+                CoreError::DataSourceError {
                     source_name: self.source_id.clone(),
                     operation: "load".to_string(),
                     cause: format!("Failed to read file {}: {}", abs_path.display(), e),
-                })?;
+                }
+            })?);
 
         // Get file metadata for conflict detection
         let (mtime, size) = self.get_file_metadata(path).await?;
@@ -1235,13 +1257,13 @@ impl DataBlock for FileSource {
         block_ref: &BlockRef,
         _from: Option<&str>,
         _to: Option<&str>,
-        ctx: Arc<dyn ToolContext>,
+        _ctx: Arc<dyn ToolContext>,
     ) -> Result<String> {
         // Find the file path for this block
         let file_path = self
             .loaded_blocks
             .iter()
-            .find(|entry| entry.value().label == block_ref.label)
+            .find(|entry| entry.value().block_id == block_ref.block_id)
             .map(|entry| entry.key().clone())
             .ok_or_else(|| CoreError::DataSourceError {
                 source_name: self.source_id.clone(),
@@ -1249,29 +1271,7 @@ impl DataBlock for FileSource {
                 cause: format!("Block {} not loaded from this source", block_ref.label),
             })?;
 
-        // Get block content
-        let memory = ctx.memory();
-        let source_id = &self.source_id;
-        let block_content = memory
-            .get_rendered_content(&block_ref.agent_id, &block_ref.label)
-            .await
-            .map_err(|e| memory_err(source_id, "diff", e))?
-            .unwrap_or_default();
-
-        // Get disk content
-        let disk_content = tokio::fs::read_to_string(&file_path)
-            .await
-            .unwrap_or_default();
-
-        // Simple diff: show both
-        if block_content == disk_content {
-            Ok("No differences between block and disk".to_string())
-        } else {
-            Ok(format!(
-                "=== Block content ===\n{}\n\n=== Disk content ===\n{}",
-                block_content, disk_content
-            ))
-        }
+        self.diff(&file_path).await
     }
 }
 

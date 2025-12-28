@@ -227,6 +227,9 @@ pub enum ToolRuleTypeConfig {
 
     /// Only allow these operations for multi-operation tools.
     AllowedOperations(std::collections::BTreeSet<String>),
+
+    /// This tool is required for some other tool/data source
+    Needed,
 }
 
 fn default_rule_priority() -> u8 {
@@ -294,6 +297,7 @@ impl ToolRuleTypeConfig {
             ToolRuleTypeConfig::AllowedOperations(ops) => {
                 ToolRuleType::AllowedOperations(ops.clone())
             }
+            ToolRuleTypeConfig::Needed => ToolRuleType::Needed,
         };
 
         Ok(runtime_type)
@@ -323,6 +327,7 @@ impl ToolRuleTypeConfig {
             ToolRuleType::AllowedOperations(ops) => {
                 ToolRuleTypeConfig::AllowedOperations(ops.clone())
             }
+            ToolRuleType::Needed => ToolRuleTypeConfig::Needed,
         }
     }
 }

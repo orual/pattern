@@ -73,6 +73,9 @@ pub enum ToolRuleType {
     /// Only allow these operations for multi-operation tools.
     /// Operations not in this set are hidden from the schema and rejected at execution.
     AllowedOperations(BTreeSet<String>),
+
+    /// This tool is required by another tool
+    Needed,
 }
 
 impl ToolRuleType {
@@ -174,10 +177,13 @@ impl ToolRuleType {
             ToolRuleType::AllowedOperations(ops) => {
                 let ops_list: Vec<_> = ops.iter().cloned().collect();
                 format!(
-                    "available operations for `{}`: {}",
+                    "Available operations for `{}`: {}",
                     tool_name,
                     ops_list.join(", ")
                 )
+            }
+            ToolRuleType::Needed => {
+                format!("Use `{}` to work with this", tool_name)
             }
         }
     }
