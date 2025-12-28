@@ -4,9 +4,7 @@
 mod tests {
     //use crate::tool::builtin::data_source::{DataSourceInput, DataSourceOperation};
     use crate::tool::builtin::send_message::SendMessageInput;
-    use crate::tool::builtin::{
-        ContextInput, CoreMemoryOperationType, MessageTarget, RecallInput, RecallOp, TargetType,
-    };
+    use crate::tool::builtin::{MessageTarget, RecallInput, RecallOp, TargetType};
     use schemars::schema_for;
 
     #[test]
@@ -34,34 +32,6 @@ mod tests {
         let schema = schema_for!(SendMessageInput);
         let json = serde_json::to_string_pretty(&schema).unwrap();
         println!("SendMessageInput schema:\n{}", json);
-    }
-
-    #[test]
-    fn test_core_memory_operation_type_schema() {
-        let schema = schema_for!(CoreMemoryOperationType);
-        let json = serde_json::to_string_pretty(&schema).unwrap();
-        println!("CoreMemoryOperationType schema:\n{}", json);
-
-        // Check if it contains oneOf
-        if json.contains("oneOf") {
-            eprintln!("WARNING: CoreMemoryOperationType generates oneOf schema!");
-            eprintln!("This will cause issues with Gemini API");
-        }
-    }
-
-    #[test]
-    fn test_context_input_schema() {
-        let schema = schema_for!(ContextInput);
-        let json = serde_json::to_string_pretty(&schema).unwrap();
-        println!("ContextInput schema:\n{}", json);
-
-        // Check for problematic patterns
-        if json.contains("oneOf") {
-            eprintln!("WARNING: ContextInput contains oneOf!");
-        }
-        if json.contains("const") {
-            eprintln!("WARNING: ContextInput contains const!");
-        }
     }
 
     #[test]

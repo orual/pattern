@@ -418,12 +418,28 @@ impl ToolExecutor {
         false
     }
 
-    /// Check if tool requires heartbeat (no ContinueLoop rule)
+    /// Check if tool requires heartbeat
     pub fn requires_heartbeat(&self, tool_name: &str) -> bool {
-        !self
+        // Does the tool have a continue rule itself?
+        // Do we have any explicit ExitLoop rules to override?
+        // If it does and we don't, then it doesn't need a heartbeat
+        if self.tools.get(tool_name).is_some_and(|t| {
+            t.value()
+                .tool_rules()
+                .iter()
+                .any(|r| matches!(r.rule_type, ToolRuleType::ContinueLoop))
+        }) && !self
             .rules
             .iter()
-            .any(|r| matches!(r.rule_type, ToolRuleType::ContinueLoop) && r.tool_name == tool_name)
+            .any(|r| matches!(r.rule_type, ToolRuleType::ExitLoop) && r.tool_name == tool_name)
+        {
+            false
+        } else {
+            // otherwise, it requires one unless there's an explicit continue rule.
+            !self.rules.iter().any(|r| {
+                matches!(r.rule_type, ToolRuleType::ContinueLoop) && r.tool_name == tool_name
+            })
+        }
     }
 
     /// Mark a batch as complete (allows cleanup of BatchConstraints)
@@ -761,8 +777,15 @@ impl ToolExecutor {
         }
     }
 
+    /// Does this tool have any sort of forced exit rule configured?
     fn is_exit_loop_tool(&self, tool_name: &str) -> bool {
-        self.rules
+        self.tools.get(tool_name).is_some_and(|t| {
+            t.value()
+                .tool_rules()
+                .iter()
+                .any(|r| matches!(r.rule_type, ToolRuleType::ExitLoop))
+        }) || self
+            .rules
             .iter()
             .any(|r| matches!(r.rule_type, ToolRuleType::ExitLoop) && r.tool_name == tool_name)
     }

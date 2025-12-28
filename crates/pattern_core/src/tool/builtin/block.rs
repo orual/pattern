@@ -89,18 +89,26 @@ impl AiTool for BlockTool {
                     ));
                 }
 
-                // Load block by label - just verify it exists
+                // Load block by label and print it
                 match memory.get_block_metadata(agent_id, &input.label).await {
-                    Ok(Some(metadata)) => Ok(ToolOutput::success_with_data(
-                        format!("Block '{}' loaded into context", input.label),
-                        json!({
-                            "label": metadata.label,
-                            "description": metadata.description,
-                            "block_type": format!("{:?}", metadata.block_type),
-                            "pinned": metadata.pinned,
-                            "char_limit": metadata.char_limit,
-                        }),
-                    )),
+                    Ok(Some(metadata)) => {
+                        let block = memory
+                            .get_rendered_content(agent_id, &input.label)
+                            .await
+                            .ok()
+                            .flatten();
+                        Ok(ToolOutput::success_with_data(
+                            format!("Block '{}' loaded into context", input.label),
+                            json!({
+                                "label": metadata.label,
+                                "description": metadata.description,
+                                "block_type": format!("{:?}", metadata.block_type),
+                                "pinned": metadata.pinned,
+                                "char_limit": metadata.char_limit,
+                                "content": block.unwrap_or_default()
+                            }),
+                        ))
+                    }
                     Ok(None) => Err(crate::CoreError::tool_exec_msg(
                         "block",
                         serde_json::json!({"op": "load", "label": input.label}),

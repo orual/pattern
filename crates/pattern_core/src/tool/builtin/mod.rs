@@ -7,8 +7,6 @@ mod block;
 mod block_edit;
 mod calculator;
 mod constellation_search;
-mod context;
-//pub mod data_source;
 mod file;
 mod recall;
 mod search;
@@ -27,11 +25,7 @@ pub use calculator::{CalculatorInput, CalculatorOutput, CalculatorTool};
 pub use constellation_search::{
     ConstellationSearchDomain, ConstellationSearchInput, ConstellationSearchTool,
 };
-pub use context::{ContextInput, ContextOutput, ContextTool, CoreMemoryOperationType};
 pub use file::FileTool;
-//pub use data_source::{
-//    DataSourceInput, DataSourceOutput, DataSourceTool, register_data_source_tool,
-//};
 pub use recall::RecallTool;
 use schemars::JsonSchema;
 pub use search::{SearchDomain, SearchInput, SearchOutput, SearchTool};
@@ -78,7 +72,6 @@ pub enum TargetType {
 pub struct BuiltinTools {
     // Existing tools
     recall_tool: Box<dyn DynamicTool>,
-    context_tool: Box<dyn DynamicTool>,
     search_tool: Box<dyn DynamicTool>,
     send_message_tool: Box<dyn DynamicTool>,
     web_tool: Box<dyn DynamicTool>,
@@ -96,7 +89,6 @@ impl BuiltinTools {
         Self {
             // Existing tools
             recall_tool: Box::new(DynamicToolAdapter::new(RecallTool::new(Arc::clone(&ctx)))),
-            context_tool: Box::new(DynamicToolAdapter::new(ContextTool::new(Arc::clone(&ctx)))),
             search_tool: Box::new(DynamicToolAdapter::new(SearchTool::new(Arc::clone(&ctx)))),
             send_message_tool: Box::new(DynamicToolAdapter::new(SendMessageTool::new(Arc::clone(
                 &ctx,
@@ -124,7 +116,6 @@ impl BuiltinTools {
     pub fn register_all(&self, registry: &ToolRegistry) {
         // Existing tools
         registry.register_dynamic(self.recall_tool.clone_box());
-        registry.register_dynamic(self.context_tool.clone_box());
         registry.register_dynamic(self.search_tool.clone_box());
         registry.register_dynamic(self.send_message_tool.clone_box());
         registry.register_dynamic(self.web_tool.clone_box());
@@ -152,7 +143,6 @@ impl BuiltinTools {
 pub struct BuiltinToolsBuilder {
     // Existing tools
     recall_tool: Option<Box<dyn DynamicTool>>,
-    context_tool: Option<Box<dyn DynamicTool>>,
     search_tool: Option<Box<dyn DynamicTool>>,
     send_message_tool: Option<Box<dyn DynamicTool>>,
     web_tool: Option<Box<dyn DynamicTool>>,
@@ -168,12 +158,6 @@ impl BuiltinToolsBuilder {
     /// Replace the default recall tool
     pub fn with_recall_tool(mut self, tool: impl DynamicTool + 'static) -> Self {
         self.recall_tool = Some(Box::new(tool));
-        self
-    }
-
-    /// Replace the default context tool
-    pub fn with_context_tool(mut self, tool: impl DynamicTool + 'static) -> Self {
-        self.context_tool = Some(Box::new(tool));
         self
     }
 
@@ -225,7 +209,6 @@ impl BuiltinToolsBuilder {
         BuiltinTools {
             // Existing tools
             recall_tool: self.recall_tool.unwrap_or(defaults.recall_tool),
-            context_tool: self.context_tool.unwrap_or(defaults.context_tool),
             search_tool: self.search_tool.unwrap_or(defaults.search_tool),
             send_message_tool: self.send_message_tool.unwrap_or(defaults.send_message_tool),
             web_tool: self.web_tool.unwrap_or(defaults.web_tool),
