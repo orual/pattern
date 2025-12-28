@@ -23,3 +23,4 @@ mcp-wrapper.sh
 **.sql
 !**/migrations/*.sql
 **.surql
+**/**.output

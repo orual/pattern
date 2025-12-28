@@ -15,7 +15,7 @@ use tracing::{debug, error, info, warn};
 
 use futures::StreamExt;
 use pattern_core::db::ConstellationDatabases;
-use pattern_core::message::Message as PatternMessage;
+use pattern_core::messages::Message as PatternMessage;
 use pattern_core::realtime::{GroupEventContext, GroupEventSink, tap_group_stream};
 use pattern_core::{
     Agent, AgentGroup,
@@ -948,11 +948,10 @@ impl DiscordBot {
                         };
                         let mut has_response = false;
 
-                        let ctx_clone = ctx.clone();
                         while let Some(event) = stream.next().await {
                             has_response = true;
                             match event {
-                                pattern_core::coordination::groups::GroupResponseEvent::ToolCallStarted { fn_name, .. } => {
+                                pattern_core::coordination::groups::GroupResponseEvent::ToolCallStarted {  .. } => {
                                     // // Show tool activity for reactions too
                                     // let tool_msg = match fn_name.as_str() {
                                     //     "context" => "💭 Processing reaction context...".to_string(),

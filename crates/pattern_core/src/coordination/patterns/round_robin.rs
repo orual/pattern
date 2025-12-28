@@ -12,7 +12,7 @@ use crate::{
         groups::{AgentWithMembership, GroupManager, GroupResponse},
         types::{CoordinationPattern, GroupState},
     },
-    message::Message,
+    messages::Message,
 };
 
 #[derive(Clone)]

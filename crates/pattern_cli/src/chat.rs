@@ -9,7 +9,7 @@ use pattern_core::{
     Agent,
     agent::ResponseEvent,
     config::PatternConfig,
-    message::{Message, MessageContent},
+    messages::{Message, MessageContent},
 };
 use std::sync::Arc;
 

@@ -8,7 +8,7 @@ use tokio_stream::Stream;
 use crate::AgentId;
 use crate::agent::{AgentState, ResponseEvent};
 use crate::error::CoreError;
-use crate::message::{Message, Response};
+use crate::messages::{Message, Response};
 use crate::runtime::AgentRuntime;
 
 /// Slim agent trait - identity + process loop + state only

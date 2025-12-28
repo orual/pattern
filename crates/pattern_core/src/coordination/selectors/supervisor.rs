@@ -20,7 +20,7 @@ use crate::coordination::types::GroupMemberRole;
 use crate::{
     CoreError, Result,
     agent::Agent,
-    message::{ChatRole, Message, MessageContent},
+    messages::{ChatRole, Message, MessageContent},
 };
 
 /// Selects agents by asking a supervisor to decide
@@ -323,7 +323,7 @@ fn build_selection_prompt(
         MessageContent::Parts(parts) => parts
             .iter()
             .filter_map(|p| match p {
-                crate::message::ContentPart::Text(text) => Some(text.clone()),
+                crate::messages::ContentPart::Text(text) => Some(text.clone()),
                 _ => None,
             })
             .collect::<Vec<_>>()

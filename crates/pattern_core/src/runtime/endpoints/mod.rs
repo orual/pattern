@@ -3,7 +3,7 @@
 mod group;
 
 use crate::error::Result;
-use crate::message::{ContentPart, Message, MessageContent};
+use crate::messages::{ContentPart, Message, MessageContent};
 use serde_json::Value;
 use tracing::{debug, info};
 

@@ -10,11 +10,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::agent::SnowflakePosition;
+use crate::SnowflakePosition;
 use crate::agent::tool_rules::{
     ExecutionPhase, ToolExecution, ToolRule, ToolRuleType, ToolRuleViolation,
 };
-use crate::message::{ToolCall, ToolResponse};
+use crate::messages::{ToolCall, ToolResponse};
 use crate::permission::{PermissionGrant, PermissionScope, broker};
 use crate::tool::{ExecutionMeta, ToolRegistry};
 use crate::{AgentId, ToolCallId};
@@ -771,7 +771,7 @@ impl ToolExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::get_next_message_position_sync;
+    use crate::utils::get_next_message_position_sync;
 
     fn test_executor(rules: Vec<ToolRule>) -> ToolExecutor {
         let tools = Arc::new(ToolRegistry::new());

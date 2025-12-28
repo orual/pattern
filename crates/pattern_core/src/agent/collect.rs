@@ -5,7 +5,7 @@ use tokio_stream::Stream;
 
 use crate::agent::ResponseEvent;
 use crate::error::CoreError;
-use crate::message::{MessageContent, Response};
+use crate::messages::{MessageContent, Response};
 
 /// Collect a stream of ResponseEvents into a final Response
 ///

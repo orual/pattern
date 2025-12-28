@@ -10,7 +10,7 @@ use tracing::{debug, error};
 
 use crate::agent::{Agent, ResponseEvent};
 use crate::error::Result;
-use crate::message::{Message, MessageMetadata};
+use crate::messages::{Message, MessageMetadata};
 use crate::realtime::{AgentEventContext, AgentEventSink};
 
 /// Configuration for the queue processor

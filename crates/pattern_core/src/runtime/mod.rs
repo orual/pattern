@@ -14,15 +14,14 @@ use std::sync::{Arc, Weak};
 
 use crate::ModelProvider;
 use crate::agent::tool_rules::ToolRule;
-use crate::agent::{SnowflakePosition, get_next_message_position_sync};
 use crate::context::ContextBuilder;
 use crate::db::ConstellationDatabases;
 use crate::error::CoreError;
 use crate::id::AgentId;
 use crate::memory::{MemoryResult, MemorySearchResult, MemoryStore, SearchOptions};
-use crate::message::{BatchType, Message, Request, ToolCall, ToolResponse};
-use crate::messages::MessageStore;
+use crate::messages::{BatchType, Message, MessageStore, Request, ToolCall, ToolResponse};
 use crate::tool::{ExecutionMeta, ToolRegistry};
+use crate::{SnowflakePosition, utils::get_next_message_position_sync};
 
 mod context;
 mod endpoints;

@@ -14,7 +14,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use crate::error::{CoreError, Result};
-use crate::message::Message;
+use crate::messages::Message;
 
 /// Describes the origin of a message
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -335,7 +335,7 @@ impl AgentMessageRouter {
 
         // Create the queued message
         let queued = pattern_db::models::QueuedMessage {
-            id: crate::agent::get_next_message_position_sync().to_string(),
+            id: crate::utils::get_next_message_position_sync().to_string(),
             target_agent_id: target_agent_id.clone(),
             source_agent_id: Some(self.agent_id.clone()),
             content,
@@ -422,7 +422,7 @@ impl AgentMessageRouter {
         let mut sent_count = 0;
         for member in members {
             let queued = pattern_db::models::QueuedMessage {
-                id: crate::agent::get_next_message_position_sync().to_string(),
+                id: crate::utils::get_next_message_position_sync().to_string(),
                 target_agent_id: member.agent_id.clone(),
                 source_agent_id: Some(self.agent_id.clone()),
                 content: content.clone(),

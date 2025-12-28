@@ -2032,7 +2032,7 @@ async fn process_heartbeats_with_dashmap<F, Fut>(
 {
     use crate::agent::{AgentState, ResponseEvent};
     use crate::context::NON_USER_MESSAGE_PREFIX;
-    use crate::message::{ChatRole, Message};
+    use crate::messages::{ChatRole, Message};
     use futures::StreamExt;
     use std::time::Duration;
 
@@ -2247,7 +2247,7 @@ mod tests {
         use crate::AgentId;
         use crate::agent::{Agent, AgentState, ResponseEvent};
         use crate::error::CoreError;
-        use crate::message::Message;
+        use crate::messages::Message;
         use crate::runtime::AgentRuntime;
         use async_trait::async_trait;
         use tokio_stream::Stream;

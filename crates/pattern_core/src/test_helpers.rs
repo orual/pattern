@@ -1,9 +1,9 @@
 #![cfg(test)]
 
 pub mod messages {
-    use crate::agent::SnowflakePosition;
-    use crate::agent::get_next_message_position_sync;
-    use crate::message::{BatchType, Message};
+    use crate::SnowflakePosition;
+    use crate::messages::{BatchType, Message};
+    use crate::utils::get_next_message_position_sync;
 
     /// Create a simple two-message batch: user then assistant.
     /// Returns (user_msg, assistant_msg, batch_id).

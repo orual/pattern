@@ -11,7 +11,7 @@ use crate::agent::{AgentState, ResponseEvent};
 use crate::context::heartbeat::HeartbeatSender;
 use crate::error::CoreError;
 use crate::id::AgentId;
-use crate::message::Message;
+use crate::messages::Message;
 use crate::model::ModelProvider;
 use crate::runtime::AgentRuntime;
 
@@ -89,10 +89,10 @@ impl Agent for DatabaseAgent {
         // Determine batch ID and type from the incoming message
         let batch_id = message
             .batch
-            .unwrap_or_else(|| crate::agent::get_next_message_position_sync());
+            .unwrap_or_else(|| crate::utils::get_next_message_position_sync());
         let batch_type = message
             .batch_type
-            .unwrap_or(crate::message::BatchType::UserRequest);
+            .unwrap_or(crate::messages::BatchType::UserRequest);
 
         // Update state to Processing
         let mut active_batches = HashSet::new();
@@ -207,6 +207,7 @@ impl Agent for DatabaseAgent {
             };
 
             // Variable to hold metadata from the last response for final Complete event
+            #[allow(unused_assignments)]
             let mut last_response_metadata = None;
 
             // Sequence number tracking within the batch
@@ -271,14 +272,14 @@ impl Agent for DatabaseAgent {
                 // 4. Stream response events (text, reasoning)
                 for content in &response.content {
                     match content {
-                        crate::message::MessageContent::Text(text) => {
+                        crate::messages::MessageContent::Text(text) => {
                             send_event(ResponseEvent::TextChunk {
                                 text: text.clone(),
                                 is_final: true,
                             })
                             .await;
                         }
-                        crate::message::MessageContent::ToolCalls(calls) => {
+                        crate::messages::MessageContent::ToolCalls(calls) => {
                             send_event(ResponseEvent::ToolCalls {
                                 calls: calls.clone(),
                             })
@@ -298,7 +299,7 @@ impl Agent for DatabaseAgent {
                 }
 
                 // 5. Store the response message(s)
-                let response_messages = crate::message::Message::from_response(
+                let response_messages = crate::messages::Message::from_response(
                     &response,
                     &agent_id,
                     Some(batch_id),
@@ -337,11 +338,11 @@ impl Agent for DatabaseAgent {
                 }
 
                 // 6. Extract and execute tool calls
-                let tool_calls: Vec<crate::message::ToolCall> = response
+                let tool_calls: Vec<crate::messages::ToolCall> = response
                     .content
                     .iter()
                     .filter_map(|c| {
-                        if let crate::message::MessageContent::ToolCalls(calls) = c {
+                        if let crate::messages::MessageContent::ToolCalls(calls) = c {
                             Some(calls.clone())
                         } else {
                             None
@@ -400,7 +401,7 @@ impl Agent for DatabaseAgent {
                                     if start_constraint_attempts >= 3 {
                                         // Attempt 3: Force execute required tools with {} args
                                         for tool_name in required_start_tools {
-                                            let synthetic_call = crate::message::ToolCall {
+                                            let synthetic_call = crate::messages::ToolCall {
                                                 call_id: format!("force_{}", crate::MessageId::generate()),
                                                 fn_name: tool_name.clone(),
                                                 fn_arguments: serde_json::json!({}),
@@ -425,7 +426,7 @@ impl Agent for DatabaseAgent {
                                                 }
                                                 Err(_) => {
                                                     // Tool failed with {} args - that's okay, we tried
-                                                    tool_responses.push(crate::message::ToolResponse {
+                                                    tool_responses.push(crate::messages::ToolResponse {
                                                         call_id: synthetic_call.call_id.clone(),
                                                         content: format!(
                                                             "Force-executed {} with empty args (failed)",
@@ -439,7 +440,7 @@ impl Agent for DatabaseAgent {
 
                                         // Mark constraints as done and add original error as response
                                         agent_self.runtime.mark_start_constraints_done(&mut process_state);
-                                        tool_responses.push(crate::message::ToolResponse {
+                                        tool_responses.push(crate::messages::ToolResponse {
                                             call_id: call.call_id.clone(),
                                             content: format!("Error: {}", e),
                                             is_error: Some(true),
@@ -447,7 +448,7 @@ impl Agent for DatabaseAgent {
                                         needs_continuation = true;
                                     } else {
                                         // Attempt 1 or 2: Return error as tool response
-                                        tool_responses.push(crate::message::ToolResponse {
+                                        tool_responses.push(crate::messages::ToolResponse {
                                             call_id: call.call_id.clone(),
                                             content: format!("Error: {}", e),
                                             is_error: Some(true),
@@ -460,7 +461,7 @@ impl Agent for DatabaseAgent {
                                                 "[System Reminder] You must call these tools first before any others: {}",
                                                 required_start_tools.join(", ")
                                             );
-                                            let reminder_msg = crate::message::Message::user_in_batch_typed(
+                                            let reminder_msg = crate::messages::Message::user_in_batch_typed(
                                                 batch_id,
                                                 current_sequence_num,
                                                 batch_type,
@@ -478,7 +479,7 @@ impl Agent for DatabaseAgent {
                                     }
                                 } else {
                                     // Other execution errors: convert to error response
-                                    tool_responses.push(crate::message::ToolResponse {
+                                    tool_responses.push(crate::messages::ToolResponse {
                                         call_id: call.call_id.clone(),
                                         content: format!("Execution error: {}", e),
                                         is_error: Some(true),
@@ -497,7 +498,7 @@ impl Agent for DatabaseAgent {
 
                         // Store tool responses as messages
                         for response in &tool_responses {
-                            let msg = crate::message::Message::tool_in_batch_typed(
+                            let msg = crate::messages::Message::tool_in_batch_typed(
                                 batch_id,
                                 current_sequence_num,
                                 batch_type,
@@ -533,7 +534,7 @@ impl Agent for DatabaseAgent {
                             let mut exit_tool_responses = Vec::new();
 
                             for tool_name in &pending_exit {
-                                let synthetic_call = crate::message::ToolCall {
+                                let synthetic_call = crate::messages::ToolCall {
                                     call_id: format!("exit_force_{}", crate::MessageId::generate()),
                                     fn_name: tool_name.clone(),
                                     fn_arguments: serde_json::json!({}),
@@ -565,7 +566,7 @@ impl Agent for DatabaseAgent {
                                     }
                                     Err(_) => {
                                         // Tool failed with {} args - that's okay, we tried
-                                        exit_tool_responses.push(crate::message::ToolResponse {
+                                        exit_tool_responses.push(crate::messages::ToolResponse {
                                             call_id: synthetic_call.call_id.clone(),
                                             content: format!(
                                                 "Force-executed {} with empty args (failed)",
@@ -586,7 +587,7 @@ impl Agent for DatabaseAgent {
 
                                 // Store tool responses as messages
                                 for response in &exit_tool_responses {
-                                    let msg = crate::message::Message::tool_in_batch_typed(
+                                    let msg = crate::messages::Message::tool_in_batch_typed(
                                         batch_id,
                                         current_sequence_num,
                                         batch_type,
@@ -622,7 +623,7 @@ impl Agent for DatabaseAgent {
                                 reminder_intensity,
                                 pending_exit.join(", ")
                             );
-                            let reminder_msg = crate::message::Message::user_in_batch_typed(
+                            let reminder_msg = crate::messages::Message::user_in_batch_typed(
                                 batch_id,
                                 current_sequence_num,
                                 batch_type,
@@ -701,7 +702,7 @@ impl Agent for DatabaseAgent {
                     let next_request = agent_self
                         .runtime
                         .prepare_request(
-                            Vec::<crate::message::Message>::new(),
+                            Vec::<crate::messages::Message>::new(),
                             None,
                             Some(batch_id),
                             Some(batch_type),
@@ -738,7 +739,7 @@ impl Agent for DatabaseAgent {
             send_event(ResponseEvent::Complete {
                 message_id: crate::MessageId::generate(),
                 metadata: last_response_metadata.unwrap_or_else(|| {
-                    crate::message::ResponseMetadata {
+                    crate::messages::ResponseMetadata {
                         processing_time: None,
                         tokens_used: None,
                         model_used: None,
@@ -1301,8 +1302,8 @@ mod tests {
         async fn complete(
             &self,
             _options: &crate::model::ResponseOptions,
-            _request: crate::message::Request,
-        ) -> crate::Result<crate::message::Response> {
+            _request: crate::messages::Request,
+        ) -> crate::Result<crate::messages::Response> {
             unimplemented!("Mock provider")
         }
 
@@ -1760,7 +1761,7 @@ mod tests {
     #[tokio::test]
     async fn test_process_basic_flow() {
         use crate::agent::Agent;
-        use crate::message::{Message, MessageContent, Response, ResponseMetadata};
+        use crate::messages::{Message, MessageContent, Response, ResponseMetadata};
         use futures::StreamExt;
 
         // Mock model that returns a simple text response
@@ -1776,8 +1777,8 @@ mod tests {
             async fn complete(
                 &self,
                 _options: &crate::model::ResponseOptions,
-                _request: crate::message::Request,
-            ) -> crate::Result<crate::message::Response> {
+                _request: crate::messages::Request,
+            ) -> crate::Result<crate::messages::Response> {
                 Ok(Response {
                     content: vec![MessageContent::Text("Hello from model!".to_string())],
                     reasoning: None,
@@ -1891,7 +1892,7 @@ mod tests {
     #[tokio::test]
     async fn test_tool_execution_flow() {
         use crate::agent::Agent;
-        use crate::message::{Message, MessageContent, Response, ResponseMetadata, ToolCall};
+        use crate::messages::{Message, MessageContent, Response, ResponseMetadata, ToolCall};
         use crate::tool::{AiTool, ExecutionMeta};
         use futures::StreamExt;
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1911,8 +1912,8 @@ mod tests {
             async fn complete(
                 &self,
                 _options: &crate::model::ResponseOptions,
-                _request: crate::message::Request,
-            ) -> crate::Result<crate::message::Response> {
+                _request: crate::messages::Request,
+            ) -> crate::Result<crate::messages::Response> {
                 let count = self.call_count.fetch_add(1, Ordering::SeqCst);
 
                 if count == 0 {
@@ -2027,7 +2028,7 @@ mod tests {
         runtime_config.set_model_options("default", response_opts.clone());
         runtime_config.set_default_options(response_opts); // Use same options as default fallback
 
-        let mut tools = crate::tool::ToolRegistry::new();
+        let tools = crate::tool::ToolRegistry::new();
         tools.register(TestTool);
 
         let runtime = AgentRuntime::builder()
@@ -2084,7 +2085,7 @@ mod tests {
     async fn test_start_constraint_retry() {
         use crate::agent::Agent;
         use crate::agent::tool_rules::{ToolRule, ToolRuleType};
-        use crate::message::{Message, MessageContent, Response, ResponseMetadata, ToolCall};
+        use crate::messages::{Message, MessageContent, Response, ResponseMetadata, ToolCall};
         use crate::tool::{AiTool, ExecutionMeta};
         use futures::StreamExt;
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2104,8 +2105,8 @@ mod tests {
             async fn complete(
                 &self,
                 _options: &crate::model::ResponseOptions,
-                _request: crate::message::Request,
-            ) -> crate::Result<crate::message::Response> {
+                _request: crate::messages::Request,
+            ) -> crate::Result<crate::messages::Response> {
                 let count = self.call_count.fetch_add(1, Ordering::SeqCst);
 
                 if count < 3 {
@@ -2242,7 +2243,7 @@ mod tests {
         runtime_config.set_model_options("default", response_opts.clone());
         runtime_config.set_default_options(response_opts); // Use same options as default fallback
 
-        let mut tools = crate::tool::ToolRegistry::new();
+        let tools = crate::tool::ToolRegistry::new();
         tools.register(StartTool);
         tools.register(RegularTool);
 
@@ -2320,7 +2321,7 @@ mod tests {
     async fn test_exit_requirement_retry() {
         use crate::agent::Agent;
         use crate::agent::tool_rules::{ToolRule, ToolRuleType};
-        use crate::message::{Message, MessageContent, Response, ResponseMetadata};
+        use crate::messages::{Message, MessageContent, Response, ResponseMetadata};
         use crate::tool::{AiTool, ExecutionMeta};
         use futures::StreamExt;
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2340,8 +2341,8 @@ mod tests {
             async fn complete(
                 &self,
                 _options: &crate::model::ResponseOptions,
-                _request: crate::message::Request,
-            ) -> crate::Result<crate::message::Response> {
+                _request: crate::messages::Request,
+            ) -> crate::Result<crate::messages::Response> {
                 let _count = self.call_count.fetch_add(1, Ordering::SeqCst);
 
                 // Always return text (no tool calls = wants to exit)
@@ -2430,7 +2431,7 @@ mod tests {
         runtime_config.set_model_options("default", response_opts.clone());
         runtime_config.set_default_options(response_opts); // Use same options as default fallback
 
-        let mut tools = crate::tool::ToolRegistry::new();
+        let tools = crate::tool::ToolRegistry::new();
         tools.register(ExitTool);
 
         let exit_rule = ToolRule {

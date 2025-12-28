@@ -1,6 +1,6 @@
 //! Utility functions for coordination patterns
 
-use crate::message::{MessageContent, Response, ResponseMetadata};
+use crate::messages::{MessageContent, Response, ResponseMetadata};
 use genai::{ModelIden, adapter::AdapterKind};
 
 /// Create a simple text response

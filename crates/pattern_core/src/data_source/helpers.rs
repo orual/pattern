@@ -8,9 +8,9 @@
 
 use crate::AgentId;
 use crate::SnowflakePosition;
-use crate::agent::get_next_message_position_sync;
 use crate::memory::{BlockSchema, BlockType, MemoryResult, MemoryStore};
-use crate::message::Message;
+use crate::messages::Message;
+use crate::utils::get_next_message_position_sync;
 
 use super::{BlockRef, Notification};
 

@@ -12,7 +12,7 @@ pub(crate) mod test {
         agent::{Agent, AgentState, ResponseEvent},
         coordination::groups::GroupResponseEvent,
         error::CoreError,
-        message::{ChatRole, Message, MessageContent, MessageMetadata, MessageOptions, Response},
+        messages::{ChatRole, Message, MessageContent, MessageMetadata, MessageOptions, Response},
         runtime::{AgentRuntime, test_support::test_runtime},
     };
 
@@ -60,7 +60,7 @@ pub(crate) mod test {
             message: Message,
         ) -> std::result::Result<Box<dyn Stream<Item = ResponseEvent> + Send + Unpin>, CoreError>
         {
-            use crate::message::ResponseMetadata;
+            use crate::messages::ResponseMetadata;
 
             // Create a simple stream that emits a complete response
             let events = vec![
@@ -154,7 +154,7 @@ pub(crate) mod test {
     pub async fn collect_agent_responses(
         mut stream: Box<dyn futures::Stream<Item = GroupResponseEvent> + Send + Unpin>,
     ) -> Vec<crate::coordination::groups::AgentResponse> {
-        use crate::message::ResponseMetadata;
+        use crate::messages::ResponseMetadata;
         use tokio_stream::StreamExt;
 
         let mut responses = Vec::new();

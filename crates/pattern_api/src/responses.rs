@@ -4,7 +4,7 @@ use pattern_core::{
     agent::{AgentState, AgentType},
     coordination::{CoordinationPattern, GroupMemberRole},
     id::{AgentId, GroupId, MessageId, UserId},
-    message::{ChatRole, MessageContent},
+    messages::{ChatRole, MessageContent},
 };
 use serde::{Deserialize, Serialize};
 

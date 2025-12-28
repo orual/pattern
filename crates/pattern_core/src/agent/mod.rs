@@ -19,26 +19,20 @@ pub use collect::collect_response;
 pub use db_agent::{DatabaseAgent, DatabaseAgentBuilder};
 pub use traits::{Agent, AgentExt};
 
-use crate::{
-    AgentId, Result,
-    message::{Message, MessageContent, Response, ToolCall, ToolResponse},
-    tool::DynamicTool,
-};
+use crate::messages::{ToolCall, ToolResponse};
 
 // Also re-export at agent module level for convenience
+use crate::SnowflakePosition;
 pub use crate::tool::rules::{
     ExecutionPhase, ToolExecution, ToolExecutionState, ToolRule, ToolRuleEngine, ToolRuleType,
     ToolRuleViolation,
 };
 
-use async_trait::async_trait;
 use chrono::Utc;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::str::FromStr;
-use std::sync::Arc;
-use tokio_stream::Stream;
 
 /// Events emitted during message processing for real-time streaming
 #[derive(Debug, Clone)]
@@ -75,7 +69,7 @@ pub enum ResponseEvent {
         /// The ID of the incoming message that triggered this response
         message_id: crate::MessageId,
         /// Metadata about the complete response (usage, timing, etc)
-        metadata: crate::message::ResponseMetadata,
+        metadata: crate::messages::ResponseMetadata,
     },
     /// An error occurred during processing
     Error { message: String, recoverable: bool },
@@ -395,120 +389,4 @@ pub enum ActionPriority {
     High,
     /// Critical priority - requires immediate attention
     Critical,
-}
-
-use ferroid::{Base32SnowExt, SnowflakeGeneratorAsyncTokioExt, SnowflakeMastodonId};
-use std::fmt;
-use std::sync::OnceLock;
-
-/// Wrapper type for Snowflake IDs with proper serde support
-#[repr(transparent)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SnowflakePosition(pub SnowflakeMastodonId);
-
-impl SnowflakePosition {
-    /// Create a new snowflake position
-    pub fn new(id: SnowflakeMastodonId) -> Self {
-        Self(id)
-    }
-}
-
-impl fmt::Display for SnowflakePosition {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Use the efficient base32 encoding via Display
-        write!(f, "{}", self.0)
-    }
-}
-
-impl FromStr for SnowflakePosition {
-    type Err = String;
-
-    fn from_str(s: &str) -> core::result::Result<Self, Self::Err> {
-        // Try parsing as base32 first
-        if let Ok(id) = SnowflakeMastodonId::decode(s) {
-            return Ok(Self(id));
-        }
-
-        // Fall back to parsing as raw u64
-        s.parse::<u64>()
-            .map(|raw| Self(SnowflakeMastodonId::from_raw(raw)))
-            .map_err(|e| format!("Failed to parse snowflake as base32 or u64: {}", e))
-    }
-}
-
-impl Serialize for SnowflakePosition {
-    fn serialize<S>(&self, serializer: S) -> core::result::Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        // Serialize as string using Display
-        serializer.serialize_str(&self.to_string())
-    }
-}
-
-impl<'de> Deserialize<'de> for SnowflakePosition {
-    fn deserialize<D>(deserializer: D) -> core::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        // Deserialize from string and parse
-        let s = String::deserialize(deserializer)?;
-        s.parse::<Self>().map_err(serde::de::Error::custom)
-    }
-}
-
-/// Type alias for the Snowflake generator we're using
-type SnowflakeGen = ferroid::AtomicSnowflakeGenerator<SnowflakeMastodonId, ferroid::MonotonicClock>;
-
-/// Global ID generator for message positions using Snowflake IDs
-/// This provides distributed, monotonic IDs that work across processes
-static MESSAGE_POSITION_GENERATOR: OnceLock<SnowflakeGen> = OnceLock::new();
-
-pub fn get_position_generator() -> &'static SnowflakeGen {
-    MESSAGE_POSITION_GENERATOR.get_or_init(|| {
-        // Use machine ID 0 for now - in production this would be configurable
-        let clock = ferroid::MonotonicClock::with_epoch(ferroid::TWITTER_EPOCH);
-        ferroid::AtomicSnowflakeGenerator::new(0, clock)
-    })
-}
-
-/// Get the next message position synchronously
-///
-/// This is designed for use in synchronous contexts like Default impls.
-/// In practice, we don't generate messages fast enough to hit the sequence
-/// limit (65536/ms), so Pending should rarely happen in production.
-///
-/// When the sequence is exhausted (e.g., in parallel tests), this will block
-/// briefly until the next millisecond boundary to get a fresh sequence.
-pub fn get_next_message_position_sync() -> SnowflakePosition {
-    use ferroid::IdGenStatus;
-
-    let generator = get_position_generator();
-
-    loop {
-        match generator.next_id() {
-            IdGenStatus::Ready { id } => return SnowflakePosition::new(id),
-            IdGenStatus::Pending { yield_for } => {
-                // If yield_for is 0, we're at the sequence limit but still in the same millisecond.
-                // Wait at least 1ms to roll over to the next millisecond and reset the sequence.
-                let wait_ms = yield_for.max(1) as u64;
-                std::thread::sleep(std::time::Duration::from_millis(wait_ms));
-                // Loop will retry after the wait
-            }
-        }
-    }
-}
-
-/// Get the next message position as a Snowflake ID (async version)
-pub async fn get_next_message_position() -> SnowflakePosition {
-    let id = get_position_generator()
-        .try_next_id_async()
-        .await
-        .expect("for now we are assuming this succeeds");
-    SnowflakePosition::new(id)
-}
-
-/// Get the next message position as a String (for database storage)
-pub async fn get_next_message_position_string() -> String {
-    get_next_message_position().await.to_string()
 }

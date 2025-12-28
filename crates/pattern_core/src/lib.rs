@@ -16,8 +16,6 @@ pub mod error;
 pub mod id;
 pub mod memory;
 pub mod memory_acl;
-pub mod message;
-pub mod message_queue;
 pub mod messages;
 pub mod model;
 pub mod oauth;
@@ -35,7 +33,7 @@ pub mod test_helpers;
 
 // Macros are automatically available at crate root due to #[macro_export]
 
-pub use crate::agent::SnowflakePosition;
+pub use crate::utils::SnowflakePosition;
 pub use agent::{Agent, AgentState, AgentType};
 pub use context::{CompressionStrategy, ContextBuilder, ContextConfig, MessageCompressor};
 pub use coordination::{AgentGroup, Constellation, CoordinationPattern};
@@ -44,7 +42,7 @@ pub use id::{
     AgentId, ConversationId, Did, IdType, MemoryId, MessageId, ModelId, OAuthTokenId,
     QueuedMessageId, RequestId, SessionId, TaskId, ToolCallId, UserId, WakeupId,
 };
-pub use message_queue::{QueuedMessage, ScheduledWakeup};
+pub use messages::queue::{QueuedMessage, ScheduledWakeup};
 pub use model::ModelCapability;
 pub use model::ModelProvider;
 pub use runtime::{AgentRuntime, RuntimeBuilder, RuntimeConfig};

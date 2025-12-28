@@ -1,6 +1,6 @@
 //! Search utilities for scoring adjustments and snippet extraction
 
-use crate::message::{ContentBlock, Message, MessageContent};
+use crate::messages::{ContentBlock, Message, MessageContent};
 use serde::{Deserialize, Serialize};
 
 /// Search result with relevance score

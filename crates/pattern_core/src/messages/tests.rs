@@ -5,12 +5,12 @@
 //! all work correctly in practice.
 
 use super::*;
-use crate::agent::{SnowflakePosition, get_next_message_position_sync};
 use crate::id::MessageId;
-use crate::message::{
+use crate::messages::{
     BatchType, ChatRole, ContentBlock, ContentPart, ImageSource, MessageContent, MessageMetadata,
     MessageOptions, ToolCall, ToolResponse,
 };
+use crate::utils::get_next_message_position_sync;
 use pattern_db::ConstellationDb;
 use pattern_db::models::{Agent, AgentStatus};
 use sqlx::types::Json as SqlxJson;
@@ -654,7 +654,7 @@ async fn test_archive_messages() {
 
     // Store several messages with increasing positions
     let positions: Vec<_> = (0..5)
-        .map(|i| {
+        .map(|_| {
             let pos = get_next_message_position_sync();
             // Small delay to ensure different positions
             std::thread::sleep(std::time::Duration::from_millis(2));

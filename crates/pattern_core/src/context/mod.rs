@@ -13,24 +13,9 @@ pub use activity::*;
 pub use builder::*;
 pub use types::*;
 
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-
-use crate::{
-    Result,
-    id::AgentId,
-    message::{CacheControl, Message, MessageBatch, MessageOptions},
-    tool::{DynamicTool, ToolRegistry},
-};
 use regex::Regex;
 
 pub use compression::{CompressionResult, CompressionStrategy, MessageCompressor};
-
-/// Maximum characters for core memory blocks by default
-const DEFAULT_CORE_MEMORY_CHAR_LIMIT: usize = 10000;
-
-/// Maximum messages to keep in immediate context before compression
-const DEFAULT_MAX_CONTEXT_MESSAGES: usize = 200;
 
 pub const NON_USER_MESSAGE_PREFIX: &str =
     "[This is an automated system message hidden from the user] ";

@@ -12,7 +12,7 @@ use pattern_core::{
     agent::Agent,
     config::PatternConfig,
     coordination::groups::{AgentGroup, AgentWithMembership, GroupManager, GroupResponseEvent},
-    message::{ContentBlock, ContentPart, Message, MessageContent},
+    messages::{ContentBlock, ContentPart, Message, MessageContent},
     runtime::router::{MessageEndpoint, MessageOrigin},
 };
 use pattern_db::models::PatternType;

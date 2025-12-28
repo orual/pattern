@@ -5,15 +5,14 @@
 //! available tools, then assembles everything into a `Request` ready for model calls.
 
 use crate::ModelProvider;
-use crate::agent::SnowflakePosition;
+use crate::SnowflakePosition;
 use crate::agent::tool_rules::ToolRule;
 use crate::context::activity::ActivityRenderer;
 use crate::context::compression::MessageCompressor;
 use crate::context::types::ContextConfig;
 use crate::error::CoreError;
 use crate::memory::{BlockType, MemoryStore, SharedBlockInfo};
-use crate::message::{ChatRole, Message, MessageContent, Request};
-use crate::messages::MessageStore;
+use crate::messages::{ChatRole, Message, MessageContent, MessageStore, Request};
 use crate::model::ModelInfo;
 use crate::tool::ToolRegistry;
 use std::sync::Arc;

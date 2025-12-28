@@ -7,7 +7,7 @@ use tracing::{debug, info, warn};
 
 use pattern_core::Result;
 use pattern_core::config::DiscordAppConfig;
-use pattern_core::message::{ContentPart, Message, MessageContent};
+use pattern_core::messages::{ContentPart, Message, MessageContent};
 use pattern_core::runtime::router::{MessageEndpoint, MessageOrigin};
 
 /// Discord endpoint for sending messages through the Pattern message router

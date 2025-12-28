@@ -13,7 +13,7 @@ use crate::{
         },
         types::{CoordinationPattern, GroupState, SelectionContext},
     },
-    message::Message,
+    messages::Message,
 };
 
 #[derive(Clone)]
@@ -91,10 +91,10 @@ impl GroupManager for DynamicManager {
 
             // Check if message directly addresses an agent by name
             let message_text = match &message.content {
-                crate::message::MessageContent::Text(text) => Some(text.as_str()),
-                crate::message::MessageContent::Parts(parts) => {
+                crate::messages::MessageContent::Text(text) => Some(text.as_str()),
+                crate::messages::MessageContent::Parts(parts) => {
                     parts.iter().find_map(|p| match p {
-                        crate::message::ContentPart::Text(text) => Some(text.as_str()),
+                        crate::messages::ContentPart::Text(text) => Some(text.as_str()),
                         _ => None,
                     })
                 }
@@ -312,10 +312,10 @@ impl GroupManager for DynamicManager {
                     // Track the response
                     let agent_responses = vec![AgentResponse {
                         agent_id: supervisor_id.clone(),
-                        response: crate::message::Response {
+                        response: crate::messages::Response {
                             content: vec![], // TODO: We'd need to collect content from the stream
                             reasoning: None,
-                            metadata: crate::message::ResponseMetadata::default(),
+                            metadata: crate::messages::ResponseMetadata::default(),
                         },
                         responded_at: Utc::now(),
                     }];
@@ -470,10 +470,10 @@ impl GroupManager for DynamicManager {
                             let _ = response_tx
                                 .send(AgentResponse {
                                     agent_id: agent_id.clone(),
-                                    response: crate::message::Response {
+                                    response: crate::messages::Response {
                                         content: vec![], // TODO: Collect actual response content
                                         reasoning: None,
-                                        metadata: crate::message::ResponseMetadata::default(),
+                                        metadata: crate::messages::ResponseMetadata::default(),
                                     },
                                     responded_at: Utc::now(),
                                 })

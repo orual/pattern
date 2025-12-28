@@ -11,7 +11,7 @@ use crate::{
     AgentId, CoreError, Result, UserId,
     agent::Agent,
     id::{ConstellationId, GroupId, MessageId, RelationId},
-    message::{Message, Response},
+    messages::{Message, Response},
 };
 use pattern_db::Agent as AgentRecord;
 

@@ -19,7 +19,7 @@ pub use uuid;
 // Re-export common types from pattern-core
 pub use pattern_core::agent::AgentState;
 pub use pattern_core::id::{AgentId, GroupId, MessageId, UserId};
-pub use pattern_core::message::{ChatRole, Message, MessageContent};
+pub use pattern_core::messages::{ChatRole, Message, MessageContent};
 
 /// API version constant
 pub const API_VERSION: &str = "v1";

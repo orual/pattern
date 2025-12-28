@@ -63,7 +63,7 @@ use super::search_utils::extract_snippet;
 use crate::{
     Result,
     memory::{SearchContentType, SearchMode, SearchOptions},
-    message::ChatRole,
+    messages::ChatRole,
     runtime::{SearchScope, ToolContext},
     tool::{AiTool, ExecutionMeta, ToolRule, ToolRuleType},
 };

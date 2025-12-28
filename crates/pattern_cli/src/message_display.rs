@@ -1,7 +1,7 @@
 //! Helper functions for displaying messages in a consistent format
 
 use owo_colors::OwoColorize;
-use pattern_core::message::{ChatRole, ContentBlock, ContentPart, Message, MessageContent};
+use pattern_core::messages::{ChatRole, ContentBlock, ContentPart, Message, MessageContent};
 
 use crate::output::Output;
 

@@ -7,7 +7,7 @@ use crate::{
     Result,
     agent::Agent,
     coordination::groups::{AgentGroup, AgentWithMembership, GroupManager, GroupResponseEvent},
-    message::Message,
+    messages::Message,
 };
 
 use super::{MessageEndpoint, MessageOrigin};

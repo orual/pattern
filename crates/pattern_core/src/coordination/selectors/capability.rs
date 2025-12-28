@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use super::SelectionContext;
 use crate::coordination::AgentSelector;
 use crate::coordination::groups::AgentWithMembership;
-use crate::{Result, agent::Agent, message::MessageContent};
+use crate::{Result, agent::Agent, messages::MessageContent};
 
 /// Selects agents based on their capabilities
 #[derive(Debug, Clone)]
@@ -40,7 +40,7 @@ impl AgentSelector for CapabilitySelector {
             MessageContent::Parts(parts) => parts
                 .iter()
                 .filter_map(|p| match p {
-                    crate::message::ContentPart::Text(text) => Some(text.to_lowercase()),
+                    crate::messages::ContentPart::Text(text) => Some(text.to_lowercase()),
                     _ => None,
                 })
                 .collect::<Vec<_>>()

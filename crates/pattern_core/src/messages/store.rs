@@ -8,10 +8,10 @@ use pattern_db::error::DbResult;
 use pattern_db::models::{self, ActivityEvent, AgentSummary, ArchiveSummary, MessageSummary};
 use sqlx::SqlitePool;
 
-use crate::agent::SnowflakePosition;
+use crate::SnowflakePosition;
 use crate::error::CoreError;
 use crate::id::MessageId;
-use crate::message::{
+use crate::messages::{
     self, ChatRole, ContentPart, Message, MessageContent, MessageMetadata, MessageOptions,
 };
 use std::str::FromStr;
@@ -73,7 +73,7 @@ fn extract_content_preview(content: &MessageContent) -> Option<String> {
             }
         }
         MessageContent::Blocks(blocks) => {
-            use crate::message::ContentBlock;
+            use crate::messages::ContentBlock;
             let estimated_len: usize = blocks
                 .iter()
                 .filter_map(|b| match b {
@@ -165,15 +165,15 @@ fn db_message_to_domain(db_msg: models::Message) -> Result<Message, CoreError> {
 
     // Parse batch_type if present
     let batch_type = db_msg.batch_type.map(|bt| match bt {
-        models::BatchType::UserRequest => message::BatchType::UserRequest,
-        models::BatchType::AgentToAgent => message::BatchType::AgentToAgent,
-        models::BatchType::SystemTrigger => message::BatchType::SystemTrigger,
-        models::BatchType::Continuation => message::BatchType::Continuation,
+        models::BatchType::UserRequest => messages::BatchType::UserRequest,
+        models::BatchType::AgentToAgent => messages::BatchType::AgentToAgent,
+        models::BatchType::SystemTrigger => messages::BatchType::SystemTrigger,
+        models::BatchType::Continuation => messages::BatchType::Continuation,
     });
 
     // Compute has_tool_calls
     let has_tool_calls = matches!(content, MessageContent::ToolCalls(_))
-        || matches!(content, MessageContent::Blocks(ref blocks) if blocks.iter().any(|b| matches!(b, crate::message::ContentBlock::ToolUse { .. })));
+        || matches!(content, MessageContent::Blocks(ref blocks) if blocks.iter().any(|b| matches!(b, crate::messages::ContentBlock::ToolUse { .. })));
 
     // Compute word_count - count words in content
     let word_count = if let Some(preview) = &db_msg.content_preview {
@@ -220,10 +220,10 @@ fn domain_message_to_db(agent_id: String, msg: &Message) -> Result<models::Messa
 
     // Serialize batch_type
     let batch_type = msg.batch_type.map(|bt| match bt {
-        message::BatchType::UserRequest => models::BatchType::UserRequest,
-        message::BatchType::AgentToAgent => models::BatchType::AgentToAgent,
-        message::BatchType::SystemTrigger => models::BatchType::SystemTrigger,
-        message::BatchType::Continuation => models::BatchType::Continuation,
+        messages::BatchType::UserRequest => models::BatchType::UserRequest,
+        messages::BatchType::AgentToAgent => models::BatchType::AgentToAgent,
+        messages::BatchType::SystemTrigger => models::BatchType::SystemTrigger,
+        messages::BatchType::Continuation => models::BatchType::Continuation,
     });
 
     // Serialize metadata - propagate errors instead of swallowing with .ok()
@@ -412,7 +412,7 @@ impl MessageStore {
     pub async fn get_batches(
         &self,
         limit: usize,
-    ) -> Result<Vec<crate::message::MessageBatch>, CoreError> {
+    ) -> Result<Vec<crate::messages::MessageBatch>, CoreError> {
         let messages = self.get_recent(limit).await?;
         let grouped = Self::group_messages_by_batch(messages);
 
@@ -422,8 +422,8 @@ impl MessageStore {
                 if let Some(batch_id) = &first.batch {
                     let batch_type = first
                         .batch_type
-                        .unwrap_or(crate::message::BatchType::UserRequest);
-                    let batch = crate::message::MessageBatch::from_messages(
+                        .unwrap_or(crate::messages::BatchType::UserRequest);
+                    let batch = crate::messages::MessageBatch::from_messages(
                         batch_id.clone(),
                         batch_type,
                         batch_messages,
@@ -508,10 +508,10 @@ impl MessageStore {
         let batch_type = messages
             .first()
             .and_then(|m| m.batch_type)
-            .unwrap_or(crate::message::BatchType::UserRequest);
+            .unwrap_or(crate::messages::BatchType::UserRequest);
 
         let mut batch =
-            crate::message::MessageBatch::from_messages(*batch_id, batch_type, messages);
+            crate::messages::MessageBatch::from_messages(*batch_id, batch_type, messages);
         let removed_ids = batch.finalize();
 
         // Tombstone the removed messages in the database
@@ -679,10 +679,10 @@ impl MessageStore {
         batch_id: SnowflakePosition,
         content: &str,
     ) -> Result<crate::id::MessageId, CoreError> {
-        let message = crate::message::Message::user_in_batch_typed(
+        let message = crate::messages::Message::user_in_batch_typed(
             batch_id,
             0, // Will be updated by store logic if needed
-            crate::message::BatchType::SystemTrigger,
+            crate::messages::BatchType::SystemTrigger,
             content.to_string(),
         );
 

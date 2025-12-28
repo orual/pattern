@@ -5,7 +5,7 @@ use std::fmt::Debug;
 
 use crate::{
     Result,
-    message::{Request, Response},
+    messages::{Request, Response},
 };
 
 pub mod defaults;
@@ -415,7 +415,7 @@ impl ModelProvider for GenAiClient {
 impl GenAiClient {
     /// Validate that image URLs are accessible, remove broken ones
     async fn validate_image_urls(&self, request: &mut Request) {
-        use crate::message::{ContentPart, ImageSource, MessageContent};
+        use crate::messages::{ContentPart, ImageSource, MessageContent};
 
         for message in &mut request.messages {
             if let MessageContent::Parts(ref mut parts) = message.content {
@@ -466,7 +466,7 @@ impl GenAiClient {
 
     /// Convert URL images to base64 for Gemini compatibility
     async fn convert_urls_to_base64_for_gemini(&self, request: &mut Request) -> Result<()> {
-        use crate::message::{ContentPart, ImageSource, MessageContent};
+        use crate::messages::{ContentPart, ImageSource, MessageContent};
         use std::sync::Arc;
 
         for message in &mut request.messages {
@@ -568,7 +568,7 @@ impl ModelProvider for MockModelProvider {
     }
 
     async fn complete(&self, _options: &ResponseOptions, _request: Request) -> Result<Response> {
-        use crate::message::MessageContent;
+        use crate::messages::MessageContent;
 
         Ok(Response {
             content: vec![MessageContent::from_text(&self.response)],

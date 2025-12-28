@@ -328,7 +328,7 @@ async fn run_group_chat_loop(
     output: Output,
     mut rl: rustyline_async::Readline,
 ) -> Result<()> {
-    use pattern_core::message::{Message, MessageContent};
+    use pattern_core::messages::{Message, MessageContent};
     use rustyline_async::ReadlineEvent;
     use tokio_stream::StreamExt;
 

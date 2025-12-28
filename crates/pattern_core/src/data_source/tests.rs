@@ -121,8 +121,8 @@ fn test_stream_event_creation() {
 
 #[test]
 fn test_notification_creation() {
-    let msg = crate::message::Message::user("test message");
-    let batch_id = crate::agent::get_next_message_position_sync();
+    let msg = crate::messages::Message::user("test message");
+    let batch_id = crate::utils::get_next_message_position_sync();
     let notification = Notification::new(msg, batch_id);
 
     assert!(notification.block_refs.is_empty());
@@ -131,8 +131,8 @@ fn test_notification_creation() {
 
 #[test]
 fn test_notification_with_blocks() {
-    let msg = crate::message::Message::user("test message");
-    let batch_id = crate::agent::get_next_message_position_sync();
+    let msg = crate::messages::Message::user("test message");
+    let batch_id = crate::utils::get_next_message_position_sync();
     let blocks = vec![
         BlockRef::new("label1", "id1"),
         BlockRef::new("label2", "id2"),

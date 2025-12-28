@@ -14,7 +14,7 @@ use crate::{
         types::{CoordinationPattern, DelegationStrategy, FallbackBehavior, GroupState},
         utils::text_response,
     },
-    message::Message,
+    messages::Message,
 };
 
 #[derive(Clone)]
@@ -218,10 +218,10 @@ impl GroupManager for SupervisorManager {
 
                             agent_responses.push(AgentResponse {
                                 agent_id: agent_id.clone(),
-                                response: crate::message::Response {
+                                response: crate::messages::Response {
                                     content: vec![],
                                     reasoning: None,
-                                    metadata: crate::message::ResponseMetadata::default(),
+                                    metadata: crate::messages::ResponseMetadata::default(),
                                 },
                                 responded_at: Utc::now(),
                             });
@@ -338,10 +338,10 @@ impl GroupManager for SupervisorManager {
 
                                     agent_responses.push(AgentResponse {
                                         agent_id: leader_id.clone(),
-                                        response: crate::message::Response {
+                                        response: crate::messages::Response {
                                             content: vec![],
                                             reasoning: None,
-                                            metadata: crate::message::ResponseMetadata::default(),
+                                            metadata: crate::messages::ResponseMetadata::default(),
                                         },
                                         responded_at: Utc::now(),
                                     });
@@ -478,10 +478,10 @@ impl GroupManager for SupervisorManager {
 
                         agent_responses.push(AgentResponse {
                             agent_id: leader_id.clone(),
-                            response: crate::message::Response {
+                            response: crate::messages::Response {
                                 content: vec![],
                                 reasoning: None,
-                                metadata: crate::message::ResponseMetadata::default(),
+                                metadata: crate::messages::ResponseMetadata::default(),
                             },
                             responded_at: Utc::now(),
                         });

@@ -15,7 +15,7 @@ use crate::{
         types::{GroupState, PipelineStage, StageFailureAction, StageResult},
         utils::text_response,
     },
-    message::Message,
+    messages::Message,
 };
 
 #[derive(Clone)]

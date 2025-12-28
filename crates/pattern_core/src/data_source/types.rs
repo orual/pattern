@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::SnowflakePosition;
 use crate::memory::{BlockSchema, CONSTELLATION_OWNER};
-use crate::message::Message;
+use crate::messages::Message;
 
 /// Reference to a block in memory store
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]

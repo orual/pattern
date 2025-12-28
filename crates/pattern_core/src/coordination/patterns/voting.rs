@@ -18,7 +18,7 @@ use crate::{
         },
         utils::text_response,
     },
-    message::Message,
+    messages::Message,
 };
 
 #[derive(Clone)]

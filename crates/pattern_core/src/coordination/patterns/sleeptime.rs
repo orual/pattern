@@ -18,7 +18,7 @@ use crate::{
         },
         utils::text_response,
     },
-    message::{ChatRole, Message},
+    messages::{ChatRole, Message},
 };
 
 #[derive(Clone)]
@@ -292,10 +292,10 @@ impl GroupManager for SleeptimeManager {
                                 // Track response for final summary
                                 agent_responses.push(AgentResponse {
                                     agent_id: agent_id.clone(),
-                                    response: crate::message::Response {
+                                    response: crate::messages::Response {
                                         content: vec![], // TODO: Collect actual response content
                                         reasoning: None,
-                                        metadata: crate::message::ResponseMetadata::default(),
+                                        metadata: crate::messages::ResponseMetadata::default(),
                                     },
                                     responded_at: Utc::now(),
                                 });

@@ -46,6 +46,7 @@ fn memory_err(source_id: &str, operation: &str, err: MemoryError) -> CoreError {
 #[derive(Debug, Clone)]
 struct LoadedFileInfo {
     /// Block ID in the memory store
+    #[allow(dead_code)]
     block_id: String,
     /// Block label (file:{hash8}:{relative_path})
     label: String,
