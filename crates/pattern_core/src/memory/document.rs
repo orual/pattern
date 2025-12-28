@@ -1,6 +1,8 @@
 //! Loro document operations for structured memory blocks
 
-use loro::{ContainerID, ContainerTrait, ExportMode, LoroDoc, LoroValue, VersionVector};
+use loro::{
+    ContainerID, ContainerTrait, ExportMode, LoroDoc, LoroValue, VersionVector, cursor::PosType,
+};
 use serde_json::Value as JsonValue;
 
 use crate::memory::schema::{BlockSchema, FieldType, LogEntrySchema};
@@ -271,23 +273,47 @@ impl StructuredDocument {
         }
     }
 
-    /// Replace all occurrences of find with replace.
-    /// Returns true if at least one replacement was made.
+    /// Replace first occurrence of find with replace using Loro's native splice.
+    /// Returns true if a replacement was made.
     /// If is_system is false, checks that the document has Overwrite permission.
+    ///
+    /// This uses surgical CRDT operations (splice) rather than rewriting the entire
+    /// content, which provides better merge behavior and attribution tracking.
     pub fn replace_text(
         &self,
         find: &str,
         replace: &str,
         is_system: bool,
     ) -> Result<bool, DocumentError> {
-        let current = self.text_content();
-        if !current.contains(find) {
-            return Ok(false);
-        }
+        self.check_permission(pattern_db::models::MemoryOp::Overwrite, is_system)?;
 
-        let new_content = current.replace(find, replace);
-        self.set_text(&new_content, is_system)?;
-        Ok(true)
+        let text = self.doc.get_text("content");
+        let current = text.to_string();
+
+        if let Some(byte_pos) = current.find(find) {
+            // Convert byte positions to Unicode character positions using Loro's convert_pos
+            // str::find() returns byte indices, but splice() needs Unicode scalar indices
+            let unicode_pos = text
+                .convert_pos(byte_pos, PosType::Bytes, PosType::Unicode)
+                .ok_or_else(|| {
+                    DocumentError::Other(format!("Invalid byte position: {}", byte_pos))
+                })?;
+
+            let find_byte_end = byte_pos + find.len();
+            let unicode_end = text
+                .convert_pos(find_byte_end, PosType::Bytes, PosType::Unicode)
+                .ok_or_else(|| {
+                    DocumentError::Other(format!("Invalid byte position: {}", find_byte_end))
+                })?;
+            let unicode_len = unicode_end - unicode_pos;
+
+            // Surgical splice: delete unicode_len chars and insert replace
+            text.splice(unicode_pos, unicode_len, replace)
+                .map_err(|e| DocumentError::Other(format!("Splice failed: {}", e)))?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     // ========== Map Operations ==========
@@ -1017,10 +1043,10 @@ mod tests {
         let doc = StructuredDocument::new_text();
         doc.set_text("Hello, world! Hello again!", true).unwrap();
 
-        // Replace all occurrences
+        // Replace first occurrence
         let replaced = doc.replace_text("Hello", "Hi", true).unwrap();
         assert!(replaced);
-        assert_eq!(doc.text_content(), "Hi, world! Hi again!");
+        assert_eq!(doc.text_content(), "Hi, world! Hello again!");
 
         // No replacement needed
         let replaced = doc.replace_text("Goodbye", "Bye", true).unwrap();

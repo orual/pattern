@@ -243,22 +243,28 @@ impl FileTool {
             )
         })?;
 
-        // Auto-load the file if not already loaded
-        let block_ref = self
+        // Get existing block ref if already loaded, otherwise load from disk
+        let block_ref = if let Some(existing) = self
             .source
-            .load(
-                Path::new(path),
-                Arc::clone(&self.ctx) as Arc<dyn ToolContext>,
-                self.agent_id(),
-            )
-            .await
-            .map_err(|e| {
-                CoreError::tool_exec_msg(
-                    "file",
-                    json!({"op": "append", "path": path}),
-                    format!("Failed to load file for append '{}': {}", path, e),
+            .get_loaded_block_ref(Path::new(path), &self.agent_id())
+        {
+            existing
+        } else {
+            self.source
+                .load(
+                    Path::new(path),
+                    Arc::clone(&self.ctx) as Arc<dyn ToolContext>,
+                    self.agent_id(),
                 )
-            })?;
+                .await
+                .map_err(|e| {
+                    CoreError::tool_exec_msg(
+                        "file",
+                        json!({"op": "append", "path": path}),
+                        format!("Failed to load file for append '{}': {}", path, e),
+                    )
+                })?
+        };
 
         // Append to the block
         let memory = self.ctx.memory();
@@ -276,6 +282,103 @@ impl FileTool {
         Ok(ToolOutput::success(format!(
             "Appended content to file '{}' (block '{}'). Use 'save' to write to disk.",
             path, block_ref.label
+        )))
+    }
+
+    /// Handle list operation - list files in the source.
+    async fn handle_list(&self, pattern: Option<&str>) -> Result<ToolOutput> {
+        let files =
+            self.source.list_files(pattern).await.map_err(|e| {
+                CoreError::tool_exec_msg("file", json!({"op": "list"}), e.to_string())
+            })?;
+
+        let file_list: Vec<serde_json::Value> = files
+            .into_iter()
+            .map(|info| {
+                json!({
+                    "path": info.path,
+                    "size": info.size,
+                    "loaded": info.loaded,
+                    "permission": format!("{:?}", info.permission),
+                })
+            })
+            .collect();
+
+        Ok(ToolOutput::success_with_data(
+            format!("Found {} files", file_list.len()),
+            json!(file_list),
+        ))
+    }
+
+    /// Handle status operation - check sync status of loaded files.
+    async fn handle_status(&self, path: Option<&str>) -> Result<ToolOutput> {
+        let statuses = self.source.get_sync_status(path).await.map_err(|e| {
+            CoreError::tool_exec_msg("file", json!({"op": "status"}), e.to_string())
+        })?;
+
+        let status_list: Vec<serde_json::Value> = statuses
+            .into_iter()
+            .map(|info| {
+                json!({
+                    "path": info.path,
+                    "label": info.label,
+                    "sync_status": info.sync_status,
+                    "disk_modified": info.disk_modified,
+                })
+            })
+            .collect();
+
+        Ok(ToolOutput::success_with_data(
+            format!("{} loaded files", status_list.len()),
+            json!(status_list),
+        ))
+    }
+
+    /// Handle diff operation - show unified diff between memory and disk.
+    async fn handle_diff(&self, path: Option<&str>) -> Result<ToolOutput> {
+        let path = path.ok_or_else(|| {
+            CoreError::tool_exec_msg(
+                "file",
+                json!({"op": "diff"}),
+                "diff requires 'path' parameter",
+            )
+        })?;
+
+        let diff_output = self.source.diff(Path::new(path)).await.map_err(|e| {
+            CoreError::tool_exec_msg(
+                "file",
+                json!({"op": "diff", "path": path}),
+                format!("Failed to generate diff: {}", e),
+            )
+        })?;
+
+        Ok(ToolOutput::success_with_data(
+            format!("Diff for '{}'", path),
+            json!({ "diff": diff_output }),
+        ))
+    }
+
+    /// Handle reload operation - discard memory changes and reload from disk.
+    async fn handle_reload(&self, path: Option<&str>) -> Result<ToolOutput> {
+        let path = path.ok_or_else(|| {
+            CoreError::tool_exec_msg(
+                "file",
+                json!({"op": "reload"}),
+                "reload requires 'path' parameter",
+            )
+        })?;
+
+        self.source.reload(Path::new(path)).await.map_err(|e| {
+            CoreError::tool_exec_msg(
+                "file",
+                json!({"op": "reload", "path": path}),
+                format!("Failed to reload file: {}", e),
+            )
+        })?;
+
+        Ok(ToolOutput::success(format!(
+            "Reloaded '{}' from disk, discarding any memory changes",
+            path
         )))
     }
 
@@ -309,22 +412,28 @@ impl FileTool {
             )
         })?;
 
-        // Auto-load the file if not already loaded
-        let block_ref = self
+        // Get existing block ref if already loaded, otherwise load from disk
+        let block_ref = if let Some(existing) = self
             .source
-            .load(
-                Path::new(path),
-                Arc::clone(&self.ctx) as Arc<dyn ToolContext>,
-                self.agent_id(),
-            )
-            .await
-            .map_err(|e| {
-                CoreError::tool_exec_msg(
-                    "file",
-                    json!({"op": "replace", "path": path}),
-                    format!("Failed to load file for replace '{}': {}", path, e),
+            .get_loaded_block_ref(Path::new(path), &self.agent_id())
+        {
+            existing
+        } else {
+            self.source
+                .load(
+                    Path::new(path),
+                    Arc::clone(&self.ctx) as Arc<dyn ToolContext>,
+                    self.agent_id(),
                 )
-            })?;
+                .await
+                .map_err(|e| {
+                    CoreError::tool_exec_msg(
+                        "file",
+                        json!({"op": "replace", "path": path}),
+                        format!("Failed to load file for replace '{}': {}", path, e),
+                    )
+                })?
+        };
 
         // Replace in the block
         let memory = self.ctx.memory();
@@ -371,6 +480,8 @@ impl AiTool for FileTool {
 - 'delete': Delete a file (requires 'path', requires escalation)
 - 'append': Append content to a file (requires 'path' and 'content', auto-loads if needed)
 - 'replace': Find and replace text in a file (requires 'path', 'old', and 'new', auto-loads if needed)
+- 'list': List files in source (optional 'pattern' for glob filtering, e.g. '**/*.rs')
+- 'status': Check sync status of loaded files (optional 'path' to filter)
 
 Note: 'append' and 'replace' modify the in-memory block. Use 'save' to write changes to disk."
     }
@@ -387,7 +498,9 @@ Note: 'append' and 'replace' modify the in-memory block. Use 'save' to write cha
     }
 
     fn operations(&self) -> &'static [&'static str] {
-        &["load", "save", "create", "delete", "append", "replace"]
+        &[
+            "load", "save", "create", "delete", "append", "replace", "list", "status",
+        ]
     }
 
     async fn execute(&self, input: Self::Input, _meta: &ExecutionMeta) -> Result<Self::Output> {
@@ -414,6 +527,10 @@ Note: 'append' and 'replace' modify the in-memory block. Use 'save' to write cha
                 )
                 .await
             }
+            FileOp::List => self.handle_list(input.pattern.as_deref()).await,
+            FileOp::Status => self.handle_status(input.path.as_deref()).await,
+            FileOp::Diff => self.handle_diff(input.path.as_deref()).await,
+            FileOp::Reload => self.handle_reload(input.path.as_deref()).await,
         }
     }
 }
@@ -459,6 +576,7 @@ mod tests {
                     content: None,
                     old: None,
                     new: None,
+                    pattern: None,
                 },
                 &ExecutionMeta::default(),
             )
@@ -492,6 +610,7 @@ mod tests {
                     content: Some("Initial content".to_string()),
                     old: None,
                     new: None,
+                    pattern: None,
                 },
                 &ExecutionMeta::default(),
             )
@@ -519,6 +638,7 @@ mod tests {
                     content: Some("\nAppended content".to_string()),
                     old: None,
                     new: None,
+                    pattern: None,
                 },
                 &ExecutionMeta::default(),
             )
@@ -542,6 +662,7 @@ mod tests {
                     content: None,
                     old: None,
                     new: None,
+                    pattern: None,
                 },
                 &ExecutionMeta::default(),
             )
@@ -586,6 +707,7 @@ mod tests {
                     content: None,
                     old: Some("World".to_string()),
                     new: Some("Universe".to_string()),
+                    pattern: None,
                 },
                 &ExecutionMeta::default(),
             )
@@ -609,6 +731,7 @@ mod tests {
                     content: None,
                     old: None,
                     new: None,
+                    pattern: None,
                 },
                 &ExecutionMeta::default(),
             )
@@ -641,6 +764,7 @@ mod tests {
                     content: None,
                     old: None,
                     new: None,
+                    pattern: None,
                 },
                 &ExecutionMeta::default(),
             )
@@ -681,6 +805,7 @@ mod tests {
                     content: None, // Missing content
                     old: None,
                     new: None,
+                    pattern: None,
                 },
                 &ExecutionMeta::default(),
             )
@@ -720,6 +845,7 @@ mod tests {
                     content: None,
                     old: Some("nonexistent".to_string()),
                     new: Some("replacement".to_string()),
+                    pattern: None,
                 },
                 &ExecutionMeta::default(),
             )

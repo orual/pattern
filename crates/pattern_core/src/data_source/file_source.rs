@@ -19,8 +19,10 @@ use std::{
 
 use async_trait::async_trait;
 use dashmap::DashMap;
+use loro::{LoroDoc, Subscription, VersionVector};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use sha2::{Digest, Sha256};
-use tokio::sync::broadcast;
+use tokio::sync::{Mutex, broadcast};
 
 use crate::error::{CoreError, Result};
 use crate::id::AgentId;
@@ -29,8 +31,8 @@ use crate::runtime::ToolContext;
 use crate::tool::rules::ToolRule;
 
 use super::{
-    BlockRef, BlockSchemaSpec, BlockSourceStatus, DataBlock, FileChange, PermissionRule,
-    ReconcileResult, VersionInfo,
+    BlockRef, BlockSchemaSpec, BlockSourceStatus, DataBlock, FileChange, FileChangeType,
+    PermissionRule, ReconcileResult, VersionInfo,
 };
 
 /// Convert MemoryError to CoreError for FileSource operations.
@@ -43,10 +45,11 @@ fn memory_err(source_id: &str, operation: &str, err: MemoryError) -> CoreError {
 }
 
 /// Information about a loaded file tracked by FileSource.
-#[derive(Debug, Clone)]
+///
+/// Contains the forked disk_doc and subscriptions for bidirectional sync.
+/// The memory_doc is a clone of the memory block's LoroDoc (Arc-based, shares state).
 struct LoadedFileInfo {
     /// Block ID in the memory store
-    #[allow(dead_code)]
     block_id: String,
     /// Block label (file:{hash8}:{relative_path})
     label: String,
@@ -54,6 +57,53 @@ struct LoadedFileInfo {
     disk_mtime: SystemTime,
     /// File size when last loaded/saved
     disk_size: u64,
+    /// Forked LoroDoc representing disk state
+    disk_doc: LoroDoc,
+    /// Clone of memory's LoroDoc (shares state via Arc)
+    memory_doc: LoroDoc,
+    /// Subscriptions kept alive: (memory→disk, disk→memory)
+    #[allow(dead_code)]
+    subscriptions: (Subscription, Subscription),
+    /// Last saved frontier for tracking unsaved changes
+    last_saved_frontier: VersionVector,
+}
+
+impl std::fmt::Debug for LoadedFileInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoadedFileInfo")
+            .field("block_id", &self.block_id)
+            .field("label", &self.label)
+            .field("disk_mtime", &self.disk_mtime)
+            .field("disk_size", &self.disk_size)
+            .field("last_saved_frontier", &"<VersionVector>")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Information about a file in the source (for list operation).
+#[derive(Debug, Clone)]
+pub struct FileInfo {
+    /// Relative path from source base
+    pub path: String,
+    /// File size in bytes
+    pub size: u64,
+    /// Whether the file is currently loaded as a block
+    pub loaded: bool,
+    /// Permission level for this file
+    pub permission: MemoryPermission,
+}
+
+/// Sync status for a loaded file (for status operation).
+#[derive(Debug, Clone)]
+pub struct FileSyncStatus {
+    /// Relative path from source base
+    pub path: String,
+    /// Block label
+    pub label: String,
+    /// Sync status description
+    pub sync_status: String,
+    /// Whether disk has been modified since load
+    pub disk_modified: bool,
 }
 
 /// Status values for BlockSourceStatus (stored as u8 for atomic operations)
@@ -79,7 +129,7 @@ const STATUS_WATCHING: u8 = 1;
 /// - `*.config.toml` -> ReadOnly
 /// - `src/**/*.rs` -> ReadWrite
 /// - `**` -> ReadWrite (default fallback)
-#[derive(Debug)]
+/// FileSource manages local files as Loro-backed memory blocks.
 pub struct FileSource {
     /// Unique identifier for this source
     source_id: String,
@@ -87,10 +137,26 @@ pub struct FileSource {
     base_path: PathBuf,
     /// Permission rules (glob pattern -> permission level)
     permission_rules: Vec<PermissionRule>,
-    /// Tracks loaded files and their metadata
-    loaded_blocks: DashMap<PathBuf, LoadedFileInfo>,
+    /// Tracks loaded files and their metadata (Arc for sharing with watcher)
+    loaded_blocks: Arc<DashMap<PathBuf, LoadedFileInfo>>,
     /// Current status (Idle or Watching)
     status: AtomicU8,
+    /// File watcher (active when watching)
+    watcher: Mutex<Option<RecommendedWatcher>>,
+    /// Channel for broadcasting file changes
+    change_tx: Mutex<Option<broadcast::Sender<FileChange>>>,
+}
+
+impl std::fmt::Debug for FileSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileSource")
+            .field("source_id", &self.source_id)
+            .field("base_path", &self.base_path)
+            .field("permission_rules", &self.permission_rules)
+            .field("loaded_blocks", &self.loaded_blocks.len())
+            .field("status", &self.status)
+            .finish_non_exhaustive()
+    }
 }
 
 impl FileSource {
@@ -114,8 +180,10 @@ impl FileSource {
                 // Default rule: all files are ReadWrite
                 PermissionRule::new("**", MemoryPermission::ReadWrite),
             ],
-            loaded_blocks: DashMap::new(),
+            loaded_blocks: Arc::new(DashMap::new()),
             status: AtomicU8::new(STATUS_IDLE),
+            watcher: Mutex::new(None),
+            change_tx: Mutex::new(None),
         }
     }
 
@@ -135,8 +203,10 @@ impl FileSource {
             source_id: source_id.into(),
             base_path: base_path.into(),
             permission_rules: rules,
-            loaded_blocks: DashMap::new(),
+            loaded_blocks: Arc::new(DashMap::new()),
             status: AtomicU8::new(STATUS_IDLE),
+            watcher: Mutex::new(None),
+            change_tx: Mutex::new(None),
         }
     }
 
@@ -160,7 +230,6 @@ impl FileSource {
         let mut hasher = Sha256::new();
         hasher.update(abs_path.to_string_lossy().as_bytes());
         let hash = hasher.finalize();
-        // Encode first 4 bytes as 8 hex chars (using format! instead of hex crate)
         let hash8 = format!(
             "{:02x}{:02x}{:02x}{:02x}",
             hash[0], hash[1], hash[2], hash[3]
@@ -229,6 +298,487 @@ impl FileSource {
             false
         }
     }
+
+    /// List files in the source, optionally filtered by glob pattern.
+    pub async fn list_files(&self, pattern: Option<&str>) -> Result<Vec<FileInfo>> {
+        use globset::Glob;
+
+        let glob_matcher = pattern
+            .map(|p| {
+                Glob::new(p)
+                    .map_err(|e| CoreError::DataSourceError {
+                        source_name: self.source_id.clone(),
+                        operation: "list".to_string(),
+                        cause: format!("Invalid glob pattern: {}", e),
+                    })
+                    .map(|g| g.compile_matcher())
+            })
+            .transpose()?;
+
+        let mut files = Vec::new();
+
+        // Walk the directory tree
+        let mut stack = vec![self.base_path.clone()];
+        while let Some(dir) = stack.pop() {
+            let mut entries =
+                tokio::fs::read_dir(&dir)
+                    .await
+                    .map_err(|e| CoreError::DataSourceError {
+                        source_name: self.source_id.clone(),
+                        operation: "list".to_string(),
+                        cause: format!("Failed to read directory {}: {}", dir.display(), e),
+                    })?;
+
+            while let Some(entry) =
+                entries
+                    .next_entry()
+                    .await
+                    .map_err(|e| CoreError::DataSourceError {
+                        source_name: self.source_id.clone(),
+                        operation: "list".to_string(),
+                        cause: format!("Failed to read entry: {}", e),
+                    })?
+            {
+                let path = entry.path();
+                let metadata = entry
+                    .metadata()
+                    .await
+                    .map_err(|e| CoreError::DataSourceError {
+                        source_name: self.source_id.clone(),
+                        operation: "list".to_string(),
+                        cause: format!("Failed to get metadata for {}: {}", path.display(), e),
+                    })?;
+
+                if metadata.is_dir() {
+                    stack.push(path);
+                } else if metadata.is_file() {
+                    // Get relative path for pattern matching and display
+                    let rel_path = path.strip_prefix(&self.base_path).unwrap_or(&path);
+
+                    // Apply glob filter if specified
+                    if let Some(ref matcher) = glob_matcher {
+                        if !matcher.is_match(rel_path) {
+                            continue;
+                        }
+                    }
+
+                    let loaded = self.loaded_blocks.contains_key(&path);
+                    let permission = self.permission_for(&path);
+
+                    files.push(FileInfo {
+                        path: rel_path.to_string_lossy().to_string(),
+                        size: metadata.len(),
+                        loaded,
+                        permission,
+                    });
+                }
+            }
+        }
+
+        // Sort by path for consistent output
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+
+        Ok(files)
+    }
+
+    /// Get sync status for loaded files.
+    pub async fn get_sync_status(&self, path: Option<&str>) -> Result<Vec<FileSyncStatus>> {
+        let mut statuses = Vec::new();
+
+        for entry in self.loaded_blocks.iter() {
+            let file_path = entry.key();
+            let info = entry.value();
+
+            // Get relative path for display
+            let rel_path = file_path
+                .strip_prefix(&self.base_path)
+                .unwrap_or(file_path)
+                .to_string_lossy()
+                .to_string();
+
+            // Filter by path if specified
+            if let Some(filter_path) = path {
+                if !rel_path.contains(filter_path) {
+                    continue;
+                }
+            }
+
+            // Check current disk state
+            let (sync_status, disk_modified) = match self.get_file_metadata(file_path).await {
+                Ok((current_mtime, _)) => {
+                    if info.disk_mtime == current_mtime {
+                        ("synced".to_string(), false)
+                    } else {
+                        ("disk_modified".to_string(), true)
+                    }
+                }
+                Err(_) => ("disk_deleted".to_string(), true),
+            };
+
+            statuses.push(FileSyncStatus {
+                path: rel_path,
+                label: info.label.clone(),
+                sync_status,
+                disk_modified,
+            });
+        }
+
+        // Sort by path for consistent output
+        statuses.sort_by(|a, b| a.path.cmp(&b.path));
+
+        Ok(statuses)
+    }
+
+    /// Check if a file is already loaded as a block.
+    pub fn is_loaded(&self, path: &Path) -> bool {
+        if let Ok(abs_path) = self.absolute_path(path) {
+            self.loaded_blocks.contains_key(&abs_path)
+        } else {
+            false
+        }
+    }
+
+    /// Get the BlockRef for an already-loaded file.
+    /// Returns None if the file is not loaded.
+    pub fn get_loaded_block_ref(&self, path: &Path, agent_id: &AgentId) -> Option<BlockRef> {
+        let abs_path = self.absolute_path(path).ok()?;
+        let info = self.loaded_blocks.get(&abs_path)?;
+        Some(BlockRef {
+            label: info.label.clone(),
+            block_id: info.block_id.clone(),
+            agent_id: agent_id.to_string(),
+        })
+    }
+
+    /// Set up bidirectional subscriptions between memory and disk docs.
+    ///
+    /// Returns (memory→disk subscription, disk→memory subscription).
+    /// Permission determines which direction(s) are active:
+    /// - ReadOnly: disk→memory only (agent can't modify)
+    /// - ReadWrite/Admin: bidirectional
+    fn setup_subscriptions(
+        &self,
+        memory_doc: &LoroDoc,
+        disk_doc: &LoroDoc,
+        file_path: PathBuf,
+        permission: MemoryPermission,
+    ) -> (Subscription, Subscription) {
+        // Memory → disk: when memory changes, import to disk and save file
+        let disk_clone = disk_doc.clone();
+        let path_clone = file_path.clone();
+        let mem_to_disk = if permission != MemoryPermission::ReadOnly {
+            memory_doc.subscribe_local_update(Box::new(move |update| {
+                // Import update to disk doc
+                if disk_clone.import(update).is_ok() {
+                    // Save disk doc content to file asynchronously
+                    let content = disk_clone.get_text("content").to_string();
+                    let path = path_clone.clone();
+                    tokio::spawn(async move {
+                        let _ = tokio::fs::write(&path, &content).await;
+                    });
+                }
+                true // Keep subscription active
+            }))
+        } else {
+            // ReadOnly: no memory→disk sync, create dummy subscription
+            memory_doc.subscribe_local_update(Box::new(|_| true))
+        };
+
+        // Disk → memory: when disk doc changes, import to memory
+        let mem_clone = memory_doc.clone();
+        let disk_to_mem = disk_doc.subscribe_local_update(Box::new(move |update| {
+            // Import update to memory doc
+            let _ = mem_clone.import(update);
+            true // Keep subscription active
+        }));
+
+        (mem_to_disk, disk_to_mem)
+    }
+
+    /// Start watching the base directory for file changes.
+    ///
+    /// Returns a receiver that will receive FileChange events when files are modified.
+    /// The watcher runs in the background and updates disk_docs when files change.
+    pub async fn start_watching(&self) -> Result<broadcast::Receiver<FileChange>> {
+        let (tx, rx) = broadcast::channel(256);
+
+        // Clone what we need for the watcher callback
+        let loaded_blocks = self.loaded_blocks.clone();
+        let base_path = self.base_path.clone();
+        let tx_clone = tx.clone();
+
+        // Create the watcher with a callback that handles events
+        let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            if let Ok(event) = res {
+                // We only care about modify/create/remove events
+                let change_type = match event.kind {
+                    notify::EventKind::Modify(_) => Some(FileChangeType::Modified),
+                    notify::EventKind::Create(_) => Some(FileChangeType::Created),
+                    notify::EventKind::Remove(_) => Some(FileChangeType::Deleted),
+                    _ => None,
+                };
+
+                if let Some(change_type) = change_type {
+                    for path in event.paths {
+                        // Check if this is a file we're tracking
+                        if let Some(mut info) = loaded_blocks.get_mut(&path) {
+                            // For modifications, update the disk_doc
+                            if matches!(change_type, FileChangeType::Modified) {
+                                // Read the new content synchronously (we're in a sync callback)
+                                if let Ok(content) = std::fs::read_to_string(&path) {
+                                    // Update disk_doc with new content
+                                    let text = info.disk_doc.get_text("content");
+                                    let len = text.len_unicode();
+                                    if len > 0 {
+                                        let _ = text.delete(0, len);
+                                    }
+                                    let _ = text.insert(0, &content);
+                                    info.disk_doc.commit();
+
+                                    // Update tracked mtime
+                                    if let Ok(meta) = std::fs::metadata(&path) {
+                                        if let Ok(mtime) = meta.modified() {
+                                            info.disk_mtime = mtime;
+                                            info.disk_size = meta.len();
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Broadcast the change
+                            let _ = tx_clone.send(FileChange {
+                                path: path.clone(),
+                                change_type: change_type.clone(),
+                                block_id: Some(info.block_id.clone()),
+                                timestamp: Some(chrono::Utc::now()),
+                            });
+                        } else {
+                            // File not loaded, but broadcast anyway for awareness
+                            let rel_path = path.strip_prefix(&base_path).ok();
+                            if rel_path.is_some() {
+                                let _ = tx_clone.send(FileChange {
+                                    path,
+                                    change_type: change_type.clone(),
+                                    block_id: None,
+                                    timestamp: Some(chrono::Utc::now()),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        })
+        .map_err(|e| CoreError::DataSourceError {
+            source_name: self.source_id.clone(),
+            operation: "start_watching".to_string(),
+            cause: format!("Failed to create watcher: {}", e),
+        })?;
+
+        // Start watching the base path
+        let mut watcher = watcher;
+        watcher
+            .watch(&self.base_path, RecursiveMode::Recursive)
+            .map_err(|e| CoreError::DataSourceError {
+                source_name: self.source_id.clone(),
+                operation: "start_watching".to_string(),
+                cause: format!("Failed to watch path: {}", e),
+            })?;
+
+        // Store watcher and tx
+        *self.watcher.lock().await = Some(watcher);
+        *self.change_tx.lock().await = Some(tx);
+
+        // Update status
+        self.status.store(STATUS_WATCHING, Ordering::SeqCst);
+
+        Ok(rx)
+    }
+
+    /// Stop watching for file changes.
+    pub async fn stop_watching(&self) {
+        *self.watcher.lock().await = None;
+        *self.change_tx.lock().await = None;
+        self.status.store(STATUS_IDLE, Ordering::SeqCst);
+    }
+
+    /// Generate a unified diff between memory state and actual disk file.
+    ///
+    /// Returns a unified diff with metadata header showing:
+    /// - File path
+    /// - Disk vs memory comparison
+    ///
+    /// Note: This reads the actual file from disk, not the disk_doc
+    /// (which is kept in sync with memory via subscriptions).
+    pub async fn diff(&self, path: &Path) -> Result<String> {
+        let abs_path = self.absolute_path(path)?;
+        let info = self
+            .loaded_blocks
+            .get(&abs_path)
+            .ok_or_else(|| CoreError::DataSourceError {
+                source_name: self.source_id.clone(),
+                operation: "diff".to_string(),
+                cause: format!("File {} is not loaded", path.display()),
+            })?;
+
+        // Get memory content
+        let memory_content = info.memory_doc.get_text("content").to_string();
+
+        // Read actual disk content (not disk_doc which is synced)
+        let disk_content =
+            tokio::fs::read_to_string(&abs_path)
+                .await
+                .map_err(|e| CoreError::DataSourceError {
+                    source_name: self.source_id.clone(),
+                    operation: "diff".to_string(),
+                    cause: format!("Failed to read file {}: {}", abs_path.display(), e),
+                })?;
+
+        // Build unified diff
+        let diff = similar::TextDiff::from_lines(&disk_content, &memory_content);
+
+        let rel_path = self
+            .relative_path(path)
+            .unwrap_or_else(|_| path.to_path_buf());
+        let rel_path_str = rel_path.display().to_string();
+
+        // Build metadata header
+        let mut output = String::new();
+        output.push_str(&format!("--- a/{}\t(disk)\n", rel_path_str));
+        output.push_str(&format!("+++ b/{}\t(memory)\n", rel_path_str));
+
+        // Generate unified diff hunks
+        let unified = diff.unified_diff();
+        for hunk in unified.iter_hunks() {
+            output.push_str(&hunk.to_string());
+        }
+
+        if output.lines().count() <= 2 {
+            // Only headers, no changes
+            output.push_str("(no changes)\n");
+        }
+
+        Ok(output)
+    }
+
+    /// Check if there are unsaved changes (memory differs from actual disk file).
+    ///
+    /// Note: This reads the actual file from disk, not the disk_doc
+    /// (which is kept in sync with memory via subscriptions).
+    pub async fn has_unsaved_changes(&self, path: &Path) -> Result<bool> {
+        let abs_path = self.absolute_path(path)?;
+        let info = self
+            .loaded_blocks
+            .get(&abs_path)
+            .ok_or_else(|| CoreError::DataSourceError {
+                source_name: self.source_id.clone(),
+                operation: "has_unsaved_changes".to_string(),
+                cause: format!("File {} is not loaded", path.display()),
+            })?;
+
+        let memory_content = info.memory_doc.get_text("content").to_string();
+
+        // Read actual disk content
+        let disk_content =
+            tokio::fs::read_to_string(&abs_path)
+                .await
+                .map_err(|e| CoreError::DataSourceError {
+                    source_name: self.source_id.clone(),
+                    operation: "has_unsaved_changes".to_string(),
+                    cause: format!("Failed to read file {}: {}", abs_path.display(), e),
+                })?;
+
+        Ok(memory_content != disk_content)
+    }
+
+    /// Reload file from disk, discarding any memory changes.
+    ///
+    /// This reads the current disk content and updates both the memory doc
+    /// and disk doc to match.
+    pub async fn reload(&self, path: &Path) -> Result<()> {
+        let abs_path = self.absolute_path(path)?;
+
+        // Read current disk content
+        let content =
+            tokio::fs::read_to_string(&abs_path)
+                .await
+                .map_err(|e| CoreError::DataSourceError {
+                    source_name: self.source_id.clone(),
+                    operation: "reload".to_string(),
+                    cause: format!("Failed to read file {}: {}", abs_path.display(), e),
+                })?;
+
+        // Get file metadata
+        let metadata =
+            tokio::fs::metadata(&abs_path)
+                .await
+                .map_err(|e| CoreError::DataSourceError {
+                    source_name: self.source_id.clone(),
+                    operation: "reload".to_string(),
+                    cause: format!("Failed to get metadata for {}: {}", abs_path.display(), e),
+                })?;
+
+        let mtime = metadata.modified().unwrap_or(SystemTime::now());
+        let size = metadata.len();
+
+        // Update the loaded block
+        let mut info =
+            self.loaded_blocks
+                .get_mut(&abs_path)
+                .ok_or_else(|| CoreError::DataSourceError {
+                    source_name: self.source_id.clone(),
+                    operation: "reload".to_string(),
+                    cause: format!("File {} is not loaded", path.display()),
+                })?;
+
+        // Update memory doc
+        let mem_text = info.memory_doc.get_text("content");
+        let mem_len = mem_text.len_unicode();
+        if mem_len > 0 {
+            mem_text
+                .delete(0, mem_len)
+                .map_err(|e| CoreError::DataSourceError {
+                    source_name: self.source_id.clone(),
+                    operation: "reload".to_string(),
+                    cause: format!("Failed to clear memory content: {}", e),
+                })?;
+        }
+        mem_text
+            .insert(0, &content)
+            .map_err(|e| CoreError::DataSourceError {
+                source_name: self.source_id.clone(),
+                operation: "reload".to_string(),
+                cause: format!("Failed to insert content: {}", e),
+            })?;
+        info.memory_doc.commit();
+
+        // Update disk doc
+        let disk_text = info.disk_doc.get_text("content");
+        let disk_len = disk_text.len_unicode();
+        if disk_len > 0 {
+            disk_text
+                .delete(0, disk_len)
+                .map_err(|e| CoreError::DataSourceError {
+                    source_name: self.source_id.clone(),
+                    operation: "reload".to_string(),
+                    cause: format!("Failed to clear disk content: {}", e),
+                })?;
+        }
+        disk_text
+            .insert(0, &content)
+            .map_err(|e| CoreError::DataSourceError {
+                source_name: self.source_id.clone(),
+                operation: "reload".to_string(),
+                cause: format!("Failed to insert content: {}", e),
+            })?;
+        info.disk_doc.commit();
+
+        // Update metadata
+        info.disk_mtime = mtime;
+        info.disk_size = size;
+        info.last_saved_frontier = info.memory_doc.oplog_vv();
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -292,6 +842,7 @@ impl DataBlock for FileSource {
         let abs_path = self.absolute_path(path)?;
         let label = self.generate_label(path)?;
         let owner_str = owner.to_string();
+        let permission = self.permission_for(path);
 
         // Read file content
         let content =
@@ -347,7 +898,26 @@ impl DataBlock for FileSource {
             id
         };
 
-        // Track loaded file info
+        // Get the StructuredDocument to access the LoroDoc
+        let doc = memory
+            .get_block(&owner_str, &label)
+            .await
+            .map_err(|e| memory_err(source_id, "load", e))?
+            .ok_or_else(|| CoreError::DataSourceError {
+                source_name: self.source_id.clone(),
+                operation: "load".to_string(),
+                cause: format!("Block {} not found after creation", label),
+            })?;
+
+        // Clone the memory LoroDoc (Arc-based, shares state) and fork for disk
+        let memory_doc = doc.inner().clone();
+        let disk_doc = memory_doc.fork();
+
+        // Set up bidirectional subscriptions based on permission
+        let subscriptions =
+            self.setup_subscriptions(&memory_doc, &disk_doc, abs_path.clone(), permission);
+
+        // Track loaded file info with fork and subscriptions
         self.loaded_blocks.insert(
             abs_path.clone(),
             LoadedFileInfo {
@@ -355,6 +925,10 @@ impl DataBlock for FileSource {
                 label: label.clone(),
                 disk_mtime: mtime,
                 disk_size: size,
+                disk_doc,
+                memory_doc,
+                subscriptions,
+                last_saved_frontier: doc.inner().oplog_vv(),
             },
         );
 
@@ -432,7 +1006,26 @@ impl DataBlock for FileSource {
                 .map_err(|e| memory_err(source_id, "create", e))?;
         }
 
-        // Track loaded file info
+        // Get the StructuredDocument to access the LoroDoc
+        let doc = memory
+            .get_block(&owner_str, &label)
+            .await
+            .map_err(|e| memory_err(source_id, "create", e))?
+            .ok_or_else(|| CoreError::DataSourceError {
+                source_name: self.source_id.clone(),
+                operation: "create".to_string(),
+                cause: format!("Block {} not found after creation", label),
+            })?;
+
+        // Clone the memory LoroDoc (Arc-based, shares state) and fork for disk
+        let memory_doc = doc.inner().clone();
+        let disk_doc = memory_doc.fork();
+
+        // Set up bidirectional subscriptions based on permission
+        let subscriptions =
+            self.setup_subscriptions(&memory_doc, &disk_doc, abs_path.clone(), permission);
+
+        // Track loaded file info with fork and subscriptions
         self.loaded_blocks.insert(
             abs_path,
             LoadedFileInfo {
@@ -440,6 +1033,10 @@ impl DataBlock for FileSource {
                 label: label.clone(),
                 disk_mtime: mtime,
                 disk_size: size,
+                disk_doc,
+                memory_doc,
+                subscriptions,
+                last_saved_frontier: doc.inner().oplog_vv(),
             },
         );
 

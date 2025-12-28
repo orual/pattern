@@ -165,7 +165,7 @@ pub enum BlockSourceStatus {
 /// }
 /// ```
 #[async_trait]
-pub trait DataBlock: Send + Sync + std::fmt::Debug {
+pub trait DataBlock: Send + Sync {
     /// Unique identifier for this block source
     fn source_id(&self) -> &str;
 

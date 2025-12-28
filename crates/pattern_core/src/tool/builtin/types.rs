@@ -152,6 +152,14 @@ pub enum FileOp {
     Append,
     /// Find/replace in file
     Replace,
+    /// List files in source (supports glob patterns)
+    List,
+    /// Check sync status of loaded files
+    Status,
+    /// Show unified diff between memory and disk
+    Diff,
+    /// Reload file from disk, discarding memory changes
+    Reload,
 }
 
 /// Input for the `file` tool
@@ -174,6 +182,9 @@ pub struct FileInput {
     /// New text for replace operation
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new: Option<String>,
+    /// Glob pattern for list operation (e.g., "**/*.rs")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
 }
 
 /// Standard output for tool operations

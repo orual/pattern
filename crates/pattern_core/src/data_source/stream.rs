@@ -59,7 +59,7 @@ pub enum StreamStatus {
 /// }
 /// ```
 #[async_trait]
-pub trait DataStream: Send + Sync + Debug {
+pub trait DataStream: Send + Sync {
     /// Unique identifier for this stream source
     fn source_id(&self) -> &str;
 

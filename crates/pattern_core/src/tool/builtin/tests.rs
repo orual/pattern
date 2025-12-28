@@ -2,12 +2,8 @@
 mod tests {
     use super::super::*;
     use crate::db::ConstellationDatabases;
-    use crate::memory::MemoryStore;
     use crate::tool::builtin::MockToolContext;
-    use crate::{
-        memory::{BlockSchema, BlockType, MemoryCache},
-        tool::ToolRegistry,
-    };
+    use crate::{memory::MemoryCache, tool::ToolRegistry};
     use std::sync::Arc;
 
     async fn create_test_context() -> (

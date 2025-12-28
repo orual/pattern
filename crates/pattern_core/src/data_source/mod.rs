@@ -141,7 +141,7 @@ pub use block::{
     BlockSourceStatus, ConflictResolution, DataBlock, FileChange, FileChangeType, PermissionRule,
     ReconcileResult, VersionInfo,
 };
-pub use file_source::FileSource;
+pub use file_source::{FileInfo, FileSource, FileSyncStatus};
 pub use helpers::{BlockBuilder, EphemeralBlockCache, NotificationBuilder};
 pub use manager::{BlockEdit, BlockSourceInfo, EditFeedback, SourceManager, StreamSourceInfo};
 pub use stream::{DataStream, StreamStatus};

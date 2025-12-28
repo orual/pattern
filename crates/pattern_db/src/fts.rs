@@ -427,8 +427,8 @@ mod tests {
         // Insert test messages
         sqlx::query(
             r#"
-            INSERT INTO messages (id, agent_id, position, role, content, is_archived, created_at)
-            VALUES ('msg_1', 'agent_1', '1', 'user', 'hello world this is a test message', false, datetime('now'))
+            INSERT INTO messages (id, agent_id, position, role, content_json, content_preview, is_archived, created_at)
+            VALUES ('msg_1', 'agent_1', '1', 'user', '{}', 'hello world this is a test message', false, datetime('now'))
             "#,
         )
         .execute(db.pool())
@@ -437,8 +437,8 @@ mod tests {
 
         sqlx::query(
             r#"
-            INSERT INTO messages (id, agent_id, position, role, content, is_archived, created_at)
-            VALUES ('msg_2', 'agent_1', '2', 'assistant', 'goodbye cruel world', false, datetime('now'))
+            INSERT INTO messages (id, agent_id, position, role, content_json, content_preview, is_archived, created_at)
+            VALUES ('msg_2', 'agent_1', '2', 'assistant', '{}', 'goodbye cruel world', false, datetime('now'))
             "#,
         )
         .execute(db.pool())
@@ -477,8 +477,8 @@ mod tests {
         // Insert a message
         sqlx::query(
             r#"
-            INSERT INTO messages (id, agent_id, position, role, content, is_archived, created_at)
-            VALUES ('msg_rebuild', 'agent_1', '1', 'user', 'rebuild test message', false, datetime('now'))
+            INSERT INTO messages (id, agent_id, position, role, content_json, content_preview, is_archived, created_at)
+            VALUES ('msg_rebuild', 'agent_1', '1', 'user', '{}', 'rebuild test message', false, datetime('now'))
             "#,
         )
         .execute(db.pool())
@@ -504,8 +504,8 @@ mod tests {
 
         sqlx::query(
             r#"
-            INSERT INTO messages (id, agent_id, position, role, content, is_archived, created_at)
-            VALUES ('msg_phrase', 'agent_1', '1', 'user', 'the quick brown fox jumps over the lazy dog', false, datetime('now'))
+            INSERT INTO messages (id, agent_id, position, role, content_json, content_preview, is_archived, created_at)
+            VALUES ('msg_phrase', 'agent_1', '1', 'user', '{}', 'the quick brown fox jumps over the lazy dog', false, datetime('now'))
             "#,
         )
         .execute(db.pool())
@@ -534,8 +534,8 @@ mod tests {
 
         sqlx::query(
             r#"
-            INSERT INTO messages (id, agent_id, position, role, content, is_archived, created_at)
-            VALUES ('msg_prefix', 'agent_1', '1', 'user', 'programming is fun', false, datetime('now'))
+            INSERT INTO messages (id, agent_id, position, role, content_json, content_preview, is_archived, created_at)
+            VALUES ('msg_prefix', 'agent_1', '1', 'user', '{}', 'programming is fun', false, datetime('now'))
             "#,
         )
         .execute(db.pool())
