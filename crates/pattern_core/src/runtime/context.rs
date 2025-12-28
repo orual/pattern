@@ -586,6 +586,43 @@ impl RuntimeContext {
         self.block_sources.len()
     }
 
+    /// Unregister a stream source by ID.
+    ///
+    /// Removes the source and cleans up all agent subscriptions to it.
+    /// Returns the source if it existed.
+    pub fn unregister_stream(&self, source_id: &str) -> Option<Box<dyn DataStream>> {
+        // Remove from main registry
+        let handle = self.stream_sources.remove(source_id);
+
+        // Clean up subscriptions - remove this source from all agents' subscription lists
+        for mut entry in self.stream_subscriptions.iter_mut() {
+            entry.value_mut().retain(|s| s != source_id);
+        }
+
+        handle.map(|(_, h)| h.source)
+    }
+
+    /// Unregister a block source by ID.
+    ///
+    /// Removes the source and cleans up all agent subscriptions and edit subscribers.
+    /// Returns the source if it existed.
+    pub fn unregister_block_source(&self, source_id: &str) -> Option<Box<dyn DataBlock>> {
+        // Remove from main registry
+        let handle = self.block_sources.remove(source_id);
+
+        // Clean up block subscriptions - remove this source from all agents' subscription lists
+        for mut entry in self.block_subscriptions.iter_mut() {
+            entry.value_mut().retain(|s| s != source_id);
+        }
+
+        // Clean up block edit subscribers - remove this source from all subscriber lists
+        for mut entry in self.block_edit_subscribers.iter_mut() {
+            entry.value_mut().retain(|s| s != source_id);
+        }
+
+        handle.map(|(_, h)| h.source)
+    }
+
     // ============================================================================
     // Source Lifecycle
     // ============================================================================

@@ -345,6 +345,11 @@ impl ToolRegistry {
         self.tools.insert(tool.name().to_compact_string(), tool);
     }
 
+    /// Remove a tool by name, returning it if it existed
+    pub fn remove(&self, name: &str) -> Option<Box<dyn DynamicTool>> {
+        self.tools.remove(name).map(|(_, tool)| tool)
+    }
+
     /// Get a tool by name
     pub fn get(
         &self,
