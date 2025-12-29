@@ -139,7 +139,7 @@ mod tests;
 
 pub use block::{
     BlockSourceStatus, ConflictResolution, DataBlock, FileChange, FileChangeType, PermissionRule,
-    ReconcileResult, VersionInfo,
+    ReconcileResult, RestoreStats, VersionInfo,
 };
 pub use file_source::{
     FileInfo, FileSource, FileSyncStatus, ParsedFileLabel, is_file_label, parse_file_label,

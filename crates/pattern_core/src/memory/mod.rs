@@ -14,6 +14,7 @@ use std::fmt::Display;
 pub use cache::{DEFAULT_MEMORY_CHAR_LIMIT, MemoryCache, WriteOptions};
 pub use document::*;
 pub use schema::*;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 pub use sharing::*;
 pub use store::*;
@@ -23,7 +24,9 @@ pub use types::*;
 pub use types::{MemorySearchResult, SearchContentType, SearchMode, SearchOptions};
 
 /// Permission levels for memory operations (most to least restrictive)
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq, PartialOrd, Ord, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryPermission {
     /// Can only read, no modifications allowed

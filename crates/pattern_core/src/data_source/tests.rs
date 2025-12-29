@@ -80,17 +80,17 @@ fn test_stream_cursor_serialization() {
 
 #[test]
 fn test_block_schema_spec_pinned() {
-    let spec = BlockSchemaSpec::pinned("config", BlockSchema::Text, "Configuration block");
+    let spec = BlockSchemaSpec::pinned("config", BlockSchema::text(), "Configuration block");
 
     assert!(spec.pinned);
     assert_eq!(spec.label_pattern, "config");
     assert_eq!(spec.description, "Configuration block");
-    assert_eq!(spec.schema, BlockSchema::Text);
+    assert_eq!(spec.schema, BlockSchema::text());
 }
 
 #[test]
 fn test_block_schema_spec_ephemeral() {
-    let spec = BlockSchemaSpec::ephemeral("user_{id}", BlockSchema::Text, "User profile");
+    let spec = BlockSchemaSpec::ephemeral("user_{id}", BlockSchema::text(), "User profile");
 
     assert!(!spec.pinned);
     assert_eq!(spec.label_pattern, "user_{id}");
@@ -99,7 +99,7 @@ fn test_block_schema_spec_ephemeral() {
 
 #[test]
 fn test_block_schema_spec_serialization() {
-    let spec = BlockSchemaSpec::pinned("config", BlockSchema::Text, "Configuration block");
+    let spec = BlockSchemaSpec::pinned("config", BlockSchema::text(), "Configuration block");
 
     let json = serde_json::to_string(&spec).unwrap();
     let parsed: BlockSchemaSpec = serde_json::from_str(&json).unwrap();
@@ -281,7 +281,7 @@ fn test_stream_source_info() {
         name: "Bluesky Firehose".to_string(),
         block_schemas: vec![BlockSchemaSpec::pinned(
             "config",
-            BlockSchema::Text,
+            BlockSchema::text(),
             "Config",
         )],
         status: StreamStatus::Running,
@@ -298,7 +298,11 @@ fn test_block_source_info() {
     let info = BlockSourceInfo {
         source_id: "files".to_string(),
         name: "File System".to_string(),
-        block_schema: BlockSchemaSpec::ephemeral("file_{path}", BlockSchema::Text, "File content"),
+        block_schema: BlockSchemaSpec::ephemeral(
+            "file_{path}",
+            BlockSchema::text(),
+            "File content",
+        ),
         permission_rules: vec![PermissionRule::new("**/*.rs", MemoryPermission::ReadWrite)],
         status: BlockSourceStatus::Watching,
     };
@@ -433,7 +437,7 @@ impl DataBlock for MockDataBlock {
     }
 
     fn block_schema(&self) -> BlockSchemaSpec {
-        BlockSchemaSpec::ephemeral("mock_{id}", BlockSchema::Text, "Mock block")
+        BlockSchemaSpec::ephemeral("mock_{id}", BlockSchema::text(), "Mock block")
     }
 
     fn permission_rules(&self) -> &[PermissionRule] {

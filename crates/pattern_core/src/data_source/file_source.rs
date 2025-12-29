@@ -32,7 +32,7 @@ use crate::tool::rules::ToolRule;
 
 use super::{
     BlockRef, BlockSchemaSpec, BlockSourceStatus, DataBlock, FileChange, FileChangeType,
-    PermissionRule, ReconcileResult, VersionInfo,
+    PermissionRule, ReconcileResult, RestoreStats, VersionInfo,
 };
 
 /// Convert MemoryError to CoreError for FileSource operations.
@@ -835,52 +835,42 @@ impl FileSource {
                     cause: format!("File {} is not loaded", path.display()),
                 })?;
 
-        // Update memory doc
-        let mem_text = info.memory_doc.get_text("content");
-        let mem_len = mem_text.len_unicode();
-        if mem_len > 0 {
-            mem_text
-                .delete(0, mem_len)
-                .map_err(|e| CoreError::DataSourceError {
-                    source_name: self.source_id.clone(),
-                    operation: "reload".to_string(),
-                    cause: format!("Failed to clear memory content: {}", e),
-                })?;
-        }
-        mem_text
-            .insert(0, &content)
-            .map_err(|e| CoreError::DataSourceError {
-                source_name: self.source_id.clone(),
-                operation: "reload".to_string(),
-                cause: format!("Failed to insert content: {}", e),
-            })?;
-        info.memory_doc.commit();
+        // Tear down subscriptions to prevent feedback loop during reload
+        let had_subscriptions = info.subscriptions.is_some();
+        info.subscriptions = None;
 
-        // Update disk doc
-        let disk_text = info.disk_doc.get_text("content");
-        let disk_len = disk_text.len_unicode();
-        if disk_len > 0 {
-            disk_text
-                .delete(0, disk_len)
-                .map_err(|e| CoreError::DataSourceError {
-                    source_name: self.source_id.clone(),
-                    operation: "reload".to_string(),
-                    cause: format!("Failed to clear disk content: {}", e),
-                })?;
-        }
-        disk_text
-            .insert(0, &content)
+        // Update memory doc using diff-based update to minimize operations
+        let mem_text = info.memory_doc.get_text("content");
+        mem_text
+            .update(&content, Default::default())
             .map_err(|e| CoreError::DataSourceError {
                 source_name: self.source_id.clone(),
                 operation: "reload".to_string(),
-                cause: format!("Failed to insert content: {}", e),
+                cause: format!("Failed to update memory content: {}", e),
             })?;
-        info.disk_doc.commit();
+
+        // Update disk doc using diff-based update
+        let disk_text = info.disk_doc.get_text("content");
+        disk_text
+            .update(&content, Default::default())
+            .map_err(|e| CoreError::DataSourceError {
+                source_name: self.source_id.clone(),
+                operation: "reload".to_string(),
+                cause: format!("Failed to update disk content: {}", e),
+            })?;
 
         // Update metadata
         info.disk_mtime = mtime;
         info.disk_size = size;
         info.last_saved_frontier = info.memory_doc.oplog_vv();
+
+        // Drop the mutable borrow before re-setting up subscriptions
+        drop(info);
+
+        // Re-setup subscriptions if they were active
+        if had_subscriptions {
+            self.setup_subscriptions_for_path(&abs_path);
+        }
 
         Ok(())
     }
@@ -928,7 +918,7 @@ impl FileSource {
                     &label,
                     &format!("File: {}", abs_path.display()),
                     BlockType::Working,
-                    BlockSchema::Text,
+                    BlockSchema::text(),
                     1024 * 1024, // 1MB char limit
                 )
                 .await
@@ -1063,7 +1053,7 @@ impl DataBlock for FileSource {
     fn block_schema(&self) -> BlockSchemaSpec {
         BlockSchemaSpec::ephemeral(
             "file:{source_id}:{path}",
-            BlockSchema::Text,
+            BlockSchema::text(),
             "Local file content with Loro-backed versioning",
         )
     }
@@ -1174,7 +1164,7 @@ impl DataBlock for FileSource {
                     &label,
                     &format!("File: {}", abs_path.display()),
                     BlockType::Working,
-                    BlockSchema::Text,
+                    BlockSchema::text(),
                     1024 * 1024, // 1MB char limit
                 )
                 .await
@@ -1286,7 +1276,7 @@ impl DataBlock for FileSource {
                 &label,
                 &format!("File: {}", abs_path.display()),
                 BlockType::Working,
-                BlockSchema::Text,
+                BlockSchema::text(),
                 1024 * 1024, // 1MB char limit
             )
             .await
@@ -1551,6 +1541,134 @@ impl DataBlock for FileSource {
             })?;
 
         self.perform_diff(&file_path).await
+    }
+
+    async fn restore_from_memory(&self, ctx: Arc<dyn ToolContext>) -> Result<RestoreStats> {
+        let memory = ctx.memory();
+        let mut stats = RestoreStats::new();
+
+        // Query for all blocks matching our source_id prefix (across all agents)
+        let prefix = format!("{}:", self.source_id);
+        let blocks = memory
+            .list_all_blocks_by_label_prefix(&prefix)
+            .await
+            .map_err(|e| memory_err(&self.source_id, "restore", e))?;
+
+        for block_meta in blocks {
+            // Parse the label to get the relative path
+            let Some(parsed) = parse_file_label(&block_meta.label) else {
+                stats.skipped += 1;
+                continue;
+            };
+
+            // Verify this block belongs to our source
+            if parsed.source_id != self.source_id {
+                stats.skipped += 1;
+                continue;
+            }
+
+            let rel_path = Path::new(&parsed.path);
+            let abs_path = match self.absolute_path(rel_path) {
+                Ok(p) => p,
+                Err(_) => {
+                    stats.skipped += 1;
+                    continue;
+                }
+            };
+
+            // Check if file still exists on disk
+            if !abs_path.exists() {
+                // File was deleted - unpin the block to remove from context
+                // but preserve history
+                if let Err(e) = memory
+                    .set_block_pinned(&block_meta.agent_id, &block_meta.label, false)
+                    .await
+                {
+                    tracing::warn!(
+                        "Failed to unpin block {} for deleted file {}: {}",
+                        block_meta.label,
+                        abs_path.display(),
+                        e
+                    );
+                }
+                stats.unpinned += 1;
+                continue;
+            }
+
+            // File exists - restore tracking
+            // Get the full document from memory
+            let doc = match memory
+                .get_block(&block_meta.agent_id, &block_meta.label)
+                .await
+            {
+                Ok(Some(d)) => d,
+                Ok(None) | Err(_) => {
+                    stats.skipped += 1;
+                    continue;
+                }
+            };
+
+            // Read current disk content
+            let disk_content = match tokio::fs::read_to_string(&abs_path).await {
+                Ok(c) => normalize_line_endings(c),
+                Err(_) => {
+                    stats.skipped += 1;
+                    continue;
+                }
+            };
+
+            // Get file metadata
+            let (mtime, size) = match self.get_file_metadata(&abs_path).await {
+                Ok((m, s)) => (m, s),
+                Err(_) => {
+                    stats.skipped += 1;
+                    continue;
+                }
+            };
+
+            // Clone memory doc and fork for disk
+            let memory_doc = doc.inner().clone();
+            let disk_doc = memory_doc.fork();
+
+            // Update disk_doc with current disk content (Loro will merge)
+            let text = disk_doc.get_text("content");
+            if let Err(e) = text.update(&disk_content, Default::default()) {
+                tracing::warn!(
+                    "Failed to update disk_doc for {}: {}",
+                    abs_path.display(),
+                    e
+                );
+                stats.skipped += 1;
+                continue;
+            }
+
+            let permission = self.permission_for(&abs_path);
+
+            // Add to loaded_blocks (subscriptions set up by start_watching later)
+            self.loaded_blocks.insert(
+                abs_path.clone(),
+                LoadedFileInfo {
+                    block_id: block_meta.id.clone(),
+                    label: block_meta.label.clone(),
+                    disk_mtime: mtime,
+                    disk_size: size,
+                    disk_doc,
+                    memory_doc,
+                    subscriptions: None,
+                    permission,
+                    last_saved_frontier: doc.inner().oplog_vv(),
+                },
+            );
+
+            stats.restored += 1;
+        }
+
+        // Start watching if we restored any files
+        if stats.restored > 0 {
+            let _ = self.start_watching().await;
+        }
+
+        Ok(stats)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

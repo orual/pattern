@@ -55,6 +55,16 @@ pub trait MemoryStore: Send + Sync + fmt::Debug {
         block_type: BlockType,
     ) -> MemoryResult<Vec<BlockMetadata>>;
 
+    /// List blocks by label prefix (across all agents).
+    ///
+    /// System-level operation for restoring DataBlock source tracking after restart.
+    /// Finds all active blocks whose labels start with the given prefix.
+    /// Not for use in agent tool calls - use agent-scoped methods instead.
+    async fn list_all_blocks_by_label_prefix(
+        &self,
+        prefix: &str,
+    ) -> MemoryResult<Vec<BlockMetadata>>;
+
     /// Delete (deactivate) a block
     async fn delete_block(&self, agent_id: &str, label: &str) -> MemoryResult<()>;
 
@@ -167,6 +177,18 @@ pub trait MemoryStore: Send + Sync + fmt::Debug {
         agent_id: &str,
         label: &str,
         block_type: BlockType,
+    ) -> MemoryResult<()>;
+
+    /// Update a block's schema settings
+    ///
+    /// Used to modify schema properties like viewport (Text) or display_limit (Log).
+    /// The schema variant must match the existing block's schema variant (can't change Text to Map).
+    /// Returns error if schema types are incompatible.
+    async fn update_block_schema(
+        &self,
+        agent_id: &str,
+        label: &str,
+        schema: BlockSchema,
     ) -> MemoryResult<()>;
 }
 

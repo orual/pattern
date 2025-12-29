@@ -139,11 +139,7 @@ pub async fn chat_with_single_agent(agent_name: &str, config: &PatternConfig) ->
             operations_requiring_escalation: vec![],
         }],
     ));
-    ctx.register_block_source(file_source);
-
-    // Create FileTool - it uses SourceManager to find registered sources
-    let file_tool = FileTool::new(agent.runtime().clone());
-    agent.runtime().tools().register(file_tool);
+    ctx.register_block_source(file_source).await;
 
     // Set up readline
     let (mut rl, writer) = Readline::new(format!("{} ", ">".bright_blue())).into_diagnostic()?;

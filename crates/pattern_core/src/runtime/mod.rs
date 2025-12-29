@@ -18,7 +18,9 @@ use crate::context::ContextBuilder;
 use crate::db::ConstellationDatabases;
 use crate::error::CoreError;
 use crate::id::AgentId;
-use crate::memory::{MemoryResult, MemorySearchResult, MemoryStore, SearchOptions};
+use crate::memory::{
+    MemoryResult, MemorySearchResult, MemoryStore, SearchOptions, SharedBlockManager,
+};
 use crate::messages::{BatchType, Message, MessageStore, Request, ToolCall, ToolResponse};
 use crate::tool::{ExecutionMeta, ToolRegistry};
 use crate::{SnowflakePosition, utils::get_next_message_position_sync};
@@ -57,6 +59,9 @@ pub struct AgentRuntime {
 
     // Combined databases (constellation + auth)
     dbs: ConstellationDatabases,
+
+    // Block sharing
+    shared_blocks: Arc<SharedBlockManager>,
 
     // Configuration
     config: RuntimeConfig,
@@ -453,6 +458,10 @@ impl ToolContext for AgentRuntime {
             .and_then(|weak| weak.upgrade())
             .map(|arc| arc as Arc<dyn crate::data_source::SourceManager>)
     }
+
+    fn shared_blocks(&self) -> Option<Arc<SharedBlockManager>> {
+        Some(self.shared_blocks.clone())
+    }
 }
 
 /// Builder for constructing an AgentRuntime
@@ -593,6 +602,9 @@ impl RuntimeBuilder {
         // Create router with agent info (uses combined databases)
         let router = AgentMessageRouter::new(agent_id.clone(), agent_name.clone(), dbs.clone());
 
+        // Create shared block manager
+        let shared_blocks = Arc::new(SharedBlockManager::new(Arc::new(dbs.clone())));
+
         Ok(AgentRuntime {
             agent_id,
             agent_name,
@@ -603,6 +615,7 @@ impl RuntimeBuilder {
             router,
             model: self.model,
             dbs,
+            shared_blocks,
             config: self.config,
             runtime_context: self.runtime_context,
         })
@@ -781,6 +794,22 @@ pub(crate) mod test_support {
             _agent_id: &str,
             _label: &str,
             _block_type: BlockType,
+        ) -> MemoryResult<()> {
+            Ok(())
+        }
+
+        async fn list_all_blocks_by_label_prefix(
+            &self,
+            _prefix: &str,
+        ) -> MemoryResult<Vec<BlockMetadata>> {
+            Ok(vec![])
+        }
+
+        async fn update_block_schema(
+            &self,
+            _agent_id: &str,
+            _label: &str,
+            _schema: BlockSchema,
         ) -> MemoryResult<()> {
             Ok(())
         }

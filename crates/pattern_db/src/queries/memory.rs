@@ -145,6 +145,45 @@ pub async fn list_blocks_by_type(
     Ok(blocks)
 }
 
+/// List memory blocks by label prefix (across all agents).
+///
+/// Used for system-level operations like restoring DataBlock source tracking
+/// after restart. Finds all blocks whose labels start with the given prefix.
+pub async fn list_blocks_by_label_prefix(
+    pool: &SqlitePool,
+    prefix: &str,
+) -> DbResult<Vec<MemoryBlock>> {
+    let pattern = format!("{}%", prefix);
+    let blocks = sqlx::query_as!(
+        MemoryBlock,
+        r#"
+        SELECT
+            id as "id!",
+            agent_id as "agent_id!",
+            label as "label!",
+            description as "description!",
+            block_type as "block_type!: MemoryBlockType",
+            char_limit as "char_limit!",
+            permission as "permission!: MemoryPermission",
+            pinned as "pinned!: bool",
+            loro_snapshot as "loro_snapshot!",
+            content_preview,
+            metadata as "metadata: _",
+            embedding_model,
+            is_active as "is_active!: bool",
+            frontier,
+            last_seq as "last_seq!",
+            created_at as "created_at!: _",
+            updated_at as "updated_at!: _"
+        FROM memory_blocks WHERE label LIKE ? AND is_active = 1 ORDER BY label
+        "#,
+        pattern
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(blocks)
+}
+
 /// Create a new memory block.
 pub async fn create_block(pool: &SqlitePool, block: &MemoryBlock) -> DbResult<()> {
     sqlx::query!(
@@ -247,6 +286,23 @@ pub async fn update_block_type(
     .bind(id)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+/// Update a memory block's metadata.
+///
+/// Used for schema updates (e.g., changing viewport settings on Text blocks).
+pub async fn update_block_metadata(
+    pool: &SqlitePool,
+    id: &str,
+    metadata: &serde_json::Value,
+) -> DbResult<()> {
+    let metadata_str = serde_json::to_string(metadata)?;
+    sqlx::query("UPDATE memory_blocks SET metadata = ?, updated_at = datetime('now') WHERE id = ?")
+        .bind(metadata_str)
+        .bind(id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 

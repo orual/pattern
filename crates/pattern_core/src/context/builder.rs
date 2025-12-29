@@ -598,7 +598,7 @@ mod tests {
                     label: "core_memory".to_string(),
                     description: "Core agent memory".to_string(),
                     block_type: BlockType::Core,
-                    schema: BlockSchema::Text,
+                    schema: BlockSchema::text(),
                     char_limit: 1000,
                     permission: pattern_db::models::MemoryPermission::ReadWrite,
                     pinned: true,
@@ -614,7 +614,7 @@ mod tests {
                             label: "working_memory".to_string(),
                             description: "Working context".to_string(),
                             block_type: BlockType::Working,
-                            schema: BlockSchema::Text,
+                            schema: BlockSchema::text(),
                             char_limit: 2000,
                             permission: pattern_db::models::MemoryPermission::ReadWrite,
                             pinned: true,
@@ -631,7 +631,7 @@ mod tests {
                                 label: "ephemeral_context".to_string(),
                                 description: "Ephemeral context block".to_string(),
                                 block_type: BlockType::Working,
-                                schema: BlockSchema::Text,
+                                schema: BlockSchema::text(),
                                 char_limit: 2000,
                                 permission: pattern_db::models::MemoryPermission::ReadWrite,
                                 pinned: false,
@@ -645,7 +645,7 @@ mod tests {
                                 label: "user_profile".to_string(),
                                 description: "User profile block".to_string(),
                                 block_type: BlockType::Working,
-                                schema: BlockSchema::Text,
+                                schema: BlockSchema::text(),
                                 char_limit: 2000,
                                 permission: pattern_db::models::MemoryPermission::ReadWrite,
                                 pinned: false,
@@ -659,7 +659,7 @@ mod tests {
                                 label: "pinned_config".to_string(),
                                 description: "Pinned configuration".to_string(),
                                 block_type: BlockType::Working,
-                                schema: BlockSchema::Text,
+                                schema: BlockSchema::text(),
                                 char_limit: 2000,
                                 permission: pattern_db::models::MemoryPermission::ReadWrite,
                                 pinned: true,
@@ -790,6 +790,22 @@ mod tests {
             _agent_id: &str,
             _label: &str,
             _block_type: BlockType,
+        ) -> MemoryResult<()> {
+            Ok(())
+        }
+
+        async fn list_all_blocks_by_label_prefix(
+            &self,
+            _prefix: &str,
+        ) -> MemoryResult<Vec<BlockMetadata>> {
+            Ok(vec![])
+        }
+
+        async fn update_block_schema(
+            &self,
+            _agent_id: &str,
+            _label: &str,
+            _schema: BlockSchema,
         ) -> MemoryResult<()> {
             Ok(())
         }

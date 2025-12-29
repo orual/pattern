@@ -13,6 +13,7 @@ use std::sync::Arc;
 pub const CONSTELLATION_OWNER: &str = "_constellation_";
 
 /// Manager for shared memory blocks
+#[derive(Debug)]
 pub struct SharedBlockManager {
     dbs: Arc<ConstellationDatabases>,
 }
@@ -61,6 +62,68 @@ impl SharedBlockManager {
         queries::delete_shared_block_attachment(self.dbs.constellation.pool(), block_id, agent_id)
             .await?;
         Ok(())
+    }
+
+    /// Share a block with another agent by name
+    ///
+    /// Looks up the target agent by name, then shares the block.
+    /// Returns the target agent's ID on success.
+    pub async fn share_block_by_name(
+        &self,
+        owner_agent_id: &str,
+        block_label: &str,
+        target_agent_name: &str,
+        permission: MemoryPermission,
+    ) -> MemoryResult<String> {
+        // Look up target agent by name
+        let target_agent =
+            queries::get_agent_by_name(self.dbs.constellation.pool(), target_agent_name)
+                .await?
+                .ok_or_else(|| {
+                    MemoryError::Other(format!("Agent not found: {}", target_agent_name))
+                })?;
+
+        // Get the block by label to find its ID
+        let block =
+            queries::get_block_by_label(self.dbs.constellation.pool(), owner_agent_id, block_label)
+                .await?
+                .ok_or_else(|| MemoryError::Other(format!("Block not found: {}", block_label)))?;
+
+        // Share the block
+        self.share_block(&block.id, &target_agent.id, permission)
+            .await?;
+
+        Ok(target_agent.id)
+    }
+
+    /// Remove sharing from another agent by name
+    ///
+    /// Looks up the target agent by name, then removes sharing.
+    /// Returns the target agent's ID on success.
+    pub async fn unshare_block_by_name(
+        &self,
+        owner_agent_id: &str,
+        block_label: &str,
+        target_agent_name: &str,
+    ) -> MemoryResult<String> {
+        // Look up target agent by name
+        let target_agent =
+            queries::get_agent_by_name(self.dbs.constellation.pool(), target_agent_name)
+                .await?
+                .ok_or_else(|| {
+                    MemoryError::Other(format!("Agent not found: {}", target_agent_name))
+                })?;
+
+        // Get the block by label to find its ID
+        let block =
+            queries::get_block_by_label(self.dbs.constellation.pool(), owner_agent_id, block_label)
+                .await?
+                .ok_or_else(|| MemoryError::Other(format!("Block not found: {}", block_label)))?;
+
+        // Unshare the block
+        self.unshare_block(&block.id, &target_agent.id).await?;
+
+        Ok(target_agent.id)
     }
 
     /// Get all agents a block is shared with

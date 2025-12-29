@@ -625,7 +625,7 @@ mod tests {
                 "preferences",
                 "User preferences",
                 BlockType::Core,
-                BlockSchema::Text,
+                BlockSchema::text(),
                 1000,
             )
             .await
@@ -800,7 +800,7 @@ mod tests {
                 "notes",
                 "Working notes",
                 BlockType::Working,
-                BlockSchema::Text,
+                BlockSchema::text(),
                 1000,
             )
             .await

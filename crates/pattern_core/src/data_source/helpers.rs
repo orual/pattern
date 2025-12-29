@@ -56,7 +56,7 @@ impl<'a> BlockBuilder<'a> {
             owner,
             label: label.into(),
             description: None,
-            schema: BlockSchema::Text,
+            schema: BlockSchema::text(),
             block_type: BlockType::Working,
             char_limit: 4096,
             pinned: false,

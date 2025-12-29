@@ -87,7 +87,7 @@ fn test_composite_section_permissions() {
             },
             CompositeSection {
                 name: "notes".to_string(),
-                schema: Box::new(BlockSchema::Text),
+                schema: Box::new(BlockSchema::text()),
                 description: Some("Agent notes".to_string()),
                 read_only: false,
             },
@@ -205,7 +205,7 @@ fn test_render_shows_permissions() {
 fn test_identity_fields() {
     // Test with identity set
     let doc_with_identity = StructuredDocument::new_with_identity(
-        BlockSchema::Text,
+        BlockSchema::text(),
         "test_block".to_string(),
         Some("agent_42".to_string()),
     );
@@ -213,7 +213,7 @@ fn test_identity_fields() {
     assert_eq!(doc_with_identity.accessor_agent_id(), Some("agent_42"));
 
     // Test without identity (default constructor)
-    let doc_without_identity = StructuredDocument::new(BlockSchema::Text);
+    let doc_without_identity = StructuredDocument::new(BlockSchema::text());
     assert_eq!(doc_without_identity.label(), "");
     assert_eq!(doc_without_identity.accessor_agent_id(), None);
 }
@@ -222,7 +222,7 @@ fn test_identity_fields() {
 fn test_auto_attribution_sets_commit_message() {
     // Create doc with identity
     let doc = StructuredDocument::new_with_identity(
-        BlockSchema::Text,
+        BlockSchema::text(),
         "test_block".to_string(),
         Some("agent_42".to_string()),
     );

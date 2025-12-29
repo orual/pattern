@@ -100,6 +100,23 @@ pub enum ConflictResolution {
     },
 }
 
+/// Statistics from restore_from_memory operation
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RestoreStats {
+    /// Number of blocks successfully restored to tracking
+    pub restored: usize,
+    /// Number of blocks unpinned (underlying resource deleted)
+    pub unpinned: usize,
+    /// Number of blocks skipped (e.g., couldn't load)
+    pub skipped: usize,
+}
+
+impl RestoreStats {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 /// Result of reconciling disk state with Loro overlay
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ReconcileResult {
@@ -290,6 +307,23 @@ pub trait DataBlock: Send + Sync {
         _ctx: Arc<dyn ToolContext>,
     ) -> Result<EditFeedback> {
         Ok(EditFeedback::Applied { message: None })
+    }
+
+    // === Restoration ===
+
+    /// Restore tracking for blocks that were previously loaded by this source.
+    ///
+    /// Called during source registration to reconnect with existing blocks
+    /// from a previous session. Scans memory for blocks matching this source's
+    /// label pattern and restores tracking/sync state.
+    ///
+    /// For each matching block:
+    /// - If underlying resource exists: restore tracking and sync state
+    /// - If underlying resource deleted: unpin block (preserves history, removes from context)
+    ///
+    /// Default implementation does nothing (for sources without persistence).
+    async fn restore_from_memory(&self, _ctx: Arc<dyn ToolContext>) -> Result<RestoreStats> {
+        Ok(RestoreStats::default())
     }
 
     // === Downcasting Support ===

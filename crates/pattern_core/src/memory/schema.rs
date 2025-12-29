@@ -24,12 +24,25 @@ pub struct CompositeSection {
     pub read_only: bool,
 }
 
+/// Viewport for displaying a portion of text content
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TextViewport {
+    /// Starting line (1-indexed)
+    pub start_line: usize,
+    /// Number of lines to display
+    pub display_lines: usize,
+}
+
 /// Block schema defines the structure of a memory block's Loro document
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum BlockSchema {
-    /// Free-form text (default, backward compatible)
+    /// Free-form text with optional viewport for large content
     /// Uses: LoroText container
-    Text,
+    Text {
+        /// Optional viewport - if set, only displays a window of lines
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        viewport: Option<TextViewport>,
+    },
 
     /// Key-value pairs with optional field definitions
     /// Uses: LoroMap with nested containers per field
@@ -56,7 +69,29 @@ pub enum BlockSchema {
 
 impl Default for BlockSchema {
     fn default() -> Self {
-        BlockSchema::Text
+        BlockSchema::text()
+    }
+}
+
+impl BlockSchema {
+    /// Create a simple text schema without viewport
+    pub fn text() -> Self {
+        BlockSchema::Text { viewport: None }
+    }
+
+    /// Create a text schema with a viewport
+    pub fn text_with_viewport(start_line: usize, display_lines: usize) -> Self {
+        BlockSchema::Text {
+            viewport: Some(TextViewport {
+                start_line,
+                display_lines,
+            }),
+        }
+    }
+
+    /// Check if this is a Text schema (with or without viewport)
+    pub fn is_text(&self) -> bool {
+        matches!(self, BlockSchema::Text { .. })
     }
 }
 
@@ -299,7 +334,7 @@ pub mod templates {
     /// Scratchpad schema
     /// Simple free-form notes
     pub fn scratchpad() -> BlockSchema {
-        BlockSchema::Text
+        BlockSchema::text()
     }
 }
 
@@ -310,7 +345,7 @@ mod tests {
     #[test]
     fn test_default_schema_is_text() {
         let schema = BlockSchema::default();
-        assert_eq!(schema, BlockSchema::Text);
+        assert_eq!(schema, BlockSchema::text());
     }
 
     #[test]
@@ -442,7 +477,7 @@ mod tests {
     #[test]
     fn test_scratchpad_is_text() {
         let schema = templates::scratchpad();
-        assert_eq!(schema, BlockSchema::Text);
+        assert_eq!(schema, BlockSchema::text());
     }
 
     #[test]
@@ -566,7 +601,7 @@ mod tests {
         assert!(schema.get_section_schema("nonexistent").is_none());
 
         // Test that non-Composite schemas return None
-        let text_schema = BlockSchema::Text;
+        let text_schema = BlockSchema::text();
         assert_eq!(text_schema.is_section_read_only("any"), None);
         assert!(text_schema.get_section_schema("any").is_none());
     }

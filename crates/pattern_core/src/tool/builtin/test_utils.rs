@@ -6,7 +6,9 @@ use std::sync::Arc;
 use crate::ModelProvider;
 use crate::data_source::SourceManager;
 use crate::db::ConstellationDatabases;
-use crate::memory::{MemoryCache, MemoryResult, MemorySearchResult, MemoryStore, SearchOptions};
+use crate::memory::{
+    MemoryCache, MemoryResult, MemorySearchResult, MemoryStore, SearchOptions, SharedBlockManager,
+};
 use crate::permission::PermissionBroker;
 use crate::runtime::{AgentMessageRouter, SearchScope, ToolContext};
 
@@ -67,6 +69,7 @@ pub struct MockToolContext {
     agent_id: String,
     memory: Arc<dyn MemoryStore>,
     router: AgentMessageRouter,
+    shared_blocks: Arc<SharedBlockManager>,
 }
 
 impl MockToolContext {
@@ -82,11 +85,13 @@ impl MockToolContext {
         dbs: Arc<ConstellationDatabases>,
     ) -> Self {
         let agent_id = agent_id.into();
+        let shared_blocks = Arc::new(SharedBlockManager::new(dbs.clone()));
 
         Self {
             router: AgentMessageRouter::new(agent_id.clone(), agent_id.clone(), (*dbs).clone()),
             agent_id,
             memory,
+            shared_blocks,
         }
     }
 }
@@ -143,5 +148,9 @@ impl ToolContext for MockToolContext {
     fn sources(&self) -> Option<Arc<dyn SourceManager>> {
         // Mock doesn't have source management
         None
+    }
+
+    fn shared_blocks(&self) -> Option<Arc<SharedBlockManager>> {
+        Some(self.shared_blocks.clone())
     }
 }

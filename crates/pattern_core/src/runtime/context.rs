@@ -511,15 +511,41 @@ impl RuntimeContext {
     ///
     /// Block sources manage document-oriented data (files, configs, etc.)
     /// with Loro-backed versioning and are identified by their source_id.
-    pub fn register_block_source(&self, source: Arc<dyn DataBlock>) {
+    ///
+    /// After registration, attempts to restore tracking for any existing blocks
+    /// from previous sessions via `restore_from_memory`.
+    pub async fn register_block_source(&self, source: Arc<dyn DataBlock>) {
         let source_id = source.source_id().to_string();
         self.block_sources.insert(
             source_id,
             BlockHandle {
-                source,
+                source: source.clone(),
                 receiver: None,
             },
         );
+
+        // Restore tracking for any existing blocks from previous sessions
+        let ctx = self.constellation_runtime.clone() as Arc<dyn ToolContext>;
+        match source.restore_from_memory(ctx).await {
+            Ok(stats) => {
+                if stats.restored > 0 || stats.unpinned > 0 {
+                    tracing::info!(
+                        source_id = source.source_id(),
+                        restored = stats.restored,
+                        unpinned = stats.unpinned,
+                        skipped = stats.skipped,
+                        "Restored block source tracking from memory"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    source_id = source.source_id(),
+                    error = %e,
+                    "Failed to restore block source tracking from memory"
+                );
+            }
+        }
     }
 
     /// Get stream source IDs
@@ -1070,7 +1096,7 @@ impl RuntimeContext {
                     label,
                     &description,
                     block_type,
-                    BlockSchema::Text,
+                    BlockSchema::text(),
                     memory_char_limit,
                 )
                 .await
@@ -1113,7 +1139,7 @@ impl RuntimeContext {
                     "persona",
                     "Agent persona and personality",
                     BlockType::Core,
-                    BlockSchema::Text,
+                    BlockSchema::text(),
                     memory_char_limit,
                 )
                 .await

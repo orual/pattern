@@ -95,7 +95,7 @@ impl StructuredDocument {
 
     /// Create with default Text schema
     pub fn new_text() -> Self {
-        Self::new(BlockSchema::Text)
+        Self::new(BlockSchema::text())
     }
 
     /// Create from an existing Loro snapshot with permission
@@ -146,6 +146,14 @@ impl StructuredDocument {
     /// Set the effective permission for this document (DB is source of truth)
     pub fn set_permission(&mut self, permission: pattern_db::models::MemoryPermission) {
         self.permission = permission;
+    }
+
+    /// Update the schema settings (DB is source of truth)
+    ///
+    /// This is used to update schema properties like viewport (Text) or display_limit (Log).
+    /// The caller must ensure the schema variant is compatible.
+    pub fn set_schema(&mut self, schema: BlockSchema) {
+        self.schema = schema;
     }
 
     /// Get the block label for identification.
@@ -253,7 +261,7 @@ impl StructuredDocument {
     /// If is_system is false, checks that the document has Append permission.
     pub fn append(&self, content: &str, is_system: bool) -> Result<(), DocumentError> {
         match &self.schema {
-            BlockSchema::Text => self.append_text(content, is_system),
+            BlockSchema::Text { .. } => self.append_text(content, is_system),
             BlockSchema::List { .. } => {
                 // Try to parse as JSON, fall back to string
                 let item = serde_json::from_str(content)
@@ -737,7 +745,7 @@ impl StructuredDocument {
     /// Returns a `Subscription` that will unsubscribe when dropped.
     pub fn subscribe_content(&self, callback: loro::event::Subscriber) -> loro::Subscription {
         let container_id = match &self.schema {
-            BlockSchema::Text => self.doc.get_text("content").id(),
+            BlockSchema::Text { .. } => self.doc.get_text("content").id(),
             BlockSchema::Map { .. } => self.doc.get_map("fields").id(),
             BlockSchema::List { .. } => self.doc.get_list("items").id(),
             BlockSchema::Log { .. } => self.doc.get_list("entries").id(),
@@ -802,7 +810,41 @@ impl StructuredDocument {
     /// Render content according to a specific schema (for recursive rendering)
     fn render_schema(&self, schema: &BlockSchema) -> String {
         match schema {
-            BlockSchema::Text => self.text_content(),
+            BlockSchema::Text { viewport } => {
+                let content = self.text_content();
+                match viewport {
+                    Some(vp) => {
+                        // Apply viewport: show only a window of lines
+                        let lines: Vec<&str> = content.lines().collect();
+                        let total_lines = lines.len();
+
+                        // start_line is 1-indexed, convert to 0-indexed
+                        let start_idx = vp.start_line.saturating_sub(1);
+                        let end_idx = (start_idx + vp.display_lines).min(total_lines);
+
+                        if start_idx >= total_lines {
+                            // Viewport is past end of content
+                            format!(
+                                "[Viewport: lines {}-{} of {} (past end of content)]",
+                                vp.start_line,
+                                vp.start_line + vp.display_lines - 1,
+                                total_lines
+                            )
+                        } else {
+                            let visible: Vec<&str> =
+                                lines[start_idx..end_idx].iter().copied().collect();
+                            let header = format!(
+                                "[Showing lines {}-{} of {}]\n",
+                                start_idx + 1,
+                                end_idx,
+                                total_lines
+                            );
+                            header + &visible.join("\n")
+                        }
+                    }
+                    None => content,
+                }
+            }
 
             BlockSchema::Map { fields } => {
                 let mut lines = Vec::new();
@@ -1236,7 +1278,7 @@ mod tests {
         let snapshot = doc.export_snapshot().unwrap();
 
         // Import into new document
-        let doc2 = StructuredDocument::from_snapshot(&snapshot, BlockSchema::Text).unwrap();
+        let doc2 = StructuredDocument::from_snapshot(&snapshot, BlockSchema::text()).unwrap();
         assert_eq!(doc2.text_content(), "Test content");
     }
 
@@ -1408,7 +1450,7 @@ mod tests {
                 },
                 CompositeSection {
                     name: "notes".to_string(),
-                    schema: Box::new(BlockSchema::Text),
+                    schema: Box::new(BlockSchema::text()),
                     description: None,
                     read_only: false,
                 },
@@ -1500,7 +1542,7 @@ mod tests {
         let schema = BlockSchema::Composite {
             sections: vec![CompositeSection {
                 name: "existing".to_string(),
-                schema: Box::new(BlockSchema::Text),
+                schema: Box::new(BlockSchema::text()),
                 description: None,
                 read_only: false,
             }],
@@ -1572,7 +1614,7 @@ mod tests {
 
     #[test]
     fn test_structured_document_identity() {
-        let schema = BlockSchema::Text;
+        let schema = BlockSchema::text();
         let doc = StructuredDocument::new_with_identity(
             schema,
             "my_block".to_string(),
@@ -1641,13 +1683,13 @@ mod tests {
             sections: vec![
                 CompositeSection {
                     name: "diagnostics".to_string(),
-                    schema: Box::new(BlockSchema::Text),
+                    schema: Box::new(BlockSchema::text()),
                     description: None,
                     read_only: true,
                 },
                 CompositeSection {
                     name: "notes".to_string(),
-                    schema: Box::new(BlockSchema::Text),
+                    schema: Box::new(BlockSchema::text()),
                     description: None,
                     read_only: false,
                 },

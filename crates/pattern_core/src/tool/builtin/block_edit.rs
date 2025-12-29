@@ -224,7 +224,7 @@ impl BlockEditTool {
             })?;
 
         // Check that the block has Text schema
-        if doc.schema() != &BlockSchema::Text {
+        if !doc.schema().is_text() {
             return Err(CoreError::tool_exec_msg(
                 "block_edit",
                 json!({"op": "replace", "label": label}),
@@ -531,7 +531,7 @@ impl BlockEditTool {
                 )
             })?;
 
-        if doc.schema() != &BlockSchema::Text {
+        if !doc.schema().is_text() {
             return Err(CoreError::tool_exec_msg(
                 "block_edit",
                 json!({"op": "edit_range", "label": label}),
@@ -659,7 +659,7 @@ impl BlockEditTool {
             })?;
 
         // Check that the block has Text schema
-        if doc.schema() != &BlockSchema::Text {
+        if !doc.schema().is_text() {
             return Err(CoreError::tool_exec_msg(
                 "block_edit",
                 json!({"op": "patch", "label": label}),
@@ -939,7 +939,7 @@ mod tests {
                 "test_block",
                 "A test block for append operation",
                 BlockType::Working,
-                BlockSchema::Text,
+                BlockSchema::text(),
                 2000,
             )
             .await
@@ -995,7 +995,7 @@ mod tests {
                 "replace_block",
                 "A test block for replace operation",
                 BlockType::Working,
-                BlockSchema::Text,
+                BlockSchema::text(),
                 2000,
             )
             .await
@@ -1194,7 +1194,7 @@ mod tests {
                 "notfound_block",
                 "A test block",
                 BlockType::Working,
-                BlockSchema::Text,
+                BlockSchema::text(),
                 2000,
             )
             .await
@@ -1251,7 +1251,7 @@ mod tests {
                 "patch_block",
                 "A test block",
                 BlockType::Working,
-                BlockSchema::Text,
+                BlockSchema::text(),
                 2000,
             )
             .await
@@ -1320,7 +1320,7 @@ mod tests {
                 "patch_block2",
                 "A test block",
                 BlockType::Working,
-                BlockSchema::Text,
+                BlockSchema::text(),
                 2000,
             )
             .await
@@ -1431,7 +1431,7 @@ mod tests {
                 "text_set_block",
                 "A Text block",
                 BlockType::Working,
-                BlockSchema::Text,
+                BlockSchema::text(),
                 2000,
             )
             .await
@@ -1498,7 +1498,7 @@ mod tests {
         match result.unwrap_err() {
             CoreError::ToolExecutionFailed { cause, .. } => {
                 assert!(
-                    cause.contains("not found"),
+                    cause.contains("Failed to get block"),
                     "Expected error about not found, got: {}",
                     cause
                 );
@@ -1517,7 +1517,7 @@ mod tests {
                 "replace_all_block",
                 "A test block",
                 BlockType::Working,
-                BlockSchema::Text,
+                BlockSchema::text(),
                 2000,
             )
             .await
@@ -1569,7 +1569,7 @@ mod tests {
                 "replace_nth_block",
                 "A test block",
                 BlockType::Working,
-                BlockSchema::Text,
+                BlockSchema::text(),
                 2000,
             )
             .await
@@ -1622,7 +1622,7 @@ mod tests {
                 "replace_regex_block",
                 "A test block",
                 BlockType::Working,
-                BlockSchema::Text,
+                BlockSchema::text(),
                 2000,
             )
             .await
@@ -1674,7 +1674,7 @@ mod tests {
                 "edit_range_block",
                 "A test block",
                 BlockType::Working,
-                BlockSchema::Text,
+                BlockSchema::text(),
                 2000,
             )
             .await
@@ -1734,7 +1734,7 @@ mod tests {
                 "edit_range_dots",
                 "A test block",
                 BlockType::Working,
-                BlockSchema::Text,
+                BlockSchema::text(),
                 2000,
             )
             .await

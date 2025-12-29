@@ -21,6 +21,12 @@ pub enum BlockOp {
     Archive,
     /// Get block metadata
     Info,
+    /// Set viewport for Text blocks (controls which lines are visible)
+    Viewport,
+    /// Share block with another agent by name
+    Share,
+    /// Remove sharing from another agent by name
+    Unshare,
 }
 
 /// Input for the `block` tool
@@ -33,6 +39,18 @@ pub struct BlockInput {
     /// Optional source ID for load operation
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_id: Option<String>,
+    /// Starting line for viewport operation (1-indexed, default: 1)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<usize>,
+    /// Number of lines to display for viewport operation (default: show all)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_lines: Option<usize>,
+    /// Target agent name for share/unshare operations
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_agent: Option<String>,
+    /// Permission level for share operation (default: Append)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission: Option<crate::memory::MemoryPermission>,
 }
 
 /// Operations for the `block_edit` tool (content editing)

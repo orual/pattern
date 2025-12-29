@@ -1443,6 +1443,13 @@ mod tests {
             Ok("test-block-id".to_string())
         }
 
+        async fn list_all_blocks_by_label_prefix(
+            &self,
+            _prefix: &str,
+        ) -> MemoryResult<Vec<BlockMetadata>> {
+            Ok(vec![])
+        }
+
         async fn get_block(
             &self,
             _agent_id: &str,
@@ -1586,6 +1593,15 @@ mod tests {
             _agent_id: &str,
             _label: &str,
             _block_type: BlockType,
+        ) -> MemoryResult<()> {
+            Ok(())
+        }
+
+        async fn update_block_schema(
+            &self,
+            _agent_id: &str,
+            _label: &str,
+            _schema: BlockSchema,
         ) -> MemoryResult<()> {
             Ok(())
         }

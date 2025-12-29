@@ -610,11 +610,6 @@ impl FileTool {
                 )
             })?;
 
-        // Ensure the file is loaded
-        let _ = file_source
-            .ensure_block(path_obj, self.agent_id(), self.ctx.clone())
-            .await;
-
         let diff_output = file_source.perform_diff(path_obj).await.map_err(|e| {
             CoreError::tool_exec_msg(
                 "file",
@@ -929,7 +924,7 @@ mod tests {
     async fn setup_test(base_path: &Path) -> (Arc<RuntimeContext>, Arc<dyn Agent>, FileTool) {
         let ctx = create_test_runtime().await;
         let file_source = Arc::new(FileSource::new(base_path));
-        ctx.register_block_source(file_source);
+        ctx.register_block_source(file_source).await;
 
         let agent_config = AgentConfig {
             name: "test_file_agent".to_string(),
@@ -1371,7 +1366,7 @@ mod tests {
         let ctx = create_test_runtime().await;
         let file_source = Arc::new(FileSource::new(base_path));
         let source_id = file_source.source_id().to_string();
-        ctx.register_block_source(file_source);
+        ctx.register_block_source(file_source).await;
 
         let agent_config = AgentConfig {
             name: "explicit_source_test_agent".to_string(),
@@ -1419,8 +1414,8 @@ mod tests {
         let source_id1 = file_source1.source_id().to_string();
         let source_id2 = file_source2.source_id().to_string();
 
-        ctx.register_block_source(file_source1);
-        ctx.register_block_source(file_source2);
+        ctx.register_block_source(file_source1).await;
+        ctx.register_block_source(file_source2).await;
 
         let agent_config = AgentConfig {
             name: "multi_source_test_agent".to_string(),

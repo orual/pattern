@@ -543,6 +543,18 @@ impl MemoryStore for MemoryCache {
         Ok(blocks.iter().map(db_block_to_metadata).collect())
     }
 
+    async fn list_all_blocks_by_label_prefix(
+        &self,
+        prefix: &str,
+    ) -> MemoryResult<Vec<BlockMetadata>> {
+        // Query DB for all blocks with matching label prefix (across all agents)
+        let blocks =
+            pattern_db::queries::list_blocks_by_label_prefix(self.dbs.constellation.pool(), prefix)
+                .await?;
+
+        Ok(blocks.iter().map(db_block_to_metadata).collect())
+    }
+
     async fn delete_block(&self, agent_id: &str, label: &str) -> MemoryResult<()> {
         // Get block ID first
         let block =
@@ -1084,6 +1096,67 @@ impl MemoryStore for MemoryCache {
 
         Ok(())
     }
+
+    async fn update_block_schema(
+        &self,
+        agent_id: &str,
+        label: &str,
+        schema: BlockSchema,
+    ) -> MemoryResult<()> {
+        // Get block from DB
+        let block =
+            pattern_db::queries::get_block_by_label(self.dbs.constellation.pool(), agent_id, label)
+                .await?;
+
+        let block = block.ok_or_else(|| MemoryError::NotFound {
+            agent_id: agent_id.to_string(),
+            label: label.to_string(),
+        })?;
+
+        // Parse existing schema to validate compatibility
+        let existing_schema = block
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("schema"))
+            .and_then(|s| serde_json::from_value::<BlockSchema>(s.clone()).ok())
+            .unwrap_or_default();
+
+        // Validate schema compatibility (same variant type)
+        if std::mem::discriminant(&existing_schema) != std::mem::discriminant(&schema) {
+            return Err(MemoryError::Other(format!(
+                "Cannot change schema type from {:?} to {:?}",
+                existing_schema, schema
+            )));
+        }
+
+        // Build updated metadata
+        let mut metadata = block
+            .metadata
+            .as_ref()
+            .and_then(|m| m.as_object().cloned())
+            .unwrap_or_default();
+        metadata.insert(
+            "schema".to_string(),
+            serde_json::to_value(&schema).map_err(|e| MemoryError::Other(e.to_string()))?,
+        );
+        let metadata_json = serde_json::Value::Object(metadata);
+
+        // Update in database
+        pattern_db::queries::update_block_metadata(
+            self.dbs.constellation.pool(),
+            &block.id,
+            &metadata_json,
+        )
+        .await?;
+
+        // Update in cache if loaded - need to update the document's schema
+        if let Some(mut cached) = self.blocks.get_mut(&block.id) {
+            cached.doc.set_schema(schema);
+            cached.last_accessed = Utc::now();
+        }
+
+        Ok(())
+    }
 }
 
 // Additional methods with WriteOptions support
@@ -1299,8 +1372,8 @@ mod tests {
         let (_dir, dbs) = test_dbs().await;
         let cache = MemoryCache::new(dbs);
 
-        let doc = cache.get("agent_1", "nonexistent").await.unwrap();
-        assert!(doc.is_none());
+        let doc = cache.get("agent_1", "nonexistent").await;
+        assert!(doc.is_err());
     }
 
     #[tokio::test]
@@ -1406,7 +1479,7 @@ mod tests {
                 "test_block",
                 "Test block description",
                 BlockType::Working,
-                BlockSchema::Text,
+                BlockSchema::text(),
                 1000,
             )
             .await
@@ -1459,7 +1532,7 @@ mod tests {
                 "block1",
                 "First block",
                 BlockType::Core,
-                BlockSchema::Text,
+                BlockSchema::text(),
                 1000,
             )
             .await
@@ -1471,7 +1544,7 @@ mod tests {
                 "block2",
                 "Second block",
                 BlockType::Working,
-                BlockSchema::Text,
+                BlockSchema::text(),
                 2000,
             )
             .await
@@ -1483,7 +1556,7 @@ mod tests {
                 "block3",
                 "Third block",
                 BlockType::Core,
-                BlockSchema::Text,
+                BlockSchema::text(),
                 1500,
             )
             .await
@@ -1540,7 +1613,7 @@ mod tests {
                 "to_delete",
                 "Will be deleted",
                 BlockType::Working,
-                BlockSchema::Text,
+                BlockSchema::text(),
                 1000,
             )
             .await
@@ -1554,8 +1627,8 @@ mod tests {
         cache.delete_block("agent_1", "to_delete").await.unwrap();
 
         // Verify it's gone (soft delete, so get_block returns None)
-        let doc = cache.get_block("agent_1", "to_delete").await.unwrap();
-        assert!(doc.is_none());
+        let doc = cache.get_block("agent_1", "to_delete").await;
+        assert!(doc.is_err());
 
         // List should not include deleted block
         let blocks = cache.list_blocks("agent_1").await.unwrap();
@@ -1594,7 +1667,7 @@ mod tests {
                 "content_test",
                 "Test content rendering",
                 BlockType::Working,
-                BlockSchema::Text,
+                BlockSchema::text(),
                 1000,
             )
             .await
@@ -1727,7 +1800,7 @@ mod tests {
                 "metadata_test",
                 "Test metadata retrieval",
                 BlockType::Core,
-                BlockSchema::Text,
+                BlockSchema::text(),
                 5000,
             )
             .await
@@ -1784,7 +1857,7 @@ mod tests {
                 "persona",
                 "Agent personality",
                 BlockType::Core,
-                BlockSchema::Text,
+                BlockSchema::text(),
                 1000,
             )
             .await
@@ -1810,7 +1883,7 @@ mod tests {
                 "notes",
                 "Working notes",
                 BlockType::Working,
-                BlockSchema::Text,
+                BlockSchema::text(),
                 1000,
             )
             .await
@@ -2002,7 +2075,7 @@ mod tests {
                 "persona",
                 "Agent personality",
                 BlockType::Core,
-                BlockSchema::Text,
+                BlockSchema::text(),
                 1000,
             )
             .await
@@ -2183,7 +2256,7 @@ mod tests {
                 "test_block",
                 "Test",
                 BlockType::Working,
-                BlockSchema::Text,
+                BlockSchema::text(),
                 1000,
             )
             .await

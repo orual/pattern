@@ -10,7 +10,9 @@ use async_trait::async_trait;
 use crate::ModelProvider;
 use crate::data_source::SourceManager;
 use crate::id::AgentId;
-use crate::memory::{MemoryResult, MemorySearchResult, MemoryStore, SearchOptions};
+use crate::memory::{
+    MemoryResult, MemorySearchResult, MemoryStore, SearchOptions, SharedBlockManager,
+};
 use crate::permission::PermissionBroker;
 use crate::runtime::AgentMessageRouter;
 
@@ -64,4 +66,9 @@ pub trait ToolContext: Send + Sync {
     /// Returns None if source management is not available (e.g., during tests
     /// or when RuntimeContext is not connected).
     fn sources(&self) -> Option<Arc<dyn SourceManager>>;
+
+    /// Get the shared block manager for block sharing operations.
+    ///
+    /// Returns None if sharing is not available (e.g., during tests).
+    fn shared_blocks(&self) -> Option<Arc<SharedBlockManager>>;
 }
