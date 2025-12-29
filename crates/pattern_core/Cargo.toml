@@ -88,8 +88,9 @@ jacquard = "0.9"
 # Glob pattern matching
 globset = "0.4"
 
-# Diff generation
+# Diff generation and patch parsing
 similar = "2.6"
+patch = "0.7"
 
 # Web tool dependencies
 html2md = "0.2"

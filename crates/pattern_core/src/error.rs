@@ -64,7 +64,7 @@ pub enum CoreError {
         span: (usize, usize),
     },
 
-    #[error("Tool execution failed")]
+    #[error("Tool {tool_name} failed: {cause}\n{parameters}")]
     #[diagnostic(
         code(pattern_core::tool_execution_failed),
         help("Check tool parameters and ensure they match the expected schema")

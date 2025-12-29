@@ -130,8 +130,8 @@ pub async fn chat_with_single_agent(agent_name: &str, config: &PatternConfig) ->
             (agent, ctx)
         };
 
+    // Register file source for ./docs directory
     let file_source = Arc::new(FileSource::with_rules(
-        "docs",
         "./docs",
         vec![PermissionRule {
             pattern: "**.txt".into(),
@@ -139,8 +139,10 @@ pub async fn chat_with_single_agent(agent_name: &str, config: &PatternConfig) ->
             operations_requiring_escalation: vec![],
         }],
     ));
-    let file_tool = FileTool::new(agent.runtime().clone(), file_source.clone());
-    ctx.register_block_source(file_source.clone());
+    ctx.register_block_source(file_source);
+
+    // Create FileTool - it uses SourceManager to find registered sources
+    let file_tool = FileTool::new(agent.runtime().clone());
     agent.runtime().tools().register(file_tool);
 
     // Set up readline

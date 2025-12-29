@@ -1,12 +1,14 @@
 //! SourceManager trait - the interface for source operations exposed to tools and sources.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::sync::broadcast;
 
-use crate::error::Result;
+use crate::DataStream;
 use crate::id::AgentId;
+use crate::{DataBlock, error::Result};
 
 use super::{
     BlockRef, BlockSchemaSpec, BlockSourceStatus, Notification, PermissionRule, ReconcileResult,
@@ -102,6 +104,19 @@ pub trait SourceManager: Send + Sync + std::fmt::Debug {
 
     /// Load a file/document through a block source
     async fn load_block(&self, source_id: &str, path: &Path, owner: AgentId) -> Result<BlockRef>;
+
+    /// Get a block source by its source_id
+    fn get_block_source(&self, source_id: &str) -> Option<Arc<dyn DataBlock>>;
+
+    /// Find a block source that matches the given path.
+    ///
+    /// Iterates through registered block sources and returns the first one
+    /// whose `matches(path)` returns true. This enables path-based routing
+    /// where tools can find the appropriate source without knowing its ID.
+    fn find_block_source_for_path(&self, path: &Path) -> Option<Arc<dyn DataBlock>>;
+
+    /// Get a stream source by its source_id
+    fn get_stream_source(&self, source_id: &str) -> Option<Arc<dyn DataStream>>;
 
     /// Create a new file/document
     async fn create_block(

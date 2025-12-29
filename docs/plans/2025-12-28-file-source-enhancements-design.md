@@ -471,18 +471,11 @@ fn line_to_byte_offset(content: &str, target_line: usize) -> usize {
 }
 ```
 
-### DiffHunk Struct
+### Unified Diff Parsing
 
-```rust
-struct DiffHunk {
-    old_start: usize,   // 1-indexed line number
-    old_count: usize,
-    new_start: usize,
-    new_count: usize,
-    old_lines: Vec<String>,  // Lines from '-' or ' ' prefix
-    new_lines: Vec<String>,  // Lines from '+' or ' ' prefix
-}
-```
+Using the `patch` crate (v0.7) for parsing unified diffs instead of a custom parser.
+The crate provides `Patch::from_single()` which returns hunks with `old_range`, `new_range`,
+and `lines: Vec<Line>` where `Line` is `Add(str)`, `Remove(str)`, or `Context(str)`.
 
 ---
 
@@ -506,9 +499,10 @@ struct DiffHunk {
 
 ### Phase 3 - Smart Editing
 
-- [ ] `patch` operation accepting unified diff
-- [ ] `replace` options: first/all/nth, regex
-- [ ] Line-range editing via BlockEditInput
+- [X] `patch` operation accepting unified diff (in BlockEditTool, uses `patch` crate)
+- [X] Line endings normalized to Unix (`\n`) on all file reads
+- [X] `replace` options: first/all/nth, regex (via `ReplaceMode` enum and `mode` field)
+- [X] Line-range editing via `edit_range` operation (parses "START-END: content" from content field)
 
 ### Phase 4 - History & Undo (Future)
 

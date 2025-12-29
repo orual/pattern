@@ -47,6 +47,23 @@ pub enum BlockEditOp {
     Patch,
     /// Set a specific field (Map/Composite schemas)
     SetField,
+    /// Replace a range of lines with new content
+    EditRange,
+}
+
+/// Mode for the replace operation
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplaceMode {
+    /// Replace first occurrence (default)
+    #[default]
+    First,
+    /// Replace all occurrences
+    All,
+    /// Replace nth occurrence - parse "N: pattern" from 'old' field
+    Nth,
+    /// Treat 'old' as a regex pattern
+    Regex,
 }
 
 /// Input for the `block_edit` tool
@@ -56,10 +73,10 @@ pub struct BlockEditInput {
     pub op: BlockEditOp,
     /// Block label
     pub label: String,
-    /// Content for append operation
+    /// Content for append operation, or "START-END: content" for edit_range
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
-    /// Old text for replace operation
+    /// Old text for replace operation. For nth mode: "N: pattern"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub old: Option<String>,
     /// New text for replace operation
@@ -74,6 +91,9 @@ pub struct BlockEditInput {
     /// Patch content for patch operation
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub patch: Option<String>,
+    /// Mode for replace operation (default: first)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<ReplaceMode>,
 }
 
 /// Operations for the `recall` tool (archival entries)
@@ -167,7 +187,7 @@ pub enum FileOp {
 pub struct FileInput {
     /// Operation to perform
     pub op: FileOp,
-    /// File path (relative to source base)
+    /// File path (relative to source base, or absolute for path-based routing)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     /// Block label (alternative to path for save)
@@ -185,6 +205,9 @@ pub struct FileInput {
     /// Glob pattern for list operation (e.g., "**/*.rs")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pattern: Option<String>,
+    /// Explicit source ID (optional - if not provided, inferred from path or label)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 /// Standard output for tool operations

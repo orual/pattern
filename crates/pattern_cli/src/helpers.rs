@@ -167,7 +167,7 @@ pub async fn require_group(config: &PatternConfig, name: &str) -> Result<AgentGr
 /// This sets up the full runtime context needed for loading and creating agents.
 /// The context includes the database connections and model provider.
 #[allow(dead_code)]
-pub async fn create_runtime_context(config: &PatternConfig) -> Result<RuntimeContext> {
+pub async fn create_runtime_context(config: &PatternConfig) -> Result<Arc<RuntimeContext>> {
     let dbs = get_dbs(config).await?;
 
     RuntimeContext::builder()
@@ -182,7 +182,7 @@ pub async fn create_runtime_context(config: &PatternConfig) -> Result<RuntimeCon
 /// Use this when you already have database connections open.
 pub async fn create_runtime_context_with_dbs(
     dbs: ConstellationDatabases,
-) -> Result<RuntimeContext> {
+) -> Result<Arc<RuntimeContext>> {
     // let api_key = std::env::var("OPENAI_API_KEY")
     //     .map_err(|e| miette::miette!("Failed to get OPENAI_API_KEY: {}", e))?;
     // let dimensions = 1536;

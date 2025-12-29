@@ -107,9 +107,20 @@ impl MemoryCache {
         )
         .await?;
 
+        tracing::info!(
+            "Access Result: {:?}, agent: {}, label: {}",
+            access_result,
+            agent_id,
+            label
+        );
         let (block_id, permission) = match access_result {
             Some((id, perm)) => (id, perm),
-            None => return Ok(None), // Block doesn't exist or no access
+            None => {
+                return Err(MemoryError::NotFound {
+                    agent_id: agent_id.to_string(),
+                    label: label.to_string(),
+                });
+            } // Block doesn't exist or no access
         };
 
         // 2. Check cache using block_id
@@ -178,7 +189,12 @@ impl MemoryCache {
 
         let block = match block {
             Some(b) if b.is_active => b,
-            _ => return Ok(None),
+            _ => {
+                return Err(MemoryError::NotFound {
+                    agent_id: agent_id.to_string(),
+                    label: label.to_string(),
+                });
+            }
         };
 
         // Parse schema from metadata (default to Text if not present)

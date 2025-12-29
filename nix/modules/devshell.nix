@@ -30,7 +30,7 @@
           bacon
           rust-analyzer
           clang
-          #surrealdb
+          lazysql
           pkg-config
           cargo-expand
           jujutsu

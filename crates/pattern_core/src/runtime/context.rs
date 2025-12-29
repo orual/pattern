@@ -9,7 +9,7 @@
 //! Uses DashMap for the agent registry to avoid async locks on access.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -203,6 +203,9 @@ pub struct RuntimeContext {
     /// Constellation-scoped runtime for operations without a specific agent owner.
     /// Used for delete_block, reconcile_blocks, and other constellation-level ops.
     constellation_runtime: Arc<AgentRuntime>,
+
+    /// Weak reference to the runtime context to pass to the agent runtime
+    context: Weak<RuntimeContext>,
 }
 
 impl std::fmt::Debug for RuntimeContext {
@@ -268,7 +271,7 @@ impl RuntimeContext {
         tools: Arc<ToolRegistry>,
         default_config: AgentConfig,
         config: RuntimeContextConfig,
-    ) -> Result<Self> {
+    ) -> Result<Arc<Self>> {
         use crate::memory::CONSTELLATION_OWNER;
         use crate::messages::MessageStore;
 
@@ -295,28 +298,31 @@ impl RuntimeContext {
         let builtin_tools = BuiltinTools::new(constellation_runtime.clone());
         builtin_tools.register_all(&tools);
 
-        Ok(Self {
-            dbs,
-            agents: Arc::new(DashMap::new()),
-            memory,
-            tools,
-            model_provider,
-            embedding_provider,
-            default_config,
-            heartbeat_tx,
-            heartbeat_rx: RwLock::new(Some(heartbeat_rx)),
-            background_tasks: std::sync::RwLock::new(Vec::new()),
-            event_sinks: RwLock::new(Vec::new()),
-            activity_renderer,
-            config,
-            // Data source storage
-            stream_sources: Arc::new(DashMap::new()),
-            block_sources: Arc::new(DashMap::new()),
-            stream_subscriptions: Arc::new(DashMap::new()),
-            block_subscriptions: Arc::new(DashMap::new()),
-            block_edit_subscribers: Arc::new(DashMap::new()),
-            constellation_runtime,
-        })
+        Ok(Arc::new_cyclic(|ctx| {
+            Self {
+                dbs,
+                agents: Arc::new(DashMap::new()),
+                memory,
+                tools,
+                model_provider,
+                embedding_provider,
+                default_config,
+                heartbeat_tx,
+                heartbeat_rx: RwLock::new(Some(heartbeat_rx)),
+                background_tasks: std::sync::RwLock::new(Vec::new()),
+                event_sinks: RwLock::new(Vec::new()),
+                activity_renderer,
+                config,
+                // Data source storage
+                stream_sources: Arc::new(DashMap::new()),
+                block_sources: Arc::new(DashMap::new()),
+                stream_subscriptions: Arc::new(DashMap::new()),
+                block_subscriptions: Arc::new(DashMap::new()),
+                block_edit_subscribers: Arc::new(DashMap::new()),
+                constellation_runtime,
+                context: ctx.clone(),
+            }
+        }))
     }
 
     // ============================================================================
@@ -660,7 +666,7 @@ impl RuntimeContext {
     ///
     /// Calls `source.start_watch()`, stores the receiver, and spawns a
     /// monitoring task that routes FileChange events to the source's handler.
-    pub async fn start_block_watch(self: &Arc<Self>, source_id: &str) -> Result<()> {
+    pub async fn start_block_watch(&self, source_id: &str) -> Result<()> {
         // Get the receiver from start_watch
         let receiver =
             {
@@ -693,11 +699,11 @@ impl RuntimeContext {
 
     /// Spawn a task that monitors file changes and routes to source handler.
     fn spawn_block_watch_task(
-        self: &Arc<Self>,
+        &self,
         source_id: String,
         mut receiver: broadcast::Receiver<crate::data_source::FileChange>,
     ) {
-        let ctx = Arc::clone(self);
+        let ctx = self.context.upgrade().expect("Context should be available");
         let source_id_clone = source_id.clone();
 
         let handle = tokio::spawn(async move {
@@ -1267,26 +1273,6 @@ impl RuntimeContext {
         let agent_id_typed = AgentId::new(agent_id);
         let messages = MessageStore::new(self.dbs.constellation.pool().clone(), agent_id);
 
-        // Filter tools based on enabled_tools list
-        let tools = if !resolved.enabled_tools.is_empty() {
-            let filtered = Arc::new(ToolRegistry::new());
-            for tool_name in &resolved.enabled_tools {
-                if let Some(tool) = self.tools.get(tool_name) {
-                    filtered.register_dynamic(tool.clone_box());
-                } else {
-                    tracing::warn!(
-                        agent_id = %agent_id,
-                        tool = %tool_name,
-                        "Tool in enabled_tools not found in registry - skipping"
-                    );
-                }
-            }
-            filtered
-        } else {
-            // Use all tools if no filter specified
-            Arc::new(self.tools.deep_clone())
-        };
-
         // Build runtime config from resolved settings
         let mut runtime_config = RuntimeConfig::default();
 
@@ -1352,6 +1338,25 @@ impl RuntimeContext {
             }
         }
 
+        // Filter tools based on enabled_tools list
+        let tools = if !resolved.enabled_tools.is_empty() {
+            let filtered = Arc::new(ToolRegistry::new());
+            for tool_name in &resolved.enabled_tools {
+                if let Some(tool) = self.tools.get(tool_name) {
+                    filtered.register_dynamic(tool.clone_box());
+                } else {
+                    tracing::warn!(
+                        agent_id = %agent_id,
+                        tool = %tool_name,
+                        "Tool in enabled_tools not found in registry - skipping"
+                    );
+                }
+            }
+            filtered
+        } else {
+            Arc::new(ToolRegistry::new())
+        };
+
         // Build runtime with config
         let runtime = AgentRuntime::builder()
             .agent_id(agent_id)
@@ -1363,11 +1368,12 @@ impl RuntimeContext {
             .dbs(self.dbs.as_ref().clone())
             .tool_rules(resolved.tool_rules.clone())
             .config(runtime_config)
+            .runtime_context(self.context.clone())
             .build()?;
 
         let runtime = Arc::new(runtime);
 
-        // ensure we fall back to having actual tools
+        // ensure we fall back to having actual tools if we don't have any
         if tools.list_tools().is_empty() {
             let builtin_tools = BuiltinTools::new(runtime.clone());
             builtin_tools.register_all(&tools);
@@ -1424,6 +1430,27 @@ impl Drop for RuntimeContext {
 
 #[async_trait]
 impl SourceManager for RuntimeContext {
+    fn get_block_source(&self, source_id: &str) -> Option<Arc<dyn DataBlock>> {
+        self.block_sources
+            .get(source_id)
+            .map(|handle| handle.source.clone())
+    }
+
+    fn get_stream_source(&self, source_id: &str) -> Option<Arc<dyn DataStream>> {
+        self.stream_sources
+            .get(source_id)
+            .map(|handle| handle.source.clone())
+    }
+
+    fn find_block_source_for_path(&self, path: &Path) -> Option<Arc<dyn DataBlock>> {
+        for entry in self.block_sources.iter() {
+            if entry.source.matches(path) {
+                return Some(entry.source.clone());
+            }
+        }
+        None
+    }
+
     // === Stream Source Operations ===
 
     fn list_streams(&self) -> Vec<String> {
@@ -1957,7 +1984,7 @@ impl RuntimeContextBuilder {
     /// If no model_provider is set, a default GenAiClient is created:
     /// - With OAuth support if the `oauth` feature is enabled
     /// - Using standard API key auth otherwise
-    pub async fn build(self) -> Result<RuntimeContext> {
+    pub async fn build(self) -> Result<Arc<RuntimeContext>> {
         let dbs = self.dbs.ok_or_else(|| CoreError::ConfigurationError {
             field: "dbs".to_string(),
             config_path: "RuntimeContextBuilder".to_string(),

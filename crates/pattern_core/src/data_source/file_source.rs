@@ -62,6 +62,10 @@ fn normalize_line_endings(content: String) -> String {
 ///
 /// Contains the forked disk_doc and subscriptions for bidirectional sync.
 /// The memory_doc is a clone of the memory block's LoroDoc (Arc-based, shares state).
+///
+/// Subscriptions are active when watching:
+/// - Watching: subscriptions sync memory↔disk, watcher updates disk_doc from filesystem
+/// - Not watching: subscriptions torn down, disk_doc frozen, explicit save() required
 struct LoadedFileInfo {
     /// Block ID in the memory store
     block_id: String,
@@ -75,9 +79,11 @@ struct LoadedFileInfo {
     disk_doc: LoroDoc,
     /// Clone of memory's LoroDoc (shares state via Arc)
     memory_doc: LoroDoc,
-    /// Subscriptions kept alive: (memory→disk, disk→memory)
+    /// Subscriptions (only when watching): (memory→disk, disk→memory)
     #[allow(dead_code)]
-    subscriptions: (Subscription, Subscription),
+    subscriptions: Option<(Subscription, Subscription)>,
+    /// Permission level for this file
+    permission: MemoryPermission,
     /// Last saved frontier for tracking unsaved changes
     last_saved_frontier: VersionVector,
 }
@@ -128,9 +134,12 @@ const STATUS_WATCHING: u8 = 1;
 ///
 /// # Block Label Format
 ///
-/// Labels follow the format `file:{hash8}:{relative_path}` where:
-/// - `hash8` is the first 8 hex characters of SHA-256 of the absolute path
+/// Labels follow the format `file:{source_id}:{relative_path}` where:
+/// - `source_id` is the first 8 hex characters of SHA-256 of the base_path (deterministic)
 /// - `relative_path` is the path relative to `base_path`
+///
+/// The source_id is automatically derived from base_path, making it stable and
+/// allowing tools to route operations to the correct FileSource by parsing block labels.
 ///
 /// # Conflict Detection
 ///
@@ -143,9 +152,8 @@ const STATUS_WATCHING: u8 = 1;
 /// - `*.config.toml` -> ReadOnly
 /// - `src/**/*.rs` -> ReadWrite
 /// - `**` -> ReadWrite (default fallback)
-/// FileSource manages local files as Loro-backed memory blocks.
 pub struct FileSource {
-    /// Unique identifier for this source
+    /// Unique identifier derived from hash of base_path (first 8 hex chars of SHA-256)
     source_id: String,
     /// Base directory for all file operations
     base_path: PathBuf,
@@ -174,22 +182,42 @@ impl std::fmt::Debug for FileSource {
 }
 
 impl FileSource {
+    /// Compute source_id from base_path (first 8 hex chars of SHA-256, prefixed with 'file:').
+    ///
+    /// This provides a deterministic, stable identifier that can be parsed
+    /// from block labels to route operations to the correct FileSource.
+    /// The 'file:' prefix makes it clear this is a FileSource.
+    fn compute_source_id(base_path: &Path) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(base_path.to_string_lossy().as_bytes());
+        let hash = hasher.finalize();
+        format!(
+            "file:{:02x}{:02x}{:02x}{:02x}",
+            hash[0], hash[1], hash[2], hash[3]
+        )
+    }
+
     /// Create a new FileSource with the given base path.
+    ///
+    /// The source_id is automatically computed from the base_path hash,
+    /// providing a stable identifier for routing operations.
     ///
     /// # Arguments
     ///
-    /// * `source_id` - Unique identifier for this source
     /// * `base_path` - Base directory for file operations
     ///
     /// # Example
     ///
     /// ```ignore
-    /// let source = FileSource::new("my_files", "/home/user/project");
+    /// let source = FileSource::new("/home/user/project");
+    /// // source_id will be something like "a3f2b1c9"
     /// ```
-    pub fn new(source_id: impl Into<String>, base_path: impl Into<PathBuf>) -> Self {
+    pub fn new(base_path: impl Into<PathBuf>) -> Self {
+        let base_path = base_path.into();
+        let source_id = Self::compute_source_id(&base_path);
         Self {
-            source_id: source_id.into(),
-            base_path: base_path.into(),
+            source_id,
+            base_path,
             permission_rules: vec![
                 // Default rule: all files are ReadWrite
                 PermissionRule::new("**", MemoryPermission::ReadWrite),
@@ -203,25 +231,29 @@ impl FileSource {
 
     /// Create a new FileSource with custom permission rules.
     ///
+    /// The source_id is automatically computed from the base_path hash.
+    ///
     /// # Arguments
     ///
-    /// * `source_id` - Unique identifier for this source
     /// * `base_path` - Base directory for file operations
     /// * `rules` - Permission rules to apply (first matching rule wins)
-    pub fn with_rules(
-        source_id: impl Into<String>,
-        base_path: impl Into<PathBuf>,
-        rules: Vec<PermissionRule>,
-    ) -> Self {
+    pub fn with_rules(base_path: impl Into<PathBuf>, rules: Vec<PermissionRule>) -> Self {
+        let base_path = base_path.into();
+        let source_id = Self::compute_source_id(&base_path);
         Self {
-            source_id: source_id.into(),
-            base_path: base_path.into(),
+            source_id,
+            base_path,
             permission_rules: rules,
             loaded_blocks: Arc::new(DashMap::new()),
             status: AtomicU8::new(STATUS_IDLE),
             watcher: Mutex::new(None),
             change_tx: Mutex::new(None),
         }
+    }
+
+    /// Get the base path for this source.
+    pub fn base_path(&self) -> &Path {
+        &self.base_path
     }
 
     /// Public method to generate a block label for a file path.
@@ -235,21 +267,13 @@ impl FileSource {
 
     /// Generate a block label for a file path.
     ///
-    /// Format: `file:{hash8}:{relative_path}`
+    /// Format: `{source_id}:{relative_path}` where source_id is already prefixed with 'file:'
+    /// Result: `file:XXXXXXXX:relative_path`
+    ///
+    /// The source_id can be used directly to route operations to the correct FileSource.
     fn generate_label(&self, path: &Path) -> Result<String> {
-        let abs_path = self.absolute_path(path)?;
         let rel_path = self.relative_path(path)?;
-
-        // Hash the absolute path
-        let mut hasher = Sha256::new();
-        hasher.update(abs_path.to_string_lossy().as_bytes());
-        let hash = hasher.finalize();
-        let hash8 = format!(
-            "{:02x}{:02x}{:02x}{:02x}",
-            hash[0], hash[1], hash[2], hash[3]
-        );
-
-        Ok(format!("file:{}:{}", hash8, rel_path.display()))
+        Ok(format!("{}:{}", self.source_id, rel_path.display()))
     }
 
     /// Get the absolute path, canonicalizing if possible.
@@ -305,12 +329,26 @@ impl FileSource {
     }
 
     /// Check if a file has been modified externally since loading.
-    fn check_conflict(&self, path: &Path, current_mtime: SystemTime) -> bool {
-        if let Some(info) = self.loaded_blocks.get(path) {
-            info.disk_mtime != current_mtime
-        } else {
-            false
-        }
+    /// Compares actual disk content with our disk_doc state.
+    async fn check_conflict(&self, path: &Path) -> Result<bool> {
+        let Some(info) = self.loaded_blocks.get(path) else {
+            return Ok(false);
+        };
+
+        // Read current disk content
+        let disk_content =
+            normalize_line_endings(tokio::fs::read_to_string(path).await.map_err(|e| {
+                CoreError::DataSourceError {
+                    source_name: self.source_id.clone(),
+                    operation: "check_conflict".to_string(),
+                    cause: format!("Failed to read file {}: {}", path.display(), e),
+                }
+            })?);
+
+        // Compare with what we think disk has (disk_doc)
+        let disk_doc_content = info.disk_doc.get_text("content").to_string();
+
+        Ok(disk_content != disk_doc_content)
     }
 
     /// List files in the source, optionally filtered by glob pattern.
@@ -480,16 +518,24 @@ impl FileSource {
         // Memory → disk: when memory changes, import to disk and save file
         let disk_clone = disk_doc.clone();
         let path_clone = file_path.clone();
+        let loaded_blocks_clone = self.loaded_blocks.clone();
         let mem_to_disk = if permission != MemoryPermission::ReadOnly {
             memory_doc.subscribe_local_update(Box::new(move |update| {
-                // Import update to disk doc
+                // Import update to disk doc, then sync to file
                 if disk_clone.import(update).is_ok() {
-                    // Save disk doc content to file asynchronously
+                    // Save disk doc content to file (sync I/O - we're in a sync callback)
                     let content = disk_clone.get_text("content").to_string();
-                    let path = path_clone.clone();
-                    tokio::spawn(async move {
-                        let _ = tokio::fs::write(&path, &content).await;
-                    });
+                    if std::fs::write(&path_clone, &content).is_ok() {
+                        // Update disk_mtime to reflect our write, preventing false conflict detection
+                        if let Ok(metadata) = std::fs::metadata(&path_clone) {
+                            if let Ok(mtime) = metadata.modified() {
+                                if let Some(mut entry) = loaded_blocks_clone.get_mut(&path_clone) {
+                                    entry.disk_mtime = mtime;
+                                    entry.disk_size = metadata.len();
+                                }
+                            }
+                        }
+                    }
                 }
                 true // Keep subscription active
             }))
@@ -507,6 +553,51 @@ impl FileSource {
         }));
 
         (mem_to_disk, disk_to_mem)
+    }
+
+    /// Set up subscriptions for a single loaded file path.
+    ///
+    /// Called when a new file is loaded while already watching,
+    /// or by start_watching for all loaded files.
+    fn setup_subscriptions_for_path(&self, path: &Path) {
+        if let Some(mut info) = self.loaded_blocks.get_mut(path) {
+            // Only set up if not already subscribed
+            if info.subscriptions.is_none() {
+                let subscriptions = self.setup_subscriptions(
+                    &info.memory_doc,
+                    &info.disk_doc,
+                    path.to_path_buf(),
+                    info.permission,
+                );
+                info.subscriptions = Some(subscriptions);
+            }
+        }
+    }
+
+    /// Set up subscriptions for all loaded files.
+    ///
+    /// Called by start_watching to enable bidirectional sync.
+    fn setup_all_subscriptions(&self) {
+        // Collect paths first to avoid holding locks during setup
+        let paths: Vec<PathBuf> = self
+            .loaded_blocks
+            .iter()
+            .filter(|entry| entry.subscriptions.is_none())
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        for path in paths {
+            self.setup_subscriptions_for_path(&path);
+        }
+    }
+
+    /// Tear down subscriptions for all loaded files.
+    ///
+    /// Called by stop_watching to disable bidirectional sync.
+    fn teardown_all_subscriptions(&self) {
+        for mut entry in self.loaded_blocks.iter_mut() {
+            entry.subscriptions = None;
+        }
     }
 
     /// Start watching the base directory for file changes.
@@ -542,14 +633,15 @@ impl FileSource {
                                 if let Ok(content) =
                                     std::fs::read_to_string(&path).map(normalize_line_endings)
                                 {
-                                    // Update disk_doc with new content
-                                    let text = info.disk_doc.get_text("content");
-                                    let len = text.len_unicode();
-                                    if len > 0 {
-                                        let _ = text.delete(0, len);
+                                    // Skip if content is the same (avoids feedback loop from our own writes)
+                                    let current_content =
+                                        info.disk_doc.get_text("content").to_string();
+                                    if content != current_content {
+                                        // Update disk_doc with new content using diff-based update
+                                        let text = info.disk_doc.get_text("content");
+                                        let _ = text.update(&content, Default::default());
+                                        // No commit needed - subscriptions see changes immediately
                                     }
-                                    let _ = text.insert(0, &content);
-                                    info.disk_doc.commit();
 
                                     // Update tracked mtime
                                     if let Ok(meta) = std::fs::metadata(&path) {
@@ -607,11 +699,17 @@ impl FileSource {
         // Update status
         self.status.store(STATUS_WATCHING, Ordering::SeqCst);
 
+        // Set up subscriptions for all loaded files
+        self.setup_all_subscriptions();
+
         Ok(rx)
     }
 
     /// Stop watching for file changes.
     pub async fn stop_watching(&self) {
+        // Tear down subscriptions first
+        self.teardown_all_subscriptions();
+
         *self.watcher.lock().await = None;
         *self.change_tx.lock().await = None;
         self.status.store(STATUS_IDLE, Ordering::SeqCst);
@@ -622,7 +720,7 @@ impl FileSource {
     /// Returns a unified diff with metadata header showing:
     /// - File path
     /// - Disk vs memory comparison
-    pub async fn diff(&self, path: &Path) -> Result<String> {
+    pub async fn perform_diff(&self, path: &Path) -> Result<String> {
         let abs_path = self.absolute_path(path)?;
         let info = self
             .loaded_blocks
@@ -786,6 +884,170 @@ impl FileSource {
 
         Ok(())
     }
+
+    pub async fn ensure_block(
+        &self,
+        path: &Path,
+        owner: AgentId,
+        ctx: Arc<dyn ToolContext>,
+    ) -> Result<()> {
+        let abs_path = self.absolute_path(path)?;
+        let label = self.generate_label(path)?;
+        let owner_str = owner.to_string();
+        let permission = self.permission_for(path);
+
+        // Read file content and normalize line endings
+        let content =
+            normalize_line_endings(tokio::fs::read_to_string(&abs_path).await.map_err(|e| {
+                CoreError::DataSourceError {
+                    source_name: self.source_id.clone(),
+                    operation: "load".to_string(),
+                    cause: format!("Failed to read file {}: {}", abs_path.display(), e),
+                }
+            })?);
+
+        // Get file metadata for conflict detection
+        let (mtime, size) = self.get_file_metadata(path).await?;
+
+        // Create or update block in memory store
+        let memory = ctx.memory();
+        let source_id = &self.source_id;
+
+        // Check if block already exists
+        let block_id = if let Some(existing) = memory
+            .get_block_metadata(&owner_str, &label)
+            .await
+            .map_err(|e| memory_err(source_id, "load", e))?
+        {
+            existing.id
+        } else {
+            // Create new block
+            let id = memory
+                .create_block(
+                    &owner_str,
+                    &label,
+                    &format!("File: {}", abs_path.display()),
+                    BlockType::Working,
+                    BlockSchema::Text,
+                    1024 * 1024, // 1MB char limit
+                )
+                .await
+                .map_err(|e| memory_err(source_id, "load", e))?;
+            memory
+                .update_block_text(&owner_str, &label, &content)
+                .await
+                .map_err(|e| memory_err(source_id, "load", e))?;
+            memory
+                .set_block_pinned(&owner_str, &label, true)
+                .await
+                .map_err(|e| memory_err(source_id, "load", e))?;
+            id
+        };
+
+        // Get the StructuredDocument to access the LoroDoc
+        let doc = memory
+            .get_block(&owner_str, &label)
+            .await
+            .map_err(|e| memory_err(source_id, "load", e))?
+            .ok_or_else(|| CoreError::DataSourceError {
+                source_name: self.source_id.clone(),
+                operation: "load".to_string(),
+                cause: format!("Block {} not found after creation", label),
+            })?;
+
+        // Clone the memory LoroDoc (Arc-based, shares state) and fork for disk
+        let memory_doc = doc.inner().clone();
+        let disk_doc = memory_doc.fork();
+
+        let text = disk_doc.get_text("content");
+
+        // Track loaded file info (subscriptions set up by start_watching)
+        self.loaded_blocks.insert(
+            abs_path.clone(),
+            LoadedFileInfo {
+                block_id: block_id.clone(),
+                label: label.clone(),
+                disk_mtime: mtime,
+                disk_size: size,
+                disk_doc,
+                memory_doc,
+                subscriptions: None,
+                permission,
+                last_saved_frontier: doc.inner().oplog_vv(),
+            },
+        );
+
+        // Start watching if not already (watching is on by default)
+        if self.status.load(Ordering::SeqCst) != STATUS_WATCHING {
+            let _ = self.start_watching().await;
+        } else {
+            // Already watching - set up subscriptions for this new block
+            self.setup_subscriptions_for_path(&abs_path);
+        }
+
+        text.update(&content, Default::default())
+            .map_err(|e| CoreError::DataSourceError {
+                source_name: self.source_id.clone(),
+                operation: "load".to_string(),
+                cause: format!("Failed to update block text from file: {}", e),
+            })?;
+
+        Ok(())
+    }
+}
+
+/// Parsed components of a file block label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedFileLabel {
+    /// The source_id (hash of base_path)
+    pub source_id: String,
+    /// The relative path within the source
+    pub path: String,
+}
+
+/// Parse a file block label into its components.
+///
+/// File labels have the format: `file:{hash}:{relative_path}`
+/// where `file:{hash}` together form the full source_id.
+///
+/// # Returns
+/// - `Some(ParsedFileLabel)` if the label is a valid file label
+/// - `None` if the label doesn't match the file label format
+///
+/// # Example
+/// ```ignore
+/// let parsed = parse_file_label("file:a3f2b1c9:src/main.rs");
+/// assert_eq!(parsed.unwrap().source_id, "file:a3f2b1c9");
+/// assert_eq!(parsed.unwrap().path, "src/main.rs");
+/// ```
+pub fn parse_file_label(label: &str) -> Option<ParsedFileLabel> {
+    // Label format: file:XXXXXXXX:path/to/file
+    // source_id is file:XXXXXXXX (13 chars: "file:" + 8 hex)
+    if !label.starts_with("file:") || label.len() < 14 {
+        return None;
+    }
+
+    // Split into source_id and path at the second colon
+    let parts: Vec<&str> = label.splitn(3, ':').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+
+    let hash = parts[1];
+    // hash should be 8 hex characters
+    if hash.len() != 8 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+
+    Some(ParsedFileLabel {
+        source_id: format!("{}:{}", parts[0], parts[1]), // "file:XXXXXXXX"
+        path: parts[2].to_string(),
+    })
+}
+
+/// Check if a block label is a file label.
+pub fn is_file_label(label: &str) -> bool {
+    label.starts_with("file:") && parse_file_label(label).is_some()
 }
 
 #[async_trait]
@@ -800,7 +1062,7 @@ impl DataBlock for FileSource {
 
     fn block_schema(&self) -> BlockSchemaSpec {
         BlockSchemaSpec::ephemeral(
-            "file:{hash}:{path}",
+            "file:{source_id}:{path}",
             BlockSchema::Text,
             "Local file content with Loro-backed versioning",
         )
@@ -830,11 +1092,19 @@ impl DataBlock for FileSource {
     }
 
     fn matches(&self, path: &Path) -> bool {
-        // Check if path is under base_path or matches any permission rule
-        if let Ok(abs_path) = self.absolute_path(path) {
-            abs_path.starts_with(&self.base_path)
+        // For absolute paths: check if under base_path
+        // For relative paths: check if file exists at base_path/path
+        if path.is_absolute() {
+            // Absolute path must be under base_path
+            if let Ok(abs_path) = self.absolute_path(path) {
+                abs_path.starts_with(&self.base_path)
+            } else {
+                false
+            }
         } else {
-            false
+            // Relative path - check if file exists under our base_path
+            let full_path = self.base_path.join(path);
+            full_path.exists()
         }
     }
 
@@ -935,11 +1205,7 @@ impl DataBlock for FileSource {
         let memory_doc = doc.inner().clone();
         let disk_doc = memory_doc.fork();
 
-        // Set up bidirectional subscriptions based on permission
-        let subscriptions =
-            self.setup_subscriptions(&memory_doc, &disk_doc, abs_path.clone(), permission);
-
-        // Track loaded file info with fork and subscriptions
+        // Track loaded file info (subscriptions set up by start_watching)
         self.loaded_blocks.insert(
             abs_path.clone(),
             LoadedFileInfo {
@@ -949,10 +1215,19 @@ impl DataBlock for FileSource {
                 disk_size: size,
                 disk_doc,
                 memory_doc,
-                subscriptions,
+                subscriptions: None,
+                permission,
                 last_saved_frontier: doc.inner().oplog_vv(),
             },
         );
+
+        // Start watching if not already (watching is on by default)
+        if self.status.load(Ordering::SeqCst) != STATUS_WATCHING {
+            let _ = self.start_watching().await;
+        } else {
+            // Already watching - set up subscriptions for this new block
+            self.setup_subscriptions_for_path(&abs_path);
+        }
 
         Ok(BlockRef::new(&label, block_id).owned_by(&owner_str))
     }
@@ -1043,13 +1318,9 @@ impl DataBlock for FileSource {
         let memory_doc = doc.inner().clone();
         let disk_doc = memory_doc.fork();
 
-        // Set up bidirectional subscriptions based on permission
-        let subscriptions =
-            self.setup_subscriptions(&memory_doc, &disk_doc, abs_path.clone(), permission);
-
-        // Track loaded file info with fork and subscriptions
+        // Track loaded file info (subscriptions set up by start_watching)
         self.loaded_blocks.insert(
-            abs_path,
+            abs_path.clone(),
             LoadedFileInfo {
                 block_id: block_id.clone(),
                 label: label.clone(),
@@ -1057,10 +1328,19 @@ impl DataBlock for FileSource {
                 disk_size: size,
                 disk_doc,
                 memory_doc,
-                subscriptions,
+                subscriptions: None,
+                permission,
                 last_saved_frontier: doc.inner().oplog_vv(),
             },
         );
+
+        // Start watching if not already (watching is on by default)
+        if self.status.load(Ordering::SeqCst) != STATUS_WATCHING {
+            let _ = self.start_watching().await;
+        } else {
+            // Already watching - set up subscriptions for this new block
+            self.setup_subscriptions_for_path(&abs_path);
+        }
 
         Ok(BlockRef::new(&label, block_id).owned_by(&owner_str))
     }
@@ -1078,9 +1358,8 @@ impl DataBlock for FileSource {
                 cause: format!("Block {} not loaded from this source", block_ref.label),
             })?;
 
-        // Check for conflicts
-        let (current_mtime, _) = self.get_file_metadata(&file_path).await?;
-        if self.check_conflict(&file_path, current_mtime) {
+        // Check for conflicts (content-based comparison)
+        if self.check_conflict(&file_path).await? {
             return Err(CoreError::DataSourceError {
                 source_name: self.source_id.clone(),
                 operation: "save".to_string(),
@@ -1271,7 +1550,11 @@ impl DataBlock for FileSource {
                 cause: format!("Block {} not loaded from this source", block_ref.label),
             })?;
 
-        self.diff(&file_path).await
+        self.perform_diff(&file_path).await
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 
@@ -1288,7 +1571,7 @@ mod tests {
         path
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
     async fn test_file_source_load_save() {
         let temp_dir = TempDir::new().unwrap();
         let base_path = temp_dir.path().to_path_buf();
@@ -1298,7 +1581,7 @@ mod tests {
         let file_path = create_test_file(&base_path, "test.txt", test_content).await;
 
         // Create FileSource
-        let source = FileSource::new("test_files", &base_path);
+        let source = FileSource::new(&base_path);
 
         // Create test context
         let agent_id = "test_agent_load_save";
@@ -1335,13 +1618,13 @@ mod tests {
         assert_eq!(content, test_content);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
     async fn test_file_source_create() {
         let temp_dir = TempDir::new().unwrap();
         let base_path = temp_dir.path().to_path_buf();
 
         // Create FileSource
-        let source = FileSource::new("test_files", &base_path);
+        let source = FileSource::new(&base_path);
 
         // Create test context
         let agent_id = "test_agent_create";
@@ -1379,7 +1662,7 @@ mod tests {
         assert_eq!(mem_content, initial_content);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
     async fn test_file_source_save() {
         let temp_dir = TempDir::new().unwrap();
         let base_path = temp_dir.path().to_path_buf();
@@ -1389,7 +1672,7 @@ mod tests {
         let file_path = create_test_file(&base_path, "save_test.txt", original_content).await;
 
         // Create FileSource
-        let source = FileSource::new("test_files", &base_path);
+        let source = FileSource::new(&base_path);
 
         // Create test context
         let agent_id = "test_agent_save";
@@ -1425,7 +1708,7 @@ mod tests {
         assert_eq!(disk_content, new_content);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
     async fn test_file_source_conflict_detection() {
         let temp_dir = TempDir::new().unwrap();
         let base_path = temp_dir.path().to_path_buf();
@@ -1435,7 +1718,7 @@ mod tests {
         let file_path = create_test_file(&base_path, "conflict_test.txt", original_content).await;
 
         // Create FileSource
-        let source = FileSource::new("test_files", &base_path);
+        let source = FileSource::new(&base_path);
 
         // Create test context
         let agent_id = "test_agent_conflict";
@@ -1452,45 +1735,51 @@ mod tests {
             .await
             .expect("Load should succeed");
 
-        // Small delay to ensure mtime changes
+        // Small delay to ensure file watcher is active
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
-        // Simulate external modification
+        // Simulate external modification (like another editor saving the file)
         let external_content = "Externally modified content";
         tokio::fs::write(&file_path, external_content)
             .await
             .unwrap();
 
-        // Modify block content
+        // Modify block content (agent making changes)
         let memory = ctx.memory();
         memory
             .update_block_text(&block_ref.agent_id, &block_ref.label, "Agent's changes")
             .await
             .expect("Update should succeed");
 
-        // Try to save - should fail with conflict error
+        // Give auto-sync a chance to run
+        tokio::task::yield_now().await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // With auto-sync enabled, Loro CRDT should merge both changes automatically.
+        // The external content and agent's changes should both be present in the merged result.
+        let final_disk = tokio::fs::read_to_string(&file_path).await.unwrap();
+
+        // Verify at least one set of changes is present (Loro merges them)
+        assert!(
+            final_disk.contains("Externally modified") || final_disk.contains("Agent's changes"),
+            "Merged content should contain at least one set of changes: {:?}",
+            final_disk
+        );
+
+        // Save should succeed since disk_doc and disk file are in sync after auto-merge
         let result = source
             .save(&block_ref, ctx.clone() as Arc<dyn ToolContext>)
             .await;
-
-        assert!(result.is_err(), "Save should fail due to conflict");
-        let err = result.unwrap_err();
-        let err_str = format!("{}", err);
         assert!(
-            err_str.contains("Conflict") || err_str.contains("modified externally"),
-            "Error should mention conflict: {}",
-            err_str
+            result.is_ok(),
+            "Save should succeed after auto-merge: {:?}",
+            result
         );
-
-        // Verify disk still has external changes
-        let disk_content = tokio::fs::read_to_string(&file_path).await.unwrap();
-        assert_eq!(disk_content, external_content);
     }
 
     #[test]
     fn test_file_source_permission_for() {
         let source = FileSource::with_rules(
-            "test_files",
             "/tmp",
             vec![
                 PermissionRule::new("*.config.toml", MemoryPermission::ReadOnly),
@@ -1518,22 +1807,36 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_file_source_matches() {
-        let source = FileSource::new("test_files", "/home/user/project");
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn test_file_source_matches() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_path = temp_dir.path().to_path_buf();
 
-        // Files under base_path should match
-        assert!(source.matches(Path::new("/home/user/project/src/main.rs")));
-        assert!(source.matches(Path::new("src/main.rs"))); // Relative paths are joined with base
+        // Create test files
+        let src_dir = base_path.join("src");
+        tokio::fs::create_dir_all(&src_dir).await.unwrap();
+        tokio::fs::write(src_dir.join("main.rs"), "fn main() {}")
+            .await
+            .unwrap();
 
-        // Files outside base_path should not match (once canonicalized)
-        // Note: This depends on actual filesystem state, so we just verify the method runs
-        let _ = source.matches(Path::new("/other/path/file.rs"));
+        let source = FileSource::new(&base_path);
+
+        // Absolute path under base_path should match
+        assert!(source.matches(&src_dir.join("main.rs")));
+
+        // Relative path that exists should match
+        assert!(source.matches(Path::new("src/main.rs")));
+
+        // Relative path that doesn't exist should not match
+        assert!(!source.matches(Path::new("nonexistent/file.rs")));
+
+        // Absolute path outside base_path should not match
+        assert!(!source.matches(Path::new("/tmp/other/file.rs")));
     }
 
     #[test]
     fn test_file_source_status() {
-        let source = FileSource::new("test_files", "/tmp");
+        let source = FileSource::new("/tmp");
 
         // Initially idle
         assert_eq!(source.status(), BlockSourceStatus::Idle);

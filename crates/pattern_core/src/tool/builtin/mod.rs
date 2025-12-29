@@ -81,6 +81,7 @@ pub struct BuiltinTools {
     block_tool: Box<dyn DynamicTool>,
     block_edit_tool: Box<dyn DynamicTool>,
     source_tool: Box<dyn DynamicTool>,
+    file_tool: Box<dyn DynamicTool>,
 }
 
 impl BuiltinTools {
@@ -104,6 +105,7 @@ impl BuiltinTools {
                 &ctx,
             )))),
             source_tool: Box::new(DynamicToolAdapter::new(SourceTool::new(Arc::clone(&ctx)))),
+            file_tool: Box::new(DynamicToolAdapter::new(FileTool::new(Arc::clone(&ctx)))),
         }
     }
 
@@ -125,11 +127,7 @@ impl BuiltinTools {
         registry.register_dynamic(self.block_tool.clone_box());
         registry.register_dynamic(self.block_edit_tool.clone_box());
         registry.register_dynamic(self.source_tool.clone_box());
-
-        // Note: DataSourceTool requires external coordinator setup.
-        // Use register_data_source_tool() function directly when you have a coordinator.
-        // Note: FileTool requires an external Arc<FileSource> so cannot be created
-        // with just a ToolContext. It must be registered separately.
+        registry.register_dynamic(self.file_tool.clone_box());
     }
 
     /// Builder pattern for customization
@@ -152,6 +150,7 @@ pub struct BuiltinToolsBuilder {
     block_tool: Option<Box<dyn DynamicTool>>,
     block_edit_tool: Option<Box<dyn DynamicTool>>,
     source_tool: Option<Box<dyn DynamicTool>>,
+    file_tool: Option<Box<dyn DynamicTool>>,
 }
 
 impl BuiltinToolsBuilder {
@@ -203,6 +202,12 @@ impl BuiltinToolsBuilder {
         self
     }
 
+    /// Replace the default file tool
+    pub fn with_file_tool(mut self, tool: impl DynamicTool + 'static) -> Self {
+        self.file_tool = Some(Box::new(tool));
+        self
+    }
+
     /// Build the tools for a specific agent using ToolContext
     pub fn build_for_agent(self, ctx: Arc<dyn ToolContext>) -> BuiltinTools {
         let defaults = BuiltinTools::default_for_agent(ctx);
@@ -218,6 +223,7 @@ impl BuiltinToolsBuilder {
             block_tool: self.block_tool.unwrap_or(defaults.block_tool),
             block_edit_tool: self.block_edit_tool.unwrap_or(defaults.block_edit_tool),
             source_tool: self.source_tool.unwrap_or(defaults.source_tool),
+            file_tool: self.file_tool.unwrap_or(defaults.file_tool),
         }
     }
 }

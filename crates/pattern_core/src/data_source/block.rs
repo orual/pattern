@@ -4,6 +4,7 @@
 //! version history, and conflict resolution for DataBlock sources.
 
 use std::{
+    any::Any,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -290,6 +291,21 @@ pub trait DataBlock: Send + Sync {
     ) -> Result<EditFeedback> {
         Ok(EditFeedback::Applied { message: None })
     }
+
+    // === Downcasting Support ===
+
+    /// Returns self as `&dyn Any` for downcasting to concrete types.
+    ///
+    /// This enables tools tightly coupled to specific source types to access
+    /// source-specific methods not exposed through the DataBlock trait.
+    ///
+    /// # Example
+    /// ```ignore
+    /// if let Some(file_source) = source.as_any().downcast_ref::<FileSource>() {
+    ///     file_source.list_files(pattern).await?;
+    /// }
+    /// ```
+    fn as_any(&self) -> &dyn Any;
 }
 
 #[cfg(test)]

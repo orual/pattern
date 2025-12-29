@@ -517,6 +517,10 @@ impl DataBlock for MockDataBlock {
     ) -> Result<String> {
         Ok(String::new())
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 #[test]
