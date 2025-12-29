@@ -11,22 +11,18 @@ use pattern_core::{
     config::PatternConfig,
     data_source::FileSource,
     messages::{Message, MessageContent},
-    tool::builtin::FileTool,
 };
 use std::sync::Arc;
 
 use crate::{
     endpoints::{CliEndpoint, build_group_cli_endpoint},
-    helpers::{
-        create_runtime_context_with_dbs, get_agent_by_name, get_dbs, require_agent_by_name,
-        require_group_by_name,
-    },
+    helpers::{create_runtime_context_with_dbs, get_agent_by_name, get_dbs, require_group_by_name},
     output::Output,
     slash_commands::handle_slash_command,
 };
 use pattern_core::runtime::router::MessageEndpoint;
 
-pub fn print_response_event(event: ResponseEvent, output: &Output) {
+pub fn print_response_event(agent_name: &str, event: ResponseEvent, output: &Output) {
     match event {
         ResponseEvent::ToolCallStarted {
             call_id: _,
@@ -58,10 +54,10 @@ pub fn print_response_event(event: ResponseEvent, output: &Output) {
         },
         ResponseEvent::TextChunk { text, .. } => {
             // Display agent's response text
-            output.agent_message("Agent", &text);
+            output.agent_message(agent_name, &text);
         }
         ResponseEvent::ReasoningChunk { text, is_final: _ } => {
-            output.status(&format!("Reasoning: {}", text));
+            output.status(&format!("{} Reasoning: {}", agent_name, text));
         }
         ResponseEvent::ToolCalls { .. } => {
             // Skip - we handle individual ToolCallStarted events instead
@@ -161,7 +157,7 @@ pub async fn chat_with_single_agent(agent_name: &str, config: &PatternConfig) ->
         let output = output_clone.clone();
         async move {
             output.status(&format!("Heartbeat continuation from {}:", agent_name));
-            print_response_event(event, &output);
+            print_response_event(&agent_name, event, &output);
         }
     })
     .await

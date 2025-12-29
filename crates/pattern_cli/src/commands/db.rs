@@ -1,116 +1,70 @@
-// TODO: CLI Refactoring for pattern_db (SQLite/sqlx) migration
+//! Database inspection commands
 //!
-//! Database inspection and query commands
-//!
-//! This module provides direct database access for debugging and
-//! inspection purposes.
-//!
-//! ## Migration Status
-//!
-//! ALL FUNCTIONS in this module are STUBBED during the pattern_db migration.
-//! These commands were SurrealDB-specific and will need reimplementation
-//! for SQLite/sqlx.
-//!
-//! ## Previous SurrealDB Usage
-//!
-//! The module previously used:
-//! - `pattern_core::db_v1::client::DB` for database access
-//! - Raw SurrealQL queries
-//! - `surrealdb::Value` for result handling
-//! - Custom unwrap_surrealdb_value() for type descriptor handling
-//!
-//! ## Future Implementation
-//!
-//! With pattern_db (SQLite), we'll need:
-//! - Raw SQL query execution
-//! - Result formatting for terminal display
-//! - Stats queries for entity counts
+//! Provides database statistics and inspection for debugging purposes.
 
 use miette::Result;
-
+use owo_colors::OwoColorize;
 use pattern_core::config::PatternConfig;
 
+use crate::helpers::get_db;
 use crate::output::Output;
 
-// =============================================================================
-// Database Stats - STUBBED
-// =============================================================================
-
-// TODO: Reimplement for pattern_db (SQLite/sqlx)
-//
-// Previous implementation:
-// 1. Ran COUNT queries for agents, messages, memories, tool calls
-// 2. Queried most active agents by message count
-// 3. Displayed database type and file path
-// 4. Showed file size for embedded databases
-//
-// Needs: pattern_db stats queries
-
 /// Show database statistics
-///
-/// NOTE: Currently STUBBED. Needs pattern_db stats queries.
-pub async fn stats(_config: &PatternConfig, output: &Output) -> Result<()> {
-    output.warning("Database stats temporarily disabled during database migration");
-    output.info("Reason:", "Needs pattern_db stats queries");
-    output.status("Previous functionality:");
-    output.list_item("Entity counts (agents, messages, memories, tool calls)");
-    output.list_item("Most active agents by message count");
-    output.list_item("Database type and file path");
-    output.list_item("Database file size");
+pub async fn stats(config: &PatternConfig, output: &Output) -> Result<()> {
+    let db = get_db(config).await?;
 
-    // TODO: Implement pattern_db stats
-    //
-    // Example pattern_db queries:
-    // SELECT COUNT(*) FROM agents
-    // SELECT COUNT(*) FROM messages
-    // SELECT COUNT(*) FROM memory_blocks
-    // SELECT name, message_count FROM agents ORDER BY message_count DESC LIMIT 5
+    output.success("Database Statistics");
+    output.status("");
+
+    // Get overall stats
+    let stats = pattern_db::queries::get_stats(db.pool())
+        .await
+        .map_err(|e| miette::miette!("Failed to get stats: {}", e))?;
+
+    // Display counts
+    output.section("Entity Counts");
+    output.kv("Agents", &stats.agent_count.to_string());
+    output.kv("Groups", &stats.group_count.to_string());
+    output.kv("Messages", &stats.message_count.to_string());
+    output.kv("Memory Blocks", &stats.memory_block_count.to_string());
+    output.kv("Archival Entries", &stats.archival_entry_count.to_string());
+
+    // Database file info
+    output.status("");
+    output.section("Database Info");
+    output.kv("Path", &config.database.path.display().to_string());
+
+    // Try to get file size
+    if let Ok(metadata) = std::fs::metadata(&config.database.path) {
+        let size = metadata.len();
+        let size_str = if size < 1024 {
+            format!("{} B", size)
+        } else if size < 1024 * 1024 {
+            format!("{:.1} KB", size as f64 / 1024.0)
+        } else {
+            format!("{:.1} MB", size as f64 / (1024.0 * 1024.0))
+        };
+        output.kv("Size", &size_str);
+    }
+
+    // Most active agents by message count
+    output.status("");
+    output.section("Most Active Agents");
+
+    let active_agents = pattern_db::queries::get_most_active_agents(db.pool(), 5)
+        .await
+        .map_err(|e| miette::miette!("Failed to get active agents: {}", e))?;
+
+    if active_agents.is_empty() {
+        output.info("  (no agents)", "");
+    } else {
+        for agent in active_agents {
+            output.info(
+                &format!("  {}", agent.name.bright_cyan()),
+                &format!("{} messages", agent.message_count),
+            );
+        }
+    }
 
     Ok(())
 }
-
-// =============================================================================
-// Raw Query - STUBBED
-// =============================================================================
-
-// TODO: Reimplement for pattern_db (SQLite/sqlx)
-//
-// Previous implementation:
-// 1. Executed raw SurrealQL query via DB.query(sql)
-// 2. Processed each statement result
-// 3. Converted surrealdb::Value to JSON
-// 4. Used unwrap_surrealdb_value() to clean type descriptors
-// 5. Pretty-printed results
-//
-// Needs: pattern_db raw query execution
-
-/// Run a raw SQL query
-///
-/// NOTE: Currently STUBBED. Needs pattern_db raw query support.
-pub async fn query(sql: &str, output: &Output) -> Result<()> {
-    output.warning("Raw query temporarily disabled during database migration");
-    output.info("Query:", sql);
-    output.info("Reason:", "Pattern_db uses SQLite, not SurrealDB");
-    output.status("Previous functionality:");
-    output.list_item("Execute raw SurrealQL queries");
-    output.list_item("Display results in JSON format");
-    output.list_item("Multiple statement support");
-
-    output.section("Migration Notes");
-    output.status("Pattern_db uses SQLite with sqlx.");
-    output.status("Raw queries will use standard SQL syntax.");
-    output.status("SurrealQL features (RELATE, graph traversal) not available.");
-
-    Ok(())
-}
-
-// =============================================================================
-// Helper Functions - Removed
-// =============================================================================
-
-// The following helper was SurrealDB-specific and is no longer needed:
-//
-// unwrap_surrealdb_value() - Recursively unwrapped SurrealDB type descriptors
-//   from JSON values (Array, Object, Strand, Number, Thing, etc.)
-//
-// SQLite/sqlx returns standard types that don't need this unwrapping.

@@ -29,6 +29,8 @@ pub struct CachedBlock {
 
     /// Whether we have unpersisted changes
     pub dirty: bool,
+    /// Whether this block is pinned
+    pub pinned: bool,
 
     /// When this was last accessed (for eviction)
     pub last_accessed: DateTime<Utc>,
@@ -41,6 +43,34 @@ pub enum BlockType {
     Working,
     Archival,
     Log,
+}
+
+impl std::str::FromStr for BlockType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "core" => Ok(Self::Core),
+            "working" => Ok(Self::Working),
+            "archival" => Ok(Self::Archival),
+            "log" => Ok(Self::Log),
+            _ => Err(format!(
+                "unknown block type '{}', expected: core, working, archival, log",
+                s
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for BlockType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Core => write!(f, "core"),
+            Self::Working => write!(f, "working"),
+            Self::Archival => write!(f, "archival"),
+            Self::Log => write!(f, "log"),
+        }
+    }
 }
 
 impl From<pattern_db::models::MemoryBlockType> for BlockType {

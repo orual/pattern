@@ -20,6 +20,7 @@ mod memory;
 mod message;
 mod queue;
 mod source;
+mod stats;
 mod task;
 
 pub use agent::*;
@@ -31,4 +32,5 @@ pub use memory::*;
 pub use message::*;
 pub use queue::*;
 pub use source::*;
+pub use stats::*;
 pub use task::*;

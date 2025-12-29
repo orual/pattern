@@ -453,6 +453,10 @@ impl SleeptimeManager {
                     "\n\nReview your domain and report any notable patterns or concerns.\n\nProvide brief status updates only if intervention is needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
                 }
             },
+            crate::coordination::types::GroupMemberRole::Observer => {
+                // Observers monitor but don't actively respond
+                "\n\nObserve constellation activity and update your internal state. No response expected."
+            }
         };
 
         format!(

@@ -49,6 +49,108 @@ fn resolve_path(base_dir: &Path, path: &Path) -> PathBuf {
     }
 }
 
+// =============================================================================
+// Data Source Configuration
+// =============================================================================
+
+/// Configuration for a data source subscription
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DataSourceConfig {
+    /// Bluesky firehose subscription
+    Bluesky(BlueskySourceConfig),
+    /// Discord event subscription
+    Discord(DiscordSourceConfig),
+    /// File watching
+    File(FileSourceConfig),
+    /// Custom/external data source
+    Custom(CustomSourceConfig),
+}
+
+impl DataSourceConfig {
+    /// Get the name/identifier of this data source
+    pub fn name(&self) -> &str {
+        match self {
+            DataSourceConfig::Bluesky(c) => &c.name,
+            DataSourceConfig::Discord(c) => &c.name,
+            DataSourceConfig::File(c) => &c.name,
+            DataSourceConfig::Custom(c) => &c.name,
+        }
+    }
+}
+
+/// Bluesky firehose data source configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlueskySourceConfig {
+    /// Identifier for this source
+    pub name: String,
+    /// Handle to post as (optional, defaults to agent's bluesky_handle)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handle: Option<String>,
+    /// Keywords to filter for
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
+    /// Whether to include only mentions
+    #[serde(default)]
+    pub mentions_only: bool,
+}
+
+/// Discord event data source configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscordSourceConfig {
+    /// Identifier for this source
+    pub name: String,
+    /// Guild ID to monitor (optional, monitors all if not specified)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guild_id: Option<String>,
+    /// Channel IDs to monitor (empty = all)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channel_ids: Vec<String>,
+}
+
+/// File watching data source configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileSourceConfig {
+    /// Identifier for this source
+    pub name: String,
+    /// Paths to watch (directories or files)
+    pub paths: Vec<PathBuf>,
+    /// Whether to watch directories recursively
+    #[serde(default)]
+    pub recursive: bool,
+    /// Glob patterns for included files (empty = include all)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include_patterns: Vec<String>,
+    /// Glob patterns for excluded files
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude_patterns: Vec<String>,
+    /// Permission rules for file access (glob pattern -> permission)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub permission_rules: Vec<FilePermissionRuleConfig>,
+}
+
+/// Permission rule for file access
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FilePermissionRuleConfig {
+    /// Glob pattern: "*.config.toml", "src/**/*.rs"
+    pub pattern: String,
+    /// Permission level: read_only, read_write, append
+    #[serde(default)]
+    pub permission: MemoryPermission,
+}
+
+/// Custom/external data source configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomSourceConfig {
+    /// Identifier for this source
+    pub name: String,
+    /// Type identifier for the custom source
+    pub source_type: String,
+    /// Arbitrary configuration data
+    #[serde(default)]
+    pub config: serde_json::Value,
+}
+
 /// Top-level configuration for Pattern
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PatternConfig {
@@ -142,6 +244,10 @@ pub struct AgentConfig {
     /// Optional Bluesky handle for this agent
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bluesky_handle: Option<String>,
+
+    /// Data sources attached to this agent
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub data_sources: HashMap<String, DataSourceConfig>,
 
     /// Tool execution rules for this agent
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -533,6 +639,14 @@ pub struct GroupConfig {
 
     /// Members of this group
     pub members: Vec<GroupMemberConfig>,
+
+    /// Shared memory blocks accessible to all group members
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub shared_memory: HashMap<String, MemoryBlockConfig>,
+
+    /// Data sources attached to this group
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub data_sources: HashMap<String, DataSourceConfig>,
 }
 
 /// Configuration for a group member
@@ -569,6 +683,7 @@ pub enum GroupMemberRoleConfig {
     #[default]
     Regular,
     Supervisor,
+    Observer,
     Specialist {
         domain: String,
     },
@@ -745,6 +860,7 @@ impl Default for AgentConfig {
             instructions: None,
             memory: HashMap::new(),
             bluesky_handle: None,
+            data_sources: HashMap::new(),
             tool_rules: Vec::new(),
             tools: Vec::new(),
             model: None,
@@ -920,6 +1036,9 @@ pub struct PartialAgentConfig {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bluesky_handle: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_sources: Option<HashMap<String, DataSourceConfig>>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_rules: Option<Vec<ToolRuleConfig>>,
@@ -1102,6 +1221,14 @@ pub fn merge_agent_configs(base: AgentConfig, overlay: PartialAgentConfig) -> Ag
             base.memory
         },
         bluesky_handle: overlay.bluesky_handle.or(base.bluesky_handle),
+        data_sources: if let Some(overlay_sources) = overlay.data_sources {
+            // Merge data sources, overlay takes precedence
+            let mut merged = base.data_sources;
+            merged.extend(overlay_sources);
+            merged
+        } else {
+            base.data_sources
+        },
         tool_rules: overlay.tool_rules.unwrap_or(base.tool_rules),
         tools: overlay.tools.unwrap_or(base.tools),
         model: overlay.model.or(base.model),
@@ -1519,6 +1646,8 @@ mod tests {
                     capabilities: vec!["recall".to_string()],
                 },
             ],
+            data_sources: HashMap::new(),
+            shared_memory: HashMap::new(),
         };
 
         let toml = toml::to_string_pretty(&group).unwrap();

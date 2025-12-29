@@ -58,8 +58,13 @@ impl GroupEventSink for CliGroupPrinterSink {
                 ));
             }
             GroupResponseEvent::TextChunk { agent_id, text, .. } => {
-                self.output
-                    .status(&format!("[{}] {}: {}", tag, agent_id, text));
+                let name = self
+                    .agents
+                    .iter()
+                    .find(|a| a.agent.id() == *agent_id)
+                    .map(|a| a.agent.name().to_string())
+                    .unwrap_or(agent_id.0.clone());
+                self.output.status(&format!("[{}] {}: {}", tag, name, text));
             }
             GroupResponseEvent::ToolCallStarted { fn_name, .. } => {
                 self.output
@@ -123,8 +128,13 @@ impl CliAgentPrinterSink {
 
 #[async_trait]
 impl AgentEventSink for CliAgentPrinterSink {
-    async fn on_event(&self, event: ResponseEvent, _ctx: AgentEventContext) {
-        crate::chat::print_response_event(event, &self.output);
+    async fn on_event(&self, event: ResponseEvent, ctx: AgentEventContext) {
+        let name = if let Some(name) = ctx.agent_name {
+            name
+        } else {
+            "Agent".to_string()
+        };
+        crate::chat::print_response_event(&name, event, &self.output);
     }
 }
 

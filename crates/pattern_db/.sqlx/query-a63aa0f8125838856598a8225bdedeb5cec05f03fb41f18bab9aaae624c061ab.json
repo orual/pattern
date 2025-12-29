@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        UPDATE agent_groups SET\n            name = ?,\n            description = ?,\n            pattern_type = ?,\n            pattern_config = ?,\n            updated_at = datetime('now')\n        WHERE id = ?\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "a63aa0f8125838856598a8225bdedeb5cec05f03fb41f18bab9aaae624c061ab"
+}

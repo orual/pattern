@@ -63,7 +63,7 @@ pub async fn agent_is_supervisor(agent: &Arc<dyn Agent>, config: &PatternConfig)
 
             for member in members {
                 if member.agent_id == agent.id().as_str() {
-                    if let Some(role) = member.role {
+                    if let Some(pattern_db::Json(role)) = member.role {
                         if role == pattern_db::models::GroupMemberRole::Supervisor {
                             return true;
                         }

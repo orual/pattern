@@ -2,6 +2,7 @@
 
 mod group;
 
+use crate::db::ConstellationDatabases;
 use crate::error::Result;
 use crate::messages::{ContentPart, Message, MessageContent};
 use serde_json::Value;
@@ -82,7 +83,6 @@ impl BlueskyAgent {
 
 /// Endpoint for sending messages to Bluesky/ATProto
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct BlueskyEndpoint {
     agent: Arc<BlueskyAgent>,
     agent_id: String,
@@ -100,16 +100,12 @@ impl BlueskyEndpoint {
     /// 3. Use (did, session_id) from whichever row is found
     /// 4. Load session from auth.db
     /// 5. Error only if NEITHER exists
-    pub async fn new(
-        agent_id: String,
-        pattern_db: &pattern_db::connection::ConstellationDb,
-        auth_db: AuthDb,
-    ) -> Result<Self> {
+    pub async fn new(agent_id: String, dbs: ConstellationDatabases) -> Result<Self> {
         use pattern_db::queries::get_agent_atproto_endpoint;
 
         // Try to get agent-specific configuration first
         let mut endpoint_config =
-            get_agent_atproto_endpoint(pattern_db.pool(), &agent_id, ENDPOINT_TYPE_BLUESKY)
+            get_agent_atproto_endpoint(dbs.constellation.pool(), &agent_id, ENDPOINT_TYPE_BLUESKY)
                 .await
                 .map_err(|e| crate::CoreError::ToolExecutionFailed {
                     tool_name: "bluesky_endpoint".to_string(),
@@ -120,7 +116,7 @@ impl BlueskyEndpoint {
         // If not found, try constellation-wide fallback
         if endpoint_config.is_none() {
             endpoint_config = get_agent_atproto_endpoint(
-                pattern_db.pool(),
+                dbs.constellation.pool(),
                 "_constellation_",
                 ENDPOINT_TYPE_BLUESKY,
             )
@@ -161,7 +157,7 @@ impl BlueskyEndpoint {
 
         // Try to load OAuth session first
         let resolver = Arc::new(JacquardResolver::default());
-        let oauth_client = OAuthClient::with_default_config(auth_db.clone());
+        let oauth_client = OAuthClient::with_default_config(dbs.auth.clone());
 
         if let Ok(oauth_session) = oauth_client.restore(&did, &session_id).await {
             info!(
@@ -180,7 +176,7 @@ impl BlueskyEndpoint {
         }
 
         // Try app-password session
-        let credential_session = CredentialSession::new(Arc::new(auth_db), resolver);
+        let credential_session = CredentialSession::new(Arc::new(dbs.auth.clone()), resolver);
         credential_session
             .restore(did.clone(), CowStr::from(session_id.clone()))
             .await
@@ -772,14 +768,4 @@ impl MessageEndpoint for BlueskyEndpoint {
     fn endpoint_type(&self) -> &'static str {
         "bluesky"
     }
-}
-
-/// Create a Bluesky endpoint for an agent by loading session from databases
-#[allow(dead_code)]
-pub async fn create_bluesky_endpoint_for_agent(
-    agent_id: String,
-    pattern_db: &pattern_db::connection::ConstellationDb,
-    auth_db: AuthDb,
-) -> Result<BlueskyEndpoint> {
-    BlueskyEndpoint::new(agent_id, pattern_db, auth_db).await
 }

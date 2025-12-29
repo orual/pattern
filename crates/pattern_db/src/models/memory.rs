@@ -103,6 +103,29 @@ impl MemoryBlockType {
     }
 }
 
+impl std::str::FromStr for MemoryBlockType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "core" => Ok(Self::Core),
+            "working" => Ok(Self::Working),
+            "archival" => Ok(Self::Archival),
+            "log" => Ok(Self::Log),
+            _ => Err(format!(
+                "unknown memory block type '{}', expected: core, working, archival, log",
+                s
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for MemoryBlockType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 /// Permission levels for memory operations.
 ///
 /// Ordered from most restrictive to least restrictive.
@@ -156,6 +179,25 @@ impl std::fmt::Display for MemoryPermission {
             Self::Append => write!(f, "Append Only"),
             Self::ReadWrite => write!(f, "Read, Append, Write"),
             Self::Admin => write!(f, "Read, Write, Delete"),
+        }
+    }
+}
+
+impl std::str::FromStr for MemoryPermission {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().replace('-', "_").as_str() {
+            "read_only" | "readonly" => Ok(Self::ReadOnly),
+            "partner" => Ok(Self::Partner),
+            "human" => Ok(Self::Human),
+            "append" => Ok(Self::Append),
+            "read_write" | "readwrite" => Ok(Self::ReadWrite),
+            "admin" => Ok(Self::Admin),
+            _ => Err(format!(
+                "unknown permission '{}', expected: read_only, partner, human, append, read_write, admin",
+                s
+            )),
         }
     }
 }

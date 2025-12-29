@@ -47,8 +47,8 @@ impl AgentSelector for SupervisorSelector {
                             specialist_domain.map_or(false, |d| d == domain)
                         }
                         GroupMemberRole::Supervisor => true,
-
                         GroupMemberRole::Regular => false,
+                        GroupMemberRole::Observer => false, // Observers don't respond
                     }
             })
             .collect();

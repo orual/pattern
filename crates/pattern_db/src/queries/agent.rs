@@ -1,6 +1,7 @@
 //! Agent-related database queries.
 
 use sqlx::SqlitePool;
+use sqlx::types::Json;
 
 use crate::error::DbResult;
 use crate::models::{Agent, AgentGroup, AgentStatus, GroupMember, GroupMemberRole, PatternType};
@@ -151,11 +152,61 @@ pub async fn update_agent_status(pool: &SqlitePool, id: &str, status: AgentStatu
     Ok(())
 }
 
+/// Update an agent's tool rules.
+pub async fn update_agent_tool_rules(
+    pool: &SqlitePool,
+    id: &str,
+    tool_rules: Option<serde_json::Value>,
+) -> DbResult<()> {
+    let rules_json = tool_rules.map(|v| serde_json::to_string(&v).unwrap_or_default());
+    sqlx::query!(
+        "UPDATE agents SET tool_rules = ?, updated_at = datetime('now') WHERE id = ?",
+        rules_json,
+        id
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Delete an agent.
 pub async fn delete_agent(pool: &SqlitePool, id: &str) -> DbResult<()> {
     sqlx::query!("DELETE FROM agents WHERE id = ?", id)
         .execute(pool)
         .await?;
+    Ok(())
+}
+
+/// Update an agent's core fields.
+pub async fn update_agent(pool: &SqlitePool, agent: &Agent) -> DbResult<()> {
+    sqlx::query!(
+        r#"
+        UPDATE agents SET
+            name = ?,
+            description = ?,
+            model_provider = ?,
+            model_name = ?,
+            system_prompt = ?,
+            config = ?,
+            enabled_tools = ?,
+            tool_rules = ?,
+            status = ?,
+            updated_at = datetime('now')
+        WHERE id = ?
+        "#,
+        agent.name,
+        agent.description,
+        agent.model_provider,
+        agent.model_name,
+        agent.system_prompt,
+        agent.config,
+        agent.enabled_tools,
+        agent.tool_rules,
+        agent.status,
+        agent.id
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -252,7 +303,8 @@ pub async fn get_group_members(pool: &SqlitePool, group_id: &str) -> DbResult<Ve
         SELECT
             group_id as "group_id!",
             agent_id as "agent_id!",
-            role as "role: GroupMemberRole",
+            role as "role: _",
+            capabilities as "capabilities!: _",
             joined_at as "joined_at!: _"
         FROM group_members WHERE group_id = ?
         "#,
@@ -267,12 +319,13 @@ pub async fn get_group_members(pool: &SqlitePool, group_id: &str) -> DbResult<Ve
 pub async fn add_group_member(pool: &SqlitePool, member: &GroupMember) -> DbResult<()> {
     sqlx::query!(
         r#"
-        INSERT INTO group_members (group_id, agent_id, role, joined_at)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO group_members (group_id, agent_id, role, capabilities, joined_at)
+        VALUES (?, ?, ?, ?, ?)
         "#,
         member.group_id,
         member.agent_id,
         member.role,
+        member.capabilities,
         member.joined_at,
     )
     .execute(pool)
@@ -288,6 +341,62 @@ pub async fn remove_group_member(
 ) -> DbResult<()> {
     sqlx::query!(
         "DELETE FROM group_members WHERE group_id = ? AND agent_id = ?",
+        group_id,
+        agent_id
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Update a group member's role.
+pub async fn update_group_member_role(
+    pool: &SqlitePool,
+    group_id: &str,
+    agent_id: &str,
+    role: Option<&Json<GroupMemberRole>>,
+) -> DbResult<()> {
+    sqlx::query!(
+        "UPDATE group_members SET role = ? WHERE group_id = ? AND agent_id = ?",
+        role,
+        group_id,
+        agent_id
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Update a group member's capabilities.
+pub async fn update_group_member_capabilities(
+    pool: &SqlitePool,
+    group_id: &str,
+    agent_id: &str,
+    capabilities: &Json<Vec<String>>,
+) -> DbResult<()> {
+    sqlx::query!(
+        "UPDATE group_members SET capabilities = ? WHERE group_id = ? AND agent_id = ?",
+        capabilities,
+        group_id,
+        agent_id
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Update a group member's role and capabilities.
+pub async fn update_group_member(
+    pool: &SqlitePool,
+    group_id: &str,
+    agent_id: &str,
+    role: Option<&Json<GroupMemberRole>>,
+    capabilities: &Json<Vec<String>>,
+) -> DbResult<()> {
+    sqlx::query!(
+        "UPDATE group_members SET role = ?, capabilities = ? WHERE group_id = ? AND agent_id = ?",
+        role,
+        capabilities,
         group_id,
         agent_id
     )
@@ -319,4 +428,41 @@ pub async fn get_agent_groups(pool: &SqlitePool, agent_id: &str) -> DbResult<Vec
     .fetch_all(pool)
     .await?;
     Ok(groups)
+}
+
+/// Update an agent group.
+pub async fn update_group(pool: &SqlitePool, group: &AgentGroup) -> DbResult<()> {
+    sqlx::query!(
+        r#"
+        UPDATE agent_groups SET
+            name = ?,
+            description = ?,
+            pattern_type = ?,
+            pattern_config = ?,
+            updated_at = datetime('now')
+        WHERE id = ?
+        "#,
+        group.name,
+        group.description,
+        group.pattern_type,
+        group.pattern_config,
+        group.id
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Delete an agent group and its members.
+pub async fn delete_group(pool: &SqlitePool, id: &str) -> DbResult<()> {
+    // Delete members first (foreign key constraint)
+    sqlx::query!("DELETE FROM group_members WHERE group_id = ?", id)
+        .execute(pool)
+        .await?;
+
+    // Delete the group
+    sqlx::query!("DELETE FROM agent_groups WHERE id = ?", id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }

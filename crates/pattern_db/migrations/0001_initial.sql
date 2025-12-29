@@ -52,7 +52,7 @@ CREATE TABLE agent_groups (
 CREATE TABLE group_members (
     group_id TEXT NOT NULL,
     agent_id TEXT NOT NULL,
-    role TEXT,  -- 'supervisor', 'worker', etc. (pattern-specific)
+    role JSON,  -- JSON-encoded role with optional data (e.g., specialist domain)
     joined_at TEXT NOT NULL,
     PRIMARY KEY (group_id, agent_id),
     FOREIGN KEY (group_id) REFERENCES agent_groups(id) ON DELETE CASCADE,

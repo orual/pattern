@@ -54,55 +54,6 @@ pub async fn list(config: &PatternConfig) -> Result<()> {
 }
 
 // =============================================================================
-// Agent Creation - STUBBED
-// =============================================================================
-
-// TODO: Reimplement for pattern_db (SQLite/sqlx)
-//
-// Previous implementation:
-// 1. Parsed agent type from string
-// 2. Created AgentRecord with default fields
-// 3. Saved via agent.store_with_relations(&DB)
-// 4. Created constellation membership
-// 5. Optionally saved agent ID back to config
-//
-// Should use: RuntimeContext.create_agent(config)
-
-/// Create a new agent
-///
-/// NOTE: Currently STUBBED. Should use RuntimeContext.create_agent().
-pub async fn create(name: &str, agent_type: Option<&str>, _config: &PatternConfig) -> Result<()> {
-    let output = Output::new();
-
-    output.warning(&format!(
-        "Agent creation for '{}' temporarily disabled during database migration",
-        name.bright_cyan()
-    ));
-
-    if let Some(atype) = agent_type {
-        output.info("Requested type:", atype);
-    }
-
-    output.info("Reason:", "Should use RuntimeContext.create_agent()");
-    output.status("Previous functionality:");
-    output.list_item("Parsed agent type");
-    output.list_item("Created AgentRecord in SurrealDB");
-    output.list_item("Created constellation membership");
-    output.list_item("Saved agent ID to config file");
-
-    // TODO: When RuntimeContext is available:
-    //
-    // let agent_config = AgentConfig {
-    //     name: name.to_string(),
-    //     ..config.agent.clone()
-    // };
-    // let agent = ctx.create_agent(&agent_config).await?;
-    // output.success(&format!("Created agent '{}'", agent.name()));
-
-    Ok(())
-}
-
-// =============================================================================
 // Agent Status
 // =============================================================================
 
@@ -225,92 +176,392 @@ pub async fn export(name: &str, output_path: Option<&Path>) -> Result<()> {
 }
 
 // =============================================================================
-// Workflow Rules - STUBBED
+// Workflow Rules
 // =============================================================================
 
-// TODO: Reimplement for pattern_db (SQLite/sqlx)
-//
-// Tool rules are stored in the agent record's tool_rules field.
-// This needs pattern_db queries for:
-// 1. get_agent_by_name() to find agent
-// 2. update_agent() to save modified rules
-//
-// The rule types themselves are in pattern_core::agent::tool_rules
-
 /// Add a workflow rule to an agent
-///
-/// NOTE: Currently STUBBED. Needs pattern_db agent queries.
 pub async fn add_rule(
     agent_name: &str,
     rule_type: &str,
     tool_name: &str,
-    _params: Option<&str>,
-    _conditions: Option<&str>,
-    _priority: u8,
+    params: Option<&str>,
+    conditions: Option<&str>,
+    priority: u8,
 ) -> Result<()> {
     let output = Output::new();
+    let config = crate::helpers::load_config().await?;
+    let db = get_db(&config).await?;
 
-    output.warning(&format!(
-        "Adding rule to '{}' temporarily disabled during database migration",
+    let agent = require_agent_by_name(&db, agent_name).await?;
+
+    // Build the rule based on type
+    let rule = match rule_type {
+        "start-constraint" | "start_constraint" => {
+            serde_json::json!({
+                "type": "start_constraint",
+                "priority": priority
+            })
+        }
+        "exit-loop" | "exit_loop" => {
+            serde_json::json!({
+                "type": "exit_loop",
+                "priority": priority
+            })
+        }
+        "continue-loop" | "continue_loop" => {
+            serde_json::json!({
+                "type": "continue_loop",
+                "priority": priority
+            })
+        }
+        "max-calls" | "max_calls" => {
+            let max = params.and_then(|p| p.parse::<u32>().ok()).unwrap_or(5);
+            serde_json::json!({
+                "type": "max_calls",
+                "max": max,
+                "priority": priority
+            })
+        }
+        "cooldown" => {
+            let seconds = params.and_then(|p| p.parse::<u64>().ok()).unwrap_or(60);
+            serde_json::json!({
+                "type": "cooldown",
+                "seconds": seconds,
+                "priority": priority
+            })
+        }
+        "requires-preceding" | "requires_preceding" => {
+            let deps: Vec<&str> = conditions
+                .map(|c| c.split(',').map(|s| s.trim()).collect())
+                .unwrap_or_default();
+            serde_json::json!({
+                "type": "requires_preceding",
+                "tools": deps,
+                "priority": priority
+            })
+        }
+        _ => {
+            return Err(miette::miette!(
+                "Unknown rule type: {}. Valid types: start-constraint, exit-loop, continue-loop, max-calls, cooldown, requires-preceding",
+                rule_type
+            ));
+        }
+    };
+
+    // Get existing rules or create new object
+    let mut rules = agent
+        .tool_rules
+        .as_ref()
+        .map(|r| r.0.clone())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    // Get or create array for this tool
+    let tool_rules = rules
+        .as_object_mut()
+        .ok_or_else(|| miette::miette!("Invalid tool_rules format"))?
+        .entry(tool_name)
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .ok_or_else(|| miette::miette!("Invalid tool rules array"))?;
+
+    tool_rules.push(rule);
+
+    // Save updated rules
+    pattern_db::queries::update_agent_tool_rules(db.pool(), &agent.id, Some(rules))
+        .await
+        .map_err(|e| miette::miette!("Failed to update rules: {}", e))?;
+
+    output.success(&format!(
+        "Added {} rule for '{}' on agent '{}'",
+        rule_type.bright_yellow(),
+        tool_name.bright_cyan(),
         agent_name.bright_cyan()
     ));
-
-    output.info("Rule type:", rule_type);
-    output.info("Tool:", tool_name);
-    output.info("Reason:", "Needs pattern_db agent queries");
-    output.status("Available rule types:");
-    output.list_item("start-constraint - Call tool first");
-    output.list_item("exit-loop - End after calling tool");
-    output.list_item("continue-loop - Continue after tool");
-    output.list_item("max-calls - Limit call count");
-    output.list_item("cooldown - Minimum time between calls");
-    output.list_item("requires-preceding - Dependencies");
-
-    Ok(())
-}
-
-/// List workflow rules for an agent
-///
-/// NOTE: Currently STUBBED. Needs pattern_db agent queries.
-pub async fn list_rules(agent_name: &str) -> Result<()> {
-    let output = Output::new();
-
-    output.warning(&format!(
-        "Rule listing for '{}' temporarily disabled during database migration",
-        agent_name.bright_cyan()
-    ));
-
-    output.info("Reason:", "Needs pattern_db::queries::get_agent_by_name()");
 
     Ok(())
 }
 
 /// Remove workflow rules from an agent
-///
-/// NOTE: Currently STUBBED. Needs pattern_db agent queries.
 pub async fn remove_rule(agent_name: &str, tool_name: &str, rule_type: Option<&str>) -> Result<()> {
     let output = Output::new();
+    let config = crate::helpers::load_config().await?;
+    let db = get_db(&config).await?;
 
-    output.warning(&format!(
-        "Removing rule from '{}' temporarily disabled during database migration",
-        agent_name.bright_cyan()
-    ));
+    let agent = require_agent_by_name(&db, agent_name).await?;
 
-    output.info("Tool:", tool_name);
+    let mut rules = agent
+        .tool_rules
+        .as_ref()
+        .map(|r| r.0.clone())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let rules_obj = rules
+        .as_object_mut()
+        .ok_or_else(|| miette::miette!("Invalid tool_rules format"))?;
+
     if let Some(rt) = rule_type {
-        output.info("Rule type:", rt);
+        // Remove specific rule type
+        let normalized_type = rt.replace('-', "_");
+        if let Some(tool_rules) = rules_obj.get_mut(tool_name) {
+            if let Some(arr) = tool_rules.as_array_mut() {
+                let before = arr.len();
+                arr.retain(|r| r.get("type").and_then(|t| t.as_str()) != Some(&normalized_type));
+                let removed = before - arr.len();
+                if removed > 0 {
+                    output.success(&format!(
+                        "Removed {} '{}' rule(s) for '{}'",
+                        removed, rt, tool_name
+                    ));
+                } else {
+                    output.warning(&format!("No '{}' rules found for '{}'", rt, tool_name));
+                }
+            }
+        } else {
+            output.warning(&format!("No rules found for tool '{}'", tool_name));
+            return Ok(());
+        }
     } else {
-        output.info("Scope:", "All rules for this tool");
+        // Remove all rules for tool
+        if rules_obj.remove(tool_name).is_some() {
+            output.success(&format!("Removed all rules for '{}'", tool_name));
+        } else {
+            output.warning(&format!("No rules found for tool '{}'", tool_name));
+            return Ok(());
+        }
     }
-    output.info("Reason:", "Needs pattern_db agent queries");
+
+    // Save updated rules
+    let new_rules = if rules_obj.is_empty() {
+        None
+    } else {
+        Some(rules)
+    };
+
+    pattern_db::queries::update_agent_tool_rules(db.pool(), &agent.id, new_rules)
+        .await
+        .map_err(|e| miette::miette!("Failed to update rules: {}", e))?;
 
     Ok(())
 }
 
 // =============================================================================
-// Interactive Rule Builder - Removed
+// Quick Add/Remove Commands
 // =============================================================================
 
-// The interactive rule builder used stdin which isn't compatible with
-// the async CLI. It will be reimplemented as a non-interactive command
-// with full arguments, or as a TUI component.
+/// Add a data source subscription to an agent
+pub async fn add_source(
+    agent_name: &str,
+    source_name: &str,
+    source_type: &str,
+    config: &PatternConfig,
+) -> Result<()> {
+    let _ = config;
+    let output = Output::new();
+    output.warning(&format!(
+        "Adding source '{}' ({}) to agent '{}' - not yet implemented",
+        source_name.bright_cyan(),
+        source_type,
+        agent_name.bright_cyan()
+    ));
+    output.info("Hint", "Use 'agent edit' for full configuration");
+    Ok(())
+}
+
+/// Add a memory block to an agent
+pub async fn add_memory(
+    agent_name: &str,
+    label: &str,
+    content: Option<&str>,
+    path: Option<&std::path::Path>,
+    memory_type: &str,
+    permission: &str,
+    pinned: bool,
+    config: &PatternConfig,
+) -> Result<()> {
+    use pattern_core::memory::{BlockSchema, BlockType, MemoryCache, MemoryStore};
+    use std::sync::Arc;
+
+    let output = Output::new();
+    let dbs = crate::helpers::get_dbs(config).await?;
+
+    let agent = pattern_db::queries::get_agent_by_name(dbs.constellation.pool(), agent_name)
+        .await
+        .map_err(|e| miette::miette!("Database error: {}", e))?
+        .ok_or_else(|| miette::miette!("Agent '{}' not found", agent_name))?;
+
+    // Determine content
+    let block_content = if let Some(c) = content {
+        c.to_string()
+    } else if let Some(p) = path {
+        std::fs::read_to_string(p)
+            .map_err(|e| miette::miette!("Failed to read file '{}': {}", p.display(), e))?
+    } else {
+        String::new()
+    };
+
+    // Parse block type using FromStr
+    let block_type: BlockType = memory_type.parse().map_err(|e| miette::miette!("{}", e))?;
+
+    // Parse permission using FromStr (we'll need this when we can set it on blocks)
+    let _permission: pattern_core::memory::MemoryPermission =
+        permission.parse().map_err(|e| miette::miette!("{}", e))?;
+
+    // Create memory cache
+    let cache = MemoryCache::new(Arc::new(dbs));
+
+    // Create the block
+    let block_id = cache
+        .create_block(
+            &agent.id,
+            label,
+            &format!("Memory block: {}", label),
+            block_type,
+            BlockSchema::text(),
+            2000, // default char limit
+        )
+        .await
+        .map_err(|e| miette::miette!("Failed to create memory block: {:?}", e))?;
+
+    // Set initial content if provided
+    if !block_content.is_empty() {
+        if let Some(doc) = cache
+            .get_block(&agent.id, label)
+            .await
+            .map_err(|e| miette::miette!("Failed to get block: {:?}", e))?
+        {
+            doc.set_text(&block_content, true)
+                .map_err(|e| miette::miette!("Failed to set content: {}", e))?;
+            cache
+                .persist_block(&agent.id, label)
+                .await
+                .map_err(|e| miette::miette!("Failed to persist block: {:?}", e))?;
+        }
+    }
+
+    // Set pinned status if requested
+    if pinned {
+        cache
+            .set_block_pinned(&agent.id, label, true)
+            .await
+            .map_err(|e| miette::miette!("Failed to pin block: {:?}", e))?;
+    }
+
+    output.success(&format!(
+        "Added memory block '{}' to agent '{}'",
+        label.bright_cyan(),
+        agent_name.bright_cyan()
+    ));
+    output.kv("Block ID", &block_id);
+    output.kv("Type", &block_type.to_string());
+    output.kv("Permission", permission);
+    if pinned {
+        output.kv("Pinned", "yes");
+    }
+
+    Ok(())
+}
+
+/// Enable a tool for an agent
+pub async fn add_tool(agent_name: &str, tool_name: &str, config: &PatternConfig) -> Result<()> {
+    let output = Output::new();
+    let db = get_db(config).await?;
+
+    let mut agent = require_agent_by_name(&db, agent_name).await?;
+
+    let mut tools = agent.enabled_tools.0.clone();
+    if tools.contains(&tool_name.to_string()) {
+        output.info("Tool already enabled", tool_name);
+        return Ok(());
+    }
+
+    tools.push(tool_name.to_string());
+    agent.enabled_tools = pattern_db::Json(tools);
+
+    pattern_db::queries::update_agent(db.pool(), &agent)
+        .await
+        .map_err(|e| miette::miette!("Failed to update agent: {}", e))?;
+
+    output.success(&format!(
+        "Enabled tool '{}' for agent '{}'",
+        tool_name.bright_yellow(),
+        agent_name.bright_cyan()
+    ));
+
+    Ok(())
+}
+
+/// Remove a data source subscription from an agent
+pub async fn remove_source(
+    agent_name: &str,
+    source_name: &str,
+    config: &PatternConfig,
+) -> Result<()> {
+    let _ = config;
+    let output = Output::new();
+    output.warning(&format!(
+        "Removing source '{}' from agent '{}' - not yet implemented",
+        source_name.bright_cyan(),
+        agent_name.bright_cyan()
+    ));
+    output.info("Hint", "Use 'agent edit' for full configuration");
+    Ok(())
+}
+
+/// Remove a memory block from an agent
+pub async fn remove_memory(agent_name: &str, label: &str, config: &PatternConfig) -> Result<()> {
+    use pattern_core::memory::{MemoryCache, MemoryStore};
+    use std::sync::Arc;
+
+    let output = Output::new();
+    let dbs = crate::helpers::get_dbs(config).await?;
+
+    let agent = pattern_db::queries::get_agent_by_name(dbs.constellation.pool(), agent_name)
+        .await
+        .map_err(|e| miette::miette!("Database error: {}", e))?
+        .ok_or_else(|| miette::miette!("Agent '{}' not found", agent_name))?;
+
+    // Create memory cache and delete the block
+    let cache = MemoryCache::new(Arc::new(dbs));
+
+    cache
+        .delete_block(&agent.id, label)
+        .await
+        .map_err(|e| miette::miette!("Failed to delete block '{}': {:?}", label, e))?;
+
+    output.success(&format!(
+        "Removed memory block '{}' from agent '{}'",
+        label.bright_cyan(),
+        agent_name.bright_cyan()
+    ));
+
+    Ok(())
+}
+
+/// Disable a tool for an agent
+pub async fn remove_tool(agent_name: &str, tool_name: &str, config: &PatternConfig) -> Result<()> {
+    let output = Output::new();
+    let db = get_db(config).await?;
+
+    let mut agent = require_agent_by_name(&db, agent_name).await?;
+
+    let mut tools = agent.enabled_tools.0.clone();
+    if !tools.contains(&tool_name.to_string()) {
+        output.info("Tool not enabled", tool_name);
+        return Ok(());
+    }
+
+    tools.retain(|t| t != tool_name);
+    agent.enabled_tools = pattern_db::Json(tools);
+
+    pattern_db::queries::update_agent(db.pool(), &agent)
+        .await
+        .map_err(|e| miette::miette!("Failed to update agent: {}", e))?;
+
+    output.success(&format!(
+        "Disabled tool '{}' for agent '{}'",
+        tool_name.bright_yellow(),
+        agent_name.bright_cyan()
+    ));
+
+    Ok(())
+}

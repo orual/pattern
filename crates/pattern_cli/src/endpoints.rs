@@ -10,10 +10,12 @@ use owo_colors::OwoColorize;
 use pattern_core::{
     Result,
     agent::Agent,
-    config::PatternConfig,
     coordination::groups::{AgentGroup, AgentWithMembership, GroupManager, GroupResponseEvent},
     messages::{ContentBlock, ContentPart, Message, MessageContent},
-    runtime::router::{MessageEndpoint, MessageOrigin},
+    runtime::{
+        endpoints::BlueskyEndpoint,
+        router::{MessageEndpoint, MessageOrigin},
+    },
 };
 use pattern_db::models::PatternType;
 use serde_json::Value;
@@ -305,30 +307,14 @@ pub async fn build_group_cli_endpoint(
 // =============================================================================
 
 /// Set up Bluesky endpoint for an agent if configured
-///
-/// NOTE: ATProto identity storage needs to be implemented in pattern_db
-/// before this can work. Currently just logs a warning.
-pub async fn setup_bluesky_endpoint(
-    _agent: &Arc<dyn Agent>,
-    config: &PatternConfig,
-    output: &Output,
-) -> Result<()> {
-    // Check if agent has a bluesky_handle configured
-    let bluesky_handle = if let Some(handle) = &config.agent.bluesky_handle {
-        handle.clone()
-    } else {
-        // No Bluesky handle configured for this agent
-        return Ok(());
-    };
-
-    output.warning(&format!(
-        "Bluesky endpoint setup for {} is temporarily disabled",
-        bluesky_handle.bright_cyan()
-    ));
-    output.info(
-        "Reason:",
-        "ATProto identity storage not yet migrated to pattern_db",
-    );
+#[allow(dead_code)]
+pub async fn setup_bluesky_endpoint(agent: &Arc<dyn Agent>) -> Result<()> {
+    let runtime = agent.runtime();
+    let router = runtime.router();
+    let bsky = BlueskyEndpoint::new(agent.id().0, runtime.dbs().clone()).await?;
+    router
+        .register_endpoint("bluesky".into(), Arc::new(bsky))
+        .await;
 
     Ok(())
 }

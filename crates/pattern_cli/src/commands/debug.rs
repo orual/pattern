@@ -8,104 +8,139 @@
 use miette::Result;
 use owo_colors::OwoColorize;
 use pattern_core::config::PatternConfig;
+use pattern_db::search::ContentFilter;
 
 use crate::helpers::{get_db, load_config, require_agent_by_name};
 use crate::output::Output;
 
 // =============================================================================
-// Search Conversations - STUBBED
+// Search Conversations
 // =============================================================================
 
-// TODO: Reimplement for pattern_db (SQLite/sqlx)
-//
-// Previous implementation:
-// 1. Found agent by name via raw SurrealDB query
-// 2. Created AgentHandle with memory and DB connection
-// 3. Called handle.search_conversations(query, role, start, end, limit)
-// 4. Displayed results with role colors, timestamps, content previews
-// 5. Showed batch/position/sequence info for each message
-//
-// Needs: pattern_db::queries::search_agent_messages()
-
-/// Search conversation history for an agent
-///
-/// NOTE: Currently STUBBED. Needs pattern_db message queries.
+/// Search conversation history for an agent using FTS.
 pub async fn search_conversations(
     agent_name: &str,
     query: Option<&str>,
-    role: Option<&str>,
-    start_time: Option<&str>,
-    end_time: Option<&str>,
+    _role: Option<&str>,
+    _start_time: Option<&str>,
+    _end_time: Option<&str>,
     limit: usize,
 ) -> Result<()> {
     let output = Output::new();
+    let config = load_config().await?;
+    let db = get_db(&config).await?;
 
-    output.warning(&format!(
-        "Conversation search for '{}' temporarily disabled during database migration",
-        agent_name.bright_cyan()
+    // Find agent
+    let agent = require_agent_by_name(&db, agent_name).await?;
+
+    let query_text = match query {
+        Some(q) => q,
+        None => {
+            output.warning("No search query provided. Use --query to search.");
+            return Ok(());
+        }
+    };
+
+    output.status(&format!(
+        "Searching conversations for '{}': \"{}\"",
+        agent_name.bright_cyan(),
+        query_text
     ));
+    output.status("");
 
-    if let Some(q) = query {
-        output.info("Query:", q);
+    // Use pattern_db's hybrid search
+    let results = pattern_db::search::search(db.pool())
+        .text(query_text)
+        .filter(ContentFilter::messages(Some(&agent.id)))
+        .limit(limit as i64)
+        .execute()
+        .await
+        .map_err(|e| miette::miette!("Search failed: {}", e))?;
+
+    if results.is_empty() {
+        output.info("No results found", "");
+        return Ok(());
     }
-    if let Some(r) = role {
-        output.info("Role filter:", r);
+
+    output.status(&format!("Found {} result(s):", results.len()));
+    output.status("");
+
+    for result in results {
+        // Display result
+        let score_str = format!("{:.3}", result.score);
+        output.info(
+            &format!("  [{}]", score_str.dimmed()),
+            &result.id.bright_yellow().to_string(),
+        );
+
+        if let Some(content) = &result.content {
+            let preview = if content.len() > 200 {
+                format!("{}...", &content[..200])
+            } else {
+                content.clone()
+            };
+            output.status(&format!("    {}", preview.dimmed()));
+        }
+        output.status("");
     }
-    if let Some(st) = start_time {
-        output.info("Start time:", st);
-    }
-    if let Some(et) = end_time {
-        output.info("End time:", et);
-    }
-    output.info("Limit:", &limit.to_string());
-    output.info(
-        "Reason:",
-        "Needs pattern_db::queries::search_agent_messages()",
-    );
-    output.status("Previous functionality:");
-    output.list_item("Full-text search across messages");
-    output.list_item("Role filtering (system, user, assistant, tool)");
-    output.list_item("Time range filtering");
-    output.list_item("Batch/position/sequence info display");
 
     Ok(())
 }
 
 // =============================================================================
-// Search Archival Memory - STUBBED
+// Search Archival Memory
 // =============================================================================
 
-// TODO: Reimplement for pattern_db (SQLite/sqlx)
-//
-// Previous implementation:
-// 1. Found agent by name via raw SurrealDB query
-// 2. Created AgentHandle with memory and DB connection
-// 3. Called handle.search_archival_memories(query, limit)
-// 4. Displayed results with labels, types, creation dates, content previews
-//
-// Needs: pattern_db::queries::search_archival_memories()
-
-/// Search archival memory as if we were the agent
-///
-/// NOTE: Currently STUBBED. Needs pattern_db memory queries.
+/// Search archival memory using FTS.
 pub async fn search_archival_memory(agent_name: &str, query: &str, limit: usize) -> Result<()> {
     let output = Output::new();
+    let config = load_config().await?;
+    let db = get_db(&config).await?;
 
-    output.warning(&format!(
-        "Archival search for '{}' temporarily disabled during database migration",
-        agent_name.bright_cyan()
+    // Find agent
+    let agent = require_agent_by_name(&db, agent_name).await?;
+
+    output.status(&format!(
+        "Searching archival memory for '{}': \"{}\"",
+        agent_name.bright_cyan(),
+        query
     ));
+    output.status("");
 
-    output.info("Query:", query);
-    output.info("Limit:", &limit.to_string());
-    output.info(
-        "Reason:",
-        "Needs pattern_db::queries::search_archival_memories()",
-    );
-    output.status("Previous functionality:");
-    output.list_item("Full-text search across archival memories");
-    output.list_item("BM25 ranking");
-    output.list_item("Content preview display");
+    // Use pattern_db's hybrid search for archival entries
+    let results = pattern_db::search::search(db.pool())
+        .text(query)
+        .filter(ContentFilter::archival(Some(&agent.id)))
+        .limit(limit as i64)
+        .execute()
+        .await
+        .map_err(|e| miette::miette!("Search failed: {}", e))?;
+
+    if results.is_empty() {
+        output.info("No results found", "");
+        return Ok(());
+    }
+
+    output.status(&format!("Found {} result(s):", results.len()));
+    output.status("");
+
+    for result in results {
+        let score_str = format!("{:.3}", result.score);
+        output.info(
+            &format!("  [{}]", score_str.dimmed()),
+            &result.id.bright_yellow().to_string(),
+        );
+
+        if let Some(content) = &result.content {
+            let preview = if content.len() > 200 {
+                format!("{}...", &content[..200])
+            } else {
+                content.clone()
+            };
+            output.status(&format!("    {}", preview.dimmed()));
+        }
+        output.status("");
+    }
 
     Ok(())
 }

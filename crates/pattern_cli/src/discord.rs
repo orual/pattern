@@ -247,8 +247,8 @@ pub async fn run_discord_bot_with_group(
         ctx.start_heartbeat_processor(move |event, _agent_id, agent_name| {
             let output = output_clone.clone();
             async move {
-                output.status(&format!("Heartbeat continuation from {}:", agent_name));
-                print_response_event(event, &output);
+                output.status("Heartbeat continuation");
+                print_response_event(&agent_name, event, &output);
             }
         })
         .await
@@ -284,8 +284,8 @@ pub async fn run_discord_bot_with_group(
         ctx.start_heartbeat_processor(move |event, _agent_id, agent_name| {
             let output = output_clone.clone();
             async move {
-                output.status(&format!("Heartbeat continuation from {}:", agent_name));
-                crate::chat::print_response_event(event, &output);
+                output.status("Heartbeat continuation");
+                crate::chat::print_response_event(&agent_name, event, &output);
             }
         })
         .await

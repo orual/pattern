@@ -349,6 +349,8 @@ pub enum GroupMemberRole {
     Regular,
     /// Group supervisor/leader
     Supervisor,
+    /// Observer (receives messages but doesn't respond)
+    Observer,
     /// Specialist in a particular domain
     Specialist { domain: String },
 }

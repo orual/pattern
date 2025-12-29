@@ -242,6 +242,7 @@ impl MemoryCache {
             last_seq,
             last_persisted_frontier: Some(frontier),
             dirty: false,
+            pinned: block.pinned,
             last_accessed: Utc::now(),
         }))
     }
@@ -489,6 +490,7 @@ impl MemoryStore for MemoryCache {
             last_seq: 0,
             last_persisted_frontier: None,
             dirty: false,
+            pinned: block.pinned,
             last_accessed: Utc::now(),
         };
 
@@ -1056,8 +1058,7 @@ impl MemoryStore for MemoryCache {
 
         // Update in cache if loaded
         if let Some(mut cached) = self.blocks.get_mut(&block.id) {
-            // Note: CachedBlock doesn't have a pinned field, so we only update the DB.
-            // The metadata will be refreshed on next get_block_metadata call.
+            cached.pinned = pinned;
             cached.last_accessed = Utc::now();
         }
 

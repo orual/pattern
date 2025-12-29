@@ -21,11 +21,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Convert a database GroupMemberRole to the core GroupMemberRole
-pub fn convert_db_role(db_role: Option<DbGroupMemberRole>) -> GroupMemberRole {
-    match db_role {
+pub fn convert_db_role(db_role: Option<pattern_db::Json<DbGroupMemberRole>>) -> GroupMemberRole {
+    match db_role.as_ref().map(|j| &j.0) {
         Some(DbGroupMemberRole::Supervisor) => GroupMemberRole::Supervisor,
-        Some(DbGroupMemberRole::Worker) => GroupMemberRole::Regular,
-        Some(DbGroupMemberRole::Observer) => GroupMemberRole::Regular, // Map observer to regular
+        Some(DbGroupMemberRole::Regular) => GroupMemberRole::Regular,
+        Some(DbGroupMemberRole::Observer) => GroupMemberRole::Observer,
+        Some(DbGroupMemberRole::Specialist { domain }) => GroupMemberRole::Specialist {
+            domain: domain.clone(),
+        },
         None => GroupMemberRole::Regular,
     }
 }
@@ -137,9 +140,11 @@ pub fn build_agents_with_membership(
                 in_id: agent.id(),
                 out_id: GroupId(db_group_id.to_string()),
                 joined_at: db_membership.map(|m| m.joined_at).unwrap_or_else(Utc::now),
-                role: convert_db_role(db_membership.and_then(|m| m.role)),
+                role: convert_db_role(db_membership.and_then(|m| m.role.clone())),
                 is_active: true,
-                capabilities: vec![],
+                capabilities: db_membership
+                    .map(|m| m.capabilities.0.clone())
+                    .unwrap_or_default(),
             };
 
             AgentWithMembership { agent, membership }

@@ -57,6 +57,25 @@ impl Display for MemoryPermission {
     }
 }
 
+impl std::str::FromStr for MemoryPermission {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().replace('-', "_").as_str() {
+            "read_only" | "readonly" => Ok(Self::ReadOnly),
+            "partner" => Ok(Self::Partner),
+            "human" => Ok(Self::Human),
+            "append" => Ok(Self::Append),
+            "read_write" | "readwrite" => Ok(Self::ReadWrite),
+            "admin" => Ok(Self::Admin),
+            _ => Err(format!(
+                "unknown permission '{}', expected: read_only, partner, human, append, read_write, admin",
+                s
+            )),
+        }
+    }
+}
+
 impl From<MemoryPermission> for pattern_db::models::MemoryPermission {
     fn from(p: MemoryPermission) -> Self {
         match p {

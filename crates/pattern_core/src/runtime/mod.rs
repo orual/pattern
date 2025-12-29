@@ -26,7 +26,7 @@ use crate::tool::{ExecutionMeta, ToolRegistry};
 use crate::{SnowflakePosition, utils::get_next_message_position_sync};
 
 mod context;
-mod endpoints;
+pub mod endpoints;
 mod executor;
 pub mod router;
 mod tool_context;

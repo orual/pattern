@@ -8,52 +8,21 @@
 use chrono::Utc;
 use miette::Result;
 use owo_colors::OwoColorize;
-use pattern_core::config::{GroupPatternConfig, PatternConfig};
-use pattern_db::{
-    Json,
-    models::{AgentGroup, GroupMember, GroupMemberRole, PatternType},
-};
+use pattern_core::config::PatternConfig;
+use pattern_db::models::{GroupMember, GroupMemberRole};
 use std::path::Path;
 
-use crate::helpers::{
-    generate_id, get_agent_by_name, get_db, get_group_by_name, require_agent_by_name,
-    require_group_by_name,
-};
+use crate::helpers::{get_db, require_agent_by_name, require_group_by_name};
 use crate::output::Output;
-
-/// Parse pattern type from string
-fn parse_pattern_type(s: &str) -> Result<PatternType> {
-    match s.to_lowercase().as_str() {
-        "round_robin" | "roundrobin" | "round-robin" => Ok(PatternType::RoundRobin),
-        "dynamic" => Ok(PatternType::Dynamic),
-        "pipeline" => Ok(PatternType::Pipeline),
-        "supervisor" => Ok(PatternType::Supervisor),
-        "voting" => Ok(PatternType::Voting),
-        "sleeptime" => Ok(PatternType::Sleeptime),
-        _ => Err(miette::miette!(
-            "Unknown pattern type: '{}'. Valid patterns: round_robin, dynamic, pipeline, supervisor, voting, sleeptime",
-            s
-        )),
-    }
-}
-
-/// Convert GroupPatternConfig enum to PatternType
-fn pattern_config_to_type(config: &GroupPatternConfig) -> Result<PatternType> {
-    Ok(match config {
-        GroupPatternConfig::Supervisor { .. } => PatternType::Supervisor,
-        GroupPatternConfig::RoundRobin { .. } => PatternType::RoundRobin,
-        GroupPatternConfig::Pipeline { .. } => PatternType::Pipeline,
-        GroupPatternConfig::Dynamic { .. } => PatternType::Dynamic,
-        GroupPatternConfig::Sleeptime { .. } => PatternType::Sleeptime,
-    })
-}
 
 /// Parse member role from string
 fn parse_role(s: &str) -> Result<GroupMemberRole> {
     match s.to_lowercase().as_str() {
         "supervisor" => Ok(GroupMemberRole::Supervisor),
-        "worker" | "regular" => Ok(GroupMemberRole::Worker),
+        "regular" => Ok(GroupMemberRole::Regular),
+
         "observer" => Ok(GroupMemberRole::Observer),
+
         _ => Err(miette::miette!(
             "Unknown role: '{}'. Valid roles: supervisor, worker (or regular), observer",
             s
@@ -105,50 +74,6 @@ pub async fn list(config: &PatternConfig) -> Result<()> {
 }
 
 // =============================================================================
-// Group Creation
-// =============================================================================
-
-/// Create a new group
-pub async fn create(
-    name: &str,
-    description: &str,
-    pattern: &str,
-    config: &PatternConfig,
-) -> Result<()> {
-    let output = Output::new();
-    let db = get_db(config).await?;
-
-    // Check if group already exists using shared helper
-    if get_group_by_name(&db, name).await?.is_some() {
-        output.error(&format!("Group '{}' already exists", name));
-        return Ok(());
-    }
-
-    let pattern_type = parse_pattern_type(pattern)?;
-
-    let group = AgentGroup {
-        id: generate_id("grp"),
-        name: name.to_string(),
-        description: Some(description.to_string()),
-        pattern_type,
-        pattern_config: Json(serde_json::json!({})),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-    };
-
-    pattern_db::queries::create_group(db.pool(), &group)
-        .await
-        .map_err(|e| miette::miette!("Failed to create group: {}", e))?;
-
-    output.success(&format!("Created group '{}'", name.bright_cyan()));
-    output.kv("ID", &group.id);
-    output.kv("Pattern", &format!("{:?}", pattern_type));
-    output.kv("Description", description);
-
-    Ok(())
-}
-
-// =============================================================================
 // Add Member
 // =============================================================================
 
@@ -157,7 +82,7 @@ pub async fn add_member(
     group_name: &str,
     agent_name: &str,
     role: &str,
-    _capabilities: Option<&str>,
+    capabilities: Option<&str>,
     config: &PatternConfig,
 ) -> Result<()> {
     let output = Output::new();
@@ -169,10 +94,21 @@ pub async fn add_member(
 
     let member_role = parse_role(role)?;
 
+    // Parse comma-separated capabilities
+    let caps: Vec<String> = capabilities
+        .map(|s| {
+            s.split(',')
+                .map(|c| c.trim().to_string())
+                .filter(|c| !c.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
     let member = GroupMember {
         group_id: group.id.clone(),
         agent_id: agent.id.clone(),
-        role: Some(member_role),
+        role: Some(pattern_db::Json(member_role.clone())),
+        capabilities: pattern_db::Json(caps.clone()),
         joined_at: Utc::now(),
     };
 
@@ -186,6 +122,9 @@ pub async fn add_member(
         group_name.bright_cyan()
     ));
     output.kv("Role", &format!("{:?}", member_role));
+    if !caps.is_empty() {
+        output.kv("Capabilities", &caps.join(", "));
+    }
 
     Ok(())
 }
@@ -283,7 +222,7 @@ pub async fn export(name: &str, output_path: Option<&Path>, config: &PatternConf
             member_configs.push(serde_json::json!({
                 "agent_id": agent.id,
                 "name": agent.name,
-                "role": member.role.map(|r| format!("{:?}", r).to_lowercase()),
+                "role": member.role.as_ref().map(|r| format!("{:?}", r.0).to_lowercase()),
             }));
         }
     }
@@ -319,89 +258,192 @@ pub async fn export(name: &str, output_path: Option<&Path>, config: &PatternConf
 }
 
 // =============================================================================
-// Initialize from Config
+// Quick Add/Remove Commands
 // =============================================================================
 
-/// Initialize groups from configuration
-///
-/// Creates groups and adds members as specified in the config file.
-#[allow(dead_code)]
-pub async fn initialize_from_config(
+/// Add a shared memory block to a group
+pub async fn add_memory(
+    group_name: &str,
+    label: &str,
+    content: Option<&str>,
+    path: Option<&std::path::Path>,
     config: &PatternConfig,
-    _heartbeat_sender: pattern_core::context::heartbeat::HeartbeatSender,
+) -> Result<()> {
+    use pattern_core::memory::{
+        BlockSchema, BlockType, MemoryCache, MemoryStore, SharedBlockManager,
+    };
+    use pattern_db::models::MemoryPermission;
+    use std::sync::Arc;
+
+    let output = Output::new();
+    let dbs = crate::helpers::get_dbs(config).await?;
+    let dbs = Arc::new(dbs);
+
+    let group = pattern_db::queries::get_group_by_name(dbs.constellation.pool(), group_name)
+        .await
+        .map_err(|e| miette::miette!("Database error: {}", e))?
+        .ok_or_else(|| miette::miette!("Group '{}' not found", group_name))?;
+
+    // Get all members of the group
+    let members = pattern_db::queries::get_group_members(dbs.constellation.pool(), &group.id)
+        .await
+        .map_err(|e| miette::miette!("Failed to get group members: {}", e))?;
+
+    // Determine content
+    let block_content = if let Some(c) = content {
+        c.to_string()
+    } else if let Some(p) = path {
+        std::fs::read_to_string(p)
+            .map_err(|e| miette::miette!("Failed to read file '{}': {}", p.display(), e))?
+    } else {
+        String::new()
+    };
+
+    // Create memory cache
+    let cache = MemoryCache::new(dbs.clone());
+
+    // Create the block with group as owner
+    let block_id = cache
+        .create_block(
+            &group.id,
+            label,
+            &format!("Shared memory for group {}: {}", group_name, label),
+            BlockType::Working,
+            BlockSchema::text(),
+            2000,
+        )
+        .await
+        .map_err(|e| miette::miette!("Failed to create shared memory block: {:?}", e))?;
+
+    // Set initial content if provided
+    if !block_content.is_empty() {
+        if let Some(doc) = cache
+            .get_block(&group.id, label)
+            .await
+            .map_err(|e| miette::miette!("Failed to get block: {:?}", e))?
+        {
+            doc.set_text(&block_content, true)
+                .map_err(|e| miette::miette!("Failed to set content: {}", e))?;
+            cache
+                .persist_block(&group.id, label)
+                .await
+                .map_err(|e| miette::miette!("Failed to persist block: {:?}", e))?;
+        }
+    }
+
+    // Share the block with all agents in the group
+    let sharing_manager = SharedBlockManager::new(dbs);
+    for member in &members {
+        sharing_manager
+            .share_block(&block_id, &member.agent_id, MemoryPermission::ReadWrite)
+            .await
+            .map_err(|e| {
+                miette::miette!(
+                    "Failed to share block with agent '{}': {:?}",
+                    member.agent_id,
+                    e
+                )
+            })?;
+    }
+
+    output.success(&format!(
+        "Added shared memory block '{}' to group '{}'",
+        label.bright_cyan(),
+        group_name.bright_cyan()
+    ));
+    output.kv("Block ID", &block_id);
+    output.kv("Shared with", &format!("{} agent(s)", members.len()));
+
+    Ok(())
+}
+
+/// Add a data source subscription to a group
+pub async fn add_source(
+    group_name: &str,
+    source_name: &str,
+    source_type: &str,
+    config: &PatternConfig,
+) -> Result<()> {
+    let _ = config;
+    let output = Output::new();
+    output.warning(&format!(
+        "Adding source '{}' ({}) to group '{}' - not yet implemented",
+        source_name.bright_cyan(),
+        source_type,
+        group_name.bright_cyan()
+    ));
+    output.info("Hint", "Use 'group edit' for full configuration");
+    Ok(())
+}
+
+/// Remove a member from a group
+pub async fn remove_member(
+    group_name: &str,
+    agent_name: &str,
+    config: &PatternConfig,
 ) -> Result<()> {
     let output = Output::new();
     let db = get_db(config).await?;
 
-    // Check if there are any groups in config
-    if config.groups.is_empty() {
-        output.info(
-            "No groups in config",
-            "Add groups to your pattern.toml file",
-        );
-        return Ok(());
-    }
+    let group = require_group_by_name(&db, group_name).await?;
+    let agent = require_agent_by_name(&db, agent_name).await?;
 
-    for group_config in &config.groups {
-        output.status(&format!(
-            "Initializing group: {}",
-            group_config.name.bright_cyan()
-        ));
+    pattern_db::queries::remove_group_member(db.pool(), &group.id, &agent.id)
+        .await
+        .map_err(|e| miette::miette!("Failed to remove member: {}", e))?;
 
-        // Check if group exists using shared helper
-        if get_group_by_name(&db, &group_config.name).await?.is_some() {
-            output.info("  Group exists", "skipping creation");
-            continue;
-        }
+    output.success(&format!(
+        "Removed '{}' from group '{}'",
+        agent_name.bright_cyan(),
+        group_name.bright_cyan()
+    ));
 
-        // Parse pattern from config
-        let pattern_type = pattern_config_to_type(&group_config.pattern)?;
+    Ok(())
+}
 
-        let group = AgentGroup {
-            id: generate_id("grp"),
-            name: group_config.name.clone(),
-            description: Some(group_config.description.clone()),
-            pattern_type,
-            pattern_config: Json(serde_json::json!({})),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
+/// Remove a shared memory block from a group
+pub async fn remove_memory(group_name: &str, label: &str, config: &PatternConfig) -> Result<()> {
+    use pattern_core::memory::{MemoryCache, MemoryStore};
+    use std::sync::Arc;
 
-        pattern_db::queries::create_group(db.pool(), &group)
-            .await
-            .map_err(|e| miette::miette!("Failed to create group: {}", e))?;
+    let output = Output::new();
+    let dbs = crate::helpers::get_dbs(config).await?;
 
-        output.success(&format!("  Created group '{}'", group_config.name));
+    let group = pattern_db::queries::get_group_by_name(dbs.constellation.pool(), group_name)
+        .await
+        .map_err(|e| miette::miette!("Database error: {}", e))?
+        .ok_or_else(|| miette::miette!("Group '{}' not found", group_name))?;
 
-        // Add members if specified
-        for member_config in &group_config.members {
-            // Try to find agent by name or ID
-            let agent_id = if let Some(ref id) = member_config.agent_id {
-                id.0.clone()
-            } else {
-                // Use name to look up agent using shared helper
-                let name = &member_config.name;
-                match get_agent_by_name(&db, name).await? {
-                    Some(a) => a.id,
-                    None => {
-                        output.warning(&format!("  Agent '{}' not found, skipping", name));
-                        continue;
-                    }
-                }
-            };
+    // Create memory cache
+    let cache = MemoryCache::new(Arc::new(dbs));
 
-            let member = GroupMember {
-                group_id: group.id.clone(),
-                agent_id,
-                role: Some(GroupMemberRole::Worker),
-                joined_at: Utc::now(),
-            };
+    // Shared memory uses group ID as owner, plain label
+    cache.delete_block(&group.id, label).await.map_err(|e| {
+        miette::miette!("Failed to delete shared memory block '{}': {:?}", label, e)
+    })?;
 
-            pattern_db::queries::add_group_member(db.pool(), &member)
-                .await
-                .map_err(|e| miette::miette!("Failed to add member: {}", e))?;
-        }
-    }
+    output.success(&format!(
+        "Removed shared memory block '{}' from group '{}'",
+        label.bright_cyan(),
+        group_name.bright_cyan()
+    ));
 
+    Ok(())
+}
+
+/// Remove a data source subscription from a group
+pub async fn remove_source(
+    group_name: &str,
+    source_name: &str,
+    config: &PatternConfig,
+) -> Result<()> {
+    let _ = config;
+    let output = Output::new();
+    output.warning(&format!(
+        "Removing source '{}' from group '{}' - not yet implemented",
+        source_name.bright_cyan(),
+        group_name.bright_cyan()
+    ));
+    output.info("Hint", "Use 'group edit' for full configuration");
     Ok(())
 }

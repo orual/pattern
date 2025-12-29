@@ -216,24 +216,28 @@ pub struct GroupMember {
     /// Agent ID
     pub agent_id: String,
 
-    /// Role within the group (pattern-specific)
-    pub role: Option<GroupMemberRole>,
+    /// Role within the group (pattern-specific), stored as JSON
+    pub role: Option<crate::Json<GroupMemberRole>>,
+
+    /// Capabilities this member provides (stored as JSON array)
+    pub capabilities: crate::Json<Vec<String>>,
 
     /// When the agent joined the group
     pub joined_at: DateTime<Utc>,
 }
 
 /// Member roles within a group.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
-#[sqlx(type_name = "TEXT", rename_all = "lowercase")]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum GroupMemberRole {
     /// Supervisor role (for supervisor pattern)
     Supervisor,
-    /// Worker role
-    Worker,
+    /// Regular role
+    Regular,
     /// Observer (receives messages but doesn't respond)
     Observer,
+    /// Specialist with a specific domain
+    Specialist { domain: String },
 }
 
 // ============================================================================

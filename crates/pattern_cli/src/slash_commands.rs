@@ -311,26 +311,6 @@ pub async fn handle_slash_command(
             output.status("Reason: Agent handle pattern removed in new architecture");
             Ok(false)
         }
-        "/query" => {
-            if parts.len() < 2 {
-                output.error("Usage: /query <sql>");
-                return Ok(false);
-            }
-
-            let sql = parts[1..].join(" ");
-            output.status(&format!("Running query: {}", sql.bright_cyan()));
-
-            // Run the query directly
-            match crate::commands::db::query(&sql, output).await {
-                Ok(_) => {
-                    // Query output is handled by the query function
-                }
-                Err(e) => {
-                    output.error(&format!("Query failed: {}", e));
-                }
-            }
-            Ok(false)
-        }
         _ => {
             output.error(&format!("Unknown command: {}", parts[0]));
             output.status("Type /help for available commands");
