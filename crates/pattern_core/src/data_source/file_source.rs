@@ -251,6 +251,34 @@ impl FileSource {
         }
     }
 
+    /// Create a FileSource from configuration for a single path.
+    ///
+    /// Note: If config has multiple paths, call this once per path to create
+    /// separate FileSource instances.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The base path for this source
+    /// * `config` - Configuration including permission rules
+    pub fn from_config(path: impl Into<PathBuf>, config: &crate::config::FileSourceConfig) -> Self {
+        use crate::config::FilePermissionRuleConfig;
+
+        let rules: Vec<PermissionRule> = if config.permission_rules.is_empty() {
+            // Default rule: all files are ReadWrite
+            vec![PermissionRule::new("**", MemoryPermission::ReadWrite)]
+        } else {
+            config
+                .permission_rules
+                .iter()
+                .map(|r: &FilePermissionRuleConfig| {
+                    PermissionRule::new(r.pattern.clone(), r.permission)
+                })
+                .collect()
+        };
+
+        Self::with_rules(path, rules)
+    }
+
     /// Get the base path for this source.
     pub fn base_path(&self) -> &Path {
         &self.base_path

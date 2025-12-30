@@ -11,7 +11,7 @@ pub struct SummaryRenderer {
 impl SummaryRenderer {
     /// Create a new summary renderer.
     pub fn new(title: &str) -> Self {
-        let width = 60;
+        let width = 100;
         let mut renderer = Self {
             lines: Vec::new(),
             width,

@@ -357,22 +357,101 @@ pub async fn add_memory(
     Ok(())
 }
 
-/// Add a data source subscription to a group
+/// Add a data source subscription to a group (interactive or from TOML file)
 pub async fn add_source(
     group_name: &str,
     source_name: &str,
-    source_type: &str,
+    source_type: Option<&str>,
+    from_toml: Option<&std::path::Path>,
     config: &PatternConfig,
 ) -> Result<()> {
-    let _ = config;
+    use crate::commands::builder::editors::select_menu;
+    use crate::data_source_config;
+
     let output = Output::new();
-    output.warning(&format!(
-        "Adding source '{}' ({}) to group '{}' - not yet implemented",
+    let db = get_db(config).await?;
+
+    let group = require_group_by_name(&db, group_name).await?;
+
+    // Parse existing pattern_config to get data_sources
+    let mut pattern_cfg = group.pattern_config.0.clone();
+    let data_sources = pattern_cfg
+        .get_mut("data_sources")
+        .and_then(|v| v.as_object_mut());
+
+    // Check if source already exists
+    if let Some(sources) = data_sources {
+        if sources.contains_key(source_name) {
+            output.warning(&format!(
+                "Data source '{}' already exists on group '{}'",
+                source_name.bright_cyan(),
+                group_name.bright_cyan()
+            ));
+            return Ok(());
+        }
+    }
+
+    // Build the data source config
+    let data_source = if let Some(toml_path) = from_toml {
+        // Load from TOML file
+        data_source_config::load_source_from_toml(toml_path)?
+    } else {
+        // Interactive builder
+        let stype = if let Some(t) = source_type {
+            t.to_string()
+        } else {
+            // Prompt for type
+            let source_types = ["bluesky", "discord", "file", "custom"];
+            let idx = select_menu("Source type", &source_types, 0)?;
+            source_types[idx].to_string()
+        };
+        data_source_config::build_source_interactive(source_name, &stype)?
+    };
+
+    // Show summary
+    println!(
+        "\n{}",
+        data_source_config::render_source_summary(source_name, &data_source)
+    );
+
+    // Add to pattern_config
+    let source_value = serde_json::to_value(&data_source)
+        .map_err(|e| miette::miette!("Failed to serialize data source: {}", e))?;
+
+    if !pattern_cfg.is_object() {
+        pattern_cfg = serde_json::json!({});
+    }
+
+    let pattern_obj = pattern_cfg.as_object_mut().unwrap();
+    let sources = pattern_obj
+        .entry("data_sources")
+        .or_insert_with(|| serde_json::json!({}));
+
+    if let Some(sources_obj) = sources.as_object_mut() {
+        sources_obj.insert(source_name.to_string(), source_value);
+    }
+
+    // Update the group
+    let updated_group = pattern_db::models::AgentGroup {
+        id: group.id.clone(),
+        name: group.name.clone(),
+        description: group.description.clone(),
+        pattern_type: group.pattern_type,
+        pattern_config: pattern_db::Json(pattern_cfg),
+        created_at: group.created_at,
+        updated_at: chrono::Utc::now(),
+    };
+
+    pattern_db::queries::update_group(db.pool(), &updated_group)
+        .await
+        .map_err(|e| miette::miette!("Failed to update group: {}", e))?;
+
+    output.success(&format!(
+        "Added source '{}' to group '{}'",
         source_name.bright_cyan(),
-        source_type,
         group_name.bright_cyan()
     ));
-    output.info("Hint", "Use 'group edit' for full configuration");
+
     Ok(())
 }
 
@@ -437,13 +516,53 @@ pub async fn remove_source(
     source_name: &str,
     config: &PatternConfig,
 ) -> Result<()> {
-    let _ = config;
     let output = Output::new();
-    output.warning(&format!(
-        "Removing source '{}' from group '{}' - not yet implemented",
+    let db = get_db(config).await?;
+
+    let group = require_group_by_name(&db, group_name).await?;
+
+    // Parse existing pattern_config to get data_sources
+    let mut pattern_cfg = group.pattern_config.0.clone();
+
+    // Check if data_sources exists and has the source
+    let removed = if let Some(sources) = pattern_cfg
+        .get_mut("data_sources")
+        .and_then(|v| v.as_object_mut())
+    {
+        sources.remove(source_name).is_some()
+    } else {
+        false
+    };
+
+    if !removed {
+        output.warning(&format!(
+            "Data source '{}' not found on group '{}'",
+            source_name.bright_cyan(),
+            group_name.bright_cyan()
+        ));
+        return Ok(());
+    }
+
+    // Update the group
+    let updated_group = pattern_db::models::AgentGroup {
+        id: group.id.clone(),
+        name: group.name.clone(),
+        description: group.description.clone(),
+        pattern_type: group.pattern_type,
+        pattern_config: pattern_db::Json(pattern_cfg),
+        created_at: group.created_at,
+        updated_at: chrono::Utc::now(),
+    };
+
+    pattern_db::queries::update_group(db.pool(), &updated_group)
+        .await
+        .map_err(|e| miette::miette!("Failed to update group: {}", e))?;
+
+    output.success(&format!(
+        "Removed source '{}' from group '{}'",
         source_name.bright_cyan(),
         group_name.bright_cyan()
     ));
-    output.info("Hint", "Use 'group edit' for full configuration");
+
     Ok(())
 }

@@ -228,6 +228,81 @@ impl BuiltinToolsBuilder {
     }
 }
 
+/// List of all available built-in tool names.
+pub const BUILTIN_TOOL_NAMES: &[&str] = &[
+    "recall",
+    "search",
+    "send_message",
+    "web",
+    "calculator",
+    "block",
+    "block_edit",
+    "source",
+    "file",
+    "emergency_halt",
+];
+
+/// Create a built-in tool by name.
+///
+/// Returns `Some(tool)` if the name matches a built-in tool, `None` otherwise.
+/// For custom tools, use the inventory-based lookup.
+pub fn create_builtin_tool(name: &str, ctx: Arc<dyn ToolContext>) -> Option<Box<dyn DynamicTool>> {
+    match name {
+        "recall" => Some(Box::new(DynamicToolAdapter::new(RecallTool::new(
+            Arc::clone(&ctx),
+        )))),
+        "search" => Some(Box::new(DynamicToolAdapter::new(SearchTool::new(
+            Arc::clone(&ctx),
+        )))),
+        "send_message" => Some(Box::new(DynamicToolAdapter::new(SendMessageTool::new(
+            Arc::clone(&ctx),
+        )))),
+        "web" => Some(Box::new(DynamicToolAdapter::new(WebTool::new(Arc::clone(
+            &ctx,
+        ))))),
+        "calculator" => Some(Box::new(DynamicToolAdapter::new(CalculatorTool::new(
+            Arc::clone(&ctx),
+        )))),
+        "block" => Some(Box::new(DynamicToolAdapter::new(BlockTool::new(
+            Arc::clone(&ctx),
+        )))),
+        "block_edit" => Some(Box::new(DynamicToolAdapter::new(BlockEditTool::new(
+            Arc::clone(&ctx),
+        )))),
+        "source" => Some(Box::new(DynamicToolAdapter::new(SourceTool::new(
+            Arc::clone(&ctx),
+        )))),
+        "file" => Some(Box::new(DynamicToolAdapter::new(FileTool::new(
+            Arc::clone(&ctx),
+        )))),
+        "emergency_halt" => Some(Box::new(DynamicToolAdapter::new(SystemIntegrityTool::new(
+            Arc::clone(&ctx),
+        )))),
+        _ => None,
+    }
+}
+
+/// Create a tool by name, checking builtins first, then custom registry.
+///
+/// This is the preferred function for tool instantiation - it handles both
+/// built-in tools and custom tools registered via inventory.
+pub fn create_tool_by_name(name: &str, ctx: Arc<dyn ToolContext>) -> Option<Box<dyn DynamicTool>> {
+    // Try builtin first
+    if let Some(tool) = create_builtin_tool(name, Arc::clone(&ctx)) {
+        return Some(tool);
+    }
+
+    // Fall back to custom tool registry
+    crate::tool::create_custom_tool(name, ctx)
+}
+
+/// List all available tool names (builtin + custom).
+pub fn all_available_tools() -> Vec<&'static str> {
+    let mut tools: Vec<&'static str> = BUILTIN_TOOL_NAMES.to_vec();
+    tools.extend(crate::tool::available_custom_tools());
+    tools
+}
+
 #[cfg(test)]
 mod test_utils;
 #[cfg(test)]

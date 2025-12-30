@@ -3,6 +3,7 @@ mod background_tasks;
 mod chat;
 mod commands;
 mod coordination_helpers;
+mod data_source_config;
 mod discord;
 mod endpoints;
 mod forwarding;
@@ -180,15 +181,18 @@ enum AgentCommands {
 
 #[derive(Subcommand)]
 enum AgentAddCommands {
-    /// Add a data source subscription
+    /// Add a data source subscription (interactive or from TOML file)
     Source {
         /// Agent name
         agent: String,
         /// Source name (identifier for this subscription)
         source: String,
-        /// Source type (bluesky, discord, file, custom)
-        #[arg(long, short = 't', default_value = "custom")]
-        source_type: String,
+        /// Source type (bluesky, discord, file, custom) - prompted if not provided
+        #[arg(long, short = 't')]
+        source_type: Option<String>,
+        /// Load configuration from a TOML file
+        #[arg(long, conflicts_with = "source_type")]
+        from_toml: Option<PathBuf>,
     },
     /// Add a memory block
     Memory {
@@ -378,15 +382,18 @@ enum GroupAddCommands {
         #[arg(long, conflicts_with = "content")]
         path: Option<PathBuf>,
     },
-    /// Add a data source subscription
+    /// Add a data source subscription (interactive or from TOML file)
     Source {
         /// Group name
         group: String,
         /// Source name (identifier for this subscription)
         source: String,
-        /// Source type (bluesky, discord, file, custom)
-        #[arg(long, short = 't', default_value = "custom")]
-        source_type: String,
+        /// Source type (bluesky, discord, file, custom) - prompted if not provided
+        #[arg(long, short = 't')]
+        source_type: Option<String>,
+        /// Load configuration from a TOML file
+        #[arg(long, conflicts_with = "source_type")]
+        from_toml: Option<PathBuf>,
     },
 }
 
@@ -824,7 +831,17 @@ async fn main() -> Result<()> {
                     agent,
                     source,
                     source_type,
-                } => commands::agent::add_source(agent, source, source_type, &config).await?,
+                    from_toml,
+                } => {
+                    commands::agent::add_source(
+                        agent,
+                        source,
+                        source_type.as_deref(),
+                        from_toml.as_deref(),
+                        &config,
+                    )
+                    .await?
+                }
                 AgentAddCommands::Memory {
                     agent,
                     label,
@@ -1021,7 +1038,17 @@ async fn main() -> Result<()> {
                     group,
                     source,
                     source_type,
-                } => commands::group::add_source(&group, &source, &source_type, &config).await?,
+                    from_toml,
+                } => {
+                    commands::group::add_source(
+                        &group,
+                        &source,
+                        source_type.as_deref(),
+                        from_toml.as_deref(),
+                        &config,
+                    )
+                    .await?
+                }
             },
             GroupCommands::Remove { cmd: remove_cmd } => match remove_cmd {
                 GroupRemoveCommands::Member { group, agent } => {

@@ -7,7 +7,8 @@ use dialoguer::Select;
 use miette::Result;
 use owo_colors::OwoColorize;
 use pattern_core::config::{
-    AgentConfig, ContextConfigOptions, MemoryBlockConfig, ModelConfig, ToolRuleConfig,
+    AgentConfig, ContextConfigOptions, DataSourceConfig, MemoryBlockConfig, ModelConfig,
+    ToolRuleConfig,
 };
 use pattern_core::db::ConstellationDatabases;
 use pattern_core::memory::MemoryType;
@@ -15,10 +16,11 @@ use pattern_core::memory::MemoryType;
 use super::display::{SummaryRenderer, format_optional, format_path, truncate};
 use super::editors::{
     self, CollectionAction, CollectionItem, TextOrPath, edit_enum, edit_text, edit_text_or_file,
-    edit_tools_multiselect,
+    edit_tools_multiselect, input_required, select_menu,
 };
 use super::save::{SaveContext, SaveResult};
 use super::{ConfigSource, MenuChoice, Section, write_state_cache};
+use crate::data_source_config;
 use crate::helpers::generate_id;
 
 /// Known model providers for selection.
@@ -207,6 +209,29 @@ impl AgentBuilder {
             r.kv_dimmed("", "(using defaults)");
         }
 
+        // Data Sources
+        r.section(&format!(
+            "Data Sources ({})",
+            self.config.data_sources.len()
+        ));
+        if self.config.data_sources.is_empty() {
+            r.kv_dimmed("", "(none)");
+        } else {
+            for (name, source) in &self.config.data_sources {
+                let source_type = match source {
+                    DataSourceConfig::Bluesky(_) => "bluesky",
+                    DataSourceConfig::Discord(_) => "discord",
+                    DataSourceConfig::File(_) => "file",
+                    DataSourceConfig::Custom(c) => &c.source_type,
+                };
+                r.list_item(&format!(
+                    "{} {}",
+                    name.cyan(),
+                    format!("[{}]", source_type).dimmed()
+                ));
+            }
+        }
+
         // Integrations
         r.section("Integrations");
         r.kv(
@@ -225,6 +250,7 @@ impl AgentBuilder {
             Section::MemoryBlocks,
             Section::ToolsAndRules,
             Section::ContextOptions,
+            Section::DataSources,
             Section::Integrations,
         ]
     }
@@ -264,6 +290,7 @@ impl AgentBuilder {
             Section::MemoryBlocks => self.edit_memory_blocks()?,
             Section::ToolsAndRules => self.edit_tools_and_rules()?,
             Section::ContextOptions => self.edit_context_options()?,
+            Section::DataSources => self.edit_data_sources()?,
             Section::Integrations => self.edit_integrations()?,
             _ => {
                 println!("{}", "Section not applicable for agents".yellow());
@@ -719,7 +746,85 @@ impl AgentBuilder {
         Ok(())
     }
 
-    /// Edit integrations section.
+    /// Edit data sources section.
+    fn edit_data_sources(&mut self) -> Result<()> {
+        println!("\n{}", "─ Data Sources ─".bold());
+
+        loop {
+            let items: Vec<DataSourceItem> = self
+                .config
+                .data_sources
+                .iter()
+                .map(|(name, source)| DataSourceItem {
+                    name: name.clone(),
+                    source: source.clone(),
+                })
+                .collect();
+
+            match editors::edit_collection("Data Sources", &items)? {
+                CollectionAction::Add => {
+                    self.add_data_source()?;
+                }
+                CollectionAction::Edit(idx) => {
+                    let name = items[idx].name.clone();
+                    self.edit_data_source(&name)?;
+                }
+                CollectionAction::Remove(idx) => {
+                    let name = &items[idx].name;
+                    self.config.data_sources.remove(name);
+                    self.modified = true;
+                    println!("{} Removed '{}'", "✓".green(), name);
+                }
+                CollectionAction::EditAsToml => {
+                    println!("{}", "Data sources TOML:".bold());
+                    let toml = toml::to_string_pretty(&self.config.data_sources)
+                        .map_err(|e| miette::miette!("Serialization error: {}", e))?;
+                    println!("{}", toml);
+                    println!("\n{}", "(Preview only)".dimmed());
+                }
+                CollectionAction::Done => break,
+            }
+        }
+
+        Ok(())
+    }
+
+    fn add_data_source(&mut self) -> Result<()> {
+        let name = input_required("Source name")?;
+
+        if self.config.data_sources.contains_key(&name) {
+            return Err(miette::miette!("Data source '{}' already exists", name));
+        }
+
+        let source_types = ["bluesky", "discord", "file", "custom"];
+        let type_idx = select_menu("Source type", &source_types, 0)?;
+        let source_type = source_types[type_idx];
+
+        let source = data_source_config::build_source_interactive(&name, source_type)?;
+
+        self.config.data_sources.insert(name.clone(), source);
+        self.modified = true;
+
+        println!("{} Added data source '{}'", "✓".green(), name);
+        Ok(())
+    }
+
+    fn edit_data_source(&mut self, name: &str) -> Result<()> {
+        let source = self
+            .config
+            .data_sources
+            .get(name)
+            .ok_or_else(|| miette::miette!("Data source not found"))?
+            .clone();
+
+        let updated = data_source_config::edit_source_interactive(name, &source)?;
+        self.config.data_sources.insert(name.to_string(), updated);
+        self.modified = true;
+
+        println!("{} Updated data source '{}'", "✓".green(), name);
+        Ok(())
+    }
+
     fn edit_integrations(&mut self) -> Result<()> {
         println!("\n{}", "─ Integrations ─".bold());
 
@@ -951,5 +1056,28 @@ impl CollectionItem for ToolRuleItem {
 
     fn label(&self) -> String {
         self.rule.tool_name.clone()
+    }
+}
+
+/// Helper struct for displaying data sources in collection editor.
+#[derive(Clone)]
+struct DataSourceItem {
+    name: String,
+    source: DataSourceConfig,
+}
+
+impl CollectionItem for DataSourceItem {
+    fn display_short(&self) -> String {
+        let source_type = match &self.source {
+            DataSourceConfig::Bluesky(_) => "bluesky",
+            DataSourceConfig::Discord(_) => "discord",
+            DataSourceConfig::File(_) => "file",
+            DataSourceConfig::Custom(c) => &c.source_type,
+        };
+        format!("{} {}", self.name, format!("[{}]", source_type).dimmed())
+    }
+
+    fn label(&self) -> String {
+        self.name.clone()
     }
 }

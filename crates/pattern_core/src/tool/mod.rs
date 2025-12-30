@@ -1,8 +1,10 @@
 pub mod builtin;
 mod mod_utils;
+mod registry;
 pub mod rules;
 pub mod schema_filter;
 
+pub use registry::{CustomToolFactory, available_custom_tools, create_custom_tool};
 pub use schema_filter::filter_schema_enum;
 
 // Re-export rule types at tool module level

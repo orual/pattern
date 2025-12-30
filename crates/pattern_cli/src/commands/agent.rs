@@ -348,22 +348,83 @@ pub async fn remove_rule(agent_name: &str, tool_name: &str, rule_type: Option<&s
 // Quick Add/Remove Commands
 // =============================================================================
 
-/// Add a data source subscription to an agent
+/// Add a data source subscription to an agent (interactive or from TOML file)
 pub async fn add_source(
     agent_name: &str,
     source_name: &str,
-    source_type: &str,
+    source_type: Option<&str>,
+    from_toml: Option<&std::path::Path>,
     config: &PatternConfig,
 ) -> Result<()> {
-    let _ = config;
+    use crate::commands::builder::editors::select_menu;
+    use crate::data_source_config;
+
     let output = Output::new();
-    output.warning(&format!(
-        "Adding source '{}' ({}) to agent '{}' - not yet implemented",
+    let db = get_db(config).await?;
+
+    let mut agent = require_agent_by_name(&db, agent_name).await?;
+
+    // Parse existing config
+    let mut agent_config: pattern_core::config::AgentConfig =
+        serde_json::from_value(agent.config.0.clone()).map_err(|e| {
+            miette::miette!("Failed to parse agent config for '{}': {}", agent_name, e)
+        })?;
+
+    // Check if source already exists
+    if agent_config.data_sources.contains_key(source_name) {
+        output.warning(&format!(
+            "Data source '{}' already exists on agent '{}'",
+            source_name.bright_cyan(),
+            agent_name.bright_cyan()
+        ));
+        return Ok(());
+    }
+
+    // Build the data source config
+    let data_source = if let Some(toml_path) = from_toml {
+        // Load from TOML file
+        data_source_config::load_source_from_toml(toml_path)?
+    } else {
+        // Interactive builder
+        let stype = if let Some(t) = source_type {
+            t.to_string()
+        } else {
+            // Prompt for type
+            let source_types = ["bluesky", "discord", "file", "custom"];
+            let idx = select_menu("Source type", &source_types, 0)?;
+            source_types[idx].to_string()
+        };
+        data_source_config::build_source_interactive(source_name, &stype)?
+    };
+
+    // Show summary
+    println!(
+        "\n{}",
+        data_source_config::render_source_summary(source_name, &data_source)
+    );
+
+    // Add to config
+    agent_config
+        .data_sources
+        .insert(source_name.to_string(), data_source);
+
+    // Update agent's config JSON
+    agent.config = pattern_db::Json(
+        serde_json::to_value(&agent_config)
+            .map_err(|e| miette::miette!("Failed to serialize config: {}", e))?,
+    );
+
+    // Save to database
+    pattern_db::queries::update_agent(db.pool(), &agent)
+        .await
+        .map_err(|e| miette::miette!("Failed to update agent: {}", e))?;
+
+    output.success(&format!(
+        "Added source '{}' to agent '{}'",
         source_name.bright_cyan(),
-        source_type,
         agent_name.bright_cyan()
     ));
-    output.info("Hint", "Use 'agent edit' for full configuration");
+
     Ok(())
 }
 
@@ -496,14 +557,47 @@ pub async fn remove_source(
     source_name: &str,
     config: &PatternConfig,
 ) -> Result<()> {
-    let _ = config;
     let output = Output::new();
-    output.warning(&format!(
-        "Removing source '{}' from agent '{}' - not yet implemented",
+    let db = get_db(config).await?;
+
+    let mut agent = require_agent_by_name(&db, agent_name).await?;
+
+    // Parse existing config
+    let mut agent_config: pattern_core::config::AgentConfig =
+        serde_json::from_value(agent.config.0.clone()).map_err(|e| {
+            miette::miette!("Failed to parse agent config for '{}': {}", agent_name, e)
+        })?;
+
+    // Check if source exists
+    if !agent_config.data_sources.contains_key(source_name) {
+        output.warning(&format!(
+            "Data source '{}' not found on agent '{}'",
+            source_name.bright_cyan(),
+            agent_name.bright_cyan()
+        ));
+        return Ok(());
+    }
+
+    // Remove from config
+    agent_config.data_sources.remove(source_name);
+
+    // Update agent's config JSON
+    agent.config = pattern_db::Json(
+        serde_json::to_value(&agent_config)
+            .map_err(|e| miette::miette!("Failed to serialize config: {}", e))?,
+    );
+
+    // Save to database
+    pattern_db::queries::update_agent(db.pool(), &agent)
+        .await
+        .map_err(|e| miette::miette!("Failed to update agent: {}", e))?;
+
+    output.success(&format!(
+        "Removed source '{}' from agent '{}'",
         source_name.bright_cyan(),
         agent_name.bright_cyan()
     ));
-    output.info("Hint", "Use 'agent edit' for full configuration");
+
     Ok(())
 }
 

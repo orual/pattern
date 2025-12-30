@@ -7,8 +7,7 @@ use dialoguer::Select;
 use miette::Result;
 use owo_colors::OwoColorize;
 use pattern_core::config::{
-    BlueskySourceConfig, CustomSourceConfig, DataSourceConfig, DiscordSourceConfig,
-    FileSourceConfig, GroupConfig, GroupMemberConfig, GroupMemberRoleConfig, GroupPatternConfig,
+    DataSourceConfig, GroupConfig, GroupMemberConfig, GroupMemberRoleConfig, GroupPatternConfig,
     MemoryBlockConfig,
 };
 use pattern_core::db::ConstellationDatabases;
@@ -16,11 +15,12 @@ use pattern_core::memory::{MemoryPermission, MemoryType};
 
 use super::display::{SummaryRenderer, format_optional};
 use super::editors::{
-    self, CollectionAction, CollectionItem, confirm, edit_enum, edit_text, input_optional,
-    input_required, select_menu,
+    self, CollectionAction, CollectionItem, confirm, edit_enum, edit_multiselect, edit_text,
+    input_optional, input_required, select_menu,
 };
 use super::save::{SaveContext, SaveResult};
 use super::{ConfigSource, MenuChoice, Section, write_state_cache};
+use crate::data_source_config;
 use crate::helpers::generate_id;
 
 /// Coordination pattern types for selection.
@@ -765,59 +765,9 @@ impl GroupBuilder {
 
         let source_types = ["bluesky", "discord", "file", "custom"];
         let type_idx = select_menu("Source type", &source_types, 0)?;
+        let source_type = source_types[type_idx];
 
-        let source = match type_idx {
-            0 => {
-                let handle = input_optional("Bluesky handle (optional)")?;
-                let mentions_only = confirm("Mentions only?", false)?;
-                DataSourceConfig::Bluesky(BlueskySourceConfig {
-                    name: name.clone(),
-                    handle,
-                    keywords: vec![],
-                    mentions_only,
-                })
-            }
-            1 => {
-                let guild_id = input_optional("Guild ID (optional, empty for all)")?;
-                DataSourceConfig::Discord(DiscordSourceConfig {
-                    name: name.clone(),
-                    guild_id,
-                    channel_ids: vec![],
-                })
-            }
-            2 => {
-                println!("  Enter paths to watch (one per line, empty line to finish):");
-                let mut paths = Vec::new();
-                loop {
-                    let path_str =
-                        input_optional(&format!("Path {} (empty to finish)", paths.len() + 1))?;
-                    match path_str {
-                        Some(p) if !p.is_empty() => paths.push(PathBuf::from(p)),
-                        _ => break,
-                    }
-                }
-                if paths.is_empty() {
-                    return Err(miette::miette!("At least one path is required"));
-                }
-                let recursive = confirm("Watch recursively?", true)?;
-                DataSourceConfig::File(FileSourceConfig {
-                    name: name.clone(),
-                    paths,
-                    recursive,
-                    include_patterns: vec![],
-                    exclude_patterns: vec![],
-                    permission_rules: vec![],
-                })
-            }
-            _ => {
-                let source_type = input_required("Custom source type")?;
-                DataSourceConfig::Custom(CustomSourceConfig {
-                    name: name.clone(),
-                    source_type,
-                    config: serde_json::Value::Object(serde_json::Map::new()),
-                })
-            }
-        };
+        let source = data_source_config::build_source_interactive(&name, source_type)?;
 
         self.config.data_sources.insert(name.clone(), source);
         self.modified = true;
@@ -834,76 +784,11 @@ impl GroupBuilder {
             .ok_or_else(|| miette::miette!("Data source not found"))?
             .clone();
 
-        println!("\nEditing data source '{}'", name.cyan());
-        println!(
-            "{}",
-            "(Limited editing - consider Edit as TOML for complex changes)".dimmed()
-        );
-
-        // Type-specific editing
-        match source {
-            DataSourceConfig::Bluesky(mut cfg) => {
-                let mentions = confirm("Mentions only?", cfg.mentions_only)?;
-                cfg.mentions_only = mentions;
-                self.config
-                    .data_sources
-                    .insert(name.to_string(), DataSourceConfig::Bluesky(cfg));
-            }
-            DataSourceConfig::Discord(cfg) => {
-                // Keep as-is for now
-                println!("Discord source: guild_id={:?}", cfg.guild_id);
-            }
-            DataSourceConfig::File(mut cfg) => {
-                // Show current paths
-                println!("Current paths:");
-                for (i, path) in cfg.paths.iter().enumerate() {
-                    println!("  {}. {}", i + 1, path.display());
-                }
-
-                let edit_options = ["Edit paths", "Toggle recursive", "Done"];
-                loop {
-                    let choice = select_menu("File source options", &edit_options, 2)?;
-                    match choice {
-                        0 => {
-                            // Edit paths
-                            println!("  Enter new paths (one per line, empty to finish):");
-                            let mut new_paths = Vec::new();
-                            loop {
-                                let path_str = input_optional(&format!(
-                                    "Path {} (empty to finish)",
-                                    new_paths.len() + 1
-                                ))?;
-                                match path_str {
-                                    Some(p) if !p.is_empty() => new_paths.push(PathBuf::from(p)),
-                                    _ => break,
-                                }
-                            }
-                            if !new_paths.is_empty() {
-                                cfg.paths = new_paths;
-                                println!("{} Updated paths", "✓".green());
-                            }
-                        }
-                        1 => {
-                            cfg.recursive = !cfg.recursive;
-                            println!(
-                                "{} Recursive: {}",
-                                "✓".green(),
-                                if cfg.recursive { "on" } else { "off" }
-                            );
-                        }
-                        _ => break,
-                    }
-                }
-                self.config
-                    .data_sources
-                    .insert(name.to_string(), DataSourceConfig::File(cfg));
-            }
-            DataSourceConfig::Custom(_) => {
-                println!("Custom sources should be edited via TOML");
-            }
-        }
+        let updated = data_source_config::edit_source_interactive(name, &source)?;
+        self.config.data_sources.insert(name.to_string(), updated);
         self.modified = true;
 
+        println!("{} Updated data source '{}'", "✓".green(), name);
         Ok(())
     }
 

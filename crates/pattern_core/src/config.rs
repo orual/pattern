@@ -77,6 +77,77 @@ impl DataSourceConfig {
             DataSourceConfig::Custom(c) => &c.name,
         }
     }
+
+    /// Create DataBlock sources from this config.
+    ///
+    /// Returns a Vec because some configs (like File with multiple paths)
+    /// create multiple source instances.
+    ///
+    /// Returns empty Vec for stream-only sources (Bluesky, Discord).
+    pub fn create_blocks(&self) -> crate::error::Result<Vec<std::sync::Arc<dyn crate::DataBlock>>> {
+        use crate::data_source::FileSource;
+        use std::sync::Arc;
+
+        match self {
+            DataSourceConfig::File(cfg) => {
+                let sources: Vec<Arc<dyn crate::DataBlock>> = cfg
+                    .paths
+                    .iter()
+                    .map(|path| -> Arc<dyn crate::DataBlock> {
+                        Arc::new(FileSource::from_config(path.clone(), cfg))
+                    })
+                    .collect();
+                Ok(sources)
+            }
+            DataSourceConfig::Custom(cfg) => {
+                // TODO: inventory lookup for custom block sources
+                tracing::warn!(
+                    source_type = %cfg.source_type,
+                    "Custom block source type not yet supported via inventory"
+                );
+                Ok(vec![])
+            }
+            // Bluesky and Discord are stream sources, not block sources
+            DataSourceConfig::Bluesky(_) | DataSourceConfig::Discord(_) => Ok(vec![]),
+        }
+    }
+
+    /// Create DataStream sources from this config.
+    ///
+    /// Returns a Vec because some configs might create multiple stream instances.
+    ///
+    /// Returns empty Vec for block-only sources (File).
+    pub fn create_streams(
+        &self,
+    ) -> crate::error::Result<Vec<std::sync::Arc<dyn crate::DataStream>>> {
+        match self {
+            DataSourceConfig::Bluesky(_cfg) => {
+                // TODO: BlueskySource::from_config when implemented
+                tracing::debug!("Bluesky stream source not yet implemented");
+                Ok(vec![])
+            }
+            DataSourceConfig::Discord(_cfg) => {
+                // TODO: DiscordSource::from_config when implemented
+                tracing::debug!("Discord stream source not yet implemented");
+                Ok(vec![])
+            }
+            DataSourceConfig::Custom(cfg) => {
+                // TODO: inventory lookup for custom stream sources
+                tracing::warn!(
+                    source_type = %cfg.source_type,
+                    "Custom stream source type not yet supported via inventory"
+                );
+                Ok(vec![])
+            }
+            // File is a block source, not a stream source
+            DataSourceConfig::File(_) => Ok(vec![]),
+        }
+    }
+}
+
+/// Helper for serde default
+fn default_true() -> bool {
+    true
 }
 
 /// Bluesky firehose data source configuration
@@ -84,15 +155,32 @@ impl DataSourceConfig {
 pub struct BlueskySourceConfig {
     /// Identifier for this source
     pub name: String,
-    /// Handle to post as (optional, defaults to agent's bluesky_handle)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub handle: Option<String>,
-    /// Keywords to filter for
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// NSIDs to filter for (e.g., "app.bsky.feed.post")
+    pub nsids: Vec<String>,
+    /// Specific DIDs to watch (empty = all)
+    pub dids: Vec<String>,
+    /// Keywords to filter posts by
     pub keywords: Vec<String>,
-    /// Whether to include only mentions
+    /// Languages to filter by (e.g., ["en", "es"])
+    pub languages: Vec<String>,
+    /// Only include posts that mention these DIDs/handles
+    pub mentions: Vec<String>,
+    /// Friends list - always see posts from these DIDs (bypasses mention requirement)
     #[serde(default)]
-    pub mentions_only: bool,
+    pub friends: Vec<String>,
+    /// Allow mentions from anyone, not just allowlisted DIDs
+    #[serde(default)]
+    pub allow_any_mentions: bool,
+    /// Keywords to exclude - filter out posts containing these (takes precedence)
+    #[serde(default)]
+    pub exclude_keywords: Vec<String>,
+    /// DIDs to exclude - never show posts from these (takes precedence over all inclusion filters)
+    #[serde(default)]
+    pub exclude_dids: Vec<String>,
+
+    /// Only show threads where agent is actively participating (default: true)
+    #[serde(default = "default_true")]
+    pub require_agent_participation: bool,
 }
 
 /// Discord event data source configuration
@@ -1145,6 +1233,7 @@ pub struct ResolvedAgentConfig {
     pub tool_rules: Vec<ToolRule>,
     pub enabled_tools: Vec<String>,
     pub memory_blocks: HashMap<String, MemoryBlockConfig>,
+    pub data_sources: HashMap<String, DataSourceConfig>,
     pub context: ContextConfigOptions,
     pub temperature: Option<f32>,
 }
@@ -1153,7 +1242,13 @@ impl ResolvedAgentConfig {
     /// Resolve from AgentConfig with defaults filled in
     pub fn from_agent_config(config: &AgentConfig, defaults: &AgentConfig) -> Self {
         let model = config.model.as_ref().or(defaults.model.as_ref());
-
+        // TODO: revisit this, so it's easier to get the default base instructions plus whatever else
+        let mut system_prompt = config
+            .system_prompt
+            .clone()
+            .unwrap_or(DEFAULT_BASE_INSTRUCTIONS.to_string());
+        system_prompt.push_str("\n");
+        system_prompt.push_str(&config.instructions.clone().unwrap_or_default());
         Self {
             id: config.id.clone().unwrap_or_else(AgentId::generate),
             name: config.name.clone(),
@@ -1162,15 +1257,13 @@ impl ResolvedAgentConfig {
                 .unwrap_or_else(|| "anthropic".to_string()),
             model_name: model
                 .and_then(|m| m.model.clone())
-                .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string()),
-            system_prompt: config
-                .system_prompt
-                .clone()
-                .unwrap_or(DEFAULT_BASE_INSTRUCTIONS.to_string()),
+                .unwrap_or_else(|| "claude-sonnet-4-5-20250929".to_string()),
+            system_prompt,
             persona: config.persona.clone(),
             tool_rules: config.get_tool_rules().unwrap_or_default(),
             enabled_tools: config.tools.clone(),
             memory_blocks: config.memory.clone(),
+            data_sources: config.data_sources.clone(),
             context: config.context.clone().unwrap_or_default(),
             temperature: model.and_then(|m| m.temperature),
         }

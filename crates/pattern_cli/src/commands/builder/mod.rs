@@ -4,7 +4,7 @@
 //! interactively via the terminal.
 
 mod display;
-mod editors;
+pub mod editors;
 mod save;
 
 pub mod agent;

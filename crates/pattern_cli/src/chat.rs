@@ -126,16 +126,16 @@ pub async fn chat_with_single_agent(agent_name: &str, config: &PatternConfig) ->
             (agent, ctx)
         };
 
-    // Register file source for ./docs directory
-    let file_source = Arc::new(FileSource::with_rules(
-        "./docs",
-        vec![PermissionRule {
-            pattern: "**.txt".into(),
-            permission: pattern_core::memory::MemoryPermission::ReadWrite,
-            operations_requiring_escalation: vec![],
-        }],
-    ));
-    ctx.register_block_source(file_source).await;
+    // // Register file source for ./docs directory
+    // let file_source = Arc::new(FileSource::with_rules(
+    //     "./docs",
+    //     vec![PermissionRule {
+    //         pattern: "**.txt".into(),
+    //         permission: pattern_core::memory::MemoryPermission::ReadWrite,
+    //         operations_requiring_escalation: vec![],
+    //     }],
+    // ));
+    // ctx.register_block_source(file_source).await;
 
     // Set up readline
     let (mut rl, writer) = Readline::new(format!("{} ", ">".bright_blue())).into_diagnostic()?;

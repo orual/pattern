@@ -1421,6 +1421,55 @@ impl RuntimeContext {
 
         let agent = agent_builder.build()?;
 
+        // Register data sources from config
+        for (source_name, source_config) in &resolved.data_sources {
+            // Create and register block sources
+            match source_config.create_blocks() {
+                Ok(blocks) => {
+                    for block_source in blocks {
+                        tracing::debug!(
+                            agent = %resolved.name,
+                            source = %source_name,
+                            source_id = %block_source.source_id(),
+                            "Registering block source"
+                        );
+                        self.register_block_source(block_source).await;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        agent = %resolved.name,
+                        source = %source_name,
+                        error = %e,
+                        "Failed to create block source"
+                    );
+                }
+            }
+
+            // Create and register stream sources
+            match source_config.create_streams() {
+                Ok(streams) => {
+                    for stream_source in streams {
+                        tracing::debug!(
+                            agent = %resolved.name,
+                            source = %source_name,
+                            source_id = %stream_source.source_id(),
+                            "Registering stream source"
+                        );
+                        self.register_stream(stream_source);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        agent = %resolved.name,
+                        source = %source_name,
+                        error = %e,
+                        "Failed to create stream source"
+                    );
+                }
+            }
+        }
+
         let agent: Arc<dyn Agent> = Arc::new(agent);
         self.register_agent(agent.clone());
 

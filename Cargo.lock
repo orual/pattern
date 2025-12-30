@@ -6183,6 +6183,7 @@ dependencies = [
  "hickory-resolver",
  "html2md",
  "http 1.3.1",
+ "inventory",
  "ipld-core",
  "iroh-car",
  "jacquard",

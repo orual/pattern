@@ -131,6 +131,7 @@ mod block;
 mod file_source;
 mod helpers;
 mod manager;
+mod registry;
 mod stream;
 mod types;
 
@@ -146,5 +147,9 @@ pub use file_source::{
 };
 pub use helpers::{BlockBuilder, EphemeralBlockCache, NotificationBuilder};
 pub use manager::{BlockEdit, BlockSourceInfo, EditFeedback, SourceManager, StreamSourceInfo};
+pub use registry::{
+    CustomBlockSourceFactory, CustomStreamSourceFactory, available_custom_block_types,
+    available_custom_stream_types, create_custom_block, create_custom_stream,
+};
 pub use stream::{DataStream, StreamStatus};
 pub use types::*;
