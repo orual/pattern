@@ -2,18 +2,17 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use super::types::{CoordinationPattern, GroupMemberRole, GroupState};
 use crate::{
-    AgentId, CoreError, Result, UserId,
+    AgentId, Result, UserId,
     agent::Agent,
-    id::{ConstellationId, GroupId, MessageId, RelationId},
+    id::{ConstellationId, GroupId, MessageId},
     messages::{Message, Response},
 };
-use pattern_db::Agent as AgentRecord;
+use pattern_db::Agent as AgentModel;
 
 /// A constellation represents a collection of agents working together for a specific user
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,7 +34,7 @@ pub struct Constellation {
 
     // Relations
     /// Agents in this constellation with membership metadata
-    pub agents: Vec<(AgentRecord, ConstellationMembership)>,
+    pub agents: Vec<(AgentModel, ConstellationMembership)>,
 
     /// Groups within this constellation
     pub groups: Vec<GroupId>,
@@ -45,9 +44,8 @@ pub struct Constellation {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConstellationMembership {
-    pub id: RelationId,
-    pub in_id: ConstellationId,
-    pub out_id: AgentId,
+    pub constellation_id: ConstellationId,
+    pub agent_id: AgentId,
     /// When this agent joined the constellation
     pub joined_at: DateTime<Utc>,
     /// Is this the primary orchestrator agent?
@@ -77,15 +75,14 @@ pub struct AgentGroup {
 
     // Relations
     /// Members of this group with their roles
-    pub members: Vec<(AgentRecord, GroupMembership)>,
+    pub members: Vec<(AgentModel, GroupMembership)>,
 }
 
 /// Edge entity for group membership
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupMembership {
-    pub id: RelationId,
-    pub in_id: AgentId,
-    pub out_id: GroupId,
+    pub agent_id: AgentId,
+    pub group_id: GroupId,
     /// When this agent joined the group
     pub joined_at: DateTime<Utc>,
     /// Role of this agent in the group
@@ -216,122 +213,4 @@ pub trait GroupManager: Send + Sync {
 pub struct AgentWithMembership<A> {
     pub agent: A,
     pub membership: GroupMembership,
-}
-
-/// In-memory constellation manager (runtime state)
-#[derive(Debug)]
-pub struct ConstellationManager {
-    /// All active constellations indexed by ID
-    constellations: Arc<DashMap<ConstellationId, Arc<Constellation>>>,
-    /// User to constellation mapping
-    user_constellations: Arc<DashMap<UserId, Vec<ConstellationId>>>,
-}
-
-impl ConstellationManager {
-    /// Create a new constellation manager
-    pub fn new() -> Self {
-        Self {
-            constellations: Arc::new(DashMap::new()),
-            user_constellations: Arc::new(DashMap::new()),
-        }
-    }
-
-    /// Register a constellation
-    pub fn register(&self, constellation: Constellation) -> Result<()> {
-        let owner_id = constellation.owner_id.clone();
-        let const_id = constellation.id.clone();
-
-        // Store the constellation
-        self.constellations
-            .insert(const_id.clone(), Arc::new(constellation));
-
-        // Update user mapping
-        self.user_constellations
-            .entry(owner_id)
-            .or_insert_with(Vec::new)
-            .push(const_id);
-
-        Ok(())
-    }
-
-    /// Get a constellation by ID
-    pub fn get(&self, id: &ConstellationId) -> Option<Arc<Constellation>> {
-        self.constellations.get(id).map(|entry| entry.clone())
-    }
-
-    /// Get all constellations for a user
-    pub fn get_user_constellations(&self, user_id: &UserId) -> Vec<Arc<Constellation>> {
-        if let Some(const_ids) = self.user_constellations.get(user_id) {
-            const_ids.iter().filter_map(|id| self.get(id)).collect()
-        } else {
-            Vec::new()
-        }
-    }
-
-    /// Remove a constellation
-    pub fn remove(&self, id: &ConstellationId) -> Result<()> {
-        if let Some((_, constellation)) = self.constellations.remove(id) {
-            // Remove from user mapping
-            if let Some(mut entry) = self.user_constellations.get_mut(&constellation.owner_id) {
-                entry.retain(|const_id| const_id != id);
-            }
-            Ok(())
-        } else {
-            Err(CoreError::CoordinationFailed {
-                group: "constellations".to_string(),
-                pattern: "manager".to_string(),
-                participating_agents: vec![],
-                cause: format!("Constellation '{}' not found", id),
-            })
-        }
-    }
-}
-
-impl Default for ConstellationManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::id::ConstellationId;
-
-    #[test]
-    fn test_constellation_manager() {
-        let manager = ConstellationManager::new();
-        let user_id = UserId::generate();
-
-        let constellation = Constellation {
-            id: ConstellationId::generate(),
-            owner_id: user_id.clone(),
-            name: "Test Constellation".to_string(),
-            description: Some("Test description".to_string()),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            is_active: true,
-            agents: vec![],
-            groups: vec![],
-        };
-
-        let const_id = constellation.id.clone();
-
-        // Register constellation
-        manager.register(constellation).unwrap();
-
-        // Should be able to retrieve it
-        assert!(manager.get(&const_id).is_some());
-
-        // Should show up in user's constellations
-        let user_consts = manager.get_user_constellations(&user_id);
-        assert_eq!(user_consts.len(), 1);
-
-        // Remove it
-        manager.remove(&const_id).unwrap();
-
-        // Should be gone
-        assert!(manager.get(&const_id).is_none());
-        assert_eq!(manager.get_user_constellations(&user_id).len(), 0);
-    }
 }

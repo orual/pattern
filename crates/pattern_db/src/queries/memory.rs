@@ -145,6 +145,62 @@ pub async fn list_blocks_by_type(
     Ok(blocks)
 }
 
+/// List all memory blocks in the database.
+///
+/// Used for constellation exports to capture all shared and owned blocks.
+/// No agent_id filter - returns every active block.
+pub async fn list_all_blocks(pool: &SqlitePool) -> DbResult<Vec<MemoryBlock>> {
+    let blocks = sqlx::query_as!(
+        MemoryBlock,
+        r#"
+        SELECT
+            id as "id!",
+            agent_id as "agent_id!",
+            label as "label!",
+            description as "description!",
+            block_type as "block_type!: MemoryBlockType",
+            char_limit as "char_limit!",
+            permission as "permission!: MemoryPermission",
+            pinned as "pinned!: bool",
+            loro_snapshot as "loro_snapshot!",
+            content_preview,
+            metadata as "metadata: _",
+            embedding_model,
+            is_active as "is_active!: bool",
+            frontier,
+            last_seq as "last_seq!",
+            created_at as "created_at!: _",
+            updated_at as "updated_at!: _"
+        FROM memory_blocks WHERE is_active = 1 ORDER BY agent_id, label
+        "#
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(blocks)
+}
+
+/// List all shared block attachments in the database.
+///
+/// Used for constellation exports to capture all sharing relationships.
+pub async fn list_all_shared_block_attachments(
+    pool: &SqlitePool,
+) -> DbResult<Vec<SharedBlockAttachment>> {
+    let attachments = sqlx::query_as!(
+        SharedBlockAttachment,
+        r#"
+        SELECT
+            block_id as "block_id!",
+            agent_id as "agent_id!",
+            permission as "permission!: MemoryPermission",
+            attached_at as "attached_at!: _"
+        FROM shared_block_agents
+        "#
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(attachments)
+}
+
 /// List memory blocks by label prefix (across all agents).
 ///
 /// Used for system-level operations like restoring DataBlock source tracking

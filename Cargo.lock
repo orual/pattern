@@ -6214,6 +6214,7 @@ dependencies = [
  "schemars 1.0.4",
  "scraper",
  "serde",
+ "serde_bytes",
  "serde_cbor",
  "serde_ipld_dagcbor",
  "serde_json",

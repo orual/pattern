@@ -136,9 +136,8 @@ pub fn build_agents_with_membership(
                 .find(|m| m.agent_id == agent.id().as_str());
 
             let membership = GroupMembership {
-                id: RelationId::generate(),
-                in_id: agent.id(),
-                out_id: GroupId(db_group_id.to_string()),
+                agent_id: agent.id(),
+                group_id: GroupId(db_group_id.to_string()),
                 joined_at: db_membership.map(|m| m.joined_at).unwrap_or_else(Utc::now),
                 role: convert_db_role(db_membership.and_then(|m| m.role.clone())),
                 is_active: true,

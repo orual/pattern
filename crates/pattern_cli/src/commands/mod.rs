@@ -6,5 +6,6 @@ pub mod builder;
 pub mod config;
 pub mod db;
 pub mod debug;
+#[cfg(feature = "export")]
 pub mod export;
 pub mod group;

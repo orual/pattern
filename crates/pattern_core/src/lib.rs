@@ -12,7 +12,8 @@ pub mod data_source;
 pub mod db;
 pub mod embeddings;
 pub mod error;
-// export moved to pattern_surreal_compat
+#[cfg(feature = "export")]
+pub mod export;
 pub mod id;
 pub mod memory;
 pub mod memory_acl;

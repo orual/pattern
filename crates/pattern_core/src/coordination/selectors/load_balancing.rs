@@ -98,7 +98,7 @@ mod tests {
             test_utils::test::{create_test_agent, create_test_message},
             types::GroupMemberRole,
         },
-        id::{AgentId, GroupId, RelationId},
+        id::{AgentId, GroupId},
     };
     use chrono::Utc;
 
@@ -120,9 +120,8 @@ mod tests {
             AgentWithMembership {
                 agent: Arc::new(agent1) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
-                    id: RelationId::generate(),
-                    in_id: AgentId::generate(),
-                    out_id: GroupId::generate(),
+                    agent_id: AgentId::generate(),
+                    group_id: GroupId::generate(),
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
                     is_active: true,
@@ -132,9 +131,8 @@ mod tests {
             AgentWithMembership {
                 agent: Arc::new(agent2) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
-                    id: RelationId::generate(),
-                    in_id: AgentId::generate(),
-                    out_id: GroupId::generate(),
+                    agent_id: AgentId::generate(),
+                    group_id: GroupId::generate(),
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
                     is_active: true,
@@ -144,9 +142,8 @@ mod tests {
             AgentWithMembership {
                 agent: Arc::new(agent3) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
-                    id: RelationId::generate(),
-                    in_id: AgentId::generate(),
-                    out_id: GroupId::generate(),
+                    agent_id: AgentId::generate(),
+                    group_id: GroupId::generate(),
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
                     is_active: true,

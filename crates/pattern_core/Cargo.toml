@@ -73,6 +73,7 @@ value-ext = "0.1.2"
 # DAG-CBOR and CAR archive support
 serde_cbor = { workspace = true }
 serde_ipld_dagcbor = { workspace = true }
+serde_bytes = "0.11"
 iroh-car = "0.5"
 ipld-core.workspace = true
 cid.workspace = true

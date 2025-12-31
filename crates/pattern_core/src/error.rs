@@ -287,6 +287,13 @@ pub enum CoreError {
     #[error("Already started: {component}")]
     #[diagnostic(code(pattern_core::already_started), help("{details}"))]
     AlreadyStarted { component: String, details: String },
+
+    #[error("Export error during {operation}: {cause}")]
+    #[diagnostic(
+        code(pattern_core::export_error),
+        help("Check export parameters and data format")
+    )]
+    ExportError { operation: String, cause: String },
 }
 
 pub type Result<T> = std::result::Result<T, CoreError>;

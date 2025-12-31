@@ -12,9 +12,10 @@ name = "pattern"
 path = "src/main.rs"
 
 [features]
-default = ["oauth", "discord",]
+default = ["oauth", "discord", "export"]
 oauth = ["pattern-core/oauth"]
 discord = ["pattern-discord"]
+export = ["pattern-core/export"]
 
 [dependencies]
 # Workspace dependencies

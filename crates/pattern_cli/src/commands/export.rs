@@ -1,275 +1,342 @@
-// TODO: CLI Refactoring for pattern_db (SQLite/sqlx) migration
-//!
 //! Export and import commands for agents, groups, and constellations
 //!
 //! This module provides CAR (Content Addressable aRchive) export/import
 //! for agents, including message history and memory blocks.
-//!
-//! ## Migration Status
-//!
-//! ALL FUNCTIONS in this module are STUBBED during the pattern_db migration.
-//! Export/import functionality requires:
-//!
-//! - Agent lookup by name
-//! - Full message history queries
-//! - Memory block queries
-//! - Group and constellation queries
-//! - CAR file serialization/deserialization
-//!
-//! ## Previous SurrealDB Usage
-//!
-//! The module previously used:
-//! - `pattern_core::db_v1::client::DB` for database access
-//! - `pattern_core::db_v1::ops` for entity operations
-//! - `surrealdb::RecordId` for ID handling
-//! - `pattern_core::export::*` for CAR export utilities
-//!   - AgentExporter::export_to_car()
-//!   - AgentExporter::export_group_to_car()
-//!   - AgentExporter::export_constellation_to_car()
-//!   - AgentImporter::import_agent_from_car()
-//!   - AgentImporter::import_group_from_car()
-//!   - AgentImporter::import_constellation_from_car()
-//!
-//! ## Known Issues (before migration)
-//!
-//! - CAR export was not archiving full message history
-//! - Pattern matching issues prevented complete export
-//! - Related to unused CompressionSettings struct
-//!
-//! These issues will be addressed when reimplementing with pattern_db.
 
 use miette::Result;
 use owo_colors::OwoColorize;
 use std::path::PathBuf;
+use tokio::fs::File;
+use tokio::io::BufReader;
 
 use pattern_core::config::PatternConfig;
+use pattern_core::export::{ExportOptions, ExportTarget, Exporter, ImportOptions, Importer};
 
+use crate::helpers::{get_db, require_agent_by_name, require_group_by_name};
 use crate::output::Output;
 
 // =============================================================================
-// Agent Export - STUBBED
+// Agent Export
 // =============================================================================
-
-// TODO: Reimplement for pattern_db (SQLite/sqlx)
-//
-// Previous implementation:
-// 1. Found agent by name via get_agent_by_name helper
-// 2. Created AgentExporter with DB connection
-// 3. Called exporter.export_to_car(agent_id, file, options)
-// 4. Displayed manifest stats (CID, message count, memory count, size)
-//
-// Needs: pattern_db::queries::get_agent_by_name() + new CAR export implementation
 
 /// Export an agent to a CAR file
 ///
-/// NOTE: Currently STUBBED. Export functionality needs pattern_db queries.
+/// Exports the agent with all memory blocks, messages, archival entries,
+/// and archive summaries.
 pub async fn export_agent(
     name: &str,
     output_path: Option<PathBuf>,
-    exclude_embeddings: bool,
-    _config: &PatternConfig,
+    config: &PatternConfig,
 ) -> Result<()> {
     let output = Output::new();
+    let db = get_db(config).await?;
 
-    output.warning(&format!(
-        "Agent export for '{}' temporarily disabled during database migration",
-        name.bright_cyan()
+    // Look up agent by name
+    let agent = require_agent_by_name(&db, name).await?;
+
+    // Determine output file path
+    let file_path = output_path.unwrap_or_else(|| {
+        let safe_name = name.replace(' ', "-");
+        PathBuf::from(format!("{}.car", safe_name))
+    });
+
+    output.status(&format!(
+        "Exporting agent '{}' to {}...",
+        name.bright_cyan(),
+        file_path.display()
     ));
 
-    if let Some(path) = output_path {
-        output.info("Requested output:", &path.display().to_string());
-    } else {
-        output.info(
-            "Default output:",
-            &format!("{}.car", name.replace(' ', "-")),
-        );
-    }
+    // Create export options
+    let options = ExportOptions {
+        target: ExportTarget::Agent(agent.id.clone()),
+        include_messages: true,
+        include_archival: true,
+        ..Default::default()
+    };
 
-    output.info(
-        "Exclude embeddings:",
-        if exclude_embeddings { "yes" } else { "no" },
+    // Create exporter and export
+    let exporter = Exporter::new(db.pool().clone());
+    let file = File::create(&file_path)
+        .await
+        .map_err(|e| miette::miette!("Failed to create output file: {}", e))?;
+
+    let manifest = exporter
+        .export_agent(&agent.id, file, &options)
+        .await
+        .map_err(|e| miette::miette!("Export failed: {:?}", e))?;
+
+    // Display results
+    output.success(&format!("Exported agent '{}'", name.bright_cyan()));
+    output.kv("File", &file_path.display().to_string());
+    output.kv("Version", &manifest.version.to_string());
+    output.kv("Export type", &format!("{:?}", manifest.export_type));
+    output.kv("Messages", &manifest.stats.message_count.to_string());
+    output.kv(
+        "Memory blocks",
+        &manifest.stats.memory_block_count.to_string(),
     );
-    output.info("Reason:", "Needs pattern_db queries for agent data");
-    output.status("CAR export previously included:");
-    output.list_item("Agent metadata (name, type, instructions)");
-    output.list_item("All memory blocks with permissions");
-    output.list_item("Full message history in chunks");
-    output.list_item("Manifest with stats (CID, counts, size)");
+    output.kv(
+        "Archival entries",
+        &manifest.stats.archival_entry_count.to_string(),
+    );
+    output.kv(
+        "Archive summaries",
+        &manifest.stats.archive_summary_count.to_string(),
+    );
+    output.kv("Total blocks", &manifest.stats.total_blocks.to_string());
+    output.kv("Total bytes", &format_bytes(manifest.stats.total_bytes));
 
     Ok(())
 }
 
 // =============================================================================
-// Group Export - STUBBED
+// Group Export
 // =============================================================================
-
-// TODO: Reimplement for pattern_db (SQLite/sqlx)
-//
-// Previous implementation:
-// 1. Found group by name via ops::get_group_by_name
-// 2. Created AgentExporter with DB connection
-// 3. Called exporter.export_group_to_car(group_id, file, options)
-// 4. Displayed manifest stats including member count
-//
-// Needs: pattern_db::queries::get_group_by_name() + new CAR export implementation
 
 /// Export a group to a CAR file
 ///
-/// NOTE: Currently STUBBED. Export functionality needs pattern_db queries.
+/// Exports the group configuration and all member agents with their data.
 pub async fn export_group(
     name: &str,
     output_path: Option<PathBuf>,
-    exclude_embeddings: bool,
-    _config: &PatternConfig,
+    config: &PatternConfig,
 ) -> Result<()> {
     let output = Output::new();
+    let db = get_db(config).await?;
 
-    output.warning(&format!(
-        "Group export for '{}' temporarily disabled during database migration",
-        name.bright_cyan()
+    // Look up group by name
+    let group = require_group_by_name(&db, name).await?;
+
+    // Determine output file path
+    let file_path = output_path.unwrap_or_else(|| {
+        let safe_name = name.replace(' ', "-");
+        PathBuf::from(format!("{}.car", safe_name))
+    });
+
+    output.status(&format!(
+        "Exporting group '{}' to {}...",
+        name.bright_cyan(),
+        file_path.display()
     ));
 
-    if let Some(path) = output_path {
-        output.info("Requested output:", &path.display().to_string());
-    } else {
-        output.info(
-            "Default output:",
-            &format!("{}.car", name.replace(' ', "-")),
-        );
-    }
+    // Create export options (full export, not thin)
+    let options = ExportOptions {
+        target: ExportTarget::Group {
+            id: group.id.clone(),
+            thin: false,
+        },
+        include_messages: true,
+        include_archival: true,
+        ..Default::default()
+    };
 
-    output.info(
-        "Exclude embeddings:",
-        if exclude_embeddings { "yes" } else { "no" },
+    // Create exporter and export
+    let exporter = Exporter::new(db.pool().clone());
+    let file = File::create(&file_path)
+        .await
+        .map_err(|e| miette::miette!("Failed to create output file: {}", e))?;
+
+    let manifest = exporter
+        .export_group(&group.id, file, &options)
+        .await
+        .map_err(|e| miette::miette!("Export failed: {:?}", e))?;
+
+    // Display results
+    output.success(&format!("Exported group '{}'", name.bright_cyan()));
+    output.kv("File", &file_path.display().to_string());
+    output.kv("Version", &manifest.version.to_string());
+    output.kv("Export type", &format!("{:?}", manifest.export_type));
+    output.kv("Agents", &manifest.stats.agent_count.to_string());
+    output.kv("Groups", &manifest.stats.group_count.to_string());
+    output.kv("Messages", &manifest.stats.message_count.to_string());
+    output.kv(
+        "Memory blocks",
+        &manifest.stats.memory_block_count.to_string(),
     );
-    output.info("Reason:", "Needs pattern_db group queries");
-    output.status("Group CAR export previously included:");
-    output.list_item("Group metadata (name, description, pattern)");
-    output.list_item("All member agents with their data");
-    output.list_item("Membership information (roles, capabilities)");
+    output.kv(
+        "Archival entries",
+        &manifest.stats.archival_entry_count.to_string(),
+    );
+    output.kv("Total blocks", &manifest.stats.total_blocks.to_string());
+    output.kv("Total bytes", &format_bytes(manifest.stats.total_bytes));
 
     Ok(())
 }
 
 // =============================================================================
-// Constellation Export - STUBBED
+// Constellation Export
 // =============================================================================
-
-// TODO: Reimplement for pattern_db (SQLite/sqlx)
-//
-// Previous implementation:
-// 1. Got user's constellation via ops::get_or_create_constellation
-// 2. Created AgentExporter with DB connection
-// 3. Called exporter.export_constellation_to_car(constellation_id, file, options)
-// 4. Displayed manifest stats including group and agent counts
-//
-// Needs: pattern_db::queries::get_user_constellation() + new CAR export implementation
 
 /// Export a constellation to a CAR file
 ///
-/// NOTE: Currently STUBBED. Export functionality needs pattern_db queries.
+/// Exports all agents and groups for the current user with agent deduplication.
 pub async fn export_constellation(
     output_path: Option<PathBuf>,
-    exclude_embeddings: bool,
-    _config: &PatternConfig,
+    config: &PatternConfig,
 ) -> Result<()> {
     let output = Output::new();
+    let db = get_db(config).await?;
 
-    output.warning("Constellation export temporarily disabled during database migration");
+    // Use a default owner ID for CLI exports
+    let owner_id = "cli-user";
 
-    if let Some(path) = output_path {
-        output.info("Requested output:", &path.display().to_string());
-    } else {
-        output.info("Default output:", "constellation.car");
-    }
+    // Determine output file path
+    let file_path = output_path.unwrap_or_else(|| PathBuf::from("constellation.car"));
 
-    output.info(
-        "Exclude embeddings:",
-        if exclude_embeddings { "yes" } else { "no" },
+    output.status(&format!(
+        "Exporting constellation to {}...",
+        file_path.display()
+    ));
+
+    // Create export options
+    let options = ExportOptions {
+        target: ExportTarget::Constellation,
+        include_messages: true,
+        include_archival: true,
+        ..Default::default()
+    };
+    // Create exporter and export
+    let exporter = Exporter::new(db.pool().clone());
+    let file = File::create(&file_path)
+        .await
+        .map_err(|e| miette::miette!("Failed to create output file: {}", e))?;
+
+    let manifest = exporter
+        .export_constellation(owner_id, file, &options)
+        .await
+        .map_err(|e| miette::miette!("Export failed: {:?}", e))?;
+
+    // Display results
+    output.success("Exported constellation");
+    output.kv("File", &file_path.display().to_string());
+    output.kv("Version", &manifest.version.to_string());
+    output.kv("Export type", &format!("{:?}", manifest.export_type));
+    output.kv("Agents", &manifest.stats.agent_count.to_string());
+    output.kv("Groups", &manifest.stats.group_count.to_string());
+    output.kv("Messages", &manifest.stats.message_count.to_string());
+    output.kv(
+        "Memory blocks",
+        &manifest.stats.memory_block_count.to_string(),
     );
-    output.info("Reason:", "Needs pattern_db constellation queries");
-    output.status("Constellation CAR export previously included:");
-    output.list_item("All groups with members");
-    output.list_item("All direct agents");
-    output.list_item("Full message histories");
-    output.list_item("All memory blocks");
+    output.kv(
+        "Archival entries",
+        &manifest.stats.archival_entry_count.to_string(),
+    );
+    output.kv(
+        "Archive summaries",
+        &manifest.stats.archive_summary_count.to_string(),
+    );
+    output.kv("Total blocks", &manifest.stats.total_blocks.to_string());
+    output.kv("Total bytes", &format_bytes(manifest.stats.total_bytes));
 
     Ok(())
 }
 
 // =============================================================================
-// Import - STUBBED
+// Import
 // =============================================================================
-
-// TODO: Reimplement for pattern_db (SQLite/sqlx)
-//
-// Previous implementation:
-// 1. Created AgentImporter with DB connection
-// 2. Detected export type from CAR file header
-// 3. Called appropriate import method based on type:
-//    - import_agent_from_car()
-//    - import_group_from_car()
-//    - import_constellation_from_car()
-// 4. Displayed import stats (agents, messages, memories, groups)
-// 5. Showed agent ID mappings (old -> new)
-//
-// Needs: pattern_db queries for entity creation + new CAR import implementation
 
 /// Import from a CAR file
 ///
-/// NOTE: Currently STUBBED. Import functionality needs pattern_db queries.
+/// Auto-detects the export type (agent, group, or constellation) and imports
+/// the data into the database.
 pub async fn import(
     file_path: PathBuf,
     rename_to: Option<String>,
     preserve_ids: bool,
-    _config: &PatternConfig,
+    config: &PatternConfig,
 ) -> Result<()> {
     let output = Output::new();
+    let db = get_db(config).await?;
 
-    output.warning(&format!(
-        "Import from '{}' temporarily disabled during database migration",
+    // Check file exists
+    if !file_path.exists() {
+        return Err(miette::miette!("File not found: {}", file_path.display()));
+    }
+
+    output.status(&format!(
+        "Importing from {}...",
         file_path.display().to_string().bright_cyan()
     ));
 
-    if let Some(new_name) = rename_to {
-        output.info("Rename to:", &new_name);
+    // Open the file
+    let file = File::open(&file_path)
+        .await
+        .map_err(|e| miette::miette!("Failed to open file: {}", e))?;
+    let reader = BufReader::new(file);
+
+    // Create import options
+    let mut options = ImportOptions::new("cli-user");
+    if let Some(name) = &rename_to {
+        options = options.with_rename(name);
     }
-    output.info("Preserve IDs:", if preserve_ids { "yes" } else { "no" });
-    output.info("Reason:", "Needs pattern_db queries for entity creation");
-    output.status("CAR import previously supported:");
-    output.list_item("Auto-detection of export type (agent, group, constellation)");
-    output.list_item("Creating/updating agents");
-    output.list_item("Importing memory blocks");
-    output.list_item("Replaying message history");
-    output.list_item("Preserving batch boundaries");
-    output.list_item("ID remapping for conflict resolution");
+    options = options.with_preserve_ids(preserve_ids);
+
+    // Create importer and import
+    let importer = Importer::new(db.pool().clone());
+    let result = importer
+        .import(reader, &options)
+        .await
+        .map_err(|e| miette::miette!("Import failed: {:?}", e))?;
+
+    // Display results
+    output.success(&format!(
+        "Imported from {}",
+        file_path.display().to_string().bright_cyan()
+    ));
+
+    if !result.agent_ids.is_empty() {
+        output.kv("Agents imported", &result.agent_ids.len().to_string());
+        for agent_id in &result.agent_ids {
+            output.list_item(agent_id);
+        }
+    }
+
+    if !result.group_ids.is_empty() {
+        output.kv("Groups imported", &result.group_ids.len().to_string());
+        for group_id in &result.group_ids {
+            output.list_item(group_id);
+        }
+    }
+
+    output.kv("Messages", &result.message_count.to_string());
+    output.kv("Memory blocks", &result.memory_block_count.to_string());
+    output.kv("Archival entries", &result.archival_entry_count.to_string());
+    output.kv(
+        "Archive summaries",
+        &result.archive_summary_count.to_string(),
+    );
+
+    if let Some(name) = rename_to {
+        output.info("Renamed to:", &name);
+    }
+
+    if preserve_ids {
+        output.info("IDs:", "preserved from original");
+    } else {
+        output.info("IDs:", "newly generated");
+    }
 
     Ok(())
 }
 
 // =============================================================================
-// Helper Functions - STUBBED
+// Helper Functions
 // =============================================================================
 
-// TODO: Reimplement for pattern_db
-//
-// get_agent_by_name() - Find agent record by name
-// This was a common helper used across multiple modules
+/// Format bytes into a human-readable string
+fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
 
-/// Get agent by name from database
-///
-/// NOTE: Currently STUBBED. Needs pattern_db::queries::get_agent_by_name().
-#[allow(dead_code)]
-pub async fn get_agent_by_name(_agent_name: &str) -> Result<Option<()>> {
-    // Previously this queried SurrealDB:
-    // let query = r#"
-    //     SELECT * FROM agent
-    //     WHERE owner_id = $user_id
-    //     AND name = $name
-    //     LIMIT 1
-    // "#;
-    // let response = DB.query(query).bind(("user_id", user_id)).bind(("name", name)).await?;
-    //
-    // Will be replaced with pattern_db query
-    Ok(None)
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} bytes", bytes)
+    }
 }
