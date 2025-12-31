@@ -321,6 +321,112 @@ pub async fn import(
 }
 
 // =============================================================================
+// Convert Legacy CAR Files (requires legacy-convert feature)
+// =============================================================================
+
+/// Convert a v1/v2 CAR file to v3 format
+///
+/// Reads the old CAR file, converts all data structures to v3 format,
+/// and writes a new CAR file.
+#[cfg(feature = "legacy-convert")]
+pub async fn convert_car(input_path: PathBuf, output_path: Option<PathBuf>) -> Result<()> {
+    let output = Output::new();
+
+    // Determine output path
+    let out_path = output_path.unwrap_or_else(|| {
+        let stem = input_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("converted");
+        input_path
+            .parent()
+            .unwrap_or(&PathBuf::from("."))
+            .join(format!("{}_v3.car", stem))
+    });
+
+    output.status(&format!(
+        "Converting {} to v3 format...",
+        input_path.display().to_string().bright_cyan()
+    ));
+
+    // Run the conversion with default options
+    let options = pattern_surreal_compat::convert::ConversionOptions::default();
+    let stats =
+        pattern_surreal_compat::convert::convert_car_v1v2_to_v3(&input_path, &out_path, &options)
+            .await
+            .map_err(|e| miette::miette!("Conversion failed: {:?}", e))?;
+
+    // Display results
+    output.success("Conversion complete");
+    output.kv("Input version", &format!("v{}", stats.input_version));
+    output.kv("Output file", &out_path.display().to_string());
+    output.kv("Agents converted", &stats.agents_converted.to_string());
+    output.kv("Groups converted", &stats.groups_converted.to_string());
+    output.kv("Messages converted", &stats.messages_converted.to_string());
+    output.kv(
+        "Memory blocks converted",
+        &stats.memory_blocks_converted.to_string(),
+    );
+    output.kv(
+        "Archival entries converted",
+        &stats.archival_entries_converted.to_string(),
+    );
+
+    Ok(())
+}
+
+// =============================================================================
+// Convert Letta Agent Files
+// =============================================================================
+
+/// Convert a Letta agent file (.af) to v3 CAR format
+///
+/// Reads the Letta JSON format and converts to Pattern's v3 CAR format.
+pub async fn convert_letta(input_path: PathBuf, output_path: Option<PathBuf>) -> Result<()> {
+    use pattern_core::export::{LettaConversionOptions, convert_letta_to_car};
+
+    let output = Output::new();
+
+    // Determine output path
+    let out_path = output_path.unwrap_or_else(|| {
+        let stem = input_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("converted");
+        input_path
+            .parent()
+            .unwrap_or(&PathBuf::from("."))
+            .join(format!("{}.car", stem))
+    });
+
+    output.status(&format!(
+        "Converting Letta agent file {} to v3 CAR...",
+        input_path.display().to_string().bright_cyan()
+    ));
+
+    // Run the conversion with default options
+    let options = LettaConversionOptions::default();
+    let stats = convert_letta_to_car(&input_path, &out_path, &options)
+        .await
+        .map_err(|e| miette::miette!("Conversion failed: {:?}", e))?;
+
+    // Display results
+    output.success("Conversion complete");
+    output.kv("Output file", &out_path.display().to_string());
+    output.kv("Agents converted", &stats.agents_converted.to_string());
+    output.kv("Groups converted", &stats.groups_converted.to_string());
+    output.kv("Messages converted", &stats.messages_converted.to_string());
+    output.kv(
+        "Memory blocks converted",
+        &stats.memory_blocks_converted.to_string(),
+    );
+    output.kv("Tools mapped", &stats.tools_mapped.to_string());
+    output.kv("Tools dropped", &stats.tools_dropped.to_string());
+
+    Ok(())
+}
+
+// =============================================================================
 // Helper Functions
 // =============================================================================
 

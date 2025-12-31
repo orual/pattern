@@ -96,6 +96,7 @@ impl DataSourceConfig {
     ) -> crate::error::Result<Vec<std::sync::Arc<dyn crate::DataBlock>>> {
         use crate::data_source::FileSource;
         use std::sync::Arc;
+        let _ = dbs;
 
         match self {
             DataSourceConfig::File(cfg) => {

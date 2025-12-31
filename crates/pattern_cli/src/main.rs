@@ -116,24 +116,14 @@ enum Commands {
         cmd: AtprotoCommands,
     },
     /// Export agents, groups, or constellations to CAR files
-    #[cfg(feature = "export")]
     Export {
         #[command(subcommand)]
         cmd: ExportCommands,
     },
-    /// Import from CAR files
-    #[cfg(feature = "export")]
+    /// Import from CAR files or convert external formats
     Import {
-        /// Path to CAR file to import
-        file: PathBuf,
-
-        /// Rename imported entity to this name
-        #[arg(long)]
-        rename_to: Option<String>,
-
-        /// Preserve original IDs when importing
-        #[arg(long, default_value_t = true)]
-        preserve_ids: bool,
+        #[command(subcommand)]
+        cmd: ImportCommands,
     },
 }
 
@@ -420,7 +410,6 @@ enum GroupRemoveCommands {
     },
 }
 
-#[cfg(feature = "export")]
 #[derive(Subcommand)]
 enum ExportCommands {
     /// Export an agent to a CAR file
@@ -442,6 +431,38 @@ enum ExportCommands {
     /// Export entire constellation to a CAR file
     Constellation {
         /// Output file path (defaults to constellation.car)
+        #[arg(short = 'o', long)]
+        output: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ImportCommands {
+    /// Import from a v3 CAR file into the database
+    Car {
+        /// Path to CAR file to import
+        file: PathBuf,
+        /// Rename imported entity to this name
+        #[arg(long)]
+        rename_to: Option<String>,
+        /// Preserve original IDs when importing
+        #[arg(long, default_value_t = true)]
+        preserve_ids: bool,
+    },
+    /// Convert a v1/v2 CAR file to v3 format (requires legacy-convert feature)
+    #[cfg(feature = "legacy-convert")]
+    Legacy {
+        /// Path to the v1/v2 CAR file to convert
+        input: PathBuf,
+        /// Output file path (defaults to <input>_v3.car)
+        #[arg(short = 'o', long)]
+        output: Option<PathBuf>,
+    },
+    /// Convert a Letta agent file (.af) to v3 CAR format
+    Letta {
+        /// Path to the Letta .af file to convert
+        input: PathBuf,
+        /// Output file path (defaults to <input>.car)
         #[arg(short = 'o', long)]
         output: Option<PathBuf>,
     },
@@ -1056,7 +1077,6 @@ async fn main() -> Result<()> {
             }
             AtprotoCommands::Test => commands::atproto::test(&config).await?,
         },
-        #[cfg(feature = "export")]
         Commands::Export { cmd } => match cmd {
             ExportCommands::Agent { name, output } => {
                 commands::export::export_agent(name, output.clone(), &config).await?
@@ -1068,15 +1088,23 @@ async fn main() -> Result<()> {
                 commands::export::export_constellation(output.clone(), &config).await?
             }
         },
-        #[cfg(feature = "export")]
-        Commands::Import {
-            file,
-            rename_to,
-            preserve_ids,
-        } => {
-            commands::export::import(file.clone(), rename_to.clone(), *preserve_ids, &config)
-                .await?
-        }
+        Commands::Import { cmd } => match cmd {
+            ImportCommands::Car {
+                file,
+                rename_to,
+                preserve_ids,
+            } => {
+                commands::export::import(file.clone(), rename_to.clone(), *preserve_ids, &config)
+                    .await?
+            }
+            #[cfg(feature = "legacy-convert")]
+            ImportCommands::ConvertLegacy { input, output } => {
+                commands::export::convert_car(input.clone(), output.clone()).await?
+            }
+            ImportCommands::Letta { input, output } => {
+                commands::export::convert_letta(input.clone(), output.clone()).await?
+            }
+        },
     }
 
     // Flush any remaining logs before exit

@@ -10,6 +10,7 @@
 pub mod agent_entity;
 pub mod atproto_identity;
 pub mod config;
+pub mod convert;
 pub mod db;
 pub mod entity;
 pub mod error;
@@ -54,3 +55,6 @@ pub use message::{
     Response, ResponseMetadata, ToolCall, ToolResponse,
 };
 pub use users::User;
+
+// Export conversion utilities
+pub use convert::{ConversionError, ConversionStats, convert_car_v1v2_to_v3};

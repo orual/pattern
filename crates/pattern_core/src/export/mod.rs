@@ -5,6 +5,8 @@
 mod car;
 mod exporter;
 mod importer;
+pub mod letta_convert;
+pub mod letta_types;
 mod types;
 
 #[cfg(test)]
@@ -13,6 +15,10 @@ mod tests;
 pub use car::*;
 pub use exporter::*;
 pub use importer::*;
+pub use letta_convert::{
+    LettaConversionError, LettaConversionOptions, LettaConversionStats, convert_letta_to_car,
+};
+pub use letta_types::AgentFileSchema;
 pub use types::*;
 
 /// Export format version

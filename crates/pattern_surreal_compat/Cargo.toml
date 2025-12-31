@@ -38,11 +38,22 @@ reqwest = { workspace = true }
 
 # Pattern dependencies
 pattern-macros = { path = "../pattern_macros" }
+pattern-core = { path = "../pattern_core", features = ["export"] }
+pattern-db = { path = "../pattern_db" }
 
 # Export/Import dependencies
 iroh-car = "0.5"
 multihash-codetable = { workspace = true }
 serde_ipld_dagcbor = { workspace = true }
+
+# Loro CRDT for memory block conversion
+loro = "1.10"
+regex = "1"
+serde_bytes = "0.11"
+
+[[bin]]
+name = "car-convert"
+path = "src/bin/convert.rs"
 
 [features]
 default = []
