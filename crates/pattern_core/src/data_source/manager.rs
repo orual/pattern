@@ -8,6 +8,7 @@ use tokio::sync::broadcast;
 
 use crate::DataStream;
 use crate::id::AgentId;
+use crate::runtime::ToolContext;
 use crate::{DataBlock, error::Result};
 
 use super::{
@@ -74,13 +75,14 @@ pub trait SourceManager: Send + Sync + std::fmt::Debug {
     async fn pause_stream(&self, source_id: &str) -> Result<()>;
 
     /// Resume a stream source
-    async fn resume_stream(&self, source_id: &str) -> Result<()>;
+    async fn resume_stream(&self, source_id: &str, ctx: Arc<dyn ToolContext>) -> Result<()>;
 
     /// Subscribe agent to a stream source
     async fn subscribe_to_stream(
         &self,
         agent_id: &AgentId,
         source_id: &str,
+        ctx: Arc<dyn ToolContext>,
     ) -> Result<broadcast::Receiver<Notification>>;
 
     /// Unsubscribe agent from a stream source

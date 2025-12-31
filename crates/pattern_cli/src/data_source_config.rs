@@ -154,6 +154,7 @@ pub fn build_bluesky_interactive(
         mentions,
         friends,
         exclude_dids,
+        ..Default::default()
     })
 }
 

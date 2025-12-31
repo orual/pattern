@@ -501,6 +501,12 @@ impl Message {
         messages
     }
 
+    /// Set block references on this message's metadata
+    pub fn with_block_refs(mut self, block_refs: Vec<BlockRef>) -> Self {
+        self.metadata.block_refs = block_refs;
+        self
+    }
+
     /// Extract text content from the message if available
     ///
     /// Returns None if the message contains only non-text content (e.g., tool calls)

@@ -51,7 +51,7 @@ pub enum BlueskyAgent {
 
 impl BlueskyAgent {
     /// Send an XRPC request using the appropriate agent type.
-    async fn send<R>(&self, request: R) -> Result<jacquard::xrpc::Response<R::Response>>
+    pub async fn send<R>(&self, request: R) -> Result<jacquard::xrpc::Response<R::Response>>
     where
         R: jacquard::xrpc::XrpcRequest + Send + Sync,
         R::Response: Send + Sync,
@@ -79,20 +79,8 @@ impl BlueskyAgent {
             }
         }
     }
-}
 
-/// Endpoint for sending messages to Bluesky/ATProto
-#[derive(Clone)]
-pub struct BlueskyEndpoint {
-    agent: Arc<BlueskyAgent>,
-    agent_id: String,
-    /// Our DID for checking threadgate permissions (validated at construction)
-    our_did: Did<'static>,
-}
-
-#[allow(dead_code)]
-impl BlueskyEndpoint {
-    /// Create a new Bluesky endpoint by loading session from pattern_auth.
+    /// Load a BlueskyAgent from the database.
     ///
     /// Lookup strategy:
     /// 1. Query pattern_db `agent_atproto_endpoints WHERE agent_id = {agent_id}`
@@ -100,17 +88,22 @@ impl BlueskyEndpoint {
     /// 3. Use (did, session_id) from whichever row is found
     /// 4. Load session from auth.db
     /// 5. Error only if NEITHER exists
-    pub async fn new(agent_id: String, dbs: ConstellationDatabases) -> Result<Self> {
+    ///
+    /// Returns the agent and the DID it's authenticated as.
+    pub async fn load(
+        agent_id: &str,
+        dbs: &ConstellationDatabases,
+    ) -> Result<(Arc<BlueskyAgent>, Did<'static>)> {
         use pattern_db::queries::get_agent_atproto_endpoint;
 
         // Try to get agent-specific configuration first
         let mut endpoint_config =
-            get_agent_atproto_endpoint(dbs.constellation.pool(), &agent_id, ENDPOINT_TYPE_BLUESKY)
+            get_agent_atproto_endpoint(dbs.constellation.pool(), agent_id, ENDPOINT_TYPE_BLUESKY)
                 .await
                 .map_err(|e| crate::CoreError::ToolExecutionFailed {
-                    tool_name: "bluesky_endpoint".to_string(),
+                    tool_name: "bluesky_agent".to_string(),
                     cause: format!("Failed to query agent endpoint config: {}", e),
-                    parameters: serde_json::json!({ "agent_id": &agent_id }),
+                    parameters: serde_json::json!({ "agent_id": agent_id }),
                 })?;
 
         // If not found, try constellation-wide fallback
@@ -122,37 +115,37 @@ impl BlueskyEndpoint {
             )
             .await
             .map_err(|e| crate::CoreError::ToolExecutionFailed {
-                tool_name: "bluesky_endpoint".to_string(),
+                tool_name: "bluesky_agent".to_string(),
                 cause: format!("Failed to query constellation endpoint config: {}", e),
                 parameters: serde_json::json!({ "agent_id": "_constellation_" }),
             })?;
         }
 
         let config = endpoint_config.ok_or_else(|| crate::CoreError::ToolExecutionFailed {
-            tool_name: "bluesky_endpoint".to_string(),
+            tool_name: "bluesky_agent".to_string(),
             cause: format!(
                 "No ATProto endpoint configured for agent '{}' or '_constellation_'. Use pattern-cli to configure.",
                 agent_id
             ),
-            parameters: serde_json::json!({ "agent_id": &agent_id }),
+            parameters: serde_json::json!({ "agent_id": agent_id }),
         })?;
 
         let session_id =
             config
                 .session_id
                 .ok_or_else(|| crate::CoreError::ToolExecutionFailed {
-                    tool_name: "bluesky_endpoint".to_string(),
+                    tool_name: "bluesky_agent".to_string(),
                     cause: "Endpoint config missing session_id".to_string(),
-                    parameters: serde_json::json!({ "agent_id": &agent_id, "did": &config.did }),
+                    parameters: serde_json::json!({ "agent_id": agent_id, "did": &config.did }),
                 })?;
 
-        let did = config.did;
+        let did_str = config.did;
 
         // Parse DID
-        let did = Did::new(&did).map_err(|e| crate::CoreError::ToolExecutionFailed {
-            tool_name: "bluesky_endpoint".to_string(),
+        let did = Did::new(&did_str).map_err(|e| crate::CoreError::ToolExecutionFailed {
+            tool_name: "bluesky_agent".to_string(),
             cause: format!("Invalid DID format: {}", e),
-            parameters: serde_json::json!({ "did": &did }),
+            parameters: serde_json::json!({ "did": &did_str }),
         })?;
 
         // Try to load OAuth session first
@@ -168,11 +161,10 @@ impl BlueskyEndpoint {
             );
             // Wrap OAuthSession in Agent
             let oauth_agent: OAuthAgent<JacquardResolver, AuthDb> = Agent::new(oauth_session);
-            return Ok(Self {
-                agent: Arc::new(BlueskyAgent::OAuth(oauth_agent)),
-                agent_id,
-                our_did: did.into_static(),
-            });
+            return Ok((
+                Arc::new(BlueskyAgent::OAuth(oauth_agent)),
+                did.into_static(),
+            ));
         }
 
         // Try app-password session
@@ -181,10 +173,10 @@ impl BlueskyEndpoint {
             .restore(did.clone(), CowStr::from(session_id.clone()))
             .await
             .map_err(|e| crate::CoreError::ToolExecutionFailed {
-                tool_name: "bluesky_endpoint".to_string(),
+                tool_name: "bluesky_agent".to_string(),
                 cause: format!("Failed to restore session: {}", e),
                 parameters: serde_json::json!({
-                    "agent_id": &agent_id,
+                    "agent_id": agent_id,
                     "did": did.as_str(),
                     "session_id": &session_id
                 }),
@@ -201,11 +193,44 @@ impl BlueskyEndpoint {
         let credential_agent: CredentialAgent<AuthDb, JacquardResolver> =
             Agent::new(credential_session);
 
+        Ok((
+            Arc::new(BlueskyAgent::Credential(credential_agent)),
+            did.into_static(),
+        ))
+    }
+}
+
+/// Endpoint for sending messages to Bluesky/ATProto
+#[derive(Clone)]
+pub struct BlueskyEndpoint {
+    agent: Arc<BlueskyAgent>,
+    #[allow(dead_code)]
+    agent_id: String,
+    /// Our DID for checking threadgate permissions (validated at construction)
+    our_did: Did<'static>,
+}
+
+#[allow(dead_code)]
+impl BlueskyEndpoint {
+    /// Create a new Bluesky endpoint by loading session from pattern_auth.
+    ///
+    /// Uses BlueskyAgent::load() to handle the session lookup and restoration.
+    pub async fn new(agent_id: String, dbs: ConstellationDatabases) -> Result<Self> {
+        let (agent, our_did) = BlueskyAgent::load(&agent_id, &dbs).await?;
+
         Ok(Self {
-            agent: Arc::new(BlueskyAgent::Credential(credential_agent)),
+            agent,
             agent_id,
-            our_did: did.into_static(),
+            our_did,
         })
+    }
+
+    pub fn from_agent(agent: Arc<BlueskyAgent>, agent_id: String, our_did: Did<'static>) -> Self {
+        Self {
+            agent,
+            agent_id,
+            our_did,
+        }
     }
 
     /// Create proper reply references with both parent and root

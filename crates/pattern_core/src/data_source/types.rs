@@ -7,34 +7,11 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::SnowflakePosition;
-use crate::memory::{BlockSchema, CONSTELLATION_OWNER};
+use crate::memory::BlockSchema;
 use crate::messages::Message;
 
-/// Reference to a block in memory store
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub struct BlockRef {
-    /// Human-readable label for context display
-    pub label: String,
-    /// Database block ID
-    pub block_id: String,
-    /// Owner agent ID, defaults to "_constellation_" for shared blocks
-    pub agent_id: String,
-}
-
-impl BlockRef {
-    pub fn new(label: impl Into<String>, block_id: impl Into<String>) -> Self {
-        Self {
-            label: label.into(),
-            block_id: block_id.into(),
-            agent_id: CONSTELLATION_OWNER.to_string(),
-        }
-    }
-
-    pub fn owned_by(mut self, agent_id: impl Into<String>) -> Self {
-        self.agent_id = agent_id.into();
-        self
-    }
-}
+// Re-export BlockRef from messages for convenience
+pub use crate::messages::BlockRef;
 
 /// Notification delivered to agent via broadcast channel
 #[derive(Debug, Clone)]

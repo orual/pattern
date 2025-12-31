@@ -1409,7 +1409,7 @@ impl RuntimeContext {
         let mut agent_builder = DatabaseAgent::builder()
             .id(agent_id_typed)
             .name(&resolved.name)
-            .runtime(runtime)
+            .runtime(runtime.clone())
             .model(self.model_provider.clone())
             .model_id(&resolved.model_name)
             .heartbeat_sender(self.heartbeat_sender());
@@ -1424,7 +1424,7 @@ impl RuntimeContext {
         // Register data sources from config
         for (source_name, source_config) in &resolved.data_sources {
             // Create and register block sources
-            match source_config.create_blocks() {
+            match source_config.create_blocks(self.dbs.clone()).await {
                 Ok(blocks) => {
                     for block_source in blocks {
                         tracing::debug!(
@@ -1447,7 +1447,10 @@ impl RuntimeContext {
             }
 
             // Create and register stream sources
-            match source_config.create_streams() {
+            match source_config
+                .create_streams(self.dbs.clone(), agent.runtime().clone())
+                .await
+            {
                 Ok(streams) => {
                     for stream_source in streams {
                         tracing::debug!(
@@ -1456,7 +1459,10 @@ impl RuntimeContext {
                             source_id = %stream_source.source_id(),
                             "Registering stream source"
                         );
-                        self.register_stream(stream_source);
+                        self.register_stream(stream_source.clone());
+                        stream_source
+                            .start(agent.runtime().clone(), AgentId::new(agent_id))
+                            .await?;
                     }
                 }
                 Err(e) => {
@@ -1560,7 +1566,7 @@ impl SourceManager for RuntimeContext {
         Ok(())
     }
 
-    async fn resume_stream(&self, source_id: &str) -> Result<()> {
+    async fn resume_stream(&self, source_id: &str, _ctx: Arc<dyn ToolContext>) -> Result<()> {
         let handle =
             self.stream_sources
                 .get(source_id)
@@ -1577,6 +1583,7 @@ impl SourceManager for RuntimeContext {
         &self,
         agent_id: &AgentId,
         source_id: &str,
+        ctx: Arc<dyn ToolContext>,
     ) -> Result<broadcast::Receiver<Notification>> {
         // Get the source handle
         let handle =
@@ -1589,15 +1596,11 @@ impl SourceManager for RuntimeContext {
                 })?;
 
         // Clone a receiver from the stored one (if stream has been started)
-        let receiver = handle
-            .receiver
-            .as_ref()
-            .ok_or_else(|| CoreError::DataSourceError {
-                source_name: source_id.to_string(),
-                operation: "subscribe".to_string(),
-                cause: "Stream has not been started yet - call start() first".to_string(),
-            })?
-            .resubscribe();
+        let receiver = if let Some(receiver) = handle.receiver.as_ref() {
+            receiver.resubscribe()
+        } else {
+            handle.source.start(ctx, agent_id.clone()).await?
+        };
 
         // Record the subscription
         self.stream_subscriptions

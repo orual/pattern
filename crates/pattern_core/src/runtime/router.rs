@@ -276,16 +276,15 @@ impl AgentMessageRouter {
         Ok(None)
     }
 
-    /// Send a message to an agent by name or ID
-    pub async fn send_to_agent(
+    /// Route a full Message to an agent by name or ID, preserving block_refs and batch info
+    pub async fn route_message_to_agent(
         &self,
         target_identifier: &str,
-        content: String,
-        metadata: Option<Value>,
+        message: Message,
         origin: Option<MessageOrigin>,
     ) -> Result<Option<String>> {
         debug!(
-            "Routing message from agent {} to agent {}",
+            "Routing full message from agent {} to agent {}",
             self.agent_id, target_identifier
         );
 
@@ -310,13 +309,10 @@ impl AgentMessageRouter {
         // Check recent message cache to prevent rapid loops
         {
             let mut recent = self.recent_messages.write().await;
-
-            // Create a consistent key for the agent pair (sorted to ensure consistency)
             let mut agents = vec![self.agent_id.clone(), target_agent_id.clone()];
             agents.sort();
             let pair_key = agents.join(":");
 
-            // Check if we've sent a message to this pair recently
             if let Some(last_time) = recent.get(&pair_key) {
                 if last_time.elapsed() < Duration::from_secs(30) {
                     return Err(CoreError::RateLimited {
@@ -325,60 +321,62 @@ impl AgentMessageRouter {
                     });
                 }
             }
-
-            // Update the cache
             recent.insert(pair_key, Instant::now());
-
-            // Clean up old entries (older than 5 minutes)
             recent.retain(|_, time| time.elapsed() < Duration::from_secs(300));
         }
 
-        // Create the queued message
+        // Serialize message components for full preservation
+        let content_json = serde_json::to_string(&message.content).ok();
+        let metadata_json_full = serde_json::to_string(&message.metadata).ok();
+        let batch_id = message.batch.map(|b| b.to_string());
+        let role = message.role.to_string();
+
+        // Create the queued message with full message fields
         let queued = pattern_db::models::QueuedMessage {
             id: crate::utils::get_next_message_position_sync().to_string(),
             target_agent_id: target_agent_id.clone(),
             source_agent_id: Some(self.agent_id.clone()),
-            content,
+            content: message.display_content(),
             origin_json: origin.as_ref().and_then(|o| serde_json::to_string(o).ok()),
-            metadata_json: metadata
-                .as_ref()
-                .and_then(|m| serde_json::to_string(m).ok()),
+            metadata_json: None, // Legacy field, no longer used
             priority: 0,
             created_at: chrono::Utc::now(),
             processed_at: None,
+            content_json,
+            metadata_json_full,
+            batch_id,
+            role,
         };
 
-        // Store the message in the database
         pattern_db::queries::create_queued_message(self.dbs.constellation.pool(), &queued).await?;
 
         info!(
-            "Queued message from {} to {} (id: {})",
+            "Queued full message from {} to {} (id: {})",
             self.agent_id, target_agent_id, queued.id
         );
 
         Ok(Some(queued.id))
     }
 
-    /// Send a message to a group by name or ID
-    pub async fn send_to_group(
+    /// Route a full Message to a group by name or ID, preserving block_refs and batch info
+    pub async fn route_message_to_group(
         &self,
         group_identifier: &str,
-        content: String,
-        metadata: Option<Value>,
+        message: Message,
         origin: Option<MessageOrigin>,
     ) -> Result<Option<String>> {
         debug!(
-            "Routing message from agent {} to group {}",
+            "Routing full message from agent {} to group {}",
             self.agent_id, group_identifier
         );
 
         // Check if we have a registered group endpoint
         let endpoints = self.endpoints.read().await;
         if let Some(endpoint) = endpoints.get("group") {
-            // Use the registered group endpoint
-            let message = Message::user(content);
-            return endpoint.send(message, metadata, origin.as_ref()).await;
+            // Use the registered group endpoint with full message
+            return endpoint.send(message, None, origin.as_ref()).await;
         }
+        drop(endpoints);
 
         // Otherwise, fall back to direct queuing to all members
         warn!(
@@ -412,13 +410,20 @@ impl AgentMessageRouter {
             return Ok(None);
         }
 
+        // Serialize message components for full preservation
+        let content_json = serde_json::to_string(&message.content).ok();
+        let metadata_json_full = serde_json::to_string(&message.metadata).ok();
+        let batch_id = message.batch.map(|b| b.to_string());
+        let role = message.role.to_string();
+        let content = message.display_content();
+
         info!(
-            "Basic routing to group {} with {} members",
+            "Basic routing full message to group {} with {} members",
             group.id,
             members.len()
         );
 
-        // Queue for all members (no is_active field in GroupMember)
+        // Queue for all members with full message
         let mut sent_count = 0;
         for member in members {
             let queued = pattern_db::models::QueuedMessage {
@@ -427,12 +432,14 @@ impl AgentMessageRouter {
                 source_agent_id: Some(self.agent_id.clone()),
                 content: content.clone(),
                 origin_json: origin.as_ref().and_then(|o| serde_json::to_string(o).ok()),
-                metadata_json: metadata
-                    .as_ref()
-                    .and_then(|m| serde_json::to_string(m).ok()),
+                metadata_json: None, // Legacy field
                 priority: 0,
                 created_at: chrono::Utc::now(),
                 processed_at: None,
+                content_json: content_json.clone(),
+                metadata_json_full: metadata_json_full.clone(),
+                batch_id: batch_id.clone(),
+                role: role.clone(),
             };
 
             if let Err(e) =
@@ -449,7 +456,7 @@ impl AgentMessageRouter {
         }
 
         info!(
-            "Basic broadcast message to {} active members of group {}",
+            "Basic broadcast full message to {} members of group {}",
             sent_count, group.id
         );
 

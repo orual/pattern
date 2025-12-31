@@ -5,12 +5,18 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::context::DEFAULT_BASE_INSTRUCTIONS;
+use crate::data_source::BlueskyStream;
+use crate::db::ConstellationDatabases;
+use crate::memory::CONSTELLATION_OWNER;
+use crate::runtime::ToolContext;
+use crate::runtime::endpoints::{BlueskyAgent, BlueskyEndpoint};
 use crate::{
     Result,
     agent::tool_rules::ToolRule,
@@ -84,7 +90,10 @@ impl DataSourceConfig {
     /// create multiple source instances.
     ///
     /// Returns empty Vec for stream-only sources (Bluesky, Discord).
-    pub fn create_blocks(&self) -> crate::error::Result<Vec<std::sync::Arc<dyn crate::DataBlock>>> {
+    pub async fn create_blocks(
+        &self,
+        dbs: Arc<ConstellationDatabases>,
+    ) -> crate::error::Result<Vec<std::sync::Arc<dyn crate::DataBlock>>> {
         use crate::data_source::FileSource;
         use std::sync::Arc;
 
@@ -117,14 +126,25 @@ impl DataSourceConfig {
     /// Returns a Vec because some configs might create multiple stream instances.
     ///
     /// Returns empty Vec for block-only sources (File).
-    pub fn create_streams(
+    pub async fn create_streams(
         &self,
+        dbs: Arc<ConstellationDatabases>,
+        tool_context: Arc<dyn ToolContext>,
     ) -> crate::error::Result<Vec<std::sync::Arc<dyn crate::DataStream>>> {
         match self {
-            DataSourceConfig::Bluesky(_cfg) => {
-                // TODO: BlueskySource::from_config when implemented
-                tracing::debug!("Bluesky stream source not yet implemented");
-                Ok(vec![])
+            DataSourceConfig::Bluesky(cfg) => {
+                let (agent, did) = BlueskyAgent::load(CONSTELLATION_OWNER, dbs.as_ref()).await?;
+                let stream = BlueskyStream::new(cfg.name.clone(), tool_context.clone())
+                    .with_agent_did(did.clone())
+                    .with_authenticated_agent(agent.clone())
+                    .with_config(cfg.clone());
+                let agent_id = tool_context.agent_id().to_string();
+                let endpoint = BlueskyEndpoint::from_agent(agent, agent_id, did);
+                tool_context
+                    .router()
+                    .register_endpoint("bluesky".to_string(), Arc::new(endpoint))
+                    .await;
+                Ok(vec![Arc::new(stream)])
             }
             DataSourceConfig::Discord(_cfg) => {
                 // TODO: DiscordSource::from_config when implemented
@@ -150,20 +170,35 @@ fn default_true() -> bool {
     true
 }
 
+fn default_target() -> String {
+    CONSTELLATION_OWNER.to_string()
+}
+
 /// Bluesky firehose data source configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlueskySourceConfig {
     /// Identifier for this source
     pub name: String,
+    /// Jetstream endpoint URL (defaults to public endpoint)
+    #[serde(default = "default_jetstream_endpoint")]
+    pub jetstream_endpoint: String,
+    /// target to route notifications to (should be set to the agent or group id or name)
+    #[serde(default = "default_target")]
+    pub target: String,
     /// NSIDs to filter for (e.g., "app.bsky.feed.post")
+    #[serde(default)]
     pub nsids: Vec<String>,
     /// Specific DIDs to watch (empty = all)
+    #[serde(default)]
     pub dids: Vec<String>,
     /// Keywords to filter posts by
+    #[serde(default)]
     pub keywords: Vec<String>,
     /// Languages to filter by (e.g., ["en", "es"])
+    #[serde(default)]
     pub languages: Vec<String>,
-    /// Only include posts that mention these DIDs/handles
+    /// Only include posts that mention these DIDs (agent DID should be here)
+    #[serde(default)]
     pub mentions: Vec<String>,
     /// Friends list - always see posts from these DIDs (bypasses mention requirement)
     #[serde(default)]
@@ -177,10 +212,29 @@ pub struct BlueskySourceConfig {
     /// DIDs to exclude - never show posts from these (takes precedence over all inclusion filters)
     #[serde(default)]
     pub exclude_dids: Vec<String>,
-
     /// Only show threads where agent is actively participating (default: true)
     #[serde(default = "default_true")]
     pub require_agent_participation: bool,
+}
+
+impl Default for BlueskySourceConfig {
+    fn default() -> Self {
+        Self {
+            name: "bluesky".to_string(),
+            jetstream_endpoint: default_jetstream_endpoint(),
+            target: default_target(),
+            nsids: vec![],
+            dids: vec![],
+            keywords: vec![],
+            languages: vec![],
+            mentions: vec![],
+            friends: vec![],
+            allow_any_mentions: false,
+            exclude_keywords: vec![],
+            exclude_dids: vec![],
+            require_agent_participation: true,
+        }
+    }
 }
 
 /// Discord event data source configuration

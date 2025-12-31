@@ -1,0 +1,92 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            id as \"id!\",\n            target_agent_id as \"target_agent_id!\",\n            source_agent_id,\n            content as \"content!\",\n            origin_json,\n            metadata_json,\n            priority as \"priority!\",\n            created_at as \"created_at!: _\",\n            processed_at as \"processed_at: _\",\n            content_json,\n            metadata_json_full,\n            batch_id,\n            role as \"role!\"\n        FROM queued_messages\n        WHERE target_agent_id = ? AND processed_at IS NULL\n        ORDER BY priority DESC, created_at ASC\n        LIMIT ?\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "target_agent_id!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "source_agent_id",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "content!",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "origin_json",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "metadata_json",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "priority!",
+        "ordinal": 6,
+        "type_info": "Integer"
+      },
+      {
+        "name": "created_at!: _",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "processed_at: _",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "content_json",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "metadata_json_full",
+        "ordinal": 10,
+        "type_info": "Text"
+      },
+      {
+        "name": "batch_id",
+        "ordinal": 11,
+        "type_info": "Text"
+      },
+      {
+        "name": "role!",
+        "ordinal": 12,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "0de5029503bcb70a8db4ad0c63875511ec6bfd065fb9c1a8d8264d98edb0b93f"
+}

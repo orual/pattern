@@ -128,6 +128,7 @@
 //! ```
 
 mod block;
+pub mod bluesky;
 mod file_source;
 mod helpers;
 mod manager;
@@ -142,6 +143,7 @@ pub use block::{
     BlockSourceStatus, ConflictResolution, DataBlock, FileChange, FileChangeType, PermissionRule,
     ReconcileResult, RestoreStats, VersionInfo,
 };
+pub use bluesky::BlueskyStream;
 pub use file_source::{
     FileInfo, FileSource, FileSyncStatus, ParsedFileLabel, is_file_label, parse_file_label,
 };

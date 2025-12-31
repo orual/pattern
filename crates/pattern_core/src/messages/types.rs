@@ -3,6 +3,49 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 
+use crate::memory::CONSTELLATION_OWNER;
+
+/// Reference to a memory block for loading into context
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, JsonSchema)]
+pub struct BlockRef {
+    /// Human-readable label for context display
+    pub label: String,
+    /// Database block ID
+    pub block_id: String,
+    /// Owner agent ID, defaults to "_constellation_" for shared blocks
+    pub agent_id: String,
+}
+
+impl BlockRef {
+    /// Create a new block ref with constellation as default owner
+    pub fn new(label: impl Into<String>, block_id: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            block_id: block_id.into(),
+            agent_id: CONSTELLATION_OWNER.to_string(),
+        }
+    }
+
+    /// Create a block ref with explicit owner
+    pub fn with_owner(
+        label: impl Into<String>,
+        block_id: impl Into<String>,
+        agent_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            label: label.into(),
+            block_id: block_id.into(),
+            agent_id: agent_id.into(),
+        }
+    }
+
+    /// Set the owner agent ID (builder pattern)
+    pub fn owned_by(mut self, agent_id: impl Into<String>) -> Self {
+        self.agent_id = agent_id.into();
+        self
+    }
+}
+
 /// Metadata associated with a message
 #[derive(Debug, Clone, Serialize, Deserialize, Default, JsonSchema)]
 pub struct MessageMetadata {
@@ -16,6 +59,9 @@ pub struct MessageMetadata {
     pub channel_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub guild_id: Option<String>,
+    /// Block references to load for this message's context
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub block_refs: Vec<BlockRef>,
     #[serde(flatten)]
     pub custom: serde_json::Value,
 }

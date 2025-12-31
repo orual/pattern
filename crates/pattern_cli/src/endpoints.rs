@@ -42,31 +42,7 @@ impl MessageEndpoint for CliEndpoint {
         origin: Option<&MessageOrigin>,
     ) -> Result<Option<String>> {
         // Extract text content from the message
-        let text = match &message.content {
-            MessageContent::Text(text) => text.as_str(),
-            MessageContent::Parts(parts) => {
-                // Find first text part
-                parts
-                    .iter()
-                    .find_map(|part| match part {
-                        ContentPart::Text(text) => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .unwrap_or("")
-            }
-            MessageContent::Blocks(blocks) => {
-                // Extract text from blocks, skipping thinking blocks
-                blocks
-                    .iter()
-                    .find_map(|block| match block {
-                        ContentBlock::Text { text, .. } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .unwrap_or("")
-            }
-            _ => "",
-        };
-
+        let text = message.display_content();
         // Use Output to format the message nicely
         // Format based on origin and extract sender name
         let sender_name = if let Some(origin) = origin {
@@ -95,7 +71,7 @@ impl MessageEndpoint for CliEndpoint {
         // Add a tiny delay to let reasoning chunks finish printing
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
-        self.output.agent_message(&sender_name, text);
+        self.output.agent_message(&sender_name, &text);
 
         Ok(None)
     }

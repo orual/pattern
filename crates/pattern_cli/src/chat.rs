@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use crate::{
     endpoints::{CliEndpoint, build_group_cli_endpoint},
+    forwarding::CliAgentPrinterSink,
     helpers::{create_runtime_context_with_dbs, get_agent_by_name, get_dbs, require_group_by_name},
     output::Output,
     slash_commands::handle_slash_command,
@@ -29,12 +30,21 @@ pub fn print_response_event(agent_name: &str, event: ResponseEvent, output: &Out
             fn_name,
             args,
         } => {
-            // For send_message, hide the content arg since it's displayed below
+            // For send_message directly to the user, hide the content, as it's displayed below
             let args_display = if fn_name == "send_message" {
                 let mut display_args = args.clone();
                 if let Some(args_obj) = display_args.as_object_mut() {
-                    if args_obj.contains_key("content") {
-                        args_obj.insert("content".to_string(), serde_json::json!("[shown below]"));
+                    if let Some(target) = args_obj.get("target").and_then(|t| t.as_object()) {
+                        if let Some(target_type) = target.get("target_type") {
+                            if target_type.as_str() == Some("user")
+                                && args_obj.contains_key("content")
+                            {
+                                args_obj.insert(
+                                    "content".to_string(),
+                                    serde_json::json!("[shown below]"),
+                                );
+                            }
+                        }
                     }
                 }
                 serde_json::to_string(&display_args).unwrap_or_else(|_| display_args.to_string())
@@ -162,6 +172,9 @@ pub async fn chat_with_single_agent(agent_name: &str, config: &PatternConfig) ->
     })
     .await
     .map_err(|e| miette::miette!("Failed to start heartbeat processor: {}", e))?;
+    ctx.add_event_sink(Arc::new(CliAgentPrinterSink::new(output.clone())))
+        .await;
+    let _queue_handle = ctx.start_queue_processor().await;
 
     // Spawn CLI permission listener
     let _perm_task = crate::permission_sink::spawn_cli_permission_listener(output.clone());

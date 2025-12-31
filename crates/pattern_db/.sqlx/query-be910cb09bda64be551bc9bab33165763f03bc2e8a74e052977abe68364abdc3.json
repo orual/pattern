@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO queued_messages (id, target_agent_id, source_agent_id, content,\n                                     origin_json, metadata_json, priority, created_at,\n                                     content_json, metadata_json_full, batch_id, role)\n        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 12
+    },
+    "nullable": []
+  },
+  "hash": "be910cb09bda64be551bc9bab33165763f03bc2e8a74e052977abe68364abdc3"
+}

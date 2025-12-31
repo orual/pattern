@@ -107,7 +107,7 @@ impl MemoryCache {
         )
         .await?;
 
-        tracing::info!(
+        tracing::debug!(
             "Access Result: {:?}, agent: {}, label: {}",
             access_result,
             agent_id,

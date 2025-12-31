@@ -9,8 +9,9 @@ pub async fn create_queued_message(pool: &SqlitePool, msg: &QueuedMessage) -> Db
     sqlx::query!(
         r#"
         INSERT INTO queued_messages (id, target_agent_id, source_agent_id, content,
-                                     origin_json, metadata_json, priority, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                     origin_json, metadata_json, priority, created_at,
+                                     content_json, metadata_json_full, batch_id, role)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
         msg.id,
         msg.target_agent_id,
@@ -20,6 +21,10 @@ pub async fn create_queued_message(pool: &SqlitePool, msg: &QueuedMessage) -> Db
         msg.metadata_json,
         msg.priority,
         msg.created_at,
+        msg.content_json,
+        msg.metadata_json_full,
+        msg.batch_id,
+        msg.role,
     )
     .execute(pool)
     .await?;
@@ -44,7 +49,11 @@ pub async fn get_pending_messages(
             metadata_json,
             priority as "priority!",
             created_at as "created_at!: _",
-            processed_at as "processed_at: _"
+            processed_at as "processed_at: _",
+            content_json,
+            metadata_json_full,
+            batch_id,
+            role as "role!"
         FROM queued_messages
         WHERE target_agent_id = ? AND processed_at IS NULL
         ORDER BY priority DESC, created_at ASC

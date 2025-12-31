@@ -585,6 +585,8 @@ impl Agent for DatabaseAgent {
                                         content: error_content,
                                         is_error: Some(true),
                                     });
+
+                                    needs_continuation = true;
                                 }
                             }
                         }

@@ -86,7 +86,7 @@ minijinja = "2.11.0"
 rocketman = { version = "0.2", features = ["zstd"] }
 notify = { version = "7.0" }
 hickory-resolver = "0.24"
-jacquard = "0.9"
+jacquard = { version = "0.9", features = ["websocket", "zstd"] }
 
 # Glob pattern matching
 globset = "0.4"

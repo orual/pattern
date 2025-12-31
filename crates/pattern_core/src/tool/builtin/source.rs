@@ -11,9 +11,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::CoreError;
 use crate::runtime::ToolContext;
 use crate::tool::{AiTool, ExecutionMeta, ToolRule, ToolRuleType};
+use crate::{AgentId, CoreError, StreamStatus};
 
 use super::types::{SourceInput, SourceOp, ToolOutput};
 
@@ -224,14 +224,31 @@ impl SourceTool {
         match sources {
             Some(manager) => {
                 // Check if it's a stream source (resume only works on streams)
-                if manager.get_stream_info(&source_id).is_some() {
-                    manager.resume_stream(&source_id).await.map_err(|e| {
-                        CoreError::tool_exec_msg(
-                            "source",
-                            json!({"op": "resume", "source_id": source_id}),
-                            format!("Failed to resume stream '{}': {:?}", source_id, e),
-                        )
-                    })?;
+                if let Some(info) = manager.get_stream_info(&source_id) {
+                    if info.status == StreamStatus::Stopped {
+                        let agent_id = AgentId::new(self.ctx.agent_id());
+                        manager
+                            .subscribe_to_stream(&agent_id, &source_id, self.ctx.clone())
+                            .await
+                            .map_err(|e| {
+                                CoreError::tool_exec_msg(
+                                    "source",
+                                    json!({"op": "resume", "source_id": source_id}),
+                                    format!("Failed to resume stream '{}': {:?}", source_id, e),
+                                )
+                            })?;
+                    } else {
+                        manager
+                            .resume_stream(&source_id, self.ctx.clone())
+                            .await
+                            .map_err(|e| {
+                                CoreError::tool_exec_msg(
+                                    "source",
+                                    json!({"op": "resume", "source_id": source_id}),
+                                    format!("Failed to resume stream '{}': {:?}", source_id, e),
+                                )
+                            })?;
+                    }
 
                     Ok(ToolOutput::success(format!(
                         "Stream source '{}' resumed",

@@ -58,10 +58,6 @@ struct Cli {
     #[arg(long)]
     db_path: Option<PathBuf>,
 
-    /// Force schema update even if unchanged
-    #[arg(long, global = true)]
-    force_schema_update: bool,
-
     /// Enable debug logging
     #[arg(long)]
     debug: bool,
@@ -629,11 +625,11 @@ async fn main() -> Result<()> {
     // Create the base subscriber with environment filter
     let env_filter = if cli.debug {
         EnvFilter::new(
-            "pattern_core=debug,pattern_cli=debug,pattern_nd=debug,pattern_mcp=debug,pattern_discord=debug,pattern_main=debug,rocketman=debug,loro_internal=warning,info",
+            "pattern_core=debug,pattern_cli=debug,pattern_nd=debug,pattern_mcp=debug,pattern_discord=debug,pattern_main=debug,rocketman=debug,loro_internal=warn,info",
         )
     } else {
         EnvFilter::new(
-            "pattern_core=info,pattern_cli=info,pattern_nd=info,pattern_mcp=info,pattern_discord=info,pattern_main=info,rocketman=info,loro_internal=warning,warning",
+            "pattern_core=info,pattern_cli=info,pattern_nd=info,pattern_mcp=info,pattern_discord=info,pattern_main=info,rocketman=info,loro_internal=warn,warning",
         )
     };
 
@@ -692,32 +688,6 @@ async fn main() -> Result<()> {
         info!("Loading config from standard locations");
         config::load_config_from_standard_locations().await?
     };
-
-    // TODO: Database initialization is being migrated from SurrealDB to pattern_db
-    //
-    // Previous implementation used:
-    // 1. DatabaseConfig::Embedded { path, strict_mode }
-    // 2. client::init_db(config) or client::init_db_with_options(config, force_schema)
-    //
-    // New approach will use:
-    // 1. pattern_db::ConstellationDb::new(path).await
-    // 2. RuntimeContext::builder().db(db).model_provider(model).build().await
-    //
-    // For now, database initialization is STUBBED. Commands that require
-    // database access will display warning messages.
-
-    if let Some(db_path) = &cli.db_path {
-        info!(
-            "DB path override requested: {:?} (currently ignored - migration in progress)",
-            db_path
-        );
-    }
-
-    if cli.force_schema_update {
-        tracing::warn!(
-            "Schema update requested but database initialization is stubbed during migration"
-        );
-    }
 
     // TODO: Uncomment when pattern_db is integrated:
     // let db = pattern_db::ConstellationDb::new(&config.database.path).await?;

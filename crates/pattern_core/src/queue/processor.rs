@@ -1,7 +1,7 @@
 //! Queue processor for polling and dispatching messages to agents.
 
 use crate::db::ConstellationDatabases;
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use futures::StreamExt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,7 +10,7 @@ use tracing::{debug, error};
 
 use crate::agent::{Agent, ResponseEvent};
 use crate::error::Result;
-use crate::messages::{Message, MessageMetadata};
+use crate::messages::{Message, MessageContent, MessageMetadata};
 use crate::realtime::{AgentEventContext, AgentEventSink};
 
 /// Configuration for the queue processor
@@ -40,6 +40,8 @@ pub struct QueueProcessor {
     config: QueueConfig,
     /// Optional sinks for forwarding response events
     sinks: Vec<Arc<dyn AgentEventSink>>,
+    /// Messages currently being processed (prevents duplicate activations)
+    in_flight: Arc<DashSet<String>>,
 }
 
 impl QueueProcessor {
@@ -54,6 +56,7 @@ impl QueueProcessor {
             agents,
             config,
             sinks: Vec::new(),
+            in_flight: Arc::new(DashSet::new()),
         }
     }
 
@@ -126,33 +129,22 @@ impl QueueProcessor {
             };
 
             for queued in pending {
+                // Skip if already being processed (prevents duplicate activations)
+                if self.in_flight.contains(&queued.id) {
+                    debug!("Skipping queued message {} - already in flight", queued.id);
+                    continue;
+                }
+
+                // Mark as in-flight before spawning
+                self.in_flight.insert(queued.id.clone());
+
                 debug!(
                     "Processing queued message {} for agent {}",
                     queued.id, agent_id
                 );
 
-                // Build metadata from QueuedMessage fields
-                let mut metadata = MessageMetadata::default();
-                metadata.user_id = queued.source_agent_id.clone();
-
-                // Parse origin_json if present and merge into custom
-                if let Some(ref origin_json) = queued.origin_json {
-                    if let Ok(origin) = serde_json::from_str::<serde_json::Value>(origin_json) {
-                        metadata.custom = serde_json::json!({
-                            "origin": origin,
-                            "queue_metadata": queued.metadata_json.as_ref()
-                                .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
-                        });
-                    }
-                } else if let Some(ref meta_json) = queued.metadata_json {
-                    if let Ok(meta) = serde_json::from_str::<serde_json::Value>(meta_json) {
-                        metadata.custom = meta;
-                    }
-                }
-
-                // Convert to Message with metadata
-                let mut message = Message::user(queued.content.clone());
-                message.metadata = metadata;
+                // Reconstruct full Message from new fields if available
+                let message = reconstruct_message(&queued);
 
                 // Create event context for sinks
                 let ctx = AgentEventContext {
@@ -163,6 +155,7 @@ impl QueueProcessor {
                 let queued_id = queued.id.clone();
                 let pool = self.dbs.constellation.pool().clone();
                 let sinks = self.sinks.clone();
+                let in_flight = Arc::clone(&self.in_flight);
 
                 tokio::spawn(async move {
                     let ctx = ctx.clone();
@@ -184,10 +177,13 @@ impl QueueProcessor {
                             }
                         }
                         Err(e) => {
-                            error!("Failed to process queued message {}: {:?}", queued.id, e);
+                            error!("Failed to process queued message {}: {:?}", queued_id, e);
                             // DON'T mark as processed - message will be retried
                         }
                     }
+
+                    // Always remove from in-flight when done
+                    in_flight.remove(&queued_id);
                 });
             }
         }
@@ -209,4 +205,55 @@ async fn forward_event(
             sink.on_event(event, ctx).await;
         });
     }
+}
+
+/// Reconstruct a full Message from a QueuedMessage.
+///
+/// Tries to deserialize from the new content_json/metadata_json_full fields first,
+/// falling back to legacy behavior for old messages.
+fn reconstruct_message(queued: &pattern_db::models::QueuedMessage) -> Message {
+    // Try to deserialize content from new field
+    let content: MessageContent = queued
+        .content_json
+        .as_ref()
+        .and_then(|json| serde_json::from_str(json).ok())
+        .unwrap_or_else(|| MessageContent::Text(queued.content.clone()));
+
+    // Try to deserialize metadata from new field
+    let metadata: MessageMetadata = queued
+        .metadata_json_full
+        .as_ref()
+        .and_then(|json| serde_json::from_str(json).ok())
+        .unwrap_or_else(|| {
+            // Legacy fallback: build metadata from old fields
+            let mut meta = MessageMetadata::default();
+            meta.user_id = queued.source_agent_id.clone();
+
+            // Parse origin_json if present
+            if let Some(ref origin_json) = queued.origin_json {
+                if let Ok(origin) = serde_json::from_str::<serde_json::Value>(origin_json) {
+                    meta.custom = serde_json::json!({
+                        "origin": origin,
+                        "queue_metadata": queued.metadata_json.as_ref()
+                            .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+                    });
+                }
+            } else if let Some(ref meta_json) = queued.metadata_json {
+                if let Ok(custom) = serde_json::from_str::<serde_json::Value>(meta_json) {
+                    meta.custom = custom;
+                }
+            }
+
+            meta
+        });
+
+    // Parse batch_id
+    let batch = queued.batch_id.as_ref().and_then(|s| s.parse().ok());
+
+    // All queued messages are user messages (architectural invariant)
+    let mut message = Message::user(content);
+    message.metadata = metadata;
+    message.batch = batch;
+
+    message
 }

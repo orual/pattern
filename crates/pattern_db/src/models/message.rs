@@ -187,13 +187,13 @@ pub struct QueuedMessage {
     /// Source agent ID (if sent by another agent)
     pub source_agent_id: Option<String>,
 
-    /// Message content
+    /// Message content (display preview, for backwards compat and debugging)
     pub content: String,
 
     /// JSON serialized MessageOrigin
     pub origin_json: Option<String>,
 
-    /// JSON for extra metadata
+    /// JSON for extra metadata (legacy field, kept for backwards compat)
     pub metadata_json: Option<String>,
 
     /// Priority (higher = more urgent)
@@ -204,4 +204,17 @@ pub struct QueuedMessage {
 
     /// Processing timestamp (NULL until processed)
     pub processed_at: Option<DateTime<Utc>>,
+
+    // === New fields for full message preservation ===
+    /// Full MessageContent as JSON (Text, Parts, ToolCalls, etc.)
+    pub content_json: Option<String>,
+
+    /// Full MessageMetadata as JSON (includes block_refs, user_id, custom, etc.)
+    pub metadata_json_full: Option<String>,
+
+    /// Batch ID for notification batching
+    pub batch_id: Option<String>,
+
+    /// Message role (user, assistant, system, tool)
+    pub role: String,
 }

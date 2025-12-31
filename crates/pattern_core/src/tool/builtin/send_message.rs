@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Result,
+    messages::Message,
+    runtime::MessageOrigin,
     tool::{AiTool, ExecutionMeta, ToolRule, ToolRuleType},
 };
 
@@ -103,7 +105,7 @@ impl AiTool for SendMessageTool {
         };
 
         // When agent uses send_message tool, origin is the agent itself
-        let origin = crate::runtime::MessageOrigin::Agent {
+        let origin = MessageOrigin::Agent {
             agent_id: router.agent_id().to_string(),
             name: router.agent_name().to_string(),
             reason: reason.to_string(),
@@ -118,24 +120,19 @@ impl AiTool for SendMessageTool {
             }
             TargetType::Agent => {
                 let agent_id = params.target.target_id.as_deref().unwrap_or("unknown");
+                let mut message = Message::user(content.clone());
+                message.metadata.custom = params.metadata.clone().unwrap_or_default();
                 router
-                    .send_to_agent(
-                        agent_id,
-                        content.clone(),
-                        params.metadata.clone(),
-                        Some(origin),
-                    )
+                    .route_message_to_agent(agent_id, message, Some(origin))
                     .await
             }
             TargetType::Group => {
                 let group_id = params.target.target_id.as_deref().unwrap_or("unknown");
+
+                let mut message = Message::user(content.clone());
+                message.metadata.custom = params.metadata.clone().unwrap_or_default();
                 router
-                    .send_to_group(
-                        group_id,
-                        content.clone(),
-                        params.metadata.clone(),
-                        Some(origin),
-                    )
+                    .route_message_to_group(group_id, message, Some(origin))
                     .await
             }
             TargetType::Channel => {
