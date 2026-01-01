@@ -388,4 +388,3 @@ export DISCORD_TOKEN="..."
 # Bluesky credentials stored in auth.db via CLI
 # pattern atproto login your.handle.bsky.social
 ```
-See `pattern.example.toml` for examples of all three methods.
