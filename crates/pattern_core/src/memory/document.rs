@@ -699,6 +699,172 @@ impl StructuredDocument {
         self.doc.oplog_vv()
     }
 
+    /// Export the document state as JSON.
+    ///
+    /// Returns the entire Loro document state as a JSON value, which includes
+    /// all containers (text, map, list, etc.) and their contents.
+    pub fn export_as_json(&self) -> Option<JsonValue> {
+        let deep_value = self.doc.get_deep_value();
+        loro_to_json(&deep_value)
+    }
+
+    /// Export the document state as a TOML string for editing.
+    ///
+    /// The format depends on the schema:
+    /// - Text: returns the raw text content
+    /// - Map/List/Log/Composite: returns TOML representation
+    pub fn export_for_editing(&self) -> String {
+        match &self.schema {
+            BlockSchema::Text { .. } => {
+                // For text, just return the rendered content
+                self.render()
+            }
+            _ => {
+                // For structured schemas, export as TOML
+                if let Some(json) = self.export_as_json() {
+                    // Convert JSON to TOML
+                    match toml::to_string_pretty(&json) {
+                        Ok(toml_str) => {
+                            // Add schema comment at top
+                            let schema_name = match &self.schema {
+                                BlockSchema::Text { .. } => "Text",
+                                BlockSchema::Map { .. } => "Map",
+                                BlockSchema::List { .. } => "List",
+                                BlockSchema::Log { .. } => "Log",
+                                BlockSchema::Composite { .. } => "Composite",
+                            };
+                            format!(
+                                "# Schema: {}\n# Edit the values below, then save.\n\n{}",
+                                schema_name, toml_str
+                            )
+                        }
+                        Err(_) => {
+                            // Fall back to JSON if TOML conversion fails
+                            serde_json::to_string_pretty(&json).unwrap_or_else(|_| self.render())
+                        }
+                    }
+                } else {
+                    self.render()
+                }
+            }
+        }
+    }
+
+    /// Import content from a JSON value based on schema.
+    ///
+    /// For Text schema: expects a string value (or object with "content" key)
+    /// For Map schema: expects an object with field values
+    /// For List schema: expects an array (or object with "items" key)
+    /// For Log schema: expects an array of entries (or object with "entries" key)
+    /// For Composite: expects an object with section keys
+    pub fn import_from_json(&self, value: &JsonValue) -> Result<(), DocumentError> {
+        match &self.schema {
+            BlockSchema::Text { .. } => {
+                // Text: expect string or object with content field
+                let text = if let Some(s) = value.as_str() {
+                    s.to_string()
+                } else if let Some(content) = value.get("content").and_then(|v| v.as_str()) {
+                    content.to_string()
+                } else {
+                    return Err(DocumentError::Other(
+                        "Text schema expects string or object with 'content' field".to_string(),
+                    ));
+                };
+                self.set_text(&text, true)?;
+            }
+            BlockSchema::Map { fields } => {
+                // Map: expect object with field values
+                let obj = value.as_object().ok_or_else(|| {
+                    DocumentError::Other("Map schema expects JSON object".to_string())
+                })?;
+
+                // Get the "fields" sub-object if present, otherwise use root
+                let fields_obj = obj.get("fields").and_then(|v| v.as_object()).unwrap_or(obj);
+
+                for field_def in fields {
+                    if let Some(field_value) = fields_obj.get(&field_def.name) {
+                        self.set_field(&field_def.name, field_value.clone(), true)?;
+                    }
+                }
+            }
+            BlockSchema::List { .. } => {
+                // List: expect array or object with items
+                let items = if let Some(arr) = value.as_array() {
+                    arr.clone()
+                } else if let Some(items) = value.get("items").and_then(|v| v.as_array()) {
+                    items.clone()
+                } else {
+                    return Err(DocumentError::Other(
+                        "List schema expects array or object with 'items' field".to_string(),
+                    ));
+                };
+
+                // Clear existing items and add new ones
+                let list = self.doc.get_list("items");
+                // Delete from end to start to avoid index shifting
+                for i in (0..list.len()).rev() {
+                    let _ = list.delete(i, 1);
+                }
+                // Insert new items
+                for item in items {
+                    let loro_value = json_to_loro(&item);
+                    let _ = list.push(loro_value);
+                }
+            }
+            BlockSchema::Log { .. } => {
+                // Log: typically append-only, but for import we can set entries
+                let entries = if let Some(arr) = value.as_array() {
+                    arr.clone()
+                } else if let Some(items) = value.get("entries").and_then(|v| v.as_array()) {
+                    items.clone()
+                } else if let Some(items) = value.get("items").and_then(|v| v.as_array()) {
+                    items.clone()
+                } else {
+                    return Err(DocumentError::Other(
+                        "Log schema expects array or object with 'entries' field".to_string(),
+                    ));
+                };
+
+                // Clear and re-add
+                let list = self.doc.get_list("items");
+                for i in (0..list.len()).rev() {
+                    let _ = list.delete(i, 1);
+                }
+                for entry in entries {
+                    self.append_log_entry(entry, true)?;
+                }
+            }
+            BlockSchema::Composite { sections } => {
+                // Composite: expect object with section keys
+                let obj = value.as_object().ok_or_else(|| {
+                    DocumentError::Other("Composite schema expects JSON object".to_string())
+                })?;
+
+                for section in sections {
+                    if let Some(section_obj) = obj.get(&section.name).and_then(|v| v.as_object()) {
+                        // Handle section content (text)
+                        if let Some(content) = section_obj.get("content").and_then(|v| v.as_str()) {
+                            self.set_text_in_section(&section.name, content, true)?;
+                        }
+                        // Handle section fields
+                        if let Some(fields) = section_obj.get("fields").and_then(|v| v.as_object())
+                        {
+                            for (field_name, field_value) in fields {
+                                self.set_field_in_section(
+                                    field_name,
+                                    field_value.clone(),
+                                    &section.name,
+                                    true,
+                                )?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     // ========== Subscriptions ==========
 
     /// Subscribe to all changes on this document.

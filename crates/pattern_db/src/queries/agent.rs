@@ -466,3 +466,453 @@ pub async fn delete_group(pool: &SqlitePool, id: &str) -> DbResult<()> {
         .await?;
     Ok(())
 }
+
+/// Check if an agent has a specific capability in any of their group memberships.
+///
+/// Returns true if the agent has the capability with specialist role in any group.
+/// This is used for permission checks on cross-agent operations like constellation-wide search.
+pub async fn agent_has_capability(
+    pool: &SqlitePool,
+    agent_id: &str,
+    capability: &str,
+) -> DbResult<bool> {
+    // Query checks:
+    // 1. Agent matches
+    // 2. Role is a specialist (JSON type field = 'specialist')
+    // 3. Capabilities JSON array contains the capability string
+    let result = sqlx::query_scalar!(
+        r#"
+        SELECT EXISTS(
+            SELECT 1 FROM group_members
+            WHERE agent_id = ?
+              AND json_extract(role, '$.type') = 'specialist'
+              AND EXISTS (
+                  SELECT 1 FROM json_each(capabilities)
+                  WHERE json_each.value = ?
+              )
+        ) as "exists!: bool"
+        "#,
+        agent_id,
+        capability
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(result)
+}
+
+/// Check if two agents share any group membership.
+///
+/// Returns true if both agents are members of at least one common group.
+/// This is used for permission checks on cross-agent search operations.
+pub async fn agents_share_group(
+    pool: &SqlitePool,
+    agent_id_1: &str,
+    agent_id_2: &str,
+) -> DbResult<bool> {
+    let result = sqlx::query_scalar!(
+        r#"
+        SELECT EXISTS(
+            SELECT 1 FROM group_members m1
+            INNER JOIN group_members m2 ON m1.group_id = m2.group_id
+            WHERE m1.agent_id = ? AND m2.agent_id = ?
+        ) as "exists!: bool"
+        "#,
+        agent_id_1,
+        agent_id_2
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ConstellationDb;
+    use crate::models::{Agent, AgentGroup, AgentStatus, PatternType};
+    use chrono::Utc;
+
+    async fn setup_test_db() -> ConstellationDb {
+        ConstellationDb::open_in_memory().await.unwrap()
+    }
+
+    async fn create_test_agent(db: &ConstellationDb, id: &str, name: &str) {
+        let agent = Agent {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: None,
+            model_provider: "test".to_string(),
+            model_name: "test-model".to_string(),
+            system_prompt: "Test prompt".to_string(),
+            config: Json(serde_json::json!({})),
+            enabled_tools: Json(vec![]),
+            tool_rules: None,
+            status: AgentStatus::Active,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        create_agent(db.pool(), &agent).await.unwrap();
+    }
+
+    async fn create_test_group(db: &ConstellationDb, id: &str, name: &str) {
+        let group = AgentGroup {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: None,
+            pattern_type: PatternType::RoundRobin,
+            pattern_config: Json(serde_json::json!({})),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        create_group(db.pool(), &group).await.unwrap();
+    }
+
+    // ============================================================================
+    // Tests for agent_has_capability
+    // ============================================================================
+
+    #[tokio::test]
+    async fn test_agent_has_capability_specialist_with_matching_capability() {
+        let db = setup_test_db().await;
+
+        // Create agent and group.
+        create_test_agent(&db, "agent1", "Agent 1").await;
+        create_test_group(&db, "group1", "Group 1").await;
+
+        // Add agent as specialist with "memory" capability.
+        let member = GroupMember {
+            group_id: "group1".to_string(),
+            agent_id: "agent1".to_string(),
+            role: Some(Json(GroupMemberRole::Specialist {
+                domain: "memory-management".to_string(),
+            })),
+            capabilities: Json(vec!["memory".to_string(), "search".to_string()]),
+            joined_at: Utc::now(),
+        };
+        add_group_member(db.pool(), &member).await.unwrap();
+
+        // Should have the "memory" capability.
+        let has_memory = agent_has_capability(db.pool(), "agent1", "memory")
+            .await
+            .unwrap();
+        assert!(
+            has_memory,
+            "Specialist with 'memory' capability should return true"
+        );
+
+        // Should also have the "search" capability.
+        let has_search = agent_has_capability(db.pool(), "agent1", "search")
+            .await
+            .unwrap();
+        assert!(
+            has_search,
+            "Specialist with 'search' capability should return true"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_agent_has_capability_specialist_without_matching_capability() {
+        let db = setup_test_db().await;
+
+        // Create agent and group.
+        create_test_agent(&db, "agent1", "Agent 1").await;
+        create_test_group(&db, "group1", "Group 1").await;
+
+        // Add agent as specialist with "search" capability only.
+        let member = GroupMember {
+            group_id: "group1".to_string(),
+            agent_id: "agent1".to_string(),
+            role: Some(Json(GroupMemberRole::Specialist {
+                domain: "search".to_string(),
+            })),
+            capabilities: Json(vec!["search".to_string()]),
+            joined_at: Utc::now(),
+        };
+        add_group_member(db.pool(), &member).await.unwrap();
+
+        // Should NOT have the "memory" capability.
+        let has_memory = agent_has_capability(db.pool(), "agent1", "memory")
+            .await
+            .unwrap();
+        assert!(
+            !has_memory,
+            "Specialist without 'memory' capability should return false"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_agent_has_capability_non_specialist_role() {
+        let db = setup_test_db().await;
+
+        // Create agent and group.
+        create_test_agent(&db, "agent1", "Agent 1").await;
+        create_test_group(&db, "group1", "Group 1").await;
+
+        // Add agent as regular member with capabilities.
+        let member = GroupMember {
+            group_id: "group1".to_string(),
+            agent_id: "agent1".to_string(),
+            role: Some(Json(GroupMemberRole::Regular)),
+            capabilities: Json(vec!["memory".to_string()]),
+            joined_at: Utc::now(),
+        };
+        add_group_member(db.pool(), &member).await.unwrap();
+
+        // Regular role should NOT grant capability access even with matching capability.
+        let has_memory = agent_has_capability(db.pool(), "agent1", "memory")
+            .await
+            .unwrap();
+        assert!(
+            !has_memory,
+            "Regular role should not grant capability access"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_agent_has_capability_agent_not_in_any_group() {
+        let db = setup_test_db().await;
+
+        // Create agent but don't add to any group.
+        create_test_agent(&db, "agent1", "Agent 1").await;
+
+        // Agent not in any group should return false.
+        let has_memory = agent_has_capability(db.pool(), "agent1", "memory")
+            .await
+            .unwrap();
+        assert!(!has_memory, "Agent not in any group should return false");
+    }
+
+    #[tokio::test]
+    async fn test_agent_has_capability_observer_role() {
+        let db = setup_test_db().await;
+
+        // Create agent and group.
+        create_test_agent(&db, "agent1", "Agent 1").await;
+        create_test_group(&db, "group1", "Group 1").await;
+
+        // Add agent as observer with capabilities.
+        let member = GroupMember {
+            group_id: "group1".to_string(),
+            agent_id: "agent1".to_string(),
+            role: Some(Json(GroupMemberRole::Observer)),
+            capabilities: Json(vec!["memory".to_string()]),
+            joined_at: Utc::now(),
+        };
+        add_group_member(db.pool(), &member).await.unwrap();
+
+        // Observer role should NOT grant capability access.
+        let has_memory = agent_has_capability(db.pool(), "agent1", "memory")
+            .await
+            .unwrap();
+        assert!(
+            !has_memory,
+            "Observer role should not grant capability access"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_agent_has_capability_supervisor_role() {
+        let db = setup_test_db().await;
+
+        // Create agent and group.
+        create_test_agent(&db, "agent1", "Agent 1").await;
+        create_test_group(&db, "group1", "Group 1").await;
+
+        // Add agent as supervisor with capabilities.
+        let member = GroupMember {
+            group_id: "group1".to_string(),
+            agent_id: "agent1".to_string(),
+            role: Some(Json(GroupMemberRole::Supervisor)),
+            capabilities: Json(vec!["memory".to_string()]),
+            joined_at: Utc::now(),
+        };
+        add_group_member(db.pool(), &member).await.unwrap();
+
+        // Supervisor role should NOT grant capability access.
+        let has_memory = agent_has_capability(db.pool(), "agent1", "memory")
+            .await
+            .unwrap();
+        assert!(
+            !has_memory,
+            "Supervisor role should not grant capability access"
+        );
+    }
+
+    // ============================================================================
+    // Tests for agents_share_group
+    // ============================================================================
+
+    #[tokio::test]
+    async fn test_agents_share_group_in_same_group() {
+        let db = setup_test_db().await;
+
+        // Create agents and group.
+        create_test_agent(&db, "agent1", "Agent 1").await;
+        create_test_agent(&db, "agent2", "Agent 2").await;
+        create_test_group(&db, "group1", "Group 1").await;
+
+        // Add both agents to the same group.
+        let member1 = GroupMember {
+            group_id: "group1".to_string(),
+            agent_id: "agent1".to_string(),
+            role: Some(Json(GroupMemberRole::Regular)),
+            capabilities: Json(vec![]),
+            joined_at: Utc::now(),
+        };
+        add_group_member(db.pool(), &member1).await.unwrap();
+
+        let member2 = GroupMember {
+            group_id: "group1".to_string(),
+            agent_id: "agent2".to_string(),
+            role: Some(Json(GroupMemberRole::Regular)),
+            capabilities: Json(vec![]),
+            joined_at: Utc::now(),
+        };
+        add_group_member(db.pool(), &member2).await.unwrap();
+
+        // They should share a group.
+        let share = agents_share_group(db.pool(), "agent1", "agent2")
+            .await
+            .unwrap();
+        assert!(share, "Agents in same group should return true");
+
+        // Order shouldn't matter.
+        let share_reversed = agents_share_group(db.pool(), "agent2", "agent1")
+            .await
+            .unwrap();
+        assert!(share_reversed, "agents_share_group should be symmetric");
+    }
+
+    #[tokio::test]
+    async fn test_agents_share_group_in_different_groups() {
+        let db = setup_test_db().await;
+
+        // Create agents and separate groups.
+        create_test_agent(&db, "agent1", "Agent 1").await;
+        create_test_agent(&db, "agent2", "Agent 2").await;
+        create_test_group(&db, "group1", "Group 1").await;
+        create_test_group(&db, "group2", "Group 2").await;
+
+        // Add agents to different groups.
+        let member1 = GroupMember {
+            group_id: "group1".to_string(),
+            agent_id: "agent1".to_string(),
+            role: Some(Json(GroupMemberRole::Regular)),
+            capabilities: Json(vec![]),
+            joined_at: Utc::now(),
+        };
+        add_group_member(db.pool(), &member1).await.unwrap();
+
+        let member2 = GroupMember {
+            group_id: "group2".to_string(),
+            agent_id: "agent2".to_string(),
+            role: Some(Json(GroupMemberRole::Regular)),
+            capabilities: Json(vec![]),
+            joined_at: Utc::now(),
+        };
+        add_group_member(db.pool(), &member2).await.unwrap();
+
+        // They should NOT share a group.
+        let share = agents_share_group(db.pool(), "agent1", "agent2")
+            .await
+            .unwrap();
+        assert!(!share, "Agents in different groups should return false");
+    }
+
+    #[tokio::test]
+    async fn test_agents_share_group_agent_not_in_any_group() {
+        let db = setup_test_db().await;
+
+        // Create agents and one group.
+        create_test_agent(&db, "agent1", "Agent 1").await;
+        create_test_agent(&db, "agent2", "Agent 2").await;
+        create_test_group(&db, "group1", "Group 1").await;
+
+        // Only add agent1 to the group.
+        let member1 = GroupMember {
+            group_id: "group1".to_string(),
+            agent_id: "agent1".to_string(),
+            role: Some(Json(GroupMemberRole::Regular)),
+            capabilities: Json(vec![]),
+            joined_at: Utc::now(),
+        };
+        add_group_member(db.pool(), &member1).await.unwrap();
+
+        // They should NOT share a group (agent2 not in any group).
+        let share = agents_share_group(db.pool(), "agent1", "agent2")
+            .await
+            .unwrap();
+        assert!(
+            !share,
+            "Should return false when one agent not in any group"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_agents_share_group_multiple_shared_groups() {
+        let db = setup_test_db().await;
+
+        // Create agents and multiple groups.
+        create_test_agent(&db, "agent1", "Agent 1").await;
+        create_test_agent(&db, "agent2", "Agent 2").await;
+        create_test_group(&db, "group1", "Group 1").await;
+        create_test_group(&db, "group2", "Group 2").await;
+
+        // Add both agents to both groups.
+        for group_id in ["group1", "group2"] {
+            let member1 = GroupMember {
+                group_id: group_id.to_string(),
+                agent_id: "agent1".to_string(),
+                role: Some(Json(GroupMemberRole::Regular)),
+                capabilities: Json(vec![]),
+                joined_at: Utc::now(),
+            };
+            add_group_member(db.pool(), &member1).await.unwrap();
+
+            let member2 = GroupMember {
+                group_id: group_id.to_string(),
+                agent_id: "agent2".to_string(),
+                role: Some(Json(GroupMemberRole::Regular)),
+                capabilities: Json(vec![]),
+                joined_at: Utc::now(),
+            };
+            add_group_member(db.pool(), &member2).await.unwrap();
+        }
+
+        // They should share a group (even multiple).
+        let share = agents_share_group(db.pool(), "agent1", "agent2")
+            .await
+            .unwrap();
+        assert!(share, "Agents in multiple shared groups should return true");
+    }
+
+    #[tokio::test]
+    async fn test_agents_share_group_same_agent() {
+        let db = setup_test_db().await;
+
+        // Create agent and group.
+        create_test_agent(&db, "agent1", "Agent 1").await;
+        create_test_group(&db, "group1", "Group 1").await;
+
+        // Add agent to group.
+        let member = GroupMember {
+            group_id: "group1".to_string(),
+            agent_id: "agent1".to_string(),
+            role: Some(Json(GroupMemberRole::Regular)),
+            capabilities: Json(vec![]),
+            joined_at: Utc::now(),
+        };
+        add_group_member(db.pool(), &member).await.unwrap();
+
+        // Same agent should share a group with itself.
+        let share = agents_share_group(db.pool(), "agent1", "agent1")
+            .await
+            .unwrap();
+        assert!(
+            share,
+            "Agent should share a group with itself if in any group"
+        );
+    }
+}

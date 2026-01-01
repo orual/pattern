@@ -1280,24 +1280,17 @@ impl MemoryCache {
             }
         }
 
-        // Get current text and replace
-        // TODO: fix this to do a proper fucking edit
-        let current = doc.text_content();
-        let new_content = current.replacen(old, new, 1);
+        // Use CRDT-aware replace_text which uses surgical splice operations.
+        // is_system = true because permission was already checked above at cache layer.
+        let replaced = doc.replace_text(old, new, true)?;
 
-        // Check if replacement occurred
-        if current == new_content {
-            return Ok(false); // No replacement occurred
+        if replaced {
+            // Mark dirty and persist only if replacement occurred.
+            self.mark_dirty(agent_id, label);
+            self.persist_block(agent_id, label).await?;
         }
 
-        // is_system = true because permission was already checked above at cache layer
-        doc.set_text(&new_content, true)?;
-
-        // Mark dirty and persist
-        self.mark_dirty(agent_id, label);
-        self.persist_block(agent_id, label).await?;
-
-        Ok(true)
+        Ok(replaced)
     }
 }
 
@@ -1312,14 +1305,12 @@ mod tests {
         (dir, dbs)
     }
 
-    #[tokio::test]
-    async fn test_cache_load_empty_block() {
-        let (_dir, dbs) = test_dbs().await;
-
-        // Create an agent first (required by foreign key)
+    /// Create a test agent in the database with sensible defaults.
+    /// Returns the agent ID for use in tests.
+    async fn create_test_agent(dbs: &ConstellationDatabases, agent_id: &str) -> String {
         let agent = pattern_db::models::Agent {
-            id: "agent_1".to_string(),
-            name: "Test Agent".to_string(),
+            id: agent_id.to_string(),
+            name: format!("Test Agent {}", agent_id),
             description: None,
             model_provider: "anthropic".to_string(),
             model_name: "claude".to_string(),
@@ -1333,7 +1324,22 @@ mod tests {
         };
         pattern_db::queries::create_agent(dbs.constellation.pool(), &agent)
             .await
-            .unwrap();
+            .expect("Failed to create test agent");
+        agent_id.to_string()
+    }
+
+    /// Create test databases and a default test agent ("agent_1").
+    /// Returns (TempDir, Arc<ConstellationDatabases>). The TempDir must be kept
+    /// alive for the duration of the test.
+    async fn test_dbs_with_agent() -> (tempfile::TempDir, Arc<ConstellationDatabases>) {
+        let (dir, dbs) = test_dbs().await;
+        create_test_agent(&dbs, "agent_1").await;
+        (dir, dbs)
+    }
+
+    #[tokio::test]
+    async fn test_cache_load_empty_block() {
+        let (_dir, dbs) = test_dbs_with_agent().await;
 
         // Create a block in DB
         let block = MemoryBlock {
@@ -1379,26 +1385,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cache_persist() {
-        let (_dir, dbs) = test_dbs().await;
-
-        // Create an agent first (required by foreign key)
-        let agent = pattern_db::models::Agent {
-            id: "agent_1".to_string(),
-            name: "Test Agent".to_string(),
-            description: None,
-            model_provider: "anthropic".to_string(),
-            model_name: "claude".to_string(),
-            system_prompt: "test".to_string(),
-            config: Default::default(),
-            enabled_tools: Default::default(),
-            tool_rules: None,
-            status: pattern_db::models::AgentStatus::Active,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        pattern_db::queries::create_agent(dbs.constellation.pool(), &agent)
-            .await
-            .unwrap();
+        let (_dir, dbs) = test_dbs_with_agent().await;
 
         // Create a block
         let block = MemoryBlock {
@@ -1450,27 +1437,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_and_get_block() {
-        let (_dir, dbs) = test_dbs().await;
-
-        // Create an agent first
-        let agent = pattern_db::models::Agent {
-            id: "agent_1".to_string(),
-            name: "Test Agent".to_string(),
-            description: None,
-            model_provider: "anthropic".to_string(),
-            model_name: "claude".to_string(),
-            system_prompt: "test".to_string(),
-            config: Default::default(),
-            enabled_tools: Default::default(),
-            tool_rules: None,
-            status: pattern_db::models::AgentStatus::Active,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        pattern_db::queries::create_agent(dbs.constellation.pool(), &agent)
-            .await
-            .unwrap();
-
+        let (_dir, dbs) = test_dbs_with_agent().await;
         let cache = MemoryCache::new(dbs);
 
         // Create a block using MemoryStore trait
@@ -1503,27 +1470,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_blocks() {
-        let (_dir, dbs) = test_dbs().await;
-
-        // Create an agent first
-        let agent = pattern_db::models::Agent {
-            id: "agent_1".to_string(),
-            name: "Test Agent".to_string(),
-            description: None,
-            model_provider: "anthropic".to_string(),
-            model_name: "claude".to_string(),
-            system_prompt: "test".to_string(),
-            config: Default::default(),
-            enabled_tools: Default::default(),
-            tool_rules: None,
-            status: pattern_db::models::AgentStatus::Active,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        pattern_db::queries::create_agent(dbs.constellation.pool(), &agent)
-            .await
-            .unwrap();
-
+        let (_dir, dbs) = test_dbs_with_agent().await;
         let cache = MemoryCache::new(dbs);
 
         // Create multiple blocks
@@ -1584,27 +1531,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_block() {
-        let (_dir, dbs) = test_dbs().await;
-
-        // Create an agent first
-        let agent = pattern_db::models::Agent {
-            id: "agent_1".to_string(),
-            name: "Test Agent".to_string(),
-            description: None,
-            model_provider: "anthropic".to_string(),
-            model_name: "claude".to_string(),
-            system_prompt: "test".to_string(),
-            config: Default::default(),
-            enabled_tools: Default::default(),
-            tool_rules: None,
-            status: pattern_db::models::AgentStatus::Active,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        pattern_db::queries::create_agent(dbs.constellation.pool(), &agent)
-            .await
-            .unwrap();
-
+        let (_dir, dbs) = test_dbs_with_agent().await;
         let cache = MemoryCache::new(dbs);
 
         // Create a block
@@ -1638,27 +1565,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_rendered_content() {
-        let (_dir, dbs) = test_dbs().await;
-
-        // Create an agent first
-        let agent = pattern_db::models::Agent {
-            id: "agent_1".to_string(),
-            name: "Test Agent".to_string(),
-            description: None,
-            model_provider: "anthropic".to_string(),
-            model_name: "claude".to_string(),
-            system_prompt: "test".to_string(),
-            config: Default::default(),
-            enabled_tools: Default::default(),
-            tool_rules: None,
-            status: pattern_db::models::AgentStatus::Active,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        pattern_db::queries::create_agent(dbs.constellation.pool(), &agent)
-            .await
-            .unwrap();
-
+        let (_dir, dbs) = test_dbs_with_agent().await;
         let cache = MemoryCache::new(dbs);
 
         // Create a block
@@ -1699,27 +1606,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_archival_operations() {
-        let (_dir, dbs) = test_dbs().await;
-
-        // Create an agent first
-        let agent = pattern_db::models::Agent {
-            id: "agent_1".to_string(),
-            name: "Test Agent".to_string(),
-            description: None,
-            model_provider: "anthropic".to_string(),
-            model_name: "claude".to_string(),
-            system_prompt: "test".to_string(),
-            config: Default::default(),
-            enabled_tools: Default::default(),
-            tool_rules: None,
-            status: pattern_db::models::AgentStatus::Active,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        pattern_db::queries::create_agent(dbs.constellation.pool(), &agent)
-            .await
-            .unwrap();
-
+        let (_dir, dbs) = test_dbs_with_agent().await;
         let cache = MemoryCache::new(dbs);
 
         // Insert archival entries
@@ -1771,27 +1658,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_block_metadata() {
-        let (_dir, dbs) = test_dbs().await;
-
-        // Create an agent first
-        let agent = pattern_db::models::Agent {
-            id: "agent_1".to_string(),
-            name: "Test Agent".to_string(),
-            description: None,
-            model_provider: "anthropic".to_string(),
-            model_name: "claude".to_string(),
-            system_prompt: "test".to_string(),
-            config: Default::default(),
-            enabled_tools: Default::default(),
-            tool_rules: None,
-            status: pattern_db::models::AgentStatus::Active,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        pattern_db::queries::create_agent(dbs.constellation.pool(), &agent)
-            .await
-            .unwrap();
-
+        let (_dir, dbs) = test_dbs_with_agent().await;
         let cache = MemoryCache::new(dbs);
 
         // Create a block
@@ -1828,27 +1695,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_memory_blocks_fts() {
-        let (_dir, dbs) = test_dbs().await;
-
-        // Create an agent
-        let agent = pattern_db::models::Agent {
-            id: "agent_1".to_string(),
-            name: "Test Agent".to_string(),
-            description: None,
-            model_provider: "anthropic".to_string(),
-            model_name: "claude".to_string(),
-            system_prompt: "test".to_string(),
-            config: Default::default(),
-            enabled_tools: Default::default(),
-            tool_rules: None,
-            status: pattern_db::models::AgentStatus::Active,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        pattern_db::queries::create_agent(dbs.constellation.pool(), &agent)
-            .await
-            .unwrap();
-
+        let (_dir, dbs) = test_dbs_with_agent().await;
         let cache = MemoryCache::new(dbs.clone());
 
         // Create blocks with searchable content
@@ -1948,27 +1795,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_archival_entries_fts() {
-        let (_dir, dbs) = test_dbs().await;
-
-        // Create an agent
-        let agent = pattern_db::models::Agent {
-            id: "agent_1".to_string(),
-            name: "Test Agent".to_string(),
-            description: None,
-            model_provider: "anthropic".to_string(),
-            model_name: "claude".to_string(),
-            system_prompt: "test".to_string(),
-            config: Default::default(),
-            enabled_tools: Default::default(),
-            tool_rules: None,
-            status: pattern_db::models::AgentStatus::Active,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        pattern_db::queries::create_agent(dbs.constellation.pool(), &agent)
-            .await
-            .unwrap();
-
+        let (_dir, dbs) = test_dbs_with_agent().await;
         let cache = MemoryCache::new(dbs);
 
         // Insert archival entries
@@ -2046,27 +1873,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_multiple_content_types() {
-        let (_dir, dbs) = test_dbs().await;
-
-        // Create an agent
-        let agent = pattern_db::models::Agent {
-            id: "agent_1".to_string(),
-            name: "Test Agent".to_string(),
-            description: None,
-            model_provider: "anthropic".to_string(),
-            model_name: "claude".to_string(),
-            system_prompt: "test".to_string(),
-            config: Default::default(),
-            enabled_tools: Default::default(),
-            tool_rules: None,
-            status: pattern_db::models::AgentStatus::Active,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        pattern_db::queries::create_agent(dbs.constellation.pool(), &agent)
-            .await
-            .unwrap();
-
+        let (_dir, dbs) = test_dbs_with_agent().await;
         let cache = MemoryCache::new(dbs.clone());
 
         // Create a memory block
@@ -2123,25 +1930,8 @@ mod tests {
         let (_dir, dbs) = test_dbs().await;
 
         // Create two agents
-        for agent_id in &["agent_1", "agent_2"] {
-            let agent = pattern_db::models::Agent {
-                id: agent_id.to_string(),
-                name: format!("Test Agent {}", agent_id),
-                description: None,
-                model_provider: "anthropic".to_string(),
-                model_name: "claude".to_string(),
-                system_prompt: "test".to_string(),
-                config: Default::default(),
-                enabled_tools: Default::default(),
-                tool_rules: None,
-                status: pattern_db::models::AgentStatus::Active,
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            };
-            pattern_db::queries::create_agent(dbs.constellation.pool(), &agent)
-                .await
-                .unwrap();
-        }
+        create_test_agent(&dbs, "agent_1").await;
+        create_test_agent(&dbs, "agent_2").await;
 
         let cache = MemoryCache::new(dbs);
 
@@ -2179,27 +1969,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_limit() {
-        let (_dir, dbs) = test_dbs().await;
-
-        // Create an agent
-        let agent = pattern_db::models::Agent {
-            id: "agent_1".to_string(),
-            name: "Test Agent".to_string(),
-            description: None,
-            model_provider: "anthropic".to_string(),
-            model_name: "claude".to_string(),
-            system_prompt: "test".to_string(),
-            config: Default::default(),
-            enabled_tools: Default::default(),
-            tool_rules: None,
-            status: pattern_db::models::AgentStatus::Active,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        pattern_db::queries::create_agent(dbs.constellation.pool(), &agent)
-            .await
-            .unwrap();
-
+        let (_dir, dbs) = test_dbs_with_agent().await;
         let cache = MemoryCache::new(dbs);
 
         // Insert many archival entries with same keyword
@@ -2227,27 +1997,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_empty_content_types() {
-        let (_dir, dbs) = test_dbs().await;
-
-        // Create an agent
-        let agent = pattern_db::models::Agent {
-            id: "agent_1".to_string(),
-            name: "Test Agent".to_string(),
-            description: None,
-            model_provider: "anthropic".to_string(),
-            model_name: "claude".to_string(),
-            system_prompt: "test".to_string(),
-            config: Default::default(),
-            enabled_tools: Default::default(),
-            tool_rules: None,
-            status: pattern_db::models::AgentStatus::Active,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        pattern_db::queries::create_agent(dbs.constellation.pool(), &agent)
-            .await
-            .unwrap();
-
+        let (_dir, dbs) = test_dbs_with_agent().await;
         let cache = MemoryCache::new(dbs.clone());
 
         // Create data in both memory blocks and archival
@@ -2290,27 +2040,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_hybrid_mode_fallback() {
-        let (_dir, dbs) = test_dbs().await;
-
-        // Create an agent
-        let agent = pattern_db::models::Agent {
-            id: "agent_1".to_string(),
-            name: "Test Agent".to_string(),
-            description: None,
-            model_provider: "anthropic".to_string(),
-            model_name: "claude".to_string(),
-            system_prompt: "test".to_string(),
-            config: Default::default(),
-            enabled_tools: Default::default(),
-            tool_rules: None,
-            status: pattern_db::models::AgentStatus::Active,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        pattern_db::queries::create_agent(dbs.constellation.pool(), &agent)
-            .await
-            .unwrap();
-
+        let (_dir, dbs) = test_dbs_with_agent().await;
         let cache = MemoryCache::new(dbs.clone());
 
         // Insert archival entry
@@ -2340,27 +2070,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_vector_mode_fallback() {
-        let (_dir, dbs) = test_dbs().await;
-
-        // Create an agent
-        let agent = pattern_db::models::Agent {
-            id: "agent_1".to_string(),
-            name: "Test Agent".to_string(),
-            description: None,
-            model_provider: "anthropic".to_string(),
-            model_name: "claude".to_string(),
-            system_prompt: "test".to_string(),
-            config: Default::default(),
-            enabled_tools: Default::default(),
-            tool_rules: None,
-            status: pattern_db::models::AgentStatus::Active,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        pattern_db::queries::create_agent(dbs.constellation.pool(), &agent)
-            .await
-            .unwrap();
-
+        let (_dir, dbs) = test_dbs_with_agent().await;
         let cache = MemoryCache::new(dbs.clone());
 
         // Insert archival entry
@@ -2390,27 +2100,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_all_hybrid_mode_fallback() {
-        let (_dir, dbs) = test_dbs().await;
-
-        // Create an agent
-        let agent = pattern_db::models::Agent {
-            id: "agent_1".to_string(),
-            name: "Test Agent".to_string(),
-            description: None,
-            model_provider: "anthropic".to_string(),
-            model_name: "claude".to_string(),
-            system_prompt: "test".to_string(),
-            config: Default::default(),
-            enabled_tools: Default::default(),
-            tool_rules: None,
-            status: pattern_db::models::AgentStatus::Active,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        pattern_db::queries::create_agent(dbs.constellation.pool(), &agent)
-            .await
-            .unwrap();
-
+        let (_dir, dbs) = test_dbs_with_agent().await;
         let cache = MemoryCache::new(dbs.clone());
 
         // Insert archival entry
@@ -2435,6 +2125,306 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .contains("Constellation-wide")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_replace_in_block_crdt_aware() {
+        let (_dir, dbs) = test_dbs_with_agent().await;
+        let cache = MemoryCache::new(dbs);
+
+        // Create a block with some initial content.
+        cache
+            .create_block(
+                "agent_1",
+                "test_replace",
+                "Test block for replacement",
+                BlockType::Working,
+                BlockSchema::text(),
+                1000,
+            )
+            .await
+            .unwrap();
+
+        // Get the block and set initial content.
+        let doc = cache
+            .get_block("agent_1", "test_replace")
+            .await
+            .unwrap()
+            .unwrap();
+        doc.set_text("Hello world, this is a test.", true).unwrap();
+        cache.mark_dirty("agent_1", "test_replace");
+        cache.persist("agent_1", "test_replace").await.unwrap();
+
+        // Get the version vector before replacement.
+        let vv_before = doc.inner().oplog_vv();
+
+        // Perform replacement using CRDT-aware method.
+        let replaced = cache
+            .replace_in_block_with_options(
+                "agent_1",
+                "test_replace",
+                "world",
+                "universe",
+                WriteOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(replaced, "Replacement should have occurred");
+
+        // Verify the content is correct.
+        let doc_after = cache
+            .get_block("agent_1", "test_replace")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(doc_after.text_content(), "Hello universe, this is a test.");
+
+        // Verify version vector advanced (CRDT operation was recorded).
+        let vv_after = doc_after.inner().oplog_vv();
+        assert_ne!(
+            vv_before.encode().as_slice(),
+            vv_after.encode().as_slice(),
+            "Version vector should advance after CRDT operation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_replace_in_block_not_found() {
+        let (_dir, dbs) = test_dbs_with_agent().await;
+        let cache = MemoryCache::new(dbs);
+
+        // Create a block with some content.
+        cache
+            .create_block(
+                "agent_1",
+                "test_replace",
+                "Test block for replacement",
+                BlockType::Working,
+                BlockSchema::text(),
+                1000,
+            )
+            .await
+            .unwrap();
+
+        // Set initial content.
+        let doc = cache
+            .get_block("agent_1", "test_replace")
+            .await
+            .unwrap()
+            .unwrap();
+        doc.set_text("Hello world", true).unwrap();
+        cache.mark_dirty("agent_1", "test_replace");
+        cache.persist("agent_1", "test_replace").await.unwrap();
+
+        // Try to replace something that doesn't exist.
+        let replaced = cache
+            .replace_in_block_with_options(
+                "agent_1",
+                "test_replace",
+                "nonexistent",
+                "replacement",
+                WriteOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(!replaced, "Replacement should not have occurred");
+
+        // Verify content is unchanged.
+        let doc_after = cache
+            .get_block("agent_1", "test_replace")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(doc_after.text_content(), "Hello world");
+    }
+
+    /// Test that replacement works correctly when content has multi-byte Unicode characters
+    /// before/around the replacement target. This exercises the byte-to-Unicode position
+    /// conversion in `replace_text` which uses Loro's `convert_pos` for correct splice().
+    #[tokio::test]
+    async fn test_replace_in_block_unicode() {
+        let (_dir, dbs) = test_dbs_with_agent().await;
+        let cache = MemoryCache::new(dbs);
+
+        // Create a block for Unicode replacement testing.
+        cache
+            .create_block(
+                "agent_1",
+                "unicode_test",
+                "Test block for Unicode replacement",
+                BlockType::Working,
+                BlockSchema::text(),
+                1000,
+            )
+            .await
+            .unwrap();
+
+        // Test case 1: Emoji before target.
+        // "Hello 🌍 world" - emoji is 4 bytes, but 1 Unicode scalar.
+        let doc = cache
+            .get_block("agent_1", "unicode_test")
+            .await
+            .unwrap()
+            .unwrap();
+        doc.set_text("Hello 🌍 world", true).unwrap();
+        cache.mark_dirty("agent_1", "unicode_test");
+        cache.persist("agent_1", "unicode_test").await.unwrap();
+
+        let replaced = cache
+            .replace_in_block_with_options(
+                "agent_1",
+                "unicode_test",
+                "world",
+                "universe",
+                WriteOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            replaced,
+            "Replacement should have occurred with emoji before target"
+        );
+
+        let doc_after = cache
+            .get_block("agent_1", "unicode_test")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            doc_after.text_content(),
+            "Hello 🌍 universe",
+            "Content should correctly replace 'world' with 'universe' after emoji"
+        );
+
+        // Test case 2: CJK characters (3 bytes each in UTF-8).
+        doc_after.set_text("日本語 world and more", true).unwrap();
+        cache.mark_dirty("agent_1", "unicode_test");
+        cache.persist("agent_1", "unicode_test").await.unwrap();
+
+        let replaced = cache
+            .replace_in_block_with_options(
+                "agent_1",
+                "unicode_test",
+                "world",
+                "世界",
+                WriteOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            replaced,
+            "Replacement should have occurred with CJK characters before target"
+        );
+
+        let doc_after = cache
+            .get_block("agent_1", "unicode_test")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            doc_after.text_content(),
+            "日本語 世界 and more",
+            "Content should correctly replace 'world' with '世界' after CJK chars"
+        );
+
+        // Test case 3: Multiple emoji and mixed content.
+        doc_after
+            .set_text("🎉🎊 Hello 🌍 beautiful world 🌈", true)
+            .unwrap();
+        cache.mark_dirty("agent_1", "unicode_test");
+        cache.persist("agent_1", "unicode_test").await.unwrap();
+
+        let replaced = cache
+            .replace_in_block_with_options(
+                "agent_1",
+                "unicode_test",
+                "beautiful world",
+                "amazing planet",
+                WriteOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            replaced,
+            "Replacement should work with multiple emoji surrounding target"
+        );
+
+        let doc_after = cache
+            .get_block("agent_1", "unicode_test")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            doc_after.text_content(),
+            "🎉🎊 Hello 🌍 amazing planet 🌈",
+            "Content should correctly handle multiple emoji around replacement"
+        );
+
+        // Test case 4: Replace at very start after Unicode prefix.
+        doc_after.set_text("🔥start middle end", true).unwrap();
+        cache.mark_dirty("agent_1", "unicode_test");
+        cache.persist("agent_1", "unicode_test").await.unwrap();
+
+        let replaced = cache
+            .replace_in_block_with_options(
+                "agent_1",
+                "unicode_test",
+                "start",
+                "begin",
+                WriteOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(replaced, "Replacement should work immediately after emoji");
+
+        let doc_after = cache
+            .get_block("agent_1", "unicode_test")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            doc_after.text_content(),
+            "🔥begin middle end",
+            "Content should correctly replace 'start' with 'begin' right after emoji"
+        );
+
+        // Test case 5: Replace emoji itself.
+        doc_after.set_text("Hello 🌍 world", true).unwrap();
+        cache.mark_dirty("agent_1", "unicode_test");
+        cache.persist("agent_1", "unicode_test").await.unwrap();
+
+        let replaced = cache
+            .replace_in_block_with_options(
+                "agent_1",
+                "unicode_test",
+                "🌍",
+                "🌎",
+                WriteOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            replaced,
+            "Replacement should work when replacing emoji with emoji"
+        );
+
+        let doc_after = cache
+            .get_block("agent_1", "unicode_test")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            doc_after.text_content(),
+            "Hello 🌎 world",
+            "Content should correctly replace emoji with different emoji"
         );
     }
 }

@@ -262,6 +262,7 @@ pub async fn run_discord_bot_with_group(
                 group_manager,
                 output.clone(),
                 rl,
+                ctx.constellation_db(),
             )
             .await?;
         }
@@ -327,6 +328,7 @@ async fn run_group_chat_loop(
     pattern_manager: Arc<dyn pattern_core::coordination::groups::GroupManager>,
     output: Output,
     mut rl: rustyline_async::Readline,
+    db: &pattern_db::ConstellationDb,
 ) -> Result<()> {
     use pattern_core::messages::{Message, MessageContent};
     use rustyline_async::ReadlineEvent;
@@ -353,6 +355,7 @@ async fn run_group_chat_loop(
                             default_agent,
                         },
                         &output,
+                        db,
                     )
                     .await
                     {

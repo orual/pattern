@@ -326,6 +326,21 @@ pub async fn update_block_pinned(pool: &SqlitePool, id: &str, pinned: bool) -> D
     Ok(())
 }
 
+/// Rename a memory block by updating its label.
+///
+/// Note: This only updates the label in the database. The caller is responsible
+/// for ensuring no other block with the same label exists for this agent.
+pub async fn update_block_label(pool: &SqlitePool, id: &str, new_label: &str) -> DbResult<()> {
+    sqlx::query!(
+        "UPDATE memory_blocks SET label = ?, updated_at = datetime('now') WHERE id = ?",
+        new_label,
+        id
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Update a memory block's type.
 ///
 /// Used for archiving blocks (changing Working -> Archival).

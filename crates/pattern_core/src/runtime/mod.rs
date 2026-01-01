@@ -378,6 +378,52 @@ impl AgentRuntime {
     pub fn tool_context(&self) -> &dyn ToolContext {
         self
     }
+
+    // ============================================================================
+    // Permission Check Helpers
+    // ============================================================================
+
+    /// Check if this agent has a specific capability as a specialist.
+    ///
+    /// Returns true if the agent has the capability with specialist role in any group.
+    /// Used for permission checks on constellation-wide operations.
+    pub async fn has_capability(&self, capability: &str) -> bool {
+        match pattern_db::queries::agent_has_capability(self.pool(), &self.agent_id, capability)
+            .await
+        {
+            Ok(has_cap) => has_cap,
+            Err(e) => {
+                tracing::warn!(
+                    agent_id = %self.agent_id,
+                    capability = %capability,
+                    error = %e,
+                    "Failed to check agent capability"
+                );
+                false
+            }
+        }
+    }
+
+    /// Check if this agent shares a group with another agent.
+    ///
+    /// Returns true if both agents are members of at least one common group.
+    /// Used for permission checks on cross-agent search operations.
+    pub async fn shares_group_with(&self, other_agent_id: &str) -> bool {
+        match pattern_db::queries::agents_share_group(self.pool(), &self.agent_id, other_agent_id)
+            .await
+        {
+            Ok(shares) => shares,
+            Err(e) => {
+                tracing::warn!(
+                    agent_id = %self.agent_id,
+                    other_agent_id = %other_agent_id,
+                    error = %e,
+                    "Failed to check group membership"
+                );
+                false
+            }
+        }
+    }
 }
 
 // ============================================================================
@@ -415,37 +461,89 @@ impl ToolContext for AgentRuntime {
         match scope {
             SearchScope::CurrentAgent => self.memory.search(&self.agent_id, query, options).await,
             SearchScope::Agent(ref id) => {
-                // TODO: Implement permission check - for now just log
+                // Permission check: agents must share a group to search each other's memory.
+                if !self.shares_group_with(id.as_str()).await {
+                    tracing::warn!(
+                        agent_id = %self.agent_id,
+                        target_agent = %id,
+                        "Cross-agent search denied: agents do not share a group"
+                    );
+                    return Ok(Vec::new());
+                }
+
                 tracing::debug!(
                     agent_id = %self.agent_id,
                     target_agent = %id,
-                    "Cross-agent search requested (permission check not yet implemented)"
+                    "Cross-agent search permitted: agents share a group"
                 );
                 self.memory.search(id.as_str(), query, options).await
             }
             SearchScope::Agents(ref ids) => {
+                // Permission check: filter to only agents that share a group with the requester.
+                // NOTE: This does sequential permission checks per agent. For very large agent lists,
+                // consider adding a batch query. In practice, groups are small so this is fine.
+                let mut permitted_ids = Vec::new();
+                for id in ids {
+                    if self.shares_group_with(id.as_str()).await {
+                        permitted_ids.push(id.clone());
+                    } else {
+                        tracing::warn!(
+                            agent_id = %self.agent_id,
+                            target_agent = %id,
+                            "Cross-agent search denied for agent: no shared group"
+                        );
+                    }
+                }
+
+                if permitted_ids.is_empty() {
+                    tracing::warn!(
+                        agent_id = %self.agent_id,
+                        "Multi-agent search denied: no target agents share a group"
+                    );
+                    return Ok(Vec::new());
+                }
+
                 tracing::debug!(
                     agent_id = %self.agent_id,
-                    target_agents = ?ids,
-                    "Multi-agent search requested (permission check not yet implemented)"
+                    permitted_count = permitted_ids.len(),
+                    total_requested = ids.len(),
+                    "Multi-agent search: searching permitted agents"
                 );
-                // TODO: Log or aggregate errors from failed agent searches instead of silently ignoring
-                // Search each and merge results
+
+                // Search each permitted agent and merge results.
                 let mut all_results = Vec::new();
-                for id in ids {
-                    let results = self
+                for id in &permitted_ids {
+                    match self
                         .memory
                         .search(id.as_str(), query, options.clone())
-                        .await?;
-                    all_results.extend(results);
+                        .await
+                    {
+                        Ok(results) => all_results.extend(results),
+                        Err(e) => {
+                            tracing::warn!(
+                                agent_id = %self.agent_id,
+                                target_agent = %id,
+                                error = %e,
+                                "Failed to search agent memory"
+                            );
+                        }
+                    }
                 }
                 Ok(all_results)
             }
             SearchScope::Constellation => {
-                // TODO: Add permission check for constellation-wide search
+                // Permission check: agent must have "memory" capability as a specialist.
+                if !self.has_capability("memory").await {
+                    tracing::warn!(
+                        agent_id = %self.agent_id,
+                        "Constellation-wide search denied: agent lacks 'memory' capability"
+                    );
+                    return Ok(Vec::new());
+                }
+
                 tracing::debug!(
                     agent_id = %self.agent_id,
-                    "Constellation-wide search requested (permission check not yet implemented)"
+                    "Constellation-wide search permitted: agent has 'memory' capability"
                 );
                 self.memory.search_all(query, options).await
             }

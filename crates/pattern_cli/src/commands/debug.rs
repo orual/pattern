@@ -10,7 +10,9 @@ use owo_colors::OwoColorize;
 use pattern_core::config::PatternConfig;
 use pattern_db::search::ContentFilter;
 
-use crate::helpers::{get_db, load_config, require_agent_by_name};
+use crate::helpers::{
+    create_runtime_context, get_agent_by_name, get_db, get_dbs, load_config, require_agent_by_name,
+};
 use crate::output::Output;
 
 // =============================================================================
@@ -468,123 +470,414 @@ pub async fn list_all_memory(agent_name: &str) -> Result<()> {
 }
 
 // =============================================================================
-// Show Context - STUBBED
+// Show Context
 // =============================================================================
 
-// TODO: Reimplement for pattern_db (SQLite/sqlx)
-//
-// Previous implementation:
-// 1. Found agent by name via raw SurrealDB query
-// 2. Loaded full agent via load_or_create_agent
-// 3. Called agent.system_prompt() to get current prompt
-// 4. Called agent.available_tools() to list tools
-// 5. Displayed formatted context
-//
-// Needs: RuntimeContext for agent loading
-
-/// Show the current context that would be passed to the LLM
+/// Show the current context that would be passed to the LLM.
 ///
-/// NOTE: Currently STUBBED. Needs RuntimeContext for agent loading.
-pub async fn show_context(agent_name: &str, _config: &PatternConfig) -> Result<()> {
+/// Uses `prepare_request()` with empty messages to build the actual context,
+/// showing what would be sent to the model.
+pub async fn show_context(agent_name: &str, config: &PatternConfig) -> Result<()> {
     let output = Output::new();
 
-    output.warning(&format!(
-        "Context display for '{}' temporarily disabled during database migration",
-        agent_name.bright_cyan()
-    ));
+    // Load agent via RuntimeContext
+    let ctx = create_runtime_context(config).await?;
+    let dbs = get_dbs(config).await?;
 
-    output.info("Reason:", "Needs RuntimeContext for agent loading");
-    output.status("Previous functionality:");
-    output.list_item("Full system prompt as passed to LLM");
-    output.list_item("Available tools list with descriptions");
-    output.list_item("Memory block values embedded in prompt");
+    let db_agent = match get_agent_by_name(&dbs.constellation, agent_name).await? {
+        Some(a) => a,
+        None => {
+            output.error(&format!("Agent '{}' not found", agent_name));
+            return Ok(());
+        }
+    };
 
-    Ok(())
-}
+    let agent = ctx
+        .load_agent(&db_agent.id)
+        .await
+        .map_err(|e| miette::miette!("Failed to load agent '{}': {}", agent_name, e))?;
 
-// =============================================================================
-// Edit Memory - STUBBED
-// =============================================================================
+    output.section(&format!("Context for: {}", agent.name().bright_cyan()));
 
-// TODO: Reimplement for pattern_db (SQLite/sqlx)
-//
-// Previous implementation:
-// 1. Found agent by name via raw SurrealDB query
-// 2. Found memory block by label via agent_memories relation
-// 3. Exported content to temp file
-// 4. Waited for user to edit file
-// 5. Read edited content and updated database
-//
-// Needs: pattern_db::queries::{get_memory_block, update_memory_block}
+    // Build the ACTUAL context using prepare_request with empty messages
+    let runtime = agent.runtime();
+    match runtime
+        .prepare_request(
+            Vec::<pattern_core::messages::Message>::new(),
+            None,
+            None,
+            None,
+            Some(&db_agent.system_prompt),
+        )
+        .await
+    {
+        Ok(request) => {
+            // System prompt section
+            output.print("");
+            if let Some(ref system_parts) = request.system {
+                let total_chars: usize = system_parts.iter().map(|s| s.len()).sum();
+                output.kv(
+                    "System Prompt",
+                    &format!(
+                        "({} parts, {} chars total)",
+                        system_parts.len(),
+                        total_chars
+                    ),
+                );
 
-/// Edit a memory block by exporting to file and reimporting after edits
-///
-/// NOTE: Currently STUBBED. Needs pattern_db memory queries.
-pub async fn edit_memory(agent_name: &str, label: &str, file_path: Option<&str>) -> Result<()> {
-    let output = Output::new();
+                for (i, part) in system_parts.iter().enumerate() {
+                    let part_type = if i == 0 {
+                        "base"
+                    } else if part.contains("<block:") {
+                        "block"
+                    } else if part.contains("# Tool Execution Rules") {
+                        "rules"
+                    } else {
+                        "section"
+                    };
 
-    output.warning(&format!(
-        "Memory editing for '{}' temporarily disabled during database migration",
-        agent_name.bright_cyan()
-    ));
+                    output.list_item(&format!("[{}] {} chars", part_type.dimmed(), part.len()));
+                }
 
-    output.info("Block label:", label);
-    if let Some(path) = file_path {
-        output.info("File path:", path);
+                // Option to show full content
+                output.print("");
+                output.status("Full system prompt parts:");
+                for (i, part) in system_parts.iter().enumerate() {
+                    output.print(&format!("\n--- Part {} ---", i + 1));
+                    // Truncate very long parts for display
+                    if part.len() > 2000 {
+                        output.print(&format!("{}...", &part[..2000]));
+                        output.status(&format!("(truncated, {} chars total)", part.len()));
+                    } else {
+                        output.print(part);
+                    }
+                }
+            } else {
+                output.kv("System Prompt", "(none)");
+            }
+
+            // Tools section
+            output.print("");
+            if let Some(ref tools) = request.tools {
+                output.kv("Tools", &format!("({})", tools.len()));
+                for tool in tools {
+                    output.list_item(&format!(
+                        "{}: {}",
+                        tool.name.bright_cyan(),
+                        tool.description.as_deref().unwrap_or("(no description)")
+                    ));
+                }
+            } else {
+                output.kv("Tools", "(none)");
+            }
+
+            // Messages section
+            output.print("");
+            output.kv("Messages in context", &request.messages.len().to_string());
+        }
+        Err(e) => {
+            output.error(&format!("Failed to build context: {}", e));
+        }
     }
-    output.info("Reason:", "Needs pattern_db memory update queries");
-    output.status("Previous functionality:");
-    output.list_item("Export memory block to temp file");
-    output.list_item("Wait for user to edit");
-    output.list_item("Import edited content back to database");
 
     Ok(())
 }
 
 // =============================================================================
-// Modify Memory - STUBBED
+// Edit Memory
 // =============================================================================
 
-// TODO: Reimplement for pattern_db (SQLite/sqlx)
-//
-// Previous implementation:
-// 1. Found agent by name via raw SurrealDB query
-// 2. Found memory block by label
-// 3. Updated specified fields (label, permission, memory_type)
-//
-// Needs: pattern_db::queries::update_memory_block()
-
-/// Modify memory block metadata
+/// Edit a memory block by exporting to file and reimporting after edits.
 ///
-/// NOTE: Currently STUBBED. Needs pattern_db memory update queries.
+/// Supports all schema types:
+/// - Text: exports as plain text
+/// - Map/List/Log/Composite: exports as TOML
+pub async fn edit_memory(agent_name: &str, label: &str, file_path: Option<&str>) -> Result<()> {
+    use std::io::Write;
+
+    let output = Output::new();
+    let config = load_config().await?;
+
+    // Load agent via RuntimeContext
+    let ctx = create_runtime_context(&config).await?;
+    let dbs = get_dbs(&config).await?;
+
+    let db_agent = match get_agent_by_name(&dbs.constellation, agent_name).await? {
+        Some(a) => a,
+        None => {
+            output.error(&format!("Agent '{}' not found", agent_name));
+            return Ok(());
+        }
+    };
+
+    let agent = ctx
+        .load_agent(&db_agent.id)
+        .await
+        .map_err(|e| miette::miette!("Failed to load agent '{}': {}", agent_name, e))?;
+
+    let runtime = agent.runtime();
+    let memory = runtime.memory();
+    let agent_id = agent.id().to_string();
+
+    // Get the memory block
+    let doc = match memory.get_block(&agent_id, label).await {
+        Ok(Some(doc)) => doc,
+        Ok(None) => {
+            output.error(&format!("Memory block '{}' not found", label));
+            return Ok(());
+        }
+        Err(e) => {
+            output.error(&format!("Failed to get memory block: {}", e));
+            return Ok(());
+        }
+    };
+
+    // Determine schema type for file extension
+    let is_text = matches!(doc.schema(), pattern_core::memory::BlockSchema::Text { .. });
+    let extension = if is_text { "txt" } else { "toml" };
+
+    // Export content for editing
+    let content = doc.export_for_editing();
+
+    // Create temp file or use provided path
+    let edit_path = if let Some(path) = file_path {
+        std::path::PathBuf::from(path)
+    } else {
+        let mut temp = std::env::temp_dir();
+        temp.push(format!(
+            "pattern_memory_{}_{}.{}",
+            agent_name, label, extension
+        ));
+        temp
+    };
+
+    // Write content to file
+    let mut file = std::fs::File::create(&edit_path)
+        .map_err(|e| miette::miette!("Failed to create temp file: {}", e))?;
+    file.write_all(content.as_bytes())
+        .map_err(|e| miette::miette!("Failed to write temp file: {}", e))?;
+
+    output.section(&format!("Editing memory block: {}", label.bright_cyan()));
+    output.info("Schema:", &format!("{:?}", doc.schema()));
+    output.info("File:", &edit_path.display().to_string());
+    output.print("");
+    output.status("Edit the file and save it. Press Enter when done, or 'q' to cancel.");
+
+    // Wait for user input
+    let mut input = String::new();
+    std::io::stdin()
+        .read_line(&mut input)
+        .map_err(|e| miette::miette!("Failed to read input: {}", e))?;
+
+    if input.trim().eq_ignore_ascii_case("q") {
+        output.warning("Edit cancelled");
+        // Clean up temp file if we created it
+        if file_path.is_none() {
+            let _ = std::fs::remove_file(&edit_path);
+        }
+        return Ok(());
+    }
+
+    // Read edited content
+    let edited_content = std::fs::read_to_string(&edit_path)
+        .map_err(|e| miette::miette!("Failed to read edited file: {}", e))?;
+
+    // Apply changes based on schema
+    if is_text {
+        // For text, just set the content directly
+        match memory
+            .update_block_text(&agent_id, label, &edited_content)
+            .await
+        {
+            Ok(()) => {
+                output.success(&format!("Updated memory block '{}'", label));
+            }
+            Err(e) => {
+                output.error(&format!("Failed to update memory block: {}", e));
+            }
+        }
+    } else {
+        // For structured schemas, parse TOML and import via document
+        // Strip the comment header if present
+        let toml_content = edited_content
+            .lines()
+            .skip_while(|line| line.starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        match toml::from_str::<serde_json::Value>(&toml_content) {
+            Ok(value) => {
+                // Import JSON into the document (Loro doc is Arc-shared with cache)
+                if let Err(e) = doc.import_from_json(&value) {
+                    output.error(&format!("Failed to import changes: {}", e));
+                    return Ok(());
+                }
+
+                // Mark dirty and persist
+                memory.mark_dirty(&agent_id, label);
+                if let Err(e) = memory.persist_block(&agent_id, label).await {
+                    output.error(&format!("Failed to persist changes: {}", e));
+                    return Ok(());
+                }
+
+                output.success(&format!("Updated memory block '{}'", label));
+            }
+            Err(e) => {
+                output.error(&format!("Failed to parse edited TOML: {}", e));
+            }
+        }
+    }
+
+    // Clean up temp file if we created it
+    if file_path.is_none() {
+        let _ = std::fs::remove_file(&edit_path);
+    }
+
+    Ok(())
+}
+
+// =============================================================================
+// Modify Memory
+// =============================================================================
+
+/// Modify memory block metadata (label, permission, type).
 pub async fn modify_memory(
-    agent: &String,
+    agent_name: &String,
     label: &String,
     new_label: &Option<String>,
     permission: &Option<String>,
     memory_type: &Option<String>,
 ) -> Result<()> {
     let output = Output::new();
+    let config = load_config().await?;
+    let db = get_db(&config).await?;
 
-    output.warning(&format!(
-        "Memory modification for '{}' temporarily disabled during database migration",
-        agent.bright_cyan()
-    ));
+    // Find agent and block
+    let db_agent = require_agent_by_name(&db, agent_name).await?;
 
-    output.info("Current label:", label);
+    output.section(&format!("Modifying memory block: {}", label.bright_cyan()));
+
+    let mut modified = false;
+
+    // Update label if specified
     if let Some(nl) = new_label {
-        output.info("New label:", nl);
+        // Check if target label already exists
+        match pattern_db::queries::get_block_by_label(db.pool(), &db_agent.id, nl).await {
+            Ok(Some(_)) => {
+                output.error(&format!("Block with label '{}' already exists", nl));
+                return Ok(());
+            }
+            Ok(None) => {} // Good, no conflict
+            Err(e) => {
+                output.error(&format!("Failed to check for existing block: {}", e));
+                return Ok(());
+            }
+        }
+
+        // Get current block
+        match pattern_db::queries::get_block_by_label(db.pool(), &db_agent.id, label).await {
+            Ok(Some(block)) => {
+                match pattern_db::queries::update_block_label(db.pool(), &block.id, nl).await {
+                    Ok(()) => {
+                        output.success(&format!("Renamed block '{}' to '{}'", label, nl));
+                        modified = true;
+                    }
+                    Err(e) => {
+                        output.error(&format!("Failed to rename block: {}", e));
+                    }
+                }
+            }
+            Ok(None) => {
+                output.error(&format!("Memory block '{}' not found", label));
+                return Ok(());
+            }
+            Err(e) => {
+                output.error(&format!("Failed to get memory block: {}", e));
+                return Ok(());
+            }
+        }
     }
-    if let Some(p) = permission {
-        output.info("Permission:", p);
+
+    // Update permission if specified
+    if let Some(perm_str) = permission {
+        let perm = match perm_str.to_lowercase().as_str() {
+            "readonly" | "ro" => pattern_db::MemoryPermission::ReadOnly,
+            "readwrite" | "rw" => pattern_db::MemoryPermission::ReadWrite,
+            "append" | "a" => pattern_db::MemoryPermission::Append,
+            "admin" => pattern_db::MemoryPermission::Admin,
+            "partner" => pattern_db::MemoryPermission::Partner,
+            "human" => pattern_db::MemoryPermission::Human,
+            _ => {
+                output.error(&format!("Invalid permission: {}", perm_str));
+                output.status("Valid: readonly, readwrite, append, admin, partner, human");
+                return Ok(());
+            }
+        };
+
+        // Get block ID from database
+        match pattern_db::queries::get_block_by_label(db.pool(), &db_agent.id, label).await {
+            Ok(Some(block)) => {
+                match pattern_db::queries::update_block_permission(db.pool(), &block.id, perm).await
+                {
+                    Ok(()) => {
+                        output.success(&format!("Updated permission to: {}", perm_str));
+                        modified = true;
+                    }
+                    Err(e) => {
+                        output.error(&format!("Failed to update permission: {}", e));
+                    }
+                }
+            }
+            Ok(None) => {
+                output.error(&format!("Memory block '{}' not found", label));
+                return Ok(());
+            }
+            Err(e) => {
+                output.error(&format!("Failed to get memory block: {}", e));
+                return Ok(());
+            }
+        }
     }
-    if let Some(mt) = memory_type {
-        output.info("Memory type:", mt);
+
+    // Update memory type if specified
+    if let Some(type_str) = memory_type {
+        let mem_type = match type_str.to_lowercase().as_str() {
+            "core" => pattern_db::MemoryBlockType::Core,
+            "working" => pattern_db::MemoryBlockType::Working,
+            _ => {
+                output.error(&format!("Invalid memory type: {}", type_str));
+                output.status("Valid: core, working");
+                return Ok(());
+            }
+        };
+
+        match pattern_db::queries::get_block_by_label(db.pool(), &db_agent.id, label).await {
+            Ok(Some(block)) => {
+                match pattern_db::queries::update_block_type(db.pool(), &block.id, mem_type).await {
+                    Ok(()) => {
+                        output.success(&format!("Updated memory type to: {}", type_str));
+                        modified = true;
+                    }
+                    Err(e) => {
+                        output.error(&format!("Failed to update memory type: {}", e));
+                    }
+                }
+            }
+            Ok(None) => {
+                output.error(&format!("Memory block '{}' not found", label));
+                return Ok(());
+            }
+            Err(e) => {
+                output.error(&format!("Failed to get memory block: {}", e));
+                return Ok(());
+            }
+        }
     }
-    output.info(
-        "Reason:",
-        "Needs pattern_db::queries::update_memory_block()",
-    );
+
+    if !modified {
+        output.warning("No modifications specified");
+        output.status("Use --permission or --memory-type to modify the block");
+    }
 
     Ok(())
 }

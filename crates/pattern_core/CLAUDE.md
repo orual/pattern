@@ -61,6 +61,7 @@ Following Letta/MemGPT patterns with multi-operation tools:
 
 2. **Memory System** (`memory/`)
    - Loro CRDT based in-memory cache backed by `pattern-db`
+   - **StructuredDocument sharing**: `MemoryCache::get_block()` returns a `StructuredDocument` where the internal `LoroDoc` is Arc-shared with the cache. Mutations via `set_text()`, `import_from_json()`, etc. propagate to the cached version. However, metadata fields (permission, label, accessor_agent_id) are *not* shared—they're cloned. After mutating, call `mark_dirty()` + `persist_block()` to save.
 
 3. **Tool System** (`tool/`)
    - Type-safe `AiTool<Input, Output>` trait

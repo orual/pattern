@@ -199,6 +199,7 @@ pub async fn chat_with_single_agent(agent_name: &str, config: &PatternConfig) ->
                         &line,
                         crate::slash_commands::CommandContext::SingleAgent(&agent),
                         &output,
+                        ctx.constellation_db(),
                     )
                     .await
                     {
