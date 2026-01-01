@@ -1,338 +1,394 @@
-# Data Sources Configuration Guide
+# Data Sources Guide
 
-This guide explains how to configure and use data sources with Pattern agents to enable them to monitor and respond to external data streams.
+Pattern's data source system enables agents to consume external data through two complementary traits: `DataStream` for real-time events and `DataBlock` for documents with version control.
 
 ## Overview
 
-Pattern's data source system allows agents to:
-- Monitor file systems for changes
-- Create indexed knowledge bases with semantic search
-- Connect to the Bluesky firehose for social media monitoring
-- Process data through customizable templates
-- Manage multiple sources simultaneously
+Data sources bridge external systems and agent memory. They:
+- Create and manage memory blocks for external content
+- Route notifications to agents or groups
+- Handle permission-gated edits with feedback
+- Support version history and rollback (for DataBlock)
 
-## Quick Start
+## Core Traits
 
-### 1. Simple File Monitoring
+### DataStream
 
-Monitor a directory and get notified when files change:
+For real-time event sources (Bluesky firehose, Discord, sensors):
 
 ```rust
-use pattern_core::data_source::monitor_directory;
+#[async_trait]
+pub trait DataStream: Send + Sync {
+    fn source_id(&self) -> &str;
+    fn name(&self) -> &str;
+    fn block_schemas(&self) -> Vec<BlockSchemaSpec>;
+    fn required_tools(&self) -> Vec<ToolRule>;
 
-let coordinator = monitor_directory(
-    agent_id,
-    agent_name,
-    db,
-    "/path/to/watch",
-).await?;
+    async fn start(&self, ctx: Arc<dyn ToolContext>, owner: AgentId)
+        -> Result<broadcast::Receiver<Notification>>;
+    async fn stop(&self) -> Result<()>;
+
+    fn pause(&self);
+    fn resume(&self);
+    fn status(&self) -> StreamStatus;
+
+    fn supports_pull(&self) -> bool;
+    async fn pull(&self, limit: usize, cursor: Option<StreamCursor>)
+        -> Result<Vec<Notification>>;
+}
 ```
 
-### 2. Indexed Knowledge Base
+### DataBlock
 
-Create a searchable knowledge base from documents:
+For document sources with versioning (files, configs):
 
 ```rust
-use pattern_core::data_source::create_knowledge_base;
+#[async_trait]
+pub trait DataBlock: Send + Sync {
+    fn source_id(&self) -> &str;
+    fn name(&self) -> &str;
+    fn block_schema(&self) -> BlockSchemaSpec;
+    fn permission_rules(&self) -> &[PermissionRule];
+    fn permission_for(&self, path: &Path) -> MemoryPermission;
+    fn matches(&self, path: &Path) -> bool;
 
-let coordinator = create_knowledge_base(
-    agent_id,
-    agent_name,
-    db,
-    "/path/to/documents",
-    embedding_provider,
-).await?;
+    async fn load(&self, path: &Path, ctx: Arc<dyn ToolContext>, owner: AgentId)
+        -> Result<BlockRef>;
+    async fn create(&self, path: &Path, content: Option<&str>, ctx, owner)
+        -> Result<BlockRef>;
+    async fn save(&self, block_ref: &BlockRef, ctx: Arc<dyn ToolContext>) -> Result<()>;
+    async fn delete(&self, path: &Path, ctx: Arc<dyn ToolContext>) -> Result<()>;
 
-// Search the knowledge base
-let results = coordinator.search_source(
-    "file:/path/to/documents",
-    "search query",
-    10  // max results
-).await?;
+    async fn start_watch(&self) -> Option<broadcast::Receiver<FileChange>>;
+    async fn stop_watch(&self) -> Result<()>;
+    fn status(&self) -> BlockSourceStatus;
+
+    async fn reconcile(&self, paths: &[PathBuf], ctx) -> Result<Vec<ReconcileResult>>;
+    async fn history(&self, block_ref: &BlockRef, ctx) -> Result<Vec<VersionInfo>>;
+    async fn rollback(&self, block_ref: &BlockRef, version: &str, ctx) -> Result<()>;
+    async fn diff(&self, block_ref, from: Option<&str>, to: Option<&str>, ctx) -> Result<String>;
+}
 ```
 
-### 3. Bluesky Monitoring
+## Configuration
 
-Monitor Bluesky for mentions and keywords:
+### Bluesky Stream
 
-```rust
-use pattern_core::data_source::monitor_bluesky_mentions;
+```toml
+[agent.data_sources.bluesky]
+type = "bluesky"
+name = "bluesky"
+target = "AgentName"  # or group name
+jetstream_endpoint = "wss://jetstream1.us-east.fire.hose.cam/subscribe"
 
-let coordinator = monitor_bluesky_mentions(
-    agent_id,
-    agent_name,
-    db,
-    "your.handle",
-    Some(agent_handle),  // For enhanced notifications
-).await?;
+# Filtering
+friends = ["did:plc:friend1", "did:plc:friend2"]  # Always see posts from these
+keywords = ["adhd", "executive function"]          # Filter by keywords
+languages = ["en"]                                 # Filter by language
+exclude_dids = ["did:plc:spam"]                    # Block these users
+exclude_keywords = ["spam"]                        # Exclude these terms
+
+# Behavior
+allow_any_mentions = false          # Only friends can mention
+require_agent_participation = true  # Only show threads agent is in
 ```
 
-## Advanced Configuration
+### File Source
 
-### Using the DataSourceBuilder
+```toml
+[agent.data_sources.notes]
+type = "file"
+name = "notes"
+paths = ["./notes", "./documents"]
+recursive = true
+include_patterns = ["*.md", "*.txt"]
+exclude_patterns = ["*.tmp", ".git/**"]
 
-For complex setups with multiple sources:
+# Permission rules (evaluated in order)
+[[agent.data_sources.notes.permission_rules]]
+pattern = "*.config.toml"
+permission = "read_only"
+
+[[agent.data_sources.notes.permission_rules]]
+pattern = "notes/**/*.md"
+permission = "read_write"
+```
+
+## Notification Routing
+
+Streams route notifications to agents or groups via the `target` field:
 
 ```rust
-use pattern_core::data_source::{DataSourceBuilder, BlueskyFilter};
+// Routing tries agent first, then group
+match router.route_message_to_agent(&target, message, origin).await {
+    Ok(Some(_)) => { /* routed to agent */ }
+    Ok(None) => {
+        // Agent not found, try as group
+        router.route_message_to_group(&target, message, origin).await?;
+    }
+    Err(e) => { /* handle error */ }
+}
+```
 
-let coordinator = DataSourceBuilder::new()
-    // Add file sources
-    .with_file_source("/data/static", false, true)      // indexed
-    .with_file_source("/data/inbox", true, false)       // watched
-    .with_templated_file_source(
-        "/data/reports",
-        "/templates/report.j2",
-        true,
-        false
-    )
-    // Add Bluesky sources
-    .with_bluesky_source(
-        "social_monitor".to_string(),
-        BlueskyFilter {
-            mentions: vec!["pattern.bsky.social".to_string()],
-            keywords: vec!["ADHD".to_string()],
-            languages: vec!["en".to_string()],
-            ..Default::default()
-        },
-        true  // use agent handle
-    )
-    .build(
-        agent_id,
-        agent_name,
-        db,
-        Some(embedding_provider),
-        Some(agent_handle),
-    )
+## SourceManager
+
+Access source operations through `ToolContext::sources()`:
+
+```rust
+#[async_trait]
+pub trait SourceManager: Send + Sync {
+    // Stream operations
+    fn list_streams(&self) -> Vec<String>;
+    fn get_stream_info(&self, source_id: &str) -> Option<StreamSourceInfo>;
+    async fn pause_stream(&self, source_id: &str) -> Result<()>;
+    async fn resume_stream(&self, source_id: &str, ctx) -> Result<()>;
+    async fn subscribe_to_stream(&self, agent_id, source_id, ctx)
+        -> Result<broadcast::Receiver<Notification>>;
+    async fn pull_from_stream(&self, source_id, limit, cursor) -> Result<Vec<Notification>>;
+
+    // Block operations
+    fn list_block_sources(&self) -> Vec<String>;
+    fn get_block_source_info(&self, source_id: &str) -> Option<BlockSourceInfo>;
+    async fn load_block(&self, source_id, path, owner) -> Result<BlockRef>;
+    async fn create_block(&self, source_id, path, content, owner) -> Result<BlockRef>;
+    async fn save_block(&self, source_id, block_ref) -> Result<()>;
+    async fn delete_block(&self, source_id, path) -> Result<()>;
+    fn find_block_source_for_path(&self, path: &Path) -> Option<Arc<dyn DataBlock>>;
+
+    // Version control
+    async fn reconcile_blocks(&self, source_id, paths) -> Result<Vec<ReconcileResult>>;
+    async fn block_history(&self, source_id, block_ref) -> Result<Vec<VersionInfo>>;
+    async fn rollback_block(&self, source_id, block_ref, version) -> Result<()>;
+    async fn diff_block(&self, source_id, block_ref, from, to) -> Result<String>;
+
+    // Edit routing
+    async fn handle_block_edit(&self, edit: &BlockEdit) -> Result<EditFeedback>;
+}
+```
+
+## Helper Utilities
+
+### BlockBuilder
+
+Fluent block creation:
+
+```rust
+use pattern_core::data_source::BlockBuilder;
+
+let block_ref = BlockBuilder::new(memory, owner, "user_profile")
+    .description("User profile information")
+    .schema(BlockSchema::Text { viewport: None })
+    .pinned()  // Always in context
+    .content("Initial content")
+    .build()
     .await?;
 ```
 
-### Bluesky Filters
+### NotificationBuilder
 
-Configure what content to monitor:
+Build notifications with blocks:
 
 ```rust
-BlueskyFilter {
-    // AT Protocol NSIDs to monitor
-    nsids: vec!["app.bsky.feed.post".to_string()],
-    
-    // Handles to watch for mentions
-    mentions: vec!["alice.bsky.social".to_string()],
-    
-    // DIDs to follow
-    dids: vec!["did:plc:abc123...".to_string()],
-    
-    // Keywords to match
-    keywords: vec!["ADHD".to_string(), "executive function".to_string()],
-    
-    // Language codes
-    languages: vec!["en".to_string(), "es".to_string()],
+use pattern_core::data_source::NotificationBuilder;
+
+let notification = NotificationBuilder::new("bluesky")
+    .text("New post from @alice about ADHD strategies")
+    .priority(NotificationPriority::Normal)
+    .block(context_block_ref)
+    .block(thread_block_ref)
+    .build();
+```
+
+### EphemeralBlockCache
+
+Get-or-create cache for ephemeral blocks:
+
+```rust
+let cache = EphemeralBlockCache::new();
+
+// Returns existing block or creates new one
+let block_ref = cache.get_or_create(
+    "did:plc:user123",  // External ID
+    || async {
+        BlockBuilder::new(memory, owner, "user_context")
+            .ephemeral()
+            .build()
+            .await
+    }
+).await?;
+```
+
+## Edit Feedback
+
+Sources can approve, defer, or reject edits:
+
+```rust
+pub enum EditFeedback {
+    Applied { message: Option<String> },  // Edit was applied
+    Pending { message: Option<String> },  // Async operation pending
+    Rejected { reason: String },          // Edit rejected
 }
 ```
 
-## Managing Data Sources
-
-### Source Operations
+Example handler:
 
 ```rust
-// List all sources
-let sources = coordinator.list_sources().await;
-for (id, source_type) in sources {
-    println!("{}: {}", id, source_type);
+async fn handle_block_edit(&self, edit: &BlockEdit, ctx: Arc<dyn ToolContext>)
+    -> Result<EditFeedback>
+{
+    let permission = self.permission_for(Path::new(&edit.block_label));
+
+    match permission {
+        MemoryPermission::ReadOnly => {
+            Ok(EditFeedback::Rejected {
+                reason: "File is read-only".to_string()
+            })
+        }
+        MemoryPermission::ReadWrite => {
+            // Apply edit to disk
+            self.save_to_disk(edit).await?;
+            Ok(EditFeedback::Applied { message: None })
+        }
+        _ => Ok(EditFeedback::Applied { message: None })
+    }
 }
-
-// Read from a source
-let items = coordinator.read_source(
-    "file:/data/inbox",
-    10,      // limit
-    None     // cursor
-).await?;
-
-// Search within a source
-let results = coordinator.search_source(
-    "file:/data/knowledge",
-    "executive function strategies",
-    5
-).await?;
-
-// Pause/resume monitoring
-coordinator.pause_source("bluesky_monitor").await?;
-coordinator.resume_source("bluesky_monitor").await?;
-
-// Get buffer statistics
-let stats = coordinator.get_buffer_stats("file:/data/inbox").await?;
 ```
 
-### Dynamic Source Management
+## File Source Sync Model
 
-Add sources at runtime:
+```
+Agent tools <-> Loro CRDT <-> Disk <-> External Editor
+                    ^
+               Version history
+```
+
+- **Loro as working state**: Agent's view with full version history
+- **Disk as canonical**: External changes detected via watch/reconcile
+- **Permission-gated writes**: Glob patterns determine access levels
+
+### Reconciliation
+
+After external file changes:
 
 ```rust
-use pattern_core::data_source::{add_file_source, add_bluesky_source};
+let results = source_manager.reconcile_blocks("files", &changed_paths).await?;
 
-// Add a file source
-add_file_source(
-    &mut coordinator,
-    "/new/path",
-    true,    // watch
-    false,   // indexed
-    None     // template
-).await?;
-
-// Add a Bluesky source
-add_bluesky_source(
-    &mut coordinator,
-    "new_monitor".to_string(),
-    None,    // default endpoint
-    filter,
-    agent_handle
-).await?;
+for result in results {
+    match result {
+        ReconcileResult::Resolved { path, resolution } => {
+            println!("{}: {:?}", path, resolution);
+        }
+        ReconcileResult::NeedsResolution { path, disk_changes, agent_changes } => {
+            // Present conflict to user
+        }
+        ReconcileResult::NoChange { path } => {}
+    }
+}
 ```
 
-## Integration with Agents
+Resolution strategies:
+- `DiskWins`: External changes overwrite
+- `AgentWins`: Agent's Loro changes preserved
+- `Merge`: CRDT merge applied
+- `Conflict`: Needs human decision
 
-### Agent Handle for Enhanced Notifications
+## BlueskyStream Features
 
-When you provide an agent handle to data sources, they can:
-- Access agent memory for context
-- Create memory blocks for tracked entities
-- Fetch additional context (e.g., Bluesky thread history)
-- Provide richer notifications to the agent
+- **Jetstream consumption**: Real-time WebSocket firehose
+- **DID/keyword/language filtering**: Reduce noise
+- **Friend list**: Always see posts from specific DIDs
+- **Thread context**: Fetches parent posts from constellation API
+- **Post batching**: 20-second windows to reduce notification frequency
+- **Agent participation**: Only show threads agent has engaged in
+- **Rich text parsing**: Extracts mentions and links
+
+## Programmatic Usage
+
+### Creating Sources from Config
 
 ```rust
-let agent_handle = agent.memory();
+use pattern_core::config::DataSourceConfig;
 
-// Bluesky source with handle can fetch thread context
-let coordinator = monitor_bluesky_mentions(
-    agent_id,
-    agent_name,
-    db,
-    handle,
-    Some(agent_handle),  // Enhanced features enabled
-).await?;
+// Create from configuration
+let blocks = config.create_blocks(dbs.clone()).await?;
+let streams = config.create_streams(dbs.clone(), tool_context.clone()).await?;
+
+// Register with runtime
+for block in blocks {
+    runtime.register_block_source(block);
+}
+for stream in streams {
+    runtime.register_stream_source(stream);
+}
 ```
 
-### Data Flow
-
-1. **Source Detection**: Data sources monitor for new items
-2. **Template Processing**: Items are formatted using Jinja2 templates
-3. **Agent Notification**: Formatted messages sent to agent
-4. **Agent Response**: Agent processes and potentially responds
-5. **Memory Update**: Important information stored in agent memory
-
-## File Storage Modes
-
-### Ephemeral Mode
-- Default for watched directories
-- Items processed and discarded
-- No indexing or search capability
-- Low memory overhead
-
-### Indexed Mode
-- Requires embedding provider
-- Documents chunked and embedded
-- Full semantic search support
-- Higher memory/compute requirements
+### Manual Source Creation
 
 ```rust
-// Ephemeral - good for transient data
-.with_file_source("/tmp/uploads", true, false)
+use pattern_core::data_source::{BlueskyStream, FileSource};
 
-// Indexed - good for knowledge bases
-.with_file_source("/data/docs", false, true)
-```
+// Bluesky stream
+let stream = BlueskyStream::new("bluesky", tool_context.clone())
+    .with_agent_did(did.clone())
+    .with_authenticated_agent(agent.clone())
+    .with_config(config.clone());
 
-## Template System
+let rx = stream.start(ctx.clone(), owner).await?;
 
-Templates control how data is presented to agents:
-
-```jinja2
-{# /templates/bluesky_post.j2 #}
-New post from @{{ author_handle }}:
-
-{{ post_text }}
-
-{% if is_reply %}
-In reply to: {{ parent_author }}
-{% endif %}
-
-{% if mentions %}
-Mentions: {{ mentions | join(", ") }}
-{% endif %}
-```
-
-## Performance Considerations
-
-1. **Buffer Configuration**
-   - Adjust buffer sizes based on data volume
-   - Monitor buffer stats to detect backpressure
-   - Use pagination for large result sets
-
-2. **Indexing Strategy**
-   - Only index stable, searchable content
-   - Use ephemeral mode for transient data
-   - Balance chunk size vs search granularity
-
-3. **Notification Frequency**
-   - Batch related items when possible
-   - Use rate limiting for high-volume sources
-   - Consider agent processing capacity
-
-## Troubleshooting
-
-### Common Issues
-
-1. **"No embedding provider" warning**
-   - Indexed mode requires embedding provider
-   - Falls back to ephemeral automatically
-   - Provide embeddings for search capability
-
-2. **Buffer overflow**
-   - Check buffer stats regularly
-   - Increase buffer size if needed
-   - Consider sampling high-volume streams
-
-3. **Template errors**
-   - Validate Jinja2 syntax
-   - Ensure all variables are available
-   - Check template file permissions
-
-### Debug Commands
-
-```rust
-// Check source status
-let sources = coordinator.list_sources().await;
-
-// Monitor buffer health
-let stats = coordinator.get_buffer_stats(source_id).await?;
-println!("Buffered: {}, Dropped: {}", 
-    stats["buffered_count"], 
-    stats["dropped_count"]
-);
-
-// Test source connectivity
-let test_items = coordinator.read_source(source_id, 1, None).await?;
+// File source
+let source = FileSource::from_config(base_path, &file_config);
+let block_ref = source.load(&file_path, ctx.clone(), owner).await?;
 ```
 
 ## Best Practices
 
-1. **Start Simple**: Begin with basic file monitoring, add complexity gradually
-2. **Monitor Performance**: Track buffer stats and processing times
-3. **Use Templates**: Keep agent prompts consistent and maintainable
-4. **Index Wisely**: Only index content that needs semantic search
-5. **Handle Errors**: Implement retry logic for network sources
-6. **Test Locally**: Use file sources to prototype before connecting to live streams
+### Source Type Selection
 
-## Example Use Cases
+| Source Type | Use For |
+|-------------|---------|
+| DataStream | Real-time events, social media, sensors |
+| DataBlock | Documents, configs, files needing version control |
 
-### ADHD Task Inbox
-Monitor a directory where users drop task files, automatically parsing and organizing them.
+### Performance
 
-### Knowledge Management
-Index documentation and notes for instant retrieval during conversations.
+- **Batching**: BlueskyStream batches posts (20s windows) to reduce agent invocations
+- **Ephemeral blocks**: Use for transient context, drops from memory after batch
+- **Pinned blocks**: Reserve for always-needed state (user config, agent settings)
 
-### Social Media Support
-Monitor mentions to provide timely ADHD support on Bluesky.
+### Permission Rules
 
-### Multi-Modal Pipeline
-Combine file monitoring, knowledge base, and social media for comprehensive support.
+Define from most to least restrictive:
+
+```toml
+# Config files: read-only
+[[agent.data_sources.files.permission_rules]]
+pattern = "**/*.config.toml"
+permission = "read_only"
+
+# Sensitive files: require escalation
+[[agent.data_sources.files.permission_rules]]
+pattern = "**/secrets/**"
+permission = "human"
+
+# General notes: full access
+[[agent.data_sources.files.permission_rules]]
+pattern = "notes/**/*.md"
+permission = "read_write"
+```
+
+### Error Handling
+
+```rust
+match source_manager.load_block("files", &path, owner).await {
+    Ok(block_ref) => {
+        // Use block_ref.block_id with memory operations
+    }
+    Err(e) if e.is_not_found() => {
+        // File doesn't exist, offer to create
+    }
+    Err(e) if e.is_permission_denied() => {
+        // Path not covered by permission rules
+    }
+    Err(e) => return Err(e),
+}
+```

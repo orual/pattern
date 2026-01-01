@@ -8,29 +8,54 @@ Pattern agents come with a set of built-in tools that provide core functionality
 
 ## Architecture
 
-### AgentHandle
+### ToolContext Trait
 
-The `AgentHandle` is a lightweight, cheaply-cloneable struct that provides built-in tools with controlled access to agent internals:
+The `ToolContext` trait provides tools with controlled access to agent runtime services. Unlike the old `AgentHandle` approach, tools receive a trait object that exposes only the APIs they need:
 
 ```rust
-#[derive(Clone)]
-pub struct AgentHandle {
-    pub agent_id: AgentId,
-    pub memory: Memory,  // Memory uses Arc<DashMap> internally
-    db: Option<Arc<SurrealEmbedded>>,  // Private DB access for archival operations
-    // Future: message_sender for inter-agent communication
+#[async_trait]
+pub trait ToolContext: Send + Sync {
+    /// Get the current agent's ID (for default scoping)
+    fn agent_id(&self) -> &str;
+
+    /// Get the memory store for blocks, archival, and search
+    fn memory(&self) -> &dyn MemoryStore;
+
+    /// Get the message router for send_message
+    fn router(&self) -> &AgentMessageRouter;
+
+    /// Get the model provider for tools that need LLM calls
+    fn model(&self) -> Option<&dyn ModelProvider>;
+
+    /// Get the permission broker for consent requests
+    fn permission_broker(&self) -> &'static PermissionBroker;
+
+    /// Search with explicit scope and permission checks
+    async fn search(
+        &self,
+        query: &str,
+        scope: SearchScope,
+        options: SearchOptions,
+    ) -> MemoryResult<Vec<MemorySearchResult>>;
+
+    /// Get the source manager for data source operations
+    fn sources(&self) -> Option<Arc<dyn SourceManager>>;
+
+    /// Get the shared block manager for block sharing operations
+    fn shared_blocks(&self) -> Option<Arc<SharedBlockManager>>;
 }
 ```
 
-Built-in tools access the database through controlled methods on AgentHandle:
-- `search_archival_memories()` - Full-text search with BM25
-- `insert_archival_memory()` - Add new archival memories
-- `delete_archival_memory()` - Remove archival memories
-- `count_archival_memories()` - Get archival memory count
+Tools access memory through the `MemoryStore` trait:
+- `create_block()` - Create new memory blocks
+- `get_block()` / `list_blocks()` - Read block content and metadata
+- `update_block_text()` / `append_to_block()` - Modify block content
+- `search_blocks()` - Full-text search with FTS5 BM25 scoring
+- `persist_block()` - Flush changes to database
 
 ## Built-in Tools
 
-### 1. Context Tool
+### 1. Block Tool (context)
 
 Manages core memory blocks following the Letta/MemGPT pattern. Each operation modifies memory and requires the agent to continue their response.
 
@@ -59,7 +84,7 @@ Manages core memory blocks following the Letta/MemGPT pattern. Each operation mo
 
 ### 2. Recall Tool
 
-Manages long-term archival storage with full-text search capabilities.
+Manages long-term archival storage with full-text search capabilities via FTS5.
 
 **Operations:**
 - `insert` - Add new memories to archival storage
@@ -78,7 +103,7 @@ Manages long-term archival storage with full-text search capabilities.
 
 ### 3. Search Tool
 
-Unified search interface across different domains.
+Unified search interface across different domains using hybrid FTS5 + vector search.
 
 **Domains:**
 - `archival_memory` - Search archival storage
@@ -116,41 +141,76 @@ Sends messages to the user (required for agents to yield control):
 ### Default Registration
 
 ```rust
-// In DatabaseAgent::new()
-let builtin = BuiltinTools::default_for_agent(context.handle());
-builtin.register_all(&context.tools);
+// In agent loading via RuntimeContext
+let builtin = BuiltinTools::new(runtime.clone());
+builtin.register_all(&tools);
 ```
 
-### Custom Tools
+### Custom Memory Backend
 
-Users can replace built-in tools with custom implementations:
+For a custom memory backend (e.g., Redis, external database), implement the `MemoryStore` trait:
 
 ```rust
-// Custom memory backend (e.g., Redis)
-#[derive(Clone)]
-struct RedisMemoryTool {
-    handle: AgentHandle,
+use pattern_core::memory::{MemoryStore, MemoryResult, BlockMetadata, StructuredDocument};
+
+#[derive(Debug)]
+struct RedisMemoryStore {
     redis: Arc<RedisClient>,
 }
 
 #[async_trait]
-impl AiTool for RedisMemoryTool {
-    type Input = UpdateMemoryInput;
-    type Output = UpdateMemoryOutput;
+impl MemoryStore for RedisMemoryStore {
+    async fn create_block(&self, agent_id: &str, label: &str, ...) -> MemoryResult<String> {
+        // Store in Redis
+        self.redis.hset(agent_id, label, block_data).await?;
+        Ok(block_id)
+    }
 
-    fn name(&self) -> &str { "update_memory" }
+    async fn get_block(&self, agent_id: &str, label: &str)
+        -> MemoryResult<Option<StructuredDocument>>
+    {
+        // Retrieve from Redis
+        self.redis.hget(agent_id, label).await
+    }
+
+    // ... implement other MemoryStore methods
+}
+
+// Use when building RuntimeContext
+let memory = Arc::new(RedisMemoryStore::new(redis_client));
+let ctx = RuntimeContext::builder()
+    .dbs_owned(dbs)
+    .model_provider(model)
+    .memory(memory)  // Custom memory backend
+    .build()
+    .await?;
+```
+
+### Custom Tools
+
+Users can also register additional tools alongside built-ins:
+
+```rust
+#[derive(Debug, Clone)]
+struct WeatherTool {
+    api_key: String,
+}
+
+#[async_trait]
+impl AiTool for WeatherTool {
+    type Input = WeatherInput;
+    type Output = WeatherOutput;
+
+    fn name(&self) -> &str { "get_weather" }
+    fn description(&self) -> &str { "Get weather for a location" }
 
     async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
-        // Store in Redis instead of local memory
-        self.redis.set(&params.label, &params.value).await?;
-        // ...
+        // Call weather API
     }
 }
 
-// Register custom tool
-let builtin = BuiltinTools::builder()
-    .with_memory_tool(RedisMemoryTool::new(redis_client))
-    .build_for_agent(handle);
+// Register alongside built-ins
+registry.register_dynamic(weather_tool.clone_box());
 ```
 
 ## Design Decisions
@@ -162,12 +222,12 @@ let builtin = BuiltinTools::builder()
 3. **Testability**: Built-in tools can be tested like any other tool
 4. **Flexibility**: Easy to override or extend built-in behavior
 
-### Why AgentHandle?
+### Why ToolContext Trait?
 
-1. **Performance**: Avoids multiple levels of Arc/Weak dereferencing
-2. **Clarity**: Tools only access what they need
-3. **Thread Safety**: Memory uses Arc<DashMap> for safe concurrent access
-4. **Extensibility**: Easy to add new capabilities to the handle
+1. **Abstraction**: Tools depend on interface, not implementation
+2. **Testability**: Easy to mock in unit tests
+3. **Safety**: Only exposes what tools need, not full runtime
+4. **Future-proof**: Interface can evolve without breaking tools
 
 ### Why Not Special-Case Built-ins?
 
@@ -186,11 +246,12 @@ Built-in tools use the generic `AiTool` trait for type safety:
 
 ```rust
 #[async_trait]
-impl AiTool for UpdateMemoryTool {
-    type Input = UpdateMemoryInput;   // Strongly typed, deserializable
-    type Output = UpdateMemoryOutput; // Strongly typed, serializable
+impl AiTool for BlockTool {
+    type Input = BlockOperation;    // Strongly typed, deserializable
+    type Output = BlockResult;      // Strongly typed, serializable
 
     async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
+        let ctx = self.runtime.as_ref() as &dyn ToolContext;
         // Compile-time type checking
     }
 }
@@ -198,27 +259,15 @@ impl AiTool for UpdateMemoryTool {
 
 ### Dynamic Dispatch
 
-The `DynamicToolAdapter` wraps typed tools for storage in the registry:
+The `DynamicTool` trait wraps typed tools for storage in the registry:
 
 ```rust
-Box::new(DynamicToolAdapter::new(UpdateMemoryTool { handle }))
+registry.register_dynamic(tool.clone_box());
 ```
 
 ### MCP Compatibility
 
 Tool schemas are generated with `inline_subschemas = true` to ensure no `$ref` fields, meeting MCP requirements.
-
-## Future Extensions
-
-### Planned Built-in Tools
-
-1. **search_memory**: Semantic search across memory blocks
-2. **append_memory**: Append to existing memory blocks
-3. **replace_in_memory**: Find and replace in memory
-4. **list_memories**: Get all memory block labels
-5. **send_to_group**: Send message to agent group
-6. **schedule_reminder**: Set time-based reminders
-7. **track_task**: Create and track ADHD-friendly tasks
 
 ## Memory Permissions and Enforcement
 
@@ -231,66 +280,52 @@ Memory blocks carry a `permission` (enum `MemoryPermission`). New blocks default
 
 Tool-specific notes:
 
-- `context.append` and `context.replace` enforce ACL and request `MemoryEdit { key }` when needed.
-- `context.archive` checks Overwrite ACL if the archival label already exists; deleting the source context requires Admin.
-- `context.load` behavior:
+- `block.append` and `block.replace` enforce ACL and request `MemoryEdit { key }` when needed.
+- `block.archive` checks Overwrite ACL if the archival label already exists; deleting the source context requires Admin.
+- `block.load` behavior:
   - Same label: convert archival → working in-memory.
   - Different label: create new working block and retain archival.
   - Does not delete archival.
-- `context.swap` enforces Overwrite ACL on the destination (with possible approval) and deletes the source archival only with Admin.
+- `block.swap` enforces Overwrite ACL on the destination (with possible approval) and deletes the source archival only with Admin.
 - `recall.append` enforces ACL; `recall.delete` requires Admin.
 
 Consent prompts are routed with origin metadata (e.g., Discord channel) for fast approval.
 
-### MessageSender Integration
+## Future Extensions
 
-The `AgentHandle` will be extended with a message sender:
+### Planned Built-in Tools
 
-```rust
-pub struct AgentHandle {
-    pub agent_id: AgentId,
-    pub memory: Memory,
-    pub message_sender: Arc<dyn MessageSender>, // Future addition
-}
-```
-
-This will enable inter-agent communication, group messages, and platform-specific routing.
+1. **semantic_search**: Enhanced semantic search with embedding support
+2. **schedule_reminder**: Set time-based reminders
+3. **track_task**: Create and track ADHD-friendly tasks
 
 ## Usage Examples
 
-### Basic Memory Update
+### Basic Memory Update via Block Tool
 
 ```rust
-let tool = registry.get("update_memory").unwrap();
-let result = tool.execute(json!({
+let result = registry.execute("block", json!({
+    "operation": "append",
     "label": "preferences",
-    "value": "User prefers dark mode",
-    "description": "UI preferences"
+    "content": "User prefers dark mode"
 })).await?;
 ```
 
-### Custom Memory Tool with Logging
+### Testing Tools with Mock Context
 
 ```rust
-#[derive(Clone)]
-struct LoggingMemoryTool {
-    inner: UpdateMemoryTool,
-    logger: Arc<Logger>,
-}
+#[tokio::test]
+async fn test_block_tool() {
+    // Create test runtime with mock memory
+    let runtime = create_test_runtime().await;
+    let tool = BlockTool::new(runtime);
 
-#[async_trait]
-impl AiTool for LoggingMemoryTool {
-    type Input = UpdateMemoryInput;
-    type Output = UpdateMemoryOutput;
+    let result = tool.execute(BlockOperation::Append {
+        label: "test".to_string(),
+        content: "test value".to_string(),
+    }).await.unwrap();
 
-    fn name(&self) -> &str { "update_memory" }
-
-    async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
-        self.logger.info(&format!("Updating memory: {}", params.label));
-        let result = self.inner.execute(params).await?;
-        self.logger.info(&format!("Memory update result: {:?}", result));
-        Ok(result)
-    }
+    assert!(result.success);
 }
 ```
 
@@ -300,38 +335,5 @@ impl AiTool for LoggingMemoryTool {
 2. **Use type safety**: Define proper Input/Output types with JsonSchema
 3. **Handle errors gracefully**: Return meaningful error messages
 4. **Document tool behavior**: Provide clear descriptions and examples
-5. **Consider concurrency**: Use Arc and thread-safe types appropriately
+5. **Consider concurrency**: MemoryStore is thread-safe via Arc
 6. **Test thoroughly**: Built-in tools are critical infrastructure
-
-## Testing
-
-Built-in tools should be tested at multiple levels:
-
-1. **Unit tests**: Test the tool in isolation
-2. **Integration tests**: Test with real Memory and AgentHandle
-3. **Registry tests**: Test registration and execution through the registry
-4. **Agent tests**: Test tools in the context of agent operations
-
-Example test:
-
-```rust
-#[tokio::test]
-async fn test_update_memory_tool() {
-    let memory = Memory::with_owner(UserId::generate());
-    let handle = AgentHandle {
-        agent_id: AgentId::generate(),
-        memory: memory.clone(),
-    };
-
-    let tool = UpdateMemoryTool { handle };
-
-    let result = tool.execute(UpdateMemoryInput {
-        label: "test".to_string(),
-        value: "test value".to_string(),
-        description: None,
-    }).await.unwrap();
-
-    assert!(result.success);
-    assert_eq!(memory.get_block("test").unwrap().content, "test value");
-}
-```

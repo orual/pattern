@@ -1,12 +1,13 @@
 # CLAUDE.md - Pattern Core
 
-⚠️ **CRITICAL WARNING**: DO NOT run `pattern-cli` or test agents during development!
+⚠️ **CRITICAL WARNING**: DO NOT run `pattern` CLI or test agents during development!
 Production agents are running. CLI commands will disrupt active agents.
 
 Core agent framework, memory management, and coordination system for Pattern's multi-agent ADHD support.
 
 ## Current Status
-- WIP major rework to sqlite, new memory architecture, jacquard, etc.
+- SQLite migration complete, Loro CRDT memory, Jacquard ATProto client
+- Active development: API server, MCP server, data sources
 
 ## Tool System Architecture
 
@@ -18,7 +19,7 @@ Following Letta/MemGPT patterns with multi-operation tools:
 
 2. **recall** - Long-term storage operations
    - `insert`, `append`, `read`, `delete`
-   - Full-text search with SurrealDB's BM25 analyzer
+   - Full-text search with FTS5 BM25 scoring
 
 3. **search** - Unified search across domains
    - Supports archival_memory, conversations, all
@@ -110,7 +111,7 @@ return Err(CoreError::memory_not_found(&agent_id, &block_name, available_blocks)
 ## Performance Notes
 - CompactString inlines strings ≤ 24 bytes
 - DashMap shards internally for concurrent access
-- AgentHandle provides cheap cloning for built-in tools
+- ToolContext via Arc<AgentRuntime> for cheap cloning
 - Database operations are non-blocking with optimistic updates
 
 ## Embedding Providers

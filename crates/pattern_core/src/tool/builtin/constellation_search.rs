@@ -118,8 +118,7 @@ pub struct ConstellationSearchInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_time: Option<String>,
 
-    /// Enable fuzzy search (Note: Currently a placeholder - fuzzy search not yet implemented)
-    /// This will enable typo-tolerant search once SurrealDB fuzzy functions are integrated
+    /// Enable fuzzy search for typo-tolerant matching
     #[serde(default)]
     pub fuzzy: bool,
     // request_heartbeat handled via ExecutionMeta injection; field removed

@@ -1,6 +1,6 @@
 # Pattern Architecture - Multi-Agent Cognitive Support System
 
-Pattern is a multi-agent cognitive support system designed specifically for ADHD brains. It uses Letta's multi-agent architecture with shared memory to provide external executive function through specialized cognitive agents inspired by Brandon Sanderson's Stormlight Archive.
+Pattern is a multi-agent cognitive support system designed specifically for ADHD brains. It uses a multi-agent architecture with shared memory to provide external executive function through specialized cognitive agents inspired by Brandon Sanderson's Stormlight Archive.
 
 ## Agent Constellation
 
@@ -15,15 +15,15 @@ Pattern (Sleeptime Orchestrator)
 
 
 ## Core Features
-- **Native Letta Groups**: Flexible agent coordination with overlapping groups
-- **Three-Tier Memory**: Core blocks (immediate), Letta sources (searchable), archival (deep storage)
+- **Native Agent Groups**: Flexible agent coordination with overlapping groups
+- **Three-Tier Memory**: Core blocks (immediate), searchable archival, and deep storage
 - **Cost-Optimized Sleeptime**: Two-tier monitoring with rules-based checks + AI intervention
 - **Passive Knowledge Sharing**: Agents write insights to embedded documents for semantic search
 - **ADHD-Specific Design**: Time blindness compensation, task breakdown, energy tracking, interruption awareness
 - **Evolving Relationship**: Agents develop understanding of user patterns over time
-- **MCP Server Interface**: Exposes agent capabilities through Model Context Protocol
+- **MCP Client/Server**: Consume external tools or expose Pattern capabilities
 
-For detailed architecture, see [Memory and Groups Architecture](./MEMORY_AND_GROUPS.md).
+For detailed architecture, see [Memory and Groups Architecture](./memory-and-groups.md).
 
 ## ADHD-Specific Design Principles
 
@@ -53,62 +53,53 @@ Agents evolve from professional assistant to trusted cognitive partner:
 
 ## Multi-Agent Architecture
 
-Pattern uses Letta's native groups API for flexible agent coordination:
+Pattern uses flexible groups for agent coordination:
 
 ### Flexible Group Patterns
 Groups are created dynamically based on needs:
-- Different manager types (dynamic, supervisor, round-robin, sleeptime)
+- Different coordination patterns (supervisor, round-robin, pipeline, dynamic, voting, sleeptime)
 - Overlapping membership - same agents in multiple groups
 - Context-specific coordination styles
 - Experiment and evolve group configurations
 
-### Memory Hierarchy
+### Memory Hierarchy (Loro CRDT + SQLite)
 1. **Core Memory Blocks** (Always in context):
    - `current_state`: Real-time status
    - `active_context`: Recent important events
    - `bond_evolution`: Relationship dynamics
 
-2. **Letta Sources** (Searchable knowledge):
+2. **Archival Memory** (Searchable via FTS5):
    - Agent observations and insights
    - Pattern detection across time
    - Accumulated wisdom
 
-3. **Archival Memory** (Deep storage):
-   - Full conversation history
-   - Important flagged moments
+3. **Vector Store** (sqlite-vec):
+   - Semantic search for related memories
+   - 384-dimensional embeddings
 
-See [Memory and Groups Architecture](./MEMORY_AND_GROUPS.md) for implementation details.
+See [Memory and Groups Architecture](./memory-and-groups.md) for implementation details.
 
-## Legacy: Multi-Agent Shared Memory Architecture
-
-### Shared Memory Blocks
+## Shared Memory Blocks
 
 All agents share these memory blocks for coordination without redundancy:
 
 ```rust
-// Shared state accessible by all agents
-pub struct SharedMemory {
-    // Real-time energy/attention/mood tracking (200 char limit)
-    current_state: Block,
-
-    // What they're doing NOW, including blockers (400 char limit)
-    active_context: Block,
-
-    // Growing understanding of this human (600 char limit)
-    bond_evolution: Block,
-}
-
-// Example state format
+// Shared state accessible by all agents via MemoryStore
+// Real-time energy/attention/mood tracking (200 char limit)
 current_state: "energy: 6/10 | attention: fragmenting | last_break: 127min | mood: focused_frustration"
-active_context: "task: letta integration | start: 10:23 | progress: 40% | friction: api auth unclear"
-bond_evolution: "trust: building | humor: dry->comfortable | formality: decreasing | shared_refs: ['time is fake', 'brain full no room']"
+
+// What they're doing NOW, including blockers (400 char limit)
+active_context: "task: integration | start: 10:23 | progress: 40% | friction: api auth unclear"
+
+// Growing understanding of this human (600 char limit)
+bond_evolution: "trust: building | humor: dry->comfortable | formality: decreasing"
 ```
 
 ### Agent Communication
 
 Agents coordinate through:
-- Shared memory updates (all agents see changes immediately)
-- `send_message_to_agent_async` for non-blocking coordination
+- Shared memory updates (all agents see changes via MemoryStore)
+- Message routing via AgentMessageRouter
 - Shared tools that any agent can invoke
 
 ## Agent Details
@@ -181,170 +172,76 @@ Momentum: "you've got 3 social things scheduled this week. based on last month's
 that's gonna wreck you. which one can we move?"
 ```
 
-## Shared Agent Tools
-
-All agents can access these core functions:
-
-```rust
-pub trait SharedTools {
-    // Any agent can pulse-check current state
-    async fn check_vibe(&self) -> VibeState;
-
-    // Capture current state for later recovery
-    async fn context_snapshot(&self) -> String;
-
-    // Search across all memory for patterns
-    async fn find_pattern(&self, query: &str) -> Vec<Pattern>;
-
-    // When current task/energy mismatch detected
-    async fn suggest_pivot(&self) -> Suggestion;
-}
-```
-
-## Smart Calendar Management
-
-References:
-- [Time blocking for ADHD](https://www.tiimoapp.com/resource-hub/time-blocking-for-adhders) - multiply time estimates by 2-4x
-- [Calendar organization guide](https://akiflow.com/blog/adhd-calendar-guide/) - buffer time between tasks
-
-```rust
-struct SmartScheduler {
-    calendar: CalendarService,
-    user_patterns: HashMap<UserId, UserTimePatterns>,
-}
-
-impl SmartScheduler {
-    async fn schedule_task(&self, task: Task, user_id: UserId) -> Result<Event> {
-        let patterns = self.user_patterns.get(&user_id);
-
-        // Apply time multiplier based on historical accuracy
-        let duration = task.estimated_duration * patterns.time_multiplier;
-
-        // Add buffer time (5min per 30min of task)
-        let buffer = duration.num_minutes() / 30 * 5;
-
-        // Find optimal slot considering energy levels
-        let slot = self.find_slot(duration + buffer, patterns).await?;
-
-        Ok(Event {
-            start: slot.start,
-            end: slot.end,
-            buffer_before: 5,
-            buffer_after: buffer,
-            ..task.into()
-        })
-    }
-}
-```
-
-## Context-Aware Interruptions
-
-Based on research showing [78-98% accuracy in detecting natural stopping points](https://dl.acm.org/doi/10.1145/3290605.3300589):
-
-```rust
-struct ActivityMonitor {
-    last_input: Instant,
-    current_app: String,
-    typing_intensity: f32,
-}
-
-impl ActivityMonitor {
-    fn detect_interruptibility(&self) -> InterruptibilityScore {
-        // Detect hyperfocus: >45min without break, high input intensity
-        if self.last_input.elapsed() < Duration::from_secs(5)
-           && self.typing_intensity > 0.8 {
-            return InterruptibilityScore::Low;
-        }
-
-        // Natural break points: app switch, idle time
-        if self.last_input.elapsed() > Duration::from_mins(2) {
-            return InterruptibilityScore::High;
-        }
-
-        InterruptibilityScore::Medium
-    }
-}
-```
-
 ## Data Architecture
 
-### Embedded Storage (No External Databases)
+### Embedded Storage (SQLite + Loro)
 
 All data stored locally using embedded databases:
 
 ```rust
-struct DataStore {
-    sqlite: SqlitePool,        // relational data
-    kv: sled::Db,             // key-value cache
-    vectors: hnsw::HNSW,      // vector similarity search
-}
+// pattern_db provides SQLite storage
+use pattern_db::ConstellationDb;
 
-impl DataStore {
-    async fn new(path: &Path) -> Result<Self> {
-        // Everything in one directory
-        let sqlite = SqlitePool::connect(&format!("sqlite://{}/data.db", path)).await?;
-        let kv = sled::open(path.join("cache"))?;
+// Memory uses Loro CRDT for versioning
+use pattern_core::memory::{MemoryCache, MemoryStore};
 
-        // Build vector index from stored embeddings
-        let vectors = Self::load_or_create_index(&sqlite).await?;
-
-        Ok(Self { sqlite, kv, vectors })
-    }
-}
+// Combined databases
+let dbs = ConstellationDatabases::open("./constellation.db", "./auth.db").await?;
+let memory = MemoryCache::new(dbs.clone());
 ```
 
 **SQLite** handles:
-- User data, agent configs
-- Calendar events and tasks
-- Stored embeddings (as blobs)
+- Agent configs and state
+- Messages and conversations
+- Memory block persistence
 - Full-text search via FTS5
 
-**Sled** provides:
-- Session cache
-- Activity state tracking
-- Rate limiting counters
-- Fast ephemeral data
+**Loro CRDT** provides:
+- Versioned memory blocks
+- Conflict-free merging
+- Time-travel for rollback
 
-**HNSW** enables:
+**sqlite-vec** enables:
+- 384-dimensional vector search
 - Semantic memory search
 - No external vector DB needed
-- Rebuilds from SQLite on startup
 
-Alternative: [sqlite-vss](https://github.com/asg017/sqlite-vss) extension for vectors directly in SQLite.
-
-### Memory Management
-
-Leverage Letta's 4-tier memory with local storage:
-- **Core**: Current context (2KB limit) - in-memory
-- **Archival**: SQLite + HNSW for unlimited storage with vector search
-- **Message**: Recent history in Sled cache
-- **Recall**: Semantic search via HNSW index
+### Memory Tiers
+- **Core**: Current context (configurable limit) - in Loro
+- **Working**: Short-term memory (configurable limit) - in Loro, loadable temporarily or pinnable in context
+- **Archival**: FTS5 + sqlite-vec for unlimited searchable storage
+- **Message**: Conversation history with summaries
+- **Embeddings**: Stored as blobs, indexed via sqlite-vec
 
 ### Built-in Agent Tools
 
-Pattern agents come with built-in tools for core functionality:
+Pattern agents come with built-in tools via BuiltinTools:
 
 ```rust
-// Tool registration happens automatically
-let builtin = BuiltinTools::default_for_agent(agent_handle);
+// Built-in tools are registered via the runtime
+let builtin = BuiltinTools::new(runtime.clone());
 builtin.register_all(&tool_registry);
 ```
 
 **Standard Tools**:
-- `update_memory`: Create/update persistent memory blocks
-- `send_message`: Send to users, agents, groups, or channels
-- `search_memory`: Semantic search across memory (planned)
-- `schedule_reminder`: Time-based reminders (planned)
+- `block`: Memory block operations (append, replace, archive, load, swap)
+- `recall`: Archival memory operations (insert, read, delete)
+- `search`: Unified search across memory and conversations
+- `send_message`: Route messages to users, agents, groups, or channels
 
 **Customization**:
+For a custom memory backend, implement `MemoryStore` and provide it to RuntimeContext:
+
 ```rust
-// Replace with custom implementations
-let builtin = BuiltinTools::builder()
-    .with_memory_tool(RedisMemoryTool::new(redis))
-    .build_for_agent(handle);
+let ctx = RuntimeContext::builder()
+    .dbs_owned(dbs)
+    .memory(Arc::new(CustomMemoryStore::new()))
+    .build()
+    .await?;
 ```
 
-**AgentHandle Architecture**:
-- Lightweight, cloneable access to agent internals
-- Separates cheap data (ID, memory) from expensive (messages)
-- Thread-safe with Arc<DashMap> for memory storage
+**AgentRuntime Architecture**:
+- Per-agent runtime with memory, tools, messages, routing
+- Tools access services through `ToolContext` trait
+- MemoryStore abstracts over storage implementation
+- Thread-safe with DashMap for concurrent access

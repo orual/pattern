@@ -7,15 +7,15 @@ Quick overview of Pattern's current implementation and key patterns.
 ```
 pattern/
 ├── crates/
-│   ├── pattern_api/      # Shared API types
-│   ├── pattern_cli/      # Command-line interface
-│   ├── pattern_core/     # Core framework
-│   ├── pattern_nd/       # ADHD-specific tools
-│   ├── pattern_mcp/      # MCP server (stub)
-│   ├── pattern_macros/   # Entity derive macros
-│   ├── pattern_discord/  # Discord bot
-│   ├── pattern_server/   # Backend API (in dev)
-│   └── pattern_main/     # Main orchestrator
+│   ├── pattern_api/      # Shared API types and contracts
+│   ├── pattern_auth/     # Credential storage (ATProto, Discord, providers)
+│   ├── pattern_cli/      # Command-line interface with TUI builders
+│   ├── pattern_core/     # Core framework (agents, memory, tools, coordination)
+│   ├── pattern_db/       # SQLite database layer (FTS5, sqlite-vec)
+│   ├── pattern_nd/       # ADHD-specific tools and personalities
+│   ├── pattern_mcp/      # MCP client (working) and server (stub)
+│   ├── pattern_discord/  # Discord bot integration
+│   └── pattern_server/   # Backend API (in development)
 ├── docs/                 # Documentation
 └── pattern.toml          # Configuration
 ```
@@ -24,59 +24,106 @@ pattern/
 
 ```bash
 # Single agent chat
-pattern-cli chat
+pattern chat
 
 # Group chat
-pattern-cli chat --group main
+pattern chat --group main
 
-# Discord mode
-pattern-cli chat --discord
-pattern-cli chat --discord --group main
+# Discord mode (requires group)
+pattern chat --group main --discord
 
 # Agent management
-pattern-cli agent create <name> --type assistant
-pattern-cli agent list
-pattern-cli agent status <name>
+pattern agent create              # Interactive TUI builder
+pattern agent edit <name>         # Edit existing agent
+pattern agent list
+pattern agent status <name>
+pattern agent export <name>
 
 # Group management
-pattern-cli group create <name> --description "desc" --pattern round-robin
-pattern-cli group add-member <group> <agent> --role member
-pattern-cli group list
-pattern-cli group status <name>
+pattern group create              # Interactive TUI builder
+pattern group edit <name>         # Edit existing group
+pattern group list
+pattern group status <name>
+pattern group add member <group> <agent> --role regular
 
 # Memory inspection
-pattern-cli memory list <agent-name>
-pattern-cli memory show <agent-name> <block-label>
+pattern debug list-core <agent>
+pattern debug list-archival <agent>
+pattern debug show-context <agent>
+pattern debug search-archival --agent <name> "query"
+
+# Export/Import
+pattern export agent <name> -o agent.car
+pattern export group <name>
+pattern export constellation
+pattern import car agent.car
+pattern import letta agent.af
 ```
 
-## Agent Creation
+## Core Architecture
+
+### RuntimeContext
+
+Central management for agents and shared infrastructure:
 
 ```rust
-use pattern_core::agent::DatabaseAgent;
+use pattern_core::runtime::RuntimeContext;
 
-let agent = DatabaseAgent::new(
-    agent_id,
-    user_id,
-    agent_type,
-    name,
-    system_prompt,
-    memory,
-    db.clone(),
-    model_provider,
-    tool_registry,
-    embedding_provider,
-    heartbeat_sender,
-).await?;
+let ctx = RuntimeContext::builder()
+    .dbs_owned(dbs)
+    .model_provider(model)
+    .build()
+    .await?;
+
+// Load agents
+let agent = ctx.load_agent("my_agent").await?;
+
+// Start background processors
+ctx.start_heartbeat_processor(event_handler).await?;
+ctx.start_queue_processor().await;
+```
+
+### AgentRuntime
+
+Per-agent runtime with memory, tools, and routing:
+
+```rust
+use pattern_core::runtime::AgentRuntime;
+
+let runtime = AgentRuntime::builder()
+    .agent_id(agent_id)
+    .agent_name(name)
+    .memory(memory_cache)
+    .messages(message_store)
+    .tools_shared(tool_registry)
+    .model(model_provider)
+    .dbs(dbs)
+    .build()?;
+```
+
+### ToolContext Trait
+
+What tools can access from the runtime:
+
+```rust
+pub trait ToolContext: Send + Sync {
+    fn agent_id(&self) -> &str;
+    fn memory(&self) -> &dyn MemoryStore;
+    fn router(&self) -> &AgentMessageRouter;
+    fn model(&self) -> Option<&dyn ModelProvider>;
+    fn permission_broker(&self) -> &'static PermissionBroker;
+    fn sources(&self) -> Option<Arc<dyn SourceManager>>;
+}
 ```
 
 ## Built-in Tools
 
-### context (Memory Operations)
+### block (Memory Operations)
 ```json
 {
   "operation": "append",
   "label": "human",
-  "value": "User prefers dark mode"
+  "content": "User prefers dark mode"
 }
 ```
 Operations: `append`, `replace`, `archive`, `load`, `swap`
@@ -86,7 +133,7 @@ Operations: `append`, `replace`, `archive`, `load`, `swap`
 {
   "operation": "insert",
   "label": "meeting_notes_2024",
-  "value": "Discussed project timeline"
+  "content": "Discussed project timeline"
 }
 ```
 Operations: `insert`, `append`, `read`, `delete`
@@ -115,153 +162,103 @@ Target types: `user`, `agent`, `group`, `discord`, `bluesky`
 
 ## Memory System
 
+### Loro CRDT Memory with MemoryStore
+
 ```rust
-// Thread-safe with Arc<DashMap>
-let memory = Memory::with_owner(user_id);
+use pattern_core::memory::{MemoryCache, MemoryStore, BlockType};
 
-## ID Tips (to_key vs to_string)
+// Create memory cache backed by pattern_db
+let memory = MemoryCache::new(dbs.clone());
 
-- Use `id.to_key()` for persistence (raw record key) and `RecordId::from(&id)` for query binds.
-- Use `id.to_string()` only for human-readable output (often includes a table prefix like `agent:` or `group:`).
-- Example: deriving a `MemoryId` or tracker key from a `GroupId` should use `group_id.to_key()`, not `group_id.to_string()`.
+// Create a block
+memory.create_block(
+    agent_id,
+    "persona",
+    "Agent personality",
+    BlockType::Core,
+    BlockSchema::text(),
+    5000,  // char limit
+).await?;
 
-Caveat (rare acceptable `to_string()`): some IDs (e.g., `Did`, `MessageId`) display as their raw key without a table prefix. In those cases `to_string()` can be acceptable if you explicitly need the raw key string. Prefer `to_key()` when unsure.
+// Update content
+memory.update_block_text(agent_id, "persona", "I am helpful").await?;
 
-// Core memory blocks
-memory.create_block("persona", "I am Pattern")?;
-memory.create_block("human", "User info here")?;
+// Append content
+memory.append_to_block(agent_id, "human", "\nNew info").await?;
 
-// Update operations
-memory.update_block_value("human", "New info")?;
-memory.append_to_block("human", "\nAdditional info")?;
-
-// Archival operations (via recall tool)
-agent.execute_tool("recall", json!({
-    "operation": "insert",
-    "label": "notes_2024",
-    "value": "Important information"
-})).await?;
+// Search archival memory
+let results = memory.search_blocks(agent_id, "project deadline", 10).await?;
 ```
 
 ### Memory Permissions and ACL
 
-- Levels: `read_only`, `partner`, `human`, `append`, `read_write` (default for new blocks), `admin`.
+- Levels: `read_only`, `partner`, `human`, `append`, `read_write` (default), `admin`.
 - ACL rules:
   - Read: allowed for all.
-  - Append: allowed for `append`/`read_write`/`admin`; `partner`/`human` require approval; `read_only` denied.
-  - Overwrite/Replace: allowed for `read_write`/`admin`; `partner`/`human` require approval; `append`/`read_only` denied.
-  - Delete: `admin` only (no consent path by default).
-- Tool behavior:
-  - `context.append`/`context.replace`: enforce ACL; auto-request approval (MemoryEdit { key }) when needed.
-  - `context.archive`: if target archival label already exists, enforce Overwrite ACL (approval if needed); deleting original context requires Admin.
-- `context.load`: 
-  - If `name` equals the archival label, flips the block to working in-memory (no deletion).
-  - Otherwise, creates a new working block under `name` and retains the archival source.
-  - Never deletes archival by default.
-  - `context.swap`: overwrite of destination context enforces ACL (approval if needed); deleting source archival requires Admin.
-  - `recall.append`: enforce ACL (approval if needed); `recall.delete`: Admin only.
-  - Consent prompts route to the originating channel (Discord) when available.
-```
+  - Append: allowed for `append`/`read_write`/`admin`; `partner`/`human` require approval.
+  - Overwrite/Replace: allowed for `read_write`/`admin`; `partner`/`human` require approval.
+  - Delete: `admin` only.
+- Consent prompts route to the originating channel (Discord) when available.
 
 ## Data Sources
 
+### DataStream (Event-driven sources)
+
 ```rust
-use pattern_core::data_source::{
-    DataIngestionCoordinator,
-    FileDataSource,
-    FileStorageMode
-};
+use pattern_core::data_source::DataStream;
 
-// Create coordinator
-let coordinator = DataIngestionCoordinator::new(
-    message_router,
-    agent.embedding_provider(),
-)?;
+// Bluesky firehose, Discord events, etc.
+impl DataStream for MySource {
+    async fn start(&self, ctx: Arc<dyn ToolContext>, owner: AgentId)
+        -> Result<broadcast::Receiver<Notification>>;
+}
 
-// Add file source
-let source = FileDataSource::new(
-    "docs",
-    PathBuf::from("./docs"),
-    FileStorageMode::Indexed,
-    Some(embedding_provider),
-)?;
-coordinator.add_source("docs", source).await?;
+// Register with RuntimeContext
+ctx.register_stream(Arc::new(bluesky_source));
+ctx.start_stream("bluesky", owner_agent_id).await?;
+```
 
-// Add Bluesky source
-let bsky_source = BlueskyFirehoseSource::new(
-    jetstream_url,
-    filter,
-    agent_did,
-)?;
-coordinator.add_source("bluesky", bsky_source).await?;
+### DataBlock (Document-oriented sources)
+
+```rust
+use pattern_core::data_source::DataBlock;
+
+// Files, configs with Loro versioning
+impl DataBlock for FileSource {
+    async fn load(&self, path: &Path, ctx: Arc<dyn ToolContext>, owner: AgentId)
+        -> Result<BlockRef>;
+    async fn save(&self, block_ref: &BlockRef, ctx: Arc<dyn ToolContext>)
+        -> Result<()>;
+}
+
+// Register with RuntimeContext
+ctx.register_block_source(Arc::new(file_source)).await;
 ```
 
 ## Group Coordination Patterns
 
 ```rust
-use pattern_core::coordination::{
-    CoordinationPattern,
-    GroupManager,
-    RoundRobinManager,
-    DynamicManager
-};
+use pattern_core::coordination::CoordinationPattern;
 
-// Round-robin distribution
-let manager = RoundRobinManager::new(agents);
-
-// Dynamic routing
-let manager = DynamicManager::new(
-    agents,
-    DynamicSelector::Capability("task_breakdown"),
-);
-
-// Pipeline processing
-let manager = PipelineManager::new(agents);
-
-// Send to group
-let response = manager.send_message(
-    message,
-    Some(metadata),
-).await?;
-```
-
-## Database Patterns
-
-```rust
-// ALWAYS use parameter binding
-let result = db.query(
-    "SELECT * FROM agent WHERE user_id = $user_id"
-).bind(("user_id", user_id)).await?;
-
-// Entity with RELATE edges
-#[derive(Entity)]
-#[entity(entity_type = "user")]
-struct User {
-    pub id: UserId,
-    #[entity(relation = "owns")]
-    pub agents: Vec<Agent>,
-}
-
-// Create RELATE edge
-db.query(
-    "RELATE $user->owns->$agent"
-).bind(("user", user_id))
- .bind(("agent", agent_id))
- .await?;
+// Six patterns available:
+// - Supervisor: Leader with delegation
+// - RoundRobin: Turn-based distribution
+// - Pipeline: Sequential processing
+// - Dynamic: Selector-based routing
+// - Voting: Quorum-based decisions
+// - Sleeptime: Background monitoring
 ```
 
 ## Agent Naming, Roles, and Defaults
 
-- Agent names are arbitrary: features no longer depend on specific names like "Pattern", "Anchor", or "Archive".
+- Agent names are arbitrary: features no longer depend on specific names.
 - Group roles drive behavior:
-  - Supervisor: acts as orchestrator; data sources (e.g., Bluesky/Jetstream) route through the Supervisor by default.
-  - Specialist with domain "system_integrity": gets the SystemIntegrityTool.
-  - Specialist with domain "memory_management": gets the ConstellationSearchTool.
-- Sleeptime prompts are role/domain-based:
-  - Supervisor uses the former orchestrator prompt; specialists use prompts matching their domain.
+  - Supervisor: orchestrator; data sources route through by default.
+  - Specialist with domain "system_integrity": gets SystemIntegrityTool.
+  - Specialist with domain "memory_management": gets ConstellationSearchTool.
 - Discord defaults:
-  - Default agent selection prefers the Supervisor when an agent isn’t specified.
-  - Bot self-mentions resolve to the Supervisor agent’s name when available.
+  - Default agent selection prefers the Supervisor when unspecified.
+  - Bot self-mentions resolve to the Supervisor agent's name.
 - CLI sender labels by origin:
   - Agent: agent name
   - Bluesky: `@handle`
@@ -293,9 +290,6 @@ return Err(CoreError::memory_not_found(
 ## Environment Variables
 
 ```bash
-# Database
-DATABASE_URL=ws://localhost:8000
-
 # Discord
 DISCORD_TOKEN=your-bot-token
 DISCORD_BATCH_DELAY_MS=1500
@@ -316,7 +310,9 @@ GOOGLE_API_KEY=...
 ### Creating Custom Tool
 ```rust
 #[derive(Debug, Clone)]
-struct MyTool;
+struct MyTool {
+    runtime: Arc<AgentRuntime>,
+}
 
 #[async_trait]
 impl AiTool for MyTool {
@@ -325,28 +321,27 @@ impl AiTool for MyTool {
 
     fn name(&self) -> &str { "my_tool" }
     fn description(&self) -> &str { "Does something" }
-    
+
     async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
-        // Implementation
+        let ctx = self.runtime.as_ref() as &dyn ToolContext;
+        // Use ctx.memory(), ctx.router(), etc.
     }
 }
 
 // Register
-tool_registry.register(Box::new(MyTool));
+tool_registry.register_dynamic(tool.clone_box());
 ```
 
 ### Anti-looping Protection
 ```rust
-// Router has built-in cooldown
-router.set_cooldown_duration(Duration::from_secs(30));
-
-// Messages between agents throttled automatically
+// Router has built-in cooldown (30 seconds between rapid agent-to-agent messages)
+// Messages between agents are throttled automatically
 ```
 
 ## Performance Notes
 
 - CompactString inlines ≤24 byte strings
 - DashMap shards for concurrent access
-- AgentHandle provides cheap cloning
-- Memory uses Arc internally
-- Database ops are non-blocking
+- MemoryCache uses write-through to SQLite
+- Loro CRDT enables versioning and conflict-free merging
+- Database ops are non-blocking with WAL mode

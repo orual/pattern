@@ -34,13 +34,7 @@ use pattern_core::config::{self};
 use std::path::PathBuf;
 use tracing::info;
 
-// TODO: Database initialization is being migrated from SurrealDB to pattern_db
-// The following imports are no longer needed once migration is complete:
-// use pattern_core::db_v1::{DatabaseConfig, client::{self}};
-//
-// New approach will use:
-// use pattern_db::ConstellationDb;
-// use pattern_core::runtime::RuntimeContext;
+// Database: Uses pattern_db (SQLite/sqlx) via RuntimeContext
 
 #[derive(Parser)]
 #[command(name = "pattern-cli")]

@@ -1,6 +1,6 @@
 //! Queue processing infrastructure
 //!
-//! Replaces SurrealDB live queries with polling for message queue and scheduled wakeups.
+//! Provides polling-based message queue and scheduled wakeup processing.
 
 mod processor;
 

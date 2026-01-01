@@ -143,22 +143,19 @@ impl AiTool for WeatherTool {
 }
 ```
 
-### Step 3: Register with an Agent
+### Step 3: Register with the Tool Registry
 
 ```rust
-// In your agent creation code
+// Register in the shared tool registry
 let weather_tool = WeatherTool { api_key: "...".to_string() };
-registry.register(Box::new(weather_tool))?;
-
-// The agent will automatically include this tool
-let agent = DatabaseAgent::new(..., registry);
+registry.register_dynamic(weather_tool.clone_box());
 ```
 
 ## Built-in Tools
 
 Pattern includes several built-in tools following the Letta/MemGPT pattern:
 
-### Memory Management (`context`)
+### Memory Management (`block`)
 - `append`: Add content to memory blocks
 - `replace`: Replace specific content in memory
 - `archive`: Move memory to long-term storage
@@ -190,21 +187,22 @@ Pattern includes a sophisticated tool rules system that allows fine-grained cont
 pub enum ToolRuleType {
     /// Tool starts the conversation (must be called first)
     StartConstraint,
-    
+
     /// Maximum number of times this tool can be called
     MaxCalls(u32),
-    
+
     /// Tool ends the conversation loop when called
     ExitLoop,
-    
+
     /// Tool continues the conversation loop when called
     ContinueLoop,
-    
+
     /// Minimum cooldown period between calls
     Cooldown(Duration),
-    
+
     /// This tool must be called after specified tools
     RequiresPreceding,
+    ...
 }
 ```
 
@@ -245,19 +243,17 @@ priority = 9
 
 ```bash
 # Add a rule that makes 'send_message' end the conversation
-pattern-cli agent add-rule MyAgent send_message exit-loop
+pattern agent add rule MyAgent send_message exit-loop
 
 # Add a dependency rule
-pattern-cli agent add-rule MyAgent validate requires-preceding -c load_data
+pattern agent add rule MyAgent validate requires-preceding -c load_data
 
 # Add a max calls rule
-pattern-cli agent add-rule MyAgent api_request max-calls -p 5
+pattern agent add rule MyAgent api_request max-calls -p 5
 
-# List all rules for an agent
-pattern-cli agent list-rules MyAgent
-
-# Remove a specific rule
-pattern-cli agent remove-rule MyAgent send_message exit-loop
+# Remove rules for a tool
+pattern agent remove rule MyAgent send_message
+pattern agent remove rule MyAgent send_message exit-loop
 ```
 
 #### 3. Programmatically
@@ -282,11 +278,12 @@ let rules = vec![
     },
 ];
 
-// When creating an agent
-let agent = DatabaseAgent::new(
-    // ... other parameters ...
-    tool_rules: rules,
-);
+// Rules are passed to AgentRuntime builder
+let runtime = AgentRuntime::builder()
+    .agent_id(agent_id)
+    .tool_rules(rules)
+    // ... other config
+    .build()?;
 ```
 
 ### How Tool Rules Work
@@ -294,14 +291,14 @@ let agent = DatabaseAgent::new(
 1. **Start Constraints**: Tools marked with `StartConstraint` are automatically executed when a conversation begins
 2. **Dependencies**: Tools with `RequiresPreceding` can only be called after their prerequisite tools
 3. **Call Limits**: Tools with `MaxCalls` enforce usage limits per conversation
-4. **Loop Control**: 
+4. **Loop Control**:
    - `ExitLoop` tools terminate the conversation after execution
    - `ContinueLoop` tools don't require heartbeat checks (performance optimization)
 5. **Cooldowns**: Prevent rapid repeated calls to expensive tools
 
 ### Rule Enforcement
 
-The tool rules engine validates every tool call before execution:
+The ToolExecutor validates every tool call before execution:
 
 ```rust
 // If a tool violates a rule, the agent receives an error:
@@ -358,15 +355,15 @@ Tools often support multiple operations:
 
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-struct ContextInput {
-    operation: ContextOperation,
+struct BlockInput {
+    operation: BlockOperation,
     #[serde(flatten)]
-    params: ContextParams,
+    params: BlockParams,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum ContextOperation {
+enum BlockOperation {
     Append,
     Replace,
     Archive,
@@ -395,6 +392,65 @@ async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
 }
 ```
 
+## Accessing Runtime Services
+
+Tools that need runtime services (memory, routing, model) should hold an `Arc<AgentRuntime>` and access it through the `ToolContext` trait:
+
+```rust
+#[derive(Debug)]
+struct MyTool {
+    runtime: Arc<AgentRuntime>,
+}
+
+impl MyTool {
+    pub fn new(runtime: Arc<AgentRuntime>) -> Self {
+        Self { runtime }
+    }
+}
+
+#[async_trait]
+impl AiTool for MyTool {
+    type Input = MyInput;
+    type Output = MyOutput;
+
+    fn name(&self) -> &str { "my_tool" }
+    fn description(&self) -> &str { "A tool that needs runtime access" }
+
+    async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
+        // Access runtime services through ToolContext trait
+        let ctx = self.runtime.as_ref() as &dyn ToolContext;
+
+        // Access memory
+        let memory = ctx.memory();
+        let block = memory.get_block(ctx.agent_id(), "some_block").await?;
+
+        // Access router for messaging
+        let router = ctx.router();
+
+        // Access model for LLM calls
+        if let Some(model) = ctx.model() {
+            // Use model for classification, etc.
+        }
+
+        // Access source manager for data sources
+        if let Some(sources) = ctx.sources() {
+            let stream_ids = sources.list_streams();
+        }
+
+        Ok(MyOutput { /* ... */ })
+    }
+}
+```
+
+The `ToolContext` trait provides:
+- `agent_id()` - Current agent's ID
+- `memory()` - MemoryStore for block operations
+- `router()` - Message routing to users, agents, groups
+- `model()` - Optional model provider for LLM calls within tools
+- `permission_broker()` - Consent request handling
+- `sources()` - Data source management
+- `shared_blocks()` - Cross-agent block sharing
+
 ## Troubleshooting
 
 ### "Tool not found" Errors
@@ -412,8 +468,6 @@ async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
 ### Concurrent Execution Problems
 
 - Tools must be `Send + Sync`
-- Watch out for deadlocks when making tools that handle agent memory, it uses a DashMap internally. Make sure you don't try and hold two simultaneous references to a memory block. The default tools illustrate reasonable behaviour.
-- The same is true for the registry itself.
 
 ### Type Conversion Errors
 
@@ -429,7 +483,7 @@ Tools can call other tools through the registry:
 
 ```rust
 async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
-    // First search for relevant data
+    // First search for relevant data via the registry
     let search_result = self.registry
         .execute("search", json!({
             "domain": "archival_memory",
@@ -442,23 +496,38 @@ async fn execute(&self, params: Self::Input) -> Result<Self::Output> {
 }
 ```
 
-### Context-Aware Tools
+### Custom Memory Backend
 
-Tools can receive an `AgentHandle` for context:
+For a custom memory backend, implement `MemoryStore`:
 
 ```rust
-impl ContextTool {
-    pub fn new(handle: AgentHandle) -> Self {
-        Self { handle }
+use pattern_core::memory::{MemoryStore, MemoryResult, StructuredDocument};
+
+#[derive(Debug)]
+struct CustomMemoryStore { /* ... */ }
+
+#[async_trait]
+impl MemoryStore for CustomMemoryStore {
+    async fn create_block(&self, agent_id: &str, label: &str, ...) -> MemoryResult<String> {
+        // Custom storage logic
     }
+
+    async fn get_block(&self, agent_id: &str, label: &str)
+        -> MemoryResult<Option<StructuredDocument>>
+    {
+        // Custom retrieval logic
+    }
+
+    // ... implement other methods
 }
+
+// Provide to RuntimeContext builder
+let ctx = RuntimeContext::builder()
+    .dbs_owned(dbs)
+    .memory(Arc::new(CustomMemoryStore::new()))
+    .build()
+    .await?;
 ```
-
-This provides access to:
-- Agent's memory blocks
-- Database connection (with restrictions)
-- Agent metadata
-
 
 ## Future plans
 

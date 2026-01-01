@@ -1,354 +1,513 @@
 # Pattern Memory Architecture & Multi-Agent Groups
 
-This document describes Pattern's memory hierarchy, agent coordination via Letta groups, and background processing strategies.
+This document describes Pattern's memory hierarchy, native agent coordination via groups, and background processing strategies.
 
 ## Memory Hierarchy
 
-Pattern uses a three-tier memory system optimized for ADHD cognitive support:
+Pattern uses a tiered memory system optimized for ADHD cognitive support:
 
-### 1. Immediate Access (Core Memory Blocks)
-Always visible in every agent's context window:
-- **current_state**: Real-time status (what's happening RIGHT NOW)
-- **active_context**: Recent important events and patterns
+### 1. Core Memory Blocks (Always in Context)
+Small blocks (~2000 chars each) always present in the agent's context window:
+- **persona**: Agent identity and capabilities
+- **current_state**: Real-time status (energy, attention, mood)
+- **active_context**: Current task and recent important events
 - **bond_evolution**: Relationship dynamics and trust building
 
-These blocks are small (~2000 tokens each) and frequently updated.
+### 2. Working Memory Blocks (Swappable)
+Active context that can be loaded or archived:
+- **Pinned blocks**: Always loaded when agent processes messages
+- **Ephemeral blocks**: Loaded only when referenced by notifications
 
-### 2. Searchable Knowledge (Letta Sources)
-Embedded documents accessible via semantic search:
+DataStream sources create Working blocks for their content:
+```rust
+// Source creates block for new content
+memory.create_block(
+    agent_id,
+    "discord_thread_12345",
+    "Discord thread context",
+    BlockType::Working,
+    BlockSchema::text(),
+    2000,
+).await?;
+
+// Block is included via batch_block_ids when processing notification
+let request = ContextBuilder::new(&memory, &config)
+    .for_agent(agent_id)
+    .with_batch_blocks(vec!["discord_thread_12345".to_string()])
+    .build()
+    .await?;
+```
+
+### 3. Archival Memory (Searchable Long-term)
+Separate from blocks, searchable via FTS5 + sqlite-vec:
 - Agent observations and insights
-- Partner behavior patterns over time
-- Cross-agent discoveries
-- Accumulated "learned wisdom"
+- Partner behaviour patterns over time
+- Accumulated wisdom
+
+```rust
+// Store insight
+memory.insert_archival(
+    agent_id,
+    "User works best with time estimates multiplied by 1.5x",
+    Some(json!({"category": "time_patterns"})),
+).await?;
+
+// Search later
+let results = memory.search_archival(agent_id, "time estimates", 10).await?;
+```
+
+### 4. Message History
+Conversation history with Snowflake ordering:
+- Complete message history with batching
+- Recursive summarization for context window management
+- FTS5 search across all messages
+
+## Memory Permissions
+
+Permissions control who can modify memory content:
+
+| Permission | Read | Append | Overwrite | Delete |
+|------------|------|--------|-----------|--------|
+| ReadOnly   | Yes  | No     | No        | No     |
+| Partner    | Yes  | Request| Request   | No     |
+| Human      | Yes  | Request| Request   | No     |
+| Append     | Yes  | Yes    | No        | No     |
+| ReadWrite  | Yes  | Yes    | Yes       | No     |
+| Admin      | Yes  | Yes    | Yes       | Yes    |
+
+- `Partner` and `Human` permissions require approval via `PermissionBroker`
+- Requests appear as Discord/CLI notifications for humans to approve
+
+## Block Schemas
+
+Loro CRDT documents support typed schemas:
+
+**Text**: Simple text with optional viewport
+```rust
+BlockSchema::Text { viewport: None }
+```
+
+**Map**: Structured key-value fields
+```rust
+BlockSchema::Map {
+    fields: vec![
+        FieldDef { name: "energy".into(), field_type: FieldType::Number, ..Default::default() },
+        FieldDef { name: "mood".into(), field_type: FieldType::Text, ..Default::default() },
+    ],
+}
+```
+
+**List**: Ordered collections (tasks, items)
+```rust
+BlockSchema::List { item_schema: None, max_items: Some(20) }
+```
+
+**Log**: Append-only with display limit
+```rust
+BlockSchema::Log {
+    display_limit: 10,
+    entry_schema: LogEntrySchema { timestamp: true, agent_id: true, fields: vec![] },
+}
+```
+
+**Composite**: Multiple sections
+```rust
+BlockSchema::Composite {
+    sections: vec![
+        CompositeSection { name: "notes".into(), schema: Box::new(BlockSchema::text()), read_only: false },
+        CompositeSection { name: "diagnostics".into(), schema: Box::new(BlockSchema::text()), read_only: true },
+    ],
+}
+```
+
+## Block Sharing
+
+Agents can share blocks with each other:
+```rust
+// Share a block with another agent (ReadOnly permission)
+db.share_block(owner_id, block_id, recipient_id, MemoryPermission::ReadOnly).await?;
+
+// Recipient sees it in their shared blocks
+let shared = memory.list_shared_blocks(recipient_id).await?;
+
+// Access shared content
+let doc = memory.get_shared_block(recipient_id, owner_id, "shared_notes").await?;
+```
+
+Shared blocks appear in context with attribution:
+```xml
+<block:shared_notes permission="ReadOnly" shared_from="Archive">
+Cross-agent insights about user patterns
+</block:shared_notes>
+```
+
+## Native Agent Groups
+
+Pattern's native coordination replaces external dependencies like Letta.
+
+### Constellations
+
+A constellation is a collection of agents for a specific user:
+```rust
+pub struct Constellation {
+    pub id: ConstellationId,
+    pub owner_id: UserId,
+    pub name: String,
+    pub agents: Vec<(AgentModel, ConstellationMembership)>,
+    pub groups: Vec<GroupId>,
+}
+```
+
+### Agent Groups
+
+Groups define how agents coordinate:
+```rust
+pub struct AgentGroup {
+    pub id: GroupId,
+    pub name: String,
+    pub description: String,
+    pub coordination_pattern: CoordinationPattern,
+    pub state: GroupState,
+    pub members: Vec<(AgentModel, GroupMembership)>,
+}
+```
+
+### Coordination Patterns
+
+Six native coordination patterns:
+
+#### 1. Supervisor
+One agent leads, delegates to others:
+```rust
+CoordinationPattern::Supervisor {
+    leader_id: pattern_id,
+    delegation_rules: DelegationRules {
+        max_delegations_per_agent: Some(3),
+        delegation_strategy: DelegationStrategy::Capability,
+        fallback_behavior: FallbackBehavior::HandleSelf,
+    },
+}
+```
+
+#### 2. Round Robin
+Agents take turns in order:
+```rust
+CoordinationPattern::RoundRobin {
+    current_index: 0,
+    skip_unavailable: true,
+}
+```
+
+#### 3. Voting
+Agents vote on decisions:
+```rust
+CoordinationPattern::Voting {
+    quorum: 3,
+    voting_rules: VotingRules {
+        voting_timeout: Duration::from_secs(30),
+        tie_breaker: TieBreaker::Random,
+        weight_by_expertise: true,
+    },
+}
+```
+
+#### 4. Pipeline
+Sequential processing through stages:
+```rust
+CoordinationPattern::Pipeline {
+    stages: vec![
+        PipelineStage {
+            name: "analysis".into(),
+            agent_ids: vec![entropy_id],
+            timeout: Duration::from_secs(60),
+            on_failure: StageFailureAction::Skip,
+        },
+        PipelineStage {
+            name: "scheduling".into(),
+            agent_ids: vec![flux_id],
+            timeout: Duration::from_secs(60),
+            on_failure: StageFailureAction::Retry { max_attempts: 2 },
+        },
+    ],
+    parallel_stages: false,
+}
+```
+
+#### 5. Dynamic
+Context-based agent selection:
+```rust
+CoordinationPattern::Dynamic {
+    selector_name: "capability".into(),
+    selector_config: HashMap::from([
+        ("preferred_domain".into(), "task_management".into()),
+    ]),
+}
+```
+
+Available selectors:
+- `random`: Random selection
+- `capability`: Match message content to agent capabilities
+- `load_balancing`: Select least recently used agent
+- `supervisor`: LLM-based selection by supervisor agent
+
+#### 6. Sleeptime
+Background monitoring with intervention triggers:
+```rust
+CoordinationPattern::Sleeptime {
+    check_interval: Duration::from_secs(20 * 60), // 20 minutes
+    triggers: vec![
+        SleeptimeTrigger {
+            name: "hyperfocus_check".into(),
+            condition: TriggerCondition::TimeElapsed {
+                duration: Duration::from_secs(90 * 60),
+            },
+            priority: TriggerPriority::High,
+        },
+        SleeptimeTrigger {
+            name: "constellation_sync".into(),
+            condition: TriggerCondition::ConstellationActivity {
+                message_threshold: 20,
+                time_threshold: Duration::from_secs(60 * 60),
+            },
+            priority: TriggerPriority::Medium,
+        },
+    ],
+    intervention_agent_id: Some(pattern_id),
+}
+```
+
+### Group Member Roles
+
+```rust
+pub enum GroupMemberRole {
+    Regular,
+    Supervisor,
+    Observer,  // Receives messages but doesn't respond
+    Specialist { domain: String },
+}
+```
+
+### Group Response Streaming
+
+Groups emit events during processing:
+```rust
+pub enum GroupResponseEvent {
+    Started { group_id, pattern, agent_count },
+    AgentStarted { agent_id, agent_name, role },
+    TextChunk { agent_id, text, is_final },
+    ToolCallStarted { agent_id, call_id, fn_name, args },
+    ToolCallCompleted { agent_id, call_id, result },
+    AgentCompleted { agent_id, agent_name, message_id },
+    Complete { group_id, pattern, execution_time, agent_responses, state_changes },
+    Error { agent_id, message, recoverable },
+}
+```
+
+## Example Group Configurations
+
+### Main Conversational Group
+```rust
+AgentGroup {
+    name: "Main Support".into(),
+    coordination_pattern: CoordinationPattern::Dynamic {
+        selector_name: "capability".into(),
+        selector_config: HashMap::new(),
+    },
+    members: vec![pattern, entropy, flux, momentum, anchor, archive],
+}
+```
+
+### Crisis Response Group
+```rust
+AgentGroup {
+    name: "Crisis Response".into(),
+    coordination_pattern: CoordinationPattern::RoundRobin {
+        current_index: 0,
+        skip_unavailable: true,
+    },
+    members: vec![pattern, momentum, anchor],
+}
+```
+
+### Planning Session Group
+```rust
+AgentGroup {
+    name: "Planning".into(),
+    coordination_pattern: CoordinationPattern::Supervisor {
+        leader_id: entropy_id,
+        delegation_rules: DelegationRules::default(),
+    },
+    members: vec![entropy, flux, pattern],
+}
+```
+
+### Sleeptime Processing Group
+```rust
+AgentGroup {
+    name: "Memory Consolidation".into(),
+    coordination_pattern: CoordinationPattern::Sleeptime {
+        check_interval: Duration::from_secs(20 * 60),
+        triggers: vec![/* ... */],
+        intervention_agent_id: Some(archive_id),
+    },
+    members: vec![pattern, archive],
+}
+```
+
+## Overlapping Groups
+
+The same agent can belong to multiple groups with different coordination styles:
+
+```
+Pattern Agent
+├── Main Support (Dynamic)
+├── Crisis Response (RoundRobin)
+├── Planning (Supervisor - as member)
+└── Sleeptime (Sleeptime - as intervener)
+
+Entropy Agent
+├── Main Support (Dynamic)
+└── Planning (Supervisor - as leader)
+
+Archive Agent
+├── Main Support (Dynamic)
+└── Sleeptime (Sleeptime - as leader)
+```
 
 Benefits:
-- No API calls for reading shared insights
-- Semantic search finds relevant patterns
-- Agents discover insights without coordination overhead
-- Creates persistent knowledge base
-
-### 3. Deep Storage (Archival Memory)
-Full conversation history and specific moments:
-- Complete message history (via Letta's sliding window)
-- Important moments flagged for recall
-- Raw data for pattern analysis
-- Accessible via `archival_memory_search` tool
-
-## Context Window Management
-
-Letta's context window structure:
-```
-[ALWAYS PRESENT - Fixed overhead]
-1. System prompt
-2. Tool descriptions
-3. Summary (compressed older conversations)
-4. Core memory blocks
-5. Tool rules
-
-[SLIDING WINDOW - Dynamic]
-6. Recent messages (until token limit)
-
-[ACCESSIBLE VIA RECALL]
-7. Older messages (searchable but not in context)
-```
-
-Key insights:
-- We don't manually manage conversation history
-- Letta handles the sliding window automatically
-- Core memory must contain only critical real-time state
-- Archive agent compresses insights into summary
-
-## Multi-Agent Groups
-
-### Why Groups Matter
-Instead of custom message routing, Letta's native groups API provides:
-- Unified conversation history across all agents
-- Multiple coordination strategies (dynamic, supervisor, round-robin)
-- Shared memory blocks between agents
-- Built-in sleeptime processing
-
-### Example Group Configurations
-
-These are examples to illustrate the flexibility of groups - your implementation can define whatever groups make sense:
-
-#### Main Conversational Group
-```rust
-let main_group = client.groups().create(GroupCreate {
-    agent_ids: vec![pattern_id, entropy_id, flux_id, momentum_id, anchor_id, archive_id],
-    description: "Main ADHD support constellation".to_string(),
-    manager_config: Some(GroupCreateManagerConfig::Dynamic(DynamicManager {
-        manager_agent_id: pattern_id,
-        termination_token: Some("DONE!".to_string()),
-        max_turns: None,
-    })),
-    shared_block_ids: Some(vec![current_state_id, active_context_id, bond_evolution_id]),
-}).await?;
-```
-- **Purpose**: Normal partner interactions
-- **Manager**: Dynamic routing allows any agent to interject
-- **Use case**: "I'm feeling overwhelmed" → all agents see it, relevant ones respond
-
-#### Sleeptime Processing Group
-```rust
-let sleeptime_group = client.groups().create(GroupCreate {
-    agent_ids: vec![pattern_id, archive_id],
-    description: "Memory consolidation team".to_string(),
-    manager_config: Some(GroupCreateManagerConfig::Sleeptime(SleeptimeManager {
-        manager_agent_id: archive_id,
-        sleeptime_agent_frequency: Some(20),  // every 20 messages
-    })),
-    shared_block_ids: Some(vec![current_state_id, active_context_id]),
-}).await?;
-```
-- **Purpose**: Background memory processing
-- **Manager**: Archive leads consolidation
-- **Use case**: Compress conversations, update shared insights
-
-#### Crisis Response Group
-```rust
-let crisis_group = client.groups().create(GroupCreate {
-    agent_ids: vec![pattern_id, momentum_id, anchor_id],
-    description: "Urgent intervention team".to_string(),
-    manager_config: Some(GroupCreateManagerConfig::RoundRobin(RoundRobinManager {
-        max_turns: Some(10),
-    })),
-    shared_block_ids: Some(vec![current_state_id]),
-}).await?;
-```
-- **Purpose**: Quick intervention for spiraling/crisis
-- **Manager**: Round-robin for rapid checks
-- **Use case**: "Help I'm spiraling" → quick focused response
-
-#### Planning Group
-```rust
-let planning_group = client.groups().create(GroupCreate {
-    agent_ids: vec![entropy_id, flux_id, pattern_id],
-    description: "Task planning specialists".to_string(),
-    manager_config: Some(GroupCreateManagerConfig::Supervisor(SupervisorManager {
-        manager_agent_id: entropy_id,
-    })),
-    shared_block_ids: Some(vec![current_state_id, active_context_id]),
-}).await?;
-```
-- **Purpose**: Dedicated planning sessions
-- **Manager**: Entropy leads task breakdown
-- **Use case**: "Let's plan my day" → structured planning
-
-### Group Benefits
-- Same agents, different coordination styles
-- Overlapping groups for different contexts
-- Shared conversation history within groups
-- No manual message routing needed
-- **Completely flexible** - define groups that make sense for your use case
-
-## Overlapping Groups Architecture
-
-A key insight: since groups only reference existing agent IDs, we can create multiple overlapping groups with different configurations for different contexts.
-
-### Benefits of Overlapping Groups
-
-1. **Context-Specific Coordination**
-   - Normal conversation uses dynamic routing (anyone can jump in)
-   - Crisis moments use round-robin (quick systematic checks)
-   - Planning uses supervisor mode (Entropy leads structured breakdown)
-
-2. **Flexible Agent Participation**
-   - Not all agents needed for all contexts
-   - Crisis group: just Pattern, Momentum, Anchor (immediate needs)
-   - Planning group: just Entropy, Flux, Pattern (task/time focus)
-   - Sleeptime: just Pattern, Archive (memory processing)
-
-3. **Cost Optimization**
-   - Sleeptime groups can use cheaper models
-   - Crisis groups can use faster models
-   - Planning groups can use more analytical models
-
-### Example Usage Patterns
-
-```rust
-// Normal conversation
-let response = client.groups().send_message(
-    &main_group.id,
-    vec![MessageCreate::user("I'm feeling scattered today")]
-).await?;
-// All agents see it, dynamic routing determines who responds
-
-// Crisis intervention
-if detect_crisis(&message) {
-    let response = client.groups().send_message(
-        &crisis_group.id,
-        vec![MessageCreate::user("Help I'm spiraling")]
-    ).await?;
-    // Only Pattern, Momentum, Anchor respond with quick checks
-}
-
-// Dedicated planning session
-if message.contains("plan") || message.contains("organize") {
-    let response = client.groups().send_message(
-        &planning_group.id,
-        vec![MessageCreate::user("Let's plan out my week")]
-    ).await?;
-    // Entropy leads, Flux provides time reality checks
-}
-
-// Background processing (automatic)
-// Every 20 messages, sleeptime group activates
-// Archive processes conversation history with Pattern
-```
-
-### Group Selection Logic
-
-The Discord bot or MCP server can intelligently route to appropriate groups:
-
-```rust
-fn select_group(message: &str, user_state: &UserState) -> GroupId {
-    if is_crisis_language(message) || user_state.stress_level > 8 {
-        return crisis_group.id;
-    }
-
-    if is_planning_request(message) {
-        return planning_group.id;
-    }
-
-    if is_memory_question(message) {
-        return memory_group.id;  // Archive-focused group
-    }
-
-    // Default to main conversational group
-    main_group.id
-}
-```
-
-### The Power of Flexibility
-
-The key insight is that groups are just references to existing agents. You can:
-- Create groups on the fly based on context
-- Experiment with different manager types
-- Add/remove agents from groups dynamically
-- Have one agent in many groups simultaneously
-- Create special-purpose groups for specific workflows
-
-This isn't a fixed architecture - it's a toolkit for building whatever coordination patterns emerge as useful.
-
-## Custom Tiered Sleeptime Architecture
-
-Pattern also implements a custom tiered approach for cost optimization:
-
-### Tier 1: Lightweight Monitor (Every 20min)
-```rust
-// Cheap rules-based or tiny model checks
-async fn quick_check() {
-    // Activity detection (are they at computer?)
-    // Time since last water/movement
-    // Current task duration
-
-    if concerning_pattern_detected() {
-        wake_pattern();  // Trigger expensive model
-    }
-}
-```
-
-**Triggers for waking Pattern:**
-- Hyperfocus >90min detected
-- No movement >2hrs
-- Task switch detected
-- User explicitly asks
-
-### Tier 2: Pattern Intervention (5-10x/day)
-When triggered, Pattern (expensive model) performs:
-- Comprehensive state assessment
-- Delegate to specialist agents
-- Update shared memory
-- Send Discord notifications if needed
-
-### Cost Optimization
-1. **Two-tier models**:
-   - Llama 3.1 8B for routine monitoring
-   - Claude/GPT-4 for complex interventions
-2. **Conditional awakening**: Pattern sleeps unless triggered
-3. **Batch processing**: Accumulate observations, process together
-4. **Shared context**: One expensive analysis, all agents read results
+- Context-specific coordination styles
+- Cost optimization (simpler models for sleeptime)
+- Focused agent participation per context
+- Easy to experiment with different configurations
 
 ## Memory Processing Strategy
 
-### Hybrid Approach
-1. **Archive handles bulk processing**:
-   - Conversation summarization
-   - Cross-agent pattern detection
-   - Long-term memory consolidation
-   - Runs as sleeptime agent every ~20 conversations
+### Agent-Level Insights
+Each agent maintains domain-specific observations:
+```rust
+// Entropy observes task patterns
+memory.insert_archival(
+    entropy_id,
+    "Tasks labeled 'quick fix' average 3.2x estimated time",
+    Some(json!({"domain": "task_patterns"})),
+).await?;
+```
 
-2. **Specialists update domain insights**:
-   - Each agent maintains "learned_[domain]" memory block
-   - Updates after significant interactions
-   - Archive reads these for meta-patterns
+### Sleeptime Consolidation
+Archive agent processes accumulated insights during sleeptime:
+```rust
+// Sleeptime trigger fires
+// Archive reads recent observations from all agents
+let all_observations = memory.search_all("observations last 24h", options).await?;
 
-3. **Pattern performs meta-synthesis**:
-   - During sleeptime checks, reads all memory blocks
-   - Identifies cross-cutting concerns
-   - Updates strategic priorities
+// Consolidates into meta-patterns
+memory.insert_archival(
+    archive_id,
+    "Cross-agent pattern: User productivity drops 40% after 2pm meetings",
+    Some(json!({"domain": "meta_patterns", "confidence": 0.85})),
+).await?;
+
+// Updates shared blocks with key insights
+memory.update_block_text(
+    pattern_id,
+    "active_context",
+    "Note: Schedule creative work before meetings today",
+).await?;
+```
 
 ### Memory Flow
+
 ```
-Partner says something
+Partner interaction
     ↓
-Core memory (immediate context)
+Core memory updated (immediate context)
     ↓
-Agents process & observe
+Agent observes and processes
     ↓
-Write insights to sources (passive sharing)
+Insights stored to archival memory
     ↓
-Archive consolidates patterns (sleeptime)
+Sleeptime trigger fires
     ↓
-Updates core memory with key insights
+Archive consolidates patterns
+    ↓
+Key insights → shared blocks
+    ↓
+All agents see updated context
 ```
 
-## Passive Data Sharing via Sources
+## Cost Optimization
 
-Each agent can write observations to shared source files:
+### Two-Tier Model Strategy
+- **Routine monitoring**: Lightweight checks (rules-based or small model)
+- **Intervention**: Full model for complex interactions
 
+### Sleeptime Triggers
+Sleeptime patterns only invoke expensive models when triggers fire:
 ```rust
-// Agent tool for passive sharing
-fn write_to_shared_insights(category: &str, content: &str) {
-    // Writes to markdown file
-    // Automatically embedded by Letta
-    // Available to all agents via search_file
+TriggerCondition::ThresholdExceeded {
+    metric: "stress_level".into(),
+    threshold: 8.0,
 }
 ```
 
-### Example Source Files
-
-**sleeptime_observations.md**:
-```markdown
-[2025-07-04 14:30] Hyperfocus detected: coding session 2.5hrs
-[2025-07-04 14:30] Physical needs: last water 90min ago
-[2025-07-04 14:30] Energy state: flow but approaching burnout risk
+### Batch Processing
+Queue processing accumulates messages between expensive model calls:
+```rust
+let processor = QueueProcessor::new(config, runtime);
+processor.start(); // Polls queue, batches notifications
 ```
 
-**task_patterns.md** (by Entropy):
-```markdown
-- "quick fix" tasks average 3.2x estimated time
-- Morning tasks have 80% completion rate
-- Tasks with >5 subtasks rarely completed same day
+## CLI Commands
+
+```bash
+# List groups
+pattern group list
+
+# Create group (interactive TUI builder)
+pattern group create
+
+# Add member
+pattern group add member "Planning" Flux --role specialist
+
+# View group status
+pattern group status "Planning"
+
+# Export group configuration
+pattern group export "Planning" -o planning.toml
 ```
 
-**energy_patterns.md** (by Momentum):
-```markdown
-- Post-lunch dip consistent 2-4pm
-- Creative tasks best 10pm-2am
-- Meetings cost 2x recovery time on low-energy days
+## Integration Points
+
+### Discord
+```rust
+// Route message to appropriate group
+let group_id = select_group(&message, &user_state);
+let events = group_manager.route_message(&group, &agents, message).await?;
+
+// Stream responses back to Discord
+while let Some(event) = events.next().await {
+    match event {
+        GroupResponseEvent::TextChunk { agent_id, text, .. } => {
+            discord.send_typing(&channel_id).await?;
+            discord.send_message(&channel_id, &text).await?;
+        }
+        // ...
+    }
+}
 ```
 
-## Implementation Priority
-
-1. **Rebuild with new backends**
-2. **Implement shared source writing** (passive knowledge sharing)
-3. **Create overlapping group configurations** (context-specific coordination)
-4. **Build lightweight monitor** (tier 1 sleeptime)
-5. **Configure Archive as sleeptime processor** (memory consolidation)
-
-This architecture balances:
-- Continuous ADHD support
-- API cost efficiency
-- Shared knowledge between agents
-- Flexible coordination strategies
+### MCP Server
+Groups can be exposed as MCP tools:
+```json
+{
+  "name": "route_to_group",
+  "description": "Route a message through an agent group",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "group_id": { "type": "string" },
+      "message": { "type": "string" }
+    }
+  }
+}
+```

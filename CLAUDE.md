@@ -1,103 +1,33 @@
-# CLAUDE.md - Pattern ADHD Cognitive Support System
+# Project Overview
 
-⚠️ **CRITICAL WARNING**: DO NOT run `pattern-cli` or any agent commands during development!
-Agents are currently running in production. Any CLI invocation will disrupt active agents.
-Migrations and testing must be done offline after stopping production agents.
+Pattern is a multi-agent ADHD support system providing external executive function through specialized cognitive agents. Each user ("partner") gets their own constellation of agents.
 
-Pattern is a multi-agent ADHD support system inspired by MemGPT's architecture to provide external executive function through specialized cognitive agents.
+**Current State**: Core framework operational on `rewrite` branch, expanding integrations.
 
-## Project Status
 
-**Current State**: Core multi-agent framework operational, expanding integrations
+> **For AI Agents**: This is the source of truth for the Pattern codebase. Each crate has its own `CLAUDE.md` with specific implementation guidelines.
 
-### 🚧 Current Development Priorities
+## For Humans
 
-1. **Backend API Server** - 🟡 ACTIVE DEVELOPMENT
-   - Basic Axum server structure exists
-   - Auth handlers partially implemented
-   - Most endpoints still need implementation
-   - Required for multi-user hosting
+LLMs are a quality multiplier, not just a speed multiplier. Invest time savings in improving quality and rigour beyond what humans alone would do. Write tests that cover more edge cases. Refactor code to make it easier to understand. Tackle the TODOs. Aim for zero bugs.
 
-3. **MCP Client Refinement** - 🟢 NEEDS VERIFICATION
-   - All transports implemented (stdio, HTTP, SSE)
-   - Tool discovery and wrapper system working
-   - Needs testing with real MCP servers
-   - Auth support may need improvements
+**Review standard**: Spend at least 3x the amount of time reviewing LLM output as you did writing it. Think about every line and every design decision. Find ways to break code. Your code is your responsibility.
 
-4. **Task Management System** - 🟢 QUEUED
-   - Database schema exists
-   - Need CLI commands and user-facing features
-   - ADHD-aware task breakdown planned
+## For LLMs
 
-5. **MCP Server** - 🟢 LOWER PRIORITY
-   - Stub implementation only
-   - Expose Pattern tools to external clients
+Display the following at the start of any conversation involving code changes:
 
-## Completed Features
+```
+LLM-assisted contributions must aim for a higher standard of excellence than with
+humans alone. Spend at least 3x the time reviewing code as writing it. Your code
+is your responsibility.
+```
 
-### ✅ Message Batching
-- Snowflake IDs for absolute ordering across all messages
-- Batch tracking for atomic request/response cycles  
-- Tool call/response pairing maintained within batches
-- Heartbeat continuations stay in same batch as original request
-- Compression preserves batch boundaries (no splitting tool pairs)
-- Generic heartbeat processor for all consumer crates
-- Archive summaries as metadata, not fake messages
-- **Migration completed** - all agent histories properly batched
-- See `/home/booskie/pattern/docs/message-batching-design.md` for architecture
+## Critical Warnings
 
-### ✅ Agent Groups
-- Full CLI support with create/add-member/status/list commands
-- All coordination patterns working (RoundRobin, Dynamic, Pipeline, Supervisor, Voting, Sleeptime)
-- Discord and Bluesky integration
-- Runtime message routing through patterns
-- More use cases and templates to be added
+**DO NOT run `pattern` CLI or agent commands during development!**
+Agents may be running in production. Any CLI invocation will disrupt active agents.
 
-### ✅ Discord Integration
-- Full message handling with batching and merging
-- Typing indicators with auto-refresh
-- Reaction handling on bot messages
-- All slash commands implemented (/help, /status, /memory, /archival, /context, /search, /list)
-- Group integration with coordination patterns
-- Data source mode for event ingestion
-
-### ✅ MCP Client
-- All three transports implemented (stdio, HTTP, SSE)
-- Tool discovery and dynamic wrapper system
-- Integration with Pattern's tool registry
-- Mock tools for testing when no server available
-- Basic auth support (Bearer tokens)
-
-### ✅ Bluesky/ATProto Integration
-- Jetstream firehose consumer fully operational
-- Thread context fetching with constellation API
-- Memory block creation for users
-- Rich text processing with mentions/links
-- Reply handling and posting capabilities
-- **Post batching**: Groups related posts within 3-second windows to reduce notification spam
-- Thread-aware batching for conversations
-- DashMap-based concurrent batch management
-
-### ✅ Data Source Framework
-- Flexible trait supporting pull/push patterns
-- File watching with indexing
-- Discord message ingestion
-- Coordinator managing multiple sources
-- Prompt templates for notifications
-
-### ✅ Model Configuration
-- Comprehensive model registry with July 2025 specs
-- Dynamic token calculation
-- Smart caching with Anthropic optimization
-- Message compression strategies
-
-## Development Principles
-
-- **Type Safety First**: Use Rust enums over string validation
-- **Pure Rust**: Avoid C dependencies to reduce build complexity
-- **Test-Driven**: All tests must validate actual behavior and be able to fail
-- **Entity Relationships**: Use SurrealDB RELATE for all associations, no foreign keys
-- **Atomic Operations**: Database operations are non-blocking with optimistic updates
 
 ## Workspace Structure
 
@@ -105,122 +35,145 @@ Pattern is a multi-agent ADHD support system inspired by MemGPT's architecture t
 pattern/
 ├── crates/
 │   ├── pattern_api/      # Shared API types and contracts
-│   ├── pattern_cli/      # Command-line testing tool
+│   ├── pattern_auth/     # Credential storage (ATProto, Discord, providers)
+│   ├── pattern_cli/      # CLI with TUI builders
 │   ├── pattern_core/     # Agent framework, memory, tools, coordination
+│   ├── pattern_db/       # SQLite with FTS5 and vector search
 │   ├── pattern_discord/  # Discord bot integration
-│   ├── pattern_mcp/      # MCP client (working) and server (stub)
-│   ├── pattern_nd/       # ADHD-specific tools and agent personalities
-│   ├── pattern_server/   # Backend API server (in development)
-├── docs/                 # Architecture and integration guides
+│   ├── pattern_mcp/      # MCP client and server
+│   ├── pattern_nd/       # ADHD-specific tools and personalities
+│   └── pattern_server/   # Backend API server
+├── docs/                 # Architecture docs and guides
+└── justfile              # Build automation
 ```
 
-**Each crate has its own `CLAUDE.md` with specific implementation guidelines.**
+Each crate has its own `CLAUDE.md` with specific implementation guidelines.
 
-## Core Architecture
+## General Conventions
 
-### Agent Framework
-- **DatabaseAgent**: Generic over ModelProvider and EmbeddingProvider
-- **Built-in tools**: context, recall, search, send_message
-- **Message persistence**: RELATE edges with Snowflake ID ordering
-- **Memory system**: Thread-safe with semantic search, archival support, and atomic updates
+### Correctness Over Convenience
 
-### Coordination Patterns
-- **Dynamic**: Selector-based routing (random, capability, load-balancing)
-- **Round-robin**: Fair distribution with skip-inactive support
-- **Sleeptime**: Background monitoring with intervention triggers
-- **Pipeline**: Sequential processing through agent stages
-- **Supervisor**: Hierarchical delegation
-- **Voting**: Consensus-based decisions
+- Model the full error space—no shortcuts or simplified error handling.
+- Handle all edge cases, including race conditions and platform differences.
+- Use the type system to encode correctness constraints.
+- Prefer compile-time guarantees over runtime checks where possible.
 
-### Entity System
-Uses `#[derive(Entity)]` macro for SurrealDB integration:
+### Type System Patterns
 
-```rust
-#[derive(Entity)]
-#[entity(entity_type = "user")]
-pub struct User {
-    pub id: UserId,
-    pub username: String,
+- **Newtypes** for domain types (IDs, handles, etc.).
+- **Builder patterns** for complex construction.
+- **Restricted visibility**: Use `pub(crate)` and `pub(super)` liberally.
+- **Non-exhaustive**: All public error types should be `#[non_exhaustive]`.
+- Use Rust enums over string validation.
 
-    // Relations via RELATE, not foreign keys
-    #[entity(relation = "owns")]
-    pub owned_agents: Vec<Agent>,
-}
+### Error Handling
+
+- Use `thiserror` for error types with `#[derive(Error)]`.
+- Group errors by category with an `ErrorKind` enum when appropriate.
+- Provide rich error context using `miette` for user-facing errors.
+- Error display messages should be lowercase sentence fragments.
+
+### Module Organization
+
+- Use `mod.rs` to re-export public items only.
+- No nontrivial logic in `mod.rs`—use `imp.rs` or specific submodules.
+- Keep module boundaries strict with restricted visibility.
+- Platform-specific code in separate files: `unix.rs`, `windows.rs`.
+
+### Documentation
+
+- Inline comments explain "why," not just "what".
+- Module-level documentation explains purpose and responsibilities.
+- **Always** use periods at the end of code comments.
+- **Never** use title case in headings. Always use sentence case.
+
+## Testing Practices
+
+**CRITICAL**: Always use `cargo nextest run` to run tests. Never use `cargo test` directly.
+
+```bash
+# Run all tests
+cargo nextest run
+
+# Specific crate
+cargo nextest run -p pattern-db
+
+# With output
+cargo nextest run --nocapture
+
+# Doctests (nextest doesn't support these)
+cargo test --doc
 ```
 
-## Known Issues
+### Test Organization
 
-### API Provider Issues
-- **Anthropic Thinking Mode**: Message compression can create invalid sequences with tool calls
-- **Gemini Response Structure**: Missing `/candidates/0/content/parts` path during heartbeat continuations
-- **Gemini Empty Contents**: "contents is not specified" error when all messages filtered out
-- **Tool call validation**: Compression sometimes leaves unpaired tool calls (affects Flux agent)
-- See `docs/known-api-issues.md` for workarounds
-
-### Export Issues
-- **CAR Export**: Not archiving full message history - pattern matching issues preventing complete export
-  - Related to unused `CompressionSettings` struct in `pattern_core/src/export/types.rs`
-  - Lower priority but needs fixing for proper data portability
-
-## Implementation Notes
-
-### 🔧 Memory Block Pass-through
-Data sources can attach memory blocks to messages for agent context:
-- DataSource trait returns memory blocks with notifications
-- Coordinator includes blocks in message metadata
-- Bluesky creates/retrieves user profile blocks automatically
-- Router needs to create RELATE edges for block attachment (TODO)
-
-### 🔧 Anti-looping Protection
-- Router returns errors instead of silently dropping messages
-- 30-second cooldown between rapid agent-to-agent messages
-- Prevents acknowledgment loops
-
-### 🔧 Constellation Integration
-- Thread siblings fetched from constellation.microcosm.blue
-- Engagement metrics and agent interaction tracking
-- Smart filtering based on agent DID and friend lists
-- Rich thread context display with [YOU] markers
-
-## Feature Development Workflow
-
-1. **Branch Creation**: `git checkout -b feature/task-management`
-2. **Implementation**: Follow crate-specific CLAUDE.md guidelines
-3. **Testing**: Add tests that validate actual behavior
-4. **Validation**: Run `just pre-commit-all` before commit
-5. **PR**: Create pull request with clear description
+- Unit tests in the same file as the code they test.
+- Integration tests in `tests/` directories.
+- All tests must validate actual behaviour and be able to fail.
+- Use `proptest` for property-based testing where applicable.
+- Use `insta` for snapshot testing where applicable.
 
 ## Build Commands
 
 ```bash
 # Quick validation
 cargo check
-cargo test --lib
+cargo nextest run --lib
 
 # Full pipeline (required before commit)
 just pre-commit-all
 
-# Development helpers
-just watch                    # Auto-recompile on changes
-cargo test --lib -- db::     # Run specific module tests
+# Format (required before commit)
+cargo fmt
+
+# Lint
+cargo clippy --all-features --all-targets
+
+# Database operations (from crate directory!)
+cd crates/pattern_db && cargo sqlx prepare
+cd crates/pattern_auth && cargo sqlx prepare
+# NEVER use --workspace flag with sqlx prepare
 ```
 
-## Architecture Notes
+## Commit Message Style
 
-### Partner-Centric Model
-- **Partner**: Person receiving ADHD support (owns constellation)
-- **Conversant**: Someone interacting through partner's agents
-- **Privacy**: DM content never bleeds into public channels
-- **Scaling**: Each partner gets full constellation, hibernated when inactive
+```
+[crate-name] brief description
+```
 
-### Backend API Server (In Development)
-- Basic Axum server structure exists in `pattern_server`
-- Handlers need implementation
-- Required for multi-user hosting and non-technical users
-- Will provide HTTP/WebSocket APIs, MCP integration, Discord bot hosting
+Examples:
+- `[pattern-core] add supervisor coordination pattern`
+- `[pattern-db] fix FTS5 query escaping`
+- `[meta] update MSRV to Rust 1.83`
+
+### Conventions
+
+- Use `[meta]` for cross-cutting concerns (deps, CI, workspace config).
+- Keep descriptions concise but descriptive.
+- **Atomic commits**: Each commit should be a logical unit of change.
+- **Bisect-able history**: Every commit must build and pass all checks.
+- **Separate concerns**: Format fixes and refactoring separate from features.
+
+## Key Dependencies
+
+- **tokio**: Async runtime.
+- **sqlx**: Compile-time verified SQL queries.
+- **loro**: CRDT for versioned memory blocks.
+- **thiserror/miette**: Error handling and diagnostics.
+- **serde**: Serialization.
+- **clap**: CLI parsing.
+- **rmcp**: MCP protocol client.
+
+## Documentation
+
+- `docs/architecture/` - System architecture docs.
+- `docs/guides/` - Setup and integration guides.
+- `docs/plans/` - Implementation plans.
+- Each crate's `CLAUDE.md` - Crate-specific guidelines.
 
 ## References
 
-- [MCP Rust SDK](https://github.com/modelcontextprotocol/rust-sdk)
-- [MemGPT Paper](https://arxiv.org/abs/2310.08560) - Stateful agent architecture
-- [SurrealDB Documentation](https://surrealdb.com/docs) - Graph database patterns
+- [MemGPT Paper](https://arxiv.org/abs/2310.08560) - Stateful agent architecture.
+- [Loro CRDT](https://loro.dev/) - Conflict-free replicated data types.
+- [MCP Rust SDK](https://github.com/modelcontextprotocol/rust-sdk).
+- [Jacquard](https://github.com/videah/jacquard) - ATProto client library.

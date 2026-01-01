@@ -121,8 +121,7 @@ fn select_agent_group(content: &str) -> AgentGroup {
 
 Run with Discord integration:
 ```bash
-pattern-cli chat --discord
-pattern-cli chat --discord --group main
+pattern chat --group main --discord
 ```
 
 ## Privacy & Security
