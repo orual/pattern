@@ -232,16 +232,17 @@ pub async fn load_model_embedding_providers(
             let oauth_client =
                 OAuthClientBuilder::new(Arc::new(DB.clone()), config.user.id.clone()).build()?;
             // Wrap in GenAiClient with all endpoints available
-            let genai_client = GenAiClient::with_endpoints(
-                oauth_client,
-                vec![
-                    genai::adapter::AdapterKind::Anthropic,
-                    genai::adapter::AdapterKind::Gemini,
-                    genai::adapter::AdapterKind::OpenAI,
-                    genai::adapter::AdapterKind::Groq,
-                    genai::adapter::AdapterKind::Cohere,
-                ],
-            );
+            let mut endpoints = vec![
+                genai::adapter::AdapterKind::Anthropic,
+                genai::adapter::AdapterKind::Gemini,
+                genai::adapter::AdapterKind::OpenAI,
+                genai::adapter::AdapterKind::Groq,
+                genai::adapter::AdapterKind::Cohere,
+            ];
+            if std::env::var("OPENROUTER_API_KEY").is_ok() {
+                endpoints.push(genai::adapter::AdapterKind::OpenRouter);
+            }
+            let genai_client = GenAiClient::with_endpoints(oauth_client, endpoints);
             Arc::new(RwLock::new(genai_client))
         }
         #[cfg(not(feature = "oauth"))]
