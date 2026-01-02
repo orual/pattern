@@ -759,7 +759,7 @@ mod tests {
         let (_db, memory, ctx) = create_test_context_with_agent("test-agent").await;
 
         // Create a text block with some content
-        memory
+        let doc = memory
             .create_block(
                 "test-agent",
                 "viewport_test",
@@ -772,12 +772,13 @@ mod tests {
             .unwrap();
 
         // Add multi-line content
+        doc.set_text(
+            "Line 1\nLine 2\nLine 3\nLine 4\nLine 5\nLine 6\nLine 7\nLine 8\nLine 9\nLine 10",
+            true,
+        )
+        .unwrap();
         memory
-            .update_block_text(
-                "test-agent",
-                "viewport_test",
-                "Line 1\nLine 2\nLine 3\nLine 4\nLine 5\nLine 6\nLine 7\nLine 8\nLine 9\nLine 10",
-            )
+            .persist_block("test-agent", "viewport_test")
             .await
             .unwrap();
 

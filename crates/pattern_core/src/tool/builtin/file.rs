@@ -449,16 +449,40 @@ impl FileTool {
                     })?
             };
 
-        // Append to the block
+        // Append to the block using get→mutate→persist pattern
         let memory = self.ctx.memory();
-        memory
-            .append_to_block(&block_ref.agent_id, &block_ref.label, content)
+        let doc = memory
+            .get_block(&block_ref.agent_id, &block_ref.label)
             .await
             .map_err(|e| {
                 CoreError::tool_exec_msg(
                     "file",
                     json!({"op": "append", "path": path_str}),
-                    format!("Failed to append to block: {:?}", e),
+                    format!("Failed to get block: {:?}", e),
+                )
+            })?
+            .ok_or_else(|| {
+                CoreError::tool_exec_msg(
+                    "file",
+                    json!({"op": "append", "path": path_str}),
+                    format!("Block not found: {}", block_ref.label),
+                )
+            })?;
+        doc.append_text(content, false).map_err(|e| {
+            CoreError::tool_exec_msg(
+                "file",
+                json!({"op": "append", "path": path_str}),
+                format!("Failed to append to block: {:?}", e),
+            )
+        })?;
+        memory
+            .persist_block(&block_ref.agent_id, &block_ref.label)
+            .await
+            .map_err(|e| {
+                CoreError::tool_exec_msg(
+                    "file",
+                    json!({"op": "append", "path": path_str}),
+                    format!("Failed to persist block: {:?}", e),
                 )
             })?;
 
@@ -772,18 +796,44 @@ impl FileTool {
                     })?
             };
 
-        // Replace in the block
+        // Replace in the block using get→mutate→persist pattern
         let memory = self.ctx.memory();
-        let replaced = memory
-            .replace_in_block(&block_ref.agent_id, &block_ref.label, old, new)
+        let doc = memory
+            .get_block(&block_ref.agent_id, &block_ref.label)
             .await
             .map_err(|e| {
                 CoreError::tool_exec_msg(
                     "file",
                     json!({"op": "replace", "path": path_str}),
-                    format!("Failed to replace in block: {:?}", e),
+                    format!("Failed to get block: {:?}", e),
+                )
+            })?
+            .ok_or_else(|| {
+                CoreError::tool_exec_msg(
+                    "file",
+                    json!({"op": "replace", "path": path_str}),
+                    format!("Block not found: {}", block_ref.label),
                 )
             })?;
+        let replaced = doc.replace_text(old, new, false).map_err(|e| {
+            CoreError::tool_exec_msg(
+                "file",
+                json!({"op": "replace", "path": path_str}),
+                format!("Failed to replace in block: {:?}", e),
+            )
+        })?;
+        if replaced {
+            memory
+                .persist_block(&block_ref.agent_id, &block_ref.label)
+                .await
+                .map_err(|e| {
+                    CoreError::tool_exec_msg(
+                        "file",
+                        json!({"op": "replace", "path": path_str}),
+                        format!("Failed to persist block: {:?}", e),
+                    )
+                })?;
+        }
 
         if replaced {
             Ok(ToolOutput::success(format!(
@@ -1046,8 +1096,14 @@ mod tests {
         let new_content = "Modified content via FileTool";
         let runtime = agent.runtime();
         let memory = runtime.memory();
+        let doc = memory
+            .get_block(agent.id().as_str(), &label)
+            .await
+            .unwrap()
+            .unwrap();
+        doc.set_text(new_content, true).unwrap();
         memory
-            .update_block_text(agent.id().as_str(), &label, new_content)
+            .persist_block(agent.id().as_str(), &label)
             .await
             .unwrap();
 
@@ -1242,8 +1298,14 @@ mod tests {
         // Modify content in memory
         let runtime = agent.runtime();
         let memory = runtime.memory();
+        let doc = memory
+            .get_block(agent.id().as_str(), &label)
+            .await
+            .unwrap()
+            .unwrap();
+        doc.set_text("Modified line\n", true).unwrap();
         memory
-            .update_block_text(agent.id().as_str(), &label, "Modified line\n")
+            .persist_block(agent.id().as_str(), &label)
             .await
             .unwrap();
 
@@ -1292,8 +1354,14 @@ mod tests {
         // Modify content in memory
         let runtime = agent.runtime();
         let memory = runtime.memory();
+        let doc = memory
+            .get_block(agent.id().as_str(), &label)
+            .await
+            .unwrap()
+            .unwrap();
+        doc.set_text("Memory changes", true).unwrap();
         memory
-            .update_block_text(agent.id().as_str(), &label, "Memory changes")
+            .persist_block(agent.id().as_str(), &label)
             .await
             .unwrap();
 

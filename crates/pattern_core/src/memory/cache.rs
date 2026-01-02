@@ -15,27 +15,6 @@ use sqlx::types::Json as SqlxJson;
 use std::sync::Arc;
 use uuid::Uuid;
 
-/// Options for write operations on memory blocks.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct WriteOptions {
-    /// If true, bypass permission checks (for system-level operations)
-    pub override_permission: bool,
-}
-
-impl WriteOptions {
-    /// Create default write options (no override)
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Create write options with permission override enabled
-    pub fn with_override() -> Self {
-        Self {
-            override_permission: true,
-        }
-    }
-}
-
 /// Default character limit for memory blocks when not specified
 pub const DEFAULT_MEMORY_CHAR_LIMIT: usize = 5000;
 
@@ -149,8 +128,8 @@ impl MemoryCache {
                     entry.last_seq = updates.last().unwrap().seq;
                 }
 
-                // DB permission overrides cached permission
-                entry.permission = permission;
+                // DB permission overrides cached permission (in metadata)
+                entry.doc.metadata_mut().permission = permission;
                 entry.last_accessed = Utc::now();
             }
 
@@ -174,15 +153,15 @@ impl MemoryCache {
         }
     }
 
-    /// Load a block from database, reconstructing StructuredDocument from snapshot + deltas
-    /// The permission parameter is the effective permission for this access (already calculated)
+    /// Load a block from database, reconstructing StructuredDocument from snapshot + deltas.
+    /// The permission parameter is the effective permission for this access (already calculated).
     async fn load_from_db(
         &self,
         agent_id: &str,
         label: &str,
         effective_permission: pattern_db::models::MemoryPermission,
     ) -> MemoryResult<Option<CachedBlock>> {
-        // Get block metadata
+        // Get block from database
         let block =
             pattern_db::queries::get_block_by_label(self.dbs.constellation.pool(), agent_id, label)
                 .await?;
@@ -197,22 +176,19 @@ impl MemoryCache {
             }
         };
 
-        // Parse schema from metadata (default to Text if not present)
-        let schema = block
-            .metadata
-            .as_ref()
-            .and_then(|m| m.get("schema"))
-            .and_then(|s| serde_json::from_value::<BlockSchema>(s.clone()).ok())
-            .unwrap_or_default(); // Default is BlockSchema::Text
+        // Build BlockMetadata from DB block
+        let mut metadata = db_block_to_metadata(&block);
+        // Override with effective permission (may differ for shared blocks)
+        metadata.permission = effective_permission;
 
-        // Create StructuredDocument from snapshot with effective permission
+        // Create StructuredDocument from snapshot with metadata
         let doc = if block.loro_snapshot.is_empty() {
-            StructuredDocument::new_with_permission(schema, effective_permission)
+            StructuredDocument::new_with_metadata(metadata.clone(), Some(agent_id.to_string()))
         } else {
-            StructuredDocument::from_snapshot_with_permission(
+            StructuredDocument::from_snapshot_with_metadata(
                 &block.loro_snapshot,
-                schema,
-                effective_permission,
+                metadata.clone(),
+                Some(agent_id.to_string()),
             )?
         };
 
@@ -231,18 +207,10 @@ impl MemoryCache {
         let frontier = doc.current_version();
 
         Ok(Some(CachedBlock {
-            id: block.id,
-            agent_id: block.agent_id,
-            label: block.label,
-            description: block.description,
-            block_type: block.block_type.into(),
-            char_limit: block.char_limit,
-            permission: block.permission,
             doc,
             last_seq,
             last_persisted_frontier: Some(frontier),
             dirty: false,
-            pinned: block.pinned,
             last_accessed: Utc::now(),
         }))
     }
@@ -355,8 +323,8 @@ impl MemoryCache {
         let block_id = self
             .blocks
             .iter()
-            .find(|entry| entry.agent_id == agent_id && entry.label == label)
-            .map(|entry| entry.id.clone());
+            .find(|entry| entry.doc.agent_id() == agent_id && entry.doc.label() == label)
+            .map(|entry| entry.doc.id().to_string());
 
         if let Some(id) = block_id {
             if let Some(mut cached) = self.blocks.get_mut(&id) {
@@ -431,7 +399,7 @@ impl MemoryStore for MemoryCache {
         block_type: BlockType,
         schema: BlockSchema,
         char_limit: usize,
-    ) -> MemoryResult<String> {
+    ) -> MemoryResult<StructuredDocument> {
         // Use default char limit if 0 is passed
         let effective_char_limit = if char_limit == 0 {
             self.default_char_limit
@@ -441,20 +409,39 @@ impl MemoryStore for MemoryCache {
 
         // Generate block ID
         let block_id = format!("mem_{}", Uuid::new_v4().simple());
+        let now = Utc::now();
 
-        // Create new StructuredDocument with schema
-        let doc = StructuredDocument::new(schema.clone());
+        // Build BlockMetadata
+        let block_metadata = BlockMetadata {
+            id: block_id.clone(),
+            agent_id: agent_id.to_string(),
+            label: label.to_string(),
+            description: description.to_string(),
+            block_type,
+            schema: schema.clone(),
+            char_limit: effective_char_limit,
+            permission: pattern_db::models::MemoryPermission::ReadWrite,
+            pinned: false,
+            created_at: now,
+            updated_at: now,
+        };
 
-        // Store schema in metadata
-        let mut metadata = serde_json::Map::new();
-        metadata.insert(
+        // Create new StructuredDocument with metadata
+        let doc = StructuredDocument::new_with_metadata(
+            block_metadata.clone(),
+            Some(agent_id.to_string()),
+        );
+
+        // Store schema in DB metadata JSON
+        let mut db_metadata = serde_json::Map::new();
+        db_metadata.insert(
             "schema".to_string(),
             serde_json::to_value(&schema).map_err(|e| MemoryError::Other(e.to_string()))?,
         );
-        let metadata_json = JsonValue::Object(metadata);
+        let metadata_json = JsonValue::Object(db_metadata);
 
         // Create MemoryBlock for DB
-        let block = pattern_db::models::MemoryBlock {
+        let db_block = pattern_db::models::MemoryBlock {
             id: block_id.clone(),
             agent_id: agent_id.to_string(),
             label: label.to_string(),
@@ -470,33 +457,25 @@ impl MemoryStore for MemoryCache {
             is_active: true,
             frontier: None,
             last_seq: 0,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: now,
+            updated_at: now,
         };
 
         // Store in DB
-        pattern_db::queries::create_block(self.dbs.constellation.pool(), &block).await?;
+        pattern_db::queries::create_block(self.dbs.constellation.pool(), &db_block).await?;
 
-        // Add to cache
+        // Add to cache (metadata is embedded in doc)
         let cached_block = CachedBlock {
-            id: block_id.clone(),
-            agent_id: agent_id.to_string(),
-            label: label.to_string(),
-            description: description.to_string(),
-            block_type,
-            char_limit: effective_char_limit as i64,
-            permission: pattern_db::models::MemoryPermission::ReadWrite,
-            doc,
+            doc: doc.clone(),
             last_seq: 0,
             last_persisted_frontier: None,
             dirty: false,
-            pinned: block.pinned,
-            last_accessed: Utc::now(),
+            last_accessed: now,
         };
 
-        self.blocks.insert(block_id.clone(), cached_block);
+        self.blocks.insert(block_id, cached_block);
 
-        Ok(block_id)
+        Ok(doc)
     }
 
     async fn get_block(
@@ -594,37 +573,6 @@ impl MemoryStore for MemoryCache {
     fn mark_dirty(&self, agent_id: &str, label: &str) {
         // Delegate to existing method
         MemoryCache::mark_dirty(self, agent_id, label);
-    }
-
-    async fn update_block_text(
-        &self,
-        agent_id: &str,
-        label: &str,
-        new_content: &str,
-    ) -> MemoryResult<()> {
-        self.update_block_text_with_options(agent_id, label, new_content, WriteOptions::default())
-            .await
-    }
-
-    async fn append_to_block(
-        &self,
-        agent_id: &str,
-        label: &str,
-        content: &str,
-    ) -> MemoryResult<()> {
-        self.append_to_block_with_options(agent_id, label, content, WriteOptions::default())
-            .await
-    }
-
-    async fn replace_in_block(
-        &self,
-        agent_id: &str,
-        label: &str,
-        old: &str,
-        new: &str,
-    ) -> MemoryResult<bool> {
-        self.replace_in_block_with_options(agent_id, label, old, new, WriteOptions::default())
-            .await
     }
 
     async fn insert_archival(
@@ -1058,7 +1006,7 @@ impl MemoryStore for MemoryCache {
 
         // Update in cache if loaded
         if let Some(mut cached) = self.blocks.get_mut(&block.id) {
-            cached.pinned = pinned;
+            cached.doc.metadata_mut().pinned = pinned;
             cached.last_accessed = Utc::now();
         }
 
@@ -1091,7 +1039,7 @@ impl MemoryStore for MemoryCache {
 
         // Update in cache if loaded
         if let Some(mut cached) = self.blocks.get_mut(&block.id) {
-            cached.block_type = block_type;
+            cached.doc.metadata_mut().block_type = block_type;
             cached.last_accessed = Utc::now();
         }
 
@@ -1157,140 +1105,6 @@ impl MemoryStore for MemoryCache {
         }
 
         Ok(())
-    }
-}
-
-// Additional methods with WriteOptions support
-impl MemoryCache {
-    /// Update block text with write options for permission override
-    pub async fn update_block_text_with_options(
-        &self,
-        agent_id: &str,
-        label: &str,
-        new_content: &str,
-        options: WriteOptions,
-    ) -> MemoryResult<()> {
-        // Get the block
-        let doc = self.get_block(agent_id, label).await?;
-        let doc = doc.ok_or_else(|| MemoryError::NotFound {
-            agent_id: agent_id.to_string(),
-            label: label.to_string(),
-        })?;
-
-        // Check permission - overwrite requires ReadWrite or Admin (unless override)
-        if !options.override_permission {
-            let permission = doc.permission();
-            use pattern_db::models::{MemoryGate, MemoryOp};
-            let gate = MemoryGate::check(MemoryOp::Overwrite, permission);
-            if !gate.is_allowed() {
-                return Err(MemoryError::PermissionDenied {
-                    block_label: label.to_string(),
-                    required: pattern_db::models::MemoryPermission::ReadWrite,
-                    actual: permission,
-                });
-            }
-        }
-
-        // Update the text content
-        // is_system = true because permission was already checked above at cache layer
-        doc.set_text(new_content, true)?;
-
-        // Mark dirty and persist
-        self.mark_dirty(agent_id, label);
-        self.persist_block(agent_id, label).await?;
-
-        Ok(())
-    }
-
-    /// Append to block with write options for permission override
-    pub async fn append_to_block_with_options(
-        &self,
-        agent_id: &str,
-        label: &str,
-        content: &str,
-        options: WriteOptions,
-    ) -> MemoryResult<()> {
-        if content.is_empty() {
-            return Ok(()); // Nothing to append
-        }
-
-        // Get the block
-        let doc = self.get_block(agent_id, label).await?;
-        let doc = doc.ok_or_else(|| MemoryError::NotFound {
-            agent_id: agent_id.to_string(),
-            label: label.to_string(),
-        })?;
-
-        // Check permission - append requires Append, ReadWrite, or Admin (unless override)
-        if !options.override_permission {
-            let permission = doc.permission();
-            use pattern_db::models::{MemoryGate, MemoryOp};
-            let gate = MemoryGate::check(MemoryOp::Append, permission);
-            if !gate.is_allowed() {
-                return Err(MemoryError::PermissionDenied {
-                    block_label: label.to_string(),
-                    required: pattern_db::models::MemoryPermission::Append,
-                    actual: permission,
-                });
-            }
-        }
-
-        // Append to the text content
-        // is_system = true because permission was already checked above at cache layer
-        doc.append_text(content, true)?;
-
-        // Mark dirty and persist
-        self.mark_dirty(agent_id, label);
-        self.persist_block(agent_id, label).await?;
-
-        Ok(())
-    }
-
-    /// Replace in block with write options for permission override
-    pub async fn replace_in_block_with_options(
-        &self,
-        agent_id: &str,
-        label: &str,
-        old: &str,
-        new: &str,
-        options: WriteOptions,
-    ) -> MemoryResult<bool> {
-        if old.is_empty() {
-            return Ok(false); // Can't replace empty string meaningfully
-        }
-
-        // Get the block
-        let doc = self.get_block(agent_id, label).await?;
-        let doc = doc.ok_or_else(|| MemoryError::NotFound {
-            agent_id: agent_id.to_string(),
-            label: label.to_string(),
-        })?;
-
-        // Check permission - replace requires Overwrite permission (ReadWrite or Admin) (unless override)
-        if !options.override_permission {
-            let permission = doc.permission();
-            use pattern_db::models::{MemoryGate, MemoryOp};
-            let gate = MemoryGate::check(MemoryOp::Overwrite, permission);
-            if !gate.is_allowed() {
-                return Err(MemoryError::PermissionDenied {
-                    block_label: label.to_string(),
-                    required: pattern_db::models::MemoryPermission::ReadWrite,
-                    actual: permission,
-                });
-            }
-        }
-
-        // Use CRDT-aware replace_text which uses surgical splice operations.
-        // is_system = true because permission was already checked above at cache layer.
-        let replaced = doc.replace_text(old, new, true)?;
-
-        if replaced {
-            // Mark dirty and persist only if replacement occurred.
-            self.mark_dirty(agent_id, label);
-            self.persist_block(agent_id, label).await?;
-        }
-
-        Ok(replaced)
     }
 }
 
@@ -1441,7 +1255,7 @@ mod tests {
         let cache = MemoryCache::new(dbs);
 
         // Create a block using MemoryStore trait
-        let block_id = cache
+        let created_doc = cache
             .create_block(
                 "agent_1",
                 "test_block",
@@ -1453,9 +1267,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(block_id.starts_with("mem_"));
+        assert!(created_doc.id().starts_with("mem_"));
 
-        // Get the block back
+        // Get the block back (should return same doc since it's cached)
         let doc = cache.get_block("agent_1", "test_block").await.unwrap();
         assert!(doc.is_some());
 
@@ -2129,74 +1943,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_replace_in_block_crdt_aware() {
+    async fn test_replace_text_crdt_aware() {
         let (_dir, dbs) = test_dbs_with_agent().await;
         let cache = MemoryCache::new(dbs);
 
         // Create a block with some initial content.
-        cache
-            .create_block(
-                "agent_1",
-                "test_replace",
-                "Test block for replacement",
-                BlockType::Working,
-                BlockSchema::text(),
-                1000,
-            )
-            .await
-            .unwrap();
-
-        // Get the block and set initial content.
         let doc = cache
-            .get_block("agent_1", "test_replace")
-            .await
-            .unwrap()
-            .unwrap();
-        doc.set_text("Hello world, this is a test.", true).unwrap();
-        cache.mark_dirty("agent_1", "test_replace");
-        cache.persist("agent_1", "test_replace").await.unwrap();
-
-        // Get the version vector before replacement.
-        let vv_before = doc.inner().oplog_vv();
-
-        // Perform replacement using CRDT-aware method.
-        let replaced = cache
-            .replace_in_block_with_options(
-                "agent_1",
-                "test_replace",
-                "world",
-                "universe",
-                WriteOptions::default(),
-            )
-            .await
-            .unwrap();
-
-        assert!(replaced, "Replacement should have occurred");
-
-        // Verify the content is correct.
-        let doc_after = cache
-            .get_block("agent_1", "test_replace")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(doc_after.text_content(), "Hello universe, this is a test.");
-
-        // Verify version vector advanced (CRDT operation was recorded).
-        let vv_after = doc_after.inner().oplog_vv();
-        assert_ne!(
-            vv_before.encode().as_slice(),
-            vv_after.encode().as_slice(),
-            "Version vector should advance after CRDT operation"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_replace_in_block_not_found() {
-        let (_dir, dbs) = test_dbs_with_agent().await;
-        let cache = MemoryCache::new(dbs);
-
-        // Create a block with some content.
-        cache
             .create_block(
                 "agent_1",
                 "test_replace",
@@ -2209,48 +1961,78 @@ mod tests {
             .unwrap();
 
         // Set initial content.
+        doc.set_text("Hello world, this is a test.", true).unwrap();
+        cache.mark_dirty("agent_1", "test_replace");
+        cache.persist("agent_1", "test_replace").await.unwrap();
+
+        // Get the version vector before replacement.
+        let vv_before = doc.inner().oplog_vv();
+
+        // Perform replacement using CRDT-aware method directly on doc.
+        let replaced = doc.replace_text("world", "universe", true).unwrap();
+
+        assert!(replaced, "Replacement should have occurred");
+
+        // Persist the changes.
+        cache.mark_dirty("agent_1", "test_replace");
+        cache.persist("agent_1", "test_replace").await.unwrap();
+
+        // Verify the content is correct.
+        assert_eq!(doc.text_content(), "Hello universe, this is a test.");
+
+        // Verify version vector advanced (CRDT operation was recorded).
+        let vv_after = doc.inner().oplog_vv();
+        assert_ne!(
+            vv_before.encode().as_slice(),
+            vv_after.encode().as_slice(),
+            "Version vector should advance after CRDT operation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_replace_text_not_found() {
+        let (_dir, dbs) = test_dbs_with_agent().await;
+        let cache = MemoryCache::new(dbs);
+
+        // Create a block with some content.
         let doc = cache
-            .get_block("agent_1", "test_replace")
+            .create_block(
+                "agent_1",
+                "test_replace",
+                "Test block for replacement",
+                BlockType::Working,
+                BlockSchema::text(),
+                1000,
+            )
             .await
-            .unwrap()
             .unwrap();
+
+        // Set initial content.
         doc.set_text("Hello world", true).unwrap();
         cache.mark_dirty("agent_1", "test_replace");
         cache.persist("agent_1", "test_replace").await.unwrap();
 
         // Try to replace something that doesn't exist.
-        let replaced = cache
-            .replace_in_block_with_options(
-                "agent_1",
-                "test_replace",
-                "nonexistent",
-                "replacement",
-                WriteOptions::default(),
-            )
-            .await
+        let replaced = doc
+            .replace_text("nonexistent", "replacement", true)
             .unwrap();
 
         assert!(!replaced, "Replacement should not have occurred");
 
         // Verify content is unchanged.
-        let doc_after = cache
-            .get_block("agent_1", "test_replace")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(doc_after.text_content(), "Hello world");
+        assert_eq!(doc.text_content(), "Hello world");
     }
 
     /// Test that replacement works correctly when content has multi-byte Unicode characters
     /// before/around the replacement target. This exercises the byte-to-Unicode position
     /// conversion in `replace_text` which uses Loro's `convert_pos` for correct splice().
     #[tokio::test]
-    async fn test_replace_in_block_unicode() {
+    async fn test_replace_text_unicode() {
         let (_dir, dbs) = test_dbs_with_agent().await;
         let cache = MemoryCache::new(dbs);
 
         // Create a block for Unicode replacement testing.
-        cache
+        let doc = cache
             .create_block(
                 "agent_1",
                 "unicode_test",
@@ -2264,165 +2046,76 @@ mod tests {
 
         // Test case 1: Emoji before target.
         // "Hello 🌍 world" - emoji is 4 bytes, but 1 Unicode scalar.
-        let doc = cache
-            .get_block("agent_1", "unicode_test")
-            .await
-            .unwrap()
-            .unwrap();
         doc.set_text("Hello 🌍 world", true).unwrap();
-        cache.mark_dirty("agent_1", "unicode_test");
-        cache.persist("agent_1", "unicode_test").await.unwrap();
 
-        let replaced = cache
-            .replace_in_block_with_options(
-                "agent_1",
-                "unicode_test",
-                "world",
-                "universe",
-                WriteOptions::default(),
-            )
-            .await
-            .unwrap();
+        let replaced = doc.replace_text("world", "universe", true).unwrap();
 
         assert!(
             replaced,
             "Replacement should have occurred with emoji before target"
         );
-
-        let doc_after = cache
-            .get_block("agent_1", "unicode_test")
-            .await
-            .unwrap()
-            .unwrap();
         assert_eq!(
-            doc_after.text_content(),
+            doc.text_content(),
             "Hello 🌍 universe",
             "Content should correctly replace 'world' with 'universe' after emoji"
         );
 
         // Test case 2: CJK characters (3 bytes each in UTF-8).
-        doc_after.set_text("日本語 world and more", true).unwrap();
-        cache.mark_dirty("agent_1", "unicode_test");
-        cache.persist("agent_1", "unicode_test").await.unwrap();
+        doc.set_text("日本語 world and more", true).unwrap();
 
-        let replaced = cache
-            .replace_in_block_with_options(
-                "agent_1",
-                "unicode_test",
-                "world",
-                "世界",
-                WriteOptions::default(),
-            )
-            .await
-            .unwrap();
+        let replaced = doc.replace_text("world", "世界", true).unwrap();
 
         assert!(
             replaced,
             "Replacement should have occurred with CJK characters before target"
         );
-
-        let doc_after = cache
-            .get_block("agent_1", "unicode_test")
-            .await
-            .unwrap()
-            .unwrap();
         assert_eq!(
-            doc_after.text_content(),
+            doc.text_content(),
             "日本語 世界 and more",
             "Content should correctly replace 'world' with '世界' after CJK chars"
         );
 
         // Test case 3: Multiple emoji and mixed content.
-        doc_after
-            .set_text("🎉🎊 Hello 🌍 beautiful world 🌈", true)
+        doc.set_text("🎉🎊 Hello 🌍 beautiful world 🌈", true)
             .unwrap();
-        cache.mark_dirty("agent_1", "unicode_test");
-        cache.persist("agent_1", "unicode_test").await.unwrap();
 
-        let replaced = cache
-            .replace_in_block_with_options(
-                "agent_1",
-                "unicode_test",
-                "beautiful world",
-                "amazing planet",
-                WriteOptions::default(),
-            )
-            .await
+        let replaced = doc
+            .replace_text("beautiful world", "amazing planet", true)
             .unwrap();
 
         assert!(
             replaced,
             "Replacement should work with multiple emoji surrounding target"
         );
-
-        let doc_after = cache
-            .get_block("agent_1", "unicode_test")
-            .await
-            .unwrap()
-            .unwrap();
         assert_eq!(
-            doc_after.text_content(),
+            doc.text_content(),
             "🎉🎊 Hello 🌍 amazing planet 🌈",
             "Content should correctly handle multiple emoji around replacement"
         );
 
         // Test case 4: Replace at very start after Unicode prefix.
-        doc_after.set_text("🔥start middle end", true).unwrap();
-        cache.mark_dirty("agent_1", "unicode_test");
-        cache.persist("agent_1", "unicode_test").await.unwrap();
+        doc.set_text("🔥start middle end", true).unwrap();
 
-        let replaced = cache
-            .replace_in_block_with_options(
-                "agent_1",
-                "unicode_test",
-                "start",
-                "begin",
-                WriteOptions::default(),
-            )
-            .await
-            .unwrap();
+        let replaced = doc.replace_text("start", "begin", true).unwrap();
 
         assert!(replaced, "Replacement should work immediately after emoji");
-
-        let doc_after = cache
-            .get_block("agent_1", "unicode_test")
-            .await
-            .unwrap()
-            .unwrap();
         assert_eq!(
-            doc_after.text_content(),
+            doc.text_content(),
             "🔥begin middle end",
             "Content should correctly replace 'start' with 'begin' right after emoji"
         );
 
         // Test case 5: Replace emoji itself.
-        doc_after.set_text("Hello 🌍 world", true).unwrap();
-        cache.mark_dirty("agent_1", "unicode_test");
-        cache.persist("agent_1", "unicode_test").await.unwrap();
+        doc.set_text("Hello 🌍 world", true).unwrap();
 
-        let replaced = cache
-            .replace_in_block_with_options(
-                "agent_1",
-                "unicode_test",
-                "🌍",
-                "🌎",
-                WriteOptions::default(),
-            )
-            .await
-            .unwrap();
+        let replaced = doc.replace_text("🌍", "🌎", true).unwrap();
 
         assert!(
             replaced,
             "Replacement should work when replacing emoji with emoji"
         );
-
-        let doc_after = cache
-            .get_block("agent_1", "unicode_test")
-            .await
-            .unwrap()
-            .unwrap();
         assert_eq!(
-            doc_after.text_content(),
+            doc.text_content(),
             "Hello 🌎 world",
             "Content should correctly replace emoji with different emoji"
         );

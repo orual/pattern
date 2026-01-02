@@ -6,10 +6,9 @@
 use miette::{IntoDiagnostic, Result};
 use owo_colors::OwoColorize;
 use pattern_core::{
-    Agent, PermissionRule,
+    Agent,
     agent::ResponseEvent,
     config::PatternConfig,
-    data_source::FileSource,
     messages::{Message, MessageContent},
 };
 use std::sync::Arc;

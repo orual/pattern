@@ -470,8 +470,8 @@ pub async fn add_memory(
     // Create memory cache
     let cache = MemoryCache::new(Arc::new(dbs));
 
-    // Create the block
-    let block_id = cache
+    // Create the block (now returns StructuredDocument directly)
+    let doc = cache
         .create_block(
             &agent.id,
             label,
@@ -482,21 +482,16 @@ pub async fn add_memory(
         )
         .await
         .map_err(|e| miette::miette!("Failed to create memory block: {:?}", e))?;
+    let block_id = doc.id().to_string();
 
     // Set initial content if provided
     if !block_content.is_empty() {
-        if let Some(doc) = cache
-            .get_block(&agent.id, label)
+        doc.set_text(&block_content, true)
+            .map_err(|e| miette::miette!("Failed to set content: {}", e))?;
+        cache
+            .persist_block(&agent.id, label)
             .await
-            .map_err(|e| miette::miette!("Failed to get block: {:?}", e))?
-        {
-            doc.set_text(&block_content, true)
-                .map_err(|e| miette::miette!("Failed to set content: {}", e))?;
-            cache
-                .persist_block(&agent.id, label)
-                .await
-                .map_err(|e| miette::miette!("Failed to persist block: {:?}", e))?;
-        }
+            .map_err(|e| miette::miette!("Failed to persist block: {:?}", e))?;
     }
 
     // Set pinned status if requested

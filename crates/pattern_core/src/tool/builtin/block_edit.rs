@@ -933,7 +933,7 @@ mod tests {
         let (_db, memory, ctx) = create_test_context_with_agent("test-agent").await;
 
         // Create a text block
-        memory
+        let doc = memory
             .create_block(
                 "test-agent",
                 "test_block",
@@ -946,8 +946,9 @@ mod tests {
             .unwrap();
 
         // Set initial content
+        doc.set_text("Hello", true).unwrap();
         memory
-            .update_block_text("test-agent", "test_block", "Hello")
+            .persist_block("test-agent", "test_block")
             .await
             .unwrap();
 
@@ -989,7 +990,7 @@ mod tests {
         let (_db, memory, ctx) = create_test_context_with_agent("test-agent").await;
 
         // Create a text block
-        memory
+        let doc = memory
             .create_block(
                 "test-agent",
                 "replace_block",
@@ -1002,8 +1003,9 @@ mod tests {
             .unwrap();
 
         // Set initial content
+        doc.set_text("Hello, world!", true).unwrap();
         memory
-            .update_block_text("test-agent", "replace_block", "Hello, world!")
+            .persist_block("test-agent", "replace_block")
             .await
             .unwrap();
 
@@ -1188,7 +1190,7 @@ mod tests {
         let (_db, memory, ctx) = create_test_context_with_agent("test-agent").await;
 
         // Create a text block
-        memory
+        let doc = memory
             .create_block(
                 "test-agent",
                 "notfound_block",
@@ -1201,8 +1203,9 @@ mod tests {
             .unwrap();
 
         // Set initial content
+        doc.set_text("Hello, world!", true).unwrap();
         memory
-            .update_block_text("test-agent", "notfound_block", "Hello, world!")
+            .persist_block("test-agent", "notfound_block")
             .await
             .unwrap();
 
@@ -1245,7 +1248,7 @@ mod tests {
         let (_db, memory, ctx) = create_test_context_with_agent("test-agent").await;
 
         // Create a text block
-        memory
+        let doc = memory
             .create_block(
                 "test-agent",
                 "patch_block",
@@ -1258,12 +1261,10 @@ mod tests {
             .unwrap();
 
         // Set initial content (3 lines)
+        doc.set_text("line one\nline two\nline three\n", true)
+            .unwrap();
         memory
-            .update_block_text(
-                "test-agent",
-                "patch_block",
-                "line one\nline two\nline three\n",
-            )
+            .persist_block("test-agent", "patch_block")
             .await
             .unwrap();
 
@@ -1511,7 +1512,7 @@ mod tests {
     async fn test_block_edit_replace_all() {
         let (_db, memory, ctx) = create_test_context_with_agent("test-agent").await;
 
-        memory
+        let doc = memory
             .create_block(
                 "test-agent",
                 "replace_all_block",
@@ -1523,8 +1524,9 @@ mod tests {
             .await
             .unwrap();
 
+        doc.set_text("foo bar foo baz foo", true).unwrap();
         memory
-            .update_block_text("test-agent", "replace_all_block", "foo bar foo baz foo")
+            .persist_block("test-agent", "replace_all_block")
             .await
             .unwrap();
 
@@ -1563,7 +1565,7 @@ mod tests {
     async fn test_block_edit_replace_nth() {
         let (_db, memory, ctx) = create_test_context_with_agent("test-agent").await;
 
-        memory
+        let doc = memory
             .create_block(
                 "test-agent",
                 "replace_nth_block",
@@ -1575,8 +1577,9 @@ mod tests {
             .await
             .unwrap();
 
+        doc.set_text("foo bar foo baz foo", true).unwrap();
         memory
-            .update_block_text("test-agent", "replace_nth_block", "foo bar foo baz foo")
+            .persist_block("test-agent", "replace_nth_block")
             .await
             .unwrap();
 
@@ -1616,7 +1619,7 @@ mod tests {
     async fn test_block_edit_replace_regex() {
         let (_db, memory, ctx) = create_test_context_with_agent("test-agent").await;
 
-        memory
+        let doc = memory
             .create_block(
                 "test-agent",
                 "replace_regex_block",
@@ -1628,8 +1631,9 @@ mod tests {
             .await
             .unwrap();
 
+        doc.set_text("The quick brown fox", true).unwrap();
         memory
-            .update_block_text("test-agent", "replace_regex_block", "The quick brown fox")
+            .persist_block("test-agent", "replace_regex_block")
             .await
             .unwrap();
 
@@ -1668,7 +1672,7 @@ mod tests {
     async fn test_block_edit_edit_range() {
         let (_db, memory, ctx) = create_test_context_with_agent("test-agent").await;
 
-        memory
+        let doc = memory
             .create_block(
                 "test-agent",
                 "edit_range_block",
@@ -1680,12 +1684,10 @@ mod tests {
             .await
             .unwrap();
 
+        doc.set_text("line 1\nline 2\nline 3\nline 4\nline 5\n", true)
+            .unwrap();
         memory
-            .update_block_text(
-                "test-agent",
-                "edit_range_block",
-                "line 1\nline 2\nline 3\nline 4\nline 5\n",
-            )
+            .persist_block("test-agent", "edit_range_block")
             .await
             .unwrap();
 
@@ -1728,7 +1730,7 @@ mod tests {
     async fn test_block_edit_edit_range_with_dots() {
         let (_db, memory, ctx) = create_test_context_with_agent("test-agent").await;
 
-        memory
+        let doc = memory
             .create_block(
                 "test-agent",
                 "edit_range_dots",
@@ -1740,8 +1742,9 @@ mod tests {
             .await
             .unwrap();
 
+        doc.set_text("A\nB\nC\nD\n", true).unwrap();
         memory
-            .update_block_text("test-agent", "edit_range_dots", "A\nB\nC\nD\n")
+            .persist_block("test-agent", "edit_range_dots")
             .await
             .unwrap();
 

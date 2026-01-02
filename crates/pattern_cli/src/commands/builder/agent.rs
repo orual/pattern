@@ -976,7 +976,7 @@ impl AgentBuilder {
                                 MemoryType::Archival => BlockType::Archival,
                             };
 
-                            memory
+                            let doc = memory
                                 .create_block(
                                     &id,
                                     label,
@@ -992,12 +992,12 @@ impl AgentBuilder {
                                 .map_err(|e| miette::miette!("Failed to create block: {:?}", e))?;
 
                             if !content.is_empty() {
-                                memory
-                                    .update_block_text(&id, label, &content)
-                                    .await
-                                    .map_err(|e| {
-                                        miette::miette!("Failed to set content: {:?}", e)
-                                    })?;
+                                doc.set_text(&content, true).map_err(|e| {
+                                    miette::miette!("Failed to set content: {:?}", e)
+                                })?;
+                                memory.persist_block(&id, label).await.map_err(|e| {
+                                    miette::miette!("Failed to persist block: {:?}", e)
+                                })?;
                             }
                         }
                     }

@@ -6,33 +6,26 @@ use serde::{Deserialize, Serialize};
 
 use crate::memory::StructuredDocument;
 
-/// A cached memory block with its LoroDoc
+/// A cached memory block with its LoroDoc.
+///
+/// Metadata (id, agent_id, label, etc.) is now embedded in the StructuredDocument
+/// and accessed via `doc.id()`, `doc.label()`, etc.
 #[derive(Debug)]
 pub struct CachedBlock {
-    /// Block metadata from DB
-    pub id: String,
-    pub agent_id: String,
-    pub label: String,
-    pub description: String,
-    pub block_type: BlockType,
-    pub char_limit: i64,
-    pub permission: pattern_db::models::MemoryPermission,
-
-    /// The structured document wrapper (LoroDoc is internally Arc'd and thread-safe)
+    /// The structured document wrapper with embedded metadata.
+    /// (LoroDoc is internally Arc'd and thread-safe)
     pub doc: StructuredDocument,
 
-    /// Last sequence number we've seen from DB
+    /// Last sequence number we've seen from DB.
     pub last_seq: i64,
 
-    /// Frontier at last persist (for delta export)
+    /// Frontier at last persist (for delta export).
     pub last_persisted_frontier: Option<VersionVector>,
 
-    /// Whether we have unpersisted changes
+    /// Whether we have unpersisted changes.
     pub dirty: bool,
-    /// Whether this block is pinned
-    pub pinned: bool,
 
-    /// When this was last accessed (for eviction)
+    /// When this was last accessed (for eviction).
     pub last_accessed: DateTime<Utc>,
 }
 

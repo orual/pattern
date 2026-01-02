@@ -11,7 +11,7 @@ use pattern_core::{
         CoordinationPattern, DelegationRules, DelegationStrategy, FallbackBehavior,
         GroupMemberRole, GroupState, TieBreaker, VotingRules,
     },
-    id::{AgentId, GroupId, RelationId},
+    id::{AgentId, GroupId},
 };
 use pattern_db::models::{
     AgentGroup as DbAgentGroup, GroupMember, GroupMemberRole as DbGroupMemberRole, PatternType,

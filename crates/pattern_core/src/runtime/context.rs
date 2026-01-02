@@ -1089,7 +1089,7 @@ impl RuntimeContext {
             };
 
             // Create the block with schema and char limit from config
-            let block_id = self
+            let doc = self
                 .memory
                 .create_block(
                     &id,
@@ -1104,23 +1104,28 @@ impl RuntimeContext {
                     data_type: "memory_block".to_string(),
                     details: format!("Failed to create memory block '{}': {}", label, e),
                 })?;
+            let block_id = doc.id();
 
-            // If content is not empty, set it
+            // If content is not empty, set it on the doc and persist
             if !content.is_empty() {
-                self.memory
-                    .update_block_text(&id, label, &content)
-                    .await
+                doc.set_text(&content, true)
                     .map_err(|e| CoreError::InvalidFormat {
                         data_type: "memory_block".to_string(),
                         details: format!("Failed to set content for block '{}': {}", label, e),
                     })?;
+                self.memory.persist_block(&id, label).await.map_err(|e| {
+                    CoreError::InvalidFormat {
+                        data_type: "memory_block".to_string(),
+                        details: format!("Failed to persist block '{}': {}", label, e),
+                    }
+                })?;
             }
 
             // Update permission if not the default (ReadWrite)
             if block_config.permission != crate::memory::MemoryPermission::ReadWrite {
                 pattern_db::queries::update_block_permission(
                     self.dbs.constellation.pool(),
-                    &block_id,
+                    block_id,
                     block_config.permission.into(),
                 )
                 .await
@@ -1133,7 +1138,8 @@ impl RuntimeContext {
 
         // 3. Create persona block if specified
         if let Some(ref persona) = config.persona {
-            self.memory
+            let persona_doc = self
+                .memory
                 .create_block(
                     &id,
                     "persona",
@@ -1148,12 +1154,18 @@ impl RuntimeContext {
                     details: format!("Failed to create persona block: {}", e),
                 })?;
 
-            self.memory
-                .update_block_text(&id, "persona", persona)
-                .await
+            persona_doc
+                .set_text(persona, true)
                 .map_err(|e| CoreError::InvalidFormat {
                     data_type: "memory_block".to_string(),
                     details: format!("Failed to set persona content: {}", e),
+                })?;
+            self.memory
+                .persist_block(&id, "persona")
+                .await
+                .map_err(|e| CoreError::InvalidFormat {
+                    data_type: "memory_block".to_string(),
+                    details: format!("Failed to persist persona block: {}", e),
                 })?;
         }
 

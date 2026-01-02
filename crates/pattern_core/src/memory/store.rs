@@ -20,7 +20,9 @@ use crate::memory::{
 pub trait MemoryStore: Send + Sync + fmt::Debug {
     // ========== Block CRUD ==========
 
-    /// Create a new memory block
+    /// Create a new memory block, returning the document ready for editing.
+    ///
+    /// The returned document includes all metadata and is already cached.
     async fn create_block(
         &self,
         agent_id: &str,
@@ -29,7 +31,7 @@ pub trait MemoryStore: Send + Sync + fmt::Debug {
         block_type: BlockType,
         schema: BlockSchema,
         char_limit: usize,
-    ) -> MemoryResult<String>; // Returns block ID
+    ) -> MemoryResult<StructuredDocument>;
 
     /// Get a block's document for reading/writing
     async fn get_block(
@@ -82,30 +84,6 @@ pub trait MemoryStore: Send + Sync + fmt::Debug {
 
     /// Mark block as dirty (has unpersisted changes)
     fn mark_dirty(&self, agent_id: &str, label: &str);
-
-    // ========== Convenience Content Operations ==========
-
-    /// Update the entire text content of a block (for PlainText schema blocks)
-    async fn update_block_text(
-        &self,
-        agent_id: &str,
-        label: &str,
-        new_content: &str,
-    ) -> MemoryResult<()>;
-
-    /// Append text to a block's content
-    async fn append_to_block(&self, agent_id: &str, label: &str, content: &str)
-    -> MemoryResult<()>;
-
-    /// Replace first occurrence of text in a block's content
-    /// Returns true if replacement was made, false if old text not found
-    async fn replace_in_block(
-        &self,
-        agent_id: &str,
-        label: &str,
-        old: &str,
-        new: &str,
-    ) -> MemoryResult<bool>;
 
     // ========== Archival Operations ==========
 
@@ -206,6 +184,26 @@ pub struct BlockMetadata {
     pub pinned: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl BlockMetadata {
+    /// Create standalone metadata for testing or documents not backed by DB.
+    pub fn standalone(schema: BlockSchema) -> Self {
+        let now = Utc::now();
+        Self {
+            id: String::new(),
+            agent_id: String::new(),
+            label: String::new(),
+            description: String::new(),
+            block_type: BlockType::Working,
+            schema,
+            char_limit: 0,
+            permission: pattern_db::models::MemoryPermission::ReadWrite,
+            pinned: false,
+            created_at: now,
+            updated_at: now,
+        }
+    }
 }
 
 /// Archival entry (for search results)

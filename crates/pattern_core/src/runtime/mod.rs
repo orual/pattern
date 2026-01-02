@@ -724,194 +724,9 @@ impl RuntimeBuilder {
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::*;
-    use crate::memory::{
-        ArchivalEntry, BlockMetadata, BlockSchema, BlockType, MemoryResult, MemorySearchResult,
-        MemoryStore, SearchOptions, StructuredDocument,
-    };
-    use async_trait::async_trait;
-    use serde_json::Value as JsonValue;
 
-    /// Mock implementation of MemoryStore for testing
-    #[derive(Debug)]
-    pub struct MockMemoryStore;
-
-    #[async_trait]
-    impl MemoryStore for MockMemoryStore {
-        async fn create_block(
-            &self,
-            _agent_id: &str,
-            _label: &str,
-            _description: &str,
-            _block_type: BlockType,
-            _schema: BlockSchema,
-            _char_limit: usize,
-        ) -> MemoryResult<String> {
-            Ok("test-block-id".to_string())
-        }
-
-        async fn get_block(
-            &self,
-            _agent_id: &str,
-            _label: &str,
-        ) -> MemoryResult<Option<StructuredDocument>> {
-            Ok(None)
-        }
-
-        async fn get_block_metadata(
-            &self,
-            _agent_id: &str,
-            _label: &str,
-        ) -> MemoryResult<Option<BlockMetadata>> {
-            Ok(None)
-        }
-
-        async fn list_blocks(&self, _agent_id: &str) -> MemoryResult<Vec<BlockMetadata>> {
-            Ok(Vec::new())
-        }
-
-        async fn list_blocks_by_type(
-            &self,
-            _agent_id: &str,
-            _block_type: BlockType,
-        ) -> MemoryResult<Vec<BlockMetadata>> {
-            Ok(Vec::new())
-        }
-
-        async fn delete_block(&self, _agent_id: &str, _label: &str) -> MemoryResult<()> {
-            Ok(())
-        }
-
-        async fn get_rendered_content(
-            &self,
-            _agent_id: &str,
-            _label: &str,
-        ) -> MemoryResult<Option<String>> {
-            Ok(None)
-        }
-
-        async fn persist_block(&self, _agent_id: &str, _label: &str) -> MemoryResult<()> {
-            Ok(())
-        }
-
-        fn mark_dirty(&self, _agent_id: &str, _label: &str) {}
-
-        async fn update_block_text(
-            &self,
-            _agent_id: &str,
-            _label: &str,
-            _new_content: &str,
-        ) -> MemoryResult<()> {
-            Ok(())
-        }
-
-        async fn append_to_block(
-            &self,
-            _agent_id: &str,
-            _label: &str,
-            _content: &str,
-        ) -> MemoryResult<()> {
-            Ok(())
-        }
-
-        async fn replace_in_block(
-            &self,
-            _agent_id: &str,
-            _label: &str,
-            _old: &str,
-            _new: &str,
-        ) -> MemoryResult<bool> {
-            Ok(false)
-        }
-
-        async fn insert_archival(
-            &self,
-            _agent_id: &str,
-            _content: &str,
-            _metadata: Option<JsonValue>,
-        ) -> MemoryResult<String> {
-            Ok("archival-id".to_string())
-        }
-
-        async fn search_archival(
-            &self,
-            _agent_id: &str,
-            _query: &str,
-            _limit: usize,
-        ) -> MemoryResult<Vec<ArchivalEntry>> {
-            Ok(Vec::new())
-        }
-
-        async fn delete_archival(&self, _id: &str) -> MemoryResult<()> {
-            Ok(())
-        }
-
-        async fn search(
-            &self,
-            _agent_id: &str,
-            _query: &str,
-            _options: SearchOptions,
-        ) -> MemoryResult<Vec<MemorySearchResult>> {
-            Ok(Vec::new())
-        }
-
-        async fn search_all(
-            &self,
-            _query: &str,
-            _options: SearchOptions,
-        ) -> MemoryResult<Vec<MemorySearchResult>> {
-            Ok(Vec::new())
-        }
-
-        async fn list_shared_blocks(
-            &self,
-            _agent_id: &str,
-        ) -> MemoryResult<Vec<crate::memory::SharedBlockInfo>> {
-            Ok(Vec::new())
-        }
-
-        async fn get_shared_block(
-            &self,
-            _requester_agent_id: &str,
-            _owner_agent_id: &str,
-            _label: &str,
-        ) -> MemoryResult<Option<StructuredDocument>> {
-            Ok(None)
-        }
-
-        async fn set_block_pinned(
-            &self,
-            _agent_id: &str,
-            _label: &str,
-            _pinned: bool,
-        ) -> MemoryResult<()> {
-            Ok(())
-        }
-
-        async fn set_block_type(
-            &self,
-            _agent_id: &str,
-            _label: &str,
-            _block_type: BlockType,
-        ) -> MemoryResult<()> {
-            Ok(())
-        }
-
-        async fn list_all_blocks_by_label_prefix(
-            &self,
-            _prefix: &str,
-        ) -> MemoryResult<Vec<BlockMetadata>> {
-            Ok(vec![])
-        }
-
-        async fn update_block_schema(
-            &self,
-            _agent_id: &str,
-            _label: &str,
-            _schema: BlockSchema,
-        ) -> MemoryResult<()> {
-            Ok(())
-        }
-    }
+    // Re-export shared MockMemoryStore from test_helpers
+    pub use crate::test_helpers::memory::MockMemoryStore;
 
     /// Create in-memory test databases
     pub async fn test_dbs() -> ConstellationDatabases {
@@ -921,7 +736,7 @@ pub(crate) mod test_support {
     /// Create a minimal test runtime
     pub async fn test_runtime(agent_id: &str) -> AgentRuntime {
         let dbs = test_dbs().await;
-        let memory = Arc::new(MockMemoryStore);
+        let memory = Arc::new(MockMemoryStore::new());
         let messages = MessageStore::new(dbs.constellation.pool().clone(), agent_id);
 
         AgentRuntime::builder()
@@ -942,7 +757,7 @@ mod tests {
     #[tokio::test]
     async fn test_runtime_builder_requires_agent_id() {
         let dbs = test_dbs().await;
-        let memory = Arc::new(MockMemoryStore);
+        let memory = Arc::new(MockMemoryStore::new());
         let messages = MessageStore::new(dbs.constellation.pool().clone(), "test");
 
         let result = AgentRuntime::builder()
@@ -987,7 +802,7 @@ mod tests {
     #[tokio::test]
     async fn test_runtime_builder_requires_messages() {
         let dbs = test_dbs().await;
-        let memory = Arc::new(MockMemoryStore);
+        let memory = Arc::new(MockMemoryStore::new());
 
         let result = AgentRuntime::builder()
             .agent_id("test_agent")
@@ -1008,7 +823,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_runtime_builder_requires_dbs() {
-        let memory = Arc::new(MockMemoryStore);
+        let memory = Arc::new(MockMemoryStore::new());
         // Create temp dbs just for the MessageStore
         let temp_dbs = test_dbs().await;
 
@@ -1035,7 +850,7 @@ mod tests {
     #[tokio::test]
     async fn test_runtime_construction() {
         let dbs = test_dbs().await;
-        let memory = Arc::new(MockMemoryStore);
+        let memory = Arc::new(MockMemoryStore::new());
         let messages = MessageStore::new(dbs.constellation.pool().clone(), "test_agent");
         let tools = ToolRegistry::new();
 
@@ -1055,7 +870,7 @@ mod tests {
     #[tokio::test]
     async fn test_runtime_construction_with_name() {
         let dbs = test_dbs().await;
-        let memory = Arc::new(MockMemoryStore);
+        let memory = Arc::new(MockMemoryStore::new());
         let messages = MessageStore::new(dbs.constellation.pool().clone(), "test_agent");
 
         let runtime = AgentRuntime::builder()
@@ -1074,7 +889,7 @@ mod tests {
     #[tokio::test]
     async fn test_runtime_default_tools() {
         let dbs = test_dbs().await;
-        let memory = Arc::new(MockMemoryStore);
+        let memory = Arc::new(MockMemoryStore::new());
         let messages = MessageStore::new(dbs.constellation.pool().clone(), "test_agent");
 
         // Don't provide tools - should get default empty registry
@@ -1092,7 +907,7 @@ mod tests {
     #[tokio::test]
     async fn test_tool_context_returns_agent_id() {
         let dbs = test_dbs().await;
-        let memory = Arc::new(MockMemoryStore);
+        let memory = Arc::new(MockMemoryStore::new());
         let messages = MessageStore::new(dbs.constellation.pool().clone(), "test_agent");
 
         let runtime = AgentRuntime::builder()
@@ -1110,7 +925,7 @@ mod tests {
     #[tokio::test]
     async fn test_tool_context_provides_memory() {
         let dbs = test_dbs().await;
-        let memory = Arc::new(MockMemoryStore);
+        let memory = Arc::new(MockMemoryStore::new());
         let messages = MessageStore::new(dbs.constellation.pool().clone(), "test_agent");
 
         let runtime = AgentRuntime::builder()

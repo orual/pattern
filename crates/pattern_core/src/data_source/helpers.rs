@@ -121,7 +121,7 @@ impl<'a> BlockBuilder<'a> {
         let description = self.description.unwrap_or_else(|| self.label.clone());
         let owner_str = self.owner.to_string();
 
-        let block_id = self
+        let doc = self
             .memory
             .create_block(
                 &owner_str,
@@ -132,12 +132,12 @@ impl<'a> BlockBuilder<'a> {
                 self.char_limit,
             )
             .await?;
+        let block_id = doc.id().to_string();
 
         // Set initial content if provided
         if let Some(content) = &self.initial_content {
-            self.memory
-                .update_block_text(&owner_str, &self.label, content)
-                .await?;
+            doc.set_text(content, true)?;
+            self.memory.persist_block(&owner_str, &self.label).await?;
         }
 
         // Set pinned flag if requested

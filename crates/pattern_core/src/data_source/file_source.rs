@@ -932,15 +932,25 @@ impl FileSource {
         let source_id = &self.source_id;
 
         // Check if block already exists
-        let block_id = if let Some(existing) = memory
+        let (block_id, doc) = if let Some(existing) = memory
             .get_block_metadata(&owner_str, &label)
             .await
             .map_err(|e| memory_err(source_id, "load", e))?
         {
-            existing.id
+            // Block exists, fetch the doc
+            let doc = memory
+                .get_block(&owner_str, &label)
+                .await
+                .map_err(|e| memory_err(source_id, "load", e))?
+                .ok_or_else(|| CoreError::DataSourceError {
+                    source_name: self.source_id.clone(),
+                    operation: "load".to_string(),
+                    cause: format!("Block {} not found", label),
+                })?;
+            (existing.id, doc)
         } else {
-            // Create new block
-            let id = memory
+            // Create new block (returns StructuredDocument with content ready to set)
+            let doc = memory
                 .create_block(
                     &owner_str,
                     &label,
@@ -951,27 +961,19 @@ impl FileSource {
                 )
                 .await
                 .map_err(|e| memory_err(source_id, "load", e))?;
+            let id = doc.id().to_string();
+            doc.set_text(&content, true)
+                .map_err(|e| memory_err(source_id, "load", e.into()))?;
             memory
-                .update_block_text(&owner_str, &label, &content)
+                .persist_block(&owner_str, &label)
                 .await
                 .map_err(|e| memory_err(source_id, "load", e))?;
             memory
                 .set_block_pinned(&owner_str, &label, true)
                 .await
                 .map_err(|e| memory_err(source_id, "load", e))?;
-            id
+            (id, doc)
         };
-
-        // Get the StructuredDocument to access the LoroDoc
-        let doc = memory
-            .get_block(&owner_str, &label)
-            .await
-            .map_err(|e| memory_err(source_id, "load", e))?
-            .ok_or_else(|| CoreError::DataSourceError {
-                source_name: self.source_id.clone(),
-                operation: "load".to_string(),
-                cause: format!("Block {} not found after creation", label),
-            })?;
 
         // Clone the memory LoroDoc (Arc-based, shares state) and fork for disk
         let memory_doc = doc.inner().clone();
@@ -1172,21 +1174,31 @@ impl DataBlock for FileSource {
         let source_id = &self.source_id;
 
         // Check if block already exists
-        let block_id = if let Some(existing) = memory
+        let (block_id, doc) = if let Some(existing) = memory
             .get_block_metadata(&owner_str, &label)
             .await
             .map_err(|e| memory_err(source_id, "load", e))?
         {
-            // Update existing block
+            // Get existing block and update content
+            let doc = memory
+                .get_block(&owner_str, &label)
+                .await
+                .map_err(|e| memory_err(source_id, "load", e))?
+                .ok_or_else(|| CoreError::DataSourceError {
+                    source_name: self.source_id.clone(),
+                    operation: "load".to_string(),
+                    cause: format!("Block {} not found", label),
+                })?;
+            doc.set_text(&content, true)
+                .map_err(|e| memory_err(source_id, "load", e.into()))?;
             memory
-                .update_block_text(&owner_str, &label, &content)
+                .persist_block(&owner_str, &label)
                 .await
                 .map_err(|e| memory_err(source_id, "load", e))?;
-
-            existing.id
+            (existing.id, doc)
         } else {
-            // Create new block
-            let id = memory
+            // Create new block (returns StructuredDocument with content ready to set)
+            let doc = memory
                 .create_block(
                     &owner_str,
                     &label,
@@ -1197,27 +1209,19 @@ impl DataBlock for FileSource {
                 )
                 .await
                 .map_err(|e| memory_err(source_id, "load", e))?;
+            let id = doc.id().to_string();
+            doc.set_text(&content, true)
+                .map_err(|e| memory_err(source_id, "load", e.into()))?;
             memory
-                .update_block_text(&owner_str, &label, &content)
+                .persist_block(&owner_str, &label)
                 .await
                 .map_err(|e| memory_err(source_id, "load", e))?;
             memory
                 .set_block_pinned(&owner_str, &label, true)
                 .await
                 .map_err(|e| memory_err(source_id, "load", e))?;
-            id
+            (id, doc)
         };
-
-        // Get the StructuredDocument to access the LoroDoc
-        let doc = memory
-            .get_block(&owner_str, &label)
-            .await
-            .map_err(|e| memory_err(source_id, "load", e))?
-            .ok_or_else(|| CoreError::DataSourceError {
-                source_name: self.source_id.clone(),
-                operation: "load".to_string(),
-                cause: format!("Block {} not found after creation", label),
-            })?;
 
         // Clone the memory LoroDoc (Arc-based, shares state) and fork for disk
         let memory_doc = doc.inner().clone();
@@ -1295,10 +1299,10 @@ impl DataBlock for FileSource {
         // Get file metadata
         let (mtime, size) = self.get_file_metadata(path).await?;
 
-        // Create block in memory store
+        // Create block in memory store (now returns StructuredDocument directly)
         let memory = ctx.memory();
         let source_id = &self.source_id;
-        let block_id = memory
+        let doc = memory
             .create_block(
                 &owner_str,
                 &label,
@@ -1309,28 +1313,21 @@ impl DataBlock for FileSource {
             )
             .await
             .map_err(|e| memory_err(source_id, "create", e))?;
+        let block_id = doc.id().to_string();
+
         memory
             .set_block_pinned(&owner_str, &label, true)
             .await
             .map_err(|e| memory_err(source_id, "create", e))?;
 
         if !content.is_empty() {
+            doc.set_text(content, true)
+                .map_err(|e| memory_err(source_id, "create", e.into()))?;
             memory
-                .update_block_text(&owner_str, &label, content)
+                .persist_block(&owner_str, &label)
                 .await
                 .map_err(|e| memory_err(source_id, "create", e))?;
         }
-
-        // Get the StructuredDocument to access the LoroDoc
-        let doc = memory
-            .get_block(&owner_str, &label)
-            .await
-            .map_err(|e| memory_err(source_id, "create", e))?
-            .ok_or_else(|| CoreError::DataSourceError {
-                source_name: self.source_id.clone(),
-                operation: "create".to_string(),
-                cause: format!("Block {} not found after creation", label),
-            })?;
 
         // Clone the memory LoroDoc (Arc-based, shares state) and fork for disk
         let memory_doc = doc.inner().clone();
@@ -1838,10 +1835,16 @@ mod tests {
         // Modify block content
         let new_content = "Modified content via memory";
         let memory = ctx.memory();
-        memory
-            .update_block_text(&block_ref.agent_id, &block_ref.label, new_content)
+        let doc = memory
+            .get_block(&block_ref.agent_id, &block_ref.label)
             .await
-            .expect("Update should succeed");
+            .expect("Get should succeed")
+            .expect("Block should exist");
+        doc.set_text(new_content, true).unwrap();
+        memory
+            .persist_block(&block_ref.agent_id, &block_ref.label)
+            .await
+            .expect("Persist should succeed");
 
         // Save back to disk
         source
@@ -1892,10 +1895,16 @@ mod tests {
 
         // Modify block content (agent making changes)
         let memory = ctx.memory();
-        memory
-            .update_block_text(&block_ref.agent_id, &block_ref.label, "Agent's changes")
+        let doc = memory
+            .get_block(&block_ref.agent_id, &block_ref.label)
             .await
-            .expect("Update should succeed");
+            .expect("Get should succeed")
+            .expect("Block should exist");
+        doc.set_text("Agent's changes", true).unwrap();
+        memory
+            .persist_block(&block_ref.agent_id, &block_ref.label)
+            .await
+            .expect("Persist should succeed");
 
         // Give auto-sync a chance to run
         tokio::task::yield_now().await;

@@ -1036,17 +1036,8 @@ impl GroupBuilder {
                             .map_err(|e| miette::miette!("Failed to check block: {:?}", e))?;
 
                         let block_id = if let Some(doc) = existing_doc {
-                            // Get block ID from metadata
-                            let metadata = cache
-                                .get_block_metadata(&id, label)
-                                .await
-                                .map_err(|e| {
-                                    miette::miette!("Failed to get block metadata: {:?}", e)
-                                })?
-                                .ok_or_else(|| {
-                                    miette::miette!("Block exists but metadata not found")
-                                })?;
-                            let existing_id = metadata.id.clone();
+                            // Get block ID from embedded metadata
+                            let existing_id = doc.id().to_string();
 
                             // Update content if provided - use the doc we already have
                             if let Some(ref content) = block_config.content {
@@ -1059,14 +1050,14 @@ impl GroupBuilder {
                             }
                             existing_id
                         } else {
-                            // Create new block
+                            // Create new block (now returns StructuredDocument)
                             let block_type = match block_config.memory_type {
                                 MemoryType::Core => BlockType::Core,
                                 MemoryType::Working => BlockType::Working,
                                 MemoryType::Archival => BlockType::Archival,
                             };
 
-                            let block_id = cache
+                            let doc = cache
                                 .create_block(
                                     &id,
                                     label,
@@ -1082,12 +1073,16 @@ impl GroupBuilder {
                                 .map_err(|e| {
                                     miette::miette!("Failed to create shared block: {:?}", e)
                                 })?;
+                            let block_id = doc.id().to_string();
 
-                            // Set initial content using update_block_text
+                            // Set initial content
                             if let Some(ref content) = block_config.content {
-                                cache.update_block_text(&id, label, content).await.map_err(
-                                    |e| miette::miette!("Failed to set content: {:?}", e),
-                                )?;
+                                doc.set_text(content, true).map_err(|e| {
+                                    miette::miette!("Failed to set content: {:?}", e)
+                                })?;
+                                cache.persist_block(&id, label).await.map_err(|e| {
+                                    miette::miette!("Failed to persist block: {:?}", e)
+                                })?;
                             }
 
                             block_id

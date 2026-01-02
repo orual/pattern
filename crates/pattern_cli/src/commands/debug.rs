@@ -685,15 +685,21 @@ pub async fn edit_memory(agent_name: &str, label: &str, file_path: Option<&str>)
     // Apply changes based on schema
     if is_text {
         // For text, just set the content directly
-        match memory
-            .update_block_text(&agent_id, label, &edited_content)
-            .await
-        {
-            Ok(()) => {
-                output.success(&format!("Updated memory block '{}'", label));
+        match memory.get_block(&agent_id, label).await {
+            Ok(Some(doc)) => {
+                if let Err(e) = doc.set_text(&edited_content, true) {
+                    output.error(&format!("Failed to update memory block: {}", e));
+                } else if let Err(e) = memory.persist_block(&agent_id, label).await {
+                    output.error(&format!("Failed to persist memory block: {}", e));
+                } else {
+                    output.success(&format!("Updated memory block '{}'", label));
+                }
+            }
+            Ok(None) => {
+                output.error(&format!("Memory block '{}' not found", label));
             }
             Err(e) => {
-                output.error(&format!("Failed to update memory block: {}", e));
+                output.error(&format!("Failed to get memory block: {}", e));
             }
         }
     } else {

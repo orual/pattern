@@ -11,7 +11,7 @@ mod types;
 
 use std::fmt::Display;
 
-pub use cache::{DEFAULT_MEMORY_CHAR_LIMIT, MemoryCache, WriteOptions};
+pub use cache::{DEFAULT_MEMORY_CHAR_LIMIT, MemoryCache};
 pub use document::*;
 pub use schema::*;
 use schemars::JsonSchema;

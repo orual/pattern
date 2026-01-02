@@ -6,19 +6,23 @@ use loro::{
 use serde_json::Value as JsonValue;
 
 use crate::memory::schema::{BlockSchema, FieldType, LogEntrySchema};
+use crate::memory::{BlockMetadata, BlockType};
 
-/// Wrapper around LoroDoc for schema-aware operations
+/// Wrapper around LoroDoc for schema-aware operations.
+///
+/// This struct combines the Loro CRDT document with block metadata,
+/// providing a unified interface for document operations and metadata access.
 #[derive(Clone, Debug)]
 pub struct StructuredDocument {
+    /// The underlying Loro CRDT document.
     doc: LoroDoc,
-    schema: BlockSchema,
-    /// Effective permission for this access (block's inherent permission or shared permission)
-    permission: pattern_db::models::MemoryPermission,
 
-    /// Block label for identification.
-    label: String,
-    /// Agent that loaded this document (for attribution).
+    /// Agent accessing this document (for attribution). May differ from
+    /// the owning agent for shared blocks.
     accessor_agent_id: Option<String>,
+
+    /// Block metadata including schema, permissions, and identity.
+    metadata: BlockMetadata,
 }
 
 /// Errors that can occur during document operations
@@ -59,70 +63,84 @@ pub enum DocumentError {
 }
 
 impl StructuredDocument {
-    /// Create a new document with identity information.
-    pub fn new_with_identity(
-        schema: BlockSchema,
-        label: String,
-        accessor_agent_id: Option<String>,
-    ) -> Self {
+    /// Create a new document with full metadata.
+    ///
+    /// This is the preferred constructor when loading from the database.
+    pub fn new_with_metadata(metadata: BlockMetadata, accessor_agent_id: Option<String>) -> Self {
         Self {
             doc: LoroDoc::new(),
-            schema,
-            permission: pattern_db::models::MemoryPermission::ReadWrite,
-            label,
             accessor_agent_id,
+            metadata,
         }
     }
 
-    /// Create a new document with the given schema and permission
-    pub fn new_with_permission(
-        schema: BlockSchema,
-        permission: pattern_db::models::MemoryPermission,
-    ) -> Self {
-        Self {
-            doc: LoroDoc::new(),
-            schema,
-            permission,
-            label: String::new(),
-            accessor_agent_id: None,
-        }
-    }
-
-    /// Create a new document with the given schema (default ReadWrite permission)
-    pub fn new(schema: BlockSchema) -> Self {
-        Self::new_with_identity(schema, String::new(), None)
-    }
-
-    /// Create with default Text schema
-    pub fn new_text() -> Self {
-        Self::new(BlockSchema::text())
-    }
-
-    /// Create from an existing Loro snapshot with permission
-    pub fn from_snapshot_with_permission(
+    /// Create a new document from a Loro snapshot with full metadata.
+    ///
+    /// This is the preferred constructor when loading from the database.
+    pub fn from_snapshot_with_metadata(
         snapshot: &[u8],
-        schema: BlockSchema,
-        permission: pattern_db::models::MemoryPermission,
+        metadata: BlockMetadata,
+        accessor_agent_id: Option<String>,
     ) -> Result<Self, DocumentError> {
         let doc = LoroDoc::new();
         doc.import(snapshot)
             .map_err(|e| DocumentError::ImportFailed(e.to_string()))?;
         Ok(Self {
             doc,
-            schema,
-            permission,
-            label: String::new(),
-            accessor_agent_id: None,
+            accessor_agent_id,
+            metadata,
         })
     }
 
-    /// Create from an existing Loro snapshot (default ReadWrite permission)
+    /// Create a new document with minimal metadata (for testing/standalone use).
+    pub fn new(schema: BlockSchema) -> Self {
+        Self::new_with_metadata(BlockMetadata::standalone(schema), None)
+    }
+
+    /// Create with default Text schema.
+    pub fn new_text() -> Self {
+        Self::new(BlockSchema::text())
+    }
+
+    /// Create a new document with identity information (for testing).
+    #[deprecated(note = "Use new_with_metadata instead")]
+    pub fn new_with_identity(
+        schema: BlockSchema,
+        label: String,
+        accessor_agent_id: Option<String>,
+    ) -> Self {
+        let mut metadata = BlockMetadata::standalone(schema);
+        metadata.label = label;
+        Self::new_with_metadata(metadata, accessor_agent_id)
+    }
+
+    /// Create a new document with the given schema and permission (for testing).
+    #[deprecated(note = "Use new_with_metadata instead")]
+    pub fn new_with_permission(
+        schema: BlockSchema,
+        permission: pattern_db::models::MemoryPermission,
+    ) -> Self {
+        let mut metadata = BlockMetadata::standalone(schema);
+        metadata.permission = permission;
+        Self::new_with_metadata(metadata, None)
+    }
+
+    /// Create from an existing Loro snapshot with permission (for testing).
+    #[deprecated(note = "Use from_snapshot_with_metadata instead")]
+    pub fn from_snapshot_with_permission(
+        snapshot: &[u8],
+        schema: BlockSchema,
+        permission: pattern_db::models::MemoryPermission,
+    ) -> Result<Self, DocumentError> {
+        let mut metadata = BlockMetadata::standalone(schema);
+        metadata.permission = permission;
+        Self::from_snapshot_with_metadata(snapshot, metadata, None)
+    }
+
+    /// Create from an existing Loro snapshot (default ReadWrite permission).
+    #[deprecated(note = "Use from_snapshot_with_metadata instead")]
     pub fn from_snapshot(snapshot: &[u8], schema: BlockSchema) -> Result<Self, DocumentError> {
-        Self::from_snapshot_with_permission(
-            snapshot,
-            schema,
-            pattern_db::models::MemoryPermission::ReadWrite,
-        )
+        Self::from_snapshot_with_metadata(snapshot, BlockMetadata::standalone(schema), None)
     }
 
     /// Apply updates to the document
@@ -133,37 +151,79 @@ impl StructuredDocument {
         Ok(())
     }
 
-    /// Get the schema
+    // ========== Metadata Accessors ==========
+
+    /// Get the full block metadata.
+    pub fn metadata(&self) -> &BlockMetadata {
+        &self.metadata
+    }
+
+    /// Get a mutable reference to the block metadata.
+    pub fn metadata_mut(&mut self) -> &mut BlockMetadata {
+        &mut self.metadata
+    }
+
+    /// Get the schema.
     pub fn schema(&self) -> &BlockSchema {
-        &self.schema
+        &self.metadata.schema
     }
 
-    /// Get the effective permission for this document
+    /// Get the effective permission for this document.
     pub fn permission(&self) -> pattern_db::models::MemoryPermission {
-        self.permission
+        self.metadata.permission
     }
 
-    /// Set the effective permission for this document (DB is source of truth)
+    /// Set the effective permission for this document (DB is source of truth).
     pub fn set_permission(&mut self, permission: pattern_db::models::MemoryPermission) {
-        self.permission = permission;
+        self.metadata.permission = permission;
     }
 
-    /// Update the schema settings (DB is source of truth)
+    /// Update the schema settings (DB is source of truth).
     ///
     /// This is used to update schema properties like viewport (Text) or display_limit (Log).
     /// The caller must ensure the schema variant is compatible.
     pub fn set_schema(&mut self, schema: BlockSchema) {
-        self.schema = schema;
+        self.metadata.schema = schema;
     }
 
     /// Get the block label for identification.
     pub fn label(&self) -> &str {
-        &self.label
+        &self.metadata.label
     }
 
     /// Get the agent that loaded this document (for attribution).
     pub fn accessor_agent_id(&self) -> Option<&str> {
         self.accessor_agent_id.as_deref()
+    }
+
+    /// Get the block ID.
+    pub fn id(&self) -> &str {
+        &self.metadata.id
+    }
+
+    /// Get the owning agent ID.
+    pub fn agent_id(&self) -> &str {
+        &self.metadata.agent_id
+    }
+
+    /// Get the block description.
+    pub fn description(&self) -> &str {
+        &self.metadata.description
+    }
+
+    /// Get the block type.
+    pub fn block_type(&self) -> BlockType {
+        self.metadata.block_type
+    }
+
+    /// Get the character limit.
+    pub fn char_limit(&self) -> usize {
+        self.metadata.char_limit
+    }
+
+    /// Check if the block is pinned.
+    pub fn is_pinned(&self) -> bool {
+        self.metadata.pinned
     }
 
     /// Set attribution automatically based on accessor agent.
@@ -189,7 +249,7 @@ impl StructuredDocument {
             return Ok(());
         }
 
-        let gate = pattern_db::models::MemoryGate::check(op, self.permission);
+        let gate = pattern_db::models::MemoryGate::check(op, self.metadata.permission);
         if gate.is_allowed() {
             Ok(())
         } else {
@@ -209,7 +269,7 @@ impl StructuredDocument {
             Err(DocumentError::PermissionDenied {
                 operation: format!("{:?}", op),
                 required,
-                actual: self.permission,
+                actual: self.metadata.permission,
             })
         }
     }
@@ -260,7 +320,7 @@ impl StructuredDocument {
     /// Returns error for Map/Composite schemas which don't support append.
     /// If is_system is false, checks that the document has Append permission.
     pub fn append(&self, content: &str, is_system: bool) -> Result<(), DocumentError> {
-        match &self.schema {
+        match &self.metadata.schema {
             BlockSchema::Text { .. } => self.append_text(content, is_system),
             BlockSchema::List { .. } => {
                 // Try to parse as JSON, fall back to string
@@ -276,7 +336,7 @@ impl StructuredDocument {
             }
             _ => Err(DocumentError::InvalidSchemaForOperation {
                 operation: "append".to_string(),
-                schema: format!("{:?}", self.schema),
+                schema: format!("{:?}", self.metadata.schema),
             }),
         }
     }
@@ -348,7 +408,7 @@ impl StructuredDocument {
     ) -> Result<(), DocumentError> {
         // Check read-only if not system
         if !is_system {
-            if let Some(true) = self.schema.is_field_read_only(field) {
+            if let Some(true) = self.metadata.schema.is_field_read_only(field) {
                 return Err(DocumentError::ReadOnlyField(field.to_string()));
             }
         }
@@ -398,7 +458,7 @@ impl StructuredDocument {
     ) -> Result<(), DocumentError> {
         // Check read-only if not system
         if !is_system {
-            if let Some(true) = self.schema.is_field_read_only(field) {
+            if let Some(true) = self.metadata.schema.is_field_read_only(field) {
                 return Err(DocumentError::ReadOnlyField(field.to_string()));
             }
         }
@@ -420,7 +480,7 @@ impl StructuredDocument {
     ) -> Result<(), DocumentError> {
         // Check read-only if not system
         if !is_system {
-            if let Some(true) = self.schema.is_field_read_only(field) {
+            if let Some(true) = self.metadata.schema.is_field_read_only(field) {
                 return Err(DocumentError::ReadOnlyField(field.to_string()));
             }
         }
@@ -456,7 +516,7 @@ impl StructuredDocument {
     ) -> Result<i64, DocumentError> {
         // Check read-only if not system
         if !is_system {
-            if let Some(true) = self.schema.is_field_read_only(field) {
+            if let Some(true) = self.metadata.schema.is_field_read_only(field) {
                 return Err(DocumentError::ReadOnlyField(field.to_string()));
             }
         }
@@ -482,13 +542,14 @@ impl StructuredDocument {
     ) -> Result<(), DocumentError> {
         // Check section read-only permission
         if !is_system {
-            if let Some(true) = self.schema.is_section_read_only(section) {
+            if let Some(true) = self.metadata.schema.is_section_read_only(section) {
                 return Err(DocumentError::ReadOnlySection(section.to_string()));
             }
         }
 
         // Get section schema and check field read-only permission
         let section_schema = self
+            .metadata
             .schema
             .get_section_schema(section)
             .ok_or_else(|| DocumentError::FieldNotFound(section.to_string()))?;
@@ -519,13 +580,14 @@ impl StructuredDocument {
     ) -> Result<(), DocumentError> {
         // Check section read-only permission
         if !is_system {
-            if let Some(true) = self.schema.is_section_read_only(section) {
+            if let Some(true) = self.metadata.schema.is_section_read_only(section) {
                 return Err(DocumentError::ReadOnlySection(section.to_string()));
             }
         }
 
         // Verify section exists
         let _ = self
+            .metadata
             .schema
             .get_section_schema(section)
             .ok_or_else(|| DocumentError::FieldNotFound(section.to_string()))?;
@@ -646,7 +708,7 @@ impl StructuredDocument {
 
         // Determine how many to return
         let display_limit = limit.or_else(|| {
-            if let BlockSchema::Log { display_limit, .. } = &self.schema {
+            if let BlockSchema::Log { display_limit, .. } = &self.metadata.schema {
                 Some(*display_limit)
             } else {
                 None
@@ -714,7 +776,7 @@ impl StructuredDocument {
     /// - Text: returns the raw text content
     /// - Map/List/Log/Composite: returns TOML representation
     pub fn export_for_editing(&self) -> String {
-        match &self.schema {
+        match &self.metadata.schema {
             BlockSchema::Text { .. } => {
                 // For text, just return the rendered content
                 self.render()
@@ -726,7 +788,7 @@ impl StructuredDocument {
                     match toml::to_string_pretty(&json) {
                         Ok(toml_str) => {
                             // Add schema comment at top
-                            let schema_name = match &self.schema {
+                            let schema_name = match &self.metadata.schema {
                                 BlockSchema::Text { .. } => "Text",
                                 BlockSchema::Map { .. } => "Map",
                                 BlockSchema::List { .. } => "List",
@@ -758,7 +820,7 @@ impl StructuredDocument {
     /// For Log schema: expects an array of entries (or object with "entries" key)
     /// For Composite: expects an object with section keys
     pub fn import_from_json(&self, value: &JsonValue) -> Result<(), DocumentError> {
-        match &self.schema {
+        match &self.metadata.schema {
             BlockSchema::Text { .. } => {
                 // Text: expect string or object with content field
                 let text = if let Some(s) = value.as_str() {
@@ -910,7 +972,7 @@ impl StructuredDocument {
     ///
     /// Returns a `Subscription` that will unsubscribe when dropped.
     pub fn subscribe_content(&self, callback: loro::event::Subscriber) -> loro::Subscription {
-        let container_id = match &self.schema {
+        let container_id = match &self.metadata.schema {
             BlockSchema::Text { .. } => self.doc.get_text("content").id(),
             BlockSchema::Map { .. } => self.doc.get_map("fields").id(),
             BlockSchema::List { .. } => self.doc.get_list("items").id(),
@@ -949,7 +1011,7 @@ impl StructuredDocument {
 
     /// Render document content for LLM context
     pub fn render(&self) -> String {
-        self.render_schema(&self.schema)
+        self.render_schema(&self.metadata.schema)
     }
 
     /// Render a Composite schema's sections recursively
@@ -1444,6 +1506,8 @@ mod tests {
         let snapshot = doc.export_snapshot().unwrap();
 
         // Import into new document
+
+        #[allow(deprecated)]
         let doc2 = StructuredDocument::from_snapshot(&snapshot, BlockSchema::text()).unwrap();
         assert_eq!(doc2.text_content(), "Test content");
     }
@@ -1781,6 +1845,7 @@ mod tests {
     #[test]
     fn test_structured_document_identity() {
         let schema = BlockSchema::text();
+        #[allow(deprecated)]
         let doc = StructuredDocument::new_with_identity(
             schema,
             "my_block".to_string(),

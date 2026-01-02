@@ -302,8 +302,8 @@ pub async fn add_memory(
     // Create memory cache
     let cache = MemoryCache::new(dbs.clone());
 
-    // Create the block with group as owner
-    let block_id = cache
+    // Create the block with group as owner (now returns StructuredDocument)
+    let doc = cache
         .create_block(
             &group.id,
             label,
@@ -314,21 +314,16 @@ pub async fn add_memory(
         )
         .await
         .map_err(|e| miette::miette!("Failed to create shared memory block: {:?}", e))?;
+    let block_id = doc.id().to_string();
 
     // Set initial content if provided
     if !block_content.is_empty() {
-        if let Some(doc) = cache
-            .get_block(&group.id, label)
+        doc.set_text(&block_content, true)
+            .map_err(|e| miette::miette!("Failed to set content: {}", e))?;
+        cache
+            .persist_block(&group.id, label)
             .await
-            .map_err(|e| miette::miette!("Failed to get block: {:?}", e))?
-        {
-            doc.set_text(&block_content, true)
-                .map_err(|e| miette::miette!("Failed to set content: {}", e))?;
-            cache
-                .persist_block(&group.id, label)
-                .await
-                .map_err(|e| miette::miette!("Failed to persist block: {:?}", e))?;
-        }
+            .map_err(|e| miette::miette!("Failed to persist block: {:?}", e))?;
     }
 
     // Share the block with all agents in the group

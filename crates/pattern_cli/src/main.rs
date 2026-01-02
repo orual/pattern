@@ -1,4 +1,3 @@
-mod agent_ops;
 mod background_tasks;
 mod chat;
 mod commands;
@@ -8,24 +7,10 @@ mod discord;
 mod endpoints;
 mod forwarding;
 mod helpers;
-mod message_display;
 mod output;
 mod permission_sink;
 mod slash_commands;
 mod tracing_writer;
-
-// CLI Status - pattern_db (SQLite/sqlx) migration
-//
-// This CLI uses RuntimeContext from pattern_core and pattern_db for database access.
-//
-// Module status:
-// - agent_ops.rs: Agent loading/creation via RuntimeContext - WORKING
-// - chat.rs: Single agent and group chat - WORKING
-// - commands/agent.rs: list/status WORKING, create/export/rules stubbed
-// - commands/group.rs: All commands WORKING (list, create, add-member, status, export)
-// - commands/export.rs: CAR export/import stubbed (needs format implementation)
-// - commands/debug.rs: Memory listing WORKING, some commands stubbed
-// - commands/db.rs: Stats/query stubbed (needs SQLite equivalents)
 
 use clap::{Parser, Subcommand};
 use miette::Result;
@@ -33,8 +18,6 @@ use owo_colors::OwoColorize;
 use pattern_core::config::{self};
 use std::path::PathBuf;
 use tracing::info;
-
-// Database: Uses pattern_db (SQLite/sqlx) via RuntimeContext
 
 #[derive(Parser)]
 #[command(name = "pattern-cli")]

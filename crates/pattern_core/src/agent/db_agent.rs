@@ -1384,13 +1384,9 @@ impl DatabaseAgentBuilder {
 mod tests {
     use super::*;
     use crate::context::heartbeat::heartbeat_channel;
-    use crate::memory::{
-        ArchivalEntry, BlockMetadata, BlockSchema, BlockType, MemoryResult, MemorySearchResult,
-        MemoryStore, SearchOptions, StructuredDocument,
-    };
     use crate::messages::MessageStore;
+    use crate::test_helpers::memory::MockMemoryStore;
     use async_trait::async_trait;
-    use serde_json::Value as JsonValue;
 
     // Mock ModelProvider for testing
     #[derive(Debug)]
@@ -1427,188 +1423,6 @@ mod tests {
         }
     }
 
-    // Mock MemoryStore for testing
-    #[derive(Debug)]
-    struct MockMemoryStore;
-
-    #[async_trait]
-    impl MemoryStore for MockMemoryStore {
-        async fn create_block(
-            &self,
-            _agent_id: &str,
-            _label: &str,
-            _description: &str,
-            _block_type: BlockType,
-            _schema: BlockSchema,
-            _char_limit: usize,
-        ) -> MemoryResult<String> {
-            Ok("test-block-id".to_string())
-        }
-
-        async fn list_all_blocks_by_label_prefix(
-            &self,
-            _prefix: &str,
-        ) -> MemoryResult<Vec<BlockMetadata>> {
-            Ok(vec![])
-        }
-
-        async fn get_block(
-            &self,
-            _agent_id: &str,
-            _label: &str,
-        ) -> MemoryResult<Option<StructuredDocument>> {
-            Ok(None)
-        }
-
-        async fn get_block_metadata(
-            &self,
-            _agent_id: &str,
-            _label: &str,
-        ) -> MemoryResult<Option<BlockMetadata>> {
-            Ok(None)
-        }
-
-        async fn list_blocks(&self, _agent_id: &str) -> MemoryResult<Vec<BlockMetadata>> {
-            Ok(Vec::new())
-        }
-
-        async fn list_blocks_by_type(
-            &self,
-            _agent_id: &str,
-            _block_type: BlockType,
-        ) -> MemoryResult<Vec<BlockMetadata>> {
-            Ok(Vec::new())
-        }
-
-        async fn delete_block(&self, _agent_id: &str, _label: &str) -> MemoryResult<()> {
-            Ok(())
-        }
-
-        async fn get_rendered_content(
-            &self,
-            _agent_id: &str,
-            _label: &str,
-        ) -> MemoryResult<Option<String>> {
-            Ok(None)
-        }
-
-        async fn persist_block(&self, _agent_id: &str, _label: &str) -> MemoryResult<()> {
-            Ok(())
-        }
-
-        fn mark_dirty(&self, _agent_id: &str, _label: &str) {}
-
-        async fn insert_archival(
-            &self,
-            _agent_id: &str,
-            _content: &str,
-            _metadata: Option<JsonValue>,
-        ) -> MemoryResult<String> {
-            Ok("archival-id".to_string())
-        }
-
-        async fn search_archival(
-            &self,
-            _agent_id: &str,
-            _query: &str,
-            _limit: usize,
-        ) -> MemoryResult<Vec<ArchivalEntry>> {
-            Ok(Vec::new())
-        }
-
-        async fn delete_archival(&self, _id: &str) -> MemoryResult<()> {
-            Ok(())
-        }
-
-        async fn search(
-            &self,
-            _agent_id: &str,
-            _query: &str,
-            _options: SearchOptions,
-        ) -> MemoryResult<Vec<MemorySearchResult>> {
-            Ok(Vec::new())
-        }
-
-        async fn search_all(
-            &self,
-            _query: &str,
-            _options: SearchOptions,
-        ) -> MemoryResult<Vec<MemorySearchResult>> {
-            Ok(Vec::new())
-        }
-
-        async fn update_block_text(
-            &self,
-            _agent_id: &str,
-            _label: &str,
-            _new_content: &str,
-        ) -> MemoryResult<()> {
-            Ok(())
-        }
-
-        async fn append_to_block(
-            &self,
-            _agent_id: &str,
-            _label: &str,
-            _content: &str,
-        ) -> MemoryResult<()> {
-            Ok(())
-        }
-
-        async fn replace_in_block(
-            &self,
-            _agent_id: &str,
-            _label: &str,
-            _old: &str,
-            _new: &str,
-        ) -> MemoryResult<bool> {
-            Ok(false)
-        }
-
-        async fn list_shared_blocks(
-            &self,
-            _agent_id: &str,
-        ) -> MemoryResult<Vec<crate::memory::SharedBlockInfo>> {
-            Ok(Vec::new())
-        }
-
-        async fn get_shared_block(
-            &self,
-            _requester_agent_id: &str,
-            _owner_agent_id: &str,
-            _label: &str,
-        ) -> MemoryResult<Option<StructuredDocument>> {
-            Ok(None)
-        }
-
-        async fn set_block_pinned(
-            &self,
-            _agent_id: &str,
-            _label: &str,
-            _pinned: bool,
-        ) -> MemoryResult<()> {
-            Ok(())
-        }
-
-        async fn set_block_type(
-            &self,
-            _agent_id: &str,
-            _label: &str,
-            _block_type: BlockType,
-        ) -> MemoryResult<()> {
-            Ok(())
-        }
-
-        async fn update_block_schema(
-            &self,
-            _agent_id: &str,
-            _label: &str,
-            _schema: BlockSchema,
-        ) -> MemoryResult<()> {
-            Ok(())
-        }
-    }
-
     async fn test_dbs() -> crate::db::ConstellationDatabases {
         crate::db::ConstellationDatabases::open_in_memory()
             .await
@@ -1642,7 +1456,7 @@ mod tests {
     #[tokio::test]
     async fn test_builder_requires_id() {
         let dbs = test_dbs().await;
-        let memory = Arc::new(MockMemoryStore);
+        let memory = Arc::new(MockMemoryStore::new());
         let messages = MessageStore::new(dbs.constellation.pool().clone(), "test_agent");
         let model = Arc::new(MockModelProvider) as Arc<dyn ModelProvider>;
         let (heartbeat_tx, _heartbeat_rx) = heartbeat_channel();
@@ -1675,7 +1489,7 @@ mod tests {
     #[tokio::test]
     async fn test_builder_requires_name() {
         let dbs = test_dbs().await;
-        let memory = Arc::new(MockMemoryStore);
+        let memory = Arc::new(MockMemoryStore::new());
         let messages = MessageStore::new(dbs.constellation.pool().clone(), "test_agent");
         let model = Arc::new(MockModelProvider) as Arc<dyn ModelProvider>;
         let (heartbeat_tx, _heartbeat_rx) = heartbeat_channel();
@@ -1730,7 +1544,7 @@ mod tests {
     #[tokio::test]
     async fn test_builder_requires_model() {
         let dbs = test_dbs().await;
-        let memory = Arc::new(MockMemoryStore);
+        let memory = Arc::new(MockMemoryStore::new());
         let messages = MessageStore::new(dbs.constellation.pool().clone(), "test_agent");
         let (heartbeat_tx, _heartbeat_rx) = heartbeat_channel();
 
@@ -1762,7 +1576,7 @@ mod tests {
     #[tokio::test]
     async fn test_builder_requires_heartbeat_sender() {
         let dbs = test_dbs().await;
-        let memory = Arc::new(MockMemoryStore);
+        let memory = Arc::new(MockMemoryStore::new());
         let messages = MessageStore::new(dbs.constellation.pool().clone(), "test_agent");
         let model = Arc::new(MockModelProvider) as Arc<dyn ModelProvider>;
 
@@ -1794,7 +1608,7 @@ mod tests {
     #[tokio::test]
     async fn test_builder_success() {
         let dbs = test_dbs().await;
-        let memory = Arc::new(MockMemoryStore);
+        let memory = Arc::new(MockMemoryStore::new());
         let messages = MessageStore::new(dbs.constellation.pool().clone(), "test_agent");
         let model = Arc::new(MockModelProvider) as Arc<dyn ModelProvider>;
         let (heartbeat_tx, _heartbeat_rx) = heartbeat_channel();
@@ -1823,7 +1637,7 @@ mod tests {
     #[tokio::test]
     async fn test_initial_state_is_ready() {
         let dbs = test_dbs().await;
-        let memory = Arc::new(MockMemoryStore);
+        let memory = Arc::new(MockMemoryStore::new());
         let messages = MessageStore::new(dbs.constellation.pool().clone(), "test_agent");
         let model = Arc::new(MockModelProvider) as Arc<dyn ModelProvider>;
         let (heartbeat_tx, _heartbeat_rx) = heartbeat_channel();
@@ -1851,7 +1665,7 @@ mod tests {
     #[tokio::test]
     async fn test_state_update() {
         let dbs = test_dbs().await;
-        let memory = Arc::new(MockMemoryStore);
+        let memory = Arc::new(MockMemoryStore::new());
         let messages = MessageStore::new(dbs.constellation.pool().clone(), "test_agent");
         let model = Arc::new(MockModelProvider) as Arc<dyn ModelProvider>;
         let (heartbeat_tx, _heartbeat_rx) = heartbeat_channel();
@@ -1935,7 +1749,7 @@ mod tests {
         let dbs = test_dbs().await;
         create_test_agent(&dbs, "test_agent").await;
 
-        let memory = Arc::new(MockMemoryStore);
+        let memory = Arc::new(MockMemoryStore::new());
         let messages = MessageStore::new(dbs.constellation.pool().clone(), "test_agent");
         let model = Arc::new(SimpleTestModel) as Arc<dyn ModelProvider>;
         let (heartbeat_tx, _heartbeat_rx) = heartbeat_channel();
@@ -2124,7 +1938,7 @@ mod tests {
         let dbs = test_dbs().await;
         create_test_agent(&dbs, "test_agent").await;
 
-        let memory = Arc::new(MockMemoryStore);
+        let memory = Arc::new(MockMemoryStore::new());
         let messages = MessageStore::new(dbs.constellation.pool().clone(), "test_agent");
         let model = Arc::new(ToolCallModel {
             call_count: Arc::new(AtomicUsize::new(0)),
@@ -2339,7 +2153,7 @@ mod tests {
         let dbs = test_dbs().await;
         create_test_agent(&dbs, "test_agent").await;
 
-        let memory = Arc::new(MockMemoryStore);
+        let memory = Arc::new(MockMemoryStore::new());
         let messages = MessageStore::new(dbs.constellation.pool().clone(), "test_agent");
         let model = Arc::new(ConstraintTestModel {
             call_count: Arc::new(AtomicUsize::new(0)),
@@ -2527,7 +2341,7 @@ mod tests {
         let dbs = test_dbs().await;
         create_test_agent(&dbs, "test_agent").await;
 
-        let memory = Arc::new(MockMemoryStore);
+        let memory = Arc::new(MockMemoryStore::new());
         let messages = MessageStore::new(dbs.constellation.pool().clone(), "test_agent");
         let model = Arc::new(ExitTestModel {
             call_count: Arc::new(AtomicUsize::new(0)),
