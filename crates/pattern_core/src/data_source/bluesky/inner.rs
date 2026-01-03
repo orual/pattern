@@ -608,6 +608,7 @@ impl BlueskyStreamInner {
         }
 
         // Persist the block
+        memory.mark_dirty(agent_id, &label);
         if let Err(e) = memory.persist_block(agent_id, &label).await {
             warn!("Failed to persist user block {}: {}", label, e);
         }

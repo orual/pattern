@@ -92,6 +92,23 @@ impl StructuredDocument {
         })
     }
 
+    /// Create a new document from an existing LoroDoc with full metadata.
+    ///
+    /// Used when reconstructing a document from checkpoint + updates for undo.
+    pub fn from_doc_with_metadata(
+        doc: LoroDoc,
+        metadata: BlockMetadata,
+        schema: BlockSchema,
+    ) -> Result<Self, DocumentError> {
+        let mut metadata = metadata;
+        metadata.schema = schema;
+        Ok(Self {
+            doc,
+            accessor_agent_id: None,
+            metadata,
+        })
+    }
+
     /// Create a new document with minimal metadata (for testing/standalone use).
     pub fn new(schema: BlockSchema) -> Self {
         Self::new_with_metadata(BlockMetadata::standalone(schema), None)

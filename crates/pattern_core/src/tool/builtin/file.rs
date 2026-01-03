@@ -475,6 +475,7 @@ impl FileTool {
                 format!("Failed to append to block: {:?}", e),
             )
         })?;
+        memory.mark_dirty(&block_ref.agent_id, &block_ref.label);
         memory
             .persist_block(&block_ref.agent_id, &block_ref.label)
             .await
@@ -823,6 +824,7 @@ impl FileTool {
             )
         })?;
         if replaced {
+            memory.mark_dirty(&block_ref.agent_id, &block_ref.label);
             memory
                 .persist_block(&block_ref.agent_id, &block_ref.label)
                 .await

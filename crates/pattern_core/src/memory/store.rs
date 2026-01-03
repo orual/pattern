@@ -168,6 +168,30 @@ pub trait MemoryStore: Send + Sync + fmt::Debug {
         label: &str,
         schema: BlockSchema,
     ) -> MemoryResult<()>;
+
+    // ========== Undo/Redo Operations ==========
+
+    /// Undo the last persisted change to a block.
+    ///
+    /// Marks the most recent active update as inactive, effectively undoing it.
+    /// Returns true if undo was performed, false if no history available.
+    async fn undo_block(&self, agent_id: &str, label: &str) -> MemoryResult<bool>;
+
+    /// Redo a previously undone change to a block.
+    ///
+    /// Reactivates the first inactive update after the current active branch.
+    /// Returns true if redo was performed, false if nothing to redo.
+    async fn redo_block(&self, agent_id: &str, label: &str) -> MemoryResult<bool>;
+
+    /// Get the number of available undo steps for a block.
+    ///
+    /// Returns the count of active updates that can be undone.
+    async fn undo_depth(&self, agent_id: &str, label: &str) -> MemoryResult<usize>;
+
+    /// Get the number of available redo steps for a block.
+    ///
+    /// Returns the count of inactive updates that can be redone.
+    async fn redo_depth(&self, agent_id: &str, label: &str) -> MemoryResult<usize>;
 }
 
 /// Block metadata (without loading the full document)

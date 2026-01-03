@@ -222,7 +222,11 @@ fn calculate_backoff(attempt: u8, config: &RetryConfig) -> u64 {
     let base = config.base_backoff_ms;
     let exponential = base.saturating_mul(2u64.saturating_pow(attempt.saturating_sub(1) as u32));
     let capped = exponential.min(config.max_backoff_ms);
-    let jitter = rand::rng().random_range(0..config.jitter_ms);
+    let jitter = if config.jitter_ms > 0 {
+        rand::rng().random_range(0..config.jitter_ms)
+    } else {
+        0
+    };
     capped.saturating_add(jitter)
 }
 

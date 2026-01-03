@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) as count FROM memory_block_updates WHERE block_id = ? AND is_active = 0 AND seq > ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "count",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ef22262bd4ca9a8b17b1512379f0dbe2dab70307db41f0fce8e5913d3c65a892"
+}

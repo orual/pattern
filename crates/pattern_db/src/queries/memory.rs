@@ -533,11 +533,14 @@ use chrono::Utc;
 /// Store a new incremental update for a memory block.
 ///
 /// Atomically assigns the next sequence number and persists the update.
+/// The `frontier` parameter stores the Loro version vector after this update,
+/// enabling precise undo to any historical state.
 /// Returns the assigned sequence number.
 pub async fn store_update(
     pool: &SqlitePool,
     block_id: &str,
     update_blob: &[u8],
+    frontier: Option<&[u8]>,
     source: Option<&str>,
 ) -> DbResult<i64> {
     let now = Utc::now();
@@ -560,14 +563,15 @@ pub async fn store_update(
     // Insert the update
     sqlx::query!(
         r#"
-        INSERT INTO memory_block_updates (block_id, seq, update_blob, byte_size, source, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO memory_block_updates (block_id, seq, update_blob, byte_size, source, frontier, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         "#,
         block_id,
         seq,
         update_blob,
         byte_size,
         source,
+        frontier,
         now,
     )
     .execute(&mut *tx)
@@ -587,9 +591,9 @@ pub async fn get_checkpoint_and_updates(
     // Get latest checkpoint
     let checkpoint = get_latest_checkpoint(pool, block_id).await?;
 
-    // Get all updates (or updates since checkpoint if we have one)
+    // Get all active updates (or updates since checkpoint if we have one)
     let updates = if let Some(ref cp) = checkpoint {
-        // Get updates created after the checkpoint
+        // Get active updates created after the checkpoint
         sqlx::query_as!(
             MemoryBlockUpdate,
             r#"
@@ -600,9 +604,11 @@ pub async fn get_checkpoint_and_updates(
                 update_blob as "update_blob!",
                 byte_size as "byte_size!",
                 source,
+                frontier,
+                is_active as "is_active!: bool",
                 created_at as "created_at!: _"
             FROM memory_block_updates
-            WHERE block_id = ? AND created_at > ?
+            WHERE block_id = ? AND created_at > ? AND is_active = 1
             ORDER BY seq ASC
             "#,
             block_id,
@@ -611,7 +617,7 @@ pub async fn get_checkpoint_and_updates(
         .fetch_all(pool)
         .await?
     } else {
-        // No checkpoint, get all updates
+        // No checkpoint, get all active updates
         sqlx::query_as!(
             MemoryBlockUpdate,
             r#"
@@ -622,9 +628,11 @@ pub async fn get_checkpoint_and_updates(
                 update_blob as "update_blob!",
                 byte_size as "byte_size!",
                 source,
+                frontier,
+                is_active as "is_active!: bool",
                 created_at as "created_at!: _"
             FROM memory_block_updates
-            WHERE block_id = ?
+            WHERE block_id = ? AND is_active = 1
             ORDER BY seq ASC
             "#,
             block_id
@@ -636,7 +644,7 @@ pub async fn get_checkpoint_and_updates(
     Ok((checkpoint, updates))
 }
 
-/// Get updates after a given sequence number.
+/// Get active updates after a given sequence number.
 ///
 /// Used for cache refresh when we already have some state.
 pub async fn get_updates_since(
@@ -654,9 +662,11 @@ pub async fn get_updates_since(
             update_blob as "update_blob!",
             byte_size as "byte_size!",
             source,
+            frontier,
+            is_active as "is_active!: bool",
             created_at as "created_at!: _"
         FROM memory_block_updates
-        WHERE block_id = ? AND seq > ?
+        WHERE block_id = ? AND seq > ? AND is_active = 1
         ORDER BY seq ASC
         "#,
         block_id,
@@ -774,6 +784,244 @@ pub async fn get_pending_update_stats(pool: &SqlitePool, block_id: &str) -> DbRe
         total_bytes: result.total_bytes,
         max_seq: result.max_seq,
     })
+}
+
+// ============================================================================
+// Undo Support Queries
+// ============================================================================
+
+/// Get the most recent active update for a block.
+///
+/// Returns None if no active updates exist.
+pub async fn get_latest_update(
+    pool: &SqlitePool,
+    block_id: &str,
+) -> DbResult<Option<MemoryBlockUpdate>> {
+    let update = sqlx::query_as!(
+        MemoryBlockUpdate,
+        r#"
+        SELECT
+            id as "id!",
+            block_id as "block_id!",
+            seq as "seq!",
+            update_blob as "update_blob!",
+            byte_size as "byte_size!",
+            source,
+            frontier,
+            is_active as "is_active!: bool",
+            created_at as "created_at!: _"
+        FROM memory_block_updates
+        WHERE block_id = ? AND is_active = 1
+        ORDER BY seq DESC
+        LIMIT 1
+        "#,
+        block_id
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(update)
+}
+
+/// Get checkpoint and active updates up to (inclusive) a sequence number.
+///
+/// Used for reconstructing document state at a specific point in history.
+/// Returns the latest checkpoint that precedes the target seq, plus all
+/// active updates from checkpoint up to and including target_seq.
+pub async fn get_checkpoint_and_updates_until(
+    pool: &SqlitePool,
+    block_id: &str,
+    max_seq: i64,
+) -> DbResult<(Option<MemoryBlockCheckpoint>, Vec<MemoryBlockUpdate>)> {
+    // Get latest checkpoint
+    let checkpoint = get_latest_checkpoint(pool, block_id).await?;
+
+    // Get active updates up to max_seq (from checkpoint if exists, otherwise from beginning)
+    let updates = if let Some(ref cp) = checkpoint {
+        sqlx::query_as!(
+            MemoryBlockUpdate,
+            r#"
+            SELECT
+                id as "id!",
+                block_id as "block_id!",
+                seq as "seq!",
+                update_blob as "update_blob!",
+                byte_size as "byte_size!",
+                source,
+                frontier,
+                is_active as "is_active!: bool",
+                created_at as "created_at!: _"
+            FROM memory_block_updates
+            WHERE block_id = ? AND created_at > ? AND seq <= ? AND is_active = 1
+            ORDER BY seq ASC
+            "#,
+            block_id,
+            cp.created_at,
+            max_seq
+        )
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query_as!(
+            MemoryBlockUpdate,
+            r#"
+            SELECT
+                id as "id!",
+                block_id as "block_id!",
+                seq as "seq!",
+                update_blob as "update_blob!",
+                byte_size as "byte_size!",
+                source,
+                frontier,
+                is_active as "is_active!: bool",
+                created_at as "created_at!: _"
+            FROM memory_block_updates
+            WHERE block_id = ? AND seq <= ? AND is_active = 1
+            ORDER BY seq ASC
+            "#,
+            block_id,
+            max_seq
+        )
+        .fetch_all(pool)
+        .await?
+    };
+
+    Ok((checkpoint, updates))
+}
+
+/// Deactivate the latest active update for a block (undo).
+///
+/// Marks the most recent active update as inactive, effectively undoing it.
+/// Returns the seq of the deactivated update, or None if no active updates.
+pub async fn deactivate_latest_update(pool: &SqlitePool, block_id: &str) -> DbResult<Option<i64>> {
+    // Find the latest active update
+    let latest = sqlx::query!(
+        r#"
+        SELECT id, seq FROM memory_block_updates
+        WHERE block_id = ? AND is_active = 1
+        ORDER BY seq DESC
+        LIMIT 1
+        "#,
+        block_id
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    let Some(row) = latest else {
+        return Ok(None);
+    };
+
+    // Mark it as inactive
+    sqlx::query!(
+        "UPDATE memory_block_updates SET is_active = 0 WHERE id = ?",
+        row.id
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(Some(row.seq))
+}
+
+/// Reactivate the next inactive update for a block (redo).
+///
+/// Finds the first inactive update after the current active branch and reactivates it.
+/// Returns the seq of the reactivated update, or None if nothing to redo.
+pub async fn reactivate_next_update(pool: &SqlitePool, block_id: &str) -> DbResult<Option<i64>> {
+    // Get the max active seq (or 0 if none)
+    let max_active = sqlx::query!(
+        r#"
+        SELECT COALESCE(MAX(seq), 0) as max_seq
+        FROM memory_block_updates
+        WHERE block_id = ? AND is_active = 1
+        "#,
+        block_id
+    )
+    .fetch_one(pool)
+    .await?;
+
+    let max_active_seq = max_active.max_seq;
+
+    // Find the first inactive update after max_active_seq
+    let next_inactive = sqlx::query!(
+        r#"
+        SELECT id, seq FROM memory_block_updates
+        WHERE block_id = ? AND is_active = 0 AND seq > ?
+        ORDER BY seq ASC
+        LIMIT 1
+        "#,
+        block_id,
+        max_active_seq
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    let Some(row) = next_inactive else {
+        return Ok(None);
+    };
+
+    // Mark it as active
+    sqlx::query!(
+        "UPDATE memory_block_updates SET is_active = 1 WHERE id = ?",
+        row.id
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(Some(row.seq))
+}
+
+/// Count available undo steps for a block.
+///
+/// Returns the number of active updates that can be undone.
+pub async fn count_undo_steps(pool: &SqlitePool, block_id: &str) -> DbResult<i64> {
+    let result = sqlx::query!(
+        "SELECT COUNT(*) as count FROM memory_block_updates WHERE block_id = ? AND is_active = 1",
+        block_id
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(result.count)
+}
+
+/// Count available redo steps for a block.
+///
+/// Returns the number of inactive updates after the active branch that can be redone.
+pub async fn count_redo_steps(pool: &SqlitePool, block_id: &str) -> DbResult<i64> {
+    // Get max active seq
+    let max_active = sqlx::query!(
+        r#"
+        SELECT COALESCE(MAX(seq), 0) as max_seq
+        FROM memory_block_updates
+        WHERE block_id = ? AND is_active = 1
+        "#,
+        block_id
+    )
+    .fetch_one(pool)
+    .await?;
+
+    let result = sqlx::query!(
+        "SELECT COUNT(*) as count FROM memory_block_updates WHERE block_id = ? AND is_active = 0 AND seq > ?",
+        block_id,
+        max_active.max_seq
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(result.count)
+}
+
+/// Reset a block's last_seq to a specific value.
+///
+/// Used after undo to sync the sequence counter with the actual update history.
+pub async fn reset_block_last_seq(pool: &SqlitePool, block_id: &str, new_seq: i64) -> DbResult<()> {
+    let now = Utc::now();
+    sqlx::query!(
+        "UPDATE memory_blocks SET last_seq = ?, updated_at = ? WHERE id = ?",
+        new_seq,
+        now,
+        block_id
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// Update a block's frontier without creating an update record.

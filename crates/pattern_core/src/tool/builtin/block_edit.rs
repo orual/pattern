@@ -92,6 +92,7 @@ impl BlockEditTool {
             )
         })?;
 
+        memory.mark_dirty(agent_id, label);
         memory.persist_block(agent_id, label).await.map_err(|e| {
             CoreError::tool_exec_msg(
                 "block_edit",
@@ -458,6 +459,7 @@ impl BlockEditTool {
         }
 
         // Persist the changes
+        memory.mark_dirty(agent_id, label);
         memory.persist_block(agent_id, label).await.map_err(|e| {
             CoreError::tool_exec_msg(
                 "block_edit",
@@ -608,6 +610,7 @@ impl BlockEditTool {
             })?;
         doc.inner().commit();
 
+        memory.mark_dirty(agent_id, label);
         memory.persist_block(agent_id, label).await.map_err(|e| {
             CoreError::tool_exec_msg(
                 "block_edit",
@@ -763,6 +766,7 @@ impl BlockEditTool {
         doc.inner().commit();
 
         // Persist the changes
+        memory.mark_dirty(agent_id, label);
         memory.persist_block(agent_id, label).await.map_err(|e| {
             CoreError::tool_exec_msg(
                 "block_edit",
@@ -850,6 +854,7 @@ impl BlockEditTool {
         })?;
 
         // Persist the changes
+        memory.mark_dirty(agent_id, label);
         memory.persist_block(agent_id, label).await.map_err(|e| {
             CoreError::tool_exec_msg(
                 "block_edit",
@@ -865,6 +870,68 @@ impl BlockEditTool {
                 "value": value,
             }),
         ))
+    }
+
+    /// Handle the undo operation
+    async fn handle_undo(&self, label: &str) -> crate::Result<ToolOutput> {
+        let agent_id = self.ctx.agent_id();
+        let memory = self.ctx.memory();
+
+        let undone = memory.undo_block(agent_id, label).await.map_err(|e| {
+            CoreError::tool_exec_msg(
+                "block_edit",
+                json!({"op": "undo", "label": label}),
+                format!("Failed to undo block '{}': {:?}", label, e),
+            )
+        })?;
+
+        if undone {
+            let undo_depth = memory.undo_depth(agent_id, label).await.unwrap_or(0);
+            let redo_depth = memory.redo_depth(agent_id, label).await.unwrap_or(0);
+            Ok(ToolOutput::success_with_data(
+                format!("Undid last change to block '{}'", label),
+                json!({
+                    "undo_remaining": undo_depth,
+                    "redo_available": redo_depth,
+                }),
+            ))
+        } else {
+            Ok(ToolOutput::error(format!(
+                "Nothing to undo in block '{}'",
+                label
+            )))
+        }
+    }
+
+    /// Handle the redo operation
+    async fn handle_redo(&self, label: &str) -> crate::Result<ToolOutput> {
+        let agent_id = self.ctx.agent_id();
+        let memory = self.ctx.memory();
+
+        let redone = memory.redo_block(agent_id, label).await.map_err(|e| {
+            CoreError::tool_exec_msg(
+                "block_edit",
+                json!({"op": "redo", "label": label}),
+                format!("Failed to redo block '{}': {:?}", label, e),
+            )
+        })?;
+
+        if redone {
+            let undo_depth = memory.undo_depth(agent_id, label).await.unwrap_or(0);
+            let redo_depth = memory.redo_depth(agent_id, label).await.unwrap_or(0);
+            Ok(ToolOutput::success_with_data(
+                format!("Redid change to block '{}'", label),
+                json!({
+                    "undo_available": undo_depth,
+                    "redo_remaining": redo_depth,
+                }),
+            ))
+        } else {
+            Ok(ToolOutput::error(format!(
+                "Nothing to redo in block '{}'",
+                label
+            )))
+        }
     }
 }
 
@@ -887,7 +954,9 @@ impl AiTool for BlockEditTool {
   - 'regex': Treat 'old' as regex pattern
 - 'patch': Apply unified diff to a text block (requires 'patch' with diff content)
 - 'set_field': Set a field value in a Map/Composite block (requires 'field', 'value')
-- 'edit_range': Replace line range (content format: 'START-END: new content', 1-indexed)"
+- 'edit_range': Replace line range (content format: 'START-END: new content', 1-indexed)
+- 'undo': Revert the last persisted change to a block
+- 'redo': Re-apply a previously undone change"
     }
 
     fn usage_rule(&self) -> Option<&'static str> {
@@ -902,7 +971,15 @@ impl AiTool for BlockEditTool {
     }
 
     fn operations(&self) -> &'static [&'static str] {
-        &["append", "replace", "patch", "set_field", "edit_range"]
+        &[
+            "append",
+            "replace",
+            "patch",
+            "set_field",
+            "edit_range",
+            "undo",
+            "redo",
+        ]
     }
 
     async fn execute(&self, input: Self::Input, _meta: &ExecutionMeta) -> Result<Self::Output> {
@@ -918,6 +995,8 @@ impl AiTool for BlockEditTool {
                     .await
             }
             BlockEditOp::EditRange => self.handle_edit_range(&input.label, input.content).await,
+            BlockEditOp::Undo => self.handle_undo(&input.label).await,
+            BlockEditOp::Redo => self.handle_redo(&input.label).await,
         }
     }
 }
@@ -1777,5 +1856,180 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(content, "X\nY\nC\nD\n");
+    }
+
+    #[tokio::test]
+    async fn test_block_edit_undo_redo() {
+        let (_db, memory, ctx) = create_test_context_with_agent("test-agent").await;
+
+        // Create a text block
+        let doc = memory
+            .create_block(
+                "test-agent",
+                "undo_block",
+                "A test block for undo",
+                BlockType::Working,
+                BlockSchema::text(),
+                2000,
+            )
+            .await
+            .unwrap();
+
+        // Set initial content (this is the baseline, not undoable since it's system)
+        doc.set_text("initial", true).unwrap();
+        memory.mark_dirty("test-agent", "undo_block");
+        memory
+            .persist_block("test-agent", "undo_block")
+            .await
+            .unwrap();
+
+        let tool = BlockEditTool::new(ctx);
+
+        // Make first edit (creates update seq 1)
+        tool.execute(
+            BlockEditInput {
+                op: BlockEditOp::Append,
+                label: "undo_block".to_string(),
+                content: Some(" first".to_string()),
+                old: None,
+                new: None,
+                field: None,
+                value: None,
+                patch: None,
+                mode: None,
+            },
+            &ExecutionMeta::default(),
+        )
+        .await
+        .unwrap();
+
+        // Make second edit (creates update seq 2)
+        tool.execute(
+            BlockEditInput {
+                op: BlockEditOp::Append,
+                label: "undo_block".to_string(),
+                content: Some(" second".to_string()),
+                old: None,
+                new: None,
+                field: None,
+                value: None,
+                patch: None,
+                mode: None,
+            },
+            &ExecutionMeta::default(),
+        )
+        .await
+        .unwrap();
+
+        // Verify current content
+        let content = memory
+            .get_rendered_content("test-agent", "undo_block")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(content, "initial first second");
+
+        // Undo the second edit
+        let result = tool
+            .execute(
+                BlockEditInput {
+                    op: BlockEditOp::Undo,
+                    label: "undo_block".to_string(),
+                    content: None,
+                    old: None,
+                    new: None,
+                    field: None,
+                    value: None,
+                    patch: None,
+                    mode: None,
+                },
+                &ExecutionMeta::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert!(result.message.contains("Undid"));
+
+        // Verify content after undo
+        let content = memory
+            .get_rendered_content("test-agent", "undo_block")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(content, "initial first");
+
+        // Redo the undone edit
+        let result = tool
+            .execute(
+                BlockEditInput {
+                    op: BlockEditOp::Redo,
+                    label: "undo_block".to_string(),
+                    content: None,
+                    old: None,
+                    new: None,
+                    field: None,
+                    value: None,
+                    patch: None,
+                    mode: None,
+                },
+                &ExecutionMeta::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert!(result.message.contains("Redid"));
+
+        // Verify content after redo
+        let content = memory
+            .get_rendered_content("test-agent", "undo_block")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(content, "initial first second");
+    }
+
+    #[tokio::test]
+    async fn test_block_edit_undo_nothing_to_undo() {
+        let (_db, memory, ctx) = create_test_context_with_agent("test-agent").await;
+
+        // Create a text block with no edits
+        memory
+            .create_block(
+                "test-agent",
+                "empty_undo_block",
+                "A test block",
+                BlockType::Working,
+                BlockSchema::text(),
+                2000,
+            )
+            .await
+            .unwrap();
+
+        let tool = BlockEditTool::new(ctx);
+
+        // Try to undo when there's nothing to undo
+        let result = tool
+            .execute(
+                BlockEditInput {
+                    op: BlockEditOp::Undo,
+                    label: "empty_undo_block".to_string(),
+                    content: None,
+                    old: None,
+                    new: None,
+                    field: None,
+                    value: None,
+                    patch: None,
+                    mode: None,
+                },
+                &ExecutionMeta::default(),
+            )
+            .await
+            .unwrap();
+
+        // Should return error message (not success)
+        assert!(!result.success);
+        assert!(result.message.contains("Nothing to undo"));
     }
 }

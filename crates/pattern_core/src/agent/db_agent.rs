@@ -943,10 +943,13 @@ mod tests {
         // Collect events
         let events: Vec<_> = stream.collect().await;
 
-        // Verify we got tool calls and tool responses
-        let has_tool_calls = events
+        // Verify we got tool call events (started/completed) and tool responses
+        let has_tool_started = events
             .iter()
-            .any(|e| matches!(e, ResponseEvent::ToolCalls { .. }));
+            .any(|e| matches!(e, ResponseEvent::ToolCallStarted { .. }));
+        let has_tool_completed = events
+            .iter()
+            .any(|e| matches!(e, ResponseEvent::ToolCallCompleted { .. }));
         let has_tool_responses = events
             .iter()
             .any(|e| matches!(e, ResponseEvent::ToolResponses { .. }));
@@ -954,7 +957,14 @@ mod tests {
             .iter()
             .any(|e| matches!(e, ResponseEvent::Complete { .. }));
 
-        assert!(has_tool_calls, "Should have emitted ToolCalls event");
+        assert!(
+            has_tool_started,
+            "Should have emitted ToolCallStarted event"
+        );
+        assert!(
+            has_tool_completed,
+            "Should have emitted ToolCallCompleted event"
+        );
         assert!(
             has_tool_responses,
             "Should have emitted ToolResponses event"

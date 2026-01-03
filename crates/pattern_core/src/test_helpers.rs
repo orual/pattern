@@ -284,5 +284,21 @@ pub mod memory {
         ) -> MemoryResult<()> {
             Ok(())
         }
+
+        async fn undo_block(&self, _agent_id: &str, _label: &str) -> MemoryResult<bool> {
+            Ok(false)
+        }
+
+        async fn redo_block(&self, _agent_id: &str, _label: &str) -> MemoryResult<bool> {
+            Ok(false)
+        }
+
+        async fn undo_depth(&self, _agent_id: &str, _label: &str) -> MemoryResult<usize> {
+            Ok(0)
+        }
+
+        async fn redo_depth(&self, _agent_id: &str, _label: &str) -> MemoryResult<usize> {
+            Ok(0)
+        }
     }
 }

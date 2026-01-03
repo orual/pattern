@@ -54,6 +54,8 @@ pub enum BlockEditOp {
     Patch,
     SetField,
     EditRange,
+    Undo,
+    Redo,
 }
 
 /// Mode for the replace operation

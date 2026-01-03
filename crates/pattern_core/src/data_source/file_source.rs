@@ -964,6 +964,7 @@ impl FileSource {
             let id = doc.id().to_string();
             doc.set_text(&content, true)
                 .map_err(|e| memory_err(source_id, "load", e.into()))?;
+            memory.mark_dirty(&owner_str, &label);
             memory
                 .persist_block(&owner_str, &label)
                 .await
@@ -1191,6 +1192,7 @@ impl DataBlock for FileSource {
                 })?;
             doc.set_text(&content, true)
                 .map_err(|e| memory_err(source_id, "load", e.into()))?;
+            memory.mark_dirty(&owner_str, &label);
             memory
                 .persist_block(&owner_str, &label)
                 .await
@@ -1212,6 +1214,7 @@ impl DataBlock for FileSource {
             let id = doc.id().to_string();
             doc.set_text(&content, true)
                 .map_err(|e| memory_err(source_id, "load", e.into()))?;
+            memory.mark_dirty(&owner_str, &label);
             memory
                 .persist_block(&owner_str, &label)
                 .await
@@ -1323,6 +1326,7 @@ impl DataBlock for FileSource {
         if !content.is_empty() {
             doc.set_text(content, true)
                 .map_err(|e| memory_err(source_id, "create", e.into()))?;
+            memory.mark_dirty(&owner_str, &label);
             memory
                 .persist_block(&owner_str, &label)
                 .await

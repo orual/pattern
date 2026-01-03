@@ -263,10 +263,13 @@ impl MemoryCache {
         let mut new_seq = None;
         if let Ok(blob) = update_blob {
             if !blob.is_empty() {
+                // Encode the frontier for storage (enables undo to this exact state)
+                let frontier_bytes = new_frontier.encode();
                 let seq = pattern_db::queries::store_update(
                     self.dbs.constellation.pool(),
                     &block_id,
                     &blob,
+                    Some(&frontier_bytes),
                     Some("agent"),
                 )
                 .await?;
@@ -1105,6 +1108,136 @@ impl MemoryStore for MemoryCache {
         }
 
         Ok(())
+    }
+
+    async fn undo_block(&self, agent_id: &str, label: &str) -> MemoryResult<bool> {
+        // Get block ID from DB
+        let block =
+            pattern_db::queries::get_block_by_label(self.dbs.constellation.pool(), agent_id, label)
+                .await?;
+
+        let block = block.ok_or_else(|| MemoryError::NotFound {
+            agent_id: agent_id.to_string(),
+            label: label.to_string(),
+        })?;
+
+        // Deactivate the latest update (marks it as not on active branch)
+        let deactivated_seq =
+            pattern_db::queries::deactivate_latest_update(self.dbs.constellation.pool(), &block.id)
+                .await?;
+
+        if deactivated_seq.is_none() {
+            return Ok(false); // Nothing to undo
+        }
+
+        // Update the block's frontier to the new latest active update's frontier
+        let new_latest =
+            pattern_db::queries::get_latest_update(self.dbs.constellation.pool(), &block.id)
+                .await?;
+
+        if let Some(update) = new_latest {
+            if let Some(frontier_bytes) = &update.frontier {
+                pattern_db::queries::update_block_frontier(
+                    self.dbs.constellation.pool(),
+                    &block.id,
+                    frontier_bytes,
+                )
+                .await?;
+            }
+        } else {
+            // No active updates left - clear frontier to initial state
+            pattern_db::queries::update_block_frontier(
+                self.dbs.constellation.pool(),
+                &block.id,
+                &[],
+            )
+            .await?;
+        }
+
+        // Evict from cache - next access will load the undone state from DB.
+        // Note: any existing references to the old doc won't see the undo,
+        // but for typical atomic operations this is fine since refs are short-lived.
+        self.blocks.remove(&block.id);
+
+        Ok(true)
+    }
+
+    async fn redo_block(&self, agent_id: &str, label: &str) -> MemoryResult<bool> {
+        // Get block ID from DB
+        let block =
+            pattern_db::queries::get_block_by_label(self.dbs.constellation.pool(), agent_id, label)
+                .await?;
+
+        let block = block.ok_or_else(|| MemoryError::NotFound {
+            agent_id: agent_id.to_string(),
+            label: label.to_string(),
+        })?;
+
+        // Reactivate the next inactive update
+        let reactivated_seq =
+            pattern_db::queries::reactivate_next_update(self.dbs.constellation.pool(), &block.id)
+                .await?;
+
+        if reactivated_seq.is_none() {
+            return Ok(false); // Nothing to redo
+        }
+
+        // Update the block's frontier to the new latest active update's frontier
+        let new_latest =
+            pattern_db::queries::get_latest_update(self.dbs.constellation.pool(), &block.id)
+                .await?;
+
+        if let Some(update) = new_latest {
+            if let Some(frontier_bytes) = &update.frontier {
+                pattern_db::queries::update_block_frontier(
+                    self.dbs.constellation.pool(),
+                    &block.id,
+                    frontier_bytes,
+                )
+                .await?;
+            }
+        }
+
+        // Evict from cache - next access will load the redone state from DB.
+        self.blocks.remove(&block.id);
+
+        Ok(true)
+    }
+
+    async fn undo_depth(&self, agent_id: &str, label: &str) -> MemoryResult<usize> {
+        // Get block ID from DB
+        let block =
+            pattern_db::queries::get_block_by_label(self.dbs.constellation.pool(), agent_id, label)
+                .await?;
+
+        let block = block.ok_or_else(|| MemoryError::NotFound {
+            agent_id: agent_id.to_string(),
+            label: label.to_string(),
+        })?;
+
+        // Count active updates
+        let count =
+            pattern_db::queries::count_undo_steps(self.dbs.constellation.pool(), &block.id).await?;
+
+        Ok(count as usize)
+    }
+
+    async fn redo_depth(&self, agent_id: &str, label: &str) -> MemoryResult<usize> {
+        // Get block ID from DB
+        let block =
+            pattern_db::queries::get_block_by_label(self.dbs.constellation.pool(), agent_id, label)
+                .await?;
+
+        let block = block.ok_or_else(|| MemoryError::NotFound {
+            agent_id: agent_id.to_string(),
+            label: label.to_string(),
+        })?;
+
+        // Count inactive updates after active branch
+        let count =
+            pattern_db::queries::count_redo_steps(self.dbs.constellation.pool(), &block.id).await?;
+
+        Ok(count as usize)
     }
 }
 

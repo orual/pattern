@@ -137,6 +137,7 @@ impl<'a> BlockBuilder<'a> {
         // Set initial content if provided
         if let Some(content) = &self.initial_content {
             doc.set_text(content, true)?;
+            self.memory.mark_dirty(&owner_str, &self.label);
             self.memory.persist_block(&owner_str, &self.label).await?;
         }
 

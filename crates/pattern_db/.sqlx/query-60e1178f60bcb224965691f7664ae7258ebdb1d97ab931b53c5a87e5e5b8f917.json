@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT id, seq FROM memory_block_updates\n        WHERE block_id = ? AND is_active = 0 AND seq > ?\n        ORDER BY seq ASC\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "seq",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "60e1178f60bcb224965691f7664ae7258ebdb1d97ab931b53c5a87e5e5b8f917"
+}

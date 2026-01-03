@@ -96,50 +96,104 @@ Combine session-based UndoManager for quick undo with persisted checkpoints for 
 
 ## Design
 
-### Checkpoint storage
+### Existing infrastructure
 
-New table in constellation database:
+Most of the infrastructure for undo already exists in `pattern_db`:
+
+- **`MemoryBlockUpdate`**: Stores incremental Loro deltas with `seq` ordering
+- **`MemoryBlockCheckpoint`**: Stores full Loro snapshots (for consolidation, not currently used)
+- **`get_checkpoint_and_updates()`**: Loads checkpoint + replays deltas to reconstruct state
+
+Currently, consolidation (`consolidate_checkpoint()`) is implemented but **not wired up**—updates accumulate indefinitely. This means we already have full edit history; we just need to expose it for undo.
+
+### Required changes
+
+**1. Add version vector to updates**
+
+Add `frontier: Option<Vec<u8>>` to `MemoryBlockUpdate` to store the version vector after each update:
 
 ```sql
-CREATE TABLE memory_block_checkpoints (
-    id TEXT PRIMARY KEY DEFAULT (uuid_generate_v4()),
-    block_id TEXT NOT NULL REFERENCES memory_blocks(id) ON DELETE CASCADE,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    version_blob BLOB NOT NULL,  -- VersionVector.encode()
-    operation TEXT,              -- What triggered this ("replace", "append", etc.)
-    seq INTEGER NOT NULL,        -- Ordering within block
-    UNIQUE(block_id, seq)
-);
-
-CREATE INDEX idx_checkpoints_block_seq ON memory_block_checkpoints(block_id, seq DESC);
+ALTER TABLE memory_block_updates ADD COLUMN frontier BLOB;
 ```
 
-### Checkpoint creation (throttled)
+```rust
+// In store_update():
+pub async fn store_update(
+    pool: &SqlitePool,
+    block_id: &str,
+    update_blob: &[u8],
+    frontier: Option<&[u8]>,  // NEW: version vector after this update
+    source: Option<&str>,
+) -> Result<i64, DbError>;
+```
 
-Checkpoints are created at **persist time**, not edit time. This captures the state before the pending batch of changes:
+**2. Undo = replay to previous seq**
 
-1. Block loaded at V1, `last_persisted_frontier = V1`
-2. Agent makes edits (doc now at V2)
-3. `persist_block()` called
-4. Check: time since last checkpoint > threshold (default 30s)?
-5. If yes → store checkpoint with `version = V1.encode()` (the "before" state)
-6. Persist delta V1→V2
-7. Update `last_persisted_frontier = V2`
-
-This approach:
-- Requires no hooks in StructuredDocument mutation methods
-- Batches rapid edits naturally
-- Checkpoints represent "last saved state" (intuitive mental model)
-
-### CachedBlock additions
+To undo to before update N:
+1. Load latest checkpoint (if any)
+2. Replay updates with `seq < N`
+3. Use `fork_at()` to get clean doc at that state
 
 ```rust
-pub struct CachedBlock {
-    // ... existing fields ...
+// Undo implementation:
+async fn undo_block(&self, agent_id: &str, label: &str) -> MemoryResult<bool> {
+    let block_id = self.get_block_id(agent_id, label).await?
+        .ok_or_else(|| MemoryError::not_found(agent_id, label))?;
 
-    /// When we last created a checkpoint (for throttling)
-    pub last_checkpoint_at: Option<std::time::Instant>,
+    // Get the update we want to revert (most recent)
+    let latest_update = pattern_db::queries::get_latest_update(
+        self.dbs.constellation.pool(),
+        &block_id,
+    ).await?;
+
+    let target_seq = match latest_update {
+        Some(u) if u.seq > 0 => u.seq - 1,
+        _ => return Ok(false), // Nothing to undo
+    };
+
+    // Load checkpoint + updates up to target_seq
+    let (checkpoint, updates) = pattern_db::queries::get_checkpoint_and_updates_until(
+        self.dbs.constellation.pool(),
+        &block_id,
+        target_seq,
+    ).await?;
+
+    // Reconstruct doc at target state
+    let doc = reconstruct_doc_at(checkpoint, updates)?;
+    let frontier = doc.current_version();
+
+    // Fork to get clean doc (discards ops after target)
+    let restored = doc.inner().fork_at(&doc.inner().oplog_frontiers());
+
+    // Update cache and persist
+    // ... (update CachedBlock, mark dirty, persist)
+
+    Ok(true)
 }
+```
+
+**3. New queries**
+
+```rust
+/// Get the most recent update for a block
+pub async fn get_latest_update(
+    pool: &SqlitePool,
+    block_id: &str,
+) -> Result<Option<MemoryBlockUpdate>, DbError>;
+
+/// Get checkpoint + updates up to (inclusive) a seq number
+pub async fn get_checkpoint_and_updates_until(
+    pool: &SqlitePool,
+    block_id: &str,
+    max_seq: i64,
+) -> Result<(Option<MemoryBlockCheckpoint>, Vec<MemoryBlockUpdate>), DbError>;
+
+/// Delete updates after a seq number (for committing undo)
+pub async fn delete_updates_after(
+    pool: &SqlitePool,
+    block_id: &str,
+    after_seq: i64,
+) -> Result<u64, DbError>;
 ```
 
 ### MemoryStore trait additions
@@ -149,122 +203,38 @@ pub struct CachedBlock {
 pub trait MemoryStore: Send + Sync + fmt::Debug {
     // ... existing methods ...
 
-    /// Undo the last checkpointed change to a block.
-    /// Returns true if undo was performed, false if no checkpoints available.
+    /// Undo the last persisted change to a block.
+    /// Returns true if undo was performed, false if no history available.
     async fn undo_block(&self, agent_id: &str, label: &str) -> MemoryResult<bool>;
 
-    /// Get number of available undo checkpoints for a block.
-    async fn undo_count(&self, agent_id: &str, label: &str) -> MemoryResult<usize>;
+    /// Get number of available undo steps for a block.
+    async fn undo_depth(&self, agent_id: &str, label: &str) -> MemoryResult<usize>;
 }
 ```
 
-### MemoryCache implementation
+### Undo window and consolidation
+
+Currently: unlimited undo (no consolidation running).
+
+When consolidation is added, it should preserve recent updates for undo:
 
 ```rust
-impl MemoryCache {
-    /// Checkpoint interval - only create checkpoint if this much time has passed
-    const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(30);
+pub struct ConsolidationConfig {
+    /// Keep at least this many recent updates for undo
+    pub keep_recent_updates: usize,  // e.g., 50
 
-    /// Maximum checkpoints to load when block is accessed
-    const MAX_LOADED_CHECKPOINTS: usize = 20;
-}
+    /// Keep updates from at least this long ago
+    pub keep_recent_duration: Duration,  // e.g., 7 days
 
-// In persist():
-async fn persist(&self, agent_id: &str, label: &str) -> MemoryResult<()> {
-    // ... existing logic to get entry and check dirty ...
-
-    let should_checkpoint = entry.dirty && match entry.last_checkpoint_at {
-        None => true,
-        Some(last) => last.elapsed() > Self::CHECKPOINT_INTERVAL,
-    };
-
-    if should_checkpoint {
-        if let Some(frontier) = &entry.last_persisted_frontier {
-            pattern_db::queries::store_checkpoint(
-                self.dbs.constellation.pool(),
-                &entry.id,
-                &frontier.encode(),
-                "edit",  // Could be more specific based on context
-            ).await?;
-            entry.last_checkpoint_at = Some(Instant::now());
-        }
-    }
-
-    // ... rest of persist logic ...
-}
-
-// Undo implementation:
-async fn undo_block(&self, agent_id: &str, label: &str) -> MemoryResult<bool> {
-    let block_id = /* get from DB */;
-
-    let checkpoint = pattern_db::queries::pop_checkpoint(
-        self.dbs.constellation.pool(),
-        &block_id,
-    ).await?;
-
-    match checkpoint {
-        Some(cp) => {
-            let vv = VersionVector::decode(&cp.version)
-                .map_err(|e| MemoryError::Other(format!("Invalid checkpoint: {}", e)))?;
-            let frontiers = entry.doc.inner().vv_to_frontiers(&vv);
-            let restored_loro = entry.doc.inner().fork_at(&frontiers);
-
-            // Reconstruct StructuredDocument with same metadata
-            let restored = StructuredDocument::from_loro_doc(
-                restored_loro,
-                entry.doc.schema().clone(),
-                entry.doc.permission(),
-                entry.doc.label().to_string(),
-                entry.doc.accessor_agent_id().map(String::from),
-            );
-
-            // Replace in cache
-            entry.doc = restored;
-            entry.dirty = true;
-            entry.last_persisted_frontier = Some(vv);
-
-            // Persist immediately
-            drop(entry);  // Release lock
-            self.persist(agent_id, label).await?;
-
-            Ok(true)
-        }
-        None => Ok(false),
-    }
+    /// Consolidate when update count exceeds this
+    pub consolidate_threshold: usize,  // e.g., 100
 }
 ```
 
-### pattern_db queries
-
-```rust
-/// Store a checkpoint for a block
-pub async fn store_checkpoint(
-    pool: &SqlitePool,
-    block_id: &str,
-    version_blob: &[u8],
-    operation: &str,
-) -> Result<i64, DbError>;
-
-/// Pop (retrieve and delete) the most recent checkpoint
-pub async fn pop_checkpoint(
-    pool: &SqlitePool,
-    block_id: &str,
-) -> Result<Option<Checkpoint>, DbError>;
-
-/// Get recent checkpoints without removing them
-pub async fn get_recent_checkpoints(
-    pool: &SqlitePool,
-    block_id: &str,
-    limit: usize,
-) -> Result<Vec<Checkpoint>, DbError>;
-
-/// Delete checkpoints older than a sequence number
-pub async fn delete_checkpoints_before(
-    pool: &SqlitePool,
-    block_id: &str,
-    seq: i64,
-) -> Result<u64, DbError>;
-```
+Consolidation would then:
+1. Create new checkpoint with merged state
+2. Delete updates older than `max(keep_recent_updates, keep_recent_duration)`
+3. Preserve recent updates for undo capability
 
 ### Tool: block_undo
 
@@ -342,26 +312,404 @@ The API cleanup benefits the undo implementation (cleaner document access, simpl
 
 ## Implementation plan
 
-### Phase 1: Database schema + queries for checkpoints
-1. Add migration for `memory_block_checkpoints` table
-2. Implement `store_checkpoint`, `pop_checkpoint`, `get_recent_checkpoints` in pattern_db
+### Phase 1: Database schema + queries
+1. Add migration: `ALTER TABLE memory_block_updates ADD COLUMN frontier BLOB`
+2. Update `store_update()` to accept and store frontier
+3. Implement `get_latest_update()`, `get_checkpoint_and_updates_until()`, `delete_updates_after()`
+4. Run `cargo sqlx prepare` in pattern_db
 
-### Phase 2: MemoryCache checkpoint integration
-1. Add `last_checkpoint_at` field to `CachedBlock`
-2. Modify `persist()` to create checkpoints based on time threshold
-3. Implement `undo_block()` and `undo_count()` methods
-4. Add `StructuredDocument::from_loro_doc()` constructor for restore
+### Phase 2: MemoryCache undo integration
+1. Update `persist()` to pass frontier to `store_update()`
+2. Implement `undo_block()` - replay to previous seq, fork, persist
+3. Implement `undo_depth()` - count of available updates
+4. Add to `MemoryStore` trait
 
 ### Phase 3: Tool + testing
-1. Create `BlockUndoTool` (or add operation to BlockEditTool)
+1. Create `BlockUndoTool` (or add `undo` operation to BlockEditTool)
 2. Register in tool registry
 3. Add integration tests for undo scenarios
-4. Test edge cases: empty block, no checkpoints, rapid edits
+4. Test edge cases: empty block, no history, rapid edits, undo multiple times
 
 ### Phase 4: FileSource integration
-1. Ensure file blocks get checkpointed like regular blocks
+1. Ensure file blocks store updates like regular blocks
 2. Document the memory-vs-disk behavior after undo
 3. Consider adding explicit "revert to disk" operation
+
+### Future: Consolidation with undo preservation
+1. Wire up `consolidate_checkpoint()` with configurable retention
+2. Add `ConsolidationConfig` to `MemoryCache`
+3. Background task or on-persist trigger for consolidation
+4. Respect `keep_recent_updates` / `keep_recent_duration` for undo window
+
+## Auto-persist design
+
+### Motivation
+
+The current API requires callers to:
+1. Get a `StructuredDocument` from `MemoryStore`
+2. Mutate the document
+3. Call `memory.mark_dirty(agent_id, label)`
+4. Call `memory.persist_block(agent_id, label)`
+
+This is error-prone—callers can forget to mark dirty or persist, leading to data loss. Since `LoroDoc` is Arc-shared internally, mutations to the returned document already propagate back to the cached version. We can leverage Loro's subscription system to detect edits and auto-persist.
+
+### Design: subscription-based auto-persist
+
+When a block is loaded, we subscribe to the underlying `LoroDoc`. When changes are detected (via the subscription callback), we spawn a debounced persist operation.
+
+```
+┌─────────────────┐     edit      ┌──────────────┐
+│ StructuredDoc   │──────────────▶│   LoroDoc    │
+│   (returned)    │               │  (Arc-shared)│
+└─────────────────┘               └──────┬───────┘
+                                         │
+                                         │ commit()
+                                         ▼
+                                  ┌──────────────┐
+                                  │ Subscription │
+                                  │   callback   │
+                                  └──────┬───────┘
+                                         │
+                                         │ signals
+                                         ▼
+                              ┌────────────────────┐
+                              │  AutoPersistHandle │
+                              │  (debounce timer)  │
+                              └──────────┬─────────┘
+                                         │
+                                         │ after debounce
+                                         ▼
+                              ┌────────────────────┐
+                              │   persist_block()  │
+                              └────────────────────┘
+```
+
+### CachedBlock additions (revised)
+
+```rust
+pub struct CachedBlock {
+    /// The Loro-backed document.
+    pub doc: StructuredDocument,
+
+    /// Last sequence number from DB updates table.
+    pub last_seq: i64,
+
+    /// Version vector at last persist (for delta exports).
+    pub last_persisted_frontier: Option<VersionVector>,
+
+    /// Whether there are unpersisted changes.
+    pub dirty: bool,
+
+    /// When this block was last accessed.
+    pub last_accessed: DateTime<Utc>,
+
+    /// When we last created a checkpoint (for throttling).
+    pub last_checkpoint_at: Option<std::time::Instant>,
+
+    // === Auto-persist fields ===
+
+    /// Subscription handle (keeps subscription alive).
+    /// Dropped when block is evicted from cache.
+    pub(crate) subscription: Option<loro::Subscription>,
+
+    /// Channel sender to signal the debounce task.
+    /// None if auto-persist is disabled for this block.
+    pub(crate) persist_trigger: Option<tokio::sync::mpsc::Sender<()>>,
+
+    /// Handle to the background debounce task.
+    /// Aborted when block is evicted.
+    pub(crate) persist_task: Option<tokio::task::JoinHandle<()>>,
+}
+```
+
+### AutoPersist configuration
+
+```rust
+/// Configuration for auto-persist behavior
+#[derive(Debug, Clone)]
+pub struct AutoPersistConfig {
+    /// Enable auto-persist globally. Defaults to true.
+    pub enabled: bool,
+
+    /// Debounce interval before persisting after the last edit.
+    /// Defaults to 500ms.
+    pub debounce_ms: u64,
+
+    /// Maximum time to wait before forcing a persist, even if edits continue.
+    /// Prevents infinite debounce with rapid continuous edits.
+    /// Defaults to 5 seconds.
+    pub max_debounce_ms: u64,
+}
+
+impl Default for AutoPersistConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            debounce_ms: 500,
+            max_debounce_ms: 5000,
+        }
+    }
+}
+```
+
+### MemoryCache additions
+
+```rust
+impl MemoryCache {
+    /// Auto-persist configuration
+    auto_persist_config: AutoPersistConfig,
+
+    /// Create with auto-persist enabled (default)
+    pub fn with_auto_persist(mut self, config: AutoPersistConfig) -> Self {
+        self.auto_persist_config = config;
+        self
+    }
+
+    /// Setup auto-persist for a cached block.
+    /// Called when block is loaded into cache.
+    fn setup_auto_persist(&self, block_id: &str, entry: &mut CachedBlock) {
+        if !self.auto_persist_config.enabled {
+            return;
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<()>(16);
+
+        // Clone what we need for the debounce task
+        let block_id = block_id.to_string();
+        let agent_id = entry.doc.agent_id().to_string();
+        let label = entry.doc.label().to_string();
+        let debounce = Duration::from_millis(self.auto_persist_config.debounce_ms);
+        let max_debounce = Duration::from_millis(self.auto_persist_config.max_debounce_ms);
+        let cache = self.clone(); // MemoryCache needs to be Clone (Arc internally)
+
+        // Spawn debounce task
+        let task = tokio::spawn(async move {
+            debounce_persist_loop(rx, debounce, max_debounce, cache, agent_id, label).await;
+        });
+
+        // Subscribe to document changes
+        let tx_clone = tx.clone();
+        let subscription = entry.doc.subscribe_root(Arc::new(move |_event| {
+            // Non-blocking send - if channel is full, the task will persist soon anyway
+            let _ = tx_clone.try_send(());
+        }));
+
+        entry.subscription = Some(subscription);
+        entry.persist_trigger = Some(tx);
+        entry.persist_task = Some(task);
+    }
+}
+
+/// Background task that debounces persist signals.
+async fn debounce_persist_loop(
+    mut rx: tokio::sync::mpsc::Receiver<()>,
+    debounce: Duration,
+    max_debounce: Duration,
+    cache: MemoryCache,
+    agent_id: String,
+    label: String,
+) {
+    let mut first_signal_at: Option<Instant> = None;
+
+    loop {
+        // Wait for first signal
+        if rx.recv().await.is_none() {
+            // Channel closed, block evicted
+            break;
+        }
+
+        // Record when we first got a signal in this batch
+        let batch_start = Instant::now();
+        if first_signal_at.is_none() {
+            first_signal_at = Some(batch_start);
+        }
+
+        // Debounce: wait for debounce duration or until max_debounce exceeded
+        loop {
+            let elapsed_since_first = first_signal_at.unwrap().elapsed();
+            if elapsed_since_first >= max_debounce {
+                // Max debounce exceeded, persist now
+                break;
+            }
+
+            let remaining_max = max_debounce - elapsed_since_first;
+            let timeout = debounce.min(remaining_max);
+
+            match tokio::time::timeout(timeout, rx.recv()).await {
+                Ok(Some(())) => {
+                    // Got another signal, restart debounce (unless max exceeded)
+                    continue;
+                }
+                Ok(None) => {
+                    // Channel closed
+                    return;
+                }
+                Err(_) => {
+                    // Timeout expired, debounce complete
+                    break;
+                }
+            }
+        }
+
+        // Persist
+        cache.mark_dirty(&agent_id, &label);
+        if let Err(e) = cache.persist(&agent_id, &label).await {
+            tracing::error!(
+                agent_id = %agent_id,
+                label = %label,
+                error = %e,
+                "Auto-persist failed"
+            );
+        } else {
+            tracing::debug!(
+                agent_id = %agent_id,
+                label = %label,
+                "Auto-persisted block"
+            );
+        }
+
+        first_signal_at = None;
+    }
+}
+```
+
+### Subscription lifecycle
+
+1. **On load**: `setup_auto_persist()` creates subscription and debounce task
+2. **On edit + commit**: Subscription fires, signals debounce task
+3. **On debounce timeout**: Task calls `persist()`
+4. **On eviction**: Dropping `CachedBlock` drops `subscription` (unsubscribes) and aborts `persist_task`
+
+Important: Loro subscriptions only fire on `commit()`. Callers must call `doc.commit()` after edits for auto-persist to work. This is already the expected pattern for CRDT semantics.
+
+### Commit convenience
+
+To make auto-persist transparent, mutation methods on `StructuredDocument` could auto-commit:
+
+```rust
+impl StructuredDocument {
+    /// Set text content and commit (triggers subscriptions).
+    pub fn set_text_and_commit(&self, content: &str, is_system: bool) -> Result<(), DocumentError> {
+        self.set_text(content, is_system)?;
+        self.commit();
+        Ok(())
+    }
+
+    // Similar for append_text_and_commit, set_field_and_commit, etc.
+}
+```
+
+Or provide a guard pattern:
+
+```rust
+impl StructuredDocument {
+    /// Create an auto-committing scope.
+    /// Commit is called when the guard is dropped.
+    pub fn editing(&self) -> EditGuard<'_> {
+        EditGuard { doc: self }
+    }
+}
+
+pub struct EditGuard<'a> {
+    doc: &'a StructuredDocument,
+}
+
+impl Drop for EditGuard<'_> {
+    fn drop(&mut self) {
+        self.doc.commit();
+    }
+}
+
+// Usage:
+{
+    let _guard = doc.editing();
+    doc.set_text("hello", true)?;
+    doc.append_text(" world", true)?;
+} // commit() called here, triggers subscription → auto-persist
+```
+
+### Explicit persist still supported
+
+Auto-persist is fire-and-forget. For operations that need guaranteed persistence (e.g., before responding to user), callers can still call:
+
+```rust
+memory.persist_block(agent_id, label).await?;
+```
+
+This immediately persists, canceling any pending debounce.
+
+### Thread safety considerations
+
+- `LoroDoc` is internally thread-safe (uses Arc)
+- Subscription callbacks run synchronously in the thread that calls `commit()`
+- `mpsc::Sender::try_send` is non-blocking and safe from any thread
+- The debounce task runs on the Tokio runtime
+- `MemoryCache` uses `DashMap` for concurrent access
+
+### MemoryCache self-reference
+
+The debounce task needs to call `cache.persist()`, but `MemoryCache` isn't currently `Clone`. Options:
+
+1. **Arc\<MemoryCacheInner\>**: Wrap fields in inner struct, make `Clone` cheap. Cleanest approach since `persist()` has non-trivial logic.
+
+2. **Pass components directly**: Give the task `Arc<DashMap>` + `Arc<ConstellationDatabases>`, refactor persist logic into a free function. More churn but better testability.
+
+3. **Weak reference**: Task holds `Weak<MemoryCache>`, upgrades when needed. Gracefully handles cache being dropped, but adds upgrade ceremony on every persist.
+
+**Recommendation**: Option 1 (Arc\<Inner\>). Standard pattern, minimal API change, keeps persist logic encapsulated.
+
+Note: Even if the debounce task somehow outlives the cache, the mpsc channel closes when `CachedBlock` is dropped (which holds the `Sender`), causing the task to exit cleanly via `rx.recv() -> None`.
+
+### Integration with checkpoints (undo)
+
+Auto-persist integrates naturally with checkpoints:
+1. Edit detected → subscription fires → signals debounce
+2. Debounce timeout → `persist()` called
+3. In `persist()`: check if checkpoint is needed (time threshold)
+4. If yes: store checkpoint with previous version
+5. Export and store delta
+6. Update `last_persisted_frontier`
+
+No changes needed to checkpoint logic—it already runs in `persist()`.
+
+### Disabling auto-persist
+
+For specific blocks (e.g., high-frequency scratch buffers):
+
+```rust
+impl MemoryStore {
+    /// Get a block without setting up auto-persist.
+    /// Caller must manually persist changes.
+    async fn get_block_manual_persist(
+        &self,
+        agent_id: &str,
+        label: &str,
+    ) -> MemoryResult<Option<StructuredDocument>>;
+}
+```
+
+Or via block metadata:
+
+```rust
+// In BlockMetadata
+pub auto_persist: bool,  // defaults to true
+```
+
+### Implementation phases
+
+This feature slots into the existing implementation plan:
+
+#### Phase 2.5: Auto-persist infrastructure
+1. Add `AutoPersistConfig` to `MemoryCache`
+2. Add subscription/task fields to `CachedBlock`
+3. Implement `setup_auto_persist()` and `debounce_persist_loop()`
+4. Wire into `load_from_db()` to setup auto-persist on load
+5. Clean up subscription/task on cache eviction
+
+#### Phase 2.6: Commit convenience
+1. Add `EditGuard` pattern to `StructuredDocument`
+2. Update tool implementations to use guard or explicit commit
+3. Document the commit requirement in API docs
 
 ## Open questions
 
@@ -372,6 +720,10 @@ The API cleanup benefits the undo implementation (cleaner document access, simpl
 3. **Checkpoint metadata**: Currently just storing operation name. Could store more context (agent_id, tool call ID, etc.) for audit trails.
 
 4. **Garbage collection**: Checkpoints accumulate forever. Add periodic cleanup of very old checkpoints? Age-based or count-based limit per block?
+
+5. **Auto-persist debounce tuning**: 500ms default feels right for interactive use. May need adjustment for batch operations. Should this be per-block configurable?
+
+6. **Commit ergonomics**: Should mutation methods auto-commit by default? This changes the current behavior where batched edits are possible. The `EditGuard` pattern preserves batching while ensuring commit happens.
 
 ## References
 

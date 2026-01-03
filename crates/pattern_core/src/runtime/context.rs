@@ -1113,6 +1113,7 @@ impl RuntimeContext {
                         data_type: "memory_block".to_string(),
                         details: format!("Failed to set content for block '{}': {}", label, e),
                     })?;
+                self.memory.mark_dirty(&id, label);
                 self.memory.persist_block(&id, label).await.map_err(|e| {
                     CoreError::InvalidFormat {
                         data_type: "memory_block".to_string(),
@@ -1160,6 +1161,7 @@ impl RuntimeContext {
                     data_type: "memory_block".to_string(),
                     details: format!("Failed to set persona content: {}", e),
                 })?;
+            self.memory.mark_dirty(&id, "persona");
             self.memory
                 .persist_block(&id, "persona")
                 .await

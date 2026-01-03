@@ -354,7 +354,7 @@ pub struct SharedBlockAttachment {
 /// An incremental update to a memory block.
 ///
 /// Updates are Loro deltas stored between checkpoints. On read, the checkpoint
-/// is loaded and updates are applied in seq order to reconstruct current state.
+/// is loaded and active updates are applied in seq order to reconstruct current state.
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct MemoryBlockUpdate {
     /// Auto-incrementing ID
@@ -374,6 +374,12 @@ pub struct MemoryBlockUpdate {
 
     /// Source of this update
     pub source: Option<String>,
+
+    /// Loro frontier after this update (for undo support)
+    pub frontier: Option<Vec<u8>>,
+
+    /// Whether this update is on the active branch (for undo/redo)
+    pub is_active: bool,
 
     /// When this update was created
     pub created_at: DateTime<Utc>,
