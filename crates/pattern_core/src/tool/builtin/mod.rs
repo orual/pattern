@@ -12,6 +12,8 @@ mod recall;
 mod search;
 pub mod search_utils;
 mod send_message;
+mod shell;
+mod shell_types;
 mod source;
 mod system_integrity;
 #[cfg(test)]
@@ -31,6 +33,8 @@ use schemars::JsonSchema;
 pub use search::{SearchDomain, SearchInput, SearchOutput, SearchTool};
 pub use send_message::SendMessageTool;
 use serde::{Deserialize, Serialize};
+pub use shell::ShellTool;
+pub use shell_types::{ShellInput, ShellOp};
 pub use source::SourceTool;
 pub use system_integrity::{SystemIntegrityInput, SystemIntegrityOutput, SystemIntegrityTool};
 pub use web::{WebFormat, WebInput, WebOutput, WebTool};
@@ -239,6 +243,7 @@ pub const BUILTIN_TOOL_NAMES: &[&str] = &[
     "block_edit",
     "source",
     "file",
+    "shell",
     "emergency_halt",
 ];
 
@@ -273,6 +278,9 @@ pub fn create_builtin_tool(name: &str, ctx: Arc<dyn ToolContext>) -> Option<Box<
             Arc::clone(&ctx),
         )))),
         "file" => Some(Box::new(DynamicToolAdapter::new(FileTool::new(
+            Arc::clone(&ctx),
+        )))),
+        "shell" => Some(Box::new(DynamicToolAdapter::new(ShellTool::new(
             Arc::clone(&ctx),
         )))),
         "emergency_halt" => Some(Box::new(DynamicToolAdapter::new(SystemIntegrityTool::new(

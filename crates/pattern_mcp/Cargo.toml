@@ -23,7 +23,7 @@ chrono = { workspace = true }
 futures = { workspace = true }
 
 # MCP SDK
-rmcp = { workspace = true, features = ["transport-child-process", "client", "transport-streamable-http-client-reqwest", "transport-sse-client", "transport-sse-client-reqwest"] }
+rmcp = { workspace = true, features = ["transport-child-process", "client", "transport-streamable-http-client-reqwest", "client-side-sse"] }
 
 # HTTP Server
 axum = { workspace = true }

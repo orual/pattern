@@ -7,6 +7,7 @@ Core agent framework, memory management, and coordination system for Pattern's m
 
 ## Current Status
 - SQLite migration complete, Loro CRDT memory, Jacquard ATProto client
+- Shell tool implemented with PTY backend and security validation
 - Active development: API server, MCP server, data sources
 
 ## Tool System Architecture
@@ -28,6 +29,13 @@ Following Letta/MemGPT patterns with multi-operation tools:
 4. **send_message** - Agent communication
    - Routes through AgentMessageRouter
    - Supports CLI, Group, Discord, Queue endpoints
+
+5. **shell** - Command execution via PTY
+   - Operations: `execute`, `spawn`, `kill`, `status`
+   - Uses `ProcessSource` DataStream for execution
+   - Permission validation via `CommandValidator` trait
+   - Blocklist for dangerous commands (rm -rf /, etc.)
+   - Three permission levels: `ReadOnly`, `ReadWrite`, `Admin`
 
 ### Implementation Notes
 - Each tool has single entry point with operation enum
@@ -80,6 +88,11 @@ Following Letta/MemGPT patterns with multi-operation tools:
    - Generic trait for pull/push consumption
    - Type-erased wrapper for concrete→generic bridging
    - Prompt templates using minijinja
+   - **bluesky/**: ATProto firehose consumption
+   - **process/**: Shell command execution via PTY
+     - `LocalPtyBackend`: Persistent shell session with cwd/env
+     - `ProcessSource`: DataStream wrapper with notifications
+     - `CommandValidator`: Security policy enforcement
 
 ## Common Patterns
 
@@ -109,6 +122,27 @@ return Err(CoreError::tool_not_found(name, available_tools));
 return Err(CoreError::memory_not_found(&agent_id, &block_name, available_blocks));
 ```
 
+### Accessing Data Sources from Tools
+Tools that need typed access to specific DataStream implementations use `as_any()` downcast:
+```rust
+// DataStream trait includes as_any() for downcasting
+fn find_process_source(&self, sources: &dyn SourceManager) -> Result<Arc<dyn DataStream>> {
+    // Try explicit source_id, then default ID, then first matching type
+    for id in sources.list_streams() {
+        if let Some(source) = sources.get_stream_source(&id) {
+            if source.as_any().is::<ProcessSource>() {
+                return Ok(source);
+            }
+        }
+    }
+    Err(CoreError::tool_exec_msg("shell", "no process source"))
+}
+
+// Downcast at point of use
+let process_source = source.as_any().downcast_ref::<ProcessSource>()?;
+```
+See `docs/data-sources-guide.md` for full pattern documentation.
+
 ## Performance Notes
 - CompactString inlines strings ≤ 24 bytes
 - DashMap shards internally for concurrent access
@@ -122,3 +156,24 @@ return Err(CoreError::memory_not_found(&agent_id, &block_name, available_blocks)
 - **Ollama**: Stub only - TODO
 
 **Known Issues**: BERT models fail in Candle (dtype errors), use Jina models instead.
+
+## Testing
+
+### Test Utilities (`tool/builtin/test_utils.rs`)
+Shared test infrastructure for tool testing:
+- `MockToolContext`: Implements `ToolContext` with optional SourceManager
+- `MockSourceManager`: Implements `SourceManager` for DataStream testing
+- `MockToolContextBuilder`: Fluent builder for configurable test contexts
+- `create_test_context_with_agent()`: Quick setup for simple tests
+- `create_test_agent_in_db()`: Helper for FK constraint satisfaction
+
+### Running Tests
+```bash
+# All pattern-core tests
+cargo nextest run -p pattern-core
+
+# Shell tool tests specifically
+cargo nextest run -p pattern-core shell
+
+# PTY tests may skip in CI (no PTY available)
+```

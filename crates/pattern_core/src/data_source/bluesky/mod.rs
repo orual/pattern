@@ -10,6 +10,7 @@ mod firehose;
 mod inner;
 mod thread;
 
+use std::any::Any;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -268,6 +269,10 @@ impl DataStream for BlueskyStream {
 
     fn supports_pull(&self) -> bool {
         false
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

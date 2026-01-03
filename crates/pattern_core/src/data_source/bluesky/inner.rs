@@ -1063,7 +1063,10 @@ impl BlueskyStreamInner {
             (text, images)
         } else {
             // Fallback: simple text format without thread tree
-            (self.format_posts_simple(&posts, &hydrated), Vec::new())
+            (
+                self.format_posts_simple(&posts, &hydrated).await,
+                Vec::new(),
+            )
         };
 
         // Mark this thread as recently shown
@@ -1147,15 +1150,20 @@ impl BlueskyStreamInner {
     }
 
     /// Simple text formatting when thread fetch fails.
-    fn format_posts_simple(
+    async fn format_posts_simple(
         &self,
         posts: &[FirehosePost],
         hydrated: &DashMap<AtUri<'static>, PostView<'static>>,
     ) -> String {
         let mut text = String::new();
+        let h = self.hydrate_posts(posts).await;
+        for r in hydrated.iter() {
+            let (uri, post) = r.pair();
+            h.insert(uri.clone(), post.clone());
+        }
 
         for post in posts {
-            if let Some(view) = hydrated.get(&post.uri) {
+            if let Some(view) = h.get(&post.uri) {
                 let handle = view.author.handle.as_str();
 
                 if post.is_mention {

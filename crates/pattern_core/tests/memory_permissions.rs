@@ -204,6 +204,7 @@ fn test_render_shows_permissions() {
 #[test]
 fn test_identity_fields() {
     // Test with identity set
+    #[allow(deprecated)]
     let doc_with_identity = StructuredDocument::new_with_identity(
         BlockSchema::text(),
         "test_block".to_string(),
@@ -221,6 +222,7 @@ fn test_identity_fields() {
 #[test]
 fn test_auto_attribution_sets_commit_message() {
     // Create doc with identity
+    #[allow(deprecated)]
     let doc = StructuredDocument::new_with_identity(
         BlockSchema::text(),
         "test_block".to_string(),

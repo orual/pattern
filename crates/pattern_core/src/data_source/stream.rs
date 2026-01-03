@@ -3,6 +3,7 @@
 //! Sources that produce events over time (Bluesky firehose, Discord events,
 //! LSP diagnostics, etc.) implement this trait.
 
+use std::any::Any;
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -138,4 +139,19 @@ pub trait DataStream: Send + Sync {
     ) -> Result<EditFeedback> {
         Ok(EditFeedback::Applied { message: None })
     }
+
+    // === Downcasting Support ===
+
+    /// Returns self as `&dyn Any` for downcasting to concrete types.
+    ///
+    /// This enables tools tightly coupled to specific source types to access
+    /// source-specific methods not exposed through the DataStream trait.
+    ///
+    /// # Example
+    /// ```ignore
+    /// if let Some(process_source) = source.as_any().downcast_ref::<ProcessSource>() {
+    ///     process_source.execute(command, timeout).await?;
+    /// }
+    /// ```
+    fn as_any(&self) -> &dyn Any;
 }

@@ -5,6 +5,7 @@
 //! - Helper utilities (NotificationBuilder, EphemeralBlockCache)
 //! - Trait object safety for DataStream and DataBlock
 
+use std::any::Any;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -416,6 +417,10 @@ impl DataStream for MockDataStream {
 
     fn status(&self) -> StreamStatus {
         StreamStatus::Stopped
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

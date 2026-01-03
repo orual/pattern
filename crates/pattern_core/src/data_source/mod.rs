@@ -132,6 +132,7 @@ pub mod bluesky;
 mod file_source;
 mod helpers;
 mod manager;
+pub mod process;
 mod registry;
 mod stream;
 mod types;
@@ -149,6 +150,11 @@ pub use file_source::{
 };
 pub use helpers::{BlockBuilder, EphemeralBlockCache, NotificationBuilder};
 pub use manager::{BlockEdit, BlockSourceInfo, EditFeedback, SourceManager, StreamSourceInfo};
+pub use process::{
+    CommandValidator, DefaultCommandValidator, ExecuteResult, LocalPtyBackend, OutputChunk,
+    ProcessSource, ProcessStatus, ShellBackend, ShellError, ShellPermission, ShellPermissionConfig,
+    TaskId,
+};
 pub use registry::{
     CustomBlockSourceFactory, CustomStreamSourceFactory, available_custom_block_types,
     available_custom_stream_types, create_custom_block, create_custom_stream,

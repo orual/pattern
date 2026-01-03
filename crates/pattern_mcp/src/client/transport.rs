@@ -3,9 +3,7 @@
 use crate::{Result, error::McpError};
 use rmcp::{
     service::{DynService, RoleClient, RunningService, ServiceExt},
-    transport::{
-        ConfigureCommandExt, SseClientTransport, StreamableHttpClientTransport, TokioChildProcess,
-    },
+    transport::{ConfigureCommandExt, StreamableHttpClientTransport, TokioChildProcess},
 };
 use tokio::process::Command;
 
@@ -43,8 +41,6 @@ pub enum TransportConfig {
     Stdio { command: String, args: Vec<String> },
     /// HTTP transport (streamable HTTP)
     Http { url: String, auth: AuthConfig },
-    /// SSE transport (Server-Sent Events)
-    Sse { url: String, auth: AuthConfig },
 }
 
 /// MCP client transport wrapper using dynamic dispatch
@@ -58,7 +54,6 @@ impl ClientTransport {
         match config {
             TransportConfig::Stdio { command, args } => Self::stdio(command, args).await,
             TransportConfig::Http { url, auth } => Self::http(url, auth).await,
-            TransportConfig::Sse { url, auth } => Self::sse(url, auth).await,
         }
     }
 
@@ -127,57 +122,6 @@ impl ClientTransport {
         }
     }
 
-    /// Create SSE transport for MCP server
-    pub async fn sse(url: String, auth: AuthConfig) -> Result<Self> {
-        match auth {
-            AuthConfig::None => {
-                let transport = SseClientTransport::start(url.clone())
-                    .await
-                    .map_err(|e| McpError::transport_init("sse", &url, e))?;
-                let service =
-                    ().into_dyn()
-                        .serve(transport)
-                        .await
-                        .map_err(|e| McpError::transport_init("sse", &url, e))?;
-                Ok(Self { service })
-            }
-            AuthConfig::Bearer(_) | AuthConfig::Headers(_) => {
-                // For now, use basic transport with auth header support
-                // TODO: Custom headers beyond Authorization need custom client implementation
-                let auth_header = auth_config_to_header(&auth);
-                if auth_header.is_some() {
-                    // The rmcp SSE transport should support auth headers
-                    let transport = SseClientTransport::start(url.clone())
-                        .await
-                        .map_err(|e| McpError::transport_init("sse", &url, e))?;
-                    let service =
-                        ().into_dyn()
-                            .serve(transport)
-                            .await
-                            .map_err(|e| McpError::transport_init("sse", &url, e))?;
-                    Ok(Self { service })
-                } else {
-                    Err(McpError::transport_init(
-                        "sse",
-                        &url,
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            "Custom headers other than Authorization not yet supported",
-                        ),
-                    ))
-                }
-            }
-            AuthConfig::OAuth { .. } => Err(McpError::transport_init(
-                "sse",
-                &url,
-                std::io::Error::new(
-                    std::io::ErrorKind::Unsupported,
-                    "OAuth authentication not yet implemented",
-                ),
-            )),
-        }
-    }
-
     /// Get the peer for MCP operations
     pub fn peer(&self) -> &rmcp::service::Peer<RoleClient> {
         self.service.peer()
@@ -201,15 +145,9 @@ mod tests {
             auth: AuthConfig::Bearer("token123".to_string()),
         };
 
-        let sse_config = TransportConfig::Sse {
-            url: "https://api.example.com/sse".to_string(),
-            auth: AuthConfig::None,
-        };
-
         // Just test that they can be created
         assert!(matches!(stdio_config, TransportConfig::Stdio { .. }));
         assert!(matches!(http_config, TransportConfig::Http { .. }));
-        assert!(matches!(sse_config, TransportConfig::Sse { .. }));
     }
 
     #[test]

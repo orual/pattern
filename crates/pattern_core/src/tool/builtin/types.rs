@@ -11,21 +11,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum BlockOp {
-    /// Load a block into working context
     Load,
-    /// Pin block to retain across batches
     Pin,
-    /// Unpin block (becomes ephemeral)
     Unpin,
-    /// Change block type to Archival
     Archive,
-    /// Get block metadata
     Info,
-    /// Set viewport for Text blocks (controls which lines are visible)
     Viewport,
-    /// Share block with another agent by name
     Share,
-    /// Remove sharing from another agent by name
     Unshare,
 }
 
@@ -57,15 +49,10 @@ pub struct BlockInput {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum BlockEditOp {
-    /// Append content to block
     Append,
-    /// Find and replace text
     Replace,
-    /// Apply diff/patch (advanced)
     Patch,
-    /// Set a specific field (Map/Composite schemas)
     SetField,
-    /// Replace a range of lines with new content
     EditRange,
 }
 
@@ -73,14 +60,10 @@ pub enum BlockEditOp {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplaceMode {
-    /// Replace first occurrence (default)
     #[default]
     First,
-    /// Replace all occurrences
     All,
-    /// Replace nth occurrence - parse "N: pattern" from 'old' field
     Nth,
-    /// Treat 'old' as a regex pattern
     Regex,
 }
 
@@ -122,9 +105,7 @@ pub struct BlockEditInput {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RecallOp {
-    /// Create new archival entry
     Insert,
-    /// Search archival entries
     Search,
 }
 
@@ -154,13 +135,9 @@ pub struct RecallInput {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceOp {
-    /// Pause stream notifications
     Pause,
-    /// Resume stream notifications
     Resume,
-    /// Get source status
     Status,
-    /// List all sources
     List,
 }
 
@@ -178,25 +155,15 @@ pub struct SourceInput {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FileOp {
-    /// Load file from disk into block
     Load,
-    /// Save block content to disk
     Save,
-    /// Create new file
     Create,
-    /// Delete file
     Delete,
-    /// Append to file
     Append,
-    /// Find/replace in file
     Replace,
-    /// List files in source (supports glob patterns)
     List,
-    /// Check sync status of loaded files
     Status,
-    /// Show unified diff between memory and disk
     Diff,
-    /// Reload file from disk, discarding memory changes
     Reload,
 }
 

@@ -8,6 +8,7 @@
 
 mod collect;
 mod db_agent;
+pub mod processing;
 mod traits;
 
 // Re-export tool_rules from tool module for backwards compatibility

@@ -340,6 +340,163 @@ let source = FileSource::from_config(base_path, &file_config);
 let block_ref = source.load(&file_path, ctx.clone(), owner).await?;
 ```
 
+## Implementation Patterns
+
+### Accessing Sources from Tools (as_any downcast)
+
+Tools that need typed access to specific data sources should use the `as_any()` downcast pattern. This allows tools to be created uniformly via `create_builtin_tool()` while still accessing type-specific source methods at runtime.
+
+```rust
+use std::any::Any;
+
+// DataStream trait includes as_any() for downcasting
+pub trait DataStream: Send + Sync {
+    fn as_any(&self) -> &dyn Any;
+    // ... other methods
+}
+
+// Tool implementation
+pub struct ShellTool {
+    ctx: Arc<dyn ToolContext>,
+    source_id: Option<String>,  // Optional explicit target
+}
+
+impl ShellTool {
+    /// Get SourceManager from ToolContext.
+    fn sources(&self) -> Result<Arc<dyn SourceManager>> {
+        self.ctx.sources().ok_or_else(|| {
+            CoreError::tool_exec_msg("shell", "no source manager available")
+        })
+    }
+
+    /// Find ProcessSource by ID or default.
+    fn find_process_source(&self, sources: &dyn SourceManager)
+        -> Result<Arc<dyn DataStream>>
+    {
+        // Try explicit source_id first
+        if let Some(id) = &self.source_id {
+            if let Some(source) = sources.get_stream_source(id) {
+                return Ok(source);
+            }
+        }
+
+        // Try default ID
+        if let Some(source) = sources.get_stream_source("process:shell") {
+            return Ok(source);
+        }
+
+        // Find first ProcessSource
+        for id in sources.list_streams() {
+            if let Some(source) = sources.get_stream_source(&id) {
+                if source.as_any().is::<ProcessSource>() {
+                    return Ok(source);
+                }
+            }
+        }
+
+        Err(CoreError::tool_exec_msg("shell", "no process source found"))
+    }
+
+    /// Downcast to concrete ProcessSource.
+    fn as_process_source(source: &dyn DataStream) -> Result<&ProcessSource> {
+        source.as_any().downcast_ref::<ProcessSource>().ok_or_else(|| {
+            CoreError::tool_exec_msg("shell", "source is not a ProcessSource")
+        })
+    }
+}
+```
+
+**Key points:**
+- Store `Arc<dyn ToolContext>`, not the concrete source
+- Implement `as_any()` on all `DataStream` implementations
+- Use fallback chain: explicit ID → default ID → first matching type
+- Downcast at point of use, not at construction
+
+### Notification Routing Task Pattern
+
+DataStream implementations that emit notifications should spawn a routing task to forward them to the owner agent. This pattern is used by BlueskyStream and ProcessSource.
+
+```rust
+impl ProcessSource {
+    async fn start(&self, ctx: Arc<dyn ToolContext>, owner: AgentId)
+        -> Result<broadcast::Receiver<Notification>>
+    {
+        // Create broadcast channel
+        let (tx, rx) = broadcast::channel(256);
+        *self.tx.write() = Some(tx.clone());
+
+        // Store context and owner for later use
+        *self.ctx.write() = Some(ctx.clone());
+        *self.owner.write() = Some(owner.to_string());
+
+        // Spawn routing task
+        let routing_rx = tx.subscribe();
+        let owner_id = owner.to_string();
+        let source_id = self.source_id().to_string();
+
+        tokio::spawn(async move {
+            route_notifications(routing_rx, owner_id, source_id, ctx).await;
+        });
+
+        *self.status.write() = StreamStatus::Running;
+        Ok(rx)
+    }
+}
+
+/// Route notifications from source to owner agent.
+async fn route_notifications(
+    mut rx: broadcast::Receiver<Notification>,
+    owner_id: String,
+    source_id: String,
+    ctx: Arc<dyn ToolContext>,
+) {
+    let router = ctx.router();
+
+    loop {
+        match rx.recv().await {
+            Ok(notification) => {
+                let mut message = notification.message;
+                message.batch = Some(notification.batch_id);
+
+                // Extract origin from message metadata for routing context
+                let origin = message.metadata.custom.as_object().and_then(|obj| {
+                    serde_json::from_value::<MessageOrigin>(
+                        serde_json::Value::Object(obj.clone())
+                    ).ok()
+                });
+
+                // Route to owner agent
+                match router.route_message_to_agent(&owner_id, message, origin).await {
+                    Ok(Some(_)) => {
+                        debug!(source_id = %source_id, "routed notification to owner");
+                    }
+                    Ok(None) => {
+                        warn!(source_id = %source_id, "owner agent not found");
+                    }
+                    Err(e) => {
+                        warn!(source_id = %source_id, error = %e, "routing failed");
+                    }
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                warn!(source_id = %source_id, lagged = n, "notification routing lagged");
+            }
+            Err(broadcast::error::RecvError::Closed) => {
+                info!(source_id = %source_id, "channel closed, stopping routing");
+                break;
+            }
+        }
+    }
+}
+```
+
+**Key points:**
+- Spawn routing task in `start()`, not constructor
+- Use `ctx.router()` for message routing
+- Store `MessageOrigin` in message metadata for routing context
+- Handle `Lagged` (log warning) and `Closed` (exit loop) errors
+- Set `message.batch` from notification's `batch_id`
+
 ## Best Practices
 
 ### Source Type Selection

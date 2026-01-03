@@ -104,6 +104,10 @@ regex = "1.11.1"
 # Calculator tool dependencies
 fend-core = "1.5.7"
 
+# Shell tool dependencies
+pty-process = { version = "0.5", features = ["async"] }
+strip-ansi-escapes = "0.2"
+
 # Local crates (to be added later)
 # pattern-nd = { path = "../pattern-nd", optional = true }
 

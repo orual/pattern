@@ -34,7 +34,8 @@ mod types;
 
 pub use context::{RuntimeContext, RuntimeContextBuilder, RuntimeContextConfig};
 pub use executor::{
-    ProcessToolState, ToolExecutionError, ToolExecutionResult, ToolExecutor, ToolExecutorConfig,
+    ProcessToolState, ToolAction, ToolExecutionError, ToolExecutionOutcome, ToolExecutionResult,
+    ToolExecutor, ToolExecutorConfig,
 };
 pub use router::{AgentMessageRouter, MessageEndpoint, MessageOrigin};
 pub use tool_context::{SearchScope, ToolContext};
@@ -313,6 +314,58 @@ impl AgentRuntime {
         self.tool_executor
             .execute_batch(calls, batch_id, process_state, meta)
             .await
+    }
+
+    /// Execute a tool and determine the resulting action for the processing loop.
+    ///
+    /// This is the high-level entry point for tool execution that combines:
+    /// - Tool execution with rule validation
+    /// - Action determination based on rules and process state
+    ///
+    /// The returned `ToolAction` tells the processing loop what to do next:
+    /// - `Continue`: Keep processing content blocks
+    /// - `ExitLoop`: Stop processing, exit the loop
+    /// - `RequestHeartbeat`: Exit loop but request external continuation
+    ///
+    /// # Arguments
+    /// * `call` - The tool call to execute
+    /// * `batch_id` - Current batch ID for batch-scoped constraints
+    /// * `process_state` - Mutable process state for this process() call
+    /// * `meta` - Execution metadata (heartbeat request, caller info, etc.)
+    ///
+    /// # Returns
+    /// A `ToolExecutionOutcome` with the response and determined action
+    pub async fn execute_tool_checked(
+        &self,
+        call: &ToolCall,
+        batch_id: SnowflakePosition,
+        process_state: &mut ProcessToolState,
+        meta: &ExecutionMeta,
+    ) -> Result<ToolExecutionOutcome, ToolExecutionError> {
+        let result = self
+            .tool_executor
+            .execute(call, batch_id, process_state, meta)
+            .await?;
+
+        // Determine action based on execution result and process state
+        let action = if meta.request_heartbeat && !result.has_continue_rule {
+            // Tool requested heartbeat and doesn't have implicit continuation
+            ToolAction::RequestHeartbeat {
+                tool_name: call.fn_name.clone(),
+                call_id: call.call_id.clone(),
+            }
+        } else if self.should_exit_loop(process_state) {
+            // Tool triggered exit (ExitLoop rule or cleanup phase complete)
+            ToolAction::ExitLoop
+        } else {
+            // Normal continuation
+            ToolAction::Continue
+        };
+
+        Ok(ToolExecutionOutcome {
+            response: result.response,
+            action,
+        })
     }
 
     // ============================================================================

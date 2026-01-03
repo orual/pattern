@@ -105,7 +105,7 @@ impl Default for BatchConstraints {
     }
 }
 
-/// Result of executing a tool
+/// Result of executing a tool (low-level)
 #[derive(Debug, Clone)]
 pub struct ToolExecutionResult {
     /// The tool response
@@ -114,6 +114,26 @@ pub struct ToolExecutionResult {
     pub requests_continuation: bool,
     /// Tool has ContinueLoop rule (implicit continuation, no heartbeat needed)
     pub has_continue_rule: bool,
+}
+
+/// What action the processing loop should take after tool execution
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolAction {
+    /// Continue processing normally
+    Continue,
+    /// Exit the processing loop (tool triggered ExitLoop rule)
+    ExitLoop,
+    /// Request external heartbeat continuation
+    RequestHeartbeat { tool_name: String, call_id: String },
+}
+
+/// High-level outcome of tool execution with determined action
+#[derive(Debug, Clone)]
+pub struct ToolExecutionOutcome {
+    /// The tool response
+    pub response: ToolResponse,
+    /// What the processing loop should do next
+    pub action: ToolAction,
 }
 
 /// Errors during tool execution (distinct from tool returning error content)

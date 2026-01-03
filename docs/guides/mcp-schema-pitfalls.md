@@ -125,3 +125,55 @@ async fn schedule_event(
 5. **No references**: Always use owned types like String
 
 When in doubt, stick to `String`, `i32`, `i64`, `f64`, `bool`, and `Vec<T>` of these types.
+
+---
+
+## Non-MCP Tool Schema Issues (AiTool/JsonSchema)
+
+For Pattern's internal `AiTool` trait using `schemars::JsonSchema`, there are additional pitfalls:
+
+### Doc Comments on Enum Variants Cause `oneOf`
+
+When you add doc comments to enum variants, `schemars` generates a `oneOf` schema with `const` values. Some LLM APIs (notably Gemini) don't handle `oneOf`/`const` patterns well.
+
+**Problematic:**
+```rust
+#[derive(JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellOp {
+    /// Execute a command and wait for completion.
+    Execute,
+    /// Spawn a long-running process.
+    Spawn,
+}
+```
+
+This generates:
+```json
+{
+  "oneOf": [
+    { "const": "execute", "description": "Execute a command..." },
+    { "const": "spawn", "description": "Spawn a long-running..." }
+  ]
+}
+```
+
+**Fixed - no doc comments on variants:**
+```rust
+#[derive(JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellOp {
+    Execute,
+    Spawn,
+}
+```
+
+This generates a simpler enum schema that works across all providers:
+```json
+{
+  "type": "string",
+  "enum": ["execute", "spawn"]
+}
+```
+
+**Rule**: If you need multi-provider LLM compatibility, avoid doc comments on enum variants. Put documentation at the enum level or in the containing struct's field description instead.
