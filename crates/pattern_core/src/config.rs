@@ -12,7 +12,9 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::context::DEFAULT_BASE_INSTRUCTIONS;
-use crate::data_source::BlueskyStream;
+use crate::data_source::{
+    BlueskyStream, DefaultCommandValidator, LocalPtyBackend, ProcessSource, ShellPermission,
+};
 use crate::db::ConstellationDatabases;
 use crate::memory::CONSTELLATION_OWNER;
 use crate::runtime::ToolContext;
@@ -55,6 +57,15 @@ fn resolve_path(base_dir: &Path, path: &Path) -> PathBuf {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub struct ShellSourceConfig {
+    /// Name of the data source
+    pub name: String,
+    #[serde(flatten)]
+    pub validator: DefaultCommandValidator,
+}
+
 // =============================================================================
 // Data Source Configuration
 // =============================================================================
@@ -69,6 +80,7 @@ pub enum DataSourceConfig {
     Discord(DiscordSourceConfig),
     /// File watching
     File(FileSourceConfig),
+    Shell(ShellSourceConfig),
     /// Custom/external data source
     Custom(CustomSourceConfig),
 }
@@ -80,6 +92,7 @@ impl DataSourceConfig {
             DataSourceConfig::Bluesky(c) => &c.name,
             DataSourceConfig::Discord(c) => &c.name,
             DataSourceConfig::File(c) => &c.name,
+            DataSourceConfig::Shell(c) => &c.name,
             DataSourceConfig::Custom(c) => &c.name,
         }
     }
@@ -117,8 +130,11 @@ impl DataSourceConfig {
                 );
                 Ok(vec![])
             }
+
             // Bluesky and Discord are stream sources, not block sources
-            DataSourceConfig::Bluesky(_) | DataSourceConfig::Discord(_) => Ok(vec![]),
+            DataSourceConfig::Shell(_)
+            | DataSourceConfig::Bluesky(_)
+            | DataSourceConfig::Discord(_) => Ok(vec![]),
         }
     }
 
@@ -151,6 +167,14 @@ impl DataSourceConfig {
                 // TODO: DiscordSource::from_config when implemented
                 tracing::debug!("Discord stream source not yet implemented");
                 Ok(vec![])
+            }
+            DataSourceConfig::Shell(cfg) => {
+                let shell = ProcessSource::new(
+                    "process",
+                    Arc::new(LocalPtyBackend::new("./".into())),
+                    Arc::new(cfg.validator.clone()),
+                );
+                Ok(vec![Arc::new(shell)])
             }
             DataSourceConfig::Custom(cfg) => {
                 // TODO: inventory lookup for custom stream sources
@@ -1195,29 +1219,48 @@ pub struct PartialAgentConfig {
 
 impl From<&pattern_db::models::Agent> for PartialAgentConfig {
     fn from(agent: &pattern_db::models::Agent) -> Self {
-        // Try to deserialize from the config JSON field first
-        if let Ok(config) = serde_json::from_value::<PartialAgentConfig>(agent.config.0.clone()) {
-            return config;
+        // Start from JSON config if parseable, otherwise default
+        let mut config: PartialAgentConfig =
+            serde_json::from_value(agent.config.0.clone()).unwrap_or_default();
+
+        // Always merge authoritative fields from DB columns (JSON may be stale/incomplete)
+        config.id = Some(AgentId(agent.id.clone()));
+        config.name = Some(agent.name.clone());
+
+        // Use DB system_prompt if config's is missing/empty
+        if config.system_prompt.is_none()
+            || config.system_prompt.as_ref().is_some_and(|s| s.is_empty())
+        {
+            if !agent.system_prompt.is_empty() {
+                config.system_prompt = Some(agent.system_prompt.clone());
+            }
         }
 
-        // Fallback: construct from individual fields
-        PartialAgentConfig {
-            id: Some(AgentId(agent.id.clone())),
-            name: Some(agent.name.clone()),
-            system_prompt: Some(agent.system_prompt.clone()),
-            model: Some(ModelConfig {
+        // Use DB model info if config's is missing
+        if config.model.is_none() {
+            config.model = Some(ModelConfig {
                 provider: agent.model_provider.clone(),
                 model: Some(agent.model_name.clone()),
                 temperature: None,
                 settings: HashMap::new(),
-            }),
-            tools: Some(agent.enabled_tools.0.clone()),
-            tool_rules: agent
-                .tool_rules
-                .as_ref()
-                .and_then(|r| serde_json::from_value(r.0.clone()).ok()),
-            ..Default::default()
+            });
         }
+
+        // Use DB tools if config's is missing/empty
+        if config.tools.is_none() || config.tools.as_ref().is_some_and(|t| t.is_empty()) {
+            if !agent.enabled_tools.0.is_empty() {
+                config.tools = Some(agent.enabled_tools.0.clone());
+            }
+        }
+
+        // Use DB tool_rules if config's is missing
+        if config.tool_rules.is_none() {
+            if let Some(ref rules_json) = agent.tool_rules {
+                config.tool_rules = serde_json::from_value(rules_json.0.clone()).ok();
+            }
+        }
+
+        config
     }
 }
 

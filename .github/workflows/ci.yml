@@ -1,33 +1,34 @@
 on:
-    # Run only when pushing to main branch, and making PRs
-    push:
-        branches:
-            - main
-    pull_request:
+  # Run only when pushing to main branch, and making PRs
+  push:
+    branches:
+      - main
+      - rewrite
+  pull_request:
 name: CI
 
 jobs:
-    check:
-        name: Rust project
-        runs-on: ubuntu-latest
-        steps:
-            - uses: actions/checkout@v2
-            - name: Install latest nightly
-              uses: actions-rs/toolchain@v1
-              with:
-                  toolchain: stable
-                  override: true
-                  components: rustfmt, clippy
-
-            # `cargo check` command here will use installed `nightly`
-            # as it is set as an "override" for current directory
-
-            - name: Run cargo check
-              uses: actions-rs/cargo@v1
-              with:
-                  command: check
-            # - name: Run cargo lib tests
-            #   uses: actions-rs/cargo@v1
-            #   with:
-            #       command: test
-            #       args: --lib
+  check:
+    name: Rust project
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Install latest nightly
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+          components: rustfmt, clippy
+      - name: Install cargo nextest
+        uses: taiki-e/install-action@nextest
+      - name: Run cargo check
+        uses: actions-rs/cargo@v1
+        with:
+          command: check
+      - name: Test with latest nextest release
+        uses: actions-rs/cargo@v1
+        env:
+          CARGO_TERM_COLOR: always
+        with:
+          command: nextest
+          args: run --all-features --profile ci

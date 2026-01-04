@@ -7,6 +7,8 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use super::error::{ShellError, ShellPermission};
 
 /// Command patterns that are always denied regardless of permission level.
@@ -135,16 +137,29 @@ pub trait CommandValidator: Send + Sync + std::fmt::Debug {
 /// 1. Blocklist check for dangerous patterns
 /// 2. Permission level check based on command type
 /// 3. Optional path sandboxing
-#[derive(Debug, Clone)]
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct DefaultCommandValidator {
     /// Current permission level for this validator.
-    permission: ShellPermission,
+    pub permission: ShellPermission,
     /// Allowed paths for file operations (if strict mode enabled).
-    allowed_paths: Vec<PathBuf>,
+    pub allowed_paths: Vec<PathBuf>,
     /// Whether to strictly enforce path restrictions.
-    strict_path_enforcement: bool,
+    pub strict_path_enforcement: bool,
     /// Additional denied patterns (user-configurable).
-    custom_denied_patterns: Vec<String>,
+    pub custom_denied_patterns: Vec<String>,
+}
+
+impl Default for DefaultCommandValidator {
+    fn default() -> Self {
+        Self {
+            permission: ShellPermission::default(),
+            allowed_paths: vec!["./".into()],
+            strict_path_enforcement: false,
+            custom_denied_patterns: Vec::new(),
+        }
+    }
 }
 
 impl DefaultCommandValidator {

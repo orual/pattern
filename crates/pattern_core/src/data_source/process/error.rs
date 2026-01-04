@@ -1,11 +1,13 @@
 //! Shell execution error types.
 
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
 use thiserror::Error;
 
 /// Permission level for shell operations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ShellPermission {
     /// Read-only commands (git status, ls, cat).
     ReadOnly,
@@ -13,6 +15,12 @@ pub enum ShellPermission {
     ReadWrite,
     /// Unrestricted access.
     Admin,
+}
+
+impl Default for ShellPermission {
+    fn default() -> Self {
+        Self::ReadOnly
+    }
 }
 
 impl std::fmt::Display for ShellPermission {

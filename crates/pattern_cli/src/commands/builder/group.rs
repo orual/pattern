@@ -281,6 +281,7 @@ impl GroupBuilder {
                     DataSourceConfig::Bluesky(_) => "bluesky",
                     DataSourceConfig::Discord(_) => "discord",
                     DataSourceConfig::File(_) => "file",
+                    DataSourceConfig::Shell(_) => "shell",
                     DataSourceConfig::Custom(c) => &c.source_type,
                 };
                 r.list_item(&format!(
@@ -763,7 +764,7 @@ impl GroupBuilder {
             return Err(miette::miette!("Data source '{}' already exists", name));
         }
 
-        let source_types = ["bluesky", "discord", "file", "custom"];
+        let source_types = ["bluesky", "discord", "file", "shell", "custom"];
         let type_idx = select_menu("Source type", &source_types, 0)?;
         let source_type = source_types[type_idx];
 
@@ -1176,6 +1177,7 @@ impl CollectionItem for DataSourceItem {
             DataSourceConfig::Bluesky(_) => "bluesky",
             DataSourceConfig::Discord(_) => "discord",
             DataSourceConfig::File(_) => "file",
+            DataSourceConfig::Shell(_) => "shell",
             DataSourceConfig::Custom(c) => &c.source_type,
         };
         format!("{} {}", self.name, format!("[{}]", source_type).dimmed())

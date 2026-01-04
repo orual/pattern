@@ -70,29 +70,46 @@ impl AgentBuilder {
             .map_err(|e| miette::miette!("Database error: {}", e))?
             .ok_or_else(|| miette::miette!("Agent '{}' not found", name))?;
 
-        // Try to deserialize config from the stored JSON
-        let config: AgentConfig =
-            serde_json::from_value(agent.config.0.clone()).unwrap_or_else(|_| {
-                // Fallback: construct from individual fields
-                AgentConfig {
-                    id: Some(pattern_core::id::AgentId(agent.id.clone())),
-                    name: agent.name.clone(),
-                    system_prompt: Some(agent.system_prompt.clone()),
-                    model: Some(ModelConfig {
-                        provider: agent.model_provider.clone(),
-                        model: Some(agent.model_name.clone()),
-                        temperature: None,
-                        settings: HashMap::new(),
-                    }),
-                    tools: agent.enabled_tools.0.clone(),
-                    tool_rules: agent
-                        .tool_rules
-                        .as_ref()
-                        .and_then(|r| serde_json::from_value(r.0.clone()).ok())
-                        .unwrap_or_default(),
-                    ..Default::default()
-                }
+        // Start from JSON config if parseable, otherwise default
+        let mut config: AgentConfig =
+            serde_json::from_value(agent.config.0.clone()).unwrap_or_default();
+
+        // Always merge authoritative fields from DB columns (JSON may be stale/incomplete)
+        config.id = Some(pattern_core::id::AgentId(agent.id.clone()));
+        config.name = agent.name.clone();
+
+        // Use DB system_prompt if config's is missing/empty
+        if config.system_prompt.is_none()
+            || config.system_prompt.as_ref().is_some_and(|s| s.is_empty())
+        {
+            if !agent.system_prompt.is_empty() {
+                config.system_prompt = Some(agent.system_prompt.clone());
+            }
+        }
+
+        // Use DB model info if config's is missing
+        if config.model.is_none() {
+            config.model = Some(ModelConfig {
+                provider: agent.model_provider.clone(),
+                model: Some(agent.model_name.clone()),
+                temperature: None,
+                settings: HashMap::new(),
             });
+        }
+
+        // Use DB tools if config's is missing/empty
+        if config.tools.is_empty() && !agent.enabled_tools.0.is_empty() {
+            config.tools = agent.enabled_tools.0.clone();
+        }
+
+        // Use DB tool_rules if config's is missing
+        if config.tool_rules.is_empty() {
+            if let Some(ref rules_json) = agent.tool_rules {
+                if let Ok(rules) = serde_json::from_value(rules_json.0.clone()) {
+                    config.tool_rules = rules;
+                }
+            }
+        }
 
         Ok(Self {
             config,
@@ -222,6 +239,7 @@ impl AgentBuilder {
                     DataSourceConfig::Bluesky(_) => "bluesky",
                     DataSourceConfig::Discord(_) => "discord",
                     DataSourceConfig::File(_) => "file",
+                    DataSourceConfig::Shell(_) => "shell",
                     DataSourceConfig::Custom(c) => &c.source_type,
                 };
                 r.list_item(&format!(
@@ -796,7 +814,7 @@ impl AgentBuilder {
             return Err(miette::miette!("Data source '{}' already exists", name));
         }
 
-        let source_types = ["bluesky", "discord", "file", "custom"];
+        let source_types = ["bluesky", "discord", "file", "shell", "custom"];
         let type_idx = select_menu("Source type", &source_types, 0)?;
         let source_type = source_types[type_idx];
 
@@ -1072,6 +1090,7 @@ impl CollectionItem for DataSourceItem {
             DataSourceConfig::Bluesky(_) => "bluesky",
             DataSourceConfig::Discord(_) => "discord",
             DataSourceConfig::File(_) => "file",
+            DataSourceConfig::Shell(_) => "shell",
             DataSourceConfig::Custom(c) => &c.source_type,
         };
         format!("{} {}", self.name, format!("[{}]", source_type).dimmed())

@@ -86,6 +86,7 @@ pub struct BuiltinTools {
     block_edit_tool: Box<dyn DynamicTool>,
     source_tool: Box<dyn DynamicTool>,
     file_tool: Box<dyn DynamicTool>,
+    shell_tool: Box<dyn DynamicTool>,
 }
 
 impl BuiltinTools {
@@ -110,6 +111,7 @@ impl BuiltinTools {
             )))),
             source_tool: Box::new(DynamicToolAdapter::new(SourceTool::new(Arc::clone(&ctx)))),
             file_tool: Box::new(DynamicToolAdapter::new(FileTool::new(Arc::clone(&ctx)))),
+            shell_tool: Box::new(DynamicToolAdapter::new(ShellTool::new(Arc::clone(&ctx)))),
         }
     }
 
@@ -132,6 +134,7 @@ impl BuiltinTools {
         registry.register_dynamic(self.block_edit_tool.clone_box());
         registry.register_dynamic(self.source_tool.clone_box());
         registry.register_dynamic(self.file_tool.clone_box());
+        registry.register_dynamic(self.shell_tool.clone_box());
     }
 
     /// Builder pattern for customization
@@ -155,6 +158,7 @@ pub struct BuiltinToolsBuilder {
     block_edit_tool: Option<Box<dyn DynamicTool>>,
     source_tool: Option<Box<dyn DynamicTool>>,
     file_tool: Option<Box<dyn DynamicTool>>,
+    shell_tool: Option<Box<dyn DynamicTool>>,
 }
 
 impl BuiltinToolsBuilder {
@@ -212,6 +216,12 @@ impl BuiltinToolsBuilder {
         self
     }
 
+    /// Replace the default shell tool
+    pub fn with_shell_tool(mut self, tool: impl DynamicTool + 'static) -> Self {
+        self.shell_tool = Some(Box::new(tool));
+        self
+    }
+
     /// Build the tools for a specific agent using ToolContext
     pub fn build_for_agent(self, ctx: Arc<dyn ToolContext>) -> BuiltinTools {
         let defaults = BuiltinTools::default_for_agent(ctx);
@@ -228,6 +238,7 @@ impl BuiltinToolsBuilder {
             block_edit_tool: self.block_edit_tool.unwrap_or(defaults.block_edit_tool),
             source_tool: self.source_tool.unwrap_or(defaults.source_tool),
             file_tool: self.file_tool.unwrap_or(defaults.file_tool),
+            shell_tool: self.shell_tool.unwrap_or(defaults.shell_tool),
         }
     }
 }

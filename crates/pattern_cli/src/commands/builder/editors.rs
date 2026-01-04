@@ -164,6 +164,7 @@ pub const KNOWN_TOOLS: &[&str] = &[
     "calculator",
     "file",
     "emergency_halt",
+    "shell",
 ];
 
 /// Edit tools list with multi-select plus custom tool option.

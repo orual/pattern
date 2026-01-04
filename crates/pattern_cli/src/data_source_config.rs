@@ -9,8 +9,9 @@ use miette::Result;
 use owo_colors::OwoColorize;
 use pattern_core::config::{
     BlueskySourceConfig, CustomSourceConfig, DataSourceConfig, DiscordSourceConfig,
-    FilePermissionRuleConfig, FileSourceConfig,
+    FilePermissionRuleConfig, FileSourceConfig, ShellSourceConfig,
 };
+use pattern_core::data_source::DefaultCommandValidator;
 use pattern_core::memory::MemoryPermission;
 
 use crate::commands::builder::editors::{confirm, input_optional, input_required, select_menu};
@@ -29,6 +30,9 @@ pub fn build_source_interactive(name: &str, source_type: &str) -> Result<DataSou
             name, None,
         )?)),
         "file" => Ok(DataSourceConfig::File(build_file_interactive(name, None)?)),
+        "shell" => Ok(DataSourceConfig::Shell(build_shell_interactive(
+            name, None,
+        )?)),
         "custom" => Ok(DataSourceConfig::Custom(build_custom_interactive(
             name, None,
         )?)),
@@ -54,6 +58,10 @@ pub fn edit_source_interactive(
             Some(cfg),
         )?)),
         DataSourceConfig::File(cfg) => Ok(DataSourceConfig::File(build_file_interactive(
+            name,
+            Some(cfg),
+        )?)),
+        DataSourceConfig::Shell(cfg) => Ok(DataSourceConfig::Shell(build_shell_interactive(
             name,
             Some(cfg),
         )?)),
@@ -233,6 +241,97 @@ pub fn build_file_interactive(
         include_patterns,
         exclude_patterns,
         permission_rules,
+    })
+}
+
+pub fn build_shell_interactive(
+    name: &str,
+    existing: Option<&ShellSourceConfig>,
+) -> Result<ShellSourceConfig> {
+    use pattern_core::data_source::ShellPermission;
+
+    println!("\n{}", "─ Shell Configuration ─".bold());
+    println!(
+        "{}",
+        "Configure shell access permissions and security restrictions.".dimmed()
+    );
+
+    // Permission level
+    let permission_options = ["read_only", "read_write", "admin"];
+    let current_perm_idx = existing
+        .map(|e| match e.validator.permission {
+            ShellPermission::ReadOnly => 0,
+            ShellPermission::ReadWrite => 1,
+            ShellPermission::Admin => 2,
+        })
+        .unwrap_or(0);
+
+    let perm_idx = select_menu(
+        "Permission level (determines what commands are allowed)",
+        &permission_options,
+        current_perm_idx,
+    )?;
+    let permission = match perm_idx {
+        1 => ShellPermission::ReadWrite,
+        2 => ShellPermission::Admin,
+        _ => ShellPermission::ReadOnly,
+    };
+
+    // Allowed paths
+    let current_paths: Vec<String> = existing
+        .map(|e| {
+            e.validator
+                .allowed_paths
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect()
+        })
+        .unwrap_or_else(|| vec!["./".to_string()]);
+
+    println!(
+        "\n{}",
+        "Allowed paths restrict file operations to specific directories.".dimmed()
+    );
+    let path_strings = edit_string_list("Allowed paths", &current_paths)?;
+    let allowed_paths: Vec<std::path::PathBuf> = path_strings
+        .into_iter()
+        .map(std::path::PathBuf::from)
+        .collect();
+
+    // Strict path enforcement
+    let current_strict = existing
+        .map(|e| e.validator.strict_path_enforcement)
+        .unwrap_or(false);
+    let strict = confirm(
+        "Enable strict path enforcement? (blocks commands accessing paths outside allowed list)",
+        current_strict,
+    )?;
+
+    // Custom denied patterns
+    let current_denied: Vec<String> = existing
+        .map(|e| e.validator.custom_denied_patterns.clone())
+        .unwrap_or_default();
+    println!(
+        "\n{}",
+        "Custom denied patterns block commands containing these substrings.".dimmed()
+    );
+    let custom_denied = edit_string_list("Custom denied patterns", &current_denied)?;
+
+    // Build the validator
+    let mut validator = DefaultCommandValidator::new(permission);
+    for path in allowed_paths {
+        validator = validator.allow_path(path);
+    }
+    if strict {
+        validator = validator.strict();
+    }
+    for pattern in custom_denied {
+        validator = validator.deny_pattern(pattern);
+    }
+
+    Ok(ShellSourceConfig {
+        name: name.to_string(),
+        validator,
     })
 }
 
@@ -592,6 +691,15 @@ pub fn render_source_summary(name: &str, source: &DataSourceConfig) -> String {
                 for rule in &cfg.permission_rules {
                     lines.push(format!("    {} -> {:?}", rule.pattern, rule.permission));
                 }
+            }
+        }
+        DataSourceConfig::Shell(cfg) => {
+            lines.push(format!("{} [shell]", name.cyan()));
+            let config_preview = serde_json::to_string(&cfg).unwrap_or_else(|_| "{}".to_string());
+            if config_preview.len() > 50 {
+                lines.push(format!("  Config: {}...", &config_preview[..50]));
+            } else {
+                lines.push(format!("  Config: {}", config_preview));
             }
         }
         DataSourceConfig::Custom(cfg) => {
