@@ -32,10 +32,15 @@ pub async fn stats(config: &PatternConfig, output: &Output) -> Result<()> {
     // Database file info
     output.status("");
     output.section("Database Info");
-    output.kv("Path", &config.database.path.display().to_string());
+    output.kv(
+        "Data Directory",
+        &config.database.path.display().to_string(),
+    );
+    let db_path = config.database.constellation_db();
+    output.kv("Database File", &db_path.display().to_string());
 
     // Try to get file size
-    if let Ok(metadata) = std::fs::metadata(&config.database.path) {
+    if let Ok(metadata) = std::fs::metadata(&db_path) {
         let size = metadata.len();
         let size_str = if size < 1024 {
             format!("{} B", size)

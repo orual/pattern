@@ -203,6 +203,51 @@ pub async fn create_message(pool: &SqlitePool, msg: &Message) -> DbResult<()> {
     Ok(())
 }
 
+/// Create or update a message (upsert).
+///
+/// If a message with the same ID exists, it will be updated in place.
+/// Used by import to handle re-imports idempotently.
+pub async fn upsert_message(pool: &SqlitePool, msg: &Message) -> DbResult<()> {
+    sqlx::query!(
+        r#"
+        INSERT INTO messages (id, agent_id, position, batch_id, sequence_in_batch,
+                             role, content_json, content_preview, batch_type,
+                             source, source_metadata, is_archived, is_deleted, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            agent_id = excluded.agent_id,
+            position = excluded.position,
+            batch_id = excluded.batch_id,
+            sequence_in_batch = excluded.sequence_in_batch,
+            role = excluded.role,
+            content_json = excluded.content_json,
+            content_preview = excluded.content_preview,
+            batch_type = excluded.batch_type,
+            source = excluded.source,
+            source_metadata = excluded.source_metadata,
+            is_archived = excluded.is_archived,
+            is_deleted = excluded.is_deleted
+        "#,
+        msg.id,
+        msg.agent_id,
+        msg.position,
+        msg.batch_id,
+        msg.sequence_in_batch,
+        msg.role,
+        msg.content_json,
+        msg.content_preview,
+        msg.batch_type,
+        msg.source,
+        msg.source_metadata,
+        msg.is_archived,
+        msg.is_deleted,
+        msg.created_at,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Mark messages as archived (excludes already-deleted messages).
 pub async fn archive_messages(
     pool: &SqlitePool,
@@ -329,6 +374,39 @@ pub async fn create_archive_summary(pool: &SqlitePool, summary: &ArchiveSummary)
         r#"
         INSERT INTO archive_summaries (id, agent_id, summary, start_position, end_position, message_count, previous_summary_id, depth, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#,
+        summary.id,
+        summary.agent_id,
+        summary.summary,
+        summary.start_position,
+        summary.end_position,
+        summary.message_count,
+        summary.previous_summary_id,
+        summary.depth,
+        summary.created_at,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Create or update an archive summary (upsert).
+///
+/// If a summary with the same ID exists, it will be updated in place.
+/// Used by import to handle re-imports idempotently.
+pub async fn upsert_archive_summary(pool: &SqlitePool, summary: &ArchiveSummary) -> DbResult<()> {
+    sqlx::query!(
+        r#"
+        INSERT INTO archive_summaries (id, agent_id, summary, start_position, end_position, message_count, previous_summary_id, depth, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            agent_id = excluded.agent_id,
+            summary = excluded.summary,
+            start_position = excluded.start_position,
+            end_position = excluded.end_position,
+            message_count = excluded.message_count,
+            previous_summary_id = excluded.previous_summary_id,
+            depth = excluded.depth
         "#,
         summary.id,
         summary.agent_id,

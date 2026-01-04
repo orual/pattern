@@ -357,10 +357,6 @@ impl ModelProvider for GenAiClient {
         self.validate_image_urls(&mut request).await;
 
         // Convert URL images to base64 for Gemini models
-        tracing::debug!(
-            "Model ID: {}, checking if it starts with 'gemini'",
-            model_info.id
-        );
         if model_info.id.starts_with("gemini") {
             tracing::debug!(
                 "Converting URLs to base64 for Gemini model: {}",
@@ -368,7 +364,7 @@ impl ModelProvider for GenAiClient {
             );
             self.convert_urls_to_base64_for_gemini(&mut request).await?;
         } else {
-            tracing::debug!(
+            tracing::trace!(
                 "Skipping base64 conversion for non-Gemini model: {}",
                 model_info.id
             );
@@ -377,7 +373,7 @@ impl ModelProvider for GenAiClient {
         // Log the full request
         let chat_request = request.as_chat_request()?;
 
-        tracing::debug!("Chat Request:\n{:#?}", chat_request);
+        tracing::trace!("Chat Request:\n{:#?}", chat_request);
 
         let response = match self
             .client
@@ -389,6 +385,7 @@ impl ModelProvider for GenAiClient {
                 response
             }
             Err(e) => {
+                tracing::debug!("Request:\n{:#?}", request);
                 crate::log_error!("GenAI API error", e);
                 return Err(crate::CoreError::from_genai_error(
                     "genai",

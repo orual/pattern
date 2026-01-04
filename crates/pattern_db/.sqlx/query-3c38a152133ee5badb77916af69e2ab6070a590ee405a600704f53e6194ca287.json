@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO agents (id, name, description, model_provider, model_name,\n                           system_prompt, config, enabled_tools, tool_rules,\n                           status, created_at, updated_at)\n        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n        ON CONFLICT(id) DO UPDATE SET\n            name = excluded.name,\n            description = excluded.description,\n            model_provider = excluded.model_provider,\n            model_name = excluded.model_name,\n            system_prompt = excluded.system_prompt,\n            config = excluded.config,\n            enabled_tools = excluded.enabled_tools,\n            tool_rules = excluded.tool_rules,\n            status = excluded.status,\n            updated_at = excluded.updated_at\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 12
+    },
+    "nullable": []
+  },
+  "hash": "3c38a152133ee5badb77916af69e2ab6070a590ee405a600704f53e6194ca287"
+}

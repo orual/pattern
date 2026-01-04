@@ -272,6 +272,60 @@ pub async fn create_block(pool: &SqlitePool, block: &MemoryBlock) -> DbResult<()
     Ok(())
 }
 
+/// Create or update a memory block (upsert).
+///
+/// If a block with the same ID exists, it will be updated in place.
+/// Used by import to handle re-imports idempotently.
+///
+/// Note: Callers must ensure no duplicate (agent_id, label) conflicts exist -
+/// the importer handles this by tracking imported CIDs.
+pub async fn upsert_block(pool: &SqlitePool, block: &MemoryBlock) -> DbResult<()> {
+    sqlx::query!(
+        r#"
+        INSERT INTO memory_blocks (id, agent_id, label, description, block_type, char_limit,
+                                   permission, pinned, loro_snapshot, content_preview, metadata,
+                                   embedding_model, is_active, frontier, last_seq, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            agent_id = excluded.agent_id,
+            label = excluded.label,
+            description = excluded.description,
+            block_type = excluded.block_type,
+            char_limit = excluded.char_limit,
+            permission = excluded.permission,
+            pinned = excluded.pinned,
+            loro_snapshot = excluded.loro_snapshot,
+            content_preview = excluded.content_preview,
+            metadata = excluded.metadata,
+            embedding_model = excluded.embedding_model,
+            is_active = excluded.is_active,
+            frontier = excluded.frontier,
+            last_seq = excluded.last_seq,
+            updated_at = excluded.updated_at
+        "#,
+        block.id,
+        block.agent_id,
+        block.label,
+        block.description,
+        block.block_type,
+        block.char_limit,
+        block.permission,
+        block.pinned,
+        block.loro_snapshot,
+        block.content_preview,
+        block.metadata,
+        block.embedding_model,
+        block.is_active,
+        block.frontier,
+        block.last_seq,
+        block.created_at,
+        block.updated_at,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Update a memory block's Loro snapshot and preview.
 pub async fn update_block_content(
     pool: &SqlitePool,
@@ -574,6 +628,35 @@ pub async fn create_archival_entry(pool: &SqlitePool, entry: &ArchivalEntry) -> 
         r#"
         INSERT INTO archival_entries (id, agent_id, content, metadata, chunk_index, parent_entry_id, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
+        "#,
+        entry.id,
+        entry.agent_id,
+        entry.content,
+        entry.metadata,
+        entry.chunk_index,
+        entry.parent_entry_id,
+        entry.created_at,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Create or update an archival entry (upsert).
+///
+/// If an entry with the same ID exists, it will be updated in place.
+/// Used by import to handle re-imports idempotently.
+pub async fn upsert_archival_entry(pool: &SqlitePool, entry: &ArchivalEntry) -> DbResult<()> {
+    sqlx::query!(
+        r#"
+        INSERT INTO archival_entries (id, agent_id, content, metadata, chunk_index, parent_entry_id, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            agent_id = excluded.agent_id,
+            content = excluded.content,
+            metadata = excluded.metadata,
+            chunk_index = excluded.chunk_index,
+            parent_entry_id = excluded.parent_entry_id
         "#,
         entry.id,
         entry.agent_id,

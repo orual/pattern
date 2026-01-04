@@ -717,14 +717,6 @@ fn convert_memory_chunk(
     let mut archival_count = 0u64;
 
     for (old_block, relation) in &old_chunk.memories {
-        // Collect the relation data for shared block tracking
-        relations.push(CollectedMemoryRelation {
-            block_id: old_block.id.to_string(),
-            agent_id: relation.in_id.to_string(),
-            permission: convert_permission(&relation.access_level),
-            created_at: relation.created_at,
-        });
-
         if old_block.memory_type == MemoryType::Archival && options.archival_blocks_to_entries {
             // Convert to archival entry (searchable text)
             let entry = ArchivalEntryExport {
@@ -751,6 +743,15 @@ fn convert_memory_chunk(
             memory_block_cids.push(cid);
             blocks.push((cid, data));
             memory_count += 1;
+
+            // Only collect relation data for blocks that become MemoryBlockExport
+            // (not archival entries, which can't be "shared" in the same way)
+            relations.push(CollectedMemoryRelation {
+                block_id: old_block.id.to_string(),
+                agent_id: relation.in_id.to_string(),
+                permission: convert_permission(&relation.access_level),
+                created_at: relation.created_at,
+            });
         }
     }
 

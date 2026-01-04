@@ -360,6 +360,69 @@ impl<'a> ThreadContext<'a> {
         count
     }
 
+    /// Format reply options for the agent.
+    ///
+    /// Lists leaf posts (posts with no replies) as reply candidates.
+    /// These are the active ends of conversation branches.
+    /// Shows up to 6 options, most recent first.
+    /// Includes instructions about character limits and like functionality.
+    pub fn format_reply_options(&self) -> String {
+        const MAX_OPTIONS: usize = 6;
+
+        let mut output = String::new();
+        output.push_str("\n💭 Reply options (choose at most one):\n");
+
+        // Collect leaf posts (posts with no replies) - these are active conversation ends
+        let mut leaves: Vec<(&str, &str)> = Vec::new();
+        self.collect_leaf_posts(&self.thread, &mut leaves);
+
+        // Take up to MAX_OPTIONS (leaves are collected deepest-first, so most recent)
+        let mut seen_uris = HashSet::new();
+        let mut count = 0;
+        for (handle, uri) in leaves {
+            if count >= MAX_OPTIONS {
+                break;
+            }
+            if seen_uris.insert(uri) {
+                output.push_str(&format!("  • @{} ({})\n", handle, uri));
+                count += 1;
+            }
+        }
+
+        output.push_str(
+            "If you choose to reply, your response must contain under 300 characters or it will be truncated.\n",
+        );
+        output.push_str(
+            "Alternatively, you can 'like' the post by submitting a reply with 'like' as the sole text\n",
+        );
+
+        output
+    }
+
+    /// Collect leaf posts (posts with no replies) from the thread tree.
+    /// Traverses depth-first so deeper (more recent) leaves come first.
+    fn collect_leaf_posts<'b>(
+        &self,
+        thread: &'b ThreadViewPost<'_>,
+        leaves: &mut Vec<(&'b str, &'b str)>,
+    ) {
+        // Check replies first (depth-first)
+        if let Some(replies) = &thread.replies {
+            if !replies.is_empty() {
+                // Has replies - recurse into them
+                for reply in replies {
+                    if let ThreadViewPostRepliesItem::ThreadViewPost(tvp) = reply {
+                        self.collect_leaf_posts(tvp, leaves);
+                    }
+                }
+                return;
+            }
+        }
+
+        // No replies (or empty) - this is a leaf
+        leaves.push((thread.post.author.handle.as_str(), thread.post.uri.as_str()));
+    }
+
     /// Collect images from the entire thread tree.
     ///
     /// Returns images with position values - higher position means newer post.

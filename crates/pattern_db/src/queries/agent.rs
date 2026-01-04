@@ -140,6 +140,47 @@ pub async fn create_agent(pool: &SqlitePool, agent: &Agent) -> DbResult<()> {
     Ok(())
 }
 
+/// Create or update an agent (upsert).
+///
+/// If an agent with the same ID exists, it will be updated in place.
+/// Used by import to handle re-imports idempotently.
+pub async fn upsert_agent(pool: &SqlitePool, agent: &Agent) -> DbResult<()> {
+    sqlx::query!(
+        r#"
+        INSERT INTO agents (id, name, description, model_provider, model_name,
+                           system_prompt, config, enabled_tools, tool_rules,
+                           status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            description = excluded.description,
+            model_provider = excluded.model_provider,
+            model_name = excluded.model_name,
+            system_prompt = excluded.system_prompt,
+            config = excluded.config,
+            enabled_tools = excluded.enabled_tools,
+            tool_rules = excluded.tool_rules,
+            status = excluded.status,
+            updated_at = excluded.updated_at
+        "#,
+        agent.id,
+        agent.name,
+        agent.description,
+        agent.model_provider,
+        agent.model_name,
+        agent.system_prompt,
+        agent.config,
+        agent.enabled_tools,
+        agent.tool_rules,
+        agent.status,
+        agent.created_at,
+        agent.updated_at,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Update an agent's status.
 pub async fn update_agent_status(pool: &SqlitePool, id: &str, status: AgentStatus) -> DbResult<()> {
     sqlx::query!(
@@ -295,6 +336,35 @@ pub async fn create_group(pool: &SqlitePool, group: &AgentGroup) -> DbResult<()>
     Ok(())
 }
 
+/// Create or update an agent group (upsert).
+///
+/// If a group with the same ID exists, it will be updated in place.
+/// Used by import to handle re-imports idempotently.
+pub async fn upsert_group(pool: &SqlitePool, group: &AgentGroup) -> DbResult<()> {
+    sqlx::query!(
+        r#"
+        INSERT INTO agent_groups (id, name, description, pattern_type, pattern_config, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            description = excluded.description,
+            pattern_type = excluded.pattern_type,
+            pattern_config = excluded.pattern_config,
+            updated_at = excluded.updated_at
+        "#,
+        group.id,
+        group.name,
+        group.description,
+        group.pattern_type,
+        group.pattern_config,
+        group.created_at,
+        group.updated_at,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Get members of a group.
 pub async fn get_group_members(pool: &SqlitePool, group_id: &str) -> DbResult<Vec<GroupMember>> {
     let members = sqlx::query_as!(
@@ -321,6 +391,30 @@ pub async fn add_group_member(pool: &SqlitePool, member: &GroupMember) -> DbResu
         r#"
         INSERT INTO group_members (group_id, agent_id, role, capabilities, joined_at)
         VALUES (?, ?, ?, ?, ?)
+        "#,
+        member.group_id,
+        member.agent_id,
+        member.role,
+        member.capabilities,
+        member.joined_at,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Add or update an agent in a group (upsert).
+///
+/// If the membership already exists, it will be updated in place.
+/// Used by import to handle re-imports idempotently.
+pub async fn upsert_group_member(pool: &SqlitePool, member: &GroupMember) -> DbResult<()> {
+    sqlx::query!(
+        r#"
+        INSERT INTO group_members (group_id, agent_id, role, capabilities, joined_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(group_id, agent_id) DO UPDATE SET
+            role = excluded.role,
+            capabilities = excluded.capabilities
         "#,
         member.group_id,
         member.agent_id,

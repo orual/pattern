@@ -3,7 +3,7 @@
 //! This module provides the inverse of the exporter, allowing CAR archives
 //! to be imported back into a Pattern database.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::Utc;
 use cid::Cid;
@@ -128,19 +128,37 @@ impl Importer {
             });
         }
 
+        // Track imported block CIDs to avoid duplicates (e.g., shared blocks)
+        let mut imported_block_cids: HashSet<Cid> = HashSet::new();
+
         // Dispatch based on export type
         match manifest.export_type {
             ExportType::Agent => {
-                self.import_agent_from_cid(&manifest.data_cid, &blocks, options)
-                    .await
+                self.import_agent_from_cid(
+                    &manifest.data_cid,
+                    &blocks,
+                    options,
+                    &mut imported_block_cids,
+                )
+                .await
             }
             ExportType::Group => {
-                self.import_group_from_cid(&manifest.data_cid, &blocks, options)
-                    .await
+                self.import_group_from_cid(
+                    &manifest.data_cid,
+                    &blocks,
+                    options,
+                    &mut imported_block_cids,
+                )
+                .await
             }
             ExportType::Constellation => {
-                self.import_constellation_from_cid(&manifest.data_cid, &blocks, options)
-                    .await
+                self.import_constellation_from_cid(
+                    &manifest.data_cid,
+                    &blocks,
+                    options,
+                    &mut imported_block_cids,
+                )
+                .await
             }
         }
     }
@@ -184,6 +202,7 @@ impl Importer {
         data_cid: &Cid,
         blocks: &HashMap<Cid, Vec<u8>>,
         options: &ImportOptions,
+        imported_block_cids: &mut HashSet<Cid>,
     ) -> Result<ImportResult> {
         let data_bytes = blocks.get(data_cid).ok_or_else(|| CoreError::ExportError {
             operation: "reading agent export".to_string(),
@@ -196,7 +215,7 @@ impl Importer {
                 details: e.to_string(),
             })?;
 
-        self.import_agent(&agent_export, blocks, options, None)
+        self.import_agent(&agent_export, blocks, options, None, imported_block_cids)
             .await
     }
 
@@ -210,6 +229,7 @@ impl Importer {
         blocks: &HashMap<Cid, Vec<u8>>,
         options: &ImportOptions,
         id_override: Option<&str>,
+        imported_block_cids: &mut HashSet<Cid>,
     ) -> Result<ImportResult> {
         let mut result = ImportResult::default();
 
@@ -245,14 +265,16 @@ impl Importer {
             updated_at: now,
         };
 
-        queries::create_agent(&self.pool, &agent).await?;
+        queries::upsert_agent(&self.pool, &agent).await?;
         result.agent_ids.push(agent_id.clone());
 
-        // Import memory blocks
+        // Import memory blocks (skip if already imported this session)
         for block_cid in &export.memory_block_cids {
-            self.import_memory_block(block_cid, blocks, &agent_id, options)
-                .await?;
-            result.memory_block_count += 1;
+            if imported_block_cids.insert(*block_cid) {
+                self.import_memory_block(block_cid, blocks, &agent_id, options)
+                    .await?;
+                result.memory_block_count += 1;
+            }
         }
 
         // Import messages if requested
@@ -338,7 +360,7 @@ impl Importer {
             updated_at: now,
         };
 
-        queries::create_block(&self.pool, &memory_block).await?;
+        queries::upsert_block(&self.pool, &memory_block).await?;
         Ok(())
     }
 
@@ -455,7 +477,7 @@ impl Importer {
             created_at: export.created_at,
         };
 
-        queries::create_message(&self.pool, &message).await?;
+        queries::upsert_message(&self.pool, &message).await?;
         Ok(())
     }
 
@@ -505,7 +527,7 @@ impl Importer {
             created_at: export.created_at,
         };
 
-        queries::create_archival_entry(&self.pool, &entry).await?;
+        queries::upsert_archival_entry(&self.pool, &entry).await?;
         Ok(())
     }
 
@@ -556,7 +578,7 @@ impl Importer {
             created_at: export.created_at,
         };
 
-        queries::create_archive_summary(&self.pool, &summary).await?;
+        queries::upsert_archive_summary(&self.pool, &summary).await?;
         Ok(())
     }
 
@@ -568,6 +590,7 @@ impl Importer {
         data_cid: &Cid,
         blocks: &HashMap<Cid, Vec<u8>>,
         options: &ImportOptions,
+        imported_block_cids: &mut HashSet<Cid>,
     ) -> Result<ImportResult> {
         let data_bytes = blocks.get(data_cid).ok_or_else(|| CoreError::ExportError {
             operation: "reading group export".to_string(),
@@ -576,7 +599,9 @@ impl Importer {
 
         // Try to decode as full GroupExport first
         if let Ok(group_export) = decode_dag_cbor::<GroupExport>(data_bytes) {
-            return self.import_group_full(&group_export, blocks, options).await;
+            return self
+                .import_group_full(&group_export, blocks, options, imported_block_cids)
+                .await;
         }
 
         // Try thin GroupConfigExport
@@ -596,6 +621,7 @@ impl Importer {
         export: &GroupExport,
         blocks: &HashMap<Cid, Vec<u8>>,
         options: &ImportOptions,
+        imported_block_cids: &mut HashSet<Cid>,
     ) -> Result<ImportResult> {
         let mut result = ImportResult::default();
 
@@ -622,7 +648,13 @@ impl Importer {
             };
 
             let agent_result = self
-                .import_agent(agent_export, blocks, &agent_options, Some(&new_id))
+                .import_agent(
+                    agent_export,
+                    blocks,
+                    &agent_options,
+                    Some(&new_id),
+                    imported_block_cids,
+                )
                 .await?;
             result.merge(agent_result);
         }
@@ -640,7 +672,7 @@ impl Importer {
             .unwrap_or_else(|| export.group.name.clone());
 
         let group = self.create_group_from_record(&export.group, &group_id, &group_name)?;
-        queries::create_group(&self.pool, &group).await?;
+        queries::upsert_group(&self.pool, &group).await?;
         result.group_ids.push(group_id.clone());
 
         // Create group members with mapped agent IDs
@@ -659,12 +691,14 @@ impl Importer {
                 .await?;
         }
 
-        // Import shared memory blocks
+        // Import shared memory blocks (skip if already imported this session)
         for block_cid in &export.shared_memory_cids {
-            // Shared blocks get the group_id as their agent_id
-            self.import_memory_block(block_cid, blocks, &group_id, options)
-                .await?;
-            result.memory_block_count += 1;
+            if imported_block_cids.insert(*block_cid) {
+                // Shared blocks get the group_id as their agent_id
+                self.import_memory_block(block_cid, blocks, &group_id, options)
+                    .await?;
+                result.memory_block_count += 1;
+            }
         }
 
         // Import shared block attachments
@@ -695,7 +729,7 @@ impl Importer {
             .unwrap_or_else(|| export.group.name.clone());
 
         let group = self.create_group_from_record(&export.group, &group_id, &group_name)?;
-        queries::create_group(&self.pool, &group).await?;
+        queries::upsert_group(&self.pool, &group).await?;
         result.group_ids.push(group_id);
 
         // Note: thin exports don't include agent data, so members can't be created
@@ -739,7 +773,7 @@ impl Importer {
             joined_at: export.joined_at,
         };
 
-        queries::add_group_member(&self.pool, &member).await?;
+        queries::upsert_group_member(&self.pool, &member).await?;
         Ok(())
     }
 
@@ -749,6 +783,7 @@ impl Importer {
         data_cid: &Cid,
         blocks: &HashMap<Cid, Vec<u8>>,
         options: &ImportOptions,
+        imported_block_cids: &mut HashSet<Cid>,
     ) -> Result<ImportResult> {
         let data_bytes = blocks.get(data_cid).ok_or_else(|| CoreError::ExportError {
             operation: "reading constellation export".to_string(),
@@ -761,7 +796,7 @@ impl Importer {
                 details: e.to_string(),
             })?;
 
-        self.import_constellation(&constellation, blocks, options)
+        self.import_constellation(&constellation, blocks, options, imported_block_cids)
             .await
     }
 
@@ -771,6 +806,7 @@ impl Importer {
         export: &ConstellationExport,
         blocks: &HashMap<Cid, Vec<u8>>,
         options: &ImportOptions,
+        imported_block_cids: &mut HashSet<Cid>,
     ) -> Result<ImportResult> {
         let mut result = ImportResult::default();
 
@@ -810,7 +846,13 @@ impl Importer {
             };
 
             let agent_result = self
-                .import_agent(&agent_export, blocks, &agent_options, Some(&new_id))
+                .import_agent(
+                    &agent_export,
+                    blocks,
+                    &agent_options,
+                    Some(&new_id),
+                    imported_block_cids,
+                )
                 .await?;
             result.merge(agent_result);
         }
@@ -818,18 +860,26 @@ impl Importer {
         // Import all groups
         for group_export in &export.group_exports {
             let group_result = self
-                .import_group_thin_with_members(group_export, blocks, options, &agent_id_map)
+                .import_group_thin_with_members(
+                    group_export,
+                    blocks,
+                    options,
+                    &agent_id_map,
+                    imported_block_cids,
+                )
                 .await?;
             result.merge(group_result);
         }
 
         // Import additional memory blocks (orphaned/system blocks not part of agents)
         for block_cid in &export.all_memory_block_cids {
-            // These blocks don't have a specific owner agent, use a placeholder
-            // or the owner_id as the agent_id
-            self.import_memory_block(block_cid, blocks, &options.owner_id, options)
-                .await?;
-            result.memory_block_count += 1;
+            if imported_block_cids.insert(*block_cid) {
+                // These blocks don't have a specific owner agent, use a placeholder
+                // or the owner_id as the agent_id
+                self.import_memory_block(block_cid, blocks, &options.owner_id, options)
+                    .await?;
+                result.memory_block_count += 1;
+            }
         }
 
         // Import all shared block attachments
@@ -846,6 +896,7 @@ impl Importer {
         blocks: &HashMap<Cid, Vec<u8>>,
         options: &ImportOptions,
         agent_id_map: &HashMap<String, String>,
+        imported_block_cids: &mut HashSet<Cid>,
     ) -> Result<ImportResult> {
         let mut result = ImportResult::default();
 
@@ -858,7 +909,7 @@ impl Importer {
 
         // For constellation groups, don't apply rename
         let group = self.create_group_from_record(&export.group, &group_id, &export.group.name)?;
-        queries::create_group(&self.pool, &group).await?;
+        queries::upsert_group(&self.pool, &group).await?;
         result.group_ids.push(group_id.clone());
 
         // Create group members with mapped agent IDs
@@ -877,12 +928,14 @@ impl Importer {
                 .await?;
         }
 
-        // Import shared memory blocks
+        // Import shared memory blocks (skip if already imported this session)
         for block_cid in &export.shared_memory_cids {
-            // Shared blocks get the group_id as their agent_id
-            self.import_memory_block(block_cid, blocks, &group_id, options)
-                .await?;
-            result.memory_block_count += 1;
+            if imported_block_cids.insert(*block_cid) {
+                // Shared blocks get the group_id as their agent_id
+                self.import_memory_block(block_cid, blocks, &group_id, options)
+                    .await?;
+                result.memory_block_count += 1;
+            }
         }
 
         // Import shared block attachments

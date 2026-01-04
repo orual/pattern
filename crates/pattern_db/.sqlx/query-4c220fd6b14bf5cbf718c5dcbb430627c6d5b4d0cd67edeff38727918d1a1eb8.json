@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO archive_summaries (id, agent_id, summary, start_position, end_position, message_count, previous_summary_id, depth, created_at)\n        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)\n        ON CONFLICT(id) DO UPDATE SET\n            agent_id = excluded.agent_id,\n            summary = excluded.summary,\n            start_position = excluded.start_position,\n            end_position = excluded.end_position,\n            message_count = excluded.message_count,\n            previous_summary_id = excluded.previous_summary_id,\n            depth = excluded.depth\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": []
+  },
+  "hash": "4c220fd6b14bf5cbf718c5dcbb430627c6d5b4d0cd67edeff38727918d1a1eb8"
+}

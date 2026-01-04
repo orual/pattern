@@ -41,14 +41,7 @@ pub type AgentGroup = DbAgentGroup;
 /// Opens both constellation.db and auth.db from the data directory.
 /// All commands that need database access should use this helper.
 pub async fn get_dbs(config: &PatternConfig) -> Result<ConstellationDatabases> {
-    // The config database.path points to constellation.db, we need the parent directory
-    let data_dir = config
-        .database
-        .path
-        .parent()
-        .ok_or_else(|| miette::miette!("Invalid database path: no parent directory"))?;
-
-    ConstellationDatabases::open(data_dir)
+    ConstellationDatabases::open(&config.database.path)
         .await
         .map_err(|e| miette::miette!("Failed to open databases: {}", e))
 }
@@ -58,7 +51,7 @@ pub async fn get_dbs(config: &PatternConfig) -> Result<ConstellationDatabases> {
 /// Use this when you only need constellation data (agents, messages, memory)
 /// and don't need auth tokens. For full functionality, prefer `get_dbs()`.
 pub async fn get_db(config: &PatternConfig) -> Result<ConstellationDb> {
-    ConstellationDb::open(&config.database.path)
+    ConstellationDb::open(&config.database.constellation_db())
         .await
         .map_err(|e| miette::miette!("Failed to open database: {}", e))
 }

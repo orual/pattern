@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO archival_entries (id, agent_id, content, metadata, chunk_index, parent_entry_id, created_at)\n        VALUES (?, ?, ?, ?, ?, ?, ?)\n        ON CONFLICT(id) DO UPDATE SET\n            agent_id = excluded.agent_id,\n            content = excluded.content,\n            metadata = excluded.metadata,\n            chunk_index = excluded.chunk_index,\n            parent_entry_id = excluded.parent_entry_id\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "f341b17c7754eb74085558e267f6c148db9b21daf3727afad36cd46594fe8016"
+}

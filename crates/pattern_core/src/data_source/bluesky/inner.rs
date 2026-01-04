@@ -1055,11 +1055,14 @@ impl BlueskyStreamInner {
             let images = ctx.collect_images();
 
             // Use abbreviated format if recently shown, full otherwise
-            let text = if recently_shown {
+            let mut text = if recently_shown {
                 ctx.format_abbreviated()
             } else {
                 ctx.format_full()
             };
+
+            // Append reply options
+            text.push_str(&ctx.format_reply_options());
 
             (text, images)
         } else {

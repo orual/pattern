@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO agent_groups (id, name, description, pattern_type, pattern_config, created_at, updated_at)\n        VALUES (?, ?, ?, ?, ?, ?, ?)\n        ON CONFLICT(id) DO UPDATE SET\n            name = excluded.name,\n            description = excluded.description,\n            pattern_type = excluded.pattern_type,\n            pattern_config = excluded.pattern_config,\n            updated_at = excluded.updated_at\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "573e1bc02c5f7676b4ed49e40e261fb3858b0fcab63daab03e2ab2a56462c2f6"
+}
