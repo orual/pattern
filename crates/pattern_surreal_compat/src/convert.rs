@@ -40,6 +40,7 @@ use crate::groups::{AgentGroup, CoordinationPattern};
 use crate::memory::{MemoryBlock as OldMemoryBlock, MemoryPermission as OldPermission, MemoryType};
 use crate::message::{
     AgentMessageRelation, BatchType as OldBatchType, ChatRole, Message as OldMessage,
+    MessageRelationType,
 };
 
 /// Options for CAR conversion.
@@ -837,7 +838,7 @@ fn convert_message(
         batch_type: old.batch_type.map(|bt| convert_batch_type(&bt)),
         source: None,
         source_metadata: None,
-        is_archived: false,
+        is_archived: matches!(relation.message_type, MessageRelationType::Archived),
         is_deleted: false,
         created_at: old.created_at,
     }
