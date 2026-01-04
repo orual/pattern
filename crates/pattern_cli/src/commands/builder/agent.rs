@@ -175,14 +175,25 @@ impl AgentBuilder {
         } else {
             for (label, block) in &self.config.memory {
                 let perm = format!("[{:?}]", block.permission).to_lowercase();
+                let pinned_indicator = if block.pinned.unwrap_or(false) {
+                    " [pinned]"
+                } else {
+                    ""
+                };
+                let limit_str = block
+                    .char_limit
+                    .map(|l| format!(" [{}c]", l))
+                    .unwrap_or_default();
                 let preview = block
                     .content
                     .as_ref()
                     .map(|c| truncate(c, 30))
                     .unwrap_or_else(|| "(empty)".to_string());
                 r.list_item(&format!(
-                    "{} {} {}",
+                    "{}{}{} {} {}",
                     label.cyan(),
+                    pinned_indicator.yellow(),
+                    limit_str.yellow(),
                     perm.dimmed(),
                     preview.dimmed()
                 ));
@@ -514,6 +525,20 @@ impl AgentBuilder {
 
         let shared = editors::confirm("Shared with other agents?", false)?;
 
+        let pinned = editors::confirm("Pin to always load in context?", false)?;
+
+        let char_limit_str = editors::input_optional("Character limit (empty for none)")?;
+        let char_limit = match char_limit_str {
+            Some(s) if !s.is_empty() => match s.parse::<usize>() {
+                Ok(n) => Some(n),
+                Err(_) => {
+                    println!("{}", "Invalid number, ignoring".yellow());
+                    None
+                }
+            },
+            _ => None,
+        };
+
         self.config.memory.insert(
             label.clone(),
             MemoryBlockConfig {
@@ -524,6 +549,9 @@ impl AgentBuilder {
                 description: None,
                 id: None,
                 shared,
+                pinned: Some(pinned),
+                char_limit,
+                schema: None,
             },
         );
         self.modified = true;
@@ -578,12 +606,38 @@ impl AgentBuilder {
             _ => pattern_core::memory::MemoryPermission::Admin,
         };
 
+        // Edit pinned.
+        let current_pinned = block.pinned.unwrap_or(false);
+        let new_pinned = editors::confirm(
+            &format!("Pin to context? (currently: {})", current_pinned),
+            current_pinned,
+        )?;
+
+        // Edit char_limit.
+        let char_limit_prompt = match block.char_limit {
+            Some(limit) => format!("New character limit (empty to remove, current: {})", limit),
+            None => "Character limit (empty for none)".to_string(),
+        };
+        let limit_str = editors::input_optional(&char_limit_prompt)?;
+        let new_char_limit = match limit_str {
+            Some(s) if !s.is_empty() => match s.parse::<usize>() {
+                Ok(n) => Some(n),
+                Err(_) => {
+                    println!("{}", "Invalid number, keeping previous value".yellow());
+                    block.char_limit
+                }
+            },
+            _ => None, // Empty input removes the limit
+        };
+
         self.config.memory.insert(
             label.to_string(),
             MemoryBlockConfig {
                 content: new_content,
                 content_path: new_path,
                 permission,
+                pinned: Some(new_pinned),
+                char_limit: new_char_limit,
                 ..block
             },
         );
@@ -1048,7 +1102,17 @@ struct MemoryBlockItem {
 impl CollectionItem for MemoryBlockItem {
     fn display_short(&self) -> String {
         let perm = format!("[{:?}]", self.block.permission).to_lowercase();
-        format!("{} {}", self.label, perm.dimmed())
+        let pinned_indicator = if self.block.pinned.unwrap_or(false) {
+            " [pinned]"
+        } else {
+            ""
+        };
+        format!(
+            "{}{} {}",
+            self.label,
+            pinned_indicator.yellow(),
+            perm.dimmed()
+        )
     }
 
     fn label(&self) -> String {

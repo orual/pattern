@@ -12,12 +12,36 @@ mod permission_sink;
 mod slash_commands;
 mod tracing_writer;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use miette::Result;
 use owo_colors::OwoColorize;
-use pattern_core::config::{self};
+use pattern_core::config::{self, ConfigPriority};
 use std::path::PathBuf;
 use tracing::info;
+
+/// CLI argument for config priority when TOML and DB conflict.
+///
+/// This maps to [`ConfigPriority`] from pattern_core.
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+pub enum ConfigPriorityArg {
+    /// DB values win for content, TOML wins for config metadata (default).
+    #[default]
+    Merge,
+    /// TOML overwrites everything except memory content.
+    Toml,
+    /// Ignore TOML entirely for existing agents.
+    Db,
+}
+
+impl From<ConfigPriorityArg> for ConfigPriority {
+    fn from(arg: ConfigPriorityArg) -> Self {
+        match arg {
+            ConfigPriorityArg::Merge => ConfigPriority::Merge,
+            ConfigPriorityArg::Toml => ConfigPriority::TomlWins,
+            ConfigPriorityArg::Db => ConfigPriority::DbWins,
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "pattern-cli")]
@@ -55,6 +79,10 @@ enum Commands {
         /// Run as Discord bot instead of CLI chat
         #[arg(long)]
         discord: bool,
+
+        /// Config priority when TOML and DB conflict
+        #[arg(long, value_enum, default_value = "merge")]
+        config_priority: ConfigPriorityArg,
     },
     /// Agent management
     Agent {
@@ -276,6 +304,14 @@ enum ConfigCommands {
         /// Path to save configuration
         #[arg(default_value = "pattern.toml")]
         path: PathBuf,
+    },
+    /// Migrate config file to new format
+    Migrate {
+        /// Path to config file to migrate
+        path: PathBuf,
+        /// Modify file in place (otherwise prints to stdout)
+        #[arg(long)]
+        in_place: bool,
     },
 }
 
@@ -704,8 +740,13 @@ async fn main() -> Result<()> {
             agent,
             group,
             discord,
+            config_priority,
         } => {
             let output = crate::output::Output::new();
+
+            // Log config priority for debugging (wiring happens in Task 11).
+            let _priority: ConfigPriority = (*config_priority).into();
+            tracing::debug!(?_priority, "Config priority selected");
 
             // Create heartbeat channel for agent(s)
             let (heartbeat_sender, heartbeat_receiver) =
@@ -936,6 +977,9 @@ async fn main() -> Result<()> {
                 ConfigCommands::Show => commands::config::show(&config, &output).await?,
                 ConfigCommands::Save { path } => {
                     commands::config::save(&config, path, &output).await?
+                }
+                ConfigCommands::Migrate { path, in_place } => {
+                    commands::config::migrate(path, *in_place).await?
                 }
             }
         }

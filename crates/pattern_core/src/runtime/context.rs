@@ -21,8 +21,8 @@ use crate::db::ConstellationDatabases;
 
 use crate::agent::{Agent, DatabaseAgent};
 use crate::config::{
-    AgentConfig, AgentOverrides, GroupConfig, GroupMemberConfig, PartialAgentConfig,
-    ResolvedAgentConfig, merge_agent_configs,
+    AgentConfig, AgentOverrides, ConfigPriority, GroupConfig, GroupMemberConfig,
+    PartialAgentConfig, ResolvedAgentConfig, merge_agent_configs,
 };
 use crate::context::heartbeat::{HeartbeatReceiver, HeartbeatSender, heartbeat_channel};
 use crate::context::{ActivityConfig, ActivityLogger, ActivityRenderer};
@@ -1126,7 +1126,7 @@ impl RuntimeContext {
             if block_config.permission != crate::memory::MemoryPermission::ReadWrite {
                 pattern_db::queries::update_block_permission(
                     self.dbs.constellation.pool(),
-                    block_id,
+                    &block_id,
                     block_config.permission.into(),
                 )
                 .await
@@ -1134,6 +1134,36 @@ impl RuntimeContext {
                     data_type: "memory_block".to_string(),
                     details: format!("Failed to set permission for block '{}': {}", label, e),
                 })?;
+            }
+
+            // Update pinned and char_limit if specified in config
+            if block_config.pinned.is_some() || block_config.char_limit.is_some() {
+                pattern_db::queries::update_block_config(
+                    self.dbs.constellation.pool(),
+                    &block_id,
+                    None, // permission already handled above
+                    None, // block_type set via create_block
+                    None, // description set via create_block
+                    block_config.pinned,
+                    block_config.char_limit.map(|l| l as i64),
+                )
+                .await
+                .map_err(|e| CoreError::InvalidFormat {
+                    data_type: "memory_block".to_string(),
+                    details: format!(
+                        "Failed to set pinned/char_limit for block '{}': {}",
+                        label, e
+                    ),
+                })?;
+
+                // Evict block from cache so metadata will be reloaded from DB
+                self.memory
+                    .evict(&id, label)
+                    .await
+                    .map_err(|e| CoreError::InvalidFormat {
+                        data_type: "memory_block".to_string(),
+                        details: format!("Failed to evict block '{}' from cache: {}", label, e),
+                    })?;
             }
         }
 
@@ -1227,6 +1257,249 @@ impl RuntimeContext {
         // Resolve config with no overrides
         let resolved = self.resolve_config(&db_agent, None);
         self.build_agent_from_resolved(agent_id, &resolved).await
+    }
+
+    /// Load an agent, merging TOML config with DB state based on priority.
+    ///
+    /// This method enables declarative agent configuration via TOML files while
+    /// preserving runtime state from the database. The `ConfigPriority` controls
+    /// how conflicts between TOML and DB are resolved.
+    ///
+    /// # Priority Modes
+    ///
+    /// - **Merge** (default): DB content is preserved, TOML updates metadata
+    ///   (permission, pinned, char_limit, block_type, description). New blocks
+    ///   in TOML are created. This is the recommended mode for production.
+    ///
+    /// - **TomlWins**: TOML overwrites all config except content. Use when you
+    ///   want the TOML file to be authoritative for configuration.
+    ///
+    /// - **DbWins**: Ignore TOML entirely for existing agents. Use when you want
+    ///   to preserve the exact DB state without any TOML influence.
+    ///
+    /// # Arguments
+    /// * `agent_name` - The name of the agent (looked up in DB, not ID)
+    /// * `toml_config` - Agent configuration from TOML file
+    /// * `priority` - How to resolve conflicts between TOML and DB
+    ///
+    /// # Returns
+    /// The loaded or created agent
+    ///
+    /// # Example
+    /// ```ignore
+    /// let config = AgentConfig::load_from_file("agent.toml").await?;
+    /// let agent = ctx.load_or_create_agent_with_config(
+    ///     "MyAgent",
+    ///     &config,
+    ///     ConfigPriority::Merge,
+    /// ).await?;
+    /// ```
+    pub async fn load_or_create_agent_with_config(
+        &self,
+        agent_name: &str,
+        toml_config: &AgentConfig,
+        priority: ConfigPriority,
+    ) -> Result<Arc<dyn Agent>> {
+        // Look up agent by name in DB
+        let db_agent =
+            pattern_db::queries::get_agent_by_name(self.dbs.constellation.pool(), agent_name)
+                .await?;
+
+        match (db_agent, priority) {
+            // Agent doesn't exist - create from TOML (seed)
+            (None, _) => {
+                tracing::debug!(agent_name, "Agent not in DB, creating from TOML config");
+                self.create_agent(toml_config).await
+            }
+
+            // Agent exists, DbWins - load from DB, ignore TOML entirely
+            (Some(db), ConfigPriority::DbWins) => {
+                tracing::debug!(
+                    agent_name,
+                    agent_id = %db.id,
+                    "Loading agent from DB (DbWins priority)"
+                );
+                self.load_agent(&db.id).await
+            }
+
+            // Agent exists, Merge - update metadata from TOML, preserve content
+            (Some(db), ConfigPriority::Merge) => {
+                tracing::debug!(
+                    agent_name,
+                    agent_id = %db.id,
+                    "Merging TOML config with DB state (Merge priority)"
+                );
+                self.merge_toml_config_with_db(&db.id, toml_config, false)
+                    .await?;
+                self.load_agent(&db.id).await
+            }
+
+            // Agent exists, TomlWins - update all config from TOML, preserve content
+            (Some(db), ConfigPriority::TomlWins) => {
+                tracing::debug!(
+                    agent_name,
+                    agent_id = %db.id,
+                    "Applying TOML config over DB (TomlWins priority)"
+                );
+                self.merge_toml_config_with_db(&db.id, toml_config, true)
+                    .await?;
+                self.load_agent(&db.id).await
+            }
+        }
+    }
+
+    /// Internal: merge TOML config into existing DB agent.
+    ///
+    /// For each block in toml_config.memory:
+    /// - If block exists in DB: update metadata (not content)
+    /// - If block doesn't exist: create it with TOML content
+    ///
+    /// When `force_update` is true, all metadata fields are updated.
+    /// When false, only fields that are explicitly set in TOML are updated.
+    async fn merge_toml_config_with_db(
+        &self,
+        agent_id: &str,
+        toml_config: &AgentConfig,
+        force_update: bool,
+    ) -> Result<()> {
+        let pool = self.dbs.constellation.pool();
+
+        for (label, block_config) in &toml_config.memory {
+            // Check if block exists in DB
+            let existing_block =
+                pattern_db::queries::get_block_by_label(pool, agent_id, label).await?;
+
+            if let Some(db_block) = existing_block {
+                // Block exists - update metadata only (preserve content).
+                // Permission and memory_type are always present in TOML (with defaults),
+                // so we always apply them. This ensures TOML wins for config metadata
+                // even when the TOML value is the default (e.g., read_write permission).
+                let permission = Some(block_config.permission.into());
+
+                let block_type = Some(
+                    self.memory_type_to_block_type(block_config.memory_type)
+                        .into(),
+                );
+
+                let description = if force_update || block_config.description.is_some() {
+                    block_config.description.as_deref()
+                } else {
+                    None
+                };
+
+                let pinned = if force_update || block_config.pinned.is_some() {
+                    block_config.pinned
+                } else {
+                    None
+                };
+
+                let char_limit = if force_update || block_config.char_limit.is_some() {
+                    block_config.char_limit.map(|l| l as i64)
+                } else {
+                    None
+                };
+
+                // Only call update if we have something to update
+                if permission.is_some()
+                    || block_type.is_some()
+                    || description.is_some()
+                    || pinned.is_some()
+                    || char_limit.is_some()
+                {
+                    pattern_db::queries::update_block_config(
+                        pool,
+                        &db_block.id,
+                        permission,
+                        block_type,
+                        description,
+                        pinned,
+                        char_limit,
+                    )
+                    .await?;
+
+                    // Evict block from cache so metadata will be reloaded from DB.
+                    // Ignore errors if block is not in cache (it might not have been loaded yet).
+                    let _ = self.memory.evict(agent_id, label).await;
+
+                    tracing::debug!(
+                        label,
+                        block_id = %db_block.id,
+                        "Updated block metadata from TOML"
+                    );
+                }
+            } else {
+                // Block doesn't exist - create it with TOML content
+                let content = block_config.load_content().await?;
+                let description = block_config
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| format!("{} memory block", label));
+                let block_type = self.memory_type_to_block_type(block_config.memory_type);
+                let char_limit = block_config.char_limit.unwrap_or(0) as usize;
+
+                // Create the block
+                let doc = self
+                    .memory
+                    .create_block(
+                        agent_id,
+                        label,
+                        &description,
+                        block_type,
+                        BlockSchema::text(),
+                        char_limit,
+                    )
+                    .await
+                    .map_err(|e| CoreError::InvalidFormat {
+                        data_type: "memory_block".to_string(),
+                        details: format!("Failed to create memory block '{}': {}", label, e),
+                    })?;
+
+                // Set content if not empty
+                if !content.is_empty() {
+                    doc.set_text(&content, true)
+                        .map_err(|e| CoreError::InvalidFormat {
+                            data_type: "memory_block".to_string(),
+                            details: format!("Failed to set content for block '{}': {}", label, e),
+                        })?;
+                    self.memory.mark_dirty(agent_id, label);
+                    self.memory.persist(agent_id, label).await.map_err(|e| {
+                        CoreError::InvalidFormat {
+                            data_type: "memory_block".to_string(),
+                            details: format!("Failed to persist block '{}': {}", label, e),
+                        }
+                    })?;
+                }
+
+                // Update permission if needed
+                let block_id = doc.id();
+                if block_config.permission != crate::memory::MemoryPermission::ReadWrite {
+                    pattern_db::queries::update_block_permission(
+                        pool,
+                        &block_id,
+                        block_config.permission.into(),
+                    )
+                    .await?;
+                }
+
+                // Update pinned if specified
+                if let Some(pinned) = block_config.pinned {
+                    pattern_db::queries::update_block_pinned(pool, &block_id, pinned).await?;
+                }
+
+                tracing::debug!(label, block_id, "Created new block from TOML config");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Helper: Convert MemoryType (config) to BlockType (memory system).
+    fn memory_type_to_block_type(&self, memory_type: crate::memory::MemoryType) -> BlockType {
+        match memory_type {
+            crate::memory::MemoryType::Core => BlockType::Core,
+            crate::memory::MemoryType::Working => BlockType::Working,
+            crate::memory::MemoryType::Archival => BlockType::Archival,
+        }
     }
 
     // ============================================================================

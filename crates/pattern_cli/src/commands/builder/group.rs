@@ -664,6 +664,9 @@ impl GroupBuilder {
                 description: None,
                 id: None,
                 shared: true, // Shared memory is always shared
+                pinned: None,
+                char_limit: None,
+                schema: None,
             },
         );
         self.modified = true;

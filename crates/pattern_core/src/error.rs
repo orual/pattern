@@ -6,6 +6,7 @@ use thiserror::Error;
 
 /// Configuration-specific errors
 #[derive(Error, Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum ConfigError {
     #[error("IO error: {0}")]
     Io(String),
@@ -21,6 +22,9 @@ pub enum ConfigError {
 
     #[error("Invalid value for field {field}: {reason}")]
     InvalidValue { field: String, reason: String },
+
+    #[error("Deprecated config: {field} - {message}")]
+    Deprecated { field: String, message: String },
 }
 
 #[derive(Error, Diagnostic, Debug)]

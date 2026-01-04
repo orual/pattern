@@ -311,6 +311,90 @@ pub async fn update_block_permission(
     Ok(())
 }
 
+/// Update configuration metadata for a memory block without touching content.
+///
+/// This is used for config file merges where the TOML can update config fields
+/// but the database owns the content. Only fields provided as Some will be updated;
+/// None values leave the field unchanged.
+///
+/// Fields:
+/// - `permission`: Access permission level for the block
+/// - `block_type`: Type classification (core, working, archival, log)
+/// - `description`: Human/LLM-readable description of the block's purpose
+/// - `pinned`: Whether the block is always loaded into context
+/// - `char_limit`: Maximum character limit for block content
+pub async fn update_block_config(
+    pool: &SqlitePool,
+    id: &str,
+    permission: Option<MemoryPermission>,
+    block_type: Option<MemoryBlockType>,
+    description: Option<&str>,
+    pinned: Option<bool>,
+    char_limit: Option<i64>,
+) -> DbResult<()> {
+    // Use a transaction to ensure atomicity between fetch and update.
+    let mut tx = pool.begin().await?;
+
+    // Fetch current values to use as defaults for unspecified fields.
+    let current = sqlx::query_as!(
+        MemoryBlock,
+        r#"
+        SELECT
+            id as "id!",
+            agent_id as "agent_id!",
+            label as "label!",
+            description as "description!",
+            block_type as "block_type!: MemoryBlockType",
+            char_limit as "char_limit!",
+            permission as "permission!: MemoryPermission",
+            pinned as "pinned!: bool",
+            loro_snapshot as "loro_snapshot!",
+            content_preview,
+            metadata as "metadata: _",
+            embedding_model,
+            is_active as "is_active!: bool",
+            frontier,
+            last_seq as "last_seq!",
+            created_at as "created_at!: _",
+            updated_at as "updated_at!: _"
+        FROM memory_blocks WHERE id = ?
+        "#,
+        id
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let Some(current) = current else {
+        return Err(crate::error::DbError::not_found("memory block", id));
+    };
+
+    // Use provided values or fall back to current values.
+    let perm = permission.unwrap_or(current.permission);
+    let btype = block_type.unwrap_or(current.block_type);
+    let desc = description.unwrap_or(&current.description);
+    let pin = pinned.unwrap_or(current.pinned);
+    let limit = char_limit.unwrap_or(current.char_limit);
+
+    sqlx::query!(
+        r#"
+        UPDATE memory_blocks
+        SET permission = ?, block_type = ?, description = ?, pinned = ?, char_limit = ?, updated_at = datetime('now')
+        WHERE id = ?
+        "#,
+        perm,
+        btype,
+        desc,
+        pin,
+        limit,
+        id
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
 /// Update a memory block's pinned flag.
 ///
 /// Pinned blocks are always loaded into agent context while subscribed.
@@ -1489,5 +1573,72 @@ mod tests {
         assert_eq!(blocks[0].permission, MemoryPermission::ReadOnly);
         assert_eq!(blocks[1].block_id, "block2");
         assert_eq!(blocks[1].permission, MemoryPermission::ReadWrite);
+    }
+
+    #[tokio::test]
+    async fn test_update_block_config() {
+        let db = setup_test_db().await;
+
+        // Create test agent (required FK).
+        create_test_agent(&db, "test-agent", "Test Agent").await;
+
+        // Create a block.
+        create_test_block(&db, "test-block", "test-agent").await;
+
+        // Update config fields.
+        update_block_config(
+            db.pool(),
+            "test-block",
+            Some(MemoryPermission::ReadOnly),
+            Some(MemoryBlockType::Core),
+            Some("Updated description"),
+            Some(true), // pinned
+            Some(8192), // char_limit
+        )
+        .await
+        .unwrap();
+
+        // Verify.
+        let block = get_block(db.pool(), "test-block").await.unwrap().unwrap();
+        assert_eq!(block.permission, MemoryPermission::ReadOnly);
+        assert_eq!(block.block_type, MemoryBlockType::Core);
+        assert_eq!(block.description, "Updated description");
+        assert!(block.pinned);
+        assert_eq!(block.char_limit, 8192);
+    }
+
+    #[tokio::test]
+    async fn test_update_block_config_partial() {
+        let db = setup_test_db().await;
+
+        // Create test agent (required FK).
+        create_test_agent(&db, "test-agent", "Test Agent").await;
+
+        // Create a block.
+        create_test_block(&db, "test-block", "test-agent").await;
+
+        // Get original values.
+        let original = get_block(db.pool(), "test-block").await.unwrap().unwrap();
+
+        // Update only pinned field.
+        update_block_config(
+            db.pool(),
+            "test-block",
+            None,       // permission unchanged
+            None,       // block_type unchanged
+            None,       // description unchanged
+            Some(true), // pinned = true
+            None,       // char_limit unchanged
+        )
+        .await
+        .unwrap();
+
+        // Verify only pinned changed.
+        let block = get_block(db.pool(), "test-block").await.unwrap().unwrap();
+        assert_eq!(block.permission, original.permission);
+        assert_eq!(block.block_type, original.block_type);
+        assert_eq!(block.description, original.description);
+        assert!(block.pinned); // This changed.
+        assert_eq!(block.char_limit, original.char_limit);
     }
 }

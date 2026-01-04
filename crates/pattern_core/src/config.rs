@@ -6,15 +6,12 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::io::AsyncWriteExt;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::context::DEFAULT_BASE_INSTRUCTIONS;
-use crate::data_source::{
-    BlueskyStream, DefaultCommandValidator, LocalPtyBackend, ProcessSource, ShellPermission,
-};
+use crate::data_source::{BlueskyStream, DefaultCommandValidator, LocalPtyBackend, ProcessSource};
 use crate::db::ConstellationDatabases;
 use crate::memory::CONSTELLATION_OWNER;
 use crate::runtime::ToolContext;
@@ -24,15 +21,39 @@ use crate::{
     agent::tool_rules::ToolRule,
     context::compression::CompressionStrategy,
     //data_source::bluesky::BlueskyFilter,
-    id::{AgentId, GroupId, MemoryId, UserId},
-    memory::{MemoryPermission, MemoryType},
+    id::{AgentId, GroupId, MemoryId},
+    memory::{BlockSchema, MemoryPermission, MemoryType},
 };
+
+/// Controls how TOML config and DB config are merged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConfigPriority {
+    /// DB values win for content, TOML wins for config metadata.
+    #[default]
+    Merge,
+    /// TOML overwrites everything except memory content.
+    TomlWins,
+    /// Ignore TOML entirely for existing agents.
+    DbWins,
+}
 
 /// Database configuration for SQLite
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatabaseConfig {
-    /// Path to SQLite database file
+    /// Path to the database directory.
     pub path: PathBuf,
+}
+
+impl DatabaseConfig {
+    /// Path to the constellation database file.
+    pub fn constellation_db(&self) -> PathBuf {
+        self.path.join("constellation.db")
+    }
+
+    /// Path to the auth database file.
+    pub fn auth_db(&self) -> PathBuf {
+        self.path.join("auth.db")
+    }
 }
 
 impl Default for DatabaseConfig {
@@ -40,8 +61,7 @@ impl Default for DatabaseConfig {
         Self {
             path: dirs::data_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
-                .join("pattern")
-                .join("constellation.db"),
+                .join("pattern"),
         }
     }
 }
@@ -321,29 +341,28 @@ pub struct CustomSourceConfig {
 /// Top-level configuration for Pattern
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PatternConfig {
-    /// User configuration
-    pub user: UserConfig,
-
-    /// Agent configuration
-    pub agent: AgentConfig,
-
-    /// Model provider configuration
-    pub model: ModelConfig,
-
-    /// Database configuration
+    /// Database configuration (path is directory containing both DBs).
     #[serde(default)]
     pub database: DatabaseConfig,
 
-    /// Agent groups configuration
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Global model defaults.
+    #[serde(default)]
+    pub model: ModelConfig,
+
+    /// Agent configurations (inline or file references).
+    #[serde(default)]
+    pub agents: Vec<AgentConfigRef>,
+
+    /// Group configurations.
+    #[serde(default)]
     pub groups: Vec<GroupConfig>,
 
-    /// Bluesky configuration
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Bluesky configuration.
+    #[serde(default)]
     pub bluesky: Option<BlueskyConfig>,
 
-    /// Discord configuration (non-sensitive options)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Discord configuration.
+    #[serde(default)]
     pub discord: Option<DiscordAppConfig>,
 }
 
@@ -356,22 +375,6 @@ pub struct DiscordAppConfig {
     pub allowed_guilds: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub admin_users: Option<Vec<String>>,
-}
-
-/// User configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UserConfig {
-    /// User ID (persisted across sessions)
-    #[serde(default)]
-    pub id: UserId,
-
-    /// Optional user name
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-
-    /// User-specific settings
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub settings: HashMap<String, serde_json::Value>,
 }
 
 /// Agent configuration
@@ -735,6 +738,42 @@ impl AgentConfig {
     }
 }
 
+/// Reference to an agent config - either inline or from a file path.
+///
+/// When deserializing, this enum uses `#[serde(untagged)]` to automatically
+/// determine the variant. The `Path` variant is tried first (single `config_path`
+/// field), then `Inline` (full `AgentConfig` structure).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AgentConfigRef {
+    /// Load config from an external file.
+    Path {
+        /// Path to the agent config TOML file.
+        config_path: PathBuf,
+    },
+    /// Inline agent configuration.
+    Inline(AgentConfig),
+}
+
+impl AgentConfigRef {
+    /// Resolve to an AgentConfig, loading from file if needed.
+    ///
+    /// For `Path` variant, loads and parses the TOML file at the given path.
+    /// For `Inline` variant, returns a clone of the embedded config.
+    ///
+    /// # Arguments
+    /// * `base_dir` - Base directory for resolving relative paths in the config_path.
+    pub async fn resolve(&self, base_dir: &Path) -> Result<AgentConfig> {
+        match self {
+            AgentConfigRef::Inline(config) => Ok(config.clone()),
+            AgentConfigRef::Path { config_path } => {
+                let path = resolve_path(base_dir, config_path);
+                AgentConfig::load_from_file(&path).await
+            }
+        }
+    }
+}
+
 /// Configuration for a memory block
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryBlockConfig {
@@ -765,6 +804,18 @@ pub struct MemoryBlockConfig {
     /// Whether this memory should be shared with other agents
     #[serde(default)]
     pub shared: bool,
+
+    /// Whether block is always loaded into context.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<bool>,
+
+    /// Maximum content size in characters.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub char_limit: Option<usize>,
+
+    /// Schema for structured content.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<BlockSchema>,
 }
 
 impl MemoryBlockConfig {
@@ -994,23 +1045,12 @@ pub struct ModelConfig {
 impl Default for PatternConfig {
     fn default() -> Self {
         Self {
-            user: UserConfig::default(),
-            agent: AgentConfig::default(),
-            model: ModelConfig::default(),
             database: DatabaseConfig::default(),
+            model: ModelConfig::default(),
+            agents: Vec::new(),
             groups: Vec::new(),
             bluesky: None,
             discord: None,
-        }
-    }
-}
-
-impl Default for UserConfig {
-    fn default() -> Self {
-        Self {
-            id: UserId::generate(),
-            name: None,
-            settings: HashMap::new(),
         }
     }
 }
@@ -1062,16 +1102,6 @@ pub async fn load_config(path: &Path) -> Result<PatternConfig> {
         }
     })?;
 
-    // Check whether the file explicitly provided a user.id key
-    let parsed_value: toml::Value =
-        toml::from_str(&content).map_err(|e| crate::CoreError::ConfigurationError {
-            config_path: path.display().to_string(),
-            field: "content".to_string(),
-            expected: "valid TOML configuration".to_string(),
-            cause: crate::error::ConfigError::TomlParse(e.to_string()),
-        })?;
-    let user_id_explicit = parsed_value.get("user").and_then(|u| u.get("id")).is_some();
-
     let mut config: PatternConfig =
         toml::from_str(&content).map_err(|e| crate::CoreError::ConfigurationError {
             config_path: path.display().to_string(),
@@ -1083,11 +1113,13 @@ pub async fn load_config(path: &Path) -> Result<PatternConfig> {
     // Resolve paths relative to the config file's directory
     let base_dir = path.parent().unwrap_or(Path::new("."));
 
-    // Resolve paths in main agent memory blocks
-    for (_, memory_block) in config.agent.memory.iter_mut() {
-        if let Some(ref content_path) = memory_block.content_path {
-            memory_block.content_path = Some(resolve_path(base_dir, content_path));
+    // Resolve config_path in AgentConfigRef::Path variants
+    for agent_ref in config.agents.iter_mut() {
+        if let AgentConfigRef::Path { config_path } = agent_ref {
+            *config_path = resolve_path(base_dir, config_path);
         }
+        // Note: For Inline agents, memory block paths are resolved when the
+        // AgentConfig is used, not here. Path agents resolve paths in load_from_file.
     }
 
     // Resolve paths in group members
@@ -1098,11 +1130,6 @@ pub async fn load_config(path: &Path) -> Result<PatternConfig> {
             }
         }
     }
-
-    // Ensure a stable user id:
-    // - If the config explicitly specified a user.id, sync the stable-id file to it.
-    // - If not specified, load (or create) a stable id and set it on the config, then persist the config back.
-    ensure_stable_user_id(&mut config, Some(path), user_id_explicit).await?;
 
     Ok(config)
 }
@@ -1144,14 +1171,9 @@ pub async fn save_config(config: &PatternConfig, path: &Path) -> Result<()> {
 /// Merge two configurations, with the overlay taking precedence
 pub fn merge_configs(base: PatternConfig, overlay: PartialConfig) -> PatternConfig {
     PatternConfig {
-        user: overlay.user.unwrap_or(base.user),
-        agent: if let Some(agent_overlay) = overlay.agent {
-            merge_agent_configs(base.agent, agent_overlay)
-        } else {
-            base.agent
-        },
-        model: overlay.model.unwrap_or(base.model),
         database: overlay.database.unwrap_or(base.database),
+        model: overlay.model.unwrap_or(base.model),
+        agents: overlay.agents.unwrap_or(base.agents),
         groups: overlay.groups.unwrap_or(base.groups),
         bluesky: overlay.bluesky.or(base.bluesky),
         discord: base.discord,
@@ -1162,16 +1184,13 @@ pub fn merge_configs(base: PatternConfig, overlay: PartialConfig) -> PatternConf
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PartialConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub user: Option<UserConfig>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent: Option<PartialAgentConfig>,
+    pub database: Option<DatabaseConfig>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelConfig>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub database: Option<DatabaseConfig>,
+    pub agents: Option<Vec<AgentConfigRef>>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub groups: Option<Vec<GroupConfig>>,
@@ -1501,14 +1520,8 @@ pub async fn load_config_from_standard_locations() -> Result<PatternConfig> {
         }
     }
 
-    // No config found, create default with a stable user id and save it
-    let mut config = PatternConfig::default();
-    // Provide no explicit path; ensure will save to standard location via PatternConfig::save()
-    ensure_stable_user_id(&mut config, None, false).await?;
-    // Persist a new config file so the user id remains stable across runs
-    config.save().await?;
-
-    Ok(config)
+    // No config found, return default
+    Ok(PatternConfig::default())
 }
 
 impl PatternConfig {
@@ -1542,129 +1555,39 @@ impl PatternConfig {
         self.save_to(&config_path).await
     }
 
-    /// Get tool rules for a specific agent by name
-    pub fn get_agent_tool_rules(&self, agent_name: &str) -> Result<Vec<ToolRule>> {
-        if self.agent.name == agent_name {
-            return self.agent.get_tool_rules();
-        }
+    /// Load config with deprecation checks.
+    ///
+    /// Returns error for hard-deprecated patterns (singular [agent]).
+    /// Warns for soft-deprecated patterns ([user]).
+    pub async fn load_with_deprecation_check(
+        path: &Path,
+    ) -> std::result::Result<Self, crate::error::ConfigError> {
+        use crate::error::ConfigError;
 
-        // Look in groups for agents with matching names
-        for group in &self.groups {
-            for member in &group.members {
-                if member.name == agent_name {
-                    // For now, group members don't have individual tool rules
-                    // This could be extended in the future
-                    return Ok(Vec::new());
-                }
-            }
-        }
-
-        // Agent not found, return empty rules
-        Ok(Vec::new())
-    }
-
-    /// Set tool rules for the main agent
-    pub fn set_agent_tool_rules(&mut self, rules: &[ToolRule]) {
-        self.agent.set_tool_rules(rules);
-    }
-}
-
-/// Determine the standard base configuration directory (usually ~/.config/pattern)
-fn standard_config_dir() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("pattern")
-}
-
-/// Path to the stable user-id file used as a fallback when no user.id is specified in config
-fn stable_user_id_path() -> PathBuf {
-    standard_config_dir().join("user_id")
-}
-
-/// Ensure `config.user.id` is stable across runs by syncing with a file in the config directory.
-/// - If `user_id_explicit` is true (config file had user.id), the stable file is set to this value.
-/// - If false, we load from the stable file if present; otherwise, generate, store, and set it.
-/// If `config_path_opt` is provided and user id was not explicit, we also persist the updated config back to disk.
-async fn ensure_stable_user_id(
-    config: &mut PatternConfig,
-    config_path_opt: Option<&Path>,
-    user_id_explicit: bool,
-) -> Result<()> {
-    let path = stable_user_id_path();
-
-    // Make sure the directory exists
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| {
-            crate::CoreError::ConfigurationError {
-                config_path: parent.display().to_string(),
-                field: "directory".to_string(),
-                expected: "writable directory".to_string(),
-                cause: crate::error::ConfigError::Io(e.to_string()),
-            }
-        })?;
-    }
-
-    if user_id_explicit {
-        // Sync stable file to the config's user id
-        let mut file = tokio::fs::File::create(&path).await.map_err(|e| {
-            crate::CoreError::ConfigurationError {
-                config_path: path.display().to_string(),
-                field: "user_id".to_string(),
-                expected: "writable file".to_string(),
-                cause: crate::error::ConfigError::Io(e.to_string()),
-            }
-        })?;
-        file.write_all(config.user.id.0.as_bytes())
+        let content = tokio::fs::read_to_string(path)
             .await
-            .map_err(|e| crate::CoreError::ConfigurationError {
-                config_path: path.display().to_string(),
-                field: "user_id".to_string(),
-                expected: "writable file".to_string(),
-                cause: crate::error::ConfigError::Io(e.to_string()),
-            })?;
-        return Ok(());
-    }
+            .map_err(|e| ConfigError::Io(e.to_string()))?;
+        let raw: toml::Value =
+            toml::from_str(&content).map_err(|e| ConfigError::TomlParse(e.to_string()))?;
 
-    // Not explicit: try to read existing stable id
-    let stable = tokio::fs::read_to_string(&path)
-        .await
-        .ok()
-        .map(|s| s.trim().to_string());
-    if let Some(stable_id) = stable {
-        config.user.id = crate::id::UserId(stable_id);
-        // If we loaded from a config file path, write back to persist the id
-        if let Some(cfg_path) = config_path_opt {
-            let _ = save_config(config, cfg_path).await; // best-effort
+        // Check for deprecated patterns.
+        if raw.get("agent").is_some() && raw.get("agents").is_none() {
+            return Err(ConfigError::Deprecated {
+                field: "agent".into(),
+                message: "Singular [agent] is deprecated. Use [[agents]].\n\
+                         Run: pattern config migrate"
+                    .into(),
+            });
         }
-        return Ok(());
-    }
 
-    // No stable id yet: generate one and store it
-    let generated = config.user.id.clone();
-    let mut file =
-        tokio::fs::File::create(&path)
-            .await
-            .map_err(|e| crate::CoreError::ConfigurationError {
-                config_path: path.display().to_string(),
-                field: "user_id".to_string(),
-                expected: "writable file".to_string(),
-                cause: crate::error::ConfigError::Io(e.to_string()),
-            })?;
-    file.write_all(generated.0.as_bytes()).await.map_err(|e| {
-        crate::CoreError::ConfigurationError {
-            config_path: path.display().to_string(),
-            field: "user_id".to_string(),
-            expected: "writable file".to_string(),
-            cause: crate::error::ConfigError::Io(e.to_string()),
+        if raw.get("user").is_some() {
+            tracing::warn!("[user] block is deprecated and ignored. Remove it from config.");
         }
-    })?;
 
-    // Persist id into config file too if we loaded from a path
-    if let Some(cfg_path) = config_path_opt {
-        let _ = save_config(config, cfg_path).await; // best-effort
+        // Convert Value to PatternConfig instead of re-parsing.
+        raw.try_into()
+            .map_err(|e: toml::de::Error| ConfigError::TomlParse(e.to_string()))
     }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1674,7 +1597,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = PatternConfig::default();
-        assert_eq!(config.agent.name, "Assistant");
+        assert!(config.agents.is_empty());
         assert_eq!(config.model.provider, "Gemini");
         assert!(config.groups.is_empty());
     }
@@ -1683,9 +1606,8 @@ mod tests {
     fn test_config_serialization() {
         let config = PatternConfig::default();
         let toml = toml::to_string_pretty(&config).unwrap();
-        assert!(toml.contains("[user]"));
-        assert!(toml.contains("[agent]"));
         assert!(toml.contains("[model]"));
+        assert!(toml.contains("[database]"));
     }
 
     #[test]
@@ -1761,51 +1683,176 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn test_pattern_config_with_tool_rules() {
+    #[test]
+    fn test_agent_config_with_tool_rules() {
         use crate::agent::tool_rules::ToolRule;
 
-        // Create a config with tool rules
-        let mut config = PatternConfig::default();
+        // Create an agent config with tool rules
+        let mut agent_config = AgentConfig::default();
         let rules = vec![
             ToolRule::start_constraint("init".to_string()),
             ToolRule::continue_loop("search".to_string()),
         ];
-        config.set_agent_tool_rules(&rules);
+        agent_config.set_tool_rules(&rules);
 
         // Test getting rules back
-        let loaded_rules = config.get_agent_tool_rules(&config.agent.name).unwrap();
+        let loaded_rules = agent_config.get_tool_rules().unwrap();
         assert_eq!(loaded_rules.len(), 2);
         assert_eq!(loaded_rules[0].tool_name, "init");
         assert_eq!(loaded_rules[1].tool_name, "search");
 
-        // Test serialization roundtrip
+        // Test serialization roundtrip via PatternConfig with inline agent
+        let config = PatternConfig {
+            agents: vec![AgentConfigRef::Inline(agent_config.clone())],
+            ..Default::default()
+        };
         let toml_content = toml::to_string_pretty(&config).unwrap();
         let deserialized_config: PatternConfig = toml::from_str(&toml_content).unwrap();
 
-        let reloaded_rules = deserialized_config
-            .get_agent_tool_rules(&config.agent.name)
-            .unwrap();
-        assert_eq!(reloaded_rules.len(), 2);
-        assert_eq!(reloaded_rules[0].tool_name, "init");
-        assert_eq!(reloaded_rules[1].tool_name, "search");
+        // Extract the inline agent and verify rules
+        assert_eq!(deserialized_config.agents.len(), 1);
+        if let AgentConfigRef::Inline(ref agent) = deserialized_config.agents[0] {
+            let reloaded_rules = agent.get_tool_rules().unwrap();
+            assert_eq!(reloaded_rules.len(), 2);
+            assert_eq!(reloaded_rules[0].tool_name, "init");
+            assert_eq!(reloaded_rules[1].tool_name, "search");
+        } else {
+            panic!("Expected Inline agent");
+        }
+    }
+
+    #[test]
+    fn test_database_config_directory_helpers() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = DatabaseConfig {
+            path: temp_dir.path().to_path_buf(),
+        };
+        assert_eq!(
+            config.constellation_db(),
+            temp_dir.path().join("constellation.db")
+        );
+        assert_eq!(config.auth_db(), temp_dir.path().join("auth.db"));
+    }
+
+    #[test]
+    fn test_config_priority_default() {
+        assert_eq!(ConfigPriority::default(), ConfigPriority::Merge);
     }
 
     #[test]
     fn test_merge_configs() {
-        let base = PatternConfig::default();
-        let overlay = PartialConfig {
-            agent: Some(PartialAgentConfig {
-                name: Some("Custom Agent".to_string()),
+        let base = PatternConfig {
+            agents: vec![AgentConfigRef::Inline(AgentConfig {
+                name: "BaseAgent".to_string(),
                 ..Default::default()
-            }),
+            })],
+            ..Default::default()
+        };
+        let overlay = PartialConfig {
+            agents: Some(vec![AgentConfigRef::Inline(AgentConfig {
+                name: "OverlayAgent".to_string(),
+                ..Default::default()
+            })]),
             ..Default::default()
         };
 
         let merged = merge_configs(base, overlay);
-        assert_eq!(merged.agent.name, "Custom Agent");
-        // persona is None by default
-        assert_eq!(merged.agent.persona, None);
+        assert_eq!(merged.agents.len(), 1);
+        if let AgentConfigRef::Inline(ref agent) = merged.agents[0] {
+            assert_eq!(agent.name, "OverlayAgent");
+        } else {
+            panic!("Expected Inline agent");
+        }
+    }
+
+    #[test]
+    fn test_agent_config_ref_inline_deserialize() {
+        let toml = r#"
+            name = "TestAgent"
+            system_prompt = "Hello"
+        "#;
+        let parsed: AgentConfigRef = toml::from_str(toml).unwrap();
+        match parsed {
+            AgentConfigRef::Inline(config) => {
+                assert_eq!(config.name, "TestAgent");
+            }
+            _ => panic!("Expected Inline variant"),
+        }
+    }
+
+    #[test]
+    fn test_agent_config_ref_path_deserialize() {
+        let toml = r#"
+            config_path = "agents/pattern.toml"
+        "#;
+        let parsed: AgentConfigRef = toml::from_str(toml).unwrap();
+        match parsed {
+            AgentConfigRef::Path { config_path } => {
+                assert_eq!(config_path, PathBuf::from("agents/pattern.toml"));
+            }
+            _ => panic!("Expected Path variant"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_agent_config_ref_resolve_inline() {
+        let config = AgentConfig {
+            name: "TestAgent".to_string(),
+            system_prompt: Some("Test prompt".to_string()),
+            ..Default::default()
+        };
+        let config_ref = AgentConfigRef::Inline(config.clone());
+
+        let resolved = config_ref.resolve(Path::new("/tmp")).await.unwrap();
+        assert_eq!(resolved.name, "TestAgent");
+        assert_eq!(resolved.system_prompt, Some("Test prompt".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_agent_config_ref_resolve_path_not_found() {
+        let config_ref = AgentConfigRef::Path {
+            config_path: PathBuf::from("nonexistent/agent.toml"),
+        };
+
+        let result = config_ref.resolve(Path::new("/tmp")).await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pattern_config_plural_agents() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let toml = format!(
+            r#"
+            [database]
+            path = "{}"
+
+            [[agents]]
+            name = "Agent1"
+
+            [[agents]]
+            name = "Agent2"
+        "#,
+            temp_dir.path().display()
+        );
+        let config: PatternConfig = toml::from_str(&toml).unwrap();
+        assert_eq!(config.agents.len(), 2);
+    }
+
+    #[test]
+    fn test_pattern_config_agent_config_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let toml = format!(
+            r#"
+            [database]
+            path = "{}"
+
+            [[agents]]
+            config_path = "agents/pattern.toml"
+        "#,
+            temp_dir.path().display()
+        );
+        let config: PatternConfig = toml::from_str(&toml).unwrap();
+        assert_eq!(config.agents.len(), 1);
     }
 
     #[test]
@@ -1846,5 +1893,81 @@ mod tests {
         assert!(toml.contains("type = \"round_robin\""));
         assert!(toml.contains("[[members]]"));
         assert!(toml.contains("name = \"Executive\""));
+    }
+
+    #[test]
+    fn test_memory_block_config_new_fields() {
+        let toml = r#"
+            content = "Test content"
+            permission = "read_write"
+            memory_type = "core"
+            pinned = true
+            char_limit = 4096
+        "#;
+        let config: MemoryBlockConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.pinned, Some(true));
+        assert_eq!(config.char_limit, Some(4096));
+    }
+
+    #[test]
+    fn test_memory_block_config_defaults() {
+        let toml = r#"
+            permission = "read_write"
+            memory_type = "working"
+        "#;
+        let config: MemoryBlockConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.pinned, None);
+        assert_eq!(config.char_limit, None);
+        assert!(config.schema.is_none());
+    }
+
+    #[test]
+    fn test_memory_block_config_with_schema() {
+        let toml = r#"
+            permission = "read_write"
+            memory_type = "core"
+            [schema]
+            Text = {}
+        "#;
+        let config: MemoryBlockConfig = toml::from_str(toml).unwrap();
+        assert!(config.schema.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_deprecation_check_singular_agent_errors() {
+        use crate::error::ConfigError;
+
+        // Create a temp file with singular [agent].
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[agent]
+name = "Test"
+"#,
+        )
+        .unwrap();
+
+        let result = PatternConfig::load_with_deprecation_check(&config_path).await;
+        assert!(matches!(result, Err(ConfigError::Deprecated { field, .. }) if field == "agent"));
+    }
+
+    #[tokio::test]
+    async fn test_deprecation_check_plural_agents_ok() {
+        // Create a temp file with plural [[agents]].
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[[agents]]
+name = "Test"
+"#,
+        )
+        .unwrap();
+
+        let result = PatternConfig::load_with_deprecation_check(&config_path).await;
+        assert!(result.is_ok());
     }
 }

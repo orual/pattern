@@ -108,32 +108,30 @@ pub async fn chat_with_single_agent(agent_name: &str, config: &PatternConfig) ->
 
     // Open databases and find agent using shared helpers
     let dbs = get_dbs(config).await?;
-    let (agent, ctx) =
-        if let Ok(Some(db_agent)) = get_agent_by_name(&dbs.constellation, agent_name).await {
-            output.status(&format!("Loading agent '{}'...", agent_name.bright_cyan()));
+    let db_agent = get_agent_by_name(&dbs.constellation, agent_name)
+        .await?
+        .ok_or_else(|| {
+            miette::miette!(
+                "Agent '{}' not found in database.\n\nCreate it with: pattern agent create",
+                agent_name
+            )
+        })?;
 
-            // Create RuntimeContext using shared helper
-            let ctx = create_runtime_context_with_dbs(dbs).await?;
-            // Load the agent
-            let agent = ctx
-                .load_agent(&db_agent.id)
-                .await
-                .map_err(|e| miette::miette!("Failed to load agent '{}': {}", agent_name, e))?;
+    output.status(&format!("Loading agent '{}'...", agent_name.bright_cyan()));
 
-            output.info("  Loaded:", &agent.name().bright_cyan().to_string());
-            output.info(
-                "  Model:",
-                &format!("{}/{}", db_agent.model_provider, db_agent.model_name),
-            );
+    // Create RuntimeContext using shared helper
+    let ctx = create_runtime_context_with_dbs(dbs).await?;
+    // Load the agent
+    let agent = ctx
+        .load_agent(&db_agent.id)
+        .await
+        .map_err(|e| miette::miette!("Failed to load agent '{}': {}", agent_name, e))?;
 
-            (agent, ctx)
-        } else {
-            output.status(&format!("Creating agent '{}'...", agent_name.bright_cyan()));
-
-            let ctx = create_runtime_context_with_dbs(dbs).await?;
-            let agent = ctx.create_agent(&config.agent).await?;
-            (agent, ctx)
-        };
+    output.info("  Loaded:", &agent.name().bright_cyan().to_string());
+    output.info(
+        "  Model:",
+        &format!("{}/{}", db_agent.model_provider, db_agent.model_name),
+    );
 
     // // Register file source for ./docs directory
     // let file_source = Arc::new(FileSource::with_rules(

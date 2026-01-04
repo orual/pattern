@@ -1,12 +1,10 @@
 # Pattern Configuration Example
 # Copy this file to pattern.toml or ~/.config/pattern/config.toml
 
-[user]
-# User ID is generated automatically if not specified
-# id = "00000000-0000-0000-0000-000000000001"  # UUID format required
-# name = "Your Name"
+# NOTE: The old [user] block has been removed. User IDs are no longer managed via config.
 
-[agent]
+# Agents are now defined as an array of tables using [[agents]]
+[[agents]]
 # Agent ID is generated on first run and then persisted
 # id = "a1234567-89ab-cdef-0123-456789abcdef"
 name = "MyAssistant"
@@ -27,40 +25,46 @@ You help users manage their tasks and stay focused.
 # bluesky_handle = "alice.bsky.social"
 
 # Tool execution rules for controlling tool behavior
-# [[agent.tool_rules]]
+# [[agents.tool_rules]]
 # tool_name = "send_message"
 # rule_type = "ExitLoop"  # This tool ends the conversation
 # priority = 8
-# 
-# [[agent.tool_rules]]
+#
+# [[agents.tool_rules]]
 # tool_name = "recall"
 # rule_type = "ContinueLoop"  # Skip heartbeat checks for performance
 # priority = 1
 #
-# [[agent.tool_rules]]
+# [[agents.tool_rules]]
 # tool_name = "api_request"
 # rule_type = { MaxCalls = 3 }  # Limit API calls per conversation
 # priority = 5
 #
-# [[agent.tool_rules]]
+# [[agents.tool_rules]]
 # tool_name = "save_progress"
 # rule_type = "RequiresPreceding"
 # conditions = ["analyze_data"]  # Must call analyze_data first
 # priority = 7
 
 # Memory blocks can be pre-configured
-[agent.memory.preferences]
+[agents.memory.preferences]
 content = "User prefers concise responses and bullet points."
 permission = "Append"                                         # Options: Read, Append, ReadWrite
 memory_type = "Core"                                          # Options: Core, Working, Archival
 description = "User communication preferences"
+# pinned = true                                               # Keep in context window
+# char_limit = 500                                            # Max characters for this block
 
 # Memory content can also be loaded from files
-[agent.memory.knowledge_base]
+[agents.memory.knowledge_base]
 content_path = "knowledge/domain_expertise.txt" # Relative to config file
 permission = "Read"
 memory_type = "Archival"
 description = "Domain-specific knowledge"
+
+# Additional agents can be defined inline or loaded from external files:
+# [[agents]]
+# config_path = "agents/specialist.toml"  # Load agent config from file
 
 [model]
 provider = "Gemini" # Options: Anthropic, OpenAI, Gemini, Groq, Cohere, Xai, Ollama, DeepSeek
@@ -69,9 +73,10 @@ provider = "Gemini" # Options: Anthropic, OpenAI, Gemini, Groq, Cohere, Xai, Oll
 # temperature = 0.7
 
 [database]
-# Uses embedded SurrealDB by default
+# Uses embedded SQLite by default
 type = "embedded"
-path = "./pattern.db"
+# Path specifies the directory; databases are named constellation.db and auth.db
+path = "./pattern_data"
 strict_mode = false
 
 # For remote database (requires surreal-remote feature):
