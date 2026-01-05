@@ -453,6 +453,7 @@ exclude_dids = [
     "did:plc:vszw3ess46odfhnzdsy4huae",
     "did:plc:lw7hallqsgrhwumgudkph44j",
     "did:plc:djpcowss7aokaydcdraoaovz",
+    "did:plc:zmdk74qov5y6ouh2vsooiqkl",
 ]
 require_agent_participation = true
 

@@ -844,7 +844,7 @@ impl BlueskyStreamInner {
         let (_sink, mut messages) = stream.into_stream();
 
         loop {
-            if *self.status.read() != StreamStatus::Stopped {
+            if *self.status.read() == StreamStatus::Stopped {
                 return Ok(());
             }
 
@@ -868,16 +868,15 @@ impl BlueskyStreamInner {
                 Some(result) = messages.next() => {
                     *self.last_message_time.write() = Some(Instant::now());
 
-                    if *self.status.read() == StreamStatus::Running {
-                        match result {
-                            Ok(msg) => {
-                                self.handle_message(msg);
-                            }
-                            Err(e) => {
-                                error!("BlueskyStream {} message error: {}", self.source_id, e);
-                            }
+                    match result {
+                        Ok(msg) => {
+                            self.handle_message(msg);
+                        }
+                        Err(e) => {
+                            error!("BlueskyStream {} message error: {}", self.source_id, e);
                         }
                     }
+
                 }
                 _ = tokio::time::sleep(Duration::from_secs(1)) => {
                     self.flush_expired_batches().await;
@@ -896,13 +895,15 @@ impl BlueskyStreamInner {
             } => {
                 *self.current_cursor.write() = Some(time_us);
 
-                if let Some(post) = self.parse_commit(&did, time_us, &commit) {
-                    if self.should_include_post(&post) {
-                        debug!(
-                            "BlueskyStream {} accepted post from {} ({})",
-                            self.source_id, post.did, post.uri
-                        );
-                        self.pending_batch.add_post(post);
+                if *self.status.read() == StreamStatus::Running {
+                    if let Some(post) = self.parse_commit(&did, time_us, &commit) {
+                        if self.should_include_post(&post) {
+                            debug!(
+                                "BlueskyStream {} accepted post from {} ({})",
+                                self.source_id, post.did, post.uri
+                            );
+                            self.pending_batch.add_post(post);
+                        }
                     }
                 }
             }
