@@ -86,7 +86,7 @@ pub async fn add_member(
     group_name: &str,
     agent_name: &str,
     role: &str,
-    _capabilities: Option<&str>,
+    capabilities: Option<&str>,
     config: &PatternConfig,
 ) -> Result<()> {
     let output = Output::new();

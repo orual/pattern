@@ -23,9 +23,9 @@ use crate::output::Output;
 pub async fn search_conversations(
     agent_name: &str,
     query: Option<&str>,
-    _role: Option<&str>,
-    _start_time: Option<&str>,
-    _end_time: Option<&str>,
+    role: Option<&str>,
+    start_time: Option<&str>,
+    end_time: Option<&str>,
     limit: usize,
 ) -> Result<()> {
     let output = Output::new();

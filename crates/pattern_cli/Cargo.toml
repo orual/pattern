@@ -15,7 +15,7 @@ path = "src/main.rs"
 default = ["oauth", "discord"]
 oauth = ["pattern-core/oauth"]
 discord = ["pattern-discord"]
-legacy-convert = ["pattern-surreal-compat"]
+legacy-convert = ["dep:pattern-surreal-compat"]
 
 [dependencies]
 # Workspace dependencies

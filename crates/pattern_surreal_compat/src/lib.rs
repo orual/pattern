@@ -10,10 +10,7 @@
 pub mod agent_entity;
 pub mod atproto_identity;
 pub mod config;
-<<<<<<< HEAD
 pub mod convert;
-=======
->>>>>>> e9a148c (rewrite mega-commit, mostly done)
 pub mod db;
 pub mod entity;
 pub mod error;
@@ -58,9 +55,5 @@ pub use message::{
     Response, ResponseMetadata, ToolCall, ToolResponse,
 };
 pub use users::User;
-<<<<<<< HEAD
-
 // Export conversion utilities
 pub use convert::{ConversionError, ConversionStats, convert_car_v1v2_to_v3};
-=======
->>>>>>> e9a148c (rewrite mega-commit, mostly done)

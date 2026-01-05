@@ -246,7 +246,7 @@ pub async fn import(
     file_path: PathBuf,
     rename_to: Option<String>,
     preserve_ids: bool,
-    _config: &PatternConfig,
+    config: &PatternConfig,
 ) -> Result<()> {
     let output = Output::new();
     let db = get_db(config).await?;

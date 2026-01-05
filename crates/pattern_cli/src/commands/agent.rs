@@ -190,9 +190,9 @@ pub async fn add_rule(
     agent_name: &str,
     rule_type: &str,
     tool_name: &str,
-    _params: Option<&str>,
-    _conditions: Option<&str>,
-    _priority: u8,
+    params: Option<&str>,
+    conditions: Option<&str>,
+    priority: u8,
 ) -> Result<()> {
     let output = Output::new();
     let config = crate::helpers::load_config().await?;

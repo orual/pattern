@@ -40,17 +40,16 @@ pub use system_integrity::{SystemIntegrityInput, SystemIntegrityOutput, SystemIn
 pub use web::{WebFormat, WebInput, WebOutput, WebTool};
 
 // V2 tool types (new tool taxonomy)
+use std::sync::Arc;
 pub use types::{
     BlockEditInput, BlockEditOp, BlockInput, BlockOp, FileInput, FileOp, RecallInput, RecallOp,
     SourceInput, SourceOp, ToolOutput,
 };
-use std::sync::Arc;
 
 use crate::{
     runtime::ToolContext,
     tool::{DynamicTool, DynamicToolAdapter, ToolRegistry},
 };
-use std::sync::Arc;
 
 // Message target types for send_message tool
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

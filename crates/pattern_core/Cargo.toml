@@ -123,15 +123,13 @@ proc-macro2-diagnostics = "0.10"
 miette = { workspace = true, features = ["fancy"] }
 
 [features]
-default = ["surreal-embedded", "embed-cloud", "file-watch"]
+default = [ "embed-cloud", "file-watch"]
 nd = []                                                                     # Enable neurodivergent features when pattern-nd is ready
 export = ["zstd"]                                                           # Agent export/import with compression
 oauth = ["reqwest-middleware", "http"]                                      # OAuth authentication support
 file-watch = []                                                             # File watching for data sources (notify always included)
 
 # Database backends
-surreal-embedded = []
-surreal-remote = []
 
 # Embedding backends
 embed-candle = [

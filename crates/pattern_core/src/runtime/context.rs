@@ -2377,6 +2377,7 @@ impl RuntimeContextBuilder {
                             AdapterKind::OpenAI,
                             AdapterKind::Groq,
                             AdapterKind::Cohere,
+                            AdapterKind::OpenRouter,
                         ],
                     );
                     Arc::new(genai_client)
