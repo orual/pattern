@@ -515,12 +515,13 @@ impl FileTool {
                 if let Some(file_source) = source.as_any().downcast_ref::<FileSource>() {
                     match file_source.list_files(pattern).await {
                         Ok(files) => {
-                            for info in files {
+                            for info in files.iter().take(50) {
                                 all_files.push(json!({
                                     "source_id": source_id,
                                     "path": info.path,
                                     "size": info.size,
                                     "loaded": info.loaded,
+                                    "is_directory": info.directory,
                                     "permission": format!("{:?}", info.permission),
                                 }));
                             }

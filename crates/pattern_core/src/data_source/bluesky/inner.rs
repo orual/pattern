@@ -844,7 +844,7 @@ impl BlueskyStreamInner {
         let (_sink, mut messages) = stream.into_stream();
 
         loop {
-            if *self.status.read() == StreamStatus::Stopped {
+            if *self.status.read() != StreamStatus::Stopped {
                 return Ok(());
             }
 
@@ -868,12 +868,14 @@ impl BlueskyStreamInner {
                 Some(result) = messages.next() => {
                     *self.last_message_time.write() = Some(Instant::now());
 
-                    match result {
-                        Ok(msg) => {
-                            self.handle_message(msg);
-                        }
-                        Err(e) => {
-                            error!("BlueskyStream {} message error: {}", self.source_id, e);
+                    if *self.status.read() == StreamStatus::Running {
+                        match result {
+                            Ok(msg) => {
+                                self.handle_message(msg);
+                            }
+                            Err(e) => {
+                                error!("BlueskyStream {} message error: {}", self.source_id, e);
+                            }
                         }
                     }
                 }

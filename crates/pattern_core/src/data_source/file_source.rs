@@ -109,6 +109,8 @@ pub struct FileInfo {
     pub size: u64,
     /// Whether the file is currently loaded as a block
     pub loaded: bool,
+    /// Whether the path is a directory
+    pub directory: bool,
     /// Permission level for this file
     pub permission: MemoryPermission,
 }
@@ -430,7 +432,26 @@ impl FileSource {
                     })?;
 
                 if metadata.is_dir() {
-                    stack.push(path);
+                    // Get relative path for pattern matching and display
+                    let rel_path = path.strip_prefix(&self.base_path).unwrap_or(&path);
+
+                    // Apply glob filter if specified
+                    if let Some(ref matcher) = glob_matcher {
+                        if !matcher.is_match(rel_path) {
+                            continue;
+                        }
+                    }
+
+                    let permission = self.permission_for(&path);
+
+                    files.push(FileInfo {
+                        path: rel_path.to_string_lossy().to_string(),
+                        size: metadata.len(),
+                        loaded: false,
+                        directory: true,
+                        permission,
+                    });
+                    //stack.push(path);
                 } else if metadata.is_file() {
                     // Get relative path for pattern matching and display
                     let rel_path = path.strip_prefix(&self.base_path).unwrap_or(&path);
@@ -449,6 +470,7 @@ impl FileSource {
                         path: rel_path.to_string_lossy().to_string(),
                         size: metadata.len(),
                         loaded,
+                        directory: false,
                         permission,
                     });
                 }
@@ -956,7 +978,12 @@ impl FileSource {
                     &label,
                     &format!("File: {}", abs_path.display()),
                     BlockType::Working,
-                    BlockSchema::text(),
+                    BlockSchema::Text {
+                        viewport: Some(crate::memory::TextViewport {
+                            start_line: 0,
+                            display_lines: 500,
+                        }),
+                    },
                     1024 * 1024, // 1MB char limit
                 )
                 .await

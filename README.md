@@ -16,17 +16,20 @@ The first is a platform for building stateful agents, based on the MemGPT paper,
 ### Current Status
 
 **Core Library Framework Complete**:
-- Agent state persistence and recovery via pattern_db
-- Loro CRDT memory system with versioning
-- Built-in tools (context, recall, search, send_message)
+- Agent state persistence and recovery via pattern_db (SQLite-based, migrated from SurrealDB)
+- Loro CRDT memory system with versioning, undo/redo support
+- Built-in tools (block, recall, search, send_message, file, shell, web, calculator)
 - Message compression strategies (truncation, summarization, importance-based)
 - Agent groups with coordination patterns (round-robin, dynamic, pipeline, supervisor, voting, sleeptime)
-- CLI tool usable, two previously active long-running public constellations on Bluesky (@pattern.atproto.systems and @lasa.numina.systems) running via the CLI
+- CLI tool usable; Pattern constellation active on Bluesky (@pattern.atproto.systems) as of January 2026
 - CAR v3 export/import for agent portability
+- File system access and shell execution for agents
+- Stream sources (Bluesky firehose, process output) with pause/resume
 
 **In Progress**:
 - Backend API server for multi-user hosting
 - MCP server (client is working)
+- Sustainability infrastructure for long-running public agents
 
 ## The `Pattern` agent constellation:
 
@@ -74,7 +77,6 @@ Create custom agent configurations through the builder API or configuration file
 ### Prerequisites
 - Rust 1.85+ (required for 2024 edition) (or use the Nix flake)
 - An LLM API key (Anthropic, OpenAI, Google, etc.)
-  - I currently recommend Gemini and OpenAI API keys, because it defaults to using OpenAI for embedding, and I've tested most extensively with Gemini
 
 ### Using as a Library
 
