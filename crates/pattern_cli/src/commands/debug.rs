@@ -1,19 +1,25 @@
-use chrono::DateTime;
-use miette::{IntoDiagnostic, Result};
-use owo_colors::OwoColorize;
-use pattern_core::{
-    agent::{AgentRecord, AgentState},
-    config::PatternConfig,
-    context::AgentHandle,
-    db::{DatabaseError, DbEntity, client::DB, ops},
-    memory::{Memory, MemoryBlock, MemoryType},
-    message::ChatRole,
-};
-use surrealdb::RecordId;
+//! Debug commands for agent inspection and memory management
+//!
+//! This module provides debugging utilities for inspecting agent state,
+//! memory blocks, message history, and context.
+//!
+//! Uses pattern_db::queries for direct database access via shared helpers.
 
+use miette::Result;
+use owo_colors::OwoColorize;
+use pattern_core::config::PatternConfig;
+use pattern_db::search::ContentFilter;
+
+use crate::helpers::{
+    create_runtime_context, get_agent_by_name, get_db, get_dbs, load_config, require_agent_by_name,
+};
 use crate::output::Output;
 
-/// Search conversation history for an agent
+// =============================================================================
+// Search Conversations
+// =============================================================================
+
+/// Search conversation history for an agent using FTS.
 pub async fn search_conversations(
     agent_name: &str,
     query: Option<&str>,
@@ -23,1749 +29,927 @@ pub async fn search_conversations(
     limit: usize,
 ) -> Result<()> {
     let output = Output::new();
+    let config = load_config().await?;
+    let db = get_db(&config).await?;
 
-    output.section("Searching conversation history");
-    println!();
+    // Find agent
+    let agent = require_agent_by_name(&db, agent_name).await?;
 
-    // First, find the agent
-    let query_sql = "SELECT * FROM agent WHERE name = $name LIMIT 1";
-    let mut response = DB
-        .query(query_sql)
-        .bind(("name", agent_name.to_string()))
+    let query_text = match query {
+        Some(q) => q,
+        None => {
+            output.warning("No search query provided. Use --query to search.");
+            return Ok(());
+        }
+    };
+
+    output.status(&format!(
+        "Searching conversations for '{}': \"{}\"",
+        agent_name.bright_cyan(),
+        query_text
+    ));
+    output.status("");
+
+    // Use pattern_db's hybrid search
+    let results = pattern_db::search::search(db.pool())
+        .text(query_text)
+        .filter(ContentFilter::messages(Some(&agent.id)))
+        .limit(limit as i64)
+        .execute()
         .await
-        .into_diagnostic()?;
+        .map_err(|e| miette::miette!("Search failed: {}", e))?;
 
-    let agents: Vec<<AgentRecord as DbEntity>::DbModel> = response.take(0).into_diagnostic()?;
-    let agents: Vec<_> = agents
-        .into_iter()
-        .map(|e| AgentRecord::from_db_model(e).unwrap())
-        .collect();
-
-    if let Some(agent_record) = agents.first() {
-        output.info(
-            "Agent:",
-            &format!(
-                "{} (ID: {})",
-                agent_record.name.bright_cyan(),
-                agent_record.id.to_string().dimmed()
-            ),
-        );
-        output.kv(
-            "Owner",
-            &agent_record.owner_id.to_string().dimmed().to_string(),
-        );
-
-        // Display search parameters
-        if let Some(q) = query {
-            output.kv("Query", &format!("\"{}\"", q.bright_yellow()));
-        }
-        if let Some(r) = role {
-            output.kv("Role filter", &r.bright_yellow().to_string());
-        }
-        if let Some(st) = start_time {
-            output.kv("Start time", &st.bright_yellow().to_string());
-        }
-        if let Some(et) = end_time {
-            output.kv("End time", &et.bright_yellow().to_string());
-        }
-        output.kv("Limit", &limit.to_string().bright_white().to_string());
-        println!();
-
-        // Parse role if provided
-        let role_filter = if let Some(role_str) = role {
-            match role_str.to_lowercase().as_str() {
-                "system" => Some(ChatRole::System),
-                "user" => Some(ChatRole::User),
-                "assistant" => Some(ChatRole::Assistant),
-                "tool" => Some(ChatRole::Tool),
-                _ => {
-                    output.warning(&format!(
-                        "Invalid role: {}. Using no role filter.",
-                        role_str
-                    ));
-                    output.status("Valid roles: system, user, assistant, tool");
-                    println!();
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        // Parse timestamps if provided
-        let start_dt = if let Some(st) = start_time {
-            match DateTime::parse_from_rfc3339(st) {
-                Ok(dt) => Some(dt.to_utc()),
-                Err(e) => {
-                    output.warning(&format!("Invalid start time format: {}", e));
-                    output.status("Expected ISO 8601 format: 2024-01-20T00:00:00Z");
-                    println!();
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        let end_dt = if let Some(et) = end_time {
-            match DateTime::parse_from_rfc3339(et) {
-                Ok(dt) => Some(dt.to_utc()),
-                Err(e) => {
-                    output.warning(&format!("Invalid end time format: {}", e));
-                    output.status("Expected ISO 8601 format: 2024-01-20T23:59:59Z");
-                    println!();
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        // Create a minimal agent handle for searching
-        let memory = Memory::with_owner(&agent_record.owner_id);
-        let mut handle = AgentHandle::default();
-        handle.name = agent_record.name.clone();
-        handle.agent_id = agent_record.id.clone();
-        handle.agent_type = agent_record.agent_type.clone();
-        handle.memory = memory;
-        handle.state = AgentState::Ready;
-        let handle = handle.with_db(DB.clone());
-
-        // Perform the search
-        match handle
-            .search_conversations(query, role_filter, start_dt, end_dt, limit)
-            .await
-        {
-            Ok(messages) => {
-                output.success(&format!("Found {} messages:", messages.len()));
-                println!();
-
-                for (i, msg) in messages.iter().enumerate() {
-                    println!(
-                        "  {} Message {} {}",
-                        match msg.role {
-                            ChatRole::System => "[system]   ".bright_blue().to_string(),
-                            ChatRole::User => "[user]     ".bright_green().to_string(),
-                            ChatRole::Assistant => "[assistant]".bright_cyan().to_string(),
-                            ChatRole::Tool => "[tool]     ".bright_yellow().to_string(),
-                        },
-                        (i + 1).to_string().bright_white(),
-                        format!("({})", msg.id.0).dimmed()
-                    );
-
-                    // Show batch/position/sequence info
-                    let batch_info = format!(
-                        "batch: {}, pos: {}, seq: {}",
-                        msg.batch
-                            .as_ref()
-                            .map(|b| b.to_string())
-                            .unwrap_or_else(|| "none".to_string()),
-                        msg.position
-                            .as_ref()
-                            .map(|p| p.to_string())
-                            .unwrap_or_else(|| "none".to_string()),
-                        msg.sequence_num
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|| "none".to_string())
-                    );
-                    output.kv("Batch Info", &batch_info.dimmed().to_string());
-
-                    output.kv(
-                        "Role",
-                        &format!("{:?}", msg.role).bright_yellow().to_string(),
-                    );
-                    output.kv(
-                        "Time",
-                        &msg.created_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
-                    );
-
-                    // Extract and display content
-                    if let Some(text) = msg.text_content() {
-                        let preview = if text.len() > 200 {
-                            format!("{}...", &text[..200])
-                        } else {
-                            text.to_string()
-                        };
-                        output.status("Content:");
-                        for line in preview.lines() {
-                            println!("      {}", line.dimmed());
-                        }
-                    } else {
-                        // Show more details about non-text content
-                        use pattern_core::message::{ContentBlock, MessageContent};
-                        match &msg.content {
-                            MessageContent::Parts(parts) => {
-                                output.status(&format!(
-                                    "Content: [Multi-part: {} parts]",
-                                    parts.len()
-                                ));
-                                for (j, part) in parts.iter().enumerate().take(3) {
-                                    match part {
-                                        pattern_core::message::ContentPart::Text(t) => {
-                                            let preview = if t.len() > 100 {
-                                                format!("{}...", &t[..100])
-                                            } else {
-                                                t.to_string()
-                                            };
-                                            println!(
-                                                "      Part {}: Text - {}",
-                                                j + 1,
-                                                preview.dimmed()
-                                            );
-                                        }
-                                        pattern_core::message::ContentPart::Image {
-                                            content_type,
-                                            ..
-                                        } => {
-                                            println!(
-                                                "      Part {}: [Image: {}]",
-                                                j + 1,
-                                                content_type
-                                            );
-                                        }
-                                    }
-                                }
-                                if parts.len() > 3 {
-                                    println!("      ... and {} more parts", parts.len() - 3);
-                                }
-                            }
-                            MessageContent::ToolCalls(calls) => {
-                                output.status(&format!(
-                                    "Content: [Tool calls: {} calls]",
-                                    calls.len()
-                                ));
-                                for (j, call) in calls.iter().enumerate().take(3) {
-                                    println!(
-                                        "      Call {}: {} (id: {})",
-                                        j + 1,
-                                        call.fn_name,
-                                        call.call_id
-                                    );
-                                }
-                                if calls.len() > 3 {
-                                    println!("      ... and {} more calls", calls.len() - 3);
-                                }
-                            }
-                            MessageContent::ToolResponses(responses) => {
-                                output.status(&format!(
-                                    "Content: [Tool responses: {} responses]",
-                                    responses.len()
-                                ));
-                                for (j, resp) in responses.iter().enumerate().take(3) {
-                                    let content_preview = if resp.content.len() > 100 {
-                                        format!("{}...", &resp.content[..100])
-                                    } else {
-                                        resp.content.clone()
-                                    };
-                                    println!(
-                                        "      Response {} (call_id: {}): {}",
-                                        j + 1,
-                                        resp.call_id,
-                                        content_preview.dimmed()
-                                    );
-                                }
-                                if responses.len() > 3 {
-                                    println!(
-                                        "      ... and {} more responses",
-                                        responses.len() - 3
-                                    );
-                                }
-                            }
-                            MessageContent::Blocks(blocks) => {
-                                output
-                                    .status(&format!("Content: [Blocks: {} blocks]", blocks.len()));
-                                for (j, block) in blocks.iter().enumerate().take(3) {
-                                    match block {
-                                        ContentBlock::Text { text, .. } => {
-                                            let preview = if text.len() > 100 {
-                                                format!("{}...", &text[..100])
-                                            } else {
-                                                text.clone()
-                                            };
-                                            println!(
-                                                "      Block {}: Text - {}",
-                                                j + 1,
-                                                preview.dimmed()
-                                            );
-                                        }
-                                        ContentBlock::Thinking { text, .. } => {
-                                            let preview = if text.len() > 100 {
-                                                format!("{}...", &text[..100])
-                                            } else {
-                                                text.clone()
-                                            };
-                                            println!(
-                                                "      Block {}: Thinking - {}",
-                                                j + 1,
-                                                preview.dimmed()
-                                            );
-                                        }
-                                        ContentBlock::RedactedThinking { .. } => {
-                                            println!("      Block {}: [Redacted Thinking]", j + 1);
-                                        }
-                                        ContentBlock::ToolUse { name, id, .. } => {
-                                            println!(
-                                                "      Block {}: Tool Use - {} (id: {})",
-                                                j + 1,
-                                                name,
-                                                id
-                                            );
-                                        }
-                                        ContentBlock::ToolResult {
-                                            tool_use_id,
-                                            content,
-                                            ..
-                                        } => {
-                                            let preview = if content.len() > 100 {
-                                                format!("{}...", &content[..100])
-                                            } else {
-                                                content.clone()
-                                            };
-                                            println!(
-                                                "      Block {}: Tool Result (tool_use_id: {}) - {}",
-                                                j + 1,
-                                                tool_use_id,
-                                                preview.dimmed()
-                                            );
-                                        }
-                                    }
-                                }
-                                if blocks.len() > 3 {
-                                    println!("      ... and {} more blocks", blocks.len() - 3);
-                                }
-                            }
-                            _ => {
-                                output.status("Content: [Non-text content]");
-                            }
-                        }
-                    }
-
-                    println!();
-                }
-
-                if messages.is_empty() {
-                    output.status("No messages found matching the search criteria");
-                    println!();
-                    output.status("Try:");
-                    output.list_item("Using broader search terms");
-                    output.list_item("Removing filters to see all messages");
-                    output.list_item("Checking if the agent has any messages in the database");
-                }
-            }
-            Err(e) => {
-                output.error(&format!("Search failed: {}", e));
-                println!();
-                output.status("This might mean:");
-                output.list_item("The database connection is not available");
-                output.list_item("There was an error in the query");
-                output.list_item("The message table or indexes are not set up");
-            }
-        }
-    } else {
-        output.error(&format!("Agent '{}' not found", agent_name));
-        println!();
-        output.status("Available agents:");
-        let all_agents = ops::list_entities::<AgentRecord, _>(&DB).await?;
-        for agent in all_agents {
-            output.list_item(&agent.name.bright_cyan().to_string());
-        }
+    if results.is_empty() {
+        output.info("No results found", "");
+        return Ok(());
     }
+
+    output.status(&format!("Found {} result(s):", results.len()));
+    output.status("");
+
+    for result in results {
+        // Display result
+        let score_str = format!("{:.3}", result.score);
+        output.info(
+            &format!("  [{}]", score_str.dimmed()),
+            &result.id.bright_yellow().to_string(),
+        );
+
+        if let Some(content) = &result.content {
+            let preview = if content.len() > 200 {
+                format!("{}...", &content[..200])
+            } else {
+                content.clone()
+            };
+            output.status(&format!("    {}", preview.dimmed()));
+        }
+        output.status("");
+    }
+    if let Some(r) = role {
+        output.info("Role filter:", r);
+    }
+    if let Some(st) = start_time {
+        output.info("Start time:", st);
+    }
+    if let Some(et) = end_time {
+        output.info("End time:", et);
+    }
+    output.info("Limit:", &limit.to_string());
+    output.info(
+        "Reason:",
+        "Needs pattern_db::queries::search_agent_messages()",
+    );
+    output.status("Previous functionality:");
+    output.list_item("Full-text search across messages");
+    output.list_item("Role filtering (system, user, assistant, tool)");
+    output.list_item("Time range filtering");
+    output.list_item("Batch/position/sequence info display");
 
     Ok(())
 }
 
-/// Search archival memory as if we were the agent
+// =============================================================================
+// Search Archival Memory
+// =============================================================================
+
+/// Search archival memory using FTS.
 pub async fn search_archival_memory(agent_name: &str, query: &str, limit: usize) -> Result<()> {
     let output = Output::new();
+    let config = load_config().await?;
+    let db = get_db(&config).await?;
 
-    output.section("Searching archival memory");
-    println!();
+    // Find agent
+    let agent = require_agent_by_name(&db, agent_name).await?;
 
-    // First, find the agent
-    let query_sql = "SELECT * FROM agent WHERE name = $name LIMIT 1";
-    let mut response = DB
-        .query(query_sql)
-        .bind(("name", agent_name.to_string()))
+    output.status(&format!(
+        "Searching archival memory for '{}': \"{}\"",
+        agent_name.bright_cyan(),
+        query
+    ));
+    output.status("");
+
+    // Use pattern_db's hybrid search for archival entries
+    let results = pattern_db::search::search(db.pool())
+        .text(query)
+        .filter(ContentFilter::archival(Some(&agent.id)))
+        .limit(limit as i64)
+        .execute()
         .await
-        .into_diagnostic()?;
+        .map_err(|e| miette::miette!("Search failed: {}", e))?;
 
-    let agents: Vec<<AgentRecord as DbEntity>::DbModel> = response.take(0).into_diagnostic()?;
-    let agents: Vec<_> = agents
-        .into_iter()
-        .map(|e| AgentRecord::from_db_model(e).unwrap())
-        .collect();
+    if results.is_empty() {
+        output.info("No results found", "");
+        return Ok(());
+    }
 
-    if let Some(agent_record) = agents.first() {
+    output.status(&format!("Found {} result(s):", results.len()));
+    output.status("");
+
+    for result in results {
+        let score_str = format!("{:.3}", result.score);
         output.info(
-            "Agent:",
-            &format!(
-                "{} (ID: {})",
-                agent_record.name.bright_cyan(),
-                agent_record.id.to_string().dimmed()
-            ),
+            &format!("  [{}]", score_str.dimmed()),
+            &result.id.bright_yellow().to_string(),
         );
-        output.kv(
-            "Owner",
-            &agent_record.owner_id.to_string().dimmed().to_string(),
-        );
-        output.kv("Query", &format!("\"{}\"", query.bright_yellow()));
-        output.kv("Limit", &limit.to_string().bright_white().to_string());
 
-        // Debug: Let's check what memories exist for this owner
-        let debug_query = format!(
-            "SELECT id, label, memory_type FROM mem WHERE owner_id = user:⟨{}⟩",
-            agent_record
-                .owner_id
-                .to_string()
-                .trim_start_matches("user_")
-        );
-        output.status("Debug - checking memories for owner...");
-        let debug_response = DB.query(&debug_query).await.into_diagnostic()?;
-        output.status(&format!("Debug response: {:?}", debug_response));
-        println!();
-
-        // Create a minimal agent handle for searching
-        // IMPORTANT: Use the actual owner_id from the database so the search will match
-        let memory = Memory::with_owner(&agent_record.owner_id);
-        let mut handle = AgentHandle::default();
-        handle.name = agent_record.name.clone();
-        handle.agent_id = agent_record.id.clone();
-        handle.agent_type = agent_record.agent_type.clone();
-        handle.memory = memory;
-        handle.state = AgentState::Ready;
-        let handle = handle.with_db(DB.clone());
-
-        // Perform the search
-        match handle.search_archival_memories(query, limit).await {
-            Ok(results) => {
-                output.success(&format!("Found {} results:", results.len()));
-                println!();
-
-                for (i, block) in results.iter().enumerate() {
-                    println!(
-                        "  {} Result {} {}",
-                        "[DOC]".bright_blue(),
-                        (i + 1).to_string().bright_white(),
-                        format!("({})", block.id).dimmed()
-                    );
-                    output.kv("Label", &block.label.bright_yellow().to_string());
-                    output.kv("Type", &format!("{:?}", block.memory_type));
-                    output.kv(
-                        "Created",
-                        &block.created_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
-                    );
-                    output.status("Content preview:");
-
-                    // Show first 200 chars of content (respecting unicode boundaries)
-                    let preview = if block.value.len() > 200 {
-                        let mut end = 200;
-                        while !block.value.is_char_boundary(end) && end > 0 {
-                            end -= 1;
-                        }
-                        format!("{}...", &block.value[..end])
-                    } else {
-                        block.value.clone()
-                    };
-
-                    for line in preview.lines() {
-                        println!("      {}", line.dimmed());
-                    }
-                    println!();
-                }
-
-                if results.is_empty() {
-                    output.status(&format!("No archival memories found matching '{}'", query));
-                    println!();
-                    output.status("Try:");
-                    output.list_item("Using broader search terms");
-                    output.list_item(&format!(
-                        "Checking if the agent has any archival memories with: pattern-cli debug list-archival --agent {}",
-                        agent_name
-                    ));
-                    output.list_item("Verifying the full-text search index exists in the database");
-                }
-            }
-            Err(e) => {
-                output.error(&format!("Search failed: {}", e));
-                println!();
-                output.status("This might mean:");
-                output.list_item("The database connection is not available");
-                output.list_item("The full-text search index is not set up");
-                output.list_item("There was an error in the query");
-            }
+        if let Some(content) = &result.content {
+            let preview = if content.len() > 200 {
+                format!("{}...", &content[..200])
+            } else {
+                content.clone()
+            };
+            output.status(&format!("    {}", preview.dimmed()));
         }
-    } else {
-        output.error(&format!("Agent '{}' not found", agent_name));
-        println!();
-        output.status("Available agents:");
-        let all_agents = ops::list_entities::<AgentRecord, _>(&DB).await?;
-        for agent in all_agents {
-            output.list_item(&agent.name.bright_cyan().to_string());
-        }
+        output.status("");
     }
 
     Ok(())
 }
 
-/// Search archival memory as if we were the agent
-#[allow(dead_code)]
-pub async fn search_group_archival_memory(
-    agent_name: &str,
-    query: &str,
-    limit: usize,
-) -> Result<()> {
-    let output = Output::new();
+// =============================================================================
+// List Archival Memory
+// =============================================================================
 
-    output.section("Searching archival memory");
-    println!();
-
-    // First, find the agent
-    let query_sql = "SELECT * FROM agent WHERE name = $name LIMIT 1";
-    let mut response = DB
-        .query(query_sql)
-        .bind(("name", agent_name.to_string()))
-        .await
-        .into_diagnostic()?;
-
-    let agents: Vec<<AgentRecord as DbEntity>::DbModel> = response.take(0).into_diagnostic()?;
-    let agents: Vec<_> = agents
-        .into_iter()
-        .map(|e| AgentRecord::from_db_model(e).unwrap())
-        .collect();
-
-    if let Some(agent_record) = agents.first() {
-        output.info(
-            "Agent:",
-            &format!(
-                "{} (ID: {})",
-                agent_record.name.bright_cyan(),
-                agent_record.id.to_string().dimmed()
-            ),
-        );
-        output.kv(
-            "Owner",
-            &agent_record.owner_id.to_string().dimmed().to_string(),
-        );
-        output.kv("Query", &format!("\"{}\"", query.bright_yellow()));
-        output.kv("Limit", &limit.to_string().bright_white().to_string());
-
-        // Debug: Let's check what memories exist for this owner
-        let debug_query = format!(
-            "SELECT id, label, memory_type FROM mem WHERE owner_id = user:⟨{}⟩",
-            agent_record
-                .owner_id
-                .to_string()
-                .trim_start_matches("user_")
-        );
-        output.status("Debug - checking memories for owner...");
-        let debug_response = DB.query(&debug_query).await.into_diagnostic()?;
-        output.status(&format!("Debug response: {:?}", debug_response));
-        println!();
-
-        // Create a minimal agent handle for searching
-        // IMPORTANT: Use the actual owner_id from the database so the search will match
-        let memory = Memory::with_owner(&agent_record.owner_id);
-        let mut handle = AgentHandle::default();
-        handle.name = agent_record.name.clone();
-        handle.agent_id = agent_record.id.clone();
-        handle.agent_type = agent_record.agent_type.clone();
-        handle.memory = memory;
-        handle.state = AgentState::Ready;
-        let handle = handle.with_db(DB.clone());
-
-        // Perform the search
-        match handle
-            .search_group_archival_memories_with_options(query, limit, None)
-            .await
-        {
-            Ok(results) => {
-                output.success(&format!("Found {} results:", results.len()));
-                println!();
-
-                for (i, block) in results.iter().enumerate() {
-                    let block = &block.block;
-                    println!(
-                        "  {} Result {} {}",
-                        "[DOC]".bright_blue(),
-                        (i + 1).to_string().bright_white(),
-                        format!("({})", block.id).dimmed()
-                    );
-                    output.kv("Label", &block.label.bright_yellow().to_string());
-                    output.kv("Type", &format!("{:?}", block.memory_type));
-                    output.kv(
-                        "Created",
-                        &block.created_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
-                    );
-                    output.status("Content preview:");
-
-                    // Show first 200 chars of content (respecting unicode boundaries)
-                    let preview = if block.value.len() > 200 {
-                        let mut end = 200;
-                        while !block.value.is_char_boundary(end) && end > 0 {
-                            end -= 1;
-                        }
-                        format!("{}...", &block.value[..end])
-                    } else {
-                        block.value.clone()
-                    };
-
-                    for line in preview.lines() {
-                        println!("      {}", line.dimmed());
-                    }
-                    println!();
-                }
-
-                if results.is_empty() {
-                    output.status(&format!("No archival memories found matching '{}'", query));
-                    println!();
-                    output.status("Try:");
-                    output.list_item("Using broader search terms");
-                    output.list_item(&format!(
-                        "Checking if the agent has any archival memories with: pattern-cli debug list-archival --agent {}",
-                        agent_name
-                    ));
-                    output.list_item("Verifying the full-text search index exists in the database");
-                }
-            }
-            Err(e) => {
-                output.error(&format!("Search failed: {}", e));
-                println!();
-                output.status("This might mean:");
-                output.list_item("The database connection is not available");
-                output.list_item("The full-text search index is not set up");
-                output.list_item("There was an error in the query");
-            }
-        }
-    } else {
-        output.error(&format!("Agent '{}' not found", agent_name));
-        println!();
-        output.status("Available agents:");
-        let all_agents = ops::list_entities::<AgentRecord, _>(&DB).await?;
-        for agent in all_agents {
-            output.list_item(&agent.name.bright_cyan().to_string());
-        }
-    }
-
-    Ok(())
-}
-
-/// List all archival memories for an agent
+/// List all archival memory entries for an agent.
+///
+/// Uses pattern_db::queries::list_archival_entries() to fetch entries.
 pub async fn list_archival_memory(agent_name: &str) -> Result<()> {
     let output = Output::new();
+    let config = load_config().await?;
+    let db = get_db(&config).await?;
 
-    output.section("Listing archival memories");
-    println!();
+    // Find agent by name using shared helper
+    let agent = require_agent_by_name(&db, agent_name).await?;
 
-    // First, find the agent
-    let query_sql = "SELECT * FROM agent WHERE name = $name LIMIT 1";
-    let mut response = DB
-        .query(query_sql)
-        .bind(("name", agent_name.to_string()))
+    // Get archival entries (use large limit to get all)
+    let entries = pattern_db::queries::list_archival_entries(db.pool(), &agent.id, 1000, 0)
         .await
-        .into_diagnostic()?;
+        .map_err(|e| miette::miette!("Failed to list archival entries: {}", e))?;
 
-    tracing::trace!("response: {:?}", response);
+    output.status(&format!(
+        "Archival Memory for '{}' ({} entries):",
+        agent_name.bright_cyan(),
+        entries.len()
+    ));
+    output.status("");
 
-    let agents: Vec<<AgentRecord as DbEntity>::DbModel> = response.take(0).into_diagnostic()?;
-    let agents: Vec<_> = agents
-        .into_iter()
-        .map(|e| AgentRecord::from_db_model(e).unwrap())
-        .collect();
+    if entries.is_empty() {
+        output.info("(no archival entries)", "");
+        return Ok(());
+    }
 
-    if let Some(agent_record) = agents.first() {
-        println!(
-            "Agent: {} (ID: {})",
-            agent_record.name.bright_cyan(),
-            agent_record.id.to_string().dimmed()
-        );
-        println!();
+    for entry in entries {
+        // Show entry ID and creation time
+        output.info("Entry:", &entry.id.bright_yellow().to_string());
+        output.kv("  Created", &entry.created_at.to_string());
 
-        // Query for all archival memories this agent has access to
-        // Note: SurrealDB requires fields in ORDER BY to be explicitly selected or use no prefix
-        let mem_query = r#"
-            SELECT *, ->agent_memories->mem AS memories FROM $agent_id FETCH memories
-        "#;
+        // Show content (truncated if long)
+        let content_preview = if entry.content.len() > 200 {
+            format!("{}...", &entry.content[..200])
+        } else {
+            entry.content.clone()
+        };
+        output.kv("  Content", &content_preview.dimmed().to_string());
 
-        let mut mem_response = DB
-            .query(mem_query)
-            .bind(("agent_id", RecordId::from(&agent_record.id)))
-            .await
-            .into_diagnostic()?;
-
-        tracing::trace!("Debug - mem_response: {:?}", mem_response);
-
-        let memories: Vec<Vec<<MemoryBlock as DbEntity>::DbModel>> =
-            mem_response.take("memories").into_diagnostic()?;
-
-        let memories: Vec<_> = memories
-            .concat()
-            .into_iter()
-            .map(|m| MemoryBlock::from_db_model(m).expect("db model"))
-            .collect();
-
-        output.success(&format!("Found {} archival memories", memories.len()));
-        println!();
-
-        for (i, block) in memories.iter().enumerate() {
-            println!(
-                "{} Memory {} {}",
-                "🧠".bright_blue(),
-                (i + 1).to_string().bright_white(),
-                format!("({})", block.id).dimmed()
-            );
-            println!("  Label: {}", block.label.bright_yellow());
-            println!("  Owner: {}", block.owner_id.to_string().dimmed());
-            println!(
-                "  Created: {}",
-                block.created_at.format("%Y-%m-%d %H:%M:%S UTC")
-            );
-            println!(
-                "  Size: {} chars",
-                block.value.len().to_string().bright_white()
-            );
-
-            if let Some(desc) = &block.description {
-                println!("  Description: {}", desc.dimmed());
+        // Show metadata if present
+        if let Some(meta) = &entry.metadata {
+            let meta_str =
+                serde_json::to_string(&meta.0).unwrap_or_else(|_| "(invalid json)".to_string());
+            if meta_str != "{}" && meta_str != "null" {
+                output.kv("  Metadata", &meta_str.dimmed().to_string());
             }
-
-            // Show first 100 chars
-            let preview = if block.value.len() > 100 {
-                format!("{}...", &block.value[..100])
-            } else {
-                block.value.clone()
-            };
-            println!("  Preview: {}", preview.dimmed());
-            println!();
         }
 
-        if memories.is_empty() {
-            output.status("No archival memories found for this agent");
-            println!();
-            println!("Archival memories can be created:");
-            println!("  • By the agent using the recall tool");
-            println!("  • Through the API");
-            println!("  • By importing from external sources");
+        // Show chunk info if this is part of a larger entry
+        if entry.chunk_index > 0 || entry.parent_entry_id.is_some() {
+            output.kv("  Chunk", &format!("#{}", entry.chunk_index));
+            if let Some(parent) = &entry.parent_entry_id {
+                output.kv("  Parent", parent);
+            }
         }
-    } else {
-        output.error(&format!("Agent '{}' not found", agent_name));
+
+        output.status("");
     }
 
     Ok(())
 }
 
-/// List all core memory blocks for an agent
+// =============================================================================
+// List Core Memory
+// =============================================================================
+
+/// List all core/working memory blocks for an agent.
+///
+/// Uses pattern_db::queries::list_blocks() to fetch memory blocks,
+/// then filters for Core and Working types.
 pub async fn list_core_memory(agent_name: &str) -> Result<()> {
     let output = Output::new();
+    let config = load_config().await?;
+    let db = get_db(&config).await?;
 
-    output.section("Listing core memory blocks");
-    println!();
+    // Find agent by name using shared helper
+    let agent = require_agent_by_name(&db, agent_name).await?;
 
-    // First, find the agent
-    let query_sql = "SELECT * FROM agent WHERE name = $name LIMIT 1";
-    let mut response = DB
-        .query(query_sql)
-        .bind(("name", agent_name.to_string()))
+    // Get all memory blocks for this agent
+    let blocks = pattern_db::queries::list_blocks(db.pool(), &agent.id)
         .await
-        .into_diagnostic()?;
+        .map_err(|e| miette::miette!("Failed to list memory blocks: {}", e))?;
 
-    let agents: Vec<<AgentRecord as DbEntity>::DbModel> = response.take(0).into_diagnostic()?;
-    let agents: Vec<_> = agents
+    // Filter for Core and Working types
+    let core_blocks: Vec<_> = blocks
         .into_iter()
-        .map(|e| AgentRecord::from_db_model(e).unwrap())
+        .filter(|b| {
+            matches!(
+                b.block_type,
+                pattern_db::models::MemoryBlockType::Core
+                    | pattern_db::models::MemoryBlockType::Working
+            )
+        })
         .collect();
 
-    if let Some(agent_record) = agents.first() {
-        println!(
-            "Agent: {} (ID: {})",
-            agent_record.name.bright_cyan(),
-            agent_record.id.to_string().dimmed()
+    output.status(&format!(
+        "Core Memory for '{}' ({} blocks):",
+        agent_name.bright_cyan(),
+        core_blocks.len()
+    ));
+    output.status("");
+
+    if core_blocks.is_empty() {
+        output.info("(no core memory blocks)", "");
+        return Ok(());
+    }
+
+    for block in core_blocks {
+        // Block header with label and type
+        let type_str = format!("{:?}", block.block_type).to_lowercase();
+        output.info(
+            &format!("{} ({})", block.label.bright_yellow(), type_str),
+            "",
         );
-        println!();
 
-        // Query for all core memory blocks this agent has access to
-        // Core memories are memory_type = 'core' or NULL (default)
-        let mem_query = r#"
-            SELECT *, ->agent_memories->mem AS memories FROM $agent_id FETCH memories
-        "#;
-
-        let mut mem_response = DB
-            .query(mem_query)
-            .bind(("agent_id", RecordId::from(&agent_record.id)))
-            .await
-            .into_diagnostic()?;
-
-        let memories: Vec<Vec<<MemoryBlock as DbEntity>::DbModel>> =
-            mem_response.take("memories").into_diagnostic()?;
-
-        let memories: Vec<_> = memories
-            .concat()
-            .into_iter()
-            .map(|m| MemoryBlock::from_db_model(m).expect("db model"))
-            .filter(|m| m.memory_type == MemoryType::Core || m.memory_type == MemoryType::Working)
-            .collect();
-
-        output.success(&format!("Found {} core memory blocks", memories.len()));
-        println!();
-
-        for (i, block) in memories.iter().enumerate() {
-            println!(
-                "{} Memory {} {}",
-                "📝".bright_blue(),
-                (i + 1).to_string().bright_white(),
-                format!("({})", block.id).dimmed()
-            );
-            println!("  Label: {}", block.label.bright_yellow());
-            println!("  Type: {:?}", block.memory_type);
-            println!("  Permission: {:?}", block.permission);
-            println!("  Owner: {}", block.owner_id.to_string().dimmed());
-            println!(
-                "  Created: {}",
-                block.created_at.format("%Y-%m-%d %H:%M:%S UTC")
-            );
-            println!(
-                "  Updated: {}",
-                block.updated_at.format("%Y-%m-%d %H:%M:%S UTC")
-            );
-            println!(
-                "  Size: {} chars",
-                block.value.len().to_string().bright_white()
-            );
-
-            if let Some(desc) = &block.description {
-                println!("  Description: {}", desc.dimmed());
-            }
-
-            // Show full content for core memories (they're usually smaller)
-            println!("  Content:");
-            for line in block.value.lines() {
-                println!("    {}", line.dimmed());
-            }
-            println!();
+        // Metadata
+        output.kv("  ID", &block.id);
+        output.kv("  Permission", &format!("{}", block.permission));
+        output.kv("  Char Limit", &block.char_limit.to_string());
+        if block.pinned {
+            output.kv("  Pinned", "yes");
         }
 
-        if memories.is_empty() {
-            output.status("No core memory blocks found for this agent");
-            println!();
-            println!("Core memory blocks are usually created:");
-            println!("  • Automatically when an agent is initialized");
-            println!("  • By the agent using the context tool");
-            println!("  • Through direct API calls");
+        // Description
+        if !block.description.is_empty() {
+            output.kv("  Description", &block.description.dimmed().to_string());
         }
-    } else {
-        output.error(&format!("Agent '{}' not found", agent_name));
+
+        // Content preview (core blocks are usually small enough to show fully)
+        if let Some(preview) = &block.content_preview {
+            output.status("  Content:");
+            // Indent the content
+            for line in preview.lines() {
+                output.status(&format!("    {}", line.dimmed()));
+            }
+        } else {
+            output.kv("  Content", "(empty)");
+        }
+
+        output.status("");
     }
 
     Ok(())
 }
 
-/// List all memory blocks for an agent (both core and archival)
+// =============================================================================
+// List All Memory
+// =============================================================================
+
+/// List all memory for an agent (blocks and archival entries).
+///
+/// Combines list_blocks() for memory blocks and list_archival_entries()
+/// for archival memory, grouped by type.
 pub async fn list_all_memory(agent_name: &str) -> Result<()> {
     let output = Output::new();
+    let config = load_config().await?;
+    let db = get_db(&config).await?;
 
-    output.section("Listing all memory blocks");
-    println!();
+    // Find agent by name using shared helper
+    let agent = require_agent_by_name(&db, agent_name).await?;
 
-    // First, find the agent
-    let query_sql = "SELECT * FROM agent WHERE name = $name LIMIT 1";
-    let mut response = DB
-        .query(query_sql)
-        .bind(("name", agent_name.to_string()))
+    // Get all memory blocks
+    let blocks = pattern_db::queries::list_blocks(db.pool(), &agent.id)
         .await
-        .into_diagnostic()?;
+        .map_err(|e| miette::miette!("Failed to list memory blocks: {}", e))?;
 
-    let agents: Vec<<AgentRecord as DbEntity>::DbModel> = response.take(0).into_diagnostic()?;
-    let agents: Vec<_> = agents
-        .into_iter()
-        .map(|e| AgentRecord::from_db_model(e).unwrap())
-        .collect();
+    // Get archival entry count
+    let archival_count = pattern_db::queries::count_archival_entries(db.pool(), &agent.id)
+        .await
+        .map_err(|e| miette::miette!("Failed to count archival entries: {}", e))?;
 
-    if let Some(agent_record) = agents.first() {
-        println!(
-            "Agent: {} (ID: {})",
-            agent_record.name.bright_cyan(),
-            agent_record.id.to_string().dimmed()
-        );
-        println!("Owner: {}", agent_record.owner_id.to_string().dimmed());
-        println!();
+    output.status(&format!("All Memory for '{}':", agent_name.bright_cyan()));
+    output.status("");
 
-        // Query for all memory blocks this agent has access to
-        let mem_query = r#"
-            SELECT out FROM agent_memories
-                WHERE in = $agent_id AND OUT IS NOT NULL
-            FETCH out
-        "#;
+    // Group blocks by type
+    let mut core_blocks = Vec::new();
+    let mut working_blocks = Vec::new();
+    let mut log_blocks = Vec::new();
+    let mut archival_blocks = Vec::new();
 
-        let mut mem_response = DB
-            .query(mem_query)
-            .bind(("agent_id", RecordId::from(&agent_record.id)))
-            .await
-            .into_diagnostic()?;
-
-        let memories: Vec<MemoryBlock> = mem_response.take("out").into_diagnostic()?;
-
-        // Group by memory type
-        let mut core_memories = Vec::new();
-        let mut archival_memories = Vec::new();
-        let mut other_memories = Vec::new();
-
-        for memory in memories {
-            match memory.memory_type {
-                pattern_core::memory::MemoryType::Core => core_memories.push(memory),
-                pattern_core::memory::MemoryType::Archival => archival_memories.push(memory),
-                _ => other_memories.push(memory),
-            }
+    for block in blocks {
+        match block.block_type {
+            pattern_db::models::MemoryBlockType::Core => core_blocks.push(block),
+            pattern_db::models::MemoryBlockType::Working => working_blocks.push(block),
+            pattern_db::models::MemoryBlockType::Log => log_blocks.push(block),
+            pattern_db::models::MemoryBlockType::Archival => archival_blocks.push(block),
         }
-
-        let total = core_memories.len() + archival_memories.len() + other_memories.len();
-        output.success(&format!("Found {} total memory blocks", total));
-        println!();
-
-        // Display core memories
-        if !core_memories.is_empty() {
-            println!(
-                "{} Core Memory Blocks ({})",
-                "📝".bright_blue(),
-                core_memories.len()
-            );
-            println!("{}", "─".repeat(30).dimmed());
-            for (i, block) in core_memories.iter().enumerate() {
-                println!(
-                    "  {} {} - {}",
-                    (i + 1).to_string().bright_white(),
-                    block.label.bright_yellow(),
-                    format!("{} chars", block.value.len()).dimmed()
-                );
-                if let Some(desc) = &block.description {
-                    println!("     {}", desc.dimmed());
-                }
-            }
-            println!();
-        }
-
-        // Display archival memories
-        if !archival_memories.is_empty() {
-            println!(
-                "{} Archival Memory Blocks ({})",
-                "📚".bright_blue(),
-                archival_memories.len()
-            );
-            println!("{}", "─".repeat(30).dimmed());
-            for (i, block) in archival_memories.iter().enumerate() {
-                println!(
-                    "  {} {} - {}",
-                    (i + 1).to_string().bright_white(),
-                    block.label.bright_yellow(),
-                    format!("{} chars", block.value.len()).dimmed()
-                );
-                // Show preview for archival memories
-                let preview = if block.value.len() > 50 {
-                    format!("{}...", &block.value[..50])
-                } else {
-                    block.value.clone()
-                };
-                println!("     {}", preview.dimmed());
-            }
-            println!();
-        }
-
-        // Display other memories
-        if !other_memories.is_empty() {
-            println!(
-                "{} Other Memory Blocks ({})",
-                "📋".bright_blue(),
-                other_memories.len()
-            );
-            println!("{}", "─".repeat(30).dimmed());
-            for (i, block) in other_memories.iter().enumerate() {
-                println!(
-                    "  {} {} ({:?}) - {}",
-                    (i + 1).to_string().bright_white(),
-                    block.label.bright_yellow(),
-                    block.memory_type,
-                    format!("{} chars", block.value.len()).dimmed()
-                );
-            }
-            println!();
-        }
-
-        if total == 0 {
-            output.status("No memory blocks found for this agent");
-            println!();
-            println!("Memory blocks are created:");
-            println!("  • Automatically when an agent is used in chat");
-            println!("  • By the agent using memory management tools");
-            println!("  • Through direct API calls");
-        }
-    } else {
-        output.error(&format!("Agent '{}' not found", agent_name));
     }
+
+    // Core Memory Section
+    output.section(&format!("Core Memory ({} blocks)", core_blocks.len()));
+    if core_blocks.is_empty() {
+        output.info("  (none)", "");
+    } else {
+        for block in &core_blocks {
+            let preview = block
+                .content_preview
+                .as_deref()
+                .map(|s| {
+                    if s.len() > 60 {
+                        format!("{}...", &s[..60])
+                    } else {
+                        s.to_string()
+                    }
+                })
+                .unwrap_or_else(|| "(empty)".to_string());
+            output.info(
+                &format!("  {}", block.label.bright_yellow()),
+                &preview.dimmed().to_string(),
+            );
+        }
+    }
+    output.status("");
+
+    // Working Memory Section
+    output.section(&format!("Working Memory ({} blocks)", working_blocks.len()));
+    if working_blocks.is_empty() {
+        output.info("  (none)", "");
+    } else {
+        for block in &working_blocks {
+            let preview = block
+                .content_preview
+                .as_deref()
+                .map(|s| {
+                    if s.len() > 60 {
+                        format!("{}...", &s[..60])
+                    } else {
+                        s.to_string()
+                    }
+                })
+                .unwrap_or_else(|| "(empty)".to_string());
+            output.info(
+                &format!("  {}", block.label.bright_yellow()),
+                &preview.dimmed().to_string(),
+            );
+        }
+    }
+    output.status("");
+
+    // Log Memory Section
+    if !log_blocks.is_empty() {
+        output.section(&format!("Log Memory ({} blocks)", log_blocks.len()));
+        for block in &log_blocks {
+            let preview = block
+                .content_preview
+                .as_deref()
+                .map(|s| {
+                    if s.len() > 60 {
+                        format!("{}...", &s[..60])
+                    } else {
+                        s.to_string()
+                    }
+                })
+                .unwrap_or_else(|| "(empty)".to_string());
+            output.info(
+                &format!("  {}", block.label.bright_yellow()),
+                &preview.dimmed().to_string(),
+            );
+        }
+        output.status("");
+    }
+
+    // Archival Memory Section (entries, not blocks)
+    output.section(&format!("Archival Memory ({} entries)", archival_count));
+    if archival_count == 0 {
+        output.info("  (none)", "");
+    } else {
+        output.info(
+            "  ",
+            &format!("Use 'debug list-archival {}' to view entries", agent_name)
+                .dimmed()
+                .to_string(),
+        );
+    }
+
+    // Also show archival blocks if any
+    if !archival_blocks.is_empty() {
+        output.status("");
+        output.section(&format!(
+            "Archival Blocks ({} blocks)",
+            archival_blocks.len()
+        ));
+        for block in &archival_blocks {
+            let preview = block
+                .content_preview
+                .as_deref()
+                .map(|s| {
+                    if s.len() > 60 {
+                        format!("{}...", &s[..60])
+                    } else {
+                        s.to_string()
+                    }
+                })
+                .unwrap_or_else(|| "(empty)".to_string());
+            output.info(
+                &format!("  {}", block.label.bright_yellow()),
+                &preview.dimmed().to_string(),
+            );
+        }
+    }
+
+    // Summary
+    output.status("");
+    let total_blocks =
+        core_blocks.len() + working_blocks.len() + log_blocks.len() + archival_blocks.len();
+    output.kv(
+        "Total",
+        &format!(
+            "{} blocks, {} archival entries",
+            total_blocks, archival_count
+        ),
+    );
 
     Ok(())
 }
 
-/// Show the current context that would be passed to the LLM
+// =============================================================================
+// Show Context
+// =============================================================================
+
+/// Show the current context that would be passed to the LLM.
+///
+/// Uses `prepare_request()` with empty messages to build the actual context,
+/// showing what would be sent to the model.
 pub async fn show_context(agent_name: &str, config: &PatternConfig) -> Result<()> {
     let output = Output::new();
 
-    output.section("Agent Context Inspection");
-    println!();
+    // Load agent via RuntimeContext
+    let ctx = create_runtime_context(config).await?;
+    let dbs = get_dbs(config).await?;
 
-    // First, find the agent
-    let query_sql = "SELECT * FROM agent WHERE name = $name LIMIT 1";
-    let mut response = DB
-        .query(query_sql)
-        .bind(("name", agent_name.to_string()))
+    let db_agent = match get_agent_by_name(&dbs.constellation, agent_name).await? {
+        Some(a) => a,
+        None => {
+            output.error(&format!("Agent '{}' not found", agent_name));
+            return Ok(());
+        }
+    };
+
+    let agent = ctx
+        .load_agent(&db_agent.id)
         .await
-        .into_diagnostic()?;
+        .map_err(|e| miette::miette!("Failed to load agent '{}': {}", agent_name, e))?;
 
-    let agents: Vec<<AgentRecord as DbEntity>::DbModel> = response.take(0).into_diagnostic()?;
-    let agents: Vec<_> = agents
-        .into_iter()
-        .map(|e| AgentRecord::from_db_model(e).unwrap())
-        .collect();
+    output.section(&format!("Context for: {}", agent.name().bright_cyan()));
 
-    if let Some(agent_record) = agents.first() {
-        output.info(
-            "Agent:",
-            &format!(
-                "{} (ID: {})",
-                agent_record.name.bright_cyan(),
-                agent_record.id.to_string().dimmed()
-            ),
-        );
-        // State is runtime-only, not persisted
-        output.info("State:", "Ready");
-        println!();
-
-        let (heartbeat_sender, _) = pattern_core::context::heartbeat::heartbeat_channel();
-
-        match crate::agent_ops::load_or_create_agent(
-            agent_name,
-            None, // Use default model
-            true, // Enable tools
-            &config,
-            heartbeat_sender,
-            &output,
+    // Build the ACTUAL context using prepare_request with empty messages
+    let runtime = agent.runtime();
+    match runtime
+        .prepare_request(
+            Vec::<pattern_core::messages::Message>::new(),
+            None,
+            None,
+            None,
+            Some(&db_agent.system_prompt),
         )
         .await
-        {
-            Ok(agent) => {
-                // Get system prompt sections from agent
-                let system_prompt_parts = agent.system_prompt().await;
-                let system_prompt = system_prompt_parts.join("\n\n");
+    {
+        Ok(request) => {
+            // System prompt section
+            output.print("");
+            if let Some(ref system_parts) = request.system {
+                let total_chars: usize = system_parts.iter().map(|s| s.len()).sum();
+                output.kv(
+                    "System Prompt",
+                    &format!(
+                        "({} parts, {} chars total)",
+                        system_parts.len(),
+                        total_chars
+                    ),
+                );
 
-                output.section("Current System Prompt (as passed to LLM)");
-                println!();
-                println!("{}", system_prompt);
-                println!();
+                for (i, part) in system_parts.iter().enumerate() {
+                    let part_type = if i == 0 {
+                        "base"
+                    } else if part.contains("<block:") {
+                        "block"
+                    } else if part.contains("# Tool Execution Rules") {
+                        "rules"
+                    } else {
+                        "section"
+                    };
 
-                // Get available tools
-                let available_tools = agent.available_tools().await;
-                if !available_tools.is_empty() {
-                    output.section(&format!("Available Tools ({})", available_tools.len()));
-                    println!();
-                    for tool in &available_tools {
-                        println!("• {} - {}", tool.name().cyan(), tool.description());
-                    }
-                    println!();
+                    output.list_item(&format!("[{}] {} chars", part_type.dimmed(), part.len()));
                 }
 
-                output.success("Context inspection complete");
+                // Option to show full content
+                output.print("");
+                output.status("Full system prompt parts:");
+                for (i, part) in system_parts.iter().enumerate() {
+                    output.print(&format!("\n--- Part {} ---", i + 1));
+                    // Truncate very long parts for display
+                    if part.len() > 2000 {
+                        output.print(&format!("{}...", &part[..2000]));
+                        output.status(&format!("(truncated, {} chars total)", part.len()));
+                    } else {
+                        output.print(part);
+                    }
+                }
+            } else {
+                output.kv("System Prompt", "(none)");
+            }
+
+            // Tools section
+            output.print("");
+            if let Some(ref tools) = request.tools {
+                output.kv("Tools", &format!("({})", tools.len()));
+                for tool in tools {
+                    output.list_item(&format!(
+                        "{}: {}",
+                        tool.name.bright_cyan(),
+                        tool.description.as_deref().unwrap_or("(no description)")
+                    ));
+                }
+            } else {
+                output.kv("Tools", "(none)");
+            }
+
+            // Messages section
+            output.print("");
+            output.kv("Messages in context", &request.messages.len().to_string());
+        }
+        Err(e) => {
+            output.error(&format!("Failed to build context: {}", e));
+        }
+    }
+
+    Ok(())
+}
+
+// =============================================================================
+// Edit Memory
+// =============================================================================
+
+/// Edit a memory block by exporting to file and reimporting after edits.
+///
+/// Supports all schema types:
+/// - Text: exports as plain text
+/// - Map/List/Log/Composite: exports as TOML
+pub async fn edit_memory(agent_name: &str, label: &str, file_path: Option<&str>) -> Result<()> {
+    use std::io::Write;
+
+    let output = Output::new();
+    let config = load_config().await?;
+
+    // Load agent via RuntimeContext
+    let ctx = create_runtime_context(&config).await?;
+    let dbs = get_dbs(&config).await?;
+
+    let db_agent = match get_agent_by_name(&dbs.constellation, agent_name).await? {
+        Some(a) => a,
+        None => {
+            output.error(&format!("Agent '{}' not found", agent_name));
+            return Ok(());
+        }
+    };
+
+    let agent = ctx
+        .load_agent(&db_agent.id)
+        .await
+        .map_err(|e| miette::miette!("Failed to load agent '{}': {}", agent_name, e))?;
+
+    let runtime = agent.runtime();
+    let memory = runtime.memory();
+    let agent_id = agent.id().to_string();
+
+    // Get the memory block
+    let doc = match memory.get_block(&agent_id, label).await {
+        Ok(Some(doc)) => doc,
+        Ok(None) => {
+            output.error(&format!("Memory block '{}' not found", label));
+            return Ok(());
+        }
+        Err(e) => {
+            output.error(&format!("Failed to get memory block: {}", e));
+            return Ok(());
+        }
+    };
+
+    // Determine schema type for file extension
+    let is_text = matches!(doc.schema(), pattern_core::memory::BlockSchema::Text { .. });
+    let extension = if is_text { "txt" } else { "toml" };
+
+    // Export content for editing
+    let content = doc.export_for_editing();
+
+    // Create temp file or use provided path
+    let edit_path = if let Some(path) = file_path {
+        std::path::PathBuf::from(path)
+    } else {
+        let mut temp = std::env::temp_dir();
+        temp.push(format!(
+            "pattern_memory_{}_{}.{}",
+            agent_name, label, extension
+        ));
+        temp
+    };
+
+    // Write content to file
+    let mut file = std::fs::File::create(&edit_path)
+        .map_err(|e| miette::miette!("Failed to create temp file: {}", e))?;
+    file.write_all(content.as_bytes())
+        .map_err(|e| miette::miette!("Failed to write temp file: {}", e))?;
+
+    output.section(&format!("Editing memory block: {}", label.bright_cyan()));
+    output.info("Schema:", &format!("{:?}", doc.schema()));
+    output.info("File:", &edit_path.display().to_string());
+    output.print("");
+    output.status("Edit the file and save it. Press Enter when done, or 'q' to cancel.");
+
+    // Wait for user input
+    let mut input = String::new();
+    std::io::stdin()
+        .read_line(&mut input)
+        .map_err(|e| miette::miette!("Failed to read input: {}", e))?;
+
+    if input.trim().eq_ignore_ascii_case("q") {
+        output.warning("Edit cancelled");
+        // Clean up temp file if we created it
+        if file_path.is_none() {
+            let _ = std::fs::remove_file(&edit_path);
+        }
+        return Ok(());
+    }
+
+    // Read edited content
+    let edited_content = std::fs::read_to_string(&edit_path)
+        .map_err(|e| miette::miette!("Failed to read edited file: {}", e))?;
+
+    // Apply changes based on schema
+    if is_text {
+        // For text, just set the content directly
+        match memory.get_block(&agent_id, label).await {
+            Ok(Some(doc)) => {
+                if let Err(e) = doc.set_text(&edited_content, true) {
+                    output.error(&format!("Failed to update memory block: {}", e));
+                } else if let Err(e) = memory.persist_block(&agent_id, label).await {
+                    output.error(&format!("Failed to persist memory block: {}", e));
+                } else {
+                    output.success(&format!("Updated memory block '{}'", label));
+                }
+            }
+            Ok(None) => {
+                output.error(&format!("Memory block '{}' not found", label));
             }
             Err(e) => {
-                output.error(&format!("Failed to load agent: {}", e));
+                output.error(&format!("Failed to get memory block: {}", e));
             }
         }
     } else {
-        output.error(&format!("Agent '{}' not found", agent_name));
+        // For structured schemas, parse TOML and import via document
+        // Strip the comment header if present
+        let toml_content = edited_content
+            .lines()
+            .skip_while(|line| line.starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
 
-        // List available agents
-        let query_sql = "SELECT name FROM agent ORDER BY name";
-        let mut response = DB.query(query_sql).await.into_diagnostic()?;
-        let agent_names: Vec<String> = response
-            .take::<Vec<surrealdb::sql::Value>>(0)
-            .into_diagnostic()?
-            .into_iter()
-            .filter_map(|v| Some(v.as_string()))
-            .collect();
+        match toml::from_str::<serde_json::Value>(&toml_content) {
+            Ok(value) => {
+                // Import JSON into the document (Loro doc is Arc-shared with cache)
+                if let Err(e) = doc.import_from_json(&value) {
+                    output.error(&format!("Failed to import changes: {}", e));
+                    return Ok(());
+                }
 
-        if !agent_names.is_empty() {
-            output.info("Available agents:", &agent_names.join(", "));
+                // Mark dirty and persist
+                memory.mark_dirty(&agent_id, label);
+                if let Err(e) = memory.persist_block(&agent_id, label).await {
+                    output.error(&format!("Failed to persist changes: {}", e));
+                    return Ok(());
+                }
+
+                output.success(&format!("Updated memory block '{}'", label));
+            }
+            Err(e) => {
+                output.error(&format!("Failed to parse edited TOML: {}", e));
+            }
         }
+    }
+
+    // Clean up temp file if we created it
+    if file_path.is_none() {
+        let _ = std::fs::remove_file(&edit_path);
     }
 
     Ok(())
 }
 
-/// Edit a memory block by exporting to file and reimporting after edits
-pub async fn edit_memory(agent_name: &str, label: &str, file_path: Option<&str>) -> Result<()> {
-    let output = Output::new();
+// =============================================================================
+// Modify Memory
+// =============================================================================
 
-    output.section(&format!(
-        "Editing memory block '{}' for agent '{}'",
-        label, agent_name
-    ));
-
-    // First, find the agent
-    let query_sql = "SELECT * FROM agent WHERE name = $name LIMIT 1";
-    let mut response = DB
-        .query(query_sql)
-        .bind(("name", agent_name.to_string()))
-        .await
-        .into_diagnostic()?;
-
-    let agents: Vec<<AgentRecord as DbEntity>::DbModel> = response.take(0).into_diagnostic()?;
-    let agents: Vec<_> = agents
-        .into_iter()
-        .map(|e| AgentRecord::from_db_model(e).unwrap())
-        .collect();
-
-    if let Some(agent_record) = agents.first() {
-        // Query for the specific memory block for this agent
-        let query_sql = r#"
-            SELECT out FROM agent_memories
-            WHERE in = $agent_id
-            AND out.*.label = $label
-            FETCH out
-        "#;
-
-        let mut response = DB
-            .query(query_sql)
-            .bind(("agent_id", RecordId::from(&agent_record.id)))
-            .bind(("label", label.to_string()))
-            .await
-            .into_diagnostic()?;
-
-        let memory_models: Vec<<MemoryBlock as DbEntity>::DbModel> =
-            response.take("out").into_diagnostic()?;
-        let memories: Vec<MemoryBlock> = memory_models
-            .into_iter()
-            .filter_map(|m| MemoryBlock::from_db_model(m).ok())
-            .collect();
-
-        if let Some(memory) = memories.first() {
-            // Extract the memory content
-            let content = memory.value.clone();
-            let memory_type = format!("{:?}", memory.memory_type);
-            let memory_id = memory.id.clone();
-
-            // Determine file path
-            let file_path_string = format!("memory_{}.txt", label);
-            let file_path = file_path.unwrap_or(&file_path_string);
-
-            // Write to file
-            std::fs::write(&file_path, &content).into_diagnostic()?;
-
-            output.info("Memory content written to:", file_path);
-            output.info("Memory type:", &memory_type);
-            output.info("Current length:", &format!("{} chars", content.len()));
-            println!();
-
-            // Get user confirmation to proceed with edit
-            output.warning(
-                "Edit the file and save it, then press Enter to update the memory block...",
-            );
-            let mut input = String::new();
-            std::io::stdin().read_line(&mut input).into_diagnostic()?;
-
-            // Read the edited content
-            let new_content = std::fs::read_to_string(&file_path).into_diagnostic()?;
-
-            // Update the memory block
-            let update_sql = r#"
-                UPDATE mem SET value = $value WHERE id = $id
-            "#;
-
-            let mut response = DB
-                .query(update_sql)
-                .bind(("value", new_content.clone()))
-                .bind(("id", RecordId::from(&memory_id)))
-                .await
-                .into_diagnostic()?;
-
-            let memory_models: Vec<<MemoryBlock as DbEntity>::DbModel> =
-                response.take(0).into_diagnostic()?;
-            let _memories: Vec<MemoryBlock> = memory_models
-                .into_iter()
-                .filter_map(|m| MemoryBlock::from_db_model(m).ok())
-                .collect();
-
-            output.success(&format!(
-                "Memory block '{}' updated successfully!",
-                label.bright_cyan()
-            ));
-            output.info("New length:", &format!("{} chars", new_content.len()));
-
-            // Optionally delete the temp file
-            output.info("Temporary file kept at:", file_path);
-        } else {
-            output.error(&format!(
-                "Memory block '{}' not found for agent '{}'",
-                label, agent_name
-            ));
-
-            // List available memory blocks
-            println!(
-                "
-Available memory blocks:"
-            );
-            let query_sql = r#"
-                SELECT * FROM mem
-                WHERE id IN (
-                    SELECT out FROM agent_memories
-                    WHERE in = $agent_id
-                )
-                ORDER BY label
-            "#;
-
-            let mut response = DB
-                .query(query_sql)
-                .bind(("agent_id", RecordId::from(&agent_record.id)))
-                .await
-                .into_diagnostic()?;
-
-            let memory_models: Vec<<MemoryBlock as DbEntity>::DbModel> =
-                response.take(0).into_diagnostic()?;
-            let memories: Vec<MemoryBlock> = memory_models
-                .into_iter()
-                .filter_map(|m| MemoryBlock::from_db_model(m).ok())
-                .collect();
-
-            for memory in memories {
-                println!(
-                    "  - {} ({:?})",
-                    memory.label.bright_cyan(),
-                    memory.memory_type
-                );
-            }
-        }
-    } else {
-        output.error(&format!("Agent '{}' not found", agent_name));
-    }
-
-    Ok(())
-}
-
+/// Modify memory block metadata (label, permission, type).
 pub async fn modify_memory(
-    agent: &String,
+    agent_name: &String,
     label: &String,
     new_label: &Option<String>,
     permission: &Option<String>,
     memory_type: &Option<String>,
-) -> miette::Result<()> {
+) -> Result<()> {
     let output = Output::new();
-    // First, find the agent
-    let query_sql = "SELECT * FROM agent WHERE name = $name LIMIT 1";
-    let mut response = DB
-        .query(query_sql)
-        .bind(("name", agent.to_string()))
-        .await
-        .into_diagnostic()?;
+    let config = load_config().await?;
+    let db = get_db(&config).await?;
 
-    let agents: Vec<<AgentRecord as DbEntity>::DbModel> = response.take(0).into_diagnostic()?;
-    let agents: Vec<_> = agents
-        .into_iter()
-        .map(|e| AgentRecord::from_db_model(e).unwrap())
-        .collect();
+    // Find agent and block
+    let db_agent = require_agent_by_name(&db, agent_name).await?;
 
-    if let Some(_agent_record) = agents.first() {
-        // Query for the specific memory block
-        let query_sql = r#"
-            SELECT id FROM mem
-            WHERE label = $label
-            LIMIT 1
-        "#;
+    output.section(&format!("Modifying memory block: {}", label.bright_cyan()));
 
-        let mut response = DB
-            .query(query_sql)
-            .bind(("label", label.to_string()))
-            .await
-            .into_diagnostic()?;
+    let mut modified = false;
 
-        let id: Vec<RecordId> = response.take("id").map_err(DatabaseError::from)?;
-
-        let mut modify_query = r#"
-            UPDATE $memory SET"#
-            .to_string();
-        if let Some(new_label) = new_label {
-            modify_query.push_str(&format!("\n label = '{}'", new_label));
-        }
-        if let Some(permission) = permission {
-            modify_query.push_str(&format!("\n permission = '{}',", permission));
+    // Update label if specified
+    if let Some(nl) = new_label {
+        // Check if target label already exists
+        match pattern_db::queries::get_block_by_label(db.pool(), &db_agent.id, nl).await {
+            Ok(Some(_)) => {
+                output.error(&format!("Block with label '{}' already exists", nl));
+                return Ok(());
+            }
+            Ok(None) => {} // Good, no conflict
+            Err(e) => {
+                output.error(&format!("Failed to check for existing block: {}", e));
+                return Ok(());
+            }
         }
 
-        if let Some(memory_type) = memory_type {
-            modify_query.push_str(&format!("\n memory_type = '{}'", memory_type));
+        // Get current block
+        match pattern_db::queries::get_block_by_label(db.pool(), &db_agent.id, label).await {
+            Ok(Some(block)) => {
+                match pattern_db::queries::update_block_label(db.pool(), &block.id, nl).await {
+                    Ok(()) => {
+                        output.success(&format!("Renamed block '{}' to '{}'", label, nl));
+                        modified = true;
+                    }
+                    Err(e) => {
+                        output.error(&format!("Failed to rename block: {}", e));
+                    }
+                }
+            }
+            Ok(None) => {
+                output.error(&format!("Memory block '{}' not found", label));
+                return Ok(());
+            }
+            Err(e) => {
+                output.error(&format!("Failed to get memory block: {}", e));
+                return Ok(());
+            }
         }
-        modify_query.push_str(";");
-
-        let _response = DB
-            .query(modify_query)
-            .bind(("memory", id))
-            .await
-            .into_diagnostic()?;
-    } else {
-        output.error(&format!("Agent '{}' not found", agent));
     }
+
+    // Update permission if specified
+    if let Some(perm_str) = permission {
+        let perm = match perm_str.to_lowercase().as_str() {
+            "readonly" | "ro" => pattern_db::MemoryPermission::ReadOnly,
+            "readwrite" | "rw" => pattern_db::MemoryPermission::ReadWrite,
+            "append" | "a" => pattern_db::MemoryPermission::Append,
+            "admin" => pattern_db::MemoryPermission::Admin,
+            "partner" => pattern_db::MemoryPermission::Partner,
+            "human" => pattern_db::MemoryPermission::Human,
+            _ => {
+                output.error(&format!("Invalid permission: {}", perm_str));
+                output.status("Valid: readonly, readwrite, append, admin, partner, human");
+                return Ok(());
+            }
+        };
+
+        // Get block ID from database
+        match pattern_db::queries::get_block_by_label(db.pool(), &db_agent.id, label).await {
+            Ok(Some(block)) => {
+                match pattern_db::queries::update_block_permission(db.pool(), &block.id, perm).await
+                {
+                    Ok(()) => {
+                        output.success(&format!("Updated permission to: {}", perm_str));
+                        modified = true;
+                    }
+                    Err(e) => {
+                        output.error(&format!("Failed to update permission: {}", e));
+                    }
+                }
+            }
+            Ok(None) => {
+                output.error(&format!("Memory block '{}' not found", label));
+                return Ok(());
+            }
+            Err(e) => {
+                output.error(&format!("Failed to get memory block: {}", e));
+                return Ok(());
+            }
+        }
+    }
+
+    // Update memory type if specified
+    if let Some(type_str) = memory_type {
+        let mem_type = match type_str.to_lowercase().as_str() {
+            "core" => pattern_db::MemoryBlockType::Core,
+            "working" => pattern_db::MemoryBlockType::Working,
+            _ => {
+                output.error(&format!("Invalid memory type: {}", type_str));
+                output.status("Valid: core, working");
+                return Ok(());
+            }
+        };
+
+        match pattern_db::queries::get_block_by_label(db.pool(), &db_agent.id, label).await {
+            Ok(Some(block)) => {
+                match pattern_db::queries::update_block_type(db.pool(), &block.id, mem_type).await {
+                    Ok(()) => {
+                        output.success(&format!("Updated memory type to: {}", type_str));
+                        modified = true;
+                    }
+                    Err(e) => {
+                        output.error(&format!("Failed to update memory type: {}", e));
+                    }
+                }
+            }
+            Ok(None) => {
+                output.error(&format!("Memory block '{}' not found", label));
+                return Ok(());
+            }
+            Err(e) => {
+                output.error(&format!("Failed to get memory block: {}", e));
+                return Ok(());
+            }
+        }
+    }
+
+    if !modified {
+        output.warning("No modifications specified");
+        output.status("Use --permission or --memory-type to modify the block");
+    }
+
     Ok(())
 }
 
+// =============================================================================
+// Context Cleanup - STUBBED
+// =============================================================================
+
+// TODO: Reimplement for pattern_db (SQLite/sqlx)
+//
+// Previous implementation:
+// 1. Found agent by name via raw SurrealDB query
+// 2. Created AgentHandle and searched all messages
+// 3. Analyzed for unpaired tool calls/results
+// 4. Detected out-of-order tool call/result pairs
+// 5. Optionally deleted problematic messages
+//
+// Needs: pattern_db::queries::{get_agent_messages, delete_message}
+
 /// Clean up message context by removing unpaired/out-of-order messages
+///
+/// NOTE: Currently STUBBED. Needs pattern_db message queries.
 pub async fn context_cleanup(
     agent_name: &str,
     interactive: bool,
     dry_run: bool,
     limit: Option<usize>,
 ) -> Result<()> {
-    use pattern_core::message::{ContentBlock, Message, MessageContent};
-    use std::collections::HashSet;
-    use std::io::{self, Write};
-
     let output = Output::new();
 
-    output.section("Context Cleanup");
-    println!();
+    output.warning(&format!(
+        "Context cleanup for '{}' temporarily disabled during database migration",
+        agent_name.bright_cyan()
+    ));
 
-    // Find the agent
-    let query_sql = "SELECT * FROM agent WHERE name = $name LIMIT 1";
-    let mut response = DB
-        .query(query_sql)
-        .bind(("name", agent_name.to_string()))
-        .await
-        .into_diagnostic()?;
-
-    let agents: Vec<<AgentRecord as DbEntity>::DbModel> = response.take(0).into_diagnostic()?;
-    let agents: Vec<_> = agents
-        .into_iter()
-        .map(|e| AgentRecord::from_db_model(e).unwrap())
-        .collect();
-
-    if let Some(agent_record) = agents.first() {
-        output.info(
-            "Agent:",
-            &format!(
-                "{} (ID: {})",
-                agent_record.name.bright_cyan(),
-                agent_record.id.to_string().dimmed()
-            ),
-        );
-
-        if dry_run {
-            output.warning("DRY RUN - No messages will be deleted");
-        }
-        println!();
-
-        // Create an agent handle to search messages properly
-        let memory = Memory::with_owner(&agent_record.owner_id);
-        let mut handle = AgentHandle::default();
-        handle.name = agent_record.name.clone();
-        handle.agent_id = agent_record.id.clone();
-        handle.agent_type = agent_record.agent_type.clone();
-        handle.memory = memory;
-        handle.state = AgentState::Ready;
-        let handle = handle.with_db(DB.clone());
-
-        // Get all messages for this agent (no text query, just get everything)
-        let messages = match handle
-            .search_conversations(None, None, None, None, limit.unwrap_or(1000))
-            .await
-        {
-            Ok(msgs) => msgs,
-            Err(e) => {
-                output.error(&format!("Failed to get messages: {}", e));
-                return Ok(());
-            }
-        };
-
-        output.info("Messages", &format!("Found {} messages", messages.len()));
-
-        // Analyze messages for issues
-        let mut unpaired_tool_calls: Vec<&Message> = Vec::new();
-        let mut unpaired_tool_results: Vec<&Message> = Vec::new();
-        let mut out_of_order: Vec<(&Message, &Message)> = Vec::new();
-        let mut tool_call_ids: HashSet<String> = HashSet::new();
-        let mut tool_result_ids: HashSet<String> = HashSet::new();
-
-        // First pass: collect all tool call and result IDs
-        for message in &messages {
-            match &message.content {
-                MessageContent::ToolCalls(calls) => {
-                    for call in calls {
-                        tool_call_ids.insert(call.call_id.clone());
-                    }
-                }
-                MessageContent::ToolResponses(responses) => {
-                    for response in responses {
-                        tool_result_ids.insert(response.call_id.clone());
-                    }
-                }
-                MessageContent::Blocks(blocks) => {
-                    for block in blocks {
-                        match block {
-                            ContentBlock::ToolUse { id, .. } => {
-                                tool_call_ids.insert(id.clone());
-                            }
-                            ContentBlock::ToolResult { tool_use_id, .. } => {
-                                tool_result_ids.insert(tool_use_id.clone());
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        // Second pass: find unpaired and check ordering
-        // Messages are in reverse chronological order (newest first)
-        for (i, message) in messages.iter().enumerate() {
-            match &message.content {
-                MessageContent::ToolCalls(calls) => {
-                    for call in calls {
-                        if !tool_result_ids.contains(&call.call_id) {
-                            unpaired_tool_calls.push(message);
-                            break;
-                        }
-                        // Check ordering: result should come before call in reverse chrono
-                        // (i.e., at a lower index since newer messages have lower indices)
-                        if i > 0 {
-                            let found_result_before = messages[..i].iter().any(|m| {
-                                match &m.content {
-                                    MessageContent::ToolResponses(responses) => {
-                                        responses.iter().any(|r| r.call_id == call.call_id)
-                                    }
-                                    MessageContent::Blocks(blocks) => {
-                                        blocks.iter().any(|b| matches!(b,
-                                            ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == &call.call_id
-                                        ))
-                                    }
-                                    _ => false
-                                }
-                            });
-                            if !found_result_before {
-                                // Find the result message that's out of order
-                                if let Some(result_msg) = messages[i+1..].iter().find(|m| {
-                                    match &m.content {
-                                        MessageContent::ToolResponses(responses) => {
-                                            responses.iter().any(|r| r.call_id == call.call_id)
-                                        }
-                                        MessageContent::Blocks(blocks) => {
-                                            blocks.iter().any(|b| matches!(b,
-                                                ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == &call.call_id
-                                            ))
-                                        }
-                                        _ => false
-                                    }
-                                }) {
-                                    out_of_order.push((message, result_msg));
-                                }
-                            }
-                        }
-                    }
-                }
-                MessageContent::ToolResponses(responses) => {
-                    for response in responses {
-                        if !tool_call_ids.contains(&response.call_id) {
-                            unpaired_tool_results.push(message);
-                            break;
-                        }
-                    }
-                }
-                MessageContent::Blocks(blocks) => {
-                    for block in blocks {
-                        match block {
-                            ContentBlock::ToolUse { id, .. } => {
-                                if !tool_result_ids.contains(id) {
-                                    unpaired_tool_calls.push(message);
-                                    break;
-                                }
-                                // Check ordering for blocks too
-                                if i > 0 {
-                                    let found_result_before = messages[..i].iter().any(|m| {
-                                        match &m.content {
-                                            MessageContent::ToolResponses(responses) => {
-                                                responses.iter().any(|r| &r.call_id == id)
-                                            }
-                                            MessageContent::Blocks(blocks) => {
-                                                blocks.iter().any(|b| matches!(b,
-                                                    ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == id
-                                                ))
-                                            }
-                                            _ => false
-                                        }
-                                    });
-                                    if !found_result_before {
-                                        if let Some(result_msg) = messages[i+1..].iter().find(|m| {
-                                            match &m.content {
-                                                MessageContent::ToolResponses(responses) => {
-                                                    responses.iter().any(|r| &r.call_id == id)
-                                                }
-                                                MessageContent::Blocks(blocks) => {
-                                                    blocks.iter().any(|b| matches!(b,
-                                                        ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == id
-                                                    ))
-                                                }
-                                                _ => false
-                                            }
-                                        }) {
-                                            out_of_order.push((message, result_msg));
-                                        }
-                                    }
-                                }
-                            }
-                            ContentBlock::ToolResult { tool_use_id, .. } => {
-                                if !tool_call_ids.contains(tool_use_id) {
-                                    unpaired_tool_results.push(message);
-                                    break;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        // Display issues found
-        println!("{}", "Issues Found:".bright_yellow());
-        println!("{}", "─".repeat(50).dimmed());
-
-        if unpaired_tool_calls.is_empty()
-            && unpaired_tool_results.is_empty()
-            && out_of_order.is_empty()
-        {
-            output.success("No issues found! All tool calls are paired and properly ordered.");
-            return Ok(());
-        }
-
-        let mut messages_to_delete: Vec<&Message> = Vec::new();
-
-        if !unpaired_tool_calls.is_empty() {
-            println!(
-                "  {} Unpaired tool calls (no matching results):",
-                "⚠".bright_yellow()
-            );
-            for msg in &unpaired_tool_calls {
-                println!("    - Message ID: {}", msg.id.to_string().dimmed());
-                println!(
-                    "      Role: {}",
-                    format!("{:?}", msg.role).bright_yellow().to_string()
-                );
-                println!(
-                    "      Time: {}",
-                    msg.created_at.format("%Y-%m-%d %H:%M:%S UTC").to_string()
-                );
-
-                // Display content using same logic as search_conversations
-                if let Some(text) = msg.text_content() {
-                    let preview = if text.len() > 200 {
-                        format!("{}...", &text[..200])
-                    } else {
-                        text.to_string()
-                    };
-                    println!("      Content:");
-                    for line in preview.lines() {
-                        println!("        {}", line.dimmed());
-                    }
-                } else {
-                    // Show details about non-text content
-                    match &msg.content {
-                        MessageContent::ToolCalls(calls) => {
-                            println!("      Content: [Tool calls: {} calls]", calls.len());
-                            for (j, call) in calls.iter().enumerate().take(3) {
-                                println!(
-                                    "        Call {}: {} (id: {})",
-                                    j + 1,
-                                    call.fn_name,
-                                    call.call_id
-                                );
-                            }
-                            if calls.len() > 3 {
-                                println!("        ... and {} more calls", calls.len() - 3);
-                            }
-                        }
-                        MessageContent::ToolResponses(responses) => {
-                            println!(
-                                "      Content: [Tool responses: {} responses]",
-                                responses.len()
-                            );
-                            for (j, resp) in responses.iter().enumerate().take(3) {
-                                let content_preview = if resp.content.len() > 100 {
-                                    format!("{}...", &resp.content[..100])
-                                } else {
-                                    resp.content.clone()
-                                };
-                                println!(
-                                    "        Response {} (call_id: {}): {}",
-                                    j + 1,
-                                    resp.call_id,
-                                    content_preview.dimmed()
-                                );
-                            }
-                            if responses.len() > 3 {
-                                println!("        ... and {} more responses", responses.len() - 3);
-                            }
-                        }
-                        MessageContent::Blocks(blocks) => {
-                            println!("      Content: [Blocks: {} blocks]", blocks.len());
-                            for (j, block) in blocks.iter().enumerate().take(3) {
-                                match block {
-                                    ContentBlock::Text { text, .. } => {
-                                        let preview = if text.len() > 100 {
-                                            format!("{}...", &text[..100])
-                                        } else {
-                                            text.clone()
-                                        };
-                                        println!(
-                                            "        Block {}: Text - {}",
-                                            j + 1,
-                                            preview.dimmed()
-                                        );
-                                    }
-                                    ContentBlock::ToolUse { name, id, .. } => {
-                                        println!(
-                                            "        Block {}: Tool Use - {} (id: {})",
-                                            j + 1,
-                                            name,
-                                            id
-                                        );
-                                    }
-                                    ContentBlock::ToolResult {
-                                        tool_use_id,
-                                        content,
-                                        ..
-                                    } => {
-                                        let preview = if content.len() > 100 {
-                                            format!("{}...", &content[..100])
-                                        } else {
-                                            content.clone()
-                                        };
-                                        println!(
-                                            "        Block {}: Tool Result (tool_use_id: {}) - {}",
-                                            j + 1,
-                                            tool_use_id,
-                                            preview.dimmed()
-                                        );
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            if blocks.len() > 3 {
-                                println!("        ... and {} more blocks", blocks.len() - 3);
-                            }
-                        }
-                        _ => {
-                            println!("      Content: [Non-text content]");
-                        }
-                    }
-                }
-
-                messages_to_delete.push(msg);
-                println!();
-            }
-            println!();
-        }
-
-        if !unpaired_tool_results.is_empty() {
-            println!(
-                "  {} Unpaired tool results (no matching calls):",
-                "⚠".bright_yellow()
-            );
-            for msg in &unpaired_tool_results {
-                println!("    - Message ID: {}", msg.id.to_string().dimmed());
-                if let MessageContent::ToolResponses(responses) = &msg.content {
-                    for response in responses {
-                        println!(
-                            "      Tool response (Call ID: {})",
-                            response.call_id.dimmed()
-                        );
-                    }
-                }
-                messages_to_delete.push(msg);
-            }
-            println!();
-        }
-
-        if !out_of_order.is_empty() {
-            println!(
-                "  {} Out-of-order tool call/result pairs:",
-                "⚠".bright_yellow()
-            );
-            // Deduplicate the pairs
-            let mut seen = HashSet::new();
-            for (call_msg, result_msg) in &out_of_order {
-                let key = (call_msg.id.to_string(), result_msg.id.to_string());
-                if seen.insert(key) {
-                    println!(
-                        "    - Call: {} ({})",
-                        call_msg.id.to_string().dimmed(),
-                        call_msg.created_at.format("%H:%M:%S").to_string().dimmed()
-                    );
-                    println!(
-                        "      Result: {} ({})",
-                        result_msg.id.to_string().dimmed(),
-                        result_msg
-                            .created_at
-                            .format("%H:%M:%S")
-                            .to_string()
-                            .dimmed()
-                    );
-                    println!(
-                        "      {} Result came AFTER call (should be before)",
-                        "⚠".bright_red()
-                    );
-                    // Add both to delete list
-                    messages_to_delete.push(call_msg);
-                    messages_to_delete.push(result_msg);
-                }
-            }
-            println!();
-        }
-
-        // Ask for confirmation or handle non-interactive mode
-        if !messages_to_delete.is_empty() {
-            println!(
-                "{}",
-                format!("Found {} messages to clean up", messages_to_delete.len()).bright_white()
-            );
-
-            if interactive && !dry_run {
-                print!("Proceed with cleanup? [y/N]: ");
-                io::stdout().flush().unwrap();
-
-                let mut input = String::new();
-                io::stdin().read_line(&mut input).unwrap();
-
-                if !input.trim().eq_ignore_ascii_case("y") {
-                    output.status("Cleanup cancelled");
-                    return Ok(());
-                }
-            }
-
-            // Delete messages (or show what would be deleted)
-            for msg in messages_to_delete {
-                if dry_run {
-                    output.status(&format!("Would delete message: {}", msg.id));
-                } else {
-                    let _: Option<<Message as DbEntity>::DbModel> = DB
-                        .delete(RecordId::from(msg.id.clone()))
-                        .await
-                        .into_diagnostic()?;
-
-                    output.success(&format!("Deleted message: {}", msg.id));
-                }
-            }
-
-            if !dry_run {
-                output.success("Context cleanup complete!");
-            } else {
-                output.info("Dry run complete", "No messages were deleted");
-            }
-        }
-    } else {
-        output.error(&format!("Agent '{}' not found", agent_name));
+    output.info("Interactive:", if interactive { "yes" } else { "no" });
+    output.info("Dry run:", if dry_run { "yes" } else { "no" });
+    if let Some(l) = limit {
+        output.info("Limit:", &l.to_string());
     }
+    output.info("Reason:", "Needs pattern_db message queries");
+    output.status("Previous functionality:");
+    output.list_item("Detect unpaired tool calls (no matching results)");
+    output.list_item("Detect unpaired tool results (no matching calls)");
+    output.list_item("Detect out-of-order tool call/result pairs");
+    output.list_item("Interactive confirmation for deletion");
+    output.list_item("Dry run mode to preview changes");
 
     Ok(())
 }

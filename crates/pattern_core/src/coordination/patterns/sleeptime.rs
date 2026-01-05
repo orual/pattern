@@ -18,7 +18,7 @@ use crate::{
         },
         utils::text_response,
     },
-    message::{ChatRole, Message},
+    messages::{ChatRole, Message},
 };
 
 #[derive(Clone)]
@@ -158,7 +158,7 @@ impl GroupManager for SleeptimeManager {
                         let _ = tx
                             .send(GroupResponseEvent::AgentStarted {
                                 agent_id: agent_id.clone(),
-                                agent_name: agent_name.clone(),
+                                agent_name: agent_name.to_string(),
                                 role: intervention_agent.membership.role.clone(),
                             })
                             .await;
@@ -200,7 +200,7 @@ impl GroupManager for SleeptimeManager {
                         match intervention_agent
                             .agent
                             .clone()
-                            .process_message_stream(intervention_message)
+                            .process(intervention_message)
                             .await
                         {
                             Ok(mut stream) => {
@@ -268,7 +268,7 @@ impl GroupManager for SleeptimeManager {
                                             let _ = tx
                                                 .send(GroupResponseEvent::AgentCompleted {
                                                     agent_id: agent_id.clone(),
-                                                    agent_name: agent_name.clone(),
+                                                    agent_name: agent_name.to_string(),
                                                     message_id: Some(msg_id),
                                                 })
                                                 .await;
@@ -292,10 +292,10 @@ impl GroupManager for SleeptimeManager {
                                 // Track response for final summary
                                 agent_responses.push(AgentResponse {
                                     agent_id: agent_id.clone(),
-                                    response: crate::message::Response {
+                                    response: crate::messages::Response {
                                         content: vec![], // TODO: Collect actual response content
                                         reasoning: None,
-                                        metadata: crate::message::ResponseMetadata::default(),
+                                        metadata: crate::messages::ResponseMetadata::default(),
                                     },
                                     responded_at: Utc::now(),
                                 });
@@ -453,6 +453,10 @@ impl SleeptimeManager {
                     "\n\nReview your domain and report any notable patterns or concerns.\n\nProvide brief status updates only if intervention is needed. Otherwise update domain memory and note anything interesting or noteworthy in recall memory."
                 }
             },
+            crate::coordination::types::GroupMemberRole::Observer => {
+                // Observers monitor but don't actively respond
+                "\n\nObserve constellation activity and update your internal state. No response expected."
+            }
         };
 
         format!(
@@ -463,31 +467,31 @@ impl SleeptimeManager {
 
     /// Find the agent that was least recently active
     /// This uses the agent's internal last_active timestamp
-    #[allow(dead_code)] // Will be used later
-    async fn find_least_recently_active(
-        agents: &[AgentWithMembership<Arc<dyn Agent>>],
-    ) -> Option<crate::AgentId> {
-        // Get active agents with their last activity times
-        let mut active_agents_with_times = Vec::new();
+    // #[allow(dead_code)] // Will be used later
+    // async fn find_least_recently_active(
+    //     agents: &[AgentWithMembership<Arc<dyn Agent>>],
+    // ) -> Option<crate::AgentId> {
+    //     // Get active agents with their last activity times
+    //     let mut active_agents_with_times = Vec::new();
 
-        for awm in agents.iter().filter(|awm| awm.membership.is_active) {
-            let last_active = awm.agent.last_active().await;
-            active_agents_with_times.push((awm, last_active));
-        }
+    //     // for awm in agents.iter().filter(|awm| awm.membership.is_active) {
+    //     //     let last_active = awm.agent.last_active().await;
+    //     //     active_agents_with_times.push((awm, last_active));
+    //     // }
 
-        if active_agents_with_times.is_empty() {
-            return None;
-        }
+    //     if active_agents_with_times.is_empty() {
+    //         return None;
+    //     }
 
-        // Find the agent with the oldest last_active timestamp
-        // If an agent has no last_active (None), treat it as very old
-        active_agents_with_times
-            .into_iter()
-            .min_by_key(|(awm, last_active)| {
-                last_active.unwrap_or_else(|| awm.membership.joined_at)
-            })
-            .map(|(awm, _)| awm.agent.id())
-    }
+    //     // Find the agent with the oldest last_active timestamp
+    //     // If an agent has no last_active (None), treat it as very old
+    //     active_agents_with_times
+    //         .into_iter()
+    //         .min_by_key(|(awm, last_active)| {
+    //             last_active.unwrap_or_else(|| awm.membership.joined_at)
+    //         })
+    //         .map(|(awm, _)| awm.agent.id())
+    // }
 
     async fn evaluate_trigger_static(
         trigger: &SleeptimeTrigger,
@@ -615,22 +619,21 @@ mod tests {
             test_utils::test::{collect_complete_event, create_test_agent, create_test_message},
             types::GroupMemberRole,
         },
-        id::{AgentId, GroupId, RelationId},
+        id::{AgentId, GroupId},
     };
 
     #[tokio::test]
     async fn test_sleeptime_trigger_check() {
         let manager = SleeptimeManager;
-        let intervention_agent = create_test_agent("Pattern");
+        let intervention_agent = create_test_agent("Pattern").await;
         let intervention_id = intervention_agent.id.clone();
 
         let agents: Vec<AgentWithMembership<Arc<dyn crate::agent::Agent>>> =
             vec![AgentWithMembership {
                 agent: Arc::new(intervention_agent) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
-                    id: RelationId::generate(),
-                    in_id: AgentId::generate(),
-                    out_id: GroupId::generate(),
+                    agent_id: AgentId::generate(),
+                    group_id: GroupId::generate(),
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Supervisor,
                     is_active: true,

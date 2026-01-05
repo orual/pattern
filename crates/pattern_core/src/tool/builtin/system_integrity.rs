@@ -1,8 +1,6 @@
 use crate::{
-    context::AgentHandle,
     error::Result,
-    id::MemoryId,
-    memory::MemoryBlock,
+    runtime::ToolContext,
     tool::{AiTool, ExecutionMeta},
 };
 use async_trait::async_trait;
@@ -10,6 +8,7 @@ use chrono::Utc;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::sync::Arc;
 use std::{fs::OpenOptions, io::Write, path::PathBuf, process};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -33,14 +32,22 @@ pub struct SystemIntegrityOutput {
     pub message: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SystemIntegrityTool {
     halt_log_path: PathBuf,
-    handle: AgentHandle,
+    ctx: Arc<dyn ToolContext>,
+}
+
+impl std::fmt::Debug for SystemIntegrityTool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SystemIntegrityTool")
+            .field("agent_id", &self.ctx.agent_id())
+            .finish()
+    }
 }
 
 impl SystemIntegrityTool {
-    pub fn new(handle: AgentHandle) -> Self {
+    pub fn new(ctx: Arc<dyn ToolContext>) -> Self {
         let halt_log_path = dirs::data_local_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("pattern")
@@ -51,10 +58,7 @@ impl SystemIntegrityTool {
             let _ = std::fs::create_dir_all(parent);
         }
 
-        Self {
-            halt_log_path,
-            handle,
-        }
+        Self { halt_log_path, ctx }
     }
 }
 
@@ -78,38 +82,38 @@ impl AiTool for SystemIntegrityTool {
         let timestamp = Utc::now();
         let halt_id = format!("halt_{}", timestamp.timestamp());
 
-        // Create memory block for the halt event
+        // Create archival entry for the halt event
         let memory_content = json!({
             "event_type": "emergency_halt",
             "halt_id": &halt_id,
             "timestamp": timestamp.to_rfc3339(),
             "reason": &reason,
             "severity": &severity,
-            "agent_id": self.handle.agent_id.to_string(),
-            "agent_name": &self.handle.name,
+            "agent_id": self.ctx.agent_id(),
         });
 
-        let halt_label = format!("EMERGENCY_HALT_{}", halt_id);
-        let memory_block = MemoryBlock::owned_with_id(
-            MemoryId::generate(),
-            self.handle.memory.owner_id.clone(),
-            &halt_label,
-            serde_json::to_string_pretty(&memory_content).unwrap(),
+        // Store in agent's archival memory
+        let archival_content = format!(
+            "EMERGENCY HALT: {} - Severity: {} - Reason: {}",
+            halt_id, severity, reason
         );
 
-        // Store in agent's memory
-        match self.handle.memory.upsert_block(&halt_label, memory_block) {
-            Ok(_) => tracing::info!("Halt event stored in memory"),
+        match self
+            .ctx
+            .memory()
+            .insert_archival(self.ctx.agent_id(), &archival_content, Some(memory_content))
+            .await
+        {
+            Ok(_) => tracing::info!("Halt event stored in archival memory"),
             Err(e) => tracing::error!("Failed to store halt event in memory: {}", e),
         }
 
         // Write to log file
         let log_entry = format!(
-            "[{}] HALT {} - Agent: {} ({}) - Severity: {} - Reason: {}\n",
+            "[{}] HALT {} - Agent: {} - Severity: {} - Reason: {}\n",
             timestamp.to_rfc3339(),
             halt_id,
-            self.handle.name,
-            self.handle.agent_id,
+            self.ctx.agent_id(),
             severity,
             reason
         );

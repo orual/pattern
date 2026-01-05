@@ -1,15 +1,23 @@
+//! CLI-specific message endpoints for agent communication
+//!
+//! This module provides endpoint implementations for routing agent messages
+//! to the terminal and external services.
+
+use crate::coordination_helpers;
 use crate::output::Output;
 use async_trait::async_trait;
 use owo_colors::OwoColorize;
 use pattern_core::{
     Result,
     agent::Agent,
-    config::PatternConfig,
-    context::message_router::{BlueskyEndpoint, MessageEndpoint, MessageOrigin},
-    coordination::groups::{AgentGroup, AgentWithMembership, GroupManager},
-    db::{client::DB, ops::atproto::get_user_atproto_identities},
-    message::{ContentBlock, ContentPart, Message, MessageContent},
+    coordination::groups::{AgentGroup, AgentWithMembership, GroupManager, GroupResponseEvent},
+    messages::{ContentBlock, ContentPart, Message, MessageContent},
+    runtime::{
+        endpoints::BlueskyEndpoint,
+        router::{MessageEndpoint, MessageOrigin},
+    },
 };
+use pattern_db::models::PatternType;
 use serde_json::Value;
 use std::sync::Arc;
 use tokio_stream::StreamExt;
@@ -34,36 +42,14 @@ impl MessageEndpoint for CliEndpoint {
         origin: Option<&MessageOrigin>,
     ) -> Result<Option<String>> {
         // Extract text content from the message
-        let text = match &message.content {
-            MessageContent::Text(text) => text.as_str(),
-            MessageContent::Parts(parts) => {
-                // Find first text part
-                parts
-                    .iter()
-                    .find_map(|part| match part {
-                        ContentPart::Text(text) => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .unwrap_or("")
-            }
-            MessageContent::Blocks(blocks) => {
-                // Extract text from blocks, skipping thinking blocks
-                blocks
-                    .iter()
-                    .find_map(|block| match block {
-                        ContentBlock::Text { text, .. } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .unwrap_or("")
-            }
-            _ => "",
-        };
-
+        let text = message.display_content();
         // Use Output to format the message nicely
         // Format based on origin and extract sender name
         let sender_name = if let Some(origin) = origin {
-            self.output
-                .status(&format!("📤 Message from {}", origin.description()));
+            self.output.status(&format!(
+                "[send_message] Message from {}",
+                origin.description()
+            ));
 
             // Choose a reasonable short sender label per origin type
             match origin {
@@ -77,14 +63,15 @@ impl MessageEndpoint for CliEndpoint {
                 _ => "Runtime".to_string(),
             }
         } else {
-            self.output.status("📤 Sending message to user:");
+            self.output
+                .status("[send_message] Sending message to user:");
             "Runtime".to_string()
         };
 
         // Add a tiny delay to let reasoning chunks finish printing
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
-        self.output.agent_message(&sender_name, text);
+        self.output.agent_message(&sender_name, &text);
 
         Ok(None)
     }
@@ -94,7 +81,14 @@ impl MessageEndpoint for CliEndpoint {
     }
 }
 
-/// CLI endpoint for routing messages through agent groups with nice formatting
+// =============================================================================
+// Group CLI Endpoint
+// =============================================================================
+
+/// CLI endpoint for routing messages through agent groups
+///
+/// This wraps the core GroupEndpoint functionality and adds CLI-specific
+/// output formatting for group coordination events.
 pub struct GroupCliEndpoint {
     pub group: AgentGroup,
     pub agents: Vec<AgentWithMembership<Arc<dyn Agent>>>,
@@ -102,24 +96,35 @@ pub struct GroupCliEndpoint {
     pub output: Output,
 }
 
+impl GroupCliEndpoint {
+    /// Create a new GroupCliEndpoint
+    pub fn new(
+        group: AgentGroup,
+        agents: Vec<AgentWithMembership<Arc<dyn Agent>>>,
+        manager: Arc<dyn GroupManager>,
+        output: Output,
+    ) -> Self {
+        Self {
+            group,
+            agents,
+            manager,
+            output,
+        }
+    }
+}
+
 #[async_trait]
+// TODO: refactor the print logic to be re-used elsewhere!
 impl MessageEndpoint for GroupCliEndpoint {
     async fn send(
         &self,
         mut message: Message,
         metadata: Option<Value>,
-        origin: Option<&MessageOrigin>,
+        _origin: Option<&MessageOrigin>,
     ) -> Result<Option<String>> {
-        // Show origin info if provided
-        if let Some(origin) = origin {
-            self.output.info("Message from:", &origin.description());
-            self.output.list_item(message.content.text().unwrap_or("")); // temporarily to see formatting
-        }
-
         // Merge any provided metadata into the message
         if let Some(meta) = metadata {
             if let Some(obj) = meta.as_object() {
-                // Merge with existing custom metadata
                 if let Some(existing_obj) = message.metadata.custom.as_object_mut() {
                     for (key, value) in obj {
                         existing_obj.insert(key.clone(), value.clone());
@@ -130,96 +135,162 @@ impl MessageEndpoint for GroupCliEndpoint {
             }
         }
 
-        let stream = self
+        self.output.status(&format!(
+            "Routing message through group '{}' ({:?} pattern)",
+            self.group.name.bright_cyan(),
+            self.group.coordination_pattern
+        ));
+
+        let mut stream = self
             .manager
             .route_message(&self.group, &self.agents, message)
             .await?;
 
-        // Tee to CLI printer + optional file; sinks handle printing
-        let sinks =
-            crate::forwarding::build_jetstream_group_sinks(&self.output, &self.agents).await;
-        let ctx = pattern_core::realtime::GroupEventContext {
-            source_tag: Some("Jetstream".to_string()),
-            group_name: Some(self.group.name.clone()),
-        };
-        let mut stream = pattern_core::realtime::tap_group_stream(stream, sinks, ctx);
-
-        // Show which source this is from at the beginning
-        self.output.section("[Jetstream] Processing incoming data");
-
-        while let Some(_event) = stream.next().await {}
+        // Process and display events
+        while let Some(event) = stream.next().await {
+            match &event {
+                GroupResponseEvent::Started { agent_count, .. } => {
+                    self.output
+                        .status(&format!("Processing with {} agent(s)...", agent_count));
+                }
+                GroupResponseEvent::AgentStarted {
+                    agent_name, role, ..
+                } => {
+                    self.output.info(
+                        &format!("  {} starting", agent_name.bright_cyan()),
+                        &format!("{:?}", role).dimmed().to_string(),
+                    );
+                }
+                GroupResponseEvent::TextChunk {
+                    agent_id,
+                    text,
+                    is_final,
+                } => {
+                    if *is_final {
+                        self.output.agent_message(&agent_id.to_string(), text);
+                    }
+                }
+                GroupResponseEvent::ToolCallStarted {
+                    agent_id,
+                    fn_name,
+                    args,
+                    ..
+                } => {
+                    self.output.tool_call(
+                        &format!("[{}] {}", agent_id, fn_name),
+                        &serde_json::to_string_pretty(args).unwrap_or_else(|_| args.to_string()),
+                    );
+                }
+                GroupResponseEvent::ToolCallCompleted { result, .. } => match result {
+                    Ok(content) => self.output.tool_result(content),
+                    Err(error) => self.output.error(&format!("Tool error: {}", error)),
+                },
+                GroupResponseEvent::AgentCompleted { agent_name, .. } => {
+                    self.output
+                        .status(&format!("  {} completed", agent_name.bright_green()));
+                }
+                GroupResponseEvent::Complete {
+                    agent_responses,
+                    execution_time,
+                    ..
+                } => {
+                    self.output.success(&format!(
+                        "Group processing complete: {} response(s) in {:?}",
+                        agent_responses.len(),
+                        execution_time
+                    ));
+                }
+                GroupResponseEvent::Error {
+                    message,
+                    agent_id,
+                    recoverable,
+                } => {
+                    let prefix = if *recoverable { "Warning" } else { "Error" };
+                    if let Some(id) = agent_id {
+                        self.output
+                            .error(&format!("{} from {}: {}", prefix, id, message));
+                    } else {
+                        self.output.error(&format!("{}: {}", prefix, message));
+                    }
+                }
+                _ => {} // ReasoningChunk handled silently
+            }
+        }
 
         Ok(None)
     }
 
     fn endpoint_type(&self) -> &'static str {
-        "group"
+        "group_cli"
     }
 }
 
-/// Set up Bluesky endpoint for an agent if configured
-pub async fn setup_bluesky_endpoint(
-    agent: &Arc<dyn Agent>,
-    config: &PatternConfig,
-    output: &Output,
-) -> Result<()> {
-    // Check if agent has a bluesky_handle configured
-    let bluesky_handle = if let Some(handle) = &config.agent.bluesky_handle {
-        handle.clone()
-    } else {
-        // No Bluesky handle configured for this agent
-        return Ok(());
+/// Create a GroupManager for the given pattern type
+pub fn create_group_manager(pattern_type: PatternType) -> Arc<dyn GroupManager> {
+    use pattern_core::coordination::{
+        DynamicManager, PipelineManager, RoundRobinManager, SleeptimeManager, SupervisorManager,
+        VotingManager, selectors::DefaultSelectorRegistry,
     };
 
-    output.status(&format!(
-        "Checking Bluesky credentials for {}",
-        bluesky_handle.bright_cyan()
-    ));
-
-    // Look up ATProto identity for this handle
-    let identities = get_user_atproto_identities(&DB, &config.user.id).await?;
-
-    // Find identity matching the handle
-    let identity = identities
-        .into_iter()
-        .find(|i| i.handle == bluesky_handle || i.id.to_record_id() == bluesky_handle);
-
-    if let Some(identity) = identity {
-        // Get credentials
-        if let Some(creds) = identity.get_auth_credentials() {
-            output.status(&format!(
-                "Setting up Bluesky endpoint for {}",
-                identity.handle.bright_cyan()
-            ));
-
-            // Create Bluesky endpoint
-            match BlueskyEndpoint::new(creds, identity.handle.clone()).await {
-                Ok(endpoint) => {
-                    // Register as the Bluesky endpoint for this agent
-                    agent
-                        .register_endpoint("bluesky".to_string(), Arc::new(endpoint))
-                        .await?;
-                    output.success(&format!(
-                        "Bluesky endpoint configured for {}",
-                        identity.handle.bright_green()
-                    ));
-                }
-                Err(e) => {
-                    output.warning(&format!("Failed to create Bluesky endpoint: {:?}", e));
-                }
-            }
-        } else {
-            output.warning(&format!(
-                "No credentials available for Bluesky account {}",
-                bluesky_handle
-            ));
+    match pattern_type {
+        PatternType::RoundRobin => Arc::new(RoundRobinManager),
+        PatternType::Dynamic => {
+            let registry = DefaultSelectorRegistry::new();
+            Arc::new(DynamicManager::new(Arc::new(registry)))
         }
-    } else {
-        output.warning(&format!(
-            "No ATProto identity found for handle '{}'. Run 'pattern-cli atproto login' to authenticate.",
-            bluesky_handle
-        ));
+        PatternType::Pipeline => Arc::new(PipelineManager),
+        PatternType::Supervisor => Arc::new(SupervisorManager),
+        PatternType::Voting => Arc::new(VotingManager),
+        PatternType::Sleeptime => Arc::new(SleeptimeManager),
     }
+}
+
+/// Build a GroupCliEndpoint from database data and loaded agents
+pub async fn build_group_cli_endpoint(
+    db_group: &pattern_db::models::AgentGroup,
+    db_members: &[pattern_db::models::GroupMember],
+    agents: Vec<Arc<dyn Agent>>,
+    output: Output,
+) -> Result<GroupCliEndpoint> {
+    use pattern_core::id::AgentId;
+
+    // Get the first agent's ID for patterns that need a leader
+    let first_agent_id = agents
+        .first()
+        .map(|a| a.id())
+        .unwrap_or_else(AgentId::generate);
+
+    // Build core AgentGroup using shared helpers
+    let group = coordination_helpers::build_agent_group(db_group, first_agent_id);
+
+    // Build agents with membership using shared helpers
+    let agents_with_membership =
+        coordination_helpers::build_agents_with_membership(agents, &db_group.id, db_members);
+
+    // Create the appropriate manager
+    let manager = create_group_manager(db_group.pattern_type);
+
+    Ok(GroupCliEndpoint::new(
+        group,
+        agents_with_membership,
+        manager,
+        output,
+    ))
+}
+
+// =============================================================================
+// Bluesky Endpoint Setup
+// =============================================================================
+
+/// Set up Bluesky endpoint for an agent if configured
+#[allow(dead_code)]
+pub async fn setup_bluesky_endpoint(agent: &Arc<dyn Agent>) -> Result<()> {
+    let runtime = agent.runtime();
+    let router = runtime.router();
+    let bsky = BlueskyEndpoint::new(agent.id().0, runtime.dbs().clone()).await?;
+    router
+        .register_endpoint("bluesky".into(), Arc::new(bsky))
+        .await;
 
     Ok(())
 }

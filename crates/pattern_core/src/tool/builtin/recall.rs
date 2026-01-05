@@ -1,607 +1,349 @@
-//! Recall storage management tool following Letta/MemGPT patterns
+//! Archival entry management tool (simplified).
+//!
+//! This is the v2 recall tool with simplified Insert/Search operations.
+//! It replaces the legacy recall tool which had Insert/Append/Read/Delete.
 
-use std::fmt::Debug;
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde_json::json;
 
-use crate::{
-    Result,
-    context::AgentHandle,
-    memory::{MemoryPermission, MemoryType},
-    memory_acl::{MemoryGate, MemoryOp, check as acl_check, consent_reason},
-    tool::{AiTool, ExecutionMeta},
-};
+use crate::CoreError;
+use crate::runtime::ToolContext;
+use crate::tool::{AiTool, ExecutionMeta, ToolRule, ToolRuleType};
 
-/// Operation types for recall storage management
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-#[schemars(inline)]
-pub enum ArchivalMemoryOperationType {
-    Insert,
-    Append,
-    Read,
-    Delete,
-}
+use super::types::{RecallInput, RecallOp, ToolOutput};
 
-/// Input for managing recall storage
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct RecallInput {
-    /// The operation to perform
-    pub operation: ArchivalMemoryOperationType,
-
-    /// For insert/read/delete: label for the memory (insert defaults to "archival_<timestamp>")
-    #[schemars(default, with = "String")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-
-    /// For insert: content to store in recall storage
-    #[schemars(default, with = "String")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
-    // request_heartbeat handled via ExecutionMeta injection; field removed
-}
-
-/// Output from recall storage operations
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct RecallOutput {
-    /// Whether the operation was successful
-    pub success: bool,
-
-    /// Message about the operation
-    #[schemars(default, with = "String")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-
-    /// For search operations, the matching entries
-    #[schemars(default)]
-    pub results: Vec<ArchivalSearchResult>,
-}
-
-/// A single search result from recall storage
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct ArchivalSearchResult {
-    /// Label of the memory block
-    pub label: String,
-    /// Content of the memory
-    pub content: String,
-    /// When the memory was created
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    /// When the memory was last updated
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-/// Unified tool for managing recall storage
-#[derive(Debug, Clone)]
+/// Archival entry management tool (simplified).
+///
+/// Operations:
+/// - `insert` - Create new immutable archival entry
+/// - `search` - Full-text search over archival entries
+///
+/// Note: This operates on archival *entries*, not Archival-typed blocks.
+/// Archival entries are immutable once created.
+#[derive(Clone)]
 pub struct RecallTool {
-    pub(crate) handle: AgentHandle,
+    ctx: Arc<dyn ToolContext>,
+}
+
+impl std::fmt::Debug for RecallTool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecallTool")
+            .field("agent_id", &self.ctx.agent_id())
+            .finish()
+    }
+}
+
+impl RecallTool {
+    pub fn new(ctx: Arc<dyn ToolContext>) -> Self {
+        Self { ctx }
+    }
+
+    async fn handle_insert(
+        &self,
+        content: Option<String>,
+        metadata: Option<serde_json::Value>,
+    ) -> crate::Result<ToolOutput> {
+        let content = content.ok_or_else(|| {
+            CoreError::tool_exec_msg(
+                "recall",
+                json!({"op": "insert"}),
+                "insert requires 'content' parameter",
+            )
+        })?;
+
+        let memory = self.ctx.memory();
+        let entry_id = memory
+            .insert_archival(self.ctx.agent_id(), &content, metadata)
+            .await
+            .map_err(|e| {
+                CoreError::tool_exec_msg(
+                    "recall",
+                    json!({"op": "insert"}),
+                    format!("Failed to insert archival entry: {}", e),
+                )
+            })?;
+
+        Ok(ToolOutput::success_with_data(
+            "Archival entry created",
+            json!({ "entry_id": entry_id }),
+        ))
+    }
+
+    async fn handle_search(
+        &self,
+        query: Option<String>,
+        limit: Option<usize>,
+    ) -> crate::Result<ToolOutput> {
+        let query = query.ok_or_else(|| {
+            CoreError::tool_exec_msg(
+                "recall",
+                json!({"op": "search"}),
+                "search requires 'query' parameter",
+            )
+        })?;
+        let limit = limit.unwrap_or(10);
+
+        let memory = self.ctx.memory();
+        let results = memory
+            .search_archival(self.ctx.agent_id(), &query, limit)
+            .await
+            .map_err(|e| {
+                CoreError::tool_exec_msg(
+                    "recall",
+                    json!({"op": "search", "query": query}),
+                    format!("Search failed: {}", e),
+                )
+            })?;
+
+        let entries: Vec<serde_json::Value> = results
+            .into_iter()
+            .map(|r| {
+                let mut entry = json!({
+                    "id": r.id,
+                    "content": r.content,
+                    "created_at": r.created_at.to_rfc3339(),
+                });
+                if let Some(metadata) = r.metadata {
+                    entry["metadata"] = metadata;
+                }
+                entry
+            })
+            .collect();
+
+        Ok(ToolOutput::success_with_data(
+            format!("Found {} archival entries", entries.len()),
+            json!({ "entries": entries }),
+        ))
+    }
 }
 
 #[async_trait]
 impl AiTool for RecallTool {
     type Input = RecallInput;
-    type Output = RecallOutput;
+    type Output = ToolOutput;
 
     fn name(&self) -> &str {
         "recall"
     }
 
     fn description(&self) -> &str {
-        "Manage long-term recall storage. Recall memories are not always visible in context. Operations: insert, append, read (by label), delete.
- - 'insert' creates a new recall memory with the provided content
- - 'append' appends the provided content to the recall memory with the specified label
- - 'read' reads out the contents of the recall block with the specified label
- - 'delete' removes the recall memory with the specified label"
+        "Manage archival memory: insert new entries for long-term storage or search existing entries. Entries are immutable once created."
+    }
+
+    fn usage_rule(&self) -> Option<&'static str> {
+        Some(
+            "Use to store important information for later retrieval. Search when you need to remember something from the past.",
+        )
+    }
+
+    fn tool_rules(&self) -> Vec<ToolRule> {
+        vec![ToolRule::new(
+            self.name().to_string(),
+            ToolRuleType::ContinueLoop,
+        )]
+    }
+
+    fn operations(&self) -> &'static [&'static str] {
+        &["insert", "search"]
     }
 
     async fn execute(
         &self,
-        params: Self::Input,
-        _meta: &crate::tool::ExecutionMeta,
-    ) -> Result<Self::Output> {
-        match params.operation {
-            ArchivalMemoryOperationType::Insert => {
-                let content = params.content.ok_or_else(|| {
-                    crate::CoreError::tool_exec_msg(
-                        "recall",
-                        serde_json::json!({"operation":"insert"}),
-                        "insert operation requires 'content' field",
-                    )
-                })?;
-                self.execute_insert(content, params.label).await
-            }
-            ArchivalMemoryOperationType::Append => {
-                let label = params.label.ok_or_else(|| {
-                    crate::CoreError::tool_exec_msg(
-                        "recall",
-                        serde_json::json!({"operation":"append"}),
-                        "append operation requires 'label' field",
-                    )
-                })?;
-                let content = params.content.ok_or_else(|| {
-                    crate::CoreError::tool_exec_msg(
-                        "recall",
-                        serde_json::json!({"operation":"append"}),
-                        "append operation requires 'content' field",
-                    )
-                })?;
-                self.execute_append(label, content, _meta).await
-            }
-            ArchivalMemoryOperationType::Read => {
-                let label = params.label.ok_or_else(|| {
-                    crate::CoreError::tool_exec_msg(
-                        "recall",
-                        serde_json::json!({"operation":"read"}),
-                        "read operation requires 'label' field",
-                    )
-                })?;
-                self.execute_read(label).await
-            }
-            ArchivalMemoryOperationType::Delete => {
-                let label = params.label.ok_or_else(|| {
-                    crate::CoreError::tool_exec_msg(
-                        "recall",
-                        serde_json::json!({"operation":"delete"}),
-                        "delete operation requires 'label' field",
-                    )
-                })?;
-                self.execute_delete(label, _meta).await
-            }
+        input: Self::Input,
+        _meta: &ExecutionMeta,
+    ) -> crate::Result<Self::Output> {
+        match input.op {
+            RecallOp::Insert => self.handle_insert(input.content, input.metadata).await,
+            RecallOp::Search => self.handle_search(input.query, input.limit).await,
         }
-    }
-
-    fn usage_rule(&self) -> Option<&'static str> {
-        Some("the conversation will be continued when called")
-    }
-
-    fn examples(&self) -> Vec<crate::tool::ToolExample<Self::Input, Self::Output>> {
-        vec![
-            crate::tool::ToolExample {
-                description: "Store important information for later".to_string(),
-                parameters: RecallInput {
-                    operation: ArchivalMemoryOperationType::Insert,
-                    content: Some(
-                        "User mentioned they have a dog named Max who likes to play fetch."
-                            .to_string(),
-                    ),
-                    label: None,
-                },
-                expected_output: Some(RecallOutput {
-                    success: true,
-                    message: Some("Created recall memory 'archival_1234567890'".to_string()),
-                    results: vec![],
-                }),
-            },
-            crate::tool::ToolExample {
-                description: "Add more information to existing recall memory".to_string(),
-                parameters: RecallInput {
-                    operation: ArchivalMemoryOperationType::Append,
-                    content: Some("Max is a golden retriever.".to_string()),
-                    label: Some("archival_1234567890".to_string()),
-                },
-                expected_output: Some(RecallOutput {
-                    success: true,
-                    message: Some("Appended to recall memory 'archival_1234567890'".to_string()),
-                    results: vec![],
-                }),
-            },
-        ]
-    }
-}
-
-impl RecallTool {
-    async fn execute_insert(&self, content: String, label: Option<String>) -> Result<RecallOutput> {
-        // Generate label if not provided
-        let label = label.unwrap_or_else(|| format!("archival_{}", chrono::Utc::now().timestamp()));
-
-        tracing::info!(
-            "Recall insert operation for label '{}' (content: {} chars)",
-            label,
-            content.len()
-        );
-
-        // Try to use database if available, fall back to in-memory
-        if self.handle.has_db_connection() {
-            match self.handle.insert_archival_memory(&label, &content).await {
-                Ok(_) => Ok(RecallOutput {
-                    success: true,
-                    message: Some(format!("Created recall memory '{}' in database", label)),
-                    results: vec![],
-                }),
-                Err(e) => {
-                    tracing::warn!("Database insert failed, falling back to in-memory: {}", e);
-                    self.insert_in_memory(label, content)
-                }
-            }
-        } else {
-            self.insert_in_memory(label, content)
-        }
-    }
-
-    fn insert_in_memory(&self, label: String, content: String) -> Result<RecallOutput> {
-        tracing::info!("Using in-memory insert for recall label '{}'", label);
-
-        // Check if label already exists
-        if self.handle.memory.contains_block(&label) {
-            return Ok(RecallOutput {
-                success: false,
-                message: Some(format!(
-                    "Memory block with label '{}' already exists",
-                    label
-                )),
-                results: vec![],
-            });
-        }
-
-        // Create the archival memory block
-        self.handle.memory.create_block(&label, &content)?;
-        tracing::info!("Created memory block '{}' in memory", label);
-
-        // Update it to be archival type with appropriate permissions using alter_block
-        self.handle.memory.alter_block(&label, |_key, mut block| {
-            block.memory_type = MemoryType::Archival;
-            block.permission = MemoryPermission::ReadWrite;
-            block
-        });
-        tracing::info!("Updated block '{}' to Archival type", label);
-
-        Ok(RecallOutput {
-            success: true,
-            message: Some(format!("Created recall memory '{}'", label)),
-            results: vec![],
-        })
-    }
-
-    async fn execute_read(&self, label: String) -> Result<RecallOutput> {
-        if let Ok(Some(memory)) = self.handle.get_archival_memory_by_label(&label).await {
-            Ok(RecallOutput {
-                success: true,
-                message: Some(format!("Found recall memory '{}'", label)),
-                results: vec![ArchivalSearchResult {
-                    label,
-                    content: memory.value,
-                    created_at: memory.created_at,
-                    updated_at: memory.updated_at,
-                }],
-            })
-        } else {
-            Ok(RecallOutput {
-                success: false,
-                message: Some(format!("Couldn't find recall memory '{}'", label)),
-                results: vec![],
-            })
-        }
-    }
-
-    async fn execute_delete(&self, label: String, meta: &ExecutionMeta) -> Result<RecallOutput> {
-        // Check if block exists and get type
-        let block_type = if let Some(block) = self.handle.memory.get_block(&label) {
-            let memory_type = block.memory_type;
-            if block.permission != MemoryPermission::Admin {
-                // High-risk delete: request explicit consent
-                let grant = crate::permission::broker()
-                    .request(
-                        self.handle.agent_id.clone(),
-                        "recall".to_string(),
-                        crate::permission::PermissionScope::MemoryEdit { key: label.clone() },
-                        Some(format!(
-                            "{} — high-risk delete",
-                            crate::memory_acl::consent_reason(
-                                &label,
-                                crate::memory_acl::MemoryOp::Delete,
-                                block.permission
-                            )
-                        )),
-                        meta.route_metadata.clone(),
-                        std::time::Duration::from_secs(90),
-                    )
-                    .await;
-                if grant.is_none() {
-                    return Ok(RecallOutput {
-                        success: false,
-                        message: Some(format!(
-                            "Delete of '{}' requires approval; request timed out or was denied",
-                            label
-                        )),
-                        results: vec![],
-                    });
-                }
-            }
-            drop(block); // Release lock immediately
-            Some(memory_type)
-        } else {
-            None
-        };
-
-        match block_type {
-            Some(MemoryType::Archival) => {
-                // Remove the block from memory
-                self.handle.memory.remove_block(&label);
-
-                Ok(RecallOutput {
-                    success: true,
-                    message: Some(format!("Deleted recall memory '{}'", label)),
-                    results: vec![],
-                })
-            }
-            Some(memory_type) => Ok(RecallOutput {
-                success: false,
-                message: Some(format!(
-                    "Block '{}' is not recall memory (type: {:?})",
-                    label, memory_type
-                )),
-                results: vec![],
-            }),
-            None => Ok(RecallOutput {
-                success: false,
-                message: Some(format!("Archival memory '{}' not found", label)),
-                results: vec![],
-            }),
-        }
-    }
-
-    async fn execute_append(
-        &self,
-        label: String,
-        content: String,
-        meta: &ExecutionMeta,
-    ) -> Result<RecallOutput> {
-        tracing::info!(
-            "Recall append operation for label '{}' (content: {} chars)",
-            label,
-            content.len()
-        );
-
-        // Check if the block exists first
-        if !self.handle.memory.contains_block(&label) {
-            tracing::warn!("Append failed: block '{}' not found", label);
-            return Ok(RecallOutput {
-                success: false,
-                message: Some(format!("Archival memory '{}' not found", label)),
-                results: vec![],
-            });
-        }
-
-        // Inspect current block and gate (copy fields, drop guard)
-        let (current_type, current_perm) = {
-            let guard = self.handle.memory.get_block(&label).unwrap();
-            (guard.memory_type, guard.permission)
-        };
-        if current_type != MemoryType::Archival {
-            return Ok(RecallOutput {
-                success: false,
-                message: Some(format!(
-                    "Block '{}' is not recall memory (type: {:?})",
-                    label, current_type
-                )),
-                results: vec![],
-            });
-        }
-
-        match acl_check(MemoryOp::Append, current_perm) {
-            MemoryGate::Allow => {}
-            MemoryGate::Deny { reason } => {
-                return Ok(RecallOutput {
-                    success: false,
-                    message: Some(format!("{} — cannot append to '{}'", reason, label)),
-                    results: vec![],
-                });
-            }
-            MemoryGate::RequireConsent { .. } => {
-                let grant = crate::permission::broker()
-                    .request(
-                        self.handle.agent_id.clone(),
-                        "recall".to_string(),
-                        crate::permission::PermissionScope::MemoryEdit { key: label.clone() },
-                        Some(consent_reason(&label, MemoryOp::Append, current_perm)),
-                        meta.route_metadata.clone(),
-                        std::time::Duration::from_secs(90),
-                    )
-                    .await;
-                if grant.is_none() {
-                    return Ok(RecallOutput {
-                        success: false,
-                        message: Some(format!(
-                            "Append to '{}' requires approval; request timed out or was denied",
-                            label
-                        )),
-                        results: vec![],
-                    });
-                }
-            }
-        }
-
-        // Perform the append
-        self.handle.memory.alter_block(&label, |_key, mut block| {
-            block.value.push_str("\n");
-            block.value.push_str(&content);
-            block.updated_at = chrono::Utc::now();
-            block
-        });
-
-        // Get the updated block to show a preview
-        let preview_info = self
-            .handle
-            .memory
-            .get_block(&label)
-            .map(|block| {
-                let char_count = block.value.chars().count();
-
-                // Show the last part of the content (where the append happened)
-                let preview_chars = 200; // Show last 200 chars
-                let content_preview = if block.value.len() > preview_chars {
-                    format!(
-                        "...{}",
-                        &block.value[block.value.len().saturating_sub(preview_chars)..]
-                    )
-                } else {
-                    block.value.clone()
-                };
-
-                (char_count, content_preview)
-            })
-            .unwrap_or((0, String::new()));
-
-        Ok(RecallOutput {
-            success: true,
-            message: Some(format!(
-                "Successfully appended {} characters to recall memory '{}'. The memory now contains {} total characters. Preview: {}",
-                content.len(),
-                label,
-                preview_info.0,
-                preview_info.1
-            )),
-            results: vec![],
-        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{UserId, memory::Memory};
+    use crate::tool::builtin::test_utils::create_test_context_with_agent;
+
+    async fn create_test_context() -> Arc<crate::tool::builtin::test_utils::MockToolContext> {
+        let (_db, _memory, ctx) = create_test_context_with_agent("test-agent").await;
+        ctx
+    }
 
     #[tokio::test]
-    async fn test_archival_insert_and_append() {
-        let memory = Memory::with_owner(&UserId::generate());
-        let handle = AgentHandle::test_with_memory(memory.clone());
+    async fn test_recall_insert() {
+        let ctx = create_test_context().await;
+        let tool = RecallTool::new(ctx);
 
-        let tool = RecallTool { handle };
-
-        // Test inserting
         let result = tool
             .execute(
                 RecallInput {
-                    operation: ArchivalMemoryOperationType::Insert,
-                    content: Some("The user's favorite color is blue.".to_string()),
-                    label: Some("user_preferences".to_string()),
+                    op: RecallOp::Insert,
+                    content: Some("Test archival content".to_string()),
+                    metadata: Some(json!({"tag": "test"})),
+                    query: None,
+                    limit: None,
                 },
-                &crate::tool::ExecutionMeta::default(),
+                &ExecutionMeta::default(),
             )
             .await
             .unwrap();
 
         assert!(result.success);
-        assert_eq!(
-            result.message.as_ref().unwrap(),
-            "Created recall memory 'user_preferences'"
-        );
+        assert_eq!(result.message, "Archival entry created");
+        assert!(result.data.is_some());
+        let data = result.data.unwrap();
+        assert!(data.get("entry_id").is_some());
+    }
 
-        // Verify the block was created with correct type
-        {
-            let block = memory.get_block("user_preferences").unwrap();
-            assert_eq!(block.memory_type, MemoryType::Archival);
-            assert_eq!(block.value, "The user's favorite color is blue.");
-        } // Block ref dropped here
+    #[tokio::test]
+    async fn test_recall_insert_requires_content() {
+        let ctx = create_test_context().await;
+        let tool = RecallTool::new(ctx);
 
-        // Test appending
         let result = tool
             .execute(
                 RecallInput {
-                    operation: ArchivalMemoryOperationType::Append,
-                    content: Some(" They also like the color green.".to_string()),
-                    label: Some("user_preferences".to_string()),
+                    op: RecallOp::Insert,
+                    content: None,
+                    metadata: None,
+                    query: None,
+                    limit: None,
                 },
-                &crate::tool::ExecutionMeta::default(),
+                &ExecutionMeta::default(),
             )
-            .await
-            .unwrap();
+            .await;
 
-        assert!(result.success);
-        // Message format has changed to include more details
-        assert!(
-            result
-                .message
-                .as_ref()
-                .unwrap()
-                .contains("Successfully appended")
-        );
-        assert!(
-            result
-                .message
-                .as_ref()
-                .unwrap()
-                .contains("user_preferences")
-        );
-
-        // Verify the append
-        {
-            let block = memory.get_block("user_preferences").unwrap();
-            assert_eq!(
-                block.value,
-                "The user's favorite color is blue.\n They also like the color green."
-            );
+        assert!(result.is_err(), "Expected error but got: {:?}", result);
+        let err = result.unwrap_err();
+        // Check that we got a ToolExecutionFailed with cause containing "content"
+        match err {
+            crate::CoreError::ToolExecutionFailed { cause, .. } => {
+                assert!(
+                    cause.contains("content"),
+                    "Expected cause to mention 'content', got: {}",
+                    cause
+                );
+            }
+            other => panic!("Expected ToolExecutionFailed, got: {:?}", other),
         }
     }
 
     #[tokio::test]
-    async fn test_archival_delete() {
-        let memory = Memory::with_owner(&UserId::generate());
+    async fn test_recall_search() {
+        let ctx = create_test_context().await;
+        let tool = RecallTool::new(ctx.clone());
 
-        // Create an archival block
-        memory
-            .create_block("to_delete", "Temporary information")
+        // First insert some data
+        let insert_result = tool
+            .execute(
+                RecallInput {
+                    op: RecallOp::Insert,
+                    content: Some("Important fact about golden retrievers".to_string()),
+                    metadata: None,
+                    query: None,
+                    limit: None,
+                },
+                &ExecutionMeta::default(),
+            )
+            .await
             .unwrap();
-        if let Some(mut block) = memory.get_block_mut("to_delete") {
-            block.memory_type = MemoryType::Archival;
-            block.permission = MemoryPermission::Admin;
-        }
 
-        let handle = AgentHandle::test_with_memory(memory.clone());
+        assert!(
+            insert_result.success,
+            "Insert failed: {}",
+            insert_result.message
+        );
 
-        let tool = RecallTool { handle };
+        // Now search for it
+        let search_result = tool
+            .execute(
+                RecallInput {
+                    op: RecallOp::Search,
+                    content: None,
+                    metadata: None,
+                    query: Some("golden retrievers".to_string()),
+                    limit: Some(5),
+                },
+                &ExecutionMeta::default(),
+            )
+            .await
+            .unwrap();
 
-        // Test deleting
+        assert!(search_result.success);
+        assert!(search_result.data.is_some());
+        let data = search_result.data.unwrap();
+        let entries = data.get("entries").unwrap().as_array().unwrap();
+        assert!(!entries.is_empty(), "Expected at least one search result");
+
+        // Verify the found entry contains the expected content
+        let first_entry = &entries[0];
+        let content = first_entry.get("content").unwrap().as_str().unwrap();
+        assert!(
+            content.contains("golden retrievers"),
+            "Expected content to contain 'golden retrievers', got: {}",
+            content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_recall_search_requires_query() {
+        let ctx = create_test_context().await;
+        let tool = RecallTool::new(ctx);
+
         let result = tool
             .execute(
                 RecallInput {
-                    operation: ArchivalMemoryOperationType::Delete,
+                    op: RecallOp::Search,
                     content: None,
-                    label: Some("to_delete".to_string()),
+                    metadata: None,
+                    query: None,
+                    limit: None,
                 },
-                &crate::tool::ExecutionMeta::default(),
+                &ExecutionMeta::default(),
+            )
+            .await;
+
+        assert!(result.is_err(), "Expected error but got: {:?}", result);
+        let err = result.unwrap_err();
+        // Check that we got a ToolExecutionFailed with cause containing "query"
+        match err {
+            crate::CoreError::ToolExecutionFailed { cause, .. } => {
+                assert!(
+                    cause.contains("query"),
+                    "Expected cause to mention 'query', got: {}",
+                    cause
+                );
+            }
+            other => panic!("Expected ToolExecutionFailed, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_recall_search_empty_results() {
+        let ctx = create_test_context().await;
+        let tool = RecallTool::new(ctx);
+
+        // Search without inserting anything first
+        let result = tool
+            .execute(
+                RecallInput {
+                    op: RecallOp::Search,
+                    content: None,
+                    metadata: None,
+                    query: Some("nonexistent topic xyz123".to_string()),
+                    limit: None,
+                },
+                &ExecutionMeta::default(),
             )
             .await
             .unwrap();
 
         assert!(result.success);
-        assert!(memory.get_block("to_delete").is_none());
-    }
-
-    #[tokio::test]
-    async fn test_cannot_delete_non_archival() {
-        let memory = Memory::with_owner(&UserId::generate());
-
-        // Create a core memory block with Admin permission
-        memory
-            .create_block("core_block", "Core information")
-            .unwrap();
-        if let Some(mut block) = memory.get_block_mut("core_block") {
-            // Default type is Core, but set Admin permission so we test the right error
-            block.permission = MemoryPermission::Admin;
-        }
-
-        let handle = AgentHandle::test_with_memory(memory.clone());
-
-        let tool = RecallTool { handle };
-
-        // Try to delete a core memory block
-        let result = tool
-            .execute(
-                RecallInput {
-                    operation: ArchivalMemoryOperationType::Delete,
-                    content: None,
-                    label: Some("core_block".to_string()),
-                },
-                &crate::tool::ExecutionMeta::default(),
-            )
-            .await
-            .unwrap();
-
-        assert!(!result.success);
-        assert!(result.message.unwrap().contains("not recall memory"));
-        // Block should still exist
-        assert!(memory.get_block("core_block").is_some());
+        assert!(result.data.is_some());
+        let data = result.data.unwrap();
+        let entries = data.get("entries").unwrap().as_array().unwrap();
+        assert!(entries.is_empty());
     }
 }

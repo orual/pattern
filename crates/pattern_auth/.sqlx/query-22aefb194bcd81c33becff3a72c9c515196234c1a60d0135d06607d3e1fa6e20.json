@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            INSERT INTO discord_bot_config (\n                id, bot_token, app_id, public_key,\n                allowed_channels, allowed_guilds, admin_users, default_dm_user,\n                created_at, updated_at\n            ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n            ON CONFLICT (id) DO UPDATE SET\n                bot_token = excluded.bot_token,\n                app_id = excluded.app_id,\n                public_key = excluded.public_key,\n                allowed_channels = excluded.allowed_channels,\n                allowed_guilds = excluded.allowed_guilds,\n                admin_users = excluded.admin_users,\n                default_dm_user = excluded.default_dm_user,\n                updated_at = excluded.updated_at\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": []
+  },
+  "hash": "22aefb194bcd81c33becff3a72c9c515196234c1a60d0135d06607d3e1fa6e20"
+}

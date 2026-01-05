@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO memory_block_updates (block_id, seq, update_blob, byte_size, source, created_at)\n        VALUES (?, ?, ?, ?, ?, ?)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "3ef498e24961c51eee524dd5304eedabef2acaeb51c4d352247774ac0ed93dec"
+}

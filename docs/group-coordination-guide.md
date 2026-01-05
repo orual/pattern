@@ -1,10 +1,12 @@
 # Pattern Group Coordination
 
-Pattern's group coordination system allows multiple agents to work together, routing messages through various coordination patterns. This enables complex multi-agent behaviors like round-robin discussions, dynamic expertise selection, and pipeline processing.
+Pattern's group coordination system enables multiple agents to work together through various patterns. This guide covers how to create, configure, and use agent groups.
 
-## Core Components
+## Core Concepts
 
-### 1. Agent Groups
+### Agent Groups
+
+A group is a collection of agents that coordinate using a specific pattern:
 
 ```rust
 pub struct AgentGroup {
@@ -13,120 +15,150 @@ pub struct AgentGroup {
     pub description: String,
     pub coordination_pattern: CoordinationPattern,
     pub state: GroupState,
-    pub members: Vec<GroupMember>,
-    // ...
+    pub members: Vec<(AgentModel, GroupMembership)>,
 }
 ```
 
-Groups are collections of agents that work together using a specific coordination pattern.
+### Coordination Patterns
 
-### 2. Coordination Patterns
+Six patterns are available:
 
 ```rust
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CoordinationPattern {
-    RoundRobin { current_index: usize, skip_unavailable: bool },
-    Dynamic { selector: String, config: HashMap<String, String> },
-    Pipeline { stages: Vec<PipelineStage> },
-    Supervisor { supervisor_agent_id: AgentId },
-    Voting { min_votes: usize, require_majority: bool },
-    Sleeptime { check_interval_ms: u64, intervention_threshold: f32 },
+    Supervisor { leader_id, delegation_rules },
+    RoundRobin { current_index, skip_unavailable },
+    Voting { quorum, voting_rules },
+    Pipeline { stages, parallel_stages },
+    Dynamic { selector_name, selector_config },
+    Sleeptime { check_interval, triggers, intervention_agent_id },
 }
 ```
 
-Each pattern implements a different strategy for routing messages between agents.
-
-### 3. Group Managers
+### Member Roles
 
 ```rust
-#[async_trait]
-pub trait GroupManager: Send + Sync {
-    async fn route_message(
-        &self,
-        group: &AgentGroup,
-        agents: &[AgentWithMembership<Arc<dyn Agent>>],
-        message: Message,
-    ) -> Result<GroupResponse>;
+pub enum GroupMemberRole {
+    Regular,                    // Standard member
+    Supervisor,                 // Group leader
+    Observer,                   // Receives messages but doesn't respond
+    Specialist { domain: String }, // Expert in a domain
 }
 ```
-
-Managers implement the logic for each coordination pattern.
 
 ## Coordination Patterns Explained
 
+### Supervisor
+
+One agent leads, delegating tasks to others:
+
+```mermaid
+graph TB
+    M[Message] --> L[Leader Agent]
+    L -->|Delegate| W1[Worker 1]
+    L -->|Delegate| W2[Worker 2]
+    L --> R[Synthesized Response]
+```
+
+```toml
+[groups.pattern]
+type = "supervisor"
+leader = "Pattern"
+
+[groups.pattern.delegation_rules]
+max_delegations_per_agent = 3
+delegation_strategy = "capability"  # round_robin, least_busy, random
+fallback_behavior = "handle_self"   # queue, fail
+```
+
+**Use Cases:**
+- Task delegation with oversight
+- Quality control
+- Hierarchical coordination
+
 ### Round Robin
-Cycles through agents in order, optionally skipping inactive ones.
+
+Agents take turns in order:
 
 ```mermaid
 graph LR
     M[Message] --> A1[Agent 1]
-    A1 --> A2[Agent 2]
-    A2 --> A3[Agent 3]
-    A3 --> A1
-    style M fill:#4299e1,stroke:#2b6cb0,color:#fff
+    A1 -.next.-> A2[Agent 2]
+    A2 -.next.-> A3[Agent 3]
+    A3 -.next.-> A1
+```
+
+```toml
+[groups.pattern]
+type = "round_robin"
+skip_unavailable = true  # Skip inactive agents
 ```
 
 **Use Cases:**
 - Fair distribution of work
-- Team discussions where everyone gets a turn
-- Load balancing simple tasks
+- Load balancing
+- Team discussions
 
-### Dynamic Selection
-Uses selectors to choose agents based on various criteria.
+### Pipeline
+
+Sequential processing through stages:
+
+```mermaid
+graph LR
+    M[Message] --> S1[Analysis Stage]
+    S1 --> S2[Planning Stage]
+    S2 --> S3[Execution Stage]
+    S3 --> R[Result]
+```
+
+```toml
+[groups.pattern]
+type = "pipeline"
+stages = ["Analyzer", "Planner", "Executor"]
+parallel_stages = false
+
+# Stage failure handling (in code)
+# on_failure = "skip" | "retry" | "abort" | "fallback"
+```
+
+**Use Cases:**
+- Multi-step workflows
+- Analysis pipelines
+- Document processing
+
+### Dynamic
+
+Context-based agent selection:
 
 ```mermaid
 graph TB
     M[Message] --> S{Selector}
     S -->|Capability Match| A1[Expert Agent]
-    S -->|Random| A2[Any Agent]
-    S -->|Load Balance| A3[Least Busy]
-    style M fill:#4299e1,stroke:#2b6cb0,color:#fff
-    style S fill:#ed8936,stroke:#c05621,color:#fff
+    S -->|Load Balance| A2[Least Busy]
+    S -->|Random| A3[Any Agent]
+```
+
+```toml
+[groups.pattern]
+type = "dynamic"
+selector = "capability"  # random, load_balancing, supervisor
+
+[groups.pattern.selector_config]
+preferred_domain = "task_management"
 ```
 
 **Available Selectors:**
-- **Capability**: Matches agent capabilities to message needs
-- **Random**: Random selection for variety
-- **LoadBalancing**: Chooses least recently used agent
+- `random`: Random selection
+- `capability`: Match message content to agent capabilities
+- `load_balancing`: Select least recently used agent
+- `supervisor`: LLM-based selection by supervisor agent
 
-### Pipeline
-Processes messages through a sequence of stages.
-
-```mermaid
-graph LR
-    M[Message] --> S1[Analyzer Agent]
-    S1 --> S2[Planner Agent]
-    S2 --> S3[Executor Agent]
-    S3 --> R[Combined Result]
-    style M fill:#4299e1,stroke:#2b6cb0,color:#fff
-    style R fill:#48bb78,stroke:#2f855a,color:#fff
-```
-
-**Use Cases:**
-- Multi-step analysis (understand → plan → execute)
-- Document processing pipelines
-- Complex workflows with dependencies
-
-### Supervisor
-One agent reviews and can modify other agents' responses.
-
-```mermaid
-graph TB
-    M[Message] --> W[Worker Agent]
-    W --> S{Supervisor}
-    S -->|Approved| R1[Final Response]
-    S -->|Modified| R2[Edited Response]
-    style M fill:#4299e1,stroke:#2b6cb0,color:#fff
-    style S fill:#ed8936,stroke:#c05621,color:#fff
-```
-
-**Use Cases:**
-- Quality control
-- Safety filtering
-- Response refinement
+**Special Addressing:**
+- `@all`: Broadcast to all active agents
+- `@agentname` or `agentname:`: Route directly to named agent
 
 ### Voting
-Multiple agents vote on responses or decisions.
+
+Agents vote on decisions:
 
 ```mermaid
 graph TB
@@ -137,272 +169,280 @@ graph TB
     A2 --> V
     A3 --> V
     V --> R[Consensus Result]
-    style M fill:#4299e1,stroke:#2b6cb0,color:#fff
-    style V fill:#ed8936,stroke:#c05621,color:#fff
+```
+
+```toml
+[groups.pattern]
+type = "voting"
+quorum = 3
+
+[groups.pattern.voting_rules]
+voting_timeout = 30  # seconds
+tie_breaker = "random"  # first_vote, no_decision, or specific_agent
+weight_by_expertise = true
 ```
 
 **Use Cases:**
 - Critical decisions
 - Consensus building
-- Reducing single-agent bias
+- Multi-perspective evaluation
 
 ### Sleeptime
-Background monitoring with intervention triggers.
+
+Background monitoring with intervention triggers:
 
 ```mermaid
 graph TB
-    T[Timer] --> C{Check Condition}
-    C -->|Threshold Met| A[Alert Agent]
+    T[Timer] --> C{Check Triggers}
+    C -->|Condition Met| A[Intervention Agent]
     C -->|Normal| T
-    A --> I[Intervention]
-    style T fill:#4299e1,stroke:#2b6cb0,color:#fff
-    style C fill:#ed8936,stroke:#c05621,color:#fff
+    A --> I[Proactive Message]
 ```
+
+```toml
+[groups.pattern]
+type = "sleeptime"
+check_interval = 1200  # 20 minutes
+intervention_agent = "Pattern"
+
+[[groups.pattern.triggers]]
+name = "hyperfocus_check"
+priority = "high"
+[groups.pattern.triggers.condition]
+type = "time_elapsed"
+duration = 5400  # 90 minutes
+
+[[groups.pattern.triggers]]
+name = "activity_sync"
+priority = "medium"
+[groups.pattern.triggers.condition]
+type = "constellation_activity"
+message_threshold = 20
+time_threshold = 3600
+```
+
+**Trigger Conditions:**
+- `time_elapsed`: Duration since last activity
+- `pattern_detected`: Named pattern recognition
+- `threshold_exceeded`: Metric over threshold
+- `constellation_activity`: Message count or time thresholds
+- `custom`: Custom evaluator
 
 **Use Cases:**
-- Deadline monitoring
-- Attention management
+- ADHD hyperfocus monitoring
 - Periodic check-ins
+- Background task management
 
-## Creating and Using Groups
+## Configuration
 
-### Step 1: Create a Group via CLI
+### TOML Configuration
 
-```bash
-# Create a group with round-robin pattern
-pattern-cli group create TaskForce \
-  --description "Multi-agent task force" \
-  --pattern round-robin
-
-# Create with dynamic selection
-pattern-cli group create Experts \
-  --description "Expert selection group" \
-  --pattern dynamic \
-  --selector capability
-```
-
-### Step 2: Add Agents to the Group
-
-```bash
-# Add agents with specific roles
-pattern-cli group add-member TaskForce analyzer \
-  --role "Analysis Expert"
-
-pattern-cli group add-member TaskForce planner \
-  --role "Strategic Planner"
-
-pattern-cli group add-member TaskForce executor \
-  --role "Task Executor"
-```
-
-### Step 3: Chat with the Group
-
-```bash
-# Start group chat
-pattern-cli chat --group TaskForce
-
-# The coordination pattern will route your messages
-# according to the group's configuration
-```
-
-## Configuration Examples
-
-### In Configuration File
+Full group configuration in `constellation.toml`:
 
 ```toml
 [[groups]]
-name = "BrainTrust"
-description = "Executive function support team"
-pattern = { type = "round_robin", skip_unavailable = true }
+name = "Main Support"
+description = "Primary ADHD support team"
+
+[groups.pattern]
+type = "dynamic"
+selector = "capability"
 
 [[groups.members]]
-name = "Prioritizer"
-agent_id = "agent_12345678-..."  # Optional, will search by name if not provided
-role = "Priority Management"
-capabilities = ["prioritization", "urgency_assessment"]
+name = "Pattern"
+config_path = "agents/pattern/agent.toml"
+role = "supervisor"
+capabilities = ["coordination", "planning", "emotional_support"]
 
 [[groups.members]]
-name = "TimeKeeper"
-role = "Schedule Management"
-capabilities = ["scheduling", "time_tracking"]
+name = "Entropy"
+config_path = "agents/entropy/agent.toml"
+role = { specialist = { domain = "task_breakdown" } }
+capabilities = ["task_analysis", "decomposition", "prioritization"]
+
+[[groups.members]]
+name = "Archive"
+config_path = "agents/archive/agent.toml"
+role = "regular"
+capabilities = ["memory", "recall", "pattern_recognition"]
+
+# Data source routing to group
+[groups.data_sources.bluesky]
+type = "bluesky"
+name = "bluesky"
+target = "Main Support"
 ```
 
-### Programmatic Creation
+### CLI Commands
+
+```bash
+# List groups
+pattern group list
+
+# Create group (interactive TUI builder)
+pattern group create
+
+# Create group from TOML template
+pattern group create --from crisis.toml
+
+# Add member
+pattern group add member "Crisis Response" Pattern --role regular
+
+# View status
+pattern group status "Crisis Response"
+
+# Edit group (interactive TUI builder)
+pattern group edit "Crisis Response"
+
+# Export configuration
+pattern group export "Crisis Response" -o crisis.toml
+```
+
+## Response Streaming
+
+Groups emit events during message processing:
 
 ```rust
-// Create group in database
-let group_id = create_group_for_user(
-    &db,
-    user.id.clone(),
-    "BrainTrust",
-    "Executive function support",
-    CoordinationPattern::Dynamic {
-        selector: "capability".to_string(),
-        config: HashMap::new(),
-    },
-).await?;
-
-// Add members
-add_agent_to_group(
-    &db,
-    group_id.clone(),
-    agent_id,
-    GroupMemberRole::Specialist,
-    json!({ "focus": "prioritization" }),
-).await?;
-```
-
-## How Message Routing Works
-
-```mermaid
-graph TB
-    U[User Message] --> G{Group Router}
-    G --> P[Pattern Manager]
-    P --> S[Select Agents]
-    S --> E[Execute Parallel/Sequential]
-    E --> C[Collect Responses]
-    C --> F[Format Group Response]
-    F --> R[Return to User]
-
-    style U fill:#4299e1,stroke:#2b6cb0,color:#fff
-    style R fill:#48bb78,stroke:#2f855a,color:#fff
-```
-
-### Detailed Flow:
-
-1. **Message Received**: User sends message to group
-2. **Pattern Routing**: GroupCoordinator identifies the pattern
-3. **Manager Selection**: Appropriate GroupManager is instantiated
-4. **Agent Selection**: Manager determines which agents to invoke
-5. **Execution**: Agents process message (parallel or sequential)
-6. **Response Collection**: All agent responses are gathered
-7. **State Update**: Group state is updated if needed
-8. **Combined Response**: Formatted response returned to user
-
-## Advanced Features
-
-### Dynamic Selector Configuration
-
-```rust
-// Capability-based selection with tag matching
-let mut config = HashMap::new();
-config.insert("match_mode".to_string(), "any".to_string()); // or "all"
-config.insert("min_score".to_string(), "0.7".to_string());
-
-// Load balancing with time windows
-config.insert("window_minutes".to_string(), "30".to_string());
-config.insert("count".to_string(), "2".to_string()); // Select top 2
-```
-
-### Pipeline Stage Configuration
-
-```rust
-PipelineStage {
-    name: "analysis".to_string(),
-    agent_selector: AgentSelector::ByCapability {
-        required: vec!["analysis".to_string()],
-        preferred: vec!["deep_analysis".to_string()],
-    },
-    timeout_ms: Some(30000),
-    optional: false,
+pub enum GroupResponseEvent {
+    Started { group_id, pattern, agent_count },
+    AgentStarted { agent_id, agent_name, role },
+    TextChunk { agent_id, text, is_final },
+    ReasoningChunk { agent_id, text, is_final },
+    ToolCallStarted { agent_id, call_id, fn_name, args },
+    ToolCallCompleted { agent_id, call_id, result },
+    AgentCompleted { agent_id, agent_name, message_id },
+    Complete { group_id, pattern, execution_time, agent_responses, state_changes },
+    Error { agent_id, message, recoverable },
 }
 ```
 
-### Group State Management
+### Usage Example
 
-Groups maintain state between interactions:
+```rust
+use pattern_core::coordination::{DynamicManager, DefaultSelectorRegistry};
+
+let registry = Arc::new(DefaultSelectorRegistry::new());
+let manager = DynamicManager::new(registry);
+
+let mut stream = manager.route_message(&group, &agents, message).await?;
+
+use tokio_stream::StreamExt;
+while let Some(event) = stream.next().await {
+    match event {
+        GroupResponseEvent::TextChunk { agent_id, text, .. } => {
+            println!("[{}]: {}", agent_id, text);
+        }
+        GroupResponseEvent::Complete { execution_time, .. } => {
+            println!("Completed in {:?}", execution_time);
+        }
+        _ => {}
+    }
+}
+```
+
+## Group State
+
+Each pattern maintains its own state:
 
 ```rust
 pub enum GroupState {
-    RoundRobin { current_index: usize, last_rotation: DateTime<Utc> },
-    Pipeline { completed_stages: Vec<String>, stage_results: Map<String, Value> },
-    Voting { current_votes: Map<AgentId, Vote>, voting_deadline: DateTime<Utc> },
-    // ...
+    Supervisor { current_delegations: HashMap<AgentId, usize> },
+    RoundRobin { current_index, last_rotation },
+    Voting { active_session: Option<VotingSession> },
+    Pipeline { active_executions: Vec<PipelineExecution> },
+    Dynamic { recent_selections: Vec<(DateTime<Utc>, AgentId)> },
+    Sleeptime { last_check, trigger_history, current_index },
 }
+```
+
+State is automatically updated after each message and persisted to the database.
+
+## Memory Sharing
+
+Agents in a group can share memory blocks:
+
+```rust
+// Share a block with another agent
+db.share_block(owner_id, block_id, recipient_id, MemoryPermission::ReadOnly).await?;
+
+// Access shared content
+let doc = memory.get_shared_block(recipient_id, owner_id, "shared_notes").await?;
+```
+
+Shared blocks appear in context with attribution:
+
+```xml
+<block:shared_notes permission="ReadOnly" shared_from="Archive">
+Cross-agent insights about user patterns
+</block:shared_notes>
+```
+
+## Best Practices
+
+### Pattern Selection
+
+| Pattern | Best For |
+|---------|----------|
+| Supervisor | Delegation, quality control |
+| RoundRobin | Fair distribution, load balancing |
+| Pipeline | Sequential workflows |
+| Dynamic | Expertise matching |
+| Voting | Critical decisions |
+| Sleeptime | Background monitoring |
+
+### Agent Capabilities
+
+Define specific, actionable capabilities:
+
+```toml
+# Good - specific and matchable
+capabilities = ["task_breakdown", "time_estimation", "priority_analysis"]
+
+# Too vague - hard to match
+capabilities = ["help", "support"]
+```
+
+### Group Composition
+
+- Keep groups focused (3-7 members typically optimal)
+- Mix complementary capabilities
+- Assign clear roles
+- Consider overlapping group memberships for different contexts
+
+### Overlapping Groups
+
+The same agent can belong to multiple groups:
+
+```
+Pattern Agent
+├── Main Support (Dynamic)
+├── Crisis Response (RoundRobin)
+├── Planning (Supervisor - as member)
+└── Sleeptime (Sleeptime - as intervener)
 ```
 
 ## Troubleshooting
 
-### Common Issues
+### "No agents available"
 
-1. **"No agents available"**
-   - Check agents are active: `pattern-cli group status <name>`
-   - Verify membership: Agents must be added to group
-   - For capability selector: Ensure agents have required capabilities
+1. Check agent states: `pattern agent list`
+2. Verify group membership: `pattern group status <name>`
+3. For capability selector: Ensure agents have matching capabilities
 
-2. **Round-robin skipping agents**
-   - Check `skip_unavailable` setting
-   - Verify agent state is not `Inactive`
-   - Look for filtered agents in logs
+### Round-robin skipping agents
 
-3. **Pipeline stage failures**
-   - Check timeout settings
-   - Verify all stages have available agents
-   - Review stage dependencies
+1. Check `skip_unavailable` setting
+2. Verify member `is_active` status
+3. Review agent logs for errors
 
-4. **Dynamic selection not working as expected**
-   - Debug with `RUST_LOG=pattern_core::coordination=debug`
-   - Check selector configuration parameters
-   - Verify agent capabilities match requirements
+### Pipeline stage failures
 
-## Best Practices
+1. Check timeout settings
+2. Verify stage agents are available
+3. Review `on_failure` action (skip, retry, abort, fallback)
 
-### 1. Choose the Right Pattern
+### Dynamic selection issues
 
-- **Round-Robin**: Equal participation, fairness
-- **Dynamic**: Expertise matching, load distribution
-- **Pipeline**: Sequential processing, workflows
-- **Supervisor**: Quality control, safety
-- **Voting**: Critical decisions, consensus
-- **Sleeptime**: Background monitoring, alerts
-
-### 2. Agent Capabilities
-
-Define clear, specific capabilities:
-```toml
-# Good
-capabilities = ["python_code_review", "security_analysis", "test_generation"]
-
-# Too vague
-capabilities = ["coding", "analysis"]
-```
-
-### 3. Group Composition
-
-- Keep groups focused on specific purposes
-- Mix complementary capabilities
-- Consider group size (3-7 agents typically optimal)
-- Use roles to clarify each agent's purpose
-
-### 4. State Management
-
-- Groups persist state between conversations
-- Reset state if behavior becomes unexpected
-- Monitor state in long-running groups
-
-## Integration with Memory System
-
-Groups can share memory between agents:
-
-```rust
-// Agents in a group can share memory blocks
-agent1.share_memory_with(
-    "project_context",
-    agent2.id(),
-    MemoryPermission::Read,
-).await?;
-```
-
-This enables:
-- Shared context across pipeline stages
-- Persistent group knowledge
-- Collaborative memory building
-
-## Future Enhancements
-
-Planned improvements include:
-- Weighted voting based on expertise
-- Dynamic pattern switching based on context
-- Group templates for common ADHD support patterns
-- Inter-group communication protocols
-- Group performance analytics
+1. Enable debug logging: `RUST_LOG=pattern_core::coordination=debug`
+2. Check selector configuration
+3. Verify agent capabilities match message content

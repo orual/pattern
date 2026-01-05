@@ -1,7 +1,7 @@
 //! MCP tool wrapper stub implementation
 
 use async_trait::async_trait;
-use pattern_core::tool::{DynamicTool, DynamicToolExample, ExecutionMeta};
+use pattern_core::tool::{DynamicTool, DynamicToolExample, ExecutionMeta, ToolRule};
 use serde_json::Value;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::Duration;
@@ -97,6 +97,10 @@ impl DynamicTool for McpToolWrapper {
     }
 
     fn examples(&self) -> Vec<DynamicToolExample> {
+        vec![]
+    }
+
+    fn tool_rules(&self) -> Vec<ToolRule> {
         vec![]
     }
 

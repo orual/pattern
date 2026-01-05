@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            agent_id as \"agent_id!\",\n            did as \"did!\",\n            endpoint_type as \"endpoint_type!\",\n            session_id,\n            config,\n            created_at as \"created_at!\",\n            updated_at as \"updated_at!\"\n        FROM agent_atproto_endpoints\n        WHERE agent_id = ? AND endpoint_type = ?\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "agent_id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "did!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "endpoint_type!",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "session_id",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "config",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at!",
+        "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "updated_at!",
+        "ordinal": 6,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "22b3bb80c19a0e1aebe4dcd1f5f433fd5962eebacccb4a4dd6cd3fdf14a6beb0"
+}

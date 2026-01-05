@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO archive_summaries (id, agent_id, summary, start_position, end_position, message_count, previous_summary_id, depth, created_at)\n        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": []
+  },
+  "hash": "956482d43555a5718893e2735f4a530f474fdd3fe24ddb75c72aa65e523402a9"
+}

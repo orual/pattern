@@ -116,19 +116,12 @@ fn select_agent_group(content: &str) -> AgentGroup {
 - Rate limit awareness
 - Comprehensive logging
 
-## Configuration
-
-Environment variables:
-- `DISCORD_TOKEN`: Bot authentication token
-- `DISCORD_BATCH_DELAY_MS`: Message batching delay (default 1500)
-- `DISCORD_MAX_MESSAGE_LENGTH`: Max Discord message size (default 2000)
 
 ## Testing
 
 Run with Discord integration:
 ```bash
-pattern-cli chat --discord
-pattern-cli chat --discord --group main
+pattern chat --group main --discord
 ```
 
 ## Privacy & Security

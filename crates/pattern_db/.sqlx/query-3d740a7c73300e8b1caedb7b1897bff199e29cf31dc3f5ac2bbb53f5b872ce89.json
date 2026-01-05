@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO agent_atproto_endpoints (agent_id, did, endpoint_type, session_id, config, created_at, updated_at)\n        VALUES (?, ?, ?, ?, ?, ?, ?)\n        ON CONFLICT(agent_id, endpoint_type) DO UPDATE SET\n            did = excluded.did,\n            session_id = excluded.session_id,\n            config = excluded.config,\n            updated_at = excluded.updated_at\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "3d740a7c73300e8b1caedb7b1897bff199e29cf31dc3f5ac2bbb53f5b872ce89"
+}

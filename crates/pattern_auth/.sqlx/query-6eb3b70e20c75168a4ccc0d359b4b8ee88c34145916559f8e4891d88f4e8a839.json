@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT\n                account_did as \"account_did!\",\n                session_id as \"session_id!\",\n                host_url as \"host_url!\",\n                expires_at\n            FROM oauth_sessions\n            ORDER BY account_did, session_id\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "account_did!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "session_id!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "host_url!",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "expires_at",
+        "ordinal": 3,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "6eb3b70e20c75168a4ccc0d359b4b8ee88c34145916559f8e4891d88f4e8a839"
+}

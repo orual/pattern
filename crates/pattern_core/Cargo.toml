@@ -27,7 +27,10 @@ parking_lot = { workspace = true }
 dirs = { workspace = true }
 
 # Database
-surrealdb = { workspace = true }
+pattern-db = { path = "../pattern_db" }
+pattern-auth = { path = "../pattern_auth" }
+loro = { version = "1.10", features = ["counter"] }
+sqlx = { version = "0.8", features = ["json"] }
 
 # AI/LLM
 genai = { workspace = true }
@@ -56,6 +59,9 @@ compact_str = { version = "0.9.0", features = ["serde", "markup", "smallvec"] }
 smallvec = { version = "1.15.1", features = ["serde"] }
 dashmap = { version = "6.1.0", features = ["serde"] }
 ferroid = { workspace = true }
+
+# Plugin registry
+inventory = "0.3"
 rand = "0.9.2"
 base64 = "0.22"
 sha2 = "0.10"
@@ -67,6 +73,7 @@ value-ext = "0.1.2"
 # DAG-CBOR and CAR archive support
 serde_cbor = { workspace = true }
 serde_ipld_dagcbor = { workspace = true }
+serde_bytes = "0.11"
 iroh-car = "0.5"
 ipld-core.workspace = true
 cid.workspace = true
@@ -76,16 +83,18 @@ multihash-codetable.workspace = true
 # Compression for archives
 zstd = { version = "0.13", optional = true }
 
-atrium-api.workspace = true
-atrium-oauth.workspace = true
-atrium-common.workspace = true
-atrium-identity.workspace = true
-atrium-xrpc.workspace = true
 minijinja = "2.11.0"
 rocketman = { version = "0.2", features = ["zstd"] }
-notify = { version = "7.0", optional = true }
-bsky-sdk = { workspace = true }
+notify = { version = "7.0" }
 hickory-resolver = "0.24"
+jacquard = { version = "0.9", features = ["websocket", "zstd"] }
+
+# Glob pattern matching
+globset = "0.4"
+
+# Diff generation and patch parsing
+similar = "2.6"
+patch = "0.7"
 
 # Web tool dependencies
 html2md = "0.2"
@@ -94,6 +103,10 @@ regex = "1.11.1"
 
 # Calculator tool dependencies
 fend-core = "1.5.7"
+
+# Shell tool dependencies
+pty-process = { version = "0.5", features = ["async"] }
+strip-ansi-escapes = "0.2"
 
 # Local crates (to be added later)
 # pattern-nd = { path = "../pattern-nd", optional = true }
@@ -110,15 +123,13 @@ proc-macro2-diagnostics = "0.10"
 miette = { workspace = true, features = ["fancy"] }
 
 [features]
-default = ["surreal-embedded", "embed-cloud", "file-watch"]
+default = [ "embed-cloud", "file-watch"]
 nd = []                                                                     # Enable neurodivergent features when pattern-nd is ready
 export = ["zstd"]                                                           # Agent export/import with compression
 oauth = ["reqwest-middleware", "http"]                                      # OAuth authentication support
-file-watch = ["notify"]                                                     # File watching for data sources
+file-watch = []                                                             # File watching for data sources (notify always included)
 
 # Database backends
-surreal-embedded = ["surrealdb/kv-surrealkv"]
-surreal-remote = ["surrealdb/protocol-ws", "surrealdb/protocol-http"]
 
 # Embedding backends
 embed-candle = [

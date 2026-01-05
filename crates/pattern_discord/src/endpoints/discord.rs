@@ -7,8 +7,8 @@ use tracing::{debug, info, warn};
 
 use pattern_core::Result;
 use pattern_core::config::DiscordAppConfig;
-use pattern_core::context::message_router::{MessageEndpoint, MessageOrigin};
-use pattern_core::message::{ContentPart, Message, MessageContent};
+use pattern_core::messages::{ContentPart, Message, MessageContent};
+use pattern_core::runtime::router::{MessageEndpoint, MessageOrigin};
 
 /// Discord endpoint for sending messages through the Pattern message router
 #[derive(Clone)]
@@ -101,7 +101,7 @@ impl DiscordEndpoint {
         }
 
         // Try to resolve by channel name using Discord API
-        // Prefer guilds from bot config if available; else fall back to env
+        // Guild IDs must come from bot config (loaded at startup)
         let guild_ids: Vec<u64> = if let Some(bot) = &self.bot {
             bot.config()
                 .allowed_guilds
@@ -110,13 +110,6 @@ impl DiscordEndpoint {
                 .into_iter()
                 .filter_map(|s| s.parse::<u64>().ok())
                 .collect()
-        } else if let Ok(guilds) = std::env::var("DISCORD_GUILD_IDS") {
-            guilds
-                .split(',')
-                .filter_map(|s| s.trim().parse::<u64>().ok())
-                .collect()
-        } else if let Ok(one) = std::env::var("DISCORD_GUILD_ID") {
-            one.parse::<u64>().ok().into_iter().collect()
         } else {
             Vec::new()
         };
@@ -199,7 +192,7 @@ impl DiscordEndpoint {
         }
 
         // Try to resolve by username/display name using Discord API
-        // Prefer guilds from bot config if available; else fall back to env
+        // Guild IDs must come from bot config (loaded at startup)
         let guild_ids: Vec<u64> = if let Some(bot) = &self.bot {
             bot.config()
                 .allowed_guilds
@@ -208,13 +201,6 @@ impl DiscordEndpoint {
                 .into_iter()
                 .filter_map(|s| s.parse::<u64>().ok())
                 .collect()
-        } else if let Ok(guilds) = std::env::var("DISCORD_GUILD_IDS") {
-            guilds
-                .split(',')
-                .filter_map(|s| s.trim().parse::<u64>().ok())
-                .collect()
-        } else if let Ok(one) = std::env::var("DISCORD_GUILD_ID") {
-            one.parse::<u64>().ok().into_iter().collect()
         } else {
             Vec::new()
         };

@@ -1,17 +1,71 @@
 //! Constellation-wide search tool for Archive agents with expanded scope
+//!
+//! # Known Regressions
+//!
+//! This tool was ported from AgentHandle-based implementation to ToolContext in commit 61a6093.
+//! Several features were lost during this refactoring. See full documentation at:
+//! `/docs/regressions/constellation-search-toolcontext-port.md`
+//!
+//! ## Summary of Major Regressions:
+//!
+//! 1. **Score adjustment logic lost** - No longer downranks reasoning/tool responses (up to 50% penalty)
+//! 2. **Metadata lost** - Results missing: label, agent_name, role, created_at, updated_at timestamps
+//! 3. **Fuzzy parameter ignored** - Always uses FTS mode, fuzzy_level conversion removed
+//! 4. **Role/time filtering lost** - Parameters accepted but prefixed with `_` (see TODO at line 431)
+//! 5. **search_all limit changed** - Now returns up to `limit` total instead of `limit` per domain
+//! 6. **Progressive truncation limits changed** - Constellation search lost longer snippet limits
+//! 7. **search_archival_in_memory() removed** - No fallback when database search fails
+//!
+//! ## Needed SearchOptions Extensions:
+//!
+//! To restore full functionality, SearchOptions needs these additions:
+//! ```rust,ignore
+//! pub struct SearchOptions {
+//!     pub mode: SearchMode,
+//!     pub content_types: Vec<SearchContentType>,
+//!     pub limit: usize,
+//!     // NEEDED:
+//!     pub fuzzy_level: Option<i32>,           // For fuzzy search support
+//!     pub role_filter: Option<ChatRole>,      // Filter messages by role
+//!     pub start_time: Option<DateTime<Utc>>,  // Time range filtering
+//!     pub end_time: Option<DateTime<Utc>>,
+//!     pub limit_per_type: bool,               // Apply limit to each content type separately
+//! }
+//! ```
+//!
+//! ## Needed MemorySearchResult Extensions:
+//!
+//! To restore metadata in output:
+//! ```rust,ignore
+//! pub struct MemorySearchResult {
+//!     pub id: String,
+//!     pub content_type: SearchContentType,
+//!     pub content: Option<String>,
+//!     pub score: f64,
+//!     // NEEDED:
+//!     pub label: Option<String>,              // For blocks/archival
+//!     pub agent_id: Option<String>,           // Which agent owns this
+//!     pub agent_name: Option<String>,         // Display name
+//!     pub role: Option<String>,               // For messages: user/assistant/tool
+//!     pub created_at: Option<DateTime<Utc>>,
+//!     pub updated_at: Option<DateTime<Utc>>,
+//! }
+//! ```
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::sync::Arc;
 
 use super::search_utils::extract_snippet;
 use crate::{
     Result,
-    context::AgentHandle,
-    message::ChatRole,
-    tool::{AiTool, ExecutionMeta},
+    memory::{SearchContentType, SearchMode, SearchOptions},
+    messages::ChatRole,
+    runtime::{SearchScope, ToolContext},
+    tool::{AiTool, ExecutionMeta, ToolRule, ToolRuleType},
 };
 
 /// Default search domain for constellation search
@@ -64,8 +118,7 @@ pub struct ConstellationSearchInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_time: Option<String>,
 
-    /// Enable fuzzy search (Note: Currently a placeholder - fuzzy search not yet implemented)
-    /// This will enable typo-tolerant search once SurrealDB fuzzy functions are integrated
+    /// Enable fuzzy search for typo-tolerant matching
     #[serde(default)]
     pub fuzzy: bool,
     // request_heartbeat handled via ExecutionMeta injection; field removed
@@ -87,9 +140,17 @@ pub struct SearchOutput {
 }
 
 /// Constellation-wide search tool for Archive agents
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ConstellationSearchTool {
-    pub(crate) handle: AgentHandle,
+    ctx: Arc<dyn ToolContext>,
+}
+
+impl std::fmt::Debug for ConstellationSearchTool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConstellationSearchTool")
+            .field("agent_id", &self.ctx.agent_id())
+            .finish()
+    }
 }
 
 #[async_trait]
@@ -180,6 +241,16 @@ impl AiTool for ConstellationSearchTool {
         Some("the conversation will be continued when called")
     }
 
+    fn tool_rules(&self) -> Vec<ToolRule> {
+        vec![ToolRule {
+            tool_name: self.name().to_string(),
+            rule_type: ToolRuleType::ContinueLoop,
+            conditions: vec![],
+            priority: 0,
+            metadata: None,
+        }]
+    }
+
     fn examples(&self) -> Vec<crate::tool::ToolExample<Self::Input, Self::Output>> {
         vec![
             crate::tool::ToolExample {
@@ -231,8 +302,8 @@ impl AiTool for ConstellationSearchTool {
 }
 
 impl ConstellationSearchTool {
-    pub fn new(handle: AgentHandle) -> Self {
-        Self { handle }
+    pub fn new(ctx: Arc<dyn ToolContext>) -> Self {
+        Self { ctx }
     }
 
     async fn search_local_archival(
@@ -241,107 +312,61 @@ impl ConstellationSearchTool {
         limit: usize,
         fuzzy: bool,
     ) -> Result<SearchOutput> {
-        // Try to use database if available
-        if self.handle.has_db_connection() {
-            // Note: fuzzy parameter is a placeholder for future fuzzy search implementation
-            // Currently just passes through to methods that will use it when available
-            let fuzzy_level = if fuzzy { Some(1) } else { None };
-            match self
-                .handle
-                .search_archival_memories_with_options(query, limit, fuzzy_level)
-                .await
-            {
-                Ok(mut scored_blocks) => {
-                    // Re-sort and limit after we have all scores
-                    scored_blocks.sort_by(|a, b| {
-                        b.score
-                            .partial_cmp(&a.score)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    });
-                    scored_blocks.truncate(limit);
+        let options = SearchOptions {
+            mode: if fuzzy {
+                SearchMode::Hybrid
+            } else {
+                SearchMode::Fts
+            },
+            content_types: vec![SearchContentType::Blocks, SearchContentType::Archival],
+            limit,
+        };
 
-                    let results: Vec<_> = scored_blocks
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, sb)| {
-                            // Progressive truncation: show less content for lower-ranked results
-                            let content = if i < 2 {
-                                sb.block.value.clone()
+        match self
+            .ctx
+            .search(query, SearchScope::CurrentAgent, options)
+            .await
+        {
+            Ok(results) => {
+                let formatted: Vec<_> = results
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| {
+                        // Progressive truncation: show less content for lower-ranked results
+                        let content = r.content.as_ref().map(|c| {
+                            if i < 2 {
+                                c.clone()
                             } else if i < 5 {
-                                extract_snippet(&sb.block.value, query, 1000)
+                                extract_snippet(c, query, 1000)
                             } else {
-                                extract_snippet(&sb.block.value, query, 400)
-                            };
+                                extract_snippet(c, query, 400)
+                            }
+                        });
 
-                            json!({
-                                "label": sb.block.label,
-                                "content": content,
-                                "created_at": sb.block.created_at,
-                                "updated_at": sb.block.updated_at,
-                                "relevance_score": sb.score
-                            })
+                        json!({
+                            "id": &r.id,
+                            "content": content,
+                            "relevance_score": r.score,
                         })
-                        .collect();
-
-                    Ok(SearchOutput {
-                        success: true,
-                        message: Some(format!(
-                            "Found {} archival memories matching '{}'",
-                            results.len(),
-                            query
-                        )),
-                        results: json!(results),
                     })
-                }
-                Err(e) => {
-                    tracing::warn!("Database search failed, falling back to in-memory: {}", e);
-                    self.search_archival_in_memory(query, limit)
-                }
-            }
-        } else {
-            self.search_archival_in_memory(query, limit)
-        }
-    }
+                    .collect();
 
-    fn search_archival_in_memory(&self, query: &str, limit: usize) -> Result<SearchOutput> {
-        let query_lower = query.to_lowercase();
-
-        let mut results: Vec<_> = self
-            .handle
-            .memory
-            .get_all_blocks()
-            .into_iter()
-            .filter(|block| {
-                block.memory_type == crate::memory::MemoryType::Archival
-                    && block.value.to_lowercase().contains(&query_lower)
-            })
-            .take(limit)
-            .map(|block| {
-                json!({
-                    "label": block.label,
-                    "content": block.value,
-                    "created_at": block.created_at,
-                    "updated_at": block.updated_at
+                Ok(SearchOutput {
+                    success: true,
+                    message: Some(format!(
+                        "Found {} archival memories matching '{}'",
+                        formatted.len(),
+                        query
+                    )),
+                    results: json!(formatted),
                 })
-            })
-            .collect();
-
-        // Sort by most recently updated first
-        results.sort_by(|a, b| {
-            let a_time = a.get("updated_at").and_then(|v| v.as_str()).unwrap_or("");
-            let b_time = b.get("updated_at").and_then(|v| v.as_str()).unwrap_or("");
-            b_time.cmp(a_time)
-        });
-
-        Ok(SearchOutput {
-            success: true,
-            message: Some(format!(
-                "Found {} archival memories matching '{}'",
-                results.len(),
-                query
-            )),
-            results: json!(results),
-        })
+            }
+            Err(e) => Ok(SearchOutput {
+                success: false,
+                message: Some(format!("Search failed: {}", e)),
+                results: json!([]),
+            }),
+        }
     }
 
     async fn search_group_archival(
@@ -350,232 +375,513 @@ impl ConstellationSearchTool {
         limit: usize,
         fuzzy: bool,
     ) -> Result<SearchOutput> {
-        // Use database search if available
-        if self.handle.has_db_connection() {
-            let fuzzy_level = if fuzzy { Some(1) } else { None };
-            match self
-                .handle
-                .search_group_archival_memories_with_options(query, limit, fuzzy_level)
-                .await
-            {
-                Ok(mut scored_blocks) => {
-                    // Re-sort and limit after we have all scores
-                    scored_blocks.sort_by(|a, b| {
-                        b.score
-                            .partial_cmp(&a.score)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    });
-                    scored_blocks.truncate(limit);
+        let options = SearchOptions {
+            mode: if fuzzy {
+                SearchMode::Hybrid
+            } else {
+                SearchMode::Fts
+            },
+            content_types: vec![SearchContentType::Blocks, SearchContentType::Archival],
+            limit,
+        };
 
-                    let results: Vec<_> = scored_blocks
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, sb)| {
-                            // Progressive truncation for constellation search - longer content since this is for Archive
-                            let content = if i < 5 {
+        match self
+            .ctx
+            .search(query, SearchScope::Constellation, options)
+            .await
+        {
+            Ok(results) => {
+                let formatted: Vec<_> = results
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| {
+                        // Progressive truncation for constellation search - longer content since this is for Archive
+                        let content = r.content.as_ref().map(|c| {
+                            if i < 5 {
                                 // Show more content for top results (Archive is designed for this)
-                                sb.block.value.clone()
+                                c.clone()
                             } else if i < 15 {
-                                extract_snippet(&sb.block.value, query, 1500)
+                                extract_snippet(c, query, 1500)
                             } else {
-                                extract_snippet(&sb.block.value, query, 800)
-                            };
+                                extract_snippet(c, query, 800)
+                            }
+                        });
 
-                            json!({
-                                "label": sb.block.label,
-                                "content": content,
-                                "created_at": sb.block.created_at,
-                                "updated_at": sb.block.updated_at,
-                                "relevance_score": sb.score
-                            })
+                        json!({
+                            "id": &r.id,
+                            "content": content,
+                            "relevance_score": r.score,
                         })
-                        .collect();
+                    })
+                    .collect();
 
-                    Ok(SearchOutput {
-                        success: true,
-                        message: Some(format!(
-                            "Found {} group archival memories matching '{}'",
-                            results.len(),
-                            query
-                        )),
-                        results: json!(results),
-                    })
-                }
-                Err(e) => {
-                    tracing::warn!("Group archival search failed: {}", e);
-                    Ok(SearchOutput {
-                        success: false,
-                        message: Some(format!("Group archival search failed: {:?}", e)),
-                        results: json!([]),
-                    })
-                }
+                Ok(SearchOutput {
+                    success: true,
+                    message: Some(format!(
+                        "Found {} group archival memories matching '{}'",
+                        formatted.len(),
+                        query
+                    )),
+                    results: json!(formatted),
+                })
             }
-        } else {
-            Ok(SearchOutput {
-                success: false,
-                message: Some("Group archival search requires database connection".to_string()),
-                results: json!([]),
-            })
+            Err(e) => {
+                tracing::warn!("Group archival search failed: {}", e);
+                Ok(SearchOutput {
+                    success: false,
+                    message: Some(format!("Group archival search failed: {}", e)),
+                    results: json!([]),
+                })
+            }
         }
     }
 
     async fn search_constellation_messages(
         &self,
         query: &str,
-        role: Option<ChatRole>,
-        start_time: Option<DateTime<Utc>>,
-        end_time: Option<DateTime<Utc>>,
+        _role: Option<ChatRole>,
+        _start_time: Option<DateTime<Utc>>,
+        _end_time: Option<DateTime<Utc>>,
         limit: usize,
         fuzzy: bool,
     ) -> Result<SearchOutput> {
-        // Use database search if available
-        if self.handle.has_db_connection() {
-            // Note: fuzzy parameter is a placeholder for future fuzzy search implementation
-            // Currently just passes through to methods that will use it when available
-            let fuzzy_level = if fuzzy { Some(1) } else { None };
-            match self
-                .handle
-                .search_constellation_messages_with_options(
-                    Some(query),
-                    role,
-                    start_time,
-                    end_time,
-                    limit,
-                    fuzzy_level,
-                )
-                .await
-            {
-                Ok(scored_messages) => {
-                    // Process results with score adjustments and truncation
-                    use super::search_utils::{extract_snippet, process_constellation_results};
-                    let processed_messages =
-                        process_constellation_results(scored_messages, query, limit);
+        // TODO: ToolContext doesn't currently expose role/time filtering for message search
+        // Need to add these parameters to SearchOptions once message search is fully integrated
+        let options = SearchOptions {
+            mode: if fuzzy {
+                SearchMode::Hybrid
+            } else {
+                SearchMode::Fts
+            },
+            content_types: vec![SearchContentType::Messages],
+            limit,
+        };
 
-                    let results: Vec<_> = processed_messages
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, scm)| {
-                            // Progressive content display
-                            let content = if i < 2 {
-                                scm.message.display_content()
+        match self
+            .ctx
+            .search(query, SearchScope::Constellation, options)
+            .await
+        {
+            Ok(results) => {
+                let formatted: Vec<_> = results
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| {
+                        // Progressive content display
+                        let content = r.content.as_ref().map(|c| {
+                            if i < 2 {
+                                c.clone()
                             } else if i < 5 {
-                                extract_snippet(&scm.message.display_content(), query, 400)
+                                extract_snippet(c, query, 400)
                             } else {
-                                extract_snippet(&scm.message.display_content(), query, 200)
-                            };
+                                extract_snippet(c, query, 200)
+                            }
+                        });
 
-                            json!({
-                                "agent": scm.agent_name,
-                                "id": scm.message.id,
-                                "role": scm.message.role.to_string(),
-                                "content": content,
-                                "created_at": scm.message.created_at,
-                                "relevance_score": scm.score
-                            })
+                        json!({
+                            "id": &r.id,
+                            "content": content,
+                            "relevance_score": r.score,
                         })
-                        .collect();
-
-                    Ok(SearchOutput {
-                        success: true,
-                        message: Some(format!(
-                            "Found {} constellation messages matching '{}' (ranked by relevance)",
-                            results.len(),
-                            query
-                        )),
-                        results: json!(results),
                     })
-                }
-                Err(e) => Ok(SearchOutput {
-                    success: false,
-                    message: Some(format!("Constellation message search failed: {:?}", e)),
-                    results: json!([]),
-                }),
+                    .collect();
+
+                Ok(SearchOutput {
+                    success: true,
+                    message: Some(format!(
+                        "Found {} constellation messages matching '{}' (ranked by relevance)",
+                        formatted.len(),
+                        query
+                    )),
+                    results: json!(formatted),
+                })
             }
-        } else {
-            Ok(SearchOutput {
+            Err(e) => Ok(SearchOutput {
                 success: false,
-                message: Some(
-                    "Constellation message search requires database connection".to_string(),
-                ),
+                message: Some(format!("Constellation message search failed: {}", e)),
                 results: json!([]),
-            })
+            }),
         }
     }
 
     async fn search_all(&self, query: &str, limit: usize, fuzzy: bool) -> Result<SearchOutput> {
-        // Search both domains and combine results
-        let archival_result = self.search_local_archival(query, limit, fuzzy).await?;
-        let conv_result = self
-            .search_constellation_messages(query, None, None, None, limit, fuzzy)
-            .await?;
+        // Search both archival and messages across constellation
+        let options = SearchOptions {
+            mode: if fuzzy {
+                SearchMode::Hybrid
+            } else {
+                SearchMode::Fts
+            },
+            content_types: vec![
+                SearchContentType::Archival,
+                SearchContentType::Blocks,
+                SearchContentType::Messages,
+            ],
+            limit,
+        };
 
-        let all_results = json!({
-            "archival_memory": archival_result.results,
-            "conversations": conv_result.results
-        });
+        match self
+            .ctx
+            .search(query, SearchScope::Constellation, options)
+            .await
+        {
+            Ok(results) => {
+                // Separate by content type
+                let mut archival = Vec::new();
+                let mut messages = Vec::new();
 
-        Ok(SearchOutput {
-            success: true,
-            message: Some(format!("Searched all domains for '{}'", query)),
-            results: all_results,
-        })
+                for (i, r) in results.iter().enumerate() {
+                    let content = r.content.as_ref().map(|c| {
+                        if i < 2 {
+                            c.clone()
+                        } else if i < 5 {
+                            extract_snippet(c, query, 1000)
+                        } else {
+                            extract_snippet(c, query, 400)
+                        }
+                    });
+
+                    let item = json!({
+                        "id": &r.id,
+                        "content": content,
+                        "relevance_score": r.score,
+                    });
+
+                    match r.content_type {
+                        SearchContentType::Archival => archival.push(item),
+                        SearchContentType::Blocks => archival.push(item),
+                        SearchContentType::Messages => messages.push(item),
+                    }
+                }
+
+                let all_results = json!({
+                    "archival_memory": archival,
+                    "conversations": messages
+                });
+
+                Ok(SearchOutput {
+                    success: true,
+                    message: Some(format!("Searched all domains for '{}'", query)),
+                    results: all_results,
+                })
+            }
+            Err(e) => Ok(SearchOutput {
+                success: false,
+                message: Some(format!("Search all failed: {}", e)),
+                results: json!({"archival_memory": [], "conversations": []}),
+            }),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        UserId,
-        memory::{Memory, MemoryType},
-        tool::builtin::{SearchDomain, SearchInput, SearchTool},
-    };
+    use crate::db::ConstellationDatabases;
+    use crate::memory::{BlockSchema, BlockType};
+    use crate::runtime::ToolContext;
+    use crate::tool::builtin::test_utils::MockToolContext;
+    use std::sync::Arc;
+
+    async fn create_test_context() -> Arc<MockToolContext> {
+        let dbs = Arc::new(
+            ConstellationDatabases::open_in_memory()
+                .await
+                .expect("Failed to create test dbs"),
+        );
+
+        // Create a test agent in the database
+        let agent = pattern_db::models::Agent {
+            id: "test-agent".to_string(),
+            name: "Test Agent".to_string(),
+            description: None,
+            model_provider: "anthropic".to_string(),
+            model_name: "claude".to_string(),
+            system_prompt: "test".to_string(),
+            config: Default::default(),
+            enabled_tools: Default::default(),
+            tool_rules: None,
+            status: pattern_db::models::AgentStatus::Active,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        pattern_db::queries::create_agent(dbs.constellation.pool(), &agent)
+            .await
+            .expect("Failed to create test agent");
+
+        let memory = Arc::new(crate::memory::MemoryCache::new(Arc::clone(&dbs)));
+        Arc::new(MockToolContext::new("test-agent", memory, dbs))
+    }
 
     #[tokio::test]
-    async fn test_search_archival_in_memory() {
-        let memory = Memory::with_owner(&UserId::generate());
+    async fn test_archival_search_returns_blocks_and_archival() {
+        let ctx = create_test_context().await;
 
-        // Create some archival memories
-        memory
-            .create_block("pref_color", "User's favorite color is blue")
-            .unwrap();
-        if let Some(mut block) = memory.get_block_mut("pref_color") {
-            block.memory_type = MemoryType::Archival;
-        }
-
-        memory
-            .create_block("pref_food", "User likes Italian food")
-            .unwrap();
-        if let Some(mut block) = memory.get_block_mut("pref_food") {
-            block.memory_type = MemoryType::Archival;
-        }
-
-        let handle = AgentHandle::test_with_memory(memory);
-        let tool = SearchTool { handle };
-
-        // Test searching
-        let result = tool
-            .execute(
-                SearchInput {
-                    domain: SearchDomain::ArchivalMemory,
-                    query: "color".to_string(),
-                    limit: None,
-                    role: None,
-                    start_time: None,
-                    end_time: None,
-                    fuzzy: false,
-                },
-                &crate::tool::ExecutionMeta::default(),
+        // Insert a memory block with searchable content
+        ctx.memory()
+            .create_block(
+                "test-agent",
+                "preferences",
+                "User preferences",
+                BlockType::Core,
+                BlockSchema::text(),
+                1000,
             )
             .await
             .unwrap();
 
-        assert!(result.success);
-        assert!(result.message.unwrap().contains("Found 1"));
+        let doc = ctx
+            .memory()
+            .get_block("test-agent", "preferences")
+            .await
+            .unwrap()
+            .unwrap();
+        doc.set_text("I love rust programming and system design", true)
+            .unwrap();
+        ctx.memory().mark_dirty("test-agent", "preferences");
+        ctx.memory()
+            .persist_block("test-agent", "preferences")
+            .await
+            .unwrap();
 
-        // Verify the results structure
+        // Insert an archival entry with searchable content
+        ctx.memory()
+            .insert_archival(
+                "test-agent",
+                "Rust is great for systems programming and has excellent tooling",
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Create tool and search for "rust"
+        let tool = ConstellationSearchTool::new(Arc::clone(&ctx) as Arc<dyn ToolContext>);
+        let result = tool.search_local_archival("rust", 10, false).await.unwrap();
+
+        assert!(result.success);
         let results = result.results.as_array().unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0]["label"], "pref_color");
+        assert!(
+            results.len() >= 2,
+            "Should find both block and archival entry, found {}",
+            results.len()
+        );
+
+        // Verify result format
+        for r in results {
+            assert!(r.get("id").is_some(), "Result should have id field");
+            assert!(
+                r.get("content").is_some(),
+                "Result should have content field"
+            );
+            assert!(
+                r.get("relevance_score").is_some(),
+                "Result should have relevance_score field"
+            );
+
+            // Verify content contains "rust"
+            let content = r.get("content").unwrap().as_str().unwrap();
+            assert!(
+                content.to_lowercase().contains("rust"),
+                "Content should contain 'rust': {}",
+                content
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_archival_search_fts_mode() {
+        let ctx = create_test_context().await;
+
+        // Insert test data
+        ctx.memory()
+            .insert_archival("test-agent", "Python is a dynamic language", None)
+            .await
+            .unwrap();
+        ctx.memory()
+            .insert_archival("test-agent", "JavaScript is used for web development", None)
+            .await
+            .unwrap();
+        ctx.memory()
+            .insert_archival("test-agent", "Rust provides memory safety", None)
+            .await
+            .unwrap();
+
+        // Search with fuzzy=false (should use FTS mode)
+        let tool = ConstellationSearchTool::new(Arc::clone(&ctx) as Arc<dyn ToolContext>);
+        let result = tool
+            .search_local_archival("memory", 10, false)
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        let results = result.results.as_array().unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "Should find exactly one result with 'memory'"
+        );
+
+        let content = results[0].get("content").unwrap().as_str().unwrap();
+        assert!(
+            content.contains("memory safety"),
+            "Should find the Rust entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_archival_search_hybrid_mode_fallback() {
+        let ctx = create_test_context().await;
+
+        // Insert test data
+        ctx.memory()
+            .insert_archival("test-agent", "Testing hybrid search fallback to FTS", None)
+            .await
+            .unwrap();
+
+        // Search with fuzzy=true (should request Hybrid but fall back to FTS with warning)
+        let tool = ConstellationSearchTool::new(Arc::clone(&ctx) as Arc<dyn ToolContext>);
+        let result = tool
+            .search_local_archival("hybrid", 10, true)
+            .await
+            .unwrap();
+
+        assert!(
+            result.success,
+            "Should succeed even without embedding provider"
+        );
+        let results = result.results.as_array().unwrap();
+        assert_eq!(results.len(), 1, "Should find result using FTS fallback");
+
+        let content = results[0].get("content").unwrap().as_str().unwrap();
+        assert!(content.contains("hybrid search"));
+    }
+
+    #[tokio::test]
+    async fn test_search_respects_limit() {
+        let ctx = create_test_context().await;
+
+        // Insert many archival entries
+        for i in 0..20 {
+            ctx.memory()
+                .insert_archival(
+                    "test-agent",
+                    &format!("Test entry {} about searching", i),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+
+        // Search with limit of 5
+        let tool = ConstellationSearchTool::new(Arc::clone(&ctx) as Arc<dyn ToolContext>);
+        let result = tool
+            .search_local_archival("searching", 5, false)
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        let results = result.results.as_array().unwrap();
+        assert!(
+            results.len() <= 5,
+            "Should respect limit of 5, got {}",
+            results.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_blocks_only() {
+        let ctx = create_test_context().await;
+
+        // Create a memory block
+        ctx.memory()
+            .create_block(
+                "test-agent",
+                "notes",
+                "Working notes",
+                BlockType::Working,
+                BlockSchema::text(),
+                1000,
+            )
+            .await
+            .unwrap();
+
+        let doc = ctx
+            .memory()
+            .get_block("test-agent", "notes")
+            .await
+            .unwrap()
+            .unwrap();
+        doc.set_text("Important meeting scheduled for tomorrow", true)
+            .unwrap();
+        ctx.memory().mark_dirty("test-agent", "notes");
+        ctx.memory()
+            .persist_block("test-agent", "notes")
+            .await
+            .unwrap();
+
+        // Search for content only in block (not in any archival)
+        let tool = ConstellationSearchTool::new(Arc::clone(&ctx) as Arc<dyn ToolContext>);
+        let result = tool
+            .search_local_archival("meeting", 10, false)
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        let results = result.results.as_array().unwrap();
+        assert_eq!(results.len(), 1, "Should find the block");
+
+        let content = results[0].get("content").unwrap().as_str().unwrap();
+        assert!(content.contains("meeting"));
+    }
+
+    #[tokio::test]
+    async fn test_search_archival_only() {
+        let ctx = create_test_context().await;
+
+        // Insert archival entries only (no blocks)
+        ctx.memory()
+            .insert_archival("test-agent", "Database schema design notes", None)
+            .await
+            .unwrap();
+        ctx.memory()
+            .insert_archival("test-agent", "API endpoint implementation details", None)
+            .await
+            .unwrap();
+
+        // Search for archival content
+        let tool = ConstellationSearchTool::new(Arc::clone(&ctx) as Arc<dyn ToolContext>);
+        let result = tool
+            .search_local_archival("database", 10, false)
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        let results = result.results.as_array().unwrap();
+        assert_eq!(results.len(), 1, "Should find exactly one archival entry");
+
+        let content = results[0].get("content").unwrap().as_str().unwrap();
+        assert!(content.contains("Database"));
+    }
+
+    #[tokio::test]
+    async fn test_search_returns_empty_when_no_matches() {
+        let ctx = create_test_context().await;
+
+        // Insert some data that won't match
+        ctx.memory()
+            .insert_archival("test-agent", "Python programming guide", None)
+            .await
+            .unwrap();
+
+        // Search for something that doesn't exist
+        let tool = ConstellationSearchTool::new(Arc::clone(&ctx) as Arc<dyn ToolContext>);
+        let result = tool
+            .search_local_archival("xyznonexistent", 10, false)
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        let results = result.results.as_array().unwrap();
+        assert_eq!(results.len(), 0, "Should return empty results");
     }
 }

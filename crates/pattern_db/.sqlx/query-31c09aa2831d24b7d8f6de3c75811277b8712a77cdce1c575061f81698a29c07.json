@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO coordination_state (key, value, updated_at, updated_by)\n        VALUES (?, ?, ?, ?)\n        ON CONFLICT(key) DO UPDATE SET\n            value = excluded.value,\n            updated_at = excluded.updated_at,\n            updated_by = excluded.updated_by\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "31c09aa2831d24b7d8f6de3c75811277b8712a77cdce1c575061f81698a29c07"
+}

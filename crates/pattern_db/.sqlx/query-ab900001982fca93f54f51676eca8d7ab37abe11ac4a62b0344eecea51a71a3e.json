@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM folder_attachments WHERE folder_id = ? AND agent_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "ab900001982fca93f54f51676eca8d7ab37abe11ac4a62b0344eecea51a71a3e"
+}

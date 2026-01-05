@@ -1,29 +1,47 @@
-mod agent_ops;
 mod background_tasks;
 mod chat;
 mod commands;
-mod data_sources;
+mod coordination_helpers;
+mod data_source_config;
 mod discord;
 mod endpoints;
 mod forwarding;
-mod message_display;
+mod helpers;
 mod output;
 mod permission_sink;
 mod slash_commands;
 mod tracing_writer;
 
-use clap::{Parser, Subcommand};
-use miette::{IntoDiagnostic, Result};
+use clap::{Parser, Subcommand, ValueEnum};
+use miette::Result;
 use owo_colors::OwoColorize;
-use pattern_core::{
-    config::{self},
-    db::{
-        DatabaseConfig,
-        client::{self},
-    },
-};
+use pattern_core::config::{self, ConfigPriority};
 use std::path::PathBuf;
 use tracing::info;
+
+/// CLI argument for config priority when TOML and DB conflict.
+///
+/// This maps to [`ConfigPriority`] from pattern_core.
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+pub enum ConfigPriorityArg {
+    /// DB values win for content, TOML wins for config metadata (default).
+    #[default]
+    Merge,
+    /// TOML overwrites everything except memory content.
+    Toml,
+    /// Ignore TOML entirely for existing agents.
+    Db,
+}
+
+impl From<ConfigPriorityArg> for ConfigPriority {
+    fn from(arg: ConfigPriorityArg) -> Self {
+        match arg {
+            ConfigPriorityArg::Merge => ConfigPriority::Merge,
+            ConfigPriorityArg::Toml => ConfigPriority::TomlWins,
+            ConfigPriorityArg::Db => ConfigPriority::DbWins,
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "pattern-cli")]
@@ -40,10 +58,6 @@ struct Cli {
     /// Database file path (overrides config)
     #[arg(long)]
     db_path: Option<PathBuf>,
-
-    /// Force schema update even if unchanged
-    #[arg(long, global = true)]
-    force_schema_update: bool,
 
     /// Enable debug logging
     #[arg(long)]
@@ -62,17 +76,13 @@ enum Commands {
         #[arg(long, conflicts_with = "agent")]
         group: Option<String>,
 
-        /// Model to use (e.g. gpt-4o, claude-3-haiku)
-        #[arg(long)]
-        model: Option<String>,
-
-        /// Disable tool usage
-        #[arg(long)]
-        no_tools: bool,
-
         /// Run as Discord bot instead of CLI chat
         #[arg(long)]
         discord: bool,
+
+        /// Config priority when TOML and DB conflict
+        #[arg(long, value_enum, default_value = "merge")]
+        config_priority: ConfigPriorityArg,
     },
     /// Agent management
     Agent {
@@ -110,28 +120,15 @@ enum Commands {
         #[command(subcommand)]
         cmd: AtprotoCommands,
     },
-    /// Bluesky firehose testing
-    Firehose {
-        #[command(subcommand)]
-        cmd: FirehoseCommands,
-    },
     /// Export agents, groups, or constellations to CAR files
     Export {
         #[command(subcommand)]
         cmd: ExportCommands,
     },
-    /// Import from CAR files
+    /// Import from CAR files or convert external formats
     Import {
-        /// Path to CAR file to import
-        file: PathBuf,
-
-        /// Rename imported entity to this name
-        #[arg(long)]
-        rename_to: Option<String>,
-
-        /// Preserve original IDs when importing
-        #[arg(long, default_value_t = true)]
-        preserve_ids: bool,
+        #[command(subcommand)]
+        cmd: ImportCommands,
     },
 }
 
@@ -139,15 +136,23 @@ enum Commands {
 enum AgentCommands {
     /// List all agents
     List,
-    /// Create a new agent
-    Create {
+    /// Show agent details
+    Status {
+        /// Agent name
         name: String,
-        #[arg(long)]
-        agent_type: Option<String>,
     },
-    /// Show agent status
-    Status { name: String },
-    /// Export agent configuration (persona and memory only)
+    /// Create a new agent interactively
+    Create {
+        /// Load initial config from TOML file
+        #[arg(long)]
+        from: Option<PathBuf>,
+    },
+    /// Edit an existing agent interactively
+    Edit {
+        /// Agent name to edit
+        name: String,
+    },
+    /// Export agent configuration to TOML file
     Export {
         /// Agent name to export
         name: String,
@@ -155,36 +160,112 @@ enum AgentCommands {
         #[arg(short = 'o', long)]
         output: Option<PathBuf>,
     },
-    /// Add a workflow rule to an agent
-    AddRule {
+    /// Add configuration to an agent
+    Add {
+        #[command(subcommand)]
+        cmd: AgentAddCommands,
+    },
+    /// Remove configuration from an agent
+    Remove {
+        #[command(subcommand)]
+        cmd: AgentRemoveCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentAddCommands {
+    /// Add a data source subscription (interactive or from TOML file)
+    Source {
         /// Agent name
         agent: String,
-        /// Rule type (start-constraint, max-calls, exit-loop, continue-loop, cooldown, requires-preceding). If not provided, interactive mode is used.
-        rule_type: Option<String>,
-        /// Tool name the rule applies to. If not provided, interactive mode is used.
-        tool: Option<String>,
+        /// Source name (identifier for this subscription)
+        source: String,
+        /// Source type (bluesky, discord, file, custom) - prompted if not provided
+        #[arg(long, short = 't')]
+        source_type: Option<String>,
+        /// Load configuration from a TOML file
+        #[arg(long, conflicts_with = "source_type")]
+        from_toml: Option<PathBuf>,
+    },
+    /// Add a memory block
+    Memory {
+        /// Agent name
+        agent: String,
+        /// Memory block label
+        label: String,
+        /// Content (inline)
+        #[arg(long, conflicts_with = "path")]
+        content: Option<String>,
+        /// Load content from file
+        #[arg(long, conflicts_with = "content")]
+        path: Option<PathBuf>,
+        /// Memory type (core, working, archival)
+        #[arg(long, short = 't', default_value = "working")]
+        memory_type: String,
+        /// Permission level (read_only, append, read_write, admin)
+        #[arg(long, short = 'p', default_value = "read_write")]
+        permission: String,
+        /// Pin the block (always in context)
+        #[arg(long)]
+        pinned: bool,
+    },
+    /// Enable a tool
+    Tool {
+        /// Agent name
+        agent: String,
+        /// Tool name to enable
+        tool: String,
+    },
+    /// Add a workflow rule
+    Rule {
+        /// Agent name
+        agent: String,
+        /// Tool name the rule applies to
+        tool: String,
+        /// Rule type (start-constraint, max-calls, exit-loop, continue-loop, cooldown, requires-preceding)
+        rule_type: String,
         /// Optional rule parameters (e.g., max count for max-calls, duration for cooldown)
         #[arg(short = 'p', long)]
         params: Option<String>,
-        /// Optional conditions (comma-separated tool names)
+        /// Optional conditions (comma-separated tool names for requires-preceding)
         #[arg(short = 'c', long)]
         conditions: Option<String>,
         /// Rule priority (1-10, higher = more important)
         #[arg(long, default_value = "5")]
         priority: u8,
     },
-    /// List workflow rules for an agent
-    ListRules {
+}
+
+#[derive(Subcommand)]
+enum AgentRemoveCommands {
+    /// Remove a data source subscription
+    Source {
         /// Agent name
         agent: String,
+        /// Source name to remove
+        source: String,
     },
-    /// Remove a workflow rule from an agent
-    RemoveRule {
+    /// Remove a memory block
+    Memory {
         /// Agent name
         agent: String,
-        /// Tool name to remove rules for
+        /// Memory block label to remove
+        label: String,
+    },
+    /// Disable a tool
+    Tool {
+        /// Agent name
+        agent: String,
+        /// Tool name to disable
         tool: String,
-        /// Optional rule type to remove (removes all if not specified)
+    },
+    /// Remove a workflow rule
+    Rule {
+        /// Agent name
+        agent: String,
+        /// Tool name to remove rules from
+        tool: String,
+        /// Optional rule type to remove (removes all for tool if not specified)
         rule_type: Option<String>,
     },
 }
@@ -212,21 +293,6 @@ enum AuthCommands {
 enum DbCommands {
     /// Show database stats
     Stats,
-    /// Run a query
-    Query { sql: String },
-    /// Force run database migrations
-    Migrate {
-        /// Skip confirmation prompt
-        #[arg(long)]
-        yes: bool,
-    },
-    /// Repair orphaned tool messages (one-time fix)
-    RepairTools,
-    /// Clean up specific artificial batch IDs
-    CleanupBatches {
-        /// Comma-separated list of batch IDs to clean up
-        batch_ids: String,
-    },
 }
 
 #[derive(Subcommand)]
@@ -239,48 +305,121 @@ enum ConfigCommands {
         #[arg(default_value = "pattern.toml")]
         path: PathBuf,
     },
+    /// Migrate config file to new format
+    Migrate {
+        /// Path to config file to migrate
+        path: PathBuf,
+        /// Modify file in place (otherwise prints to stdout)
+        #[arg(long)]
+        in_place: bool,
+    },
 }
 
 #[derive(Subcommand)]
 enum GroupCommands {
     /// List all groups
     List,
-    /// Create a new group
-    Create {
-        /// Group name
-        name: String,
-        /// Group description
-        #[arg(short = 'd', long)]
-        description: String,
-        /// Coordination pattern (round_robin, supervisor, dynamic, pipeline)
-        #[arg(short = 'p', long, default_value = "round_robin")]
-        pattern: String,
-    },
-    /// Add an agent to a group
-    AddMember {
-        /// Group name
-        group: String,
-        /// Agent name
-        agent: String,
-        /// Member role (regular, supervisor, specialist)
-        #[arg(long, default_value = "regular")]
-        role: String,
-        /// Capabilities (comma-separated)
-        #[arg(long)]
-        capabilities: Option<String>,
-    },
-    /// Show group status and members
+    /// Show group details and members
     Status {
         /// Group name
         name: String,
     },
-    /// Export group configuration (members and pattern only)
+    /// Create a new group interactively
+    Create {
+        /// Load initial config from TOML file
+        #[arg(long)]
+        from: Option<PathBuf>,
+    },
+    /// Edit an existing group interactively
+    Edit {
+        /// Group name to edit
+        name: String,
+    },
+    /// Export group configuration to TOML file
     Export {
         /// Group name to export
         name: String,
         /// Output file path (defaults to <group_name>_group.toml)
         #[arg(short = 'o', long)]
         output: Option<PathBuf>,
+    },
+    /// Add configuration to a group
+    Add {
+        #[command(subcommand)]
+        cmd: GroupAddCommands,
+    },
+    /// Remove configuration from a group
+    Remove {
+        #[command(subcommand)]
+        cmd: GroupRemoveCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum GroupAddCommands {
+    /// Add an agent member to the group
+    Member {
+        /// Group name
+        group: String,
+        /// Agent name
+        agent: String,
+        /// Member role (regular, supervisor, observer, specialist)
+        #[arg(long, default_value = "regular")]
+        role: String,
+        /// Capabilities (comma-separated)
+        #[arg(long)]
+        capabilities: Option<String>,
+    },
+    /// Add a shared memory block
+    Memory {
+        /// Group name
+        group: String,
+        /// Memory block label
+        label: String,
+        /// Content (inline)
+        #[arg(long, conflicts_with = "path")]
+        content: Option<String>,
+        /// Load content from file
+        #[arg(long, conflicts_with = "content")]
+        path: Option<PathBuf>,
+    },
+    /// Add a data source subscription (interactive or from TOML file)
+    Source {
+        /// Group name
+        group: String,
+        /// Source name (identifier for this subscription)
+        source: String,
+        /// Source type (bluesky, discord, file, custom) - prompted if not provided
+        #[arg(long, short = 't')]
+        source_type: Option<String>,
+        /// Load configuration from a TOML file
+        #[arg(long, conflicts_with = "source_type")]
+        from_toml: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum GroupRemoveCommands {
+    /// Remove an agent member from the group
+    Member {
+        /// Group name
+        group: String,
+        /// Agent name to remove
+        agent: String,
+    },
+    /// Remove a shared memory block
+    Memory {
+        /// Group name
+        group: String,
+        /// Memory block label to remove
+        label: String,
+    },
+    /// Remove a data source subscription
+    Source {
+        /// Group name
+        group: String,
+        /// Source name to remove
+        source: String,
     },
 }
 
@@ -293,9 +432,6 @@ enum ExportCommands {
         /// Output file path (defaults to <name>.car)
         #[arg(short = 'o', long)]
         output: Option<PathBuf>,
-        /// Exclude embeddings from export to reduce file size
-        #[arg(long)]
-        exclude_embeddings: bool,
     },
     /// Export a group with all member agents to a CAR file
     Group {
@@ -304,62 +440,44 @@ enum ExportCommands {
         /// Output file path (defaults to <name>.car)
         #[arg(short = 'o', long)]
         output: Option<PathBuf>,
-        /// Exclude embeddings from export to reduce file size
-        #[arg(long)]
-        exclude_embeddings: bool,
     },
     /// Export entire constellation to a CAR file
     Constellation {
         /// Output file path (defaults to constellation.car)
         #[arg(short = 'o', long)]
         output: Option<PathBuf>,
-        /// Exclude embeddings from export to reduce file size
-        #[arg(long)]
-        exclude_embeddings: bool,
     },
 }
 
 #[derive(Subcommand)]
-enum FirehoseCommands {
-    /// Listen to the Jetstream firehose with filters
-    Listen {
-        /// How many events to receive before stopping (0 for unlimited)
-        #[arg(long, default_value = "10")]
-        limit: usize,
-
-        /// NSIDs to filter (e.g., app.bsky.feed.post)
+enum ImportCommands {
+    /// Import from a v3 CAR file into the database
+    Car {
+        /// Path to CAR file to import
+        file: PathBuf,
+        /// Rename imported entity to this name
         #[arg(long)]
-        nsid: Vec<String>,
-
-        /// DIDs to filter
-        #[arg(long)]
-        did: Vec<String>,
-
-        /// Handles to filter mentions
-        #[arg(long)]
-        mention: Vec<String>,
-
-        /// Keywords to filter
-        #[arg(long)]
-        keyword: Vec<String>,
-
-        /// Languages to filter (e.g., en, ja)
-        #[arg(long)]
-        lang: Vec<String>,
-
-        /// Custom Jetstream endpoint URL
-        #[arg(long)]
-        endpoint: Option<String>,
-
-        /// Output format (pretty, json, raw)
-        #[arg(long, default_value = "pretty")]
-        format: String,
+        rename_to: Option<String>,
+        /// Preserve original IDs when importing
+        #[arg(long, default_value_t = true)]
+        preserve_ids: bool,
     },
-    /// Test connection to Jetstream
-    Test {
-        /// Custom Jetstream endpoint URL
-        #[arg(long)]
-        endpoint: Option<String>,
+    /// Convert a v1/v2 CAR file to v3 format (requires legacy-convert feature)
+    #[cfg(feature = "legacy-convert")]
+    Legacy {
+        /// Path to the v1/v2 CAR file to convert
+        input: PathBuf,
+        /// Output file path (defaults to <input>_v3.car)
+        #[arg(short = 'o', long)]
+        output: Option<PathBuf>,
+    },
+    /// Convert a Letta agent file (.af) to v3 CAR format
+    Letta {
+        /// Path to the Letta .af file to convert
+        input: PathBuf,
+        /// Output file path (defaults to <input>.car)
+        #[arg(short = 'o', long)]
+        output: Option<PathBuf>,
     },
 }
 
@@ -372,11 +490,17 @@ enum AtprotoCommands {
         /// App password (will prompt if not provided)
         #[arg(short = 'p', long)]
         app_password: Option<String>,
+        /// Agent to link this identity to (defaults to _constellation_ for shared identity)
+        #[arg(short = 'a', long, default_value = "_constellation_")]
+        agent_id: String,
     },
-    /// Login with OAuth (coming soon)
+    /// Login with OAuth
     OAuth {
         /// Your handle (e.g., alice.bsky.social) or DID
         identifier: String,
+        /// Agent to link this identity to (defaults to _constellation_ for shared identity)
+        #[arg(short = 'a', long, default_value = "_constellation_")]
+        agent_id: String,
     },
     /// Show authentication status
     Status,
@@ -529,11 +653,11 @@ async fn main() -> Result<()> {
     // Create the base subscriber with environment filter
     let env_filter = if cli.debug {
         EnvFilter::new(
-            "pattern_core=debug,pattern_cli=debug,pattern_nd=debug,pattern_mcp=debug,pattern_discord=debug,pattern_main=debug,rocketman=debug,info",
+            "pattern_core=debug,pattern_cli=debug,pattern_nd=debug,pattern_mcp=debug,pattern_discord=debug,pattern_main=debug,rocketman=debug,loro_internal=warn,info",
         )
     } else {
         EnvFilter::new(
-            "pattern_core=info,pattern_cli=info,pattern_nd=info,pattern_mcp=info,pattern_discord=info,pattern_main=info,rocketman=info,warning",
+            "pattern_core=info,pattern_cli=info,pattern_nd=info,pattern_mcp=info,pattern_discord=info,pattern_main=info,rocketman=info,loro_internal=warn,warning",
         )
     };
 
@@ -585,7 +709,7 @@ async fn main() -> Result<()> {
     );
 
     // Load configuration
-    let mut config = if let Some(config_path) = &cli.config {
+    let config = if let Some(config_path) = &cli.config {
         info!("Loading config from: {:?}", config_path);
         config::load_config(config_path).await?
     } else {
@@ -593,70 +717,36 @@ async fn main() -> Result<()> {
         config::load_config_from_standard_locations().await?
     };
 
-    // Apply CLI overrides
-    if let Some(db_path) = &cli.db_path {
-        info!("Overriding database path with: {:?}", db_path);
-        config.database = DatabaseConfig::Embedded {
-            path: db_path.to_string_lossy().to_string(),
-            strict_mode: false,
-        };
-    }
+    // TODO: Uncomment when pattern_db is integrated:
+    // let db = pattern_db::ConstellationDb::new(&config.database.path).await?;
+    // let model_provider = /* create from config */;
+    // let embedding_provider = /* create from config */;
+    // let runtime_ctx = RuntimeContext::builder()
+    //     .db(db)
+    //     .model_provider(model_provider)
+    //     .embedding_provider(embedding_provider)
+    //     .build()
+    //     .await?;
 
-    // Apply environment variable overrides for Remote database config
-    #[cfg(feature = "surreal-remote")]
-    if let DatabaseConfig::Remote {
-        username, password, ..
-    } = &mut config.database
-    {
-        // Only override if not already set in config
-        if username.is_none() {
-            if let Ok(user) = std::env::var("SURREAL_USER") {
-                info!("Using SURREAL_USER from environment");
-                *username = Some(user);
-            }
-        }
-        if password.is_none() {
-            if let Ok(pass) = std::env::var("SURREAL_PASS") {
-                info!("Using SURREAL_PASS from environment");
-                *password = Some(pass);
-            }
-        }
-    }
-
-    tracing::info!("Using database config: {:?}", config.database);
-
-    // Initialize database
-    if cli.force_schema_update {
-        tracing::info!("Forcing schema update...");
-        client::init_db_with_options(config.database.clone(), true).await?;
-    } else {
-        client::init_db(config.database.clone()).await?;
-    }
-
-    // Initialize groups from configuration (skip for auth/atproto/config commands to avoid API key issues)
-    let _skip_group_init = matches!(
-        &cli.command,
-        Commands::Auth { .. }
-            | Commands::Config { .. }
-            | Commands::Atproto { .. }
-            | Commands::Db { .. }
-    );
-
-    // if !config.groups.is_empty() && !skip_group_init {
-    //     // Create a heartbeat channel for group initialization
-    //     let (heartbeat_sender, _receiver) = pattern_core::context::heartbeat::heartbeat_channel();
-    //     commands::group::initialize_from_config(&config, heartbeat_sender).await?;
-    // }
+    // Group initialization from config is disabled during migration
+    // Previously this would:
+    // 1. Iterate over config.groups
+    // 2. Create or load each group
+    // 3. Load or create member agents
+    // 4. Set up coordination patterns
 
     match &cli.command {
         Commands::Chat {
             agent,
             group,
-            model,
-            no_tools,
             discord,
+            config_priority,
         } => {
             let output = crate::output::Output::new();
+
+            // Log config priority for debugging (wiring happens in Task 11).
+            let _priority: ConfigPriority = (*config_priority).into();
+            tracing::debug!(?_priority, "Config priority selected");
 
             // Create heartbeat channel for agent(s)
             let (heartbeat_sender, heartbeat_receiver) =
@@ -682,11 +772,7 @@ async fn main() -> Result<()> {
                     #[cfg(feature = "discord")]
                     {
                         discord::run_discord_bot_with_group(
-                            group_name,
-                            model.clone(),
-                            *no_tools,
-                            &config,
-                            true, // enable_cli
+                            group_name, &config, true, // enable_cli
                         )
                         .await?;
                     }
@@ -696,15 +782,9 @@ async fn main() -> Result<()> {
                         return Ok(());
                     }
                 } else if has_bluesky_config {
-                    chat::chat_with_group_and_jetstream(
-                        group_name,
-                        model.clone(),
-                        *no_tools,
-                        &config,
-                    )
-                    .await?;
+                    chat::chat_with_group_and_jetstream(group_name, &config).await?;
                 } else {
-                    chat::chat_with_group(group_name, model.clone(), *no_tools, &config).await?;
+                    chat::chat_with_group(group_name, &config).await?;
                 }
             } else {
                 // Chat with a single agent
@@ -715,160 +795,120 @@ async fn main() -> Result<()> {
 
                 output.success("Starting chat mode...");
                 output.info("Agent:", &agent.bright_cyan().to_string());
-                if let Some(model_name) = &model {
-                    output.info("Model:", &model_name.bright_yellow().to_string());
-                }
-                if !*no_tools {
-                    output.info("Tools:", &"enabled".bright_green().to_string());
-                } else {
-                    output.info("Tools:", &"disabled".bright_red().to_string());
-                }
 
-                // Try to load existing agent or create new one
-                let agent = agent_ops::load_or_create_agent(
-                    agent,
-                    model.clone(),
-                    !*no_tools,
-                    &config,
-                    heartbeat_sender,
-                    &output,
-                )
-                .await?;
-                chat::chat_with_agent(agent, heartbeat_receiver).await?;
+                // Suppress unused variable warnings (heartbeat handled by RuntimeContext now)
+                let _ = heartbeat_sender;
+                let _ = heartbeat_receiver;
+
+                chat::chat_with_single_agent(agent, &config).await?;
             }
         }
         Commands::Agent { cmd } => match cmd {
-            AgentCommands::List => commands::agent::list().await?,
-            AgentCommands::Create { name, agent_type } => {
-                commands::agent::create(name, agent_type.as_deref(), &config).await?
+            AgentCommands::List => commands::agent::list(&config).await?,
+            AgentCommands::Status { name } => commands::agent::status(name, &config).await?,
+            AgentCommands::Create { from } => {
+                let dbs = crate::helpers::get_dbs(&config).await?;
+                let builder = if let Some(path) = from {
+                    commands::builder::agent::AgentBuilder::from_file(path.clone())
+                        .await?
+                        .with_dbs(dbs)
+                } else {
+                    commands::builder::agent::AgentBuilder::new().with_dbs(dbs)
+                };
+                if let Some(result) = builder.run().await? {
+                    result.display();
+                }
             }
-            AgentCommands::Status { name } => commands::agent::status(name).await?,
+            AgentCommands::Edit { name } => {
+                let dbs = crate::helpers::get_dbs(&config).await?;
+                let builder = commands::builder::agent::AgentBuilder::from_db(dbs, name).await?;
+                if let Some(result) = builder.run().await? {
+                    result.display();
+                }
+            }
             AgentCommands::Export { name, output } => {
                 commands::agent::export(name, output.as_deref()).await?
             }
-            AgentCommands::AddRule {
-                agent,
-                rule_type,
-                tool,
-                params,
-                conditions,
-                priority,
-            } => {
-                let rule_type_str = rule_type.as_deref().unwrap_or("");
-                let tool_str = tool.as_deref().unwrap_or("");
-                commands::agent::add_rule(
+            AgentCommands::Add { cmd: add_cmd } => match add_cmd {
+                AgentAddCommands::Source {
                     agent,
-                    rule_type_str,
-                    tool_str,
-                    params.as_deref(),
-                    conditions.as_deref(),
-                    *priority,
-                )
-                .await?
-            }
-            AgentCommands::ListRules { agent } => commands::agent::list_rules(agent).await?,
-            AgentCommands::RemoveRule {
-                agent,
-                tool,
-                rule_type,
-            } => commands::agent::remove_rule(agent, tool, rule_type.as_deref()).await?,
+                    source,
+                    source_type,
+                    from_toml,
+                } => {
+                    commands::agent::add_source(
+                        agent,
+                        source,
+                        source_type.as_deref(),
+                        from_toml.as_deref(),
+                        &config,
+                    )
+                    .await?
+                }
+                AgentAddCommands::Memory {
+                    agent,
+                    label,
+                    content,
+                    path,
+                    memory_type,
+                    permission,
+                    pinned,
+                } => {
+                    commands::agent::add_memory(
+                        agent,
+                        label,
+                        content.as_deref(),
+                        path.as_deref(),
+                        memory_type,
+                        permission,
+                        *pinned,
+                        &config,
+                    )
+                    .await?
+                }
+                AgentAddCommands::Tool { agent, tool } => {
+                    commands::agent::add_tool(agent, tool, &config).await?
+                }
+                AgentAddCommands::Rule {
+                    agent,
+                    tool,
+                    rule_type,
+                    params,
+                    conditions,
+                    priority,
+                } => {
+                    commands::agent::add_rule(
+                        agent,
+                        &rule_type,
+                        tool,
+                        params.as_deref(),
+                        conditions.as_deref(),
+                        *priority,
+                    )
+                    .await?
+                }
+            },
+            AgentCommands::Remove { cmd: remove_cmd } => match remove_cmd {
+                AgentRemoveCommands::Source { agent, source } => {
+                    commands::agent::remove_source(agent, source, &config).await?
+                }
+                AgentRemoveCommands::Memory { agent, label } => {
+                    commands::agent::remove_memory(agent, label, &config).await?
+                }
+                AgentRemoveCommands::Tool { agent, tool } => {
+                    commands::agent::remove_tool(agent, tool, &config).await?
+                }
+                AgentRemoveCommands::Rule {
+                    agent,
+                    tool,
+                    rule_type,
+                } => commands::agent::remove_rule(agent, tool, rule_type.as_deref()).await?,
+            },
         },
         Commands::Db { cmd } => {
             let output = crate::output::Output::new();
             match cmd {
                 DbCommands::Stats => commands::db::stats(&config, &output).await?,
-                DbCommands::Query { sql } => commands::db::query(sql, &output).await?,
-                DbCommands::Migrate { yes } => {
-                    if !yes {
-                        output.warning("⚠️  This will run database migrations!");
-                        output.warning("Make sure you have a backup before proceeding.");
-                        output.info("", "Run with --yes to skip this prompt.");
-
-                        use std::io::{self, Write};
-                        print!("Continue? [y/N]: ");
-                        io::stdout().flush().into_diagnostic()?;
-
-                        let mut input = String::new();
-                        io::stdin().read_line(&mut input).into_diagnostic()?;
-
-                        if !input.trim().eq_ignore_ascii_case("y") {
-                            output.status("Migration cancelled.");
-                            return Ok(());
-                        }
-                    }
-
-                    output.status("Running database migrations...");
-
-                    // Use the database config from PatternConfig
-                    let db_config = if let Some(path) = cli.db_path.clone() {
-                        DatabaseConfig::Embedded {
-                            path: path.to_string_lossy().to_string(),
-                            strict_mode: false,
-                        }
-                    } else {
-                        config.database.clone()
-                    };
-
-                    // Initialize database with force_schema_update = true
-                    client::init_db_with_options(db_config, true).await?;
-
-                    output.success("✓ Migrations completed successfully");
-                }
-                DbCommands::RepairTools => {
-                    output.status("Repairing orphaned tool messages...");
-
-                    // Use the database config from PatternConfig
-                    let db_config = if let Some(path) = cli.db_path.clone() {
-                        DatabaseConfig::Embedded {
-                            path: path.to_string_lossy().to_string(),
-                            strict_mode: false,
-                        }
-                    } else {
-                        config.database.clone()
-                    };
-
-                    // Initialize database connection
-                    client::init_db(db_config).await?;
-
-                    // Use the static DB client
-                    use pattern_core::db::client::DB;
-                    use pattern_core::db::migration::MigrationRunner;
-
-                    // Call the repair function directly
-                    MigrationRunner::repair_orphaned_tool_messages_standalone(&*DB).await?;
-
-                    output.success("✓ Tool message repair completed");
-                }
-                DbCommands::CleanupBatches { batch_ids } => {
-                    output.status("Cleaning up specific batch IDs...");
-
-                    // Use the database config from PatternConfig
-                    let db_config = if let Some(path) = cli.db_path.clone() {
-                        DatabaseConfig::Embedded {
-                            path: path.to_string_lossy().to_string(),
-                            strict_mode: false,
-                        }
-                    } else {
-                        config.database.clone()
-                    };
-
-                    // Initialize database connection
-                    client::init_db(db_config).await?;
-
-                    // Parse the batch IDs
-                    let ids: Vec<&str> = batch_ids.split(',').map(|s| s.trim()).collect();
-
-                    output.status(&format!("Cleaning up {} batch IDs", ids.len()));
-
-                    // Use the static DB client
-                    use pattern_core::db::client::DB;
-                    use pattern_core::db::migration::MigrationRunner;
-
-                    // Call the cleanup function
-                    MigrationRunner::cleanup_specific_artificial_batches(&*DB, &ids).await?;
-
-                    output.success("✓ Batch cleanup completed");
-                }
             }
         }
         Commands::Debug { cmd } => match cmd {
@@ -938,28 +978,95 @@ async fn main() -> Result<()> {
                 ConfigCommands::Save { path } => {
                     commands::config::save(&config, path, &output).await?
                 }
+                ConfigCommands::Migrate { path, in_place } => {
+                    commands::config::migrate(path, *in_place).await?
+                }
             }
         }
         Commands::Group { cmd } => match cmd {
             GroupCommands::List => commands::group::list(&config).await?,
-            GroupCommands::Create {
-                name,
-                description,
-                pattern,
-            } => commands::group::create(name, description, pattern, &config).await?,
-            GroupCommands::AddMember {
-                group,
-                agent,
-                role,
-                capabilities,
-            } => {
-                commands::group::add_member(group, agent, role, capabilities.as_deref(), &config)
-                    .await?
-            }
             GroupCommands::Status { name } => commands::group::status(name, &config).await?,
+            GroupCommands::Create { from } => {
+                let dbs = crate::helpers::get_dbs(&config).await?;
+                let builder = if let Some(path) = from {
+                    commands::builder::group::GroupBuilder::from_file(path.clone())
+                        .await?
+                        .with_dbs(dbs)
+                } else {
+                    commands::builder::group::GroupBuilder::default().with_dbs(dbs)
+                };
+                if let Some(result) = builder.run().await? {
+                    result.display();
+                }
+            }
+            GroupCommands::Edit { name } => {
+                let dbs = crate::helpers::get_dbs(&config).await?;
+                let builder = commands::builder::group::GroupBuilder::from_db(dbs, name).await?;
+                if let Some(result) = builder.run().await? {
+                    result.display();
+                }
+            }
             GroupCommands::Export { name, output } => {
                 commands::group::export(name, output.as_deref(), &config).await?
             }
+            GroupCommands::Add { cmd: add_cmd } => match add_cmd {
+                GroupAddCommands::Member {
+                    group,
+                    agent,
+                    role,
+                    capabilities,
+                } => {
+                    commands::group::add_member(
+                        &group,
+                        &agent,
+                        &role,
+                        capabilities.as_deref(),
+                        &config,
+                    )
+                    .await?
+                }
+                GroupAddCommands::Memory {
+                    group,
+                    label,
+                    content,
+                    path,
+                } => {
+                    commands::group::add_memory(
+                        &group,
+                        &label,
+                        content.as_deref(),
+                        path.as_deref(),
+                        &config,
+                    )
+                    .await?
+                }
+                GroupAddCommands::Source {
+                    group,
+                    source,
+                    source_type,
+                    from_toml,
+                } => {
+                    commands::group::add_source(
+                        &group,
+                        &source,
+                        source_type.as_deref(),
+                        from_toml.as_deref(),
+                        &config,
+                    )
+                    .await?
+                }
+            },
+            GroupCommands::Remove { cmd: remove_cmd } => match remove_cmd {
+                GroupRemoveCommands::Member { group, agent } => {
+                    commands::group::remove_member(&group, &agent, &config).await?
+                }
+                GroupRemoveCommands::Memory { group, label } => {
+                    commands::group::remove_memory(&group, &label, &config).await?
+                }
+                GroupRemoveCommands::Source { group, source } => {
+                    commands::group::remove_source(&group, &source, &config).await?
+                }
+            },
         },
         #[cfg(feature = "oauth")]
         Commands::Auth { cmd } => match cmd {
@@ -971,80 +1078,54 @@ async fn main() -> Result<()> {
             AtprotoCommands::Login {
                 identifier,
                 app_password,
+                agent_id,
             } => {
-                commands::atproto::app_password_login(identifier, app_password.clone(), &config)
-                    .await?
+                commands::atproto::app_password_login(
+                    identifier,
+                    app_password.clone(),
+                    agent_id,
+                    &config,
+                )
+                .await?
             }
-            AtprotoCommands::OAuth { identifier } => {
-                commands::atproto::oauth_login(identifier, &config).await?
-            }
+            AtprotoCommands::OAuth {
+                identifier,
+                agent_id,
+            } => commands::atproto::oauth_login(identifier, agent_id, &config).await?,
             AtprotoCommands::Status => commands::atproto::status(&config).await?,
             AtprotoCommands::Unlink { identifier } => {
                 commands::atproto::unlink(identifier, &config).await?
             }
             AtprotoCommands::Test => commands::atproto::test(&config).await?,
         },
-        Commands::Firehose { cmd } => match cmd {
-            FirehoseCommands::Listen {
-                limit,
-                nsid,
-                did,
-                mention,
-                keyword,
-                lang,
-                endpoint,
-                format,
-            } => {
-                commands::firehose::listen(
-                    *limit,
-                    nsid.clone(),
-                    did.clone(),
-                    mention.clone(),
-                    keyword.clone(),
-                    lang.clone(),
-                    endpoint.clone(),
-                    format.clone(),
-                    &config,
-                )
-                .await?
-            }
-            FirehoseCommands::Test { endpoint } => {
-                commands::firehose::test_connection(endpoint.clone(), &config).await?
-            }
-        },
         Commands::Export { cmd } => match cmd {
-            ExportCommands::Agent {
-                name,
-                output,
-                exclude_embeddings,
-            } => {
-                commands::export::export_agent(name, output.clone(), *exclude_embeddings, &config)
-                    .await?
+            ExportCommands::Agent { name, output } => {
+                commands::export::export_agent(name, output.clone(), &config).await?
             }
-            ExportCommands::Group {
-                name,
-                output,
-                exclude_embeddings,
-            } => {
-                commands::export::export_group(name, output.clone(), *exclude_embeddings, &config)
-                    .await?
+            ExportCommands::Group { name, output } => {
+                commands::export::export_group(name, output.clone(), &config).await?
             }
-            ExportCommands::Constellation {
-                output,
-                exclude_embeddings,
-            } => {
-                commands::export::export_constellation(output.clone(), *exclude_embeddings, &config)
-                    .await?
+            ExportCommands::Constellation { output } => {
+                commands::export::export_constellation(output.clone(), &config).await?
             }
         },
-        Commands::Import {
-            file,
-            rename_to,
-            preserve_ids,
-        } => {
-            commands::export::import(file.clone(), rename_to.clone(), *preserve_ids, &config)
-                .await?
-        }
+        Commands::Import { cmd } => match cmd {
+            ImportCommands::Car {
+                file,
+                rename_to,
+                preserve_ids,
+            } => {
+                commands::export::import(file.clone(), rename_to.clone(), *preserve_ids, &config)
+                    .await?
+            }
+            #[cfg(feature = "legacy-convert")]
+            ImportCommands::ConvertLegacy { input, output } => {
+                commands::export::convert_car(input.clone(), output.clone()).await?
+            }
+            ImportCommands::Letta { input, output } => {
+                commands::export::convert_letta(input.clone(), output.clone()).await?
+            }
+        },
     }
 
     // Flush any remaining logs before exit

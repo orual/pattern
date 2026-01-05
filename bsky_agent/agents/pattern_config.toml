@@ -1,5 +1,5 @@
 # Pattern - Main Coordinator
-name = "Pattern"
+name = "Patternv2"
 agent_type = "assistant"
 bluesky_handle = "pattern.atproto.systems"
 system_prompt_path = "../pattern-system-prompt.md"
@@ -127,15 +127,14 @@ and has multiple facets that surface as needed, internal or via dialogue with ot
 max_messages = 300
 
 
-# Bluesky configuration for the constellation
-[bluesky]
-default_filter = { nsids = [
-    "app.bsky.feed.post",
-], mentions = [
-    # Pattern's DID - required mention target
-    "did:plc:xivud6i24ruyki3bwjypjgy2",
-], dids = [
-    # follower list
+
+[data_sources.bluesky]
+type = "bluesky"
+name = "bluesky"
+jetstream_endpoint = "wss://jetstream1.us-east.fire.hose.cam"
+target = "Pattern"
+nsids = ["app.bsky.feed.post"]
+dids = [
     "did:plc:iln4c6fb4lubhtudetdey7xu",
     "did:plc:mmdzunv3n7gx3ktnlqrufmz2",
     "did:plc:hbveviy7odagwpqdgomiinzm",
@@ -409,49 +408,73 @@ default_filter = { nsids = [
     "did:plc:oj4enpdo6uuuikvs73cqvwdm",
     "did:plc:wzsilnxf24ehtmmc3gssy5bu",
     "did:plc:yfvwmnlztr4dwkb7hwz55r2g",
-
-    # original DIDs allowlist - only see posts from these accounts
-    "did:plc:yfvwmnlztr4dwkb7hwz55r2g", # orual
-    "did:plc:by3jhwdqgbtrcc7q4tkkv3cf", # alice (__justplaying)
-    "did:plc:jqnuubqvyurc3n3km2puzpfx", # laurens's alt
-    "did:plc:i7ayw57idpkvkyzktdpmtgm7", # catherine
-    "did:plc:vw4e7blkwzdokanwp24k3igr", # hoopy
-    "did:plc:mdjhvva6vlrswsj26cftjttd", # laurens's main
-    "did:plc:r65qsoiv3gx7xvljzdngnyvg", # deltave
-    "did:plc:7757w723nk675bqziinitoif", # alice (avengingfemme)
-    "did:plc:neisyrds2fyyfqod5zq56chr", # ed miles (anesthesiologist)
-    "did:plc:3xu5titidud43sfemwro3j62", # paul mcghee (carpet repair guy)
-    "did:plc:mxzuau6m53jtdsbqe6f4laov", # void
-    "did:plc:uqndyrh6gh7rjai33ulnwvkn", # susank
-    "did:plc:gfrmhdmjvxn2sjedzboeudef", # Cameron (void's admin)
-    "did:plc:k644h4rq5bjfzcetgsa6tuby", # natalie.sh
-    "did:plc:uxelaqoua6psz2for5amm6bp", # luna
-    "did:plc:yokspuz7ha7rf5mrqmhgdtxw", # penelope
-], friends = [ # Friends list - always see ALL posts from these DIDs (bypass mention requirement)
-    "did:plc:yfvwmnlztr4dwkb7hwz55r2g", # orual
-    "did:plc:vw4e7blkwzdokanwp24k3igr", # hoopy
-    "did:plc:7757w723nk675bqziinitoif", # alice (avengingfemme)
-    "did:plc:by3jhwdqgbtrcc7q4tkkv3cf", # alice (__justplaying)
-    "did:plc:ouylf4wfd75rdqupddfmeerk", # nutty.land (kris nuttycombe)
-    "did:plc:dzvxvsiy3maw4iarpvizsj67", # dollspace.gay
-    "did:plc:bnqkww7bjxaacajzvu5gswdf", # shreyan
-], allow_any_mentions = true, keywords = [ # Keywords to include
-], languages = [ # Languages to include
-], require_agent_participation = true, exclude_keywords = [
-    # Keywords to exclude (takes precedence)
-    # Example: "crypto", "nft", "airdrop"
+    "did:plc:yfvwmnlztr4dwkb7hwz55r2g",
+    "did:plc:by3jhwdqgbtrcc7q4tkkv3cf",
+    "did:plc:jqnuubqvyurc3n3km2puzpfx",
+    "did:plc:i7ayw57idpkvkyzktdpmtgm7",
+    "did:plc:vw4e7blkwzdokanwp24k3igr",
+    "did:plc:mdjhvva6vlrswsj26cftjttd",
+    "did:plc:r65qsoiv3gx7xvljzdngnyvg",
+    "did:plc:7757w723nk675bqziinitoif",
+    "did:plc:neisyrds2fyyfqod5zq56chr",
+    "did:plc:3xu5titidud43sfemwro3j62",
+    "did:plc:mxzuau6m53jtdsbqe6f4laov",
+    "did:plc:uqndyrh6gh7rjai33ulnwvkn",
+    "did:plc:gfrmhdmjvxn2sjedzboeudef",
+    "did:plc:k644h4rq5bjfzcetgsa6tuby",
+    "did:plc:uxelaqoua6psz2for5amm6bp",
+    "did:plc:yokspuz7ha7rf5mrqmhgdtxw",
+]
+keywords = []
+languages = []
+mentions = ["did:plc:xivud6i24ruyki3bwjypjgy2"]
+friends = [
+    "did:plc:yfvwmnlztr4dwkb7hwz55r2g",
+    "did:plc:vw4e7blkwzdokanwp24k3igr",
+    "did:plc:7757w723nk675bqziinitoif",
+    "did:plc:by3jhwdqgbtrcc7q4tkkv3cf",
+    "did:plc:ouylf4wfd75rdqupddfmeerk",
+    "did:plc:dzvxvsiy3maw4iarpvizsj67",
+    "did:plc:bnqkww7bjxaacajzvu5gswdf",
+    "did:plc:hu35oubkccqrxl4ldgczpgw7",
+]
+allow_any_mentions = true
+exclude_keywords = [
     "patternstop",
     "p*ttern",
-], exclude_dids = [
-    # DIDs to exclude (takes precedence over all inclusion filters)
-    # Example spam accounts would go here
-    "did:plc:7iozku5btifey2a2x6lojvyk", # jerkface
-    "did:plc:2xreieabu3louljggmfkgc74", # blocked pattern after informed of their nature (belt + suspenders)
-    "did:plc:e6n7jxtu2qrhwvp3j6ib6sq6", # proptermalone
-    "did:plc:klhtmrnregub7we7h6jwiljm", # ed3d
-    "did:plc:ap56m7pvnz4lnrtaguxiuawm", # random spammer
-    "did:plc:boia3kqcyo3qnjw5fmqknib4", # jo wynter cannot stop pushing buttons
-    "did:plc:vszw3ess46odfhnzdsy4huae", # se gyges got got one too many times
-] }
-auto_connect_firehose = true # Control when to connect
-jetstream_endpoint = "wss://jetstream1.us-east.fire.hose.cam/subscribe"
+]
+exclude_dids = [
+    "did:plc:7iozku5btifey2a2x6lojvyk",
+    "did:plc:2xreieabu3louljggmfkgc74",
+    "did:plc:e6n7jxtu2qrhwvp3j6ib6sq6",
+    "did:plc:klhtmrnregub7we7h6jwiljm",
+    "did:plc:ap56m7pvnz4lnrtaguxiuawm",
+    "did:plc:boia3kqcyo3qnjw5fmqknib4",
+    "did:plc:vszw3ess46odfhnzdsy4huae",
+    "did:plc:lw7hallqsgrhwumgudkph44j",
+    "did:plc:djpcowss7aokaydcdraoaovz",
+    "did:plc:zmdk74qov5y6ouh2vsooiqkl",
+]
+require_agent_participation = true
+
+
+[data_sources.file]
+type = "file"
+name = "repo"
+paths = ["./"]
+
+
+[data_sources.shell]
+type = "shell"
+name = "shell"
+allowed_paths = ["./"]
+strict_path_enforcement = false
+custom_denied_patterns = []
+
+[data_sources.shell.permission]
+type = "read_only"
+
+
+[model]
+provider = "anthropic"
+model = "claude-sonnet-4-5"

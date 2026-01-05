@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT a.name as \"name!\", COUNT(m.id) as \"msg_count!\"\n        FROM agents a\n        LEFT JOIN messages m ON a.id = m.agent_id AND m.is_deleted = 0\n        GROUP BY a.id\n        ORDER BY 2 DESC\n        LIMIT ?\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "name!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "msg_count!",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "54644d1a2ac47a5054c2fa9f5ef0ae892ae16cd2082ec505e7b74f5f4c4b76b1"
+}

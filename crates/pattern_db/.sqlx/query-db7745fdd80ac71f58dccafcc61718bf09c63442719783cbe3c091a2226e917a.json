@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            folder_id as \"folder_id!\",\n            agent_id as \"agent_id!\",\n            access as \"access!: FolderAccess\",\n            attached_at as \"attached_at!: _\"\n        FROM folder_attachments WHERE folder_id = ?\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "folder_id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "agent_id!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "access!: FolderAccess",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "attached_at!: _",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "db7745fdd80ac71f58dccafcc61718bf09c63442719783cbe3c091a2226e917a"
+}

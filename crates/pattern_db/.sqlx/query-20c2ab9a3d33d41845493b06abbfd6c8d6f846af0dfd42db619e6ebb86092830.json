@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            id as \"id!\",\n            event_id as \"event_id!\",\n            starts_at as \"starts_at!: _\",\n            ends_at as \"ends_at: _\",\n            status as \"status!: OccurrenceStatus\",\n            notes,\n            created_at as \"created_at!: _\"\n        FROM event_occurrences WHERE event_id = ? ORDER BY starts_at ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "event_id!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "starts_at!: _",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "ends_at: _",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "status!: OccurrenceStatus",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "notes",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at!: _",
+        "ordinal": 6,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      true,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "20c2ab9a3d33d41845493b06abbfd6c8d6f846af0dfd42db619e6ebb86092830"
+}

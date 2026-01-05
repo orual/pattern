@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE messages SET is_deleted = 1 WHERE id = ? AND is_deleted = 0",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "21b334b5a2fbf08830606b16707e1a153afcd14f6ea219a0dc43a5856e90beef"
+}

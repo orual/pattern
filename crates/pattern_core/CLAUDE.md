@@ -1,62 +1,14 @@
 # CLAUDE.md - Pattern Core
 
-⚠️ **CRITICAL WARNING**: DO NOT run `pattern-cli` or test agents during development!
+⚠️ **CRITICAL WARNING**: DO NOT run `pattern` CLI or test agents during development!
 Production agents are running. CLI commands will disrupt active agents.
 
 Core agent framework, memory management, and coordination system for Pattern's multi-agent ADHD support.
 
 ## Current Status
-
-### ✅ Complete Features
-- **Message Batching**: Snowflake IDs, atomic request/response cycles, tool pairing integrity, migration completed
-- **Agent Groups**: Full database operations, CLI integration, all coordination patterns working
-- **Data Sources**: Generic abstraction with file/Discord/Bluesky implementations
-- **Memory System**: MemGPT-style blocks with archival, semantic search, thread-safe access
-- **Tool System**: Multi-operation tools (context, recall, search) with automatic rule bundling
-- **Message Router**: Agent-to-agent messaging with anti-looping protection
-- **Model Configuration**: Comprehensive registry with provider-specific optimizations
-- **Bluesky Post Batching**: Thread-aware batching with 3-second windows, DashMap-based concurrent management
-
-### 🚧 In Progress
-
-- **Memory Block Pass-through**: Router needs to create RELATE edges for attached blocks
-- **MCP Client Integration**: Consume external MCP tools (high priority)
-- **Thread Cache Implementation**: Utilize the CachedThreadContext structure for constellation API caching
-
-### Future Simplifications
-- **Model Provider Refactoring**: Move model provider from DatabaseAgent into AgentContext entirely and remove the RwLock wrapper since ModelProvider methods only need `&self`. This would simplify DatabaseAgent and make the model provider more directly accessible for compression strategies.
-
-## Critical Implementation Notes
-
-### Entity System Sacred Patterns ⚠️
-
-**Edge Entity Pattern - DO NOT CHANGE**:
-The macro looks redundant but it's required. Users should ONLY specify `edge_entity`:
-
-```rust
-// Correct usage:
-#[entity(edge_entity = "agent_memories")]
-pub memories: Vec<(TestMemory, AgentMemoryRelation)>,
-
-// WRONG - don't specify both:
-// #[entity(relation = "agent_memories", edge_entity = "AgentMemoryRelation")]
-```
-
-### Database Patterns (CRITICAL)
-
-1. **SurrealDB Response Handling**:
-   - NEVER try to get `Vec<serde_json::Value>` from a SurrealDB response
-   - ALWAYS print raw response before `.take()` when debugging
-   - Use `unwrap_surreal_value` helper for nested value extraction
-
-2. **Parameterized Queries**:
-   - ALWAYS use parameter binding to prevent SQL injection
-   - Example: `query("SELECT * FROM user WHERE id = $id").bind(("id", user_id))`
-
-3. **Concurrent Memory Access**:
-   - Use `alter_block` for atomic updates
-   - Never hold refs across async boundaries
-   - Extract data and drop locks immediately
+- SQLite migration complete, Loro CRDT memory, Jacquard ATProto client
+- Shell tool implemented with PTY backend and security validation
+- Active development: API server, MCP server, data sources
 
 ## Tool System Architecture
 
@@ -68,7 +20,7 @@ Following Letta/MemGPT patterns with multi-operation tools:
 
 2. **recall** - Long-term storage operations
    - `insert`, `append`, `read`, `delete`
-   - Full-text search with SurrealDB's BM25 analyzer
+   - Full-text search with FTS5 BM25 scoring
 
 3. **search** - Unified search across domains
    - Supports archival_memory, conversations, all
@@ -77,6 +29,13 @@ Following Letta/MemGPT patterns with multi-operation tools:
 4. **send_message** - Agent communication
    - Routes through AgentMessageRouter
    - Supports CLI, Group, Discord, Queue endpoints
+
+5. **shell** - Command execution via PTY
+   - Operations: `execute`, `spawn`, `kill`, `status`
+   - Uses `ProcessSource` DataStream for execution
+   - Permission validation via `CommandValidator` trait
+   - Blocklist for dangerous commands (rm -rf /, etc.)
+   - Three permission levels: `ReadOnly`, `ReadWrite`, `Admin`
 
 ### Implementation Notes
 - Each tool has single entry point with operation enum
@@ -105,13 +64,12 @@ Following Letta/MemGPT patterns with multi-operation tools:
 
 1. **Agent System** (`agent/`, `context/`)
    - Base `Agent` trait with memory and tool access
-   - DatabaseAgent with SurrealDB persistence
+   - DatabaseAgent using `pattern-db`
    - AgentType enum with feature-gated ADHD variants
 
-2. **Memory System** (`memory.rs`)
-   - Arc<DashMap> for thread-safe concurrent access
-   - Character-limited blocks with overflow handling
-   - Persistent between conversations
+2. **Memory System** (`memory/`)
+   - Loro CRDT based in-memory cache backed by `pattern-db`
+   - **StructuredDocument sharing**: `MemoryCache::get_block()` returns a `StructuredDocument` where the internal `LoroDoc` is Arc-shared with the cache. Mutations via `set_text()`, `import_from_json()`, etc. propagate to the cached version. However, metadata fields (permission, label, accessor_agent_id) are *not* shared—they're cloned. After mutating, call `mark_dirty()` + `persist_block()` to save.
 
 3. **Tool System** (`tool/`)
    - Type-safe `AiTool<Input, Output>` trait
@@ -123,15 +81,18 @@ Following Letta/MemGPT patterns with multi-operation tools:
    - Type-erased `Arc<dyn Agent>` for group flexibility
    - Message routing and response aggregation
 
-5. **Database** (`db/`)
-   - SurrealKV embedded database
-   - Entity system with `#[derive(Entity)]` macro
-   - RELATE-based relationships (no foreign keys)
+5. **Database** (`../pattern_db`, `../pattern_auth`)
+   - SQLite embedded databases
 
 6. **Data Sources** (`data_source/`)
    - Generic trait for pull/push consumption
    - Type-erased wrapper for concrete→generic bridging
    - Prompt templates using minijinja
+   - **bluesky/**: ATProto firehose consumption
+   - **process/**: Shell command execution via PTY
+     - `LocalPtyBackend`: Persistent shell session with cwd/env
+     - `ProcessSource`: DataStream wrapper with notifications
+     - `CommandValidator`: Security policy enforcement
 
 ## Common Patterns
 
@@ -161,10 +122,31 @@ return Err(CoreError::tool_not_found(name, available_tools));
 return Err(CoreError::memory_not_found(&agent_id, &block_name, available_blocks));
 ```
 
+### Accessing Data Sources from Tools
+Tools that need typed access to specific DataStream implementations use `as_any()` downcast:
+```rust
+// DataStream trait includes as_any() for downcasting
+fn find_process_source(&self, sources: &dyn SourceManager) -> Result<Arc<dyn DataStream>> {
+    // Try explicit source_id, then default ID, then first matching type
+    for id in sources.list_streams() {
+        if let Some(source) = sources.get_stream_source(&id) {
+            if source.as_any().is::<ProcessSource>() {
+                return Ok(source);
+            }
+        }
+    }
+    Err(CoreError::tool_exec_msg("shell", "no process source"))
+}
+
+// Downcast at point of use
+let process_source = source.as_any().downcast_ref::<ProcessSource>()?;
+```
+See `docs/data-sources-guide.md` for full pattern documentation.
+
 ## Performance Notes
 - CompactString inlines strings ≤ 24 bytes
 - DashMap shards internally for concurrent access
-- AgentHandle provides cheap cloning for built-in tools
+- ToolContext via Arc<AgentRuntime> for cheap cloning
 - Database operations are non-blocking with optimistic updates
 
 ## Embedding Providers
@@ -174,3 +156,24 @@ return Err(CoreError::memory_not_found(&agent_id, &block_name, available_blocks)
 - **Ollama**: Stub only - TODO
 
 **Known Issues**: BERT models fail in Candle (dtype errors), use Jina models instead.
+
+## Testing
+
+### Test Utilities (`tool/builtin/test_utils.rs`)
+Shared test infrastructure for tool testing:
+- `MockToolContext`: Implements `ToolContext` with optional SourceManager
+- `MockSourceManager`: Implements `SourceManager` for DataStream testing
+- `MockToolContextBuilder`: Fluent builder for configurable test contexts
+- `create_test_context_with_agent()`: Quick setup for simple tests
+- `create_test_agent_in_db()`: Helper for FK constraint satisfaction
+
+### Running Tests
+```bash
+# All pattern-core tests
+cargo nextest run -p pattern-core
+
+# Shell tool tests specifically
+cargo nextest run -p pattern-core shell
+
+# PTY tests may skip in CI (no PTY available)
+```

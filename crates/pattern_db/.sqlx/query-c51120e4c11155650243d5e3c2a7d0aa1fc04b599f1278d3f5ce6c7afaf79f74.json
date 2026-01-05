@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE messages SET is_archived = 1 WHERE agent_id = ? AND position < ? AND is_archived = 0 AND is_deleted = 0",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "c51120e4c11155650243d5e3c2a7d0aa1fc04b599f1278d3f5ce6c7afaf79f74"
+}

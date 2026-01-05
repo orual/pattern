@@ -92,17 +92,7 @@ serenity = { version = "0.12", default-features = false, features = [
     "standard_framework",
 ] }
 
-rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk.git", features = [
-    "transport-io",
-    "transport-sse-client",
-    "transport-sse-server",
-    "transport-streamable-http-client",
-    "transport-streamable-http-server",
-    "transport-child-process",
-    "server",
-    "reqwest",
-    "client",
-] } # MCP
+rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk.git" } # MCP
 
 # Testing
 mockall = "0.13"

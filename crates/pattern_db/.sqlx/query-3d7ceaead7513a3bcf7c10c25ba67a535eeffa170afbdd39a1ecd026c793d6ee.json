@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            id as \"id!\",\n            from_agent as \"from_agent!\",\n            to_agent,\n            content as \"content!\",\n            created_at as \"created_at!: _\",\n            read_at as \"read_at: _\"\n        FROM handoff_notes\n        WHERE (to_agent = ? OR to_agent IS NULL) AND read_at IS NULL\n        ORDER BY created_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "from_agent!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "to_agent",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "content!",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at!: _",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "read_at: _",
+        "ordinal": 5,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "3d7ceaead7513a3bcf7c10c25ba67a535eeffa170afbdd39a1ecd026c793d6ee"
+}

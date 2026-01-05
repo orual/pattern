@@ -50,6 +50,19 @@
               };
             };
           };
+          "pattern-db" = {
+            imports = [ globalCrateConfig ];
+            autoWire = [ "crate" "clippy" ];
+            path = ./../../crates/pattern_db;
+            crane = {
+              args = {
+                buildInputs =
+                  commonBuildInputs
+                  ++ [
+                  ];
+              };
+            };
+          };
 
           "pattern-nd" = {
             imports = [ globalCrateConfig ];
@@ -72,7 +85,6 @@
               };
             };
           };
-
 
           "pattern-cli" = {
             imports = [ globalCrateConfig ];
@@ -107,9 +119,6 @@
               };
             };
           };
-
-
-
         };
       };
 

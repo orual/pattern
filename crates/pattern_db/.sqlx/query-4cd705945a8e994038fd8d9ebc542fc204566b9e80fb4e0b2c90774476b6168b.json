@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT EXISTS(\n            SELECT 1 FROM group_members m1\n            INNER JOIN group_members m2 ON m1.group_id = m2.group_id\n            WHERE m1.agent_id = ? AND m2.agent_id = ?\n        ) as \"exists!: bool\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "exists!: bool",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4cd705945a8e994038fd8d9ebc542fc204566b9e80fb4e0b2c90774476b6168b"
+}

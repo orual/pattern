@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO constellation_summaries (id, period_start, period_end, summary, key_decisions, open_threads, created_at)\n        VALUES (?, ?, ?, ?, ?, ?, ?)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "c869809c1010a94fe4a1cf76d42f7850f9dbd52aca4286046af569d8cdf979f2"
+}

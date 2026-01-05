@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 use uuid::Uuid;
 
-use crate::{AgentId, AgentState, message::Message};
+use crate::{AgentId, AgentState, messages::Message};
 
 /// Defines how agents in a group coordinate their actions
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -349,6 +349,8 @@ pub enum GroupMemberRole {
     Regular,
     /// Group supervisor/leader
     Supervisor,
+    /// Observer (receives messages but doesn't respond)
+    Observer,
     /// Specialist in a particular domain
     Specialist { domain: String },
 }

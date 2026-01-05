@@ -1,38 +1,39 @@
-//! Agent framework for Pattern
+//! V2 Agent framework with slim trait design
 //!
-//! This module provides the core agent abstraction and implementations.
+//! The AgentV2 trait is dramatically slimmer than the original Agent trait:
+//! - Agent is just identity + process loop + state
+//! - Runtime handles all "doing" (tool execution, message sending, storage)
+//! - ContextBuilder handles all "reading" (memory, messages, tools → Request)
+//! - Memory access is via tools, not direct trait methods
 
-mod entity;
-mod impls;
-#[cfg(test)]
-mod tests;
-pub mod tool_rules;
+mod collect;
+mod db_agent;
+pub mod processing;
+mod traits;
 
-use compact_str::CompactString;
-pub use entity::{
-    AgentMemoryRelation, AgentRecord, SnowflakePosition, get_next_message_position,
-    get_next_message_position_string, get_next_message_position_sync,
-};
-pub use impls::{AgentDbExt, DatabaseAgent};
-pub use tool_rules::{
+// Re-export tool_rules from tool module for backwards compatibility
+pub mod tool_rules {
+    pub use crate::tool::rules::*;
+}
+
+pub use collect::collect_response;
+pub use db_agent::{DatabaseAgent, DatabaseAgentBuilder};
+pub use traits::{Agent, AgentExt};
+
+use crate::messages::{ToolCall, ToolResponse};
+
+// Also re-export at agent module level for convenience
+use crate::SnowflakePosition;
+pub use crate::tool::rules::{
     ExecutionPhase, ToolExecution, ToolExecutionState, ToolRule, ToolRuleEngine, ToolRuleType,
     ToolRuleViolation,
 };
 
-use async_trait::async_trait;
 use chrono::Utc;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::str::FromStr;
-use std::sync::Arc;
-use tokio_stream::Stream;
-
-use crate::{
-    AgentId, MemoryBlock, Result,
-    message::{Message, MessageContent, Response, ToolCall, ToolResponse},
-    tool::DynamicTool,
-};
 
 /// Events emitted during message processing for real-time streaming
 #[derive(Debug, Clone)]
@@ -69,172 +70,10 @@ pub enum ResponseEvent {
         /// The ID of the incoming message that triggered this response
         message_id: crate::MessageId,
         /// Metadata about the complete response (usage, timing, etc)
-        metadata: crate::message::ResponseMetadata,
+        metadata: crate::messages::ResponseMetadata,
     },
     /// An error occurred during processing
     Error { message: String, recoverable: bool },
-}
-
-/// The base trait that all agents must implement
-#[async_trait]
-pub trait Agent: Send + Sync + Debug {
-    /// Get the agent's unique identifier
-    fn id(&self) -> AgentId;
-
-    /// Get the agent's name
-    fn name(&self) -> String;
-
-    /// Get the agent's type
-    fn agent_type(&self) -> AgentType;
-
-    /// Get the agent's handle for controlled access to internals
-    async fn handle(&self) -> crate::context::state::AgentHandle;
-
-    /// Get the agent's last active timestamp
-    async fn last_active(&self) -> Option<chrono::DateTime<chrono::Utc>>;
-
-    /// Process an incoming message and generate a response
-    async fn process_message(self: Arc<Self>, message: Message) -> Result<Response>;
-
-    /// Process a message and stream responses as they happen
-    ///
-    /// Default implementation collects all events and returns the final response.
-    /// Implementations should override this to provide real streaming.
-    async fn process_message_stream(
-        self: Arc<Self>,
-        message: Message,
-    ) -> Result<Box<dyn Stream<Item = ResponseEvent> + Send + Unpin>>
-    where
-        Self: 'static,
-    {
-        use tokio_stream::wrappers::ReceiverStream;
-
-        let (tx, rx) = tokio::sync::mpsc::channel(100);
-
-        // Clone for the spawned task
-        let self_clone = self.clone();
-        let message_id = message.id.clone();
-
-        tokio::spawn(async move {
-            match self_clone.process_message(message).await {
-                Ok(response) => {
-                    // Emit any text content
-                    for content in &response.content {
-                        match content {
-                            MessageContent::Text(text) => {
-                                let _ = tx
-                                    .send(ResponseEvent::TextChunk {
-                                        text: text.clone(),
-                                        is_final: true,
-                                    })
-                                    .await;
-                            }
-                            MessageContent::ToolCalls(calls) => {
-                                let _ = tx
-                                    .send(ResponseEvent::ToolCalls {
-                                        calls: calls.clone(),
-                                    })
-                                    .await;
-                            }
-                            MessageContent::ToolResponses(responses) => {
-                                let _ = tx
-                                    .send(ResponseEvent::ToolResponses {
-                                        responses: responses.clone(),
-                                    })
-                                    .await;
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    // Emit reasoning if present
-                    if let Some(reasoning) = &response.reasoning {
-                        let _ = tx
-                            .send(ResponseEvent::ReasoningChunk {
-                                text: reasoning.clone(),
-                                is_final: true,
-                            })
-                            .await;
-                    }
-
-                    // Send completion
-                    let _ = tx
-                        .send(ResponseEvent::Complete {
-                            message_id,
-                            metadata: response.metadata,
-                        })
-                        .await;
-                }
-                Err(e) => {
-                    let _ = tx
-                        .send(ResponseEvent::Error {
-                            message: e.to_string(),
-                            recoverable: false,
-                        })
-                        .await;
-                }
-            }
-        });
-
-        Ok(Box::new(ReceiverStream::new(rx)))
-    }
-
-    /// Get a memory block by key
-    async fn get_memory(&self, key: &str) -> Result<Option<MemoryBlock>>;
-
-    /// Update a memory block
-    async fn update_memory(&self, key: &str, memory: MemoryBlock) -> Result<()>;
-
-    /// Execute a tool with the given parameters
-    async fn execute_tool(
-        &self,
-        tool_name: &str,
-        params: serde_json::Value,
-    ) -> Result<serde_json::Value>;
-
-    /// Create or update a memory block with just the value
-    async fn set_memory(&self, key: &str, value: String) -> Result<()> {
-        self.update_memory(key, MemoryBlock::new(key, value)).await
-    }
-
-    /// List all available memory block keys
-    async fn list_memory_keys(&self) -> Result<Vec<CompactString>>;
-
-    /// Share a memory block with another agent
-    async fn share_memory_with(
-        &self,
-        memory_key: &str,
-        target_agent_id: AgentId,
-        access_level: crate::memory::MemoryPermission,
-    ) -> Result<()>;
-
-    /// Get all memory blocks shared with this agent
-    async fn get_shared_memories(&self) -> Result<Vec<(AgentId, CompactString, MemoryBlock)>>;
-
-    /// Get the agent's system prompt components
-    async fn system_prompt(&self) -> Vec<String>;
-
-    /// Get the list of tools available to this agent
-    async fn available_tools(&self) -> Vec<Box<dyn DynamicTool>>;
-
-    /// Get the agent's current state and a watch receiver for changes
-    async fn state(&self) -> (AgentState, Option<tokio::sync::watch::Receiver<AgentState>>);
-
-    /// Update the agent's state
-    async fn set_state(&self, state: AgentState) -> Result<()>;
-
-    /// Register a message endpoint for a specific channel
-    async fn register_endpoint(
-        &self,
-        name: String,
-        endpoint: Arc<dyn crate::context::message_router::MessageEndpoint>,
-    ) -> Result<()>;
-
-    /// Set the default user endpoint
-    async fn set_default_user_endpoint(
-        &self,
-        endpoint: Arc<dyn crate::context::message_router::MessageEndpoint>,
-    ) -> Result<()>;
 }
 
 /// Types of agents in the system

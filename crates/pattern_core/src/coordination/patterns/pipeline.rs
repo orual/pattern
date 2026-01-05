@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use std::{sync::Arc, time::Instant};
 
+use crate::agent::AgentExt;
 use crate::{
     AgentId, CoreError, Result,
     agent::Agent,
@@ -14,7 +15,7 @@ use crate::{
         types::{GroupState, PipelineStage, StageFailureAction, StageResult},
         utils::text_response,
     },
-    message::Message,
+    messages::Message,
 };
 
 #[derive(Clone)]
@@ -227,7 +228,11 @@ impl PipelineManager {
         }
 
         // Process message with selected agent
-        let agent_response = awm.agent.clone().process_message(message.clone()).await?;
+        let agent_response = awm
+            .agent
+            .clone()
+            .process_to_response(message.clone())
+            .await?;
         let response = AgentResponse {
             agent_id: awm.agent.as_ref().id(),
             response: agent_response,

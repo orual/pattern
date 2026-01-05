@@ -1,28 +1,34 @@
-//! Agent export/import functionality using DAG-CBOR CAR archives
+//! CAR archive export/import for Pattern agents and constellations.
 //!
-//! This module provides tools for exporting agents to portable CAR files
-//! and importing them back, preserving all relationships and data.
+//! Format version 3 - designed for SQLite-backed architecture.
 
+mod car;
 mod exporter;
 mod importer;
+pub mod letta_convert;
+pub mod letta_types;
 mod types;
 
-pub use exporter::{AgentExporter, ExportOptions};
-pub use importer::{AgentImporter, ImportOptions, ImportResult};
-pub use types::{
-    AgentExport, AgentRecordExport, ConstellationExport, ExportManifest, ExportStats, ExportType,
-    GroupExport, MemoryChunk, MessageChunk,
+#[cfg(test)]
+mod tests;
+
+pub use car::*;
+pub use exporter::*;
+pub use importer::*;
+pub use letta_convert::{
+    LettaConversionError, LettaConversionOptions, LettaConversionStats, convert_letta_to_car,
 };
+pub use letta_types::AgentFileSchema;
+pub use types::*;
 
-/// Current export format version
-pub const EXPORT_VERSION: u32 = 2;
+/// Export format version
+pub const EXPORT_VERSION: u32 = 3;
 
-/// Default chunk size for message batching
-pub const DEFAULT_CHUNK_SIZE: usize = 1000;
-
-/// Default chunk size for memory batching
-pub const DEFAULT_MEMORY_CHUNK_SIZE: usize = 100;
-
-/// Hard limit for any single block in a CAR file (bytes)
-/// Keep at or below 1MB to maximize compatibility with common IPLD tooling.
+/// Maximum bytes per CAR block (IPLD compatibility)
 pub const MAX_BLOCK_BYTES: usize = 1_000_000;
+
+/// Default max messages per chunk
+pub const DEFAULT_MAX_MESSAGES_PER_CHUNK: usize = 1000;
+
+/// Target bytes per chunk (leave headroom under MAX_BLOCK_BYTES)
+pub const TARGET_CHUNK_BYTES: usize = 900_000;

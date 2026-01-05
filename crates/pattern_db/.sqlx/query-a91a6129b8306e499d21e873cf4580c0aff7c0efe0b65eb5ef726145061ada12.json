@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE messages SET content_json = ?, content_preview = ? WHERE id = ? AND is_deleted = 0",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "a91a6129b8306e499d21e873cf4580c0aff7c0efe0b65eb5ef726145061ada12"
+}

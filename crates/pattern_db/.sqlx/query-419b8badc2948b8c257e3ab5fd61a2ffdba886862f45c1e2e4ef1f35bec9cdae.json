@@ -1,0 +1,68 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            id as \"id!\",\n            target_agent_id as \"target_agent_id!\",\n            source_agent_id,\n            content as \"content!\",\n            origin_json,\n            metadata_json,\n            priority as \"priority!\",\n            created_at as \"created_at!: _\",\n            processed_at as \"processed_at: _\"\n        FROM queued_messages\n        WHERE target_agent_id = ? AND processed_at IS NULL\n        ORDER BY priority DESC, created_at ASC\n        LIMIT ?\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "target_agent_id!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "source_agent_id",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "content!",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "origin_json",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "metadata_json",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "priority!",
+        "ordinal": 6,
+        "type_info": "Integer"
+      },
+      {
+        "name": "created_at!: _",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "processed_at: _",
+        "ordinal": 8,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "419b8badc2948b8c257e3ab5fd61a2ffdba886862f45c1e2e4ef1f35bec9cdae"
+}

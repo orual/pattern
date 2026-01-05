@@ -78,7 +78,7 @@ pub enum RecallOperation {
 }
 ```
 
-**Purpose**: Long-term storage with full-text search via SurrealDB.
+**Purpose**: Long-term storage with full-text search via FTS5.
 
 ### 3. search - Unified Search
 ```rust

@@ -14,7 +14,7 @@ use crate::{
         types::{CoordinationPattern, DelegationStrategy, FallbackBehavior, GroupState},
         utils::text_response,
     },
-    message::Message,
+    messages::Message,
 };
 
 #[derive(Clone)]
@@ -127,18 +127,13 @@ impl GroupManager for SupervisorManager {
                     let _ = tx
                         .send(GroupResponseEvent::AgentStarted {
                             agent_id: agent_id.clone(),
-                            agent_name: agent_name.clone(),
+                            agent_name: agent_name.to_string(),
                             role: delegate_awm.membership.role.clone(),
                         })
                         .await;
 
                     // Process with streaming
-                    match delegate_awm
-                        .agent
-                        .clone()
-                        .process_message_stream(message.clone())
-                        .await
-                    {
+                    match delegate_awm.agent.clone().process(message.clone()).await {
                         Ok(mut stream) => {
                             use tokio_stream::StreamExt;
 
@@ -197,7 +192,7 @@ impl GroupManager for SupervisorManager {
                                         let _ = tx
                                             .send(GroupResponseEvent::AgentCompleted {
                                                 agent_id: agent_id.clone(),
-                                                agent_name: agent_name.clone(),
+                                                agent_name: agent_name.to_string(),
                                                 message_id: Some(message_id),
                                             })
                                             .await;
@@ -223,10 +218,10 @@ impl GroupManager for SupervisorManager {
 
                             agent_responses.push(AgentResponse {
                                 agent_id: agent_id.clone(),
-                                response: crate::message::Response {
+                                response: crate::messages::Response {
                                     content: vec![],
                                     reasoning: None,
-                                    metadata: crate::message::ResponseMetadata::default(),
+                                    metadata: crate::messages::ResponseMetadata::default(),
                                 },
                                 responded_at: Utc::now(),
                             });
@@ -252,17 +247,12 @@ impl GroupManager for SupervisorManager {
                             let _ = tx
                                 .send(GroupResponseEvent::AgentStarted {
                                     agent_id: agent_id.clone(),
-                                    agent_name: agent_name.clone(),
+                                    agent_name: agent_name.to_string(),
                                     role: leader.membership.role.clone(),
                                 })
                                 .await;
 
-                            match leader
-                                .agent
-                                .clone()
-                                .process_message_stream(message.clone())
-                                .await
-                            {
+                            match leader.agent.clone().process(message.clone()).await {
                                 Ok(mut stream) => {
                                     use tokio_stream::StreamExt;
 
@@ -325,7 +315,7 @@ impl GroupManager for SupervisorManager {
                                                 let _ = tx
                                                     .send(GroupResponseEvent::AgentCompleted {
                                                         agent_id: agent_id.clone(),
-                                                        agent_name: agent_name.clone(),
+                                                        agent_name: agent_name.to_string(),
                                                         message_id: Some(message_id),
                                                     })
                                                     .await;
@@ -348,10 +338,10 @@ impl GroupManager for SupervisorManager {
 
                                     agent_responses.push(AgentResponse {
                                         agent_id: leader_id.clone(),
-                                        response: crate::message::Response {
+                                        response: crate::messages::Response {
                                             content: vec![],
                                             reasoning: None,
-                                            metadata: crate::message::ResponseMetadata::default(),
+                                            metadata: crate::messages::ResponseMetadata::default(),
                                         },
                                         responded_at: Utc::now(),
                                     });
@@ -406,17 +396,12 @@ impl GroupManager for SupervisorManager {
                 let _ = tx
                     .send(GroupResponseEvent::AgentStarted {
                         agent_id: agent_id.clone(),
-                        agent_name: agent_name.clone(),
+                        agent_name: agent_name.to_string(),
                         role: leader.membership.role.clone(),
                     })
                     .await;
 
-                match leader
-                    .agent
-                    .clone()
-                    .process_message_stream(message.clone())
-                    .await
-                {
+                match leader.agent.clone().process(message.clone()).await {
                     Ok(mut stream) => {
                         use tokio_stream::StreamExt;
 
@@ -470,7 +455,7 @@ impl GroupManager for SupervisorManager {
                                     let _ = tx
                                         .send(GroupResponseEvent::AgentCompleted {
                                             agent_id: agent_id.clone(),
-                                            agent_name: agent_name.clone(),
+                                            agent_name: agent_name.to_string(),
                                             message_id: Some(message_id),
                                         })
                                         .await;
@@ -493,10 +478,10 @@ impl GroupManager for SupervisorManager {
 
                         agent_responses.push(AgentResponse {
                             agent_id: leader_id.clone(),
-                            response: crate::message::Response {
+                            response: crate::messages::Response {
                                 content: vec![],
                                 reasoning: None,
-                                metadata: crate::message::ResponseMetadata::default(),
+                                metadata: crate::messages::ResponseMetadata::default(),
                             },
                             responded_at: Utc::now(),
                         });

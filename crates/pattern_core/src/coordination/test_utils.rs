@@ -5,21 +5,34 @@ pub(crate) mod test {
     use std::sync::Arc;
 
     use chrono::Utc;
+    use tokio_stream::Stream;
 
     use crate::{
-        AgentId, MemoryBlock, Result, UserId,
-        agent::{Agent, AgentState, AgentType},
+        AgentId, UserId,
+        agent::{Agent, AgentState, ResponseEvent},
         coordination::groups::GroupResponseEvent,
-        memory::MemoryPermission,
-        message::{ChatRole, Message, MessageContent, MessageMetadata, MessageOptions, Response},
-        tool::DynamicTool,
+        error::CoreError,
+        messages::{ChatRole, Message, MessageContent, MessageMetadata, MessageOptions, Response},
+        runtime::{AgentRuntime, test_support::test_runtime},
     };
 
     /// Test agent implementation for coordination pattern tests
-    #[derive(Debug)]
+    ///
+    /// Uses the new slim Agent trait with a real AgentRuntime
     pub struct TestAgent {
         pub id: AgentId,
         pub name: String,
+        runtime: Arc<AgentRuntime>,
+        state: std::sync::RwLock<AgentState>,
+    }
+
+    impl std::fmt::Debug for TestAgent {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("TestAgent")
+                .field("id", &self.id)
+                .field("name", &self.name)
+                .finish()
+        }
     }
 
     impl AsRef<TestAgent> for TestAgent {
@@ -34,103 +47,57 @@ pub(crate) mod test {
             self.id.clone()
         }
 
-        fn name(&self) -> String {
-            self.name.to_string()
+        fn name(&self) -> &str {
+            &self.name
         }
 
-        fn agent_type(&self) -> AgentType {
-            AgentType::Generic
+        fn runtime(&self) -> Arc<AgentRuntime> {
+            self.runtime.clone()
         }
 
-        async fn process_message(self: Arc<Self>, _message: Message) -> Result<Response> {
-            use crate::message::ResponseMetadata;
-            Ok(Response {
-                content: vec![MessageContent::Text(format!("{} test response", self.name))],
-                reasoning: None,
-                metadata: ResponseMetadata::default(),
-            })
-        }
+        async fn process(
+            self: Arc<Self>,
+            message: Message,
+        ) -> std::result::Result<Box<dyn Stream<Item = ResponseEvent> + Send + Unpin>, CoreError>
+        {
+            use crate::messages::ResponseMetadata;
 
-        async fn get_memory(&self, _key: &str) -> Result<Option<MemoryBlock>> {
-            unimplemented!("Test agent")
-        }
+            // Create a simple stream that emits a complete response
+            let events = vec![
+                ResponseEvent::TextChunk {
+                    text: format!("{} test response", self.name),
+                    is_final: true,
+                },
+                ResponseEvent::Complete {
+                    message_id: message.id,
+                    metadata: ResponseMetadata::default(),
+                },
+            ];
 
-        async fn update_memory(&self, _key: &str, _memory: MemoryBlock) -> Result<()> {
-            unimplemented!("Test agent")
-        }
-
-        async fn execute_tool(
-            &self,
-            _tool_name: &str,
-            _params: serde_json::Value,
-        ) -> Result<serde_json::Value> {
-            unimplemented!("Test agent")
-        }
-
-        async fn list_memory_keys(&self) -> Result<Vec<compact_str::CompactString>> {
-            unimplemented!("Test agent")
-        }
-
-        async fn share_memory_with(
-            &self,
-            _memory_key: &str,
-            _target_agent_id: AgentId,
-            _access_level: MemoryPermission,
-        ) -> Result<()> {
-            unimplemented!("Test agent")
-        }
-
-        async fn handle(&self) -> crate::context::state::AgentHandle {
-            unimplemented!("Test agent")
-        }
-
-        async fn last_active(&self) -> Option<chrono::DateTime<chrono::Utc>> {
-            Some(chrono::Utc::now())
-        }
-
-        async fn get_shared_memories(
-            &self,
-        ) -> Result<Vec<(AgentId, compact_str::CompactString, MemoryBlock)>> {
-            unimplemented!("Test agent")
-        }
-
-        async fn system_prompt(&self) -> Vec<String> {
-            vec![]
-        }
-
-        async fn available_tools(&self) -> Vec<Box<dyn DynamicTool>> {
-            vec![]
+            Ok(Box::new(tokio_stream::iter(events)))
         }
 
         async fn state(&self) -> (AgentState, Option<tokio::sync::watch::Receiver<AgentState>>) {
-            (AgentState::Ready, None)
+            let state = self.state.read().unwrap().clone();
+            (state, None)
         }
 
-        async fn set_state(&self, _state: AgentState) -> Result<()> {
-            unimplemented!("Test agent")
-        }
-
-        async fn register_endpoint(
-            &self,
-            _name: String,
-            _endpoint: Arc<dyn crate::context::message_router::MessageEndpoint>,
-        ) -> Result<()> {
-            unimplemented!("Test agent")
-        }
-
-        async fn set_default_user_endpoint(
-            &self,
-            _endpoint: Arc<dyn crate::context::message_router::MessageEndpoint>,
-        ) -> Result<()> {
-            unimplemented!("Test agent")
+        async fn set_state(&self, state: AgentState) -> std::result::Result<(), CoreError> {
+            *self.state.write().unwrap() = state;
+            Ok(())
         }
     }
 
     /// Create a test agent with the given name
-    pub fn create_test_agent(name: &str) -> TestAgent {
+    pub async fn create_test_agent(name: &str) -> TestAgent {
+        let id = AgentId::generate();
+        let runtime = test_runtime(&id.to_string()).await;
+
         TestAgent {
-            id: AgentId::generate(),
+            id,
             name: name.to_string(),
+            runtime: Arc::new(runtime),
+            state: std::sync::RwLock::new(AgentState::Ready),
         }
     }
 
@@ -146,8 +113,6 @@ pub(crate) mod test {
             has_tool_calls: false,
             word_count: content.split_whitespace().count() as u32,
             created_at: Utc::now(),
-            embedding: None,
-            embedding_model: None,
             position: None,
             batch: None,
             sequence_num: None,
@@ -189,7 +154,7 @@ pub(crate) mod test {
     pub async fn collect_agent_responses(
         mut stream: Box<dyn futures::Stream<Item = GroupResponseEvent> + Send + Unpin>,
     ) -> Vec<crate::coordination::groups::AgentResponse> {
-        use crate::message::ResponseMetadata;
+        use crate::messages::ResponseMetadata;
         use tokio_stream::StreamExt;
 
         let mut responses = Vec::new();

@@ -14,7 +14,7 @@ pub struct HeartbeatRequest {
     pub agent_id: AgentId,
     pub tool_name: String,
     pub tool_call_id: String,
-    pub batch_id: Option<crate::agent::SnowflakePosition>,
+    pub batch_id: Option<crate::SnowflakePosition>,
     pub next_sequence_num: Option<u32>,
     pub model_vendor: Option<crate::model::ModelVendor>,
 }
@@ -39,7 +39,7 @@ pub fn check_heartbeat_request(fn_arguments: &Value) -> bool {
 use crate::{
     agent::{Agent, AgentState, ResponseEvent},
     context::NON_USER_MESSAGE_PREFIX,
-    message::{ChatRole, Message},
+    messages::{ChatRole, Message},
 };
 use futures::StreamExt;
 use std::time::Duration;
@@ -120,7 +120,7 @@ pub async fn process_heartbeats<F, Fut>(
                 };
 
                 // Process and handle events
-                match agent.process_message_stream(message).await {
+                match agent.process(message).await {
                     Ok(mut stream) => {
                         while let Some(event) = stream.next().await {
                             handler(event, agent_id.clone(), agent_name.clone()).await;

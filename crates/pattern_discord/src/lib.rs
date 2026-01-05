@@ -2,11 +2,21 @@
 //!
 //! This crate provides Discord bot functionality for Pattern,
 //! enabling natural language interaction with the multi-agent system.
+//!
+//! ## Configuration
+//!
+//! The bot uses `pattern_auth::DiscordBotConfig` for configuration.
+//! Configuration can be loaded from:
+//! - Environment variables via `DiscordBotConfig::from_env()`
+//! - Database via `AuthDb::get_discord_bot_config()`
+//!
+//! The config should be loaded once at startup and passed to the bot.
+//! There are NO runtime environment variable reads in this crate.
 
 pub mod bot;
 pub mod commands;
 pub mod context;
-pub mod data_source;
+//pub mod data_source;
 pub mod endpoints;
 pub mod error;
 pub mod helpers;
@@ -22,38 +32,14 @@ pub use routing::{MessageRouter, RoutingStrategy};
 // Re-export serenity for convenience
 pub use serenity;
 
-/// Discord-specific configuration
-pub mod config {
-    use serde::{Deserialize, Serialize};
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct DiscordConfig {
-        pub token: String,
-        pub prefix: String,
-        pub allowed_channels: Option<Vec<String>>,
-        pub allowed_guilds: Option<Vec<String>>,
-        pub admin_users: Option<Vec<String>>,
-    }
-
-    impl Default for DiscordConfig {
-        fn default() -> Self {
-            Self {
-                token: String::new(),
-                prefix: "!".to_string(),
-                allowed_channels: None,
-                allowed_guilds: None,
-                admin_users: None,
-            }
-        }
-    }
-}
+// Re-export pattern_auth for config access
+pub use pattern_auth;
 
 /// Re-export commonly used types
 pub mod prelude {
     pub use crate::{
         Command, CommandHandler, DiscordBot, DiscordBotConfig, DiscordContext, DiscordError,
         MessageContext, MessageRouter, Result, RoutingStrategy, SlashCommand, UserContext,
-        config::DiscordConfig,
     };
 }
 

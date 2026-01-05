@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            id as \"id!\",\n            block_id as \"block_id!\",\n            snapshot as \"snapshot!\",\n            created_at as \"created_at!: _\",\n            updates_consolidated as \"updates_consolidated!\",\n            frontier\n        FROM memory_block_checkpoints WHERE block_id = ? ORDER BY created_at DESC LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "block_id!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "snapshot!",
+        "ordinal": 2,
+        "type_info": "Blob"
+      },
+      {
+        "name": "created_at!: _",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "updates_consolidated!",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "frontier",
+        "ordinal": 5,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "c7cd59b8503add03a3519bfd3c35da57bb2d95ec7f312eb0fecb6d8db8498b67"
+}

@@ -1,0 +1,68 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            id as \"id!\",\n            name as \"name!\",\n            source_type as \"source_type!: SourceType\",\n            config as \"config!: _\",\n            last_sync_at as \"last_sync_at: _\",\n            sync_cursor,\n            enabled as \"enabled!: bool\",\n            created_at as \"created_at!: _\",\n            updated_at as \"updated_at!: _\"\n        FROM data_sources ORDER BY name\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "name!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "source_type!: SourceType",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "config!: _",
+        "ordinal": 3,
+        "type_info": "Null"
+      },
+      {
+        "name": "last_sync_at: _",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "sync_cursor",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "enabled!: bool",
+        "ordinal": 6,
+        "type_info": "Integer"
+      },
+      {
+        "name": "created_at!: _",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "updated_at!: _",
+        "ordinal": 8,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "fdf60e2819c40c4db72b343976cbedc7a2bf3a2ad33b6b6504ec290eb00a023a"
+}

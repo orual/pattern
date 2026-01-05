@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            group_id as \"group_id!\",\n            agent_id as \"agent_id!\",\n            role as \"role: _\",\n            capabilities as \"capabilities!: _\",\n            joined_at as \"joined_at!: _\"\n        FROM group_members WHERE group_id = ?\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "group_id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "agent_id!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "role: _",
+        "ordinal": 2,
+        "type_info": "Null"
+      },
+      {
+        "name": "capabilities!: _",
+        "ordinal": 3,
+        "type_info": "Null"
+      },
+      {
+        "name": "joined_at!: _",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "a2a2253837048825ddd0099ae6cb3a07baf3548ffd41e2db6f8c24293e8735ca"
+}

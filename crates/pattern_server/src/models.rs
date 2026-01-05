@@ -15,8 +15,7 @@ define_id_type!(RefreshTokenFamilyId, "rtfam");
 
 /// Server-side user model with authentication fields
 /// Extends pattern_core::User with auth-specific fields
-#[derive(Debug, Clone, Entity, Serialize, Deserialize)]
-#[entity(entity_type = "user", crate_path = "::pattern_core")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerUser {
     // Core user fields (from pattern_core::User)
     pub id: UserId,
@@ -36,29 +35,22 @@ pub struct ServerUser {
     pub is_active: bool,
 
     // Relations from pattern_core::User
-    #[entity(relation = "owns")]
     pub owned_agent_ids: Vec<AgentId>,
 
-    #[entity(relation = "created")]
     pub created_task_ids: Vec<TaskId>,
 
-    #[entity(relation = "remembers")]
     pub memory_ids: Vec<MemoryId>,
 
-    #[entity(relation = "scheduled")]
     pub scheduled_event_ids: Vec<EventId>,
 
     // Server-specific relations
-    #[entity(relation = "owns")]
     pub api_keys: Vec<ApiKeyId>,
 
-    #[entity(relation = "owns")]
     pub refresh_token_families: Vec<RefreshTokenFamilyId>,
 }
 
 /// Database record for API keys
-#[derive(Debug, Clone, Entity, Serialize, Deserialize)]
-#[entity(entity_type = "api_key", crate_path = "::pattern_core")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiKey {
     pub id: ApiKeyId,
     pub user_id: UserId,
@@ -72,8 +64,7 @@ pub struct ApiKey {
 }
 
 /// Database record for refresh token families
-#[derive(Debug, Clone, Entity, Serialize, Deserialize)]
-#[entity(entity_type = "refresh_token_family", crate_path = "::pattern_core")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RefreshTokenFamily {
     pub id: RefreshTokenFamilyId,
     pub user_id: UserId,

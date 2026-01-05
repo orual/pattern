@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            block_id as \"block_id!\",\n            agent_id as \"agent_id!\",\n            permission as \"permission!: MemoryPermission\",\n            attached_at as \"attached_at!: _\"\n        FROM shared_block_agents\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "block_id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "agent_id!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "permission!: MemoryPermission",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "attached_at!: _",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "b03116d995f9680cfee42270bd3b0d59257bcffdd9cb28ec19fb0f3fc77ed970"
+}

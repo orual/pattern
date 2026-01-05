@@ -14,9 +14,13 @@ CLAUDE.md.local
 mcp-wrapper.sh
 /logs
 **/**.db
+**/**.db-**
 **.txt
 **.car
 **.log.**
 **.json
+!**/.sqlx/*.json
 **.sql
+!**/migrations/*.sql
 **.surql
+**/**.output

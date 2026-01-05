@@ -1,7 +1,22 @@
 //! Search utilities for scoring adjustments and snippet extraction
 
-use crate::context::state::{ScoredConstellationMessage, ScoredMessage};
-use crate::message::{ContentBlock, Message, MessageContent};
+use crate::messages::{ContentBlock, Message, MessageContent};
+use serde::{Deserialize, Serialize};
+
+/// Search result with relevance score
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScoredMessage {
+    pub message: Message,
+    pub score: f32,
+}
+
+/// Search result for constellation messages with relevance score
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScoredConstellationMessage {
+    pub agent_name: String,
+    pub message: Message,
+    pub score: f32,
+}
 
 /// Adjust score based on content type (downrank reasoning/tool responses)
 pub fn adjust_message_score(msg: &Message, base_score: f32) -> f32 {

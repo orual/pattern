@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            id as \"id!\",\n            timestamp as \"timestamp!: _\",\n            agent_id,\n            event_type as \"event_type!: ActivityEventType\",\n            details as \"details!: _\",\n            importance as \"importance: EventImportance\"\n        FROM activity_events\n        WHERE timestamp >= ?\n        ORDER BY timestamp DESC\n        LIMIT ?\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "timestamp!: _",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "agent_id",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "event_type!: ActivityEventType",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "details!: _",
+        "ordinal": 4,
+        "type_info": "Null"
+      },
+      {
+        "name": "importance: EventImportance",
+        "ordinal": 5,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "217dd760df9f402d4933beffa064fac9126a7e5d395e56f490f6ca1478228ff0"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        UPDATE memory_blocks\n        SET permission = ?, block_type = ?, description = ?, pinned = ?, char_limit = ?, updated_at = datetime('now')\n        WHERE id = ?\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "ec40b3bb658e7084a6cf4becd296f2108afe741476ac9f1c7c052ef3cc1d62a7"
+}

@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            id as \"id!\",\n            folder_id as \"folder_id!\",\n            name as \"name!\",\n            content_type,\n            size_bytes,\n            content,\n            uploaded_at as \"uploaded_at!: _\",\n            indexed_at as \"indexed_at: _\"\n        FROM folder_files WHERE folder_id = ? AND name = ?\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "folder_id!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "name!",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "content_type",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "size_bytes",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "content",
+        "ordinal": 5,
+        "type_info": "Blob"
+      },
+      {
+        "name": "uploaded_at!: _",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "indexed_at: _",
+        "ordinal": 7,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "74b614385c2f258c9cbcd359b3c76187c3dc328277689963324345810b551a14"
+}

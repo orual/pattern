@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT COALESCE(MAX(seq), 0) as max_seq\n        FROM memory_block_updates\n        WHERE block_id = ? AND is_active = 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "max_seq",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ddfebbf62f43e0ad127786324ee052fd2d130bd168b07afb41f41b6512a7dad7"
+}

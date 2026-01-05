@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM oauth_sessions WHERE account_did = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "7c83fc13935116f38e7acf9168569c0dc435be9ba1ec4cad7ba052cc9c5abc2e"
+}

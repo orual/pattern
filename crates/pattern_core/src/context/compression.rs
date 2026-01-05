@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::{
     CoreError, ModelProvider, Result,
-    message::{ChatRole, ContentBlock, Message, MessageContent},
+    messages::{ChatRole, ContentBlock, Message, MessageContent},
 };
 
 /// Detect provider from model string
@@ -80,13 +80,13 @@ impl Default for CompressionStrategy {
 #[derive(Debug, Clone)]
 pub struct CompressionResult {
     /// Batches to keep in the active context
-    pub active_batches: Vec<crate::message::MessageBatch>,
+    pub active_batches: Vec<crate::messages::MessageBatch>,
 
     /// Summary of compressed batches (if applicable)
     pub summary: Option<String>,
 
     /// Batches moved to recall storage
-    pub archived_batches: Vec<crate::message::MessageBatch>,
+    pub archived_batches: Vec<crate::messages::MessageBatch>,
 
     /// Metadata about the compression
     pub metadata: CompressionMetadata,
@@ -199,7 +199,7 @@ impl MessageCompressor {
     /// Compress batches according to the configured strategy
     pub async fn compress(
         &self,
-        batches: Vec<crate::message::MessageBatch>,
+        batches: Vec<crate::messages::MessageBatch>,
         max_messages: usize,
         max_tokens: Option<usize>,
     ) -> Result<CompressionResult> {
@@ -306,7 +306,7 @@ impl MessageCompressor {
     /// Simple truncation strategy with chunk-based compression
     fn truncate_messages(
         &self,
-        batches: Vec<crate::message::MessageBatch>,
+        batches: Vec<crate::messages::MessageBatch>,
         keep_recent: usize,
         max_messages: usize,
         max_tokens: Option<usize>,
@@ -406,7 +406,7 @@ impl MessageCompressor {
     /// Recursive summarization following MemGPT approach
     async fn recursive_summarization(
         &self,
-        mut batches: Vec<crate::message::MessageBatch>,
+        mut batches: Vec<crate::messages::MessageBatch>,
         max_messages: usize,
         max_tokens: Option<usize>,
         chunk_size: usize,
@@ -618,7 +618,7 @@ impl MessageCompressor {
     /// Importance-based compression using heuristics or LLM
     async fn importance_based_compression(
         &self,
-        mut batches: Vec<crate::message::MessageBatch>,
+        mut batches: Vec<crate::messages::MessageBatch>,
         keep_recent: usize,
         keep_important: usize,
         max_messages: usize,
@@ -702,7 +702,7 @@ impl MessageCompressor {
         };
 
         // Score older batches based on their messages
-        let mut scored_batches: Vec<(f32, crate::message::MessageBatch)> = Vec::new();
+        let mut scored_batches: Vec<(f32, crate::messages::MessageBatch)> = Vec::new();
 
         for batch in older_batches.iter() {
             // Calculate batch score as average of message scores
@@ -853,7 +853,7 @@ impl MessageCompressor {
                 msg.text_content().unwrap_or_default()
             );
 
-            let request = crate::message::Request {
+            let request = crate::messages::Request {
                 system: Some(vec![
                     "You are an expert at evaluating message importance.".to_string(),
                 ]),
@@ -895,7 +895,7 @@ impl MessageCompressor {
     /// Time-decay based compression
     fn time_decay_compression(
         &self,
-        mut batches: Vec<crate::message::MessageBatch>,
+        mut batches: Vec<crate::messages::MessageBatch>,
         compress_after_hours: f64,
         min_keep_recent: usize,
         max_messages: usize,
@@ -1006,7 +1006,7 @@ impl MessageCompressor {
     }
 
     /// Estimate tokens for batches
-    fn estimate_tokens_from_batches(&self, batches: &[crate::message::MessageBatch]) -> usize {
+    fn estimate_tokens_from_batches(&self, batches: &[crate::messages::MessageBatch]) -> usize {
         batches
             .iter()
             .flat_map(|b| &b.messages)
@@ -1068,7 +1068,7 @@ impl MessageCompressor {
                 ]
             };
 
-            let request = crate::message::Request {
+            let request = crate::messages::Request {
                 system: Some(system_prompt),
                 messages: messages_for_summary,
                 tools: None,
@@ -1116,7 +1116,7 @@ impl MessageCompressor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::MessageContent;
+    use crate::messages::MessageContent;
 
     #[test]
     fn test_truncation_strategy() {
@@ -1141,7 +1141,7 @@ mod tests {
         while i < messages.len() {
             // Add small delay to prevent snowflake exhaustion in tests
             std::thread::sleep(std::time::Duration::from_millis(1));
-            let batch_id = crate::agent::get_next_message_position_sync();
+            let batch_id = crate::utils::get_next_message_position_sync();
             let mut batch_messages = vec![messages[i].clone()];
             i += 1;
             // Add assistant response if available
@@ -1149,9 +1149,9 @@ mod tests {
                 batch_messages.push(messages[i].clone());
                 i += 1;
             }
-            batches.push(crate::message::MessageBatch::from_messages(
+            batches.push(crate::messages::MessageBatch::from_messages(
                 batch_id,
-                crate::message::BatchType::UserRequest,
+                crate::messages::BatchType::UserRequest,
                 batch_messages,
             ));
         }
@@ -1187,7 +1187,7 @@ mod tests {
         messages.push(Message::user("Search for something"));
         messages.push(Message {
             role: ChatRole::Assistant,
-            content: MessageContent::ToolCalls(vec![crate::message::ToolCall {
+            content: MessageContent::ToolCalls(vec![crate::messages::ToolCall {
                 call_id: "456".to_string(),
                 fn_name: "search".to_string(),
                 fn_arguments: serde_json::json!({"query": "test"}),
@@ -1197,7 +1197,7 @@ mod tests {
         });
         messages.push(Message {
             role: ChatRole::Tool,
-            content: MessageContent::ToolResponses(vec![crate::message::ToolResponse {
+            content: MessageContent::ToolResponses(vec![crate::messages::ToolResponse {
                 call_id: "456".to_string(),
                 content: "Search results".to_string(),
                 is_error: Some(false),
@@ -1209,7 +1209,7 @@ mod tests {
         let mut batches = Vec::new();
         let mut i = 0;
         while i < messages.len() {
-            let batch_id = crate::agent::get_next_message_position_sync();
+            let batch_id = crate::utils::get_next_message_position_sync();
             let mut batch_messages = vec![messages[i].clone()];
             i += 1;
             // Add responses until we hit another user message
@@ -1217,9 +1217,9 @@ mod tests {
                 batch_messages.push(messages[i].clone());
                 i += 1;
             }
-            batches.push(crate::message::MessageBatch::from_messages(
+            batches.push(crate::messages::MessageBatch::from_messages(
                 batch_id,
-                crate::message::BatchType::UserRequest,
+                crate::messages::BatchType::UserRequest,
                 batch_messages,
             ));
         }
@@ -1316,7 +1316,7 @@ mod tests {
         let mut batches = Vec::new();
         let mut i = 0;
         while i < messages.len() {
-            let batch_id = crate::agent::get_next_message_position_sync();
+            let batch_id = crate::utils::get_next_message_position_sync();
             let mut batch_messages = vec![messages[i].clone()];
             i += 1;
             // Add responses until we hit another user message
@@ -1324,9 +1324,9 @@ mod tests {
                 batch_messages.push(messages[i].clone());
                 i += 1;
             }
-            batches.push(crate::message::MessageBatch::from_messages(
+            batches.push(crate::messages::MessageBatch::from_messages(
                 batch_id,
-                crate::message::BatchType::UserRequest,
+                crate::messages::BatchType::UserRequest,
                 batch_messages,
             ));
         }
@@ -1358,28 +1358,28 @@ mod tests {
         let mut batches = Vec::new();
         // Batch 1: user then assistant (complete)
         {
-            let batch_id = crate::agent::get_next_message_position_sync();
-            batches.push(crate::message::MessageBatch::from_messages(
+            let batch_id = crate::utils::get_next_message_position_sync();
+            batches.push(crate::messages::MessageBatch::from_messages(
                 batch_id,
-                crate::message::BatchType::UserRequest,
+                crate::messages::BatchType::UserRequest,
                 vec![Message::user("Message 1"), Message::agent("Ack 1")],
             ));
         }
         // Batch 2: assistant only (complete)
         {
-            let batch_id = crate::agent::get_next_message_position_sync();
-            batches.push(crate::message::MessageBatch::from_messages(
+            let batch_id = crate::utils::get_next_message_position_sync();
+            batches.push(crate::messages::MessageBatch::from_messages(
                 batch_id,
-                crate::message::BatchType::UserRequest,
+                crate::messages::BatchType::UserRequest,
                 vec![Message::agent("Message 2")],
             ));
         }
         // Batch 3: user then assistant (complete and most recent; should be kept)
         {
-            let batch_id = crate::agent::get_next_message_position_sync();
-            batches.push(crate::message::MessageBatch::from_messages(
+            let batch_id = crate::utils::get_next_message_position_sync();
+            batches.push(crate::messages::MessageBatch::from_messages(
                 batch_id,
-                crate::message::BatchType::UserRequest,
+                crate::messages::BatchType::UserRequest,
                 vec![Message::user("Message 3"), Message::agent("Ack 3")],
             ));
         }
@@ -1473,7 +1473,7 @@ mod tests {
         let mut batches = Vec::new();
         let mut i = 0;
         while i < messages.len() {
-            let batch_id = crate::agent::get_next_message_position_sync();
+            let batch_id = crate::utils::get_next_message_position_sync();
             let mut batch_messages = vec![messages[i].clone()];
             i += 1;
             // Add responses until we hit another user message or system message
@@ -1484,9 +1484,9 @@ mod tests {
                 batch_messages.push(messages[i].clone());
                 i += 1;
             }
-            batches.push(crate::message::MessageBatch::from_messages(
+            batches.push(crate::messages::MessageBatch::from_messages(
                 batch_id,
-                crate::message::BatchType::UserRequest,
+                crate::messages::BatchType::UserRequest,
                 batch_messages,
             ));
         }
@@ -1536,10 +1536,10 @@ mod tests {
         // Create batches from messages
         let mut batches = Vec::new();
         for msg in messages {
-            let batch_id = crate::agent::get_next_message_position_sync();
-            batches.push(crate::message::MessageBatch::from_messages(
+            let batch_id = crate::utils::get_next_message_position_sync();
+            batches.push(crate::messages::MessageBatch::from_messages(
                 batch_id,
-                crate::message::BatchType::UserRequest,
+                crate::messages::BatchType::UserRequest,
                 vec![msg],
             ));
         }
@@ -1568,10 +1568,10 @@ mod tests {
         // Create batches from messages
         // Small delay to prevent snowflake exhaustion
         std::thread::sleep(std::time::Duration::from_millis(1));
-        let batch_id = crate::agent::get_next_message_position_sync();
-        let batch = crate::message::MessageBatch::from_messages(
+        let batch_id = crate::utils::get_next_message_position_sync();
+        let batch = crate::messages::MessageBatch::from_messages(
             batch_id,
-            crate::message::BatchType::UserRequest,
+            crate::messages::BatchType::UserRequest,
             messages,
         );
         let batches = vec![batch];

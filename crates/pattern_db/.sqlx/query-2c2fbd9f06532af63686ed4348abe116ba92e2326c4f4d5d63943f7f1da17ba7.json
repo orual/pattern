@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO messages (id, agent_id, position, batch_id, sequence_in_batch,\n                             role, content_json, content_preview, batch_type,\n                             source, source_metadata, is_archived, is_deleted, created_at)\n        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 14
+    },
+    "nullable": []
+  },
+  "hash": "2c2fbd9f06532af63686ed4348abe116ba92e2326c4f4d5d63943f7f1da17ba7"
+}

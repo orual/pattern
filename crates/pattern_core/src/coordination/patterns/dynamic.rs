@@ -13,7 +13,7 @@ use crate::{
         },
         types::{CoordinationPattern, GroupState, SelectionContext},
     },
-    message::Message,
+    messages::Message,
 };
 
 #[derive(Clone)]
@@ -91,10 +91,10 @@ impl GroupManager for DynamicManager {
 
             // Check if message directly addresses an agent by name
             let message_text = match &message.content {
-                crate::message::MessageContent::Text(text) => Some(text.as_str()),
-                crate::message::MessageContent::Parts(parts) => {
+                crate::messages::MessageContent::Text(text) => Some(text.as_str()),
+                crate::messages::MessageContent::Parts(parts) => {
                     parts.iter().find_map(|p| match p {
-                        crate::message::ContentPart::Text(text) => Some(text.as_str()),
+                        crate::messages::ContentPart::Text(text) => Some(text.as_str()),
                         _ => None,
                     })
                 }
@@ -222,7 +222,7 @@ impl GroupManager for DynamicManager {
                     let _ = tx
                         .send(GroupResponseEvent::AgentStarted {
                             agent_id: supervisor_id.clone(),
-                            agent_name: supervisor_name.clone(),
+                            agent_name: supervisor_name.to_string(),
                             role: supervisor_awm.membership.role.clone(),
                         })
                         .await;
@@ -304,7 +304,7 @@ impl GroupManager for DynamicManager {
                     let _ = tx
                         .send(GroupResponseEvent::AgentCompleted {
                             agent_id: supervisor_id.clone(),
-                            agent_name: supervisor_name.clone(),
+                            agent_name: supervisor_name.to_string(),
                             message_id,
                         })
                         .await;
@@ -312,10 +312,10 @@ impl GroupManager for DynamicManager {
                     // Track the response
                     let agent_responses = vec![AgentResponse {
                         agent_id: supervisor_id.clone(),
-                        response: crate::message::Response {
+                        response: crate::messages::Response {
                             content: vec![], // TODO: We'd need to collect content from the stream
                             reasoning: None,
-                            metadata: crate::message::ResponseMetadata::default(),
+                            metadata: crate::messages::ResponseMetadata::default(),
                         },
                         responded_at: Utc::now(),
                     }];
@@ -361,7 +361,7 @@ impl GroupManager for DynamicManager {
 
             for awm in selected_agents {
                 let agent_id = awm.agent.as_ref().id();
-                let agent_name = awm.agent.name();
+                let agent_name = awm.agent.name().to_string();
                 let tx = tx.clone();
                 let message = message.clone();
                 let agent = awm.agent.clone();
@@ -380,7 +380,7 @@ impl GroupManager for DynamicManager {
                         .await;
 
                     // Process message with streaming
-                    match agent.process_message_stream(message).await {
+                    match agent.process(message).await {
                         Ok(mut stream) => {
                             use tokio_stream::StreamExt;
 
@@ -470,10 +470,10 @@ impl GroupManager for DynamicManager {
                             let _ = response_tx
                                 .send(AgentResponse {
                                     agent_id: agent_id.clone(),
-                                    response: crate::message::Response {
+                                    response: crate::messages::Response {
                                         content: vec![], // TODO: Collect actual response content
                                         reasoning: None,
-                                        metadata: crate::message::ResponseMetadata::default(),
+                                        metadata: crate::messages::ResponseMetadata::default(),
                                     },
                                     responded_at: Utc::now(),
                                 })
@@ -570,7 +570,7 @@ mod tests {
             test_utils::test::{create_test_agent, create_test_message},
             types::GroupMemberRole,
         },
-        id::{AgentId, GroupId, RelationId},
+        id::{AgentId, GroupId},
     };
     use chrono::Utc;
     use std::collections::HashMap;
@@ -615,11 +615,10 @@ mod tests {
 
         let agents: Vec<AgentWithMembership<Arc<dyn crate::agent::Agent>>> = vec![
             AgentWithMembership {
-                agent: Arc::new(create_test_agent("Agent1")) as Arc<dyn crate::agent::Agent>,
+                agent: Arc::new(create_test_agent("Agent1").await) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
-                    id: RelationId::generate(),
-                    in_id: AgentId::generate(),
-                    out_id: GroupId::generate(),
+                    agent_id: AgentId::generate(),
+                    group_id: GroupId::generate(),
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
                     is_active: true,
@@ -627,11 +626,10 @@ mod tests {
                 },
             },
             AgentWithMembership {
-                agent: Arc::new(create_test_agent("Agent2")) as Arc<dyn crate::agent::Agent>,
+                agent: Arc::new(create_test_agent("Agent2").await) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
-                    id: RelationId::generate(),
-                    in_id: AgentId::generate(),
-                    out_id: GroupId::generate(),
+                    agent_id: AgentId::generate(),
+                    group_id: GroupId::generate(),
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
                     is_active: true,
@@ -639,11 +637,10 @@ mod tests {
                 },
             },
             AgentWithMembership {
-                agent: Arc::new(create_test_agent("Agent3")) as Arc<dyn crate::agent::Agent>,
+                agent: Arc::new(create_test_agent("Agent3").await) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
-                    id: RelationId::generate(),
-                    in_id: AgentId::generate(),
-                    out_id: GroupId::generate(),
+                    agent_id: AgentId::generate(),
+                    group_id: GroupId::generate(),
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
                     is_active: false, // Inactive - should not be selected

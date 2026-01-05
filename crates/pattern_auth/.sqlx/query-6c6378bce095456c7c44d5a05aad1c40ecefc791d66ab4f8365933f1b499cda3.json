@@ -1,0 +1,122 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT\n                account_did as \"account_did!\",\n                session_id as \"session_id!\",\n                host_url as \"host_url!\",\n                authserver_url as \"authserver_url!\",\n                authserver_token_endpoint as \"authserver_token_endpoint!\",\n                authserver_revocation_endpoint,\n                scopes as \"scopes!\",\n                dpop_key as \"dpop_key!\",\n                dpop_authserver_nonce as \"dpop_authserver_nonce!\",\n                dpop_host_nonce as \"dpop_host_nonce!\",\n                token_iss as \"token_iss!\",\n                token_sub as \"token_sub!\",\n                token_aud as \"token_aud!\",\n                token_scope,\n                refresh_token,\n                access_token as \"access_token!\",\n                token_type as \"token_type!\",\n                expires_at\n            FROM oauth_sessions\n            WHERE account_did = ? AND session_id = ?\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "account_did!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "session_id!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "host_url!",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "authserver_url!",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "authserver_token_endpoint!",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "authserver_revocation_endpoint",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "scopes!",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "dpop_key!",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "dpop_authserver_nonce!",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "dpop_host_nonce!",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "token_iss!",
+        "ordinal": 10,
+        "type_info": "Text"
+      },
+      {
+        "name": "token_sub!",
+        "ordinal": 11,
+        "type_info": "Text"
+      },
+      {
+        "name": "token_aud!",
+        "ordinal": 12,
+        "type_info": "Text"
+      },
+      {
+        "name": "token_scope",
+        "ordinal": 13,
+        "type_info": "Text"
+      },
+      {
+        "name": "refresh_token",
+        "ordinal": 14,
+        "type_info": "Text"
+      },
+      {
+        "name": "access_token!",
+        "ordinal": 15,
+        "type_info": "Text"
+      },
+      {
+        "name": "token_type!",
+        "ordinal": 16,
+        "type_info": "Text"
+      },
+      {
+        "name": "expires_at",
+        "ordinal": 17,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "6c6378bce095456c7c44d5a05aad1c40ecefc791d66ab4f8365933f1b499cda3"
+}

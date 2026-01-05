@@ -36,14 +36,49 @@ impl CliGroupPrinterSink {
 #[async_trait]
 impl GroupEventSink for CliGroupPrinterSink {
     async fn on_event(&self, event: GroupResponseEvent, _ctx: GroupEventContext) {
-        // Reuse the existing CLI printer path
-        crate::chat::print_group_response_event(
-            event,
-            &self.output,
-            &self.agents,
-            self.source_tag.as_deref(),
-        )
-        .await;
+        // Print group response events
+        let tag = self.source_tag.as_deref().unwrap_or("Group");
+        match &event {
+            GroupResponseEvent::Started {
+                pattern,
+                agent_count,
+                ..
+            } => {
+                self.output.status(&format!(
+                    "[{}] Group started: {} pattern, {} agents",
+                    tag, pattern, agent_count
+                ));
+            }
+            GroupResponseEvent::AgentStarted {
+                agent_name, role, ..
+            } => {
+                self.output.status(&format!(
+                    "[{}] {} ({:?}) processing...",
+                    tag, agent_name, role
+                ));
+            }
+            GroupResponseEvent::TextChunk { agent_id, text, .. } => {
+                let name = self
+                    .agents
+                    .iter()
+                    .find(|a| a.agent.id() == *agent_id)
+                    .map(|a| a.agent.name().to_string())
+                    .unwrap_or(agent_id.0.clone());
+                self.output.status(&format!("[{}] {}: {}", tag, name, text));
+            }
+            GroupResponseEvent::ToolCallStarted { fn_name, .. } => {
+                self.output
+                    .status(&format!("[{}] Tool call: {}", tag, fn_name));
+            }
+            GroupResponseEvent::Complete { .. } => {
+                self.output
+                    .status(&format!("[{}] Group processing complete", tag));
+            }
+            _ => {
+                // Other events logged at debug level
+                tracing::debug!("Group event: {:?}", event);
+            }
+        }
     }
 }
 
@@ -93,8 +128,13 @@ impl CliAgentPrinterSink {
 
 #[async_trait]
 impl AgentEventSink for CliAgentPrinterSink {
-    async fn on_event(&self, event: ResponseEvent, _ctx: AgentEventContext) {
-        crate::chat::print_response_event(event, &self.output);
+    async fn on_event(&self, event: ResponseEvent, ctx: AgentEventContext) {
+        let name = if let Some(name) = ctx.agent_name {
+            name
+        } else {
+            "Agent".to_string()
+        };
+        crate::chat::print_response_event(&name, event, &self.output);
     }
 }
 

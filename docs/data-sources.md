@@ -1,317 +1,378 @@
-# Data Sources for Pattern Agents
+# Data Sources
 
-This document describes the data source abstraction system that allows Pattern agents to consume data from various sources including files, streams, and APIs.
-
-## Overview
-
-The data source system provides a flexible way to pipe inputs from various data sources to prompt agents. It supports both pull-based (polling) and push-based (streaming) data consumption patterns with proper cursor management for resumption.
+Pattern's data source system enables agents to consume data from external sources like files, social media, and APIs. It uses two core traits: `DataStream` for event-driven sources and `DataBlock` for document-oriented sources.
 
 ## Architecture
 
-### Core Components
+### Core Traits
 
-1. **DataSource Trait** (`pattern_core/src/data_source/traits.rs`)
-   - Generic trait with associated types for Item, Filter, and Cursor
-   - Supports both `pull()` for polling and `subscribe()` for streaming
-   - Metadata tracking for source status and statistics
+#### DataStream
 
-2. **DataIngestionCoordinator** (`pattern_core/src/data_source/coordinator.rs`)
-   - Manages multiple data sources
-   - Routes data to agents via prompt templates
-   - Type-erased wrapper pattern for generic handling
-   - Integrates with agent's embedding provider
-
-3. **FileDataSource** (`pattern_core/src/data_source/file.rs`)
-   - Concrete implementation for file-based data
-   - Two storage modes:
-     - **Ephemeral**: Simple file monitoring without persistence
-     - **Indexed**: Semantic search with embeddings
-   - Watch support for file change notifications
-   - Multiple cursor types (ModTime, LineNumber, ByteOffset)
-
-4. **StreamBuffer** (`pattern_core/src/data_source/buffer.rs`)
-   - Caches stream data with configurable limits
-   - Time-based and count-based retention
-   - Optional database persistence for historical search
-
-5. **PromptTemplate** (`pattern_core/src/prompt_template.rs`)
-   - Jinja2-style templates using minijinja
-   - Default templates for common data sources
-   - Variable extraction and validation
-
-6. **DataSourceTool** (`pattern_core/src/tool/builtin/data_source.rs`)
-   - Agent-accessible tool for data source operations
-   - Operations: ReadFile, IndexFile, WatchFile, ListSources, etc.
-
-## Usage Guide
-
-### Setting Up Data Sources for an Agent
+For real-time event sources (Bluesky firehose, Discord events):
 
 ```rust
-use pattern_core::{
-    agent::DatabaseAgent,
-    data_source::{DataIngestionCoordinator, FileDataSource, FileStorageMode},
-    context::message_router::AgentMessageRouter,
-};
-
-// 1. Create your agent with an embedding provider
-let agent = DatabaseAgent::new(
-    agent_id,
-    user_id,
-    agent_type,
-    name,
-    system_prompt,
-    memory,
-    db.clone(),
-    model_provider,
-    tool_registry,
-    Some(embedding_provider), // Important for indexed sources
-    heartbeat_sender,
-);
-
-// 2. Create the coordinator with the agent's embedding provider
-let message_router = AgentMessageRouter::new(agent_id.clone(), db.clone());
-let coordinator = DataIngestionCoordinator::new(
-    message_router,
-    agent.embedding_provider(), // Reuse agent's provider
-)?;
-
-// 3. Register the DataSourceTool
-pattern_core::tool::builtin::register_data_source_tool(
-    &tool_registry,
-    Arc::new(RwLock::new(coordinator)),
-);
-```
-
-### File Data Source Examples
-
-#### Simple File Reading
-```rust
-// Ephemeral mode - no indexing, just read
-let source = FileDataSource::new(
-    "/path/to/file.txt",
-    FileStorageMode::Ephemeral,
-);
-
-// Pull latest content
-let items = source.pull(10, None).await?;
-```
-
-#### Indexed File with Semantic Search
-```rust
-// Indexed mode - requires embedding provider
-let source = FileDataSource::new(
-    "/path/to/docs.md",
-    FileStorageMode::Indexed {
-        embedding_provider: agent.embedding_provider().unwrap(),
-        chunk_size: 1000,
-    },
-);
-
-// Content will be chunked and embedded for search
-```
-
-#### Watch File for Changes
-```rust
-let source = FileDataSource::new(path, FileStorageMode::Ephemeral)
-    .with_watch();
-
-// Subscribe to changes
-let stream = source.subscribe(None).await?;
-
-// Process events as they come
-while let Some(event) = stream.next().await {
-    match event {
-        Ok(StreamEvent { item, cursor, timestamp }) => {
-            // Process new file content
-        }
-        Err(e) => {
-            // Handle error
-        }
-    }
-}
-```
-
-### Prompt Templates
-
-The system uses prompt templates to format data for agents:
-
-```rust
-use pattern_core::prompt_template::{PromptTemplate, TemplateRegistry};
-
-// Create a custom template
-let template = PromptTemplate::new(
-    "github_issue",
-    "New issue #{{ number }} by @{{ author }}: {{ title }}\n{{ body }}",
-)?;
-
-// Register it
-let mut registry = TemplateRegistry::new();
-registry.register(template);
-
-// Use it when adding a source
-coordinator.add_source(
-    github_source,
-    buffer_config,
-    "github_issue".to_string(), // Template name
-).await?;
-```
-
-### Default Templates
-
-The system includes default templates:
-- `file_changed` - File modification notifications
-- `stream_item` - Generic stream items
-- `bluesky_post` - Bluesky social posts
-- `scheduled_task` - Scheduled task triggers
-- `data_ingestion` - Generic data ingestion
-
-### Agent Tool Operations
-
-Agents can interact with data sources through the DataSourceTool:
-
-```yaml
-# Read a file
-operation: ReadFile
-path: "/home/user/notes.txt"
-lines: # Optional range
-  start: 0
-  end: 100
-
-# Index a file for semantic search
-operation: IndexFile
-path: "/home/user/docs/manual.pdf"
-chunk_size: 2000
-
-# Watch a file for changes
-operation: WatchFile
-path: "/home/user/config.json"
-notify: true
-template_name: "config_changed"
-
-# List all data sources
-operation: ListSources
-
-# Get buffer statistics
-operation: GetBufferStats
-source_id: "file_/home/user/data.log"
-```
-
-## Implementing Custom Data Sources
-
-### Bluesky Firehose Implementation
-
-The Bluesky firehose data source is fully implemented and uses the rocketman crate for Jetstream consumption:
-
-```rust
-use rocketman::{
-    connection::JetstreamConnection,
-    handler,
-    ingestion::LexiconIngestor,
-    options::JetstreamOptions,
-    types::event::{Commit, Event, Operation},
-};
-
-pub struct BlueskyFirehoseSource {
-    source_id: String,
-    endpoint: String,
-    filter: BlueskyFilter,
-    current_cursor: Option<BlueskyFirehoseCursor>,
-    stats: SourceStats,
-    buffer: Option<Arc<parking_lot::Mutex<StreamBuffer<BlueskyPost, BlueskyFirehoseCursor>>>>,
-}
-
-// Rich post structure with facets for mentions/links
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BlueskyPost {
-    pub uri: String,
-    pub did: String,
-    pub handle: String,
-    pub text: String,
-    pub created_at: DateTime<Utc>,
-    pub reply_to: Option<String>,
-    pub embed: Option<serde_json::Value>,
-    pub langs: Vec<String>,
-    pub labels: Vec<String>,
-    pub facets: Vec<Facet>, // Rich text annotations
-}
-
-// Custom ingestor implementing rocketman's LexiconIngestor trait
-struct PostIngestor {
-    tx: tokio::sync::mpsc::UnboundedSender<Result<StreamEvent<BlueskyPost, BlueskyFirehoseCursor>>>,
-    filter: BlueskyFilter,
-    buffer: Option<Arc<parking_lot::Mutex<StreamBuffer<BlueskyPost, BlueskyFirehoseCursor>>>>,
-}
-
 #[async_trait]
-impl LexiconIngestor for PostIngestor {
-    async fn ingest(&self, event: Event<serde_json::Value>) -> anyhow::Result<()> {
-        // Process commit events for posts
-        if let Some(ref commit) = event.commit {
-            if commit.collection == "app.bsky.feed.post" 
-                && matches!(commit.operation, Operation::Create) {
-                // Parse and filter post
-                // Send to channel and buffer
-            }
-        }
-        Ok(())
+pub trait DataStream: Send + Sync + std::fmt::Debug {
+    /// Unique identifier for this source
+    fn source_id(&self) -> &str;
+
+    /// Human-readable name
+    fn name(&self) -> &str;
+
+    /// Memory block schemas this source may create
+    fn block_schemas(&self) -> Vec<BlockSchemaSpec>;
+
+    /// Tool rules required when this source is active
+    fn required_tools(&self) -> Vec<ToolRule>;
+
+    /// Start the stream and return a notification receiver
+    async fn start(
+        &self,
+        ctx: Arc<dyn ToolContext>,
+        owner: AgentId,
+    ) -> Result<broadcast::Receiver<Notification>>;
+
+    /// Stop the stream
+    async fn stop(&self) -> Result<()>;
+
+    /// Pause notifications (source may continue internally)
+    fn pause(&self);
+
+    /// Resume notifications
+    fn resume(&self);
+
+    /// Current status
+    fn status(&self) -> StreamStatus;
+
+    /// Whether this source supports pull-based access
+    fn supports_pull(&self) -> bool;
+
+    /// Pull items if supported (optional)
+    async fn pull(
+        &self,
+        _limit: usize,
+        _cursor: Option<StreamCursor>,
+    ) -> Result<Vec<Notification>> {
+        Ok(vec![])
     }
 }
+```
 
-// Usage with rocketman's handle_message
-let msg_rx = connection.get_msg_rx();
-let reconnect_tx = connection.get_reconnect_tx();
-let mut ingestors: HashMap<String, Box<dyn LexiconIngestor + Send + Sync>> = HashMap::new();
-ingestors.insert("app.bsky.feed.post".to_string(), Box::new(post_ingestor));
+#### DataBlock
 
-while let Ok(message) = msg_rx.recv_async().await {
-    handler::handle_message(message, &ingestors, reconnect_tx.clone(), cursor_arc.clone()).await?;
+For document-oriented sources (files, external storage):
+
+```rust
+#[async_trait]
+pub trait DataBlock: Send + Sync + std::fmt::Debug {
+    /// Unique identifier for this source
+    fn source_id(&self) -> &str;
+
+    /// Human-readable name
+    fn name(&self) -> &str;
+
+    /// Schema for blocks created by this source
+    fn block_schema(&self) -> BlockSchemaSpec;
+
+    /// Permission rules for block access
+    fn permission_rules(&self) -> Vec<PermissionRule>;
+
+    /// Check if this source handles the given path
+    fn matches(&self, path: &Path) -> bool;
+
+    /// Current status
+    fn status(&self) -> BlockSourceStatus;
+
+    /// Load a document into a memory block
+    async fn load(
+        &self,
+        path: &Path,
+        owner: AgentId,
+        ctx: Arc<dyn ToolContext>,
+    ) -> Result<BlockRef>;
+
+    /// Create a new document
+    async fn create(
+        &self,
+        path: &Path,
+        content: Option<&str>,
+        owner: AgentId,
+        ctx: Arc<dyn ToolContext>,
+    ) -> Result<BlockRef>;
+
+    /// Save block back to external storage
+    async fn save(&self, block_ref: &BlockRef, ctx: Arc<dyn ToolContext>) -> Result<()>;
+
+    /// Delete a document
+    async fn delete(&self, path: &Path) -> Result<()>;
+
+    /// Reconcile after external changes
+    async fn reconcile(
+        &self,
+        paths: &[PathBuf],
+        ctx: Arc<dyn ToolContext>,
+    ) -> Result<Vec<ReconcileResult>>;
+
+    /// Get version history
+    async fn history(&self, block_ref: &BlockRef) -> Result<Vec<VersionInfo>>;
+
+    /// Rollback to previous version
+    async fn rollback(
+        &self,
+        block_ref: &BlockRef,
+        version: &str,
+        ctx: Arc<dyn ToolContext>,
+    ) -> Result<()>;
+
+    /// Diff between versions
+    async fn diff(
+        &self,
+        block_ref: &BlockRef,
+        from: Option<&str>,
+        to: Option<&str>,
+    ) -> Result<String>;
 }
 ```
 
-## Type Erasure Pattern
+### Supporting Types
 
-The coordinator uses a type erasure pattern to handle concrete data sources generically:
+#### Notification
+
+Event from a stream source:
 
 ```rust
-// Your source has concrete types
-let file_source: FileDataSource; // Item=FileItem, Cursor=FileCursor
-
-// Coordinator wraps it in TypeErasedSource
-coordinator.add_source(file_source, config, template).await?;
-
-// Internally converts to Item=Value, Cursor=Value
-// This allows the coordinator to handle any data source type
+pub struct Notification {
+    pub id: String,
+    pub batch_id: String,
+    pub source_id: String,
+    pub message: Message,
+    pub block_ids: Vec<String>,
+    pub priority: NotificationPriority,
+    pub created_at: DateTime<Utc>,
+}
 ```
 
-## Cursor Management
+#### BlockRef
 
-Cursors enable resumption after interruption:
+Reference to a loaded block:
 
-- **Time-based**: For sources ordered by time (e.g., ModTime for files)
-- **Sequence-based**: For sources with sequence numbers (e.g., Bluesky firehose)
-- **Position-based**: For sources with byte/line positions (e.g., log files)
+```rust
+pub struct BlockRef {
+    pub block_id: String,
+    pub agent_id: AgentId,
+    pub source_id: String,
+    pub external_path: PathBuf,
+    pub loaded_at: DateTime<Utc>,
+    pub version: Option<String>,
+}
+```
 
-The system automatically serializes/deserializes cursors for persistence.
+#### BlockSchemaSpec
+
+Schema specification for blocks a source creates:
+
+```rust
+pub struct BlockSchemaSpec {
+    pub label_template: String,  // e.g., "bluesky_user_{handle}"
+    pub schema: BlockSchema,
+    pub description: String,
+    pub ephemeral: bool,         // Working block vs Core block
+}
+```
+
+## Source Manager
+
+The `SourceManager` trait (implemented by `RuntimeContext`) coordinates source operations:
+
+```rust
+#[async_trait]
+pub trait SourceManager: Send + Sync + std::fmt::Debug {
+    // Stream operations
+    fn list_streams(&self) -> Vec<String>;
+    fn get_stream_info(&self, source_id: &str) -> Option<StreamSourceInfo>;
+    async fn pause_stream(&self, source_id: &str) -> Result<()>;
+    async fn resume_stream(&self, source_id: &str, ctx: Arc<dyn ToolContext>) -> Result<()>;
+    async fn subscribe_to_stream(
+        &self,
+        agent_id: &AgentId,
+        source_id: &str,
+        ctx: Arc<dyn ToolContext>,
+    ) -> Result<broadcast::Receiver<Notification>>;
+    async fn pull_from_stream(
+        &self,
+        source_id: &str,
+        limit: usize,
+        cursor: Option<StreamCursor>,
+    ) -> Result<Vec<Notification>>;
+
+    // Block operations
+    fn list_block_sources(&self) -> Vec<String>;
+    fn get_block_source_info(&self, source_id: &str) -> Option<BlockSourceInfo>;
+    async fn load_block(&self, source_id: &str, path: &Path, owner: AgentId) -> Result<BlockRef>;
+    async fn create_block(
+        &self,
+        source_id: &str,
+        path: &Path,
+        content: Option<&str>,
+        owner: AgentId,
+    ) -> Result<BlockRef>;
+    async fn save_block(&self, source_id: &str, block_ref: &BlockRef) -> Result<()>;
+    async fn delete_block(&self, source_id: &str, path: &Path) -> Result<()>;
+    fn find_block_source_for_path(&self, path: &Path) -> Option<Arc<dyn DataBlock>>;
+
+    // Edit routing
+    async fn handle_block_edit(&self, edit: &BlockEdit) -> Result<EditFeedback>;
+}
+```
+
+## Implementations
+
+### BlueskyStream
+
+Consumes Bluesky firehose via Jetstream:
+
+```rust
+let stream = BlueskyStream::new("bluesky", tool_context.clone())
+    .with_agent_did(did.clone())
+    .with_authenticated_agent(agent.clone())
+    .with_config(config.clone());
+
+// Start consuming
+let rx = stream.start(ctx.clone(), owner).await?;
+
+// Notifications routed to target agent/group
+while let Ok(notification) = rx.recv().await {
+    // Process notification.message
+}
+```
+
+Features:
+- Jetstream WebSocket consumption
+- DID/keyword/language filtering
+- Friend list (bypass filters)
+- Exclusion lists
+- Thread context fetching
+- Post batching (20-second windows)
+- Agent participation filtering
+- Rich text parsing (mentions, links)
+
+### FileSource
+
+Manages file-backed memory blocks:
+
+```rust
+let source = FileSource::from_config(path, &config);
+
+// Load file into block
+let block_ref = source.load(&file_path, owner, ctx.clone()).await?;
+
+// Access via memory
+let doc = memory.get_block(&owner.0, &block_ref.block_id).await?;
+let content = doc.render();
+
+// Modify and save
+doc.set_text("new content", true)?;
+source.save(&block_ref, ctx.clone()).await?;
+```
+
+Features:
+- Path-based matching with globs
+- Permission rules per pattern
+- Reconciliation after external changes
+- Version history via Loro CRDT
+- Diff between versions
+
+## Configuration
+
+### Via TOML
+
+```toml
+[agent.data_sources.bluesky]
+type = "bluesky"
+name = "bluesky"
+target = "Main Support"
+jetstream_endpoint = "wss://jetstream1.us-east.fire.hose.cam/subscribe"
+friends = ["did:plc:friend1"]
+keywords = ["adhd"]
+require_agent_participation = true
+
+[agent.data_sources.notes]
+type = "file"
+name = "notes"
+paths = ["./notes"]
+recursive = true
+include_patterns = ["*.md"]
+
+[[agent.data_sources.notes.permission_rules]]
+pattern = "*.md"
+permission = "read_write"
+```
+
+### Programmatic
+
+```rust
+use pattern_core::config::DataSourceConfig;
+
+// Create from config
+let blocks = config.create_blocks(dbs.clone()).await?;
+let streams = config.create_streams(dbs.clone(), tool_context.clone()).await?;
+
+// Register with runtime
+for block in blocks {
+    runtime.register_block_source(block);
+}
+for stream in streams {
+    runtime.register_stream_source(stream);
+}
+```
+
+## Notification Routing
+
+Streams route notifications to agents or groups:
+
+```rust
+// BlueskyStream starts routing task when target is configured
+let target = config.target.clone();
+let routing_rx = tx.subscribe();
+
+tokio::spawn(async move {
+    route_notifications(routing_rx, target, source_id, ctx).await;
+});
+
+// route_notifications tries agent first, then group
+async fn route_notifications(...) {
+    match router.route_message_to_agent(&target, message.clone(), origin).await {
+        Ok(Some(_)) => { /* routed to agent */ }
+        Ok(None) => {
+            // Agent not found, try as group
+            router.route_message_to_group(&target, message, origin).await?;
+        }
+        Err(e) => { /* handle error */ }
+    }
+}
+```
+
+## Edit Feedback
+
+Block sources can provide feedback on edits:
+
+```rust
+pub enum EditFeedback {
+    Applied { message: Option<String> },
+    Pending { message: Option<String> },
+    Rejected { reason: String },
+}
+```
+
+This enables:
+- Validation before writing
+- Async save operations
+- Rejection with explanation
 
 ## Best Practices
 
-1. **Use the agent's embedding provider** - Don't create duplicate providers
-2. **Choose appropriate storage mode** - Indexed only when semantic search is needed
-3. **Set reasonable buffer limits** - Balance between memory usage and data availability
-4. **Use descriptive source IDs** - Makes debugging and monitoring easier
-5. **Handle errors gracefully** - Streams can fail, have retry logic
-6. **Update cursors atomically** - Ensure exactly-once processing
-
-## Future Extensions
-
-The data source abstraction is designed to support:
-- Database change streams
-- Message queue consumers (Kafka, RabbitMQ)
-- WebSocket streams
-- RSS/Atom feeds
-- Email monitoring
-- Calendar event streams
-- IoT sensor data
-
-Each just needs to implement the `DataSource` trait with appropriate Item, Filter, and Cursor types.
+1. **Use appropriate source type**: DataStream for events, DataBlock for documents
+2. **Configure targets carefully**: Route to groups for coordination, agents for direct processing
+3. **Set permission rules**: Control agent access to external data
+4. **Handle reconciliation**: External changes should trigger reconcile
+5. **Use batching**: BlueskyStream batches posts to reduce notification frequency

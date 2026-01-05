@@ -152,7 +152,10 @@ mod embeddings_tests {
             }
             #[cfg(not(feature = "embed-candle"))]
             {
-                panic!("No embedding provider available");
+                eprintln!(
+                    "Skipping test: no embedding provider available (set OPENAI_API_KEY or enable embed-candle feature)"
+                );
+                return;
             }
         };
 

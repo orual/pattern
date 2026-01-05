@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM group_members WHERE group_id = ? AND agent_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "b1ecd9bb51363e0ce2d08862dfe6e4b6df64d137b3fa0a2eacefe3bf9a27dee2"
+}

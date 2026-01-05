@@ -1,5 +1,5 @@
 [package]
-name = "pattern_cli"
+name = "pattern-cli"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -8,30 +8,33 @@ repository.workspace = true
 homepage.workspace = true
 
 [[bin]]
-name = "pattern-cli"
+name = "pattern"
 path = "src/main.rs"
 
 [features]
-default = ["oauth", "discord", "surreal-remote"]
+default = ["oauth", "discord"]
 oauth = ["pattern-core/oauth"]
 discord = ["pattern-discord"]
-surreal-remote = ["pattern-core/surreal-remote"]
+legacy-convert = ["dep:pattern-surreal-compat"]
 
 [dependencies]
 # Workspace dependencies
-pattern-core = { path = "../pattern_core" }
+pattern-core = { path = "../pattern_core", features = ["export"] }
 pattern-discord = { path = "../pattern_discord", optional = true }
+pattern-db = { path = "../pattern_db"}
+pattern-surreal-compat = { path = "../pattern_surreal_compat", optional = true }
+pattern-auth = { path = "../pattern_auth" }
 genai = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
+toml_edit = "0.22"
 miette = { workspace = true, features = ["fancy", "syntect-highlighter"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
-surrealdb = { workspace = true }
 clap = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
@@ -52,13 +55,8 @@ rustyline-async = "0.4"
 rpassword = "7.3"
 
 # ATProto dependencies
-atrium-api = { workspace = true }
-atrium-xrpc = { workspace = true }
-atrium-xrpc-client = { version = "0.5.13", features = ["reqwest"] }
-atrium-common = { workspace = true }
-atrium-identity = { workspace = true }
-hickory-resolver = "0.24"
 reqwest = { workspace = true }
+jacquard = "0.9"
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }

@@ -7,7 +7,8 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{CoreError, Result, context::AgentHandle, tool::AiTool};
+use crate::runtime::ToolContext;
+use crate::{CoreError, Result, tool::AiTool};
 
 /// Input for calculator operations
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -47,22 +48,30 @@ fn random_u32() -> u32 {
 }
 
 /// Calculator tool using fend-core for mathematical computations
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CalculatorTool {
     #[allow(dead_code)]
-    pub(crate) handle: AgentHandle,
+    ctx: Arc<dyn ToolContext>,
     /// Shared fend context for maintaining variables across calculations
     context: Arc<Mutex<fend_core::Context>>,
 }
 
+impl std::fmt::Debug for CalculatorTool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CalculatorTool")
+            .field("agent_id", &self.ctx.agent_id())
+            .finish()
+    }
+}
+
 impl CalculatorTool {
     /// Create a new calculator tool
-    pub fn new(handle: AgentHandle) -> Self {
+    pub fn new(ctx: Arc<dyn ToolContext>) -> Self {
         let mut context = fend_core::Context::new();
         context.set_random_u32_fn(random_u32);
 
         Self {
-            handle,
+            ctx,
             context: Arc::new(Mutex::new(context)),
         }
     }
@@ -172,17 +181,24 @@ Use this for any mathematical calculations, unit conversions, or complex computa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::AgentHandle;
+    use crate::db::ConstellationDatabases;
+    use crate::tool::builtin::test_utils::MockToolContext;
+    use std::sync::Arc;
 
-    fn create_test_tool() -> CalculatorTool {
-        let memory = crate::memory::Memory::new();
-        let handle = AgentHandle::test_with_memory(memory);
-        CalculatorTool::new(handle)
+    async fn create_test_tool() -> CalculatorTool {
+        let dbs = Arc::new(
+            ConstellationDatabases::open_in_memory()
+                .await
+                .expect("Failed to create test dbs"),
+        );
+        let memory = Arc::new(crate::memory::MemoryCache::new(Arc::clone(&dbs)));
+        let ctx = Arc::new(MockToolContext::new("test-agent", memory, dbs));
+        CalculatorTool::new(ctx)
     }
 
     #[tokio::test]
     async fn test_basic_arithmetic() {
-        let tool = create_test_tool();
+        let tool = create_test_tool().await;
         let meta = crate::tool::ExecutionMeta::default();
 
         let input = CalculatorInput {
@@ -198,7 +214,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiplication() {
-        let tool = create_test_tool();
+        let tool = create_test_tool().await;
         let meta = crate::tool::ExecutionMeta::default();
 
         let input = CalculatorInput {
@@ -212,7 +228,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_unit_conversion() {
-        let tool = create_test_tool();
+        let tool = create_test_tool().await;
         let meta = crate::tool::ExecutionMeta::default();
 
         let input = CalculatorInput {
@@ -226,7 +242,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mathematical_functions() {
-        let tool = create_test_tool();
+        let tool = create_test_tool().await;
         let meta = crate::tool::ExecutionMeta::default();
 
         let input = CalculatorInput {
@@ -240,7 +256,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_variables_persist() {
-        let tool = create_test_tool();
+        let tool = create_test_tool().await;
         let meta = crate::tool::ExecutionMeta::default();
 
         // Set a variable
@@ -262,7 +278,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reset_context() {
-        let tool = create_test_tool();
+        let tool = create_test_tool().await;
         let meta = crate::tool::ExecutionMeta::default();
 
         // Set a variable
@@ -283,7 +299,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_approximate_result() {
-        let tool = create_test_tool();
+        let tool = create_test_tool().await;
         let meta = crate::tool::ExecutionMeta::default();
 
         let input = CalculatorInput {
@@ -316,7 +332,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_complex_calculation() {
-        let tool = create_test_tool();
+        let tool = create_test_tool().await;
         let meta = crate::tool::ExecutionMeta::default();
 
         let input = CalculatorInput {
@@ -331,7 +347,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_demonstration() {
-        let tool = create_test_tool();
+        let tool = create_test_tool().await;
         let meta = crate::tool::ExecutionMeta::default();
 
         // Test basic arithmetic

@@ -5,7 +5,7 @@ use std::fmt::Debug;
 
 use crate::{
     Result,
-    message::{Request, Response},
+    messages::{Request, Response},
 };
 
 pub mod defaults;
@@ -376,10 +376,6 @@ impl ModelProvider for GenAiClient {
         self.validate_image_urls(&mut request).await;
 
         // Convert URL images to base64 for Gemini models
-        tracing::debug!(
-            "Model ID: {}, checking if it starts with 'gemini'",
-            model_info.id
-        );
         if model_info.id.starts_with("gemini") {
             tracing::debug!(
                 "Converting URLs to base64 for Gemini model: {}",
@@ -387,7 +383,7 @@ impl ModelProvider for GenAiClient {
             );
             self.convert_urls_to_base64_for_gemini(&mut request).await?;
         } else {
-            tracing::debug!(
+            tracing::trace!(
                 "Skipping base64 conversion for non-Gemini model: {}",
                 model_info.id
             );
@@ -396,7 +392,7 @@ impl ModelProvider for GenAiClient {
         // Log the full request
         let chat_request = request.as_chat_request()?;
 
-        tracing::debug!("Chat Request:\n{:#?}", chat_request);
+        tracing::trace!("Chat Request:\n{:#?}", chat_request);
 
         let response = match self
             .client
@@ -408,6 +404,7 @@ impl ModelProvider for GenAiClient {
                 response
             }
             Err(e) => {
+                tracing::debug!("Request:\n{:#?}", request);
                 crate::log_error!("GenAI API error", e);
                 return Err(crate::CoreError::from_genai_error(
                     "genai",
@@ -434,7 +431,7 @@ impl ModelProvider for GenAiClient {
 impl GenAiClient {
     /// Validate that image URLs are accessible, remove broken ones
     async fn validate_image_urls(&self, request: &mut Request) {
-        use crate::message::{ContentPart, ImageSource, MessageContent};
+        use crate::messages::{ContentPart, ImageSource, MessageContent};
 
         for message in &mut request.messages {
             if let MessageContent::Parts(ref mut parts) = message.content {
@@ -485,7 +482,7 @@ impl GenAiClient {
 
     /// Convert URL images to base64 for Gemini compatibility
     async fn convert_urls_to_base64_for_gemini(&self, request: &mut Request) -> Result<()> {
-        use crate::message::{ContentPart, ImageSource, MessageContent};
+        use crate::messages::{ContentPart, ImageSource, MessageContent};
         use std::sync::Arc;
 
         for message in &mut request.messages {
@@ -587,7 +584,7 @@ impl ModelProvider for MockModelProvider {
     }
 
     async fn complete(&self, _options: &ResponseOptions, _request: Request) -> Result<Response> {
-        use crate::message::MessageContent;
+        use crate::messages::MessageContent;
 
         Ok(Response {
             content: vec![MessageContent::from_text(&self.response)],

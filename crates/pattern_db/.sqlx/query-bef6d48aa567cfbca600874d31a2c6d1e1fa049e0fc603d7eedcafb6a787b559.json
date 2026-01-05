@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO group_members (group_id, agent_id, role, capabilities, joined_at)\n        VALUES (?, ?, ?, ?, ?)\n        ON CONFLICT(group_id, agent_id) DO UPDATE SET\n            role = excluded.role,\n            capabilities = excluded.capabilities\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "bef6d48aa567cfbca600874d31a2c6d1e1fa049e0fc603d7eedcafb6a787b559"
+}

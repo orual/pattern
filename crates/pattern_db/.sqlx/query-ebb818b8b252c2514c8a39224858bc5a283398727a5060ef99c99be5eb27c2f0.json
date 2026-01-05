@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            id as \"id!\",\n            agent_id as \"agent_id!\",\n            content as \"content!\",\n            metadata as \"metadata: _\",\n            chunk_index as \"chunk_index!\",\n            parent_entry_id,\n            created_at as \"created_at!: _\"\n        FROM archival_entries WHERE id = ?\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "agent_id!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "content!",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "metadata: _",
+        "ordinal": 3,
+        "type_info": "Null"
+      },
+      {
+        "name": "chunk_index!",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "parent_entry_id",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at!: _",
+        "ordinal": 6,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "ebb818b8b252c2514c8a39224858bc5a283398727a5060ef99c99be5eb27c2f0"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO folder_files (id, folder_id, name, content_type, size_bytes, content, uploaded_at, indexed_at)\n        VALUES (?, ?, ?, ?, ?, ?, ?, ?)\n        ON CONFLICT(folder_id, name) DO UPDATE SET\n            content_type = excluded.content_type,\n            size_bytes = excluded.size_bytes,\n            content = excluded.content,\n            uploaded_at = excluded.uploaded_at\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "6fa3dd68d87a157674b5015964e2f1640f800524f5c650c7002d883d6dba5c4f"
+}

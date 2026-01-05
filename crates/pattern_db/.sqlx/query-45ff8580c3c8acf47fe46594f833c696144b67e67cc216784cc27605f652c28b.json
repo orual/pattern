@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO memory_block_checkpoints (block_id, snapshot, created_at, updates_consolidated, frontier)\n        VALUES (?, ?, ?, ?, ?)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "45ff8580c3c8acf47fe46594f833c696144b67e67cc216784cc27605f652c28b"
+}

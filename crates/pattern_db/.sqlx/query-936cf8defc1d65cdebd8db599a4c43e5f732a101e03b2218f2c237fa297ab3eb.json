@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE memory_blocks SET frontier = ?, updated_at = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "936cf8defc1d65cdebd8db599a4c43e5f732a101e03b2218f2c237fa297ab3eb"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            INSERT INTO oauth_auth_requests (\n                state, authserver_url, account_did, scopes, request_uri,\n                authserver_token_endpoint, authserver_revocation_endpoint,\n                pkce_verifier, dpop_key, dpop_nonce, created_at, expires_at\n            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n            ON CONFLICT (state) DO UPDATE SET\n                authserver_url = excluded.authserver_url,\n                account_did = excluded.account_did,\n                scopes = excluded.scopes,\n                request_uri = excluded.request_uri,\n                authserver_token_endpoint = excluded.authserver_token_endpoint,\n                authserver_revocation_endpoint = excluded.authserver_revocation_endpoint,\n                pkce_verifier = excluded.pkce_verifier,\n                dpop_key = excluded.dpop_key,\n                dpop_nonce = excluded.dpop_nonce,\n                expires_at = excluded.expires_at\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 12
+    },
+    "nullable": []
+  },
+  "hash": "28076aa4f19efa9cf79fa6b8a20a20e573baf4df20cddf98a7126b31c1bc0765"
+}

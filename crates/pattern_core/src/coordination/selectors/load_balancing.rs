@@ -93,13 +93,12 @@ impl AgentSelector for LoadBalancingSelector {
 mod tests {
     use super::*;
     use crate::{
-        AgentId,
         coordination::{
             groups::GroupMembership,
-            test_utils::test::{TestAgent, create_test_message},
+            test_utils::test::{create_test_agent, create_test_message},
             types::GroupMemberRole,
         },
-        id::{GroupId, RelationId},
+        id::{AgentId, GroupId},
     };
     use chrono::Utc;
 
@@ -107,21 +106,22 @@ mod tests {
     async fn test_load_balancing_selector() {
         let selector = LoadBalancingSelector;
 
-        let agent1_id = AgentId::generate();
-        let agent2_id = AgentId::generate();
-        let agent3_id = AgentId::generate();
+        // Create agents first to get their IDs
+        let agent1 = create_test_agent("agent1").await;
+        let agent2 = create_test_agent("agent2").await;
+        let agent3 = create_test_agent("agent3").await;
+
+        let agent1_id = agent1.id.clone();
+        let agent2_id = agent2.id.clone();
+        let agent3_id = agent3.id.clone();
 
         // Create agents
         let agents: Vec<AgentWithMembership<Arc<dyn crate::agent::Agent>>> = vec![
             AgentWithMembership {
-                agent: Arc::new(TestAgent {
-                    id: agent1_id.clone(),
-                    name: "agent1".to_string(),
-                }) as Arc<dyn crate::agent::Agent>,
+                agent: Arc::new(agent1) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
-                    id: RelationId::generate(),
-                    in_id: AgentId::generate(),
-                    out_id: GroupId::generate(),
+                    agent_id: AgentId::generate(),
+                    group_id: GroupId::generate(),
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
                     is_active: true,
@@ -129,14 +129,10 @@ mod tests {
                 },
             },
             AgentWithMembership {
-                agent: Arc::new(TestAgent {
-                    id: agent2_id.clone(),
-                    name: "agent2".to_string(),
-                }) as Arc<dyn crate::agent::Agent>,
+                agent: Arc::new(agent2) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
-                    id: RelationId::generate(),
-                    in_id: AgentId::generate(),
-                    out_id: GroupId::generate(),
+                    agent_id: AgentId::generate(),
+                    group_id: GroupId::generate(),
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
                     is_active: true,
@@ -144,14 +140,10 @@ mod tests {
                 },
             },
             AgentWithMembership {
-                agent: Arc::new(TestAgent {
-                    id: agent3_id.clone(),
-                    name: "agent3".to_string(),
-                }) as Arc<dyn crate::agent::Agent>,
+                agent: Arc::new(agent3) as Arc<dyn crate::agent::Agent>,
                 membership: GroupMembership {
-                    id: RelationId::generate(),
-                    in_id: AgentId::generate(),
-                    out_id: GroupId::generate(),
+                    agent_id: AgentId::generate(),
+                    group_id: GroupId::generate(),
                     joined_at: Utc::now(),
                     role: GroupMemberRole::Regular,
                     is_active: true,

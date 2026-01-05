@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE memory_block_updates SET is_active = 1 WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "0da841a03e7737cb95ecccc7a17d117c27a3fe6cd67c52f458806075d2921646"
+}

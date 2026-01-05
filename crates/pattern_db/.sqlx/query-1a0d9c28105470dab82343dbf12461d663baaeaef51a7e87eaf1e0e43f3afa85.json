@@ -1,0 +1,68 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT\n                id as \"id!\",\n                block_id as \"block_id!\",\n                seq as \"seq!\",\n                update_blob as \"update_blob!\",\n                byte_size as \"byte_size!\",\n                source,\n                frontier,\n                is_active as \"is_active!: bool\",\n                created_at as \"created_at!: _\"\n            FROM memory_block_updates\n            WHERE block_id = ? AND is_active = 1\n            ORDER BY seq ASC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "block_id!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "seq!",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "update_blob!",
+        "ordinal": 3,
+        "type_info": "Blob"
+      },
+      {
+        "name": "byte_size!",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "source",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "frontier",
+        "ordinal": 6,
+        "type_info": "Blob"
+      },
+      {
+        "name": "is_active!: bool",
+        "ordinal": 7,
+        "type_info": "Integer"
+      },
+      {
+        "name": "created_at!: _",
+        "ordinal": 8,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "1a0d9c28105470dab82343dbf12461d663baaeaef51a7e87eaf1e0e43f3afa85"
+}

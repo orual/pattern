@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO shared_block_agents (block_id, agent_id, permission, attached_at)\n        VALUES (?, ?, ?, ?)\n        ON CONFLICT(block_id, agent_id) DO UPDATE SET\n            permission = excluded.permission,\n            attached_at = excluded.attached_at\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "1053c192bf53f4a5e017e8082b2a5cc4c2f266d3a2cdab2d281ebfe90ff4f5d2"
+}

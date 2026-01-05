@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE group_members SET capabilities = ? WHERE group_id = ? AND agent_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "6af47f17fda289cf297201978f251a14f4048dbc28f51d0b82749382b2abeba6"
+}

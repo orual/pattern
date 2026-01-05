@@ -17,15 +17,13 @@ pub mod integration;
 use crate::CoreError;
 use crate::id::{OAuthTokenId, UserId};
 use chrono::{DateTime, Utc};
-use pattern_macros::Entity;
 use serde::{Deserialize, Serialize};
 
 /// OAuth token entity for database persistence
 ///
 /// Stores OAuth tokens for external service authentication.
 /// Tokens are associated with Pattern users and include refresh capabilities.
-#[derive(Debug, Clone, Entity, Serialize, Deserialize)]
-#[entity(entity_type = "oauth_token")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OAuthToken {
     pub id: OAuthTokenId,
 
@@ -57,7 +55,6 @@ pub struct OAuthToken {
     pub last_used_at: DateTime<Utc>,
 
     /// The user who owns this token
-    #[entity(relation = "owns", reverse = true)]
     pub owner_id: UserId,
 }
 

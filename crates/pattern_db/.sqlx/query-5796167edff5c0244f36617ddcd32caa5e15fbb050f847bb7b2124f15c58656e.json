@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            COUNT(*) as count,\n            COALESCE(SUM(byte_size), 0) as total_bytes,\n            COALESCE(MAX(seq), 0) as max_seq\n        FROM memory_block_updates\n        WHERE block_id = ?\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "count",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "total_bytes",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "max_seq",
+        "ordinal": 2,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "5796167edff5c0244f36617ddcd32caa5e15fbb050f847bb7b2124f15c58656e"
+}

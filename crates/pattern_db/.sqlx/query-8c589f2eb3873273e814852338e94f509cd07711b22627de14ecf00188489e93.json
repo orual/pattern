@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT EXISTS(\n            SELECT 1 FROM group_members\n            WHERE agent_id = ?\n              AND json_extract(role, '$.type') = 'specialist'\n              AND EXISTS (\n                  SELECT 1 FROM json_each(capabilities)\n                  WHERE json_each.value = ?\n              )\n        ) as \"exists!: bool\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "exists!: bool",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8c589f2eb3873273e814852338e94f509cd07711b22627de14ecf00188489e93"
+}

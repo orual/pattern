@@ -1,0 +1,98 @@
+{
+  "db_name": "SQLite",
+  "query": "\n                SELECT\n                    id as \"id!\",\n                    agent_id,\n                    title as \"title!\",\n                    description,\n                    starts_at as \"starts_at!: _\",\n                    ends_at as \"ends_at: _\",\n                    rrule,\n                    reminder_minutes,\n                    all_day as \"all_day!: bool\",\n                    location,\n                    external_id,\n                    external_source,\n                    created_at as \"created_at!: _\",\n                    updated_at as \"updated_at!: _\"\n                FROM events WHERE agent_id = ? ORDER BY starts_at ASC\n                ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "agent_id",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "title!",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "description",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "starts_at!: _",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "ends_at: _",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "rrule",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "reminder_minutes",
+        "ordinal": 7,
+        "type_info": "Integer"
+      },
+      {
+        "name": "all_day!: bool",
+        "ordinal": 8,
+        "type_info": "Integer"
+      },
+      {
+        "name": "location",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "external_id",
+        "ordinal": 10,
+        "type_info": "Text"
+      },
+      {
+        "name": "external_source",
+        "ordinal": 11,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at!: _",
+        "ordinal": 12,
+        "type_info": "Text"
+      },
+      {
+        "name": "updated_at!: _",
+        "ordinal": 13,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "dc2366ca1cd7cc172a0a0879b69f19603277ba556d218e2b806e186734b3258b"
+}

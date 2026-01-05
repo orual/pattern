@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT\n                did as \"did!\",\n                session_id as \"session_id!\",\n                access_jwt as \"access_jwt!\",\n                refresh_jwt as \"refresh_jwt!\",\n                handle as \"handle!\"\n            FROM app_password_sessions\n            ORDER BY did, session_id\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "did!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "session_id!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "access_jwt!",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "refresh_jwt!",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "handle!",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "f32077846e9e30a2cd2766dce0da50b1f18de9309a06f98fe5268718b750ab15"
+}

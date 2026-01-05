@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT\n                id as \"id!\",\n                block_id as \"block_id!\",\n                seq as \"seq!\",\n                update_blob as \"update_blob!\",\n                byte_size as \"byte_size!\",\n                source,\n                created_at as \"created_at!: _\"\n            FROM memory_block_updates\n            WHERE block_id = ? AND created_at > ?\n            ORDER BY seq ASC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "block_id!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "seq!",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "update_blob!",
+        "ordinal": 3,
+        "type_info": "Blob"
+      },
+      {
+        "name": "byte_size!",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "source",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at!: _",
+        "ordinal": 6,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "ede8f1546f49eefdad386d3c2d4988520bfab6aeb947d1193d2b37b3f8826af1"
+}

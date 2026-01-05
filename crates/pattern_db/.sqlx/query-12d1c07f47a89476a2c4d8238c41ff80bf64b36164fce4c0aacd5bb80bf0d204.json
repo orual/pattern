@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            id as \"id!\",\n            name as \"name!\",\n            description,\n            path_type as \"path_type!: FolderPathType\",\n            path_value,\n            embedding_model as \"embedding_model!\",\n            created_at as \"created_at!: _\"\n        FROM folders WHERE id = ?\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "name!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "description",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "path_type!: FolderPathType",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "path_value",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "embedding_model!",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at!: _",
+        "ordinal": 6,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "12d1c07f47a89476a2c4d8238c41ff80bf64b36164fce4c0aacd5bb80bf0d204"
+}

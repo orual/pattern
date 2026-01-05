@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT\n                bot_token as \"bot_token!\",\n                app_id,\n                public_key,\n                allowed_channels,\n                allowed_guilds,\n                admin_users,\n                default_dm_user\n            FROM discord_bot_config\n            WHERE id = 1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "bot_token!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "app_id",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "public_key",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "allowed_channels",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "allowed_guilds",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "admin_users",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "default_dm_user",
+        "ordinal": 6,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "6cea8047d75190feb4a87b36d6d16a1abd3025164d6bfea80ba9042755a4f164"
+}
