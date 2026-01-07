@@ -348,6 +348,29 @@ pub async fn update_block_content(
     Ok(())
 }
 
+/// Update only a memory block's content preview without touching the snapshot.
+///
+/// Used by persist() to update the preview for quick lookups without
+/// overwriting any existing snapshot data (e.g., from CAR imports).
+pub async fn update_block_preview(
+    pool: &SqlitePool,
+    id: &str,
+    content_preview: Option<&str>,
+) -> DbResult<()> {
+    sqlx::query!(
+        r#"
+        UPDATE memory_blocks
+        SET content_preview = ?, updated_at = datetime('now')
+        WHERE id = ?
+        "#,
+        content_preview,
+        id
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Update a memory block's permission.
 pub async fn update_block_permission(
     pool: &SqlitePool,

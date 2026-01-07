@@ -1034,6 +1034,7 @@ impl AgentBuilder {
                             if !content.is_empty() {
                                 doc.set_text(&content, true)
                                     .map_err(|e| miette::miette!("Failed to set content: {}", e))?;
+                                memory.mark_dirty(&id, label);
                                 memory
                                     .persist_block(&id, label)
                                     .await
@@ -1067,6 +1068,7 @@ impl AgentBuilder {
                                 doc.set_text(&content, true).map_err(|e| {
                                     miette::miette!("Failed to set content: {:?}", e)
                                 })?;
+                                memory.mark_dirty(&id, label);
                                 memory.persist_block(&id, label).await.map_err(|e| {
                                     miette::miette!("Failed to persist block: {:?}", e)
                                 })?;

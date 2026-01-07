@@ -306,8 +306,15 @@ impl AgentMessageRouter {
 
         let target_agent_id = target_agent.id;
 
-        // Check recent message cache to prevent rapid loops
-        {
+        // Check recent message cache to prevent rapid loops.
+        // Skip rate limiting for data sources - they legitimately send multiple
+        // messages quickly (e.g., Bluesky firehose batches).
+        let is_data_source = matches!(
+            &origin,
+            Some(MessageOrigin::DataSource { .. }) | Some(MessageOrigin::Bluesky { .. })
+        );
+
+        if !is_data_source {
             let mut recent = self.recent_messages.write().await;
             let mut agents = vec![self.agent_id.clone(), target_agent_id.clone()];
             agents.sort();

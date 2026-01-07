@@ -181,6 +181,14 @@ impl MemoryCache {
         // Override with effective permission (may differ for shared blocks)
         metadata.permission = effective_permission;
 
+        // Get and apply any updates since the snapshot
+        // TODO: use the checkpoint here as the starting snapshot
+        let (_checkpoint, updates) = pattern_db::queries::get_checkpoint_and_updates(
+            self.dbs.constellation.pool(),
+            &block.id,
+        )
+        .await?;
+
         // Create StructuredDocument from snapshot with metadata
         let doc = if block.loro_snapshot.is_empty() {
             StructuredDocument::new_with_metadata(metadata.clone(), Some(agent_id.to_string()))
@@ -191,13 +199,6 @@ impl MemoryCache {
                 Some(agent_id.to_string()),
             )?
         };
-
-        // Get and apply any updates since the snapshot
-        let (_, updates) = pattern_db::queries::get_checkpoint_and_updates(
-            self.dbs.constellation.pool(),
-            &block.id,
-        )
-        .await?;
 
         for update in &updates {
             doc.apply_updates(&update.update_blob)?;
@@ -285,10 +286,12 @@ impl MemoryCache {
             Some(preview.as_str())
         };
 
-        pattern_db::queries::update_block_content(
+        // Only update the preview, don't touch loro_snapshot.
+        // The snapshot may contain imported data (e.g., from CAR files) that
+        // we must not overwrite. Incremental updates go to memory_block_updates.
+        pattern_db::queries::update_block_preview(
             self.dbs.constellation.pool(),
             &block_id,
-            &[], // Don't update snapshot on every write
             preview_str,
         )
         .await?;
@@ -442,6 +445,8 @@ impl MemoryStore for MemoryCache {
             serde_json::to_value(&schema).map_err(|e| MemoryError::Other(e.to_string()))?,
         );
         let metadata_json = JsonValue::Object(db_metadata);
+        let loro_snapshot = doc.export_snapshot()?;
+        let frontier = doc.current_version().get_frontiers();
 
         // Create MemoryBlock for DB
         let db_block = pattern_db::models::MemoryBlock {
@@ -453,12 +458,12 @@ impl MemoryStore for MemoryCache {
             char_limit: effective_char_limit as i64,
             permission: pattern_db::models::MemoryPermission::ReadWrite,
             pinned: false,
-            loro_snapshot: vec![],
+            loro_snapshot: loro_snapshot,
             content_preview: None,
             metadata: Some(SqlxJson(metadata_json)),
             embedding_model: None,
             is_active: true,
-            frontier: None,
+            frontier: Some(frontier.encode()),
             last_seq: 0,
             created_at: now,
             updated_at: now,
@@ -471,7 +476,7 @@ impl MemoryStore for MemoryCache {
         let cached_block = CachedBlock {
             doc: doc.clone(),
             last_seq: 0,
-            last_persisted_frontier: None,
+            last_persisted_frontier: Some(doc.current_version()),
             dirty: false,
             last_accessed: now,
         };

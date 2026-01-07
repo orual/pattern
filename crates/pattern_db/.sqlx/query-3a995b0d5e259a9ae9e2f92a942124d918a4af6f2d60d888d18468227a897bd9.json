@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        UPDATE memory_blocks\n        SET content_preview = ?, updated_at = datetime('now')\n        WHERE id = ?\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "3a995b0d5e259a9ae9e2f92a942124d918a4af6f2d60d888d18468227a897bd9"
+}

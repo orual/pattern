@@ -204,6 +204,13 @@ impl<'a> ContextBuilder<'a> {
 
         // Get tools in genai format if tool registry is provided
         let tools = self.tools.map(|registry| registry.to_genai_tools());
+        for s in system.iter() {
+            tracing::debug!(
+                "{}\n{}",
+                s.chars().take(300).collect::<String>(),
+                s.chars().rev().take(300).collect::<String>()
+            );
+        }
 
         Ok(Request {
             system: if system.is_empty() {
@@ -365,8 +372,6 @@ impl<'a> ContextBuilder<'a> {
             }
             // Incomplete non-active: dropped
         }
-
-        // INCORRECT SORT REMOVED
 
         Ok(messages)
     }
