@@ -15,7 +15,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 miette = { workspace = true }
-pattern-macros = { path = "../pattern_macros" }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
@@ -87,8 +86,7 @@ minijinja = "2.11.0"
 rocketman = { version = "0.2", features = ["zstd"] }
 notify = { version = "7.0" }
 hickory-resolver = "0.24"
-jacquard = { version = "0.9", features = ["websocket", "zstd"] }
-
+jacquard.workspace = true
 # Glob pattern matching
 globset = "0.4"
 
@@ -107,6 +105,7 @@ fend-core = "1.5.7"
 # Shell tool dependencies
 pty-process = { version = "0.5", features = ["async"] }
 strip-ansi-escapes = "0.2"
+shellexpand = { version = "3.1.1", features = ["full"] }
 
 # Local crates (to be added later)
 # pattern-nd = { path = "../pattern-nd", optional = true }

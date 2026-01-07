@@ -964,7 +964,8 @@ mod tests {
     }
 
     /// Create a test file in the temp directory
-    async fn create_test_file(dir: &Path, name: &str, content: &str) -> PathBuf {
+    async fn create_test_file(dir: &str, name: &str, content: &str) -> PathBuf {
+        let dir = Path::new(dir);
         let path = dir.join(name);
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await.ok();
@@ -974,7 +975,7 @@ mod tests {
     }
 
     /// Set up test context, agent, and file tool with a FileSource registered
-    async fn setup_test(base_path: &Path) -> (Arc<RuntimeContext>, Arc<dyn Agent>, FileTool) {
+    async fn setup_test(base_path: &str) -> (Arc<RuntimeContext>, Arc<dyn Agent>, FileTool) {
         let ctx = create_test_runtime().await;
         let file_source = Arc::new(FileSource::new(base_path));
         ctx.register_block_source(file_source).await;
@@ -1011,13 +1012,13 @@ mod tests {
     #[tokio::test]
     async fn test_file_tool_load() {
         let temp_dir = TempDir::new().unwrap();
-        let base_path = temp_dir.path();
+        let base_path = temp_dir.path().to_string_lossy();
 
         // Create test file
         let test_content = "Hello, FileTool!";
-        create_test_file(base_path, "load_test.txt", test_content).await;
+        create_test_file(&base_path, "load_test.txt", test_content).await;
 
-        let (_ctx, _agent, tool) = setup_test(base_path).await;
+        let (_ctx, _agent, tool) = setup_test(&base_path).await;
 
         // Execute load operation
         let mut input = file_input(FileOp::Load);
@@ -1046,9 +1047,9 @@ mod tests {
     #[tokio::test]
     async fn test_file_tool_create() {
         let temp_dir = TempDir::new().unwrap();
-        let base_path = temp_dir.path();
+        let base_path = temp_dir.path().to_string_lossy();
 
-        let (_ctx, _agent, tool) = setup_test(base_path).await;
+        let (_ctx, _agent, tool) = setup_test(&base_path).await;
 
         // Execute create operation
         let initial_content = "New file content";
@@ -1063,6 +1064,7 @@ mod tests {
         assert!(output.success, "Output should indicate success");
 
         // Verify file exists on disk
+        let base_path = temp_dir.path();
         let file_path = base_path.join("new_file.txt");
         assert!(file_path.exists(), "File should exist on disk");
 
@@ -1074,13 +1076,13 @@ mod tests {
     #[tokio::test]
     async fn test_file_tool_save() {
         let temp_dir = TempDir::new().unwrap();
-        let base_path = temp_dir.path();
+        let base_path = temp_dir.path().to_string_lossy();
 
         // Create test file
         let original_content = "Original content";
-        create_test_file(base_path, "save_test.txt", original_content).await;
+        create_test_file(&base_path, "save_test.txt", original_content).await;
 
-        let (_ctx, agent, tool) = setup_test(base_path).await;
+        let (_ctx, agent, tool) = setup_test(&base_path).await;
 
         // Load the file first
         let mut load_input = file_input(FileOp::Load);
@@ -1122,6 +1124,7 @@ mod tests {
         assert!(result.is_ok(), "Save should succeed: {:?}", result.err());
 
         // Verify disk was updated
+        let base_path = temp_dir.path();
         let file_path = base_path.join("save_test.txt");
         let disk_content = tokio::fs::read_to_string(&file_path).await.unwrap();
         assert_eq!(disk_content, new_content);
@@ -1130,13 +1133,13 @@ mod tests {
     #[tokio::test]
     async fn test_file_tool_append() {
         let temp_dir = TempDir::new().unwrap();
-        let base_path = temp_dir.path();
+        let base_path = temp_dir.path().to_string_lossy();
 
         // Create test file
         let original_content = "Line 1\n";
-        create_test_file(base_path, "append_test.txt", original_content).await;
+        create_test_file(&base_path, "append_test.txt", original_content).await;
 
-        let (_ctx, _agent, tool) = setup_test(base_path).await;
+        let (_ctx, _agent, tool) = setup_test(&base_path).await;
 
         // Execute append operation (auto-loads the file)
         let append_content = "Line 2\n";
@@ -1158,12 +1161,11 @@ mod tests {
     #[tokio::test]
     async fn test_file_tool_replace() {
         let temp_dir = TempDir::new().unwrap();
-        let base_path = temp_dir.path();
-
+        let base_path = temp_dir.path().to_string_lossy();
         // Create test file
-        create_test_file(base_path, "replace_test.txt", "Hello, World!").await;
+        create_test_file(&base_path, "replace_test.txt", "Hello, World!").await;
 
-        let (_ctx, _agent, tool) = setup_test(base_path).await;
+        let (_ctx, _agent, tool) = setup_test(&base_path).await;
 
         // Execute replace operation (auto-loads the file)
         let mut input = file_input(FileOp::Replace);
@@ -1185,14 +1187,14 @@ mod tests {
     #[tokio::test]
     async fn test_file_tool_list() {
         let temp_dir = TempDir::new().unwrap();
-        let base_path = temp_dir.path();
+        let base_path = temp_dir.path().to_string_lossy();
 
         // Create test files
-        create_test_file(base_path, "file1.txt", "content 1").await;
-        create_test_file(base_path, "file2.rs", "fn main() {}").await;
-        create_test_file(base_path, "subdir/file3.txt", "nested").await;
+        create_test_file(&base_path, "file1.txt", "content 1").await;
+        create_test_file(&base_path, "file2.rs", "fn main() {}").await;
+        create_test_file(&base_path, "subdir/file3.txt", "nested").await;
 
-        let (_ctx, _agent, tool) = setup_test(base_path).await;
+        let (_ctx, _agent, tool) = setup_test(&base_path).await;
 
         // Execute list operation
         let input = file_input(FileOp::List);
@@ -1216,14 +1218,14 @@ mod tests {
     #[tokio::test]
     async fn test_file_tool_list_with_pattern() {
         let temp_dir = TempDir::new().unwrap();
-        let base_path = temp_dir.path();
+        let base_path = temp_dir.path().to_string_lossy();
 
         // Create test files
-        create_test_file(base_path, "file1.txt", "content 1").await;
-        create_test_file(base_path, "file2.rs", "fn main() {}").await;
-        create_test_file(base_path, "file3.txt", "content 3").await;
+        create_test_file(&base_path, "file1.txt", "content 1").await;
+        create_test_file(&base_path, "file2.rs", "fn main() {}").await;
+        create_test_file(&base_path, "file3.txt", "content 3").await;
 
-        let (_ctx, _agent, tool) = setup_test(base_path).await;
+        let (_ctx, _agent, tool) = setup_test(&base_path).await;
 
         // Execute list with pattern
         let mut input = file_input(FileOp::List);
@@ -1247,12 +1249,12 @@ mod tests {
     #[tokio::test]
     async fn test_file_tool_status() {
         let temp_dir = TempDir::new().unwrap();
-        let base_path = temp_dir.path();
+        let base_path = temp_dir.path().to_string_lossy();
 
         // Create test file
-        create_test_file(base_path, "status_test.txt", "content").await;
+        create_test_file(&base_path, "status_test.txt", "content").await;
 
-        let (_ctx, _agent, tool) = setup_test(base_path).await;
+        let (_ctx, _agent, tool) = setup_test(&base_path).await;
 
         // Load file first
         let mut load_input = file_input(FileOp::Load);
@@ -1278,12 +1280,12 @@ mod tests {
     #[tokio::test]
     async fn test_file_tool_diff() {
         let temp_dir = TempDir::new().unwrap();
-        let base_path = temp_dir.path();
+        let base_path = temp_dir.path().to_string_lossy();
 
         // Create test file
-        create_test_file(base_path, "diff_test.txt", "Original line\n").await;
+        create_test_file(&base_path, "diff_test.txt", "Original line\n").await;
 
-        let (_ctx, agent, tool) = setup_test(base_path).await;
+        let (_ctx, agent, tool) = setup_test(&base_path).await;
 
         // Load and modify
         let mut load_input = file_input(FileOp::Load);
@@ -1334,12 +1336,12 @@ mod tests {
     #[tokio::test]
     async fn test_file_tool_reload() {
         let temp_dir = TempDir::new().unwrap();
-        let base_path = temp_dir.path();
+        let base_path = temp_dir.path().to_string_lossy();
 
         // Create test file
-        let file_path = create_test_file(base_path, "reload_test.txt", "Original content").await;
+        let file_path = create_test_file(&base_path, "reload_test.txt", "Original content").await;
 
-        let (_ctx, agent, tool) = setup_test(base_path).await;
+        let (_ctx, agent, tool) = setup_test(&base_path).await;
 
         // Load the file
         let mut load_input = file_input(FileOp::Load);
@@ -1428,10 +1430,10 @@ mod tests {
     #[tokio::test]
     async fn test_file_tool_explicit_source() {
         let temp_dir = TempDir::new().unwrap();
-        let base_path = temp_dir.path();
+        let base_path = temp_dir.path().to_string_lossy();
 
         // Create test file
-        create_test_file(base_path, "explicit_source.txt", "content").await;
+        create_test_file(&base_path, "explicit_source.txt", "content").await;
 
         // Set up RuntimeContext - need to get source_id before setup_test
         let ctx = create_test_runtime().await;
@@ -1471,12 +1473,12 @@ mod tests {
     async fn test_file_tool_multiple_sources() {
         let temp_dir1 = TempDir::new().unwrap();
         let temp_dir2 = TempDir::new().unwrap();
-        let base_path1 = temp_dir1.path();
-        let base_path2 = temp_dir2.path();
+        let base_path1 = temp_dir1.path().to_string_lossy();
+        let base_path2 = temp_dir2.path().to_string_lossy();
 
         // Create test files in different directories
-        create_test_file(base_path1, "file_in_dir1.txt", "content 1").await;
-        create_test_file(base_path2, "file_in_dir2.txt", "content 2").await;
+        create_test_file(&base_path1, "file_in_dir1.txt", "content 1").await;
+        create_test_file(&base_path2, "file_in_dir2.txt", "content 2").await;
 
         // Set up RuntimeContext with two FileSources
         let ctx = create_test_runtime().await;

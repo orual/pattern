@@ -718,7 +718,12 @@ impl BlueskyStreamInner {
         depth: usize,
         parent_height: usize,
     ) -> Option<ThreadViewPost<'static>> {
-        let agent = self.authenticated_agent.as_ref()?;
+        let Some(agent) = self.authenticated_agent.as_ref() else {
+            debug!("fetch_thread: no authenticated_agent available");
+            return None;
+        };
+
+        debug!("fetch_thread: fetching thread for {}", uri);
 
         let request = GetPostThread::new()
             .uri(uri.clone())
@@ -733,7 +738,16 @@ impl BlueskyStreamInner {
 
         match result {
             Ok(response) => {
-                let output = response.into_output().ok()?;
+                let output = match response.into_output() {
+                    Ok(o) => o,
+                    Err(e) => {
+                        debug!(
+                            "fetch_thread: failed to parse response for {}: {:?}",
+                            uri, e
+                        );
+                        return None;
+                    }
+                };
                 match output.thread {
                     GetPostThreadOutputThread::ThreadViewPost(tvp) => Some((*tvp).into_static()),
                     GetPostThreadOutputThread::BlockedPost(_) => {
@@ -928,17 +942,25 @@ impl BlueskyStreamInner {
                 let batch_id = crate::utils::get_next_message_position_sync();
 
                 // Build notification with thread context if authenticated
-                let notification = if self.authenticated_agent.is_some() {
-                    self.build_notification_with_thread(posts, &thread_root, batch_id)
-                        .await
+                let notification = if let Some(notif) = self
+                    .build_notification_with_thread(posts.clone(), &thread_root, batch_id)
+                    .await
+                {
+                    Some(notif)
                 } else {
                     Some(self.build_notification(posts, batch_id))
                 };
 
                 // Only send if notification wasn't vacated by exclusion/participation checks
-                if let Some(notif) = notification {
+                if let Some(ref notif) = notification {
+                    info!(
+                        "BlueskyStream {} queuing notification (batch_id={}):\n{}",
+                        self.source_id,
+                        notif.batch_id,
+                        notif.message.display_content()
+                    );
                     if let Some(tx) = self.tx.read().as_ref() {
-                        if let Err(e) = tx.send(notif) {
+                        if let Err(e) = tx.send(notif.clone()) {
                             warn!(
                                 "BlueskyStream {} failed to send notification: {}",
                                 self.source_id, e

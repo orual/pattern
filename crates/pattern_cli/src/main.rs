@@ -653,7 +653,7 @@ async fn main() -> Result<()> {
     // Create the base subscriber with environment filter
     let env_filter = if cli.debug {
         EnvFilter::new(
-            "pattern_core=debug,pattern_cli=debug,pattern_nd=debug,pattern_mcp=debug,pattern_discord=debug,pattern_main=debug,rocketman=debug,loro_internal=warn,info",
+            "pattern_core=debug,pattern_cli=debug,pattern_nd=debug,pattern_mcp=debug,pattern_discord=debug,pattern_main=debug,jacquard=debug,jacquard-common=debug,loro_internal=warn,sqlx=warn,info",
         )
     } else {
         EnvFilter::new(
@@ -684,7 +684,7 @@ async fn main() -> Result<()> {
 
     // Create file layer with debug logging
     let file_env_filter = EnvFilter::new(
-        "pattern_core=debug,pattern_cli=debug,pattern_nd=debug,pattern_mcp=debug,pattern_discord=debug,pattern_main=debug,info",
+        "pattern_core=debug,pattern_cli=debug,pattern_nd=debug,pattern_mcp=debug,pattern_discord=debug,pattern_main=debug,jacquard=debug,jacquard-common=debug,info",
     );
 
     let file_layer = fmt::layer()

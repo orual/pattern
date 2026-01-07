@@ -5,6 +5,7 @@
 
 use std::collections::HashSet;
 
+use jacquard::CowStr;
 use jacquard::api::app_bsky::feed::{
     PostView, ThreadViewPost, ThreadViewPostParent, ThreadViewPostRepliesItem,
 };
@@ -514,6 +515,11 @@ impl PostDisplay for PostView<'_> {
         } else {
             ""
         };
+        let display_name = self
+            .author
+            .display_name
+            .clone()
+            .unwrap_or(CowStr::new_static(""));
         let handle = self.author.handle.as_str();
         let text = self
             .record
@@ -523,7 +529,7 @@ impl PostDisplay for PostView<'_> {
         let uri = self.uri.as_str();
 
         let mut output = String::new();
-        let first_prefix = format!("┌─ {}@{}: ", you_marker, handle);
+        let first_prefix = format!("┌─ {}{} @{}: ", you_marker, display_name, handle);
         let continuation = "   ";
         output.push_str(&indent_multiline(text, &first_prefix, continuation));
         output.push_str(&format!("\n   🔗 {}", uri));
@@ -543,6 +549,11 @@ impl PostDisplay for PostView<'_> {
         } else {
             ""
         };
+        let display_name = self
+            .author
+            .display_name
+            .clone()
+            .unwrap_or(CowStr::new_static(""));
         let handle = self.author.handle.as_str();
         let text = self
             .record
@@ -552,7 +563,7 @@ impl PostDisplay for PostView<'_> {
         let uri = self.uri.as_str();
 
         let mut output = String::new();
-        let first_prefix = format!("{}├─ {}@{}: ", indent, you_marker, handle);
+        let first_prefix = format!("{}├─ {}{} @{}: ", indent, you_marker, display_name, handle);
         let continuation = format!("{}   ", indent);
         output.push_str(&indent_multiline(text, &first_prefix, &continuation));
         output.push_str(&format!("\n{}   🔗 {}", indent, uri));
@@ -578,6 +589,11 @@ impl PostDisplay for PostView<'_> {
             ""
         };
         let handle = self.author.handle.as_str();
+        let display_name = self
+            .author
+            .display_name
+            .clone()
+            .unwrap_or(CowStr::new_static(""));
         let text = self
             .record
             .get_at_path(".text")
@@ -586,7 +602,10 @@ impl PostDisplay for PostView<'_> {
         let uri = self.uri.as_str();
 
         let mut output = String::new();
-        let first_prefix = format!("{}{}@{}: ", batch_marker, you_marker, handle);
+        let first_prefix = format!(
+            "{}{}{} @{}: ",
+            batch_marker, you_marker, display_name, handle
+        );
         let continuation = "│ ";
         output.push_str(&indent_multiline(text, &first_prefix, continuation));
         output.push_str(&format!("\n│ 🔗 {}", uri));
@@ -608,6 +627,11 @@ impl PostDisplay for PostView<'_> {
         };
         let connector = if is_last { "└─" } else { "├─" };
         let handle = self.author.handle.as_str();
+        let display_name = self
+            .author
+            .display_name
+            .clone()
+            .unwrap_or(CowStr::new_static(""));
         let text = self
             .record
             .get_at_path(".text")
@@ -616,7 +640,10 @@ impl PostDisplay for PostView<'_> {
         let uri = self.uri.as_str();
 
         let mut output = String::new();
-        let first_prefix = format!("{}{} {}@{}: ", indent, connector, you_marker, handle);
+        let first_prefix = format!(
+            "{}{} {}{} @{}: ",
+            indent, connector, you_marker, display_name, handle
+        );
         let continuation = format!("{}   ", indent);
         output.push_str(&indent_multiline(text, &first_prefix, &continuation));
         output.push_str(&format!("\n{}   🔗 {}", indent, uri));
@@ -637,6 +664,11 @@ impl PostDisplay for PostView<'_> {
             ""
         };
         let handle = self.author.handle.as_str();
+        let display_name = self
+            .author
+            .display_name
+            .clone()
+            .unwrap_or(CowStr::new_static(""));
         let text = self
             .record
             .get_at_path(".text")
@@ -645,7 +677,7 @@ impl PostDisplay for PostView<'_> {
         let uri = self.uri.as_str();
 
         let mut output = String::new();
-        let first_prefix = format!("{}↳ {}@{}: ", indent, you_marker, handle);
+        let first_prefix = format!("{}↳ {}{} @{}: ", indent, you_marker, display_name, handle);
         let continuation = format!("{}  ", indent);
         output.push_str(&indent_multiline(text, &first_prefix, &continuation));
         output.push_str(&format!("\n{}  🔗 {}", indent, uri));

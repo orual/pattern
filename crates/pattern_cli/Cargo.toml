@@ -56,7 +56,7 @@ rpassword = "7.3"
 
 # ATProto dependencies
 reqwest = { workspace = true }
-jacquard = "0.9"
+jacquard.workspace = true
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }

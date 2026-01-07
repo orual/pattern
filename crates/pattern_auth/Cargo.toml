@@ -35,7 +35,7 @@ tracing = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 
 # Jacquard for ATProto auth traits
-jacquard = "0.9"
+jacquard.workspace = true
 
 # JWK key serialization (used by Jacquard DPoP)
 jose-jwk = "0.1"

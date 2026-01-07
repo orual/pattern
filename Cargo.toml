@@ -123,6 +123,8 @@ ipld-core = "0.4.2"
 serde_cbor = "0.11.2"
 serde_ipld_dagcbor = { version = "0.6.1", features = ["codec"] }
 
+jacquard = { version  = "0.9", git = "https://tangled.org/@nonbinary.computer/jacquard", features = ["websocket", "zstd", "tracing"] }
+
 atrium-xrpc = "0.12.3"
 atrium-api = "0.25.3"
 atrium-common = "0.1.1"

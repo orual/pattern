@@ -24,3 +24,6 @@ mcp-wrapper.sh
 !**/migrations/*.sql
 **.surql
 **/**.output
+
+# Deciduous database (local)
+.deciduous/

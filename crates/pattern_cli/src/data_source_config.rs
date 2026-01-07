@@ -3,7 +3,7 @@
 //! This module provides interactive builders and file loaders for data source
 //! configuration. Used by both CLI commands and the agent/group builders.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use miette::Result;
 use owo_colors::OwoColorize;
@@ -208,11 +208,8 @@ pub fn build_file_interactive(
     println!("\n{}", "─ File Source Configuration ─".bold());
 
     // Paths
-    let current_paths: Vec<String> = existing
-        .map(|e| e.paths.iter().map(|p| p.display().to_string()).collect())
-        .unwrap_or_default();
-    let path_strings = edit_string_list_required("Paths to watch", &current_paths)?;
-    let paths: Vec<PathBuf> = path_strings.into_iter().map(PathBuf::from).collect();
+    let current_paths: Vec<String> = existing.map(|e| e.paths.clone()).unwrap_or_default();
+    let paths = edit_string_list_required("Paths to watch", &current_paths)?;
 
     // Recursive
     let current_recursive = existing.map(|e| e.recursive).unwrap_or(true);
@@ -674,7 +671,7 @@ pub fn render_source_summary(name: &str, source: &DataSourceConfig) -> String {
             lines.push(format!("{} [file]", name.cyan()));
             lines.push(format!("  Paths: {}", cfg.paths.len()));
             for path in &cfg.paths {
-                lines.push(format!("    - {}", path.display()));
+                lines.push(format!("    - {}", path));
             }
             lines.push(format!("  Recursive: {}", cfg.recursive));
             if !cfg.include_patterns.is_empty() {

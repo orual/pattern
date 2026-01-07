@@ -214,8 +214,9 @@ impl FileSource {
     /// let source = FileSource::new("/home/user/project");
     /// // source_id will be something like "a3f2b1c9"
     /// ```
-    pub fn new(base_path: impl Into<PathBuf>) -> Self {
-        let base_path = base_path.into();
+    pub fn new(base_path: impl AsRef<str>) -> Self {
+        let base_path = shellexpand::full(&base_path).unwrap();
+        let base_path = PathBuf::from(base_path.to_string());
         let source_id = Self::compute_source_id(&base_path);
         Self {
             source_id,
@@ -239,8 +240,9 @@ impl FileSource {
     ///
     /// * `base_path` - Base directory for file operations
     /// * `rules` - Permission rules to apply (first matching rule wins)
-    pub fn with_rules(base_path: impl Into<PathBuf>, rules: Vec<PermissionRule>) -> Self {
-        let base_path = base_path.into();
+    pub fn with_rules(base_path: impl AsRef<str>, rules: Vec<PermissionRule>) -> Self {
+        let base_path = shellexpand::full(&base_path).unwrap();
+        let base_path = PathBuf::from(base_path.to_string());
         let source_id = Self::compute_source_id(&base_path);
         Self {
             source_id,
@@ -262,9 +264,8 @@ impl FileSource {
     ///
     /// * `path` - The base path for this source
     /// * `config` - Configuration including permission rules
-    pub fn from_config(path: impl Into<PathBuf>, config: &crate::config::FileSourceConfig) -> Self {
+    pub fn from_config(path: impl AsRef<str>, config: &crate::config::FileSourceConfig) -> Self {
         use crate::config::FilePermissionRuleConfig;
-
         let rules: Vec<PermissionRule> = if config.permission_rules.is_empty() {
             // Default rule: all files are ReadWrite
             vec![PermissionRule::new("**", MemoryPermission::ReadWrite)]
@@ -1755,7 +1756,7 @@ mod tests {
         let file_path = create_test_file(&base_path, "test.txt", test_content).await;
 
         // Create FileSource
-        let source = FileSource::new(&base_path);
+        let source = FileSource::new(&base_path.to_string_lossy());
 
         // Create test context
         let agent_id = "test_agent_load_save";
@@ -1798,7 +1799,7 @@ mod tests {
         let base_path = temp_dir.path().to_path_buf();
 
         // Create FileSource
-        let source = FileSource::new(&base_path);
+        let source = FileSource::new(&base_path.to_string_lossy());
 
         // Create test context
         let agent_id = "test_agent_create";
@@ -1846,7 +1847,7 @@ mod tests {
         let file_path = create_test_file(&base_path, "save_test.txt", original_content).await;
 
         // Create FileSource
-        let source = FileSource::new(&base_path);
+        let source = FileSource::new(&base_path.to_string_lossy());
 
         // Create test context
         let agent_id = "test_agent_save";
@@ -1898,7 +1899,7 @@ mod tests {
         let file_path = create_test_file(&base_path, "conflict_test.txt", original_content).await;
 
         // Create FileSource
-        let source = FileSource::new(&base_path);
+        let source = FileSource::new(&base_path.to_string_lossy());
 
         // Create test context
         let agent_id = "test_agent_conflict";
@@ -2005,7 +2006,7 @@ mod tests {
             .await
             .unwrap();
 
-        let source = FileSource::new(&base_path);
+        let source = FileSource::new(&base_path.to_string_lossy());
 
         // Absolute path under base_path should match
         assert!(source.matches(&src_dir.join("main.rs")));

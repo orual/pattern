@@ -301,7 +301,7 @@ pub struct FileSourceConfig {
     /// Identifier for this source
     pub name: String,
     /// Paths to watch (directories or files)
-    pub paths: Vec<PathBuf>,
+    pub paths: Vec<String>,
     /// Whether to watch directories recursively
     #[serde(default)]
     pub recursive: bool,
