@@ -47,7 +47,7 @@ pub trait Agent: Send + Sync + Debug {
     /// 5. Stream ResponseEvents as processing proceeds
     async fn process(
         self: Arc<Self>,
-        message: Message,
+        messages: Vec<Message>,
     ) -> Result<Box<dyn Stream<Item = ResponseEvent> + Send + Unpin>, CoreError>;
 
     /// Get the agent's current state and a watch receiver for changes
@@ -67,8 +67,11 @@ pub trait AgentExt: Agent {
     ///
     /// Convenience wrapper around `process()` for callers who
     /// don't need real-time streaming.
-    async fn process_to_response(self: Arc<Self>, message: Message) -> Result<Response, CoreError> {
-        let stream = self.process(message).await?;
+    async fn process_to_response(
+        self: Arc<Self>,
+        messages: Vec<Message>,
+    ) -> Result<Response, CoreError> {
+        let stream = self.process(messages).await?;
         super::collect::collect_response(stream).await
     }
 }

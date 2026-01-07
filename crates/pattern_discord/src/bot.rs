@@ -1624,7 +1624,7 @@ impl DiscordBot {
                         // Direct agent call
                         let mut stream = agent
                             .clone()
-                            .process(pattern_msg)
+                            .process(vec![pattern_msg])
                             .await
                             .map_err(|e| format!("Failed to process message: {}", e))?;
 

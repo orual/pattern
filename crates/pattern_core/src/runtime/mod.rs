@@ -200,6 +200,8 @@ impl AgentRuntime {
             .or_else(|| existing_batch_messages.first().and_then(|m| m.batch_type))
             .unwrap_or(BatchType::UserRequest);
 
+        let mut batch_block_ids = Vec::new();
+
         // Process each incoming message
         for message in &mut incoming_messages {
             // Assign batch ID if not set
@@ -223,6 +225,13 @@ impl AgentRuntime {
                 message.batch_type = Some(inferred_batch_type);
             }
 
+            let mut block_ids = message
+                .metadata
+                .block_refs
+                .iter()
+                .map(|r| r.block_id.clone())
+                .collect::<Vec<_>>();
+            batch_block_ids.append(&mut block_ids);
             // Store the message
             self.messages.store(message).await?;
         }
@@ -232,7 +241,8 @@ impl AgentRuntime {
             .for_agent(&self.agent_id)
             .with_messages(&self.messages)
             .with_tools(&self.tools)
-            .with_active_batch(batch_id);
+            .with_active_batch(batch_id)
+            .with_batch_blocks(batch_block_ids);
 
         // Add base instructions if provided
         if let Some(instructions) = base_instructions {
@@ -250,9 +260,13 @@ impl AgentRuntime {
         if let Some(ref model_provider) = self.model {
             builder = builder.with_model_provider(model_provider.clone());
         }
-
         // Build and return the request
-        builder.build().await
+        if let Some(ctx) = self.runtime_context.clone().and_then(|ctx| ctx.upgrade()) {
+            builder = builder.with_activity_renderer(ctx.activity_renderer());
+            builder.build().await
+        } else {
+            builder.build().await
+        }
     }
 
     /// Store a message in the message store.

@@ -117,7 +117,7 @@ impl GroupManager for RoundRobinManager {
                 .await;
 
             // Process message with streaming
-            match awm.agent.clone().process(message.clone()).await {
+            match awm.agent.clone().process(vec![message.clone()]).await {
                 Ok(mut stream) => {
                     use tokio_stream::StreamExt;
 

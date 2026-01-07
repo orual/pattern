@@ -200,7 +200,7 @@ impl GroupManager for SleeptimeManager {
                         match intervention_agent
                             .agent
                             .clone()
-                            .process(intervention_message)
+                            .process(vec![intervention_message])
                             .await
                         {
                             Ok(mut stream) => {

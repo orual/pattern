@@ -231,7 +231,7 @@ impl PipelineManager {
         let agent_response = awm
             .agent
             .clone()
-            .process_to_response(message.clone())
+            .process_to_response(vec![message.clone()])
             .await?;
         let response = AgentResponse {
             agent_id: awm.agent.as_ref().id(),

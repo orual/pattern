@@ -103,7 +103,11 @@ impl AgentSelector for SupervisorSelector {
         };
 
         // Ask supervisor to decide
-        let mut stream = supervisor.agent.clone().process(supervisor_message).await?;
+        let mut stream = supervisor
+            .agent
+            .clone()
+            .process(vec![supervisor_message])
+            .await?;
 
         // Stream response while collecting just enough text to make decision
         use tokio::sync::mpsc;

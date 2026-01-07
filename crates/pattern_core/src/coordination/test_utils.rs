@@ -57,7 +57,7 @@ pub(crate) mod test {
 
         async fn process(
             self: Arc<Self>,
-            message: Message,
+            messages: Vec<Message>,
         ) -> std::result::Result<Box<dyn Stream<Item = ResponseEvent> + Send + Unpin>, CoreError>
         {
             use crate::messages::ResponseMetadata;
@@ -69,7 +69,7 @@ pub(crate) mod test {
                     is_final: true,
                 },
                 ResponseEvent::Complete {
-                    message_id: message.id,
+                    message_id: messages[0].id.clone(),
                     metadata: ResponseMetadata::default(),
                 },
             ];

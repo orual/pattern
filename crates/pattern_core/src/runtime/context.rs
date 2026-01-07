@@ -2515,7 +2515,7 @@ async fn process_heartbeats_with_dashmap<F, Fut>(
                 };
 
                 // Process and handle events
-                match agent.process(message).await {
+                match agent.process(vec![message]).await {
                     Ok(mut stream) => {
                         while let Some(event) = stream.next().await {
                             handler(event, agent_id.clone(), agent_name.clone()).await;
@@ -2690,7 +2690,7 @@ mod tests {
 
             async fn process(
                 self: Arc<Self>,
-                _message: Message,
+                _message: Vec<Message>,
             ) -> std::result::Result<Box<dyn Stream<Item = ResponseEvent> + Send + Unpin>, CoreError>
             {
                 unimplemented!("Mock agent")

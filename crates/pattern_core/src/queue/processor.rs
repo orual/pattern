@@ -160,7 +160,7 @@ impl QueueProcessor {
                 tokio::spawn(async move {
                     let ctx = ctx.clone();
                     // Process through agent
-                    match agent.process(message).await {
+                    match agent.process(vec![message]).await {
                         Ok(mut stream) => {
                             while let Some(event) = stream.next().await {
                                 forward_event(&sinks, event, &ctx).await;

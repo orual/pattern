@@ -80,7 +80,7 @@ impl Agent for DatabaseAgent {
 
     async fn process(
         self: Arc<Self>,
-        message: Message,
+        messages: Vec<Message>,
     ) -> Result<Box<dyn Stream<Item = ResponseEvent> + Send + Unpin>, CoreError> {
         use std::collections::HashSet;
         use tokio::sync::mpsc;
@@ -91,10 +91,10 @@ impl Agent for DatabaseAgent {
         };
 
         // Determine batch ID and type from the incoming message
-        let batch_id = message
+        let batch_id = messages[0]
             .batch
             .unwrap_or_else(|| crate::utils::get_next_message_position_sync());
-        let batch_type = message
+        let batch_type = messages[0]
             .batch_type
             .unwrap_or(crate::messages::BatchType::UserRequest);
 
@@ -142,7 +142,12 @@ impl Agent for DatabaseAgent {
             };
 
             // Extract initial sequence number
-            let initial_sequence_num = message.sequence_num.map(|n| n + 1).unwrap_or(1);
+            let initial_sequence_num = messages
+                .last()
+                .expect("must have at least one message")
+                .sequence_num
+                .map(|n| n + 1)
+                .unwrap_or(1);
 
             // Build processing context and state
             let ctx = ProcessingContext {
@@ -164,7 +169,7 @@ impl Agent for DatabaseAgent {
             };
 
             // Run the processing loop
-            let outcome = run_processing_loop(ctx, &mut state, &tx, message).await;
+            let outcome = run_processing_loop(ctx, &mut state, &tx, messages).await;
 
             // Emit completion event
             let metadata = match &outcome {
@@ -745,7 +750,7 @@ mod tests {
         let test_message = Message::user("Hello agent!");
 
         // Process the message
-        let stream = agent.clone().process(test_message).await.unwrap();
+        let stream = agent.clone().process(vec![test_message]).await.unwrap();
 
         // Collect events
         let events: Vec<_> = stream.collect().await;
@@ -938,7 +943,7 @@ mod tests {
 
         // Process a message
         let test_message = Message::user("Test tool execution");
-        let stream = agent.clone().process(test_message).await.unwrap();
+        let stream = agent.clone().process(vec![test_message]).await.unwrap();
 
         // Collect events
         let events: Vec<_> = stream.collect().await;
@@ -1173,7 +1178,7 @@ mod tests {
 
         // Process a message
         let test_message = Message::user("Test start constraint");
-        let stream = agent.clone().process(test_message).await.unwrap();
+        let stream = agent.clone().process(vec![test_message]).await.unwrap();
 
         // Collect events
         let events: Vec<_> = stream.collect().await;
@@ -1360,7 +1365,7 @@ mod tests {
 
         // Process a message
         let test_message = Message::user("Test exit requirement");
-        let stream = agent.clone().process(test_message).await.unwrap();
+        let stream = agent.clone().process(vec![test_message]).await.unwrap();
 
         // Collect events
         let events: Vec<_> = stream.collect().await;

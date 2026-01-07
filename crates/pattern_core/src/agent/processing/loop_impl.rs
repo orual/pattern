@@ -68,7 +68,7 @@ pub async fn run_processing_loop(
     ctx: ProcessingContext<'_>,
     state: &mut ProcessingState,
     event_tx: &mpsc::Sender<ResponseEvent>,
-    initial_message: Message,
+    initial_messages: impl Into<Vec<Message>>,
 ) -> Result<LoopOutcome, ProcessingError> {
     let retry_config = RetryConfig::default();
     let error_ctx = ErrorContext {
@@ -82,7 +82,7 @@ pub async fn run_processing_loop(
     let mut request = ctx
         .runtime
         .prepare_request(
-            vec![initial_message],
+            initial_messages,
             None,
             Some(ctx.batch_id),
             Some(ctx.batch_type),

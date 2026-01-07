@@ -133,7 +133,12 @@ impl GroupManager for SupervisorManager {
                         .await;
 
                     // Process with streaming
-                    match delegate_awm.agent.clone().process(message.clone()).await {
+                    match delegate_awm
+                        .agent
+                        .clone()
+                        .process(vec![message.clone()])
+                        .await
+                    {
                         Ok(mut stream) => {
                             use tokio_stream::StreamExt;
 
@@ -252,7 +257,7 @@ impl GroupManager for SupervisorManager {
                                 })
                                 .await;
 
-                            match leader.agent.clone().process(message.clone()).await {
+                            match leader.agent.clone().process(vec![message.clone()]).await {
                                 Ok(mut stream) => {
                                     use tokio_stream::StreamExt;
 
@@ -401,7 +406,7 @@ impl GroupManager for SupervisorManager {
                     })
                     .await;
 
-                match leader.agent.clone().process(message.clone()).await {
+                match leader.agent.clone().process(vec![message.clone()]).await {
                     Ok(mut stream) => {
                         use tokio_stream::StreamExt;
 

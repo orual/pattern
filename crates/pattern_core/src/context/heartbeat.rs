@@ -120,7 +120,7 @@ pub async fn process_heartbeats<F, Fut>(
                 };
 
                 // Process and handle events
-                match agent.process(message).await {
+                match agent.process(vec![message]).await {
                     Ok(mut stream) => {
                         while let Some(event) = stream.next().await {
                             handler(event, agent_id.clone(), agent_name.clone()).await;

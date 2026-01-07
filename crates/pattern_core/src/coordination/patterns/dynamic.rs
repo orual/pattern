@@ -380,7 +380,7 @@ impl GroupManager for DynamicManager {
                         .await;
 
                     // Process message with streaming
-                    match agent.process(message).await {
+                    match agent.process(vec![message]).await {
                         Ok(mut stream) => {
                             use tokio_stream::StreamExt;
 

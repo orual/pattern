@@ -236,7 +236,7 @@ pub async fn chat_with_single_agent(agent_name: &str, config: &PatternConfig) ->
 
                     use tokio_stream::StreamExt;
 
-                    match r_agent.clone().process(message).await {
+                    match r_agent.clone().process(vec![message]).await {
                         Ok(stream) => {
                             // Tee the agent stream to CLI printer and optional file
                             let sinks = crate::forwarding::build_cli_agent_sinks(&output).await;
