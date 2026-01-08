@@ -214,14 +214,6 @@ pub async fn build_cli_group_sinks(
     build_group_sinks(output, agents, "CLI").await
 }
 
-/// Build group sinks for Jetstream endpoint routing (CLI printer + optional file)
-pub async fn build_jetstream_group_sinks(
-    output: &Output,
-    agents: &Vec<AgentWithMembership<Arc<dyn Agent>>>,
-) -> Vec<Arc<dyn GroupEventSink>> {
-    build_group_sinks(output, agents, "Jetstream").await
-}
-
 /// Build agent sinks for single-agent CLI chat: CLI printer + optional file
 pub async fn build_cli_agent_sinks(output: &Output) -> Vec<Arc<dyn AgentEventSink>> {
     let mut sinks: Vec<Arc<dyn AgentEventSink>> = Vec::new();

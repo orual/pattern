@@ -495,7 +495,7 @@ enum AtprotoCommands {
         agent_id: String,
     },
     /// Login with OAuth
-    OAuth {
+    Oauth {
         /// Your handle (e.g., alice.bsky.social) or DID
         identifier: String,
         /// Agent to link this identity to (defaults to _constellation_ for shared identity)
@@ -781,26 +781,34 @@ async fn main() -> Result<()> {
                         output.error("Discord support not compiled. Add --features discord");
                         return Ok(());
                     }
-                } else if has_bluesky_config {
-                    chat::chat_with_group_and_jetstream(group_name, &config).await?;
                 } else {
                     chat::chat_with_group(group_name, &config).await?;
                 }
             } else {
                 // Chat with a single agent
-                if *discord {
-                    output.error("Discord mode requires a group. Use --group <name> --discord");
-                    return Ok(());
-                }
-
-                output.success("Starting chat mode...");
-                output.info("Agent:", &agent.bright_cyan().to_string());
-
                 // Suppress unused variable warnings (heartbeat handled by RuntimeContext now)
                 let _ = heartbeat_sender;
                 let _ = heartbeat_receiver;
 
-                chat::chat_with_single_agent(agent, &config).await?;
+                if *discord {
+                    #[cfg(feature = "discord")]
+                    {
+                        discord::run_discord_bot_with_agent(
+                            agent, &config, true, // enable_cli
+                        )
+                        .await?;
+                    }
+                    #[cfg(not(feature = "discord"))]
+                    {
+                        output.error("Discord support not compiled. Add --features discord");
+                        return Ok(());
+                    }
+                } else {
+                    output.success("Starting chat mode...");
+                    output.info("Agent:", &agent.bright_cyan().to_string());
+
+                    chat::chat_with_single_agent(agent, &config).await?;
+                }
             }
         }
         Commands::Agent { cmd } => match cmd {
@@ -1088,7 +1096,7 @@ async fn main() -> Result<()> {
                 )
                 .await?
             }
-            AtprotoCommands::OAuth {
+            AtprotoCommands::Oauth {
                 identifier,
                 agent_id,
             } => commands::atproto::oauth_login(identifier, agent_id, &config).await?,

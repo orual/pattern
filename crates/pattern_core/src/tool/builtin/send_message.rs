@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::{
     Result,
@@ -136,12 +137,21 @@ impl AiTool for SendMessageTool {
                     .await
             }
             TargetType::Channel => {
-                let channel_type = params.target.target_id.as_deref().unwrap_or("cli");
+                // Include target_id in metadata for channel resolution
+                let mut channel_metadata = params
+                    .metadata
+                    .clone()
+                    .unwrap_or_else(|| Value::Object(Default::default()));
+                if let Some(target_id) = &params.target.target_id {
+                    if let Value::Object(ref mut map) = channel_metadata {
+                        map.insert("target_id".to_string(), Value::String(target_id.clone()));
+                    }
+                }
                 router
                     .send_to_channel(
-                        channel_type,
+                        params.target.target_type.as_str(),
                         content.clone(),
-                        params.metadata.clone(),
+                        Some(channel_metadata.clone()),
                         Some(origin),
                     )
                     .await

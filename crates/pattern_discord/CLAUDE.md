@@ -121,6 +121,11 @@ fn select_agent_group(content: &str) -> AgentGroup {
 
 Run with Discord integration:
 ```bash
+# Single agent mode
+pattern chat --discord
+pattern chat --agent MyAgent --discord
+
+# Group mode
 pattern chat --group main --discord
 ```
 

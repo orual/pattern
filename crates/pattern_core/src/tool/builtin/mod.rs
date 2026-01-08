@@ -71,6 +71,18 @@ pub enum TargetType {
     Bluesky,
 }
 
+impl TargetType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TargetType::User => "user",
+            TargetType::Agent => "agent",
+            TargetType::Group => "group",
+            TargetType::Channel => "channel",
+            TargetType::Bluesky => "bluesky",
+        }
+    }
+}
+
 /// Registry specifically for built-in tools
 #[derive(Clone)]
 pub struct BuiltinTools {

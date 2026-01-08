@@ -18,7 +18,11 @@ pattern chat --agent MyAgent
 # Group chat
 pattern chat --group main
 
-# Discord mode (requires group)
+# Discord mode (single agent)
+pattern chat --discord
+pattern chat --agent MyAgent --discord
+
+# Discord mode (group)
 pattern chat --group main --discord
 ```
 

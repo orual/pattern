@@ -11,11 +11,8 @@ use pattern_core::{
     Result,
     agent::Agent,
     coordination::groups::{AgentGroup, AgentWithMembership, GroupManager, GroupResponseEvent},
-    messages::{ContentBlock, ContentPart, Message, MessageContent},
-    runtime::{
-        endpoints::BlueskyEndpoint,
-        router::{MessageEndpoint, MessageOrigin},
-    },
+    messages::Message,
+    runtime::router::{MessageEndpoint, MessageOrigin},
 };
 use pattern_db::models::PatternType;
 use serde_json::Value;
@@ -164,11 +161,9 @@ impl MessageEndpoint for GroupCliEndpoint {
                 GroupResponseEvent::TextChunk {
                     agent_id,
                     text,
-                    is_final,
+                    is_final: _,
                 } => {
-                    if *is_final {
-                        self.output.agent_message(&agent_id.to_string(), text);
-                    }
+                    self.output.agent_message(&agent_id.to_string(), text);
                 }
                 GroupResponseEvent::ToolCallStarted {
                     agent_id,
@@ -176,10 +171,32 @@ impl MessageEndpoint for GroupCliEndpoint {
                     args,
                     ..
                 } => {
-                    self.output.tool_call(
-                        &format!("[{}] {}", agent_id, fn_name),
-                        &serde_json::to_string_pretty(args).unwrap_or_else(|_| args.to_string()),
-                    );
+                    // For send_message directly to the user, hide the content, as it's displayed below
+                    let args_display = if fn_name == "send_message" {
+                        let mut display_args = args.clone();
+                        if let Some(args_obj) = display_args.as_object_mut() {
+                            if let Some(target) = args_obj.get("target").and_then(|t| t.as_object())
+                            {
+                                if let Some(target_type) = target.get("target_type") {
+                                    if target_type.as_str() == Some("user")
+                                        && args_obj.contains_key("content")
+                                    {
+                                        args_obj.insert(
+                                            "content".to_string(),
+                                            serde_json::json!("[shown below]"),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        serde_json::to_string(&display_args)
+                            .unwrap_or_else(|_| display_args.to_string())
+                    } else {
+                        serde_json::to_string_pretty(&args).unwrap_or_else(|_| args.to_string())
+                    };
+
+                    self.output
+                        .tool_call(&format!("[{}] {}", agent_id, fn_name), &args_display);
                 }
                 GroupResponseEvent::ToolCallCompleted { result, .. } => match result {
                     Ok(content) => self.output.tool_result(content),
@@ -213,7 +230,9 @@ impl MessageEndpoint for GroupCliEndpoint {
                         self.output.error(&format!("{}: {}", prefix, message));
                     }
                 }
-                _ => {} // ReasoningChunk handled silently
+                GroupResponseEvent::ReasoningChunk { agent_id, text, .. } => {
+                    self.output.agent_reasoning(agent_id.as_str(), text);
+                }
             }
         }
 
@@ -276,21 +295,4 @@ pub async fn build_group_cli_endpoint(
         manager,
         output,
     ))
-}
-
-// =============================================================================
-// Bluesky Endpoint Setup
-// =============================================================================
-
-/// Set up Bluesky endpoint for an agent if configured
-#[allow(dead_code)]
-pub async fn setup_bluesky_endpoint(agent: &Arc<dyn Agent>) -> Result<()> {
-    let runtime = agent.runtime();
-    let router = runtime.router();
-    let bsky = BlueskyEndpoint::new(agent.id().0, runtime.dbs().clone()).await?;
-    router
-        .register_endpoint("bluesky".into(), Arc::new(bsky))
-        .await;
-
-    Ok(())
 }

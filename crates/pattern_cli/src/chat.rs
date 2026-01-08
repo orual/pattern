@@ -66,7 +66,7 @@ pub fn print_response_event(agent_name: &str, event: ResponseEvent, output: &Out
             output.agent_message(agent_name, &text);
         }
         ResponseEvent::ReasoningChunk { text, is_final: _ } => {
-            output.status(&format!("{} Reasoning: {}", agent_name, text));
+            output.agent_reasoning(agent_name, &text);
         }
         ResponseEvent::ToolCalls { .. } => {
             // Skip - we handle individual ToolCallStarted events instead
@@ -397,19 +397,4 @@ pub async fn chat_with_group(group_name: &str, config: &PatternConfig) -> Result
     }
 
     Ok(())
-}
-
-/// Chat with a group and Jetstream data routing
-///
-/// This is an enhanced version that also subscribes to Jetstream events
-/// and routes them through the group.
-pub async fn chat_with_group_and_jetstream(group_name: &str, config: &PatternConfig) -> Result<()> {
-    let output = Output::new();
-
-    // For now, just call the regular chat_with_group
-    // Jetstream integration requires additional work to set up the firehose consumer
-    output.warning("Jetstream routing not yet integrated with pattern_db groups");
-    output.info("Fallback:", "Using standard group chat");
-
-    chat_with_group(group_name, config).await
 }
