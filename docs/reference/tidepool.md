@@ -4,6 +4,16 @@
 **Commit**: cc0ebf815967a215dfb662120ce24347f402ee71 (2026-04-15)  
 **License**: MIT OR Apache-2.0
 
+> **Revision note (2026-04-16):** The "Embedding Story → Public API Surface"
+> section has been updated to reflect `JitEffectMachine::compile`/`run` as the
+> recommended pattern for long-lived embedders, and to document internal
+> `step`/`resume` primitives (currently private). Earlier drafts described only
+> the one-shot `compile_and_run_with_nursery_size` API and incorrectly implied
+> recompile-per-invocation was unavoidable. The separated compile + run path is
+> public today; tick-by-tick stepping is a ~10-line upstream change away. Other
+> sections (IO posture, resource bounding, maturity, ExoMonad) are unchanged
+> and still accurate as of the cited commit.
+
 ## Overview
 
 Tidepool compiles Haskell effect programs (written using `freer-simple`) into native state machines via Cranelift JIT. The core design is **Haskell expands, Rust collapses**: Haskell code builds a pure, recursive description of side-effecting operations; Rust interprets that description through pluggable effect handlers.
@@ -171,7 +181,7 @@ pub fn compile_haskell(
 
 Takes Haskell source, target binder name, and include paths. Returns `(CoreExpr, DataConTable, MetaWarnings)` or an error.
 
-**Execution** (`tidepool-runtime/src/lib.rs:223-245`):
+**Execution — one-shot convenience** (`tidepool-runtime/src/lib.rs:223-245`):
 
 ```rust
 pub fn compile_and_run_with_nursery_size<U, H: DispatchEffect<U>>(
@@ -184,7 +194,41 @@ pub fn compile_and_run_with_nursery_size<U, H: DispatchEffect<U>>(
 ) -> Result<Value, RuntimeError>
 ```
 
-Compiles and runs in one shot, dispatching effects through the handler and returning the final `Value` (convertible to JSON via `value_to_json`).
+Compiles and runs in one shot, dispatching effects through the handler and returning the final `Value` (convertible to JSON via `value_to_json`). Convenient for single-shot scripts.
+
+**Execution — separated compile + run** (`tidepool-codegen/src/jit_machine.rs`):
+
+For long-lived embedders that want to compile once and run many times, `JitEffectMachine` exposes the split directly:
+
+```rust
+// tidepool-codegen/src/jit_machine.rs:79-99
+pub fn compile(
+    expr: &CoreExpr,
+    table: &DataConTable,
+    nursery_size: usize,
+) -> Result<Self, JitError>
+
+// tidepool-codegen/src/jit_machine.rs:109-209
+pub fn run<U, H: DispatchEffect<U>>(
+    &mut self,
+    table: &DataConTable,
+    handlers: &mut H,
+    user: &U,
+) -> Result<Value, JitError>
+```
+
+**This is the recommended pattern for Pattern-like embedders**: call `compile_haskell` once per program-version to get `(CoreExpr, DataConTable)`, call `JitEffectMachine::compile` once to warm the JIT, then invoke `machine.run` as many times as needed with no recompile cost. Tidepool caches the CBOR representation at `~/.cache/tidepool/` by default, so even `compile_haskell` re-runs are fast when the source is unchanged.
+
+**Internal step/resume primitives** (`tidepool-codegen/src/effect_machine.rs:118-220`, currently private):
+
+```rust
+// NOT PUBLIC — internal to JitEffectMachine::run's loop
+fn step(&mut self) -> Result<Yield, SignalError>
+fn resume(&mut self, continuation: Cont, response: Value) -> Result<Yield, SignalError>
+// Yield = Done(ptr) | Request { tag, request, continuation } | Error(e)
+```
+
+These exist and drive the effect dispatch loop internally, but `JitEffectMachine::run` bakes the driving loop in. An embedder wanting tick-by-tick control (mid-JIT pause, explicit step-and-inspect) would need a small upstream change (~10 lines) to expose them as public methods on `JitEffectMachine`. Worth noting if future work wants explicit yield-based turn boundaries instead of per-turn `run` invocations.
 
 **No direct C FFI**: Tidepool does not expose Haskell function pointers or support low-level Rust↔Haskell function calls. All communication goes through the effect system. To call a Haskell function from Rust, wrap it in a handler that dispatches an effect.
 

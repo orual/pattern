@@ -36,15 +36,21 @@ pub async fn login(provider: &str, config: &PatternConfig) -> Result<()> {
     let oauth_client = OAuthClient::new(oauth_provider);
     let device_response = oauth_client.start_device_flow().into_diagnostic()?;
 
-    // Display instructions
+    // Display the actual OAuth authorize URL the user needs to visit.
+    // Previously this printed an unrelated "Get API keys at..." URL and never
+    // surfaced `device_response.verification_uri`, which is the real auth URL.
     output.print("");
     output.info(
-        "Get API keys at:",
-        "https://console.anthropic.com/settings/keys",
+        "Open this URL in your browser to authorize:",
+        &device_response.verification_uri.bright_cyan().to_string(),
     );
     output.print("");
-    output.status("Please visit the URL above and authorize the application.");
-    output.status("After authorization, copy the full callback URL or code shown on the page.");
+    output.status(
+        "After you authorize, the page will display an authorization code.",
+    );
+    output.status(
+        "Copy the code (it looks like `<code>#<state>`) and paste it below.",
+    );
     output.print("");
 
     // Prompt for the code

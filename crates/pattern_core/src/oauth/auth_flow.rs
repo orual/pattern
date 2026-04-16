@@ -35,12 +35,33 @@ impl OAuthConfig {
         Self {
             client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e".to_string(),
             auth_endpoint: "https://claude.ai/oauth/authorize".to_string(),
+            // Subscription-tier OAuth lives on claude.com, not console.anthropic.com.
+            // console.* is for the API-key/console flow we just routed away from.
+            // platform.claude.com/oauth/code/callback is the manual paste-back URL
+            // (user copies the code from the browser into the CLI). The alternative
+            // is a local `http://localhost:{port}/callback` with an ephemeral listener;
+            // Pattern currently uses the manual-paste shape so we're preserving it.
             token_endpoint: "https://console.anthropic.com/v1/oauth/token".to_string(),
-            redirect_uri: "https://console.anthropic.com/oauth/code/callback".to_string(),
+            redirect_uri: "https://platform.claude.com/oauth/code/callback".to_string(),
+            // Subscription (Claude Pro/Max) OAuth scope set, matching the
+            // claude-code / cliproxy convention as of 2026-04-16.
+            //
+            // NOTE: `org:create_api_key` has been removed. That scope signals
+            // Anthropic's OAuth server to route users into the API-key creation
+            // flow on console.anthropic.com — which is what was causing
+            // Pattern's auth to terminate on the API key page instead of
+            // completing the subscription device-auth handshake.
+            //
+            // `user:sessions:claude_code` is Anthropic's subscription-session
+            // scope. The scope name is Anthropic's, not a client-settable
+            // value; requesting it consents to the scope Anthropic defined
+            // for subscription clients, not a claim to be claude-code.
             scopes: vec![
-                "org:create_api_key".to_string(),
                 "user:profile".to_string(),
                 "user:inference".to_string(),
+                "user:sessions:claude_code".to_string(),
+                "user:mcp_servers".to_string(),
+                "user:file_upload".to_string(),
             ],
         }
     }
