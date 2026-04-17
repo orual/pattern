@@ -14,5 +14,5 @@ pub mod handlers;
 pub mod location;
 pub mod requests;
 
-pub use bundle::{SdkBundle, default_bundle};
+pub use bundle::SdkBundle;
 pub use location::SdkLocation;

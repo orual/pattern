@@ -11,10 +11,10 @@ use crate::sdk::requests::McpReq;
 #[derive(Default)]
 pub struct McpHandler;
 
-impl EffectHandler for McpHandler {
+impl<U> EffectHandler<U> for McpHandler {
     type Request = McpReq;
 
-    fn handle(&mut self, req: McpReq, _cx: &EffectContext<'_>) -> Result<Value, EffectError> {
+    fn handle(&mut self, req: McpReq, _cx: &EffectContext<'_, U>) -> Result<Value, EffectError> {
         Err(EffectError::Handler(format!(
             "Pattern.Mcp.{req:?} is not implemented in v3 foundation \
              (phase: post-foundation plugin-system plan). Agent code should \

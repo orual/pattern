@@ -28,10 +28,10 @@ impl LogHandler {
     }
 }
 
-impl EffectHandler for LogHandler {
+impl<U> EffectHandler<U> for LogHandler {
     type Request = LogReq;
 
-    fn handle(&mut self, req: LogReq, cx: &EffectContext<'_>) -> Result<Value, EffectError> {
+    fn handle(&mut self, req: LogReq, cx: &EffectContext<'_, U>) -> Result<Value, EffectError> {
         let sid = self.session_id.as_deref().unwrap_or("unknown");
         match req {
             LogReq::Debug(msg) => debug!(session = sid, source = "agent", "{msg}"),

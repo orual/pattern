@@ -11,10 +11,10 @@ use crate::sdk::requests::SpawnReq;
 #[derive(Default)]
 pub struct SpawnHandler;
 
-impl EffectHandler for SpawnHandler {
+impl<U> EffectHandler<U> for SpawnHandler {
     type Request = SpawnReq;
 
-    fn handle(&mut self, req: SpawnReq, _cx: &EffectContext<'_>) -> Result<Value, EffectError> {
+    fn handle(&mut self, req: SpawnReq, _cx: &EffectContext<'_, U>) -> Result<Value, EffectError> {
         Err(EffectError::Handler(format!(
             "Pattern.Spawn.{req:?} is not implemented in v3 foundation \
              (phase: post-foundation constellation-runtime plan). Agent \

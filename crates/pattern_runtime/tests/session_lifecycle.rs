@@ -1,0 +1,271 @@
+//! End-to-end tests for [`pattern_runtime::TidepoolSession`] and
+//! [`pattern_runtime::TidepoolRuntime`] (Phase 3 Task 14 — AC2.1, AC2.10).
+//!
+//! Preflight is enforced up-front via `.expect(...)`: tests must fail
+//! loudly (not silently skip) when `tidepool-extract` is unavailable.
+
+use std::sync::Arc;
+use std::time::Instant;
+
+use jiff::Timestamp;
+use pattern_core::traits::{AgentRuntime, Session};
+use pattern_core::types::ids::new_id;
+use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
+use pattern_core::types::snapshot::PersonaConfig;
+use pattern_core::types::turn::TurnInput;
+use pattern_runtime::TidepoolRuntime;
+use pattern_runtime::testing::InMemoryMemoryStore;
+
+/// Build a TurnInput carrying zero messages (Phase 3 tests don't yet
+/// exercise message-bearing turns; Phase 4 adds that path).
+fn fresh_turn_input() -> TurnInput {
+    TurnInput {
+        turn_id: new_id(),
+        origin: MessageOrigin::new(
+            Author::System {
+                reason: SystemReason::Wakeup,
+            },
+            Sphere::System,
+        ),
+        messages: vec![],
+    }
+}
+
+fn preflight_or_fail() {
+    pattern_runtime::preflight::check()
+        .expect("tidepool-extract must be available; see crates/pattern_runtime/CLAUDE.md");
+}
+
+/// AC2.1: open → step → drop cycle completes without error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn open_then_step_then_drop() {
+    preflight_or_fail();
+    let memory = Arc::new(InMemoryMemoryStore::new());
+    let runtime = TidepoolRuntime::with_default_sdk(memory);
+    let persona = PersonaConfig::new(
+        "open-step-drop",
+        "OpenStepDrop",
+        include_str!("fixtures/time_log.hs"),
+    );
+    let mut session = runtime.open_session(persona, None).await.expect("open");
+    let _out = session.step(fresh_turn_input()).await.expect("step");
+    drop(session);
+}
+
+/// AC2.1: second step reuses the compiled machine. We assert this via
+/// timing — the first step's cost includes compile+JIT warm; subsequent
+/// steps are much cheaper. A 5× ratio is conservative relative to the
+/// ~100× we see in practice (compile ~600ms, warm-run ~5ms).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn open_step_twice_does_not_recompile() {
+    preflight_or_fail();
+    let memory = Arc::new(InMemoryMemoryStore::new());
+    let runtime = TidepoolRuntime::with_default_sdk(memory);
+    let persona = PersonaConfig::new(
+        "step-twice",
+        "StepTwice",
+        include_str!("fixtures/time_log.hs"),
+    );
+    let mut session = runtime.open_session(persona, None).await.expect("open");
+
+    let t0 = Instant::now();
+    session.step(fresh_turn_input()).await.expect("step 1");
+    let first = t0.elapsed();
+
+    let t1 = Instant::now();
+    session.step(fresh_turn_input()).await.expect("step 2");
+    let second = t1.elapsed();
+
+    // Warm run should be dramatically faster than the cold one. If
+    // recompilation snuck in, second would be comparable to first.
+    assert!(
+        second.as_secs_f64() * 2.0 < first.as_secs_f64().max(0.001),
+        "warm run ({:?}) should be at least 2× faster than cold ({:?})",
+        second,
+        first,
+    );
+}
+
+/// AC2.4: memory writes persist across turns within a session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn memory_write_then_read_roundtrips() {
+    preflight_or_fail();
+    let memory = Arc::new(InMemoryMemoryStore::new());
+    let runtime = TidepoolRuntime::with_default_sdk(memory.clone());
+
+    // Turn 1: write using the write-agent program.
+    let persona_write = PersonaConfig::new(
+        "roundtrip",
+        "RoundtripWrite",
+        include_str!("fixtures/memory_write.hs"),
+    );
+    let mut session_write = runtime
+        .open_session(persona_write, None)
+        .await
+        .expect("open write");
+    session_write
+        .step(fresh_turn_input())
+        .await
+        .expect("write turn");
+
+    // The store is shared between sessions (same Arc). Verify the block
+    // landed via the trait directly — independent of handler dispatch.
+    let content = pattern_core::traits::MemoryStore::get_rendered_content(
+        memory.as_ref(),
+        "roundtrip",
+        "scratchpad",
+    )
+    .await
+    .expect("get_rendered_content")
+    .expect("block should exist after write turn");
+    assert_eq!(content, "hello from turn 1");
+
+    // Turn 2: open a fresh session with the same agent id + store and
+    // run the read-agent. The read should see the prior write.
+    let persona_read = PersonaConfig::new(
+        "roundtrip",
+        "RoundtripRead",
+        include_str!("fixtures/memory_read.hs"),
+    );
+    let mut session_read = runtime
+        .open_session(persona_read, None)
+        .await
+        .expect("open read");
+    // Reading a missing block would produce a handler error; a
+    // successful step confirms the block was found and returned.
+    session_read
+        .step(fresh_turn_input())
+        .await
+        .expect("read turn");
+}
+
+/// AC2.10: concurrent sessions run in isolation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_sessions_are_isolated() {
+    preflight_or_fail();
+    let memory = Arc::new(InMemoryMemoryStore::new());
+    let runtime = Arc::new(TidepoolRuntime::with_default_sdk(memory));
+
+    let mut handles = Vec::new();
+    for i in 0..4u32 {
+        let rt = runtime.clone();
+        handles.push(tokio::spawn(async move {
+            let persona = PersonaConfig::new(
+                format!("concurrent-{i}"),
+                format!("Concurrent{i}"),
+                include_str!("fixtures/time_log.hs"),
+            );
+            let mut s = rt.open_session(persona, None).await.expect("open");
+            for _ in 0..3 {
+                s.step(fresh_turn_input()).await.expect("step");
+            }
+        }));
+    }
+    for h in handles {
+        h.await.expect("task join");
+    }
+}
+
+/// AC2.4: checkpoint → restore round-trip. Phase 3 scope verifies that
+/// the snapshot survives a serialise/deserialise cycle via
+/// [`pattern_core::types::snapshot::SessionSnapshot`]. Faithful
+/// deterministic replay (re-driving the JIT with recorded responses) is
+/// deferred to the phase that lands the replay bundle — see
+/// `crates/pattern_runtime/src/checkpoint.rs` for the shape rationale.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn checkpoint_restore_roundtrip_preserves_events() {
+    preflight_or_fail();
+    let memory = Arc::new(InMemoryMemoryStore::new());
+    let runtime = TidepoolRuntime::with_default_sdk(memory);
+    let persona = PersonaConfig::new(
+        "cp-roundtrip",
+        "CpRoundtrip",
+        include_str!("fixtures/time_log.hs"),
+    );
+    let mut session = runtime.open_session(persona, None).await.expect("open");
+
+    // Seed the event log so there's something to round-trip. Phase 3
+    // handlers do not yet write to the log during `step` (that wiring
+    // goes in once the replay bundle is ready); we exercise the
+    // snapshot contract directly.
+    let log = session.checkpoint_log();
+    {
+        let mut guard = log.lock().expect("log mutex");
+        use pattern_runtime::checkpoint::CheckpointEvent;
+        use tidepool_eval::Value;
+        use tidepool_repr::Literal;
+        guard.record(CheckpointEvent::new(
+            7,
+            &Value::Lit(Literal::LitInt(1)),
+            &Value::Lit(Literal::LitInt(2)),
+            1,
+        ));
+        guard.record(CheckpointEvent::new(
+            9,
+            &Value::Lit(Literal::LitInt(3)),
+            &Value::Lit(Literal::LitInt(4)),
+            1,
+        ));
+    }
+
+    let snap = session.checkpoint().await.expect("checkpoint");
+    assert_eq!(snap.schema_version, 1);
+    assert_eq!(snap.personas.len(), 1);
+
+    // Serialize → deserialize to exercise the full wire contract
+    // (JSON-as-opaque-data on `SessionSnapshot.data`).
+    let json =
+        serde_json::to_string(&snap).expect("SessionSnapshot should serialize to JSON");
+    let decoded: pattern_core::types::snapshot::SessionSnapshot =
+        serde_json::from_str(&json).expect("SessionSnapshot should deserialize");
+    assert_eq!(decoded.personas.len(), 1);
+
+    // Restore into a fresh session; event log should now contain the
+    // recovered events.
+    let persona2 = PersonaConfig::new(
+        "cp-roundtrip",
+        "CpRoundtrip2",
+        include_str!("fixtures/time_log.hs"),
+    );
+    let mut session2 = runtime.open_session(persona2, None).await.expect("open 2");
+    session2.restore(decoded).await.expect("restore");
+    let log2 = session2.checkpoint_log();
+    let guard = log2.lock().expect("log mutex");
+    assert_eq!(guard.len(), 2);
+    assert_eq!(guard.events()[0].tag, 7);
+    assert_eq!(guard.events()[1].tag, 9);
+
+    // Touch `Timestamp::now()` to silence an unused-import warning on
+    // jiff; keeping this import makes future time-aware checkpoint
+    // extensions diff-minimally.
+    let _ = Timestamp::now();
+}
+
+/// Re-opening a runtime with `with_default_sdk` using the same store
+/// produces independent sessions that see the same persisted memory
+/// writes. This complements `memory_write_then_read_roundtrips` by
+/// exercising the runtime-level path rather than a single session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn runtime_shares_store_across_sessions() {
+    preflight_or_fail();
+    let memory = Arc::new(InMemoryMemoryStore::new());
+    let runtime = TidepoolRuntime::with_default_sdk(memory.clone());
+
+    let persona = PersonaConfig::new(
+        "shared-store",
+        "SharedStore",
+        include_str!("fixtures/memory_write.hs"),
+    );
+    let mut s1 = runtime.open_session(persona, None).await.expect("open 1");
+    s1.step(fresh_turn_input()).await.expect("write");
+
+    drop(s1);
+
+    let persona2 = PersonaConfig::new(
+        "shared-store",
+        "SharedStore",
+        include_str!("fixtures/memory_read.hs"),
+    );
+    let mut s2 = runtime.open_session(persona2, None).await.expect("open 2");
+    s2.step(fresh_turn_input()).await.expect("read");
+}

@@ -8,16 +8,27 @@
 //! - Phase 3: Tidepool FFI, timeout harness, SDK effect algebra, agent loop, checkpoint, `time`/`log` handlers.
 //! - Phase 5: Memory adapter (wraps preserved storage), pseudo-message emission, pre-turn `current_state` pseudo-turn.
 
+pub mod checkpoint;
 pub mod preflight;
+pub mod runtime;
 pub mod sdk;
+pub mod session;
 pub mod tidepool;
+pub mod timeout;
+pub use runtime::TidepoolRuntime;
 pub use sdk::SdkLocation;
+pub use session::{SessionContext, TidepoolSession};
 pub use tidepool::{CompiledProgram, SessionMachine};
 
 /// Test fixtures re-exported from [`tidepool_testing`] under Rust-2024-safe
-/// paths. Only compiled for this crate's own tests; other crates depending
-/// on `tidepool-testing` as a dev-dep should maintain their own equivalent
-/// module. See `testing.rs` for rationale (tidepool's `gen` submodule is a
-/// reserved keyword in edition 2024).
-#[cfg(test)]
-mod testing;
+/// paths, plus an in-memory [`pattern_core::traits::MemoryStore`] double
+/// (`test_support::InMemoryMemoryStore`) used by session / runtime
+/// integration tests.
+///
+/// The module is compiled unconditionally so integration tests in
+/// `crates/pattern_runtime/tests/` can import the helpers; the contents
+/// are small enough that the release-binary cost is negligible, and
+/// gating this module on a feature flag complicates the workspace's
+/// test pipeline. See `testing.rs` for the history of the `gen`
+/// submodule workaround (edition 2024 reserves `gen`).
+pub mod testing;

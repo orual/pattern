@@ -31,7 +31,11 @@
 //! let core_err: CoreError = prov_err.into();
 //! assert!(core_err.to_string().contains("rate limited"));
 //!
-//! let rt_err = RuntimeError::Timeout { wall_ms: 5000, cpu_ms: 1000 };
+//! let rt_err = RuntimeError::Timeout {
+//!     wall_ms: 5000,
+//!     cpu_ms: 1000,
+//!     path: pattern_core::error::CancelPath::Soft,
+//! };
 //! let core_err: CoreError = rt_err.into();
 //! assert!(core_err.to_string().contains("timed out"));
 //! ```
@@ -46,7 +50,7 @@ pub use core::{ConfigError, CoreError};
 pub use embedding::EmbeddingError;
 pub use memory::MemoryError;
 pub use provider::ProviderError;
-pub use runtime::{RuntimeError, SandboxConstraint};
+pub use runtime::{CancelPath, RuntimeError, SandboxConstraint};
 
 /// Convenience `Result` alias using [`CoreError`] as the error type.
 ///

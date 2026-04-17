@@ -20,10 +20,10 @@ const MAX_SLEEP_NS: i64 = 100_000_000;
 #[derive(Default)]
 pub struct TimeHandler;
 
-impl EffectHandler for TimeHandler {
+impl<U> EffectHandler<U> for TimeHandler {
     type Request = TimeReq;
 
-    fn handle(&mut self, req: TimeReq, cx: &EffectContext<'_>) -> Result<Value, EffectError> {
+    fn handle(&mut self, req: TimeReq, cx: &EffectContext<'_, U>) -> Result<Value, EffectError> {
         match req {
             TimeReq::Now => {
                 // jiff::Timestamp is an explicit UTC instant with nanosecond precision.

@@ -11,13 +11,13 @@ use crate::sdk::requests::MessageReq;
 #[derive(Default)]
 pub struct MessageHandler;
 
-impl EffectHandler for MessageHandler {
+impl<U> EffectHandler<U> for MessageHandler {
     type Request = MessageReq;
 
-    fn handle(&mut self, req: MessageReq, _cx: &EffectContext<'_>) -> Result<Value, EffectError> {
+    fn handle(&mut self, req: MessageReq, _cx: &EffectContext<'_, U>) -> Result<Value, EffectError> {
         Err(EffectError::Handler(format!(
-            "Pattern.Message.{req:?} is stubbed in Phase 3 — Phase 4 wires real \
-             pattern_provider backing. Agent code should not call message effects yet."
+            "Message handler is stubbed in phase 3 — Phase 4 wires pattern_provider. \
+             Request was: Pattern.Message.{req:?}."
         )))
     }
 }
@@ -34,8 +34,8 @@ mod tests {
         let cx = EffectContext::with_user(&table, &());
         let err = h.handle(MessageReq::Ask("test".into()), &cx).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("Pattern.Message"), "got: {msg}");
-        assert!(msg.contains("stubbed"), "got: {msg}");
+        assert!(msg.contains("Message handler"), "got: {msg}");
+        assert!(msg.contains("stubbed in phase 3"), "got: {msg}");
         assert!(msg.contains("Phase 4"), "got: {msg}");
     }
 }

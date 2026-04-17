@@ -14,6 +14,32 @@ use miette::Diagnostic;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Which cancellation path produced a [`RuntimeError::Timeout`].
+///
+/// See the v3-foundation Phase 3 Task 16 description for the two-path
+/// cancellation design. The distinction matters to callers because
+/// [`CancelPath::Soft`] leaves the session usable while
+/// [`CancelPath::HardAbandon`] poisons it.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CancelPath {
+    /// Soft cancel fired at an effect boundary; the session remains usable.
+    Soft,
+    /// Hard abandon fired — the blocking thread was detached and the session
+    /// is poisoned. Callers must open a fresh session.
+    HardAbandon,
+}
+
+impl std::fmt::Display for CancelPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CancelPath::Soft => f.write_str("soft"),
+            CancelPath::HardAbandon => f.write_str("hard_abandon"),
+        }
+    }
+}
+
 /// Kinds of sandbox constraint a runtime may enforce on agent programs.
 ///
 /// Surfaced through [`RuntimeError::SandboxConstraintViolated`]. These are
@@ -56,11 +82,15 @@ pub enum RuntimeError {
     /// ```
     /// use pattern_core::error::RuntimeError;
     ///
-    /// let err = RuntimeError::Timeout { wall_ms: 30_000, cpu_ms: 10_000 };
+    /// let err = RuntimeError::Timeout {
+    ///     wall_ms: 30_000,
+    ///     cpu_ms: 10_000,
+    ///     path: pattern_core::error::CancelPath::Soft,
+    /// };
     /// assert!(err.to_string().contains("wall"));
     /// assert!(err.to_string().contains("30000"));
     /// ```
-    #[error("agent turn timed out: wall {wall_ms}ms, cpu {cpu_ms}ms")]
+    #[error("agent turn timed out ({path}): wall {wall_ms}ms, cpu {cpu_ms}ms")]
     #[diagnostic(
         code(pattern_core::runtime::timeout),
         help("increase the turn budget or reduce the agent's workload per turn")
@@ -70,6 +100,8 @@ pub enum RuntimeError {
         wall_ms: u64,
         /// Elapsed CPU time in milliseconds.
         cpu_ms: u64,
+        /// Which cancellation path produced this timeout.
+        path: CancelPath,
     },
 
     /// The agent attempted to emit more effects in one turn than the budget
@@ -280,6 +312,93 @@ pub enum RuntimeError {
     )]
     PreflightFailed {
         /// Human-readable description of what the preflight check found wrong.
+        reason: String,
+    },
+
+    /// The session was poisoned by a hard-abandoned turn and can no longer
+    /// be stepped. Callers must open a fresh session.
+    ///
+    /// Produced by the Phase 3 Task 16 two-path cancellation harness when
+    /// a runaway compute turn had to be abandoned in the background.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::RuntimeError;
+    ///
+    /// let err = RuntimeError::SessionPoisoned {
+    ///     reason: "previous turn hard-abandoned".into(),
+    /// };
+    /// assert!(err.to_string().contains("poisoned"));
+    /// ```
+    #[error("session poisoned: {reason}")]
+    #[diagnostic(
+        code(pattern_core::runtime::session_poisoned),
+        help("open a fresh session — compile is cached so this is cheap")
+    )]
+    SessionPoisoned {
+        /// Why the session was poisoned.
+        reason: String,
+    },
+
+    /// A tokio task joined with an error (panic or cancellation propagation).
+    ///
+    /// Produced by the cancellation harness when the blocking task hosting
+    /// the JIT fails to join cleanly. The underlying task error is preserved
+    /// as a human-readable string.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::RuntimeError;
+    ///
+    /// let err = RuntimeError::JoinError { reason: "task panicked".into() };
+    /// assert!(err.to_string().contains("join"));
+    /// ```
+    #[error("join error: {reason}")]
+    #[diagnostic(code(pattern_core::runtime::join_error))]
+    JoinError {
+        /// Human-readable description of the join failure.
+        reason: String,
+    },
+
+    /// The cancellation watchdog itself failed (e.g., its task panicked).
+    ///
+    /// Should not occur in practice; surfaced defensively so callers can
+    /// distinguish a watchdog bug from a genuine timeout.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::RuntimeError;
+    ///
+    /// let err = RuntimeError::WatchdogFailure;
+    /// assert!(err.to_string().contains("watchdog"));
+    /// ```
+    #[error("cancellation watchdog failed")]
+    #[diagnostic(code(pattern_core::runtime::watchdog_failure))]
+    WatchdogFailure,
+
+    /// An SDK effect handler reported a failure during turn execution.
+    ///
+    /// Produced when a handler returns `EffectError::Handler(...)` (or any
+    /// other effect error) that is not a cancellation sentinel. The raw
+    /// message is preserved for diagnostics.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::RuntimeError;
+    ///
+    /// let err = RuntimeError::EffectHandlerFailed {
+    ///     reason: "Pattern.Memory.Search(...) not yet wired".into(),
+    /// };
+    /// assert!(err.to_string().contains("Pattern.Memory"));
+    /// ```
+    #[error("effect handler failed: {reason}")]
+    #[diagnostic(code(pattern_core::runtime::effect_handler_failed))]
+    EffectHandlerFailed {
+        /// Human-readable description of the handler failure.
         reason: String,
     },
 }

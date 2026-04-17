@@ -12,10 +12,10 @@ use crate::sdk::requests::ShellReq;
 #[derive(Default)]
 pub struct ShellHandler;
 
-impl EffectHandler for ShellHandler {
+impl<U> EffectHandler<U> for ShellHandler {
     type Request = ShellReq;
 
-    fn handle(&mut self, req: ShellReq, _cx: &EffectContext<'_>) -> Result<Value, EffectError> {
+    fn handle(&mut self, req: ShellReq, _cx: &EffectContext<'_, U>) -> Result<Value, EffectError> {
         Err(EffectError::Handler(format!(
             "Pattern.Shell.{req:?} is not implemented in v3 foundation \
              (phase: post-foundation shell-tool plan). Agent code should \

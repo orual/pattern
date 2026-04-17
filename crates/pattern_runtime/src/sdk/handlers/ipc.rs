@@ -11,10 +11,10 @@ use crate::sdk::requests::IpcReq;
 #[derive(Default)]
 pub struct IpcHandler;
 
-impl EffectHandler for IpcHandler {
+impl<U> EffectHandler<U> for IpcHandler {
     type Request = IpcReq;
 
-    fn handle(&mut self, req: IpcReq, _cx: &EffectContext<'_>) -> Result<Value, EffectError> {
+    fn handle(&mut self, req: IpcReq, _cx: &EffectContext<'_, U>) -> Result<Value, EffectError> {
         Err(EffectError::Handler(format!(
             "Pattern.Ipc.{req:?} is not implemented in v3 foundation \
              (phase: post-foundation constellation-runtime plan). Agent \
