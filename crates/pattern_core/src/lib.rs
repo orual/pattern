@@ -26,6 +26,7 @@ pub mod export;
 pub mod memory;
 pub mod memory_acl;
 pub mod permission;
+pub mod traits;
 pub mod types;
 pub mod utils;
 
