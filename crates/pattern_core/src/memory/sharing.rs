@@ -3,8 +3,8 @@
 //! Enables explicit sharing of blocks between agents with controlled access levels.
 //! Uses MemoryPermission from pattern_db for access control granularity.
 
-use pattern_db::ConstellationDb;
 use crate::memory::{MemoryError, MemoryResult};
+use pattern_db::ConstellationDb;
 use pattern_db::models::MemoryPermission;
 use pattern_db::queries;
 use std::sync::Arc;
@@ -46,21 +46,15 @@ impl SharedBlockManager {
         }
 
         // Create shared attachment
-        queries::create_shared_block_attachment(
-            self.db.pool(),
-            block_id,
-            agent_id,
-            permission,
-        )
-        .await?;
+        queries::create_shared_block_attachment(self.db.pool(), block_id, agent_id, permission)
+            .await?;
 
         Ok(())
     }
 
     /// Remove sharing for a block
     pub async fn unshare_block(&self, block_id: &str, agent_id: &str) -> MemoryResult<()> {
-        queries::delete_shared_block_attachment(self.db.pool(), block_id, agent_id)
-            .await?;
+        queries::delete_shared_block_attachment(self.db.pool(), block_id, agent_id).await?;
         Ok(())
     }
 
@@ -76,18 +70,14 @@ impl SharedBlockManager {
         permission: MemoryPermission,
     ) -> MemoryResult<String> {
         // Look up target agent by name
-        let target_agent =
-            queries::get_agent_by_name(self.db.pool(), target_agent_name)
-                .await?
-                .ok_or_else(|| {
-                    MemoryError::Other(format!("Agent not found: {}", target_agent_name))
-                })?;
+        let target_agent = queries::get_agent_by_name(self.db.pool(), target_agent_name)
+            .await?
+            .ok_or_else(|| MemoryError::Other(format!("Agent not found: {}", target_agent_name)))?;
 
         // Get the block by label to find its ID
-        let block =
-            queries::get_block_by_label(self.db.pool(), owner_agent_id, block_label)
-                .await?
-                .ok_or_else(|| MemoryError::Other(format!("Block not found: {}", block_label)))?;
+        let block = queries::get_block_by_label(self.db.pool(), owner_agent_id, block_label)
+            .await?
+            .ok_or_else(|| MemoryError::Other(format!("Block not found: {}", block_label)))?;
 
         // Share the block
         self.share_block(&block.id, &target_agent.id, permission)
@@ -107,18 +97,14 @@ impl SharedBlockManager {
         target_agent_name: &str,
     ) -> MemoryResult<String> {
         // Look up target agent by name
-        let target_agent =
-            queries::get_agent_by_name(self.db.pool(), target_agent_name)
-                .await?
-                .ok_or_else(|| {
-                    MemoryError::Other(format!("Agent not found: {}", target_agent_name))
-                })?;
+        let target_agent = queries::get_agent_by_name(self.db.pool(), target_agent_name)
+            .await?
+            .ok_or_else(|| MemoryError::Other(format!("Agent not found: {}", target_agent_name)))?;
 
         // Get the block by label to find its ID
-        let block =
-            queries::get_block_by_label(self.db.pool(), owner_agent_id, block_label)
-                .await?
-                .ok_or_else(|| MemoryError::Other(format!("Block not found: {}", block_label)))?;
+        let block = queries::get_block_by_label(self.db.pool(), owner_agent_id, block_label)
+            .await?
+            .ok_or_else(|| MemoryError::Other(format!("Block not found: {}", block_label)))?;
 
         // Unshare the block
         self.unshare_block(&block.id, &target_agent.id).await?;
@@ -131,8 +117,7 @@ impl SharedBlockManager {
         &self,
         block_id: &str,
     ) -> MemoryResult<Vec<(String, MemoryPermission)>> {
-        let attachments =
-            queries::list_block_shared_agents(self.db.pool(), block_id).await?;
+        let attachments = queries::list_block_shared_agents(self.db.pool(), block_id).await?;
 
         Ok(attachments
             .into_iter()
@@ -145,8 +130,7 @@ impl SharedBlockManager {
         &self,
         agent_id: &str,
     ) -> MemoryResult<Vec<(String, MemoryPermission)>> {
-        let attachments =
-            queries::list_agent_shared_blocks(self.db.pool(), agent_id).await?;
+        let attachments = queries::list_agent_shared_blocks(self.db.pool(), agent_id).await?;
 
         Ok(attachments
             .into_iter()
@@ -184,8 +168,7 @@ impl SharedBlockManager {
 
         // 3. Check shared attachments
         let attachment =
-            queries::get_shared_block_attachment(self.db.pool(), block_id, agent_id)
-                .await?;
+            queries::get_shared_block_attachment(self.db.pool(), block_id, agent_id).await?;
 
         Ok(attachment.map(|att| att.permission))
     }
@@ -231,16 +214,10 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
-        queries::create_agent(dbs.pool(), &agent)
-            .await
-            .unwrap();
+        queries::create_agent(dbs.pool(), &agent).await.unwrap();
     }
 
-    async fn create_test_block(
-        dbs: &ConstellationDb,
-        id: &str,
-        agent_id: &str,
-    ) -> MemoryBlock {
+    async fn create_test_block(dbs: &ConstellationDb, id: &str, agent_id: &str) -> MemoryBlock {
         let block = MemoryBlock {
             id: id.to_string(),
             agent_id: agent_id.to_string(),
@@ -260,9 +237,7 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
-        queries::create_block(dbs.pool(), &block)
-            .await
-            .unwrap();
+        queries::create_block(dbs.pool(), &block).await.unwrap();
         block
     }
 

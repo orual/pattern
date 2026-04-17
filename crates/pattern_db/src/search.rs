@@ -317,9 +317,10 @@ impl<'a> HybridSearchBuilder<'a> {
 
                 // Apply threshold
                 if let Some(min_score) = self.min_fts_score
-                    && normalized < min_score {
-                        return None;
-                    }
+                    && normalized < min_score
+                {
+                    return None;
+                }
 
                 Some(SearchResult {
                     id: m.id,
@@ -358,9 +359,10 @@ impl<'a> HybridSearchBuilder<'a> {
             .filter_map(|(pos, r)| {
                 // Apply threshold
                 if let Some(max_dist_thresh) = self.max_vector_distance
-                    && r.distance > max_dist_thresh {
-                        return None;
-                    }
+                    && r.distance > max_dist_thresh
+                {
+                    return None;
+                }
 
                 let normalized = 1.0 - (r.distance / max_dist) as f64;
                 let content_type = match r.content_type {

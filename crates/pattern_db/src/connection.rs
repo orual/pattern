@@ -33,9 +33,10 @@ impl ConstellationDb {
 
         // Ensure parent directory exists
         if let Some(parent) = path.parent()
-            && !parent.exists() {
-                std::fs::create_dir_all(parent)?;
-            }
+            && !parent.exists()
+        {
+            std::fs::create_dir_all(parent)?;
+        }
 
         let path_str = path.to_string_lossy();
         info!("Opening constellation database: {}", path_str);

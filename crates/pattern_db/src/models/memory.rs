@@ -87,7 +87,6 @@ pub enum MemoryBlockType {
     Log,
 }
 
-
 impl MemoryBlockType {
     /// Returns the lowercase string representation matching the database format.
     pub fn as_str(&self) -> &'static str {
@@ -148,7 +147,6 @@ pub enum MemoryPermission {
     /// Total control, including delete
     Admin,
 }
-
 
 impl MemoryPermission {
     /// Returns the snake_case string representation matching the database format.

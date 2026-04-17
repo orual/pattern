@@ -61,17 +61,11 @@ pub trait ProviderClient: Send + Sync {
     /// The returned stream emits [`CompletionChunk`]s until a terminal chunk
     /// (`is_final: true`) or an error. Callers typically assemble the chunk
     /// stream into a [`crate::types::provider::CompletionResponse`].
-    async fn complete(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<ChunkStream, ProviderError>;
+    async fn complete(&self, request: CompletionRequest) -> Result<ChunkStream, ProviderError>;
 
     /// Return the provider-reported input token count for a composed request.
     ///
     /// Used pre-request by compaction and context-length decisions; replaces
     /// the pre-v3 heuristic token approximation. See v3-foundation.AC5b.
-    async fn count_tokens(
-        &self,
-        request: &CompletionRequest,
-    ) -> Result<TokenCount, ProviderError>;
+    async fn count_tokens(&self, request: &CompletionRequest) -> Result<TokenCount, ProviderError>;
 }

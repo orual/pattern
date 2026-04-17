@@ -108,4 +108,3 @@ pub enum OccurrenceStatus {
     /// Cancelled this occurrence (but not the series)
     Cancelled,
 }
-

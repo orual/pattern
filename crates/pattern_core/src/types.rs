@@ -18,12 +18,12 @@ pub mod turn;
 pub use batch::{BatchType, MessageBatch};
 pub use block::{Block, BlockHandle, BlockWrite};
 pub use block_ref::BlockRef;
-pub use origin::{AgentAuthor, Author, Human, MessageOrigin, Partner, Sphere};
 pub use ids::{
     AgentId, BatchId, ConstellationId, ConversationId, DiscordIdentityId, EventId, GroupId,
     MemoryId, MessageId, ModelId, OAuthTokenId, ProjectId, QueuedMessageId, RelationId, RequestId,
     SessionId, TaskId, ToolCallId, UserId, WakeupId, WorkspaceId, new_id,
 };
 pub use message::{Message, ResponseMeta};
+pub use origin::{AgentAuthor, Author, Human, MessageOrigin, Partner, Sphere};
 pub use snapshot::{PersonaConfig, PersonaSnapshot, SessionSnapshot};
 pub use turn::{TurnCacheMetrics, TurnId, TurnInput, TurnOutput};

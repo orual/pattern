@@ -17,9 +17,9 @@ use std::fmt::Display;
 pub use cache::*;
 pub use document::*;
 pub use schema::*;
-pub use sharing::*;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+pub use sharing::*;
 pub use store::*;
 pub use types::*;
 

@@ -809,20 +809,20 @@ impl CoreError {
                 body,
                 headers,
             } = webc_error
-            {
-                let hdrs: Vec<(String, String)> = headers
-                    .as_ref()
-                    .iter()
-                    .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
-                    .collect();
-                return Self::ProviderHttpError {
-                    provider,
-                    model,
-                    status: status.as_u16(),
-                    headers: hdrs,
-                    body: body.clone(),
-                };
-            }
+        {
+            let hdrs: Vec<(String, String)> = headers
+                .as_ref()
+                .iter()
+                .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+                .collect();
+            return Self::ProviderHttpError {
+                provider,
+                model,
+                status: status.as_u16(),
+                headers: hdrs,
+                body: body.clone(),
+            };
+        }
         Self::ModelProviderError {
             provider,
             model,
@@ -954,15 +954,16 @@ impl CoreError {
             .get("anthropic-ratelimit-unified-5h-reset")
             .or_else(|| map.get("anthropic-ratelimit-unified-reset"))
             .map(|s| s.as_str())
-            && let Ok(epoch) = raw.trim().parse::<u64>() {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .ok()?
-                    .as_secs();
-                if epoch > now {
-                    return Some(std::time::Duration::from_millis((epoch - now) * 1000));
-                }
+            && let Ok(epoch) = raw.trim().parse::<u64>()
+        {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_secs();
+            if epoch > now {
+                return Some(std::time::Duration::from_millis((epoch - now) * 1000));
             }
+        }
 
         // Provider-specific reset headers (OpenAI/Groq-like)
         let keys = [
@@ -975,21 +976,25 @@ impl CoreError {
             if let Some(raw) = map.get(k).map(|s| s.as_str()) {
                 let s = raw.trim();
                 if let Some(stripped) = s.strip_suffix("ms")
-                    && let Ok(v) = stripped.trim().parse::<u64>() {
-                        return Some(std::time::Duration::from_millis(v));
-                    }
+                    && let Ok(v) = stripped.trim().parse::<u64>()
+                {
+                    return Some(std::time::Duration::from_millis(v));
+                }
                 if let Some(stripped) = s.strip_suffix('s')
-                    && let Ok(v) = stripped.trim().parse::<u64>() {
-                        return Some(std::time::Duration::from_millis(v * 1000));
-                    }
+                    && let Ok(v) = stripped.trim().parse::<u64>()
+                {
+                    return Some(std::time::Duration::from_millis(v * 1000));
+                }
                 if let Some(stripped) = s.strip_suffix('m')
-                    && let Ok(v) = stripped.trim().parse::<u64>() {
-                        return Some(std::time::Duration::from_millis(v * 60_000));
-                    }
+                    && let Ok(v) = stripped.trim().parse::<u64>()
+                {
+                    return Some(std::time::Duration::from_millis(v * 60_000));
+                }
                 if let Some(stripped) = s.strip_suffix('h')
-                    && let Ok(v) = stripped.trim().parse::<u64>() {
-                        return Some(std::time::Duration::from_millis(v * 3_600_000));
-                    }
+                    && let Ok(v) = stripped.trim().parse::<u64>()
+                {
+                    return Some(std::time::Duration::from_millis(v * 3_600_000));
+                }
                 if let Ok(secs) = s.parse::<u64>() {
                     return Some(std::time::Duration::from_millis(secs * 1000));
                 }

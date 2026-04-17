@@ -316,12 +316,8 @@ pub trait MemoryStore: Send + Sync + fmt::Debug {
     /// Pinned blocks are always loaded into agent context while subscribed.
     /// Unpinned (ephemeral) blocks only load when referenced by a
     /// notification.
-    async fn set_block_pinned(
-        &self,
-        agent_id: &str,
-        label: &str,
-        pinned: bool,
-    ) -> MemoryResult<()>;
+    async fn set_block_pinned(&self, agent_id: &str, label: &str, pinned: bool)
+    -> MemoryResult<()>;
 
     /// Change a block's type.
     ///

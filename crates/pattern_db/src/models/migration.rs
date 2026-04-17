@@ -117,4 +117,3 @@ pub enum IssueSeverity {
     /// Critical, migration may be incomplete
     Critical,
 }
-

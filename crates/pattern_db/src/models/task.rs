@@ -100,7 +100,6 @@ pub enum UserTaskStatus {
     Deferred,
 }
 
-
 impl std::fmt::Display for UserTaskStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -141,7 +140,6 @@ pub enum UserTaskPriority {
     /// Critical blocker - everything else waits
     Critical,
 }
-
 
 impl std::fmt::Display for UserTaskPriority {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

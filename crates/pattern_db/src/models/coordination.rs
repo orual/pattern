@@ -78,7 +78,6 @@ pub enum EventImportance {
     Critical,
 }
 
-
 /// Per-agent activity summary.
 ///
 /// LLM-generated summary of an agent's recent activity,
@@ -202,7 +201,6 @@ pub enum TaskStatus {
     Cancelled,
 }
 
-
 /// Task priority.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, sqlx::Type,
@@ -221,7 +219,6 @@ pub enum TaskPriority {
     /// Urgent priority
     Urgent,
 }
-
 
 /// A handoff note from one agent to another.
 ///

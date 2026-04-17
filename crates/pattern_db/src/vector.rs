@@ -271,9 +271,10 @@ pub async fn knn_search(
             let ct = ContentType::parse_from_str(&content_type)?;
             // Apply content type filter if specified
             if let Some(filter_ct) = content_type_filter
-                && ct != filter_ct {
-                    return None;
-                }
+                && ct != filter_ct
+            {
+                return None;
+            }
             Some(VectorSearchResult {
                 content_id,
                 distance,

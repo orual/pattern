@@ -159,7 +159,6 @@ pub enum AgentStatus {
     Archived,
 }
 
-
 /// An agent group for coordination.
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct AgentGroup {

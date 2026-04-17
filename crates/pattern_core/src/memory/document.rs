@@ -424,10 +424,9 @@ impl StructuredDocument {
         is_system: bool,
     ) -> Result<(), DocumentError> {
         // Check read-only if not system
-        if !is_system
-            && let Some(true) = self.metadata.schema.is_field_read_only(field) {
-                return Err(DocumentError::ReadOnlyField(field.to_string()));
-            }
+        if !is_system && let Some(true) = self.metadata.schema.is_field_read_only(field) {
+            return Err(DocumentError::ReadOnlyField(field.to_string()));
+        }
 
         let map = self.doc.get_map("fields");
         let loro_value = json_to_loro(&value);
@@ -473,10 +472,9 @@ impl StructuredDocument {
         is_system: bool,
     ) -> Result<(), DocumentError> {
         // Check read-only if not system
-        if !is_system
-            && let Some(true) = self.metadata.schema.is_field_read_only(field) {
-                return Err(DocumentError::ReadOnlyField(field.to_string()));
-            }
+        if !is_system && let Some(true) = self.metadata.schema.is_field_read_only(field) {
+            return Err(DocumentError::ReadOnlyField(field.to_string()));
+        }
 
         let list = self.doc.get_list(format!("list_{field}"));
         let loro_value = json_to_loro(&item);
@@ -494,10 +492,9 @@ impl StructuredDocument {
         is_system: bool,
     ) -> Result<(), DocumentError> {
         // Check read-only if not system
-        if !is_system
-            && let Some(true) = self.metadata.schema.is_field_read_only(field) {
-                return Err(DocumentError::ReadOnlyField(field.to_string()));
-            }
+        if !is_system && let Some(true) = self.metadata.schema.is_field_read_only(field) {
+            return Err(DocumentError::ReadOnlyField(field.to_string()));
+        }
 
         let list = self.doc.get_list(format!("list_{field}"));
         if index >= list.len() {
@@ -529,10 +526,9 @@ impl StructuredDocument {
         is_system: bool,
     ) -> Result<i64, DocumentError> {
         // Check read-only if not system
-        if !is_system
-            && let Some(true) = self.metadata.schema.is_field_read_only(field) {
-                return Err(DocumentError::ReadOnlyField(field.to_string()));
-            }
+        if !is_system && let Some(true) = self.metadata.schema.is_field_read_only(field) {
+            return Err(DocumentError::ReadOnlyField(field.to_string()));
+        }
 
         let counter = self.doc.get_counter(format!("counter_{field}"));
         counter
@@ -554,10 +550,9 @@ impl StructuredDocument {
         is_system: bool,
     ) -> Result<(), DocumentError> {
         // Check section read-only permission
-        if !is_system
-            && let Some(true) = self.metadata.schema.is_section_read_only(section) {
-                return Err(DocumentError::ReadOnlySection(section.to_string()));
-            }
+        if !is_system && let Some(true) = self.metadata.schema.is_section_read_only(section) {
+            return Err(DocumentError::ReadOnlySection(section.to_string()));
+        }
 
         // Get section schema and check field read-only permission
         let section_schema = self
@@ -566,10 +561,9 @@ impl StructuredDocument {
             .get_section_schema(section)
             .ok_or_else(|| DocumentError::FieldNotFound(section.to_string()))?;
 
-        if !is_system
-            && let Some(true) = section_schema.is_field_read_only(field) {
-                return Err(DocumentError::ReadOnlyField(field.to_string()));
-            }
+        if !is_system && let Some(true) = section_schema.is_field_read_only(field) {
+            return Err(DocumentError::ReadOnlyField(field.to_string()));
+        }
 
         // Get the section's map container and set the field
         // Use namespaced container: section_{name}_fields
@@ -590,10 +584,9 @@ impl StructuredDocument {
         is_system: bool,
     ) -> Result<(), DocumentError> {
         // Check section read-only permission
-        if !is_system
-            && let Some(true) = self.metadata.schema.is_section_read_only(section) {
-                return Err(DocumentError::ReadOnlySection(section.to_string()));
-            }
+        if !is_system && let Some(true) = self.metadata.schema.is_section_read_only(section) {
+            return Err(DocumentError::ReadOnlySection(section.to_string()));
+        }
 
         // Verify section exists
         let _ = self
@@ -1069,8 +1062,7 @@ impl StructuredDocument {
                                 total_lines
                             )
                         } else {
-                            let visible: Vec<&str> =
-                                lines[start_idx..end_idx].to_vec();
+                            let visible: Vec<&str> = lines[start_idx..end_idx].to_vec();
                             let header = format!(
                                 "[Showing lines {}-{} of {}]\n",
                                 start_idx + 1,
@@ -1253,15 +1245,17 @@ fn format_log_entry(entry: &JsonValue, schema: &LogEntrySchema) -> String {
 
         // Add timestamp if present and enabled in schema
         if schema.timestamp
-            && let Some(timestamp) = obj.get("timestamp").and_then(|v| v.as_str()) {
-                parts.push(format!("[{}]", timestamp));
-            }
+            && let Some(timestamp) = obj.get("timestamp").and_then(|v| v.as_str())
+        {
+            parts.push(format!("[{}]", timestamp));
+        }
 
         // Add agent_id if present and enabled in schema
         if schema.agent_id
-            && let Some(agent_id) = obj.get("agent_id").and_then(|v| v.as_str()) {
-                parts.push(format!("({})", agent_id));
-            }
+            && let Some(agent_id) = obj.get("agent_id").and_then(|v| v.as_str())
+        {
+            parts.push(format!("({})", agent_id));
+        }
 
         // Add other fields
         for field_def in &schema.fields {

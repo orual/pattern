@@ -231,13 +231,14 @@ fn convert_agent(
     // Count tool mapping stats
     for tool_id in &agent.tool_ids {
         if let Some(tool) = all_tools.iter().find(|t| &t.id == tool_id)
-            && let Some(ref name) = tool.name {
-                if ToolMapping::map_tool(name).is_some() {
-                    tools_mapped += 1;
-                } else {
-                    tools_dropped += 1;
-                }
+            && let Some(ref name) = tool.name
+        {
+            if ToolMapping::map_tool(name).is_some() {
+                tools_mapped += 1;
+            } else {
+                tools_dropped += 1;
             }
+        }
     }
 
     // Parse model provider/name from "provider/model-name" format
@@ -782,15 +783,16 @@ fn parse_model_string(agent: &AgentSchema) -> (String, String) {
 
     // Fall back to llm_config
     if let Some(ref config) = agent.llm_config
-        && let Some(ref model) = config.model {
-            // Try to infer provider from endpoint_type
-            let provider = config
-                .model_endpoint_type
-                .as_deref()
-                .unwrap_or("openai")
-                .to_string();
-            return (provider, model.clone());
-        }
+        && let Some(ref model) = config.model
+    {
+        // Try to infer provider from endpoint_type
+        let provider = config
+            .model_endpoint_type
+            .as_deref()
+            .unwrap_or("openai")
+            .to_string();
+        return (provider, model.clone());
+    }
 
     // Default
     (
