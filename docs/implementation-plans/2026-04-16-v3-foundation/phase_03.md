@@ -1091,24 +1091,16 @@ pub type SdkBundle =
     HList![MemoryHandler, MessageHandler, DisplayHandler, ShellHandler, FileHandler,
            SourcesHandler, McpHandler, TimeHandler, IpcHandler, LogHandler, SpawnHandler];
 
-pub fn default_bundle() -> SdkBundle {
-    frunk::hlist![
-        MemoryHandler::default(),
-        MessageHandler::default(),
-        DisplayHandler::default(),
-        ShellHandler::default(),
-        FileHandler::default(),
-        SourcesHandler::default(),
-        McpHandler::default(),
-        TimeHandler::default(),
-        IpcHandler::default(),
-        LogHandler::default(),
-        SpawnHandler::default(),
-    ]
-}
+// No `default_bundle()` — MemoryHandler requires an `Arc<dyn MemoryStore>`
+// that has no sensible default. Bundles are always constructed inline by
+// `TidepoolSession::open`, which owns the store reference.
 ```
 
-**Step 1:** Define `MemoryHandler` and `MessageHandler` as stubs too for now — Phase 5 makes Memory real; the Message handler body becomes real once pattern_provider exists (Phase 4) — but we need the types for the bundle to type-check. Stub bodies emit `EffectError::custom("<Namespace> handler is stubbed in phase 3 — Phase 4/5 wires real backing")`.
+**Step 1:** Define `MessageHandler` as a stub — its body becomes real once pattern_provider exists (Phase 4). Stub body emits `EffectError::Handler("Message handler is stubbed in phase 3 — Phase 4 wires pattern_provider")`.
+
+Define `MemoryHandler` as a **real** handler holding `Arc<dyn pattern_core::traits::MemoryStore>`. It dispatches the non-vector memory ops (`read`, `write`, `append`, `replace`, `archive`, `load_from_archival`) to the store. Vector-search / semantic recall ops (e.g., `MemoryReq::Search { mode: Semantic, .. }`) return `EffectError::Handler("vector search not yet available in phase 3")` until pattern_db's vector backend lands in a later phase. The handler must have a constructor `MemoryHandler::new(store: Arc<dyn MemoryStore>) -> Self` — no `Default` impl, because the store has no default. Tests that don't exercise memory build a tiny `InMemoryMemoryStore` test double and pass it in.
+
+`default_bundle()` no longer makes sense if MemoryHandler requires a store — drop it, or make it take a store argument. Prefer dropping: sessions always go through `TidepoolSession::open` which constructs the bundle inline with the right dependencies.
 
 **Step 2:** The `default_bundle()` function constructs an instance with `Default` defaults. Sessions that need custom handler state (e.g., `LogHandler::session_id`) build bundles directly.
 
@@ -1255,10 +1247,15 @@ use crate::{
 /// that tidepool-effect hands to each EffectHandler. Holds session-long
 /// state handlers read through the `EffectContext<U = SessionContext>` API.
 ///
-/// **Phase 3 scope:** holds only `budget`, `cancellation`, and `handler_gate`.
-/// Memory and provider references threaded in Phase 5 / Phase 4 respectively
-/// once the real handlers land; Phase 3's MessageHandler + MemoryHandler are
-/// stubs that ignore the context they'd receive.
+/// **Phase 3 scope:** carries budget, cancellation, handler_gate, and an
+/// `Arc<dyn MemoryStore>` handle (memory exists in pattern_core as of
+/// Phase 2 — `MemoryCache` + `SharedBlockManager`). MemoryHandler is
+/// wired for real: read/write/append/replace ops dispatch to the store.
+/// Vector-search / semantic recall is deferred — MemoryHandler returns
+/// `EffectError::Handler("vector search not yet available")` for those
+/// ops in Phase 3. Provider reference is deferred to Phase 4 when
+/// pattern_provider lands; until then `MessageHandler` is a stub that
+/// returns `EffectError::Handler(...)`.
 pub struct SessionContext {
     /// Timeout budget for `step()` calls. Persona-configurable via
     /// [`PersonaConfig::with_wall_budget_ms`] etc.
@@ -1268,15 +1265,24 @@ pub struct SessionContext {
     cancellation: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Handler entry/exit counter for Task 16's budget-pause logic.
     handler_gate: std::sync::Arc<crate::timeout::HandlerGate>,
+    /// Memory storage for MemoryHandler. Phase 3's MemoryHandler may be a
+    /// stub or a real translator between `MemoryReq` and trait calls — see
+    /// task 14's implementation decision below — but the plumbing lands now.
+    memory_store: std::sync::Arc<dyn pattern_core::traits::MemoryStore>,
+    // Phase 4: provider: Arc<dyn pattern_core::traits::ProviderClient>,
 }
 
 impl SessionContext {
-    pub fn from_persona(persona: &PersonaConfig) -> Self {
+    pub fn from_persona(
+        persona: &PersonaConfig,
+        memory_store: std::sync::Arc<dyn pattern_core::traits::MemoryStore>,
+    ) -> Self {
         let budget = crate::timeout::Budget::from_persona(persona);
         Self {
             budget,
             cancellation: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             handler_gate: std::sync::Arc::new(crate::timeout::HandlerGate::new()),
+            memory_store,
         }
     }
     pub fn budget(&self) -> crate::timeout::Budget { self.budget }
@@ -1285,6 +1291,9 @@ impl SessionContext {
     }
     pub fn handler_gate(&self) -> std::sync::Arc<crate::timeout::HandlerGate> {
         self.handler_gate.clone()
+    }
+    pub fn memory_store(&self) -> std::sync::Arc<dyn pattern_core::traits::MemoryStore> {
+        self.memory_store.clone()
     }
 }
 
@@ -1338,15 +1347,17 @@ impl Session for TidepoolSession {
 }
 
 impl TidepoolSession {
-    /// Open a session for `persona`. Phase 3 takes no provider/memory
-    /// arguments because the MessageHandler + MemoryHandler are stubs that
-    /// return `EffectError::Handler(...)` regardless — they don't actually
-    /// dispatch to real backing. Phase 4 adds an `Arc<dyn ProviderClient>`
-    /// parameter when the real MessageHandler lands; Phase 5 adds
-    /// `Arc<dyn MemoryStore>` for the real MemoryHandler.
+    /// Open a session for `persona`. Phase 3 takes `memory_store` so
+    /// MemoryHandler can dispatch to real memory ops (read/write/append/
+    /// replace) against `MemoryCache` + `SharedBlockManager`. Vector-search
+    /// memory ops are not yet wired — the handler returns
+    /// `EffectError::Handler(...)` for those until pattern_db's vector
+    /// search is ready. Phase 4 adds an `Arc<dyn ProviderClient>` parameter
+    /// when the real MessageHandler lands.
     pub fn open(
         persona: PersonaConfig,
         sdk: &SdkLocation,
+        memory_store: std::sync::Arc<dyn pattern_core::traits::MemoryStore>,
     ) -> Result<Self, RuntimeError> {
         crate::preflight::check()?;
         let sdk_dir = sdk.resolve()?;
@@ -1356,7 +1367,7 @@ impl TidepoolSession {
             persona.nursery_size.unwrap_or(32 * 1024 * 1024),
         )?;
         let session_id = pattern_core::types::ids::new_id();
-        let ctx = SessionContext::from_persona(&persona);
+        let ctx = SessionContext::from_persona(&persona, memory_store.clone());
         // Construct the handler bundle inline, seeding the log handler with
         // the session id. Display handler is shared (Arc<RwLock> subscriber
         // list): one copy lives in the bundle, another on this struct so
@@ -1364,8 +1375,8 @@ impl TidepoolSession {
         use crate::sdk::handlers::*;
         let display = DisplayHandler::new();
         let bundle = frunk::hlist![
-            MemoryHandler::default(),      // stub in Phase 3
-            MessageHandler::default(),     // stub in Phase 3
+            MemoryHandler::new(memory_store), // real read/write/append; vector-search errors
+            MessageHandler::default(),        // stub in Phase 3
             display.clone(),
             ShellHandler::default(),
             FileHandler::default(),
@@ -1394,14 +1405,16 @@ impl TidepoolSession {
 ```rust
 //! Concrete AgentRuntime implementation.
 //!
-//! Phase 3 scope: owns the SdkLocation and spawns TidepoolSession instances.
-//! Phase 4 will add an `Arc<dyn ProviderClient>` field (forwarded to
-//! `TidepoolSession::open` alongside `persona` + `sdk`). Phase 5 will add
-//! `Arc<dyn MemoryStore>`. Both use trait-object dispatch so pattern_runtime
-//! does not depend on pattern_provider at compile time — that coupling is
-//! forbidden by the Phase 2 architecture.
+//! Phase 3 scope: owns the SdkLocation and an `Arc<dyn MemoryStore>`,
+//! spawns TidepoolSession instances threading both. Phase 4 will add an
+//! `Arc<dyn ProviderClient>` field (forwarded to `TidepoolSession::open`
+//! alongside `persona` + `sdk` + memory). Trait-object dispatch is load-
+//! bearing — pattern_runtime MUST NOT depend on pattern_provider or any
+//! concrete memory backend at compile time; that coupling is forbidden
+//! by the Phase 2 architecture.
 
-use pattern_core::traits::AgentRuntime;
+use std::sync::Arc;
+use pattern_core::traits::{AgentRuntime, MemoryStore};
 use pattern_core::types::{PersonaConfig, SessionSnapshot};
 use pattern_core::error::RuntimeError;
 use crate::session::TidepoolSession;
@@ -1409,18 +1422,18 @@ use crate::sdk::SdkLocation;
 
 pub struct TidepoolRuntime {
     sdk: SdkLocation,
+    memory_store: Arc<dyn MemoryStore>,
     // Phase 4: provider: Arc<dyn pattern_core::traits::ProviderClient>,
-    // Phase 5: memory_store: Arc<dyn pattern_core::traits::MemoryStore>,
 }
 
 impl TidepoolRuntime {
-    pub fn new(sdk: SdkLocation) -> Self {
-        Self { sdk }
+    pub fn new(sdk: SdkLocation, memory_store: Arc<dyn MemoryStore>) -> Self {
+        Self { sdk, memory_store }
     }
 
     /// Convenience constructor using `SdkLocation::default()`.
-    pub fn with_default_sdk() -> Self {
-        Self::new(SdkLocation::default())
+    pub fn with_default_sdk(memory_store: Arc<dyn MemoryStore>) -> Self {
+        Self::new(SdkLocation::default(), memory_store)
     }
 }
 
@@ -1434,9 +1447,12 @@ impl AgentRuntime for TidepoolRuntime {
         snapshot: Option<SessionSnapshot>,
     ) -> Result<Self::Session, RuntimeError> {
         let sdk = self.sdk.clone();
-        let session = tokio::task::spawn_blocking(move || TidepoolSession::open(persona, &sdk))
-            .await
-            .map_err(|e| RuntimeError::JoinError { source: e.to_string() })??;
+        let memory_store = self.memory_store.clone();
+        let session = tokio::task::spawn_blocking(move || {
+            TidepoolSession::open(persona, &sdk, memory_store)
+        })
+        .await
+        .map_err(|e| RuntimeError::JoinError { source: e.to_string() })??;
         // Restore path if caller supplied a snapshot. Phase 3 Task 15 implements restore;
         // an un-started session restored from a snapshot replays the event log before
         // the next step() call.
@@ -1459,16 +1475,18 @@ impl AgentRuntime for TidepoolRuntime {
 
 **Step 1:** Implement both files.
 
-**Step 2:** Integration test in `tests/session_lifecycle.rs`. Uses an agent program that only exercises Time + Log effects (MessageHandler + MemoryHandler are stubs and will error if invoked — that's a Phase 4/5 integration concern).
+**Step 2:** Integration test in `tests/session_lifecycle.rs`. Uses an agent program that exercises Time + Log + basic Memory read/write. MessageHandler is a stub and will error if invoked; vector-search memory ops error too — that's a Phase 4 / future-phase integration concern. Tests construct a tiny `InMemoryMemoryStore` test double (implements `pattern_core::traits::MemoryStore`) and pass it to `TidepoolRuntime::new(sdk, Arc::new(store))`.
 - `open_then_step_then_drop` — assert preflight + compile + single run path works.
 - `open_step_twice` — assert the second step does not trigger a recompile (observe via timing — warm run should be well under a second compared to cold compile).
+- `memory_write_then_read_roundtrips` — agent writes a block in one turn, reads it back in the next; assert round-trip through the store.
 
 **Step 3:** Concurrency test (AC2.10):
 
 ```rust
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_sessions_are_isolated() {
-    let runtime = TidepoolRuntime::with_default_sdk();
+    let memory = std::sync::Arc::new(InMemoryMemoryStore::default());
+    let runtime = TidepoolRuntime::with_default_sdk(memory);
     let futs: Vec<_> = (0..4).map(|i| {
         let rt = &runtime;
         async move {
@@ -1489,9 +1507,10 @@ async fn concurrent_sessions_are_isolated() {
 }
 ```
 
-**What Phase 3 Subcomponent D verifies (agent programs using Time + Log + Display only):**
+**What Phase 3 Subcomponent D verifies (agent programs using Time + Log + Display + non-vector Memory):**
 - ✅ Session open/step/drop lifecycle (`open_then_step_then_drop`)
 - ✅ Warm-run reuses compiled machine (`open_step_twice`)
+- ✅ Memory read/write/append/replace round-trips through `Arc<dyn MemoryStore>` (`memory_write_then_read_roundtrips`)
 - ✅ Concurrent sessions isolated (`concurrent_sessions_are_isolated` — AC2.10)
 - ✅ Timeout soft-cancel with effect-yielding agent (Task 16)
 - ✅ Timeout hard-abandon with tight-compute agent (Task 16)
@@ -1499,13 +1518,13 @@ async fn concurrent_sessions_are_isolated() {
 - ✅ Checkpoint/restore round-trip (Task 15)
 - ✅ Effect-overflow (Task 17 — AC2.7)
 
-**What Phase 3 Subcomponent D explicitly does NOT test (deferred to Phase 4/5):**
+**What Phase 3 Subcomponent D explicitly does NOT test (deferred):**
 - ❌ MessageHandler dispatching to a real provider (Phase 4 wires `Arc<dyn ProviderClient>` through the bundle)
-- ❌ MemoryHandler reading/writing real storage (Phase 5 wires `Arc<dyn MemoryStore>`)
+- ❌ MemoryHandler vector / semantic search (blocked on pattern_db vector backend; errors with `EffectError::Handler("vector search not yet available in phase 3")`)
 - ❌ Streaming chunks forwarded to DisplaySubscribers during provider calls (Phase 4's MessageHandler drives this)
 - ❌ HTTP-timeout-inside-handler distinction from runtime-timeout (Task 16's `slow_llm_handler_does_not_trigger_timeout` test needs a real provider to exercise; Phase 3 can stand in with a mock handler that sleeps, but that's a Phase 4 test realistically)
 
-Agent programs in Phase 3 Subcomp D tests must stay within Time/Log/Display effects. Programs calling Message.Ask or Memory.* effects will receive `EffectError::Handler(...)` from the respective stubs, which the JIT surfaces as `JitError::Effect(...)`. That's not what these tests are asserting, so don't author agent programs that call stubbed namespaces in Subcomp D test fixtures.
+Agent programs in Phase 3 Subcomp D tests must stay within Time/Log/Display + non-vector Memory effects. Programs calling `Message.Ask` will receive `EffectError::Handler(...)` from the MessageHandler stub; programs calling semantic-search memory ops will error similarly. Either surfaces as `JitError::Effect(...)` from the JIT — don't author Subcomp D fixtures that exercise stubbed paths.
 
 **Commit:**
 ```bash
