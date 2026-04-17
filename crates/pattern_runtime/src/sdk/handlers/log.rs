@@ -50,12 +50,18 @@ impl EffectHandler for LogHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidepool_repr::{DataCon, DataConId, DataConTable};
+    use tidepool_repr::{DataCon, DataConId};
+    use tidepool_testing::r#gen::standard_datacon_table;
+    use tracing_test::traced_test;
 
-    fn unit_table() -> DataConTable {
-        let mut table = DataConTable::new();
+    /// Build a test DataConTable that includes the `()` constructor required by
+    /// `ToCore<()>` / `cx.respond(())`. `standard_datacon_table()` already covers
+    /// the boxing constructors.
+    fn handler_table() -> tidepool_repr::DataConTable {
+        let mut table = standard_datacon_table();
+        // `()` (GHC.Tuple) is a primitive tuple type, not in the stdlib set.
         table.insert(DataCon {
-            id: DataConId(0),
+            id: DataConId(100),
             name: "()".to_string(),
             tag: 1,
             rep_arity: 0,
@@ -65,21 +71,77 @@ mod tests {
         table
     }
 
+    /// Verify that `Info` events are emitted via tracing with the expected
+    /// message and structured fields.
+    #[traced_test]
     #[test]
-    fn log_info_returns_unit() {
-        let table = unit_table();
+    fn log_info_is_observed_via_tracing() {
+        let table = handler_table();
         let cx = EffectContext::with_user(&table, &());
-        let mut h = LogHandler::for_session("sess-123");
-        let v = h.handle(LogReq::Info("hello".into()), &cx).unwrap();
+        let mut h = LogHandler::for_session("sess_123");
+        let v = h.handle(LogReq::Info("hello from agent".into()), &cx).unwrap();
+        // Return value is Haskell unit.
         match v {
             Value::Con(_, ref fields) if fields.is_empty() => {}
-            other => panic!("expected unit, got {other:?}"),
+            other => panic!("expected unit Value::Con(_, []), got {other:?}"),
         }
+        assert!(logs_contain("hello from agent"));
+        assert!(logs_contain("sess_123"));
+        assert!(logs_contain("agent"));
     }
 
+    /// Verify that `Warn` events are emitted and captured.
+    #[traced_test]
     #[test]
-    fn log_all_levels_succeed() {
-        let table = unit_table();
+    fn log_warn_is_observed_via_tracing() {
+        let table = handler_table();
+        let cx = EffectContext::with_user(&table, &());
+        let mut h = LogHandler::for_session("sess_warn");
+        h.handle(LogReq::Warn("warn message".into()), &cx).unwrap();
+        assert!(logs_contain("warn message"));
+        assert!(logs_contain("sess_warn"));
+    }
+
+    /// Verify that `Error` events are emitted and captured.
+    #[traced_test]
+    #[test]
+    fn log_error_is_observed_via_tracing() {
+        let table = handler_table();
+        let cx = EffectContext::with_user(&table, &());
+        let mut h = LogHandler::for_session("sess_err");
+        h.handle(LogReq::Error("error message".into()), &cx).unwrap();
+        assert!(logs_contain("error message"));
+        assert!(logs_contain("sess_err"));
+    }
+
+    /// Verify that `Debug` events are emitted and captured.
+    #[traced_test]
+    #[test]
+    fn log_debug_is_observed_via_tracing() {
+        let table = handler_table();
+        let cx = EffectContext::with_user(&table, &());
+        let mut h = LogHandler::for_session("sess_dbg");
+        h.handle(LogReq::Debug("debug message".into()), &cx).unwrap();
+        assert!(logs_contain("debug message"));
+        assert!(logs_contain("sess_dbg"));
+    }
+
+    /// Verify that events logged without a session id fall back to "unknown".
+    #[traced_test]
+    #[test]
+    fn log_without_session_uses_unknown() {
+        let table = handler_table();
+        let cx = EffectContext::with_user(&table, &());
+        let mut h = LogHandler::default();
+        h.handle(LogReq::Info("no session".into()), &cx).unwrap();
+        assert!(logs_contain("no session"));
+        assert!(logs_contain("unknown"));
+    }
+
+    /// Verify that all four levels complete without error (dispatch-level smoke test).
+    #[test]
+    fn log_all_levels_return_unit() {
+        let table = handler_table();
         let cx = EffectContext::with_user(&table, &());
         let mut h = LogHandler::default();
         for req in [
@@ -88,7 +150,11 @@ mod tests {
             LogReq::Warn("w".into()),
             LogReq::Error("e".into()),
         ] {
-            h.handle(req, &cx).unwrap();
+            let v = h.handle(req, &cx).unwrap();
+            match v {
+                Value::Con(_, ref fields) if fields.is_empty() => {}
+                other => panic!("expected unit Value::Con(_, []), got {other:?}"),
+            }
         }
     }
 }

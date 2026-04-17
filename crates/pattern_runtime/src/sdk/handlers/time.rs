@@ -62,22 +62,18 @@ impl EffectHandler for TimeHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidepool_repr::{DataCon, DataConId, DataConTable, Literal, SrcBang};
+    use tidepool_repr::{DataCon, DataConId, Literal};
+    use tidepool_testing::r#gen::standard_datacon_table;
 
-    /// Build a `DataConTable` populated with the small set of boxing /
-    /// unit constructors the bridge needs to marshal `i64`, `()`.
-    fn primitive_table() -> DataConTable {
-        let mut table = DataConTable::new();
+    /// Build a test DataConTable from the standard set plus the `()`
+    /// constructor. `standard_datacon_table()` already contains `I#` for
+    /// int boxing; `()` is not in the standard set because it is a
+    /// Haskell primitive tuple type rather than a stdlib algebraic type.
+    fn handler_table() -> tidepool_repr::DataConTable {
+        let mut table = standard_datacon_table();
+        // `()` (GHC.Tuple) is required by `ToCore<()>` / `cx.respond(())`.
         table.insert(DataCon {
-            id: DataConId(0),
-            name: "I#".to_string(),
-            tag: 1,
-            rep_arity: 1,
-            field_bangs: vec![SrcBang::NoSrcBang],
-            qualified_name: Some("GHC.Types.I#".to_string()),
-        });
-        table.insert(DataCon {
-            id: DataConId(1),
+            id: DataConId(100),
             name: "()".to_string(),
             tag: 1,
             rep_arity: 0,
@@ -89,7 +85,7 @@ mod tests {
 
     #[test]
     fn time_now_returns_current_nanos() {
-        let table = primitive_table();
+        let table = handler_table();
         let cx = EffectContext::with_user(&table, &());
         let mut h = TimeHandler;
 
@@ -97,7 +93,8 @@ mod tests {
         let v = h.handle(TimeReq::Now, &cx).unwrap();
         let after = i64::try_from(Timestamp::now().as_nanosecond()).unwrap();
 
-        // `ToCore<i64>` wraps the literal in the `I#` boxing constructor.
+        // `ToCore<i64>` boxes the int into an `I#` constructor
+        // (Haskell Int = I# Int#).
         match v {
             Value::Con(_, ref fields) if fields.len() == 1 => match &fields[0] {
                 Value::Lit(Literal::LitInt(n)) => {
@@ -114,7 +111,7 @@ mod tests {
 
     #[test]
     fn time_sleep_zero_returns_unit() {
-        let table = primitive_table();
+        let table = handler_table();
         let cx = EffectContext::with_user(&table, &());
         let mut h = TimeHandler;
         let v = h.handle(TimeReq::Sleep(0), &cx).unwrap();
@@ -126,7 +123,7 @@ mod tests {
 
     #[test]
     fn time_sleep_negative_errors() {
-        let table = primitive_table();
+        let table = handler_table();
         let cx = EffectContext::with_user(&table, &());
         let mut h = TimeHandler;
         let err = h.handle(TimeReq::Sleep(-1), &cx).unwrap_err();
@@ -135,7 +132,7 @@ mod tests {
 
     #[test]
     fn time_sleep_exceeds_limit_errors() {
-        let table = primitive_table();
+        let table = handler_table();
         let cx = EffectContext::with_user(&table, &());
         let mut h = TimeHandler;
         let err = h.handle(TimeReq::Sleep(MAX_SLEEP_NS + 1), &cx).unwrap_err();

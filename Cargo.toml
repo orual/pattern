@@ -149,7 +149,11 @@ tidepool-bridge  = { path = "../tidepool/tidepool-bridge"  }
 tidepool-bridge-derive = { path = "../tidepool/tidepool-bridge-derive" }
 tidepool-repr    = { path = "../tidepool/tidepool-repr"    }
 tidepool-eval    = { path = "../tidepool/tidepool-eval"    }
+tidepool-testing = { path = "../tidepool/tidepool-testing" }
 frunk = "0.4"
+
+# Test utilities
+tracing-test = "0.2"
 
 # Binary/process utilities
 which = "8.0"

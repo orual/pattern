@@ -788,7 +788,7 @@ impl EffectHandler for TimeHandler {
                 // for the Haskell Int wire format. try_from panics only past year 2262.
                 let ns: i64 = i64::try_from(Timestamp::now().as_nanosecond())
                     .expect("timestamp fits in i64 nanos until year 2262");
-                cx.respond(ns) // ToCore<i64> produces Value::Lit(Literal::LitInt(ns))
+                cx.respond(ns) // ToCore<i64> boxes the int into an I# constructor (Haskell Int = I# Int#)
             }
             TimeReq::Sleep(ns) => {
                 // Very short sleeps only — we don't want the handler to block the JIT loop.
@@ -809,7 +809,7 @@ impl EffectHandler for TimeHandler {
 }
 ```
 
-Rationale: `jiff::Timestamp::now()` gives an explicit wall-clock UTC instant with nanosecond precision; `.as_nanosecond()` returns nanos-since-epoch as `i128`, narrowed to `i64` for the GHC `Int` wire format (`Literal::LitInt(i64)`). Handlers return via `cx.respond(rust_value)` which uses the `ToCore` trait from `tidepool_bridge` — handlers don't construct `Value` variants manually. `Sleep` is bounded — long sleeps would block the JIT caller thread (`std::thread::sleep` + `std::time::Duration` is correct here; we're doing a short stopwatch sleep, not manipulating a wall-clock instant).
+Rationale: `jiff::Timestamp::now()` gives an explicit wall-clock UTC instant with nanosecond precision; `.as_nanosecond()` returns nanos-since-epoch as `i128`, narrowed to `i64` for the GHC `Int` wire format. `ToCore<i64>` does not produce a bare `Literal::LitInt`; it boxes the value into `Value::Con(I#, [Lit(LitInt(i64))])` because Haskell's `Int` is `data Int = I# Int#` and the boxing constructor is required at the FFI boundary. Handlers return via `cx.respond(rust_value)` which uses the `ToCore` trait from `tidepool_bridge` — handlers don't construct `Value` variants manually. `Sleep` is bounded — long sleeps would block the JIT caller thread (`std::thread::sleep` + `std::time::Duration` is correct here; we're doing a short stopwatch sleep, not manipulating a wall-clock instant).
 
 **`log.rs` implementation:**
 
@@ -917,29 +917,43 @@ mod tests {
     #[test]
     fn time_now_returns_current_nanos() {
         use tidepool_repr::Literal;
+        // Build a DataConTable with I# and () using tidepool_testing::standard_datacon_table(),
+        // then add () (GHC.Tuple) which is not in the standard set.
 
-        let mut h = TimeHandler::default();
         let before = i64::try_from(jiff::Timestamp::now().as_nanosecond()).unwrap();
-        let v = h.handle(TimeReq::Now, &EffectContext::for_test()).unwrap();
+        let mut h = TimeHandler::default();
+        let v = h.handle(TimeReq::Now, &cx).unwrap();
         let after = i64::try_from(jiff::Timestamp::now().as_nanosecond()).unwrap();
+        // ToCore<i64> boxes the int: Value::Con(I#, [Value::Lit(Literal::LitInt(n))])
+        // because Haskell Int is `data Int = I# Int#`.
         match v {
-            Value::Lit(Literal::LitInt(n)) => {
-                assert!(n >= before && n <= after);
-            }
-            other => panic!("expected Value::Lit(LitInt), got {:?}", other),
+            Value::Con(_, ref fields) if fields.len() == 1 => match &fields[0] {
+                Value::Lit(Literal::LitInt(n)) => {
+                    assert!(*n >= before && *n <= after);
+                }
+                other => panic!("expected boxed LitInt, got {:?}", other),
+            },
+            other => panic!("expected Value::Con(I#, [_]), got {:?}", other),
         }
     }
 
+    #[traced_test]
     #[test]
     fn log_info_is_observed_via_tracing() {
-        // Attach a tracing subscriber that captures events.
-        // Dispatch LogReq::Info; assert the subscriber saw the event with
-        // session= / source= fields.
+        // tracing-test provides #[traced_test] which installs a subscriber
+        // and injects logs_contain() into the test scope.
+        let mut h = LogHandler::for_session("sess_123");
+        h.handle(LogReq::Info("hello from agent".into()), &cx).unwrap();
+        assert!(logs_contain("hello from agent"));
+        assert!(logs_contain("sess_123"));
+        assert!(logs_contain("agent"));
     }
 }
 ```
 
-The tracing-subscriber capture test may require `tracing-test` or similar — add as a dev-dep if needed.
+`tracing-test = "0.2"` is required as a dev-dep (already wired in workspace). Use
+`tidepool_testing::r#gen::standard_datacon_table()` (note: `gen` is a reserved keyword
+in Rust 2024 edition and requires the `r#gen` raw identifier escape).
 
 **Commit:**
 ```bash
