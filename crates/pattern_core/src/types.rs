@@ -7,6 +7,7 @@
 pub mod batch;
 pub mod block;
 pub mod block_ref;
+pub mod embedding;
 pub mod ids;
 pub mod message;
 pub mod origin;

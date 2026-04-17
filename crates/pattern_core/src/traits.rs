@@ -7,6 +7,7 @@
 
 pub mod agent_runtime;
 pub mod data_stream;
+pub mod embedding_provider;
 pub mod endpoint;
 pub mod endpoint_registry;
 pub mod memory_store;
@@ -16,6 +17,7 @@ pub mod source_manager;
 
 pub use agent_runtime::AgentRuntime;
 pub use data_stream::{DataStream, StreamEvent};
+pub use embedding_provider::EmbeddingProvider;
 pub use endpoint::Endpoint;
 pub use endpoint_registry::EndpointRegistry;
 pub use memory_store::MemoryStore;

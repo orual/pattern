@@ -18,7 +18,7 @@ use compact_str::CompactString;
 use miette::Diagnostic;
 use thiserror::Error;
 
-use super::{MemoryError, ProviderError, RuntimeError};
+use super::{EmbeddingError, MemoryError, ProviderError, RuntimeError};
 use crate::types::ids::AgentId;
 
 /// Top-level error type for pattern-core operations.
@@ -75,6 +75,20 @@ pub enum CoreError {
     #[error(transparent)]
     #[diagnostic(transparent)]
     Memory(#[from] MemoryError),
+
+    /// An error from an embedding provider or vector comparison.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::{CoreError, EmbeddingError};
+    ///
+    /// let err: CoreError = EmbeddingError::EmptyInput.into();
+    /// assert!(err.to_string().contains("empty"));
+    /// ```
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Embedding(#[from] EmbeddingError),
 
     // ── Agent lifecycle ──────────────────────────────────────────────────────
     /// Agent initialisation failed before the first turn could run.

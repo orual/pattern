@@ -37,11 +37,13 @@
 //! ```
 
 mod core;
+pub mod embedding;
 mod memory;
 mod provider;
 mod runtime;
 
 pub use core::{ConfigError, CoreError};
+pub use embedding::EmbeddingError;
 pub use memory::MemoryError;
 pub use provider::ProviderError;
 pub use runtime::RuntimeError;
