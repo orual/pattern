@@ -8,3 +8,21 @@ workspace = true
 
 [dependencies]
 pattern-core = { path = "../pattern_core" }
+tidepool-runtime = { workspace = true }
+tidepool-codegen = { workspace = true }
+tidepool-effect  = { workspace = true }
+tidepool-bridge  = { workspace = true }
+tidepool-repr    = { workspace = true }
+tidepool-eval    = { workspace = true }
+frunk            = { workspace = true }
+which            = { workspace = true }
+async-trait      = { workspace = true }
+tokio            = { workspace = true, features = ["rt", "time", "sync", "macros"] }
+tracing          = { workspace = true }
+thiserror        = { workspace = true }
+miette           = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util", "macros"] }
