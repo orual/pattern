@@ -9,4 +9,5 @@
 //! display fully implemented; shell / file / sources / mcp / ipc / spawn
 //! stubbed with NotImplemented diagnostics).
 
+pub mod handlers;
 pub mod requests;
