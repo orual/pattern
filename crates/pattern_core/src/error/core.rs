@@ -815,8 +815,8 @@ impl CoreError {
     ) -> Self {
         let provider = provider.into();
         let model = model.into();
-        if let genai::Error::WebModelCall { webc_error, .. } = &cause {
-            if let genai::webc::Error::ResponseFailedStatus {
+        if let genai::Error::WebModelCall { webc_error, .. } = &cause
+            && let genai::webc::Error::ResponseFailedStatus {
                 status,
                 body,
                 headers,
@@ -835,7 +835,6 @@ impl CoreError {
                     body: body.clone(),
                 };
             }
-        }
         Self::ModelProviderError {
             provider,
             model,
@@ -967,8 +966,7 @@ impl CoreError {
             .get("anthropic-ratelimit-unified-5h-reset")
             .or_else(|| map.get("anthropic-ratelimit-unified-reset"))
             .map(|s| s.as_str())
-        {
-            if let Ok(epoch) = raw.trim().parse::<u64>() {
+            && let Ok(epoch) = raw.trim().parse::<u64>() {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .ok()?
@@ -977,7 +975,6 @@ impl CoreError {
                     return Some(std::time::Duration::from_millis((epoch - now) * 1000));
                 }
             }
-        }
 
         // Provider-specific reset headers (OpenAI/Groq-like)
         let keys = [
@@ -989,26 +986,22 @@ impl CoreError {
         for k in keys {
             if let Some(raw) = map.get(k).map(|s| s.as_str()) {
                 let s = raw.trim();
-                if let Some(stripped) = s.strip_suffix("ms") {
-                    if let Ok(v) = stripped.trim().parse::<u64>() {
+                if let Some(stripped) = s.strip_suffix("ms")
+                    && let Ok(v) = stripped.trim().parse::<u64>() {
                         return Some(std::time::Duration::from_millis(v));
                     }
-                }
-                if let Some(stripped) = s.strip_suffix('s') {
-                    if let Ok(v) = stripped.trim().parse::<u64>() {
+                if let Some(stripped) = s.strip_suffix('s')
+                    && let Ok(v) = stripped.trim().parse::<u64>() {
                         return Some(std::time::Duration::from_millis(v * 1000));
                     }
-                }
-                if let Some(stripped) = s.strip_suffix('m') {
-                    if let Ok(v) = stripped.trim().parse::<u64>() {
+                if let Some(stripped) = s.strip_suffix('m')
+                    && let Ok(v) = stripped.trim().parse::<u64>() {
                         return Some(std::time::Duration::from_millis(v * 60_000));
                     }
-                }
-                if let Some(stripped) = s.strip_suffix('h') {
-                    if let Ok(v) = stripped.trim().parse::<u64>() {
+                if let Some(stripped) = s.strip_suffix('h')
+                    && let Ok(v) = stripped.trim().parse::<u64>() {
                         return Some(std::time::Duration::from_millis(v * 3_600_000));
                     }
-                }
                 if let Ok(secs) = s.parse::<u64>() {
                     return Some(std::time::Duration::from_millis(secs * 1000));
                 }
@@ -1035,6 +1028,7 @@ mod tests {
         );
         let report = Report::new(error);
         let output = format!("{:?}", report);
-        assert!(output.contains("Available tools: tool1, tool2, tool3"));
+        // Error messages use lowercase sentence fragments (per CLAUDE.md).
+        assert!(output.contains("available tools: tool1, tool2, tool3"));
     }
 }

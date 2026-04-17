@@ -92,8 +92,10 @@ pub struct EventOccurrence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[sqlx(type_name = "TEXT", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum OccurrenceStatus {
     /// Upcoming, not yet happened
+    #[default]
     Scheduled,
     /// Currently happening
     Active,
@@ -107,8 +109,3 @@ pub enum OccurrenceStatus {
     Cancelled,
 }
 
-impl Default for OccurrenceStatus {
-    fn default() -> Self {
-        Self::Scheduled
-    }
-}

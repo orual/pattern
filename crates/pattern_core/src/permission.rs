@@ -162,5 +162,5 @@ use std::sync::OnceLock;
 static BROKER: OnceLock<PermissionBroker> = OnceLock::new();
 
 pub fn broker() -> &'static PermissionBroker {
-    BROKER.get_or_init(|| PermissionBroker::new())
+    BROKER.get_or_init(PermissionBroker::new)
 }

@@ -67,8 +67,10 @@ pub struct Message {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[sqlx(type_name = "TEXT", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum MessageRole {
     /// User/human message
+    #[default]
     User,
     /// Assistant/agent response
     Assistant,
@@ -78,11 +80,6 @@ pub enum MessageRole {
     Tool,
 }
 
-impl Default for MessageRole {
-    fn default() -> Self {
-        Self::User
-    }
-}
 
 impl std::fmt::Display for MessageRole {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

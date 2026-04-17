@@ -67,6 +67,7 @@ pub struct MemoryBlock {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[sqlx(type_name = "TEXT", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum MemoryBlockType {
     /// Always in context, critical for agent identity
     /// Examples: persona, human, system guidelines
@@ -74,6 +75,7 @@ pub enum MemoryBlockType {
 
     /// Working memory, can be swapped in/out based on relevance
     /// Examples: scratchpad, current_task, session_notes
+    #[default]
     Working,
 
     /// Long-term storage, NOT in context by default
@@ -85,11 +87,6 @@ pub enum MemoryBlockType {
     Log,
 }
 
-impl Default for MemoryBlockType {
-    fn default() -> Self {
-        Self::Working
-    }
-}
 
 impl MemoryBlockType {
     /// Returns the lowercase string representation matching the database format.
@@ -135,6 +132,7 @@ impl std::fmt::Display for MemoryBlockType {
 )]
 #[sqlx(type_name = "TEXT", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum MemoryPermission {
     /// Can only read, no modifications allowed
     ReadOnly,
@@ -145,16 +143,12 @@ pub enum MemoryPermission {
     /// Can append to existing content, but not overwrite
     Append,
     /// Can modify content freely (default)
+    #[default]
     ReadWrite,
     /// Total control, including delete
     Admin,
 }
 
-impl Default for MemoryPermission {
-    fn default() -> Self {
-        Self::ReadWrite
-    }
-}
 
 impl MemoryPermission {
     /// Returns the snake_case string representation matching the database format.

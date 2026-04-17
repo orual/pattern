@@ -91,7 +91,7 @@ impl ProviderOAuthTokenRow {
 
 /// Convert a Unix timestamp (seconds) to a DateTime<Utc>.
 fn timestamp_to_datetime(timestamp: i64) -> DateTime<Utc> {
-    DateTime::from_timestamp(timestamp, 0).unwrap_or_else(|| Utc::now())
+    DateTime::from_timestamp(timestamp, 0).unwrap_or_else(Utc::now)
 }
 
 impl AuthDb {

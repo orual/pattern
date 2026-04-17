@@ -682,15 +682,13 @@ impl ToolMapping {
         // Map tool_ids to Pattern equivalents
         for tool_id in &agent.tool_ids {
             // Find the tool by ID
-            if let Some(tool) = all_tools.iter().find(|t| &t.id == tool_id) {
-                if let Some(ref name) = tool.name {
-                    if let Some(mapped) = Self::map_tool(name) {
+            if let Some(tool) = all_tools.iter().find(|t| &t.id == tool_id)
+                && let Some(ref name) = tool.name
+                    && let Some(mapped) = Self::map_tool(name) {
                         for m in mapped {
                             tools.insert(m.to_string());
                         }
                     }
-                }
-            }
         }
 
         // Map legacy tool names

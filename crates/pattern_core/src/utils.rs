@@ -204,7 +204,7 @@ pub fn get_next_message_position_sync() -> SnowflakePosition {
             IdGenStatus::Pending { yield_for } => {
                 // If yield_for is 0, we're at the sequence limit but still in the same millisecond.
                 // Wait at least 1ms to roll over to the next millisecond and reset the sequence.
-                let wait_ms = yield_for.max(1) as u64;
+                let wait_ms = yield_for.max(1);
                 std::thread::sleep(std::time::Duration::from_millis(wait_ms));
                 // Loop will retry after the wait
             }

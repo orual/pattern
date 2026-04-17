@@ -1,3 +1,11 @@
+// MOVING TO: pattern_runtime/examples/typed_tool.rs (once tool system returns to pattern_runtime)
+// ORIGIN: crates/pattern_core/examples/typed_tool.rs
+// PHASE: 3
+// RESHAPE: References staged-out ToolRegistry / AiTool / related types.
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! Example of implementing a type-safe tool using the new AiTool trait
 
 use async_trait::async_trait;

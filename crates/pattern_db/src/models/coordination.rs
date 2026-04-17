@@ -65,10 +65,12 @@ pub enum ActivityEventType {
 )]
 #[sqlx(type_name = "TEXT", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum EventImportance {
     /// Routine event, can be skipped in summaries
     Low,
     /// Normal event, included in standard summaries
+    #[default]
     Medium,
     /// Important event, always included in summaries
     High,
@@ -76,11 +78,6 @@ pub enum EventImportance {
     Critical,
 }
 
-impl Default for EventImportance {
-    fn default() -> Self {
-        Self::Medium
-    }
-}
 
 /// Per-agent activity summary.
 ///
@@ -192,8 +189,10 @@ pub struct CoordinationTask {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[sqlx(type_name = "TEXT", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum TaskStatus {
     /// Task is pending, not yet started
+    #[default]
     Pending,
     /// Task is in progress
     InProgress,
@@ -203,11 +202,6 @@ pub enum TaskStatus {
     Cancelled,
 }
 
-impl Default for TaskStatus {
-    fn default() -> Self {
-        Self::Pending
-    }
-}
 
 /// Task priority.
 #[derive(
@@ -215,10 +209,12 @@ impl Default for TaskStatus {
 )]
 #[sqlx(type_name = "TEXT", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum TaskPriority {
     /// Low priority
     Low,
     /// Medium priority (default)
+    #[default]
     Medium,
     /// High priority
     High,
@@ -226,11 +222,6 @@ pub enum TaskPriority {
     Urgent,
 }
 
-impl Default for TaskPriority {
-    fn default() -> Self {
-        Self::Medium
-    }
-}
 
 /// A handoff note from one agent to another.
 ///

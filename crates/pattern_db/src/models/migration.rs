@@ -105,8 +105,10 @@ pub struct MigrationIssue {
 /// Migration issue severity levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum IssueSeverity {
     /// Informational, no action needed
+    #[default]
     Info,
     /// Warning, migration continued but may need review
     Warning,
@@ -116,8 +118,3 @@ pub enum IssueSeverity {
     Critical,
 }
 
-impl Default for IssueSeverity {
-    fn default() -> Self {
-        Self::Info
-    }
-}

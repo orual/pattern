@@ -148,8 +148,10 @@ pub struct Agent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[sqlx(type_name = "TEXT", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum AgentStatus {
     /// Agent is active and can process messages
+    #[default]
     Active,
     /// Agent is hibernated (not processing, but data preserved)
     Hibernated,
@@ -157,11 +159,6 @@ pub enum AgentStatus {
     Archived,
 }
 
-impl Default for AgentStatus {
-    fn default() -> Self {
-        Self::Active
-    }
-}
 
 /// An agent group for coordination.
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]

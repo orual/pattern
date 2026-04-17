@@ -74,12 +74,14 @@ pub struct Task {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[sqlx(type_name = "TEXT", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum UserTaskStatus {
     /// Task exists but isn't ready to work on yet
     /// (e.g., waiting for something, needs breakdown)
     Backlog,
 
     /// Task is ready to be worked on
+    #[default]
     Pending,
 
     /// Currently being worked on
@@ -98,11 +100,6 @@ pub enum UserTaskStatus {
     Deferred,
 }
 
-impl Default for UserTaskStatus {
-    fn default() -> Self {
-        Self::Pending
-    }
-}
 
 impl std::fmt::Display for UserTaskStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -126,11 +123,13 @@ impl std::fmt::Display for UserTaskStatus {
 )]
 #[sqlx(type_name = "TEXT", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum UserTaskPriority {
     /// Can wait, nice to have
     Low,
 
     /// Normal priority, should get done
+    #[default]
     Medium,
 
     /// Important, prioritize this
@@ -143,11 +142,6 @@ pub enum UserTaskPriority {
     Critical,
 }
 
-impl Default for UserTaskPriority {
-    fn default() -> Self {
-        Self::Medium
-    }
-}
 
 impl std::fmt::Display for UserTaskPriority {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

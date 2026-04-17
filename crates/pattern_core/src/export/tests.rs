@@ -1495,7 +1495,7 @@ async fn test_batch_id_consistency_across_chunks() {
     // All messages in the batch should have the same (new) batch_id
     let imported_messages = queries::get_messages_with_archived(
         target_db.pool(),
-        &*queries::list_agents(target_db.pool()).await.unwrap()[0].id,
+        &queries::list_agents(target_db.pool()).await.unwrap()[0].id,
         100,
     )
     .await

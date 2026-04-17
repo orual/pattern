@@ -96,7 +96,12 @@ impl ContentType {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    /// Parse from the canonical string form (inverse of [`Self::as_str`]).
+    ///
+    /// Named `parse_from_str` rather than `from_str` to avoid shadowing
+    /// [`std::str::FromStr::from_str`], whose error-returning signature is a
+    /// poor fit for this `Option`-returning parser.
+    pub fn parse_from_str(s: &str) -> Option<Self> {
         match s {
             "memory_block" => Some(ContentType::MemoryBlock),
             "message" => Some(ContentType::Message),
@@ -263,13 +268,12 @@ pub async fn knn_search(
     let mut results: Vec<VectorSearchResult> = results
         .into_iter()
         .filter_map(|(content_id, distance, content_type, chunk_index)| {
-            let ct = ContentType::from_str(&content_type)?;
+            let ct = ContentType::parse_from_str(&content_type)?;
             // Apply content type filter if specified
-            if let Some(filter_ct) = content_type_filter {
-                if ct != filter_ct {
+            if let Some(filter_ct) = content_type_filter
+                && ct != filter_ct {
                     return None;
                 }
-            }
             Some(VectorSearchResult {
                 content_id,
                 distance,
@@ -335,7 +339,7 @@ pub async fn get_embedding_stats(pool: &SqlitePool) -> DbResult<EmbeddingStats> 
         total_embeddings: total.0 as u64,
         by_content_type: by_type
             .into_iter()
-            .filter_map(|(ct, count)| ContentType::from_str(&ct).map(|t| (t, count as u64)))
+            .filter_map(|(ct, count)| ContentType::parse_from_str(&ct).map(|t| (t, count as u64)))
             .collect(),
     })
 }
@@ -353,13 +357,13 @@ mod tests {
             ContentType::FilePassage,
         ] {
             let s = ct.as_str();
-            assert_eq!(ContentType::from_str(s), Some(ct));
+            assert_eq!(ContentType::parse_from_str(s), Some(ct));
         }
     }
 
     #[test]
     fn test_content_type_unknown() {
-        assert_eq!(ContentType::from_str("unknown"), None);
+        assert_eq!(ContentType::parse_from_str("unknown"), None);
     }
 
     #[test]

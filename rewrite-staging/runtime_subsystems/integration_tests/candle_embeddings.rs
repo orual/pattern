@@ -1,3 +1,11 @@
+// MOVING TO: pattern_runtime/tests/ (or respective subsystem tests) once the dependencies are restored
+// ORIGIN: crates/pattern_core/tests/candle_embeddings.rs
+// PHASE: 3
+// RESHAPE: References staged-out modules (embeddings, config, tool, runtime, etc.)
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 #![cfg(feature = "embed-candle")]
 
 use pattern_core::embeddings::EmbeddingProvider;
