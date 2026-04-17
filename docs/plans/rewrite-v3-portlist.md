@@ -88,6 +88,49 @@ Not deleted in the same commit as the migration work — makes bisection easier.
   `export/`, `config.rs`, `permission.rs`, `error.rs`, `test_helpers.rs` ports
   incrementally as those modules are reworked. Do not do a bulk migration.
 
+## Staging contents (`rewrite-staging/`)
+
+Generated at end of Phase 2. Reflects every file in `rewrite-staging/` with
+destination + phase. Drained by subsequent phases; this section shrinks as
+files are absorbed. See `rewrite-staging/migration-manifest.md` for the full
+per-file provenance.
+
+### Destined for pattern_runtime (Phase 3 + future subagent plan)
+
+- `rewrite-staging/agent_runtime/agent/…` — agent state + processing loop
+- `rewrite-staging/agent_runtime/runtime/…` — router, orchestration
+- `rewrite-staging/runtime_subsystems/tool/…` — tool registry (also plugin-system plan)
+- `rewrite-staging/runtime_subsystems/coordination/…` — supervisor, round-robin, etc. (subagent plan)
+- `rewrite-staging/runtime_subsystems/data_source/…` — concrete source backends (Phase 3 core; plugin-migration for ATProto/Discord)
+- `rewrite-staging/runtime_subsystems/realtime/…` — impls only; traits live in core (rework expected)
+- `rewrite-staging/runtime_subsystems/queue/…` — impls only; traits live in core (rework expected)
+- `rewrite-staging/runtime_subsystems/messages/…` — storage/runtime helpers from pre-v3 messages module
+- `rewrite-staging/runtime_subsystems/config.rs` — pre-v3 Pattern config system (Phase 3 reassembly — depends on staged data_source/runtime/context/agent types)
+
+### Destined for pattern_provider (Phase 4)
+
+- `rewrite-staging/provider/oauth/…` — pre-v3 oauth module; absorbs into auth/
+- `rewrite-staging/provider/model/…` — pre-v3 ModelProvider impls (trait shape kept in core)
+- `rewrite-staging/provider/embeddings/…` — embedding backends (future)
+
+### Destined for pattern_provider/compose (Phase 5)
+
+- `rewrite-staging/context/compression.rs` — four compaction strategies
+- `rewrite-staging/context/builder.rs` — contains block-render excerpt at lines 226–316
+- `rewrite-staging/context/…` — remaining system-prompt composer glue
+
+### Draining protocol
+
+When a phase fully consumes a staging subdirectory, a dedicated commit removes
+the subdirectory and updates this section:
+
+```
+[meta] remove drained staging dir: <subdir> (absorbed by <target>)
+```
+
+Commit body lists what moved to where. Section above is deleted in the same
+change.
+
 ## Audit checklist (run at every phase boundary)
 
 ```bash
