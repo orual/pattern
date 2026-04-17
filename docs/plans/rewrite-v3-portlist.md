@@ -36,6 +36,7 @@ Cruft (code with no fate marker, `unimplemented!()`/`todo!()` without phase/AC r
 - **Absorbs into:** `pattern_provider` (Anthropic OAuth keychain storage).
 - **Deferred to:** plugin-migration plan (ATProto + Discord bits).
 - **Notes:** Directory deleted in a dedicated commit after Phase 4 lands. ATProto and Discord auth bits move to their respective plugin crates in a later plan.
+- **Known coupling (must unwind at Phase 4 retirement):** `pattern_core` currently depends on `pattern_auth` via a path dep in `crates/pattern_core/Cargo.toml`, and `CoreError::AuthError(#[from] pattern_auth::AuthError)` carries an `AuthError` variant sourced from it. When `pattern_auth` is deleted, the Phase 4 retirement commit **must** simultaneously: (a) remove the `pattern-auth` path dep from `pattern_core/Cargo.toml`, (b) drop or restructure `CoreError::AuthError` (auth errors belong in `pattern_provider::ProviderError` in v3, not pattern_core), and (c) update any downstream `CoreError::AuthError` matches. Skipping any of these breaks the `pattern_core` compile.
 
 ### pattern_cli
 - **Fate:** port.
@@ -87,6 +88,48 @@ Not deleted in the same commit as the migration work — makes bisection easier.
   any substantive change port to jiff. Remaining chrono usage in `memory/`,
   `export/`, `config.rs`, `permission.rs`, `error.rs`, `test_helpers.rs` ports
   incrementally as those modules are reworked. Do not do a bulk migration.
+
+- **AC1.6 verification deferred to Phase 4 retirement**: Phase 2's AC1.6
+  (referencing a retired crate fails loudly) cannot be satisfied by cargo at
+  Phase 2 time — `path = "../retired"` deps to non-member crates compile
+  silently. The real failure mode fires when `pattern_auth` is deleted in
+  Phase 4. The Phase 4 retirement commit must simultaneously (a) remove the
+  `pattern-auth` path dep from `crates/pattern_core/Cargo.toml`, (b) drop or
+  restructure `CoreError::AuthError` (auth errors belong in
+  `pattern_provider::ProviderError`), and (c) update any downstream
+  `CoreError::AuthError` pattern matches. See the `pattern_auth` entry above
+  for details.
+
+- **Workspace path-dep audit (performed 2026-04-16)**: `grep 'path = "' crates/*/Cargo.toml`
+  shows a single path dep to a non-workspace crate: `pattern-auth` from
+  `pattern_core`. All other path deps (`pattern-db`, `pattern-core`) point at
+  active workspace members. No new leaks accumulated during Phase 2.
+
+- **`BlockHandle` now a `SmolStr` alias** (was `pub struct BlockHandle(pub String)`):
+  matches the ID-alias policy in `crates/pattern_core/CLAUDE.md` and drops
+  newtype ceremony that carried no invariant. `BlockRef.block_id` /
+  `BlockRef.agent_id` still use `String`; those port opportunistically when
+  the composer (Phase 5) touches them.
+
+- **Opaque `serde_json::Value` payloads on `PersonaConfig` / `PersonaSnapshot` /
+  `SessionSnapshot`**: Phase 2 lands the shape with opaque JSON payloads per
+  the original plan. Phase 3 populates the concrete runtime-state shape when
+  the Tidepool session lifecycle lands; consider wrapping in a
+  `#[non_exhaustive] OpaquePayload(serde_json::Value)` newtype then so callers
+  don't pattern-match on the raw JSON.
+
+- **`pattern-db` / `pattern-auth` clippy-fix scope leak**: during the Phase 2
+  close commit, `cargo clippy --fix` was run against pattern-db + pattern-auth
+  (to satisfy `-D warnings` across transitive deps). Includes a mechanical
+  rename of `ContentType::from_str` → `parse_from_str` at 4 call sites in
+  pattern-db. Acknowledged deviation; noted for traceability, no rework
+  planned.
+
+- **Crate-level `#![allow(...)]` entries in pattern_core for pre-existing
+  style lints**: present in `export/`, `error/core.rs`, `memory/document.rs`
+  with rationale comments (feature-gated code, `#[derive]` `#[non_exhaustive]`
+  interaction). Revisit in Phase 3 or 4 when those modules see substantive
+  touch.
 
 ## Staging contents (`rewrite-staging/`)
 

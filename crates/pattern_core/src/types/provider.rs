@@ -102,8 +102,9 @@ pub struct CompletionResponse {
 ///
 /// Returned by [`crate::traits::ProviderClient::count_tokens`] and used
 /// pre-request by compaction and context-length decisions. Only the
-/// input-token count is surfaced here; output-token accounting is a
-/// post-response concern, not a pre-request one.
+/// input-token count is surfaced here; output-token accounting and
+/// cache-read accounting are post-response concerns, read from the
+/// provider's response `Usage` rather than projected pre-flight.
 ///
 /// # Examples
 ///

@@ -1,129 +1,139 @@
-//! Block value type and handle for memory storage.
+//! Block identifier alias and post-turn `BlockWrite` audit record.
 //!
-//! A [`Block`] is the content retrieved from memory storage — it carries both
-//! the rendered text and the metadata needed for agents to refer to and update
-//! that content. A [`BlockHandle`] is the lightweight identifier an agent uses
-//! to name a block in tool calls and context references.
+//! Pattern agents name memory blocks by a human-chosen label (`"persona"`,
+//! `"task_list"`, etc.). That label is the [`BlockHandle`]. The full block
+//! state — content, schema, metadata, permissions — lives on
+//! [`crate::memory::StructuredDocument`], which the memory trait surface
+//! returns directly. The context composer renders blocks via
+//! `MemoryStore::get_rendered_content(agent_id, label)` (owned blocks) and
+//! `StructuredDocument::render()` (shared blocks); this module therefore does
+//! not define a parallel `Block` value type.
 //!
-//! # Relationship to `memory::store`
-//!
-//! `BlockMetadata` in `memory::store` is an implementation-level type for the
-//! V2 cache/DB layer. `Block` and `BlockHandle` here are the value-level types
-//! that cross trait boundaries and appear in `TurnOutput::block_writes`.
+//! A [`BlockWrite`] is the post-turn audit record of a memory change,
+//! attached to [`crate::types::turn::TurnOutput::block_writes`]. Phase 5's
+//! pseudo-message emission renders one `[memory:written]` or
+//! `[memory:updated]` pseudo-message per `BlockWrite`; the record is
+//! intentionally self-contained so emission does not need to re-query memory
+//! at display time.
 
-use schemars::JsonSchema;
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
+use smol_str::SmolStr;
+
+use crate::memory::BlockType;
+use crate::types::ids::MemoryId;
+use crate::types::origin::Author;
 
 /// A lightweight, stable identifier for a memory block as seen by agents.
 ///
-/// Agents refer to blocks by their handle in tool calls and context rendering.
-/// The handle is stable across edits; the block's content may change while the
-/// handle remains constant.
+/// Agents refer to blocks by handle in tool calls and context references. The
+/// handle is the human-chosen label (`"persona"`, `"task_list"`, …), stable
+/// across edits; the block's content may change while the handle remains
+/// constant. Distinct from [`MemoryId`], which is the DB row identifier.
+///
+/// Like the other identifier types in [`crate::types::ids`], `BlockHandle` is
+/// a [`SmolStr`] alias — cheap to clone (Arc-sharing beyond the inline cap),
+/// no newtype ceremony.
 ///
 /// # Examples
 ///
 /// ```
 /// use pattern_core::types::block::BlockHandle;
+/// use smol_str::SmolStr;
 ///
-/// let h = BlockHandle::new("persona");
+/// let h: BlockHandle = SmolStr::new("persona");
 /// assert_eq!(h.as_str(), "persona");
-/// let h2: BlockHandle = "task_list".into();
-/// assert_ne!(h, h2);
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
-pub struct BlockHandle(pub String);
+pub type BlockHandle = SmolStr;
 
-impl BlockHandle {
-    /// Create a new `BlockHandle` from any string label.
-    pub fn new(label: impl Into<String>) -> Self {
-        BlockHandle(label.into())
-    }
-
-    /// Borrow the inner label string.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for BlockHandle {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl From<String> for BlockHandle {
-    fn from(s: String) -> Self {
-        BlockHandle(s)
-    }
-}
-
-impl From<&str> for BlockHandle {
-    fn from(s: &str) -> Self {
-        BlockHandle(s.to_string())
-    }
-}
-
-impl From<BlockHandle> for String {
-    fn from(h: BlockHandle) -> Self {
-        h.0
-    }
-}
-
-/// The content and metadata of a memory block retrieved from storage.
+/// Classification of a write recorded by [`BlockWrite`].
 ///
-/// `Block` is the value type that crosses the memory trait boundary — it is
-/// what the context composer renders into the agent's prompt and what
-/// `TurnOutput::block_writes` references after a turn completes.
+/// Mirrors the shape Phase 5's pseudo-message emission expects: `Created` and
+/// `Replaced` both map to `[memory:written]`; `Appended` and `Updated` map to
+/// `[memory:updated]` with diff-style rendering; `Deleted` is reserved for
+/// future tombstone emission.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockWriteKind {
+    /// Block was newly created this turn.
+    Created,
+    /// Block's entire content was replaced with a new value.
+    Replaced,
+    /// New content was appended to the existing content.
+    Appended,
+    /// A structured-schema block was updated without a full replace.
+    Updated,
+    /// Block was deleted (soft-delete in storage; see `pattern_db` for
+    /// retention semantics).
+    Deleted,
+}
+
+/// A post-turn audit record of a memory-block write.
 ///
-/// For the mutable, cache-backed document used during editing, see
-/// `memory::store::StructuredDocument`.
+/// Attached to [`crate::types::turn::TurnOutput::block_writes`] so that
+/// pseudo-message emission (Phase 5) and checkpoint replay (Phase 3) can
+/// reconstruct what the turn did to memory without re-querying the store at
+/// display time. The record is intentionally self-contained:
+///
+/// - `rendered_content` is the text representation ready for
+///   `[memory:written]` / `[memory:updated]` pseudo-message bodies.
+/// - `previous_content_hash` (when present) lets diff-style rendering decide
+///   between "this content was written fresh" and "this content changed from
+///   something else," without requiring the storage layer to be queried for
+///   the pre-write state.
+/// - Full post-write state can be re-fetched from memory via `memory_id` or
+///   `(handle, agent)` lookup when a caller wants the richer
+///   [`crate::memory::StructuredDocument`] (with schema, permissions, Loro
+///   history, etc.). Detached snapshots can be obtained by forking the
+///   document.
 ///
 /// # Examples
 ///
 /// ```
-/// use pattern_core::types::block::{Block, BlockHandle};
+/// use jiff::Timestamp;
+/// use smol_str::SmolStr;
 ///
-/// let block = Block {
-///     handle: BlockHandle::new("persona"),
-///     label: "Persona".to_string(),
-///     content: "I am a helpful assistant.".to_string(),
-///     char_limit: Some(2000),
-/// };
-/// assert_eq!(block.handle.as_str(), "persona");
-/// assert!(block.content.contains("helpful"));
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Block {
-    /// Stable identifier for this block.
-    pub handle: BlockHandle,
-    /// Human-readable display label (shown in context headers).
-    pub label: String,
-    /// Rendered text content ready for prompt injection.
-    pub content: String,
-    /// Optional character limit; `None` means unlimited.
-    pub char_limit: Option<usize>,
-}
-
-/// A pending write to a memory block, recorded in `TurnOutput`.
+/// use pattern_core::memory::BlockType;
+/// use pattern_core::types::block::{BlockHandle, BlockWrite, BlockWriteKind};
+/// use pattern_core::types::origin::{Author, SystemReason};
 ///
-/// Block writes are applied after a turn completes so that the change log is
-/// available for pseudo-message emission (Phase 5) and checkpointing (Phase 3).
-///
-/// # Examples
-///
-/// ```
-/// use pattern_core::types::block::{BlockHandle, BlockWrite};
-///
+/// let handle: BlockHandle = SmolStr::new("task_list");
 /// let write = BlockWrite {
-///     handle: BlockHandle::new("task_list"),
-///     new_content: "- [ ] Review PR\n- [x] Write tests".to_string(),
+///     handle,
+///     memory_id: SmolStr::new("mem_01HXYZ"),
+///     block_type: BlockType::Working,
+///     rendered_content: "- [ ] Review PR\n- [x] Write tests".to_string(),
+///     kind: BlockWriteKind::Appended,
+///     previous_content_hash: Some(0xdead_beef_dead_beef),
+///     at: Timestamp::now(),
+///     author: Author::System { reason: SystemReason::ToolCall },
 /// };
-/// assert!(write.new_content.contains("Review PR"));
+/// assert!(write.rendered_content.contains("Review PR"));
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockWrite {
-    /// The block that was written to.
+    /// Human-chosen label for the block the agent writes to.
     pub handle: BlockHandle,
-    /// Replacement content after the write.
-    pub new_content: String,
+    /// DB row identifier for the block (for re-fetch of full state).
+    pub memory_id: MemoryId,
+    /// Whether the block is Core, Working, or Archival.
+    pub block_type: BlockType,
+    /// Rendered text content after the write, ready for pseudo-message
+    /// display. Derived from the underlying [`crate::memory::StructuredDocument`]
+    /// at write time so display does not need to re-query memory.
+    pub rendered_content: String,
+    /// Classification of the write (created / replaced / appended / ...).
+    pub kind: BlockWriteKind,
+    /// Hash of the content before this write, when applicable. `None` for
+    /// [`BlockWriteKind::Created`]; `Some(_)` for updates that carry a
+    /// pre-write baseline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_content_hash: Option<u64>,
+    /// Wall-clock time the write occurred (UTC instant via `jiff`).
+    pub at: Timestamp,
+    /// Who authored the write, using the shared `MessageOrigin` author
+    /// surface so anti-loop / trust policies have structural access to the
+    /// originator.
+    pub author: Author,
 }

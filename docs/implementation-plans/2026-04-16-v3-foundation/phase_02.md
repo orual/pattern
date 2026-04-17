@@ -30,7 +30,7 @@ This phase implements and tests the following ACs in full:
 - **v3-foundation.AC1.3 Success:** Dummy struct impls of `AgentRuntime`, `Session`, `MemoryStore`, `ProviderClient`, `MessageRouter`, `DataStream`, `SourceManager` all compile, confirming trait shape is satisfiable
 - **v3-foundation.AC1.4 Success:** Port-list doc at `docs/plans/rewrite-v3-portlist.md` exists and lists every currently-excluded crate with deferral-plan note
 - **v3-foundation.AC1.5 Failure:** Removing a required method from a dummy trait impl causes `cargo check` to fail with a clear "missing implementation" error
-- **v3-foundation.AC1.6 Edge:** Referencing a retired crate (e.g., `pattern_auth`) from an active crate's `Cargo.toml` causes explicit workspace error, not silent acceptance
+- **v3-foundation.AC1.6 Edge:** Referencing a retired crate (e.g., `pattern_auth`) from an active crate's `Cargo.toml` causes explicit workspace error, not silent acceptance. **Reviewer note:** cargo does NOT error on a `path = "../retired"` dep to a non-member crate — workspace-members narrowing does not enforce this. The real failure mode fires at **crate deletion** (Phase 4 retirement commit): any remaining dep on a deleted crate fails to resolve. Phase 2 verifies this AC by documenting the coupling explicitly in `docs/plans/rewrite-v3-portlist.md` under the `pattern_auth` entry (which notes Phase 4 must simultaneously drop the dep + restructure `CoreError::AuthError`). A synthetic test — adding a truly nonexistent crate path dep — was deemed low-value since it tests cargo's own behaviour, not Pattern's policy.
 - **v3-foundation.AC1.7 Success:** Every in-flight or pending-move code region has a `// MOVING TO:`, `// REPLACED BY:`, or `// MOVING WITHIN CRATE:` comment identifying its defined fate; port-list doc cross-references these markers
 - **v3-foundation.AC1.8 Success:** No surface API contains `unimplemented!()` / `todo!()` without a comment identifying the filling phase and AC
 - **v3-foundation.AC1.9 Failure:** A code region pending move that has no fate marker, OR a stubbed API with no phase/AC reference, causes the intermediate-state audit check to fail (grep-based scan during phase verification)
@@ -770,7 +770,7 @@ jj new
 **Files:**
 - Create: `crates/pattern_core/src/types.rs` (module root with re-exports)
 - Create: `crates/pattern_core/src/types/ids.rs` (absorbs existing `id.rs`; adds `WorkspaceId`, `ProjectId`)
-- Create: `crates/pattern_core/src/types/block.rs` (`Block`, `BlockHandle`)
+- Create: `crates/pattern_core/src/types/block.rs` (`BlockHandle` alias + `BlockWrite` + `BlockWriteKind`; **no standalone `Block` value type** — the memory trait surface returns `StructuredDocument` directly; composer renders via `MemoryStore::get_rendered_content(agent_id, label)` for owned blocks and `StructuredDocument::render()` for shared blocks)
 - Create: `crates/pattern_core/src/types/message.rs` (refined `Message` from Task 9)
 - Create: `crates/pattern_core/src/types/caller.rs` (`Caller` enum: `Agent(AgentId)` / `Human(UserId)`)
 - Create: `crates/pattern_core/src/types/turn.rs` (`TurnInput`, `TurnOutput`, `TurnId`)

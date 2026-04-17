@@ -148,7 +148,34 @@ pub enum Author {
     /// Another agent, typically in a cooperating constellation.
     Agent(AgentAuthor),
     /// The system itself (scheduler, pseudo-message emitter, runtime).
-    System,
+    ///
+    /// The [`SystemReason`] discriminates the trigger kind so anti-loop,
+    /// rate-limit, and attribution code can key off cause without adding
+    /// another axis to [`Author`].
+    System { reason: SystemReason },
+}
+
+/// Why the system triggered a message.
+///
+/// Used on [`Author::System`] to distinguish the concrete cause of a
+/// system-authored message. `#[non_exhaustive]` so plugin/integration code
+/// can add variants in future phases without breaking match arms.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemReason {
+    /// A generic timer effect fired. Use a more specific variant below when
+    /// the cause is known (sleeptime/wakeup/tool-call); `Timer` is the
+    /// fallback for agent-scheduled timers that don't fit those cases.
+    Timer,
+    /// Scheduled sleeptime processing (nightly consolidation, etc.).
+    Sleeptime,
+    /// A scheduled wakeup fired.
+    Wakeup,
+    /// Message surfaced by pseudo-message emission after a memory write.
+    MemoryChange,
+    /// Turn was triggered by a tool-call follow-up.
+    ToolCall,
 }
 
 /// Provenance for a single inbound message.
@@ -163,16 +190,30 @@ pub enum Author {
 /// ```
 /// use pattern_core::types::origin::{Author, MessageOrigin, Sphere};
 ///
-/// let origin = MessageOrigin {
-///     author: Author::System,
-///     sphere: Sphere::System,
-/// };
+/// # use pattern_core::types::origin::SystemReason;
+/// let origin = MessageOrigin::new(
+///     Author::System { reason: SystemReason::Wakeup },
+///     Sphere::System,
+/// );
 /// assert_eq!(origin.sphere, Sphere::System);
 /// ```
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MessageOrigin {
     /// Who authored the message.
     pub author: Author,
     /// What visibility sphere it was published into.
     pub sphere: Sphere,
+    // `transport_hint: Option<SmolStr>` will be added in a later phase when
+    // transport-specific display hints are wired through. `#[non_exhaustive]`
+    // lets us add fields without breaking external constructor call sites.
+}
+
+impl MessageOrigin {
+    /// Construct a `MessageOrigin` from its two mandatory axes. Use this
+    /// constructor rather than struct-literal syntax so future
+    /// `#[non_exhaustive]` fields can be added without breakage.
+    pub fn new(author: Author, sphere: Sphere) -> Self {
+        Self { author, sphere }
+    }
 }

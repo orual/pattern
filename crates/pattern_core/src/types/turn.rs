@@ -37,15 +37,15 @@ pub use crate::types::ids::TurnId;
 ///
 /// ```
 /// use pattern_core::types::turn::{TurnId, TurnInput};
-/// use pattern_core::types::origin::{Author, MessageOrigin, Sphere};
+/// use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
 /// use pattern_core::types::ids::new_id;
 ///
 /// let input = TurnInput {
 ///     turn_id: new_id(),
-///     origin: MessageOrigin {
-///         author: Author::System,
-///         sphere: Sphere::System,
-///     },
+///     origin: MessageOrigin::new(
+///         Author::System { reason: SystemReason::Wakeup },
+///         Sphere::System,
+///     ),
 ///     messages: vec![],
 /// };
 /// assert_eq!(input.turn_id.len(), 32);
