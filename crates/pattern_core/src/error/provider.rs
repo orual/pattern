@@ -191,6 +191,32 @@ pub enum ProviderError {
         retry_after: Duration,
     },
 
+    /// No credential tier could resolve a usable credential for the provider.
+    ///
+    /// Surfaced by `pattern_provider::auth` when every tier in a provider's
+    /// chain (session-pickup, PKCE, API key for Anthropic; API key only for
+    /// Gemini) has fallen through without producing a credential.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::ProviderError;
+    ///
+    /// let err = ProviderError::NoAuthAvailable {
+    ///     provider: "anthropic".into(),
+    /// };
+    /// assert!(err.to_string().contains("no auth"));
+    /// ```
+    #[error("no auth available for provider '{provider}'")]
+    #[diagnostic(
+        code(pattern_core::provider::no_auth_available),
+        help("run `pattern auth login` or set the provider's API key env var")
+    )]
+    NoAuthAvailable {
+        /// Provider name (matches `AdapterKind` string form).
+        provider: String,
+    },
+
     /// The provider returned an HTTP error response.
     ///
     /// # Example

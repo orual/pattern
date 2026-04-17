@@ -14,14 +14,18 @@
 //! short-circuits the chain with a hard
 //! [`pattern_core::error::ProviderError`].
 
+pub mod api_key;
+pub mod resolver;
+
 #[cfg(feature = "subscription-oauth")]
 pub mod pkce;
 #[cfg(feature = "subscription-oauth")]
 pub mod session_pickup;
 
+pub use api_key::ApiKeyTier;
+pub use resolver::{AnthropicAuthChain, AuthTier, CredentialChain, GeminiAuthChain, ResolvedCredential};
+
 #[cfg(feature = "subscription-oauth")]
 pub use pkce::{PendingAuth, PkceConfig, PkceTier};
 #[cfg(feature = "subscription-oauth")]
 pub use session_pickup::SessionPickupTier;
-
-// api_key + resolver populate in Task 10 of phase_04.md.
