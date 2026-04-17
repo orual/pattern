@@ -30,3 +30,4 @@ jiff             = { workspace = true }
 tokio          = { workspace = true, features = ["rt-multi-thread", "test-util", "macros"] }
 tidepool-testing = { workspace = true }
 tracing-test   = { workspace = true }
+tracing-subscriber = { workspace = true }
