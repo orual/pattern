@@ -6,11 +6,19 @@
 //! subsystem modules (e.g. memory storage).
 
 pub mod agent_runtime;
+pub mod data_stream;
+pub mod endpoint;
+pub mod endpoint_registry;
 pub mod memory_store;
 pub mod provider_client;
 pub mod session;
+pub mod source_manager;
 
 pub use agent_runtime::AgentRuntime;
+pub use data_stream::{DataStream, StreamEvent};
+pub use endpoint::Endpoint;
+pub use endpoint_registry::EndpointRegistry;
 pub use memory_store::MemoryStore;
 pub use provider_client::ProviderClient;
 pub use session::Session;
+pub use source_manager::{SourceManager, SourceName};

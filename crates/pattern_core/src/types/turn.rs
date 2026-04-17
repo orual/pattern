@@ -20,8 +20,8 @@ use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::types::block::BlockWrite;
-use crate::types::caller::Caller;
 use crate::types::message::Message;
+use crate::types::origin::MessageOrigin;
 
 // `TurnId` is defined in `types::ids` as a `SmolStr` type alias. Mint fresh
 // turn ids via `pattern_core::types::ids::new_id()`.
@@ -37,12 +37,15 @@ pub use crate::types::ids::TurnId;
 ///
 /// ```
 /// use pattern_core::types::turn::{TurnId, TurnInput};
-/// use pattern_core::types::caller::Caller;
-/// use pattern_core::types::ids::{UserId, new_id};
+/// use pattern_core::types::origin::{Author, MessageOrigin, Sphere};
+/// use pattern_core::types::ids::new_id;
 ///
 /// let input = TurnInput {
 ///     turn_id: new_id(),
-///     caller: Caller::Human(new_id()),
+///     origin: MessageOrigin {
+///         author: Author::System,
+///         sphere: Sphere::System,
+///     },
 ///     messages: vec![],
 /// };
 /// assert_eq!(input.turn_id.len(), 32);
@@ -51,8 +54,9 @@ pub use crate::types::ids::TurnId;
 pub struct TurnInput {
     /// Stable identifier assigned before the turn begins.
     pub turn_id: TurnId,
-    /// Who initiated this turn.
-    pub caller: Caller,
+    /// Provenance of the messages delivered this turn — who authored them
+    /// and into what visibility sphere.
+    pub origin: MessageOrigin,
     /// Messages delivered to the agent for this activation.
     pub messages: Vec<Message>,
 }

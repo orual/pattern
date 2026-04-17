@@ -8,12 +8,11 @@
 //! # Quick start
 //!
 //! ```
-//! use pattern_core::{AgentId, UserId, Caller, TurnId, new_id};
+//! use pattern_core::{AgentId, UserId, TurnId, new_id};
 //! use smol_str::SmolStr;
 //!
 //! let agent: AgentId = SmolStr::new("orual-companion");
-//! let user: UserId = new_id();
-//! let caller = Caller::Human(user);
+//! let _user: UserId = new_id();
 //! let turn: TurnId = new_id();
 //! assert_eq!(turn.len(), 32);
 //! ```
@@ -57,8 +56,7 @@ pub use types::message::{Message, ResponseMeta};
 pub use types::block::{Block, BlockHandle, BlockWrite};
 
 // Turn types
-pub use types::caller::Caller;
-pub use types::turn::{TurnId, TurnInput, TurnOutput};
+pub use types::turn::{TurnCacheMetrics, TurnId, TurnInput, TurnOutput};
 
 // Snapshot types (Phase 3 checkpoint stubs)
 pub use types::snapshot::{PersonaSnapshot, SessionSnapshot};

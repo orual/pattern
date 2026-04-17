@@ -7,9 +7,9 @@
 pub mod batch;
 pub mod block;
 pub mod block_ref;
-pub mod caller;
 pub mod ids;
 pub mod message;
+pub mod origin;
 pub mod provider;
 pub mod snapshot;
 pub mod turn;
@@ -17,7 +17,7 @@ pub mod turn;
 pub use batch::{BatchType, MessageBatch};
 pub use block::{Block, BlockHandle, BlockWrite};
 pub use block_ref::BlockRef;
-pub use caller::Caller;
+pub use origin::{AgentAuthor, Author, Human, MessageOrigin, Partner, Sphere};
 pub use ids::{
     AgentId, BatchId, ConstellationId, ConversationId, DiscordIdentityId, EventId, GroupId,
     MemoryId, MessageId, ModelId, OAuthTokenId, ProjectId, QueuedMessageId, RelationId, RequestId,
