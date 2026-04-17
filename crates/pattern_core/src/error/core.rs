@@ -30,16 +30,48 @@ use crate::types::ids::AgentId;
 pub enum CoreError {
     // ── Sub-system wrappers ──────────────────────────────────────────────────
     /// An error from the agent execution runtime (timeouts, crashes, etc.).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::{CoreError, RuntimeError};
+    ///
+    /// let err: CoreError = RuntimeError::RuntimeCrashed.into();
+    /// assert!(err.to_string().contains("crashed"));
+    /// ```
     #[error(transparent)]
     #[diagnostic(transparent)]
     Runtime(#[from] RuntimeError),
 
     /// An error from an external LLM provider or credential store.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use pattern_core::error::{CoreError, ProviderError};
+    ///
+    /// let err: CoreError = ProviderError::AuthFlowTimeout.into();
+    /// assert!(err.to_string().contains("timed out"));
+    /// ```
     #[error(transparent)]
     #[diagnostic(transparent)]
     Provider(#[from] ProviderError),
 
     /// An error from the memory block store.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::{CoreError, MemoryError};
+    /// use pattern_core::types::block::BlockHandle;
+    ///
+    /// let err: CoreError = MemoryError::StoreCorrupted {
+    ///     detail: "bad checksum".to_string(),
+    /// }
+    /// .into();
+    /// assert!(err.to_string().contains("bad checksum"));
+    /// ```
     #[error(transparent)]
     #[diagnostic(transparent)]
     Memory(#[from] MemoryError),
@@ -635,26 +667,86 @@ pub enum CoreError {
 #[non_exhaustive]
 pub enum ConfigError {
     /// An I/O error occurred while reading or writing the config file.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::ConfigError;
+    ///
+    /// let err = ConfigError::Io("permission denied".to_string());
+    /// assert!(err.to_string().contains("permission denied"));
+    /// ```
     #[error("IO error: {0}")]
     Io(String),
 
     /// The TOML config file could not be parsed.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::ConfigError;
+    ///
+    /// let err = ConfigError::TomlParse("unexpected key".to_string());
+    /// assert!(err.to_string().contains("unexpected key"));
+    /// ```
     #[error("TOML parse error: {0}")]
     TomlParse(String),
 
     /// The TOML config could not be serialized.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::ConfigError;
+    ///
+    /// let err = ConfigError::TomlSerialize("type mismatch".to_string());
+    /// assert!(err.to_string().contains("type mismatch"));
+    /// ```
     #[error("TOML serialize error: {0}")]
     TomlSerialize(String),
 
     /// A required configuration field was absent.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::ConfigError;
+    ///
+    /// let err = ConfigError::MissingField("api_key".to_string());
+    /// assert!(err.to_string().contains("api_key"));
+    /// ```
     #[error("missing required field: {0}")]
     MissingField(String),
 
     /// A configuration field had an invalid value.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::ConfigError;
+    ///
+    /// let err = ConfigError::InvalidValue {
+    ///     field: "timeout".to_string(),
+    ///     reason: "must be positive".to_string(),
+    /// };
+    /// assert!(err.to_string().contains("timeout"));
+    /// ```
     #[error("invalid value for field {field}: {reason}")]
     InvalidValue { field: String, reason: String },
 
     /// A deprecated configuration field was present.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::ConfigError;
+    ///
+    /// let err = ConfigError::Deprecated {
+    ///     field: "max_tokens".to_string(),
+    ///     message: "use context_window instead".to_string(),
+    /// };
+    /// assert!(err.to_string().contains("max_tokens"));
+    /// ```
     #[error("deprecated config: {field} - {message}")]
     Deprecated { field: String, message: String },
 }
