@@ -463,7 +463,7 @@ impl MemoryStore for MemoryStoreAdapter {
             handle: handle.clone(),
             author: block.author,
             turn_id: block.turn_id,
-            timestamp: chrono::Utc::now(), // stored in UTC; rendered in local time (Task 6)
+            timestamp: jiff::Timestamp::now(), // stored as UTC instant; rendered in local time (Task 6)
         });
         Ok(handle)
     }
@@ -479,7 +479,7 @@ impl MemoryStore for MemoryStoreAdapter {
             author,
             previous_content_hash: hash(&previous),
             new_content: content,
-            timestamp: chrono::Utc::now(), // stored in UTC; rendered in local time (Task 6)
+            timestamp: jiff::Timestamp::now(), // stored as UTC instant; rendered in local time (Task 6)
         });
         Ok(())
     }
@@ -548,7 +548,7 @@ pub enum ChangeEvent {
         handle: BlockHandle,
         author: Caller,
         turn_id: TurnId,
-        timestamp: chrono::DateTime<chrono::Utc>,
+        timestamp: jiff::Timestamp,
         content_preview: String, // first N chars for the pseudo-message body
     },
     /// Existing block modified this turn.
@@ -558,7 +558,7 @@ pub enum ChangeEvent {
         previous_content_hash: u64, // for diff computation
         new_content: BlockContent,
         turn_id: TurnId,
-        timestamp: chrono::DateTime<chrono::Utc>,
+        timestamp: jiff::Timestamp,
     },
 }
 
@@ -648,14 +648,17 @@ pub fn render_change_event(event: &ChangeEvent) -> MessageBlock {
 }
 
 /// Render a UTC timestamp in the user's local timezone, in a friendly but useful format.
-/// Timestamps are stored in UTC for portability/correctness; rendered
+/// Timestamps are stored as UTC instants for portability/correctness; rendered
 /// in local time for display so the agent and user see familiar-looking times.
 ///
 /// Example: UTC `2026-04-16T19:30:00Z` rendered as `2026-04-16, 12:30:00 PDT (Thursday)` - weekday at end to remain sortable)
 /// when pattern is running in a PDT locale.
-fn render_local_timestamp(utc: chrono::DateTime<chrono::Utc>) -> String {
-    utc.with_timezone(&chrono::Local).format(/*see https://docs.rs/chrono/latest/chrono/format/strftime/index.html#specifiers for reference to hit above format example */).to_string()
-    // or use .format_localized() with the user's system locale
+fn render_local_timestamp(ts: jiff::Timestamp) -> String {
+    let zoned = ts.to_zoned(jiff::tz::TimeZone::system());
+    // Format via jiff::fmt::strtime — see https://docs.rs/jiff/latest/jiff/fmt/strtime/index.html for specifier reference.
+    // Example format: "%Y-%m-%d, %H:%M:%S %Z (%A)"
+    jiff::fmt::strtime::format("%Y-%m-%d, %H:%M:%S %Z (%A)", &zoned)
+        .unwrap_or_else(|_| zoned.to_string())
 }
 
 fn render_author(caller: &Caller) -> String {
@@ -682,7 +685,7 @@ fn compute_diff(previous_hash: u64, new_content: &BlockContent) -> String {
 - AC8.6: author attribution uses the correct Caller variant; unknown variants render as `<unknown source>` with a tracing::warn
 - Local-time rendering: construct a known UTC timestamp, assert the rendered string matches the expected local-offset format for the test environment's timezone (or gate with a `TZ=America/Los_Angeles` env override in the test to get deterministic output)
 
-**Timestamp convention** (applies throughout Phase 5 + future pattern work): timestamps are stored in UTC (`chrono::DateTime<Utc>`) for portability, serialization, and cross-timezone correctness. They are rendered in the **user's local timezone** (`chrono::Local`) whenever displayed to the user or included in LLM-facing text. Helper `render_local_timestamp()` is the canonical conversion point.
+**Timestamp convention** (applies throughout Phase 5 + future pattern work): timestamps are stored as UTC instants (`jiff::Timestamp`) for portability, serialization, and cross-timezone correctness. They are rendered in the **user's local timezone** (`jiff::tz::TimeZone::system()`) whenever displayed to the user or included in LLM-facing text. Helper `render_local_timestamp()` is the canonical conversion point.
 
 **Commit:**
 

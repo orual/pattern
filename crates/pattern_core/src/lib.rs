@@ -6,7 +6,6 @@
 
 pub mod base_instructions;
 pub mod config;
-pub mod db;
 pub mod error;
 #[cfg(feature = "export")]
 pub mod export;

@@ -757,7 +757,7 @@ jj new
 **`time.rs` implementation:**
 
 ```rust
-use std::time::{SystemTime, UNIX_EPOCH};
+use jiff::Timestamp;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use crate::sdk::requests::TimeReq;
 
@@ -770,10 +770,8 @@ impl EffectHandler for TimeHandler {
     fn handle(&mut self, req: TimeReq, _cx: &EffectContext) -> Result<tidepool_bridge::Value, EffectError> {
         match req {
             TimeReq::Now => {
-                let ns = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map_err(|e| EffectError::custom(format!("SystemTime error: {e}")))?
-                    .as_nanos() as i64;
+                // jiff::Timestamp is an explicit UTC instant with nanosecond precision.
+                let ns = Timestamp::now().as_nanosecond() as i64;
                 Ok(tidepool_bridge::Value::Integer(ns.into()))
             }
             TimeReq::Sleep(ns) => {
@@ -795,7 +793,7 @@ impl EffectHandler for TimeHandler {
 }
 ```
 
-Rationale: `SystemTime::now()` is fine here (wall-clock semantics). `Sleep` is bounded — long sleeps would block the JIT caller thread.
+Rationale: `jiff::Timestamp::now()` gives an explicit wall-clock UTC instant with nanosecond precision; `.as_nanosecond()` returns nanos-since-epoch for the SDK wire format. `Sleep` is bounded — long sleeps would block the JIT caller thread (`std::thread::sleep` + `std::time::Duration` is correct here; we're doing a short stopwatch sleep, not manipulating a wall-clock instant).
 
 **`log.rs` implementation:**
 
@@ -903,9 +901,9 @@ mod tests {
     #[test]
     fn time_now_returns_current_nanos() {
         let mut h = TimeHandler::default();
-        let before = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as i64;
+        let before = jiff::Timestamp::now().as_nanosecond() as i64;
         let v = h.handle(TimeReq::Now, &EffectContext::for_test()).unwrap();
-        let after = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as i64;
+        let after = jiff::Timestamp::now().as_nanosecond() as i64;
         match v {
             Value::Integer(n) => {
                 let n: i64 = n.try_into().unwrap();
@@ -1754,7 +1752,7 @@ fn handle(&mut self, req: Self::Request, cx: &EffectContext) -> Result<Value, Ef
 }
 ```
 
-Where `handle_inner` is the handler-specific logic that actually does the work (HTTP calls for MessageHandler, `SystemTime::now()` for TimeHandler, etc.). This pattern is duplicated across all 11 handlers; a macro or trait-helper can reduce boilerplate. Light-weight handlers (TimeHandler, LogHandler, DisplayHandler) may skip the gate since their work is instantaneous; gating is primarily for I/O-bound ones.
+Where `handle_inner` is the handler-specific logic that actually does the work (HTTP calls for MessageHandler, `jiff::Timestamp::now()` for TimeHandler, etc.). This pattern is duplicated across all 11 handlers; a macro or trait-helper can reduce boilerplate. Light-weight handlers (TimeHandler, LogHandler, DisplayHandler) may skip the gate since their work is instantaneous; gating is primarily for I/O-bound ones.
 
 **Add to `pattern_core::error::RuntimeError`:**
 
@@ -1970,7 +1968,7 @@ agent :: Eff '[Time.Time] Integer
 agent = Time.now
 ```
 
-Rust side: run, capture the integer, assert it's within ±1s of `SystemTime::now()` before/after invocation.
+Rust side: run, capture the integer, assert it's within ±1s of `jiff::Timestamp::now().as_nanosecond()` before/after invocation.
 
 **Log.Info:**
 

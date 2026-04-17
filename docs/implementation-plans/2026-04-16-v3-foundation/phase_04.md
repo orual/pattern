@@ -453,7 +453,7 @@ serde_json = { workspace = true }
 reqwest = { workspace = true }
 governor = { workspace = true }
 secrecy = { workspace = true }
-chrono = { workspace = true }
+jiff = { workspace = true, features = ["serde"] }
 uuid = { workspace = true, features = ["v4", "serde"] }
 rand = { workspace = true }
 sha2 = { workspace = true }
@@ -562,7 +562,7 @@ Pre-v3 had this struct in `pattern_auth::providers::oauth`. Phase 2 staged patte
 
 ```rust
 // pattern_core/src/types/provider.rs (create or extend)
-use chrono::{DateTime, Utc};
+use jiff::{Timestamp, ToSpan};
 use secrecy::SecretString;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -570,19 +570,19 @@ pub struct ProviderOAuthToken {
     pub provider: String,
     pub access_token: SecretString,
     pub refresh_token: Option<SecretString>,
-    pub expires_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<Timestamp>,
     pub scope: Option<String>,
     pub session_id: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 impl ProviderOAuthToken {
     pub fn is_expired(&self) -> bool {
-        matches!(self.expires_at, Some(t) if t <= Utc::now())
+        matches!(self.expires_at, Some(t) if t <= Timestamp::now())
     }
     pub fn needs_refresh(&self) -> bool {
-        matches!(self.expires_at, Some(t) if t <= Utc::now() + chrono::Duration::minutes(5))
+        matches!(self.expires_at, Some(t) if t <= Timestamp::now() + 5.minutes())
     }
 }
 ```
@@ -906,19 +906,20 @@ impl SessionPickupTier {
 
     fn to_pattern_token(creds: ClaudeCredentials) -> Option<ProviderOAuthToken> {
         // AC3.5: expired → skip.
-        let now_ms = chrono::Utc::now().timestamp_millis();
+        let now_ms = jiff::Timestamp::now().as_millisecond();
         if let Some(exp) = creds.expires_at {
             if exp <= now_ms { return None; }
         }
+        let now = jiff::Timestamp::now();
         Some(ProviderOAuthToken {
             provider: "anthropic".into(),
             access_token: SecretString::new(creds.access_token.into()),
             refresh_token: creds.refresh_token.map(|s| SecretString::new(s.into())),
-            expires_at: creds.expires_at.and_then(|ms| chrono::DateTime::from_timestamp_millis(ms)),
+            expires_at: creds.expires_at.and_then(|ms| jiff::Timestamp::from_millisecond(ms).ok()),
             scope: creds.scopes.map(|v| v.join(" ")),
             session_id: None, // credentials file doesn't expose; pattern generates its own
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: now,
+            updated_at: now,
         })
     }
 }
