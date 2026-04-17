@@ -10,7 +10,7 @@
 //!
 //! Phase 3 scope: MemoryHandler dispatches to the session's
 //! `Arc<dyn MemoryStore>`; MessageHandler is stubbed; handlers
-//! co-operatively check [`SessionContext::cancellation`] at entry.
+//! co-operatively check [`SessionContext::cancel_state`] at entry.
 
 use std::sync::Arc;
 
@@ -193,6 +193,21 @@ impl TidepoolSession {
     /// recorded events.
     pub fn checkpoint_log(&self) -> Arc<std::sync::Mutex<CheckpointLog>> {
         self.checkpoint_log.clone()
+    }
+
+    /// Test-only: flip the session's `poisoned` flag so the next `step`
+    /// short-circuits with `RuntimeError::SessionPoisoned`. Used by the
+    /// Phase 3 Task 18 / AC2.8 integration test to assert the poison
+    /// short-circuit on its own without having to reproduce the exact
+    /// race conditions that cause the real `run_turn` path to flip it
+    /// (the JoinError branch is inherently non-deterministic under
+    /// test). Kept `#[doc(hidden)]` so it does not appear in the public
+    /// API surface, but `pub` so integration tests can reach it.
+    #[doc(hidden)]
+    pub fn __poison_for_tests(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.poisoned = true;
+        }
     }
 
     /// Open a session for `persona`. Compiles the program, warms the JIT,

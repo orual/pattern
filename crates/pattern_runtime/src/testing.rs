@@ -1,6 +1,6 @@
 //! Test fixtures for `pattern_runtime` and downstream integration tests.
 //!
-//! Re-exports commonly-needed [`tidepool_testing`] helpers under paths that
+//! Re-exports commonly-needed `tidepool_testing` helpers under paths that
 //! work under Rust 2024 edition. The upstream `tidepool-testing` crate is on
 //! edition 2021 and defines a `gen` submodule, which is a reserved keyword
 //! under 2024 — downstream callers would need `tidepool_testing::r#gen::…` at

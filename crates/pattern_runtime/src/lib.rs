@@ -20,7 +20,7 @@ pub use sdk::SdkLocation;
 pub use session::{SessionContext, TidepoolSession};
 pub use tidepool::{CompiledProgram, SessionMachine};
 
-/// Test fixtures re-exported from [`tidepool_testing`] under Rust-2024-safe
+/// Test fixtures re-exported from `tidepool_testing` under Rust-2024-safe
 /// paths, plus an in-memory [`pattern_core::traits::MemoryStore`] double
 /// (`test_support::InMemoryMemoryStore`) used by session / runtime
 /// integration tests.
