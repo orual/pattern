@@ -28,36 +28,40 @@ pub(super) const BANNED_BETA_MARKERS: &[&str] = &[
 
 /// Build the identification + beta headers for a single outbound request.
 ///
-/// - `User-Agent`: `pattern/<cargo-version>`.
-/// - `X-App`: `config.x_app` (defaults to `"pattern"`; Task 20
+/// All header names are lowercased to match HTTP's case-insensitive
+/// semantics — this lets downstream merge steps use plain BTreeMap
+/// operations (insert/extend) without worrying about `Authorization`
+/// vs `authorization` being treated as distinct keys.
+///
+/// - `user-agent`: `pattern/<cargo-version>`.
+/// - `x-app`: `config.x_app` (defaults to `"pattern"`; Task 20
 ///   verification may force a change to `"cli"` for subscription-routing
 ///   compat).
-/// - `X-Pattern-Session-Id`: the persona's rotating session UUID.
-/// - `X-Client-Request-Id`: a fresh UUID-v4 per request.
-/// - `Anthropic-Beta`: comma-joined beta markers per the auth tier +
-///   model-capability flags. Empty if no markers apply.
+/// - `x-pattern-session-id`: the persona's rotating session UUID.
+/// - `x-client-request-id`: a fresh UUID-v4 per request.
+/// - `anthropic-beta`: comma-joined beta markers per the auth tier +
+///   model-capability flags. Omitted entirely if no markers apply.
 pub fn build_identification_headers(
     config: &ShaperConfig,
     session_uuid: &PatternSessionUuid,
     auth_tier: AuthTier,
     model: &str,
-) -> Result<Vec<(String, String)>, ProviderError> {
-    let mut out = vec![
-        (
-            "User-Agent".into(),
-            format!("pattern/{}", env!("CARGO_PKG_VERSION")),
-        ),
-        ("X-App".into(), config.x_app.clone()),
-        ("X-Pattern-Session-Id".into(), session_uuid.to_string()),
-        (
-            "X-Client-Request-Id".into(),
-            uuid::Uuid::new_v4().to_string(),
-        ),
-    ];
+) -> Result<std::collections::BTreeMap<String, String>, ProviderError> {
+    let mut out = std::collections::BTreeMap::new();
+    out.insert(
+        "user-agent".into(),
+        format!("pattern/{}", env!("CARGO_PKG_VERSION")),
+    );
+    out.insert("x-app".into(), config.x_app.clone());
+    out.insert("x-pattern-session-id".into(), session_uuid.to_string());
+    out.insert(
+        "x-client-request-id".into(),
+        uuid::Uuid::new_v4().to_string(),
+    );
 
     let betas = build_beta_header_value(config, auth_tier, model);
     if !betas.is_empty() {
-        out.push(("Anthropic-Beta".into(), betas));
+        out.insert("anthropic-beta".into(), betas);
     }
 
     Ok(out)
@@ -72,13 +76,13 @@ pub(super) fn build_beta_header_value(
 ) -> String {
     let mut betas: Vec<&str> = Vec::new();
 
-    // OAuth routing marker — required when the outbound auth tier is
-    // subscription OAuth.
-    #[cfg(feature = "subscription-oauth")]
-    if matches!(auth_tier, AuthTier::SessionPickup | AuthTier::Pkce) {
-        betas.push("oauth-2025-04-20");
-    }
-    // Suppress "auth_tier unused when no oauth feature" by consuming it.
+    // NOTE: the `oauth-2025-04-20` marker — which signals "this is an
+    // OAuth-tier call" to Anthropic — is auth-specific, not a shaper
+    // capability flag. It lives in
+    // `gateway::auth_headers_for_tier` alongside the Bearer token.
+    // Keeping `auth_tier` in this function signature so future capability
+    // flags that ARE tier-dependent can condition on it without a
+    // retroactive API change.
     let _ = auth_tier;
 
     // Prompt-caching scope marker — claude-code always sends this on 1P
@@ -170,11 +174,11 @@ mod tests {
         )
         .expect("build ok");
 
-        let names: Vec<&str> = headers.iter().map(|(k, _)| k.as_str()).collect();
-        assert!(names.contains(&"User-Agent"));
-        assert!(names.contains(&"X-App"));
-        assert!(names.contains(&"X-Pattern-Session-Id"));
-        assert!(names.contains(&"X-Client-Request-Id"));
+        // Keys are lowercased (HTTP case-insensitive + BTreeMap-friendly).
+        assert!(headers.contains_key("user-agent"));
+        assert!(headers.contains_key("x-app"));
+        assert!(headers.contains_key("x-pattern-session-id"));
+        assert!(headers.contains_key("x-client-request-id"));
     }
 
     #[test]
@@ -184,12 +188,20 @@ mod tests {
         assert_eq!(value, "", "no flags + api-key auth → no beta markers");
     }
 
+    /// `oauth-2025-04-20` is an AUTH-tier header, not a shaper capability
+    /// flag — it's emitted by `gateway::auth_headers_for_tier` alongside
+    /// the Bearer token, NOT by the shaper's beta builder. This test
+    /// pins the contract by asserting the shaper does NOT emit it
+    /// regardless of the auth tier.
     #[cfg(feature = "subscription-oauth")]
     #[test]
-    fn oauth_tier_adds_oauth_beta_marker() {
+    fn shaper_does_not_emit_oauth_beta_marker() {
         let config = min_config();
         let value = build_beta_header_value(&config, AuthTier::SessionPickup, "claude-opus-4-7");
-        assert!(value.contains("oauth-2025-04-20"));
+        assert!(
+            !value.contains("oauth-2025-04-20"),
+            "shaper must not emit oauth-2025-04-20; that's auth-tier territory"
+        );
     }
 
     #[test]

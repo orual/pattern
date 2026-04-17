@@ -186,8 +186,11 @@ mod tests {
     /// cargo nextest run -p pattern-runtime preflight -- --ignored
     /// ```
     #[test]
-    #[ignore = "requires tidepool-extract on PATH or $TIDEPOOL_EXTRACT set"]
     fn succeeds_when_extract_on_path() {
+        // The devshell exports `$TIDEPOOL_EXTRACT` pointing at the
+        // flake-provided binary; CI runs inside the same devshell. If this
+        // ever fails outside those environments, the fix is to activate
+        // `nix develop` first, not to re-ignore this test.
         super::check().expect("preflight should succeed when tidepool-extract is available");
     }
 

@@ -20,6 +20,7 @@ mcp-wrapper.sh
 **.log.**
 **.json
 !**/.sqlx/*.json
+!crates/*/tests/data/*.json
 **.sql
 !**/migrations/*.sql
 **.surql

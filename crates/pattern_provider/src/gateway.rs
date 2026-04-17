@@ -40,14 +40,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::stream::TryStreamExt;
 use genai::adapter::AdapterKind;
 use genai::chat::ChatRequest;
 use genai::resolver::{AuthData, Endpoint};
 use genai::{Headers, ModelIden, ServiceTarget};
 use pattern_core::error::ProviderError;
 use pattern_core::traits::provider_client::{ChunkStream, ProviderClient};
-use pattern_core::types::provider::{CompletionRequest, TokenCount};
+use pattern_core::types::provider::{ChatStreamEvent, CompletionRequest, TokenCount};
 use secrecy::ExposeSecret;
 
 use crate::auth::{AuthTier, CredentialChain, ResolvedCredential};
@@ -90,6 +89,17 @@ pub struct PatternGatewayClient {
     /// with a metadata field in a follow-up; for now the gateway carries a
     /// single persona per instance.
     default_persona: String,
+
+    /// Per-provider base-URL overrides, keyed by provider name. When present,
+    /// replaces the hardcoded canonical URL in [`chat_url_for`]. Primarily
+    /// used by integration tests to point at wiremock servers, but also
+    /// surface for self-hosted proxies and corporate routing.
+    ///
+    /// The override replaces the *base* URL (scheme+host+port); the
+    /// adapter-specific path suffix (`/v1/messages` for Anthropic,
+    /// `/v1beta/models/{model}:streamGenerateContent` for Gemini) still
+    /// appends.
+    base_url_overrides: HashMap<String, String>,
 }
 
 impl std::fmt::Debug for PatternGatewayClient {
@@ -174,12 +184,19 @@ impl ProviderClient for PatternGatewayClient {
         let ident_headers = shaper.shape(&mut chat, &ctx)?;
 
         // Compose the full outbound header set: shaper identification +
-        // per-tier auth headers. For RequestOverride this fully replaces
-        // what genai would have built from `AuthData::Key`.
+        // per-tier auth headers. BTreeMap's `.extend()` is last-insert-
+        // wins per key — overlapping contributions from the shaper and
+        // auth stages resolve to the auth value (which is the
+        // authoritative layer). No separate de-dup pass needed.
         let mut outbound_headers = ident_headers;
         outbound_headers.extend(auth_headers_for_tier(&resolved, adapter));
 
-        let target = service_target(adapter, &model, outbound_headers);
+        let target = service_target(
+            adapter,
+            &model,
+            outbound_headers,
+            self.base_url_overrides.get(&provider).map(String::as_str),
+        );
 
         let limiter =
             self.limiters
@@ -189,16 +206,19 @@ impl ProviderClient for PatternGatewayClient {
                 })?;
         limiter.acquire_completion().await;
 
-        // Exec + retry on transient failures (429, transient network
-        // errors). Streaming errors mid-stream propagate to the caller.
-        let stream_resp =
-            exec_chat_stream_with_retry(&self.genai, target, chat, options, RetryPolicy::default())
-                .await?;
-
-        // Map genai's stream events + errors into pattern's Result<ChatStreamEvent, ProviderError>.
-        let mapped = stream_resp.stream.map_err(map_genai_error);
-
-        Ok(Box::pin(mapped))
+        // Open the stream with transparent retry on pre-stream failures
+        // AND on first-event tunneled HTTP errors (429 / 5xx). Once the
+        // first successful event arrives, subsequent errors flow through
+        // to the caller — retrying after content emission would duplicate
+        // output.
+        open_stream_with_retry(
+            &self.genai,
+            target,
+            chat,
+            options,
+            RetryPolicy::default(),
+        )
+        .await
     }
 
     async fn count_tokens(&self, request: &CompletionRequest) -> Result<TokenCount, ProviderError> {
@@ -258,6 +278,7 @@ pub struct PatternGatewayClientBuilder {
     session_uuid: Option<Arc<SessionUuidRotator>>,
     default_persona: Option<String>,
     genai: Option<genai::Client>,
+    base_url_overrides: HashMap<String, String>,
 }
 
 impl PatternGatewayClientBuilder {
@@ -310,6 +331,21 @@ impl PatternGatewayClientBuilder {
         self
     }
 
+    /// Override the base URL for a provider. Primarily used by integration
+    /// tests to point the gateway at a wiremock server; also supports
+    /// self-hosted proxies and corporate routing.
+    ///
+    /// `base_url` should be scheme+host+port only, no trailing slash. The
+    /// adapter-specific path (`/v1/messages`, etc.) still appends.
+    pub fn with_provider_base_url(
+        mut self,
+        name: impl Into<String>,
+        base_url: impl Into<String>,
+    ) -> Self {
+        self.base_url_overrides.insert(name.into(), base_url.into());
+        self
+    }
+
     pub fn build(self) -> Result<PatternGatewayClient, ProviderError> {
         if self.chains.is_empty() {
             return Err(ProviderError::ShaperMisconfigured {
@@ -326,6 +362,7 @@ impl PatternGatewayClientBuilder {
                 .session_uuid
                 .unwrap_or_else(|| Arc::new(SessionUuidRotator::new())),
             default_persona: self.default_persona.unwrap_or_default(),
+            base_url_overrides: self.base_url_overrides,
         })
     }
 }
@@ -350,40 +387,148 @@ impl Default for RetryPolicy {
     }
 }
 
-async fn exec_chat_stream_with_retry(
+/// Open a chat stream, retrying pre-stream and first-event failures with
+/// exponential backoff.
+///
+/// Two retry points:
+///
+/// 1. **Pre-stream**: `exec_chat_stream` returns `Err` (auth resolution,
+///    bucket acquire, reqwest-level transport failure). Retry if
+///    [`is_retryable`] classifies the error as transient.
+/// 2. **First-event**: genai tunnels HTTP errors (429, 5xx) into the
+///    stream as an initial error event. We peek the first event before
+///    handing the stream to the caller — if it's retryable and no
+///    content has yet been observed, we drop the stream and re-open.
+///
+/// Once the first event is Ok (i.e. `message_start` has arrived),
+/// subsequent failures stream through to the caller verbatim. Retrying
+/// after content has been emitted would duplicate output.
+async fn open_stream_with_retry(
     client: &genai::Client,
     target: ServiceTarget,
     chat: ChatRequest,
     options: genai::chat::ChatOptions,
     policy: RetryPolicy,
-) -> Result<genai::chat::ChatStreamResponse, ProviderError> {
+) -> Result<ChunkStream, ProviderError> {
+    use futures::stream::StreamExt;
+
     let mut attempt: u32 = 0;
     loop {
-        let target_clone = target.clone();
-        let chat_clone = chat.clone();
-        let result = client
-            .exec_chat_stream(target_clone, chat_clone, Some(&options))
+        let open_result = client
+            .exec_chat_stream(target.clone(), chat.clone(), Some(&options))
             .await;
 
-        match result {
-            Ok(stream) => return Ok(stream),
+        let mut stream = match open_result {
+            Ok(resp) => resp.stream,
             Err(e) => {
                 attempt += 1;
                 if !is_retryable(&e) || attempt >= policy.max_attempts {
                     return Err(map_genai_error(e));
                 }
-                // Exponential backoff with jitter.
                 let delay = exponential_backoff(attempt, policy.base_delay, policy.max_delay);
                 tracing::warn!(
                     attempt,
                     max = policy.max_attempts,
                     wait_ms = delay.as_millis(),
                     error = %e,
-                    "transient gateway error; retrying"
+                    "pre-stream error; retrying"
                 );
                 tokio::time::sleep(delay).await;
+                continue;
+            }
+        };
+
+        // Peek the first event. This is the moment we know whether the
+        // HTTP request actually succeeded — genai tunnels non-2xx status
+        // as a stream error on the first poll.
+        let Some(first) = stream.next().await else {
+            // Empty stream (no events at all). Unusual but not retryable —
+            // could be an idle-closed connection or a broken server.
+            // Surface as an empty chunk stream; drain will see end=0 +
+            // errors=0 and callers can treat that as a hard failure.
+            tracing::warn!("genai stream closed with zero events");
+            let empty: futures::stream::Empty<Result<ChatStreamEvent, ProviderError>> =
+                futures::stream::empty();
+            return Ok(Box::pin(empty));
+        };
+
+        match first {
+            Ok(evt) => {
+                // First event succeeded — request accepted, content (or
+                // End) is flowing. From here on, errors propagate to the
+                // caller; no more retries.
+                let head = futures::stream::once(async move { Ok(evt) });
+                let tail = stream.map(|r| r.map_err(map_genai_error));
+                return Ok(Box::pin(head.chain(tail)));
+            }
+            Err(e) => {
+                attempt += 1;
+                if !is_first_event_retryable(&e) || attempt >= policy.max_attempts {
+                    return Err(map_genai_error(e));
+                }
+                let delay = exponential_backoff(attempt, policy.base_delay, policy.max_delay);
+                // Structured Retry-After/5h-reset extraction lives in
+                // map_webc_error; peek into the error to honour the
+                // server-provided hint when we have one.
+                let server_hint = server_rate_limit_hint(&e);
+                let wait = server_hint.map(|h| h.min(policy.max_delay)).unwrap_or(delay);
+                tracing::warn!(
+                    attempt,
+                    max = policy.max_attempts,
+                    wait_ms = wait.as_millis(),
+                    error = %e,
+                    "first-event error; retrying"
+                );
+                tokio::time::sleep(wait).await;
             }
         }
+    }
+}
+
+/// Classify the first-poll stream error: is it worth re-opening?
+///
+/// genai's tunneled status errors land as `Error::HttpError { status, ... }`.
+/// 429 and 5xx are transient; 4xx other than 429 are caller bugs.
+fn is_first_event_retryable(err: &genai::Error) -> bool {
+    use genai::Error as E;
+    match err {
+        E::HttpError { status, .. } => status.as_u16() == 429 || status.is_server_error(),
+        E::WebStream { .. } => true,
+        E::WebModelCall { webc_error, .. } => is_webc_retryable(webc_error),
+        _ => false,
+    }
+}
+
+/// Extract a server-provided rate-limit wait hint from an error, when
+/// available. Preference order:
+///
+/// 1. Response headers via `parse_rate_limit_reset` (honours the
+///    Anthropic 5-hour cap reset + RFC 7231 `Retry-After`).
+/// 2. JSON body's `error.retry_after_ms` / `error.retry_after` (some
+///    providers — Anthropic in particular — include retry hints here
+///    instead of, or in addition to, headers).
+///
+/// Returns `None` when neither source yields a parseable hint; caller
+/// falls back to the computed exponential backoff.
+fn server_rate_limit_hint(err: &genai::Error) -> Option<Duration> {
+    use genai::Error as E;
+    match err {
+        E::HttpError { headers, body, .. } => {
+            if let Some(d) = parse_rate_limit_reset(headers) {
+                return Some(d);
+            }
+            // Body-level hint as secondary source.
+            let v: serde_json::Value = serde_json::from_str(body).ok()?;
+            let err_obj = v.get("error")?;
+            if let Some(ms) = err_obj.get("retry_after_ms").and_then(|x| x.as_u64()) {
+                return Some(Duration::from_millis(ms));
+            }
+            if let Some(s) = err_obj.get("retry_after").and_then(|x| x.as_u64()) {
+                return Some(Duration::from_secs(s));
+            }
+            None
+        }
+        _ => None,
     }
 }
 
@@ -402,28 +547,28 @@ fn exponential_backoff(attempt: u32, base: Duration, max: Duration) -> Duration 
 
 /// Is a genai error worth retrying?
 ///
-/// Retry on: 429 (explicit rate-limit), network-transport hiccups.
-/// Do NOT retry on: 4xx other than 429 (auth / payload), 5xx until we have
-/// explicit classification (a hard 500 loop is bad; adjust if needed in a
-/// follow-up).
+/// Retry on: 429 (rate-limit), 5xx (transient server), reqwest transport
+/// failures (connect/timeout). Do NOT retry on: 4xx other than 429
+/// (auth / payload shape), stream-parse errors (our bug or a provider
+/// protocol change).
 fn is_retryable(err: &genai::Error) -> bool {
     use genai::Error as E;
     match err {
         E::WebModelCall { webc_error, .. } => is_webc_retryable(webc_error),
-        E::WebStream { .. } => true, // stream-layer transport issues can be transient
+        E::WebStream { .. } => true, // stream-layer transport hiccups
         _ => false,
     }
 }
 
 fn is_webc_retryable(err: &genai::webc::Error) -> bool {
-    let msg = err.to_string();
-    // Best-effort substring check. genai's webc::Error doesn't currently
-    // expose HTTP status in a structured way we can rely on; when it does,
-    // switch to typed matching.
-    msg.contains("429")
-        || msg.contains("rate")
-        || msg.contains("timeout")
-        || msg.contains("connect")
+    use genai::webc::Error as W;
+    match err {
+        W::ResponseFailedStatus { status, .. } => {
+            status.as_u16() == 429 || status.is_server_error()
+        }
+        W::Reqwest(e) => e.is_connect() || e.is_timeout() || e.is_request(),
+        _ => false,
+    }
 }
 
 // ---- genai error mapping ----
@@ -431,31 +576,17 @@ fn is_webc_retryable(err: &genai::webc::Error) -> bool {
 fn map_genai_error(err: genai::Error) -> ProviderError {
     use genai::Error as E;
     match err {
-        E::WebModelCall { webc_error, .. } => {
-            let msg = webc_error.to_string();
-            if msg.contains("429") || msg.contains("rate") {
-                // TODO: parse Retry-After and anthropic-ratelimit-unified-5h-reset
-                // headers when the webc error shape exposes them. For now the
-                // retry_after is a placeholder best-guess.
-                ProviderError::RateLimited {
-                    retry_after: Duration::from_secs(60),
-                }
-            } else {
-                ProviderError::RequestFailed {
-                    status: 0,
-                    body: Some(msg),
-                }
-            }
-        }
+        E::WebModelCall { webc_error, .. } => map_webc_error(webc_error),
         E::HttpError {
             status,
             canonical_reason: _,
             body,
+            headers,
         } => {
             if status.as_u16() == 429 {
-                ProviderError::RateLimited {
-                    retry_after: Duration::from_secs(60),
-                }
+                let retry_after = parse_rate_limit_reset(&headers)
+                    .unwrap_or_else(|| Duration::from_secs(60));
+                ProviderError::RateLimited { retry_after }
             } else {
                 ProviderError::RequestFailed {
                     status: status.as_u16(),
@@ -492,36 +623,104 @@ fn map_genai_error(err: genai::Error) -> ProviderError {
     }
 }
 
+/// Map a `genai::webc::Error` into the gateway's `ProviderError`, including
+/// structured extraction of rate-limit reset info from response headers.
+fn map_webc_error(err: genai::webc::Error) -> ProviderError {
+    use genai::webc::Error as W;
+    match err {
+        W::ResponseFailedStatus {
+            status,
+            body,
+            headers,
+        } => {
+            if status.as_u16() == 429 {
+                let retry_after = parse_rate_limit_reset(&headers)
+                    .unwrap_or_else(|| Duration::from_secs(60));
+                ProviderError::RateLimited { retry_after }
+            } else {
+                ProviderError::RequestFailed {
+                    status: status.as_u16(),
+                    body: Some(body),
+                }
+            }
+        }
+        other => ProviderError::RequestFailed {
+            status: 0,
+            body: Some(other.to_string()),
+        },
+    }
+}
+
+/// Parse a rate-limit reset hint from response headers.
+///
+/// Preference order:
+/// 1. `anthropic-ratelimit-unified-5h-reset` (UNIX epoch seconds;
+///    Anthropic subscription-tier 5-hour cap signal — when this is
+///    present, the wait is hours, not seconds, and callers want to
+///    surface that clearly).
+/// 2. `Retry-After` (RFC 7231 — delta-seconds only; we don't parse the
+///    HTTP-date variant yet).
+///
+/// Returns `None` if neither header parses cleanly; caller falls back to
+/// a configured default.
+fn parse_rate_limit_reset(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    // Anthropic subscription 5-hour cap: absolute UNIX epoch seconds.
+    if let Some(v) = headers.get("anthropic-ratelimit-unified-5h-reset")
+        && let Ok(s) = v.to_str()
+        && let Ok(reset_epoch) = s.parse::<i64>()
+    {
+        let now = jiff::Timestamp::now().as_second();
+        let delta = reset_epoch.saturating_sub(now).max(0) as u64;
+        return Some(Duration::from_secs(delta));
+    }
+    // RFC 7231 Retry-After: delta-seconds variant only.
+    if let Some(v) = headers.get(reqwest::header::RETRY_AFTER)
+        && let Ok(s) = v.to_str()
+        && let Ok(secs) = s.parse::<u64>()
+    {
+        return Some(Duration::from_secs(secs));
+    }
+    None
+}
+
 // ---- Per-tier auth header composition ----
 
+/// Build the per-tier auth headers. Lowercased keys to match HTTP's
+/// case-insensitive semantics — letting the gateway merge with the
+/// shaper's identification headers via a plain `BTreeMap::extend` without
+/// worrying about `Authorization` vs `authorization` dedup.
 fn auth_headers_for_tier(
     resolved: &ResolvedCredential,
     adapter: AdapterKind,
-) -> Vec<(String, String)> {
-    let mut headers = Vec::new();
+) -> std::collections::BTreeMap<String, String> {
+    let mut headers = std::collections::BTreeMap::new();
     // Common: every Anthropic request needs anthropic-version.
     if matches!(adapter, AdapterKind::Anthropic) {
-        headers.push(("anthropic-version".into(), "2023-06-01".into()));
+        headers.insert("anthropic-version".into(), "2023-06-01".into());
     }
 
     let token = resolved.token.access_token.expose_secret().to_string();
     match resolved.source {
         AuthTier::ApiKey => match adapter {
             AdapterKind::Anthropic => {
-                headers.push(("x-api-key".into(), token));
+                headers.insert("x-api-key".into(), token);
             }
             AdapterKind::Gemini => {
-                headers.push(("x-goog-api-key".into(), token));
+                headers.insert("x-goog-api-key".into(), token);
             }
             _ => {
-                headers.push(("Authorization".into(), format!("Bearer {token}")));
+                headers.insert("authorization".into(), format!("Bearer {token}"));
             }
         },
         #[cfg(feature = "subscription-oauth")]
         AuthTier::SessionPickup | AuthTier::Pkce => {
-            headers.push(("Authorization".into(), format!("Bearer {token}")));
+            headers.insert("authorization".into(), format!("Bearer {token}"));
+            // `anthropic-beta: oauth-2025-04-20` is auth-tier specific (it
+            // signals "this is an OAuth call" to Anthropic), not a feature
+            // capability. Emitted here alongside the Bearer token rather
+            // than in the shaper's beta bundle.
             if matches!(adapter, AdapterKind::Anthropic) {
-                headers.push(("anthropic-beta".into(), "oauth-2025-04-20".into()));
+                headers.insert("anthropic-beta".into(), "oauth-2025-04-20".into());
             }
         }
     }
@@ -534,35 +733,49 @@ fn auth_headers_for_tier(
 fn service_target(
     adapter: AdapterKind,
     model: &str,
-    headers: Vec<(String, String)>,
+    headers: std::collections::BTreeMap<String, String>,
+    base_url_override: Option<&str>,
 ) -> ServiceTarget {
-    let url = chat_url_for(adapter, model).to_string();
+    let url = chat_url_for(adapter, model, base_url_override);
+    // Single conversion to Vec at the genai boundary.
+    let headers_vec: Vec<(String, String)> = headers.into_iter().collect();
     ServiceTarget {
         model: ModelIden::new(adapter, model.to_string()),
         // Endpoint is irrelevant under RequestOverride but must be non-empty.
         endpoint: Endpoint::from_static("https://pattern-gateway-override.invalid"),
         auth: AuthData::RequestOverride {
             url,
-            headers: Headers::from(headers),
+            headers: Headers::from(headers_vec),
         },
     }
 }
 
-/// Hardcoded chat URLs per adapter. Pattern's gateway uses
-/// [`AuthData::RequestOverride`] which fully replaces the URL genai would
-/// have computed, so we need to know the canonical endpoint ourselves.
-/// Add entries as we extend provider coverage.
-fn chat_url_for(adapter: AdapterKind, model: &str) -> String {
+/// Build the chat URL for an adapter, honouring any base-URL override.
+///
+/// Pattern's gateway uses [`AuthData::RequestOverride`] which fully replaces
+/// the URL genai would have computed, so we need to know the canonical
+/// endpoint ourselves. The per-adapter path suffix is fixed; the base URL
+/// (scheme + host + optional port) can be overridden via the gateway
+/// builder's `with_provider_base_url` for tests and self-hosted proxies.
+fn chat_url_for(adapter: AdapterKind, model: &str, base_url_override: Option<&str>) -> String {
     match adapter {
-        AdapterKind::Anthropic => "https://api.anthropic.com/v1/messages".to_string(),
-        // Gemini's endpoint embeds the model name and the service verb; for
-        // now pattern only uses RequestOverride for Anthropic, but return a
-        // best-guess here for Phase 4 so other adapters at least get a
-        // plausible url if they slip through the provider dispatch.
-        AdapterKind::Gemini => format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent"
-        ),
-        _ => format!("https://pattern-gateway-unsupported-adapter-{adapter:?}.invalid"),
+        AdapterKind::Anthropic => {
+            let base = base_url_override.unwrap_or("https://api.anthropic.com");
+            format!("{base}/v1/messages")
+        }
+        AdapterKind::Gemini => {
+            // Gemini's endpoint embeds the model name and the service verb.
+            let base = base_url_override.unwrap_or("https://generativelanguage.googleapis.com");
+            format!("{base}/v1beta/models/{model}:streamGenerateContent")
+        }
+        _ => {
+            let base = base_url_override.unwrap_or_else(|| {
+                // Surface a clearly-invalid URL so mis-routed calls fail
+                // loudly rather than silently hitting some other service.
+                "https://pattern-gateway-unsupported-adapter.invalid"
+            });
+            format!("{base}/v1/messages")
+        }
     }
 }
 
@@ -593,30 +806,9 @@ fn adapter_kind_to_provider_name(adapter: AdapterKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::ApiKeyTier;
-    use crate::ratelimit::ProviderRateLimiter;
-    use crate::shaper::{HonestPatternShaper, ShaperCompatMode, ShaperConfig};
-    use futures::StreamExt;
     use jiff::Timestamp;
-    use pattern_core::types::provider::{
-        ChatMessage, ChatOptions, ChatStreamEvent, ProviderCredential,
-    };
+    use pattern_core::types::provider::ProviderCredential;
     use secrecy::SecretString;
-    use wiremock::matchers::{header, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    fn min_shaper_config() -> ShaperConfig {
-        ShaperConfig {
-            x_app: "pattern".into(),
-            compat_mode: ShaperCompatMode::HonestPattern,
-            target_is_first_party: false,
-            enable_interleaved_thinking: false,
-            enable_dev_full_thinking: false,
-            enable_context_management: false,
-            enable_extended_cache_ttl: false,
-            enable_1m_context: false,
-        }
-    }
 
     #[test]
     fn adapter_to_provider_name_covers_known_adapters() {
@@ -675,10 +867,9 @@ mod tests {
             token: api_key_auth_token(),
         };
         let hdrs = auth_headers_for_tier(&resolved, AdapterKind::Anthropic);
-        let names: Vec<&str> = hdrs.iter().map(|(k, _)| k.as_str()).collect();
-        assert!(names.contains(&"x-api-key"));
-        assert!(names.contains(&"anthropic-version"));
-        assert!(!names.contains(&"Authorization"));
+        assert!(hdrs.contains_key("x-api-key"));
+        assert!(hdrs.contains_key("anthropic-version"));
+        assert!(!hdrs.contains_key("authorization"));
     }
 
     #[cfg(feature = "subscription-oauth")]
@@ -689,11 +880,15 @@ mod tests {
             token: api_key_auth_token(),
         };
         let hdrs = auth_headers_for_tier(&resolved, AdapterKind::Anthropic);
-        let names: Vec<&str> = hdrs.iter().map(|(k, _)| k.as_str()).collect();
-        assert!(names.contains(&"Authorization"));
-        assert!(names.contains(&"anthropic-beta"));
-        assert!(names.contains(&"anthropic-version"));
-        assert!(!names.contains(&"x-api-key"));
+        // Keys are lowercased (HTTP case-insensitive + BTreeMap-friendly).
+        assert!(hdrs.contains_key("authorization"));
+        assert!(hdrs.contains_key("anthropic-beta"));
+        assert!(hdrs.contains_key("anthropic-version"));
+        assert!(!hdrs.contains_key("x-api-key"));
+        assert_eq!(
+            hdrs.get("anthropic-beta").map(String::as_str),
+            Some("oauth-2025-04-20")
+        );
     }
 
     #[test]
@@ -705,109 +900,14 @@ mod tests {
             token: tok,
         };
         let hdrs = auth_headers_for_tier(&resolved, AdapterKind::Gemini);
-        let names: Vec<&str> = hdrs.iter().map(|(k, _)| k.as_str()).collect();
-        assert!(names.contains(&"x-goog-api-key"));
-        assert!(!names.contains(&"anthropic-version"));
+        assert!(hdrs.contains_key("x-goog-api-key"));
+        assert!(!hdrs.contains_key("anthropic-version"));
     }
 
-    struct TestApiKeyChain {
-        tier: ApiKeyTier,
-    }
-
-    #[async_trait]
-    impl CredentialChain for TestApiKeyChain {
-        fn provider(&self) -> &str {
-            "anthropic"
-        }
-
-        async fn resolve(&self) -> Result<ResolvedCredential, ProviderError> {
-            let token = self.tier.resolve().ok_or(ProviderError::NoAuthAvailable {
-                provider: "anthropic".into(),
-            })?;
-            Ok(ResolvedCredential {
-                source: AuthTier::ApiKey,
-                token,
-            })
-        }
-    }
-
-    /// End-to-end streaming round trip via wiremock.
-    ///
-    /// `#[ignore]` for now: the gateway currently hardcodes Anthropic's
-    /// canonical URL inside [`chat_url_for`], so the wiremock server at a
-    /// random port can't actually service the request. Task 19 adds a
-    /// per-provider URL-override knob on the builder and un-ignores this.
-    /// Kept in-tree as a documentation artifact of the shape we want to
-    /// verify end-to-end.
-    #[ignore]
-    #[tokio::test]
-    async fn complete_end_to_end_streams_anthropic_response() {
-        let server = MockServer::start().await;
-
-        let sse_body = concat!(
-            "event: message_start\n",
-            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_test\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-opus-4-7\",\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\n",
-            "event: content_block_start\n",
-            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
-            "event: content_block_delta\n",
-            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n",
-            "event: content_block_delta\n",
-            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" world\"}}\n\n",
-            "event: content_block_stop\n",
-            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
-            "event: message_delta\n",
-            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n",
-            "event: message_stop\n",
-            "data: {\"type\":\"message_stop\"}\n\n",
-        );
-
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .and(header("anthropic-version", "2023-06-01"))
-            .and(header("x-api-key", "sk-ant-test"))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(sse_body, "text/event-stream"))
-            .mount(&server)
-            .await;
-
-        let chain: Arc<dyn CredentialChain> = Arc::new(TestApiKeyChain {
-            tier: ApiKeyTier::anthropic(),
-        });
-        let shaper: Arc<dyn RequestShaper> =
-            Arc::new(HonestPatternShaper::new(min_shaper_config()).unwrap());
-        let limiter = Arc::new(ProviderRateLimiter::anthropic_default());
-
-        // Set the API-key env so ApiKeyTier resolves.
-        unsafe {
-            std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test");
-        }
-
-        let gateway = PatternGatewayClient::builder()
-            .with_provider("anthropic", chain, shaper, limiter)
-            .build()
-            .expect("gateway builds");
-
-        let req = CompletionRequest::new("claude-opus-4-7")
-            .append_message(ChatMessage::user("hi"))
-            .with_options(ChatOptions::default());
-
-        let mut stream = gateway.complete(req).await.expect("complete opens stream");
-
-        // Drain events; content-delta events should surface.
-        let mut saw_chunk = false;
-        let mut saw_end = false;
-        while let Some(evt) = stream.next().await {
-            match evt {
-                Ok(ChatStreamEvent::Chunk(_)) => saw_chunk = true,
-                Ok(ChatStreamEvent::End(_)) => saw_end = true,
-                _ => {}
-            }
-        }
-
-        assert!(saw_chunk, "should receive at least one content chunk");
-        assert!(saw_end, "should receive end event");
-
-        unsafe {
-            std::env::remove_var("ANTHROPIC_API_KEY");
-        }
-    }
+    // End-to-end streaming round trip tests live in
+    // `crates/pattern_provider/tests/gateway_integration.rs` — they
+    // exercise the Anthropic and Gemini paths end-to-end via wiremock
+    // and use the per-provider base-URL override to target a test
+    // server. The tests that stay here are shape-only unit tests
+    // (auth-header composition, adapter name mapping, backoff math).
 }

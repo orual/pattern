@@ -131,13 +131,21 @@ pub struct ShapeContext<'a> {
 
 /// Per-call shape transformation. Produces headers to inject and mutates
 /// `ChatRequest` in place when system-prompt rewriting is needed.
+///
+/// Headers return as a [`std::collections::BTreeMap<String, String>`] —
+/// names must be lowercased so that case-insensitive HTTP semantics work
+/// correctly when the gateway merges shaper headers with per-tier auth
+/// headers (which it does with `.extend()`, relying on BTreeMap's
+/// last-insert-wins per key). BTreeMap over HashMap gives us
+/// deterministic iteration order — useful for logging, tests, and any
+/// future wire-formats that care about header ordering.
 pub trait RequestShaper: Send + Sync {
     /// Apply shaping. Returns the identification + beta headers to inject.
     fn shape(
         &self,
         req: &mut genai::chat::ChatRequest,
         ctx: &ShapeContext<'_>,
-    ) -> Result<Vec<(String, String)>, ProviderError>;
+    ) -> Result<std::collections::BTreeMap<String, String>, ProviderError>;
 
     /// Headers-only path. Used by `count_tokens` and similar calls that
     /// don't carry a `ChatRequest` to shape. Must return the same set of
@@ -145,7 +153,7 @@ pub trait RequestShaper: Send + Sync {
     fn identification_headers(
         &self,
         ctx: &ShapeContext<'_>,
-    ) -> Result<Vec<(String, String)>, ProviderError>;
+    ) -> Result<std::collections::BTreeMap<String, String>, ProviderError>;
 }
 
 // ---- HonestPatternShaper (Anthropic) ----
@@ -172,7 +180,7 @@ impl RequestShaper for HonestPatternShaper {
         &self,
         req: &mut genai::chat::ChatRequest,
         ctx: &ShapeContext<'_>,
-    ) -> Result<Vec<(String, String)>, ProviderError> {
+    ) -> Result<std::collections::BTreeMap<String, String>, ProviderError> {
         let instructions = ctx
             .system_instructions_override
             .unwrap_or(DEFAULT_BASE_INSTRUCTIONS);
@@ -192,7 +200,7 @@ impl RequestShaper for HonestPatternShaper {
     fn identification_headers(
         &self,
         ctx: &ShapeContext<'_>,
-    ) -> Result<Vec<(String, String)>, ProviderError> {
+    ) -> Result<std::collections::BTreeMap<String, String>, ProviderError> {
         build_identification_headers(&self.config, ctx.session_uuid, ctx.auth_tier, ctx.model)
     }
 }
@@ -210,18 +218,20 @@ impl RequestShaper for NoOpShaper {
         &self,
         _req: &mut genai::chat::ChatRequest,
         ctx: &ShapeContext<'_>,
-    ) -> Result<Vec<(String, String)>, ProviderError> {
+    ) -> Result<std::collections::BTreeMap<String, String>, ProviderError> {
         self.identification_headers(ctx)
     }
 
     fn identification_headers(
         &self,
         _ctx: &ShapeContext<'_>,
-    ) -> Result<Vec<(String, String)>, ProviderError> {
-        Ok(vec![(
-            "User-Agent".into(),
+    ) -> Result<std::collections::BTreeMap<String, String>, ProviderError> {
+        let mut out = std::collections::BTreeMap::new();
+        out.insert(
+            "user-agent".into(),
             format!("pattern/{}", env!("CARGO_PKG_VERSION")),
-        )])
+        );
+        Ok(out)
     }
 }
 
@@ -327,13 +337,19 @@ mod tests {
         );
         assert!(blocks[2].text.contains("I am Pattern."), "slot[2] persona");
 
-        // OAuth auth tier → oauth-2025-04-20 in beta headers.
+        // The shaper is no longer responsible for the `oauth-2025-04-20`
+        // beta marker — that's emitted by `gateway::auth_headers_for_tier`
+        // alongside the Bearer token. Shaper output should NOT contain it
+        // even when the auth_tier says OAuth.
         let anthropic_beta = headers
             .iter()
-            .find(|(k, _)| k == "Anthropic-Beta")
+            .find(|(k, _)| k.eq_ignore_ascii_case("Anthropic-Beta"))
             .map(|(_, v)| v.as_str())
             .unwrap_or_default();
-        assert!(anthropic_beta.contains("oauth-2025-04-20"));
+        assert!(
+            !anthropic_beta.contains("oauth-2025-04-20"),
+            "shaper output must not contain the OAuth auth marker"
+        );
     }
 
     #[test]
@@ -388,10 +404,12 @@ mod tests {
             "NoOpShaper must leave system_blocks untouched (None)"
         );
 
-        // Only a User-Agent header.
+        // Only a user-agent header (lowercased for HTTP case-insensitivity).
         assert_eq!(headers.len(), 1);
-        assert_eq!(headers[0].0, "User-Agent");
-        assert!(headers[0].1.starts_with("pattern/"));
+        let user_agent = headers
+            .get("user-agent")
+            .expect("NoOpShaper should emit user-agent");
+        assert!(user_agent.starts_with("pattern/"));
     }
 
     #[test]

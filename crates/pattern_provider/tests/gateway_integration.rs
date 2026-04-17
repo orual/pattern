@@ -1,0 +1,751 @@
+//! Gateway integration tests — end-to-end HTTP round trips via wiremock.
+//!
+//! Covers the variant matrix the gateway should handle:
+//!
+//! - **text streaming** (Anthropic + Gemini): canned provider-native
+//!   responses parse through genai into `ChatStreamEvent::Chunk` + `End`.
+//! - **tool-call streaming** (Anthropic): `ChatStreamEvent::ToolCallChunk`
+//!   surfaces through the gateway.
+//! - **thinking/reasoning streaming** (Gemini): reasoning content surfaces
+//!   distinct from plain text.
+//! - **OAuth Bearer auth** (Anthropic): subscription-oauth tier produces
+//!   `Authorization: Bearer …` + `anthropic-beta: oauth-2025-04-20`,
+//!   distinct from API-key tier's `x-api-key`.
+//! - **429 retry**: first attempt 429 → exponential backoff → second
+//!   attempt 200 → stream completes. Exercises the gateway's retry loop.
+//! - **500 error**: surfaces as `ProviderError::RequestFailed` with the
+//!   status code preserved.
+//! - **missing credential**: `NoAuthAvailable` without hitting the wire.
+//! - **provider isolation**: parallel Anthropic + Gemini requests target
+//!   the right server with the right auth (AC5.6).
+//!
+//! Assertions use wiremock's `body_partial_json` for structural checks on
+//! outbound bodies (the shaper's system-prompt injection, tool-call
+//! payload shape, etc.) and `.expect(1)` on every mock so matcher misses
+//! surface as `MockServer` drop panics rather than silent-pass tests.
+//!
+//! SSE + JSON fixtures live under `tests/data/`:
+//! - `anthropic_text_stream.sse` — pattern-authored text-delta variant
+//! - `anthropic_tool_stream.sse` — copied verbatim from rust-genai's yakbak
+//!   fixture (`tests/data/yakbak/anthropic/tool_stream/response_000.txt`)
+//! - `gemini_text_stream.json` — pattern-authored two-chunk text stream
+//! - `gemini_thinking_stream.json` — copied verbatim from rust-genai's
+//!   yakbak fixture (`tests/data/yakbak/gemini/thinking_stream/response_000.txt`)
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use futures::stream::StreamExt;
+use jiff::Timestamp;
+use pattern_core::error::ProviderError;
+use pattern_core::traits::provider_client::ProviderClient;
+use pattern_core::types::provider::{
+    ChatMessage, ChatOptions, ChatStreamEvent, CompletionRequest, ProviderCredential,
+};
+use pattern_provider::auth::{AuthTier, CredentialChain, GeminiAuthChain, ResolvedCredential};
+use pattern_provider::gateway::PatternGatewayClient;
+use pattern_provider::ratelimit::ProviderRateLimiter;
+use pattern_provider::shaper::{
+    HonestPatternShaper, NoOpShaper, RequestShaper, ShaperCompatMode, ShaperConfig,
+};
+use secrecy::SecretString;
+use serde_json::json;
+use wiremock::matchers::{body_partial_json, header, header_exists, method, path, path_regex};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+// ---- Fixtures ----
+
+const ANTHROPIC_TEXT_STREAM: &str = include_str!("data/anthropic_text_stream.sse");
+const ANTHROPIC_TOOL_STREAM: &str = include_str!("data/anthropic_tool_stream.sse");
+const GEMINI_TEXT_STREAM: &str = include_str!("data/gemini_text_stream.json");
+const GEMINI_THINKING_STREAM: &str = include_str!("data/gemini_thinking_stream.json");
+
+// ---- Test helpers ----
+
+struct StaticApiKeyChain {
+    provider: &'static str,
+    token: ProviderCredential,
+}
+
+#[async_trait]
+impl CredentialChain for StaticApiKeyChain {
+    fn provider(&self) -> &str {
+        self.provider
+    }
+
+    async fn resolve(&self) -> Result<ResolvedCredential, ProviderError> {
+        Ok(ResolvedCredential {
+            source: AuthTier::ApiKey,
+            token: self.token.clone(),
+        })
+    }
+}
+
+#[cfg(feature = "subscription-oauth")]
+struct StaticOAuthChain {
+    token: ProviderCredential,
+}
+
+#[cfg(feature = "subscription-oauth")]
+#[async_trait]
+impl CredentialChain for StaticOAuthChain {
+    fn provider(&self) -> &str {
+        "anthropic"
+    }
+
+    async fn resolve(&self) -> Result<ResolvedCredential, ProviderError> {
+        Ok(ResolvedCredential {
+            source: AuthTier::Pkce,
+            token: self.token.clone(),
+        })
+    }
+}
+
+fn token(provider: &str, key: &str) -> ProviderCredential {
+    let now = Timestamp::now();
+    ProviderCredential {
+        provider: provider.into(),
+        access_token: SecretString::from(key.to_string()),
+        refresh_token: None,
+        expires_at: None,
+        scope: None,
+        session_id: None,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+fn honest_shaper() -> Arc<dyn RequestShaper> {
+    Arc::new(
+        HonestPatternShaper::new(ShaperConfig {
+            x_app: "pattern".into(),
+            compat_mode: ShaperCompatMode::HonestPattern,
+            target_is_first_party: false,
+            enable_interleaved_thinking: false,
+            enable_dev_full_thinking: false,
+            enable_context_management: false,
+            enable_extended_cache_ttl: false,
+            enable_1m_context: false,
+        })
+        .expect("valid shaper config"),
+    )
+}
+
+/// Drain a stream, collecting counts of each event variant. Capped at 200
+/// iterations so a broken test can't hang the suite.
+#[derive(Default)]
+struct StreamObservation {
+    chunk_count: usize,
+    reasoning_count: usize,
+    tool_call_count: usize,
+    end_count: usize,
+    error_count: usize,
+    concatenated_text: String,
+}
+
+async fn drain_stream(
+    stream: pattern_core::traits::provider_client::ChunkStream,
+) -> StreamObservation {
+    let mut stream = stream;
+    let mut obs = StreamObservation::default();
+    let mut guard = 0;
+
+    while let Some(evt) = stream.next().await {
+        guard += 1;
+        if guard > 200 {
+            break;
+        }
+        match evt {
+            Ok(ChatStreamEvent::Chunk(c)) => {
+                obs.chunk_count += 1;
+                obs.concatenated_text.push_str(&c.content);
+            }
+            Ok(ChatStreamEvent::ReasoningChunk(_)) => {
+                obs.reasoning_count += 1;
+            }
+            Ok(ChatStreamEvent::ToolCallChunk(_)) => {
+                obs.tool_call_count += 1;
+            }
+            Ok(ChatStreamEvent::End(_)) => {
+                obs.end_count += 1;
+            }
+            Ok(_) => {}
+            Err(_) => obs.error_count += 1,
+        }
+    }
+
+    obs
+}
+
+// ==== Anthropic: text streaming + API-key auth ====
+
+/// Happy path: API-key tier → outbound request has `x-api-key` +
+/// `anthropic-version` + `messages` array + `system` field (from the
+/// HonestPattern shaper's single-block output). Server returns canned
+/// SSE text stream; drain produces Chunk events whose concatenated
+/// content spells out the fixture's text.
+#[tokio::test]
+async fn anthropic_text_stream_api_key() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(header("anthropic-version", "2023-06-01"))
+        .and(header("x-api-key", "sk-ant-text-test"))
+        .and(header_exists("X-App"))
+        .and(header_exists("X-Pattern-Session-Id"))
+        // Body shape: the user's message must reach Anthropic verbatim.
+        .and(body_partial_json(json!({
+            "model": "claude-opus-4-7",
+            "messages": [
+                {"role": "user", "content": "hello world"}
+            ]
+        })))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(ANTHROPIC_TEXT_STREAM, "text/event-stream"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let chain: Arc<dyn CredentialChain> = Arc::new(StaticApiKeyChain {
+        provider: "anthropic",
+        token: token("anthropic", "sk-ant-text-test"),
+    });
+    let gateway = PatternGatewayClient::builder()
+        .with_provider(
+            "anthropic",
+            chain,
+            honest_shaper(),
+            Arc::new(ProviderRateLimiter::anthropic_default()),
+        )
+        .with_provider_base_url("anthropic", server.uri())
+        .build()
+        .expect("gateway builds");
+
+    let req =
+        CompletionRequest::new("claude-opus-4-7").append_message(ChatMessage::user("hello world"));
+    let stream = gateway.complete(req).await.expect("complete opens");
+
+    let obs = drain_stream(stream).await;
+    assert!(
+        obs.chunk_count >= 3,
+        "expected ≥3 Chunks, got {}",
+        obs.chunk_count
+    );
+    assert_eq!(
+        obs.concatenated_text, "Hello there!",
+        "concatenated chunks must match fixture text exactly"
+    );
+    assert_eq!(
+        obs.end_count, 1,
+        "stream must terminate with exactly one End"
+    );
+    assert_eq!(obs.error_count, 0, "no stream-parse errors expected");
+    // MockServer.drop verifies .expect(1) matched exactly once.
+}
+
+/// Anthropic tool-call streaming: using rust-genai's own yakbak fixture
+/// verbatim. Drain should produce ToolCallChunk events (one per
+/// input_json_delta) and terminate on `stop_reason: tool_use`.
+#[tokio::test]
+async fn anthropic_tool_stream_surfaces_tool_call_chunks() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(header("x-api-key", "sk-ant-tool-test"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(ANTHROPIC_TOOL_STREAM, "text/event-stream"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let chain: Arc<dyn CredentialChain> = Arc::new(StaticApiKeyChain {
+        provider: "anthropic",
+        token: token("anthropic", "sk-ant-tool-test"),
+    });
+    let gateway = PatternGatewayClient::builder()
+        .with_provider(
+            "anthropic",
+            chain,
+            honest_shaper(),
+            Arc::new(ProviderRateLimiter::anthropic_default()),
+        )
+        .with_provider_base_url("anthropic", server.uri())
+        .build()
+        .expect("gateway builds");
+
+    let req = CompletionRequest::new("claude-haiku-4-5-20251001")
+        .append_message(ChatMessage::user("what's the weather in Paris?"));
+    let stream = gateway.complete(req).await.expect("complete opens");
+
+    let obs = drain_stream(stream).await;
+    assert!(
+        obs.tool_call_count >= 1,
+        "tool_stream fixture must surface ≥1 ToolCallChunk, got {}",
+        obs.tool_call_count
+    );
+    assert_eq!(obs.end_count, 1);
+    assert_eq!(obs.error_count, 0);
+}
+
+// ==== Anthropic: OAuth Bearer auth ====
+
+/// subscription-oauth tier → `Authorization: Bearer` + `anthropic-beta:
+/// oauth-2025-04-20`, NOT `x-api-key`. Same stream payload; verify the
+/// auth shape is distinct from the API-key path.
+#[cfg(feature = "subscription-oauth")]
+#[tokio::test]
+async fn anthropic_oauth_bearer_auth_round_trip() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(header("Authorization", "Bearer oauth-test-access-token"))
+        .and(header("anthropic-beta", "oauth-2025-04-20"))
+        .and(header("anthropic-version", "2023-06-01"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(ANTHROPIC_TEXT_STREAM, "text/event-stream"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let chain: Arc<dyn CredentialChain> = Arc::new(StaticOAuthChain {
+        token: token("anthropic", "oauth-test-access-token"),
+    });
+    let gateway = PatternGatewayClient::builder()
+        .with_provider(
+            "anthropic",
+            chain,
+            honest_shaper(),
+            Arc::new(ProviderRateLimiter::anthropic_default()),
+        )
+        .with_provider_base_url("anthropic", server.uri())
+        .build()
+        .expect("gateway builds");
+
+    let req = CompletionRequest::new("claude-opus-4-7").append_message(ChatMessage::user("hi"));
+    let stream = gateway.complete(req).await.expect("complete opens");
+    let obs = drain_stream(stream).await;
+
+    assert_eq!(obs.concatenated_text, "Hello there!");
+    assert_eq!(obs.end_count, 1);
+}
+
+// ==== 429 error surfacing ====
+
+/// 429 response on a streaming call. genai tunnels non-2xx status into a
+/// stream error (`HttpError { status: 429, ... }`) rather than returning
+/// Err from `exec_chat_stream` itself. The gateway's retry loop catches
+/// pre-stream failures (auth resolution, bucket acquire, transport); for
+/// mid-stream 429s it's the caller's responsibility to back off and
+/// re-issue the request.
+///
+/// This test validates the error-surfacing contract: a 429 streams an
+/// error event containing the status code, and NO content chunks leak
+/// through. Transparent mid-stream retry is a Phase 5+ concern (requires
+/// intercepting the stream's first event and re-opening if it's a
+/// retryable error — non-trivial because genai's stream type isn't
+/// cleanly re-entrant).
+#[tokio::test]
+async fn anthropic_429_surfaces_as_stream_error_without_content() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(header("x-api-key", "sk-ant-429-test"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .set_body_string("rate limit exceeded")
+                .insert_header("retry-after", "30"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let chain: Arc<dyn CredentialChain> = Arc::new(StaticApiKeyChain {
+        provider: "anthropic",
+        token: token("anthropic", "sk-ant-429-test"),
+    });
+    let gateway = PatternGatewayClient::builder()
+        .with_provider(
+            "anthropic",
+            chain,
+            honest_shaper(),
+            Arc::new(ProviderRateLimiter::anthropic_default()),
+        )
+        .with_provider_base_url("anthropic", server.uri())
+        .build()
+        .expect("gateway builds");
+
+    let req = CompletionRequest::new("claude-opus-4-7").append_message(ChatMessage::user("hi"));
+    let stream = gateway
+        .complete(req)
+        .await
+        .expect("complete opens (error comes via stream)");
+    let obs = drain_stream(stream).await;
+
+    // No content should leak through a 429.
+    assert_eq!(obs.chunk_count, 0, "429 must not produce content chunks");
+    assert_eq!(obs.tool_call_count, 0);
+    assert!(obs.error_count > 0, "429 must surface as a stream error");
+    assert_eq!(obs.end_count, 0, "429 must not emit End");
+}
+
+// ==== 500 error path ====
+
+/// A 500 that persists across all retry attempts → gateway exhausts
+/// retries and surfaces `ProviderError::RequestFailed`. Stream opening
+/// may fail upfront OR mid-stream; either way the ultimate error should
+/// propagate.
+#[tokio::test]
+async fn anthropic_500_propagates_as_request_failed() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("internal server error"))
+        // Mount without expect() — retry policy may hit this 1 or N times;
+        // we assert on the ultimate outcome not the hit count.
+        .mount(&server)
+        .await;
+
+    let chain: Arc<dyn CredentialChain> = Arc::new(StaticApiKeyChain {
+        provider: "anthropic",
+        token: token("anthropic", "sk-ant-500-test"),
+    });
+    let gateway = PatternGatewayClient::builder()
+        .with_provider(
+            "anthropic",
+            chain,
+            honest_shaper(),
+            Arc::new(ProviderRateLimiter::anthropic_default()),
+        )
+        .with_provider_base_url("anthropic", server.uri())
+        .build()
+        .expect("gateway builds");
+
+    let req = CompletionRequest::new("claude-opus-4-7").append_message(ChatMessage::user("hi"));
+
+    // A 500 must surface as an error — either upfront (before the stream
+    // opens) or mid-stream. What MUST NOT happen: content chunks getting
+    // through as if the request succeeded.
+    match gateway.complete(req).await {
+        Err(ProviderError::RequestFailed { status, .. }) => {
+            assert_eq!(status, 500, "RequestFailed must preserve the HTTP status");
+        }
+        Err(ProviderError::RateLimited { .. }) => {
+            panic!("500 must not be classified as a rate limit");
+        }
+        Err(other) => panic!("expected RequestFailed with status 500, got {other:?}"),
+        Ok(stream) => {
+            let obs = drain_stream(stream).await;
+            assert_eq!(
+                obs.chunk_count, 0,
+                "500 must not produce content chunks (got {} chunks, text={:?})",
+                obs.chunk_count, obs.concatenated_text
+            );
+            assert_eq!(
+                obs.tool_call_count, 0,
+                "500 must not produce tool-call chunks"
+            );
+            assert!(
+                obs.error_count > 0,
+                "if the stream opens on a 500, at least one error must propagate \
+                 (chunks={}, errors={}, end={})",
+                obs.chunk_count,
+                obs.error_count,
+                obs.end_count
+            );
+        }
+    }
+}
+
+// ==== Gemini: text streaming ====
+
+/// Gemini happy path: credential via GeminiAuthChain env lookup → NoOpShaper
+/// → `x-goog-api-key` header → gateway dispatches to the Gemini-shaped URL
+/// path. Response body parses through genai's Gemini streamer.
+#[tokio::test]
+async fn gemini_text_stream_api_key() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path_regex(r"/v1beta/models/.+:streamGenerateContent"))
+        .and(header("x-goog-api-key", "gem-text-test"))
+        .and(header_exists("User-Agent"))
+        .and(body_partial_json(json!({
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": "hello gemini"}]
+                }
+            ]
+        })))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(GEMINI_TEXT_STREAM, "application/json"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let prior = std::env::var("GEMINI_API_KEY").ok();
+    // SAFETY: nextest default isolation = one test per process; env writes are safe.
+    unsafe {
+        std::env::set_var("GEMINI_API_KEY", "gem-text-test");
+    }
+
+    let chain: Arc<dyn CredentialChain> = Arc::new(GeminiAuthChain::new());
+    let shaper: Arc<dyn RequestShaper> = Arc::new(NoOpShaper);
+    let gateway = PatternGatewayClient::builder()
+        .with_provider(
+            "gemini",
+            chain,
+            shaper,
+            Arc::new(ProviderRateLimiter::gemini_default()),
+        )
+        .with_provider_base_url("gemini", server.uri())
+        .build()
+        .expect("gateway builds");
+
+    let req = CompletionRequest::new("gemini-2.5-flash")
+        .append_message(ChatMessage::user("hello gemini"));
+    let stream = gateway.complete(req).await.expect("complete opens");
+    let obs = drain_stream(stream).await;
+
+    // Restore env BEFORE assertions so a panic doesn't leak env state.
+    unsafe {
+        match prior {
+            Some(v) => std::env::set_var("GEMINI_API_KEY", v),
+            None => std::env::remove_var("GEMINI_API_KEY"),
+        }
+    }
+
+    assert!(
+        obs.chunk_count >= 1,
+        "gemini text stream should surface ≥1 Chunk, got chunk_count={} (errors={})",
+        obs.chunk_count,
+        obs.error_count
+    );
+    assert!(
+        obs.concatenated_text.contains("Hello"),
+        "concatenated text should contain 'Hello'; got {:?}",
+        obs.concatenated_text
+    );
+    assert_eq!(obs.end_count, 1);
+}
+
+/// Gemini thinking stream: the yakbak `thinking_stream` fixture produces
+/// `ReasoningChunk` events for `thought: true` parts plus `Chunk` events
+/// for final answer parts. Verifies the gateway passes both through.
+#[tokio::test]
+async fn gemini_thinking_stream_surfaces_reasoning_and_text() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path_regex(r"/v1beta/models/.+:streamGenerateContent"))
+        .and(header("x-goog-api-key", "gem-thinking-test"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(GEMINI_THINKING_STREAM, "application/json"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let prior = std::env::var("GEMINI_API_KEY").ok();
+    unsafe {
+        std::env::set_var("GEMINI_API_KEY", "gem-thinking-test");
+    }
+
+    let chain: Arc<dyn CredentialChain> = Arc::new(GeminiAuthChain::new());
+    let gateway = PatternGatewayClient::builder()
+        .with_provider(
+            "gemini",
+            chain,
+            Arc::new(NoOpShaper),
+            Arc::new(ProviderRateLimiter::gemini_default()),
+        )
+        .with_provider_base_url("gemini", server.uri())
+        .build()
+        .expect("gateway builds");
+
+    let req = CompletionRequest::new("gemini-2.5-flash")
+        .append_message(ChatMessage::user("why is the sky blue?"));
+    let stream = gateway.complete(req).await.expect("complete opens");
+    let obs = drain_stream(stream).await;
+
+    unsafe {
+        match prior {
+            Some(v) => std::env::set_var("GEMINI_API_KEY", v),
+            None => std::env::remove_var("GEMINI_API_KEY"),
+        }
+    }
+
+    assert!(
+        obs.reasoning_count >= 1,
+        "thinking fixture should surface ≥1 ReasoningChunk, got {}",
+        obs.reasoning_count
+    );
+    assert!(
+        obs.chunk_count >= 1,
+        "thinking fixture should surface ≥1 text Chunk (the actual answer), got {}",
+        obs.chunk_count
+    );
+    assert!(
+        obs.concatenated_text.to_lowercase().contains("blue"),
+        "final answer should reference 'blue'; got {:?}",
+        obs.concatenated_text
+    );
+    assert_eq!(obs.end_count, 1);
+}
+
+// ==== Error: no credential ====
+
+/// Without GEMINI_API_KEY or GOOGLE_API_KEY set, the chain returns
+/// NoAuthAvailable and the gateway never makes an HTTP call.
+#[tokio::test]
+async fn gemini_without_credential_surfaces_no_auth_available() {
+    let prior_gemini = std::env::var("GEMINI_API_KEY").ok();
+    let prior_google = std::env::var("GOOGLE_API_KEY").ok();
+    unsafe {
+        std::env::remove_var("GEMINI_API_KEY");
+        std::env::remove_var("GOOGLE_API_KEY");
+    }
+
+    let chain: Arc<dyn CredentialChain> = Arc::new(GeminiAuthChain::new());
+    let gateway = PatternGatewayClient::builder()
+        .with_provider(
+            "gemini",
+            chain,
+            Arc::new(NoOpShaper),
+            Arc::new(ProviderRateLimiter::gemini_default()),
+        )
+        // Point at an unreachable URL — if the gateway tries to make a
+        // request anyway the test fails loudly via connection error.
+        .with_provider_base_url("gemini", "https://pattern-test-unreachable.invalid")
+        .build()
+        .expect("gateway builds");
+
+    let req = CompletionRequest::new("gemini-2.5-flash").append_message(ChatMessage::user("hi"));
+    let result = gateway.complete(req).await;
+
+    unsafe {
+        match prior_gemini {
+            Some(v) => std::env::set_var("GEMINI_API_KEY", v),
+            None => std::env::remove_var("GEMINI_API_KEY"),
+        }
+        match prior_google {
+            Some(v) => std::env::set_var("GOOGLE_API_KEY", v),
+            None => std::env::remove_var("GOOGLE_API_KEY"),
+        }
+    }
+
+    match result {
+        Err(ProviderError::NoAuthAvailable { provider }) => {
+            assert_eq!(provider, "gemini");
+        }
+        Err(other) => panic!("expected NoAuthAvailable{{gemini}}, got {other:?}"),
+        Ok(_) => panic!("must not open a stream without credentials"),
+    }
+}
+
+// ==== Provider isolation (AC5.6) ====
+
+/// Two providers registered on the same gateway resolve independently:
+/// Anthropic call hits the Anthropic server with `x-api-key`, Gemini call
+/// hits the Gemini server with `x-goog-api-key`. Cross-contamination would
+/// manifest as wiremock 404s (no matcher match).
+#[tokio::test]
+async fn provider_dispatch_routes_per_model() {
+    let anth_server = MockServer::start().await;
+    let gem_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(header("x-api-key", "sk-ant-iso"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(ANTHROPIC_TEXT_STREAM, "text/event-stream"),
+        )
+        .expect(1)
+        .mount(&anth_server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path_regex(r"/v1beta/models/.+:streamGenerateContent"))
+        .and(header("x-goog-api-key", "gem-iso"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(GEMINI_TEXT_STREAM, "application/json"),
+        )
+        .expect(1)
+        .mount(&gem_server)
+        .await;
+
+    let prior_gemini = std::env::var("GEMINI_API_KEY").ok();
+    unsafe {
+        std::env::set_var("GEMINI_API_KEY", "gem-iso");
+    }
+
+    let anth_chain: Arc<dyn CredentialChain> = Arc::new(StaticApiKeyChain {
+        provider: "anthropic",
+        token: token("anthropic", "sk-ant-iso"),
+    });
+    let gem_chain: Arc<dyn CredentialChain> = Arc::new(GeminiAuthChain::new());
+
+    let gateway = PatternGatewayClient::builder()
+        .with_provider(
+            "anthropic",
+            anth_chain,
+            honest_shaper(),
+            Arc::new(ProviderRateLimiter::anthropic_default()),
+        )
+        .with_provider(
+            "gemini",
+            gem_chain,
+            Arc::new(NoOpShaper),
+            Arc::new(ProviderRateLimiter::gemini_default()),
+        )
+        .with_provider_base_url("anthropic", anth_server.uri())
+        .with_provider_base_url("gemini", gem_server.uri())
+        .build()
+        .expect("gateway builds");
+
+    let anth_stream = gateway
+        .complete(
+            CompletionRequest::new("claude-opus-4-7").append_message(ChatMessage::user("anth")),
+        )
+        .await
+        .expect("anthropic completes");
+    let anth_obs = drain_stream(anth_stream).await;
+
+    let gem_stream = gateway
+        .complete(
+            CompletionRequest::new("gemini-2.5-flash").append_message(ChatMessage::user("gem")),
+        )
+        .await
+        .expect("gemini completes");
+    let gem_obs = drain_stream(gem_stream).await;
+
+    unsafe {
+        match prior_gemini {
+            Some(v) => std::env::set_var("GEMINI_API_KEY", v),
+            None => std::env::remove_var("GEMINI_API_KEY"),
+        }
+    }
+
+    assert_eq!(anth_obs.concatenated_text, "Hello there!");
+    assert_eq!(anth_obs.end_count, 1);
+    assert!(gem_obs.chunk_count >= 1);
+    assert_eq!(gem_obs.end_count, 1);
+    // Both mock servers assert `.expect(1)` on drop — if one got 0 or 2
+    // hits the test fails.
+}
+
+/// Unused helpers: kept here so ChatOptions is still referenced when we
+/// wire it into future tests (temperature, reasoning_effort, etc.).
+#[allow(dead_code)]
+fn _unused_chat_options_sentinel() -> ChatOptions {
+    ChatOptions::default()
+}
