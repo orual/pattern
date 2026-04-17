@@ -20,7 +20,7 @@
 //! token on their post-lock re-read. See AC4.7.
 
 use pattern_core::error::ProviderError;
-use pattern_core::types::provider::ProviderOAuthToken;
+use pattern_core::types::provider::ProviderCredential;
 
 use super::api_key::ApiKeyTier;
 
@@ -40,7 +40,7 @@ pub enum AuthTier {
 #[derive(Debug, Clone)]
 pub struct ResolvedCredential {
     pub source: AuthTier,
-    pub token: ProviderOAuthToken,
+    pub token: ProviderCredential,
 }
 
 /// Per-provider credential chain.
@@ -201,8 +201,8 @@ impl AnthropicAuthChain {
     async fn refresh_if_needed(
         &self,
         oauth: &OAuthChainState,
-        token: ProviderOAuthToken,
-    ) -> Result<ProviderOAuthToken, ProviderError> {
+        token: ProviderCredential,
+    ) -> Result<ProviderCredential, ProviderError> {
         if !token.needs_refresh() {
             return Ok(token);
         }
@@ -307,7 +307,7 @@ mod tests {
 
             // Pre-seed a non-near-expiry stored token.
             let now = Timestamp::now();
-            let stored = ProviderOAuthToken {
+            let stored = ProviderCredential {
                 provider: "anthropic".into(),
                 access_token: SecretString::from("at-stored".to_string()),
                 refresh_token: Some(SecretString::from("rt-stored".to_string())),
@@ -356,7 +356,7 @@ mod tests {
 
             let now = Timestamp::now();
             // Near-expiry: 30 seconds out, well inside the 5-minute refresh window.
-            let stored = ProviderOAuthToken {
+            let stored = ProviderCredential {
                 provider: "anthropic".into(),
                 access_token: SecretString::from("at-old".to_string()),
                 refresh_token: Some(SecretString::from("rt-old".to_string())),
@@ -398,7 +398,7 @@ mod tests {
                 Arc::new(JsonFallbackStore::with_root(dir.path().join("creds")).unwrap());
 
             let now = Timestamp::now();
-            let stored = ProviderOAuthToken {
+            let stored = ProviderCredential {
                 provider: "anthropic".into(),
                 access_token: SecretString::from("at-orphan".to_string()),
                 refresh_token: None, // no refresh token → cannot refresh
@@ -441,7 +441,7 @@ mod tests {
                 Arc::new(JsonFallbackStore::with_root(dir.path().join("creds")).unwrap());
 
             let now = Timestamp::now();
-            let stored = ProviderOAuthToken {
+            let stored = ProviderCredential {
                 provider: "anthropic".into(),
                 access_token: SecretString::from("at-bad".to_string()),
                 refresh_token: Some(SecretString::from("rt-bad".to_string())),

@@ -18,7 +18,7 @@
 use std::path::{Path, PathBuf};
 
 use pattern_core::error::ProviderError;
-use pattern_core::types::provider::ProviderOAuthToken;
+use pattern_core::types::provider::ProviderCredential;
 
 use super::CredsStore;
 
@@ -54,11 +54,11 @@ impl JsonFallbackStore {
 
 #[async_trait::async_trait]
 impl CredsStore for JsonFallbackStore {
-    async fn get(&self, provider: &str) -> Result<Option<ProviderOAuthToken>, ProviderError> {
+    async fn get(&self, provider: &str) -> Result<Option<ProviderCredential>, ProviderError> {
         let path = self.path_for(provider);
         match tokio::fs::read_to_string(&path).await {
             Ok(json) => {
-                let tok: ProviderOAuthToken = serde_json::from_str(&json).map_err(|e| {
+                let tok: ProviderCredential = serde_json::from_str(&json).map_err(|e| {
                     ProviderError::CredentialStorage {
                         reason: format!("json_fallback parse failed for {path:?}: {e}"),
                     }
@@ -70,7 +70,7 @@ impl CredsStore for JsonFallbackStore {
         }
     }
 
-    async fn put(&self, token: &ProviderOAuthToken) -> Result<(), ProviderError> {
+    async fn put(&self, token: &ProviderCredential) -> Result<(), ProviderError> {
         let path = self.path_for(&token.provider);
         let tmp = path.with_extension("json.tmp");
 
@@ -170,9 +170,9 @@ mod tests {
     use secrecy::{ExposeSecret, SecretString};
     use tempfile::tempdir;
 
-    fn sample_token(provider: &str) -> ProviderOAuthToken {
+    fn sample_token(provider: &str) -> ProviderCredential {
         let now = Timestamp::now();
-        ProviderOAuthToken {
+        ProviderCredential {
             provider: provider.into(),
             access_token: SecretString::from(format!("at-{provider}")),
             refresh_token: Some(SecretString::from(format!("rt-{provider}"))),

@@ -33,8 +33,8 @@ Cruft (code with no fate marker, `unimplemented!()`/`todo!()` without phase/AC r
 ### pattern_auth (retired Phase 4)
 - **Fate:** **retired** — directory deleted.
 - **Absorbed into:** `pattern_provider::creds_store` (Anthropic OAuth
-  keychain + JSON fallback storage); `ProviderOAuthToken` now lives at
-  `pattern_core::types::provider::ProviderOAuthToken` with `SecretString`
+  keychain + JSON fallback storage); `ProviderCredential` now lives at
+  `pattern_core::types::provider::ProviderCredential` with `SecretString`
   wrappers for tokens.
 - **Deferred to:** plugin-migration plan (ATProto + Discord bits, staged
   to `rewrite-staging/provider/` during Phase 2).

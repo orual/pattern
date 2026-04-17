@@ -5,7 +5,7 @@
 
 use miette::{IntoDiagnostic, Result};
 use owo_colors::OwoColorize;
-use pattern_auth::ProviderOAuthToken;
+use pattern_auth::ProviderCredential;
 use pattern_core::config::PatternConfig;
 use pattern_core::oauth::{OAuthClient, OAuthProvider, auth_flow::split_callback_code};
 use std::io::{self, Write};
@@ -94,7 +94,7 @@ pub async fn login(provider: &str, config: &PatternConfig) -> Result<()> {
     let now = chrono::Utc::now();
     let expires_at = now + chrono::Duration::seconds(token_response.expires_in as i64);
 
-    let token = ProviderOAuthToken {
+    let token = ProviderCredential {
         provider: oauth_provider.as_str().to_string(),
         access_token: token_response.access_token,
         refresh_token: token_response.refresh_token,

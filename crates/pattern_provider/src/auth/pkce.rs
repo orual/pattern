@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use base64::Engine;
 use pattern_core::error::ProviderError;
-use pattern_core::types::provider::ProviderOAuthToken;
+use pattern_core::types::provider::ProviderCredential;
 use rand::RngCore;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
@@ -48,7 +48,7 @@ pub struct PkceConfig {
     /// Requested scope set, space-joined into the authorize URL.
     pub scopes: Vec<String>,
 
-    /// Provider name used when minting [`ProviderOAuthToken`] instances.
+    /// Provider name used when minting [`ProviderCredential`] instances.
     /// Defaults to `"anthropic"` via [`PkceConfig::anthropic`].
     pub provider_name: String,
 }
@@ -198,7 +198,7 @@ impl PkceTier {
         &self,
         pending: PendingAuth,
         code_and_state: &str,
-    ) -> Result<ProviderOAuthToken, ProviderError> {
+    ) -> Result<ProviderCredential, ProviderError> {
         let (code, state) = split_code_and_state(code_and_state)?;
 
         if state != pending.state {
@@ -221,11 +221,11 @@ impl PkceTier {
     }
 
     /// Refresh the access token using a stored refresh token. Returns a
-    /// fresh [`ProviderOAuthToken`] with new access + refresh values.
+    /// fresh [`ProviderCredential`] with new access + refresh values.
     pub async fn refresh(
         &self,
         refresh_token: &SecretString,
-    ) -> Result<ProviderOAuthToken, ProviderError> {
+    ) -> Result<ProviderCredential, ProviderError> {
         let response = self
             .exchange(TokenRequestBody::Refresh {
                 client_id: &self.config.client_id,
@@ -272,7 +272,7 @@ impl PkceTier {
             })
     }
 
-    fn token_from_response(&self, resp: TokenResponse) -> ProviderOAuthToken {
+    fn token_from_response(&self, resp: TokenResponse) -> ProviderCredential {
         let now = jiff::Timestamp::now();
         // `expires_in` is seconds from now; compute absolute expiry.
         let expires_at = resp
@@ -283,7 +283,7 @@ impl PkceTier {
                 now.checked_add(span).ok()
             });
 
-        ProviderOAuthToken {
+        ProviderCredential {
             provider: self.config.provider_name.clone(),
             access_token: SecretString::from(resp.access_token),
             refresh_token: resp.refresh_token.map(SecretString::from),

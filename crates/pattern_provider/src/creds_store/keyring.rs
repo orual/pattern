@@ -17,7 +17,7 @@
 
 use keyring::Entry;
 use pattern_core::error::ProviderError;
-use pattern_core::types::provider::ProviderOAuthToken;
+use pattern_core::types::provider::ProviderCredential;
 
 use super::CredsStore;
 
@@ -106,11 +106,11 @@ impl TapLog for ProviderError {
 
 #[async_trait::async_trait]
 impl CredsStore for KeyringStore {
-    async fn get(&self, provider: &str) -> Result<Option<ProviderOAuthToken>, ProviderError> {
+    async fn get(&self, provider: &str) -> Result<Option<ProviderCredential>, ProviderError> {
         let entry = self.entry(provider)?;
         match entry.get_password() {
             Ok(json) => {
-                let tok: ProviderOAuthToken = serde_json::from_str(&json).map_err(|e| {
+                let tok: ProviderCredential = serde_json::from_str(&json).map_err(|e| {
                     ProviderError::CredentialStorage {
                         reason: format!("keyring JSON parse failed for provider '{provider}': {e}"),
                     }
@@ -122,7 +122,7 @@ impl CredsStore for KeyringStore {
         }
     }
 
-    async fn put(&self, token: &ProviderOAuthToken) -> Result<(), ProviderError> {
+    async fn put(&self, token: &ProviderCredential) -> Result<(), ProviderError> {
         let entry = self.entry(&token.provider)?;
         let json = serde_json::to_string(token).map_err(|e| ProviderError::CredentialStorage {
             reason: format!("keyring JSON serialize failed: {e}"),

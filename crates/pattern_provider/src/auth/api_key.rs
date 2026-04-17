@@ -5,13 +5,11 @@
 //! on each resolve — this lets tests override via
 //! `std::env::set_var` / `remove_var` without rebuilding the tier.
 //!
-//! API keys don't expire, so the produced [`ProviderOAuthToken`] has
-//! `expires_at = None`. The `ProviderOAuthToken` shape is shared across
-//! all auth tiers (session-pickup, PKCE, API key) even though "OAuth" is
-//! in the name — it's just "the thing the gateway needs to authenticate a
-//! request", not necessarily the product of an OAuth exchange.
+//! API keys don't expire, so the produced [`ProviderCredential`] has
+//! `expires_at = None`. The `ProviderCredential` shape is shared across
+//! all auth tiers (session-pickup, PKCE, API key)
 
-use pattern_core::types::provider::ProviderOAuthToken;
+use pattern_core::types::provider::ProviderCredential;
 use secrecy::SecretString;
 
 /// API-key tier for a single provider.
@@ -55,7 +53,7 @@ impl ApiKeyTier {
     /// Resolve the API key. Returns:
     /// - `Some(token)` when the env var is set to a non-empty string.
     /// - `None` when absent or empty (tier fall-through).
-    pub fn resolve(&self) -> Option<ProviderOAuthToken> {
+    pub fn resolve(&self) -> Option<ProviderCredential> {
         let key = read_api_key(&self.env_var).or_else(|| {
             // Gemini-specific compat: fall back to GOOGLE_API_KEY.
             if self.provider == "gemini" {
@@ -66,7 +64,7 @@ impl ApiKeyTier {
         })?;
 
         let now = jiff::Timestamp::now();
-        Some(ProviderOAuthToken {
+        Some(ProviderCredential {
             provider: self.provider.clone(),
             access_token: SecretString::from(key),
             refresh_token: None,
@@ -91,9 +89,12 @@ fn read_api_key(env_var: &str) -> Option<String> {
 
 /// Build a token from a literal API key. Used by non-env auth paths (e.g.
 /// a key loaded from config file) that don't want to pollute the env.
-pub fn token_from_literal_key(provider: impl Into<String>, key: SecretString) -> ProviderOAuthToken {
+pub fn token_from_literal_key(
+    provider: impl Into<String>,
+    key: SecretString,
+) -> ProviderCredential {
     let now = jiff::Timestamp::now();
-    ProviderOAuthToken {
+    ProviderCredential {
         provider: provider.into(),
         access_token: key,
         refresh_token: None,

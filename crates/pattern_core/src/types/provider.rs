@@ -23,7 +23,7 @@ use crate::types::message::Message;
 
 /// Serde helper: write a [`SecretString`] as its plaintext string form.
 ///
-/// Used only by `ProviderOAuthToken`'s at-rest serialization. `SecretString`
+/// Used only by `ProviderCredential`'s at-rest serialization. `SecretString`
 /// deliberately declines automatic `Serialize` to prevent accidental leak via
 /// `Debug`/`tracing`; the credential store explicitly opts in here because
 /// it's the one place the token legitimately crosses the wire (to disk).
@@ -153,26 +153,31 @@ pub struct TokenCount {
     pub input_tokens: u32,
 }
 
-/// A stored OAuth token for a specific provider.
+/// A stored credential for a specific provider.
 ///
-/// Used by `pattern_provider::creds_store::CredsStore` implementations to
-/// persist OAuth-tier credentials (access token, refresh token, expiry,
-/// scope, session ID). Access and refresh tokens wrap in
-/// [`secrecy::SecretString`] so a stray `Debug` or `tracing::info!` cannot
-/// accidentally leak them to logs.
+/// Used by `pattern_provider::creds_store::CredsStore` implementations and by
+/// every auth tier (session-pickup, PKCE, API key) to carry the credential
+/// across the provider boundary. The name avoids the "OAuth" qualifier
+/// because the same shape also represents API keys and session-pickup
+/// credentials — fields like `refresh_token`, `expires_at`, `scope`, and
+/// `session_id` are OAuth-flavoured but optional, and remain `None` on
+/// non-OAuth credential paths.
+///
+/// Access and refresh tokens wrap in [`secrecy::SecretString`] so a stray
+/// `Debug` or `tracing::info!` cannot accidentally leak them to logs.
 ///
 /// **Absorbed from:** `pattern_auth::providers::oauth::ProviderOAuthToken`
-/// (retired in Phase 4).
+/// (retired in Phase 4; renamed here to reflect the broader role).
 ///
 /// # Examples
 ///
 /// ```
 /// use jiff::Timestamp;
-/// use pattern_core::types::provider::ProviderOAuthToken;
+/// use pattern_core::types::provider::ProviderCredential;
 /// use secrecy::SecretString;
 ///
 /// let now = Timestamp::now();
-/// let tok = ProviderOAuthToken {
+/// let tok = ProviderCredential {
 ///     provider: "anthropic".into(),
 ///     access_token: "at-xxx".to_string().into(),
 ///     refresh_token: Some("rt-xxx".to_string().into()),
@@ -185,7 +190,7 @@ pub struct TokenCount {
 /// assert_eq!(tok.provider, "anthropic");
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProviderOAuthToken {
+pub struct ProviderCredential {
     /// Provider name (`"anthropic"`, `"gemini"`, etc.). Keys the per-provider
     /// credential store.
     pub provider: String,
@@ -227,19 +232,19 @@ pub struct ProviderOAuthToken {
     pub updated_at: Timestamp,
 }
 
-impl ProviderOAuthToken {
+impl ProviderCredential {
     /// `true` when `expires_at` is set and is in the past.
     ///
     /// # Examples
     ///
     /// ```
     /// use jiff::{Timestamp, ToSpan};
-    /// use pattern_core::types::provider::ProviderOAuthToken;
+    /// use pattern_core::types::provider::ProviderCredential;
     /// use secrecy::SecretString;
     ///
     /// let now = Timestamp::now();
     /// let past = now.checked_sub(1.hour()).unwrap();
-    /// let tok = ProviderOAuthToken {
+    /// let tok = ProviderCredential {
     ///     provider: "anthropic".into(),
     ///     access_token: "at".to_string().into(),
     ///     refresh_token: None,

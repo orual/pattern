@@ -37,7 +37,7 @@
 use std::path::PathBuf;
 
 use pattern_core::error::ProviderError;
-use pattern_core::types::provider::ProviderOAuthToken;
+use pattern_core::types::provider::ProviderCredential;
 use secrecy::SecretString;
 use serde::Deserialize;
 
@@ -79,7 +79,7 @@ impl SessionPickupTier {
     ///   error (permission denied, etc.). The caller should not silently
     ///   fall through on these; something is actively wrong with the
     ///   filesystem.
-    pub async fn pick_up(&self) -> Result<Option<ProviderOAuthToken>, ProviderError> {
+    pub async fn pick_up(&self) -> Result<Option<ProviderCredential>, ProviderError> {
         for path in &self.paths {
             match tokio::fs::read_to_string(path).await {
                 Ok(json) => match serde_json::from_str::<ClaudeCredentials>(&json) {
@@ -113,7 +113,7 @@ impl SessionPickupTier {
         Ok(None)
     }
 
-    fn to_pattern_token(creds: ClaudeCredentials) -> Option<ProviderOAuthToken> {
+    fn to_pattern_token(creds: ClaudeCredentials) -> Option<ProviderCredential> {
         // AC3.5: expired → skip.
         let now_ms = jiff::Timestamp::now().as_millisecond();
         if let Some(exp) = creds.expires_at
@@ -128,7 +128,7 @@ impl SessionPickupTier {
         }
 
         let now = jiff::Timestamp::now();
-        Some(ProviderOAuthToken {
+        Some(ProviderCredential {
             provider: "anthropic".into(),
             access_token: SecretString::from(creds.access_token),
             refresh_token: creds.refresh_token.map(SecretString::from),

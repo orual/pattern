@@ -7,7 +7,7 @@
 //! resolver; Task 8 lands session-pickup in isolation.
 //!
 //! The gateway asks the per-provider chain for credentials on each request;
-//! the first tier that returns a [`pattern_core::types::provider::ProviderOAuthToken`]
+//! the first tier that returns a [`pattern_core::types::provider::ProviderCredential`]
 //! (or other `ResolvedCredential` variant — that shape lands with Task 10)
 //! wins. Absence of a credential from one tier is not an error; the chain
 //! falls through. An explicit failure (e.g. stored token refresh failed)

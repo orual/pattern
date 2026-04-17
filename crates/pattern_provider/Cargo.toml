@@ -20,6 +20,7 @@ genai = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["rt", "time", "sync", "macros", "fs", "io-util"] }
 futures = { workspace = true }
+parking_lot = { workspace = true }
 
 # Tracing + errors
 tracing = { workspace = true }

@@ -5167,6 +5167,7 @@ dependencies = [
  "jiff",
  "keyring",
  "miette",
+ "parking_lot",
  "pattern-core",
  "rand 0.8.5",
  "reqwest 0.12.28",

@@ -27,7 +27,7 @@ pub mod keyring;
 use std::sync::Arc;
 
 use pattern_core::error::ProviderError;
-use pattern_core::types::provider::ProviderOAuthToken;
+use pattern_core::types::provider::ProviderCredential;
 
 pub use json_fallback::JsonFallbackStore;
 pub use keyring::KeyringStore;
@@ -41,10 +41,10 @@ pub use keyring::KeyringStore;
 #[async_trait::async_trait]
 pub trait CredsStore: Send + Sync {
     /// Fetch the stored token for `provider`, if any.
-    async fn get(&self, provider: &str) -> Result<Option<ProviderOAuthToken>, ProviderError>;
+    async fn get(&self, provider: &str) -> Result<Option<ProviderCredential>, ProviderError>;
 
     /// Insert or replace the token for `token.provider`.
-    async fn put(&self, token: &ProviderOAuthToken) -> Result<(), ProviderError>;
+    async fn put(&self, token: &ProviderCredential) -> Result<(), ProviderError>;
 
     /// Remove the token for `provider`, if any. Absence is not an error.
     async fn delete(&self, provider: &str) -> Result<(), ProviderError>;
@@ -79,7 +79,7 @@ impl CredsStoreResolver {
 
 #[async_trait::async_trait]
 impl CredsStore for CredsStoreResolver {
-    async fn get(&self, provider: &str) -> Result<Option<ProviderOAuthToken>, ProviderError> {
+    async fn get(&self, provider: &str) -> Result<Option<ProviderCredential>, ProviderError> {
         match self.primary.get(provider).await {
             Ok(result) => Ok(result),
             Err(ProviderError::CredentialStoreUnavailable) => {
@@ -93,7 +93,7 @@ impl CredsStore for CredsStoreResolver {
         }
     }
 
-    async fn put(&self, token: &ProviderOAuthToken) -> Result<(), ProviderError> {
+    async fn put(&self, token: &ProviderCredential) -> Result<(), ProviderError> {
         match self.primary.put(token).await {
             Ok(()) => Ok(()),
             Err(ProviderError::CredentialStoreUnavailable) => {
@@ -141,16 +141,16 @@ mod tests {
 
     /// Test double: configurable CredsStore behaviour per-call.
     struct MockStore {
-        get_fn: Mutex<Box<dyn FnMut(&str) -> Result<Option<ProviderOAuthToken>, ProviderError> + Send>>,
-        put_fn: Mutex<Box<dyn FnMut(&ProviderOAuthToken) -> Result<(), ProviderError> + Send>>,
+        get_fn: Mutex<Box<dyn FnMut(&str) -> Result<Option<ProviderCredential>, ProviderError> + Send>>,
+        put_fn: Mutex<Box<dyn FnMut(&ProviderCredential) -> Result<(), ProviderError> + Send>>,
         delete_fn: Mutex<Box<dyn FnMut(&str) -> Result<(), ProviderError> + Send>>,
     }
 
     impl MockStore {
         fn new<G, P, D>(get: G, put: P, del: D) -> Arc<Self>
         where
-            G: FnMut(&str) -> Result<Option<ProviderOAuthToken>, ProviderError> + Send + 'static,
-            P: FnMut(&ProviderOAuthToken) -> Result<(), ProviderError> + Send + 'static,
+            G: FnMut(&str) -> Result<Option<ProviderCredential>, ProviderError> + Send + 'static,
+            P: FnMut(&ProviderCredential) -> Result<(), ProviderError> + Send + 'static,
             D: FnMut(&str) -> Result<(), ProviderError> + Send + 'static,
         {
             Arc::new(Self {
@@ -163,10 +163,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl CredsStore for MockStore {
-        async fn get(&self, provider: &str) -> Result<Option<ProviderOAuthToken>, ProviderError> {
+        async fn get(&self, provider: &str) -> Result<Option<ProviderCredential>, ProviderError> {
             (self.get_fn.lock().unwrap())(provider)
         }
-        async fn put(&self, token: &ProviderOAuthToken) -> Result<(), ProviderError> {
+        async fn put(&self, token: &ProviderCredential) -> Result<(), ProviderError> {
             (self.put_fn.lock().unwrap())(token)
         }
         async fn delete(&self, provider: &str) -> Result<(), ProviderError> {
@@ -174,9 +174,9 @@ mod tests {
         }
     }
 
-    fn sample_token() -> ProviderOAuthToken {
+    fn sample_token() -> ProviderCredential {
         let now = Timestamp::now();
-        ProviderOAuthToken {
+        ProviderCredential {
             provider: "anthropic".into(),
             access_token: SecretString::from("at".to_string()),
             refresh_token: None,
