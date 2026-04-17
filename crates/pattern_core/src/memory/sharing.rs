@@ -1,17 +1,9 @@
-// MOVING TO: pattern_runtime/src/memory/sharing.rs (or pattern_core if refactored to use pattern_db directly)
-// ORIGIN: crates/pattern_core/src/memory/sharing.rs
-// PHASE: 3
-// RESHAPE: ConstellationDatabases dependency moved; CONSTELLATION_OWNER const re-homed to crate::memory
-//
-// This file is retained verbatim for reference during the v3 foundation rewrite.
-// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
-
 //! Shared memory block support
 //!
 //! Enables explicit sharing of blocks between agents with controlled access levels.
 //! Uses MemoryPermission from pattern_db for access control granularity.
 
-use crate::db::ConstellationDatabases;
+use pattern_db::ConstellationDb;
 use crate::memory::{MemoryError, MemoryResult};
 use pattern_db::models::MemoryPermission;
 use pattern_db::queries;
@@ -23,13 +15,13 @@ pub const CONSTELLATION_OWNER: &str = "_constellation_";
 /// Manager for shared memory blocks
 #[derive(Debug)]
 pub struct SharedBlockManager {
-    dbs: Arc<ConstellationDatabases>,
+    db: Arc<ConstellationDb>,
 }
 
 impl SharedBlockManager {
     /// Create a new shared block manager
-    pub fn new(dbs: Arc<ConstellationDatabases>) -> Self {
-        Self { dbs }
+    pub fn new(db: Arc<ConstellationDb>) -> Self {
+        Self { db }
     }
 
     /// Share a block with another agent
@@ -48,14 +40,14 @@ impl SharedBlockManager {
         permission: MemoryPermission,
     ) -> MemoryResult<()> {
         // Check that the block exists
-        let block = queries::get_block(self.dbs.constellation.pool(), block_id).await?;
+        let block = queries::get_block(self.db.pool(), block_id).await?;
         if block.is_none() {
             return Err(MemoryError::Other(format!("Block not found: {}", block_id)));
         }
 
         // Create shared attachment
         queries::create_shared_block_attachment(
-            self.dbs.constellation.pool(),
+            self.db.pool(),
             block_id,
             agent_id,
             permission,
@@ -67,7 +59,7 @@ impl SharedBlockManager {
 
     /// Remove sharing for a block
     pub async fn unshare_block(&self, block_id: &str, agent_id: &str) -> MemoryResult<()> {
-        queries::delete_shared_block_attachment(self.dbs.constellation.pool(), block_id, agent_id)
+        queries::delete_shared_block_attachment(self.db.pool(), block_id, agent_id)
             .await?;
         Ok(())
     }
@@ -85,7 +77,7 @@ impl SharedBlockManager {
     ) -> MemoryResult<String> {
         // Look up target agent by name
         let target_agent =
-            queries::get_agent_by_name(self.dbs.constellation.pool(), target_agent_name)
+            queries::get_agent_by_name(self.db.pool(), target_agent_name)
                 .await?
                 .ok_or_else(|| {
                     MemoryError::Other(format!("Agent not found: {}", target_agent_name))
@@ -93,7 +85,7 @@ impl SharedBlockManager {
 
         // Get the block by label to find its ID
         let block =
-            queries::get_block_by_label(self.dbs.constellation.pool(), owner_agent_id, block_label)
+            queries::get_block_by_label(self.db.pool(), owner_agent_id, block_label)
                 .await?
                 .ok_or_else(|| MemoryError::Other(format!("Block not found: {}", block_label)))?;
 
@@ -116,7 +108,7 @@ impl SharedBlockManager {
     ) -> MemoryResult<String> {
         // Look up target agent by name
         let target_agent =
-            queries::get_agent_by_name(self.dbs.constellation.pool(), target_agent_name)
+            queries::get_agent_by_name(self.db.pool(), target_agent_name)
                 .await?
                 .ok_or_else(|| {
                     MemoryError::Other(format!("Agent not found: {}", target_agent_name))
@@ -124,7 +116,7 @@ impl SharedBlockManager {
 
         // Get the block by label to find its ID
         let block =
-            queries::get_block_by_label(self.dbs.constellation.pool(), owner_agent_id, block_label)
+            queries::get_block_by_label(self.db.pool(), owner_agent_id, block_label)
                 .await?
                 .ok_or_else(|| MemoryError::Other(format!("Block not found: {}", block_label)))?;
 
@@ -140,7 +132,7 @@ impl SharedBlockManager {
         block_id: &str,
     ) -> MemoryResult<Vec<(String, MemoryPermission)>> {
         let attachments =
-            queries::list_block_shared_agents(self.dbs.constellation.pool(), block_id).await?;
+            queries::list_block_shared_agents(self.db.pool(), block_id).await?;
 
         Ok(attachments
             .into_iter()
@@ -154,7 +146,7 @@ impl SharedBlockManager {
         agent_id: &str,
     ) -> MemoryResult<Vec<(String, MemoryPermission)>> {
         let attachments =
-            queries::list_agent_shared_blocks(self.dbs.constellation.pool(), agent_id).await?;
+            queries::list_agent_shared_blocks(self.db.pool(), agent_id).await?;
 
         Ok(attachments
             .into_iter()
@@ -175,7 +167,7 @@ impl SharedBlockManager {
         agent_id: &str,
     ) -> MemoryResult<Option<MemoryPermission>> {
         // 1. Get block, check if agent is owner -> Admin access
-        let block = queries::get_block(self.dbs.constellation.pool(), block_id).await?;
+        let block = queries::get_block(self.db.pool(), block_id).await?;
         if let Some(block) = block {
             if block.agent_id == agent_id {
                 return Ok(Some(MemoryPermission::Admin));
@@ -192,7 +184,7 @@ impl SharedBlockManager {
 
         // 3. Check shared attachments
         let attachment =
-            queries::get_shared_block_attachment(self.dbs.constellation.pool(), block_id, agent_id)
+            queries::get_shared_block_attachment(self.db.pool(), block_id, agent_id)
                 .await?;
 
         Ok(attachment.map(|att| att.permission))
@@ -218,11 +210,11 @@ mod tests {
     use chrono::Utc;
     use pattern_db::models::{MemoryBlock, MemoryBlockType};
 
-    async fn setup_test_dbs() -> Arc<ConstellationDatabases> {
-        Arc::new(ConstellationDatabases::open_in_memory().await.unwrap())
+    async fn setup_test_dbs() -> Arc<ConstellationDb> {
+        Arc::new(ConstellationDb::open_in_memory().await.unwrap())
     }
 
-    async fn create_test_agent(dbs: &ConstellationDatabases, id: &str, name: &str) {
+    async fn create_test_agent(dbs: &ConstellationDb, id: &str, name: &str) {
         use pattern_db::models::{Agent, AgentStatus};
         use sqlx::types::Json;
         let agent = Agent {
@@ -239,13 +231,13 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
-        queries::create_agent(dbs.constellation.pool(), &agent)
+        queries::create_agent(dbs.pool(), &agent)
             .await
             .unwrap();
     }
 
     async fn create_test_block(
-        dbs: &ConstellationDatabases,
+        dbs: &ConstellationDb,
         id: &str,
         agent_id: &str,
     ) -> MemoryBlock {
@@ -268,7 +260,7 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
-        queries::create_block(dbs.constellation.pool(), &block)
+        queries::create_block(dbs.pool(), &block)
             .await
             .unwrap();
         block
