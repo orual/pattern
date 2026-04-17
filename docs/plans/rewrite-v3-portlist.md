@@ -30,13 +30,24 @@ Cruft (code with no fate marker, `unimplemented!()`/`todo!()` without phase/AC r
 - **Deferred to:** plugin-migration plan.
 - **Notes:** Shared API types and contracts. Revisit alongside `pattern_server` when the plugin surface is re-established.
 
-### pattern_auth
-- **Fate:** absorb + retire.
-- **Location:** `crates/pattern_auth/`.
-- **Absorbs into:** `pattern_provider` (Anthropic OAuth keychain storage).
-- **Deferred to:** plugin-migration plan (ATProto + Discord bits).
-- **Notes:** Directory deleted in a dedicated commit after Phase 4 lands. ATProto and Discord auth bits move to their respective plugin crates in a later plan.
-- **Known coupling (must unwind at Phase 4 retirement):** `pattern_core` currently depends on `pattern_auth` via a path dep in `crates/pattern_core/Cargo.toml`, and `CoreError::AuthError(#[from] pattern_auth::AuthError)` carries an `AuthError` variant sourced from it. When `pattern_auth` is deleted, the Phase 4 retirement commit **must** simultaneously: (a) remove the `pattern-auth` path dep from `pattern_core/Cargo.toml`, (b) drop or restructure `CoreError::AuthError` (auth errors belong in `pattern_provider::ProviderError` in v3, not pattern_core), and (c) update any downstream `CoreError::AuthError` matches. Skipping any of these breaks the `pattern_core` compile.
+### pattern_auth (retired Phase 4)
+- **Fate:** **retired** — directory deleted.
+- **Absorbed into:** `pattern_provider::creds_store` (Anthropic OAuth
+  keychain + JSON fallback storage); `ProviderOAuthToken` now lives at
+  `pattern_core::types::provider::ProviderOAuthToken` with `SecretString`
+  wrappers for tokens.
+- **Deferred to:** plugin-migration plan (ATProto + Discord bits, staged
+  to `rewrite-staging/provider/` during Phase 2).
+- **Retirement actions (all landed together in the Task 7 commit):**
+  (a) removed `pattern-auth` path dep from `pattern_core/Cargo.toml`,
+  (b) dropped `CoreError::AuthError(#[from] pattern_auth::AuthError)`
+  variant — auth errors belong in `pattern_provider::ProviderError` now,
+  (c) verified no downstream `CoreError::AuthError` matches existed in
+  active crates, (d) deleted `crates/pattern_auth/`.
+- **AC1.6 verified:** adding `pattern-auth = { path = "../pattern_auth" }`
+  to an active crate's Cargo.toml produces an explicit
+  `failed to read Cargo.toml: No such file or directory` workspace
+  error, confirming the retirement is loud-failing as intended.
 
 ### pattern_cli
 - **Fate:** port.

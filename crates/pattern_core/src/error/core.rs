@@ -542,16 +542,6 @@ pub enum CoreError {
     )]
     SqliteError(#[from] pattern_db::DbError),
 
-    /// An auth database operation failed.
-    ///
-    /// Cannot construct pattern_auth::AuthError in doctest directly.
-    #[error("authentication database error: {0}")]
-    #[diagnostic(
-        code(pattern_core::auth_error),
-        help("check auth database connection and credentials")
-    )]
-    AuthError(#[from] pattern_auth::AuthError),
-
     // ── Misc validation ───────────────────────────────────────────────────────
     /// A value was in an invalid or unrecognised format.
     ///
