@@ -21,13 +21,15 @@ use crate::types::ids::{AgentId, UserId};
 ///
 /// ```
 /// use pattern_core::types::caller::Caller;
-/// use pattern_core::types::ids::{AgentId, UserId};
+/// use pattern_core::types::ids::{AgentId, UserId, new_id};
+/// use smol_str::SmolStr;
 ///
-/// let human = Caller::Human(UserId::generate());
-/// let agent = Caller::Agent(AgentId::new("orual-companion"));
+/// let human = Caller::Human(new_id());
+/// let agent: AgentId = SmolStr::new("orual-companion");
+/// let agent_caller = Caller::Agent(agent);
 ///
 /// match &human {
-///     Caller::Human(id) => assert!(id.to_string().starts_with("user:")),
+///     Caller::Human(id) => assert_eq!(id.len(), 32),
 ///     Caller::Agent(_) => unreachable!(),
 ///     _ => {}
 /// }

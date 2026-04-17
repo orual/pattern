@@ -4534,6 +4534,7 @@ dependencies = [
  "shellexpand",
  "similar",
  "smallvec",
+ "smol_str",
  "sqlx",
  "strip-ansi-escapes",
  "tempfile",

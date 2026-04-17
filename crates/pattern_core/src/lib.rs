@@ -8,13 +8,14 @@
 //! # Quick start
 //!
 //! ```
-//! use pattern_core::{AgentId, UserId, Caller, TurnId};
+//! use pattern_core::{AgentId, UserId, Caller, TurnId, new_id};
+//! use smol_str::SmolStr;
 //!
-//! let agent = AgentId::new("orual-companion");
-//! let user  = UserId::generate();
+//! let agent: AgentId = SmolStr::new("orual-companion");
+//! let user: UserId = new_id();
 //! let caller = Caller::Human(user);
-//! let turn  = TurnId::generate();
-//! assert!(turn.to_string().starts_with("turn_"));
+//! let turn: TurnId = new_id();
+//! assert_eq!(turn.len(), 32);
 //! ```
 
 pub mod base_instructions;
@@ -39,11 +40,11 @@ pub use error::{ConfigError, CoreError, MemoryError, ProviderError, Result, Runt
 // ── Type re-exports ──────────────────────────────────────────────────────────
 // Explicit re-exports (no wildcard) so the public surface is greppable.
 
-// IDs and identity
+// IDs and identity — all are `SmolStr` aliases; `new_id()` mints fresh UUIDs.
 pub use types::ids::{
-    AgentId, BatchId, ConstellationId, ConversationId, Did, DiscordIdentityId, EventId, GroupId,
-    IdError, IdType, MemoryId, MessageId, ModelId, OAuthTokenId, ProjectId, QueuedMessageId,
-    RelationId, RequestId, SessionId, TaskId, ToolCallId, UserId, WakeupId, WorkspaceId,
+    AgentId, BatchId, ConstellationId, ConversationId, DiscordIdentityId, EventId, GroupId,
+    MemoryId, MessageId, ModelId, OAuthTokenId, ProjectId, QueuedMessageId, RelationId, RequestId,
+    SessionId, TaskId, ToolCallId, UserId, WakeupId, WorkspaceId, new_id,
 };
 
 // Message / batch

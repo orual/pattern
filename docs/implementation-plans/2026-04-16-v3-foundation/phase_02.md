@@ -59,7 +59,7 @@ This phase implements and tests the following ACs in full:
 **Rust-coding-style reminders (apply throughout):**
 - `#[non_exhaustive]` on every public error enum.
 - `thiserror::Error` + `miette::Diagnostic` on error types.
-- Newtype IDs via `define_id_type!` (or equivalent — see Subcomponent D).
+- **Identifier types: `SmolStr` type aliases** (see Subcomponent D / Task 12). No newtype ceremony, no `define_id_type!` macro. Mint via `pattern_core::types::ids::new_id()`. Wrap locally only when a genuine invariant justifies it (rare).
 - `module.rs + module/submodule.rs` layout; avoid `mod.rs`.
 - Sentence-case rustdoc, period-terminated.
 - State machines use enums with associated data, not string tags.
@@ -252,7 +252,7 @@ Generated 2026-04-16. Authoritative until this phase completes; archived after.
 | `error.rs` | rewrite-in-place | `pattern_core/src/error/` (split into CoreError/RuntimeError/ProviderError/MemoryError) | 2 | See Task 13 |
 | `export/` | keep | pattern_core | — | Fate comment: may reshape if file-format plan lands |
 | `config/` | keep | pattern_core | — | Fate comment: breakup needed in future config-cleanup plan |
-| `id.rs` | absorb | `pattern_core/src/types/ids.rs` | 2 | Merge existing define_id_type! newtypes with new WorkspaceId/ProjectId |
+| `id.rs` | absorb-then-delete | `pattern_core/src/types/ids.rs` | 2 | Replaced by SmolStr type aliases (Task 12); `define_id_type!` macro and newtypes retired |
 | `lib.rs` | rewrite | `pattern_core/src/lib.rs` (replace exports with traits/types/error/memory surface) | 2 | — |
 | `memory/cache.rs` | keep | pattern_core | — | Preserved verbatim per design |
 | `memory/document.rs` | keep | pattern_core | — | Preserved |
@@ -780,9 +780,13 @@ jj new
 
 **Implementation:**
 
-Each type follows rust-coding-style: `#[non_exhaustive]` on enums, newtype wrappers with validation, thorough rustdoc including at least one code example.
+Each type follows rust-coding-style: `#[non_exhaustive]` on public enums, newtype wrappers when a genuine invariant justifies one (rare for this crate; see IDs section below for the default), thorough rustdoc including at least one code example.
 
-**IDs — reuse the existing `define_id_type!` macro from the old `id.rs`.** That macro handles UUID-based newtype + display/from_str/serde. Add `WorkspaceId` and `ProjectId` as new macro invocations alongside the existing ones. Preserve `AgentId`'s custom non-UUID shape if it exists (investigator noted it accepts arbitrary strings).
+**IDs — collapse to `SmolStr` type aliases.** **Reviewer note: this supersedes the prior `define_id_type!` newtype approach.** All identifier types (`AgentId`, `UserId`, `MessageId`, `BatchId`, `TurnId`, `WorkspaceId`, `ProjectId`, and the rest) are defined in `types/ids.rs` as `pub type Foo = smol_str::SmolStr;`. There is no newtype ceremony, no `IdType` trait, no `define_id_type!` macro, no per-type `Display`/`FromStr`/`from_uuid`/`generate` impls. Aliases exist only for signature readability; at runtime all IDs are `SmolStr`. Mint fresh IDs via `pattern_core::types::ids::new_id()` (returns a 32-char unhyphenated UUID-v4 in `SmolStr`). Add `smol_str = { version = "0.3", features = ["serde"] }` to the workspace and pattern_core deps.
+
+Rationale: the newtype pattern didn't carry meaningful invariants — nothing relied on the type-level distinction. DB row types enforce shape at retrieval; serde `#[serde(tag = ...)]` handles wire-format discrimination for enums that carry different kinds. Aliases give identical ergonomics without the macro/impl overhead. When a distinct type is genuinely justified (atproto `Did`, plugin-scoped `PluginId`, etc.), wrap locally at the site that needs it. See `crates/pattern_core/CLAUDE.md` "Identifier Types" for the canonical policy statement.
+
+Delete the old `crates/pattern_core/src/id.rs` (the `define_id_type!` macro and all newtype invocations go away). Do NOT re-export `IdType`, `IdError`, or `Did` from `types::ids` — those are obsolete.
 
 **Caller** — enum with two mandatory variants:
 
@@ -932,59 +936,56 @@ jj new
 <!-- END_TASK_14 -->
 
 <!-- START_TASK_15 -->
-### Task 15: Property tests for id roundtrips
+### Task 15: Sanity tests for `new_id()`
 
-**Verifies:** AC1.2 (documented behaviour exercised).
+**Reviewer note:** this supersedes the prior "proptest id roundtrips for all *Id newtypes" task. With `SmolStr` type aliases (see Task 12), there is nothing meaningful to roundtrip — `SmolStr::from_str` is identity and every `*Id` resolves to the same runtime type. The former proptest was testing the UUID crate's behaviour.
+
+**Verifies:** AC1.2 (documented behaviour exercised, minimally).
 
 **Files:**
-- Create: `crates/pattern_core/src/types/ids/tests.rs` or `tests/id_roundtrip.rs` (pick per convention used in `types/ids.rs` itself).
+- Modify: `crates/pattern_core/src/types/ids.rs` — add `#[cfg(test)] mod tests` inline.
 
 **Implementation:**
 
-For each `*Id` newtype, a `proptest!` test asserting:
-- `id.to_string().parse::<Id>() == Ok(id)` (roundtrip)
-- Display format matches the documented shape (UUID, prefix, etc.).
-
-**Step 1:** Add `proptest` as a dev-dependency to `crates/pattern_core/Cargo.toml`:
-
-```toml
-[dev-dependencies]
-proptest = "1"
-```
-
-(Workspace-pin if proptest isn't already in workspace deps.)
-
-**Step 2:** Write tests.
+Two small unit tests covering `new_id()`:
+1. Returns a 32-character ASCII-hex string (the simple UUID-v4 format).
+2. Two successive calls return different values.
 
 ```rust
 #[cfg(test)]
 mod tests {
     use super::*;
-    use proptest::prelude::*;
 
-    proptest! {
-        #[test]
-        fn agent_id_roundtrip(uuid_bytes in any::<[u8; 16]>()) {
-            let id = AgentId::from_uuid(uuid::Uuid::from_bytes(uuid_bytes));
-            let as_str = id.to_string();
-            let parsed: AgentId = as_str.parse().expect("roundtrip");
-            prop_assert_eq!(id, parsed);
-        }
+    #[test]
+    fn new_id_returns_32_char_hex_string() {
+        let id = new_id();
+        assert_eq!(id.len(), 32);
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
     }
-    // … one per ID type …
+
+    #[test]
+    fn new_id_values_are_unique() {
+        let a = new_id();
+        let b = new_id();
+        assert_ne!(a, b);
+    }
 }
 ```
 
-**Step 3:** Run.
+No proptest dependency needed. If `proptest` was added to dev-dependencies by the old Task 15, it can stay (harmless) or be removed — whichever the implementor finds cleaner.
+
+**Step 1:** Add the tests inline.
+
+**Step 2:** Run.
 
 ```bash
-cargo nextest run -p pattern_core id_roundtrip 2>&1 | tail -5
+cargo nextest run -p pattern-core --lib types::ids
 ```
 
 **Commit:**
 
 ```bash
-jj describe -m "[pattern-core] proptest id roundtrips for all *Id newtypes"
+jj describe -m "[pattern-core] sanity tests for new_id()"
 jj new
 ```
 <!-- END_TASK_15 -->

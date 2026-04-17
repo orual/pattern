@@ -143,8 +143,30 @@ let process_source = source.as_any().downcast_ref::<ProcessSource>()?;
 ```
 See `docs/data-sources-guide.md` for full pattern documentation.
 
+## Identifier Types
+
+All identifiers (`AgentId`, `MessageId`, `BatchId`, `TurnId`, etc.) are
+[`smol_str::SmolStr`] type aliases defined in `types/ids.rs`. There is
+no newtype ceremony and no compile-time distinction between kinds:
+aliases exist only for signature readability.
+
+Mint fresh identifiers via `pattern_core::types::ids::new_id()`
+(returns a 32-char unhyphenated UUID-v4 string). When a distinct type
+is genuinely useful (rare — e.g. validation-bearing atproto
+identifiers), wrap locally at the site that needs it rather than
+dragging every ID into the newtype pattern.
+
+Rationale: the previous `define_id_type!` macro generated newtypes
+with prefixed-UUID displays, `Display`/`FromStr`/`from_uuid`/`generate`
+impls, and per-type validation errors. In practice nothing relied on
+the type-level distinctness — DB query types enforced row shape,
+serde tags handled wire-format discrimination, and the newtypes just
+added ceremony. SmolStr is cheap to clone (Arc-sharing for >22 bytes)
+and interop is straightforward.
+
 ## Performance Notes
-- CompactString inlines strings ≤ 24 bytes
+- SmolStr inlines strings ≤ 22 bytes, shares via Arc beyond that
+- CompactString (used for non-id string fields) inlines ≤ 24 bytes
 - DashMap shards internally for concurrent access
 - ToolContext via Arc<AgentRuntime> for cheap cloning
 - Database operations are non-blocking with optimistic updates

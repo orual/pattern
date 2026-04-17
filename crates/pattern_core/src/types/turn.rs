@@ -17,63 +17,15 @@
 //! reconstruct exactly which blocks changed during that turn.
 
 use jiff::Timestamp;
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use crate::types::block::BlockWrite;
 use crate::types::caller::Caller;
 use crate::types::message::Message;
 
-/// Stable identifier for a single agent-loop activation.
-///
-/// `TurnId` is a UUID formatted without hyphens and prefixed with `"turn_"`.
-/// It is assigned *before* the turn starts so it can be embedded in
-/// checkpoints and log entries.
-///
-/// # Examples
-///
-/// ```
-/// use pattern_core::types::turn::TurnId;
-///
-/// let id = TurnId::generate();
-/// assert!(id.to_string().starts_with("turn_"));
-/// let parsed: TurnId = id.to_string().parse().expect("roundtrip");
-/// assert_eq!(id, parsed);
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
-pub struct TurnId(pub String);
-
-impl TurnId {
-    /// Generate a new random `TurnId`.
-    pub fn generate() -> Self {
-        TurnId(format!("turn_{}", Uuid::new_v4().simple()))
-    }
-
-    /// Return the nil `TurnId` (for testing and defaults).
-    pub fn nil() -> Self {
-        TurnId(format!("turn_{}", Uuid::nil().simple()))
-    }
-
-    /// Borrow the inner string.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for TurnId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::str::FromStr for TurnId {
-    type Err = std::convert::Infallible;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(TurnId(s.to_string()))
-    }
-}
+// `TurnId` is defined in `types::ids` as a `SmolStr` type alias. Mint fresh
+// turn ids via `pattern_core::types::ids::new_id()`.
+pub use crate::types::ids::TurnId;
 
 /// Input to a single agent turn.
 ///
@@ -86,14 +38,14 @@ impl std::str::FromStr for TurnId {
 /// ```
 /// use pattern_core::types::turn::{TurnId, TurnInput};
 /// use pattern_core::types::caller::Caller;
-/// use pattern_core::types::ids::UserId;
+/// use pattern_core::types::ids::{UserId, new_id};
 ///
 /// let input = TurnInput {
-///     turn_id: TurnId::generate(),
-///     caller: Caller::Human(UserId::generate()),
+///     turn_id: new_id(),
+///     caller: Caller::Human(new_id()),
 ///     messages: vec![],
 /// };
-/// assert!(input.turn_id.to_string().starts_with("turn_"));
+/// assert_eq!(input.turn_id.len(), 32);
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnInput {

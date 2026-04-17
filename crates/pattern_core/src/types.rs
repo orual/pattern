@@ -18,9 +18,9 @@ pub use block::{Block, BlockHandle, BlockWrite};
 pub use block_ref::BlockRef;
 pub use caller::Caller;
 pub use ids::{
-    AgentId, BatchId, ConstellationId, ConversationId, Did, DiscordIdentityId, EventId, GroupId,
-    IdError, IdType, MemoryId, MessageId, ModelId, OAuthTokenId, ProjectId, QueuedMessageId,
-    RelationId, RequestId, SessionId, TaskId, ToolCallId, UserId, WakeupId, WorkspaceId,
+    AgentId, BatchId, ConstellationId, ConversationId, DiscordIdentityId, EventId, GroupId,
+    MemoryId, MessageId, ModelId, OAuthTokenId, ProjectId, QueuedMessageId, RelationId, RequestId,
+    SessionId, TaskId, ToolCallId, UserId, WakeupId, WorkspaceId, new_id,
 };
 pub use message::{Message, ResponseMeta};
 pub use snapshot::{PersonaSnapshot, SessionSnapshot};

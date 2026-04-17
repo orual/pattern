@@ -29,12 +29,12 @@ use crate::types::turn::TurnId;
 /// ```
 /// use jiff::Timestamp;
 /// use pattern_core::types::snapshot::PersonaSnapshot;
-/// use pattern_core::types::ids::AgentId;
-/// use pattern_core::types::turn::TurnId;
+/// use pattern_core::types::ids::{AgentId, new_id};
+/// use smol_str::SmolStr;
 ///
 /// let snap = PersonaSnapshot {
-///     agent_id: AgentId::new("orual-companion"),
-///     as_of_turn: TurnId::generate(),
+///     agent_id: SmolStr::new("orual-companion"),
+///     as_of_turn: new_id(),
 ///     captured_at: Timestamp::now(),
 ///     data: serde_json::json!({}),
 /// };
@@ -66,12 +66,12 @@ pub struct PersonaSnapshot {
 /// ```
 /// use jiff::Timestamp;
 /// use pattern_core::types::snapshot::{PersonaSnapshot, SessionSnapshot};
-/// use pattern_core::types::ids::AgentId;
-/// use pattern_core::types::turn::TurnId;
+/// use pattern_core::types::ids::{AgentId, new_id};
+/// use smol_str::SmolStr;
 ///
 /// let persona = PersonaSnapshot {
-///     agent_id: AgentId::new("orual-companion"),
-///     as_of_turn: TurnId::nil(),
+///     agent_id: SmolStr::new("orual-companion"),
+///     as_of_turn: new_id(),
 ///     captured_at: Timestamp::now(),
 ///     data: serde_json::json!({}),
 /// };

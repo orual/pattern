@@ -1367,7 +1367,7 @@ impl ResolvedAgentConfig {
         system_prompt.push_str("\n");
         system_prompt.push_str(&config.instructions.clone().unwrap_or_default());
         Self {
-            id: config.id.clone().unwrap_or_else(AgentId::generate),
+            id: config.id.clone().unwrap_or_else(crate::types::ids::new_id),
             name: config.name.clone(),
             model_provider: model
                 .map(|m| m.provider.clone())
@@ -1875,7 +1875,7 @@ mod tests {
                 },
                 GroupMemberConfig {
                     name: "Memory".to_string(),
-                    agent_id: Some(AgentId::generate()),
+                    agent_id: Some(crate::types::ids::new_id()),
                     config_path: None,
                     agent_config: None,
                     role: GroupMemberRoleConfig::Specialist {

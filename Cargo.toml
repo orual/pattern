@@ -61,6 +61,7 @@ genai = { git = "https://github.com/orual/rust-genai" }
 uuid = { version = "1.10", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 jiff = { version = "0.2", features = ["serde"] }
+smol_str = { version = "0.3", features = ["serde"] }
 async-trait = "0.1"
 futures = "0.3"
 once_cell = "1.20"
