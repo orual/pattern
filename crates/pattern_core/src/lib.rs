@@ -25,7 +25,6 @@ pub mod queue;
 pub mod realtime;
 pub mod runtime;
 pub mod tool;
-pub mod users;
 pub mod utils;
 
 #[cfg(test)]
