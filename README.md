@@ -189,6 +189,16 @@ export PATTERN_FORWARD_FILE=/tmp/pattern-stream.log
 
 ## Development
 
+### Runtime prerequisites
+
+Pattern v3's agent runtime (`pattern_runtime`) invokes the `tidepool-extract`
+GHC plugin binary at runtime when compiling agent Haskell programs. It must
+be available on `$PATH` (or via `$TIDEPOOL_EXTRACT`) before any agent session
+opens. Easiest: `nix develop` enters a shell with the binary already wired up
+from the pinned `tidepool-heavy-industries/tidepool` flake input. Manual
+setup instructions (including non-Nix builds from source) live in
+[`crates/pattern_runtime/CLAUDE.md`](crates/pattern_runtime/CLAUDE.md).
+
 ### Building
 
 ```bash

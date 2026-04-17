@@ -42,11 +42,11 @@ This phase implements and tests:
 **Working bookmark:** `rewrite-v3`
 **Pre-phase state:** After Phase 2, `pattern_core` is traits + types + errors + preserved memory storage. `pattern_runtime` is an empty skeleton (lib.rs + CLAUDE.md only). `rewrite-staging/agent_runtime/` holds the pre-v3 agent loop code for reference only.
 
-**Tidepool checkout:** `/home/orual/Projects/PatternProject/tidepool` (sibling of pattern repo). Commit `cc0ebf815967a215dfb662120ce24347f402ee71` verified during Phase 3 research. All crate paths assume this sibling layout.
+**Tidepool source:** `github:tidepool-heavy-industries/tidepool`. Local checkout expected at `/home/orual/Projects/PatternProject/tidepool` (sibling of pattern repo) for Cargo path-dep consumption and for overriding the nix flake input during tidepool-side iteration. **Re-verified against tidepool commit `746da8b` ("feat: consolidate error handling with thiserror")**; the original Phase 3 research was done at `cc0ebf815…`, and this phase file's error-mapping table + API references have been refreshed to match `746da8b`.
 
-**Path-dep policy:** Phase 3 uses path deps (`tidepool-runtime = { path = "../tidepool/tidepool-runtime" }`) during the v3 rewrite for ease of iteration on both sides. When the foundation lands and tidepool stabilises, convert to a git dep pinned to commit (or an upstream crates.io release if tidepool publishes one). This is tracked as a follow-up in the post-foundation dep-hardening plan.
+**Path-dep policy:** Phase 3 uses Cargo path deps (`tidepool-runtime = { path = "../tidepool/tidepool-runtime" }`) during the v3 rewrite for ease of iteration on both sides; the Nix flake input is pinned via `flake.lock` against the GitHub repo for reproducible devshells. When the foundation lands and tidepool stabilises, convert the Cargo deps to a git dep pinned to commit (or an upstream crates.io release if tidepool publishes one). Tracked as a follow-up in the post-foundation dep-hardening plan.
 
-**Runtime dependency:** `tidepool-extract` GHC plugin binary (~300MB, GHC 9.12) must be on `$PATH` at runtime. Paths can be overridden via `TIDEPOOL_EXTRACT`, `TIDEPOOL_PRELUDE_DIR`, `TIDEPOOL_GHC_LIBDIR`. Pattern ships a preflight check (Task 5) and flake.nix integration (Task 4) to reduce setup friction.
+**Runtime dependency:** `tidepool-extract` GHC plugin binary (~300MB, GHC 9.12) must be on `$PATH` at runtime, or pointed at via `$TIDEPOOL_EXTRACT` (absolute path to the binary). **Reviewer note:** the earlier research notes mentioned `TIDEPOOL_PRELUDE_DIR` and `TIDEPOOL_GHC_LIBDIR` as overrides; verified against tidepool `746da8b`, only `TIDEPOOL_EXTRACT` is read by `tidepool_runtime`. The Nix-built derivation wraps the extractor with a shell script that sets up GHC PATH internally, so no prelude/libdir overrides are needed in practice. Pattern ships a preflight check (Task 5) and flake.nix integration (Task 4) to reduce setup friction.
 
 **Build tools:**
 - `cargo check -p pattern_runtime`
@@ -67,18 +67,25 @@ This phase implements and tests:
 - `frunk::hlist![H0, H1, ...]` — HList bundling handlers; tag dispatch routes automatically by handler position.
 - Error hierarchy: `RuntimeError { Compile(CompileError), Jit(JitError) }`; `JitError { Compilation, Pipeline, Effect, Yield, Signal }`; `YieldError { DivisionByZero, Overflow, StackOverflow, HeapOverflow, Signal(i32), UserError, UserErrorMsg(String), Undefined, BlackHole, BadThunkState }`.
 
-**Mapping tidepool errors to `pattern_core::error::RuntimeError`:**
+**Mapping tidepool errors to `pattern_core::error::RuntimeError`** (verified against tidepool commit `746da8b` — "feat: consolidate error handling with thiserror"):
 
 | Tidepool | Pattern |
 |---|---|
 | `CompileError::ExtractFailed(stderr)` | `RuntimeError::GhcPanic { reason: stderr }` |
-| `JitError::Signal(_)` | `RuntimeError::RuntimeCrashed` |
+| `CompileError::Io(_)` / `ReadError(_)` / `MissingOutput(_)` / `IOTypeDetected` | `RuntimeError::GhcPanic { reason: e.to_string() }` (extractor setup / IO sandbox violation) |
+| `JitError::Signal(SignalError)` | `RuntimeError::RuntimeCrashed` (JIT-time signal during codegen or heap bridge) |
+| `JitError::HeapBridge(_)` | `RuntimeError::RuntimeCrashed` (heap-object conversion failed) |
+| `JitError::MissingConTags(name)` | `RuntimeError::GhcPanic { reason: format!("missing freer-simple constructor: {name}") }` (agent DSL missing required constructors) |
+| `JitError::EffectResponseTooLarge { nodes, limit }` | `RuntimeError::EffectOverflow` (dedicated variant as of 746da8b; older research notes conflated with `JitError::Effect`) |
+| `JitError::Effect(EffectError)` | bubble up the handler's `EffectError` as an `SdkError` (handler-local) — this is an SDK call failing, not a runtime crash |
 | `JitError::Yield(YieldError::StackOverflow \| HeapOverflow)` | `RuntimeError::RuntimeCrashed` (treat as unrecoverable) |
 | `JitError::Yield(YieldError::Signal(sig))` | `RuntimeError::RuntimeCrashed` |
-| `JitError::Effect(_)` where handler returned `ResponseTooLarge` | `RuntimeError::EffectOverflow` |
+| `JitError::Yield(YieldError::DivisionByZero \| Overflow \| BlackHole \| BadThunkState \| NullFunPtr \| BadFunPtrTag \| UnresolvedVar \| TypeMetadata)` | `RuntimeError::RuntimeCrashed` (runtime-semantic errors from agent code) |
+| `JitError::Yield(YieldError::UserError \| UserErrorMsg)` | surface as agent-logic output, not `RuntimeError` (agent called Haskell's `error`) |
+| `JitError::Yield(YieldError::UnexpectedTag \| UnexpectedConTag \| BadValFields \| BadEFields \| BadUnionFields \| NullPointer)` | `RuntimeError::RuntimeCrashed` (heap-parse errors at the result boundary — implementation bugs, should be rare) |
+| `JitError::Pipeline(_)` / `JitError::Compilation(_)` | `RuntimeError::GhcPanic` (compile/codegen pipeline failed — generally happens at `compile_haskell`/`JitEffectMachine::compile` time, not during `run`) |
 | (external wrapper) wall-clock timeout expired | `RuntimeError::Timeout { wall_ms, cpu_ms: <last sample> }` |
 | (external wrapper) CPU sample exceeded budget | `RuntimeError::Timeout { wall_ms: <elapsed>, cpu_ms }` |
-| `JitError::Yield(YieldError::UserError \| UserErrorMsg)` | surface as agent-logic output, not `RuntimeError` (agent called Haskell's `error`) |
 
 **Rust-coding-style reminders:**
 - All errors `#[non_exhaustive]` via the Phase 2 hierarchy. New variants added this phase go to `pattern_core::error::RuntimeError` if shared, or a new `pattern_runtime::SdkError` if handler-local.
@@ -340,39 +347,39 @@ jj new
 - Modify: `/home/orual/Projects/PatternProject/pattern/crates/pattern_runtime/CLAUDE.md` — add setup section
 - Modify: `/home/orual/Projects/PatternProject/pattern/README.md` — one-liner pointing at the setup section
 
-**Step 1: flake.nix integration**
+**Step 1: flake.nix integration** (folded into Phase 3 prep — see the prep commit before Task 1 dispatch)
 
-The sibling `tidepool/flake.nix` exposes `tidepool-extract` as a derivation. Import via flake input:
+Pattern's flake uses `flake-parts` with per-system modules under `nix/modules/`. Integration is two edits:
 
-```nix
-# flake.nix (pattern)
-{
-  inputs = {
-    tidepool.url = "path:../tidepool";  # or git URL once tidepool publishes
-    # ... existing inputs ...
-  };
+1. Add tidepool as a flake input in `flake.nix`:
 
-  outputs = { self, nixpkgs, tidepool, ... }: {
-    devShells = forAllSystems (system: let
-      pkgs = import nixpkgs { inherit system; };
-    in {
-      default = pkgs.mkShell {
-        buildInputs = [
-          tidepool.packages.${system}.tidepool-extract
-          # ... rest of current buildInputs ...
-        ];
-        shellHook = ''
-          export TIDEPOOL_EXTRACT=${tidepool.packages.${system}.tidepool-extract}/bin/tidepool-extract
-          export TIDEPOOL_PRELUDE_DIR=${tidepool.packages.${system}.tidepool-extract}/share/tidepool/prelude
-          # TIDEPOOL_GHC_LIBDIR: let tidepool-extract ask GHC; override only if ghc is not on PATH
-        '';
-      };
-    });
-  };
-}
+   ```nix
+   tidepool.url = "github:tidepool-heavy-industries/tidepool";
+   ```
+
+   `github:` inputs are pure and lock properly via `flake.lock`. (An earlier draft suggested `path:../tidepool` — rejected as impure.)
+
+2. Wire the derivation into `nix/modules/devshell.nix`:
+
+   ```nix
+   let
+     tidepool-extract = inputs.tidepool.packages.${system}.tidepool-extract;
+   in {
+     devShells.default = pkgsWithUnfree.mkShell {
+       # ...existing config...
+       TIDEPOOL_EXTRACT = "${tidepool-extract}/bin/tidepool-extract";
+       packages = [ /* existing packages */ ] ++ [ tidepool-extract ];
+     };
+   }
+   ```
+
+The tidepool-built derivation is a `writeShellScriptBin` wrapper that sets up GHC PATH internally, so no `TIDEPOOL_PRELUDE_DIR` or `TIDEPOOL_GHC_LIBDIR` exports are needed. Only `TIDEPOOL_EXTRACT` is consumed by tidepool-runtime in the current commit.
+
+Developers iterating on tidepool itself should override the flake input locally:
+
+```sh
+nix develop --override-input tidepool path:../tidepool
 ```
-
-Exact flake shape depends on the current `flake.nix`; task-implementor reads it first and integrates consistently. The important outputs: `tidepool-extract` binary on PATH, `TIDEPOOL_EXTRACT` + `TIDEPOOL_PRELUDE_DIR` exported.
 
 **Step 2: pattern_runtime/CLAUDE.md**
 
