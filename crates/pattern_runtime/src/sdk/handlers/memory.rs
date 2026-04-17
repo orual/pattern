@@ -89,10 +89,40 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                     })?;
                 cx.respond(text)
             }
-            MemoryReq::Write(label, content) => {
+            MemoryReq::Write(label, content, description) => {
                 handle
-                    .block_on(upsert_block_content(&*store, &agent_id, &label, &content))
+                    .block_on(upsert_block_content(
+                        &*store,
+                        &agent_id,
+                        &label,
+                        &content,
+                        description.as_deref(),
+                    ))
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Write: {e}")))?;
+                cx.respond(())
+            }
+            MemoryReq::Create(label, description, block_type, schema_kind, char_limit, initial) => {
+                let bt: BlockType = block_type.into();
+                let schema: BlockSchema = schema_kind.into();
+                let limit = char_limit
+                    .map(|n| n.max(0) as usize)
+                    .unwrap_or(DEFAULT_CHAR_LIMIT);
+                let doc = handle
+                    .block_on(store.create_block(
+                        &agent_id,
+                        &label,
+                        &description,
+                        bt,
+                        schema,
+                        limit,
+                    ))
+                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Create: {e}")))?;
+                write_text_into(&doc, &initial)
+                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Create: {e}")))?;
+                store.mark_dirty(&agent_id, &label);
+                handle
+                    .block_on(store.persist_block(&agent_id, &label))
+                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Create: {e}")))?;
                 cx.respond(())
             }
             MemoryReq::Append(label, content) => {
@@ -106,8 +136,30 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                     format!("{existing}{content}")
                 };
                 handle
-                    .block_on(upsert_block_content(&*store, &agent_id, &label, &combined))
+                    .block_on(upsert_block_content(
+                        &*store, &agent_id, &label, &combined, None,
+                    ))
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Append: {e}")))?;
+                cx.respond(())
+            }
+            MemoryReq::Replace(label, old, new) => {
+                let existing = handle
+                    .block_on(store.get_rendered_content(&agent_id, &label))
+                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Replace: {e}")))?
+                    .ok_or_else(|| {
+                        EffectError::Handler(format!(
+                            "Pattern.Memory.Replace: no block named {label:?} for agent {agent_id:?}"
+                        ))
+                    })?;
+                let replaced = existing.replace(&old, &new);
+                // `upsert_block_content` with description=None preserves
+                // existing metadata (and won't auto-create since the
+                // block was just observed to exist).
+                handle
+                    .block_on(upsert_block_content(
+                        &*store, &agent_id, &label, &replaced, None,
+                    ))
+                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Replace: {e}")))?;
                 cx.respond(())
             }
             MemoryReq::Search(_query) => Err(EffectError::Handler(
@@ -130,38 +182,65 @@ impl EffectHandler<SessionContext> for MemoryHandler {
 /// Working block with a Text schema; otherwise replace its rendered text
 /// and persist.
 ///
+/// - `description = Some(d)`: update (or set on auto-create) the block's
+///   description metadata.
+/// - `description = None`: leave existing metadata untouched. When the
+///   block is missing and must be auto-created, falls back to
+///   `DEFAULT_AUTO_CREATE_DESCRIPTION` — which is itself a narrow
+///   fallback, not the previous pervasive magic string.
+///
 /// The StructuredDocument sharing contract documented in
 /// `crates/pattern_core/CLAUDE.md` states that the returned document's
-/// internal LoroDoc is Arc-shared with the cache, so mutations propagate.
-/// After mutating we call `mark_dirty` + `persist_block` per that
+/// internal LoroDoc is Arc-shared with the cache, so content mutations
+/// propagate. Metadata fields are *not* Arc-shared, so description
+/// updates go through the store trait (`update_block_description`).
+/// After mutating we call `mark_dirty` + `persist_block` per the
 /// contract.
 async fn upsert_block_content(
     store: &dyn MemoryStore,
     agent_id: &str,
     label: &str,
     content: &str,
+    description: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let existing = store.get_block(agent_id, label).await?;
-    let doc = match existing {
-        Some(doc) => doc,
+    let (doc, is_new) = match existing {
+        Some(doc) => (doc, false),
         None => {
-            store
+            let desc = description.unwrap_or(DEFAULT_AUTO_CREATE_DESCRIPTION);
+            let doc = store
                 .create_block(
                     agent_id,
                     label,
-                    "auto-created by Pattern.Memory handler",
+                    desc,
                     BlockType::Working,
                     BlockSchema::text(),
                     DEFAULT_CHAR_LIMIT,
                 )
-                .await?
+                .await?;
+            (doc, true)
         }
     };
     write_text_into(&doc, content)?;
+    // For an existing block, a Some-description updates metadata. For a
+    // freshly created block, the description is already set at creation
+    // time so we skip the redundant trait call.
+    if let (false, Some(desc)) = (is_new, description) {
+        store
+            .update_block_description(agent_id, label, desc)
+            .await?;
+    }
     store.mark_dirty(agent_id, label);
     store.persist_block(agent_id, label).await?;
     Ok(())
 }
+
+/// Fallback description applied only when an agent calls
+/// `Pattern.Memory.write` on a label that doesn't exist *and* supplies
+/// no description. Agents wanting meaningful metadata should call
+/// `Pattern.Memory.create` (or `writeWithDesc`) explicitly.
+const DEFAULT_AUTO_CREATE_DESCRIPTION: &str =
+    "auto-created by Pattern.Memory.write (no description supplied)";
 
 /// Replace the rendered text of a document. Delegates to
 /// [`StructuredDocument::set_text`] if available; otherwise we fall
@@ -260,7 +339,11 @@ mod tests {
         ) -> pattern_core::memory::MemoryResult<Option<String>> {
             panic!()
         }
-        async fn persist_block(&self, _a: &str, _l: &str) -> pattern_core::memory::MemoryResult<()> {
+        async fn persist_block(
+            &self,
+            _a: &str,
+            _l: &str,
+        ) -> pattern_core::memory::MemoryResult<()> {
             panic!()
         }
         fn mark_dirty(&self, _a: &str, _l: &str) {}
@@ -288,14 +371,16 @@ mod tests {
             _a: &str,
             _q: &str,
             _o: pattern_core::memory::SearchOptions,
-        ) -> pattern_core::memory::MemoryResult<Vec<pattern_core::memory::MemorySearchResult>> {
+        ) -> pattern_core::memory::MemoryResult<Vec<pattern_core::memory::MemorySearchResult>>
+        {
             panic!()
         }
         async fn search_all(
             &self,
             _q: &str,
             _o: pattern_core::memory::SearchOptions,
-        ) -> pattern_core::memory::MemoryResult<Vec<pattern_core::memory::MemorySearchResult>> {
+        ) -> pattern_core::memory::MemoryResult<Vec<pattern_core::memory::MemorySearchResult>>
+        {
             panic!()
         }
         async fn list_shared_blocks(
@@ -338,18 +423,18 @@ mod tests {
         ) -> pattern_core::memory::MemoryResult<()> {
             panic!()
         }
-        async fn undo_block(
+        async fn update_block_description(
             &self,
             _a: &str,
             _l: &str,
-        ) -> pattern_core::memory::MemoryResult<bool> {
+            _d: &str,
+        ) -> pattern_core::memory::MemoryResult<()> {
             panic!()
         }
-        async fn redo_block(
-            &self,
-            _a: &str,
-            _l: &str,
-        ) -> pattern_core::memory::MemoryResult<bool> {
+        async fn undo_block(&self, _a: &str, _l: &str) -> pattern_core::memory::MemoryResult<bool> {
+            panic!()
+        }
+        async fn redo_block(&self, _a: &str, _l: &str) -> pattern_core::memory::MemoryResult<bool> {
             panic!()
         }
         async fn undo_depth(
@@ -398,6 +483,42 @@ mod tests {
         assert!(err.to_string().contains("vector search"), "got: {err}");
     }
 
+    /// Replace on a block that does not exist surfaces a handler error
+    /// rather than silently auto-creating. The handler uses
+    /// `Handle::current().block_on(..)` internally — it expects to be
+    /// invoked from a blocking worker, so we dispatch the call through
+    /// `spawn_blocking`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn replace_on_missing_block_returns_handler_error() {
+        use crate::testing::InMemoryMemoryStore;
+        let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
+        let store_for_ctx = store.clone();
+        let err_msg = tokio::task::spawn_blocking(move || {
+            let table = standard_datacon_table();
+            let persona = PersonaConfig::new("agent-a", "A", "module X where\nx = pure ()");
+            let ctx = SessionContext::from_persona(&persona, store_for_ctx);
+            let cx = EffectContext::with_user(&table, &ctx);
+            let mut h = MemoryHandler::new(store);
+            let err = h
+                .handle(
+                    MemoryReq::Replace("ghost".into(), "a".into(), "b".into()),
+                    &cx,
+                )
+                .unwrap_err();
+            err.to_string()
+        })
+        .await
+        .expect("spawn_blocking task panicked");
+        assert!(
+            err_msg.contains("Pattern.Memory.Replace"),
+            "error should identify op; got: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("ghost"),
+            "error should identify missing label; got: {err_msg}"
+        );
+    }
+
     #[tokio::test]
     async fn cancelled_flag_short_circuits_at_entry() {
         let table = standard_datacon_table();
@@ -409,13 +530,8 @@ mod tests {
         let mut h = MemoryHandler::new(Arc::new(NeverStore));
         // Even though NeverStore panics on any call, this should not
         // reach the store — the sentinel short-circuits at entry.
-        let err = h
-            .handle(MemoryReq::Read("any".into()), &cx)
-            .unwrap_err();
-        assert!(
-            err.to_string().contains(CANCELLED_SENTINEL),
-            "got: {err}"
-        );
+        let err = h.handle(MemoryReq::Read("any".into()), &cx).unwrap_err();
+        assert!(err.to_string().contains(CANCELLED_SENTINEL), "got: {err}");
         let _ = CancelState::new(); // suppress unused import warning if any
     }
 }

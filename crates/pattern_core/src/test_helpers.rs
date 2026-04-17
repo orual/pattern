@@ -269,6 +269,15 @@ pub mod memory {
             Ok(())
         }
 
+        async fn update_block_description(
+            &self,
+            _agent_id: &str,
+            _label: &str,
+            _description: &str,
+        ) -> MemoryResult<()> {
+            Ok(())
+        }
+
         async fn undo_block(&self, _agent_id: &str, _label: &str) -> MemoryResult<bool> {
             Ok(false)
         }

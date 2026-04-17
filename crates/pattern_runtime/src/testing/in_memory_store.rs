@@ -207,12 +207,7 @@ impl MemoryStore for InMemoryMemoryStore {
     ) -> MemoryResult<Option<StructuredDocument>> {
         Ok(None)
     }
-    async fn set_block_pinned(
-        &self,
-        _a: &str,
-        _l: &str,
-        _p: bool,
-    ) -> MemoryResult<()> {
+    async fn set_block_pinned(&self, _a: &str, _l: &str, _p: bool) -> MemoryResult<()> {
         Ok(())
     }
     async fn set_block_type(
@@ -227,13 +222,26 @@ impl MemoryStore for InMemoryMemoryStore {
         }
         Ok(())
     }
-    async fn update_block_schema(
-        &self,
-        _a: &str,
-        _l: &str,
-        _s: BlockSchema,
-    ) -> MemoryResult<()> {
+    async fn update_block_schema(&self, _a: &str, _l: &str, _s: BlockSchema) -> MemoryResult<()> {
         Ok(())
+    }
+    async fn update_block_description(
+        &self,
+        agent_id: &str,
+        label: &str,
+        description: &str,
+    ) -> MemoryResult<()> {
+        let mut guard = self.blocks.lock().unwrap();
+        match guard.get_mut(&(agent_id.to_string(), label.to_string())) {
+            Some(r) => {
+                r.document.metadata_mut().description = description.to_string();
+                Ok(())
+            }
+            None => Err(pattern_core::memory::MemoryError::NotFound {
+                agent_id: agent_id.to_string(),
+                label: label.to_string(),
+            }),
+        }
     }
     async fn undo_block(&self, _a: &str, _l: &str) -> MemoryResult<bool> {
         Ok(false)

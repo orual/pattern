@@ -56,7 +56,9 @@ mod parity {
         ("DisplayReq", &["Chunk", "Final", "Note"]),
         (
             "MemoryReq",
-            &["Read", "Write", "Append", "Search", "Recall", "Archive"],
+            &[
+                "Read", "Write", "Create", "Append", "Replace", "Search", "Recall", "Archive",
+            ],
         ),
         ("MessageReq", &["Ask", "Send", "Reply", "Notify"]),
         ("ShellReq", &["Execute", "Spawn", "Kill", "Status"]),
@@ -140,13 +142,23 @@ mod parity {
     #[test]
     fn memory_req_variants() {
         use super::MemoryReq;
+        use super::memory::{BlockTypeReq, SchemaKindReq};
         let _ = MemoryReq::Read(String::new());
-        let _ = MemoryReq::Write(String::new(), String::new());
+        let _ = MemoryReq::Write(String::new(), String::new(), None);
+        let _ = MemoryReq::Create(
+            String::new(),
+            String::new(),
+            BlockTypeReq::Working,
+            SchemaKindReq::Text,
+            None,
+            String::new(),
+        );
         let _ = MemoryReq::Append(String::new(), String::new());
+        let _ = MemoryReq::Replace(String::new(), String::new(), String::new());
         let _ = MemoryReq::Search(String::new());
         let _ = MemoryReq::Recall(String::new());
         let _ = MemoryReq::Archive(String::new());
-        assert_eq!(count("MemoryReq"), 6);
+        assert_eq!(count("MemoryReq"), 8);
     }
 
     #[test]

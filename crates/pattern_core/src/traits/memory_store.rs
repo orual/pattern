@@ -170,6 +170,14 @@ use crate::memory::{
 ///     ) -> MemoryResult<()> {
 ///         unimplemented!("dummy: satisfaction-only example; AC1.3")
 ///     }
+///     async fn update_block_description(
+///         &self,
+///         _a: &str,
+///         _l: &str,
+///         _d: &str,
+///     ) -> MemoryResult<()> {
+///         unimplemented!("dummy: satisfaction-only example; AC1.3")
+///     }
 ///     async fn undo_block(&self, _a: &str, _l: &str) -> MemoryResult<bool> {
 ///         unimplemented!("dummy: satisfaction-only example; AC1.3")
 ///     }
@@ -341,6 +349,16 @@ pub trait MemoryStore: Send + Sync + fmt::Debug {
         agent_id: &str,
         label: &str,
         schema: BlockSchema,
+    ) -> MemoryResult<()>;
+
+    /// Update a block's human-readable description.
+    ///
+    /// Returns `MemoryError::NotFound` if the block does not exist.
+    async fn update_block_description(
+        &self,
+        agent_id: &str,
+        label: &str,
+        description: &str,
     ) -> MemoryResult<()>;
 
     // ========== Undo/Redo Operations ==========

@@ -214,8 +214,7 @@ async fn checkpoint_restore_roundtrip_preserves_events() {
 
     // Serialize → deserialize to exercise the full wire contract
     // (JSON-as-opaque-data on `SessionSnapshot.data`).
-    let json =
-        serde_json::to_string(&snap).expect("SessionSnapshot should serialize to JSON");
+    let json = serde_json::to_string(&snap).expect("SessionSnapshot should serialize to JSON");
     let decoded: pattern_core::types::snapshot::SessionSnapshot =
         serde_json::from_str(&json).expect("SessionSnapshot should deserialize");
     assert_eq!(decoded.personas.len(), 1);
@@ -268,4 +267,79 @@ async fn runtime_shares_store_across_sessions() {
     );
     let mut s2 = runtime.open_session(persona2, None).await.expect("open 2");
     s2.step(fresh_turn_input()).await.expect("read");
+}
+
+/// The `memory_create` fixture exercises `Pattern.Memory.create`,
+/// `writeWithDesc`, and `replace` in one agent turn. After the step:
+///
+/// - the `notes` block exists with the final description set by
+///   `writeWithDesc`,
+/// - its type / schema match what `create` requested,
+/// - the content reflects `replace` applied after `writeWithDesc`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn memory_create_write_replace_end_to_end() {
+    preflight_or_fail();
+    let memory = Arc::new(InMemoryMemoryStore::new());
+    let runtime = TidepoolRuntime::with_default_sdk(memory.clone());
+
+    let persona = PersonaConfig::new(
+        "create-agent",
+        "CreateAgent",
+        include_str!("fixtures/memory_create.hs"),
+    );
+    let mut session = runtime
+        .open_session(persona, None)
+        .await
+        .expect("open create session");
+    session.step(fresh_turn_input()).await.expect("create turn");
+
+    // Verify metadata — description was updated by writeWithDesc.
+    let meta = pattern_core::traits::MemoryStore::get_block_metadata(
+        memory.as_ref(),
+        "create-agent",
+        "notes",
+    )
+    .await
+    .expect("get_block_metadata")
+    .expect("block notes should exist");
+    assert_eq!(
+        meta.description, "user notes (revised)",
+        "description should reflect writeWithDesc, not the original create value"
+    );
+    assert_eq!(meta.block_type, pattern_core::memory::BlockType::Working);
+    assert!(
+        meta.schema.is_text(),
+        "schema should be Text (as Created); got {:?}",
+        meta.schema
+    );
+
+    // Verify content — replace turned "first" into "HEAD" in the content
+    // written by writeWithDesc.
+    let content = pattern_core::traits::MemoryStore::get_rendered_content(
+        memory.as_ref(),
+        "create-agent",
+        "notes",
+    )
+    .await
+    .expect("get_rendered_content")
+    .expect("notes content should be present");
+    assert_eq!(content, "HEAD line\nsecond line");
+}
+
+/// Direct unit test against the in-memory store: `update_block_description`
+/// errors on a missing block. (Handler-level negative tests for Replace
+/// are covered by handler unit tests.)
+#[tokio::test]
+async fn update_block_description_on_missing_block_returns_not_found() {
+    let memory = InMemoryMemoryStore::new();
+    let err =
+        pattern_core::traits::MemoryStore::update_block_description(&memory, "who", "nope", "x")
+            .await
+            .expect_err("missing block should fail");
+    match err {
+        pattern_core::memory::MemoryError::NotFound { label, .. } => {
+            assert_eq!(label, "nope");
+        }
+        other => panic!("expected NotFound, got {other:?}"),
+    }
 }

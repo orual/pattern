@@ -1080,6 +1080,43 @@ impl MemoryStore for MemoryCache {
         Ok(())
     }
 
+    async fn update_block_description(
+        &self,
+        agent_id: &str,
+        label: &str,
+        description: &str,
+    ) -> MemoryResult<()> {
+        // Get block from DB
+        let block =
+            pattern_db::queries::get_block_by_label(self.db.pool(), agent_id, label).await?;
+
+        let block = block.ok_or_else(|| MemoryError::NotFound {
+            agent_id: agent_id.to_string(),
+            label: label.to_string(),
+        })?;
+
+        // Update in database via the shared update_block_config helper
+        // (only description is set; other fields are preserved).
+        pattern_db::queries::update_block_config(
+            self.db.pool(),
+            &block.id,
+            None,
+            None,
+            Some(description),
+            None,
+            None,
+        )
+        .await?;
+
+        // Update in cache if loaded.
+        if let Some(mut cached) = self.blocks.get_mut(&block.id) {
+            cached.doc.metadata_mut().description = description.to_string();
+            cached.last_accessed = Utc::now();
+        }
+
+        Ok(())
+    }
+
     async fn undo_block(&self, agent_id: &str, label: &str) -> MemoryResult<bool> {
         // Get block ID from DB
         let block =
