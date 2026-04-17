@@ -53,3 +53,56 @@ place the resulting binary on `$PATH` or export
 `pattern_runtime::preflight::check()` (Phase 3 Task 5) verifies the binary is
 reachable and returns a structured error pointing at this section when the
 setup is wrong. Run it at binary startup before opening any Session.
+
+## Authoring agent programs
+
+### SDK imports (current constraint)
+
+Agent programs import from the `Pattern.*` SDK module tree (installed at
+`$PATTERN_SDK_DIR` or `crates/pattern_runtime/haskell/Pattern/` by default):
+`Pattern.Time`, `Pattern.Log`, `Pattern.Memory`, `Pattern.Message`,
+`Pattern.Display`, plus `Pattern.Prelude` which re-exports the common subset.
+
+**Imports must be unqualified**:
+
+```haskell
+-- Works:
+import Pattern.Time
+import Pattern.Log
+-- With specific items (recommended for collision-aversion):
+import Pattern.Time (now, Instant, Duration, seconds)
+
+-- Does NOT work:
+import qualified Pattern.Time as Time
+-- then using `Time.now` — breaks.
+```
+
+**Why:** `pattern_runtime::tidepool::inline::inline_sdk_modules` preprocesses
+agent source by flattening `Pattern.*` dependencies into the combined module
+before `tidepool-extract` sees it. The flattening is a workaround for
+tidepool's current limitation: multi-module compilation succeeds at extract
+time but produces inconsistent `DataConTable` / `CoreExpr` state at JIT time
+(manifests as `[CASE TRAP]` / `Jit(Yield(Undefined))`). The `haskell_inline!`
+build-time macro in tidepool's own ecosystem uses the same flattening trick
+for the same reason.
+
+After flattening, the `Pattern.X` namespaces no longer exist as modules —
+their top-level bindings are in scope directly. Qualified aliases
+(`as Time`) become dangling references.
+
+**Mitigation strategies** if a collision between SDK modules becomes a
+problem:
+
+- Use the explicit-list import form: `import Pattern.Time (now, Instant)` and
+  `import Pattern.Log (info)` — only the listed names enter scope.
+- Rename on import: `import Pattern.Time (now as timeNow)` where Haskell's
+  `import` syntax allows.
+- If the collision is unavoidable, inline a specific identifier in the agent
+  source directly instead of importing it.
+
+**This is provisional.** If upstream tidepool fixes multi-module DataCon
+handling (tracking issue: the `investigation/multi-module-datacon-tags`
+branch), the inliner becomes a no-op and qualified imports work natively.
+At that point this section collapses to a one-liner. See
+`crates/pattern_runtime/src/tidepool/inline.rs` for the current preprocessor
+implementation.
