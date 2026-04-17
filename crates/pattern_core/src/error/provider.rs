@@ -191,6 +191,30 @@ pub enum ProviderError {
         retry_after: Duration,
     },
 
+    /// Request shaper is missing required configuration (e.g. empty `x_app`,
+    /// banned beta header set, etc.). Raised at shaper construction time
+    /// rather than at request time — AC5.5.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::ProviderError;
+    ///
+    /// let err = ProviderError::ShaperMisconfigured {
+    ///     reason: "x_app cannot be empty".into(),
+    /// };
+    /// assert!(err.to_string().contains("x_app"));
+    /// ```
+    #[error("request shaper misconfigured: {reason}")]
+    #[diagnostic(
+        code(pattern_core::provider::shaper_misconfigured),
+        help("check the shaper config passed to the gateway construction")
+    )]
+    ShaperMisconfigured {
+        /// Human-readable description of the misconfiguration.
+        reason: String,
+    },
+
     /// No credential tier could resolve a usable credential for the provider.
     ///
     /// Surfaced by `pattern_provider::auth` when every tier in a provider's

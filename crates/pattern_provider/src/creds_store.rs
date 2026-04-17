@@ -123,7 +123,10 @@ impl CredsStore for CredsStoreResolver {
             // One unavailable, other succeeded → log + succeed (forget is best-effort)
             (Err(ProviderError::CredentialStoreUnavailable), Ok(()))
             | (Ok(()), Err(ProviderError::CredentialStoreUnavailable)) => {
-                tracing::warn!(provider, "one creds-store backend unavailable during delete");
+                tracing::warn!(
+                    provider,
+                    "one creds-store backend unavailable during delete"
+                );
                 Ok(())
             }
             // Any non-Unavailable error propagates
@@ -141,7 +144,8 @@ mod tests {
 
     /// Test double: configurable CredsStore behaviour per-call.
     struct MockStore {
-        get_fn: Mutex<Box<dyn FnMut(&str) -> Result<Option<ProviderCredential>, ProviderError> + Send>>,
+        get_fn:
+            Mutex<Box<dyn FnMut(&str) -> Result<Option<ProviderCredential>, ProviderError> + Send>>,
         put_fn: Mutex<Box<dyn FnMut(&ProviderCredential) -> Result<(), ProviderError> + Send>>,
         delete_fn: Mutex<Box<dyn FnMut(&str) -> Result<(), ProviderError> + Send>>,
     }
@@ -202,7 +206,10 @@ mod tests {
         };
 
         let resolver = CredsStoreResolver::new(primary, fallback);
-        let result = resolver.get("anthropic").await.expect("fallback should succeed");
+        let result = resolver
+            .get("anthropic")
+            .await
+            .expect("fallback should succeed");
         let fetched = result.expect("token should be present");
         assert_eq!(fetched.provider, "anthropic");
     }
@@ -221,7 +228,10 @@ mod tests {
         );
 
         let resolver = CredsStoreResolver::new(primary, fallback);
-        let err = resolver.get("anthropic").await.expect_err("both unavailable");
+        let err = resolver
+            .get("anthropic")
+            .await
+            .expect_err("both unavailable");
         assert!(matches!(err, ProviderError::CredentialStoreUnavailable));
     }
 
@@ -243,7 +253,10 @@ mod tests {
         );
 
         let resolver = CredsStoreResolver::new(primary, fallback);
-        let err = resolver.get("anthropic").await.expect_err("corruption propagates");
+        let err = resolver
+            .get("anthropic")
+            .await
+            .expect_err("corruption propagates");
         assert!(matches!(
             err,
             ProviderError::CredentialStorage { reason } if reason.contains("corrupt")
@@ -271,7 +284,10 @@ mod tests {
         };
 
         let resolver = CredsStoreResolver::new(primary, fallback);
-        resolver.put(&sample_token()).await.expect("fallback write should succeed");
+        resolver
+            .put(&sample_token())
+            .await
+            .expect("fallback write should succeed");
         assert_eq!(*fallback_calls.lock().unwrap(), 1);
     }
 }
