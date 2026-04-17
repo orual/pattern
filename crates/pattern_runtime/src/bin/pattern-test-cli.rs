@@ -96,6 +96,19 @@ enum Cmd {
         #[arg(long, default_value = "")]
         persona: String,
     },
+
+    /// Clear pattern's stored credentials for a provider.
+    ///
+    /// Removes the entry from both the keyring (primary store) and the
+    /// JSON fallback at `$XDG_CONFIG_HOME/pattern/creds/<provider>.json`.
+    /// Does NOT touch claude-code's own `~/.claude/.credentials.json` —
+    /// that file is read-only from pattern's side. After clearing,
+    /// the next `auth` run falls through to session-pickup (if
+    /// claude-code's file is valid) or to the PKCE flow.
+    Clear {
+        #[arg(long, value_enum, default_value_t = ProviderKind::Anthropic)]
+        provider: ProviderKind,
+    },
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -162,6 +175,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             shaper,
             persona,
         } => cmd_ask(provider, model, prompt, shaper, persona).await,
+        Cmd::Clear { provider } => cmd_clear(provider).await,
     }
 }
 
@@ -303,6 +317,38 @@ async fn cmd_ask(
         std::process::exit(3);
     }
     Ok(())
+}
+
+// ---- clear ----
+
+async fn cmd_clear(provider: ProviderKind) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(feature = "subscription-oauth")]
+    {
+        use pattern_provider::creds_store::{
+            CredsStore, CredsStoreResolver, JsonFallbackStore, KeyringStore,
+        };
+
+        let primary: Arc<dyn CredsStore> = Arc::new(KeyringStore::new());
+        let fallback: Arc<dyn CredsStore> = Arc::new(JsonFallbackStore::new()?);
+        let store = CredsStoreResolver::new(primary, fallback);
+
+        eprintln!(
+            "clearing stored credentials for provider={} (keyring + JSON fallback)",
+            provider.as_str()
+        );
+        eprintln!("  NOTE: claude-code's ~/.claude/.credentials.json is NOT touched.");
+
+        store.delete(provider.as_str()).await?;
+        eprintln!("✓ cleared. next `auth` run will fall through to session-pickup or PKCE.");
+        Ok(())
+    }
+    #[cfg(not(feature = "subscription-oauth"))]
+    {
+        let _ = provider;
+        Err("clear requires the `subscription-oauth` feature (keyring + JSON fallback are \
+             only compiled in under that feature)"
+            .into())
+    }
 }
 
 // ---- chain construction ----
