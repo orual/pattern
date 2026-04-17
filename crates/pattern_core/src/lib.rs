@@ -6,8 +6,6 @@
 
 pub mod config;
 pub mod context;
-pub mod coordination;
-pub mod data_source;
 pub mod db;
 pub mod embeddings;
 pub mod error;
@@ -22,7 +20,6 @@ pub mod oauth;
 pub mod permission;
 pub mod queue;
 pub mod realtime;
-pub mod tool;
 pub mod utils;
 
 #[cfg(test)]
