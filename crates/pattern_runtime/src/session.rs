@@ -27,8 +27,8 @@ use crate::sdk::bundle::SdkBundle;
 use crate::sdk::handlers::{
     DisplayHandler, LogHandler, MemoryHandler, MessageHandler, TimeHandler,
 };
-use crate::timeout::{Budget, CancelState};
 use crate::tidepool::{SessionMachine, compile_program};
+use crate::timeout::{Budget, CancelState};
 
 /// Session-scoped context threaded into every handler as the
 /// [`tidepool_effect::EffectContext::user`] value.
@@ -51,6 +51,44 @@ pub struct SessionContext {
     budget: Budget,
     cancel_state: Arc<CancelState>,
     memory_store: Arc<dyn MemoryStore>,
+}
+
+/// Handlers call this to decide whether to short-circuit on soft-cancel.
+///
+/// The session's `SessionContext` implements this to expose the shared
+/// [`CancelState`]; the no-op blanket impl on `()` lets existing unit
+/// tests keep passing `&()` as the user context.
+pub trait HasCancelState {
+    /// Shared cancel state used by the watchdog + handlers. A no-op
+    /// implementation (e.g. on `()`) may return a fresh, unrelated
+    /// state — handlers will just observe `false` and proceed.
+    fn cancel_state(&self) -> Arc<CancelState>;
+}
+
+impl HasCancelState for SessionContext {
+    fn cancel_state(&self) -> Arc<CancelState> {
+        SessionContext::cancel_state(self)
+    }
+}
+
+impl HasCancelState for () {
+    fn cancel_state(&self) -> Arc<CancelState> {
+        // Return a freshly allocated, never-cancelled state. Handlers
+        // using this context effectively bypass the cancellation check.
+        thread_local! {
+            static NEVER: std::cell::RefCell<Option<Arc<CancelState>>> =
+                const { std::cell::RefCell::new(None) };
+        }
+        NEVER.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            if let Some(s) = slot.as_ref() {
+                return s.clone();
+            }
+            let fresh = Arc::new(CancelState::new());
+            *slot = Some(fresh.clone());
+            fresh
+        })
+    }
 }
 
 impl SessionContext {
@@ -205,14 +243,14 @@ impl TidepoolSession {
         // task (holding a std::sync::MutexGuard across `.await` would
         // block the executor thread).
         let (mut machine, mut bundle) = {
-            let mut inner = self
-                .inner
-                .lock()
-                .map_err(|_| RuntimeError::JoinError { reason: "inner mutex poisoned".into() })?;
+            let mut inner = self.inner.lock().map_err(|_| RuntimeError::JoinError {
+                reason: "inner mutex poisoned".into(),
+            })?;
             if inner.poisoned {
                 return Err(RuntimeError::SessionPoisoned {
-                    reason: "previous turn hard-abandoned due to runaway compute without effect yields"
-                        .into(),
+                    reason:
+                        "previous turn hard-abandoned due to runaway compute without effect yields"
+                            .into(),
                 });
             }
             inner.turn_counter += 1;
@@ -279,9 +317,31 @@ impl TidepoolSession {
             outcome = &mut watchdog => {
                 match outcome {
                     Ok(crate::timeout::BoundedOutcome::HardAbandoned { wall_ms, cpu_ms }) => {
-                        // Detach the JIT task; we can't stop it but we stop
-                        // waiting on it. The machine + bundle are leaked to
-                        // the detached task; the session becomes poisoned.
+                        // The watchdog escalated because cooperative
+                        // cancellation couldn't be delivered: no effect
+                        // entries observed after the soft-cancel flag
+                        // flipped. We "abandon" the blocking task, but
+                        // that does NOT stop the OS thread — tokio
+                        // blocking threads cannot be preempted, and
+                        // tidepool has no external interrupt API yet.
+                        // The thread keeps consuming CPU until process
+                        // exit. Make this loud so operators notice
+                        // accumulated undead JIT threads.
+                        tracing::warn!(
+                            session_id = %self.session_id,
+                            wall_ms,
+                            cpu_ms,
+                            "hard-abandon: JIT thread detached and will continue consuming CPU \
+                             until process exit; upstream interrupt support tracked for tidepool \
+                             (cancel_flag in gc_trigger)"
+                        );
+                        // TODO(phase-deferred): upstream AtomicBool
+                        // cancel_flag on JitEffectMachine, checked in
+                        // gc_trigger, triggers
+                        // runtime_user_error_cancelled. Swap drop() for
+                        // cancel_handle.store(true) + await jit_handle.
+                        // Tracked separately — a parallel agent will
+                        // land the tidepool patch.
                         if let Ok(mut inner) = self.inner.lock() {
                             inner.poisoned = true;
                         }
@@ -331,11 +391,12 @@ impl Session for TidepoolSession {
     }
 
     async fn checkpoint(&self) -> Result<SessionSnapshot, RuntimeError> {
-        let log = self.checkpoint_log.lock().map_err(|_| {
-            RuntimeError::CheckpointFailed {
+        let log = self
+            .checkpoint_log
+            .lock()
+            .map_err(|_| RuntimeError::CheckpointFailed {
                 reason: "checkpoint log mutex poisoned".into(),
-            }
-        })?;
+            })?;
         log.snapshot(&self.session_id, self.ctx.agent_id())
     }
 
@@ -345,11 +406,12 @@ impl Session for TidepoolSession {
         // with the restored events so the next `step` replays them through
         // a `ReplayingBundle`. Phase 3 scope stores events verbatim;
         // follow-up phases plug this into the run loop.
-        let mut log = self.checkpoint_log.lock().map_err(|_| {
-            RuntimeError::CheckpointFailed {
+        let mut log = self
+            .checkpoint_log
+            .lock()
+            .map_err(|_| RuntimeError::CheckpointFailed {
                 reason: "checkpoint log mutex poisoned".into(),
-            }
-        })?;
+            })?;
         log.reset_to(events);
         Ok(())
     }

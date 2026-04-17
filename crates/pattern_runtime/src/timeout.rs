@@ -345,4 +345,77 @@ mod tests {
         let msg = format!("{}: cancelled at Pattern.Time.Now", CANCELLED_SENTINEL);
         assert!(msg.contains(CANCELLED_SENTINEL));
     }
+
+    /// When budget is exhausted and no handler entries are observed,
+    /// the watchdog escalates to HardAbandoned after the
+    /// hard_abandon_threshold elapses.
+    ///
+    /// This tests the watchdog in isolation — no JIT, no blocking
+    /// thread to leak. We drive `CancelState` from the test itself.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn watchdog_escalates_to_hard_abandon_when_no_effects_seen() {
+        let state = Arc::new(CancelState::new());
+        let budget = Budget {
+            wall: Duration::from_millis(50),
+            cpu: Duration::from_millis(50),
+            hard_abandon_threshold: Duration::from_millis(100),
+        };
+        let handle = spawn_watchdog(state.clone(), budget, Duration::from_millis(10));
+        let outcome = tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("watchdog should terminate within 2s")
+            .expect("watchdog task should not panic");
+        match outcome {
+            BoundedOutcome::HardAbandoned { wall_ms, cpu_ms } => {
+                assert!(
+                    wall_ms >= 50,
+                    "expected wall budget consumed ({wall_ms}ms)"
+                );
+                assert!(
+                    cpu_ms >= 50,
+                    "expected cpu budget consumed ({cpu_ms}ms)"
+                );
+                assert!(state.is_cancelled(), "soft-cancel flag should be set too");
+            }
+            other => panic!("expected HardAbandoned, got {other:?}"),
+        }
+    }
+
+    /// When handlers keep entering the gate (simulating cooperative
+    /// yielding), the watchdog does NOT escalate to hard-abandon — it
+    /// just waits for the cooperative soft-cancel to be observed.
+    /// We verify this indirectly by asserting the watchdog is still
+    /// running after several budget periods have elapsed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn watchdog_does_not_escalate_while_handlers_yield() {
+        let state = Arc::new(CancelState::new());
+        let budget = Budget {
+            wall: Duration::from_millis(50),
+            cpu: Duration::from_millis(50),
+            hard_abandon_threshold: Duration::from_millis(500),
+        };
+        let handle = spawn_watchdog(state.clone(), budget, Duration::from_millis(10));
+
+        // Simulate an agent that enters a handler, runs briefly, and
+        // loops back into another handler — i.e. it's yielding.
+        let yielder = {
+            let state = state.clone();
+            tokio::spawn(async move {
+                for _ in 0..20 {
+                    let _g = HandlerGuard::enter(&state.gate);
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+        };
+        yielder.await.expect("yielder panic");
+
+        // By now ~200ms has elapsed but handlers entered every 10ms
+        // keeping `last_entry_observed_at` fresh. Watchdog should
+        // still be waiting (not yet HardAbandoned).
+        assert!(
+            !handle.is_finished(),
+            "watchdog should not have escalated while handlers yielded"
+        );
+        handle.abort();
+    }
 }

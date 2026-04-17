@@ -58,7 +58,8 @@ impl EffectHandler<SessionContext> for MemoryHandler {
     ) -> Result<Value, EffectError> {
         // Soft-cancel check — if the watchdog has set the flag, return
         // the sentinel error and let the JIT unwind.
-        if cx.user().cancel_state().cancellation.load(Ordering::SeqCst) {
+        let state = cx.user().cancel_state();
+        if state.cancellation.load(Ordering::SeqCst) {
             return Err(EffectError::Handler(format!(
                 "{CANCELLED_SENTINEL}: memory handler cancelled at entry"
             )));
@@ -66,8 +67,7 @@ impl EffectHandler<SessionContext> for MemoryHandler {
 
         // Gate entry: pauses the watchdog's budget accumulation while we
         // do I/O-bound work. RAII guarantees exit on error / panic.
-        let gate = cx.user().cancel_state();
-        let _guard = HandlerGuard::enter(&gate.gate);
+        let _guard = HandlerGuard::enter(&state.gate);
 
         let agent_id = cx.user().agent_id().to_string();
         let store = self.store.clone();

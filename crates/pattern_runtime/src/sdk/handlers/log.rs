@@ -28,10 +28,20 @@ impl LogHandler {
     }
 }
 
-impl<U> EffectHandler<U> for LogHandler {
+impl<U> EffectHandler<U> for LogHandler
+where
+    U: crate::session::HasCancelState,
+{
     type Request = LogReq;
 
     fn handle(&mut self, req: LogReq, cx: &EffectContext<'_, U>) -> Result<Value, EffectError> {
+        // Soft-cancel cooperative check (see TimeHandler).
+        if cx.user().cancel_state().cancellation.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(EffectError::Handler(format!(
+                "{}: log handler cancelled at entry",
+                crate::timeout::CANCELLED_SENTINEL,
+            )));
+        }
         let sid = self.session_id.as_deref().unwrap_or("unknown");
         match req {
             LogReq::Debug(msg) => debug!(session = sid, source = "agent", "{msg}"),

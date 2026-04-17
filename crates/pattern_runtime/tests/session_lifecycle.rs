@@ -182,7 +182,7 @@ async fn checkpoint_restore_roundtrip_preserves_events() {
         "CpRoundtrip",
         include_str!("fixtures/time_log.hs"),
     );
-    let mut session = runtime.open_session(persona, None).await.expect("open");
+    let session = runtime.open_session(persona, None).await.expect("open");
 
     // Seed the event log so there's something to round-trip. Phase 3
     // handlers do not yet write to the log during `step` (that wiring

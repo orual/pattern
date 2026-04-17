@@ -13,7 +13,12 @@
     # via flake.lock; bump with `nix flake update tidepool` when chasing
     # upstream API changes. When iterating against local tidepool changes,
     # use `nix develop --override-input tidepool path:../tidepool`.
-    tidepool.url = "github:tidepool-heavy-industries/tidepool";
+    #
+    # Currently pointed at our fork (orual/tidepool). Tracks upstream main
+    # with Pattern-needed fixes (multi-module DataCon tag mismatch; planned
+    # external-cancellation) applied on top. Fixes have pending upstream PRs;
+    # swap back to `tidepool-heavy-industries/tidepool` once they merge.
+    tidepool.url = "github:orual/tidepool";
 
     git-hooks.url = "github:cachix/git-hooks.nix";
     git-hooks.flake = false;

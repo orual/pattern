@@ -20,10 +20,23 @@ const MAX_SLEEP_NS: i64 = 100_000_000;
 #[derive(Default)]
 pub struct TimeHandler;
 
-impl<U> EffectHandler<U> for TimeHandler {
+impl<U> EffectHandler<U> for TimeHandler
+where
+    U: crate::session::HasCancelState,
+{
     type Request = TimeReq;
 
     fn handle(&mut self, req: TimeReq, cx: &EffectContext<'_, U>) -> Result<Value, EffectError> {
+        // Soft-cancel cooperative check: the watchdog may have flipped
+        // the session's cancellation flag while we were running agent
+        // compute between effect yields. Surface the documented sentinel
+        // so `run_turn` maps it to a CancelPath::Soft timeout.
+        if cx.user().cancel_state().cancellation.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(EffectError::Handler(format!(
+                "{}: time handler cancelled at entry",
+                crate::timeout::CANCELLED_SENTINEL,
+            )));
+        }
         match req {
             TimeReq::Now => {
                 // jiff::Timestamp is an explicit UTC instant with nanosecond precision.

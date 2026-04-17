@@ -143,6 +143,16 @@ fn map_yield_error(y: YieldError) -> JitOutcome {
         | YieldError::BadEFields(_)
         | YieldError::BadUnionFields(_)
         | YieldError::NullPointer => JitOutcome::Runtime(RuntimeError::RuntimeCrashed),
+
+        // External cancellation observed at a JIT safepoint (cancel_handle().cancel()
+        // fired, JIT hit a heap check / trampoline and bailed). This is expected when
+        // the session-level watchdog hard-abandons — the session layer catches the
+        // returned JitError and promotes it to `Timeout { path: HardAbandon }` with
+        // wall/cpu bookkeeping. If the error reaches this mapping (i.e., cancel fired
+        // without an active hard-abandon flow) treat it as a crash since we lost the
+        // context. Phase 3 followup: session.rs to wire cancel_handle into the
+        // watchdog race so this arm becomes dead code in the normal flow.
+        YieldError::Cancelled => JitOutcome::Runtime(RuntimeError::RuntimeCrashed),
     }
 }
 
