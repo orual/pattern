@@ -1,19 +1,20 @@
 {-# LANGUAGE DataKinds, TypeOperators, OverloadedStrings #-}
--- | Cross-module DataCon collision validation fixture.
+-- | Cross-module dispatch validation fixture.
 --
--- Exercises the hardest Memory/File collision: both modules have a
--- `Read :: String -> _` constructor with identical unqualified name AND
--- identical arity. The earlier arity-disambiguation fix couldn't help
--- these; only module-qualified lookup (the `#[core(module = "...")]`
--- derive attribute) can pick the right DataCon.
+-- The SDK today uses distinct unqualified constructor names across the
+-- two modules: Memory exposes `Get`/`Put` (KV semantics) and File
+-- exposes `Read`/`Write` (file semantics), so there is no naming
+-- collision at decode time. This fixture exercises cross-module
+-- dispatch anyway — regression guard against a future rename that
+-- might reintroduce an unqualified-name overlap; the derive layer's
+-- arity disambiguation + module-qualified lookup must continue to work.
 --
--- The agent calls both `M.read_` and `F.read_` in sequence. Decode must
--- succeed for both; dispatch then routes Memory.Read to the real handler
--- (errors with "no block named ..." — expected, the block was never
--- created) and File.Read to the stub (errors with "Pattern.File is not
--- implemented" — expected). The test asserts neither surfaces as
--- `UnknownDataConQualified` / `UnknownDataConNameArity`, which would
--- indicate a decode-path regression.
+-- The agent calls `M.put`, `M.get`, and `F.read_` in sequence. Decode
+-- must succeed for all three; dispatch then routes the Memory ops to
+-- the real MemoryHandler (Put auto-creates, Get reads it back) and
+-- File.Read to the stub (which errors with "not implemented" —
+-- expected). The test asserts no `UnknownDataCon*` error appears,
+-- guarding against decode-path regressions.
 --
 -- Effect-row positions match SdkBundle:
 --   0=Memory, 1=Message, 2=Display, 3=Time, 4=Log,

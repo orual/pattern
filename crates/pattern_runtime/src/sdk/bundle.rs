@@ -7,15 +7,17 @@
 //!
 //! **Why Prelude-5-first (historical note):** originally this ordering was
 //! required to avoid DataCon name collisions: tidepool-bridge looked up
-//! constructors by unqualified name, which failed when e.g. both
-//! `Pattern.Memory.Read` and `Pattern.File.Read` existed in the same
-//! DataConTable. The fork at `github:orual/tidepool` (commit 16b6ead)
-//! switched `FromCore`/`ToCore` codegen to `get_by_name_arity`, which
-//! disambiguates by arity — `Memory.Write` (arity 3) and `File.Write`
-//! (arity 2) now resolve correctly. Prelude-5-first is kept for
-//! backwards compatibility and because the remaining ambiguous pair
-//! (`Memory.Read` / `File.Read`, both arity 1) still requires agents to
-//! avoid importing both unqualified simultaneously.
+//! constructors by unqualified name, which failed when distinct modules
+//! declared same-named constructors. The fork at `github:orual/tidepool`
+//! first added `get_by_name_arity` (arity disambiguation) and later
+//! module-qualified lookup via `#[core(module = "Pattern.<Module>",
+//! name = "...")]`. Memory uses `Get`/`Put` (KV semantics) rather than
+//! `Read`/`Write`, so the remaining residual collisions (e.g. both
+//! `Memory.Get` and no `File.Get`) are handled entirely at the
+//! derive-layer disambiguation stage — agent programs can mix
+//! unqualified imports across all eleven modules without ambiguity in
+//! current Pattern. Prelude-5-first is kept for backwards compatibility
+//! and authoring clarity.
 //!
 //! Individual handler structs remain available for ad-hoc bundles (see
 //! `crate::sdk::handlers`).

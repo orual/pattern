@@ -4994,6 +4994,7 @@ dependencies = [
  "jiff",
  "miette",
  "pattern-core",
+ "pattern-runtime",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

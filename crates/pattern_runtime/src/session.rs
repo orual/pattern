@@ -247,8 +247,12 @@ impl TidepoolSession {
     /// short-circuit on its own without having to reproduce the exact
     /// race conditions that cause the real `run_turn` path to flip it
     /// (the JoinError branch is inherently non-deterministic under
-    /// test). Kept `#[doc(hidden)]` so it does not appear in the public
-    /// API surface, but `pub` so integration tests can reach it.
+    /// test).
+    ///
+    /// Feature-gated behind `test-hooks` so this never leaks into
+    /// downstream consumers' builds. Pattern's own integration tests
+    /// enable the feature via the self-dev-dep in `Cargo.toml`.
+    #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn __poison_for_tests(&self) {
         if let Ok(mut inner) = self.inner.lock() {

@@ -11,10 +11,12 @@
 //! replay will freeze time at the recorded timestamp when the replay
 //! bundle ships).
 //!
-//! CBOR is used via `serde_cbor` for the on-wire shape of each exchange
-//! so both requests and responses (represented as
-//! [`tidepool_eval::Value`]) survive a round-trip. Values are already
-//! serde-serialisable in `tidepool-eval`.
+//! JSON via `serde_json` is used for the on-wire shape of each
+//! exchange: `CheckpointEvent` is `Serialize`/`Deserialize` with plain
+//! string representations of request / response values, because
+//! [`tidepool_eval::Value`] itself contains closure data that cannot
+//! round-trip through any structured serde format. See the comment on
+//! [`CheckpointEvent::request_repr`] for the shape rationale.
 
 use pattern_core::error::RuntimeError;
 use pattern_core::types::ids::new_id;
@@ -29,8 +31,9 @@ use tidepool_eval::Value;
 ///
 /// [`tidepool_eval::Value`] does not implement `serde::Serialize` /
 /// `Deserialize` — it contains function pointers and closure data that
-/// cannot round-trip. For replay to be faithful we would need CBOR via
-/// `tidepool_repr`, but that payload is not yet stabilised. Phase 3
+/// cannot round-trip. For replay to be faithful we would need a
+/// structured wire format via `tidepool_repr`, but that payload is not
+/// yet stabilised. Phase 3
 /// lands the event-log plumbing with a debug-string shape so tests can
 /// assert sequence + tag ordering and snapshot/restore round-trips
 /// survive without information loss on those fields. Faithful replay

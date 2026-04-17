@@ -2,11 +2,14 @@
 //!
 //! Every variant carries `#[core(module = "Pattern.Memory", name = "...")]`
 //! so `FromCore` dispatches via `get_by_qualified_name` — fully
-//! disambiguating against other SDK modules even when name+arity collide
-//! (e.g. `Pattern.Memory.Read` vs `Pattern.File.Read`, both `Read :: String
-//! -> ...`). The `Block*` / `Schema*` prefixes on the nested enums remain
-//! only for source-level clarity; disambiguation is now
-//! name-qualification rather than name-prefixing.
+//! disambiguating against other SDK modules even if a future rename
+//! reintroduced a name+arity collision. Pattern's current SDK already
+//! uses distinct unqualified names across modules (Memory uses
+//! `Get`/`Put`, File uses `Read`/`Write`), but the module-qualified
+//! derive attribute is kept as defense in depth. The `Block*` /
+//! `Schema*` prefixes on the nested enums remain only for source-level
+//! clarity; disambiguation is name-qualification rather than
+//! name-prefixing.
 
 use tidepool_bridge_derive::FromCore;
 

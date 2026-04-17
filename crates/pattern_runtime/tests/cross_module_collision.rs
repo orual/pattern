@@ -5,23 +5,25 @@
 //! overlaps in the SDK:
 //!
 //! - **Arity disambiguation** (`get_by_name_arity`) handles constructors
-//!   sharing an unqualified name but differing in arity — e.g. `Memory.Write`
-//!   (arity 3) vs `File.Write` (arity 2).
+//!   sharing an unqualified name but differing in arity — e.g. a
+//!   hypothetical `Foo.Write` (arity 3) vs another module's `Write`
+//!   (arity 2).
 //! - **Module qualification** (`get_by_qualified_name`, via
 //!   `#[core(module = "Pattern.<Module>", name = "...")]`) handles the
-//!   residual case where name AND arity collide — e.g. `Memory.Read` and
-//!   `File.Read`, both `Read :: String -> ...` (arity 1).
+//!   residual case where name AND arity collide — e.g. if two modules
+//!   both declared `Read :: String -> ...` at the same arity.
 //!
-//! This agent exercises both: `M.write "greeting" "hello"` (arity 3
-//! Memory.Write), `M.read_ "greeting"` (arity 1 Memory.Read), and
-//! `F.read_ "/does/not/exist"` (arity 1 File.Read). Without module
-//! qualification the two arity-1 Reads are indistinguishable.
+//! Pattern's current SDK uses `Memory.Get` / `Memory.Put` (not
+//! `Read`/`Write`) and `File.Read` / `File.Write`, so there is no
+//! unqualified-name collision at all in practice — this test still
+//! exercises the disambiguation layers defensively, and documents the
+//! decode contract so a future SDK rename cannot silently regress.
 //!
 //! Assertions:
 //! - No `UnknownDataConQualified`, `UnknownDataConNameArity`, or
 //!   `UnknownDataCon` error appears — every DataCon decode succeeds.
-//! - The program errors at the dispatch/handler layer (File stub or
-//!   missing-block for Memory.Read), which confirms effects routed correctly.
+//! - The program errors at the dispatch/handler layer (File stub or a
+//!   Memory-layer error), which confirms effects routed correctly.
 //!
 //! STOP condition: any decode-level error signals the module-qualification
 //! fix is not reaching the SDK request types.
@@ -49,22 +51,28 @@ fn fresh_turn_input() -> TurnInput {
     }
 }
 
-/// Core validation: `Memory.Read`, `Memory.Write`, and `File.Read` all
+/// Core validation: `Memory.Put`, `Memory.Get`, and `File.Read` all
 /// dispatch correctly when the agent imports both modules simultaneously.
 ///
 /// The agent (`fixtures/cross_module_collision.hs`) emits three decode
-/// events exercising both disambiguation paths:
-///   1. `M.write "greeting" "hello"` → `Memory.Write` at arity 3 (arity
-///      disambiguates from `File.Write` at arity 2)
-///   2. `M.read_ "greeting"`         → `Memory.Read` at arity 1 (module
-///      disambiguates from `File.Read` at arity 1)
-///   3. `F.read_ "/does/not/exist"`  → `File.Read` at arity 1 (module
-///      disambiguates from `Memory.Read` at arity 1)
+/// events exercising the dispatcher across two modules:
+///   1. `M.put "greeting" "hello"` → `Memory.Put` at arity 3 (distinct
+///      unqualified name from anything in `File`)
+///   2. `M.get "greeting"`         → `Memory.Get` at arity 1 (distinct
+///      unqualified name from `File.Read`)
+///   3. `F.read_ "/does/not/exist"` → `File.Read` at arity 1 (distinct
+///      unqualified name from `Memory.Get`)
 ///
-/// Expected outcome: every DataCon decode succeeds. The program surfaces a
-/// handler-layer error (Memory.Read fails because the block was never
-/// created; or the File stub errors first with "not implemented") — NOT a
-/// decode-layer error.
+/// In the current SDK the three constructor names are already distinct,
+/// so plain name-based lookup is sufficient. The test is retained as a
+/// regression guard: if a future rename reintroduces a collision, the
+/// arity-disambiguation + module-qualification layers must continue to
+/// resolve correctly.
+///
+/// Expected outcome: every DataCon decode succeeds. The program surfaces
+/// a handler-layer error (Memory.Get fails because the block was never
+/// created, or the File stub errors first with "not implemented") — NOT
+/// a decode-layer error.
 ///
 /// STOP guard: test panics if any `UnknownDataCon*` variant appears in the
 /// error, indicating the fix is not flowing through to the SDK request

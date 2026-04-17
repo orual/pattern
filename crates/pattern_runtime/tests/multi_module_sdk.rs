@@ -93,9 +93,12 @@ agent = do
 /// via the inliner. If this test passes, the inliner is fully redundant:
 /// the multi-module path handles both qualified and unqualified import styles.
 ///
-/// Note: unqualified multi-module imports can still produce name collisions
-/// (e.g. `Memory.Read` vs `File.Read` both expose `Read` into scope), but
-/// for `Time` and `Log` there are no collisions, so this should succeed.
+/// Note: unqualified imports only cause ambiguity when two modules expose
+/// the same unqualified constructor. Pattern's current SDK is collision-
+/// free at the unqualified layer (Memory uses `Get`/`Put`, File uses
+/// `Read`/`Write`, etc.), but mixing Haskell-level re-exports could still
+/// reintroduce ambiguity — this test confirms the simple `Time` + `Log`
+/// pair compiles cleanly without any inliner preprocessing.
 #[test]
 fn unqualified_imports_direct() {
     pattern_runtime::preflight::check()

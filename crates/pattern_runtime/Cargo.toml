@@ -6,6 +6,14 @@ edition.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Expose test-only hooks on pattern_runtime's public surface so
+# integration tests can deterministically drive paths that the
+# production API deliberately hides (e.g. session poisoning). Never
+# enable this for downstream consumers — the hooks are not part of the
+# stable API contract.
+test-hooks = []
+
 [dependencies]
 pattern-core = { path = "../pattern_core" }
 tidepool-runtime = { workspace = true }
@@ -31,3 +39,9 @@ tokio          = { workspace = true, features = ["rt-multi-thread", "test-util",
 tidepool-testing = { workspace = true }
 tracing-test   = { workspace = true }
 tracing-subscriber = { workspace = true }
+# Self-reference enabling the `test-hooks` feature only for this
+# crate's own integration tests. Cargo permits `dep:self` style
+# reachability: the integration test binaries link against the library
+# crate with the feature enabled, while downstream users of this crate
+# see no feature turned on unless they opt in explicitly.
+pattern-runtime = { path = ".", features = ["test-hooks"] }

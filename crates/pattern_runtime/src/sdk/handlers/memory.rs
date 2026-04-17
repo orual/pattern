@@ -91,10 +91,10 @@ impl EffectHandler<SessionContext> for MemoryHandler {
             MemoryReq::Get(label) => {
                 let text = handle
                     .block_on(store.get_rendered_content(&agent_id, &label))
-                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Read: {e}")))?
+                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Get: {e}")))?
                     .ok_or_else(|| {
                         EffectError::Handler(format!(
-                            "Pattern.Memory.Read: no block named {label:?} for agent {agent_id:?}"
+                            "Pattern.Memory.Get: no block named {label:?} for agent {agent_id:?}"
                         ))
                     })?;
                 cx.respond(text)
@@ -108,7 +108,7 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                         &content,
                         description.as_deref(),
                     ))
-                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Write: {e}")))?;
+                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Put: {e}")))?;
                 cx.respond(())
             }
             MemoryReq::Create(label, description, block_type, schema_kind, char_limit, initial) => {

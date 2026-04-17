@@ -7,10 +7,9 @@
 //! identifies the File handler.
 //!
 //! A custom 1-element HList is used to test FileHandler in isolation. The
-//! agent source imports only Pattern.File so no DataCon name collisions can
-//! arise even for constructors that still share both name and arity with
-//! other modules (e.g. `File.Read` and `Memory.Read` are both arity 1).
-//! For the multi-module collision validation test, see
+//! agent source imports only Pattern.File so no cross-module DataCon
+//! ambiguity can arise regardless of SDK-rename history. For the
+//! multi-module collision-guard test, see
 //! `tests/cross_module_collision.rs`.
 
 use pattern_runtime::sdk::handlers::file::FileHandler;

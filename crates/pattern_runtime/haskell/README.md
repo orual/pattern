@@ -7,12 +7,16 @@ Source of truth for the Pattern agent-SDK effect algebras.
 - `Pattern/Time.hs`, `Pattern/Log.hs`, `Pattern/Display.hs` — fully
   implemented in Phase 3 (Rust handlers at
   `crates/pattern_runtime/src/sdk/handlers/{time,log,display}.rs`).
-- `Pattern/Memory.hs`, `Pattern/Message.hs` — GADTs declared; Rust
-  handlers stubbed (NotImplemented) until Phases 4–5.
+- `Pattern/Memory.hs` — GADT declared; Rust handler wired end-to-end
+  in Phase 3 against `Arc<dyn MemoryStore>` (vector search / recall
+  still stubbed for Phase 4).
+- `Pattern/Message.hs` — GADT declared; Rust handler stubbed
+  (NotImplemented) until Phase 4 plumbs the provider.
 - `Pattern/Shell.hs`, `Pattern/File.hs`, `Pattern/Sources.hs`,
-  `Pattern/Mcp.hs`, `Pattern/Ipc.hs`, `Pattern/Spawn.hs` — stubs.
-- `Pattern/Prelude.hs` — convenience re-export of the common subset
-  (Time, Log, Memory, Message, Display).
+  `Pattern/Mcp.hs`, `Pattern/Rpc.hs`, `Pattern/Spawn.hs` — stubs
+  pending their respective post-foundation plans.
+- `Pattern/Prelude.hs` — convenience re-export of the full 11-module
+  SDK surface.
 
 ## Parity with Rust
 

@@ -14,9 +14,34 @@
 //! 2. **Session poisoning.** If a session becomes poisoned, subsequent
 //!    `step()` calls short-circuit with `RuntimeError::SessionPoisoned`
 //!    rather than running another turn. The real path that flips the flag
-//!    (join-error during hard-abandon) is inherently racy, so we use the
-//!    `__poison_for_tests` hook to deterministically trigger the
-//!    short-circuit and verify the surfaced error.
+//!    lives in `session::run_turn`'s hard-abandon arm, specifically the
+//!    `join_result.is_err() => inner.poisoned = true` branch. Reaching
+//!    that branch deterministically from an integration test is
+//!    infeasible at the protocol level:
+//!
+//!      * The hard-abandon arm only runs after the watchdog escalates.
+//!      * Watchdog escalation requires the JIT to have NOT entered any
+//!        handler for `hard_abandon_threshold` milliseconds — i.e. pure
+//!        compute with no yields.
+//!      * A `JoinError` from `tokio::task::spawn_blocking` requires the
+//!        blocking task to panic (or be aborted by the runtime; we do
+//!        not abort it).
+//!      * A panic inside the spawn_blocking task can only come from
+//!        (a) a handler panic — ruled out, because no handler is
+//!        executing during pure compute, OR (b) an internal tidepool
+//!        panic — we cannot reliably induce one from agent-level
+//!        code, and doing so would defeat the controlled-test
+//!        premise anyway.
+//!
+//!    Reproducing this at the integration level would require either a
+//!    test-only side channel that forces a spawn_blocking panic post
+//!    hard-abandon (equivalent to the existing `__poison_for_tests`
+//!    hook, at more cost), or a custom instrumented `run_turn` that
+//!    only exists for tests. Both are strictly worse than the hook:
+//!    the hook is small, well-commented, and asserts the same
+//!    observable outcome (subsequent steps short-circuit with
+//!    `SessionPoisoned`). This tests the short-circuit, not the
+//!    production poisoning path.
 
 use std::sync::Arc;
 
@@ -88,11 +113,11 @@ fn heap_bridge_maps_to_runtime_crashed() {
 /// with `RuntimeError::SessionPoisoned` rather than running another
 /// turn.
 ///
-/// We use `__poison_for_tests` to deterministically flip the flag. The
-/// real-world path is the JoinError branch in
-/// `session::run_turn`'s hard-abandon arm — reproducing that
-/// deterministically in a test would require racing a blocking-task
-/// panic with the watchdog escalation, which is both slow and flaky.
+/// We use `__poison_for_tests` to deterministically flip the flag.
+/// This tests the short-circuit, not the production poisoning path.
+/// See the module-level doc for the detailed infeasibility argument
+/// (mutually exclusive protocol-level conditions rule out driving the
+/// real JoinError-during-hard-abandon branch from integration tests).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ghc_crash_poisons_session() {
     pattern_runtime::preflight::check()
