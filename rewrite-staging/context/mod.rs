@@ -1,3 +1,11 @@
+// MOVING TO: pattern_provider/src/compose/mod.rs
+// ORIGIN: crates/pattern_core/src/context/mod.rs
+// PHASE: 5
+// RESHAPE: DEFAULT_BASE_INSTRUCTIONS extracted to pattern_core/src/base_instructions.rs; remaining context composition logic stages here
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! V2 Context System
 //!
 //! Schema-aware context building with structured summaries

@@ -4,8 +4,8 @@
 //! and tool execution system that powers Pattern's multi-agent
 //! cognitive support system.
 
+pub mod base_instructions;
 pub mod config;
-pub mod context;
 pub mod db;
 pub mod embeddings;
 pub mod error;
@@ -28,6 +28,7 @@ pub mod test_helpers;
 // Macros are automatically available at crate root due to #[macro_export]
 
 pub use crate::utils::SnowflakePosition;
+pub use base_instructions::DEFAULT_BASE_INSTRUCTIONS;
 pub use agent::{Agent, AgentState, AgentType};
 pub use context::{CompressionStrategy, ContextBuilder, ContextConfig, MessageCompressor};
 pub use coordination::{AgentGroup, Constellation, CoordinationPattern};

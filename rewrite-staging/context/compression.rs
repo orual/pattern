@@ -1,3 +1,11 @@
+// MOVING TO: pattern_provider/src/compose/compression.rs
+// ORIGIN: crates/pattern_core/src/context/compression.rs
+// PHASE: 5
+// RESHAPE: Token-count call sites become async, consuming ProviderClient::count_tokens
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! Message compression strategies for managing context window limits
 //!
 //! This module implements various strategies for compressing message history

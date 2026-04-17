@@ -1,3 +1,11 @@
+// MOVING TO: pattern_provider/src/compose/heartbeat.rs
+// ORIGIN: crates/pattern_core/src/context/heartbeat.rs
+// PHASE: 5
+// RESHAPE: Heartbeat logic stages with context remainder; reshape in phase 5 composer
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! Heartbeat handling for multi-step agent reasoning
 //!
 //! Based on Letta/MemGPT's heartbeat concept, this allows agents to request

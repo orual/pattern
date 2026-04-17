@@ -1,3 +1,11 @@
+// MOVING TO: pattern_provider/src/compose/memory_render.rs
+// ORIGIN: crates/pattern_core/src/context/builder.rs
+// PHASE: 5
+// RESHAPE: Lines 226-316 (block render) become composer input; output rendered as [memory:current_state] pseudo-turn, not inline in system prompt; remainder reshapes as provider composer glue
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! ContextBuilder: Assembles model requests from memory, messages, and tools
 //!
 //! This is the core of the v2 context system. It reads from MemoryStore to get

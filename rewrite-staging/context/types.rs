@@ -1,3 +1,11 @@
+// MOVING TO: pattern_provider/src/compose/types.rs
+// ORIGIN: crates/pattern_core/src/context/types.rs
+// PHASE: 5
+// RESHAPE: Context type definitions stage with context remainder; reshape in phase 5 composer
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! Types for v2 context building
 
 use crate::memory::BlockType;

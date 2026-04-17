@@ -1,3 +1,11 @@
+// MOVING TO: pattern_provider/src/compose/activity.rs
+// ORIGIN: crates/pattern_core/src/context/activity.rs
+// PHASE: 5
+// RESHAPE: Activity tracking stages with context remainder; reshape in phase 5 composer
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! Activity logging and rendering for agents
 //!
 //! This module provides:
