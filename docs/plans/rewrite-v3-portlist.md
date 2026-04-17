@@ -81,6 +81,13 @@ Crates marked `retire` keep their source on disk (excluded from `members`) until
 
 Not deleted in the same commit as the migration work — makes bisection easier.
 
+## Pending migrations within pattern_core
+
+- **chrono → jiff**: Files touched for relocation keep chrono; files touched for
+  any substantive change port to jiff. Remaining chrono usage in `memory/`,
+  `export/`, `config.rs`, `permission.rs`, `error.rs`, `test_helpers.rs` ports
+  incrementally as those modules are reworked. Do not do a bulk migration.
+
 ## Audit checklist (run at every phase boundary)
 
 ```bash
