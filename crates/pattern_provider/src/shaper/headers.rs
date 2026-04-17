@@ -188,8 +188,7 @@ mod tests {
     #[test]
     fn oauth_tier_adds_oauth_beta_marker() {
         let config = min_config();
-        let value =
-            build_beta_header_value(&config, AuthTier::SessionPickup, "claude-opus-4-7");
+        let value = build_beta_header_value(&config, AuthTier::SessionPickup, "claude-opus-4-7");
         assert!(value.contains("oauth-2025-04-20"));
     }
 

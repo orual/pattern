@@ -95,5 +95,10 @@ pub use types::snapshot::{PersonaConfig, PersonaSnapshot, SessionSnapshot};
 // Embedding value types
 pub use types::embedding::{Embedding, EmbeddingResult};
 
-// Provider request / response types
-pub use types::provider::{CompletionChunk, CompletionRequest, CompletionResponse, TokenCount};
+// Provider request / response types + genai re-exports for callers that
+// want `use pattern_core::*` without also depending on genai directly.
+pub use types::provider::{
+    CacheControl, ChatMessage, ChatOptions, ChatRequest, ChatStreamEvent, CompletionRequest,
+    ProviderCredential, ReasoningEffort, StreamEnd, SystemBlock, TokenCount, Tool, ToolCall,
+    ToolResponse, Usage,
+};

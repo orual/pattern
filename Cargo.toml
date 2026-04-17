@@ -184,7 +184,3 @@ which = "8.0"
 [workspace.lints.clippy]
 mod_module_files = "warn"
 manual_range_contains = "allow"
-
-
-[profile.dev.package."surrealdb"]
-opt-level = 2

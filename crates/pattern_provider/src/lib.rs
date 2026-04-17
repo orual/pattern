@@ -26,6 +26,8 @@ pub mod session_uuid;
 pub mod shaper;
 pub mod token_count;
 
+pub use gateway::{PatternGatewayClient, PatternGatewayClientBuilder, RetryPolicy};
+
 // Note: the `auth` module is always compiled, but its internal submodules
 // (session_pickup, pkce) are feature-gated. `api_key` and the top-level
 // CredentialTier machinery are always available. See auth.rs for details.

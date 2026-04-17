@@ -14,7 +14,7 @@ use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
 use pattern_core::types::snapshot::PersonaConfig;
 use pattern_core::types::turn::TurnInput;
 use pattern_runtime::TidepoolRuntime;
-use pattern_runtime::testing::InMemoryMemoryStore;
+use pattern_runtime::testing::{InMemoryMemoryStore, NopProviderClient};
 
 /// Build a TurnInput carrying zero messages (Phase 3 tests don't yet
 /// exercise message-bearing turns; Phase 4 adds that path).
@@ -41,7 +41,8 @@ fn preflight_or_fail() {
 async fn open_then_step_then_drop() {
     preflight_or_fail();
     let memory = Arc::new(InMemoryMemoryStore::new());
-    let runtime = TidepoolRuntime::with_default_sdk(memory);
+    let provider = Arc::new(NopProviderClient);
+    let runtime = TidepoolRuntime::with_default_sdk(memory, provider);
     let persona = PersonaConfig::new(
         "open-step-drop",
         "OpenStepDrop",
@@ -69,7 +70,8 @@ async fn open_then_step_then_drop() {
 async fn open_step_twice_does_not_recompile() {
     preflight_or_fail();
     let memory = Arc::new(InMemoryMemoryStore::new());
-    let runtime = TidepoolRuntime::with_default_sdk(memory);
+    let provider = Arc::new(NopProviderClient);
+    let runtime = TidepoolRuntime::with_default_sdk(memory, provider);
     let persona = PersonaConfig::new(
         "step-twice",
         "StepTwice",
@@ -103,7 +105,8 @@ async fn open_step_twice_does_not_recompile() {
 async fn memory_write_then_read_roundtrips() {
     preflight_or_fail();
     let memory = Arc::new(InMemoryMemoryStore::new());
-    let runtime = TidepoolRuntime::with_default_sdk(memory.clone());
+    let provider = Arc::new(NopProviderClient);
+    let runtime = TidepoolRuntime::with_default_sdk(memory.clone(), provider);
 
     // Turn 1: write using the write-agent program.
     let persona_write = PersonaConfig::new(
@@ -156,7 +159,8 @@ async fn memory_write_then_read_roundtrips() {
 async fn concurrent_sessions_are_isolated() {
     preflight_or_fail();
     let memory = Arc::new(InMemoryMemoryStore::new());
-    let runtime = Arc::new(TidepoolRuntime::with_default_sdk(memory));
+    let provider = Arc::new(NopProviderClient);
+    let runtime = Arc::new(TidepoolRuntime::with_default_sdk(memory, provider));
 
     let mut handles = Vec::new();
     for i in 0..4u32 {
@@ -188,7 +192,8 @@ async fn concurrent_sessions_are_isolated() {
 async fn checkpoint_restore_roundtrip_preserves_events() {
     preflight_or_fail();
     let memory = Arc::new(InMemoryMemoryStore::new());
-    let runtime = TidepoolRuntime::with_default_sdk(memory);
+    let provider = Arc::new(NopProviderClient);
+    let runtime = TidepoolRuntime::with_default_sdk(memory, provider);
     let persona = PersonaConfig::new(
         "cp-roundtrip",
         "CpRoundtrip",
@@ -260,7 +265,8 @@ async fn checkpoint_restore_roundtrip_preserves_events() {
 async fn runtime_shares_store_across_sessions() {
     preflight_or_fail();
     let memory = Arc::new(InMemoryMemoryStore::new());
-    let runtime = TidepoolRuntime::with_default_sdk(memory.clone());
+    let provider = Arc::new(NopProviderClient);
+    let runtime = TidepoolRuntime::with_default_sdk(memory.clone(), provider);
 
     let persona = PersonaConfig::new(
         "shared-store",
@@ -292,7 +298,8 @@ async fn runtime_shares_store_across_sessions() {
 async fn memory_create_write_replace_end_to_end() {
     preflight_or_fail();
     let memory = Arc::new(InMemoryMemoryStore::new());
-    let runtime = TidepoolRuntime::with_default_sdk(memory.clone());
+    let provider = Arc::new(NopProviderClient);
+    let runtime = TidepoolRuntime::with_default_sdk(memory.clone(), provider);
 
     let persona = PersonaConfig::new(
         "create-agent",
@@ -347,7 +354,8 @@ async fn memory_create_write_replace_end_to_end() {
 async fn memory_handler_records_exchanges_into_checkpoint_log() {
     preflight_or_fail();
     let memory = Arc::new(InMemoryMemoryStore::new());
-    let runtime = TidepoolRuntime::with_default_sdk(memory);
+    let provider = Arc::new(NopProviderClient);
+    let runtime = TidepoolRuntime::with_default_sdk(memory, provider);
 
     let persona = PersonaConfig::new(
         "cp-wire",

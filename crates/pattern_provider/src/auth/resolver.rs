@@ -221,11 +221,13 @@ impl AnthropicAuthChain {
             return Ok(post_lock);
         }
 
-        let refresh_token = token.refresh_token.as_ref().ok_or_else(|| {
-            ProviderError::RefreshFailed {
-                reason: "stored token has no refresh_token".into(),
-            }
-        })?;
+        let refresh_token =
+            token
+                .refresh_token
+                .as_ref()
+                .ok_or_else(|| ProviderError::RefreshFailed {
+                    reason: "stored token has no refresh_token".into(),
+                })?;
 
         let fresh = oauth.pkce.refresh(refresh_token).await?;
         oauth.creds_store.put(&fresh).await?;
@@ -270,7 +272,9 @@ mod tests {
         let _g = EnvGuard::remove("ANTHROPIC_API_KEY");
         let chain = AnthropicAuthChain::api_key_only();
         let err = chain.resolve().await.expect_err("no key → NoAuthAvailable");
-        assert!(matches!(err, ProviderError::NoAuthAvailable { provider } if provider == "anthropic"));
+        assert!(
+            matches!(err, ProviderError::NoAuthAvailable { provider } if provider == "anthropic")
+        );
     }
 
     // subscription-oauth tier-chain tests — session-pickup, stored-token,
@@ -417,7 +421,10 @@ mod tests {
             );
 
             let _g = EnvGuard::remove("ANTHROPIC_API_KEY");
-            let err = chain.resolve().await.expect_err("no refresh_token → RefreshFailed");
+            let err = chain
+                .resolve()
+                .await
+                .expect_err("no refresh_token → RefreshFailed");
             assert!(
                 matches!(
                     &err,

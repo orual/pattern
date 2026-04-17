@@ -178,7 +178,8 @@ impl PkceTier {
         let authorize_url = format!(
             "{}?{}",
             self.config.auth_endpoint,
-            serde_urlencoded::to_string(params).expect("urlencode failure is impossible for &str params")
+            serde_urlencoded::to_string(params)
+                .expect("urlencode failure is impossible for &str params")
         );
 
         PendingAuth {
@@ -233,17 +234,16 @@ impl PkceTier {
             })
             .await
             .map_err(|e| match e {
-                ProviderError::AuthExchangeFailed { reason } => ProviderError::RefreshFailed { reason },
+                ProviderError::AuthExchangeFailed { reason } => {
+                    ProviderError::RefreshFailed { reason }
+                }
                 other => other,
             })?;
 
         Ok(self.token_from_response(response))
     }
 
-    async fn exchange(
-        &self,
-        body: TokenRequestBody<'_>,
-    ) -> Result<TokenResponse, ProviderError> {
+    async fn exchange(&self, body: TokenRequestBody<'_>) -> Result<TokenResponse, ProviderError> {
         let form = body.into_form();
         let response = self
             .http
@@ -275,13 +275,11 @@ impl PkceTier {
     fn token_from_response(&self, resp: TokenResponse) -> ProviderCredential {
         let now = jiff::Timestamp::now();
         // `expires_in` is seconds from now; compute absolute expiry.
-        let expires_at = resp
-            .expires_in
-            .and_then(|secs| {
-                let dur = Duration::from_secs(secs);
-                let span = jiff::SignedDuration::try_from(dur).ok()?;
-                now.checked_add(span).ok()
-            });
+        let expires_at = resp.expires_in.and_then(|secs| {
+            let dur = Duration::from_secs(secs);
+            let span = jiff::SignedDuration::try_from(dur).ok()?;
+            now.checked_add(span).ok()
+        });
 
         ProviderCredential {
             provider: self.config.provider_name.clone(),
@@ -342,12 +340,16 @@ pub(crate) fn split_code_and_state(
 
     // Otherwise, treat as plain `code#state`.
     let mut split = code_and_state.split('#');
-    let code = split.next().ok_or_else(|| ProviderError::AuthExchangeFailed {
-        reason: "paste string was empty".into(),
-    })?;
-    let state = split.next().ok_or_else(|| ProviderError::AuthExchangeFailed {
-        reason: "paste missing '#state' suffix; did you copy the whole string?".into(),
-    })?;
+    let code = split
+        .next()
+        .ok_or_else(|| ProviderError::AuthExchangeFailed {
+            reason: "paste string was empty".into(),
+        })?;
+    let state = split
+        .next()
+        .ok_or_else(|| ProviderError::AuthExchangeFailed {
+            reason: "paste missing '#state' suffix; did you copy the whole string?".into(),
+        })?;
     if code.is_empty() || state.is_empty() {
         return Err(ProviderError::AuthExchangeFailed {
             reason: "empty code or state in paste".into(),
@@ -458,7 +460,10 @@ mod tests {
         assert!(url.contains("code_challenge="));
         assert!(url.contains("code_challenge_method=S256"));
         assert!(url.contains("state="));
-        assert!(url.contains("code=true"), "subscription-flow marker missing");
+        assert!(
+            url.contains("code=true"),
+            "subscription-flow marker missing"
+        );
         assert!(url.contains("client_id=9d1c250a"));
         assert!(url.contains("redirect_uri=https%3A%2F%2Fplatform.claude.com"));
     }
@@ -528,7 +533,10 @@ mod tests {
 
         let pending = tier.begin_auth();
         let paste = format!("good-code#{}", pending.state());
-        let token = tier.complete_manual(pending, &paste).await.expect("exchange ok");
+        let token = tier
+            .complete_manual(pending, &paste)
+            .await
+            .expect("exchange ok");
 
         assert_eq!(token.provider, "anthropic");
         assert_eq!(token.access_token.expose_secret(), "at-fresh");

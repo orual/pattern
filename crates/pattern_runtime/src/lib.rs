@@ -32,3 +32,4 @@ pub use tidepool::{CompiledProgram, SessionMachine};
 /// test pipeline. See `testing.rs` for the history of the `gen`
 /// submodule workaround (edition 2024 reserves `gen`).
 pub mod testing;
+pub use testing::NopProviderClient;

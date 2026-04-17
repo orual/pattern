@@ -19,6 +19,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use pattern_core::ProviderClient;
 use pattern_core::error::RuntimeError;
 use pattern_core::traits::{AgentRuntime, MemoryStore};
 use pattern_core::types::snapshot::{PersonaConfig, SessionSnapshot};
@@ -31,18 +32,33 @@ use crate::session::TidepoolSession;
 pub struct TidepoolRuntime {
     sdk: SdkLocation,
     memory_store: Arc<dyn MemoryStore>,
-    // Phase 4: provider: Arc<dyn ProviderClient>,
+    /// Provider-client handle. Phase 4 wires it in; Phase 5 consumes it
+    /// from agent-side model calls. Held here so the runtime's construction
+    /// signature is stable across phase boundaries.
+    #[allow(dead_code)]
+    provider: Arc<dyn ProviderClient>,
 }
 
 impl TidepoolRuntime {
     /// Construct with an explicit SDK location and memory store.
-    pub fn new(sdk: SdkLocation, memory_store: Arc<dyn MemoryStore>) -> Self {
-        Self { sdk, memory_store }
+    pub fn new(
+        sdk: SdkLocation,
+        memory_store: Arc<dyn MemoryStore>,
+        provider: Arc<dyn ProviderClient>,
+    ) -> Self {
+        Self {
+            sdk,
+            memory_store,
+            provider,
+        }
     }
 
     /// Construct using [`SdkLocation::default`] (respects `$PATTERN_SDK_DIR`).
-    pub fn with_default_sdk(memory_store: Arc<dyn MemoryStore>) -> Self {
-        Self::new(SdkLocation::default(), memory_store)
+    pub fn with_default_sdk(
+        memory_store: Arc<dyn MemoryStore>,
+        provider: Arc<dyn ProviderClient>,
+    ) -> Self {
+        Self::new(SdkLocation::default(), memory_store, provider)
     }
 }
 

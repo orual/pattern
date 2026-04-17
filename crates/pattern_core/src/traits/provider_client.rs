@@ -1,21 +1,22 @@
-//! Provider-client trait: async LLM completion and token counting.
+//! Provider-client trait: streaming LLM completion and token counting.
 //!
-//! Implemented by `pattern_provider::AnthropicClient` (Phase 4). The trait is
-//! intentionally minimal — rate limiting, retries, session-UUID management,
-//! and cache-TTL selection are internal concerns of the concrete impl, not
-//! surfaced here. Options that vary per request live inside
-//! [`CompletionRequest`] as fields or nested params.
+//! Implemented by `pattern_provider::gateway::PatternGatewayClient` (Phase 4).
+//! The trait is intentionally minimal — rate limiting, retries, session-UUID
+//! management, credential resolution, and cache-TTL selection are internal
+//! concerns of the concrete impl, not surfaced here.
 //!
-//! # Design notes
+//! # Streaming contract
 //!
-//! - `complete` returns a streaming chunk stream; callers assemble chunks
-//!   into a final response.
-//! - `count_tokens` replaces the pre-v3 heuristic token approximation with a
-//!   provider-native count, per v3-foundation.AC5b.
-//! - There is intentionally **no** `usage()` method. Post-response usage
-//!   accounting is captured as part of the response stream itself (Phase 4
-//!   detail) rather than through a separate trait method; keeping the trait
-//!   narrow avoids locking in a shape before Phase 4 concretises it.
+//! `complete` returns a [`Stream`] of [`ChatStreamEvent`]s (re-exported from
+//! `genai::chat`). Callers match on the variants — `Chunk`, `ReasoningChunk`,
+//! `ToolCallChunk`, `End` — and assemble whatever shape they need. Pattern
+//! does not buffer the stream on the way through; the gateway emits genai
+//! events verbatim, only mapping errors to [`ProviderError`] so callers
+//! deal with a single error type.
+//!
+//! The final event is always `End(StreamEnd)`, which carries provider-
+//! reported [`Usage`]. Phase 5's compaction path consumes that usage
+//! directly.
 
 use std::pin::Pin;
 
@@ -23,11 +24,18 @@ use async_trait::async_trait;
 use futures::stream::Stream;
 
 use crate::error::ProviderError;
-use crate::types::provider::{CompletionChunk, CompletionRequest, TokenCount};
+use crate::types::provider::{ChatStreamEvent, CompletionRequest, TokenCount};
 
-/// Streaming chunk result alias used by [`ProviderClient::complete`].
+// Re-exports for the doctest + callers that want `use pattern_core::traits::provider_client::*;`.
+pub use crate::types::provider::{ChatStreamEvent as ProviderEvent, Usage};
+
+/// Streaming event stream produced by [`ProviderClient::complete`].
+///
+/// Each `Ok` item is a [`ChatStreamEvent`] emitted verbatim from the
+/// underlying provider (modulo gateway-side transformations). Errors in the
+/// stream map from provider-specific failures into [`ProviderError`].
 pub type ChunkStream =
-    Pin<Box<dyn Stream<Item = Result<CompletionChunk, ProviderError>> + Send + 'static>>;
+    Pin<Box<dyn Stream<Item = Result<ChatStreamEvent, ProviderError>> + Send + 'static>>;
 
 /// Minimal trait for a streaming LLM provider.
 ///
@@ -35,9 +43,12 @@ pub type ChunkStream =
 ///
 /// ```no_run
 /// use async_trait::async_trait;
+/// use futures::stream::StreamExt;
 /// use pattern_core::error::ProviderError;
 /// use pattern_core::traits::provider_client::{ChunkStream, ProviderClient};
-/// use pattern_core::types::provider::{CompletionRequest, TokenCount};
+/// use pattern_core::types::provider::{
+///     ChatMessage, ChatStreamEvent, CompletionRequest, TokenCount,
+/// };
 ///
 /// struct Dummy;
 ///
@@ -53,14 +64,31 @@ pub type ChunkStream =
 ///         unimplemented!("dummy: satisfaction-only example; AC1.3")
 ///     }
 /// }
+///
+/// async fn example(client: &dyn ProviderClient) -> Result<(), ProviderError> {
+///     let req = CompletionRequest::new("claude-opus-4-7")
+///         .append_message(ChatMessage::user("hi"));
+///     let mut stream = client.complete(req).await?;
+///     while let Some(event) = stream.next().await {
+///         match event? {
+///             ChatStreamEvent::Chunk(c) => eprint!("{}", c.content),
+///             ChatStreamEvent::End(_end) => eprintln!("\n[done]"),
+///             _ => {}
+///         }
+///     }
+///     Ok(())
+/// }
 /// ```
 #[async_trait]
-pub trait ProviderClient: Send + Sync {
-    /// Stream completion chunks for a composed request.
+pub trait ProviderClient: Send + Sync + std::fmt::Debug {
+    /// Stream completion events for a composed request.
     ///
-    /// The returned stream emits [`CompletionChunk`]s until a terminal chunk
-    /// (`is_final: true`) or an error. Callers typically assemble the chunk
-    /// stream into a [`crate::types::provider::CompletionResponse`].
+    /// The returned stream emits [`ChatStreamEvent`]s until the terminal
+    /// `End(StreamEnd)` event or an error. Callers can match on the
+    /// variants to surface partial content, tool calls, reasoning, etc.
+    ///
+    /// Post-response [`Usage`] arrives on the `End` variant's
+    /// `StreamEnd.usage` field.
     async fn complete(&self, request: CompletionRequest) -> Result<ChunkStream, ProviderError>;
 
     /// Return the provider-reported input token count for a composed request.

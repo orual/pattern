@@ -197,10 +197,18 @@ mod tests {
         // AC3.1: happy path.
         let dir = tempdir().expect("tempdir");
         let future_ms = jiff::Timestamp::now().as_millisecond() + 3_600_000; // +1h
-        let path = write_creds(dir.path(), ".credentials.json", &valid_creds_json(Some(future_ms)));
+        let path = write_creds(
+            dir.path(),
+            ".credentials.json",
+            &valid_creds_json(Some(future_ms)),
+        );
 
         let tier = SessionPickupTier::with_paths(vec![path]);
-        let token = tier.pick_up().await.expect("pick_up ok").expect("token present");
+        let token = tier
+            .pick_up()
+            .await
+            .expect("pick_up ok")
+            .expect("token present");
 
         assert_eq!(token.provider, "anthropic");
         assert_eq!(token.access_token.expose_secret(), "at-subscription-test");
@@ -227,7 +235,10 @@ mod tests {
         let path = write_creds(dir.path(), ".credentials.json", "{not valid json");
 
         let tier = SessionPickupTier::with_paths(vec![path]);
-        let result = tier.pick_up().await.expect("malformed json is skipped, not errored");
+        let result = tier
+            .pick_up()
+            .await
+            .expect("malformed json is skipped, not errored");
         assert!(result.is_none(), "malformed → None");
     }
 
@@ -236,7 +247,11 @@ mod tests {
         // AC3.5.
         let dir = tempdir().expect("tempdir");
         let past_ms = jiff::Timestamp::now().as_millisecond() - 3_600_000; // 1h ago
-        let path = write_creds(dir.path(), ".credentials.json", &valid_creds_json(Some(past_ms)));
+        let path = write_creds(
+            dir.path(),
+            ".credentials.json",
+            &valid_creds_json(Some(past_ms)),
+        );
 
         let tier = SessionPickupTier::with_paths(vec![path]);
         let result = tier.pick_up().await.expect("expired → None");
@@ -277,7 +292,11 @@ mod tests {
         );
 
         let tier = SessionPickupTier::with_paths(vec![primary, legacy]);
-        let token = tier.pick_up().await.expect("pick_up ok").expect("token present");
+        let token = tier
+            .pick_up()
+            .await
+            .expect("pick_up ok")
+            .expect("token present");
         assert_eq!(token.access_token.expose_secret(), "primary-wins");
     }
 
@@ -295,7 +314,11 @@ mod tests {
         );
 
         let tier = SessionPickupTier::with_paths(vec![primary, legacy]);
-        let token = tier.pick_up().await.expect("pick_up ok").expect("token present");
+        let token = tier
+            .pick_up()
+            .await
+            .expect("pick_up ok")
+            .expect("token present");
         assert_eq!(token.access_token.expose_secret(), "legacy-found");
     }
 
@@ -308,7 +331,11 @@ mod tests {
         let path = write_creds(dir.path(), ".credentials.json", &valid_creds_json(None));
 
         let tier = SessionPickupTier::with_paths(vec![path]);
-        let token = tier.pick_up().await.expect("pick_up ok").expect("no-expiry = valid");
+        let token = tier
+            .pick_up()
+            .await
+            .expect("pick_up ok")
+            .expect("no-expiry = valid");
         assert!(token.expires_at.is_none());
     }
 }

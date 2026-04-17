@@ -10,6 +10,12 @@
 //! when tidepool either renames its `gen` module or moves to edition 2024
 //! itself.
 
+use async_trait::async_trait;
+use pattern_core::ProviderClient;
+use pattern_core::error::ProviderError;
+use pattern_core::traits::provider_client::ChunkStream;
+use pattern_core::types::provider::{CompletionRequest, TokenCount};
+
 /// Standard Haskell-boxing `DataConTable` with `I#`, `W#`, `D#`, `()`,
 /// `Maybe`/`Just`/`Nothing`, `Bool`/`True`/`False`, pair `(,)`, and list
 /// `[]`/`:` constructors pre-registered. Use in handler tests rather than
@@ -23,3 +29,22 @@ pub use tidepool_testing::r#gen::standard_datacon_table;
 
 pub mod in_memory_store;
 pub use in_memory_store::InMemoryMemoryStore;
+
+/// Minimal `ProviderClient` implementation that panics on any method call.
+///
+/// Used in tests that construct `TidepoolRuntime` but never invoke the
+/// provider. If a test actually needs to call provider methods, use a
+/// proper mock instead.
+#[derive(Debug)]
+pub struct NopProviderClient;
+
+#[async_trait]
+impl ProviderClient for NopProviderClient {
+    async fn complete(&self, _: CompletionRequest) -> Result<ChunkStream, ProviderError> {
+        panic!("NopProviderClient::complete called — test must not invoke the provider");
+    }
+
+    async fn count_tokens(&self, _: &CompletionRequest) -> Result<TokenCount, ProviderError> {
+        panic!("NopProviderClient::count_tokens called — test must not invoke the provider");
+    }
+}

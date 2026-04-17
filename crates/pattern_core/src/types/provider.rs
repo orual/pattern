@@ -1,25 +1,53 @@
 //! Request and response types for the [`crate::traits::ProviderClient`] trait.
 //!
-//! These types are opaque-but-serializable shapes that cross the provider
-//! boundary. Concrete backends (e.g. `pattern_provider::AnthropicClient`)
-//! translate them to and from provider-native formats.
+//! # Type policy
 //!
-//! Extension points — cache-TTL hints, sampling parameters, tool shaping —
-//! belong as fields inside [`CompletionRequest`] rather than as additional
-//! trait methods. This keeps the trait surface minimal and stable while the
-//! request shape evolves.
+//! The trait is the boundary at which pattern hands a request to a concrete
+//! backend (`pattern_provider`, or any future alternative). Rather than
+//! defining a parallel type hierarchy for chat messages, tool calls,
+//! streaming events, and sampling options, this module **re-exports
+//! `genai::chat` types directly**. Pattern is already tightly integrated
+//! with `rust-genai` through the `pattern_provider::gateway` implementation;
+//! introducing a translation layer would just add lines of code without
+//! giving us any extra flexibility — the gateway consumes genai types on
+//! the outbound side regardless.
 //!
-//! # Phase 2 shape
+//! Pattern-specific types live here too:
 //!
-//! These types are stubs sufficient to satisfy AC1.3 (dummy-impl
-//! satisfiability). Phase 4 (`pattern_provider`) fleshes them out with
-//! provider-native field mappings and caching hints.
+//! - [`CompletionRequest`] — thin wrapper around `ChatRequest` + `ChatOptions`
+//!   that bundles the target model string and leaves room for pattern-side
+//!   metadata (persona hints, routing preferences, cache-TTL overrides, etc.)
+//!   as they become needed.
+//! - [`ProviderCredential`] — the credential shape stored by
+//!   `pattern_provider::creds_store` and produced by each auth tier.
+//! - [`TokenCount`] — the result of a pre-request `/v1/messages/count_tokens`
+//!   call. Complements (does not replace) the post-response `Usage` that
+//!   comes back in [`ChatStreamEvent::End`].
+//!
+//! # Streaming model
+//!
+//! `ProviderClient::complete` returns a [`Stream`] of [`ChatStreamEvent`]s
+//! verbatim from genai, modulo error mapping. Callers match on the event
+//! variants (`Chunk` / `ReasoningChunk` / `ToolCallChunk` / `End`) and
+//! assemble whatever they need — pattern does not buffer the stream on the
+//! way through.
 
 use jiff::Timestamp;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::types::message::Message;
+// ---- Re-exports from genai ----
+//
+// These are the types `ProviderClient::complete` / `count_tokens` traffic in.
+// Pattern does not define parallel types for these — the gateway consumes
+// genai types directly.
+pub use genai::chat::{
+    CacheControl, ChatMessage, ChatOptions, ChatRequest, ChatResponse, ChatRole, ChatStream,
+    ChatStreamEvent, ChatStreamResponse, ReasoningEffort, StreamChunk, StreamEnd, SystemBlock,
+    Tool, ToolCall, ToolChunk, ToolResponse, Usage,
+};
+
+// ---- Serde helpers (SecretString round-trip) ----
 
 /// Serde helper: write a [`SecretString`] as its plaintext string form.
 ///
@@ -31,7 +59,9 @@ fn serialize_secret<S: Serializer>(value: &SecretString, serializer: S) -> Resul
     serializer.serialize_str(value.expose_secret())
 }
 
-fn deserialize_secret<'de, D: Deserializer<'de>>(deserializer: D) -> Result<SecretString, D::Error> {
+fn deserialize_secret<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<SecretString, D::Error> {
     let s = String::deserialize(deserializer)?;
     Ok(SecretString::from(s))
 }
@@ -53,83 +83,106 @@ fn deserialize_opt_secret<'de, D: Deserializer<'de>>(
     Ok(s.map(SecretString::from))
 }
 
+// ---- CompletionRequest ----
+
 /// A composed request to an LLM provider.
 ///
-/// Carries the messages to send, the target model identifier, and an opaque
-/// parameter bag for provider-specific options. Phase 4 expands this shape
-/// with typed fields for common options (temperature, max tokens, tool
-/// shaping, etc.).
+/// Thin wrapper around the three things every call needs: the target model,
+/// the conversation payload ([`ChatRequest`]), and the sampling / tooling /
+/// routing options ([`ChatOptions`]). Pattern-specific metadata (persona
+/// hints, priority, cache-TTL overrides, future model-router directives)
+/// is reserved for additional fields on this struct rather than piggybacked
+/// onto `ChatOptions::extra_headers` or similar side channels.
 ///
-/// # Examples
+/// Callers typically use the builder methods to shape the request
+/// incrementally:
 ///
 /// ```
-/// use pattern_core::types::provider::CompletionRequest;
+/// use pattern_core::types::provider::{ChatMessage, ChatOptions, CompletionRequest};
 ///
-/// let req = CompletionRequest {
-///     model: "claude-sonnet-4".to_string(),
-///     messages: vec![],
-///     params: serde_json::json!({}),
-/// };
-/// assert_eq!(req.model, "claude-sonnet-4");
+/// let req = CompletionRequest::new("claude-opus-4-7")
+///     .with_system("You are a helpful assistant.")
+///     .append_message(ChatMessage::user("hello"))
+///     .with_options(ChatOptions::default().with_temperature(0.7));
+///
+/// assert_eq!(req.model, "claude-opus-4-7");
+/// assert_eq!(req.chat.messages.len(), 1);
 /// ```
+///
+/// Fields are public so callers with unusual needs can reach into `chat` or
+/// `options` directly — the builders are convenience, not an encapsulation
+/// barrier.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletionRequest {
-    /// Target model identifier in the provider's naming scheme.
+    /// Target model identifier in the provider's naming scheme (e.g.
+    /// `"claude-opus-4-7"`, `"gemini-2.5-pro"`). Drives adapter inference
+    /// inside the gateway.
     pub model: String,
-    /// The conversation so far. Provider impls translate into their native
-    /// message/role format.
-    pub messages: Vec<Message>,
-    /// Provider-specific options (temperature, tools, cache hints, etc.).
-    ///
-    /// Opaque in Phase 2; Phase 4 replaces this with a typed options struct.
-    pub params: serde_json::Value,
+
+    /// Messages + system prompt + tool definitions. See
+    /// [`genai::chat::ChatRequest`].
+    pub chat: ChatRequest,
+
+    /// Sampling, tool config, cache-control, extra headers, reasoning
+    /// effort, etc. See [`genai::chat::ChatOptions`].
+    pub options: ChatOptions,
 }
 
-/// A single chunk of a streamed completion response.
-///
-/// Providers emit chunks incrementally. Callers assemble them into a final
-/// [`CompletionResponse`] when the stream terminates.
-///
-/// # Examples
-///
-/// ```
-/// use pattern_core::types::provider::CompletionChunk;
-///
-/// let chunk = CompletionChunk {
-///     delta_text: "hello".to_string(),
-///     is_final: false,
-/// };
-/// assert!(!chunk.is_final);
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompletionChunk {
-    /// Incremental text produced by the provider for this chunk.
-    pub delta_text: String,
-    /// Whether this is the terminal chunk of the stream.
-    pub is_final: bool,
+impl CompletionRequest {
+    /// Construct a fresh request targeting `model`, with default
+    /// [`ChatRequest`] and [`ChatOptions`].
+    pub fn new(model: impl Into<String>) -> Self {
+        Self {
+            model: model.into(),
+            chat: ChatRequest::default(),
+            options: ChatOptions::default(),
+        }
+    }
+
+    /// Set or replace the legacy string-form system prompt. For
+    /// per-block cache-control, use [`Self::with_system_blocks`].
+    pub fn with_system(mut self, system: impl Into<String>) -> Self {
+        self.chat = self.chat.with_system(system);
+        self
+    }
+
+    /// Set or replace the per-block system prompts. Enables the
+    /// three-segment cache layout via the fork's `SystemBlock` patch.
+    pub fn with_system_blocks(mut self, blocks: Vec<SystemBlock>) -> Self {
+        self.chat.system_blocks = Some(blocks);
+        self
+    }
+
+    /// Replace the message list wholesale.
+    pub fn with_messages(mut self, messages: Vec<ChatMessage>) -> Self {
+        self.chat.messages = messages;
+        self
+    }
+
+    /// Append a single message to the conversation.
+    pub fn append_message(mut self, message: impl Into<ChatMessage>) -> Self {
+        self.chat = self.chat.append_message(message);
+        self
+    }
+
+    /// Replace the tool set.
+    pub fn with_tools<I>(mut self, tools: I) -> Self
+    where
+        I: IntoIterator,
+        I::Item: Into<Tool>,
+    {
+        self.chat = self.chat.with_tools(tools);
+        self
+    }
+
+    /// Replace the options block wholesale.
+    pub fn with_options(mut self, options: ChatOptions) -> Self {
+        self.options = options;
+        self
+    }
 }
 
-/// A completed provider response, assembled from all streamed chunks.
-///
-/// # Examples
-///
-/// ```
-/// use jiff::Timestamp;
-/// use pattern_core::types::provider::CompletionResponse;
-///
-/// let resp = CompletionResponse {
-///     text: "hello world".to_string(),
-///     completed_at: Timestamp::now(),
-/// };
-/// assert!(resp.text.contains("hello"));
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompletionResponse {
-    /// Final assembled text from the provider.
-    pub text: String,
-    /// Wall-clock time at which the response terminated.
-    pub completed_at: Timestamp,
-}
+// ---- TokenCount (pre-request sizing) ----
 
 /// Provider-reported input token count for a request.
 ///
@@ -137,7 +190,7 @@ pub struct CompletionResponse {
 /// pre-request by compaction and context-length decisions. Only the
 /// input-token count is surfaced here; output-token accounting and
 /// cache-read accounting are post-response concerns, read from the
-/// provider's response `Usage` rather than projected pre-flight.
+/// [`Usage`] carried by [`ChatStreamEvent::End`].
 ///
 /// # Examples
 ///
@@ -152,6 +205,8 @@ pub struct TokenCount {
     /// Number of input tokens the provider reports for the composed request.
     pub input_tokens: u32,
 }
+
+// ---- ProviderCredential ----
 
 /// A stored credential for a specific provider.
 ///
@@ -202,7 +257,10 @@ pub struct ProviderCredential {
     /// `serialize_secret` / `deserialize_secret` helpers — the credential
     /// store is the one place this token legitimately round-trips through
     /// JSON.
-    #[serde(serialize_with = "serialize_secret", deserialize_with = "deserialize_secret")]
+    #[serde(
+        serialize_with = "serialize_secret",
+        deserialize_with = "deserialize_secret"
+    )]
     pub access_token: SecretString,
 
     /// Optional refresh token, when the provider issues one.

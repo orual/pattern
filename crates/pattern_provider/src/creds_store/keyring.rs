@@ -88,7 +88,8 @@ fn classify_keyring_error(e: keyring::Error) -> ProviderError {
             reason: "NoEntry reached classify_keyring_error — this is a bug in KeyringStore".into(),
         },
         // Future-proofing against new variants we don't recognise.
-        other => ProviderError::CredentialStoreUnavailable.tap_log(format!("unknown keyring error: {other}")),
+        other => ProviderError::CredentialStoreUnavailable
+            .tap_log(format!("unknown keyring error: {other}")),
     }
 }
 
@@ -110,11 +111,10 @@ impl CredsStore for KeyringStore {
         let entry = self.entry(provider)?;
         match entry.get_password() {
             Ok(json) => {
-                let tok: ProviderCredential = serde_json::from_str(&json).map_err(|e| {
-                    ProviderError::CredentialStorage {
+                let tok: ProviderCredential =
+                    serde_json::from_str(&json).map_err(|e| ProviderError::CredentialStorage {
                         reason: format!("keyring JSON parse failed for provider '{provider}': {e}"),
-                    }
-                })?;
+                    })?;
                 Ok(Some(tok))
             }
             Err(keyring::Error::NoEntry) => Ok(None),

@@ -198,10 +198,10 @@ impl TokenCounter {
 
         let url = format!("{}/v1/messages/count_tokens", self.base_url);
 
-        let mut req_builder = self.http.post(&url).header(
-            "anthropic-version",
-            self.anthropic_version.clone(),
-        );
+        let mut req_builder = self
+            .http
+            .post(&url)
+            .header("anthropic-version", self.anthropic_version.clone());
 
         // Identification + beta headers from the shaper.
         for (k, v) in shaper.identification_headers(shape_ctx)? {
@@ -225,13 +225,11 @@ impl TokenCounter {
                 .header("anthropic-beta", "oauth-2025-04-20"),
         };
 
-        let response = req_builder
-            .json(request)
-            .send()
-            .await
-            .map_err(|e| ProviderError::TokenCountFailed {
+        let response = req_builder.json(request).send().await.map_err(|e| {
+            ProviderError::TokenCountFailed {
                 reason: format!("HTTP request failed: {e}"),
-            })?;
+            }
+        })?;
 
         let status = response.status();
         if status != StatusCode::OK {

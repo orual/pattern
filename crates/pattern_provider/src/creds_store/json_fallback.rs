@@ -58,11 +58,10 @@ impl CredsStore for JsonFallbackStore {
         let path = self.path_for(provider);
         match tokio::fs::read_to_string(&path).await {
             Ok(json) => {
-                let tok: ProviderCredential = serde_json::from_str(&json).map_err(|e| {
-                    ProviderError::CredentialStorage {
+                let tok: ProviderCredential =
+                    serde_json::from_str(&json).map_err(|e| ProviderError::CredentialStorage {
                         reason: format!("json_fallback parse failed for {path:?}: {e}"),
-                    }
-                })?;
+                    })?;
                 Ok(Some(tok))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -74,9 +73,10 @@ impl CredsStore for JsonFallbackStore {
         let path = self.path_for(&token.provider);
         let tmp = path.with_extension("json.tmp");
 
-        let json = serde_json::to_string_pretty(token).map_err(|e| ProviderError::CredentialStorage {
-            reason: format!("json_fallback serialize failed: {e}"),
-        })?;
+        let json =
+            serde_json::to_string_pretty(token).map_err(|e| ProviderError::CredentialStorage {
+                reason: format!("json_fallback serialize failed: {e}"),
+            })?;
 
         tokio::fs::write(&tmp, &json)
             .await
@@ -187,8 +187,8 @@ mod tests {
     #[tokio::test]
     async fn round_trip_put_get_delete() {
         let dir = tempdir().expect("tempdir");
-        let store = JsonFallbackStore::with_root(dir.path().join("creds"))
-            .expect("construct store");
+        let store =
+            JsonFallbackStore::with_root(dir.path().join("creds")).expect("construct store");
 
         let tok = sample_token("anthropic");
         store.put(&tok).await.expect("put");
@@ -216,16 +216,16 @@ mod tests {
     #[tokio::test]
     async fn delete_absent_is_idempotent() {
         let dir = tempdir().expect("tempdir");
-        let store = JsonFallbackStore::with_root(dir.path().join("creds"))
-            .expect("construct store");
+        let store =
+            JsonFallbackStore::with_root(dir.path().join("creds")).expect("construct store");
         store.delete("never-stored").await.expect("no-op delete");
     }
 
     #[tokio::test]
     async fn get_absent_returns_none_not_error() {
         let dir = tempdir().expect("tempdir");
-        let store = JsonFallbackStore::with_root(dir.path().join("creds"))
-            .expect("construct store");
+        let store =
+            JsonFallbackStore::with_root(dir.path().join("creds")).expect("construct store");
         let result = store.get("anthropic").await.expect("absent key is ok");
         assert!(result.is_none());
     }
@@ -235,8 +235,8 @@ mod tests {
     async fn stored_file_has_0600_perms() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempdir().expect("tempdir");
-        let store = JsonFallbackStore::with_root(dir.path().join("creds"))
-            .expect("construct store");
+        let store =
+            JsonFallbackStore::with_root(dir.path().join("creds")).expect("construct store");
         store.put(&sample_token("anthropic")).await.expect("put");
 
         let path = dir.path().join("creds").join("anthropic.json");

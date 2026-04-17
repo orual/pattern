@@ -23,7 +23,9 @@ pub mod pkce;
 pub mod session_pickup;
 
 pub use api_key::ApiKeyTier;
-pub use resolver::{AnthropicAuthChain, AuthTier, CredentialChain, GeminiAuthChain, ResolvedCredential};
+pub use resolver::{
+    AnthropicAuthChain, AuthTier, CredentialChain, GeminiAuthChain, ResolvedCredential,
+};
 
 #[cfg(feature = "subscription-oauth")]
 pub use pkce::{PendingAuth, PkceConfig, PkceTier};

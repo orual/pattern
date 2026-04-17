@@ -36,7 +36,7 @@ use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
 use pattern_core::types::snapshot::PersonaConfig;
 use pattern_core::types::turn::TurnInput;
 use pattern_runtime::TidepoolRuntime;
-use pattern_runtime::testing::InMemoryMemoryStore;
+use pattern_runtime::testing::{InMemoryMemoryStore, NopProviderClient};
 
 fn fresh_turn_input() -> TurnInput {
     TurnInput {
@@ -83,7 +83,8 @@ async fn memory_and_file_together_do_not_produce_decode_error() {
         .expect("tidepool-extract must be available; see crates/pattern_runtime/CLAUDE.md");
 
     let memory = Arc::new(InMemoryMemoryStore::new());
-    let runtime = TidepoolRuntime::with_default_sdk(memory);
+    let provider = Arc::new(NopProviderClient);
+    let runtime = TidepoolRuntime::with_default_sdk(memory, provider);
 
     let persona = PersonaConfig::new(
         "collision-agent",

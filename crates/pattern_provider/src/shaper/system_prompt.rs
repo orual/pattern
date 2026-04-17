@@ -68,9 +68,7 @@ pub fn build_system_prompt(
                 // claim — see module-level docs.
                 SystemBlock::new(CLAUDE_CODE_LITERAL),
                 // Slot [1]: identity-override prefix + base instructions.
-                SystemBlock::new(format!(
-                    "{NEGATION_PREFIX}\n\n{system_instructions}"
-                )),
+                SystemBlock::new(format!("{NEGATION_PREFIX}\n\n{system_instructions}")),
             ];
             // Slot [2+]: persona + any long-lived content.
             let mut persona_text = persona.to_string();
@@ -169,12 +167,7 @@ mod tests {
         // Feature-gated tests must verify HonestPattern still works when
         // subscription-oauth is enabled (it's the abstraction-validation
         // mode for non-Anthropic providers).
-        let blocks = build_system_prompt(
-            ShaperCompatMode::HonestPattern,
-            "base",
-            "persona",
-            &[],
-        );
+        let blocks = build_system_prompt(ShaperCompatMode::HonestPattern, "base", "persona", &[]);
         assert_eq!(blocks.len(), 1);
     }
 }

@@ -19,7 +19,7 @@ use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
 use pattern_core::types::snapshot::PersonaConfig;
 use pattern_core::types::turn::TurnInput;
 use pattern_runtime::TidepoolRuntime;
-use pattern_runtime::testing::InMemoryMemoryStore;
+use pattern_runtime::testing::{InMemoryMemoryStore, NopProviderClient};
 
 fn preflight_or_fail() {
     pattern_runtime::preflight::check()
@@ -56,7 +56,8 @@ fn fresh_turn_input() -> TurnInput {
 async fn hard_abandon_await_enforces_cancel_grace_ceiling() {
     preflight_or_fail();
     let memory = Arc::new(InMemoryMemoryStore::new());
-    let runtime = TidepoolRuntime::with_default_sdk(memory);
+    let provider = Arc::new(NopProviderClient);
+    let runtime = TidepoolRuntime::with_default_sdk(memory, provider);
     let persona = PersonaConfig::new(
         "grace-ceiling",
         "GraceCeiling",
@@ -107,7 +108,8 @@ async fn hard_abandon_await_enforces_cancel_grace_ceiling() {
 async fn soft_cancel_on_yielding_loop_returns_soft_path() {
     preflight_or_fail();
     let memory = Arc::new(InMemoryMemoryStore::new());
-    let runtime = TidepoolRuntime::with_default_sdk(memory);
+    let provider = Arc::new(NopProviderClient);
+    let runtime = TidepoolRuntime::with_default_sdk(memory, provider);
     let persona = PersonaConfig::new(
         "soft-cancel",
         "SoftCancel",
@@ -173,7 +175,8 @@ async fn soft_cancel_on_yielding_loop_returns_soft_path() {
 async fn hard_abandon_on_tight_compute_poisons_session() {
     preflight_or_fail();
     let memory = Arc::new(InMemoryMemoryStore::new());
-    let runtime = TidepoolRuntime::with_default_sdk(memory);
+    let provider = Arc::new(NopProviderClient);
+    let runtime = TidepoolRuntime::with_default_sdk(memory, provider);
     let persona = PersonaConfig::new(
         "hard-abandon",
         "HardAbandon",
@@ -245,7 +248,8 @@ async fn hard_abandon_on_tight_compute_poisons_session() {
 async fn soft_cancel_then_reuse_same_session_resets_cancel_flags() {
     preflight_or_fail();
     let memory = Arc::new(InMemoryMemoryStore::new());
-    let runtime = TidepoolRuntime::with_default_sdk(memory);
+    let provider = Arc::new(NopProviderClient);
+    let runtime = TidepoolRuntime::with_default_sdk(memory, provider);
     let persona = PersonaConfig::new(
         "soft-reuse",
         "SoftReuse",
@@ -296,7 +300,8 @@ async fn soft_cancel_then_reuse_same_session_resets_cancel_flags() {
 async fn soft_cancel_then_short_turn_succeeds() {
     preflight_or_fail();
     let memory = Arc::new(InMemoryMemoryStore::new());
-    let runtime = TidepoolRuntime::with_default_sdk(memory);
+    let provider = Arc::new(NopProviderClient);
+    let runtime = TidepoolRuntime::with_default_sdk(memory, provider);
     // First open a session for the infinite loop.
     let persona = PersonaConfig::new(
         "soft-then-short",

@@ -52,7 +52,7 @@ use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
 use pattern_core::types::snapshot::PersonaConfig;
 use pattern_core::types::turn::TurnInput;
 use pattern_runtime::TidepoolRuntime;
-use pattern_runtime::testing::InMemoryMemoryStore;
+use pattern_runtime::testing::{InMemoryMemoryStore, NopProviderClient};
 use pattern_runtime::tidepool::error_map::{JitOutcome, map_jit_error};
 use tidepool_codegen::jit_machine::JitError;
 use tidepool_codegen::signal_safety::SignalError;
@@ -124,7 +124,8 @@ async fn ghc_crash_poisons_session() {
         .expect("tidepool-extract must be available; see crates/pattern_runtime/CLAUDE.md");
 
     let memory = Arc::new(InMemoryMemoryStore::new());
-    let runtime = TidepoolRuntime::with_default_sdk(memory);
+    let provider = Arc::new(NopProviderClient);
+    let runtime = TidepoolRuntime::with_default_sdk(memory, provider);
     // A well-behaved program so the only way `step` can fail is via
     // the poison short-circuit we flip below.
     let persona = PersonaConfig::new(

@@ -321,7 +321,10 @@ mod tests {
         let blocks = req.system_blocks.as_ref().expect("blocks injected");
         assert_eq!(blocks.len(), 3);
         assert!(blocks[0].text.contains("Claude Code"), "slot[0] literal");
-        assert!(blocks[1].text.contains("NOT Claude Code"), "slot[1] negation");
+        assert!(
+            blocks[1].text.contains("NOT Claude Code"),
+            "slot[1] negation"
+        );
         assert!(blocks[2].text.contains("I am Pattern."), "slot[2] persona");
 
         // OAuth auth tier → oauth-2025-04-20 in beta headers.
@@ -352,7 +355,9 @@ mod tests {
 
         let blocks = req.system_blocks.as_ref().expect("blocks");
         assert!(
-            blocks.iter().any(|b| b.text.contains("CUSTOM BASE INSTRUCTIONS MARKER")),
+            blocks
+                .iter()
+                .any(|b| b.text.contains("CUSTOM BASE INSTRUCTIONS MARKER")),
             "override must appear in rendered blocks"
         );
     }

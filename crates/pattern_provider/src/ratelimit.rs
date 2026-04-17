@@ -211,11 +211,8 @@ mod tests {
 
         // Third call should block on the daily bucket. With rpd=2, the
         // daily period is 43200s = 12h, so the wait is long.
-        let third = tokio::time::timeout(
-            Duration::from_millis(500),
-            limiter.acquire_completion(),
-        )
-        .await;
+        let third =
+            tokio::time::timeout(Duration::from_millis(500), limiter.acquire_completion()).await;
 
         assert!(
             third.is_err(),
