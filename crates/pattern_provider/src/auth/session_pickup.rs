@@ -82,17 +82,25 @@ impl SessionPickupTier {
     pub async fn pick_up(&self) -> Result<Option<ProviderCredential>, ProviderError> {
         for path in &self.paths {
             match tokio::fs::read_to_string(path).await {
-                Ok(json) => match serde_json::from_str::<ClaudeCredentials>(&json) {
-                    Ok(creds) => {
-                        if let Some(token) = Self::to_pattern_token(creds) {
-                            tracing::debug!(?path, "session-pickup: valid credential found");
-                            return Ok(Some(token));
+                Ok(json) => match serde_json::from_str::<CredentialsFile>(&json) {
+                    Ok(file) => match file.claude_credentials() {
+                        Some(creds) => {
+                            if let Some(token) = Self::to_pattern_token(creds) {
+                                tracing::debug!(?path, "session-pickup: valid credential found");
+                                return Ok(Some(token));
+                            }
+                            tracing::debug!(
+                                ?path,
+                                "session-pickup: file present but token expired or unusable; skipping"
+                            );
                         }
-                        tracing::debug!(
-                            ?path,
-                            "session-pickup: file present but token expired or unusable; skipping"
-                        );
-                    }
+                        None => {
+                            tracing::debug!(
+                                ?path,
+                                "session-pickup: file parsed but no Anthropic credential block; skipping"
+                            );
+                        }
+                    },
                     Err(e) => {
                         // AC3.4: malformed JSON warns and falls through.
                         tracing::warn!(?path, error = %e, "session-pickup: malformed JSON; skipping");
@@ -145,8 +153,53 @@ impl SessionPickupTier {
     }
 }
 
-/// Wire shape of claude-code's `.credentials.json`. Fields irrelevant to
-/// pattern (subscriptionType, rateLimitTier, etc.) are simply ignored.
+/// Wire shape of claude-code's `~/.claude/.credentials.json`.
+///
+/// The canonical layout (verified against a real file on 2026-04-17) is:
+///
+/// ```json
+/// {
+///   "claudeAiOauth": {
+///     "accessToken": "sk-ant-oat01-...",
+///     "refreshToken": "sk-ant-ort01-...",
+///     "expiresAt": 1776485530581,
+///     "scopes": ["user:inference", ...],
+///     "subscriptionType": "max",
+///     "rateLimitTier": "default_claude_max_20x"
+///   },
+///   "mcpOAuth": { /* per-server MCP OAuth state, ignored here */ }
+/// }
+/// ```
+///
+/// Some legacy `~/.claude/session.json` files may store the Anthropic
+/// credential block at the top level without the `claudeAiOauth` wrapper;
+/// `claude_credentials()` accepts both forms.
+#[derive(Deserialize)]
+struct CredentialsFile {
+    /// Canonical shape: claude-code's current `.credentials.json`.
+    #[serde(rename = "claudeAiOauth")]
+    claude_ai_oauth: Option<ClaudeCredentials>,
+
+    /// Legacy / fallback shape: the credential block at the top level
+    /// (older claude-code installs, or proxies that write a flatter file).
+    /// `#[serde(flatten)]` requires field-level accessors, so we instead
+    /// capture the flat variant via `#[serde(default)]` + manual field
+    /// listing on a sibling struct, unified by `claude_credentials()`.
+    #[serde(flatten)]
+    flat: Option<ClaudeCredentials>,
+}
+
+impl CredentialsFile {
+    fn claude_credentials(self) -> Option<ClaudeCredentials> {
+        // Prefer the canonical wrapped form; fall back to flat only if
+        // the wrapped block is absent.
+        self.claude_ai_oauth.or(self.flat)
+    }
+}
+
+/// Credential fields shared by the wrapped and flat file layouts. Fields
+/// irrelevant to pattern (subscriptionType, rateLimitTier, profile, etc.)
+/// are simply ignored during deserialization.
 #[derive(Deserialize)]
 struct ClaudeCredentials {
     #[serde(rename = "accessToken")]
@@ -176,7 +229,9 @@ mod tests {
     }
 
     fn valid_creds_json(expires_at_ms: Option<i64>) -> String {
-        // Uses the real wire keys (camelCase) to catch serde-rename regressions.
+        // Legacy flat shape — some older `session.json` files wrote the
+        // credential block at the top level without the `claudeAiOauth`
+        // wrapper. The pickup tier accepts this via the `flat` fallback.
         let expiry = expires_at_ms
             .map(|ms| format!("\"expiresAt\": {ms},"))
             .unwrap_or_default();
@@ -188,6 +243,35 @@ mod tests {
                 "scopes": ["user:inference", "user:profile"],
                 "subscriptionType": "max",
                 "rateLimitTier": "high"
+            }}"#
+        )
+    }
+
+    /// Canonical `~/.claude/.credentials.json` shape — the `claudeAiOauth`
+    /// wrapper plus a sibling `mcpOAuth` object that the pickup tier
+    /// must ignore. Verified against a real on-disk file on 2026-04-17.
+    fn canonical_creds_json(expires_at_ms: Option<i64>) -> String {
+        let expiry = expires_at_ms
+            .map(|ms| format!("\"expiresAt\": {ms},"))
+            .unwrap_or_default();
+        format!(
+            r#"{{
+                "claudeAiOauth": {{
+                    "accessToken": "sk-ant-oat01-real-shape",
+                    "refreshToken": "sk-ant-ort01-real-shape",
+                    {expiry}
+                    "scopes": ["user:file_upload", "user:inference", "user:mcp_servers", "user:profile", "user:sessions:claude_code"],
+                    "subscriptionType": "max",
+                    "rateLimitTier": "default_claude_max_20x"
+                }},
+                "mcpOAuth": {{
+                    "plugin:some:server|abc123": {{
+                        "serverName": "plugin:some:server",
+                        "serverUrl": "https://example.invalid/mcp",
+                        "accessToken": "",
+                        "expiresAt": 0
+                    }}
+                }}
             }}"#
         )
     }
@@ -337,5 +421,57 @@ mod tests {
             .expect("pick_up ok")
             .expect("no-expiry = valid");
         assert!(token.expires_at.is_none());
+    }
+
+    /// Canonical `.credentials.json` shape: `claudeAiOauth` wrapper +
+    /// sibling `mcpOAuth` object. The pickup tier must reach into the
+    /// wrapper and ignore the MCP sibling. Schema verified against a
+    /// real on-disk file on 2026-04-17.
+    #[tokio::test]
+    async fn canonical_wrapped_shape_is_picked_up() {
+        let dir = tempdir().expect("tempdir");
+        let future_ms = jiff::Timestamp::now().as_millisecond() + 3_600_000;
+        let path = write_creds(
+            dir.path(),
+            ".credentials.json",
+            &canonical_creds_json(Some(future_ms)),
+        );
+
+        let tier = SessionPickupTier::with_paths(vec![path]);
+        let token = tier
+            .pick_up()
+            .await
+            .expect("pick_up ok")
+            .expect("canonical shape → token present");
+
+        assert_eq!(token.provider, "anthropic");
+        assert_eq!(token.access_token.expose_secret(), "sk-ant-oat01-real-shape");
+        assert_eq!(
+            token.refresh_token.as_ref().map(|s| s.expose_secret()),
+            Some("sk-ant-ort01-real-shape")
+        );
+        assert!(token.expires_at.is_some());
+        let scope = token.scope.expect("scope populated");
+        assert!(scope.contains("user:inference"));
+        assert!(scope.contains("user:sessions:claude_code"));
+    }
+
+    /// A file with ONLY the `mcpOAuth` sibling (no `claudeAiOauth`,
+    /// no flat fallback fields) must not mistakenly resolve anything.
+    #[tokio::test]
+    async fn mcp_only_file_yields_no_credential() {
+        let dir = tempdir().expect("tempdir");
+        let path = write_creds(
+            dir.path(),
+            ".credentials.json",
+            r#"{"mcpOAuth": {"plugin:foo|abc": {"serverName":"plugin:foo","serverUrl":"https://example.invalid","accessToken":"","expiresAt":0}}}"#,
+        );
+
+        let tier = SessionPickupTier::with_paths(vec![path]);
+        let result = tier.pick_up().await.expect("pick_up ok");
+        assert!(
+            result.is_none(),
+            "file with only mcpOAuth must not yield a credential"
+        );
     }
 }
