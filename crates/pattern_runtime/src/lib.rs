@@ -11,6 +11,7 @@
 pub mod preflight;
 pub mod sdk;
 pub mod tidepool;
+pub use sdk::SdkLocation;
 pub use tidepool::{CompiledProgram, SessionMachine};
 
 /// Test fixtures re-exported from [`tidepool_testing`] under Rust-2024-safe

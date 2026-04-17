@@ -232,6 +232,35 @@ pub enum RuntimeError {
         reason: String,
     },
 
+    /// The Haskell SDK directory could not be found at the expected location.
+    ///
+    /// Returned by [`SdkLocation::resolve()`] when the configured directory does
+    /// not exist. `hint` provides actionable guidance (e.g., set `PATTERN_SDK_DIR`).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::RuntimeError;
+    /// use std::path::PathBuf;
+    ///
+    /// let err = RuntimeError::SdkNotFound {
+    ///     path: PathBuf::from("/missing/haskell"),
+    ///     hint: "Set PATTERN_SDK_DIR".to_string(),
+    /// };
+    /// assert!(err.to_string().contains("/missing/haskell"));
+    /// ```
+    #[error("SDK directory not found: {}", path.display())]
+    #[diagnostic(
+        code(pattern_runtime::sdk_not_found),
+        help("{hint}")
+    )]
+    SdkNotFound {
+        /// The path that was expected to contain the SDK.
+        path: std::path::PathBuf,
+        /// Actionable guidance for the operator.
+        hint: String,
+    },
+
     /// The runtime environment failed a preflight check before any compilation started.
     ///
     /// Returned by `pattern_runtime::preflight::check()` when a required binary

@@ -10,4 +10,7 @@
 //! stubbed with NotImplemented diagnostics).
 
 pub mod handlers;
+pub mod location;
 pub mod requests;
+
+pub use location::SdkLocation;
