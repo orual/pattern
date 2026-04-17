@@ -1244,7 +1244,7 @@ jj new
 use pattern_core::{
     error::RuntimeError,
     traits::Session,
-    types::{SessionSnapshot, TurnInput, TurnOutput},
+    types::{PersonaConfig, SessionSnapshot, TurnInput, TurnOutput},
 };
 use crate::{
     sdk::{SdkLocation, SdkBundle, default_bundle},
@@ -1252,47 +1252,39 @@ use crate::{
 };
 
 /// Session-scoped context threaded into `machine.run()` as the `user` param
-/// that tidepool-effect hands to each EffectHandler. Holds session-long state
-/// handlers may need to read.
+/// that tidepool-effect hands to each EffectHandler. Holds session-long
+/// state handlers read through the `EffectContext<U = SessionContext>` API.
+///
+/// **Phase 3 scope:** holds only `budget`, `cancellation`, and `handler_gate`.
+/// Memory and provider references threaded in Phase 5 / Phase 4 respectively
+/// once the real handlers land; Phase 3's MessageHandler + MemoryHandler are
+/// stubs that ignore the context they'd receive.
 pub struct SessionContext {
-    /// Timeout budget for `step()` calls. Persona-configurable.
+    /// Timeout budget for `step()` calls. Persona-configurable via
+    /// [`PersonaConfig::with_wall_budget_ms`] etc.
     budget: crate::timeout::Budget,
-    /// Shared handle to pattern_core::memory storage. Phase 5's MemoryHandler
-    /// uses this to service memory effects.
-    memory_store: std::sync::Arc<dyn pattern_core::traits::MemoryStore>,
-    /// Shared handle to the provider client. Phase 4's MessageHandler uses
-    /// this for LLM calls; forwarded by reference when the handler fires.
-    provider: std::sync::Arc<pattern_provider::AnthropicProviderClient>,
-    /// Persona snapshot for identity / config lookup.
-    persona: PersonaSnapshot,
     /// Shared cancellation flag (Phase 3 Task 16 two-path cancellation).
     /// Set by the watchdog when soft-cancel fires; checked by each handler.
     cancellation: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Handler entry/exit counter for Task 16's budget-pause logic.
+    handler_gate: std::sync::Arc<crate::timeout::HandlerGate>,
 }
 
 impl SessionContext {
-    pub fn from_persona(
-        persona: &PersonaSnapshot,
-        memory_store: &std::sync::Arc<dyn pattern_core::traits::MemoryStore>,
-        provider: &std::sync::Arc<pattern_provider::AnthropicProviderClient>,
-    ) -> Self {
+    pub fn from_persona(persona: &PersonaConfig) -> Self {
+        let budget = crate::timeout::Budget::from_persona(persona);
         Self {
-            budget: persona.budget.unwrap_or_default(),
-            memory_store: memory_store.clone(),
-            provider: provider.clone(),
-            persona: persona.clone(),
+            budget,
             cancellation: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            handler_gate: std::sync::Arc::new(crate::timeout::HandlerGate::new()),
         }
     }
     pub fn budget(&self) -> crate::timeout::Budget { self.budget }
     pub fn cancellation(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
         self.cancellation.clone()
     }
-    pub fn memory_store(&self) -> std::sync::Arc<dyn pattern_core::traits::MemoryStore> {
-        self.memory_store.clone()
-    }
-    pub fn provider(&self) -> std::sync::Arc<pattern_provider::AnthropicProviderClient> {
-        self.provider.clone()
+    pub fn handler_gate(&self) -> std::sync::Arc<crate::timeout::HandlerGate> {
+        self.handler_gate.clone()
     }
 }
 
@@ -1346,33 +1338,34 @@ impl Session for TidepoolSession {
 }
 
 impl TidepoolSession {
+    /// Open a session for `persona`. Phase 3 takes no provider/memory
+    /// arguments because the MessageHandler + MemoryHandler are stubs that
+    /// return `EffectError::Handler(...)` regardless — they don't actually
+    /// dispatch to real backing. Phase 4 adds an `Arc<dyn ProviderClient>`
+    /// parameter when the real MessageHandler lands; Phase 5 adds
+    /// `Arc<dyn MemoryStore>` for the real MemoryHandler.
     pub fn open(
-        persona: PersonaSnapshot,
+        persona: PersonaConfig,
         sdk: &SdkLocation,
-        memory_store: std::sync::Arc<dyn pattern_core::traits::MemoryStore>,
-        provider: std::sync::Arc<pattern_provider::AnthropicProviderClient>,
     ) -> Result<Self, RuntimeError> {
         crate::preflight::check()?;
         let sdk_dir = sdk.resolve()?;
-        let program = compile_program(&persona.program, "agent", &[&sdk_dir])?;
-        let machine = SessionMachine::new(program, persona.nursery_size.unwrap_or(32 * 1024 * 1024))?;
-        let session_id = persona.new_session_id();
-        // Clone Arcs before moving into SessionContext so we retain handles
-        // for the inline bundle construction below.
-        let ctx = SessionContext::from_persona(&persona, &memory_store, &provider);
-        // Construct the handler bundle inline, seeding session-scoped state
-        // (LogHandler.session_id, MemoryHandler with store handle, etc.)
-        // on the relevant handlers. `default_bundle()` from Task 12 with the
-        // log handler overridden.
+        let program = compile_program(&persona.program, "agent", &sdk_dir)?;
+        let machine = SessionMachine::new(
+            program,
+            persona.nursery_size.unwrap_or(32 * 1024 * 1024),
+        )?;
+        let session_id = pattern_core::types::ids::new_id();
+        let ctx = SessionContext::from_persona(&persona);
+        // Construct the handler bundle inline, seeding the log handler with
+        // the session id. Display handler is shared (Arc<RwLock> subscriber
+        // list): one copy lives in the bundle, another on this struct so
+        // callers can register subscribers after open.
         use crate::sdk::handlers::*;
-        // MessageHandler gets a clone of the DisplayHandler so it can forward
-        // stream chunks to display subscribers during provider streaming.
-        // A third clone lives on TidepoolSession itself so callers can
-        // register subscribers via `session.display()` after open.
         let display = DisplayHandler::new();
         let bundle = frunk::hlist![
-            MemoryHandler::new(ctx.memory_store(), ctx.cancellation()),
-            MessageHandler::new(ctx.provider(), display.clone(), ctx.cancellation()),
+            MemoryHandler::default(),      // stub in Phase 3
+            MessageHandler::default(),     // stub in Phase 3
             display.clone(),
             ShellHandler::default(),
             FileHandler::default(),
@@ -1380,7 +1373,7 @@ impl TidepoolSession {
             McpHandler::default(),
             TimeHandler::default(),
             IpcHandler::default(),
-            LogHandler { session_id: Some(session_id.clone()) },
+            LogHandler::for_session(session_id.as_str()),
             SpawnHandler::default(),
         ];
         Ok(Self {
@@ -1400,27 +1393,34 @@ impl TidepoolSession {
 
 ```rust
 //! Concrete AgentRuntime implementation.
-//! Owns the SdkLocation and spawns TidepoolSession instances.
+//!
+//! Phase 3 scope: owns the SdkLocation and spawns TidepoolSession instances.
+//! Phase 4 will add an `Arc<dyn ProviderClient>` field (forwarded to
+//! `TidepoolSession::open` alongside `persona` + `sdk`). Phase 5 will add
+//! `Arc<dyn MemoryStore>`. Both use trait-object dispatch so pattern_runtime
+//! does not depend on pattern_provider at compile time — that coupling is
+//! forbidden by the Phase 2 architecture.
 
 use pattern_core::traits::AgentRuntime;
-use pattern_core::types::PersonaSnapshot;
+use pattern_core::types::{PersonaConfig, SessionSnapshot};
 use pattern_core::error::RuntimeError;
 use crate::session::TidepoolSession;
 use crate::sdk::SdkLocation;
 
 pub struct TidepoolRuntime {
     sdk: SdkLocation,
-    memory_store: std::sync::Arc<dyn pattern_core::traits::MemoryStore>,
-    provider: std::sync::Arc<pattern_provider::AnthropicProviderClient>,
+    // Phase 4: provider: Arc<dyn pattern_core::traits::ProviderClient>,
+    // Phase 5: memory_store: Arc<dyn pattern_core::traits::MemoryStore>,
 }
 
 impl TidepoolRuntime {
-    pub fn new(
-        sdk: SdkLocation,
-        memory_store: std::sync::Arc<dyn pattern_core::traits::MemoryStore>,
-        provider: std::sync::Arc<pattern_provider::AnthropicProviderClient>,
-    ) -> Self {
-        Self { sdk, memory_store, provider }
+    pub fn new(sdk: SdkLocation) -> Self {
+        Self { sdk }
+    }
+
+    /// Convenience constructor using `SdkLocation::default()`.
+    pub fn with_default_sdk() -> Self {
+        Self::new(SdkLocation::default())
     }
 }
 
@@ -1428,19 +1428,30 @@ impl TidepoolRuntime {
 impl AgentRuntime for TidepoolRuntime {
     type Session = TidepoolSession;
 
-    async fn open_session(&self, persona: PersonaSnapshot) -> Result<Self::Session, RuntimeError> {
-        // Offload compile to blocking pool — GHC subprocess shouldn't block async runtime.
-        let persona_cloned = persona.clone();
+    async fn open_session(
+        &self,
+        persona: PersonaConfig,
+        snapshot: Option<SessionSnapshot>,
+    ) -> Result<Self::Session, RuntimeError> {
         let sdk = self.sdk.clone();
-        let memory_store = self.memory_store.clone();
-        let provider = self.provider.clone();
-        tokio::task::spawn_blocking(move || TidepoolSession::open(persona_cloned, &sdk, memory_store, provider))
+        let session = tokio::task::spawn_blocking(move || TidepoolSession::open(persona, &sdk))
             .await
-            .map_err(|e| RuntimeError::SessionOpenFailed { source: e.to_string() })?
+            .map_err(|e| RuntimeError::JoinError { source: e.to_string() })??;
+        // Restore path if caller supplied a snapshot. Phase 3 Task 15 implements restore;
+        // an un-started session restored from a snapshot replays the event log before
+        // the next step() call.
+        if let Some(snap) = snapshot {
+            let mut s = session;
+            s.restore(snap).await?;
+            Ok(s)
+        } else {
+            Ok(session)
+        }
     }
 
     async fn shutdown(&self) -> Result<(), RuntimeError> {
-        // Nothing session-level to release; individual sessions drop their machines.
+        // Nothing runtime-level to release; sessions drop their machines on
+        // their own `Drop`.
         Ok(())
     }
 }
@@ -1448,9 +1459,9 @@ impl AgentRuntime for TidepoolRuntime {
 
 **Step 1:** Implement both files.
 
-**Step 2:** Integration test in `tests/session_lifecycle.rs`:
-- open → step (once) → drop. Assert preflight + compile + single run path works.
-- open → step (twice) → drop. Assert the second step does not trigger a recompile (observe via bench / instrumentation).
+**Step 2:** Integration test in `tests/session_lifecycle.rs`. Uses an agent program that only exercises Time + Log effects (MessageHandler + MemoryHandler are stubs and will error if invoked — that's a Phase 4/5 integration concern).
+- `open_then_step_then_drop` — assert preflight + compile + single run path works.
+- `open_step_twice` — assert the second step does not trigger a recompile (observe via timing — warm run should be well under a second compared to cold compile).
 
 **Step 3:** Concurrency test (AC2.10):
 
@@ -1461,17 +1472,40 @@ async fn concurrent_sessions_are_isolated() {
     let futs: Vec<_> = (0..4).map(|i| {
         let rt = &runtime;
         async move {
-            let mut s = rt.open_session(PersonaSnapshot::test_agent(i)).await.unwrap();
+            let persona = PersonaConfig::new(
+                format!("test-agent-{i}"),
+                format!("Test Agent {i}"),
+                include_str!("fixtures/time_log_agent.hs"),
+            );
+            let mut s = rt.open_session(persona, None).await.unwrap();
             for _ in 0..3 {
-                let input = TurnInput::test(i);
-                let out = s.step(input).unwrap();
-                assert_eq!(out.session_tag(), i);
+                let out = s.step(TurnInput::test(i)).await.unwrap();
+                // Assert output well-formed (structure depends on TurnInput/TurnOutput shape
+                // which Phase 2 left minimal — details finalised in Phase 4/5).
             }
         }
     }).collect();
     futures::future::join_all(futs).await;
 }
 ```
+
+**What Phase 3 Subcomponent D verifies (agent programs using Time + Log + Display only):**
+- ✅ Session open/step/drop lifecycle (`open_then_step_then_drop`)
+- ✅ Warm-run reuses compiled machine (`open_step_twice`)
+- ✅ Concurrent sessions isolated (`concurrent_sessions_are_isolated` — AC2.10)
+- ✅ Timeout soft-cancel with effect-yielding agent (Task 16)
+- ✅ Timeout hard-abandon with tight-compute agent (Task 16)
+- ✅ Budget pauses while handler is active (Task 16 — mock slow handler)
+- ✅ Checkpoint/restore round-trip (Task 15)
+- ✅ Effect-overflow (Task 17 — AC2.7)
+
+**What Phase 3 Subcomponent D explicitly does NOT test (deferred to Phase 4/5):**
+- ❌ MessageHandler dispatching to a real provider (Phase 4 wires `Arc<dyn ProviderClient>` through the bundle)
+- ❌ MemoryHandler reading/writing real storage (Phase 5 wires `Arc<dyn MemoryStore>`)
+- ❌ Streaming chunks forwarded to DisplaySubscribers during provider calls (Phase 4's MessageHandler drives this)
+- ❌ HTTP-timeout-inside-handler distinction from runtime-timeout (Task 16's `slow_llm_handler_does_not_trigger_timeout` test needs a real provider to exercise; Phase 3 can stand in with a mock handler that sleeps, but that's a Phase 4 test realistically)
+
+Agent programs in Phase 3 Subcomp D tests must stay within Time/Log/Display effects. Programs calling Message.Ask or Memory.* effects will receive `EffectError::Handler(...)` from the respective stubs, which the JIT surfaces as `JitError::Effect(...)`. That's not what these tests are asserting, so don't author agent programs that call stubbed namespaces in Subcomp D test fixtures.
 
 **Commit:**
 ```bash

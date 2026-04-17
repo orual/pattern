@@ -17,35 +17,116 @@ use crate::types::turn::TurnId;
 
 /// Configuration required to open a new session for an agent.
 ///
-/// `PersonaConfig` is the opaque configuration blob that
-/// [`crate::traits::AgentRuntime::open_session`] consumes when constructing a
-/// new session. It names the agent to run and carries any persona-level
-/// parameters the concrete runtime requires. Phase 3 replaces the opaque
-/// `data` field with a typed persona-config shape; Phase 2 lands only the
-/// name + ID surface so the trait signature is stable.
+/// [`crate::traits::AgentRuntime::open_session`] consumes a `PersonaConfig`
+/// when constructing a fresh session. Carries the agent's identity, the
+/// Haskell program the runtime will compile, and runtime-policy knobs
+/// (timeout budgets, nursery size). `extra` is a free-form `serde_json::Value`
+/// slot for configuration that hasn't earned a first-class field yet
+/// (persona-specific tool toggles, model-name overrides, experiments).
 ///
-/// Callers should treat this type as opaque: construct it via the helpers
-/// that Phase 3 will provide, rather than populating `data` directly.
+/// Construct with [`PersonaConfig::new`] to pick up default optional fields;
+/// use builder-style setters for the optional knobs. `#[non_exhaustive]` so
+/// future fields can be added without breaking callers.
 ///
 /// # Examples
 ///
 /// ```
 /// use pattern_core::types::snapshot::PersonaConfig;
-/// use pattern_core::types::ids::new_id;
-/// use smol_str::SmolStr;
 ///
-/// let cfg = PersonaConfig {
-///     agent_id: SmolStr::new("orual-companion"),
-///     data: serde_json::json!({}),
-/// };
+/// let cfg = PersonaConfig::new(
+///     "orual-companion",
+///     "Companion",
+///     "module Agent where\nagent = pure ()",
+/// )
+/// .with_wall_budget_ms(30_000)
+/// .with_cpu_budget_ms(10_000);
 /// assert_eq!(cfg.agent_id.as_str(), "orual-companion");
+/// assert_eq!(cfg.wall_budget_ms, Some(30_000));
 /// ```
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersonaConfig {
-    /// The agent this configuration describes.
+    /// Stable identifier for this agent.
     pub agent_id: AgentId,
-    /// Opaque persona configuration. Implementation defined by Phase 3.
-    pub data: serde_json::Value,
+    /// Human-readable name for logs / display. Smol since it's short and cloned often.
+    pub name: smol_str::SmolStr,
+    /// The Haskell agent program source. The runtime will run it through its
+    /// SDK-inlining preprocessor (see `pattern_runtime::tidepool::inline`) and
+    /// hand the result to `tidepool-extract`.
+    pub program: String,
+    /// Wall-clock time-in-JIT budget per turn, in milliseconds. `None` means
+    /// use the runtime's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_budget_ms: Option<u64>,
+    /// CPU time-in-JIT budget per turn, in milliseconds. `None` means use
+    /// the runtime's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_budget_ms: Option<u64>,
+    /// Additional milliseconds of runaway compute (no effect yields) to
+    /// tolerate after the CPU budget is exhausted before escalating from
+    /// soft-cancel to hard-abandon. `None` means runtime default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hard_abandon_ms: Option<u64>,
+    /// JIT nursery size in bytes. `None` means the runtime's default
+    /// (32 MiB per pattern_runtime's `TidepoolSession::open`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nursery_size: Option<usize>,
+    /// Free-form persona metadata that hasn't earned a first-class field
+    /// yet. Phase 4+ may promote particular keys to named fields.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub extra: serde_json::Value,
+}
+
+impl PersonaConfig {
+    /// Build a minimal config with only the required fields; optional knobs
+    /// default to `None` (runtime chooses) and `extra` defaults to `null`.
+    pub fn new(
+        agent_id: impl Into<AgentId>,
+        name: impl Into<smol_str::SmolStr>,
+        program: impl Into<String>,
+    ) -> Self {
+        Self {
+            agent_id: agent_id.into(),
+            name: name.into(),
+            program: program.into(),
+            wall_budget_ms: None,
+            cpu_budget_ms: None,
+            hard_abandon_ms: None,
+            nursery_size: None,
+            extra: serde_json::Value::Null,
+        }
+    }
+
+    /// Set the per-turn wall-clock budget in milliseconds.
+    pub fn with_wall_budget_ms(mut self, ms: u64) -> Self {
+        self.wall_budget_ms = Some(ms);
+        self
+    }
+
+    /// Set the per-turn CPU budget in milliseconds.
+    pub fn with_cpu_budget_ms(mut self, ms: u64) -> Self {
+        self.cpu_budget_ms = Some(ms);
+        self
+    }
+
+    /// Set the additional milliseconds of runaway compute tolerated beyond
+    /// the CPU budget before hard-abandonment fires.
+    pub fn with_hard_abandon_ms(mut self, ms: u64) -> Self {
+        self.hard_abandon_ms = Some(ms);
+        self
+    }
+
+    /// Set the JIT nursery size in bytes.
+    pub fn with_nursery_size(mut self, bytes: usize) -> Self {
+        self.nursery_size = Some(bytes);
+        self
+    }
+
+    /// Attach free-form persona metadata.
+    pub fn with_extra(mut self, extra: serde_json::Value) -> Self {
+        self.extra = extra;
+        self
+    }
 }
 
 /// A serializable snapshot of a single agent's persona-scoped state.
