@@ -6,5 +6,7 @@
 //! subsystem modules (e.g. memory storage).
 
 pub mod memory_store;
+pub mod provider_client;
 
 pub use memory_store::MemoryStore;
+pub use provider_client::ProviderClient;

@@ -10,6 +10,7 @@ pub mod block_ref;
 pub mod caller;
 pub mod ids;
 pub mod message;
+pub mod provider;
 pub mod snapshot;
 pub mod turn;
 
