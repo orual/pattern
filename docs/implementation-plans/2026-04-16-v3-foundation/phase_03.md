@@ -69,13 +69,16 @@ This phase implements and tests:
 
 **Mapping tidepool errors to `pattern_core::error::RuntimeError`** (verified against tidepool commit `746da8b` — "feat: consolidate error handling with thiserror"):
 
+**Reviewer note:** `RuntimeError::GhcPanic` (earlier draft) was renamed and split. It conflated substrate-setup IO errors, codegen pipeline failures, missing SDK primitives, and sandbox IO-type violations — none of which are actual GHC panics. The replacement variants are `ProgramCompileFailed { diagnostics }`, `MissingRuntimePrimitive { name }`, `CompileInternal { reason }`, and `SandboxConstraintViolated { constraint: SandboxConstraint, detail }`. See the reviewer note in phase_02.md Task 13 for the rationale. Phase 3 implementers should assume the new variants exist; the Subcomponent B task dispatch performs the rename/split before touching the handlers.
+
 | Tidepool | Pattern |
 |---|---|
-| `CompileError::ExtractFailed(stderr)` | `RuntimeError::GhcPanic { reason: stderr }` |
-| `CompileError::Io(_)` / `ReadError(_)` / `MissingOutput(_)` / `IOTypeDetected` | `RuntimeError::GhcPanic { reason: e.to_string() }` (extractor setup / IO sandbox violation) |
+| `CompileError::ExtractFailed(stderr)` | `RuntimeError::ProgramCompileFailed { diagnostics: stderr }` (agent author's program has source-level errors) |
+| `CompileError::IOTypeDetected` | `RuntimeError::SandboxConstraintViolated { constraint: SandboxConstraint::NoIoAllowed, detail: "agent program uses IO types; use SDK effects instead" }` (surfaces back to the agent so it can iterate — it's a learned constraint, not a bug) |
+| `CompileError::Io(_)` / `ReadError(_)` / `MissingOutput(_)` | `RuntimeError::CompileInternal { reason: e.to_string() }` (substrate IO / missing support files — environment problem, not user program) |
 | `JitError::Signal(SignalError)` | `RuntimeError::RuntimeCrashed` (JIT-time signal during codegen or heap bridge) |
 | `JitError::HeapBridge(_)` | `RuntimeError::RuntimeCrashed` (heap-object conversion failed) |
-| `JitError::MissingConTags(name)` | `RuntimeError::GhcPanic { reason: format!("missing freer-simple constructor: {name}") }` (agent DSL missing required constructors) |
+| `JitError::MissingConTags(name)` | `RuntimeError::MissingRuntimePrimitive { name: name.into() }` (agent SDK references a freer-simple constructor the runtime doesn't provide — version mismatch) |
 | `JitError::EffectResponseTooLarge { nodes, limit }` | `RuntimeError::EffectOverflow` (dedicated variant as of 746da8b; older research notes conflated with `JitError::Effect`) |
 | `JitError::Effect(EffectError)` | bubble up the handler's `EffectError` as an `SdkError` (handler-local) — this is an SDK call failing, not a runtime crash |
 | `JitError::Yield(YieldError::StackOverflow \| HeapOverflow)` | `RuntimeError::RuntimeCrashed` (treat as unrecoverable) |
@@ -83,7 +86,7 @@ This phase implements and tests:
 | `JitError::Yield(YieldError::DivisionByZero \| Overflow \| BlackHole \| BadThunkState \| NullFunPtr \| BadFunPtrTag \| UnresolvedVar \| TypeMetadata)` | `RuntimeError::RuntimeCrashed` (runtime-semantic errors from agent code) |
 | `JitError::Yield(YieldError::UserError \| UserErrorMsg)` | surface as agent-logic output, not `RuntimeError` (agent called Haskell's `error`) |
 | `JitError::Yield(YieldError::UnexpectedTag \| UnexpectedConTag \| BadValFields \| BadEFields \| BadUnionFields \| NullPointer)` | `RuntimeError::RuntimeCrashed` (heap-parse errors at the result boundary — implementation bugs, should be rare) |
-| `JitError::Pipeline(_)` / `JitError::Compilation(_)` | `RuntimeError::GhcPanic` (compile/codegen pipeline failed — generally happens at `compile_haskell`/`JitEffectMachine::compile` time, not during `run`) |
+| `JitError::Pipeline(_)` / `JitError::Compilation(_)` | `RuntimeError::CompileInternal { reason }` (codegen/linking pipeline failed — runtime-internal, not user program bug) |
 | (external wrapper) wall-clock timeout expired | `RuntimeError::Timeout { wall_ms, cpu_ms: <last sample> }` |
 | (external wrapper) CPU sample exceeded budget | `RuntimeError::Timeout { wall_ms: <elapsed>, cpu_ms }` |
 
@@ -224,7 +227,9 @@ pub fn compile_program(
     target: &str,
     include_dirs: &[&Path],
 ) -> Result<CompiledProgram, RuntimeError> {
-    // 1. Call compile_haskell, map CompileError → RuntimeError::GhcPanic.
+    // 1. Call compile_haskell, map CompileError via error_map::map_compile_error
+    //    (ExtractFailed → ProgramCompileFailed, IOTypeDetected → SandboxConstraintViolated,
+    //    Io/ReadError/MissingOutput → CompileInternal).
     // 2. Unpack CompileResult into CompiledProgram.
     // 3. Log warnings via tracing.
     // ... implementation per task-implementor ...
@@ -312,7 +317,7 @@ mod tests {
     fn extract_failure_becomes_ghc_panic() {
         let input = tidepool_runtime::CompileError::ExtractFailed("kaboom".into());
         let mapped = map_compile_error(input);
-        assert!(matches!(mapped, RuntimeError::GhcPanic { .. }));
+        assert!(matches!(mapped, RuntimeError::ProgramCompileFailed { .. }));
     }
 
     #[test]

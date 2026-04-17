@@ -46,7 +46,7 @@ pub use core::{ConfigError, CoreError};
 pub use embedding::EmbeddingError;
 pub use memory::MemoryError;
 pub use provider::ProviderError;
-pub use runtime::RuntimeError;
+pub use runtime::{RuntimeError, SandboxConstraint};
 
 /// Convenience `Result` alias using [`CoreError`] as the error type.
 ///

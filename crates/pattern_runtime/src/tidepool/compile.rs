@@ -36,7 +36,7 @@ pub fn compile_program(
     _target: &str,
     _include_dirs: &[&Path],
 ) -> Result<CompiledProgram, RuntimeError> {
-    // 1. Call compile_haskell, map CompileError → RuntimeError::GhcPanic.
+    // 1. Call compile_haskell, map CompileError via error_map::map_compile_error.
     // 2. Unpack CompileResult into CompiledProgram.
     // 3. Log warnings via tracing.
     // phase: 3; AC: AC2.1

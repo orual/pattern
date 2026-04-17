@@ -9,42 +9,50 @@
 //!
 //! See the error-mapping table in `docs/implementation-plans/2026-04-16-v3-foundation/phase_03.md`
 //! (executor context section) for the full rationale for each mapping decision.
-//! The key split:
-//! - Compile-time errors (extractor failures, IO, missing outputs) → `RuntimeError::GhcPanic`
-//! - JIT-time infrastructure failures (signal, heap bridge, missing con tags) → `RuntimeError::RuntimeCrashed` or `GhcPanic`
+//! The key splits:
+//! - Source-level program errors (extractor stderr) → `RuntimeError::ProgramCompileFailed`
+//! - Substrate IO / missing support-files / codegen pipeline → `RuntimeError::CompileInternal`
+//! - Missing SDK primitive (con-tag) → `RuntimeError::MissingRuntimePrimitive`
+//! - IO-type usage in sandbox → `RuntimeError::SandboxConstraintViolated { NoIoAllowed, .. }`
+//! - JIT-time signals / heap-bridge / unrecoverable yields → `RuntimeError::RuntimeCrashed`
 //! - Effect-level overflow (too many response nodes) → `RuntimeError::EffectOverflow`
 //! - Agent-logic errors (Haskell `error`/`undefined`) → `JitOutcome::AgentError`; not a runtime crash
 //! - SDK handler failures → `SdkError` (handler-local; not a runtime crash)
 
-use pattern_core::error::RuntimeError;
+use pattern_core::error::{RuntimeError, SandboxConstraint};
 use tidepool_codegen::jit_machine::JitError;
 use tidepool_codegen::yield_type::YieldError;
 use tidepool_runtime::CompileError;
 
 /// Map a `tidepool_runtime::CompileError` to a `pattern_core::error::RuntimeError`.
 ///
-/// All compile errors surface as `RuntimeError::GhcPanic` because they represent a
-/// failure in the extractor pipeline (GHC parse/type-check/Core translation), not an
-/// agent-logic problem.
+/// Splits along the axes the agent orchestrator cares about: source-level user
+/// errors (`ProgramCompileFailed`), substrate IO / infrastructure failures
+/// (`CompileInternal`), and sandbox constraint violations
+/// (`SandboxConstraintViolated`).
 pub fn map_compile_error(e: CompileError) -> RuntimeError {
     match e {
-        // GHC parse/type-check/Core failure: stderr captured by extractor.
-        CompileError::ExtractFailed(stderr) => RuntimeError::GhcPanic { reason: stderr },
+        // GHC parse/type-check/Core failure: surface stderr to the program author.
+        CompileError::ExtractFailed(stderr) => RuntimeError::ProgramCompileFailed {
+            diagnostics: stderr,
+        },
 
-        // Extractor setup or IO sandbox issues: surface the OS error as reason.
-        CompileError::Io(io_err) => RuntimeError::GhcPanic {
+        // Substrate IO / missing support files — environment problem, not user program.
+        CompileError::Io(io_err) => RuntimeError::CompileInternal {
             reason: io_err.to_string(),
         },
-        CompileError::ReadError(read_err) => RuntimeError::GhcPanic {
+        CompileError::ReadError(read_err) => RuntimeError::CompileInternal {
             reason: read_err.to_string(),
         },
-        CompileError::MissingOutput(path) => RuntimeError::GhcPanic {
+        CompileError::MissingOutput(path) => RuntimeError::CompileInternal {
             reason: format!("missing extractor output: {}", path.display()),
         },
 
-        // Agent tried to use IO operations (unsafePerformIO etc.) in a sandbox-only context.
-        CompileError::IOTypeDetected => RuntimeError::GhcPanic {
-            reason: "IO type detected in result binding: IO operations are not permitted in the Tidepool sandbox".to_string(),
+        // Sandbox constraint: program uses IO types. Surface to the agent so it
+        // can iterate — this is a learned operational constraint, not a bug.
+        CompileError::IOTypeDetected => RuntimeError::SandboxConstraintViolated {
+            constraint: SandboxConstraint::NoIoAllowed,
+            detail: "agent program uses IO types; use SDK effects instead".to_string(),
         },
     }
 }
@@ -69,9 +77,12 @@ pub fn map_jit_error(e: JitError) -> JitOutcome {
         JitError::HeapBridge(_) => JitOutcome::Runtime(RuntimeError::RuntimeCrashed),
 
         // Agent DSL missing required freer-simple constructor tags.
-        JitError::MissingConTags(name) => JitOutcome::Runtime(RuntimeError::GhcPanic {
-            reason: format!("missing freer-simple constructor: {name}"),
-        }),
+        // `name` is a `&'static str`.
+        JitError::MissingConTags(name) => {
+            JitOutcome::Runtime(RuntimeError::MissingRuntimePrimitive {
+                name: name.to_string(),
+            })
+        }
 
         // Effect handler response exceeded the node budget (dedicated variant as of 746da8b).
         JitError::EffectResponseTooLarge { .. } => {
@@ -81,11 +92,11 @@ pub fn map_jit_error(e: JitError) -> JitOutcome {
         // SDK handler failure — not a runtime crash; surface to handler infrastructure.
         JitError::Effect(effect_err) => JitOutcome::Sdk(SdkError(effect_err)),
 
-        // Codegen/pipeline failures — generally happen at compile time, not run time.
-        JitError::Pipeline(pipeline_err) => JitOutcome::Runtime(RuntimeError::GhcPanic {
+        // Codegen/pipeline failures — runtime-internal, not user program bug.
+        JitError::Pipeline(pipeline_err) => JitOutcome::Runtime(RuntimeError::CompileInternal {
             reason: pipeline_err.to_string(),
         }),
-        JitError::Compilation(emit_err) => JitOutcome::Runtime(RuntimeError::GhcPanic {
+        JitError::Compilation(emit_err) => JitOutcome::Runtime(RuntimeError::CompileInternal {
             reason: emit_err.to_string(),
         }),
 
@@ -190,36 +201,43 @@ mod tests {
     // --- CompileError tests ---
 
     #[test]
-    fn extract_failed_becomes_ghc_panic() {
+    fn extract_failed_becomes_program_compile_failed() {
         let input = CompileError::ExtractFailed("kaboom".into());
         let mapped = map_compile_error(input);
         assert!(
-            matches!(mapped, RuntimeError::GhcPanic { ref reason } if reason.contains("kaboom"))
+            matches!(mapped, RuntimeError::ProgramCompileFailed { ref diagnostics } if diagnostics.contains("kaboom"))
         );
     }
 
     #[test]
-    fn io_error_becomes_ghc_panic() {
+    fn io_error_becomes_compile_internal() {
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
         let mapped = map_compile_error(CompileError::Io(io_err));
-        assert!(matches!(mapped, RuntimeError::GhcPanic { .. }));
+        assert!(matches!(mapped, RuntimeError::CompileInternal { .. }));
     }
 
     #[test]
-    fn missing_output_becomes_ghc_panic() {
+    fn missing_output_becomes_compile_internal() {
         let path = std::path::PathBuf::from("/tmp/missing.cbor");
         let mapped = map_compile_error(CompileError::MissingOutput(path));
         assert!(
-            matches!(mapped, RuntimeError::GhcPanic { ref reason } if reason.contains("missing extractor output"))
+            matches!(mapped, RuntimeError::CompileInternal { ref reason } if reason.contains("missing extractor output"))
         );
     }
 
     #[test]
-    fn io_type_detected_becomes_ghc_panic() {
+    fn io_type_detected_becomes_sandbox_constraint_violated() {
         let mapped = map_compile_error(CompileError::IOTypeDetected);
-        assert!(
-            matches!(mapped, RuntimeError::GhcPanic { ref reason } if reason.contains("IO type"))
-        );
+        match mapped {
+            RuntimeError::SandboxConstraintViolated {
+                constraint,
+                ref detail,
+            } => {
+                assert_eq!(constraint, SandboxConstraint::NoIoAllowed);
+                assert!(detail.contains("IO"));
+            }
+            other => panic!("expected SandboxConstraintViolated, got {other:?}"),
+        }
     }
 
     // --- JitError tests ---
@@ -246,11 +264,11 @@ mod tests {
     }
 
     #[test]
-    fn missing_con_tags_becomes_ghc_panic_with_name() {
+    fn missing_con_tags_becomes_missing_runtime_primitive() {
         let e = JitError::MissingConTags("MyEffect");
         let outcome = map_jit_error(e);
         assert!(
-            matches!(outcome, JitOutcome::Runtime(RuntimeError::GhcPanic { ref reason }) if reason.contains("MyEffect"))
+            matches!(outcome, JitOutcome::Runtime(RuntimeError::MissingRuntimePrimitive { ref name }) if name == "MyEffect")
         );
     }
 

@@ -11,7 +11,33 @@
 //! variants are new for v3.
 
 use miette::Diagnostic;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+/// Kinds of sandbox constraint a runtime may enforce on agent programs.
+///
+/// Surfaced through [`RuntimeError::SandboxConstraintViolated`]. These are
+/// learned operational constraints we surface back to the agent rather than
+/// program bugs — the agent can iterate on its program to avoid the
+/// constraint.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxConstraint {
+    /// Program uses IO types. Pattern's Tidepool-backed sandbox only
+    /// accepts pure functional code — all side effects go through the
+    /// SDK effect algebra, not `IO`.
+    NoIoAllowed,
+    // Future: NoUnsafeFfi, ExcessiveRecursion, etc.
+}
+
+impl std::fmt::Display for SandboxConstraint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SandboxConstraint::NoIoAllowed => f.write_str("no_io_allowed"),
+        }
+    }
+}
 
 /// Errors that originate in the agent execution loop.
 ///
@@ -64,33 +90,112 @@ pub enum RuntimeError {
     )]
     EffectOverflow,
 
-    /// The underlying Tidepool runtime panicked.
+    /// The agent program failed to parse or type-check.
     ///
-    /// This indicates a bug in the Tidepool runtime, not in the agent program.
-    /// The `reason` field contains the panic message if it could be captured.
+    /// Source-level errors from the Haskell extractor pipeline (GHC parse /
+    /// type-check / Core translation). The `diagnostics` field carries the
+    /// extractor's stderr verbatim, which the program author should use to
+    /// fix their code.
     ///
     /// # Example
     ///
     /// ```
     /// use pattern_core::error::RuntimeError;
     ///
-    /// let err = RuntimeError::GhcPanic { reason: "out of memory".to_string() };
-    /// assert!(err.to_string().contains("out of memory"));
+    /// let err = RuntimeError::ProgramCompileFailed {
+    ///     diagnostics: "Main.hs:3:1: parse error".to_string(),
+    /// };
+    /// assert!(err.to_string().contains("parse error"));
     /// ```
-    #[error("tidepool runtime panicked: {reason}")]
+    #[error("agent program compile failed:\n{diagnostics}")]
+    #[diagnostic(code(pattern_runtime::program_compile_failed))]
+    ProgramCompileFailed {
+        /// Raw extractor diagnostics (GHC stderr) describing the failure.
+        diagnostics: String,
+    },
+
+    /// The agent program references a primitive the runtime doesn't provide.
+    ///
+    /// Typically an SDK/runtime version mismatch — the Haskell SDK refers to
+    /// a freer-simple constructor (effect variant, data constructor) that the
+    /// embedded runtime hasn't registered. Surfaces the constructor name so
+    /// operators can diagnose which SDK/runtime pair is out of sync.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::RuntimeError;
+    ///
+    /// let err = RuntimeError::MissingRuntimePrimitive { name: "Notify".to_string() };
+    /// assert!(err.to_string().contains("Notify"));
+    /// ```
+    #[error("missing runtime primitive: {name}")]
     #[diagnostic(
-        code(pattern_core::runtime::ghc_panic),
-        help("this is a runtime bug; report it with the reason string")
+        code(pattern_runtime::missing_runtime_primitive),
+        help(
+            "the agent SDK refers to `{name}` but the runtime doesn't provide it. check SDK/runtime version alignment."
+        )
     )]
-    GhcPanic {
-        /// The panic message captured from the runtime, if available.
+    MissingRuntimePrimitive {
+        /// Name of the missing constructor / primitive.
+        name: String,
+    },
+
+    /// Runtime-internal failure during compilation.
+    ///
+    /// Covers codegen / linking / supporting-file resolution / substrate IO
+    /// errors inside the compile pipeline. Not a user program bug — file
+    /// against the runtime crate.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::RuntimeError;
+    ///
+    /// let err = RuntimeError::CompileInternal {
+    ///     reason: "failed to spawn tidepool-extract".to_string(),
+    /// };
+    /// assert!(err.to_string().contains("tidepool-extract"));
+    /// ```
+    #[error("runtime-internal compile failure: {reason}")]
+    #[diagnostic(code(pattern_runtime::compile_internal))]
+    CompileInternal {
+        /// Human-readable description of the internal failure.
         reason: String,
+    },
+
+    /// The agent program violates a substrate sandbox constraint.
+    ///
+    /// Surface `detail` back to the agent (not the author) so it can iterate —
+    /// this is a learned operational constraint, not a bug. `constraint`
+    /// identifies the kind of constraint violated and is stable for matching;
+    /// `detail` is free-form and may be surfaced directly to the agent.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::{RuntimeError, SandboxConstraint};
+    ///
+    /// let err = RuntimeError::SandboxConstraintViolated {
+    ///     constraint: SandboxConstraint::NoIoAllowed,
+    ///     detail: "agent program uses IO types; use SDK effects instead".to_string(),
+    /// };
+    /// assert!(err.to_string().contains("IO"));
+    /// ```
+    #[error("sandbox constraint violated: {detail}")]
+    #[diagnostic(code(pattern_runtime::sandbox_constraint_violated))]
+    SandboxConstraintViolated {
+        /// The kind of sandbox constraint violated.
+        constraint: SandboxConstraint,
+        /// Human-readable detail for the agent.
+        detail: String,
     },
 
     /// The Tidepool runtime process crashed unexpectedly.
     ///
-    /// Distinct from [`RuntimeError::GhcPanic`]: a crash means the process
-    /// exited without a catchable panic (e.g., segfault, OOM kill).
+    /// A crash means the process exited without a catchable panic
+    /// (e.g., segfault, OOM kill, fatal JIT signal). Distinct from the
+    /// compile-failure variants: these happen mid-execution.
     ///
     /// # Example
     ///
