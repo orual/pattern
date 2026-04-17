@@ -252,7 +252,7 @@ impl SessionMachine {
         todo!("phase: 3; AC: AC2.1")
     }
 
-    pub fn run<U, H>(&mut self, handlers: &mut H, user: &U) -> Result<tidepool_bridge::Value, RuntimeError>
+    pub fn run<U, H>(&mut self, handlers: &mut H, user: &U) -> Result<tidepool_eval::Value, RuntimeError>
     where
         H: tidepool_effect::DispatchEffect<U>,
     {
@@ -716,7 +716,7 @@ pub struct McpHandler;
 impl EffectHandler for McpHandler {
     type Request = McpReq;
 
-    fn handle(&mut self, req: McpReq, _cx: &EffectContext) -> Result<tidepool_bridge::Value, EffectError> {
+    fn handle(&mut self, req: McpReq, _cx: &EffectContext) -> Result<tidepool_eval::Value, EffectError> {
         // Construct a descriptive error. freer-simple side will surface it.
         Err(EffectError::custom(format!(
             "Pattern.Mcp.{:?} is not implemented in v3 foundation \
@@ -759,6 +759,7 @@ jj new
 ```rust
 use jiff::Timestamp;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
+use tidepool_eval::Value;
 use crate::sdk::requests::TimeReq;
 
 #[derive(Default)]
@@ -767,12 +768,15 @@ pub struct TimeHandler;
 impl EffectHandler for TimeHandler {
     type Request = TimeReq;
 
-    fn handle(&mut self, req: TimeReq, _cx: &EffectContext) -> Result<tidepool_bridge::Value, EffectError> {
+    fn handle(&mut self, req: TimeReq, cx: &EffectContext) -> Result<Value, EffectError> {
         match req {
             TimeReq::Now => {
                 // jiff::Timestamp is an explicit UTC instant with nanosecond precision.
-                let ns = Timestamp::now().as_nanosecond() as i64;
-                Ok(tidepool_bridge::Value::Integer(ns.into()))
+                // as_nanosecond() returns i128 (jiff's range exceeds i64); narrow to i64
+                // for the Haskell Int wire format. try_from panics only past year 2262.
+                let ns: i64 = i64::try_from(Timestamp::now().as_nanosecond())
+                    .expect("timestamp fits in i64 nanos until year 2262");
+                cx.respond(ns) // ToCore<i64> produces Value::Lit(Literal::LitInt(ns))
             }
             TimeReq::Sleep(ns) => {
                 // Very short sleeps only — we don't want the handler to block the JIT loop.
@@ -786,14 +790,14 @@ impl EffectHandler for TimeHandler {
                     )));
                 }
                 std::thread::sleep(std::time::Duration::from_nanos(ns as u64));
-                Ok(tidepool_bridge::Value::Unit)
+                cx.respond(()) // ToCore<()> produces the Haskell unit Value
             }
         }
     }
 }
 ```
 
-Rationale: `jiff::Timestamp::now()` gives an explicit wall-clock UTC instant with nanosecond precision; `.as_nanosecond()` returns nanos-since-epoch for the SDK wire format. `Sleep` is bounded — long sleeps would block the JIT caller thread (`std::thread::sleep` + `std::time::Duration` is correct here; we're doing a short stopwatch sleep, not manipulating a wall-clock instant).
+Rationale: `jiff::Timestamp::now()` gives an explicit wall-clock UTC instant with nanosecond precision; `.as_nanosecond()` returns nanos-since-epoch as `i128`, narrowed to `i64` for the GHC `Int` wire format (`Literal::LitInt(i64)`). Handlers return via `cx.respond(rust_value)` which uses the `ToCore` trait from `tidepool_bridge` — handlers don't construct `Value` variants manually. `Sleep` is bounded — long sleeps would block the JIT caller thread (`std::thread::sleep` + `std::time::Duration` is correct here; we're doing a short stopwatch sleep, not manipulating a wall-clock instant).
 
 **`log.rs` implementation:**
 
@@ -813,7 +817,7 @@ pub struct LogHandler {
 impl EffectHandler for LogHandler {
     type Request = LogReq;
 
-    fn handle(&mut self, req: LogReq, _cx: &EffectContext) -> Result<tidepool_bridge::Value, EffectError> {
+    fn handle(&mut self, req: LogReq, cx: &EffectContext) -> Result<tidepool_eval::Value, EffectError> {
         let sid = self.session_id.as_deref().unwrap_or("unknown");
         match req {
             LogReq::Debug(msg) => debug!(session = sid, source = "agent", "{msg}"),
@@ -821,7 +825,7 @@ impl EffectHandler for LogHandler {
             LogReq::Warn(msg)  => warn!( session = sid, source = "agent", "{msg}"),
             LogReq::Error(msg) => error!(session = sid, source = "agent", "{msg}"),
         }
-        Ok(tidepool_bridge::Value::Unit)
+        cx.respond(()) // Haskell unit via ToCore
     }
 }
 ```
@@ -873,7 +877,7 @@ impl DisplayHandler {
 impl EffectHandler for DisplayHandler {
     type Request = DisplayReq;
 
-    fn handle(&mut self, req: DisplayReq, _cx: &EffectContext) -> Result<tidepool_bridge::Value, EffectError> {
+    fn handle(&mut self, req: DisplayReq, cx: &EffectContext) -> Result<tidepool_eval::Value, EffectError> {
         let event = match req {
             DisplayReq::Chunk(s) => DisplayEvent::Chunk(s),
             DisplayReq::Final(s) => DisplayEvent::Final(s),
@@ -881,7 +885,7 @@ impl EffectHandler for DisplayHandler {
         };
         let subs = self.subscribers.read().unwrap();
         for s in subs.iter() { s.on_event(&event); }
-        Ok(tidepool_bridge::Value::Unit)
+        cx.respond(()) // Haskell unit via ToCore
     }
 }
 ```
@@ -896,20 +900,21 @@ impl EffectHandler for DisplayHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidepool_bridge::Value;
+    use tidepool_eval::Value;
 
     #[test]
     fn time_now_returns_current_nanos() {
+        use tidepool_repr::Literal;
+
         let mut h = TimeHandler::default();
-        let before = jiff::Timestamp::now().as_nanosecond() as i64;
+        let before = i64::try_from(jiff::Timestamp::now().as_nanosecond()).unwrap();
         let v = h.handle(TimeReq::Now, &EffectContext::for_test()).unwrap();
-        let after = jiff::Timestamp::now().as_nanosecond() as i64;
+        let after = i64::try_from(jiff::Timestamp::now().as_nanosecond()).unwrap();
         match v {
-            Value::Integer(n) => {
-                let n: i64 = n.try_into().unwrap();
+            Value::Lit(Literal::LitInt(n)) => {
                 assert!(n >= before && n <= after);
             }
-            _ => panic!("expected integer"),
+            other => panic!("expected Value::Lit(LitInt), got {:?}", other),
         }
     }
 
@@ -1162,8 +1167,11 @@ async fn hello_world_runs_end_to_end() {
     let user_ctx = /* Session-scoped user context */ ();
 
     let result = machine.run(&mut bundle, &user_ctx).unwrap();
-    // Value::Unit expected from `agent :: ... Eff ... ()`.
-    assert!(matches!(result, tidepool_bridge::Value::Unit));
+    // Haskell unit `()` rendered as Value::Con(unit_dcid, []). Use the
+    // `FromCore` impl for Rust `()` rather than hand-matching the DataConId:
+    //   <() as tidepool_bridge::FromCore>::from_value(&result, machine.table()).unwrap();
+    // which will error if the returned value isn't unit.
+    <() as tidepool_bridge::FromCore>::from_value(&result, machine.table()).unwrap();
 
     // Assert tracing captured a log line containing "hello from haskell".
     // (Using tracing-test or similar.)
@@ -1480,7 +1488,7 @@ pub struct CheckpointLog {
 }
 
 impl CheckpointLog {
-    pub fn record(&mut self, tag: u32, req: &tidepool_bridge::Value, resp: &tidepool_bridge::Value) {
+    pub fn record(&mut self, tag: u32, req: &tidepool_eval::Value, resp: &tidepool_eval::Value) {
         // Serialise req/resp via tidepool_repr CBOR. Append to self.events.
         todo!("phase: 3; AC: AC2.4")
     }
@@ -1619,7 +1627,7 @@ pub async fn run_bounded<U, H>(
     budget: Budget,
     cancellation: Arc<AtomicBool>,
     gate: Arc<HandlerGate>,
-) -> Result<(tidepool_bridge::Value, Option<CancelPath>), RuntimeError>
+) -> Result<(tidepool_eval::Value, Option<CancelPath>), RuntimeError>
 where
     H: tidepool_effect::DispatchEffect<U>,
 {
