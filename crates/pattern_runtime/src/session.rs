@@ -28,7 +28,7 @@ use crate::sdk::handlers::{
     DisplayHandler, FileHandler, IpcHandler, LogHandler, McpHandler, MemoryHandler, MessageHandler,
     ShellHandler, SourcesHandler, SpawnHandler, TimeHandler,
 };
-use crate::tidepool::{SessionMachine, compile_program};
+use crate::tidepool::{CancelHandle, SessionMachine, compile_program};
 use crate::timeout::{Budget, CancelState};
 
 /// Session-scoped context threaded into every handler as the
@@ -147,6 +147,14 @@ pub struct TidepoolSession {
     /// Shared DisplayHandler so callers (CLI, tests) can register
     /// subscribers after `open`.
     display_handle: DisplayHandler,
+    /// External cancel handle for the JIT machine. The watchdog flips
+    /// this on hard-abandon; the JIT observes at its next GC safepoint
+    /// and returns `YieldError::Cancelled`. Separate from
+    /// `SessionContext::cancel_state`: soft-cancel is a handler-level
+    /// early return, hard-cancel is a JIT-level forced unwind. Keeping
+    /// them distinct avoids escalating every soft cancel into a
+    /// full JIT abort.
+    jit_cancel: CancelHandle,
 }
 
 /// Mutable per-session state guarded by [`TidepoolSession::inner`].
@@ -209,6 +217,7 @@ impl TidepoolSession {
         // reproduction lives at `crates/pattern_runtime/tests/recurse_repro.rs`.
         let nursery = persona.nursery_size.unwrap_or(64 * 1024 * 1024);
         let machine = SessionMachine::new(program, nursery)?;
+        let jit_cancel = machine.cancel_handle();
         let session_id = pattern_core::types::ids::new_id().to_string();
         let ctx = Arc::new(SessionContext::from_persona(&persona, memory_store.clone()));
 
@@ -242,6 +251,7 @@ impl TidepoolSession {
             session_id,
             checkpoint_log: Arc::new(std::sync::Mutex::new(CheckpointLog::new())),
             display_handle: display,
+            jit_cancel,
         })
     }
 
@@ -278,6 +288,10 @@ impl TidepoolSession {
         };
         let budget = self.ctx.budget();
         self.ctx.cancel_state.reset();
+        // Clear any lingering cancel request from a previous turn. The
+        // handle is Arc-shared with the JIT machine; resetting on both
+        // ends keeps soft and hard paths independent.
+        self.jit_cancel.reset();
         let ctx_clone = self.ctx.clone();
 
         let jit_handle = tokio::task::spawn_blocking(move || {
@@ -332,37 +346,90 @@ impl TidepoolSession {
                         // The watchdog escalated because cooperative
                         // cancellation couldn't be delivered: no effect
                         // entries observed after the soft-cancel flag
-                        // flipped. We "abandon" the blocking task, but
-                        // that does NOT stop the OS thread — tokio
-                        // blocking threads cannot be preempted, and
-                        // tidepool has no external interrupt API yet.
-                        // The thread keeps consuming CPU until process
-                        // exit. Make this loud so operators notice
-                        // accumulated undead JIT threads.
-                        tracing::warn!(
+                        // flipped. We flip the tidepool cancel flag; the
+                        // JIT observes it at the next heap check (every
+                        // non-trivial allocation) and unwinds cleanly
+                        // with `YieldError::Cancelled`, which
+                        // `error_map::map_yield_error` promotes to
+                        // `RuntimeError::Timeout { path: HardAbandon }`
+                        // with placeholder zeros. We then await the
+                        // blocking task to reclaim the thread before
+                        // returning. Typical observation latency on
+                        // tight compute loops: ~20ms.
+                        tracing::info!(
                             session_id = %self.session_id,
                             wall_ms,
                             cpu_ms,
-                            "hard-abandon: JIT thread detached and will continue consuming CPU \
-                             until process exit; upstream interrupt support tracked for tidepool \
-                             (cancel_flag in gc_trigger)"
+                            "hard-abandon: signalling tidepool CancelHandle; awaiting JIT unwind",
                         );
-                        // TODO(phase-deferred): upstream AtomicBool
-                        // cancel_flag on JitEffectMachine, checked in
-                        // gc_trigger, triggers
-                        // runtime_user_error_cancelled. Swap drop() for
-                        // cancel_handle.store(true) + await jit_handle.
-                        // Tracked separately — a parallel agent will
-                        // land the tidepool patch.
-                        if let Ok(mut inner) = self.inner.lock() {
-                            inner.poisoned = true;
-                        }
+                        self.jit_cancel.cancel();
+
+                        let join_result = (&mut jit_handle).await;
+                        // Reset the cancel flag so a future turn (if the
+                        // session stays clean) is not immediately
+                        // cancelled on entry.
+                        self.jit_cancel.reset();
                         self.ctx.cancel_state.reset();
-                        Err(RuntimeError::Timeout {
-                            wall_ms,
-                            cpu_ms,
-                            path: CancelPath::HardAbandon,
-                        })
+
+                        let (run_result, machine, bundle) = match join_result {
+                            Ok(triple) => triple,
+                            Err(join_err) => {
+                                // Blocking task panicked or was cancelled by
+                                // the runtime — we cannot recover machine
+                                // state. Poison and surface the join error;
+                                // this is distinct from a clean cancel.
+                                if let Ok(mut inner) = self.inner.lock() {
+                                    inner.poisoned = true;
+                                }
+                                return Err(RuntimeError::JoinError {
+                                    reason: join_err.to_string(),
+                                });
+                            }
+                        };
+                        // Reinstate state. Whether the JIT returned
+                        // cleanly or with an unexpected error, the
+                        // machine struct itself is structurally intact
+                        // — unwinding happens through the normal
+                        // Result return, not a panic.
+                        if let Ok(mut inner) = self.inner.lock() {
+                            inner.machine = Some(machine);
+                            inner.bundle = Some(bundle);
+                        }
+
+                        match run_result {
+                            // Expected path: the JIT observed the cancel
+                            // flag at a heap check and returned our
+                            // placeholder `Timeout { HardAbandon }`.
+                            // Session remains clean — the next turn
+                            // will reuse the machine.
+                            Err(RuntimeError::Timeout {
+                                path: CancelPath::HardAbandon,
+                                ..
+                            }) => Err(RuntimeError::Timeout {
+                                wall_ms,
+                                cpu_ms,
+                                path: CancelPath::HardAbandon,
+                            }),
+                            // JIT returned some other error during the
+                            // cancel race (e.g., finished normally
+                            // before observing cancel, or crashed). The
+                            // cancel still succeeded in unblocking us;
+                            // surface the watchdog's verdict.
+                            //
+                            // Belt-and-suspenders poison: if we can't
+                            // confirm clean cancellation we err on the
+                            // side of not reusing the machine state.
+                            _ => {
+                                if let Ok(mut inner) = self.inner.lock() {
+                                    inner.poisoned = true;
+                                }
+                                Err(RuntimeError::Timeout {
+                                    wall_ms,
+                                    cpu_ms,
+                                    path: CancelPath::HardAbandon,
+                                })
+                            }
+                        }
                     }
                     Ok(_) => Err(RuntimeError::WatchdogFailure),
                     Err(_) => Err(RuntimeError::WatchdogFailure),

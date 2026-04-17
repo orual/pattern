@@ -19,7 +19,7 @@
 //! - Agent-logic errors (Haskell `error`/`undefined`) → `JitOutcome::AgentError`; not a runtime crash
 //! - SDK handler failures → `SdkError` (handler-local; not a runtime crash)
 
-use pattern_core::error::{RuntimeError, SandboxConstraint};
+use pattern_core::error::{CancelPath, RuntimeError, SandboxConstraint};
 use tidepool_codegen::jit_machine::JitError;
 use tidepool_codegen::yield_type::YieldError;
 use tidepool_runtime::CompileError;
@@ -144,15 +144,22 @@ fn map_yield_error(y: YieldError) -> JitOutcome {
         | YieldError::BadUnionFields(_)
         | YieldError::NullPointer => JitOutcome::Runtime(RuntimeError::RuntimeCrashed),
 
-        // External cancellation observed at a JIT safepoint (cancel_handle().cancel()
-        // fired, JIT hit a heap check / trampoline and bailed). This is expected when
-        // the session-level watchdog hard-abandons — the session layer catches the
-        // returned JitError and promotes it to `Timeout { path: HardAbandon }` with
-        // wall/cpu bookkeeping. If the error reaches this mapping (i.e., cancel fired
-        // without an active hard-abandon flow) treat it as a crash since we lost the
-        // context. Phase 3 followup: session.rs to wire cancel_handle into the
-        // watchdog race so this arm becomes dead code in the normal flow.
-        YieldError::Cancelled => JitOutcome::Runtime(RuntimeError::RuntimeCrashed),
+        // External cancellation observed at a JIT safepoint. This arm is the
+        // contract end of the two-path cancellation harness: the session
+        // watchdog calls `CancelHandle::cancel()` on hard-abandon; the JIT
+        // unwinds at the next heap check / trampoline with
+        // `YieldError::Cancelled`. `session.rs::run_turn` awaits the joined
+        // blocking task and rewrites the placeholder zero budget fields
+        // below with the watchdog's real wall/cpu bookkeeping before
+        // bubbling the `Timeout` back to the caller. If a cancel somehow
+        // fires without a watchdog race (e.g., in a direct `SessionMachine`
+        // unit test), the placeholder values survive — that's diagnosable
+        // since `path: HardAbandon` uniquely identifies the cancel path.
+        YieldError::Cancelled => JitOutcome::Runtime(RuntimeError::Timeout {
+            wall_ms: 0,
+            cpu_ms: 0,
+            path: CancelPath::HardAbandon,
+        }),
     }
 }
 

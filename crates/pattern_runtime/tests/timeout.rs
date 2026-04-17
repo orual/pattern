@@ -93,34 +93,21 @@ async fn soft_cancel_on_yielding_loop_returns_soft_path() {
 }
 
 /// AC2.6: hard abandon fires when an agent spins in pure compute with
-/// no effect yields, returning `CancelPath::HardAbandon` and poisoning
-/// the session.
+/// no effect yields, returning `CancelPath::HardAbandon`. The watchdog
+/// flips the tidepool `CancelHandle`, the JIT observes it at the next
+/// heap check, and unwinds cleanly — the session remains usable for a
+/// subsequent turn (it does NOT poison on clean cancellation).
 ///
-/// Running time is tight_compute's budget + hard_abandon_ms = ~500ms.
+/// Running time is infinite_spin's budget + hard_abandon_ms = ~500ms,
+/// plus ~20ms cancel observation latency at the JIT's next safepoint.
 ///
-/// # Why this is ignored
-///
-/// The hard-abandon escape hatch detaches the tokio blocking thread
-/// that hosts the JIT, but it cannot stop that thread — tidepool has
-/// no upstream interrupt API yet (tracked as
-/// `tidepool::JitEffectMachine::cancel_flag`). In a long-running
-/// binary the leaked thread is "just" accumulated CPU waste; in a
-/// test harness the thread keeps running past the test's await point
-/// and SIGSEGVs when the test process tears down its tokio runtime.
-///
-/// The hard-abandon code path is still exercised end-to-end — the
-/// watchdog escalation logic, the session poisoning, and the
-/// subsequent `SessionPoisoned` error are all code-path-reachable via
-/// unit tests in `timeout.rs` (see `watchdog_escalates_*` tests, added
-/// in the Task 16 watchdog-unit-test follow-up). Run this integration
-/// test manually once tidepool lands cancel_flag:
-///
-/// ```sh
-/// cargo nextest run -p pattern_runtime --test timeout -- --ignored
-/// ```
+/// Uses `infinite_spin.hs` (non-terminating) rather than
+/// `tight_compute.hs` (terminating strict fold) because hard-abandon
+/// requires a program that does not cooperate via handler entries AND
+/// does not complete on its own — a finite compute hits soft-cancel at
+/// the trailing `info` effect or finishes naturally before the watchdog
+/// can escalate.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "hard-abandon leaves a detached JIT thread that SIGSEGVs on process teardown; \
-            gated until tidepool lands JitEffectMachine::cancel_flag — see TODO in session.rs"]
 async fn hard_abandon_on_tight_compute_poisons_session() {
     preflight_or_fail();
     let memory = Arc::new(InMemoryMemoryStore::new());
@@ -128,7 +115,7 @@ async fn hard_abandon_on_tight_compute_poisons_session() {
     let persona = PersonaConfig::new(
         "hard-abandon",
         "HardAbandon",
-        include_str!("fixtures/tight_compute.hs"),
+        include_str!("fixtures/infinite_spin.hs"),
     )
     // Low wall / cpu budget + short hard-abandon window to keep the
     // test fast while still exercising the escalation path.
@@ -145,25 +132,99 @@ async fn hard_abandon_on_tight_compute_poisons_session() {
     match err {
         RuntimeError::Timeout {
             path: CancelPath::HardAbandon,
-            ..
-        } => {}
+            wall_ms,
+            cpu_ms,
+        } => {
+            assert!(
+                wall_ms > 0 || cpu_ms > 0,
+                "expected non-zero budget ms on hard-abandon (wall={wall_ms}, cpu={cpu_ms})"
+            );
+        }
         other => panic!("expected Timeout {{ path: HardAbandon }}, got {other:?}"),
     }
 
-    // Subsequent step must return SessionPoisoned.
+    // Session must NOT be poisoned: tidepool's CancelHandle unwinds the
+    // JIT cleanly, so machine state is safe to reuse. A subsequent step
+    // that hits the same runaway program should produce another
+    // HardAbandon rather than SessionPoisoned.
     let err2 = session
         .step(fresh_turn_input())
         .await
-        .expect_err("poisoned session step");
-    match err2 {
-        RuntimeError::SessionPoisoned { ref reason } => {
-            assert!(
-                reason.contains("hard-abandoned"),
-                "expected poisoned reason to mention hard-abandon; got: {reason}"
-            );
-        }
-        other => panic!("expected SessionPoisoned, got {other:?}"),
-    }
+        .expect_err("subsequent step on tight compute also hard-abandons");
+    assert!(
+        !matches!(err2, RuntimeError::SessionPoisoned { .. }),
+        "session should not be poisoned after clean hard-abandon; got {err2:?}"
+    );
+    assert!(
+        matches!(
+            err2,
+            RuntimeError::Timeout {
+                path: CancelPath::HardAbandon,
+                ..
+            }
+        ),
+        "expected repeated HardAbandon on reused session; got {err2:?}"
+    );
+}
+
+/// After a soft-cancel on a yielding loop, running another turn on the
+/// SAME session succeeds once both the handler-side `CancelState` and
+/// the JIT-side `CancelHandle` have been reset at the top of run_turn.
+/// This exercises reuse of the JIT machine across a cancelled turn
+/// (the interesting case — if either reset is skipped, the next turn
+/// would either short-circuit in every handler or be cancelled at the
+/// first heap check).
+///
+/// Uses the yielding-loop fixture for the first step (soft cancel
+/// observable at handler boundaries), then swaps no persona — the
+/// second step runs the same loop again and must produce another
+/// soft-cancel (not a poisoned session, not a hard-abandon).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn soft_cancel_then_reuse_same_session_resets_cancel_flags() {
+    preflight_or_fail();
+    let memory = Arc::new(InMemoryMemoryStore::new());
+    let runtime = TidepoolRuntime::with_default_sdk(memory);
+    let persona = PersonaConfig::new(
+        "soft-reuse",
+        "SoftReuse",
+        include_str!("fixtures/yielding_loop.hs"),
+    )
+    .with_wall_budget_ms(150)
+    .with_cpu_budget_ms(150)
+    .with_hard_abandon_ms(5_000);
+
+    let mut session = runtime.open_session(persona, None).await.expect("open");
+
+    let err1 = session
+        .step(fresh_turn_input())
+        .await
+        .expect_err("first step soft-cancels");
+    assert!(
+        matches!(
+            err1,
+            RuntimeError::Timeout {
+                path: CancelPath::Soft,
+                ..
+            }
+        ),
+        "expected first step to soft-cancel; got {err1:?}"
+    );
+
+    let err2 = session
+        .step(fresh_turn_input())
+        .await
+        .expect_err("second step on same session soft-cancels again");
+    assert!(
+        matches!(
+            err2,
+            RuntimeError::Timeout {
+                path: CancelPath::Soft,
+                ..
+            }
+        ),
+        "expected second step to soft-cancel again (not poisoned, not hard-abandoned); \
+         got {err2:?}"
+    );
 }
 
 /// Budget resets between turns: running a short, well-behaved program

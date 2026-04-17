@@ -15,3 +15,4 @@ pub mod machine;
 
 pub use compile::{CompiledProgram, compile_program};
 pub use machine::SessionMachine;
+pub use tidepool_codegen::jit_machine::CancelHandle;

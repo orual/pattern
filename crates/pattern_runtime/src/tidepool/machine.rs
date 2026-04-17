@@ -5,7 +5,7 @@
 //! once at `Session::open`, re-run on every turn via `run`.
 
 use pattern_core::error::RuntimeError;
-use tidepool_codegen::jit_machine::JitEffectMachine;
+use tidepool_codegen::jit_machine::{CancelHandle, JitEffectMachine};
 use tidepool_effect::DispatchEffect;
 use tidepool_eval::value::Value;
 use tidepool_repr::DataConTable;
@@ -85,5 +85,18 @@ impl SessionMachine {
     /// Needed for `FromCore::from_value` round-trips on the result value.
     pub fn table(&self) -> &DataConTable {
         &self.data_cons
+    }
+
+    /// Obtain an external cancel handle. Clone-able, `Send + Sync`. Flipping
+    /// it via [`CancelHandle::cancel`] causes the JIT to observe cancellation
+    /// at its next GC safepoint and return with
+    /// `JitError::Yield(YieldError::Cancelled)`, which `error_map` converts
+    /// into `RuntimeError::Timeout { path: CancelPath::HardAbandon }` with
+    /// placeholder wall/cpu — session.rs fills in real bookkeeping.
+    ///
+    /// The flag is per-machine, not per-run. Call [`CancelHandle::reset`]
+    /// between turns if a cancelled run is followed by a reuse.
+    pub fn cancel_handle(&self) -> CancelHandle {
+        self.inner.cancel_handle()
     }
 }
