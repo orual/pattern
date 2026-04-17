@@ -532,9 +532,14 @@ fn empty_turn_output() -> TurnOutput {
 /// whether it was really our cancellation sentinel bubbling back out.
 ///
 /// The JIT machine maps effect-handler errors to
-/// `RuntimeError::CompileInternal { reason }` via `error_map`; when our
-/// handlers emit the sentinel string, that string lands verbatim in
-/// `reason`. See [`crate::timeout::CANCELLED_SENTINEL`].
+/// `RuntimeError::SdkHandlerFailed { reason, .. }` via `error_map` (as
+/// of the phase-3 review follow-up that split SDK-handler failure out
+/// of CompileInternal); when our handlers emit the sentinel string, it
+/// lands verbatim inside `reason`. We match on the rendered `Display`
+/// rather than the specific variant so a future rehoming of the
+/// sentinel through a different error-mapping still works — the
+/// sentinel is stable-by-design and the predicate stays on its
+/// observable identity. See [`crate::timeout::CANCELLED_SENTINEL`].
 fn is_cancel_sentinel(e: &RuntimeError) -> bool {
     let s = e.to_string();
     s.contains(crate::timeout::CANCELLED_SENTINEL)

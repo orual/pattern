@@ -72,10 +72,15 @@ impl SessionMachine {
                     RuntimeError::RuntimeCrashed
                 }
                 crate::tidepool::error_map::JitOutcome::Sdk(sdk) => {
-                    // SDK handler failure during run — escalate to compile-internal for now.
-                    RuntimeError::CompileInternal {
-                        reason: sdk.to_string(),
-                    }
+                    // SDK handler failure during run — route to the
+                    // dedicated SdkHandlerFailed variant so callers can
+                    // match on the category without string-scanning a
+                    // generic CompileInternal message. `handler` and
+                    // `reason` are extracted from the underlying
+                    // EffectError; see `sdk_failure_parts` for the
+                    // contract when the handler id isn't surfaced.
+                    let (handler, reason) = sdk_failure_parts(&sdk);
+                    RuntimeError::SdkHandlerFailed { handler, reason }
                 }
             })
     }
@@ -98,5 +103,87 @@ impl SessionMachine {
     /// between turns if a cancelled run is followed by a reuse.
     pub fn cancel_handle(&self) -> CancelHandle {
         self.inner.cancel_handle()
+    }
+}
+
+/// Extract `(handler, reason)` from an [`crate::tidepool::error_map::SdkError`]
+/// for surfacing as [`RuntimeError::SdkHandlerFailed`].
+///
+/// `tidepool_effect::EffectError` does not carry a structured handler
+/// identity — it's one of a few flat variants with `{error}` interpolated
+/// messages. Pattern's own handlers conventionally prefix their
+/// `EffectError::Handler(...)` strings with `"Pattern.<Module>..."` so
+/// the module name is recoverable via a light parse. For non-`Handler`
+/// variants (Eval / Bridge / Unhandled / etc.) we fall back to
+/// `handler = "unknown"` and use the `Display` as the full reason.
+///
+/// TODO: once `tidepool-effect` surfaces a dedicated handler-id on
+/// `EffectError`, thread it through here and drop the string parse.
+fn sdk_failure_parts(sdk: &crate::tidepool::error_map::SdkError) -> (String, String) {
+    use tidepool_effect::EffectError;
+    match &sdk.0 {
+        EffectError::Handler(msg) => parse_pattern_handler(msg),
+        other => ("unknown".to_string(), other.to_string()),
+    }
+}
+
+/// Heuristic: if `msg` starts with `Pattern.<Module>` (optionally
+/// followed by `.<Op>` and then `:` or whitespace), return
+/// `("Pattern.<Module>", rest_of_message)`. Otherwise return
+/// `("unknown", msg)`.
+fn parse_pattern_handler(msg: &str) -> (String, String) {
+    let Some(rest) = msg.strip_prefix("Pattern.") else {
+        return ("unknown".to_string(), msg.to_string());
+    };
+    // Take the first path segment: up to the next '.', ':', or whitespace.
+    let end = rest
+        .find(|c: char| c == '.' || c == ':' || c.is_whitespace())
+        .unwrap_or(rest.len());
+    let module = &rest[..end];
+    if module.is_empty() {
+        return ("unknown".to_string(), msg.to_string());
+    }
+    (format!("Pattern.{module}"), msg.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tidepool_effect::EffectError;
+
+    #[test]
+    fn parse_pattern_handler_extracts_module_prefix() {
+        let (h, _r) = parse_pattern_handler("Pattern.Memory.Get: no block named \"x\"");
+        assert_eq!(h, "Pattern.Memory");
+    }
+
+    #[test]
+    fn parse_pattern_handler_handles_bare_module() {
+        let (h, _r) = parse_pattern_handler("Pattern.File is not implemented");
+        assert_eq!(h, "Pattern.File");
+    }
+
+    #[test]
+    fn parse_pattern_handler_falls_back_on_no_prefix() {
+        let (h, r) = parse_pattern_handler("nothing useful here");
+        assert_eq!(h, "unknown");
+        assert_eq!(r, "nothing useful here");
+    }
+
+    #[test]
+    fn sdk_failure_parts_extracts_handler_from_handler_variant() {
+        let sdk = crate::tidepool::error_map::SdkError(EffectError::Handler(
+            "Pattern.Memory.Put: boom".into(),
+        ));
+        let (h, r) = sdk_failure_parts(&sdk);
+        assert_eq!(h, "Pattern.Memory");
+        assert!(r.contains("boom"));
+    }
+
+    #[test]
+    fn sdk_failure_parts_falls_back_for_non_handler_variant() {
+        let sdk = crate::tidepool::error_map::SdkError(EffectError::UnhandledEffect { tag: 42 });
+        let (h, _r) = sdk_failure_parts(&sdk);
+        assert_eq!(h, "unknown");
     }
 }

@@ -401,4 +401,36 @@ pub enum RuntimeError {
         /// Human-readable description of the handler failure.
         reason: String,
     },
+
+    /// A Pattern SDK handler failed during JIT execution.
+    ///
+    /// Distinct from [`Self::CompileInternal`], which describes codegen /
+    /// pipeline / substrate failures: this variant carries a handler
+    /// identity and message surfaced from a tidepool-effect `EffectError`
+    /// that bubbled out of the JIT run path. Routing SDK handler failures
+    /// here rather than into `CompileInternal` gives callers a category
+    /// they can match on without string-matching on an opaque reason.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::RuntimeError;
+    ///
+    /// let err = RuntimeError::SdkHandlerFailed {
+    ///     handler: "Pattern.File".into(),
+    ///     reason: "not yet implemented".into(),
+    /// };
+    /// assert!(err.to_string().contains("Pattern.File"));
+    /// assert!(err.to_string().contains("not yet implemented"));
+    /// ```
+    #[error("SDK handler {handler} failed: {reason}")]
+    #[diagnostic(code(pattern_core::runtime::sdk_handler_failed))]
+    SdkHandlerFailed {
+        /// Best-effort handler identity extracted from the effect error
+        /// message (e.g. `"Pattern.File"`). Falls back to `"unknown"` if
+        /// the upstream effect error did not carry a handler tag.
+        handler: String,
+        /// Human-readable reason surfaced by the handler.
+        reason: String,
+    },
 }
