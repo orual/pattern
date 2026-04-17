@@ -44,10 +44,13 @@ mod tests {
 
     /// Verifies that when `tidepool-extract` is not findable, the error message
     /// contains actionable install instructions.
+    ///
+    /// Implemented in Task 5 when `preflight::check` is fleshed out.
     #[test]
+    #[ignore = "phase: 3; AC: AC2.1 — test implemented in Task 5"]
     fn fails_with_actionable_message_when_missing() {
-        // This test will be filled in during Task 5 when the real implementation lands.
+        // Temporarily clear PATH; confirm error message contains install hint.
         // phase: 3; AC: AC2.1
-        todo!("implement after preflight::check is fleshed out in Task 5")
+        todo!("implement in Task 5 alongside preflight::check body")
     }
 }
