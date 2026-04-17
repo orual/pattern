@@ -1,3 +1,11 @@
+// MOVING TO: pattern_core/src/types/*
+// ORIGIN: crates/pattern_core/src/messages/conversions.rs
+// PHASE: 2
+// RESHAPE: Value types extracted into types/{message,batch,block_ref}.rs; legacy shape retained for reference until Phase 2 closes
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! Conversions between pattern-core message types and genai chat types
 
 use super::*;

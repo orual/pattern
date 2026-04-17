@@ -21,6 +21,7 @@ tracing = { workspace = true }
 async-trait = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+jiff = { workspace = true }
 futures = { workspace = true }
 parking_lot = { workspace = true }
 dirs = { workspace = true }

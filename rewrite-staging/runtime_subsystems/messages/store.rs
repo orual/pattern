@@ -1,3 +1,11 @@
+// MOVING TO: pattern_db/
+// ORIGIN: crates/pattern_core/src/messages/store.rs
+// PHASE: future
+// RESHAPE: Message storage reshapes alongside new Message type; may fold into pattern_db query helpers
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! MessageStore: Per-agent message operations wrapper.
 //!
 //! Provides a scoped interface for message storage, retrieval, and coordination

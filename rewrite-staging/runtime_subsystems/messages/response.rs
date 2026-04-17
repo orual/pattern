@@ -1,3 +1,11 @@
+// MOVING TO: pattern_provider/src/compose/
+// ORIGIN: crates/pattern_core/src/messages/response.rs
+// PHASE: 5
+// RESHAPE: Request/Response become composer pipeline input/output; as_chat_request logic becomes a compose pass
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 use crate::messages::{ChatRole, ContentBlock, ContentPart, Message, MessageContent};
 use genai::{ModelIden, chat::Usage};
 use serde::{Deserialize, Serialize};

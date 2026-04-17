@@ -326,6 +326,7 @@ impl IdType for Did {
 }
 
 // More ID types using the macro
+define_id_type!(BatchId, "batch");
 define_id_type!(MemoryId, "mem");
 define_id_type!(EventId, "event");
 define_id_type!(SessionId, "session");

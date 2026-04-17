@@ -1,3 +1,11 @@
+// MOVING TO: follows absorbing module
+// ORIGIN: crates/pattern_core/src/messages/tests.rs
+// PHASE: future
+// RESHAPE: Rewrite against new Message/MessageBatch shape when absorbed
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! Integration tests for MessageStore and related functionality.
 //!
 //! These tests verify correct behavior against a real SQLite database,

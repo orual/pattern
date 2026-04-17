@@ -1,3 +1,11 @@
+// MOVING TO: rewrite-staging/runtime_subsystems/queue/
+// ORIGIN: crates/pattern_core/src/messages/queue.rs
+// PHASE: future
+// RESHAPE: Message-queue helpers fold into runtime turn scheduler
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

@@ -12,8 +12,8 @@ pub mod export;
 pub mod id;
 pub mod memory;
 pub mod memory_acl;
-pub mod messages;
 pub mod permission;
+pub mod types;
 pub mod utils;
 
 #[cfg(test)]
@@ -28,10 +28,9 @@ pub use context::{CompressionStrategy, ContextBuilder, ContextConfig, MessageCom
 pub use coordination::{AgentGroup, Constellation, CoordinationPattern};
 pub use error::{CoreError, Result};
 pub use id::{
-    AgentId, ConversationId, Did, IdType, MemoryId, MessageId, ModelId, OAuthTokenId,
+    AgentId, BatchId, ConversationId, Did, IdType, MemoryId, MessageId, ModelId, OAuthTokenId,
     QueuedMessageId, RequestId, SessionId, TaskId, ToolCallId, UserId, WakeupId,
 };
-pub use messages::queue::{QueuedMessage, ScheduledWakeup};
 pub use model::ModelCapability;
 pub use model::ModelProvider;
 pub use runtime::{AgentRuntime, RuntimeBuilder, RuntimeConfig};
