@@ -5,8 +5,8 @@
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
-use crate::id::{AgentId, BatchId, MessageId};
 use crate::types::block_ref::BlockRef;
+use crate::types::ids::{AgentId, BatchId, MessageId};
 use genai::ModelIden;
 use genai::chat::Usage;
 

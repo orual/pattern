@@ -12,7 +12,7 @@ use jiff::Timestamp;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::id::BatchId;
+use crate::types::ids::BatchId;
 use crate::types::message::Message;
 
 /// Classification of an agent-activation batch.

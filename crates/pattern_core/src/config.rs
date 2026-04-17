@@ -20,9 +20,9 @@ use crate::{
     Result,
     agent::tool_rules::ToolRule,
     context::compression::CompressionStrategy,
-    //data_source::bluesky::BlueskyFilter,
-    id::{AgentId, GroupId, MemoryId},
     memory::{BlockSchema, MemoryPermission, MemoryType},
+    //data_source::bluesky::BlueskyFilter,
+    types::ids::{AgentId, GroupId, MemoryId},
 };
 
 /// Controls how TOML config and DB config are merged.

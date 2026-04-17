@@ -1,15 +1,27 @@
-//! Pattern Core - Agent Framework and Memory System
+//! Pattern Core — agent framework and memory system for Pattern v3.
 //!
-//! This crate provides the core agent framework, memory management,
-//! and tool execution system that powers Pattern's multi-agent
-//! cognitive support system.
+//! This crate provides the foundational value types, error hierarchy, and
+//! memory abstraction that power Pattern's multi-agent cognitive support
+//! system. Higher-level concerns (agent loop, provider integration, context
+//! composition) will live in dedicated crates once Phase 3 is complete.
+//!
+//! # Quick start
+//!
+//! ```
+//! use pattern_core::{AgentId, UserId, Caller, TurnId};
+//!
+//! let agent = AgentId::new("orual-companion");
+//! let user  = UserId::generate();
+//! let caller = Caller::Human(user);
+//! let turn  = TurnId::generate();
+//! assert!(turn.to_string().starts_with("turn_"));
+//! ```
 
 pub mod base_instructions;
 pub mod config;
 pub mod error;
 #[cfg(feature = "export")]
 pub mod export;
-pub mod id;
 pub mod memory;
 pub mod memory_acl;
 pub mod permission;
@@ -19,93 +31,32 @@ pub mod utils;
 #[cfg(test)]
 pub mod test_helpers;
 
-// Macros are automatically available at crate root due to #[macro_export]
+// Macros are automatically available at crate root due to #[macro_export].
 
-pub use crate::utils::SnowflakePosition;
-pub use agent::{Agent, AgentState, AgentType};
 pub use base_instructions::DEFAULT_BASE_INSTRUCTIONS;
-pub use context::{CompressionStrategy, ContextBuilder, ContextConfig, MessageCompressor};
-pub use coordination::{AgentGroup, Constellation, CoordinationPattern};
 pub use error::{CoreError, Result};
-pub use id::{
-    AgentId, BatchId, ConversationId, Did, IdType, MemoryId, MessageId, ModelId, OAuthTokenId,
-    QueuedMessageId, RequestId, SessionId, TaskId, ToolCallId, UserId, WakeupId,
+
+// ── Type re-exports ──────────────────────────────────────────────────────────
+// Explicit re-exports (no wildcard) so the public surface is greppable.
+
+// IDs and identity
+pub use types::ids::{
+    AgentId, BatchId, ConstellationId, ConversationId, Did, DiscordIdentityId, EventId, GroupId,
+    IdError, IdType, MemoryId, MessageId, ModelId, OAuthTokenId, ProjectId, QueuedMessageId,
+    RelationId, RequestId, SessionId, TaskId, ToolCallId, UserId, WakeupId, WorkspaceId,
 };
-pub use model::ModelCapability;
-pub use model::ModelProvider;
-pub use runtime::{AgentRuntime, RuntimeBuilder, RuntimeConfig};
-pub use tool::{AiTool, DynamicTool, ToolRegistry, ToolResult};
 
-// Data source types
-pub use data_source::{
-    // Helper utilities
-    BlockBuilder,
-    // Manager types
-    BlockEdit,
-    // Core reference types
-    BlockRef,
-    // Schema and status types
-    BlockSchemaSpec,
-    BlockSourceInfo,
-    BlockSourceStatus,
-    // Block source types
-    ConflictResolution,
-    // Core traits
-    DataBlock,
-    DataStream,
-    EditFeedback,
-    EphemeralBlockCache,
-    FileChange,
-    FileChangeType,
-    Notification,
-    NotificationBuilder,
-    PermissionRule,
-    ReconcileResult,
-    SourceManager,
-    StreamCursor,
-    StreamSourceInfo,
-    StreamStatus,
-    VersionInfo,
-};
-/// Re-export commonly used types
-pub mod prelude {
-    pub use crate::{
-        Agent, AgentId, AgentState, AgentType, AiTool, CompressionStrategy, ContextBuilder,
-        ContextConfig, CoreError, DynamicTool, IdType, MessageCompressor, ModelCapability,
-        ModelProvider, Result, ToolRegistry, ToolResult,
-    };
-}
+// Message / batch
+pub use types::batch::{BatchType, MessageBatch};
+pub use types::block_ref::BlockRef;
+pub use types::message::{Message, ResponseMeta};
 
-#[derive(Debug, Clone)]
-pub struct PatternHttpClient {
-    pub client: reqwest::Client,
-}
+// Block value types
+pub use types::block::{Block, BlockHandle, BlockWrite};
 
-impl Default for PatternHttpClient {
-    fn default() -> Self {
-        Self {
-            client: pattern_reqwest_client(),
-        }
-    }
-}
+// Turn types
+pub use types::caller::Caller;
+pub use types::turn::{TurnId, TurnInput, TurnOutput};
 
-pub fn pattern_reqwest_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .user_agent(concat!("pattern/", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(10)) // 10 second timeout for constellation API calls
-        .connect_timeout(std::time::Duration::from_secs(5)) // 5 second connection timeout
-        .build()
-        .unwrap() // panics for the same reasons Client::new() would: https://docs.rs/reqwest/latest/reqwest/struct.Client.html#panics
-}
-
-impl jacquard::http_client::HttpClient for PatternHttpClient {
-    type Error = reqwest::Error;
-
-    fn send_http(
-        &self,
-        request: http::Request<Vec<u8>>,
-    ) -> impl Future<Output = core::result::Result<http::Response<Vec<u8>>, Self::Error>> + Send
-    {
-        async { self.client.send_http(request).await }
-    }
-}
+// Snapshot types (Phase 3 checkpoint stubs)
+pub use types::snapshot::{PersonaSnapshot, SessionSnapshot};
