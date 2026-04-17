@@ -9,5 +9,6 @@
 //! - Phase 5: Memory adapter (wraps preserved storage), pseudo-message emission, pre-turn `current_state` pseudo-turn.
 
 pub mod preflight;
+pub mod sdk;
 pub mod tidepool;
 pub use tidepool::{CompiledProgram, SessionMachine};

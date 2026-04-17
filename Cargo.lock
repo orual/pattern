@@ -4846,6 +4846,7 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tidepool-bridge",
+ "tidepool-bridge-derive",
  "tidepool-codegen",
  "tidepool-effect",
  "tidepool-eval",
@@ -7104,6 +7105,15 @@ dependencies = [
  "thiserror 1.0.69",
  "tidepool-eval",
  "tidepool-repr",
+]
+
+[[package]]
+name = "tidepool-bridge-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.113",
 ]
 
 [[package]]

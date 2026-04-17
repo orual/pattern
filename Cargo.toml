@@ -146,6 +146,7 @@ tidepool-runtime = { path = "../tidepool/tidepool-runtime" }
 tidepool-codegen = { path = "../tidepool/tidepool-codegen" }
 tidepool-effect  = { path = "../tidepool/tidepool-effect"  }
 tidepool-bridge  = { path = "../tidepool/tidepool-bridge"  }
+tidepool-bridge-derive = { path = "../tidepool/tidepool-bridge-derive" }
 tidepool-repr    = { path = "../tidepool/tidepool-repr"    }
 tidepool-eval    = { path = "../tidepool/tidepool-eval"    }
 frunk = "0.4"

@@ -12,6 +12,7 @@ tidepool-runtime = { workspace = true }
 tidepool-codegen = { workspace = true }
 tidepool-effect  = { workspace = true }
 tidepool-bridge  = { workspace = true }
+tidepool-bridge-derive = { workspace = true }
 tidepool-repr    = { workspace = true }
 tidepool-eval    = { workspace = true }
 frunk            = { workspace = true }
