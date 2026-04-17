@@ -21,7 +21,6 @@ pub mod messages;
 pub mod model;
 pub mod oauth;
 pub mod permission;
-pub mod prompt_template;
 pub mod queue;
 pub mod realtime;
 pub mod runtime;
