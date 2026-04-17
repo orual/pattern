@@ -65,6 +65,26 @@ impl CheckpointEvent {
             sequence: 0,
         }
     }
+
+    /// Construct an event from an already-formatted request repr and a
+    /// response [`Value`]. Used by handlers that only have the typed
+    /// request (not a raw `Value`) to record their exchange — the
+    /// Debug-string shape of [`Self::request_repr`] is unchanged so the
+    /// round-trip contract holds.
+    pub fn from_request_repr(
+        tag: u32,
+        request_repr: impl Into<String>,
+        response: &Value,
+        turn: u64,
+    ) -> Self {
+        Self {
+            tag,
+            request_repr: request_repr.into(),
+            response_repr: format!("{response:?}"),
+            turn,
+            sequence: 0,
+        }
+    }
 }
 
 /// Append-only log of effect exchanges for the current session.

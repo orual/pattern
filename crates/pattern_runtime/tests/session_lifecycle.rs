@@ -326,6 +326,81 @@ async fn memory_create_write_replace_end_to_end() {
     assert_eq!(content, "HEAD line\nsecond line");
 }
 
+/// AC2.4 wiring: MemoryHandler records each exchange into the session's
+/// checkpoint log. After running an agent that does `Put` + `Get` we
+/// should see two recorded events with tag=0 (MemoryHandler position),
+/// and the events survive a checkpoint → restore round-trip into a fresh
+/// session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn memory_handler_records_exchanges_into_checkpoint_log() {
+    preflight_or_fail();
+    let memory = Arc::new(InMemoryMemoryStore::new());
+    let runtime = TidepoolRuntime::with_default_sdk(memory);
+
+    let persona = PersonaConfig::new(
+        "cp-wire",
+        "CpWire",
+        include_str!("fixtures/memory_put_get.hs"),
+    );
+    let mut session = runtime.open_session(persona, None).await.expect("open");
+    session
+        .step(fresh_turn_input())
+        .await
+        .expect("put+get turn");
+
+    // The handler records one event per successful Memory effect. The
+    // agent does Put + Get; both succeed (Put auto-creates, Get reads
+    // back the value).
+    let log = session.checkpoint_log();
+    let events = {
+        let guard = log.lock().expect("log mutex");
+        guard.events().to_vec()
+    };
+    assert_eq!(
+        events.len(),
+        2,
+        "expected 2 recorded exchanges (Put, Get), got {}: {:?}",
+        events.len(),
+        events,
+    );
+    // Every event should carry the MemoryHandler tag (0). Without the
+    // wiring, `events` would be empty.
+    for e in &events {
+        assert_eq!(e.tag, 0, "expected MemoryHandler tag 0, got {}", e.tag);
+        assert_eq!(e.turn, 1, "events should be stamped with turn 1");
+    }
+    // Sanity: request reprs should identify which MemoryReq variant
+    // produced them, confirming the Debug-repr path works.
+    assert!(
+        events[0].request_repr.contains("Put"),
+        "first event should be a Put, got: {}",
+        events[0].request_repr,
+    );
+    assert!(
+        events[1].request_repr.contains("Get"),
+        "second event should be a Get, got: {}",
+        events[1].request_repr,
+    );
+
+    // Checkpoint → restore round-trip preserves the recorded events in
+    // a fresh session.
+    let snap = session.checkpoint().await.expect("checkpoint");
+    let persona2 = PersonaConfig::new(
+        "cp-wire",
+        "CpWire2",
+        include_str!("fixtures/memory_put_get.hs"),
+    );
+    let mut session2 = runtime.open_session(persona2, None).await.expect("open 2");
+    session2.restore(snap).await.expect("restore");
+    let log2 = session2.checkpoint_log();
+    let restored = log2.lock().expect("log mutex 2").events().to_vec();
+    assert_eq!(restored.len(), 2, "restored event count matches source");
+    assert_eq!(restored[0].tag, 0);
+    assert_eq!(restored[1].tag, 0);
+    assert!(restored[0].request_repr.contains("Put"));
+    assert!(restored[1].request_repr.contains("Get"));
+}
+
 /// Direct unit test against the in-memory store: `update_block_description`
 /// errors on a missing block. (Handler-level negative tests for Replace
 /// are covered by handler unit tests.)

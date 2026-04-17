@@ -13,6 +13,7 @@
 //! co-operatively check [`SessionContext::cancel_state`] at entry.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use jiff::Timestamp;
@@ -52,6 +53,15 @@ pub struct SessionContext {
     budget: Budget,
     cancel_state: Arc<CancelState>,
     memory_store: Arc<dyn MemoryStore>,
+    /// Shared checkpoint log. Handlers record `(request, response)` pairs
+    /// after a successful effect dispatch so restart-then-replay can
+    /// deterministically re-drive the JIT. Wired to the same `Arc` as
+    /// [`TidepoolSession::checkpoint_log`].
+    checkpoint_log: Arc<std::sync::Mutex<CheckpointLog>>,
+    /// Current turn number. Incremented by [`TidepoolSession::run_turn`]
+    /// before each turn; read by handlers when stamping recorded
+    /// exchanges.
+    current_turn: Arc<AtomicU64>,
 }
 
 /// Handlers call this to decide whether to short-circuit on soft-cancel.
@@ -94,7 +104,10 @@ impl HasCancelState for () {
 
 impl SessionContext {
     /// Build a context from a persona + store handle. Shared cancel state
-    /// starts un-cancelled and with no handlers in flight.
+    /// starts un-cancelled and with no handlers in flight. The checkpoint
+    /// log is a fresh empty log; the session wires a shared log via the
+    /// crate-private `with_checkpoint_log` builder so handlers record
+    /// into the same log the session exposes.
     pub fn from_persona(persona: &PersonaConfig, memory_store: Arc<dyn MemoryStore>) -> Self {
         let budget = Budget::from_persona(persona);
         Self {
@@ -102,7 +115,23 @@ impl SessionContext {
             budget,
             cancel_state: Arc::new(CancelState::new()),
             memory_store,
+            checkpoint_log: Arc::new(std::sync::Mutex::new(CheckpointLog::new())),
+            current_turn: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Replace the checkpoint log handle and turn counter with externally
+    /// owned ones. Used by [`TidepoolSession::open`] so the handler path
+    /// records into the same log the session exposes via
+    /// [`TidepoolSession::checkpoint_log`].
+    pub(crate) fn with_checkpoint_log(
+        mut self,
+        log: Arc<std::sync::Mutex<CheckpointLog>>,
+        turn: Arc<AtomicU64>,
+    ) -> Self {
+        self.checkpoint_log = log;
+        self.current_turn = turn;
+        self
     }
 
     /// Agent id this session runs as.
@@ -126,6 +155,19 @@ impl SessionContext {
     pub fn memory_store(&self) -> Arc<dyn MemoryStore> {
         self.memory_store.clone()
     }
+
+    /// Shared checkpoint log handle. Handlers record exchanges here
+    /// after a successful dispatch (see the module-private
+    /// `record_exchange` helper).
+    pub fn checkpoint_log(&self) -> Arc<std::sync::Mutex<CheckpointLog>> {
+        self.checkpoint_log.clone()
+    }
+
+    /// Current turn number (monotonic; bumped by `run_turn` before each
+    /// turn). Handlers read this when stamping recorded events.
+    pub fn current_turn(&self) -> u64 {
+        self.current_turn.load(Ordering::SeqCst)
+    }
 }
 
 /// A running session: owns the JIT machine, handler bundle, cancellation
@@ -144,6 +186,10 @@ pub struct TidepoolSession {
     ctx: Arc<SessionContext>,
     session_id: String,
     checkpoint_log: Arc<std::sync::Mutex<CheckpointLog>>,
+    /// Monotonic turn counter exposed to handlers via SessionContext so
+    /// recorded exchanges can be stamped with the current turn. Shared
+    /// `Arc<AtomicU64>` with `ctx.current_turn`.
+    current_turn: Arc<AtomicU64>,
     /// Shared DisplayHandler so callers (CLI, tests) can register
     /// subscribers after `open`.
     display_handle: DisplayHandler,
@@ -234,7 +280,16 @@ impl TidepoolSession {
         let machine = SessionMachine::new(program, nursery)?;
         let jit_cancel = machine.cancel_handle();
         let session_id = pattern_core::types::ids::new_id().to_string();
-        let ctx = Arc::new(SessionContext::from_persona(&persona, memory_store.clone()));
+        // Share the checkpoint log + current-turn counter between the
+        // session and the handler-facing SessionContext so handlers'
+        // `record_exchange` calls land in the same log the session
+        // publishes via `TidepoolSession::checkpoint_log`.
+        let checkpoint_log = Arc::new(std::sync::Mutex::new(CheckpointLog::new()));
+        let current_turn = Arc::new(AtomicU64::new(0));
+        let ctx = Arc::new(
+            SessionContext::from_persona(&persona, memory_store.clone())
+                .with_checkpoint_log(checkpoint_log.clone(), current_turn.clone()),
+        );
 
         let display = DisplayHandler::new();
         // Bundle order: Prelude-5 first, then rarer effects. See
@@ -263,7 +318,8 @@ impl TidepoolSession {
             }),
             ctx,
             session_id,
-            checkpoint_log: Arc::new(std::sync::Mutex::new(CheckpointLog::new())),
+            checkpoint_log,
+            current_turn,
             display_handle: display,
             jit_cancel,
         })
@@ -290,6 +346,11 @@ impl TidepoolSession {
                 });
             }
             inner.turn_counter += 1;
+            // Publish the new turn number to the shared atomic so
+            // handlers recording exchanges via SessionContext can stamp
+            // them with the current turn.
+            self.current_turn
+                .store(inner.turn_counter, Ordering::SeqCst);
             let machine = inner
                 .machine
                 .take()
@@ -513,15 +574,38 @@ impl Session for TidepoolSession {
 /// Record one effect exchange into the shared checkpoint log. Called by
 /// handlers after they produce a response so restart-then-replay can
 /// deterministically re-drive the JIT.
-#[allow(dead_code)]
+///
+/// `request_repr` is a pre-formatted Debug string — handlers that only
+/// see a typed request (not a raw `Value`) can pass
+/// `format!("{req:?}")` without paying for a synthetic Value round-trip.
+/// The shape written to the log matches [`CheckpointEvent::new`].
+///
+/// A poisoned log mutex is swallowed (logged via `tracing::warn`): we
+/// do not want recording failures to affect the hot handler path. The
+/// log is a best-effort artifact; if it becomes poisoned the session
+/// has bigger problems than a missing event.
 pub(crate) fn record_exchange(
     log: &Arc<std::sync::Mutex<CheckpointLog>>,
     tag: u32,
-    request: &tidepool_eval::Value,
+    request_repr: String,
     response: &tidepool_eval::Value,
     turn: u64,
 ) {
-    if let Ok(mut guard) = log.lock() {
-        guard.record(CheckpointEvent::new(tag, request, response, turn));
+    match log.lock() {
+        Ok(mut guard) => {
+            guard.record(CheckpointEvent::from_request_repr(
+                tag,
+                request_repr,
+                response,
+                turn,
+            ));
+        }
+        Err(_) => {
+            tracing::warn!(
+                tag,
+                turn,
+                "checkpoint log mutex poisoned; exchange not recorded"
+            );
+        }
     }
 }

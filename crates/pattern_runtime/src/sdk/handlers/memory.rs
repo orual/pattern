@@ -25,8 +25,13 @@ use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use tidepool_eval::Value;
 
 use crate::sdk::requests::MemoryReq;
-use crate::session::SessionContext;
+use crate::session::{SessionContext, record_exchange};
 use crate::timeout::{CANCELLED_SENTINEL, HandlerGuard};
+
+/// Handler position of `MemoryHandler` in the canonical [`crate::sdk::bundle::SdkBundle`]
+/// HList. Used as the effect tag when recording exchanges into the
+/// checkpoint log. Keep in sync with `bundle::SdkBundle`'s ordering.
+const MEMORY_HANDLER_TAG: u32 = 0;
 
 /// Handler for `Pattern.Memory`. Holds an `Arc<dyn MemoryStore>` handed
 /// over by `TidepoolSession::open`; cheap to clone (Arc-share).
@@ -72,12 +77,17 @@ impl EffectHandler<SessionContext> for MemoryHandler {
         let agent_id = cx.user().agent_id().to_string();
         let store = self.store.clone();
 
+        // Capture the typed request's Debug form up front — we consume
+        // `req` below, so we need the string before the match arms move
+        // its fields.
+        let request_repr = format!("{req:?}");
+
         // `handle` is synchronous but the trait is async. We're inside
         // a `spawn_blocking` task (the JIT loop); `block_on` here does
         // not deadlock the tokio runtime's executor threads.
         let handle = tokio::runtime::Handle::current();
 
-        match req {
+        let result = (|| match req {
             MemoryReq::Get(label) => {
                 let text = handle
                     .block_on(store.get_rendered_content(&agent_id, &label))
@@ -174,7 +184,20 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Archive: {e}")))?;
                 cx.respond(())
             }
+        })();
+
+        // Record the exchange on success. We don't record failures:
+        // replay re-drives the JIT against recorded responses, so a
+        // failed exchange has no stable response to replay. The JIT
+        // will re-encounter the same failure on reach. See
+        // crates/pattern_runtime/src/checkpoint.rs for the full
+        // replay-shape rationale.
+        if let Ok(ref value) = result {
+            let log = cx.user().checkpoint_log();
+            let turn = cx.user().current_turn();
+            record_exchange(&log, MEMORY_HANDLER_TAG, request_repr, value, turn);
         }
+        result
     }
 }
 
