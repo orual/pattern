@@ -1,26 +1,25 @@
 //! End-to-end integration test: compile a Haskell agent program, JIT it, run it.
 //!
-//! The agent imports Pattern.Time and Pattern.Log, exercising the runtime inliner
-//! (`pattern_runtime::tidepool::inline::inline_sdk_modules`). The inliner flattens
-//! those SDK modules into a single combined module before invoking tidepool-extract,
-//! avoiding the DataConTable/Core inconsistency that arises from tidepool's
-//! multi-module include-path JIT path.
+//! The agent imports `Pattern.Time` and `Pattern.Log` from the SDK. Compilation
+//! goes through tidepool's native multi-module path — the SDK directory is passed
+//! as a GHC include path and `tidepool-extract` resolves the imports on disk.
 //!
-//! The full pipeline exercised: inliner → tidepool-extract → JIT → effect dispatch
-//! → value return.
+//! Full pipeline exercised: tidepool-extract (multi-module) → JIT → effect
+//! dispatch → value return.
 
 use pattern_runtime::SessionMachine;
 use pattern_runtime::sdk::handlers::log::LogHandler;
 use pattern_runtime::sdk::handlers::time::TimeHandler;
 
-/// Reduced bundle matching `Eff '[Time, Log]` in hello.hs (unqualified, post-inlining).
+/// Reduced bundle matching `Eff '[Time, Log]` in hello.hs.
 /// Effect tag 0 -> Time, tag 1 -> Log.
 type HelloBundle = frunk::HList![TimeHandler, LogHandler];
 
-/// End-to-end smoke test using tidepool_runtime::compile_and_run directly with inlined source.
+/// End-to-end smoke test using tidepool_runtime::compile_and_run directly on the
+/// raw SDK-importing source.
 ///
-/// This test calls `inline_sdk_modules` manually so the direct tidepool path also
-/// exercises the inliner — confirming the flattened source is well-formed Haskell.
+/// Mirrors the style of `tests/multi_module_sdk.rs`: the SDK directory is passed
+/// as an include path and tidepool-extract resolves `import Pattern.*` natively.
 #[tokio::test]
 async fn hello_world_via_tidepool_direct() {
     pattern_runtime::preflight::check()
@@ -31,18 +30,20 @@ async fn hello_world_via_tidepool_direct() {
         .resolve()
         .expect("SDK dir should exist");
 
-    // Run the inliner so compile_and_run sees a single-module source.
-    let module_name = pattern_runtime::tidepool::inline::extract_module_name(source)
-        .unwrap_or_else(|| "Hello".to_string());
-    let combined =
-        pattern_runtime::tidepool::inline::inline_sdk_modules(source, &sdk_dir, &module_name)
-            .expect("inliner should succeed");
-
     let mut bundle: HelloBundle = frunk::hlist![TimeHandler, LogHandler::default()];
 
     let result = std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
-        .spawn(move || tidepool_runtime::compile_and_run(&combined, "agent", &[], &mut bundle, &()))
+        .spawn(move || {
+            let include_path = sdk_dir;
+            tidepool_runtime::compile_and_run(
+                source,
+                "agent",
+                &[include_path.as_path()],
+                &mut bundle,
+                &(),
+            )
+        })
         .unwrap()
         .join()
         .unwrap();
@@ -70,7 +71,8 @@ async fn hello_world_runs_end_to_end() {
         .resolve()
         .expect("SDK dir should exist");
 
-    // Compile. The inliner flattens Pattern.Time + Pattern.Log into the source.
+    // Compile. `compile_program` uses tidepool's native multi-module path;
+    // Pattern.Time + Pattern.Log resolve against `sdk_dir` on the include path.
     let program = pattern_runtime::tidepool::compile_program(source, "agent", &sdk_dir)
         .expect("compile hello.hs");
 

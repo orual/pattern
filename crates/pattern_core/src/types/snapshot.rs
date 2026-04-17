@@ -50,9 +50,9 @@ pub struct PersonaConfig {
     pub agent_id: AgentId,
     /// Human-readable name for logs / display. Smol since it's short and cloned often.
     pub name: smol_str::SmolStr,
-    /// The Haskell agent program source. The runtime will run it through its
-    /// SDK-inlining preprocessor (see `pattern_runtime::tidepool::inline`) and
-    /// hand the result to `tidepool-extract`.
+    /// The Haskell agent program source. The runtime hands it to
+    /// `tidepool-extract` with the SDK directory on the include path; agent
+    /// programs import from the `Pattern.*` module tree directly.
     pub program: String,
     /// Wall-clock time-in-JIT budget per turn, in milliseconds. `None` means
     /// use the runtime's default.

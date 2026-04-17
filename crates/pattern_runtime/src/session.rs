@@ -25,7 +25,8 @@ use crate::checkpoint::{CheckpointEvent, CheckpointLog};
 use crate::sdk::SdkLocation;
 use crate::sdk::bundle::SdkBundle;
 use crate::sdk::handlers::{
-    DisplayHandler, LogHandler, MemoryHandler, MessageHandler, TimeHandler,
+    DisplayHandler, FileHandler, IpcHandler, LogHandler, McpHandler, MemoryHandler, MessageHandler,
+    ShellHandler, SourcesHandler, SpawnHandler, TimeHandler,
 };
 use crate::tidepool::{SessionMachine, compile_program};
 use crate::timeout::{Budget, CancelState};
@@ -200,23 +201,34 @@ impl TidepoolSession {
         crate::preflight::check()?;
         let sdk_dir = sdk.resolve()?;
         let program = compile_program(&persona.program, "agent", &sdk_dir)?;
-        let nursery = persona.nursery_size.unwrap_or(32 * 1024 * 1024);
+        // 64 MiB matches tidepool-runtime's `DEFAULT_NURSERY_SIZE`. Smaller
+        // nurseries trigger more GC cycles; upstream tidepool has an open bug
+        // where long-running multi-module recursive agents can corrupt closure
+        // pointers during GC in the JIT, manifesting as `[JIT] App: tag 255`.
+        // 64 MiB sidesteps the corruption for the loop sizes used in tests;
+        // reproduction lives at `crates/pattern_runtime/tests/recurse_repro.rs`.
+        let nursery = persona.nursery_size.unwrap_or(64 * 1024 * 1024);
         let machine = SessionMachine::new(program, nursery)?;
         let session_id = pattern_core::types::ids::new_id().to_string();
         let ctx = Arc::new(SessionContext::from_persona(&persona, memory_store.clone()));
 
         let display = DisplayHandler::new();
-        // Bundle order MUST match Pattern.Prelude's re-export order:
-        // Memory, Message, Display, Time, Log. See
-        // `crates/pattern_runtime/src/sdk/bundle.rs` for the Phase-3
-        // scoping rationale (inliner can't handle the rarer-effects
-        // subset yet due to cross-module constructor collisions).
+        // Bundle order: Prelude-5 first, then rarer effects. See
+        // `crates/pattern_runtime/src/sdk/bundle.rs` for why the
+        // Prelude-5 prefix matters (DataCon name-collision avoidance
+        // for agents that only need the common subset).
         let bundle: SdkBundle = frunk::hlist![
             MemoryHandler::new(memory_store),
-            MessageHandler::default(),
+            MessageHandler,
             display.clone(),
-            TimeHandler::default(),
+            TimeHandler,
             LogHandler::for_session(session_id.clone()),
+            ShellHandler,
+            FileHandler,
+            SourcesHandler,
+            McpHandler,
+            IpcHandler,
+            SpawnHandler,
         ];
 
         Ok(Self {

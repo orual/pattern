@@ -1,35 +1,46 @@
-//! Bundle the Phase-3-visible SDK handlers into a single `DispatchEffect`.
+//! Bundle the full 11-handler SDK into a single `DispatchEffect`.
 //!
-//! **Scope note for Phase 3 Subcomp D:** the session's bundle lists
-//! handlers in the same order as `Pattern.Prelude` re-exports its
-//! modules — `Memory, Message, Display, Time, Log`. Handler position in
-//! the HList is the effect tag in the JIT, so agent programs MUST declare
-//! `Eff '[Memory, Message, Display, Time, Log] a` (or a prefix thereof)
-//! to line up with this bundle.
+//! Handler position in the HList is the JIT effect tag: agent programs must
+//! declare `Eff '[...]` rows whose head prefix aligns with this order. The
+//! canonical order is Prelude-5 first (`Memory, Message, Display, Time,
+//! Log`), then the rarer effects (`Shell, File, Sources, Mcp, Ipc, Spawn`).
 //!
-//! The full 11-handler bundle (adding Shell / File / Sources / Mcp /
-//! Ipc / Spawn) cannot currently be flattened by the SDK inliner due to
-//! constructor-name collisions across modules (e.g. both `Memory.Read`
-//! and `File.Read`). Until the upstream inliner grows multi-module
-//! qualified-rename support, agent programs in Phase 3 are limited to the
-//! Prelude subset. Rarer-effect handlers remain available as independent
-//! structs — downstream code can build custom ad-hoc bundles if all
-//! imports are limited to a collision-free subset.
+//! **Why Prelude-5-first:** tidepool-bridge's `FromCore` derive looks up
+//! data constructors by their unqualified name. When an agent imports
+//! multiple Pattern.* modules that export constructors with overlapping
+//! names (e.g. both `Pattern.Memory.Read` and `Pattern.File.Read`), the
+//! lookup becomes ambiguous and the bridge errors with
+//! "Unknown DataCon name: Read". Putting Prelude-5 at the prefix lets
+//! agents using only those five effects declare `Eff '[Memory, Message,
+//! Display, Time, Log] a` and avoid importing the modules whose
+//! constructors collide. See
+//! `/home/orual/Projects/PatternProject/tidepool/tidepool-bridge/src/impls.rs`
+//! for the `get_by_name` call sites that drive this constraint.
+//!
+//! Individual handler structs remain available for ad-hoc bundles (see
+//! `crate::sdk::handlers`).
 
 use crate::sdk::handlers::{
-    DisplayHandler, LogHandler, MemoryHandler, MessageHandler, TimeHandler,
+    DisplayHandler, FileHandler, IpcHandler, LogHandler, McpHandler, MemoryHandler, MessageHandler,
+    ShellHandler, SourcesHandler, SpawnHandler, TimeHandler,
 };
 
-/// The 5-handler Prelude SDK bundle, typed as a `frunk::HList`.
+/// The full 11-handler SDK bundle, typed as a `frunk::HList`.
 ///
-/// Order mirrors `Pattern.Prelude`'s module re-export order:
-/// `Memory, Message, Display, Time, Log`. Agent programs that use a
-/// subset must still match this ordering in their `Eff '[...]` list so
-/// JIT effect-tag lookups resolve correctly.
+/// Order (Prelude-5 first, then rarer effects):
+/// `Memory, Message, Display, Time, Log, Shell, File, Sources, Mcp, Ipc,
+/// Spawn`. Agent `Eff '[...]` rows must line up with this order so JIT
+/// effect-tag lookups resolve correctly.
 pub type SdkBundle = frunk::HList![
     MemoryHandler,
     MessageHandler,
     DisplayHandler,
     TimeHandler,
     LogHandler,
+    ShellHandler,
+    FileHandler,
+    SourcesHandler,
+    McpHandler,
+    IpcHandler,
+    SpawnHandler,
 ];

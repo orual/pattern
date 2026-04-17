@@ -11,7 +11,6 @@
 
 pub mod compile;
 pub mod error_map;
-pub mod inline;
 pub mod machine;
 
 pub use compile::{CompiledProgram, compile_program};

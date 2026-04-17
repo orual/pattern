@@ -1,7 +1,7 @@
 {-# LANGUAGE DataKinds, TypeOperators, OverloadedStrings #-}
 -- | Time + Log agent using the Prelude-5 effect list so its tag ordering
 -- aligns with `pattern_runtime::sdk::bundle::SdkBundle`
--- (`Memory, Message, Display, Time, Log`).
+-- (`Memory, Message, Display, Time, Log` prefix of the 11-handler bundle).
 module TimeLog (agent) where
 
 import Control.Monad.Freer (Eff)

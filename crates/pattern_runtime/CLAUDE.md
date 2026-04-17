@@ -27,10 +27,11 @@ which tidepool-extract   # should print a /nix/store/... path
 ```
 
 The devshell module at `nix/modules/devshell.nix` pulls the
-`github:tidepool-heavy-industries/tidepool` flake input and surfaces the
-binary via the `tidepool-extract` derivation. The pinned revision lives in
-`flake.lock`; bump it with `nix flake update tidepool` when chasing upstream
-API changes.
+`github:orual/tidepool` flake input (our fork — see `flake.nix` for the
+reasoning) and surfaces the binary via the `tidepool-extract` derivation.
+The pinned revision lives in `flake.lock`; bump it with
+`nix flake update tidepool` when chasing updated fixes on our fork or to
+swap back to upstream once our patches merge.
 
 Developers iterating on tidepool itself can override the input:
 
@@ -39,6 +40,40 @@ nix develop --override-input tidepool path:../tidepool
 ```
 
 This picks up uncommitted local changes and skips the GitHub fetch.
+
+### Stale-harness troubleshooting
+
+**Symptom:** `test_cross_module_effect_runs` or other multi-module agent
+compilation fails with `CASE TRAP` / `Jit(Yield(Undefined))`, *despite*
+`flake.lock` pinning tidepool at a commit that contains the fix.
+
+**Cause:** `$TIDEPOOL_EXTRACT` in the active devshell / direnv cache
+points at an older `tidepool-extract` derivation built from a pre-fix
+harness snapshot. The symlink chain
+(wrapper → harness → haskell-snapshot) may be pinned to a stale store
+path even after `flake.lock` moves forward.
+
+**Recovery:**
+
+```sh
+# 1. Force eval of the pinned harness (no-op if cache already has it).
+nix build github:orual/tidepool/$(jq -r '.nodes.tidepool.locked.rev' flake.lock)#tidepool-extract
+
+# 2. Reload direnv — this is what actually refreshes $TIDEPOOL_EXTRACT.
+direnv reload
+
+# 3. Verify the resolved binary.
+readlink -f "$TIDEPOOL_EXTRACT"
+# Must match the path produced by step (1).
+```
+
+Or, for one-off runs: `TIDEPOOL_EXTRACT=$(nix build --print-out-paths .#tidepool-extract)/bin/tidepool-extract cargo nextest run ...`
+
+Hardening opportunity (upstream, not urgent): add a
+`tidepool-extract --version` endpoint whose commit-hash output
+`tidepool-runtime::compile_haskell` cross-checks against its own
+`EXPECTED_HARNESS_VERSION` constant at session open. Self-diagnosing
+error instead of silent CASE TRAP.
 
 ### Without Nix
 
@@ -56,53 +91,34 @@ setup is wrong. Run it at binary startup before opening any Session.
 
 ## Authoring agent programs
 
-### SDK imports (current constraint)
+### SDK imports
 
 Agent programs import from the `Pattern.*` SDK module tree (installed at
-`$PATTERN_SDK_DIR` or `crates/pattern_runtime/haskell/Pattern/` by default):
-`Pattern.Time`, `Pattern.Log`, `Pattern.Memory`, `Pattern.Message`,
-`Pattern.Display`, plus `Pattern.Prelude` which re-exports the common subset.
-
-**Imports must be unqualified**:
+`$PATTERN_SDK_DIR` or `crates/pattern_runtime/haskell/Pattern/` by default).
+`tidepool-extract` compiles agents with the SDK directory on its include
+path — both qualified and unqualified imports work:
 
 ```haskell
--- Works:
-import Pattern.Time
-import Pattern.Log
--- With specific items (recommended for collision-aversion):
-import Pattern.Time (now, Instant, Duration, seconds)
+import qualified Pattern.File as F   -- recommended for rarer effects
+F.read_ "/tmp/foo"
 
--- Does NOT work:
-import qualified Pattern.Time as Time
--- then using `Time.now` — breaks.
+import Pattern.Time                  -- fine when no name collisions
+now
 ```
 
-**Why:** `pattern_runtime::tidepool::inline::inline_sdk_modules` preprocesses
-agent source by flattening `Pattern.*` dependencies into the combined module
-before `tidepool-extract` sees it. The flattening is a workaround for
-tidepool's current limitation: multi-module compilation succeeds at extract
-time but produces inconsistent `DataConTable` / `CoreExpr` state at JIT time
-(manifests as `[CASE TRAP]` / `Jit(Yield(Undefined))`). The `haskell_inline!`
-build-time macro in tidepool's own ecosystem uses the same flattening trick
-for the same reason.
+The full 11-effect SDK is available: `Pattern.Memory`, `Pattern.Message`,
+`Pattern.Display`, `Pattern.Time`, `Pattern.Log`, `Pattern.Shell`,
+`Pattern.File`, `Pattern.Sources`, `Pattern.Mcp`, `Pattern.Ipc`,
+`Pattern.Spawn`. `Pattern.Prelude` re-exports the common five
+(`Memory, Message, Display, Time, Log`); the rarer modules have to be
+imported explicitly because some share constructor names with Memory
+(e.g. `Pattern.Memory.Read` vs `Pattern.File.Read`), and tidepool-bridge's
+current `FromCore` lookup is by unqualified name only. In practice this
+means agents using the rarer effects should import them `qualified` and
+never let two conflicting modules be in unqualified scope simultaneously.
 
-After flattening, the `Pattern.X` namespaces no longer exist as modules —
-their top-level bindings are in scope directly. Qualified aliases
-(`as Time`) become dangling references.
-
-**Mitigation strategies** if a collision between SDK modules becomes a
-problem:
-
-- Use the explicit-list import form: `import Pattern.Time (now, Instant)` and
-  `import Pattern.Log (info)` — only the listed names enter scope.
-- Rename on import: `import Pattern.Time (now as timeNow)` where Haskell's
-  `import` syntax allows.
-- If the collision is unavoidable, inline a specific identifier in the agent
-  source directly instead of importing it.
-
-**This is provisional.** If upstream tidepool fixes multi-module DataCon
-handling (tracking issue: the `investigation/multi-module-datacon-tags`
-branch), the inliner becomes a no-op and qualified imports work natively.
-At that point this section collapses to a one-liner. See
-`crates/pattern_runtime/src/tidepool/inline.rs` for the current preprocessor
-implementation.
+Effect-row ordering matters: handler position in the `SdkBundle` HList
+determines the JIT effect tag. The canonical order is Prelude-5 first,
+then rarer effects:
+`Memory, Message, Display, Time, Log, Shell, File, Sources, Mcp, Ipc,
+Spawn`. Agent `Eff '[...]` rows must line up with this prefix.

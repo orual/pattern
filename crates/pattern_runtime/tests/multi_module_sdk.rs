@@ -1,0 +1,149 @@
+//! Validation test: can Pattern SDK modules be compiled with the multi-module
+//! path now that tidepool fork commit 6120c51 fixes the DataConTable/CoreExpr
+//! inconsistency at JIT time?
+//!
+//! Two test cases:
+//!
+//! 1. `qualified_imports_direct` — qualified imports (`import qualified Pattern.Time as Time`)
+//!    compiled with NO inliner preprocessing. SDK dir passed as include path to
+//!    `tidepool_runtime::compile_and_run`. This is the post-deprecation authoring style.
+//!
+//! 2. `unqualified_imports_direct` — unqualified imports (`import Pattern.Time`, as the
+//!    Prelude-5 bundle currently uses), compiled with NO inliner preprocessing. SDK dir
+//!    passed as include path. If this passes, the inliner is fully redundant.
+//!
+//! Both tests fail loudly (via `.expect`) if `tidepool-extract` is not available —
+//! they are environment-gated, not silently skipped.
+
+use pattern_runtime::sdk::handlers::log::LogHandler;
+use pattern_runtime::sdk::handlers::time::TimeHandler;
+
+/// Reduced bundle matching `Eff '[Time, Log]`.
+/// Effect tag 0 -> Time, tag 1 -> Log.
+type TimePlusLogBundle = frunk::HList![TimeHandler, LogHandler];
+
+/// Test 1: qualified imports, multi-module path (no inliner).
+///
+/// The agent uses `import qualified Pattern.Time as Time` and
+/// `import qualified Pattern.Log as Log`, which is the idiomatic Haskell
+/// style when module namespacing is available. Qualified aliases require the
+/// modules to be genuinely separate (not inlined), so this is the definitive
+/// test that tidepool's multi-module DataCon fix works.
+///
+/// `sdk_dir` is passed as the single include path; the modules are found at
+/// `sdk_dir/Pattern/Time.hs` and `sdk_dir/Pattern/Log.hs`.
+#[test]
+fn qualified_imports_direct() {
+    pattern_runtime::preflight::check()
+        .expect("tidepool-extract must be available; see crates/pattern_runtime/CLAUDE.md");
+
+    let sdk_dir = pattern_runtime::SdkLocation::default()
+        .resolve()
+        .expect("SDK dir should exist");
+
+    // Agent using qualified imports — these would FAIL with the inliner
+    // (qualified aliases become dangling references after module flattening).
+    let source = r#"{-# LANGUAGE DataKinds, TypeOperators, OverloadedStrings #-}
+module Agent where
+import Control.Monad.Freer (Eff)
+import qualified Pattern.Time as Time
+import qualified Pattern.Log as Log
+
+agent :: Eff '[Time.Time, Log.Log] ()
+agent = do
+  _t <- Time.now
+  Log.info "hello via qualified imports; no inliner"
+"#;
+
+    let mut bundle: TimePlusLogBundle = frunk::hlist![TimeHandler, LogHandler::default()];
+
+    // Spawn on a larger stack — tidepool JIT needs it. Move sdk_dir into the
+    // closure so lifetime is self-contained ('static bound on the closure).
+    let result = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let include_path = sdk_dir;
+            tidepool_runtime::compile_and_run(
+                source,
+                "agent",
+                &[include_path.as_path()],
+                &mut bundle,
+                &(),
+            )
+        })
+        .expect("thread spawn should succeed")
+        .join()
+        .expect("thread should not panic");
+
+    let eval_result = result.expect("compile_and_run should succeed for qualified imports");
+    let value = eval_result.into_value();
+
+    match &value {
+        tidepool_eval::value::Value::Con(_, fields) if fields.is_empty() => {
+            eprintln!("qualified_imports_direct: got unit () as expected");
+        }
+        other => panic!("expected unit, got: {other:?}"),
+    }
+}
+
+/// Test 2: unqualified imports, multi-module path (no inliner).
+///
+/// The agent uses `import Pattern.Time` and `import Pattern.Log` without
+/// qualifiers — exactly the style that Prelude-5 agents currently rely on
+/// via the inliner. If this test passes, the inliner is fully redundant:
+/// the multi-module path handles both qualified and unqualified import styles.
+///
+/// Note: unqualified multi-module imports can still produce name collisions
+/// (e.g. `Memory.Read` vs `File.Read` both expose `Read` into scope), but
+/// for `Time` and `Log` there are no collisions, so this should succeed.
+#[test]
+fn unqualified_imports_direct() {
+    pattern_runtime::preflight::check()
+        .expect("tidepool-extract must be available; see crates/pattern_runtime/CLAUDE.md");
+
+    let sdk_dir = pattern_runtime::SdkLocation::default()
+        .resolve()
+        .expect("SDK dir should exist");
+
+    // Agent using unqualified imports — the Prelude-5 authoring style.
+    // The SDK dir is passed as a GHC include path; no source preprocessing.
+    let source = r#"{-# LANGUAGE DataKinds, TypeOperators, OverloadedStrings #-}
+module Agent where
+import Control.Monad.Freer (Eff)
+import Pattern.Time
+import Pattern.Log
+
+agent :: Eff '[Time, Log] ()
+agent = do
+  _t <- now
+  info "hello via unqualified imports; no inliner"
+"#;
+
+    let mut bundle: TimePlusLogBundle = frunk::hlist![TimeHandler, LogHandler::default()];
+
+    let result = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let include_path = sdk_dir;
+            tidepool_runtime::compile_and_run(
+                source,
+                "agent",
+                &[include_path.as_path()],
+                &mut bundle,
+                &(),
+            )
+        })
+        .expect("thread spawn should succeed")
+        .join()
+        .expect("thread should not panic");
+
+    let eval_result = result.expect("compile_and_run should succeed for unqualified imports");
+    let value = eval_result.into_value();
+
+    match &value {
+        tidepool_eval::value::Value::Con(_, fields) if fields.is_empty() => {
+            eprintln!("unqualified_imports_direct: got unit () as expected");
+        }
+        other => panic!("expected unit, got: {other:?}"),
+    }
+}

@@ -1,8 +1,12 @@
 {-# LANGUAGE DataKinds, TypeOperators, OverloadedStrings #-}
 -- | Yielding-loop agent: calls `now` in a tight loop so the soft-cancel
 -- path (watchdog flips the flag; next effect returns the sentinel)
--- exercises cleanly. The loop size is large enough that without
--- cancellation it would run longer than any reasonable test budget.
+-- exercises cleanly.
+--
+-- Loop size caveat: an upstream bug in tidepool's JIT corrupts closure
+-- pointers after ~200k iterations of this exact shape (manifests as
+-- `[JIT] App: tag 255 (UNKNOWN)` then SIGSEGV). 100k stays under that
+-- threshold with a 64 MiB nursery, which is Pattern's default.
 module YieldingLoop (agent) where
 
 import Control.Monad.Freer (Eff)
@@ -19,4 +23,4 @@ loop_ n = do
   loop_ (n - 1)
 
 agent :: Eff '[Memory, Message, Display, Time, Log] ()
-agent = loop_ 1000000
+agent = loop_ 100000
