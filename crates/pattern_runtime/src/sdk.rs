@@ -9,8 +9,10 @@
 //! display fully implemented; shell / file / sources / mcp / ipc / spawn
 //! stubbed with NotImplemented diagnostics).
 
+pub mod bundle;
 pub mod handlers;
 pub mod location;
 pub mod requests;
 
+pub use bundle::{SdkBundle, default_bundle};
 pub use location::SdkLocation;
