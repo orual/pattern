@@ -34,7 +34,7 @@ pub mod test_helpers;
 // Macros are automatically available at crate root due to #[macro_export].
 
 pub use base_instructions::DEFAULT_BASE_INSTRUCTIONS;
-pub use error::{CoreError, Result};
+pub use error::{ConfigError, CoreError, MemoryError, ProviderError, Result, RuntimeError};
 
 // ── Type re-exports ──────────────────────────────────────────────────────────
 // Explicit re-exports (no wildcard) so the public surface is greppable.
