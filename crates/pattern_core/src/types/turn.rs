@@ -77,6 +77,7 @@ pub struct TurnInput {
 ///     messages: vec![],
 ///     block_writes: vec![],
 ///     usage: None,
+///     cache_metrics: Default::default(),
 ///     completed_at: Timestamp::now(),
 /// };
 /// assert!(output.block_writes.is_empty());
@@ -89,6 +90,30 @@ pub struct TurnOutput {
     pub block_writes: Vec<BlockWrite>,
     /// Token usage reported by the provider, if available.
     pub usage: Option<genai::chat::Usage>,
+    /// Provider cache metrics for this turn (empty in Phase 2).
+    #[serde(default)]
+    pub cache_metrics: TurnCacheMetrics,
     /// Wall-clock time at which the turn completed.
     pub completed_at: Timestamp,
 }
+
+/// Provider-reported cache metrics for a single turn.
+///
+/// Placeholder shape in Phase 2: no fields are surfaced yet, but the struct
+/// reserves a slot on [`TurnOutput`] so that Phase 4 (provider rebase +
+/// prompt-caching integration) can add metrics without breaking the turn
+/// boundary. The type uses `#[non_exhaustive]` so that future fields do not
+/// break exhaustive-construction call sites.
+///
+/// # Examples
+///
+/// ```
+/// use pattern_core::types::turn::TurnCacheMetrics;
+///
+/// let m = TurnCacheMetrics::default();
+/// // Placeholder: no observable state in Phase 2.
+/// let _ = m;
+/// ```
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TurnCacheMetrics {}

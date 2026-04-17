@@ -15,6 +15,39 @@ use serde::{Deserialize, Serialize};
 use crate::types::ids::AgentId;
 use crate::types::turn::TurnId;
 
+/// Configuration required to open a new session for an agent.
+///
+/// `PersonaConfig` is the opaque configuration blob that
+/// [`crate::traits::AgentRuntime::open_session`] consumes when constructing a
+/// new session. It names the agent to run and carries any persona-level
+/// parameters the concrete runtime requires. Phase 3 replaces the opaque
+/// `data` field with a typed persona-config shape; Phase 2 lands only the
+/// name + ID surface so the trait signature is stable.
+///
+/// Callers should treat this type as opaque: construct it via the helpers
+/// that Phase 3 will provide, rather than populating `data` directly.
+///
+/// # Examples
+///
+/// ```
+/// use pattern_core::types::snapshot::PersonaConfig;
+/// use pattern_core::types::ids::new_id;
+/// use smol_str::SmolStr;
+///
+/// let cfg = PersonaConfig {
+///     agent_id: SmolStr::new("orual-companion"),
+///     data: serde_json::json!({}),
+/// };
+/// assert_eq!(cfg.agent_id.as_str(), "orual-companion");
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersonaConfig {
+    /// The agent this configuration describes.
+    pub agent_id: AgentId,
+    /// Opaque persona configuration. Implementation defined by Phase 3.
+    pub data: serde_json::Value,
+}
+
 /// A serializable snapshot of a single agent's persona-scoped state.
 ///
 /// Captures the Loro CRDT snapshot of an agent's memory blocks plus any

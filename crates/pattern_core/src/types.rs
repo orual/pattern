@@ -24,5 +24,5 @@ pub use ids::{
     SessionId, TaskId, ToolCallId, UserId, WakeupId, WorkspaceId, new_id,
 };
 pub use message::{Message, ResponseMeta};
-pub use snapshot::{PersonaSnapshot, SessionSnapshot};
-pub use turn::{TurnId, TurnInput, TurnOutput};
+pub use snapshot::{PersonaConfig, PersonaSnapshot, SessionSnapshot};
+pub use turn::{TurnCacheMetrics, TurnId, TurnInput, TurnOutput};
