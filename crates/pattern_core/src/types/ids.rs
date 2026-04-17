@@ -531,5 +531,77 @@ mod tests {
             let id = ProjectId::from_uuid(uuid);
             prop_assert!(id.to_string().starts_with("project:"));
         }
+
+        #[test]
+        fn memory_id_roundtrip(uuid_bytes in any::<[u8; 16]>()) {
+            let id = MemoryId::from_uuid(Uuid::from_bytes(uuid_bytes));
+            let as_str = id.to_string();
+            let parsed: MemoryId = as_str.parse().expect("roundtrip");
+            prop_assert_eq!(id, parsed);
+        }
+
+        #[test]
+        fn model_id_roundtrip(uuid_bytes in any::<[u8; 16]>()) {
+            let id = ModelId::from_uuid(Uuid::from_bytes(uuid_bytes));
+            let as_str = id.to_string();
+            let parsed: ModelId = as_str.parse().expect("roundtrip");
+            prop_assert_eq!(id, parsed);
+        }
+
+        #[test]
+        fn request_id_roundtrip(uuid_bytes in any::<[u8; 16]>()) {
+            let id = RequestId::from_uuid(Uuid::from_bytes(uuid_bytes));
+            let as_str = id.to_string();
+            let parsed: RequestId = as_str.parse().expect("roundtrip");
+            prop_assert_eq!(id, parsed);
+        }
+
+        #[test]
+        fn oauth_token_id_roundtrip(uuid_bytes in any::<[u8; 16]>()) {
+            let id = OAuthTokenId::from_uuid(Uuid::from_bytes(uuid_bytes));
+            let as_str = id.to_string();
+            let parsed: OAuthTokenId = as_str.parse().expect("roundtrip");
+            prop_assert_eq!(id, parsed);
+        }
+
+        #[test]
+        fn queued_message_id_roundtrip(uuid_bytes in any::<[u8; 16]>()) {
+            let id = QueuedMessageId::from_uuid(Uuid::from_bytes(uuid_bytes));
+            let as_str = id.to_string();
+            let parsed: QueuedMessageId = as_str.parse().expect("roundtrip");
+            prop_assert_eq!(id, parsed);
+        }
+
+        #[test]
+        fn tool_call_id_roundtrip(uuid_bytes in any::<[u8; 16]>()) {
+            let id = ToolCallId::from_uuid(Uuid::from_bytes(uuid_bytes));
+            let as_str = id.to_string();
+            let parsed: ToolCallId = as_str.parse().expect("roundtrip");
+            prop_assert_eq!(id, parsed);
+        }
+
+        #[test]
+        fn group_id_roundtrip(uuid_bytes in any::<[u8; 16]>()) {
+            let id = GroupId::from_uuid(Uuid::from_bytes(uuid_bytes));
+            let as_str = id.to_string();
+            let parsed: GroupId = as_str.parse().expect("roundtrip");
+            prop_assert_eq!(id, parsed);
+        }
+
+        #[test]
+        fn constellation_id_roundtrip(uuid_bytes in any::<[u8; 16]>()) {
+            let id = ConstellationId::from_uuid(Uuid::from_bytes(uuid_bytes));
+            let as_str = id.to_string();
+            let parsed: ConstellationId = as_str.parse().expect("roundtrip");
+            prop_assert_eq!(id, parsed);
+        }
+
+        #[test]
+        fn wakeup_id_roundtrip(uuid_bytes in any::<[u8; 16]>()) {
+            let id = WakeupId::from_uuid(Uuid::from_bytes(uuid_bytes));
+            let as_str = id.to_string();
+            let parsed: WakeupId = as_str.parse().expect("roundtrip");
+            prop_assert_eq!(id, parsed);
+        }
     }
 }
