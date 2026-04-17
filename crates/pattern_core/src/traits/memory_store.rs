@@ -3,7 +3,7 @@
 //! This trait is the interface that tools (context, recall, search) use to
 //! read and write memory blocks. It abstracts over storage implementations
 //! (cache-backed, direct DB, in-memory stub, etc.). The canonical
-//! implementation lives in [`crate::memory::store`] alongside the supporting
+//! implementation lives in `crate::memory` alongside the supporting
 //! value types ([`crate::memory::BlockMetadata`], [`crate::memory::ArchivalEntry`],
 //! [`crate::memory::SharedBlockInfo`]).
 //!

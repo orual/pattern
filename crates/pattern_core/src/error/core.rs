@@ -249,9 +249,7 @@ pub enum CoreError {
     ///
     /// # Example
     ///
-    /// ```no_run
-    /// // Cannot construct genai::Error in doctest; see ProviderError::RequestFailed.
-    /// ```
+    /// Cannot construct genai::Error in doctest; see [`ProviderError::RequestFailed`].
     #[error("model provider error")]
     #[diagnostic(
         code(pattern_core::model_provider_error),
@@ -437,9 +435,7 @@ pub enum CoreError {
     ///
     /// # Example
     ///
-    /// ```no_run
-    /// // Cannot construct serde_ipld_dagcbor error in doctest directly.
-    /// ```
+    /// Cannot construct serde_ipld_dagcbor error in doctest directly.
     #[error("DAG-CBOR encoding error")]
     #[diagnostic(
         code(pattern_core::dagcbor_encoding_error),
@@ -475,9 +471,7 @@ pub enum CoreError {
     ///
     /// # Example
     ///
-    /// ```no_run
-    /// // Cannot construct iroh_car::Error in doctest directly.
-    /// ```
+    /// Cannot construct iroh_car::Error in doctest directly.
     #[error("CAR archive error: {operation} failed")]
     #[diagnostic(
         code(pattern_core::car_error),
@@ -540,9 +534,7 @@ pub enum CoreError {
     ///
     /// # Example
     ///
-    /// ```no_run
-    /// // Cannot construct pattern_db::DbError in doctest directly.
-    /// ```
+    /// Cannot construct pattern_db::DbError in doctest directly.
     #[error("SQLite database error: {0}")]
     #[diagnostic(
         code(pattern_core::sqlite_error),
@@ -552,11 +544,7 @@ pub enum CoreError {
 
     /// An auth database operation failed.
     ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// // Cannot construct pattern_auth::AuthError in doctest directly.
-    /// ```
+    /// Cannot construct pattern_auth::AuthError in doctest directly.
     #[error("authentication database error: {0}")]
     #[diagnostic(
         code(pattern_core::auth_error),
