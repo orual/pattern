@@ -14,11 +14,7 @@ pub struct MemoryHandler;
 impl EffectHandler for MemoryHandler {
     type Request = MemoryReq;
 
-    fn handle(
-        &mut self,
-        req: MemoryReq,
-        _cx: &EffectContext<'_>,
-    ) -> Result<Value, EffectError> {
+    fn handle(&mut self, req: MemoryReq, _cx: &EffectContext<'_>) -> Result<Value, EffectError> {
         Err(EffectError::Handler(format!(
             "Pattern.Memory.{req:?} is stubbed in Phase 3 — Phase 5 wires real \
              memory backing. Agent code should not call memory effects yet."
@@ -36,9 +32,7 @@ mod tests {
         let mut h = MemoryHandler;
         let table = DataConTable::new();
         let cx = EffectContext::with_user(&table, &());
-        let err = h
-            .handle(MemoryReq::Read("test".into()), &cx)
-            .unwrap_err();
+        let err = h.handle(MemoryReq::Read("test".into()), &cx).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("Pattern.Memory"), "got: {msg}");
         assert!(msg.contains("stubbed"), "got: {msg}");

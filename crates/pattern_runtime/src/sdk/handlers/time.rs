@@ -23,11 +23,7 @@ pub struct TimeHandler;
 impl EffectHandler for TimeHandler {
     type Request = TimeReq;
 
-    fn handle(
-        &mut self,
-        req: TimeReq,
-        cx: &EffectContext<'_>,
-    ) -> Result<Value, EffectError> {
+    fn handle(&mut self, req: TimeReq, cx: &EffectContext<'_>) -> Result<Value, EffectError> {
         match req {
             TimeReq::Now => {
                 // jiff::Timestamp is an explicit UTC instant with nanosecond precision.
@@ -62,8 +58,8 @@ impl EffectHandler for TimeHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidepool_repr::{DataCon, DataConId, Literal};
     use crate::testing::standard_datacon_table;
+    use tidepool_repr::{DataCon, DataConId, Literal};
 
     /// Build a test DataConTable from the standard set plus the `()`
     /// constructor. `standard_datacon_table()` already contains `I#` for
@@ -136,6 +132,9 @@ mod tests {
         let cx = EffectContext::with_user(&table, &());
         let mut h = TimeHandler;
         let err = h.handle(TimeReq::Sleep(MAX_SLEEP_NS + 1), &cx).unwrap_err();
-        assert!(err.to_string().contains("exceeds in-handler limit"), "got: {err}");
+        assert!(
+            err.to_string().contains("exceeds in-handler limit"),
+            "got: {err}"
+        );
     }
 }

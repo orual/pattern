@@ -31,11 +31,7 @@ impl LogHandler {
 impl EffectHandler for LogHandler {
     type Request = LogReq;
 
-    fn handle(
-        &mut self,
-        req: LogReq,
-        cx: &EffectContext<'_>,
-    ) -> Result<Value, EffectError> {
+    fn handle(&mut self, req: LogReq, cx: &EffectContext<'_>) -> Result<Value, EffectError> {
         let sid = self.session_id.as_deref().unwrap_or("unknown");
         match req {
             LogReq::Debug(msg) => debug!(session = sid, source = "agent", "{msg}"),
@@ -50,8 +46,8 @@ impl EffectHandler for LogHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidepool_repr::{DataCon, DataConId};
     use crate::testing::standard_datacon_table;
+    use tidepool_repr::{DataCon, DataConId};
     use tracing_test::traced_test;
 
     /// Build a test DataConTable that includes the `()` constructor required by
@@ -79,7 +75,9 @@ mod tests {
         let table = handler_table();
         let cx = EffectContext::with_user(&table, &());
         let mut h = LogHandler::for_session("sess_123");
-        let v = h.handle(LogReq::Info("hello from agent".into()), &cx).unwrap();
+        let v = h
+            .handle(LogReq::Info("hello from agent".into()), &cx)
+            .unwrap();
         // Return value is Haskell unit.
         match v {
             Value::Con(_, ref fields) if fields.is_empty() => {}
@@ -109,7 +107,8 @@ mod tests {
         let table = handler_table();
         let cx = EffectContext::with_user(&table, &());
         let mut h = LogHandler::for_session("sess_err");
-        h.handle(LogReq::Error("error message".into()), &cx).unwrap();
+        h.handle(LogReq::Error("error message".into()), &cx)
+            .unwrap();
         assert!(logs_contain("error message"));
         assert!(logs_contain("sess_err"));
     }
@@ -121,7 +120,8 @@ mod tests {
         let table = handler_table();
         let cx = EffectContext::with_user(&table, &());
         let mut h = LogHandler::for_session("sess_dbg");
-        h.handle(LogReq::Debug("debug message".into()), &cx).unwrap();
+        h.handle(LogReq::Debug("debug message".into()), &cx)
+            .unwrap();
         assert!(logs_contain("debug message"));
         assert!(logs_contain("sess_dbg"));
     }

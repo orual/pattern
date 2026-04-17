@@ -14,11 +14,7 @@ pub struct FileHandler;
 impl EffectHandler for FileHandler {
     type Request = FileReq;
 
-    fn handle(
-        &mut self,
-        req: FileReq,
-        _cx: &EffectContext<'_>,
-    ) -> Result<Value, EffectError> {
+    fn handle(&mut self, req: FileReq, _cx: &EffectContext<'_>) -> Result<Value, EffectError> {
         Err(EffectError::Handler(format!(
             "Pattern.File.{req:?} is not implemented in v3 foundation \
              (phase: post-foundation filesystem-sandbox plan). Agent code \
@@ -37,7 +33,9 @@ mod tests {
         let mut h = FileHandler;
         let table = DataConTable::new();
         let cx = EffectContext::with_user(&table, &());
-        let err = h.handle(FileReq::Read("/etc/hosts".into()), &cx).unwrap_err();
+        let err = h
+            .handle(FileReq::Read("/etc/hosts".into()), &cx)
+            .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("Pattern.File"), "got: {msg}");
         assert!(msg.contains("not implemented"), "got: {msg}");

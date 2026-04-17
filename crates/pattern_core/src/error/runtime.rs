@@ -250,10 +250,7 @@ pub enum RuntimeError {
     /// assert!(err.to_string().contains("/missing/haskell"));
     /// ```
     #[error("SDK directory not found: {}", path.display())]
-    #[diagnostic(
-        code(pattern_runtime::sdk_not_found),
-        help("{hint}")
-    )]
+    #[diagnostic(code(pattern_runtime::sdk_not_found), help("{hint}"))]
     SdkNotFound {
         /// The path that was expected to contain the SDK.
         path: std::path::PathBuf,

@@ -32,13 +32,32 @@ pub struct CompiledProgram {
 /// Compilation results are cached on disk (via tidepool-runtime's XDG cache) so
 /// repeated invocations with identical inputs return quickly.
 pub fn compile_program(
-    _source: &str,
-    _target: &str,
-    _include_dirs: &[&Path],
+    source: &str,
+    target: &str,
+    include_dirs: &[&Path],
 ) -> Result<CompiledProgram, RuntimeError> {
-    // 1. Call compile_haskell, map CompileError via error_map::map_compile_error.
-    // 2. Unpack CompileResult into CompiledProgram.
-    // 3. Log warnings via tracing.
-    // phase: 3; AC: AC2.1
-    todo!("implement per tidepool-runtime::compile_haskell wrapper")
+    let (core, mut data_cons, meta_warnings) =
+        tidepool_runtime::compile_haskell(source, target, include_dirs)
+            .map_err(super::error_map::map_compile_error)?;
+
+    // Surface IO-type warnings as hard errors per sandbox policy.
+    if meta_warnings.has_io {
+        return Err(RuntimeError::SandboxConstraintViolated {
+            constraint: pattern_core::error::SandboxConstraint::NoIoAllowed,
+            detail: "agent program uses IO types; use SDK effects instead".to_string(),
+        });
+    }
+
+    // Populate type-sibling groups from case branches so that get_companion
+    // can disambiguate constructors sharing unqualified names. Without this,
+    // the JIT's case dispatch may fail with CASE TRAP on constructor tags
+    // when multiple types share constructor names (e.g. Bin/Tip from Data.Map
+    // vs Data.Set). Matches tidepool-runtime's own compile_and_run path.
+    data_cons.populate_siblings_from_expr(&core);
+
+    Ok(CompiledProgram {
+        core,
+        data_cons,
+        warnings: Vec::new(),
+    })
 }

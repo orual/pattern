@@ -8,8 +8,8 @@
 //! and Rust bundle.
 
 use crate::sdk::handlers::{
-    DisplayHandler, FileHandler, IpcHandler, LogHandler, McpHandler, MemoryHandler,
-    MessageHandler, ShellHandler, SourcesHandler, SpawnHandler, TimeHandler,
+    DisplayHandler, FileHandler, IpcHandler, LogHandler, McpHandler, MemoryHandler, MessageHandler,
+    ShellHandler, SourcesHandler, SpawnHandler, TimeHandler,
 };
 
 /// The full 11-handler SDK bundle, typed as a `frunk::HList`.

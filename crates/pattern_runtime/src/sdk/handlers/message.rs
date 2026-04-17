@@ -14,11 +14,7 @@ pub struct MessageHandler;
 impl EffectHandler for MessageHandler {
     type Request = MessageReq;
 
-    fn handle(
-        &mut self,
-        req: MessageReq,
-        _cx: &EffectContext<'_>,
-    ) -> Result<Value, EffectError> {
+    fn handle(&mut self, req: MessageReq, _cx: &EffectContext<'_>) -> Result<Value, EffectError> {
         Err(EffectError::Handler(format!(
             "Pattern.Message.{req:?} is stubbed in Phase 3 — Phase 4 wires real \
              pattern_provider backing. Agent code should not call message effects yet."
@@ -36,9 +32,7 @@ mod tests {
         let mut h = MessageHandler;
         let table = DataConTable::new();
         let cx = EffectContext::with_user(&table, &());
-        let err = h
-            .handle(MessageReq::Ask("test".into()), &cx)
-            .unwrap_err();
+        let err = h.handle(MessageReq::Ask("test".into()), &cx).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("Pattern.Message"), "got: {msg}");
         assert!(msg.contains("stubbed"), "got: {msg}");

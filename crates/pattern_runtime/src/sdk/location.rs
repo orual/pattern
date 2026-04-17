@@ -61,11 +61,13 @@ impl SdkLocation {
                 }
                 Ok(p.clone())
             }
+            // phase: post-foundation SDK-distribution plan; AC2.9-adjacent.
             Self::Embedded => todo!(
                 "SdkLocation::Embedded not yet implemented — \
                  phase: post-foundation SDK-distribution plan. \
                  Use SdkLocation::Directory or the Default (PATTERN_SDK_DIR env)."
             ),
+            // phase: post-foundation SDK-distribution plan; AC2.9-adjacent.
             Self::Auto { .. } => todo!(
                 "SdkLocation::Auto not yet implemented — \
                  phase: post-foundation SDK-distribution plan. \

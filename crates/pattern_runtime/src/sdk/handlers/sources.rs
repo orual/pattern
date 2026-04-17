@@ -15,11 +15,7 @@ pub struct SourcesHandler;
 impl EffectHandler for SourcesHandler {
     type Request = SourcesReq;
 
-    fn handle(
-        &mut self,
-        req: SourcesReq,
-        _cx: &EffectContext<'_>,
-    ) -> Result<Value, EffectError> {
+    fn handle(&mut self, req: SourcesReq, _cx: &EffectContext<'_>) -> Result<Value, EffectError> {
         Err(EffectError::Handler(format!(
             "Pattern.Sources.{req:?} is not implemented in v3 foundation \
              (phase: post-foundation data-sources plan). Agent code should \

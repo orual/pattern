@@ -100,10 +100,7 @@ mod parity {
                 );
             }
             for v in *variants {
-                assert!(
-                    !v.is_empty(),
-                    "enum {enum_name} has an empty variant name"
-                );
+                assert!(!v.is_empty(), "enum {enum_name} has an empty variant name");
             }
         }
     }

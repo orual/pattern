@@ -89,19 +89,22 @@ fn resolve_binary() -> Result<PathBuf, RuntimeError> {
     }
 }
 
-/// Run `tidepool-extract --version` and verify it exits successfully.
+/// Run `tidepool-extract` (bare invocation, prints usage) and verify it exits successfully.
+///
+/// Note: `tidepool-extract` does not support `--version` or `--help` flags.
+/// A bare invocation prints usage and exits 0, which is sufficient to verify
+/// the binary is functional.
 fn verify_binary(path: &PathBuf) -> Result<(), RuntimeError> {
     // Spawn the process with a short timeout. We can't use tokio here since
     // `check()` is sync (called before the runtime starts). Instead we spawn
     // and poll with a deadline — standard library only.
     let mut child = Command::new(path)
-        .arg("--version")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| RuntimeError::PreflightFailed {
             reason: format!(
-                "failed to spawn {path:?} --version: {e}\n\
+                "failed to spawn {path:?}: {e}\n\
                  \n\
                  The binary may not be executable. Check file permissions.",
                 path = path,
@@ -121,7 +124,7 @@ fn verify_binary(path: &PathBuf) -> Result<(), RuntimeError> {
                     let _ = child.kill();
                     return Err(RuntimeError::PreflightFailed {
                         reason: format!(
-                            "tidepool-extract --version timed out after {}s\n\
+                            "tidepool-extract timed out after {}s\n\
                              \n\
                              The binary may be corrupt or the system may be under heavy load.",
                             VERSION_TIMEOUT.as_secs()
@@ -132,7 +135,7 @@ fn verify_binary(path: &PathBuf) -> Result<(), RuntimeError> {
             }
             Err(e) => {
                 return Err(RuntimeError::PreflightFailed {
-                    reason: format!("error waiting for tidepool-extract --version: {e}"),
+                    reason: format!("error waiting for tidepool-extract: {e}"),
                 });
             }
         }
@@ -155,7 +158,7 @@ fn verify_binary(path: &PathBuf) -> Result<(), RuntimeError> {
 
     Err(RuntimeError::PreflightFailed {
         reason: format!(
-            "tidepool-extract --version exited with status {exit_status}\n\
+            "tidepool-extract exited with status {exit_status}\n\
              \n\
              stderr:\n\
              {stderr}",

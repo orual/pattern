@@ -70,11 +70,7 @@ impl DisplayHandler {
 impl EffectHandler for DisplayHandler {
     type Request = DisplayReq;
 
-    fn handle(
-        &mut self,
-        req: DisplayReq,
-        cx: &EffectContext<'_>,
-    ) -> Result<Value, EffectError> {
+    fn handle(&mut self, req: DisplayReq, cx: &EffectContext<'_>) -> Result<Value, EffectError> {
         let event = match req {
             DisplayReq::Chunk(s) => DisplayEvent::Chunk(s),
             DisplayReq::Final(s) => DisplayEvent::Final(s),
