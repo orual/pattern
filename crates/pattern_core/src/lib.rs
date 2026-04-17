@@ -84,9 +84,7 @@ pub use types::message::{Message, ResponseMeta};
 pub use types::block::{BlockHandle, BlockWrite, BlockWriteKind};
 
 // Origin / provenance
-pub use types::origin::{
-    AgentAuthor, Author, Human, MessageOrigin, Partner, Sphere, SystemReason,
-};
+pub use types::origin::{AgentAuthor, Author, Human, MessageOrigin, Partner, Sphere, SystemReason};
 
 // Turn types
 pub use types::turn::{TurnCacheMetrics, TurnId, TurnInput, TurnOutput};

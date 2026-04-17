@@ -126,4 +126,29 @@ pub enum RuntimeError {
         /// Human-readable description of why the checkpoint failed.
         reason: String,
     },
+
+    /// The runtime environment failed a preflight check before any compilation started.
+    ///
+    /// Returned by `pattern_runtime::preflight::check()` when a required binary
+    /// (e.g., `tidepool-extract`) is missing or non-functional.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::RuntimeError;
+    ///
+    /// let err = RuntimeError::PreflightFailed { reason: "tidepool-extract not found".to_string() };
+    /// assert!(err.to_string().contains("tidepool-extract"));
+    /// ```
+    #[error("runtime preflight failed: {reason}")]
+    #[diagnostic(
+        code(pattern_core::runtime::preflight_failed),
+        help(
+            "install tidepool-extract and ensure it is on PATH, or set $TIDEPOOL_EXTRACT to its absolute path; see crates/pattern_runtime/CLAUDE.md for setup instructions"
+        )
+    )]
+    PreflightFailed {
+        /// Human-readable description of what the preflight check found wrong.
+        reason: String,
+    },
 }
