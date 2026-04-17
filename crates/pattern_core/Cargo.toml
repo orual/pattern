@@ -25,6 +25,7 @@ jiff = { workspace = true }
 futures = { workspace = true }
 parking_lot = { workspace = true }
 dirs = { workspace = true }
+secrecy = { workspace = true }
 
 # Database
 pattern-db = { path = "../pattern_db" }

@@ -16,9 +16,42 @@
 //! provider-native field mappings and caching hints.
 
 use jiff::Timestamp;
-use serde::{Deserialize, Serialize};
+use secrecy::{ExposeSecret, SecretString};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::types::message::Message;
+
+/// Serde helper: write a [`SecretString`] as its plaintext string form.
+///
+/// Used only by `ProviderOAuthToken`'s at-rest serialization. `SecretString`
+/// deliberately declines automatic `Serialize` to prevent accidental leak via
+/// `Debug`/`tracing`; the credential store explicitly opts in here because
+/// it's the one place the token legitimately crosses the wire (to disk).
+fn serialize_secret<S: Serializer>(value: &SecretString, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(value.expose_secret())
+}
+
+fn deserialize_secret<'de, D: Deserializer<'de>>(deserializer: D) -> Result<SecretString, D::Error> {
+    let s = String::deserialize(deserializer)?;
+    Ok(SecretString::from(s))
+}
+
+fn serialize_opt_secret<S: Serializer>(
+    value: &Option<SecretString>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match value {
+        Some(s) => serializer.serialize_some(s.expose_secret()),
+        None => serializer.serialize_none(),
+    }
+}
+
+fn deserialize_opt_secret<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<SecretString>, D::Error> {
+    let s: Option<String> = Option::deserialize(deserializer)?;
+    Ok(s.map(SecretString::from))
+}
 
 /// A composed request to an LLM provider.
 ///
@@ -118,4 +151,120 @@ pub struct CompletionResponse {
 pub struct TokenCount {
     /// Number of input tokens the provider reports for the composed request.
     pub input_tokens: u32,
+}
+
+/// A stored OAuth token for a specific provider.
+///
+/// Used by `pattern_provider::creds_store::CredsStore` implementations to
+/// persist OAuth-tier credentials (access token, refresh token, expiry,
+/// scope, session ID). Access and refresh tokens wrap in
+/// [`secrecy::SecretString`] so a stray `Debug` or `tracing::info!` cannot
+/// accidentally leak them to logs.
+///
+/// **Absorbed from:** `pattern_auth::providers::oauth::ProviderOAuthToken`
+/// (retired in Phase 4).
+///
+/// # Examples
+///
+/// ```
+/// use jiff::Timestamp;
+/// use pattern_core::types::provider::ProviderOAuthToken;
+/// use secrecy::SecretString;
+///
+/// let now = Timestamp::now();
+/// let tok = ProviderOAuthToken {
+///     provider: "anthropic".into(),
+///     access_token: "at-xxx".to_string().into(),
+///     refresh_token: Some("rt-xxx".to_string().into()),
+///     expires_at: None,
+///     scope: Some("user:inference".into()),
+///     session_id: None,
+///     created_at: now,
+///     updated_at: now,
+/// };
+/// assert_eq!(tok.provider, "anthropic");
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderOAuthToken {
+    /// Provider name (`"anthropic"`, `"gemini"`, etc.). Keys the per-provider
+    /// credential store.
+    pub provider: String,
+
+    /// The bearer access token. Wrapped in [`secrecy::SecretString`] so
+    /// accidental logging does not leak the value.
+    ///
+    /// Serialization explicitly exposes the inner string via the module's
+    /// `serialize_secret` / `deserialize_secret` helpers — the credential
+    /// store is the one place this token legitimately round-trips through
+    /// JSON.
+    #[serde(serialize_with = "serialize_secret", deserialize_with = "deserialize_secret")]
+    pub access_token: SecretString,
+
+    /// Optional refresh token, when the provider issues one.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_opt_secret",
+        deserialize_with = "deserialize_opt_secret"
+    )]
+    pub refresh_token: Option<SecretString>,
+
+    /// Wall-clock expiry of the access token, if known.
+    pub expires_at: Option<Timestamp>,
+
+    /// OAuth scopes granted. Stored for diagnostic purposes; scope gating
+    /// happens at the provider's authorize step, not here.
+    pub scope: Option<String>,
+
+    /// Opaque provider-side session identifier, when applicable (e.g.
+    /// Anthropic's per-session token metadata).
+    pub session_id: Option<String>,
+
+    /// When the token was first stored.
+    pub created_at: Timestamp,
+
+    /// When the token was last refreshed / updated.
+    pub updated_at: Timestamp,
+}
+
+impl ProviderOAuthToken {
+    /// `true` when `expires_at` is set and is in the past.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use jiff::{Timestamp, ToSpan};
+    /// use pattern_core::types::provider::ProviderOAuthToken;
+    /// use secrecy::SecretString;
+    ///
+    /// let now = Timestamp::now();
+    /// let past = now.checked_sub(1.hour()).unwrap();
+    /// let tok = ProviderOAuthToken {
+    ///     provider: "anthropic".into(),
+    ///     access_token: "at".to_string().into(),
+    ///     refresh_token: None,
+    ///     expires_at: Some(past),
+    ///     scope: None,
+    ///     session_id: None,
+    ///     created_at: now,
+    ///     updated_at: now,
+    /// };
+    /// assert!(tok.is_expired());
+    /// ```
+    pub fn is_expired(&self) -> bool {
+        matches!(self.expires_at, Some(t) if t <= Timestamp::now())
+    }
+
+    /// `true` when the token is within 5 minutes of expiry. Callers use this
+    /// to trigger a proactive refresh before the next request.
+    pub fn needs_refresh(&self) -> bool {
+        use jiff::ToSpan;
+        let Some(expires_at) = self.expires_at else {
+            return false;
+        };
+        let threshold = Timestamp::now()
+            .checked_add(5.minutes())
+            .unwrap_or(Timestamp::now());
+        expires_at <= threshold
+    }
 }

@@ -45,6 +45,9 @@ secrecy = { workspace = true }
 jiff = { workspace = true, features = ["serde"] }
 uuid = { workspace = true, features = ["v4", "serde"] }
 
+# Paths
+dirs = { workspace = true }
+
 # PKCE primitives
 rand = { workspace = true }
 sha2 = { workspace = true }

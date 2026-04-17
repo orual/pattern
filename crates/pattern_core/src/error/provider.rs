@@ -64,7 +64,13 @@ pub enum ProviderError {
         reason: String,
     },
 
-    /// The credential store (pattern-auth database) is not reachable.
+    /// The credential store backend is not reachable (keyring daemon down,
+    /// DBus unavailable, filesystem path refused, etc.).
+    ///
+    /// Callers with a fallback store try the next tier on this error;
+    /// distinguished from [`ProviderError::CredentialStorage`] which
+    /// indicates corruption or a hard persistence failure that should NOT
+    /// trigger fallback.
     ///
     /// # Example
     ///
@@ -77,9 +83,37 @@ pub enum ProviderError {
     #[error("credential store unavailable")]
     #[diagnostic(
         code(pattern_core::provider::credential_store_unavailable),
-        help("check that the pattern-auth database exists and is not locked")
+        help("check that the credential store backend is running and reachable")
     )]
     CredentialStoreUnavailable,
+
+    /// The credential store returned a value that could not be processed —
+    /// corrupt JSON, wrong shape, I/O error during write, etc.
+    ///
+    /// Distinguished from [`ProviderError::CredentialStoreUnavailable`] by
+    /// the fact that the backend IS available but the stored credential is
+    /// unusable. Callers should NOT fall back to a different tier on this
+    /// error — the problem is the data itself.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::ProviderError;
+    ///
+    /// let err = ProviderError::CredentialStorage {
+    ///     reason: "malformed JSON in ~/.config/pattern/creds/anthropic.json".into(),
+    /// };
+    /// assert!(err.to_string().contains("malformed"));
+    /// ```
+    #[error("credential storage error: {reason}")]
+    #[diagnostic(
+        code(pattern_core::provider::credential_storage),
+        help("inspect the credential store manually or re-authenticate")
+    )]
+    CredentialStorage {
+        /// Human-readable description of the persistence failure.
+        reason: String,
+    },
 
     /// Token counting failed before the request was sent.
     ///
