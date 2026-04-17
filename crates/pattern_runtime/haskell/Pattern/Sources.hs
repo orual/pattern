@@ -2,7 +2,7 @@
 -- | Pattern.Sources — external data streams (firehose, process output,
 -- future RSS / webhooks / etc.).
 --
--- Stubbed in Phase 3. Rust handler returns NotImplemented; real
+-- Stubbed in Phase 3. runtime handler returns NotImplemented; real
 -- implementation will wrap the preserved `data_source/` abstractions.
 module Pattern.Sources where
 
@@ -12,8 +12,7 @@ import Data.Text (Text)
 type Name = Text
 type Cb   = Text  -- Stub: real type carries callback closure; Phase 5 decides encoding.
 
--- | Sources effect algebra. Variant names are mirrored by
--- @Pattern.sdk::requests::sources::SourcesReq@ (Rust).
+-- | Effect algebra.
 data Sources a where
   Stream    :: Name -> Sources Text
   Subscribe :: Name -> Cb -> Sources ()

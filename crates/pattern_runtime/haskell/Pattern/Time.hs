@@ -1,7 +1,7 @@
 {-# LANGUAGE GADTs #-}
 -- | Pattern.Time — time-oriented agent effects.
 --
--- Fully implemented in Phase 3. The Rust-side `TimeHandler` dispatches
+-- Fully implemented in Phase 3. The runtime handler `TimeHandler` dispatches
 -- `Now` by reading `jiff::Timestamp::now()` (UTC, nanosecond precision,
 -- narrowed to Haskell `Int`) and `Sleep` by bounded `std::thread::sleep`.
 --
@@ -31,10 +31,9 @@ module Pattern.Time
 import Control.Monad.Freer (Eff, Member, send)
 
 -- | Time effect algebra. Variant names are mirrored byte-for-byte by
--- @Pattern.sdk::requests::time::TimeReq@ (Rust).
 --
 -- NOTE: We use 'Int' (machine-width, 64-bit) rather than 'Integer'
--- (arbitrary-precision) because (a) the Rust handler returns @i64@, and
+-- (arbitrary-precision) because (a) the runtime handler returns @i64@, and
 -- (b) GHC's 'Integer' type has multiple internal constructors (IS\/IP\/IN)
 -- that the tidepool JIT codegen does not yet support. 'Int' fits epoch
 -- nanoseconds until approximately year 2262.

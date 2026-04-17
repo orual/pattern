@@ -11,5 +11,5 @@ import Pattern.Log
 
 agent :: Eff '[Memory, Message, Display, Time, Log] ()
 agent = do
-  v <- read_ "scratchpad"
+  v <- get "scratchpad"
   info v

@@ -6,9 +6,9 @@ use tidepool_bridge_derive::FromCore;
 #[derive(Debug, FromCore)]
 pub enum TimeReq {
     /// Haskell: `Now :: Time Integer`.
-    #[core(name = "Now")]
+    #[core(module = "Pattern.Time", name = "Now")]
     Now,
     /// Haskell: `Sleep :: Integer -> Time ()`.
-    #[core(name = "Sleep")]
+    #[core(module = "Pattern.Time", name = "Sleep")]
     Sleep(i64),
 }

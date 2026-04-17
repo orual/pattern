@@ -25,7 +25,7 @@ use crate::checkpoint::{CheckpointEvent, CheckpointLog};
 use crate::sdk::SdkLocation;
 use crate::sdk::bundle::SdkBundle;
 use crate::sdk::handlers::{
-    DisplayHandler, FileHandler, IpcHandler, LogHandler, McpHandler, MemoryHandler, MessageHandler,
+    DisplayHandler, FileHandler, LogHandler, McpHandler, MemoryHandler, MessageHandler, RpcHandler,
     ShellHandler, SourcesHandler, SpawnHandler, TimeHandler,
 };
 use crate::tidepool::{CancelHandle, SessionMachine, compile_program};
@@ -223,9 +223,8 @@ impl TidepoolSession {
 
         let display = DisplayHandler::new();
         // Bundle order: Prelude-5 first, then rarer effects. See
-        // `crates/pattern_runtime/src/sdk/bundle.rs` for why the
-        // Prelude-5 prefix matters (DataCon name-collision avoidance
-        // for agents that only need the common subset).
+        // `crates/pattern_runtime/src/sdk/bundle.rs` for the ordering
+        // rationale (arity-aware DataCon disambiguation + backwards compat).
         let bundle: SdkBundle = frunk::hlist![
             MemoryHandler::new(memory_store),
             MessageHandler,
@@ -236,7 +235,7 @@ impl TidepoolSession {
             FileHandler,
             SourcesHandler,
             McpHandler,
-            IpcHandler,
+            RpcHandler,
             SpawnHandler,
         ];
 

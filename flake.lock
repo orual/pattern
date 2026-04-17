@@ -228,11 +228,11 @@
         "rust-overlay": "rust-overlay_2"
       },
       "locked": {
-        "lastModified": 1776440176,
-        "narHash": "sha256-LBK/IjgKYQJbewKg+IBfIxUKlxwgLouFCE7lDc7EO+c=",
+        "lastModified": 1776452860,
+        "narHash": "sha256-VzJTABnB5VcnhDikFtjMniYG6pcur9JH0RlFuLxXY/A=",
         "owner": "orual",
         "repo": "tidepool",
-        "rev": "a3069378b22c48f10b848091eab729373f8e6e58",
+        "rev": "77dd58e4fca734d626bda8a2952e8fa26a3c2841",
         "type": "github"
       },
       "original": {

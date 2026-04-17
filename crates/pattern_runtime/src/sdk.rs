@@ -6,7 +6,7 @@
 //! the `#[core(name = "...")]` attribute from `tidepool-bridge-derive`.
 //!
 //! Handler implementations live in `sdk::handlers` (Phase 3: time, log,
-//! display fully implemented; shell / file / sources / mcp / ipc / spawn
+//! display fully implemented; shell / file / sources / mcp / rpc / spawn
 //! stubbed with NotImplemented diagnostics).
 
 pub mod bundle;

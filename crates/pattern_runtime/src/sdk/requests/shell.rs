@@ -5,12 +5,12 @@ use tidepool_bridge_derive::FromCore;
 /// Rust mirror of the Haskell `Shell` GADT.
 #[derive(Debug, FromCore)]
 pub enum ShellReq {
-    #[core(name = "Execute")]
+    #[core(module = "Pattern.Shell", name = "Execute")]
     Execute(String),
-    #[core(name = "Spawn")]
+    #[core(module = "Pattern.Shell", name = "Spawn")]
     Spawn(String),
-    #[core(name = "Kill")]
+    #[core(module = "Pattern.Shell", name = "Kill")]
     Kill(i64),
-    #[core(name = "Status")]
+    #[core(module = "Pattern.Shell", name = "Status")]
     Status(i64),
 }

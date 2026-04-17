@@ -5,10 +5,10 @@ use tidepool_bridge_derive::FromCore;
 /// Rust mirror of the Haskell `Sources` GADT.
 #[derive(Debug, FromCore)]
 pub enum SourcesReq {
-    #[core(name = "Stream")]
+    #[core(module = "Pattern.Sources", name = "Stream")]
     Stream(String),
-    #[core(name = "Subscribe")]
+    #[core(module = "Pattern.Sources", name = "Subscribe")]
     Subscribe(String, String),
-    #[core(name = "List")]
+    #[core(module = "Pattern.Sources", name = "List")]
     List,
 }

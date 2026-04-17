@@ -1,11 +1,12 @@
 //! Mirror of `Pattern.Memory` (`haskell/Pattern/Memory.hs`).
 //!
-//! Variant names mirror the Haskell GADT constructors byte-for-byte via
-//! the `#[core(name = "...")]` attribute. `FromCore` dispatches by
-//! unqualified DataCon name, so the `Block*` / `Schema*` prefixes on
-//! the nested enums are load-bearing — they avoid collisions with
-//! other SDK modules' constructor namespaces (e.g. a bare `Log` would
-//! clash with `Pattern.Log`'s module namespace in future).
+//! Every variant carries `#[core(module = "Pattern.Memory", name = "...")]`
+//! so `FromCore` dispatches via `get_by_qualified_name` — fully
+//! disambiguating against other SDK modules even when name+arity collide
+//! (e.g. `Pattern.Memory.Read` vs `Pattern.File.Read`, both `Read :: String
+//! -> ...`). The `Block*` / `Schema*` prefixes on the nested enums remain
+//! only for source-level clarity; disambiguation is now
+//! name-qualification rather than name-prefixing.
 
 use tidepool_bridge_derive::FromCore;
 
@@ -13,13 +14,13 @@ use tidepool_bridge_derive::FromCore;
 /// The `Block` prefix is deliberate — see module docs.
 #[derive(Debug, FromCore)]
 pub enum BlockTypeReq {
-    #[core(name = "BlockCore")]
+    #[core(module = "Pattern.Memory", name = "BlockCore")]
     Core,
-    #[core(name = "BlockWorking")]
+    #[core(module = "Pattern.Memory", name = "BlockWorking")]
     Working,
-    #[core(name = "BlockArchival")]
+    #[core(module = "Pattern.Memory", name = "BlockArchival")]
     Archival,
-    #[core(name = "BlockLog")]
+    #[core(module = "Pattern.Memory", name = "BlockLog")]
     Log,
 }
 
@@ -39,13 +40,13 @@ impl From<BlockTypeReq> for pattern_core::memory::BlockType {
 /// The handler fills in nested defaults (e.g. empty `fields` for Map).
 #[derive(Debug, FromCore)]
 pub enum SchemaKindReq {
-    #[core(name = "SchemaText")]
+    #[core(module = "Pattern.Memory", name = "SchemaText")]
     Text,
-    #[core(name = "SchemaMap")]
+    #[core(module = "Pattern.Memory", name = "SchemaMap")]
     Map,
-    #[core(name = "SchemaList")]
+    #[core(module = "Pattern.Memory", name = "SchemaList")]
     List,
-    #[core(name = "SchemaLog")]
+    #[core(module = "Pattern.Memory", name = "SchemaLog")]
     Log,
 }
 
@@ -77,24 +78,29 @@ impl From<SchemaKindReq> for pattern_core::memory::BlockSchema {
 }
 
 /// Rust mirror of the Haskell `Memory` GADT.
+///
+/// Uses `Get`/`Put` rather than `Read`/`Write` so the module composes
+/// cleanly with `Pattern.File` (which owns `Read`/`Write` semantically).
+/// Agents can import `Pattern.Prelude` unqualified or mix Memory + File
+/// via qualified imports without Haskell-level collisions either way.
 #[derive(Debug, FromCore)]
 pub enum MemoryReq {
-    #[core(name = "Read")]
-    Read(String),
+    #[core(module = "Pattern.Memory", name = "Get")]
+    Get(String),
 
-    /// `Write label content description`.
+    /// `Put label content description`.
     ///
     /// - `description = None`: leave existing metadata untouched (or
     ///   fall through to a default when auto-creating a missing block).
     /// - `description = Some(d)`: set/update the block's description.
-    #[core(name = "Write")]
-    Write(String, String, Option<String>),
+    #[core(module = "Pattern.Memory", name = "Put")]
+    Put(String, String, Option<String>),
 
     /// `Create label description block_type schema_kind char_limit initial_content`.
     ///
     /// Explicit block creation with full metadata control. `char_limit = None`
     /// falls back to the runtime's default (`DEFAULT_CHAR_LIMIT`).
-    #[core(name = "Create")]
+    #[core(module = "Pattern.Memory", name = "Create")]
     Create(
         String,
         String,
@@ -104,20 +110,20 @@ pub enum MemoryReq {
         String,
     ),
 
-    #[core(name = "Append")]
+    #[core(module = "Pattern.Memory", name = "Append")]
     Append(String, String),
 
     /// `Replace label old new` — string-replace within the block's
     /// rendered text. Errors if the block does not exist.
-    #[core(name = "Replace")]
+    #[core(module = "Pattern.Memory", name = "Replace")]
     Replace(String, String, String),
 
-    #[core(name = "Search")]
+    #[core(module = "Pattern.Memory", name = "Search")]
     Search(String),
 
-    #[core(name = "Recall")]
+    #[core(module = "Pattern.Memory", name = "Recall")]
     Recall(String),
 
-    #[core(name = "Archive")]
+    #[core(module = "Pattern.Memory", name = "Archive")]
     Archive(String),
 }

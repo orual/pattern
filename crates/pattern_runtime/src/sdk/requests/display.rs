@@ -12,15 +12,15 @@ use tidepool_bridge_derive::FromCore;
 pub enum DisplayReq {
     /// A partial chunk during a streaming provider response. Forwarded to
     /// every registered subscriber as-is.
-    #[core(name = "Chunk")]
+    #[core(module = "Pattern.Display", name = "Chunk")]
     Chunk(String),
     /// Final assembled content for the turn's Message.Ask. Fires once,
     /// after the provider stream completes.
-    #[core(name = "Final")]
+    #[core(module = "Pattern.Display", name = "Final")]
     Final(String),
     /// Agent-visible note (typing indicator, tool-call progress, etc.) that
     /// isn't part of the LLM response stream. Subscribers decide whether
     /// to render.
-    #[core(name = "Note")]
+    #[core(module = "Pattern.Display", name = "Note")]
     Note(String),
 }

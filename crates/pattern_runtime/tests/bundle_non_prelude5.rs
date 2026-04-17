@@ -6,12 +6,12 @@
 //! position in the HList are consistent) by asserting the error message
 //! identifies the File handler.
 //!
-//! A custom 1-element HList is used rather than the full `SdkBundle` so that
-//! agent source can avoid importing Pattern.Memory alongside Pattern.File —
-//! tidepool-bridge's `FromCore::get_by_name` lookup is ambiguous when both
-//! modules' `Read` constructors coexist in the DataConTable. See
-//! `crates/pattern_runtime/src/sdk/bundle.rs` for the rationale behind the
-//! Prelude-5-first bundle ordering and the DataCon-collision constraint.
+//! A custom 1-element HList is used to test FileHandler in isolation. The
+//! agent source imports only Pattern.File so no DataCon name collisions can
+//! arise even for constructors that still share both name and arity with
+//! other modules (e.g. `File.Read` and `Memory.Read` are both arity 1).
+//! For the multi-module collision validation test, see
+//! `tests/cross_module_collision.rs`.
 
 use pattern_runtime::sdk::handlers::file::FileHandler;
 

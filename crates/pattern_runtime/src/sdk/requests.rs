@@ -8,11 +8,11 @@
 
 pub mod display;
 pub mod file;
-pub mod ipc;
 pub mod log;
 pub mod mcp;
 pub mod memory;
 pub mod message;
+pub mod rpc;
 pub mod shell;
 pub mod sources;
 pub mod spawn;
@@ -20,11 +20,11 @@ pub mod time;
 
 pub use display::DisplayReq;
 pub use file::FileReq;
-pub use ipc::IpcReq;
 pub use log::LogReq;
 pub use mcp::McpReq;
 pub use memory::MemoryReq;
 pub use message::MessageReq;
+pub use rpc::RpcReq;
 pub use shell::ShellReq;
 pub use sources::SourcesReq;
 pub use spawn::SpawnReq;
@@ -57,15 +57,15 @@ mod parity {
         (
             "MemoryReq",
             &[
-                "Read", "Write", "Create", "Append", "Replace", "Search", "Recall", "Archive",
+                "Get", "Put", "Create", "Append", "Replace", "Search", "Recall", "Archive",
             ],
         ),
         ("MessageReq", &["Ask", "Send", "Reply", "Notify"]),
         ("ShellReq", &["Execute", "Spawn", "Kill", "Status"]),
-        ("FileReq", &["Read", "Write", "List"]),
+        ("FileReq", &["Read", "Write", "ListDir"]),
         ("SourcesReq", &["Stream", "Subscribe", "List"]),
-        ("McpReq", &["Call"]),
-        ("IpcReq", &["Send", "Recv"]),
+        ("McpReq", &["Use"]),
+        ("RpcReq", &["Call", "Recv"]),
         ("SpawnReq", &["Start", "Stop"]),
     ];
 
@@ -143,8 +143,8 @@ mod parity {
     fn memory_req_variants() {
         use super::MemoryReq;
         use super::memory::{BlockTypeReq, SchemaKindReq};
-        let _ = MemoryReq::Read(String::new());
-        let _ = MemoryReq::Write(String::new(), String::new(), None);
+        let _ = MemoryReq::Get(String::new());
+        let _ = MemoryReq::Put(String::new(), String::new(), None);
         let _ = MemoryReq::Create(
             String::new(),
             String::new(),
@@ -186,7 +186,7 @@ mod parity {
         use super::FileReq;
         let _ = FileReq::Read(String::new());
         let _ = FileReq::Write(String::new(), String::new());
-        let _ = FileReq::List(String::new());
+        let _ = FileReq::ListDir(String::new());
         assert_eq!(count("FileReq"), 3);
     }
 
@@ -202,16 +202,16 @@ mod parity {
     #[test]
     fn mcp_req_variants() {
         use super::McpReq;
-        let _ = McpReq::Call(String::new(), String::new());
+        let _ = McpReq::Use(String::new(), String::new());
         assert_eq!(count("McpReq"), 1);
     }
 
     #[test]
-    fn ipc_req_variants() {
-        use super::IpcReq;
-        let _ = IpcReq::Send(String::new(), String::new());
-        let _ = IpcReq::Recv(String::new());
-        assert_eq!(count("IpcReq"), 2);
+    fn rpc_req_variants() {
+        use super::RpcReq;
+        let _ = RpcReq::Call(String::new(), String::new());
+        let _ = RpcReq::Recv(String::new());
+        assert_eq!(count("RpcReq"), 2);
     }
 
     #[test]

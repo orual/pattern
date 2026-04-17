@@ -5,12 +5,12 @@ use tidepool_bridge_derive::FromCore;
 /// Rust mirror of the Haskell `Message` GADT.
 #[derive(Debug, FromCore)]
 pub enum MessageReq {
-    #[core(name = "Ask")]
+    #[core(module = "Pattern.Message", name = "Ask")]
     Ask(String),
-    #[core(name = "Send")]
+    #[core(module = "Pattern.Message", name = "Send")]
     Send(String, String),
-    #[core(name = "Reply")]
+    #[core(module = "Pattern.Message", name = "Reply")]
     Reply(String, String),
-    #[core(name = "Notify")]
+    #[core(module = "Pattern.Message", name = "Notify")]
     Notify(String, String),
 }

@@ -57,13 +57,12 @@ impl AgentRuntime for TidepoolRuntime {
     ) -> Result<Self::Session, RuntimeError> {
         let sdk = self.sdk.clone();
         let memory_store = self.memory_store.clone();
-        let mut session = tokio::task::spawn_blocking(move || {
-            TidepoolSession::open(persona, &sdk, memory_store)
-        })
-        .await
-        .map_err(|e| RuntimeError::JoinError {
-            reason: e.to_string(),
-        })??;
+        let mut session =
+            tokio::task::spawn_blocking(move || TidepoolSession::open(persona, &sdk, memory_store))
+                .await
+                .map_err(|e| RuntimeError::JoinError {
+                    reason: e.to_string(),
+                })??;
 
         if let Some(snap) = snapshot {
             // Restore seeds the checkpoint log for replay-then-continue.

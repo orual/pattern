@@ -1,7 +1,7 @@
 {-# LANGUAGE GADTs #-}
 -- | Pattern.Log — agent-facing structured logging.
 --
--- Fully implemented in Phase 3. The Rust-side `LogHandler` routes each
+-- Fully implemented in Phase 3. The runtime handler `LogHandler` routes each
 -- variant through `tracing` at the matching level with structured
 -- @session@ and @source@ fields so tests / telemetry / CLI can observe
 -- agent-originated log events.
@@ -10,8 +10,7 @@ module Pattern.Log where
 import Control.Monad.Freer (Eff, Member, send)
 import Data.Text (Text)
 
--- | Log effect algebra. Variant names are mirrored by
--- @Pattern.sdk::requests::log::LogReq@ (Rust).
+-- | Effect algebra.
 data Log a where
   Debug :: Text -> Log ()
   Info  :: Text -> Log ()

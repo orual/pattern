@@ -6,10 +6,10 @@
 --
 -- From the agent's perspective this is fire-and-forget: the agent emits
 -- `Chunk` / `Final` / `Note` envelopes describing what the human / UX
--- layer should see. Subscribers are registered Rust-side; see the
+-- layer should see. Subscribers are registered host-side; see the
 -- `DisplayHandler` in @pattern_runtime::sdk::handlers::display@.
 --
--- Typical flow: the Rust `MessageHandler` forwards streaming provider
+-- Typical flow: the runtime handler `MessageHandler` forwards streaming provider
 -- chunks through `Display.Chunk` in real time, then emits `Display.Final`
 -- with the assembled content. Agent Haskell programs that want to react
 -- mid-stream should register a Display subscriber rather than attempting
@@ -19,8 +19,7 @@ module Pattern.Display where
 import Control.Monad.Freer (Eff, Member, send)
 import Data.Text (Text)
 
--- | Display effect algebra. Variant names are mirrored by
--- @Pattern.sdk::requests::display::DisplayReq@ (Rust).
+-- | Effect algebra.
 data Display a where
   -- | Incremental chunk during a streaming provider response.
   Chunk :: Text -> Display ()

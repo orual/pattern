@@ -31,7 +31,12 @@ where
         // the session's cancellation flag while we were running agent
         // compute between effect yields. Surface the documented sentinel
         // so `run_turn` maps it to a CancelPath::Soft timeout.
-        if cx.user().cancel_state().cancellation.load(std::sync::atomic::Ordering::SeqCst) {
+        if cx
+            .user()
+            .cancel_state()
+            .cancellation
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
             return Err(EffectError::Handler(format!(
                 "{}: time handler cancelled at entry",
                 crate::timeout::CANCELLED_SENTINEL,

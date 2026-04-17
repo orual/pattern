@@ -5,8 +5,8 @@ use tidepool_bridge_derive::FromCore;
 /// Rust mirror of the Haskell `Spawn` GADT.
 #[derive(Debug, FromCore)]
 pub enum SpawnReq {
-    #[core(name = "Start")]
+    #[core(module = "Pattern.Spawn", name = "Start")]
     Start(String),
-    #[core(name = "Stop")]
+    #[core(module = "Pattern.Spawn", name = "Stop")]
     Stop(String),
 }

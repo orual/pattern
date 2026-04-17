@@ -1,25 +1,23 @@
--- | Pattern.Prelude — ergonomic re-export of the common agent-SDK subset.
+-- | Pattern.Prelude — ergonomic re-export of the full 11-effect SDK.
 --
--- Re-exports the five Prelude effects in the order expected by
--- `pattern_runtime::sdk::bundle::SdkBundle`:
--- `Memory, Message, Display, Time, Log`. These five form the head of
--- the full 11-handler bundle; agents declaring
--- `Eff '[Memory, Message, Display, Time, Log] a` line up with JIT tags
--- 0..4 correctly.
---
--- The remaining six effects (`Shell, File, Sources, Mcp, Ipc, Spawn`)
--- are available as individual modules. They are *not* re-exported from
--- Prelude because some of their constructors collide with Memory's
--- (`Pattern.File` and `Pattern.Memory` both export `Read` / `Write`),
--- which would make `import Pattern.Prelude` ambiguous at any use site.
--- Agents that need those effects should import them qualified, e.g.
--- `import qualified Pattern.File as F` + `F.read_ path`.
+-- The SDK uses distinct constructor names across modules
+-- (@Memory.Get@/@Put@, @File.Read@/@Write@/@ListDir@, @Rpc.Call@/@Recv@,
+-- @Message.Send@, …), so @import Pattern.Prelude@ unqualified works even
+-- when agents use several effects together. Qualified imports remain a
+-- fine stylistic choice when you want explicit module attribution at the
+-- call site (@Memory.Get \"label\"@ vs. @get \"label\"@).
 module Pattern.Prelude
   ( module Pattern.Memory
   , module Pattern.Message
   , module Pattern.Display
   , module Pattern.Time
   , module Pattern.Log
+  , module Pattern.Shell
+  , module Pattern.File
+  , module Pattern.Sources
+  , module Pattern.Mcp
+  , module Pattern.Rpc
+  , module Pattern.Spawn
   ) where
 
 import Pattern.Memory
@@ -27,3 +25,9 @@ import Pattern.Message
 import Pattern.Display
 import Pattern.Time
 import Pattern.Log
+import Pattern.Shell
+import Pattern.File
+import Pattern.Sources
+import Pattern.Mcp
+import Pattern.Rpc
+import Pattern.Spawn

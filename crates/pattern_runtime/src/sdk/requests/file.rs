@@ -5,10 +5,10 @@ use tidepool_bridge_derive::FromCore;
 /// Rust mirror of the Haskell `File` GADT.
 #[derive(Debug, FromCore)]
 pub enum FileReq {
-    #[core(name = "Read")]
+    #[core(module = "Pattern.File", name = "Read")]
     Read(String),
-    #[core(name = "Write")]
+    #[core(module = "Pattern.File", name = "Write")]
     Write(String, String),
-    #[core(name = "List")]
-    List(String),
+    #[core(module = "Pattern.File", name = "ListDir")]
+    ListDir(String),
 }

@@ -1,7 +1,7 @@
 {-# LANGUAGE GADTs #-}
 -- | Pattern.Shell — shell command execution.
 --
--- Stubbed in Phase 3. Rust handler returns NotImplemented; real
+-- Stubbed in Phase 3. runtime handler returns NotImplemented; real
 -- implementation will reuse the preserved PTY backend (see
 -- `docs/plans/` for the shell-tool / ProcessSource plan).
 module Pattern.Shell where
@@ -12,8 +12,7 @@ import Data.Text (Text)
 type Command = Text
 type Pid     = Integer
 
--- | Shell effect algebra. Variant names are mirrored by
--- @Pattern.sdk::requests::shell::ShellReq@ (Rust).
+-- | Effect algebra.
 data Shell a where
   Execute :: Command -> Shell Text
   Spawn   :: Command -> Shell Pid

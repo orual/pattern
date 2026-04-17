@@ -36,7 +36,12 @@ where
 
     fn handle(&mut self, req: LogReq, cx: &EffectContext<'_, U>) -> Result<Value, EffectError> {
         // Soft-cancel cooperative check (see TimeHandler).
-        if cx.user().cancel_state().cancellation.load(std::sync::atomic::Ordering::SeqCst) {
+        if cx
+            .user()
+            .cancel_state()
+            .cancellation
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
             return Err(EffectError::Handler(format!(
                 "{}: log handler cancelled at entry",
                 crate::timeout::CANCELLED_SENTINEL,

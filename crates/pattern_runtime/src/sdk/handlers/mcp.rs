@@ -34,7 +34,7 @@ mod tests {
         let table = DataConTable::new();
         let cx = EffectContext::with_user(&table, &());
         let err = h
-            .handle(McpReq::Call("server".into(), "method".into()), &cx)
+            .handle(McpReq::Use("server".into(), "method".into()), &cx)
             .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("Pattern.Mcp"), "got: {msg}");

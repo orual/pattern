@@ -96,29 +96,48 @@ setup is wrong. Run it at binary startup before opening any Session.
 Agent programs import from the `Pattern.*` SDK module tree (installed at
 `$PATTERN_SDK_DIR` or `crates/pattern_runtime/haskell/Pattern/` by default).
 `tidepool-extract` compiles agents with the SDK directory on its include
-path — both qualified and unqualified imports work:
+path — all 11 modules are compiled and linked together.
+
+The SDK uses distinct constructor names across modules, so `import
+Pattern.Prelude` unqualified works even for agents that mix effects:
 
 ```haskell
-import qualified Pattern.File as F   -- recommended for rarer effects
-F.read_ "/tmp/foo"
+import Pattern.Prelude
 
-import Pattern.Time                  -- fine when no name collisions
-now
+agent = do
+  put "notes" "hello"           -- Memory.Put
+  write "/tmp/f" "contents"     -- File.Write  (distinct from Memory.Put)
+  _ <- read_ "/tmp/f"           -- File.Read
+  _ <- get "notes"              -- Memory.Get  (distinct from File.Read)
+  send_ "agent:orual" "ping"    -- Message.Send
+  info "done"                   -- Log.Info
 ```
 
-The full 11-effect SDK is available: `Pattern.Memory`, `Pattern.Message`,
-`Pattern.Display`, `Pattern.Time`, `Pattern.Log`, `Pattern.Shell`,
-`Pattern.File`, `Pattern.Sources`, `Pattern.Mcp`, `Pattern.Ipc`,
-`Pattern.Spawn`. `Pattern.Prelude` re-exports the common five
-(`Memory, Message, Display, Time, Log`); the rarer modules have to be
-imported explicitly because some share constructor names with Memory
-(e.g. `Pattern.Memory.Read` vs `Pattern.File.Read`), and tidepool-bridge's
-current `FromCore` lookup is by unqualified name only. In practice this
-means agents using the rarer effects should import them `qualified` and
-never let two conflicting modules be in unqualified scope simultaneously.
+Qualified imports remain a fine stylistic choice when you want explicit
+module attribution at the call site:
+
+```haskell
+import qualified Pattern.Memory as Memory
+import qualified Pattern.File as File
+
+agent = do
+  Memory.Get "notes"
+  File.Read "/tmp/f"
+```
+
+Collision-avoidance decisions on the Haskell side:
+
+- `Memory` uses `Get`/`Put` (KV semantics) — leaving `Read`/`Write` to `File`.
+- `File.List` is `ListDir` — leaves `List` to `Sources` (list all sources).
+- `Rpc.Call` (request/response) — leaves `Send` to `Message` for
+  agent-to-agent messaging.
+
+Defense-in-depth at the host-runtime decode boundary is provided by the
+derive layer (arity disambiguation + `#[core(module = "Pattern.<Module>",
+name = "...")]` on every SDK request variant).
 
 Effect-row ordering matters: handler position in the `SdkBundle` HList
 determines the JIT effect tag. The canonical order is Prelude-5 first,
 then rarer effects:
-`Memory, Message, Display, Time, Log, Shell, File, Sources, Mcp, Ipc,
+`Memory, Message, Display, Time, Log, Shell, File, Sources, Mcp, Rpc,
 Spawn`. Agent `Eff '[...]` rows must line up with this prefix.

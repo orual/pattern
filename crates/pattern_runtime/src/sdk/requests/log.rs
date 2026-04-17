@@ -5,12 +5,12 @@ use tidepool_bridge_derive::FromCore;
 /// Rust mirror of the Haskell `Log` GADT.
 #[derive(Debug, FromCore)]
 pub enum LogReq {
-    #[core(name = "Debug")]
+    #[core(module = "Pattern.Log", name = "Debug")]
     Debug(String),
-    #[core(name = "Info")]
+    #[core(module = "Pattern.Log", name = "Info")]
     Info(String),
-    #[core(name = "Warn")]
+    #[core(module = "Pattern.Log", name = "Warn")]
     Warn(String),
-    #[core(name = "Error")]
+    #[core(module = "Pattern.Log", name = "Error")]
     Error(String),
 }

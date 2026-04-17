@@ -18,7 +18,7 @@ agent = do
   -- Explicitly create a block with full metadata.
   M.create "notes" "user notes block" BlockWorking SchemaText Nothing "first line"
   -- writeWithDesc updates both content and description on an existing block.
-  M.writeWithDesc "notes" "first line\nsecond line" "user notes (revised)"
+  M.putWithDesc "notes" "first line\nsecond line" "user notes (revised)"
   -- Replace exercises the string-replace path.
   M.replace "notes" "first" "HEAD"
   info "memory_create fixture done"

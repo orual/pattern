@@ -367,14 +367,8 @@ mod tests {
             .expect("watchdog task should not panic");
         match outcome {
             BoundedOutcome::HardAbandoned { wall_ms, cpu_ms } => {
-                assert!(
-                    wall_ms >= 50,
-                    "expected wall budget consumed ({wall_ms}ms)"
-                );
-                assert!(
-                    cpu_ms >= 50,
-                    "expected cpu budget consumed ({cpu_ms}ms)"
-                );
+                assert!(wall_ms >= 50, "expected wall budget consumed ({wall_ms}ms)");
+                assert!(cpu_ms >= 50, "expected cpu budget consumed ({cpu_ms}ms)");
                 assert!(state.is_cancelled(), "soft-cancel flag should be set too");
             }
             other => panic!("expected HardAbandoned, got {other:?}"),

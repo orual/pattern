@@ -78,7 +78,7 @@ impl EffectHandler<SessionContext> for MemoryHandler {
         let handle = tokio::runtime::Handle::current();
 
         match req {
-            MemoryReq::Read(label) => {
+            MemoryReq::Get(label) => {
                 let text = handle
                     .block_on(store.get_rendered_content(&agent_id, &label))
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Read: {e}")))?
@@ -89,7 +89,7 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                     })?;
                 cx.respond(text)
             }
-            MemoryReq::Write(label, content, description) => {
+            MemoryReq::Put(label, content, description) => {
                 handle
                     .block_on(upsert_block_content(
                         &*store,
@@ -530,7 +530,7 @@ mod tests {
         let mut h = MemoryHandler::new(Arc::new(NeverStore));
         // Even though NeverStore panics on any call, this should not
         // reach the store — the sentinel short-circuits at entry.
-        let err = h.handle(MemoryReq::Read("any".into()), &cx).unwrap_err();
+        let err = h.handle(MemoryReq::Get("any".into()), &cx).unwrap_err();
         assert!(err.to_string().contains(CANCELLED_SENTINEL), "got: {err}");
         let _ = CancelState::new(); // suppress unused import warning if any
     }
