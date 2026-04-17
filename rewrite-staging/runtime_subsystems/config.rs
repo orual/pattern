@@ -1,3 +1,11 @@
+// MOVING TO: pattern_runtime/src/config.rs (Phase 3), with leaf pieces possibly reabsorbed into pattern_core
+// ORIGIN: crates/pattern_core/src/config.rs
+// PHASE: 3
+// RESHAPE: References to staged-out modules (agent/, runtime/, context/, data_source/, embeddings/, db/) must be rewired after phase 3 lands those crates. Config breakup is out of scope for phase 2 per plan task 21 note.
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! Configuration system for Pattern
 //!
 //! This module provides configuration structures and utilities for persisting

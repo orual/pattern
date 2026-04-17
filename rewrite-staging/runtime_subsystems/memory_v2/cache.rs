@@ -1,3 +1,11 @@
+// MOVING TO: pattern_runtime/src/memory/cache.rs (or pattern_core if refactored to use pattern_db directly)
+// ORIGIN: crates/pattern_core/src/memory/cache.rs
+// PHASE: 3
+// RESHAPE: ConstellationDatabases dependency moved; EmbeddingProvider path updated to crate::traits::EmbeddingProvider
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! In-memory cache of StructuredDocument instances
 
 use crate::db::ConstellationDatabases;

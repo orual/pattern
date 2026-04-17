@@ -1,3 +1,11 @@
+// MOVING TO: pattern_runtime/src/memory/sharing.rs (or pattern_core if refactored to use pattern_db directly)
+// ORIGIN: crates/pattern_core/src/memory/sharing.rs
+// PHASE: 3
+// RESHAPE: ConstellationDatabases dependency moved; CONSTELLATION_OWNER const re-homed to crate::memory
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! Shared memory block support
 //!
 //! Enables explicit sharing of blocks between agents with controlled access levels.

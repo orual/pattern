@@ -1,27 +1,42 @@
 //! V2 Memory System
 //!
-//! In-memory LoroDoc cache with lazy loading and write-through persistence.
+//! Memory value types, schema definitions, and the `MemoryStore` trait
+//! supporting surface. Concrete storage implementations (the LoroDoc-based
+//! `MemoryCache` and `SharedBlockManager`) are staged to
+//! `rewrite-staging/runtime_subsystems/memory_v2/` pending the Phase 3
+//! runtime landing — they depend on removed `crate::db::ConstellationDatabases`
+//! plumbing and will return once that plumbing is reassembled in
+//! `pattern_runtime`.
 
-mod cache;
 mod document;
 mod schema;
-mod sharing;
 mod store;
 mod types;
 
 use std::fmt::Display;
 
-pub use cache::{DEFAULT_MEMORY_CHAR_LIMIT, MemoryCache};
 pub use document::*;
 pub use schema::*;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-pub use sharing::*;
 pub use store::*;
 pub use types::*;
 
-// Re-export search types for convenience
+// Re-export search types for convenience.
 pub use types::{MemorySearchResult, SearchContentType, SearchMode, SearchOptions};
+
+/// Special agent id used for constellation-level blocks (readable by all
+/// agents). Re-homed from the staged `memory/sharing.rs` so that
+/// [`crate::types::block_ref::BlockRef`] can reference it without pulling in
+/// the staged module.
+pub const CONSTELLATION_OWNER: &str = "_constellation_";
+
+/// Default character limit for memory blocks when not specified.
+///
+/// Re-homed from the staged `memory/cache.rs` so that consumers (e.g. the
+/// context composer in Phase 5) can reference the canonical default without
+/// reaching into staging.
+pub const DEFAULT_MEMORY_CHAR_LIMIT: usize = 5000;
 
 /// Permission levels for memory operations (most to least restrictive)
 #[derive(
