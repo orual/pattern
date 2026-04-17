@@ -24,6 +24,7 @@ thiserror        = { workspace = true }
 miette           = { workspace = true }
 serde            = { workspace = true }
 serde_json       = { workspace = true }
+jiff             = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util", "macros"] }

@@ -4,9 +4,12 @@
 //! `shell`, `file`, `sources`, `mcp`, `ipc`, and `spawn` are stubbed out to
 //! return an actionable `EffectError::Handler("…not yet implemented…")`.
 
+pub mod display;
 pub mod file;
 pub mod ipc;
+pub mod log;
 pub mod mcp;
 pub mod shell;
 pub mod sources;
 pub mod spawn;
+pub mod time;
