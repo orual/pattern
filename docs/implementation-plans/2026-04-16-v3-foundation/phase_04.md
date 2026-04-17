@@ -1,15 +1,69 @@
-# Pattern v3 Foundation — Phase 4: pattern_provider (rebased rust-genai + three-tier auth)
+# Pattern v3 Foundation — Phase 4: pattern_provider (rebased rust-genai + multi-provider gateway)
 
-**Goal:** Stand up `pattern_provider` as the Anthropic-facing LLM gateway. Rebase the `rust-genai` fork onto current upstream, shedding obsolete thinking patches (upstream subsumes them) and keeping only the minimum pattern-specific patches. Implement three-tier auth (session-pickup, PKCE, API key), a keyring-backed credential store with JSON fallback, an honest-pattern request shaper with a discrete escalation ladder for subscription-tier compatibility, per-provider rate limiting with separate buckets for chat completions vs token counting, per-persona session UUID rotation, and an external async `count_tokens` wrapper. Retire `pattern_auth` as its Anthropic responsibilities land here.
+> ## Revision log (2026-04-17)
+>
+> **Scope change: multi-provider gateway instead of Anthropic-only client.**
+>
+> Original plan targeted a single `AnthropicProviderClient`. Revised plan
+> generalises this to `PatternGatewayClient` — one `ProviderClient` impl that
+> dispatches per-call to any provider `rust-genai` supports, with pattern-side
+> state (credential tiers, request shaper, rate limiter) keyed by
+> `genai::adapter::AdapterKind`. Per-call `model` override drives provider
+> selection; one client instance can hit Anthropic + Gemini + OpenAI (+ others)
+> based solely on the model string in the request.
+>
+> **What changes:**
+> - Task 6 creds store → keyed by provider; Anthropic gets full three-tier
+>   resolution, Gemini gets API-key-only (second provider for abstraction
+>   validation), OpenAI stub entry point kept for future wiring.
+> - Task 10 three-tier resolver → generalises to a `CredentialTier` trait with
+>   per-provider tier chains. Anthropic chain: session-pickup → PKCE → API key.
+>   Gemini chain: API key only.
+> - Task 12 RequestShaper → `RequestShaper` trait object, dispatched per
+>   `AdapterKind`. `HonestPatternShaper` (Anthropic), `NoOpShaper` (default for
+>   Gemini/OpenAI). Per-provider shaper-mapping lives in `PatternGatewayClient`;
+>   future rule-set (model-group, cost-tier) extensions slot in as a second
+>   dispatch layer without reworking the trait.
+> - Task 14 rate limiter → map keyed by `AdapterKind`; shared bucket per
+>   adapter kind (i.e. all Anthropic models share one bucket, all Gemini
+>   models share one, etc.), not per-model.
+> - Task 18 `AnthropicProviderClient` → `PatternGatewayClient` (generic,
+>   dispatches per-call based on model → adapter inference).
+> - Task 19 wiremock integration → add at least one Gemini-path end-to-end
+>   test alongside the Anthropic tests to lock the per-provider abstraction.
+> - Second provider scope (this phase): **Gemini**. OpenAI wiring deferred
+>   to a follow-up task once Gemini proves the abstraction.
+>
+> **What does NOT change:**
+> - Anthropic auth/shaper/beta-header details (Tasks 8, 9, 11, 12 [Anthropic
+>   parts], 20).
+> - Phase 5 dependency boundary — gateway still stands alone; runtime wiring
+>   is Phase 5.
+> - Router-level rule engine (model-group-based routing, cost-aware selection,
+>   fallback chains) remains out of scope; future phase.
+>
+> **Why the change:** the user flagged multi-provider dispatch as a near-term
+> need rather than a future-phase concern. `rust-genai` already does the
+> adapter-kind inference natively on model strings and its `AuthResolver`
+> closure dispatches per `ModelIden`, so the generalisation cost is modest
+> (~additional abstraction design + second provider wiring). Avoiding a
+> later rewrite outweighs the cost.
+>
+> Acceptance-criteria coverage unchanged; the ACs were already phrased in
+> terms of `ProviderClient`, not an Anthropic-specific name.
+
+**Goal:** Stand up `pattern_provider` as the multi-provider LLM gateway. Rebase the `rust-genai` fork onto current upstream, shedding obsolete thinking patches (upstream subsumes them) and keeping only the minimum pattern-specific patches. Implement multi-provider credential storage (Anthropic three-tier: session-pickup → PKCE → API key; Gemini API-key-only as the abstraction-validation partner), a keyring-backed credential store with JSON fallback, a per-`AdapterKind` request shaper dispatch (honest-pattern shaper for Anthropic with a discrete escalation ladder for subscription-tier compatibility; no-op shaper default), per-provider rate limiting with separate buckets for chat completions vs token counting, per-persona session UUID rotation, and an external async `count_tokens` wrapper. Retire `pattern_auth` as its Anthropic responsibilities land here.
 
 **Architecture:**
-- `pattern_provider` depends on rebased `rust-genai` (v0.6.0-beta.17 base) via workspace dep, consuming its adaptive-thinking + CacheControl APIs directly rather than maintaining fork-side deviations.
-- Fork-side patches are minimal: system-prompt-as-array-with-cache-control (required for Phase 5's three-segment cache layout), `ANTHROPIC_VERSION` bump, and Opus/Sonnet 4.7 model-ID additions if upstream prefix matching doesn't already cover them.
-- Auth resolver tries tiers in order — session-pickup reads `~/.claude/.credentials.json` (canonical claude-code path per research, not the stale `session.json`), PKCE uses pattern's verified-working OAuth config, API key falls back to `ANTHROPIC_API_KEY` env.
-- `RequestShaper` injects honest pattern identification with a `ShaperCompatMode` enum for subscription-tier compatibility: default `SubscriptionRoutingShape` (system prompt array with claude-code-literal `system[0]` as structural requirement + honest pattern content in `system[1]`/`[2]`), aspirational `HonestPattern` (flip default to this if Phase 4 verification proves it works), future-gated `FullSurfaceImpersonation` (not implemented; requires explicit sign-off).
+- `pattern_provider` depends on rebased `rust-genai` (v0.6.0-beta.17 base) via path dep, consuming its adaptive-thinking + CacheControl APIs directly rather than maintaining fork-side deviations.
+- Fork-side patches are minimal: `SystemBlock` / `ChatRequest::system_blocks` for per-block `cache_control` (required for Phase 5's three-segment cache layout), `ANTHROPIC_VERSION` pin-check, and `claude-opus-4-7` additions to the reasoning-support arrays (upstream still lists only 4-6 + regex-dispatched XHigh).
+- `PatternGatewayClient` holds one `genai::Client` plus per-`AdapterKind` pattern-side state: credential-tier chain, request shaper, rate limiter. Per-call model string drives adapter inference inside genai; pattern-side dispatch uses the same `AdapterKind` key.
+- Anthropic credential chain: session-pickup reads `~/.claude/.credentials.json` (canonical claude-code path per research, not the stale `session.json`); PKCE uses pattern's verified-working OAuth config; API-key falls back to `ANTHROPIC_API_KEY` env.
+- Gemini credential chain (abstraction-validation partner): API-key only from `GOOGLE_API_KEY` / `GEMINI_API_KEY` env or config.
+- `RequestShaper` is a trait dispatched per-provider. `HonestPatternShaper` (Anthropic) injects honest pattern identification with a `ShaperCompatMode` enum for subscription-tier compatibility: default `SubscriptionRoutingShape` (system prompt array with claude-code-literal `system[0]` as structural requirement + honest pattern content in `system[1]`/`[2]`), aspirational `HonestPattern` (flip default to this if Phase 4 verification proves it works), future-gated `FullSurfaceImpersonation` (not implemented; requires explicit sign-off). `NoOpShaper` default for non-Anthropic providers.
 - Beta headers curated per Anthropic's 2026-04-16 list, opt-in via `ShaperConfig`, excluding `claude-code-20250219` and other claude-code-specific markers.
-- Rate limiting via `governor` with separate token buckets per endpoint (chat completions + count-tokens per AC5b.5).
-- `ProviderClient` trait impl wires resolver + shaper + rate limiter + token-count wrapper + rebased genai into the shape Phase 2 defined.
+- Rate limiting via `governor` with separate token buckets per endpoint (chat completions + count-tokens per AC5b.5). Buckets keyed by `AdapterKind`, shared across all models within a provider.
+- `ProviderClient` trait impl (`PatternGatewayClient`) wires resolver + shaper + rate limiter + token-count wrapper + rebased genai into the shape Phase 2 defined, dispatching per-call based on the request's model string.
 
 **Tech Stack:** Rust 2024, `rust-genai` path dep to the rebased fork at `~/Projects/PatternProject/rust-genai`, `keyring` (with Linux backend features + JSON fallback), `oauth2` crate considered but deferred — pattern extends the existing hand-rolled PKCE which works post-fix, `governor` GCRA rate limiting, `reqwest` for raw `count_tokens` calls, `wiremock` for integration tests, `secrecy` for token redaction in logs.
 
@@ -510,7 +564,7 @@ default = ["subscription-oauth"]
 pub mod auth;
 #[cfg(feature = "subscription-oauth")]
 pub mod creds_store;
-pub mod provider_impl;
+pub mod gateway;
 pub mod ratelimit;
 pub mod session_uuid;
 pub mod shaper;
@@ -522,7 +576,7 @@ pub mod token_count;
 
 pub use auth::{AuthResolver, AuthTier, ResolvedCredential};
 pub use creds_store::{CredsStore, KeyringStore, JsonFallbackStore};
-pub use provider_impl::AnthropicProviderClient;
+pub use gateway::PatternGatewayClient;
 pub use ratelimit::{ProviderRateLimiter, RateBucket};
 pub use session_uuid::{PatternSessionUuid, SessionUuidRotator};
 pub use shaper::{RequestShaper, HonestPatternShaper, ShaperCompatMode, ShaperConfig};
@@ -531,7 +585,7 @@ pub use token_count::{TokenCounter, UsageCapture};
 
 **Step 4: Empty submodule files**
 
-Create `src/auth.rs`, `src/creds_store.rs`, `src/provider_impl.rs`, `src/ratelimit.rs`, `src/session_uuid.rs`, `src/shaper.rs`, `src/token_count.rs`, all with `todo!("phase: 4; AC: <relevant>")` in their public fns (filled by later tasks).
+Create `src/auth.rs`, `src/creds_store.rs`, `src/gateway.rs`, `src/ratelimit.rs`, `src/session_uuid.rs`, `src/shaper.rs`, `src/token_count.rs`, all with `todo!("phase: 4; AC: <relevant>")` in their public fns (filled by later tasks).
 
 **Step 5: `cargo check -p pattern_provider`**
 
@@ -1785,17 +1839,17 @@ jj new
 
 <!-- START_SUBCOMPONENT_F (tasks 18-22) -->
 <!-- START_TASK_18 -->
-### Task 18: `AnthropicProviderClient` — `ProviderClient` impl
+### Task 18: `PatternGatewayClient` — `ProviderClient` impl
 
 **Verifies:** all Phase 4 ACs end-to-end.
 
 **Files:**
-- Create: `crates/pattern_provider/src/provider_impl.rs`
+- Create: `crates/pattern_provider/src/gateway.rs`
 
 **Implementation:**
 
 ```rust
-pub struct AnthropicProviderClient {
+pub struct PatternGatewayClient {
     auth_resolver: AuthResolver,
     shaper: RequestShaper,
     rate_limiter: Arc<ProviderRateLimiter>,
@@ -1805,7 +1859,7 @@ pub struct AnthropicProviderClient {
 }
 
 #[async_trait::async_trait]
-impl ProviderClient for AnthropicProviderClient {
+impl ProviderClient for PatternGatewayClient {
     /// Streaming completion — default path for all callers.
     ///
     /// Internally uses genai::Client::exec_chat_stream. Chunks forward to
@@ -1833,7 +1887,7 @@ impl ProviderClient for AnthropicProviderClient {
     fn usage(&self, response: &CompletionResponse) -> Usage { ... }
 }
 
-impl AnthropicProviderClient {
+impl PatternGatewayClient {
     /// Convenience helper for callers that want the assembled content post-stream
     /// rather than iterating chunks themselves. Internally drives `complete`'s
     /// stream and collects chunks into `(MessageContent, Usage)`.
@@ -1902,7 +1956,7 @@ Map `genai::chat::ChatStreamEvent` to Pattern's `CompletionChunk`. Preserve: tex
 **Commit:**
 
 ```bash
-jj describe -m "[pattern-provider] AnthropicProviderClient: ProviderClient impl wiring resolver + shaper + ratelimit + count_tokens"
+jj describe -m "[pattern-provider] PatternGatewayClient: ProviderClient impl wiring resolver + shaper + ratelimit + count_tokens"
 jj new
 ```
 <!-- END_TASK_18 -->
@@ -2042,7 +2096,7 @@ jj new
 - [ ] Per-provider rate limiter with separate buckets for chat + count_tokens (AC5.*/5b.5)
 - [ ] `count_tokens` async wrapper against `/v1/messages/count_tokens`
 - [ ] `usage` field capture from chat responses (+ streaming end event)
-- [ ] `AnthropicProviderClient` implements `pattern_core::traits::ProviderClient`
+- [ ] `PatternGatewayClient` implements `pattern_core::traits::ProviderClient`
 - [ ] wiremock integration suite covers all AC paths
 - [ ] Live subscription auth verification (Task 20) determines default `ShaperCompatMode`
 - [ ] All tests pass (`cargo nextest run -p pattern_provider`)

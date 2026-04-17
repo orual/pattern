@@ -54,8 +54,17 @@ async fn open_then_step_then_drop() {
 
 /// AC2.1: second step reuses the compiled machine. We assert this via
 /// timing — the first step's cost includes compile+JIT warm; subsequent
-/// steps are much cheaper. A 5× ratio is conservative relative to the
-/// ~100× we see in practice (compile ~600ms, warm-run ~5ms).
+/// steps are much cheaper. In practice the ratio is ~100× (compile
+/// ~600ms, warm-run ~5ms); a 10× threshold tolerates a noisy CI / loaded
+/// machine without being so loose that a regression where the second
+/// step re-compiles would go unnoticed.
+///
+/// This timing ratio is an inherently fragile shape — if it starts
+/// flaking under CI load, the right fix is to expose a structural
+/// "was recompiled" signal on `TidepoolSession` (e.g. a boolean flag on
+/// `InnerState` or a JIT-instance identity check) and match on that
+/// instead of wall time. Today no such signal exists, and 10× has
+/// comfortable headroom.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn open_step_twice_does_not_recompile() {
     preflight_or_fail();
@@ -76,11 +85,14 @@ async fn open_step_twice_does_not_recompile() {
     session.step(fresh_turn_input()).await.expect("step 2");
     let second = t1.elapsed();
 
-    // Warm run should be dramatically faster than the cold one. If
-    // recompilation snuck in, second would be comparable to first.
+    // Both steps must succeed (already asserted via `.expect`).
+    // Warm run should be dramatically faster than the cold one. A 10×
+    // ratio absorbs CI jitter while still failing loud on a regression
+    // that reintroduces recompilation.
     assert!(
-        second.as_secs_f64() * 2.0 < first.as_secs_f64().max(0.001),
-        "warm run ({:?}) should be at least 2× faster than cold ({:?})",
+        second.as_secs_f64() * 10.0 < first.as_secs_f64().max(0.001),
+        "warm run ({:?}) should be at least 10× faster than cold ({:?}); \
+         a smaller ratio suggests recompilation snuck in",
         second,
         first,
     );

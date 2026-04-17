@@ -57,6 +57,9 @@
             gh
             haskellPackages.lsp
             sqlx-cli
+            # pattern-provider deps: keyring (Secret Service) needs libdbus.
+            dbus
+            openssl
           ]
           ++ [
             # Tidepool GHC plugin binary (~300MB, GHC 9.12). Required at

@@ -52,9 +52,13 @@ surrealdb = { version = "2.3", default-features = false, features = [
 ] }
 
 # AI/LLM
-# Using fork with OAuth support (system prompt array format)
-genai = { git = "https://github.com/orual/rust-genai" }
-#genai = { path = "../rust-genai" }
+# Using fork with pattern-v3-foundation patches: per-block cache_control on
+# system prompts (`SystemBlock` / `ChatRequest::system_blocks`) and
+# `claude-opus-4-7` in the reasoning-support arrays. Path dep during v3
+# foundation for ease of dual-iteration; tracked for conversion to git-rev
+# dep in the post-foundation dep-hardening plan.
+genai = { path = "../rust-genai" }
+# genai = { git = "https://github.com/orual/rust-genai" }
 # genai = { git = "https://github.com/jeremychone/rust-genai" }
 
 # Utilities
@@ -122,6 +126,24 @@ jsonwebtoken = "9.3"
 argon2 = "0.5"
 axum-extra = { version = "0.9", default-features = false }
 rand = "0.8"
+
+# pattern_provider — Phase 4 additions
+keyring = { version = "3", default-features = false, features = [
+    "linux-native-sync-persistent",
+    "apple-native",
+    "windows-native",
+] }
+whoami = "1"
+governor = "0.8"
+secrecy = { version = "0.10", features = ["serde"] }
+sha2 = "0.10"
+base64 = "0.22"
+url = "2"
+serde_urlencoded = "0.7"
+
+# dev-only
+wiremock = "0.6"
+tempfile = "3"
 
 cid = { version = "0.11", features = ["serde-codec"] }
 multihash = { version = "0.19" }

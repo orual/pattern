@@ -85,20 +85,14 @@ impl HasCancelState for SessionContext {
 impl HasCancelState for () {
     fn cancel_state(&self) -> Arc<CancelState> {
         // Return a freshly allocated, never-cancelled state. Handlers
-        // using this context effectively bypass the cancellation check.
-        thread_local! {
-            static NEVER: std::cell::RefCell<Option<Arc<CancelState>>> =
-                const { std::cell::RefCell::new(None) };
-        }
-        NEVER.with(|cell| {
-            let mut slot = cell.borrow_mut();
-            if let Some(s) = slot.as_ref() {
-                return s.clone();
-            }
-            let fresh = Arc::new(CancelState::new());
-            *slot = Some(fresh.clone());
-            fresh
-        })
+        // using `&()` as their user context effectively bypass the
+        // cancellation check: they'll observe `cancellation == false`
+        // and the gate entry will simply increment a fresh counter
+        // nobody observes. No caller of `cx.user().cancel_state()`
+        // depends on `Arc` identity across calls within a single
+        // dispatch, so allocating per call is cheap and simpler than
+        // the prior thread-local caching approach.
+        Arc::new(CancelState::new())
     }
 }
 
@@ -443,7 +437,37 @@ impl TidepoolSession {
                         );
                         self.jit_cancel.cancel();
 
-                        let join_result = (&mut jit_handle).await;
+                        // Bound the await: a buggy or upstream-broken JIT
+                        // that never reaches a heap-check safepoint would
+                        // otherwise hang the entire runtime forever here.
+                        // If we exceed `cancel_grace`, abort the blocking
+                        // task (which detaches its thread — tokio has no
+                        // way to actually stop blocking work), poison the
+                        // session so no further steps reuse the machine,
+                        // and return a RuntimeCrashed to tell the caller
+                        // this is not a recoverable timeout.
+                        let cancel_grace = budget.cancel_grace;
+                        let join_result = match tokio::time::timeout(
+                            cancel_grace,
+                            &mut jit_handle,
+                        )
+                        .await
+                        {
+                            Ok(r) => r,
+                            Err(_) => {
+                                jit_handle.abort();
+                                if let Ok(mut inner) = self.inner.lock() {
+                                    inner.poisoned = true;
+                                }
+                                tracing::warn!(
+                                    session_id = %self.session_id,
+                                    elapsed_ms = cancel_grace.as_millis() as u64,
+                                    thread_id = ?std::thread::current().id(),
+                                    "JIT failed to observe cancel within grace window; session poisoned, thread detached",
+                                );
+                                return Err(RuntimeError::RuntimeCrashed);
+                            }
+                        };
                         // Reset the cancel flag so a future turn (if the
                         // session stays clean) is not immediately
                         // cancelled on entry.

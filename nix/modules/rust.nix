@@ -103,6 +103,28 @@
             };
           };
 
+          "pattern-provider" = {
+            imports = [ globalCrateConfig ];
+            autoWire = [ "crate" "clippy" ];
+            path = ./../../crates/pattern_provider;
+            crane = {
+              args = {
+                # keyring's linux-native backend (Secret Service) needs
+                # libdbus-1 at build time. openssl is pulled by rust-genai's
+                # reqwest transitively (even though reqwest is rustls-tls on
+                # the pattern side, some adapter deps may still need it).
+                buildInputs =
+                  commonBuildInputs
+                  ++ [
+                    pkgs.dbus
+                    pkgs.openssl
+                    pkgs.pkg-config
+                  ];
+                nativeBuildInputs = [ pkgs.pkg-config ];
+              };
+            };
+          };
+
           "pattern-discord" = {
             imports = [ globalCrateConfig ];
             autoWire = [ "crate" "clippy" ];

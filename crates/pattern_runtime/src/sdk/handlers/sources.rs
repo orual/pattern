@@ -5,6 +5,8 @@ use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use tidepool_eval::Value;
 
 use crate::sdk::requests::SourcesReq;
+use crate::session::HasCancelState;
+use crate::timeout::HandlerGuard;
 
 /// Not-implemented placeholder for the Sources effect. Real
 /// implementation wraps the preserved `data_source/` abstractions in a
@@ -12,14 +14,16 @@ use crate::sdk::requests::SourcesReq;
 #[derive(Default)]
 pub struct SourcesHandler;
 
-impl<U> EffectHandler<U> for SourcesHandler {
+impl<U> EffectHandler<U> for SourcesHandler
+where
+    U: HasCancelState,
+{
     type Request = SourcesReq;
 
-    fn handle(
-        &mut self,
-        req: SourcesReq,
-        _cx: &EffectContext<'_, U>,
-    ) -> Result<Value, EffectError> {
+    fn handle(&mut self, req: SourcesReq, cx: &EffectContext<'_, U>) -> Result<Value, EffectError> {
+        // Uniform HandlerGate entry — see ShellHandler for the rationale.
+        let state = cx.user().cancel_state();
+        let _guard = HandlerGuard::enter(&state.gate);
         Err(EffectError::Handler(format!(
             "Pattern.Sources.{req:?} is not implemented in v3 foundation \
              (phase: post-foundation data-sources plan). Agent code should \

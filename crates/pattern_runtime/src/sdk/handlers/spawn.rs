@@ -5,16 +5,24 @@ use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use tidepool_eval::Value;
 
 use crate::sdk::requests::SpawnReq;
+use crate::session::HasCancelState;
+use crate::timeout::HandlerGuard;
 
 /// Not-implemented placeholder for the Spawn effect. Real implementation
 /// arrives in the post-foundation constellation-runtime plan.
 #[derive(Default)]
 pub struct SpawnHandler;
 
-impl<U> EffectHandler<U> for SpawnHandler {
+impl<U> EffectHandler<U> for SpawnHandler
+where
+    U: HasCancelState,
+{
     type Request = SpawnReq;
 
-    fn handle(&mut self, req: SpawnReq, _cx: &EffectContext<'_, U>) -> Result<Value, EffectError> {
+    fn handle(&mut self, req: SpawnReq, cx: &EffectContext<'_, U>) -> Result<Value, EffectError> {
+        // Uniform HandlerGate entry — see ShellHandler for the rationale.
+        let state = cx.user().cancel_state();
+        let _guard = HandlerGuard::enter(&state.gate);
         Err(EffectError::Handler(format!(
             "Pattern.Spawn.{req:?} is not implemented in v3 foundation \
              (phase: post-foundation constellation-runtime plan). Agent \

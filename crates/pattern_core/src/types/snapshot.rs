@@ -67,6 +67,14 @@ pub struct PersonaConfig {
     /// soft-cancel to hard-abandon. `None` means runtime default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hard_abandon_ms: Option<u64>,
+    /// After hard-abandon fires and the JIT cancel flag has been
+    /// signalled, how long (in milliseconds) to wait for the blocking
+    /// task to observe cancel and unwind before giving up. Exceeding
+    /// this detaches the task and poisons the session. `None` means
+    /// runtime default (30s). See [`crate::error::RuntimeError`] for
+    /// how the surfaced error signals the overrun.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_grace_ms: Option<u64>,
     /// JIT nursery size in bytes. `None` means the runtime's default
     /// (32 MiB per pattern_runtime's `TidepoolSession::open`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -92,6 +100,7 @@ impl PersonaConfig {
             wall_budget_ms: None,
             cpu_budget_ms: None,
             hard_abandon_ms: None,
+            cancel_grace_ms: None,
             nursery_size: None,
             extra: serde_json::Value::Null,
         }
@@ -113,6 +122,13 @@ impl PersonaConfig {
     /// the CPU budget before hard-abandonment fires.
     pub fn with_hard_abandon_ms(mut self, ms: u64) -> Self {
         self.hard_abandon_ms = Some(ms);
+        self
+    }
+
+    /// Set the post-hard-abandon grace window in milliseconds. See
+    /// [`Self::cancel_grace_ms`] for semantics.
+    pub fn with_cancel_grace_ms(mut self, ms: u64) -> Self {
+        self.cancel_grace_ms = Some(ms);
         self
     }
 

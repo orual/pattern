@@ -1,6 +1,6 @@
 //! SDK location resolution. Phase 3 implements Directory mode only; Embedded
-//! and Auto are declared for API stability but return a todo! with clear
-//! guidance to use Directory mode.
+//! and Auto are declared for API stability but return
+//! `RuntimeError::CompileInternal` with guidance to use Directory mode.
 
 use std::path::PathBuf;
 
@@ -62,17 +62,23 @@ impl SdkLocation {
                 Ok(p.clone())
             }
             // phase: post-foundation SDK-distribution plan; AC2.9-adjacent.
-            Self::Embedded => todo!(
-                "SdkLocation::Embedded not yet implemented — \
-                 phase: post-foundation SDK-distribution plan. \
-                 Use SdkLocation::Directory or the Default (PATTERN_SDK_DIR env)."
-            ),
+            // Surfacing Err (not panic) lets callers handle the
+            // unimplemented variant without unwinding the process —
+            // e.g. a CLI can print a clear 'use Directory' hint.
+            Self::Embedded => Err(RuntimeError::CompileInternal {
+                reason: "SdkLocation::Embedded not yet implemented — \
+                         phase: post-foundation SDK-distribution plan. \
+                         Use SdkLocation::Directory or the Default \
+                         (PATTERN_SDK_DIR env)."
+                    .to_string(),
+            }),
             // phase: post-foundation SDK-distribution plan; AC2.9-adjacent.
-            Self::Auto { .. } => todo!(
-                "SdkLocation::Auto not yet implemented — \
-                 phase: post-foundation SDK-distribution plan. \
-                 Use SdkLocation::Directory."
-            ),
+            Self::Auto { .. } => Err(RuntimeError::CompileInternal {
+                reason: "SdkLocation::Auto not yet implemented — \
+                         phase: post-foundation SDK-distribution plan. \
+                         Use SdkLocation::Directory."
+                    .to_string(),
+            }),
         }
     }
 }
@@ -111,19 +117,35 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Embedded not yet implemented")]
-    fn embedded_panics_with_todo() {
+    fn embedded_returns_err_not_panic() {
         let loc = SdkLocation::Embedded;
-        let _ = loc.resolve();
+        let err = loc.resolve().unwrap_err();
+        match err {
+            RuntimeError::CompileInternal { ref reason } => {
+                assert!(
+                    reason.contains("Embedded not yet implemented"),
+                    "reason: {reason}",
+                );
+            }
+            other => panic!("expected CompileInternal, got {other:?}"),
+        }
     }
 
     #[test]
-    #[should_panic(expected = "Auto not yet implemented")]
-    fn auto_panics_with_todo() {
+    fn auto_returns_err_not_panic() {
         let loc = SdkLocation::Auto {
             directory: PathBuf::from("/tmp"),
             strict: false,
         };
-        let _ = loc.resolve();
+        let err = loc.resolve().unwrap_err();
+        match err {
+            RuntimeError::CompileInternal { ref reason } => {
+                assert!(
+                    reason.contains("Auto not yet implemented"),
+                    "reason: {reason}",
+                );
+            }
+            other => panic!("expected CompileInternal, got {other:?}"),
+        }
     }
 }

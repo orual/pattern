@@ -5,16 +5,24 @@ use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use tidepool_eval::Value;
 
 use crate::sdk::requests::FileReq;
+use crate::session::HasCancelState;
+use crate::timeout::HandlerGuard;
 
 /// Not-implemented placeholder for the File effect. Real implementation
 /// arrives in the post-foundation filesystem-sandbox plan.
 #[derive(Default)]
 pub struct FileHandler;
 
-impl<U> EffectHandler<U> for FileHandler {
+impl<U> EffectHandler<U> for FileHandler
+where
+    U: HasCancelState,
+{
     type Request = FileReq;
 
-    fn handle(&mut self, req: FileReq, _cx: &EffectContext<'_, U>) -> Result<Value, EffectError> {
+    fn handle(&mut self, req: FileReq, cx: &EffectContext<'_, U>) -> Result<Value, EffectError> {
+        // Uniform HandlerGate entry — see ShellHandler for the rationale.
+        let state = cx.user().cancel_state();
+        let _guard = HandlerGuard::enter(&state.gate);
         Err(EffectError::Handler(format!(
             "Pattern.File.{req:?} is not implemented in v3 foundation \
              (phase: post-foundation filesystem-sandbox plan). Agent code \

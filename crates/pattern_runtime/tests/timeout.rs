@@ -39,6 +39,68 @@ fn fresh_turn_input() -> TurnInput {
     }
 }
 
+/// Post-review follow-up: the hard-abandon await used to be unbounded
+/// (`(&mut jit_handle).await`), so a JIT that refused to observe cancel
+/// — or an upstream bug that swallowed the cancel flag — would hang the
+/// runtime forever. The new `Budget::cancel_grace` ceiling caps that
+/// wait; on overrun the blocking task is detached, the session is
+/// poisoned, and a `RuntimeCrashed` is surfaced so callers know to open
+/// a fresh session instead of retrying.
+///
+/// We drive this by setting `cancel_grace_ms` to 1ms — even the
+/// fastest cancel observation needs several ms in practice, so the
+/// grace window is guaranteed to expire before the JIT unwinds. The
+/// observable contract: non-hanging failure with a specific error
+/// shape, and the session becoming poisoned afterwards.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hard_abandon_await_enforces_cancel_grace_ceiling() {
+    preflight_or_fail();
+    let memory = Arc::new(InMemoryMemoryStore::new());
+    let runtime = TidepoolRuntime::with_default_sdk(memory);
+    let persona = PersonaConfig::new(
+        "grace-ceiling",
+        "GraceCeiling",
+        include_str!("fixtures/infinite_spin.hs"),
+    )
+    .with_wall_budget_ms(100)
+    .with_cpu_budget_ms(100)
+    .with_hard_abandon_ms(200)
+    // Deliberately zero cancel-grace: tokio::time::timeout(0, ..)
+    // resolves on its next scheduler tick before the JoinHandle can
+    // become ready, so we deterministically take the ceiling branch
+    // rather than racing a clean hard-abandon.
+    .with_cancel_grace_ms(0);
+
+    let mut session = runtime.open_session(persona, None).await.expect("open");
+
+    // The test passes if this await returns at all within a sane
+    // wall-clock bound (say, 5s) — unbounded-await behaviour would
+    // hang forever. Using tokio::time::timeout here defends against
+    // a regression.
+    let step = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        session.step(fresh_turn_input()).await
+    })
+    .await
+    .expect("run_turn must return within 5s despite tight-compute agent");
+
+    let err = step.expect_err("tight compute + ceiling breach should surface as error");
+    assert!(
+        matches!(err, RuntimeError::RuntimeCrashed),
+        "expected RuntimeCrashed when cancel-grace expires, got {err:?}",
+    );
+
+    // Session should now be poisoned: the next step must short-circuit
+    // with SessionPoisoned rather than run another turn.
+    let err2 = session
+        .step(fresh_turn_input())
+        .await
+        .expect_err("poisoned session should reject subsequent steps");
+    assert!(
+        matches!(err2, RuntimeError::SessionPoisoned { .. }),
+        "expected SessionPoisoned after grace overrun; got {err2:?}",
+    );
+}
+
 /// AC2.5: soft cancel returns `CancelPath::Soft` when an agent yielding
 /// via effects exceeds its budget, and the session remains usable.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

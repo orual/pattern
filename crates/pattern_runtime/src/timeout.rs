@@ -40,6 +40,15 @@ pub struct Budget {
     /// When no effect invocations observed for this long beyond the cpu
     /// budget, escalate to hard-abandon. Default: 2× cpu budget.
     pub hard_abandon_threshold: Duration,
+    /// After hard-abandon fires and the JIT cancel flag has been
+    /// signalled, how long to wait for the blocking task to observe the
+    /// cancel and unwind before giving up. Exceeding this ceiling
+    /// indicates either a JIT that never reaches a heap-check safepoint
+    /// or an upstream bug — we detach the task, poison the session,
+    /// and surface a dedicated `RuntimeCrashed` error so the caller can
+    /// open a fresh session cheaply instead of the whole runtime
+    /// hanging. Default: 30s.
+    pub cancel_grace: Duration,
 }
 
 impl Default for Budget {
@@ -49,6 +58,7 @@ impl Default for Budget {
             wall: Duration::from_secs(30),
             cpu,
             hard_abandon_threshold: cpu * 2,
+            cancel_grace: Duration::from_secs(30),
         }
     }
 }
@@ -70,10 +80,15 @@ impl Budget {
             .hard_abandon_ms
             .map(Duration::from_millis)
             .unwrap_or(cpu * 2);
+        let cancel_grace = persona
+            .cancel_grace_ms
+            .map(Duration::from_millis)
+            .unwrap_or(defaults.cancel_grace);
         Self {
             wall,
             cpu,
             hard_abandon_threshold,
+            cancel_grace,
         }
     }
 }
@@ -359,6 +374,7 @@ mod tests {
             wall: Duration::from_millis(50),
             cpu: Duration::from_millis(50),
             hard_abandon_threshold: Duration::from_millis(100),
+            cancel_grace: Duration::from_secs(30),
         };
         let handle = spawn_watchdog(state.clone(), budget, Duration::from_millis(10));
         let outcome = tokio::time::timeout(Duration::from_secs(2), handle)
@@ -387,6 +403,7 @@ mod tests {
             wall: Duration::from_millis(50),
             cpu: Duration::from_millis(50),
             hard_abandon_threshold: Duration::from_millis(500),
+            cancel_grace: Duration::from_secs(30),
         };
         let handle = spawn_watchdog(state.clone(), budget, Duration::from_millis(10));
 
