@@ -1,3 +1,11 @@
+// MOVING TO: pattern_runtime/src/agent/collect.rs
+// ORIGIN: crates/pattern_core/src/agent/collect.rs
+// PHASE: 3
+// RESHAPE: Helper for agent message collection; reshape during runtime integration
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! Response collection utilities for stream-based agent processing
 
 use futures::StreamExt;

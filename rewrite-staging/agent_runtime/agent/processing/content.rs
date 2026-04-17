@@ -1,3 +1,11 @@
+// MOVING TO: pattern_runtime/src/agent/processing/content.rs
+// ORIGIN: crates/pattern_core/src/agent/processing/content.rs
+// PHASE: 3
+// RESHAPE: Content processing helpers; stage with remainder
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! Content block iteration for processing responses.
 //!
 //! Provides a unified view over different MessageContent formats without

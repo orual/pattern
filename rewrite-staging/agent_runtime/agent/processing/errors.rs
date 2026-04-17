@@ -1,3 +1,11 @@
+// MOVING TO: pattern_runtime/src/agent/processing/errors.rs
+// ORIGIN: crates/pattern_core/src/agent/processing/errors.rs
+// PHASE: 3
+// RESHAPE: Processing error types; stage with remainder
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! Error handling for the processing loop.
 //!
 //! Provides centralized error handling, classification, and recovery logic.

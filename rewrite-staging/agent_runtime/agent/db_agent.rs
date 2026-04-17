@@ -1,3 +1,11 @@
+// MOVING TO: pattern_runtime/src/agent/db_agent.rs
+// ORIGIN: crates/pattern_core/src/agent/db_agent.rs
+// PHASE: 3
+// RESHAPE: DB-backed agent impl; reshape during runtime integration
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! DatabaseAgent - V2 agent implementation with slim trait design
 
 use async_trait::async_trait;

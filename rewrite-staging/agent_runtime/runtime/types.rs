@@ -1,3 +1,11 @@
+// MOVING TO: pattern_runtime/src/runtime/types.rs
+// ORIGIN: crates/pattern_core/src/runtime/types.rs
+// PHASE: 3
+// RESHAPE: Runtime type definitions; reshape during phase 3 integration
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! Runtime configuration types
 
 use crate::context::ContextConfig;

@@ -1,3 +1,11 @@
+// MOVING TO: pattern_runtime/src/agent/processing/retry.rs
+// ORIGIN: crates/pattern_core/src/agent/processing/retry.rs
+// PHASE: 3
+// RESHAPE: Retry logic; stage with remainder
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! Model completion with retry logic.
 //!
 //! Provides robust retry handling for model API calls, including:

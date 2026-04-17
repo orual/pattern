@@ -1,3 +1,11 @@
+// MOVING TO: pattern_runtime/src/runtime/endpoints/group.rs
+// ORIGIN: crates/pattern_core/src/runtime/endpoints/group.rs
+// PHASE: 3
+// RESHAPE: Group endpoint; reshape during phase 3 integration
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;

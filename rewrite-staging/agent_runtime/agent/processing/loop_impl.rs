@@ -1,3 +1,11 @@
+// MOVING TO: pattern_runtime/src/loop_impl.rs
+// ORIGIN: crates/pattern_core/src/agent/processing/loop_impl.rs
+// PHASE: 3
+// RESHAPE: Replace async loop body with Tidepool instantiate/step/yield cycle per Phase 3 design
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! Main processing loop implementation.
 //!
 //! This module contains the core processing loop extracted from DatabaseAgent,

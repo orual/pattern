@@ -1,3 +1,11 @@
+// MOVING TO: pattern_runtime/src/runtime/tool_context.rs
+// ORIGIN: crates/pattern_core/src/runtime/tool_context.rs
+// PHASE: 3
+// RESHAPE: Tool context; reshape during phase 3 integration
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! ToolContext: A minimal API surface for tools
 //!
 //! Provides tools with access to memory, router, model, and permission broker

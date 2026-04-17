@@ -1,3 +1,11 @@
+// MOVING TO: pattern_runtime/src/agent/mod.rs
+// ORIGIN: crates/pattern_core/src/agent/mod.rs
+// PHASE: 3
+// RESHAPE: Kept verbatim; reshape during runtime integration
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! V2 Agent framework with slim trait design
 //!
 //! The AgentV2 trait is dramatically slimmer than the original Agent trait:

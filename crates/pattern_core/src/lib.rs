@@ -4,7 +4,6 @@
 //! and tool execution system that powers Pattern's multi-agent
 //! cognitive support system.
 
-pub mod agent;
 pub mod config;
 pub mod context;
 pub mod coordination;
@@ -23,7 +22,6 @@ pub mod oauth;
 pub mod permission;
 pub mod queue;
 pub mod realtime;
-pub mod runtime;
 pub mod tool;
 pub mod utils;
 

@@ -1,3 +1,11 @@
+// MOVING TO: pattern_runtime/src/runtime/endpoints/mod.rs
+// ORIGIN: crates/pattern_core/src/runtime/endpoints/mod.rs
+// PHASE: 3
+// RESHAPE: Endpoint registry; reshape during phase 3 integration
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! Message delivery endpoints for routing agent messages to various destinations
 
 mod group;

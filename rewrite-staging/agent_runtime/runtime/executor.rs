@@ -1,3 +1,11 @@
+// MOVING TO: pattern_runtime/src/runtime/executor.rs
+// ORIGIN: crates/pattern_core/src/runtime/executor.rs
+// PHASE: 3
+// RESHAPE: Runtime executor; reshape during phase 3 integration
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! ToolExecutor: Rule-aware, permission-aware tool execution
 //!
 //! Implements three-tier state scoping:

@@ -1,3 +1,11 @@
+// MOVING TO: pattern_runtime/src/runtime/mod.rs
+// ORIGIN: crates/pattern_core/src/runtime/mod.rs
+// PHASE: 3
+// RESHAPE: See Phase 3 for decomposition
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! AgentRuntime: The "doing" layer for agents
 //!
 //! Holds all agent dependencies and handles:

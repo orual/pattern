@@ -1,3 +1,11 @@
+// MOVING TO: rewrite-staging/agent_runtime/legacy_agent_traits.rs
+// ORIGIN: crates/pattern_core/src/agent/traits.rs
+// PHASE: 2+3
+// RESHAPE: Reference copy: Task 18 uses this shape as input for AgentRuntime + Session split
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! Core AgentV2 trait and extension trait
 
 use async_trait::async_trait;

@@ -1,3 +1,11 @@
+// MOVING TO: pattern_runtime/src/agent/processing/mod.rs
+// ORIGIN: crates/pattern_core/src/agent/processing/mod.rs
+// PHASE: 3
+// RESHAPE: See Phase 3 for decomposition
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! Processing loop implementation for agents.
 //!
 //! This module contains the core processing logic extracted from DatabaseAgent,

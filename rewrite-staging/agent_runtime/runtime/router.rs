@@ -1,3 +1,11 @@
+// MOVING TO: pattern_runtime/src/runtime/router.rs
+// ORIGIN: crates/pattern_core/src/runtime/router.rs
+// PHASE: 3
+// RESHAPE: MessageRouter trait extracted in Task 19
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! Message routing for agent-to-agent communication.
 //!
 //! The MessageRouter handles delivery of messages between agents, to users,
