@@ -64,6 +64,34 @@ pub enum ProviderError {
         reason: String,
     },
 
+    /// The initial authorization-code exchange failed (code → access token).
+    ///
+    /// Distinguished from [`ProviderError::RefreshFailed`] because the
+    /// remediation is different: refresh failure typically means "re-auth
+    /// from scratch"; exchange failure means "the auth flow itself didn't
+    /// complete" (bad state, invalid code, rejected by provider, network
+    /// failure).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::ProviderError;
+    ///
+    /// let err = ProviderError::AuthExchangeFailed {
+    ///     reason: "state parameter mismatch (CSRF guard)".into(),
+    /// };
+    /// assert!(err.to_string().contains("state parameter"));
+    /// ```
+    #[error("auth code exchange failed: {reason}")]
+    #[diagnostic(
+        code(pattern_core::provider::auth_exchange_failed),
+        help("restart the auth flow; check the browser copied the entire code#state string")
+    )]
+    AuthExchangeFailed {
+        /// Description of the exchange failure.
+        reason: String,
+    },
+
     /// The credential store backend is not reachable (keyring daemon down,
     /// DBus unavailable, filesystem path refused, etc.).
     ///

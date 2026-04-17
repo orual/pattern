@@ -15,9 +15,13 @@
 //! [`pattern_core::error::ProviderError`].
 
 #[cfg(feature = "subscription-oauth")]
+pub mod pkce;
+#[cfg(feature = "subscription-oauth")]
 pub mod session_pickup;
 
 #[cfg(feature = "subscription-oauth")]
+pub use pkce::{PendingAuth, PkceConfig, PkceTier};
+#[cfg(feature = "subscription-oauth")]
 pub use session_pickup::SessionPickupTier;
 
-// api_key, resolver, pkce populate in Tasks 9-10 of phase_04.md.
+// api_key + resolver populate in Task 10 of phase_04.md.
