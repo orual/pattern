@@ -1,3 +1,11 @@
+// MOVING TO: pattern_provider/src/embeddings/simple.rs
+// ORIGIN: crates/pattern_core/src/embeddings/simple.rs
+// PHASE: future
+// RESHAPE: Deferred until provider-side embedding use case confirmed
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 use async_trait::async_trait;
 
 use super::{Embedding, EmbeddingError, EmbeddingProvider, Result};

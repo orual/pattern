@@ -1,3 +1,11 @@
+// MOVING TO: pattern_provider/src/embeddings/candle.rs
+// ORIGIN: crates/pattern_core/src/embeddings/candle.rs
+// PHASE: future
+// RESHAPE: Deferred until provider-side embedding use case confirmed
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! Candle-based local embedding provider
 
 use super::{Embedding, EmbeddingError, EmbeddingProvider, Result, validate_input};

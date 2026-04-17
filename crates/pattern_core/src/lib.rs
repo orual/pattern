@@ -7,7 +7,6 @@
 pub mod base_instructions;
 pub mod config;
 pub mod db;
-pub mod embeddings;
 pub mod error;
 #[cfg(feature = "export")]
 pub mod export;
@@ -15,8 +14,6 @@ pub mod id;
 pub mod memory;
 pub mod memory_acl;
 pub mod messages;
-pub mod model;
-pub mod oauth;
 pub mod permission;
 pub mod queue;
 pub mod realtime;

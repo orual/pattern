@@ -1,3 +1,11 @@
+// MOVING TO: pattern_provider/src/auth/middleware.rs
+// ORIGIN: crates/pattern_core/src/oauth/middleware.rs
+// PHASE: 4
+// RESHAPE: Absorbs into three-tier resolver; pattern_auth crate retires in same phase
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! Request transformation middleware for OAuth-authenticated requests
 //!
 //! This middleware transforms requests to match Anthropic's OAuth API requirements,

@@ -1,3 +1,11 @@
+// MOVING TO: pattern_provider/src/defaults.rs
+// ORIGIN: crates/pattern_core/src/model/defaults.rs
+// PHASE: 4
+// RESHAPE: ProviderClient trait lands in pattern_core in this phase; impls reshape in phase 4 atop rebased rust-genai
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! Model-specific default configurations
 //!
 //! This module provides accurate default settings for different language models,

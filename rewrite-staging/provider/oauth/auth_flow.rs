@@ -1,3 +1,11 @@
+// MOVING TO: pattern_provider/src/auth/auth_flow.rs
+// ORIGIN: crates/pattern_core/src/oauth/auth_flow.rs
+// PHASE: 4
+// RESHAPE: Absorbs into three-tier resolver; pattern_auth crate retires in same phase
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! OAuth device authorization flow implementation
 //!
 //! Implements the OAuth 2.0 device authorization flow with PKCE

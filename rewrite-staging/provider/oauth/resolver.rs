@@ -1,3 +1,11 @@
+// MOVING TO: pattern_provider/src/auth/resolver.rs
+// ORIGIN: crates/pattern_core/src/oauth/resolver.rs
+// PHASE: 4
+// RESHAPE: Absorbs into three-tier resolver; pattern_auth crate retires in same phase
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! Custom resolvers for genai integration with OAuth
 //!
 //! Provides AuthResolver and ServiceTargetResolver implementations that

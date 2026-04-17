@@ -1,3 +1,11 @@
+// MOVING TO: pattern_provider/src/model.rs
+// ORIGIN: crates/pattern_core/src/model.rs
+// PHASE: 4
+// RESHAPE: ProviderClient trait lands in pattern_core in this phase; impls reshape in phase 4 atop rebased rust-genai
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 use async_trait::async_trait;
 use genai::{adapter::AdapterKind, chat::ChatOptions};
 use serde::{Deserialize, Serialize};

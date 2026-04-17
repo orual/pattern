@@ -1,3 +1,11 @@
+// MOVING TO: pattern_provider/src/embeddings/mod.rs
+// ORIGIN: crates/pattern_core/src/embeddings/mod.rs
+// PHASE: future
+// RESHAPE: Deferred until provider-side embedding use case confirmed
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! Embedding providers for Pattern
 //!
 //! This module provides traits and implementations for generating

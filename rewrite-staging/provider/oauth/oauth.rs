@@ -1,3 +1,11 @@
+// MOVING TO: pattern_provider/src/auth/oauth.rs
+// ORIGIN: crates/pattern_core/src/oauth.rs
+// PHASE: 4
+// RESHAPE: Absorbs into three-tier resolver; pattern_auth crate retires in same phase
+//
+// This file is retained verbatim for reference during the v3 foundation rewrite.
+// It does not compile in this location; rewrite-staging/ is not a cargo workspace member.
+
 //! OAuth authentication support for external services
 //!
 //! This module provides OAuth token storage and management for integrating
