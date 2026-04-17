@@ -15,8 +15,6 @@ pub mod memory;
 pub mod memory_acl;
 pub mod messages;
 pub mod permission;
-pub mod queue;
-pub mod realtime;
 pub mod utils;
 
 #[cfg(test)]
@@ -25,8 +23,8 @@ pub mod test_helpers;
 // Macros are automatically available at crate root due to #[macro_export]
 
 pub use crate::utils::SnowflakePosition;
-pub use base_instructions::DEFAULT_BASE_INSTRUCTIONS;
 pub use agent::{Agent, AgentState, AgentType};
+pub use base_instructions::DEFAULT_BASE_INSTRUCTIONS;
 pub use context::{CompressionStrategy, ContextBuilder, ContextConfig, MessageCompressor};
 pub use coordination::{AgentGroup, Constellation, CoordinationPattern};
 pub use error::{CoreError, Result};
