@@ -138,6 +138,14 @@ pub trait RequestShaper: Send + Sync {
         req: &mut genai::chat::ChatRequest,
         ctx: &ShapeContext<'_>,
     ) -> Result<Vec<(String, String)>, ProviderError>;
+
+    /// Headers-only path. Used by `count_tokens` and similar calls that
+    /// don't carry a `ChatRequest` to shape. Must return the same set of
+    /// identification headers `shape()` would emit for the same context.
+    fn identification_headers(
+        &self,
+        ctx: &ShapeContext<'_>,
+    ) -> Result<Vec<(String, String)>, ProviderError>;
 }
 
 // ---- HonestPatternShaper (Anthropic) ----
@@ -178,6 +186,13 @@ impl RequestShaper for HonestPatternShaper {
 
         req.system_blocks = Some(blocks);
 
+        self.identification_headers(ctx)
+    }
+
+    fn identification_headers(
+        &self,
+        ctx: &ShapeContext<'_>,
+    ) -> Result<Vec<(String, String)>, ProviderError> {
         build_identification_headers(&self.config, ctx.session_uuid, ctx.auth_tier, ctx.model)
     }
 }
@@ -194,6 +209,13 @@ impl RequestShaper for NoOpShaper {
     fn shape(
         &self,
         _req: &mut genai::chat::ChatRequest,
+        ctx: &ShapeContext<'_>,
+    ) -> Result<Vec<(String, String)>, ProviderError> {
+        self.identification_headers(ctx)
+    }
+
+    fn identification_headers(
+        &self,
         _ctx: &ShapeContext<'_>,
     ) -> Result<Vec<(String, String)>, ProviderError> {
         Ok(vec![(
