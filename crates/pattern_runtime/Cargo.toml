@@ -1,0 +1,10 @@
+[package]
+name = "pattern-runtime"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+pattern-core = { path = "../pattern_core" }
