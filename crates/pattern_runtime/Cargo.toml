@@ -7,6 +7,8 @@ edition.workspace = true
 workspace = true
 
 [features]
+default = ["subscription-oauth"]
+
 # Expose test-only hooks on pattern_runtime's public surface so
 # integration tests can deterministically drive paths that the
 # production API deliberately hides (e.g. session poisoning). Never
@@ -14,8 +16,18 @@ workspace = true
 # stable API contract.
 test-hooks = []
 
+# Forward pattern-provider's subscription-oauth feature. When enabled,
+# the `pattern-test-cli` bin exposes the interactive PKCE flow and the
+# session-pickup + OAuth tiers of the Anthropic credential chain.
+subscription-oauth = ["pattern-provider/subscription-oauth"]
+
 [dependencies]
 pattern-core = { path = "../pattern_core" }
+# pattern-provider: consumed by the `pattern-test-cli` bin for live-tier
+# auth + completion verification (AC3.1, AC4.1, AC4.3, Task 20). Phase 5
+# integrates it into the TidepoolRuntime proper; holding the dep here
+# means the bin + the Phase 5 wiring share a single edge in the dep graph.
+pattern-provider = { path = "../pattern_provider" }
 tidepool-runtime = { workspace = true }
 tidepool-codegen = { workspace = true }
 tidepool-effect  = { workspace = true }
@@ -33,6 +45,11 @@ miette           = { workspace = true }
 serde            = { workspace = true }
 serde_json       = { workspace = true }
 jiff             = { workspace = true }
+# Bin-only deps (pattern-test-cli)
+clap             = { workspace = true }
+futures          = { workspace = true }
+secrecy          = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 tokio          = { workspace = true, features = ["rt-multi-thread", "test-util", "macros"] }
