@@ -51,7 +51,7 @@ impl EffectHandler for LogHandler {
 mod tests {
     use super::*;
     use tidepool_repr::{DataCon, DataConId};
-    use tidepool_testing::r#gen::standard_datacon_table;
+    use crate::testing::standard_datacon_table;
     use tracing_test::traced_test;
 
     /// Build a test DataConTable that includes the `()` constructor required by

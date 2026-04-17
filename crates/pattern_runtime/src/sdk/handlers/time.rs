@@ -63,7 +63,7 @@ impl EffectHandler for TimeHandler {
 mod tests {
     use super::*;
     use tidepool_repr::{DataCon, DataConId, Literal};
-    use tidepool_testing::r#gen::standard_datacon_table;
+    use crate::testing::standard_datacon_table;
 
     /// Build a test DataConTable from the standard set plus the `()`
     /// constructor. `standard_datacon_table()` already contains `I#` for

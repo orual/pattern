@@ -12,3 +12,11 @@ pub mod preflight;
 pub mod sdk;
 pub mod tidepool;
 pub use tidepool::{CompiledProgram, SessionMachine};
+
+/// Test fixtures re-exported from [`tidepool_testing`] under Rust-2024-safe
+/// paths. Only compiled for this crate's own tests; other crates depending
+/// on `tidepool-testing` as a dev-dep should maintain their own equivalent
+/// module. See `testing.rs` for rationale (tidepool's `gen` submodule is a
+/// reserved keyword in edition 2024).
+#[cfg(test)]
+mod testing;
