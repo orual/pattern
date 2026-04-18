@@ -289,8 +289,10 @@ mod tests {
     //! Phase-3 stub error.
 
     use super::*;
+    use crate::NopProviderClient;
     use crate::testing::standard_datacon_table;
     use crate::timeout::CancelState;
+    use pattern_core::ProviderClient;
     use pattern_core::types::snapshot::PersonaConfig;
 
     /// Minimal in-memory store that errors on any call. Sufficient for
@@ -469,7 +471,7 @@ mod tests {
 
     fn sctx() -> SessionContext {
         let persona = PersonaConfig::new("agent-a", "A", "module X where\nx = pure ()");
-        SessionContext::from_persona(&persona, Arc::new(NeverStore))
+        SessionContext::from_persona(&persona, Arc::new(NeverStore), Arc::new(NopProviderClient))
     }
 
     #[tokio::test]
@@ -506,11 +508,13 @@ mod tests {
     async fn replace_on_missing_block_returns_handler_error() {
         use crate::testing::InMemoryMemoryStore;
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
+        let provider: Arc<dyn ProviderClient> = Arc::new(NopProviderClient);
         let store_for_ctx = store.clone();
+        let provider_for_ctx = provider.clone();
         let err_msg = tokio::task::spawn_blocking(move || {
             let table = standard_datacon_table();
             let persona = PersonaConfig::new("agent-a", "A", "module X where\nx = pure ()");
-            let ctx = SessionContext::from_persona(&persona, store_for_ctx);
+            let ctx = SessionContext::from_persona(&persona, store_for_ctx, provider_for_ctx);
             let cx = EffectContext::with_user(&table, &ctx);
             let mut h = MemoryHandler::new(store);
             let err = h

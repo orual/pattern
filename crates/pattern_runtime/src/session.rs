@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use jiff::Timestamp;
+use pattern_core::ProviderClient;
 use pattern_core::error::{CancelPath, RuntimeError};
 use pattern_core::traits::{MemoryStore, Session};
 use pattern_core::types::snapshot::{PersonaConfig, SessionSnapshot};
@@ -46,13 +47,13 @@ use crate::timeout::{Budget, CancelState};
 ///   deliberate: `pattern_runtime` must not compile-link to any concrete
 ///   memory backend (Phase 2 architecture rule).
 ///
-/// Phase 4 will add `provider: Arc<dyn ProviderClient>` for MessageHandler.
 #[derive(Debug)]
 pub struct SessionContext {
     agent_id: String,
     budget: Budget,
     cancel_state: Arc<CancelState>,
     memory_store: Arc<dyn MemoryStore>,
+    provider: Arc<dyn ProviderClient>,
     /// Shared checkpoint log. Handlers record `(request, response)` pairs
     /// after a successful effect dispatch so restart-then-replay can
     /// deterministically re-drive the JIT. Wired to the same `Arc` as
@@ -102,13 +103,18 @@ impl SessionContext {
     /// log is a fresh empty log; the session wires a shared log via the
     /// crate-private `with_checkpoint_log` builder so handlers record
     /// into the same log the session exposes.
-    pub fn from_persona(persona: &PersonaConfig, memory_store: Arc<dyn MemoryStore>) -> Self {
+    pub fn from_persona(
+        persona: &PersonaConfig,
+        memory_store: Arc<dyn MemoryStore>,
+        provider: Arc<dyn ProviderClient>,
+    ) -> Self {
         let budget = Budget::from_persona(persona);
         Self {
             agent_id: persona.agent_id.to_string(),
             budget,
             cancel_state: Arc::new(CancelState::new()),
             memory_store,
+            provider,
             checkpoint_log: Arc::new(std::sync::Mutex::new(CheckpointLog::new())),
             current_turn: Arc::new(AtomicU64::new(0)),
         }
@@ -264,6 +270,7 @@ impl TidepoolSession {
         persona: PersonaConfig,
         sdk: &SdkLocation,
         memory_store: Arc<dyn MemoryStore>,
+        provider: Arc<dyn ProviderClient>,
     ) -> Result<Self, RuntimeError> {
         crate::preflight::check()?;
         let sdk_dir = sdk.resolve()?;
@@ -285,7 +292,7 @@ impl TidepoolSession {
         let checkpoint_log = Arc::new(std::sync::Mutex::new(CheckpointLog::new()));
         let current_turn = Arc::new(AtomicU64::new(0));
         let ctx = Arc::new(
-            SessionContext::from_persona(&persona, memory_store.clone())
+            SessionContext::from_persona(&persona, memory_store.clone(), provider.clone())
                 .with_checkpoint_log(checkpoint_log.clone(), current_turn.clone()),
         );
 
@@ -429,7 +436,7 @@ impl TidepoolSession {
                         // blocking task to reclaim the thread before
                         // returning. Typical observation latency on
                         // tight compute loops: ~20ms.
-                        tracing::info!(
+                        tracing::warn!(
                             session_id = %self.session_id,
                             wall_ms,
                             cpu_ms,
@@ -459,7 +466,7 @@ impl TidepoolSession {
                                 if let Ok(mut inner) = self.inner.lock() {
                                     inner.poisoned = true;
                                 }
-                                tracing::warn!(
+                                tracing::error!(
                                     session_id = %self.session_id,
                                     elapsed_ms = cancel_grace.as_millis() as u64,
                                     thread_id = ?std::thread::current().id(),
