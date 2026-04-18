@@ -179,31 +179,73 @@ not just what came back. The composer builds the request inside
 `drive_step`, and by the time we get a `StepReply` the request is
 gone.
 
-Two options:
-- **A. A `RequestTap` sink** — extend the `TurnSink` mechanism
-  (Task 20 part 5b) to emit a `TurnEvent::ComposedRequest(ChatRequest)`
-  event just before the provider call. The CLI's `VecSink` records
-  it; pass/fail checks the ChatMessage text for `[memory:updated]`.
-  Cleanest integration; mirrors how Text / ToolCall already flow.
-- **B. A wiremock middleman** — run wiremock against the ACTUAL
-  Anthropic backend as a transparent proxy that captures the request
-  body before forwarding. Overkill for this; keeps the live
-  assertion but costs a lot of plumbing.
-- **C. Debug-level tracing** — the composer emits a `tracing::debug`
-  log of the assembled request. CLI subscribes to the tracing
-  subscriber and greps for `[memory:updated]` in captured logs. Loose
-  coupling but fragile to log-format changes.
+### Decision: emit the full `CompletionRequest` via `TurnSink`
 
-**Recommendation: A.** Add `TurnEvent::ComposedRequest` with a
-condensed projection (not the full struct — just what's relevant for
-observability: message roles + `first_text()` previews + content-part
-type tags). The orchestrator emits one per wire turn. CLI inspects
-the recorded events.
+Add a new variant `TurnEvent::ComposedRequest(CompletionRequest)`
+— the whole struct, not a projection. Sinks choose how much to
+render / log / discard.
 
-*Open question:* should this variant land in Task 15 or a separate
-prep commit? Lean prep commit since it's a general TurnSink
-enhancement, not test-specific — future work (debug UI, replay) will
-want it too.
+**Why full-struct over projection:**
+
+- **Debug-level tracing was the previous approach** and it had
+  problems — massive logs (KBs per turn, hard to grep, noisy in
+  CI). A `tracing::debug` dump is the wrong abstraction: every
+  subscriber pays the serialisation cost whether they care or not.
+- **Request tap via sink is opt-in.** `NoOpSink` (the default)
+  drops the event immediately — free. Serious subscribers
+  (CLI cache-test, future replay debugger, regression-snapshot
+  capture) want the full structure and will pay the clone cost
+  knowingly.
+- **Letting the sink filter** keeps the event producer simple
+  and the consumer flexible. A condensed-projection approach
+  locks in a specific "what matters" decision at the producer
+  layer; different consumers want different slices.
+
+**Event shape:**
+
+```rust
+// In pattern_core::traits::turn_sink
+pub enum TurnEvent {
+    // ... existing variants ...
+    /// The composer produced a complete CompletionRequest; the
+    /// orchestrator is about to hand it to the provider. Emitted
+    /// once per wire turn, immediately before the provider call.
+    /// Consumers typically use this for debugging, request
+    /// replay / snapshot testing, or cache-behaviour inspection.
+    ComposedRequest(Box<CompletionRequest>),
+}
+```
+
+Boxed to keep the enum stable-sized (CompletionRequest is large
+and variable).
+
+**Where the orchestrator emits:**
+
+In `agent_loop::orchestrate`, immediately before
+`ctx.provider().complete(req).await`:
+
+```rust
+let sink = ctx.turn_sink().clone();
+sink.emit(TurnEvent::ComposedRequest(Box::new(req.clone())));
+let mut stream = ctx.provider().complete(req).await?;
+```
+
+**Sink rendering recipes:**
+
+- `NoOpSink::emit` — matches `TurnEvent::ComposedRequest(_)` and
+  does nothing. One extra branch in a hot path; negligible cost.
+- `VecSink::emit` — stores it. Memory grows linearly with wire
+  turn count; test writers should `drain()` periodically if they
+  run long sessions.
+- CLI cache-test sink — in `--verbose` mode prints a condensed
+  summary (system block count + hash, messages count + last few
+  roles/previews, breakpoint placements); otherwise drops it.
+- Future snapshot/replay — captures the raw struct, serialises to
+  disk, plays back via a scripted provider.
+
+**Landing order:** lands in a prep commit BEFORE Task 15
+implementation — it's a general `TurnSink` enhancement, not
+test-specific. Task 15's CLI subcommand then becomes a consumer.
 
 ## Dependencies
 
@@ -227,6 +269,32 @@ want it too.
 - **`TurnEvent::ComposedRequest`** (see AC8.3 hook) — if we want the
   "[memory:updated] appears" check automated. Otherwise the operator
   eyeballs `--verbose` output.
+
+## Test persona — Anchor from `bsky_agent/`
+
+The test uses Anchor, Pattern's maintenance facet, as the persona
+fixture. Reasons:
+
+- **Focused voice**: Anchor has a distinct, constrained character
+  (physical-maintenance observations, steady cadence, no
+  meta-fanfare) so cache-hit behaviour is empirically assessable
+  — if Turn 3 after a memory edit produces Anchor-voiced
+  responses, we can eyeball that the persona block cached
+  correctly.
+- **Memory-reading by design**: Anchor's persona specifically
+  describes observing user state (water, medication, sleep). With
+  `current_human` pre-seeded, the model WILL pull from the block
+  in its response, giving segment 3 real weight in token counts
+  (the segment-3 drop after a memory edit becomes measurable).
+- **Realistic size**: the `bsky_agent/*.md` block files are
+  ~200-500 words each — comfortable 1 KB range per block,
+  matching the plan's "3+ blocks ~1 KB each" recipe.
+
+The CLI loads from `bsky_agent/anchor-persona-block.md`,
+`bsky_agent/pattern-current-human-block.md`, and
+`bsky_agent/pattern-partner-block.md`. If `bsky_agent/` isn't
+present (non-dev checkouts), fall back to embedded minimal
+content so the test still runs.
 
 ## Memory-store surface — what's needed vs what exists
 
