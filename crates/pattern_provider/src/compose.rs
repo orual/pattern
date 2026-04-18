@@ -35,18 +35,26 @@
 //!   [`breakpoints::BreakpointTracker`] — `cache_control` placement
 //!   + Anthropic's 4-marker-per-request budget enforcement.
 //!
-//! Future tasks (Phase 5 Tasks 8–10) will add `pub mod passes` with
-//! the concrete three-segment pass implementations.
+//! - [`passes`] — concrete three-segment pass implementations:
+//!   `passes::Segment1Pass`, `passes::Segment2Pass`,
+//!   `passes::Segment3Pass` (Phase 5 Tasks 8-9; Segment2Pass and
+//!   Segment3Pass are placeholders pending Task 9).
+//! - [`break_detection`] — [`break_detection::BreakDetectionSnapshot`],
+//!   cheap per-turn hashes for attributing unexpected cache misses to
+//!   a specific subsystem (Phase 5 Task 11).
 
+pub mod break_detection;
 pub mod breakpoints;
 pub mod current_state;
 pub mod partial_request;
+pub mod passes;
 pub mod pipeline;
 pub mod profile;
 pub mod pseudo_messages;
 
 // Convenience re-exports so call sites can type `compose::ComposerPass`
 // instead of `compose::pipeline::ComposerPass`.
+pub use break_detection::BreakDetectionSnapshot;
 pub use breakpoints::{BreakpointLocation, BreakpointPlacement, BreakpointTracker};
 pub use current_state::render_current_state;
 pub use partial_request::PartialRequest;
