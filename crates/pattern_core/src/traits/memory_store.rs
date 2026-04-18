@@ -25,6 +25,7 @@ use crate::memory::{
     ArchivalEntry, BlockMetadata, BlockSchema, BlockType, MemoryResult, MemorySearchResult,
     SearchOptions, SharedBlockInfo, StructuredDocument,
 };
+use crate::types::block::BlockCreate;
 
 /// Storage-agnostic contract for reading and writing memory blocks.
 ///
@@ -43,6 +44,7 @@ use crate::memory::{
 ///     MemorySearchResult, SearchOptions, SharedBlockInfo, StructuredDocument,
 /// };
 /// use pattern_core::traits::MemoryStore;
+/// use pattern_core::types::block::BlockCreate;
 ///
 /// #[derive(Debug)]
 /// struct Dummy;
@@ -52,11 +54,7 @@ use crate::memory::{
 ///     async fn create_block(
 ///         &self,
 ///         _agent_id: &str,
-///         _label: &str,
-///         _description: &str,
-///         _block_type: BlockType,
-///         _schema: BlockSchema,
-///         _char_limit: usize,
+///         _create: BlockCreate,
 ///     ) -> MemoryResult<StructuredDocument> {
 ///         unimplemented!("dummy: satisfaction-only example; AC1.3")
 ///     }
@@ -199,14 +197,12 @@ pub trait MemoryStore: Send + Sync + fmt::Debug {
     /// Create a new memory block, returning the document ready for editing.
     ///
     /// The returned document includes all metadata and is already cached.
+    /// Construction parameters are bundled in [`BlockCreate`] to prevent
+    /// positional-argument transposition across the six scalar fields.
     async fn create_block(
         &self,
         agent_id: &str,
-        label: &str,
-        description: &str,
-        block_type: BlockType,
-        schema: BlockSchema,
-        char_limit: usize,
+        create: BlockCreate,
     ) -> MemoryResult<StructuredDocument>;
 
     /// Get a block's document for reading/writing.

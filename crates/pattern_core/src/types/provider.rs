@@ -26,7 +26,8 @@
 //!
 //! # Streaming model
 //!
-//! `ProviderClient::complete` returns a [`Stream`] of [`ChatStreamEvent`]s
+//! `ProviderClient::complete` returns a [`futures::Stream`] of
+//! [`ChatStreamEvent`]s
 //! verbatim from genai, modulo error mapping. Callers match on the event
 //! variants (`Chunk` / `ReasoningChunk` / `ToolCallChunk` / `End`) and
 //! assemble whatever they need — pattern does not buffer the stream on the

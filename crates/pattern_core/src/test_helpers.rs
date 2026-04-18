@@ -14,6 +14,7 @@ pub mod memory {
         ArchivalEntry, BlockMetadata, BlockSchema, BlockType, MemoryResult, MemorySearchResult,
         MemoryStore, SearchOptions, SharedBlockInfo, StructuredDocument,
     };
+    use crate::types::block::BlockCreate;
 
     /// Configurable mock MemoryStore for testing different block configurations.
     ///
@@ -47,13 +48,9 @@ pub mod memory {
         async fn create_block(
             &self,
             _agent_id: &str,
-            _label: &str,
-            _description: &str,
-            _block_type: BlockType,
-            schema: BlockSchema,
-            _char_limit: usize,
+            create: BlockCreate,
         ) -> MemoryResult<StructuredDocument> {
-            Ok(StructuredDocument::new(schema))
+            Ok(StructuredDocument::new(create.schema))
         }
 
         async fn get_block(

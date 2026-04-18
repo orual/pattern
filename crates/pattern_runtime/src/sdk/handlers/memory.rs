@@ -117,15 +117,12 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                 let limit = char_limit
                     .map(|n| n.max(0) as usize)
                     .unwrap_or(DEFAULT_CHAR_LIMIT);
+                let create =
+                    pattern_core::types::block::BlockCreate::new(label.clone(), bt, schema)
+                        .with_description(description)
+                        .with_char_limit(limit);
                 let doc = handle
-                    .block_on(store.create_block(
-                        &agent_id,
-                        &label,
-                        &description,
-                        bt,
-                        schema,
-                        limit,
-                    ))
+                    .block_on(store.create_block(&agent_id, create))
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Create: {e}")))?;
                 write_text_into(&doc, &initial)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Create: {e}")))?;
@@ -231,16 +228,14 @@ async fn upsert_block_content(
         Some(doc) => (doc, false),
         None => {
             let desc = description.unwrap_or(DEFAULT_AUTO_CREATE_DESCRIPTION);
-            let doc = store
-                .create_block(
-                    agent_id,
-                    label,
-                    desc,
-                    BlockType::Working,
-                    BlockSchema::text(),
-                    DEFAULT_CHAR_LIMIT,
-                )
-                .await?;
+            let create = pattern_core::types::block::BlockCreate::new(
+                label.to_owned(),
+                BlockType::Working,
+                BlockSchema::text(),
+            )
+            .with_description(desc)
+            .with_char_limit(DEFAULT_CHAR_LIMIT);
+            let doc = store.create_block(agent_id, create).await?;
             (doc, true)
         }
     };
@@ -309,11 +304,7 @@ mod tests {
         async fn create_block(
             &self,
             _a: &str,
-            _l: &str,
-            _d: &str,
-            _t: pattern_core::memory::BlockType,
-            _s: pattern_core::memory::BlockSchema,
-            _c: usize,
+            _create: pattern_core::types::block::BlockCreate,
         ) -> pattern_core::memory::MemoryResult<pattern_core::memory::StructuredDocument> {
             panic!("NeverStore should not be called in this test")
         }

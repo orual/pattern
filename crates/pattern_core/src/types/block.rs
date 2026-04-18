@@ -1,4 +1,5 @@
-//! Block identifier alias and post-turn `BlockWrite` audit record.
+//! Block identifier alias, creation parameters, and post-turn `BlockWrite`
+//! audit record.
 //!
 //! Pattern agents name memory blocks by a human-chosen label (`"persona"`,
 //! `"task_list"`, etc.). That label is the [`BlockHandle`]. The full block
@@ -8,6 +9,11 @@
 //! `MemoryStore::get_rendered_content(agent_id, label)` (owned blocks) and
 //! `StructuredDocument::render()` (shared blocks); this module therefore does
 //! not define a parallel `Block` value type.
+//!
+//! A [`BlockCreate`] bundles the parameters for
+//! [`crate::traits::memory_store::MemoryStore::create_block`] into a single
+//! struct, avoiding positional-argument transposition mistakes across six
+//! scalar fields.
 //!
 //! A [`BlockWrite`] is the post-turn audit record of a memory change,
 //! attached to [`crate::types::turn::TurnOutput::block_writes`]. Phase 5's
@@ -20,7 +26,7 @@ use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
-use crate::memory::BlockType;
+use crate::memory::{BlockSchema, BlockType};
 use crate::types::ids::MemoryId;
 use crate::types::origin::Author;
 
@@ -45,6 +51,69 @@ use crate::types::origin::Author;
 /// assert_eq!(h.as_str(), "persona");
 /// ```
 pub type BlockHandle = SmolStr;
+
+/// Input for [`crate::traits::memory_store::MemoryStore::create_block`].
+///
+/// Bundles block-creation parameters so call sites don't rely on positional
+/// args — six scalar fields are easy to transpose, and `#[non_exhaustive]`
+/// future-proofs against additions (read_only, permission defaults, initial
+/// content, etc.) without breaking exhaustive-construction call sites.
+///
+/// # Examples
+///
+/// ```
+/// use pattern_core::memory::{BlockSchema, BlockType};
+/// use pattern_core::types::block::BlockCreate;
+///
+/// // Minimal construction using defaults.
+/// let create = BlockCreate::new("persona", BlockType::Core, BlockSchema::text());
+///
+/// // With optional overrides.
+/// let create = BlockCreate::new("task_list", BlockType::Working, BlockSchema::text())
+///     .with_description("Tasks for this session")
+///     .with_char_limit(2000);
+/// ```
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub struct BlockCreate {
+    /// Human-chosen label for the block. Must be unique per agent.
+    pub label: String,
+    /// Human-readable description of what this block holds.
+    pub description: String,
+    /// Whether the block is Core, Working, or Archival.
+    pub block_type: BlockType,
+    /// Schema governing the block's content structure.
+    pub schema: BlockSchema,
+    /// Maximum number of characters the block may hold.
+    pub char_limit: usize,
+}
+
+impl BlockCreate {
+    /// Minimal constructor with sensible defaults:
+    /// - `description`: empty string
+    /// - `char_limit`: [`crate::memory::DEFAULT_MEMORY_CHAR_LIMIT`]
+    pub fn new(label: impl Into<String>, block_type: BlockType, schema: BlockSchema) -> Self {
+        Self {
+            label: label.into(),
+            description: String::new(),
+            block_type,
+            schema,
+            char_limit: crate::memory::DEFAULT_MEMORY_CHAR_LIMIT,
+        }
+    }
+
+    /// Set the human-readable description.
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = description.into();
+        self
+    }
+
+    /// Override the character limit.
+    pub fn with_char_limit(mut self, char_limit: usize) -> Self {
+        self.char_limit = char_limit;
+        self
+    }
+}
 
 /// Classification of a write recorded by [`BlockWrite`].
 ///
@@ -106,6 +175,7 @@ pub enum BlockWriteKind {
 ///     rendered_content: "- [ ] Review PR\n- [x] Write tests".to_string(),
 ///     kind: BlockWriteKind::Appended,
 ///     previous_content_hash: Some(0xdead_beef_dead_beef),
+///     previous_rendered_content: Some("- [x] Review PR".to_string()),
 ///     at: Timestamp::now(),
 ///     author: Author::System { reason: SystemReason::ToolCall },
 /// };
@@ -130,6 +200,24 @@ pub struct BlockWrite {
     /// pre-write baseline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_content_hash: Option<u64>,
+    /// Rendered text content *before* this write. `None` for
+    /// [`BlockWriteKind::Created`] (no prior state exists); `Some(_)` for
+    /// updates that carry diff-able prior content.
+    ///
+    /// Populated by the runtime turn loop at mutation time — snapshotted from
+    /// the pre-write [`crate::memory::StructuredDocument::render`] output.
+    /// Phase 5's pseudo-message renderer consumes this via
+    /// `similar::TextDiff::from_lines(previous, current).unified_diff()` to
+    /// produce diff-style `[memory:updated]` bodies rather than dumping the
+    /// full post-write state into segment 2 on every edit.
+    ///
+    /// Wire-format-wise this doubles the memory footprint of a `BlockWrite`
+    /// record transiently; records don't live past the next turn's pseudo-
+    /// message emission. If this becomes a concern, a future refactor can
+    /// drop the field and query loro's history via `memory_id` at display
+    /// time instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_rendered_content: Option<String>,
     /// Wall-clock time the write occurred (UTC instant via `jiff`).
     pub at: Timestamp,
     /// Who authored the write, using the shared `MessageOrigin` author

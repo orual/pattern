@@ -11,6 +11,7 @@ use crate::memory::{
     StructuredDocument,
 };
 use crate::traits::EmbeddingProvider;
+use crate::types::block::BlockCreate;
 use async_trait::async_trait;
 use chrono::Utc;
 use dashmap::DashMap;
@@ -390,29 +391,33 @@ impl MemoryStore for MemoryCache {
     async fn create_block(
         &self,
         agent_id: &str,
-        label: &str,
-        description: &str,
-        block_type: BlockType,
-        schema: BlockSchema,
-        char_limit: usize,
+        create: BlockCreate,
     ) -> MemoryResult<StructuredDocument> {
-        // Use default char limit if 0 is passed
+        let BlockCreate {
+            label,
+            description,
+            block_type,
+            schema,
+            char_limit,
+        } = create;
+
+        // Use default char limit if 0 is passed.
         let effective_char_limit = if char_limit == 0 {
             self.default_char_limit
         } else {
             char_limit
         };
 
-        // Generate block ID
+        // Generate block ID.
         let block_id = format!("mem_{}", Uuid::new_v4().simple());
         let now = Utc::now();
 
-        // Build BlockMetadata
+        // Build BlockMetadata.
         let block_metadata = BlockMetadata {
             id: block_id.clone(),
             agent_id: agent_id.to_string(),
-            label: label.to_string(),
-            description: description.to_string(),
+            label: label.clone(),
+            description: description.clone(),
             block_type,
             schema: schema.clone(),
             char_limit: effective_char_limit,
@@ -438,12 +443,12 @@ impl MemoryStore for MemoryCache {
         let loro_snapshot = doc.export_snapshot()?;
         let frontier = doc.current_version().get_frontiers();
 
-        // Create MemoryBlock for DB
+        // Create MemoryBlock for DB.
         let db_block = pattern_db::models::MemoryBlock {
             id: block_id.clone(),
             agent_id: agent_id.to_string(),
-            label: label.to_string(),
-            description: description.to_string(),
+            label,
+            description,
             block_type: block_type.into(),
             char_limit: effective_char_limit as i64,
             permission: pattern_db::models::MemoryPermission::ReadWrite,
@@ -1373,15 +1378,13 @@ mod tests {
         let (_dir, dbs) = test_dbs_with_agent().await;
         let cache = MemoryCache::new(dbs);
 
-        // Create a block using MemoryStore trait
+        // Create a block using MemoryStore trait.
         let created_doc = cache
             .create_block(
                 "agent_1",
-                "test_block",
-                "Test block description",
-                BlockType::Working,
-                BlockSchema::text(),
-                1000,
+                BlockCreate::new("test_block", BlockType::Working, BlockSchema::text())
+                    .with_description("Test block description")
+                    .with_char_limit(1000),
             )
             .await
             .unwrap();
@@ -1406,15 +1409,13 @@ mod tests {
         let (_dir, dbs) = test_dbs_with_agent().await;
         let cache = MemoryCache::new(dbs);
 
-        // Create multiple blocks
+        // Create multiple blocks.
         cache
             .create_block(
                 "agent_1",
-                "block1",
-                "First block",
-                BlockType::Core,
-                BlockSchema::text(),
-                1000,
+                BlockCreate::new("block1", BlockType::Core, BlockSchema::text())
+                    .with_description("First block")
+                    .with_char_limit(1000),
             )
             .await
             .unwrap();
@@ -1422,11 +1423,9 @@ mod tests {
         cache
             .create_block(
                 "agent_1",
-                "block2",
-                "Second block",
-                BlockType::Working,
-                BlockSchema::text(),
-                2000,
+                BlockCreate::new("block2", BlockType::Working, BlockSchema::text())
+                    .with_description("Second block")
+                    .with_char_limit(2000),
             )
             .await
             .unwrap();
@@ -1434,11 +1433,9 @@ mod tests {
         cache
             .create_block(
                 "agent_1",
-                "block3",
-                "Third block",
-                BlockType::Core,
-                BlockSchema::text(),
-                1500,
+                BlockCreate::new("block3", BlockType::Core, BlockSchema::text())
+                    .with_description("Third block")
+                    .with_char_limit(1500),
             )
             .await
             .unwrap();
@@ -1467,15 +1464,13 @@ mod tests {
         let (_dir, dbs) = test_dbs_with_agent().await;
         let cache = MemoryCache::new(dbs);
 
-        // Create a block
+        // Create a block.
         cache
             .create_block(
                 "agent_1",
-                "to_delete",
-                "Will be deleted",
-                BlockType::Working,
-                BlockSchema::text(),
-                1000,
+                BlockCreate::new("to_delete", BlockType::Working, BlockSchema::text())
+                    .with_description("Will be deleted")
+                    .with_char_limit(1000),
             )
             .await
             .unwrap();
@@ -1501,15 +1496,13 @@ mod tests {
         let (_dir, dbs) = test_dbs_with_agent().await;
         let cache = MemoryCache::new(dbs);
 
-        // Create a block
+        // Create a block.
         cache
             .create_block(
                 "agent_1",
-                "content_test",
-                "Test content rendering",
-                BlockType::Working,
-                BlockSchema::text(),
-                1000,
+                BlockCreate::new("content_test", BlockType::Working, BlockSchema::text())
+                    .with_description("Test content rendering")
+                    .with_char_limit(1000),
             )
             .await
             .unwrap();
@@ -1594,15 +1587,13 @@ mod tests {
         let (_dir, dbs) = test_dbs_with_agent().await;
         let cache = MemoryCache::new(dbs);
 
-        // Create a block
+        // Create a block.
         cache
             .create_block(
                 "agent_1",
-                "metadata_test",
-                "Test metadata retrieval",
-                BlockType::Core,
-                BlockSchema::text(),
-                5000,
+                BlockCreate::new("metadata_test", BlockType::Core, BlockSchema::text())
+                    .with_description("Test metadata retrieval")
+                    .with_char_limit(5000),
             )
             .await
             .unwrap();
@@ -1631,15 +1622,13 @@ mod tests {
         let (_dir, dbs) = test_dbs_with_agent().await;
         let cache = MemoryCache::new(dbs.clone());
 
-        // Create blocks with searchable content
+        // Create blocks with searchable content.
         cache
             .create_block(
                 "agent_1",
-                "persona",
-                "Agent personality",
-                BlockType::Core,
-                BlockSchema::text(),
-                1000,
+                BlockCreate::new("persona", BlockType::Core, BlockSchema::text())
+                    .with_description("Agent personality")
+                    .with_char_limit(1000),
             )
             .await
             .unwrap();
@@ -1657,15 +1646,13 @@ mod tests {
         cache.mark_dirty("agent_1", "persona");
         cache.persist_block("agent_1", "persona").await.unwrap();
 
-        // Create another block
+        // Create another block.
         cache
             .create_block(
                 "agent_1",
-                "notes",
-                "Working notes",
-                BlockType::Working,
-                BlockSchema::text(),
-                1000,
+                BlockCreate::new("notes", BlockType::Working, BlockSchema::text())
+                    .with_description("Working notes")
+                    .with_char_limit(1000),
             )
             .await
             .unwrap();
@@ -1809,15 +1796,13 @@ mod tests {
         let (_dir, dbs) = test_dbs_with_agent().await;
         let cache = MemoryCache::new(dbs.clone());
 
-        // Create a memory block
+        // Create a memory block.
         cache
             .create_block(
                 "agent_1",
-                "persona",
-                "Agent personality",
-                BlockType::Core,
-                BlockSchema::text(),
-                1000,
+                BlockCreate::new("persona", BlockType::Core, BlockSchema::text())
+                    .with_description("Agent personality")
+                    .with_char_limit(1000),
             )
             .await
             .unwrap();
@@ -1832,7 +1817,7 @@ mod tests {
         cache.mark_dirty("agent_1", "persona");
         cache.persist_block("agent_1", "persona").await.unwrap();
 
-        // Create an archival entry
+        // Create an archival entry.
         cache
             .insert_archival(
                 "agent_1",
@@ -1933,15 +1918,13 @@ mod tests {
         let (_dir, dbs) = test_dbs_with_agent().await;
         let cache = MemoryCache::new(dbs.clone());
 
-        // Create data in both memory blocks and archival
+        // Create data in both memory blocks and archival.
         cache
             .create_block(
                 "agent_1",
-                "test_block",
-                "Test",
-                BlockType::Working,
-                BlockSchema::text(),
-                1000,
+                BlockCreate::new("test_block", BlockType::Working, BlockSchema::text())
+                    .with_description("Test")
+                    .with_char_limit(1000),
             )
             .await
             .unwrap();
@@ -2070,11 +2053,9 @@ mod tests {
         let doc = cache
             .create_block(
                 "agent_1",
-                "test_replace",
-                "Test block for replacement",
-                BlockType::Working,
-                BlockSchema::text(),
-                1000,
+                BlockCreate::new("test_replace", BlockType::Working, BlockSchema::text())
+                    .with_description("Test block for replacement")
+                    .with_char_limit(1000),
             )
             .await
             .unwrap();
@@ -2117,11 +2098,9 @@ mod tests {
         let doc = cache
             .create_block(
                 "agent_1",
-                "test_replace",
-                "Test block for replacement",
-                BlockType::Working,
-                BlockSchema::text(),
-                1000,
+                BlockCreate::new("test_replace", BlockType::Working, BlockSchema::text())
+                    .with_description("Test block for replacement")
+                    .with_char_limit(1000),
             )
             .await
             .unwrap();
@@ -2154,11 +2133,9 @@ mod tests {
         let doc = cache
             .create_block(
                 "agent_1",
-                "unicode_test",
-                "Test block for Unicode replacement",
-                BlockType::Working,
-                BlockSchema::text(),
-                1000,
+                BlockCreate::new("unicode_test", BlockType::Working, BlockSchema::text())
+                    .with_description("Test block for Unicode replacement")
+                    .with_char_limit(1000),
             )
             .await
             .unwrap();

@@ -266,8 +266,9 @@ pub enum RuntimeError {
 
     /// The Haskell SDK directory could not be found at the expected location.
     ///
-    /// Returned by [`SdkLocation::resolve()`] when the configured directory does
-    /// not exist. `hint` provides actionable guidance (e.g., set `PATTERN_SDK_DIR`).
+    /// Returned by `SdkLocation::resolve()` (pattern_runtime) when the
+    /// configured directory does not exist. `hint` provides actionable
+    /// guidance (e.g., set `PATTERN_SDK_DIR`).
     ///
     /// # Example
     ///

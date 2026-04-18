@@ -81,7 +81,7 @@ pub use types::block_ref::BlockRef;
 pub use types::message::{Message, ResponseMeta};
 
 // Block value types
-pub use types::block::{BlockHandle, BlockWrite, BlockWriteKind};
+pub use types::block::{BlockCreate, BlockHandle, BlockWrite, BlockWriteKind};
 
 // Origin / provenance
 pub use types::origin::{AgentAuthor, Author, Human, MessageOrigin, Partner, Sphere, SystemReason};

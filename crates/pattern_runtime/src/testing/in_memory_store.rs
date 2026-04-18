@@ -23,6 +23,7 @@ use pattern_core::memory::{
     SearchOptions, SharedBlockInfo, StructuredDocument,
 };
 use pattern_core::traits::MemoryStore;
+use pattern_core::types::block::BlockCreate;
 use serde_json::Value as JsonValue;
 
 /// Key used by the in-memory store: `(agent_id, label)` — the shape the
@@ -55,25 +56,21 @@ impl MemoryStore for InMemoryMemoryStore {
     async fn create_block(
         &self,
         agent_id: &str,
-        label: &str,
-        description: &str,
-        block_type: BlockType,
-        schema: BlockSchema,
-        char_limit: usize,
+        create: BlockCreate,
     ) -> MemoryResult<StructuredDocument> {
-        let mut metadata = BlockMetadata::standalone(schema.clone());
+        let mut metadata = BlockMetadata::standalone(create.schema.clone());
         metadata.agent_id = agent_id.to_string();
-        metadata.label = label.to_string();
-        metadata.description = description.to_string();
-        metadata.block_type = block_type;
-        metadata.char_limit = char_limit;
+        metadata.label = create.label.clone();
+        metadata.description = create.description.clone();
+        metadata.block_type = create.block_type;
+        metadata.char_limit = create.char_limit;
         let doc = StructuredDocument::new_with_metadata(metadata, Some(agent_id.to_string()));
         let mut guard = self.blocks.lock().unwrap();
         guard.insert(
-            (agent_id.to_string(), label.to_string()),
+            (agent_id.to_string(), create.label),
             BlockRecord {
                 document: doc.clone(),
-                block_type,
+                block_type: create.block_type,
             },
         );
         Ok(doc)

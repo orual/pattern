@@ -1,0 +1,318 @@
+//! Session-stable cache policy. Latched at session open; never mutated
+//! mid-session.
+//!
+//! # Why session-latched
+//!
+//! Empirically, mid-session TTL or scope flips bust the server-side
+//! prompt cache wholesale (observed ~20K tokens per flip on Anthropic's
+//! subscription tier). Cache-friendly design is to lock the policy at
+//! the point of session open and make it immutable for the session's
+//! duration.
+//!
+//! # genai types
+//!
+//! Uses `genai::chat::CacheControl` directly per the Phase 5 Task 1
+//! decision — no pattern-side mirror, no `From`-conversion layer.
+//! `CacheControl` is already re-exported from
+//! `pattern_core::types::provider` for callers that want it without
+//! pulling genai directly.
+
+use genai::chat::CacheControl;
+
+/// Session-latched cache policy. See module docs for rationale.
+#[derive(Debug, Clone)]
+pub struct CacheProfile {
+    /// TTL for segment 1 (system + instructions + tools). Default
+    /// `Ephemeral1h` for the long-lived-stable content — identity,
+    /// base instructions, tool schemas don't churn within a session.
+    /// Downgrades to `Ephemeral5m` when `allow_extended_ttl` is false.
+    pub segment_1_ttl: CacheControl,
+
+    /// TTL for segment 2 (message-history boundary). Default
+    /// `Ephemeral5m`. Segment 2 carries prior-turn messages + any
+    /// memory-change pseudo-messages emitted this turn.
+    pub segment_2_ttl: CacheControl,
+
+    /// TTL for segment 3 (memory pseudo-turn). Default `Ephemeral5m`.
+    /// Segment 3 is the `[memory:current_state]` pseudo-turn carrying
+    /// current block state; naturally shorter TTL since block edits
+    /// invalidate it.
+    pub segment_3_ttl: CacheControl,
+
+    /// Whether extended-TTL (`Ephemeral1h` / `Ephemeral24h`) is
+    /// permitted for this session. Latched from subscription-tier
+    /// status at session open:
+    ///
+    /// - OAuth subscription tier with `extended-cache-ttl-2025-04-11`
+    ///   beta available → `true`
+    /// - API-key tier with the beta available → `true`
+    /// - Subscription-in-overage (future billing-aware plan) → `false`
+    ///
+    /// When `false`, [`segment_1_control`](Self::segment_1_control)
+    /// downgrades `Ephemeral1h` / `Ephemeral24h` → `Ephemeral5m` with a
+    /// `tracing::warn` so cache-break-detection can attribute the
+    /// downgrade if it surfaces as a cache bust.
+    pub allow_extended_ttl: bool,
+
+    /// Cache-placement strategy. Phase 5 only supports
+    /// [`CacheStrategy::Default`]; `McpAware` and `BedrockExtraBody`
+    /// are declared for API-shape stability against future plans but
+    /// panic via `todo!` if used at composer-pass time.
+    pub strategy: CacheStrategy,
+}
+
+/// Cache-placement strategy enum. `#[non_exhaustive]` because future
+/// strategies (MCP-aware, Bedrock extra-body, etc.) will be added in
+/// subsequent phases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CacheStrategy {
+    /// Three-segment layout: system+tools → history+pseudo-msgs →
+    /// memory-current-state. Phase 5 default.
+    Default,
+
+    /// Future: MCP integration plan. Adapts cache boundaries when MCP
+    /// tools are dynamically discovered or removed mid-session.
+    /// Currently unimplemented; composer pass panics with `todo!` if
+    /// encountered.
+    McpAware,
+
+    /// Future: Bedrock provider plan. Different cache-boundary rules
+    /// driven by AWS Bedrock's request shape.
+    BedrockExtraBody,
+}
+
+impl CacheProfile {
+    /// Default profile for an OAuth subscription-tier session with
+    /// extended-cache-ttl beta available.
+    pub fn default_anthropic_subscriber() -> Self {
+        Self {
+            segment_1_ttl: CacheControl::Ephemeral1h,
+            segment_2_ttl: CacheControl::Ephemeral5m,
+            segment_3_ttl: CacheControl::Ephemeral5m,
+            allow_extended_ttl: true,
+            strategy: CacheStrategy::Default,
+        }
+    }
+
+    /// Default profile for an API-key-tier session. Same defaults as
+    /// the subscription-tier path — Pattern doesn't model scope (single
+    /// user, single org) so API-key and subscription-OAuth shapes are
+    /// identical at the profile level.
+    pub fn default_api_key() -> Self {
+        Self {
+            segment_1_ttl: CacheControl::Ephemeral1h,
+            segment_2_ttl: CacheControl::Ephemeral5m,
+            segment_3_ttl: CacheControl::Ephemeral5m,
+            allow_extended_ttl: true,
+            strategy: CacheStrategy::Default,
+        }
+    }
+
+    /// Resolve the effective segment-1 `CacheControl`, respecting
+    /// `allow_extended_ttl`. When extended TTL isn't permitted,
+    /// downgrades `Ephemeral1h` / `Ephemeral24h` → `Ephemeral5m` with a
+    /// `tracing::warn` so cache-break-detection can attribute any
+    /// bust that results.
+    pub fn segment_1_control(&self) -> CacheControl {
+        match (self.allow_extended_ttl, &self.segment_1_ttl) {
+            (false, CacheControl::Ephemeral1h | CacheControl::Ephemeral24h) => {
+                tracing::warn!(
+                    requested = ?self.segment_1_ttl,
+                    applied = "Ephemeral5m",
+                    "segment_1 extended TTL not permitted; downgrading",
+                );
+                CacheControl::Ephemeral5m
+            }
+            _ => self.segment_1_ttl.clone(),
+        }
+    }
+
+    /// Segment-2 effective `CacheControl`. Segments 2 and 3 aren't
+    /// downgrade-gated because `Ephemeral5m` is always permitted.
+    pub fn segment_2_control(&self) -> CacheControl {
+        self.segment_2_ttl.clone()
+    }
+
+    /// Segment-3 effective `CacheControl`.
+    pub fn segment_3_control(&self) -> CacheControl {
+        self.segment_3_ttl.clone()
+    }
+
+    /// True if any effective segment control requires the
+    /// `extended-cache-ttl-2025-04-11` beta header (i.e., uses
+    /// `Ephemeral1h` or `Ephemeral24h`). The shaper / gateway is
+    /// responsible for ensuring the header is present; the composer's
+    /// finalize pass validates it.
+    pub fn requires_extended_ttl_beta(&self) -> bool {
+        [
+            self.segment_1_control(),
+            self.segment_2_control(),
+            self.segment_3_control(),
+        ]
+        .iter()
+        .any(|cc| matches!(cc, CacheControl::Ephemeral1h | CacheControl::Ephemeral24h))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tracing_test::traced_test;
+
+    // --- Test 1: default_anthropic_subscriber returns expected defaults ---
+
+    #[test]
+    fn default_anthropic_subscriber_returns_expected_defaults() {
+        let profile = CacheProfile::default_anthropic_subscriber();
+        assert_eq!(profile.segment_1_ttl, CacheControl::Ephemeral1h);
+        assert_eq!(profile.segment_2_ttl, CacheControl::Ephemeral5m);
+        assert_eq!(profile.segment_3_ttl, CacheControl::Ephemeral5m);
+        assert!(profile.allow_extended_ttl);
+        assert_eq!(profile.strategy, CacheStrategy::Default);
+    }
+
+    // --- Test 2: default_api_key returns identical defaults ---
+
+    #[test]
+    fn default_api_key_returns_same_defaults_as_subscriber() {
+        let subscriber = CacheProfile::default_anthropic_subscriber();
+        let api_key = CacheProfile::default_api_key();
+        assert_eq!(subscriber.segment_1_ttl, api_key.segment_1_ttl);
+        assert_eq!(subscriber.segment_2_ttl, api_key.segment_2_ttl);
+        assert_eq!(subscriber.segment_3_ttl, api_key.segment_3_ttl);
+        assert_eq!(subscriber.allow_extended_ttl, api_key.allow_extended_ttl);
+        assert_eq!(subscriber.strategy, api_key.strategy);
+    }
+
+    // --- Test 3: allow_extended_ttl=false downgrades 1h to 5m with warn ---
+
+    #[traced_test]
+    #[test]
+    fn allow_extended_false_downgrades_1h_to_5m_with_warn() {
+        let profile = CacheProfile {
+            segment_1_ttl: CacheControl::Ephemeral1h,
+            segment_2_ttl: CacheControl::Ephemeral5m,
+            segment_3_ttl: CacheControl::Ephemeral5m,
+            allow_extended_ttl: false,
+            strategy: CacheStrategy::Default,
+        };
+
+        let effective = profile.segment_1_control();
+        assert_eq!(effective, CacheControl::Ephemeral5m);
+        assert!(logs_contain("downgrading"));
+    }
+
+    // --- Test 4: allow_extended_ttl=false with 5m stored does NOT warn ---
+
+    #[traced_test]
+    #[test]
+    fn allow_extended_false_with_5m_stored_does_not_warn() {
+        let profile = CacheProfile {
+            segment_1_ttl: CacheControl::Ephemeral5m,
+            segment_2_ttl: CacheControl::Ephemeral5m,
+            segment_3_ttl: CacheControl::Ephemeral5m,
+            allow_extended_ttl: false,
+            strategy: CacheStrategy::Default,
+        };
+
+        let effective = profile.segment_1_control();
+        assert_eq!(effective, CacheControl::Ephemeral5m);
+        assert!(!logs_contain("downgrading"));
+    }
+
+    // --- Test 5: allow_extended_ttl=true respects stored segment_1_ttl ---
+
+    #[test]
+    fn allow_extended_true_preserves_stored_segment_1_ttl() {
+        let profile = CacheProfile {
+            segment_1_ttl: CacheControl::Ephemeral1h,
+            segment_2_ttl: CacheControl::Ephemeral5m,
+            segment_3_ttl: CacheControl::Ephemeral5m,
+            allow_extended_ttl: true,
+            strategy: CacheStrategy::Default,
+        };
+        assert_eq!(profile.segment_1_control(), CacheControl::Ephemeral1h);
+    }
+
+    // --- Test 6a: requires_extended_ttl_beta true when seg1 is 1h and allow=true ---
+
+    #[test]
+    fn requires_extended_ttl_beta_true_when_seg1_is_1h_and_allowed() {
+        let profile = CacheProfile {
+            segment_1_ttl: CacheControl::Ephemeral1h,
+            segment_2_ttl: CacheControl::Ephemeral5m,
+            segment_3_ttl: CacheControl::Ephemeral5m,
+            allow_extended_ttl: true,
+            strategy: CacheStrategy::Default,
+        };
+        assert!(profile.requires_extended_ttl_beta());
+    }
+
+    // --- Test 6b: requires_extended_ttl_beta false when all effective are 5m ---
+
+    #[test]
+    fn requires_extended_ttl_beta_false_when_all_effective_5m() {
+        // Includes the downgrade case: stored 1h but allow=false → effective 5m.
+        let profile = CacheProfile {
+            segment_1_ttl: CacheControl::Ephemeral1h,
+            segment_2_ttl: CacheControl::Ephemeral5m,
+            segment_3_ttl: CacheControl::Ephemeral5m,
+            allow_extended_ttl: false,
+            strategy: CacheStrategy::Default,
+        };
+        assert!(!profile.requires_extended_ttl_beta());
+    }
+
+    // --- Test 6c: requires_extended_ttl_beta true when seg2 or seg3 is 1h ---
+
+    #[test]
+    fn requires_extended_ttl_beta_true_when_seg2_is_1h() {
+        let profile = CacheProfile {
+            segment_1_ttl: CacheControl::Ephemeral5m,
+            segment_2_ttl: CacheControl::Ephemeral1h,
+            segment_3_ttl: CacheControl::Ephemeral5m,
+            allow_extended_ttl: true,
+            strategy: CacheStrategy::Default,
+        };
+        assert!(profile.requires_extended_ttl_beta());
+    }
+
+    #[test]
+    fn requires_extended_ttl_beta_true_when_seg3_is_24h() {
+        let profile = CacheProfile {
+            segment_1_ttl: CacheControl::Ephemeral5m,
+            segment_2_ttl: CacheControl::Ephemeral5m,
+            segment_3_ttl: CacheControl::Ephemeral24h,
+            allow_extended_ttl: true,
+            strategy: CacheStrategy::Default,
+        };
+        assert!(profile.requires_extended_ttl_beta());
+    }
+
+    // --- Test 7: CacheStrategy variants are constructible ---
+
+    #[test]
+    fn cache_strategy_variants_are_constructible() {
+        let _default = CacheStrategy::Default;
+        let _mcp = CacheStrategy::McpAware;
+        let _bedrock = CacheStrategy::BedrockExtraBody;
+    }
+
+    // --- Additional: 24h also downgrades when allow_extended=false ---
+
+    #[traced_test]
+    #[test]
+    fn allow_extended_false_downgrades_24h_to_5m_with_warn() {
+        let profile = CacheProfile {
+            segment_1_ttl: CacheControl::Ephemeral24h,
+            segment_2_ttl: CacheControl::Ephemeral5m,
+            segment_3_ttl: CacheControl::Ephemeral5m,
+            allow_extended_ttl: false,
+            strategy: CacheStrategy::Default,
+        };
+        let effective = profile.segment_1_control();
+        assert_eq!(effective, CacheControl::Ephemeral5m);
+        assert!(logs_contain("downgrading"));
+    }
+}

@@ -18,6 +18,7 @@
 //! three-segment cache layout defined in the v3 foundation design.
 
 pub mod auth;
+pub mod compose;
 #[cfg(feature = "subscription-oauth")]
 pub mod creds_store;
 pub mod gateway;

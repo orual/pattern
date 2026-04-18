@@ -141,3 +141,47 @@ determines the JIT effect tag. The canonical order is Prelude-5 first,
 then rarer effects:
 `Memory, Message, Display, Time, Log, Shell, File, Sources, Mcp, Rpc,
 Spawn`. Agent `Eff '[...]` rows must line up with this prefix.
+
+## Known flakes — MUST fix before GA
+
+These tests pass in isolation but intermittently fail under
+`cargo nextest run --workspace` parallel load. Observed 2026-04-17
+during Phase 5 Tier 1 work; different tests fail on different runs,
+so the root cause is load-induced contention rather than a per-test
+regression. **This is tech debt that blocks shipping a stable release**
+— CI that occasionally fails for reasons unrelated to the PR under
+review corrodes trust in the signal.
+
+**Flaky tests observed so far:**
+
+- `session_lifecycle::open_step_twice_does_not_recompile`
+- `timeout::hard_abandon_await_enforces_cancel_grace_ceiling`
+
+Both touch the `tidepool-extract` subprocess path. Hypothesis: when N
+parallel test binaries spawn `tidepool-extract` concurrently, they
+contend on some combination of:
+
+- Shared cache / temp-dir paths (spurious "was recompiled" signal when
+  another test touched the cache state between open and step)
+- Wall-clock margins tight enough that scheduler jitter under load
+  pushes grace-ceiling assertions past their threshold
+- Filesystem-level races on the extract binary's lockfile or scratch
+  directory
+
+**Investigation vectors** (pick up when we come back to this):
+
+1. Add tracing-level logging to the subprocess spawn / cache-lookup
+   path to see which shared resource is getting hit.
+2. Run the suite under `cargo nextest run --test-threads=1` to confirm
+   single-threaded runs are always clean. If yes, contention is the
+   whole story; if no, there's a second bug.
+3. Check whether per-test tempdirs are actually per-test, or whether
+   something's collapsing to a shared `/tmp` or `$XDG_CACHE_HOME` path.
+4. For the timeout test specifically: widen the grace ceiling to
+   something less schedule-sensitive, or switch from wall-clock to a
+   deterministic tokio-test clock.
+
+**Why not fix it now:** the flake is intermittent, passes on rerun, and
+doesn't block Phase 5 work. Pushing it behind a phase boundary prevents
+scope creep. But it must be addressed before shipping — a flaky CI is
+worse than a slower CI.

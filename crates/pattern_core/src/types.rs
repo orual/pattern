@@ -16,7 +16,7 @@ pub mod snapshot;
 pub mod turn;
 
 pub use batch::{BatchType, MessageBatch};
-pub use block::{BlockHandle, BlockWrite, BlockWriteKind};
+pub use block::{BlockCreate, BlockHandle, BlockWrite, BlockWriteKind};
 pub use block_ref::BlockRef;
 pub use ids::{
     AgentId, BatchId, ConstellationId, ConversationId, DiscordIdentityId, EventId, GroupId,
