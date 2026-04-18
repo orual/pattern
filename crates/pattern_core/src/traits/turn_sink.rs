@@ -36,7 +36,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::provider::{ToolCall, ToolResult};
+use crate::types::provider::{CompletionRequest, ToolCall, ToolResult};
 use crate::types::turn::StopReason;
 
 /// Sub-variant of [`TurnEvent::Display`] — which Haskell
@@ -98,6 +98,11 @@ pub enum DisplayKind {
 ///   reasons (anything except `ToolUse`) mark the end of the
 ///   user-visible exchange; the next `Stop` will belong to a fresh
 ///   `Session::step` call.
+/// - [`ComposedRequest`](TurnEvent::ComposedRequest) — the composer
+///   produced a complete `CompletionRequest` for this wire turn.
+///   Emitted once per wire turn, immediately before the provider
+///   call. Full request struct (boxed); sinks decide how much to
+///   render or discard.
 ///
 /// # UX guidance for the text-bearing variants
 ///
@@ -168,6 +173,26 @@ pub enum TurnEvent {
     /// the user-visible exchange is complete; otherwise the driver
     /// will issue a follow-up turn with tool results.
     Stop(StopReason),
+    /// The composer produced a complete [`CompletionRequest`]; the
+    /// orchestrator is about to hand it to the provider. Emitted
+    /// once per wire turn, immediately before
+    /// `ProviderClient::complete`.
+    ///
+    /// Intended for debugging, request replay / snapshot testing,
+    /// and cache-behaviour inspection. The event carries the FULL
+    /// request struct — sinks choose how much to render or log.
+    /// [`NoOpSink`] drops it immediately (free); [`VecSink`]
+    /// retains it (memory grows linearly with wire-turn count; call
+    /// `drain()` periodically for long sessions).
+    ///
+    /// Boxed to keep the enum stable-sized —
+    /// [`CompletionRequest`] is large and variable.
+    ///
+    /// Historical note: the previous "dump via `tracing::debug`"
+    /// approach produced massive logs that were painful to grep
+    /// and noisy in CI. The sink-based tap is opt-in — only
+    /// subscribers that care pay the clone cost.
+    ComposedRequest(Box<CompletionRequest>),
 }
 
 /// Destination for [`TurnEvent`]s emitted during a wire turn.
@@ -287,6 +312,32 @@ mod tests {
         assert_eq!(j, r#""final""#);
         let j = serde_json::to_string(&DisplayKind::Note).unwrap();
         assert_eq!(j, r#""note""#);
+    }
+
+    #[test]
+    fn vec_sink_captures_composed_request() {
+        let sink = VecSink::new();
+        let req = CompletionRequest::new("claude-opus-4-7");
+        sink.emit(TurnEvent::ComposedRequest(Box::new(req)));
+        sink.emit(TurnEvent::Stop(StopReason::EndTurn));
+
+        let events = sink.snapshot();
+        assert_eq!(events.len(), 2);
+        match &events[0] {
+            TurnEvent::ComposedRequest(boxed) => {
+                assert_eq!(boxed.model, "claude-opus-4-7");
+            }
+            other => panic!("expected ComposedRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn noop_sink_drops_composed_request_without_panicking() {
+        // The full-struct clone cost is opt-in — NoOpSink callers pay
+        // nothing for this variant at runtime.
+        let sink = NoOpSink;
+        let req = CompletionRequest::new("claude-sonnet-4-20250514");
+        sink.emit(TurnEvent::ComposedRequest(Box::new(req)));
     }
 
     #[test]

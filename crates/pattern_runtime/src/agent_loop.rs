@@ -154,6 +154,13 @@ pub async fn orchestrate(
     //    1/2/3 + fresh input messages appended) — `orchestrate`
     //    itself doesn't know about the cache layout.
     let sink = ctx.turn_sink().clone();
+
+    // Emit the composed request to the sink BEFORE shipping it —
+    // consumers (debug UIs, replay snapshot capture, Task 15
+    // cache-test observers) tap the request here. NoOpSink drops
+    // immediately; subscribers pay a single clone per wire turn.
+    sink.emit(TurnEvent::ComposedRequest(Box::new(req.clone())));
+
     let mut stream =
         ctx.provider()
             .complete(req)
