@@ -24,11 +24,28 @@
 //! # Module layout
 //!
 //! - [`profile`] — [`CacheProfile`] + [`CacheStrategy`]. Session-latched
-//!   cache policy.
+//!   cache policy (Phase 5 Task 2).
+//! - [`pipeline`] — [`pipeline::ComposerPass`] trait, [`pipeline::compose`]
+//!   orchestrator, and [`pipeline::finalize`] request assembly
+//!   (Phase 5 Task 3).
+//! - [`partial_request`] — [`partial_request::PartialRequest`], the
+//!   mutable request being assembled by composer passes.
+//! - [`breakpoints`] — [`breakpoints::BreakpointLocation`],
+//!   [`breakpoints::BreakpointPlacement`], and
+//!   [`breakpoints::BreakpointTracker`] — `cache_control` placement
+//!   + Anthropic's 4-marker-per-request budget enforcement.
 //!
-//! Future tasks (Phase 5 Tasks 3, 8–10) will add `pub mod pipeline`,
-//! `pub mod passes`, and related plumbing here.
+//! Future tasks (Phase 5 Tasks 8–10) will add `pub mod passes` with
+//! the concrete three-segment pass implementations.
 
+pub mod breakpoints;
+pub mod partial_request;
+pub mod pipeline;
 pub mod profile;
 
+// Convenience re-exports so call sites can type `compose::ComposerPass`
+// instead of `compose::pipeline::ComposerPass`.
+pub use breakpoints::{BreakpointLocation, BreakpointPlacement, BreakpointTracker};
+pub use partial_request::PartialRequest;
+pub use pipeline::{ComposerPass, compose, finalize};
 pub use profile::{CacheProfile, CacheStrategy};

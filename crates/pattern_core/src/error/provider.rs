@@ -265,4 +265,143 @@ pub enum ProviderError {
         /// Response body, if one was received.
         body: Option<String>,
     },
+
+    // ---- Composer pipeline errors (Phase 5) ----
+    //
+    // Produced by `pattern_provider::compose` passes and the finalization
+    // step. Surfaced when a composer pass fails, a cache-breakpoint budget
+    // is exceeded, a placement targets an out-of-bounds index, or the
+    // required beta header is missing when extended-TTL markers are in use.
+    /// A composer pass returned an error. The pass name + inner error are
+    /// preserved for diagnosis; pass names are internal string literals
+    /// (`"segment_1"`, `"segment_2"`, …).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::ProviderError;
+    ///
+    /// let inner = ProviderError::ShaperMisconfigured {
+    ///     reason: "x_app empty".into(),
+    /// };
+    /// let err = ProviderError::ComposerPassFailed {
+    ///     pass: "segment_1".into(),
+    ///     source: Box::new(inner),
+    /// };
+    /// assert!(err.to_string().contains("segment_1"));
+    /// ```
+    #[error("composer pass '{pass}' failed: {source}")]
+    #[diagnostic(
+        code(pattern_core::provider::composer_pass_failed),
+        help("check the source error for the pass-specific failure reason")
+    )]
+    ComposerPassFailed {
+        /// Name of the pass that failed (e.g., `"segment_1"`).
+        pass: String,
+        /// Underlying error that caused the failure.
+        #[source]
+        source: Box<ProviderError>,
+    },
+
+    /// A composer pass attempted to place a cache_control marker when the
+    /// breakpoint budget (Anthropic: 4 per request) was already exhausted.
+    /// The `placed_by` list identifies which passes already consumed
+    /// breakpoints; `attempted_by` names the pass that would have placed
+    /// the fifth marker.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::ProviderError;
+    ///
+    /// let err = ProviderError::CacheBreakpointBudgetExceeded {
+    ///     budget: 4,
+    ///     placed_by: vec!["segment_1".into(), "segment_2".into(),
+    ///                      "segment_3".into(), "cache_reference".into()],
+    ///     attempted_by: "cache_edits".into(),
+    /// };
+    /// assert!(err.to_string().contains("4"));
+    /// ```
+    #[error(
+        "cache breakpoint budget of {budget} exceeded (placed by {placed_by:?}; \
+         '{attempted_by}' attempted to exceed it)"
+    )]
+    #[diagnostic(
+        code(pattern_core::provider::breakpoint_budget_exceeded),
+        help(
+            "anthropic allows at most 4 cache_control markers per request; \
+             review the pipeline pass set and drop a marker placement"
+        )
+    )]
+    CacheBreakpointBudgetExceeded {
+        /// Maximum number of breakpoints allowed (Anthropic: 4).
+        budget: usize,
+        /// Names of passes that had already placed breakpoints when the
+        /// budget-exceeding attempt fired.
+        placed_by: Vec<String>,
+        /// Name of the pass that attempted to exceed the budget.
+        attempted_by: String,
+    },
+
+    /// A breakpoint placement targets an out-of-bounds index into its
+    /// location collection (system_blocks / messages / tools). Usually
+    /// indicates a composer pass running before the block it placed a
+    /// marker on was populated — order-of-operations bug.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::ProviderError;
+    ///
+    /// let err = ProviderError::InvalidBreakpointLocation {
+    ///     location: "system".into(),
+    ///     idx: 42,
+    /// };
+    /// assert!(err.to_string().contains("42"));
+    /// ```
+    #[error("breakpoint location '{location}' index {idx} is out of bounds")]
+    #[diagnostic(
+        code(pattern_core::provider::invalid_breakpoint_location),
+        help(
+            "a composer pass placed a marker at an index that doesn't \
+             exist in the final request — check pass ordering and any \
+             conditional message/block emission"
+        )
+    )]
+    InvalidBreakpointLocation {
+        /// Which collection the breakpoint targeted
+        /// (`"system"`, `"message"`, `"tool"`).
+        location: String,
+        /// The out-of-bounds index.
+        idx: usize,
+    },
+
+    /// A cache_control marker with extended-TTL semantics (`Ephemeral1h`
+    /// or `Ephemeral24h`) was placed but the outbound request lacks the
+    /// required `anthropic-beta: extended-cache-ttl-2025-04-11` header.
+    /// The shaper normally ensures the header is present when the
+    /// session's `CacheProfile::requires_extended_ttl_beta()` is true;
+    /// this variant surfaces when that invariant breaks.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::ProviderError;
+    ///
+    /// let err = ProviderError::MissingExtendedCacheTtlBeta;
+    /// assert!(err.to_string().contains("extended-cache-ttl"));
+    /// ```
+    #[error(
+        "composer placed an extended-TTL cache marker but the outbound \
+         request lacks the `extended-cache-ttl-2025-04-11` beta header"
+    )]
+    #[diagnostic(
+        code(pattern_core::provider::missing_extended_cache_ttl_beta),
+        help(
+            "ensure the shaper emits the extended-cache-ttl-2025-04-11 \
+             anthropic-beta marker when CacheProfile::requires_extended_ttl_beta() \
+             is true"
+        )
+    )]
+    MissingExtendedCacheTtlBeta,
 }
