@@ -126,12 +126,16 @@ pub struct ChatResponse {
     pub usage: Option<UsageInfo>,
 }
 
-/// Usage information for model calls
+/// Usage information for model calls.
+///
+/// Widths match `pattern_core::types::provider::{TokenCount, Usage}` — u64
+/// across the board. Anthropic's count_tokens surface is native u64, and
+/// cumulative counts from long-lived sessions can exceed u32::MAX.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageInfo {
-    pub input_tokens: u32,
-    pub output_tokens: u32,
-    pub total_tokens: u32,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
     pub model: String,
 }
 

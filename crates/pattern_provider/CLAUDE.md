@@ -92,18 +92,18 @@ shaper's `build_system_prompt` drops empty fragments before joining —
 empty persona + empty extras in `SubscriptionRoutingShape` produces a
 two-block system (slot[0] + slot[1]), not a three-block system with an
 empty slot[2]. Tests pin this behaviour in
-`shaper/system_prompt.rs::tests::subscription_routing_skips_slot_2_*`.
+`shaper/anthropic/system_prompt.rs::tests::subscription_routing_skips_slot_2_*`.
 
 ## Beta-header allow / deny list
 
 The `Anthropic-Beta` value is curated per-request by
-`shaper::headers::build_beta_header_value`. This function is the
+`shaper::anthropic::headers::build_beta_header_value`. This function is the
 **single source of truth** for the full header value — do NOT emit
 `anthropic-beta` from `gateway::auth_headers_for_tier` or any other
 path, as `BTreeMap::extend` is last-insert-wins per key and would
 silently overwrite the shaper's capability markers.
 
-**Auth-tier-conditional** (lives in `shaper::headers::build_beta_header_value`
+**Auth-tier-conditional** (lives in `shaper::anthropic::headers::build_beta_header_value`
 alongside the capability markers — NOT in `auth_headers_for_tier`):
 
 - `oauth-2025-04-20` — emitted for the PKCE + session-pickup tiers so

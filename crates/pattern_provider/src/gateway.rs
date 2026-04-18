@@ -433,26 +433,76 @@ async fn open_stream_with_retry(
             }
         };
 
-        // Peek the first event. This is the moment we know whether the
-        // HTTP request actually succeeded — genai tunnels non-2xx status
-        // as a stream error on the first poll.
-        let Some(first) = stream.next().await else {
-            // Empty stream (no events at all). Unusual but not retryable —
-            // could be an idle-closed connection or a broken server.
-            // Surface as an empty chunk stream; drain will see end=0 +
-            // errors=0 and callers can treat that as a hard failure.
+        // Peek the stream to detect early errors before committing to the
+        // caller. genai always emits `ChatStreamEvent::Start` as event 0
+        // (from the SSE "Open" pseudo-event), so we peek TWO events:
+        //
+        //   event 0: Start  → transport open, not yet proof of success
+        //   event 1: Chunk/End/ToolCallChunk (success) OR Err (failure)
+        //
+        // Only after seeing a non-Start Ok event do we commit. If event 1 is
+        // a retryable error (429, 5xx, transport), we drop the stream and
+        // re-open. This is why we must peek past Start — committing on Start
+        // alone would prevent retry for any HTTP-level error (they all start
+        // with a transport-open Start before the status propagates).
+        let Some(event_0) = stream.next().await else {
+            // Empty stream (no events at all). Unusual and not retryable.
             tracing::warn!("genai stream closed with zero events");
             let empty: futures::stream::Empty<Result<ChatStreamEvent, ProviderError>> =
                 futures::stream::empty();
             return Ok(Box::pin(empty));
         };
 
-        match first {
+        // If event 0 is not the expected Start, treat it like any other event.
+        let is_start = matches!(event_0, Ok(ChatStreamEvent::Start));
+        if !is_start {
+            match event_0 {
+                Ok(evt) => {
+                    let head = futures::stream::once(async move { Ok(evt) });
+                    let tail = stream.map(|r| r.map_err(map_genai_error));
+                    return Ok(Box::pin(head.chain(tail)));
+                }
+                Err(e) => {
+                    attempt += 1;
+                    if !is_first_event_retryable(&e) || attempt >= policy.max_attempts {
+                        return Err(map_genai_error(e));
+                    }
+                    let delay = exponential_backoff(attempt, policy.base_delay, policy.max_delay);
+                    let server_hint = server_rate_limit_hint(&e);
+                    let wait = server_hint
+                        .map(|h| h.min(policy.max_delay))
+                        .unwrap_or(delay);
+                    tracing::warn!(
+                        attempt,
+                        max = policy.max_attempts,
+                        wait_ms = wait.as_millis(),
+                        error = %e,
+                        "event-0 error; retrying"
+                    );
+                    tokio::time::sleep(wait).await;
+                    continue;
+                }
+            }
+        }
+
+        // event 0 is Start. Peek event 1 to see if the request actually
+        // succeeded — errors tunnel through event 1 for HTTP-level failures.
+        let start_evt = event_0; // Ok(Start)
+        let Some(event_1) = stream.next().await else {
+            // Start with no follow-up — unusual, treat as empty stream.
+            tracing::warn!("genai stream closed after Start with no content");
+            let empty: futures::stream::Empty<Result<ChatStreamEvent, ProviderError>> =
+                futures::stream::empty();
+            return Ok(Box::pin(empty));
+        };
+
+        match event_1 {
             Ok(evt) => {
-                // First event succeeded — request accepted, content (or
-                // End) is flowing. From here on, errors propagate to the
-                // caller; no more retries.
-                let head = futures::stream::once(async move { Ok(evt) });
+                // event 1 is Ok → request accepted, content is flowing.
+                // Stitch Start + event 1 back at the front, then the tail.
+                // All items are mapped through the ProviderError converter so
+                // the combined stream has a uniform item type.
+                let head = futures::stream::iter([start_evt.map_err(map_genai_error), Ok(evt)]);
                 let tail = stream.map(|r| r.map_err(map_genai_error));
                 return Ok(Box::pin(head.chain(tail)));
             }
@@ -462,9 +512,8 @@ async fn open_stream_with_retry(
                     return Err(map_genai_error(e));
                 }
                 let delay = exponential_backoff(attempt, policy.base_delay, policy.max_delay);
-                // Structured Retry-After/5h-reset extraction lives in
-                // map_webc_error; peek into the error to honour the
-                // server-provided hint when we have one.
+                // Parse the server-provided rate-limit hint from the error.
+                // The hint lives in HttpError's headers when available.
                 let server_hint = server_rate_limit_hint(&e);
                 let wait = server_hint
                     .map(|h| h.min(policy.max_delay))
@@ -474,7 +523,7 @@ async fn open_stream_with_retry(
                     max = policy.max_attempts,
                     wait_ms = wait.as_millis(),
                     error = %e,
-                    "first-event error; retrying"
+                    "first-event error after Start; retrying"
                 );
                 tokio::time::sleep(wait).await;
             }
@@ -524,6 +573,14 @@ fn server_rate_limit_hint(err: &genai::Error) -> Option<Duration> {
                 return Some(Duration::from_secs(s));
             }
             None
+        }
+        // `WebStream` wraps the raw BoxError from the transport layer. When
+        // the underlying error is a `genai::Error::HttpError` (the common
+        // case for 429s surfaced through the SSE stream), try to downcast
+        // and extract the rate-limit hint from there.
+        E::WebStream { error, .. } => {
+            let inner = error.downcast_ref::<E>()?;
+            server_rate_limit_hint(inner)
         }
         _ => None,
     }
@@ -609,10 +666,38 @@ fn map_genai_error(err: genai::Error) -> ProviderError {
             status: 0,
             body: Some(format!("stream parse error: {serde_error}")),
         },
-        E::WebStream { cause, .. } => ProviderError::RequestFailed {
-            status: 0,
-            body: Some(format!("stream transport error: {cause}")),
-        },
+        E::WebStream { cause, error, .. } => {
+            // `WebStream` wraps the raw BoxError from the SSE transport layer.
+            // When the underlying error is a `genai::Error::HttpError` (the
+            // common case for 429s and 5xx responses surfaced through the
+            // stream), downcast and map it properly so callers see structured
+            // `RateLimited` / `RequestFailed` rather than an opaque
+            // `RequestFailed { status: 0 }`. `genai::Error` is not `Clone`,
+            // so we downcast by reference and match the inner variant directly
+            // rather than delegating to `map_genai_error`.
+            if let Some(E::HttpError {
+                status,
+                body,
+                headers,
+                ..
+            }) = error.downcast_ref::<E>()
+            {
+                return if status.as_u16() == 429 {
+                    let retry_after =
+                        parse_rate_limit_reset(headers).unwrap_or_else(|| Duration::from_secs(60));
+                    ProviderError::RateLimited { retry_after }
+                } else {
+                    ProviderError::RequestFailed {
+                        status: status.as_u16(),
+                        body: Some(body.clone()),
+                    }
+                };
+            }
+            ProviderError::RequestFailed {
+                status: 0,
+                body: Some(format!("stream transport error: {cause}")),
+            }
+        }
         other => ProviderError::RequestFailed {
             status: 0,
             body: Some(other.to_string()),
@@ -713,7 +798,7 @@ fn auth_headers_for_tier(
         AuthTier::SessionPickup | AuthTier::Pkce => {
             headers.insert("authorization".into(), format!("Bearer {token}"));
             // NOTE: `anthropic-beta: oauth-2025-04-20` is intentionally NOT
-            // inserted here. It lives in `shaper::headers::build_beta_header_value`
+            // inserted here. It lives in `shaper::anthropic::headers::build_beta_header_value`
             // alongside the other beta markers (prompt-caching-scope, etc.).
             // Emitting it here would cause `BTreeMap::extend` in the caller to
             // overwrite the shaper's `anthropic-beta` value (last-insert-wins),
@@ -883,7 +968,7 @@ mod tests {
         // `anthropic-beta` is NOT emitted here — it lives in the shaper's
         // `build_beta_header_value` as the single source of truth. Emitting
         // it here would overwrite the shaper's capability markers via
-        // BTreeMap::extend (last-insert-wins). See shaper/headers.rs.
+        // BTreeMap::extend (last-insert-wins). See shaper/anthropic/headers.rs.
         assert!(
             !hdrs.contains_key("anthropic-beta"),
             "auth_headers_for_tier must not emit anthropic-beta; \

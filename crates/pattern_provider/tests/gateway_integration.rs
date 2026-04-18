@@ -9,10 +9,13 @@
 //! - **thinking/reasoning streaming** (Gemini): reasoning content surfaces
 //!   distinct from plain text.
 //! - **OAuth Bearer auth** (Anthropic): subscription-oauth tier produces
-//!   `Authorization: Bearer …` + `anthropic-beta: oauth-2025-04-20`,
-//!   distinct from API-key tier's `x-api-key`.
-//! - **429 retry**: first attempt 429 → exponential backoff → second
-//!   attempt 200 → stream completes. Exercises the gateway's retry loop.
+//!   `Authorization: Bearer …`; the shaper owns `anthropic-beta` (single
+//!   source of truth including the oauth marker), distinct from the API-key
+//!   tier's `x-api-key` path.
+//! - **429 retry-then-succeed**: first attempt 429 → exponential backoff →
+//!   second attempt 200 → stream completes. Proves retry logic is active.
+//! - **429 persistent**: all retries return 429 → error surfaces cleanly
+//!   with no content chunks leaking through.
 //! - **500 error**: surfaces as `ProviderError::RequestFailed` with the
 //!   status code preserved.
 //! - **missing credential**: `NoAuthAvailable` without hitting the wire.
@@ -33,6 +36,7 @@
 //!   yakbak fixture (`tests/data/yakbak/gemini/thinking_stream/response_000.txt`)
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use futures::stream::StreamExt;
@@ -51,7 +55,52 @@ use pattern_provider::shaper::{
 use secrecy::SecretString;
 use serde_json::json;
 use wiremock::matchers::{body_partial_json, header, header_exists, method, path, path_regex};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+// ---- Custom stateful responder for retry tests ----
+
+/// A responder that returns 429 on the first N calls, then 200 + SSE.
+/// Uses an AtomicUsize to track calls safely across async boundaries.
+struct RetryThenSucceed {
+    fail_times: usize,
+    calls: Arc<AtomicUsize>,
+    success_body: &'static str,
+    success_content_type: &'static str,
+}
+
+impl RetryThenSucceed {
+    fn new(
+        fail_times: usize,
+        success_body: &'static str,
+        success_content_type: &'static str,
+    ) -> (Self, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let responder = Self {
+            fail_times,
+            calls: Arc::clone(&calls),
+            success_body,
+            success_content_type,
+        };
+        (responder, calls)
+    }
+}
+
+impl Respond for RetryThenSucceed {
+    fn respond(&self, _: &Request) -> ResponseTemplate {
+        let call_n = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call_n < self.fail_times {
+            ResponseTemplate::new(429)
+                .set_body_string("rate limit exceeded")
+                .insert_header("retry-after", "0")
+                // Force connection close so the retry uses a fresh TCP connection
+                // rather than potentially reusing a keep-alive connection that's
+                // in a post-429 state.
+                .insert_header("connection", "close")
+        } else {
+            ResponseTemplate::new(200).set_body_raw(self.success_body, self.success_content_type)
+        }
+    }
+}
 
 // ---- Fixtures ----
 
@@ -345,13 +394,6 @@ async fn anthropic_oauth_bearer_auth_round_trip() {
 #[cfg(feature = "subscription-oauth")]
 #[tokio::test]
 async fn anthropic_oauth_first_party_beta_header_contains_both_markers() {
-    use std::sync::{Arc, Mutex};
-
-    // Capture the outbound `anthropic-beta` header so we can assert on its
-    // value without needing a wiremock matcher that does substring checks.
-    let captured_beta: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let captured_beta_clone = Arc::clone(&captured_beta);
-
     let server = MockServer::start().await;
 
     // Mount a permissive mock — we'll extract the header from wiremock's
@@ -416,10 +458,6 @@ async fn anthropic_oauth_first_party_beta_header_contains_both_markers() {
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    // Drop the capture — not actually needed since we read from wiremock
-    drop(captured_beta_clone);
-    drop(captured_beta);
-
     let beta = beta_header.expect("anthropic-beta header must be present on OAuth+1P call");
     assert!(
         beta.contains("oauth-2025-04-20"),
@@ -432,21 +470,20 @@ async fn anthropic_oauth_first_party_beta_header_contains_both_markers() {
     );
 }
 
-// ==== 429 error surfacing ====
+// ==== 429 error surfacing and retry ====
 
-/// 429 response on a streaming call. genai tunnels non-2xx status into a
-/// stream error (`HttpError { status: 429, ... }`) rather than returning
-/// Err from `exec_chat_stream` itself. The gateway's retry loop catches
-/// pre-stream failures (auth resolution, bucket acquire, transport); for
-/// mid-stream 429s it's the caller's responsibility to back off and
-/// re-issue the request.
+/// Persistent 429: a 429 that fires on every attempt exhausts the retry
+/// budget and surfaces as a stream error with NO content chunks. This
+/// validates the error-surfacing contract for the exhausted-retry path.
 ///
-/// This test validates the error-surfacing contract: a 429 streams an
-/// error event containing the status code, and NO content chunks leak
-/// through. Transparent mid-stream retry is a Phase 5+ concern (requires
-/// intercepting the stream's first event and re-opening if it's a
-/// retryable error — non-trivial because genai's stream type isn't
-/// cleanly re-entrant).
+/// NOTE: The gateway's `open_stream_with_retry` already implements
+/// first-event 429 retry (exponential backoff, up to `RetryPolicy::max_attempts`).
+/// This test verifies what happens when ALL retries fail — the error
+/// surfaces cleanly. The `anthropic_429_retries_then_succeeds` test
+/// verifies the retry-then-succeed path.
+///
+/// The mock is mounted without `.expect(N)` because the retry loop fires
+/// several times; we assert on the outcome, not the hit count.
 #[tokio::test]
 async fn anthropic_429_surfaces_as_stream_error_without_content() {
     let server = MockServer::start().await;
@@ -457,9 +494,10 @@ async fn anthropic_429_surfaces_as_stream_error_without_content() {
         .respond_with(
             ResponseTemplate::new(429)
                 .set_body_string("rate limit exceeded")
-                .insert_header("retry-after", "30"),
+                .insert_header("retry-after", "0"),
         )
-        .expect(1)
+        // No .expect(N) — retry fires multiple times; we care about the
+        // final outcome, not the hit count.
         .mount(&server)
         .await;
 
@@ -479,17 +517,95 @@ async fn anthropic_429_surfaces_as_stream_error_without_content() {
         .expect("gateway builds");
 
     let req = CompletionRequest::new("claude-opus-4-7").append_message(ChatMessage::user("hi"));
+
+    // A persistent 429 surfaces as either:
+    // - Err from complete() when the retry budget is exhausted upfront, OR
+    // - a stream error on the first event (genai tunnels non-2xx as stream errors).
+    // What MUST NOT happen: content chunks arriving as if the request succeeded.
+    match gateway.complete(req).await {
+        Err(ProviderError::RateLimited { .. }) => {
+            // Retries exhausted, error returned upfront. Correct.
+        }
+        Err(other) => panic!("persistent 429 must surface as RateLimited, got {other:?}"),
+        Ok(stream) => {
+            let obs = drain_stream(stream).await;
+            assert_eq!(obs.chunk_count, 0, "429 must not produce content chunks");
+            assert_eq!(obs.tool_call_count, 0);
+            assert!(obs.error_count > 0, "429 must surface as a stream error");
+            assert_eq!(obs.end_count, 0, "429 must not emit End");
+        }
+    }
+}
+
+/// 429 on the first attempt, 200 with a valid SSE stream on the second.
+/// Proves that `open_stream_with_retry` actually retries and the stream
+/// completes successfully — the gateway's retry budget isn't decorative.
+///
+/// Uses `RetryThenSucceed`, a custom stateful responder that returns 429 on
+/// the first call and 200 + SSE on subsequent calls. `retry-after: 0` keeps
+/// the test fast.
+///
+/// Retry verification: the shared call counter is asserted to be 2 after the
+/// stream completes — proving the retry fired and hit the server twice.
+#[tokio::test]
+async fn anthropic_429_retries_then_succeeds() {
+    let server = MockServer::start().await;
+
+    let (responder, call_counter) =
+        RetryThenSucceed::new(1, ANTHROPIC_TEXT_STREAM, "text/event-stream");
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(header("x-api-key", "sk-ant-retry-test"))
+        .respond_with(responder)
+        // No .expect() — we verify hit count via the call counter.
+        .mount(&server)
+        .await;
+
+    let chain: Arc<dyn CredentialChain> = Arc::new(StaticApiKeyChain {
+        provider: "anthropic",
+        token: token("anthropic", "sk-ant-retry-test"),
+    });
+    let gateway = PatternGatewayClient::builder()
+        .with_provider(
+            "anthropic",
+            chain,
+            honest_shaper(),
+            Arc::new(ProviderRateLimiter::anthropic_default()),
+        )
+        .with_provider_base_url("anthropic", server.uri())
+        .build()
+        .expect("gateway builds");
+
+    let req = CompletionRequest::new("claude-opus-4-7").append_message(ChatMessage::user("hi"));
     let stream = gateway
         .complete(req)
         .await
-        .expect("complete opens (error comes via stream)");
+        .expect("complete must succeed after retry");
     let obs = drain_stream(stream).await;
 
-    // No content should leak through a 429.
-    assert_eq!(obs.chunk_count, 0, "429 must not produce content chunks");
-    assert_eq!(obs.tool_call_count, 0);
-    assert!(obs.error_count > 0, "429 must surface as a stream error");
-    assert_eq!(obs.end_count, 0, "429 must not emit End");
+    // Verify retry fired: the responder was called exactly twice (429 + retry).
+    // This is the key assertion proving the retry loop actually runs.
+    let calls = call_counter.load(Ordering::SeqCst);
+    assert_eq!(
+        calls, 2,
+        "gateway must retry once: expected 2 calls (429 + retry), got {calls}"
+    );
+
+    // The retry succeeded — we get content, not errors.
+    assert_eq!(
+        obs.concatenated_text, "Hello there!",
+        "retry path must produce correct content (chunk_count={}, error_count={}, end_count={})",
+        obs.chunk_count, obs.error_count, obs.end_count
+    );
+    assert_eq!(
+        obs.end_count, 1,
+        "stream must terminate cleanly after retry"
+    );
+    assert_eq!(
+        obs.error_count, 0,
+        "no stream errors after successful retry"
+    );
 }
 
 // ==== 500 error path ====
