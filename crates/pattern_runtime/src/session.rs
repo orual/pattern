@@ -24,6 +24,7 @@ use pattern_core::types::snapshot::{PersonaConfig, SessionSnapshot};
 use pattern_core::types::turn::{TurnInput, TurnOutput};
 
 use crate::checkpoint::{CheckpointEvent, CheckpointLog};
+use crate::memory::MemoryStoreAdapter;
 use crate::sdk::SdkLocation;
 use crate::sdk::bundle::SdkBundle;
 use crate::sdk::handlers::{
@@ -52,7 +53,16 @@ pub struct SessionContext {
     agent_id: String,
     budget: Budget,
     cancel_state: Arc<CancelState>,
-    memory_store: Arc<dyn MemoryStore>,
+    /// Memory store adapter: delegates to the underlying `MemoryStore` and
+    /// records `BlockWrite` entries for the current turn. Handlers access
+    /// via [`SessionContext::adapter`] to call `record_write` after
+    /// mutations; trait-object callers use [`SessionContext::memory_store`]
+    /// which returns the adapter (it implements `MemoryStore`).
+    adapter: Arc<MemoryStoreAdapter>,
+    /// Provider-client handle. Phase 5 wires it in; Phase 5 Task 20
+    /// consumes it from the agent loop. Held here so the construction
+    /// signature is stable across phase boundaries.
+    #[allow(dead_code)]
     provider: Arc<dyn ProviderClient>,
     /// Shared checkpoint log. Handlers record `(request, response)` pairs
     /// after a successful effect dispatch so restart-then-replay can
@@ -98,22 +108,26 @@ impl HasCancelState for () {
 }
 
 impl SessionContext {
-    /// Build a context from a persona + store handle. Shared cancel state
-    /// starts un-cancelled and with no handlers in flight. The checkpoint
-    /// log is a fresh empty log; the session wires a shared log via the
-    /// crate-private `with_checkpoint_log` builder so handlers record
-    /// into the same log the session exposes.
+    /// Build a context from a persona + store handle. The store is wrapped
+    /// in a [`MemoryStoreAdapter`] that records `BlockWrite` entries;
+    /// handlers call [`SessionContext::adapter`] to access `record_write`.
+    /// Shared cancel state starts un-cancelled and with no handlers in
+    /// flight. The checkpoint log is a fresh empty log; the session wires
+    /// a shared log via the crate-private `with_checkpoint_log` builder so
+    /// handlers record into the same log the session exposes.
     pub fn from_persona(
         persona: &PersonaConfig,
         memory_store: Arc<dyn MemoryStore>,
         provider: Arc<dyn ProviderClient>,
     ) -> Self {
+        let agent_id = persona.agent_id.to_string();
         let budget = Budget::from_persona(persona);
+        let adapter = Arc::new(MemoryStoreAdapter::new(memory_store, &agent_id));
         Self {
-            agent_id: persona.agent_id.to_string(),
+            agent_id,
             budget,
             cancel_state: Arc::new(CancelState::new()),
-            memory_store,
+            adapter,
             provider,
             checkpoint_log: Arc::new(std::sync::Mutex::new(CheckpointLog::new())),
             current_turn: Arc::new(AtomicU64::new(0)),
@@ -151,9 +165,16 @@ impl SessionContext {
         self.cancel_state.clone()
     }
 
-    /// Memory store used by MemoryHandler. Cheap clone (Arc).
+    /// Memory store used by MemoryHandler. Returns the adapter, which
+    /// implements `MemoryStore` via delegation. Cheap clone (Arc).
     pub fn memory_store(&self) -> Arc<dyn MemoryStore> {
-        self.memory_store.clone()
+        self.adapter.clone()
+    }
+
+    /// Memory store adapter. Handlers call `adapter().record_write(..)`
+    /// after mutations to populate `TurnOutput.block_writes`.
+    pub fn adapter(&self) -> &Arc<MemoryStoreAdapter> {
+        &self.adapter
     }
 
     /// Shared checkpoint log handle. Handlers record exchanges here
@@ -292,7 +313,7 @@ impl TidepoolSession {
         let checkpoint_log = Arc::new(std::sync::Mutex::new(CheckpointLog::new()));
         let current_turn = Arc::new(AtomicU64::new(0));
         let ctx = Arc::new(
-            SessionContext::from_persona(&persona, memory_store.clone(), provider.clone())
+            SessionContext::from_persona(&persona, memory_store, provider.clone())
                 .with_checkpoint_log(checkpoint_log.clone(), current_turn.clone()),
         );
 
@@ -301,7 +322,7 @@ impl TidepoolSession {
         // `crates/pattern_runtime/src/sdk/bundle.rs` for the ordering
         // rationale (arity-aware DataCon disambiguation + backwards compat).
         let bundle: SdkBundle = frunk::hlist![
-            MemoryHandler::new(memory_store),
+            MemoryHandler::new(ctx.memory_store()),
             MessageHandler,
             display.clone(),
             TimeHandler,
@@ -409,7 +430,18 @@ impl TidepoolSession {
                 let cancelled = self.ctx.cancel_state.is_cancelled();
                 self.ctx.cancel_state.reset();
                 match run_result {
-                    Ok(_value) => Ok(empty_turn_output()),
+                    Ok(_value) => {
+                        // Drain pending BlockWrites from the adapter into the
+                        // TurnOutput. Phase 5: these feed pseudo-message emission.
+                        let block_writes = self.ctx.adapter.drain_pending();
+                        Ok(TurnOutput {
+                            messages: vec![],
+                            block_writes,
+                            usage: None,
+                            cache_metrics: Default::default(),
+                            completed_at: Timestamp::now(),
+                        })
+                    }
                     Err(e) if cancelled && is_cancel_sentinel(&e) => {
                         Err(RuntimeError::Timeout {
                             wall_ms: budget.wall.as_millis() as u64,
@@ -546,16 +578,6 @@ impl TidepoolSession {
                 }
             }
         }
-    }
-}
-
-fn empty_turn_output() -> TurnOutput {
-    TurnOutput {
-        messages: vec![],
-        block_writes: vec![],
-        usage: None,
-        cache_metrics: Default::default(),
-        completed_at: Timestamp::now(),
     }
 }
 

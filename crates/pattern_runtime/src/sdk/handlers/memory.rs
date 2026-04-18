@@ -16,11 +16,16 @@
 //! `tokio::runtime::Handle::current().block_on(...)` without deadlocking
 //! the runtime's executor threads.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use pattern_core::memory::{BlockSchema, BlockType, StructuredDocument};
 use pattern_core::traits::MemoryStore;
+use pattern_core::types::block::{BlockWrite, BlockWriteKind};
+use pattern_core::types::origin::{AgentAuthor, Author};
+use smol_str::SmolStr;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use tidepool_eval::Value;
 
@@ -87,6 +92,8 @@ impl EffectHandler<SessionContext> for MemoryHandler {
         // not deadlock the tokio runtime's executor threads.
         let handle = tokio::runtime::Handle::current();
 
+        let adapter = cx.user().adapter().clone();
+
         let result = (|| match req {
             MemoryReq::Get(label) => {
                 let text = handle
@@ -100,6 +107,10 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                 cx.respond(text)
             }
             MemoryReq::Put(label, content, description) => {
+                // Capture pre-write state for BlockWrite record.
+                let pre = handle
+                    .block_on(pre_write_state(&*store, &agent_id, &label))
+                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Put: {e}")))?;
                 handle
                     .block_on(upsert_block_content(
                         &*store,
@@ -109,6 +120,25 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                         description.as_deref(),
                     ))
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Put: {e}")))?;
+
+                // Record the write.
+                let kind = if pre.existed {
+                    BlockWriteKind::Replaced
+                } else {
+                    BlockWriteKind::Created
+                };
+                record_block_write(
+                    RecordBlockWriteParams {
+                        adapter: &adapter,
+                        agent_id: &agent_id,
+                        label: &label,
+                        post_content: &content,
+                        kind,
+                        pre: &pre,
+                    },
+                    &handle,
+                    &*store,
+                );
                 cx.respond(())
             }
             MemoryReq::Create(label, description, block_type, schema_kind, char_limit, initial) => {
@@ -130,15 +160,36 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                 handle
                     .block_on(store.persist_block(&agent_id, &label))
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Create: {e}")))?;
+
+                // Record the write. Freshly created — no pre-content.
+                let memory_id = SmolStr::new(doc.id());
+                adapter.record_write(BlockWrite {
+                    handle: SmolStr::new(&label),
+                    memory_id,
+                    block_type: doc.block_type(),
+                    rendered_content: initial,
+                    kind: BlockWriteKind::Created,
+                    previous_content_hash: None,
+                    previous_rendered_content: None,
+                    at: jiff::Timestamp::now(),
+                    author: Author::Agent(AgentAuthor {
+                        agent_id: SmolStr::new(&agent_id),
+                    }),
+                });
                 cx.respond(())
             }
             MemoryReq::Append(label, content) => {
-                let existing = handle
-                    .block_on(store.get_rendered_content(&agent_id, &label))
-                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Append: {e}")))?
-                    .unwrap_or_default();
+                // Capture pre-write state.
+                let pre = handle
+                    .block_on(pre_write_state(&*store, &agent_id, &label))
+                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Append: {e}")))?;
+                let existing = pre
+                    .rendered_content
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_string();
                 let combined = if existing.is_empty() {
-                    content
+                    content.clone()
                 } else {
                     format!("{existing}{content}")
                 };
@@ -147,9 +198,23 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                         &*store, &agent_id, &label, &combined, None,
                     ))
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Append: {e}")))?;
+
+                record_block_write(
+                    RecordBlockWriteParams {
+                        adapter: &adapter,
+                        agent_id: &agent_id,
+                        label: &label,
+                        post_content: &combined,
+                        kind: BlockWriteKind::Appended,
+                        pre: &pre,
+                    },
+                    &handle,
+                    &*store,
+                );
                 cx.respond(())
             }
             MemoryReq::Replace(label, old, new) => {
+                // Capture pre-write state (also validates existence).
                 let existing = handle
                     .block_on(store.get_rendered_content(&agent_id, &label))
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Replace: {e}")))?
@@ -158,15 +223,34 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                             "Pattern.Memory.Replace: no block named {label:?} for agent {agent_id:?}"
                         ))
                     })?;
+                let pre_hash = content_hash(&existing);
                 let replaced = existing.replace(&old, &new);
-                // `upsert_block_content` with description=None preserves
-                // existing metadata (and won't auto-create since the
-                // block was just observed to exist).
                 handle
                     .block_on(upsert_block_content(
                         &*store, &agent_id, &label, &replaced, None,
                     ))
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Replace: {e}")))?;
+
+                // We already have the pre-content from the existence check.
+                let pre = PreWriteState {
+                    existed: true,
+                    rendered_content: Some(existing),
+                    content_hash: Some(pre_hash),
+                    memory_id: None,
+                    block_type: None,
+                };
+                record_block_write(
+                    RecordBlockWriteParams {
+                        adapter: &adapter,
+                        agent_id: &agent_id,
+                        label: &label,
+                        post_content: &replaced,
+                        kind: BlockWriteKind::Replaced,
+                        pre: &pre,
+                    },
+                    &handle,
+                    &*store,
+                );
                 cx.respond(())
             }
             MemoryReq::Search(_query) => Err(EffectError::Handler(
@@ -277,6 +361,110 @@ fn write_text_into(
 /// Default character limit for auto-created blocks. Matches the pattern-db
 /// default for Working blocks.
 const DEFAULT_CHAR_LIMIT: usize = 4096;
+
+/// Snapshot of a block's state before a mutation, used to populate
+/// `BlockWrite.previous_*` fields.
+struct PreWriteState {
+    existed: bool,
+    rendered_content: Option<String>,
+    content_hash: Option<u64>,
+    memory_id: Option<SmolStr>,
+    block_type: Option<BlockType>,
+}
+
+/// Capture pre-write state for a block. If the block doesn't exist,
+/// returns a state with `existed = false` and `None` fields.
+async fn pre_write_state(
+    store: &dyn MemoryStore,
+    agent_id: &str,
+    label: &str,
+) -> Result<PreWriteState, Box<dyn std::error::Error + Send + Sync>> {
+    match store.get_block(agent_id, label).await? {
+        Some(doc) => {
+            let rendered = doc.text_content();
+            let hash = content_hash(&rendered);
+            Ok(PreWriteState {
+                existed: true,
+                rendered_content: Some(rendered),
+                content_hash: Some(hash),
+                memory_id: Some(SmolStr::new(doc.id())),
+                block_type: Some(doc.block_type()),
+            })
+        }
+        None => Ok(PreWriteState {
+            existed: false,
+            rendered_content: None,
+            content_hash: None,
+            memory_id: None,
+            block_type: None,
+        }),
+    }
+}
+
+/// Compute a simple hash of content for `BlockWrite.previous_content_hash`.
+fn content_hash(content: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    content.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Parameters for recording a block write via the adapter.
+struct RecordBlockWriteParams<'a> {
+    adapter: &'a crate::memory::MemoryStoreAdapter,
+    agent_id: &'a str,
+    label: &'a str,
+    post_content: &'a str,
+    kind: BlockWriteKind,
+    pre: &'a PreWriteState,
+}
+
+/// Record a BlockWrite on the adapter after a successful mutation.
+/// Resolves memory_id and block_type from the store if not already
+/// captured in the pre-write state (e.g. for newly-created blocks via
+/// upsert auto-create).
+fn record_block_write(
+    params: RecordBlockWriteParams<'_>,
+    handle: &tokio::runtime::Handle,
+    store: &dyn MemoryStore,
+) {
+    let RecordBlockWriteParams {
+        adapter,
+        agent_id,
+        label,
+        post_content,
+        kind,
+        pre,
+    } = params;
+
+    // Resolve memory_id and block_type. If the pre-write state has them,
+    // use those; otherwise fetch from the store (the block exists now
+    // since the mutation succeeded).
+    let (memory_id, block_type) = match (&pre.memory_id, &pre.block_type) {
+        (Some(mid), Some(bt)) => (mid.clone(), *bt),
+        _ => {
+            // Post-mutation fetch for metadata. Best-effort: if this
+            // fails we still record the write with placeholder values.
+            match handle.block_on(store.get_block(agent_id, label)) {
+                Ok(Some(doc)) => (SmolStr::new(doc.id()), doc.block_type()),
+                _ => (SmolStr::new("unknown"), BlockType::Working),
+            }
+        }
+    };
+
+    adapter.record_write(BlockWrite {
+        handle: SmolStr::new(label),
+        memory_id,
+        block_type,
+        rendered_content: post_content.to_string(),
+        kind,
+        previous_content_hash: pre.content_hash,
+        previous_rendered_content: pre.rendered_content.clone(),
+        at: jiff::Timestamp::now(),
+        author: Author::Agent(AgentAuthor {
+            agent_id: SmolStr::new(agent_id),
+        }),
+    });
+}
 
 #[cfg(test)]
 mod tests {

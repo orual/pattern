@@ -45,6 +45,7 @@ miette           = { workspace = true }
 serde            = { workspace = true }
 serde_json       = { workspace = true }
 jiff             = { workspace = true }
+smol_str         = { workspace = true }
 # Bin-only deps (pattern-test-cli)
 clap             = { workspace = true }
 futures          = { workspace = true }
