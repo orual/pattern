@@ -342,6 +342,28 @@ pub enum RuntimeError {
         reason: String,
     },
 
+    /// The LLM provider returned an error during completion.
+    ///
+    /// Produced by the agent loop when `ProviderClient::complete` fails
+    /// or the response stream yields an error event.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::RuntimeError;
+    ///
+    /// let err = RuntimeError::ProviderError {
+    ///     reason: "rate limited".to_string(),
+    /// };
+    /// assert!(err.to_string().contains("rate limited"));
+    /// ```
+    #[error("provider error: {reason}")]
+    #[diagnostic(code(pattern_core::runtime::provider_error))]
+    ProviderError {
+        /// Human-readable description of the provider failure.
+        reason: String,
+    },
+
     /// A tokio task joined with an error (panic or cancellation propagation).
     ///
     /// Produced by the cancellation harness when the blocking task hosting

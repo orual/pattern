@@ -1457,32 +1457,59 @@ jj new
 <!-- START_TASK_20 -->
 ### Task 20: Agent loop + `code` tool + router registry
 
-**Verifies:** the keystone human↔agent integration. Wires `run_turn` to a real Rust-driven agent orchestrator that calls pattern_provider's `PatternGatewayClient`, evaluates LLM-emitted Haskell snippets via `tidepool_runtime::compile_and_run`, and routes agent output through a scheme-dispatched router registry. This is the task that makes `TurnOutput.messages` non-empty in the production path.
+**Verifies:** the keystone human↔agent integration. Wires `Session::step` to a Rust-driven orchestrator that calls pattern_provider's `PatternGatewayClient`, evaluates LLM-emitted Haskell snippets via `tidepool_runtime::compile_and_run`, routes agent output through a scheme-dispatched router registry, and **drives the multi-wire-turn tool-use loop honestly** — each wire turn is one complete provider request/response (matching Anthropic's protocol: every tool_result batch is a new HTTP request, not a mid-stream injection). One `Session::step` call = one user-visible exchange = N wire turns chained by tool_result feedback.
 
-**Rationale:** Phase 4 built pattern_provider (the gateway) but did NOT wire it into `MessageHandler`. Phase 3's stub returned an `EffectError::Handler`. The originally-planned Task 5 comment "Phase 4+ wire these through the real MessageHandler" left a gap — the actual integration is substantial. Also, the v2 mental model of `Pattern.Message.Ask` (agent "asks" an LLM and blocks for the answer) doesn't fit v3's architecture: v3 agents don't call LLMs via an effect; LLMs call agents via `run_turn`, and within that call the LLM uses a **single tool** (`code`) to invoke agent capabilities through the SDK. `Ask` stays stubbed as a candidate for removal.
+**Rationale:** Phase 4 built pattern_provider (the gateway) but did NOT wire it into `MessageHandler`. Phase 3's stub returned an `EffectError::Handler`. The Anthropic tool-use model is explicit in the docs: "Send a new request containing the original messages, the assistant's response, and a user message with the `tool_result` blocks. Repeat while `stop_reason` is `tool_use`." This means:
+
+- a "turn" in the **wire sense** is one provider call (one composer pass, one TurnRecord, one checkpoint boundary);
+- a "turn" in the **user sense** is the full loop from human input to final assistant text;
+- the composer runs fresh on each wire turn — pseudo-messages (`[memory:updated]` etc.) naturally flow as the agent's own prior-turn writes become visible in segment 2 of the next wire turn's composition. No mid-turn re-rendering needed.
+
+v2's `Pattern.Message.Ask` (agent "asks" an LLM and blocks) doesn't fit v3: v3 agents don't call LLMs via effects; LLMs drive agent work via `Session::step`, and within each wire turn they use a **single tool** (`code`) to invoke SDK capabilities. `Ask` stays stubbed as a candidate for removal.
 
 **Depends on:**
-- Tasks 4 + 5 (`MemoryStoreAdapter` + `TurnHistory` + DB wiring; adapter pending-buffer + session drains). Pending-writes flow into `TurnOutput.block_writes` via these.
-- Tasks 8 + 9 + 10 (composer passes + finalize). Agent loop calls `compose::compose` to build each `CompletionRequest`.
-- Task 6 (pseudo-message renderer). Agent loop feeds `TurnHistory.most_recent_block_writes` through it for segment 2 injection.
+- Tasks 4 + 5 (`MemoryStoreAdapter` + `TurnHistory` + DB wiring; adapter pending-buffer + session drains). Pending-writes flow into each wire turn's `TurnOutput.block_writes` via these.
+- Tasks 8 + 9 + 10 (composer passes + finalize). Orchestrator calls `compose::compose` to build each wire turn's `CompletionRequest`.
+- Task 6 (pseudo-message renderer). Prior wire turn's drained block_writes get rendered as `[memory:updated]` pseudo-messages in the NEXT wire turn's segment 2.
 
 **Blocks:**
-- Task 15 (e2e memory-edit cache preservation test) — that test exercises the full run_turn round-trip, which is this task's keystone.
+- Task 15 (e2e memory-edit cache preservation test) — exercises the full step → wire turns → final answer round-trip.
 - Task 16 (zero-blocks edge) — same.
 
 **Files:**
 
-- Create: `crates/pattern_runtime/src/agent_loop.rs` — async orchestrator module
-- Create: `crates/pattern_runtime/src/sdk/code_tool.rs` — `CODE_TOOL` static + genai schema + Haskell-source templating adapted from `tidepool-mcp`
-- Create: `crates/pattern_runtime/src/sdk/preamble.rs` — Haskell preamble assembler for tool-eval source wrapping; uses each handler's `DescribeEffect` impl
-- Create: `crates/pattern_runtime/src/router/mod.rs` — `Router` trait + `RouterRegistry`
-- Create: `crates/pattern_runtime/src/router/cli.rs` — `CliRouter` implementation
-- Modify: `crates/pattern_runtime/src/sdk/handlers/*.rs` — add `impl DescribeEffect` for each of the 11 handlers
-- Modify: `crates/pattern_runtime/src/sdk/handlers/message.rs` — replace `Send/Reply/Notify` stubs with real router dispatch; leave `Ask` stubbed with a comment marking it "candidate for removal per Phase 5 Task 20"
-- Modify: `crates/pattern_runtime/src/session.rs` — `TidepoolSession` gains `router_registry: Arc<RouterRegistry>`, `pending_messages: Arc<Mutex<Vec<Message>>>`, `agent_helpers_dir: Option<PathBuf>` (optional, for hybrid pre-baked helpers); `SessionContext` exposes the same fields to handlers
-- Modify: `crates/pattern_runtime/src/session.rs::run_turn` — replace the `SessionMachine.run` path for production with `agent_loop::orchestrate`. The static-program eval path stays on `SessionMachine` for test fixtures that exercise it explicitly.
-- Modify: `crates/pattern_provider/src/compose/passes/segment_1.rs` (when that file lands in Task 8) — injects `CODE_TOOL.clone()` into `partial.tools`
-- Add constant: `crates/pattern_core/src/lib.rs::PERSONA_LABEL: &str = "persona"` — the reserved memory-block label Segment 1 reads for persona content
+Types-layer additions (pattern_core):
+- Add enum: `crates/pattern_core/src/types/turn.rs::StopReason` — `EndTurn` / `ToolUse` / `MaxTokens` / `StopSequence` / `Refusal` / `PauseTurn`. Serde for cross-boundary. Includes `is_terminal()` helper (everything except `ToolUse`).
+- Add struct: `crates/pattern_core/src/types/turn.rs::StepReply` — `{ turns: Vec<TurnOutput>, final_stop_reason: StopReason, total_usage: Usage }` with convenience accessors (`all_messages`, `all_block_writes`, `final_text`, `turn_count`).
+- Extend struct: `crates/pattern_core/src/types/turn.rs::TurnOutput` — add `tool_calls: Vec<ToolCall>`, `tool_results: Vec<ToolResult>`, `stop_reason: StopReason` fields. Document invariant: `tool_calls.len() == tool_results.len()` and both nonempty iff `stop_reason == ToolUse`.
+- Add enum: `crates/pattern_core/src/types/provider.rs::ToolOutcome` — `Success(serde_json::Value)` / `Error(String)`. Maps to Anthropic's `tool_result { is_error: bool, content: ... }` wire shape.
+- Add struct: `crates/pattern_core/src/types/provider.rs::ToolResult` — `{ call_id: String, outcome: ToolOutcome }`.
+- Add constructor: `crates/pattern_core/src/types/turn.rs::TurnInput::from_tool_results(prior: &TurnOutput, batch_id: BatchId) -> Self` — mints a fresh `TurnId`, preserves `batch_id`, builds ONE `ChatRole::User` message whose content is the sequence of tool_result content blocks (one per `prior.tool_results`). Same batch = same user-visible exchange.
+- Add trait + enum: `crates/pattern_core/src/traits/turn_sink.rs::{TurnSink, TurnEvent, DisplayKind}`:
+  - `TurnEvent::Text(String)` — LLM text chunk as it streams. No sub-kind; UIs concatenate into a streaming buffer.
+  - `TurnEvent::ToolCall(ToolCall)` — LLM requested a tool (pre-dispatch)
+  - `TurnEvent::ToolResult(ToolResult)` — eval completed, result in hand
+  - `TurnEvent::Display { kind: DisplayKind, text: String }` — from Haskell `Pattern.Display.*`. `kind` is `Chunk` / `Final` / `Note` so UIs can render the three styles distinctly (streaming assembled text vs terminal assembled content vs side-channel status).
+  - `TurnEvent::Stop(StopReason)` — wire turn ended (after all evals settled)
+  - Default impl: `NoOpSink` (for tests or headless runs); `VecSink` for test assertions.
+  - **UX invariant:** `TurnEvent::Text` (LLM-authored stream) and `TurnEvent::Display` (agent-authored deliberate output) MUST render differently in the CLI / TUI. CLI convention: `Text` in default style; `Display::Chunk` / `::Final` prefixed with a glyph or framed block; `Display::Note` dimmed or parenthesised. Documented on the types themselves for implementers.
+- Update signature: `crates/pattern_core/src/traits/session.rs::Session::step` — return type changes from `TurnOutput` → `StepReply`. Doc-comment updated to explain "one user-visible exchange (may comprise multiple wire turns driven by tool_use cycles)".
+- Add constant: `crates/pattern_core/src/lib.rs::PERSONA_LABEL: &str = "persona"` — reserved memory-block label read by Segment 1.
+
+Runtime-layer additions (pattern_runtime):
+- Create: `crates/pattern_runtime/src/agent_loop.rs` — async orchestrator for **one wire turn**. No inner loop. Returns `TurnOutput`.
+- Create: `crates/pattern_runtime/src/sdk/code_tool.rs` — `CODE_TOOL` static + genai schema + Haskell-source templating adapted from `tidepool-mcp`.
+- Create: `crates/pattern_runtime/src/sdk/preamble.rs` — Haskell preamble assembler; uses each handler's `DescribeEffect` impl.
+- Create: `crates/pattern_runtime/src/router/mod.rs` — `Router` trait + `RouterRegistry`.
+- Create: `crates/pattern_runtime/src/router/cli.rs` — `CliRouter` implementation.
+- Modify: `crates/pattern_runtime/src/sdk/handlers/*.rs` — add `impl DescribeEffect` for each of the 11 handlers.
+- Modify: `crates/pattern_runtime/src/sdk/handlers/message.rs` — replace `Send/Reply/Notify` stubs with real router dispatch; `Ask` stays stubbed with a "candidate for removal" comment.
+- Modify: `crates/pattern_runtime/src/sdk/handlers/display.rs` — forward text into the session's `TurnSink` as `TurnEvent::Display`.
+- Modify: `crates/pattern_runtime/src/session.rs` — `TidepoolSession` gains `router_registry: Arc<RouterRegistry>`, `pending_messages: Arc<Mutex<Vec<Message>>>`, `turn_sink: Arc<dyn TurnSink>`, `agent_helpers_dir: Option<PathBuf>`. `SessionContext` exposes the same fields.
+- Modify: `crates/pattern_runtime/src/session.rs::TidepoolSession::step` — becomes **the wire-turn loop driver**. Reads `BatchId` from input (caller-provided), invokes `agent_loop::orchestrate` per wire turn, uses `TurnInput::from_tool_results` to chain tool_use cycles, returns `StepReply` when `stop_reason.is_terminal()`.
+- Modify: `crates/pattern_provider/src/compose/passes/segment_1.rs` (from Task 8) — injects `CODE_TOOL.clone()` into `partial.tools`.
+
+**Retire** (no longer applicable): the "run_turn replaces SessionMachine.run" framing. There's no longer a `run_turn`; `Session::step` is the public entry. The static-program eval path (`SessionMachine.run`) stays available via an internal method for test fixtures but is not the production path. Full retirement to Phase 6.
 
 **Implementation details:**
 
@@ -1532,95 +1559,196 @@ jj new
      paginateResult 4096 (toJSON _r)
    ```
 
-5. **Agent loop structure:**
+5. **Orchestrator structure — one wire turn, no inner loop:**
 
    ```rust
+   // agent_loop.rs
    pub async fn orchestrate(
        input: TurnInput,
        ctx: Arc<SessionContext>,
+       eval_tx: &EvalSender,
+       preamble: &str,
    ) -> Result<TurnOutput, RuntimeError> {
-       // 1. Spawn (or acquire from session pool) eval worker thread.
-       //    std::thread::Builder::new().stack_size(256 * 1024 * 1024).spawn(...)
-       //    Worker loop: recv (source, oneshot::Sender) → compile_and_run →
-       //      send result back via oneshot.
-       let eval_tx = spawn_eval_worker(ctx.clone());
+       // 1. Push input.messages into ctx.pending_messages (for this wire
+       //    turn's TurnRecord; composer reads TurnHistory which will
+       //    include them after persistence).
+       ctx.pending_messages().lock().extend(input.messages.clone());
 
-       // 2. Push input.messages into ctx.pending_messages (these are the
-       //    human/system messages delivered to the agent this turn).
-       ctx.pending_messages.lock().extend(input.messages.clone());
+       // 2. Build CompletionRequest via composer pipeline (segments 1-3).
+       let req = build_request(&ctx, &input).await?;
 
-       let mut completion_messages: Vec<ChatMessage> = Vec::new(); // accumulator for multi-round tool_use loop
-       let mut aggregated_usage = Usage::default();
+       // 3. Stream the provider response.
+       let mut stream = ctx.provider().complete(req).await?;
+       let mut text_accum = String::new();
+       let mut tool_calls: Vec<ToolCall> = Vec::new();
+       let mut pending_evals: FuturesUnordered<
+           JoinHandle<(String, ToolOutcome)>
+       > = FuturesUnordered::new();
+       let mut stop_reason = StopReason::EndTurn; // default until stream tells us
+       let mut usage = Usage::default();
 
-       loop {
-           // 3. Build CompletionRequest via composer pipeline (Task 9).
-           let persona = ctx.memory_store
-               .get_block(ctx.agent_id(), pattern_core::PERSONA_LABEL).await?
-               .map(|d| d.render())
-               .unwrap_or_default();
-           let partial = compose::PartialRequest::new(ctx.model_id().to_string());
-           // Pass builder configures Segment 1 with persona + CODE_TOOL, Segment 2
-           // with TurnHistory messages + pseudo-messages, Segment 3 with current
-           // block state, etc. Exact orchestration TBD in Task 9 integration.
-           let req = compose::compose(&passes, partial)?;
-
-           // 4. Call provider.complete + consume stream.
-           let mut stream = ctx.provider.complete(req).await?;
-           let mut text_accum = String::new();
-           let mut tool_uses: Vec<ToolCall> = Vec::new();
-           while let Some(event) = stream.next().await {
-               match event? {
-                   ChatStreamEvent::Chunk(c) => {
-                       text_accum.push_str(&c.content);
-                       ctx.display.forward_chunk(&c); // Display gets live stream
-                   }
-                   ChatStreamEvent::ToolCallChunk(tc) => tool_uses.push(tc.into()),
-                   ChatStreamEvent::End(end) => {
-                       if let Some(u) = end.captured_usage { aggregated_usage.add(&u); }
-                   }
-                   _ => {}
+       while let Some(event) = stream.next().await {
+           match event? {
+               ChatTurnEvent::Chunk(c) => {
+                   text_accum.push_str(&c.content);
+                   ctx.turn_sink().emit(TurnEvent::Text(c.content.clone()));
                }
-           }
-
-           // 5. If no tool_uses, we're done — push final assistant message
-           //    into pending_messages, break.
-           if tool_uses.is_empty() {
-               let assistant_msg = Message::assistant(text_accum);
-               ctx.pending_messages.lock().push(assistant_msg);
-               break;
-           }
-
-           // 6. Dispatch each tool_use through the eval worker.
-           for tc in tool_uses {
-               if tc.name != "code" {
-                   // Unknown tool — surface as tool_result error, let LLM recover.
-                   continue;
+               ChatTurnEvent::ToolCall(tc) => {
+                   ctx.turn_sink().emit(TurnEvent::ToolCall(tc.clone()));
+                   tool_calls.push(tc.clone());
+                   // 4. Dispatch eval IN PARALLEL with remaining stream work.
+                   if tc.fn_name == "code" {
+                       pending_evals.push(dispatch_eval(
+                           tc.clone(), preamble, eval_tx.clone()
+                       ));
+                   } else {
+                       // Unknown tool — synthesize error outcome.
+                       pending_evals.push(pre_error(
+                           tc.call_id.clone(),
+                           format!("unsupported tool: {}", tc.fn_name),
+                       ));
+                   }
                }
-               let params: CodeToolInput = serde_json::from_value(tc.input)?;
-               let source = template_source(&preamble, &params.code,
-                   params.imports.as_deref().unwrap_or(""),
-                   params.helpers.as_deref().unwrap_or(""));
-               let (reply_tx, reply_rx) = oneshot::channel();
-               eval_tx.send((source, reply_tx)).await?;
-               let result = reply_rx.await??;
-               // Append tool_result to completion_messages for next iteration.
+               ChatTurnEvent::End(end) => {
+                   stop_reason = map_stop_reason(&end);
+                   if let Some(u) = end.captured_usage { usage = u; }
+               }
+               _ => {}
            }
        }
 
-       // 7. Drain buffers, assemble TurnOutput.
-       let block_writes = ctx.adapter.drain_pending();
-       let messages = ctx.pending_messages.lock().drain(..).collect();
+       // 5. Stream closed. Drain pending evals in arrival order.
+       let mut results_by_id: HashMap<String, ToolOutcome> = HashMap::new();
+       while let Some(joined) = pending_evals.next().await {
+           let (call_id, outcome) = joined?;
+           ctx.turn_sink().emit(TurnEvent::ToolResult(
+               ToolResult { call_id: call_id.clone(), outcome: outcome.clone() }
+           ));
+           results_by_id.insert(call_id, outcome);
+       }
+
+       // 6. Build tool_results paired 1:1 with tool_calls (preserved order).
+       let tool_results: Vec<ToolResult> = tool_calls.iter().map(|tc| {
+           let outcome = results_by_id.remove(&tc.call_id).unwrap_or_else(||
+               ToolOutcome::Error("eval did not complete".into())
+           );
+           ToolResult { call_id: tc.call_id.clone(), outcome }
+       }).collect();
+
+       // 7. Emit final Stop event.
+       ctx.turn_sink().emit(TurnEvent::Stop(stop_reason));
+
+       // 8. Drain block_writes + messages. Assemble TurnOutput.
+       let block_writes = ctx.adapter().drain_pending();
+       let messages: Vec<Message> = std::mem::take(
+           &mut *ctx.pending_messages().lock()
+       );
+       if !text_accum.is_empty() || !tool_calls.is_empty() {
+           // Push assistant message (text + tool_calls) into the returned
+           // messages so TurnRecord captures it.
+           messages.push(make_assistant_message(
+               text_accum, tool_calls.clone(), ctx.agent_id(), input.batch_id.clone()
+           ));
+       }
+
        Ok(TurnOutput {
-           messages,
-           block_writes,
-           usage: Some(aggregated_usage),
-           cache_metrics: TurnCacheMetrics::default(), // Task 12 feeds this in
+           messages, block_writes,
+           tool_calls, tool_results, stop_reason,
+           usage: Some(usage),
+           cache_metrics: TurnCacheMetrics::default(), // Task 12 populates
            completed_at: Timestamp::now(),
        })
    }
    ```
 
-   (Sketch — the implementer fleshes out composer-pass construction + stream event handling + tool_result message shaping.)
+6. **`TidepoolSession::step` — the wire-turn loop driver:**
+
+   ```rust
+   // session.rs
+   #[async_trait]
+   impl Session for TidepoolSession {
+       async fn step(&mut self, input: TurnInput)
+           -> Result<StepReply, RuntimeError>
+       {
+           let batch_id = input.batch_id.clone();
+           let mut turns: Vec<TurnOutput> = Vec::new();
+           let mut cur_input = input;
+
+           loop {
+               let out = agent_loop::orchestrate(
+                   cur_input,
+                   self.ctx.clone(),
+                   &self.eval_tx,
+                   &self.preamble,
+               ).await?;
+
+               // Persist this wire turn: TurnRecord → pattern_db,
+               // TurnHistory update, checkpoint if due.
+               self.persist_wire_turn(&out).await?;
+
+               let terminal = out.stop_reason.is_terminal();
+               let needs_next = matches!(out.stop_reason, StopReason::ToolUse)
+                   && !out.tool_calls.is_empty();
+
+               turns.push(out);
+               if terminal || !needs_next { break; }
+
+               // Build the next wire turn's input from this turn's tool_results.
+               // batch_id preserved; fresh turn_id.
+               cur_input = TurnInput::from_tool_results(
+                   turns.last().unwrap(),
+                   batch_id.clone(),
+               );
+           }
+
+           let total_usage = turns.iter().filter_map(|t| t.usage.as_ref())
+               .fold(Usage::default(), |acc, u| acc + *u);
+           let final_stop_reason = turns.last()
+               .map(|t| t.stop_reason)
+               .unwrap_or(StopReason::EndTurn);
+
+           Ok(StepReply { turns, final_stop_reason, total_usage })
+       }
+   }
+   ```
+
+   Key properties:
+   - Each wire turn runs the full composer pipeline → cache boundaries respected.
+   - Each wire turn produces its own TurnRecord + checkpoint → crash-safe resume.
+   - Prior wire turn's `block_writes` naturally flow into NEXT wire turn's segment 2 via TurnHistory + pseudo-message renderer (no special-case wiring).
+   - `batch_id` is load-bearing: all wire turns in one step share it (same user-visible exchange); a new `Session::step` call mints a fresh batch externally.
+
+7. **`dispatch_eval` — mid-stream parallel dispatch:**
+
+   ```rust
+   fn dispatch_eval(
+       tc: ToolCall, preamble: &str, eval_tx: EvalSender,
+   ) -> JoinHandle<(String, ToolOutcome)> {
+       let call_id = tc.call_id.clone();
+       tokio::spawn(async move {
+           // Parse code tool input; template the source; send to worker.
+           let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+           let params: CodeToolInput = match serde_json::from_value(tc.fn_arguments) {
+               Ok(p) => p,
+               Err(e) => return (call_id, ToolOutcome::Error(
+                   format!("invalid code tool input: {e}")
+               )),
+           };
+           let source = template_source(
+               preamble, &params.code,
+               params.imports.as_deref(), params.helpers.as_deref(),
+           );
+           if eval_tx.send(EvalRequest { source, reply: reply_tx }).is_err() {
+               return (call_id, ToolOutcome::Error("eval worker closed".into()));
+           }
+           match reply_rx.await {
+               Ok(Ok(v)) => (call_id, ToolOutcome::Success(v)),
+               Ok(Err(e)) => (call_id, ToolOutcome::Error(format!("{e}"))),
+               Err(_) => (call_id, ToolOutcome::Error("eval dropped reply".into())),
+           }
+       })
+   }
+   ```
 
 6. **Router registry:**
 
@@ -1655,57 +1783,163 @@ jj new
    - Same for `Reply` and `Notify` (the differences between them are in the Message's metadata, not the routing)
    - `Ask` stays stubbed: returns a handler error noting "Pattern.Message.Ask is a candidate for removal in a future plan; v3 agents don't call LLMs via effects — LLMs drive agent turns via the `code` tool. Use Memory / Send / Reply for inter-agent communication instead."
 
-9. **`run_turn` production path:**
-   - New body essentially `agent_loop::orchestrate(input, self.ctx.clone()).await`
-   - Old `SessionMachine.run` path preserved behind a method/flag for tests that want the pre-compiled-program model; production goes through agent_loop.
+9. **Router registry + `CliRouter`:**
 
-10. **Hybrid pre-baked helpers (plumbing only):**
-    - `TidepoolSession::open` accepts optional `agent_helpers_dir: Option<PathBuf>`
-    - Stored on `SessionContext`; eval worker appends it to `include_paths` for each `compile_and_run` call
-    - GHC's `.hi`/`.o` cache makes this essentially free after first use
-    - No CLI-level wiring in Phase 5; exposed for future specialized-agent scenarios
+   ```rust
+   #[async_trait]
+   pub trait Router: Send + Sync {
+       fn scheme(&self) -> &str;
+       async fn route(&self, recipient: &str, body: &Message)
+           -> Result<(), RouterError>;
+   }
+
+   pub struct RouterRegistry {
+       routers: DashMap<String, Arc<dyn Router>>,
+   }
+
+   impl RouterRegistry {
+       pub fn register(&self, router: Arc<dyn Router>);
+       pub async fn route(&self, recipient: &str, body: &Message)
+           -> Result<(), RouterError>
+       {
+           let (scheme, _target) = recipient.split_once(':')
+               .ok_or(RouterError::MalformedRecipient)?;
+           let router = self.routers.get(scheme)
+               .ok_or(RouterError::NoRouterForScheme(scheme.into()))?;
+           router.route(recipient, body).await
+       }
+   }
+   ```
+
+   `CliRouter` holds `Arc<UnboundedSender<Message>>`, `scheme() == "cli"`, pushes all `cli:*` recipients to the single registered sink.
+
+10. **Handler integration for `Send/Reply/Notify`:**
+    - `MessageHandler::handle(Send(recipient, body))` → reads `RouterRegistry` from `EffectContext`, calls `registry.route(recipient, &msg)`, returns `Value::Unit` or maps error → `EffectError::Handler(...)`
+    - Same for `Reply` and `Notify` (differences are in metadata, not routing)
+    - `Ask` stays stubbed: "Pattern.Message.Ask is a candidate for removal in a future plan; v3 agents don't call LLMs via effects — LLMs drive agent turns via `Session::step`, and within each wire turn they use the `code` tool. Use Memory / Send / Reply for inter-agent communication instead."
+
+11. **`DisplayHandler` → `TurnSink` wiring:**
+    - `DisplayHandler` gains `turn_sink: Arc<dyn TurnSink>` constructor argument.
+    - On `Display.Show text`, emit `TurnEvent::Display { text }` to the sink.
+    - Orchestrator uses the same sink for `TurnEvent::Text/ToolCall/ToolResult/Stop`.
+    - CLI registers a sink that prints to stdout (with ANSI colour coding per event variant in a later CLI task).
+    - Tests register a `VecSink` (collects events into a Vec for assertions).
+
+12. **Hybrid pre-baked helpers (plumbing only):**
+    - `TidepoolSession::open` accepts optional `agent_helpers_dir: Option<PathBuf>`.
+    - Stored on `SessionContext`; eval worker appends it to `include_paths` for each `compile_and_run` call.
+    - GHC's `.hi`/`.o` cache makes this essentially free after first use.
+    - No CLI-level wiring in Phase 5; exposed for future specialized-agent scenarios.
 
 **Tests:**
-- Unit tests for `preamble::build` with a synthetic handler set
-- Unit tests for `template_source` matching expected wrapper shape
-- Unit tests for `RouterRegistry::route` with mock routers (scheme dispatch, missing-scheme error, malformed-recipient error)
-- Integration test for `CliRouter`: register, send a message, assert receiver side got it
-- Integration test for the full agent loop end-to-end via wiremock: mock provider returns a `code` tool_use, agent_loop evaluates a trivial snippet (`put "notes" "hello"`), pseudo-mock second response returns final text, assert TurnOutput captures the assistant response + the BlockWrite from the Memory.Put
-- Stubbed-Ask test: `Ask` effect still returns the "candidate for removal" error
+
+Types-layer:
+- `StopReason::is_terminal` returns correct values for each variant.
+- `StepReply` convenience accessors (`all_messages`, `all_block_writes`, `final_text`, `turn_count`) work across 0-turn, 1-turn, multi-turn cases.
+- `TurnInput::from_tool_results` preserves batch_id, mints fresh turn_id, and produces a single user-role message with N content blocks when given N results.
+- `TurnOutput` tool_calls/tool_results pairing invariant enforced (ideally via constructor; at minimum documented + test).
+- `ToolOutcome` serde round-trips.
+
+Runtime-layer:
+- `preamble::build` with a synthetic handler set (2-3 mock `DescribeEffect` impls) produces expected Haskell string.
+- `template_source` matches expected wrapper shape (regression against tidepool-mcp's template).
+- `RouterRegistry::route` with mock routers: scheme dispatch, missing-scheme error, malformed-recipient error.
+- `CliRouter`: register, send a message, assert receiver side got it.
+- `dispatch_eval`: a task with good input returns `ToolOutcome::Success`; bad JSON returns `ToolOutcome::Error`; dropped reply returns `ToolOutcome::Error("eval dropped reply")`.
+- `VecSink` test fixture: asserts TurnEvent ordering during a simulated orchestrate run (mock provider).
+- Stubbed-Ask test: `Ask` effect still returns the "candidate for removal" error.
+
+Integration (wiremock):
+- **Single wire turn, no tools:** mock provider returns final text; `Session::step` returns `StepReply` with one TurnOutput, `stop_reason=EndTurn`.
+- **One tool round-trip (two wire turns):** mock provider turn 1 returns `code` tool_use; orchestrator evaluates `put "notes" "hello"`; turn 2 returns final text. Assert `StepReply.turns.len() == 2`, `turns[0].stop_reason == ToolUse`, `turns[0].tool_results[0].outcome` is Success, `turns[0].block_writes` contains the write, `turns[1].stop_reason == EndTurn`, `all_block_writes()` aggregates correctly, all turns share `batch_id`, each has distinct `turn_id`.
+- **Tool error recovery:** turn 1 returns `code` tool_use with invalid Haskell; orchestrator returns `ToolOutcome::Error`; turn 2 receives the error tool_result and returns an apology; assert loop terminates cleanly.
+- **Pseudo-message flow across wire turns:** turn 1 writes a block; turn 2's ChatRequest (captured by the mock provider harness) contains a `[memory:updated]` pseudo-message in segment 2.
 
 **Commit:**
 
 ```
-[pattern-runtime] Task 20: agent loop + `code` tool + router registry
+[pattern-runtime] Task 20: agent loop + code tool + router
 
-Replaces Phase 3's stubbed MessageHandler + SessionMachine.run
-production path with a Rust-driven agent orchestrator. New modules:
+Wires Pattern.Session::step to a Rust-driven wire-turn loop driver that
+calls pattern_provider per wire turn, dispatches LLM-emitted `code`
+tool_use to a Haskell eval worker, and chains tool_result → next wire
+turn the way Anthropic's protocol requires (every tool_result batch is
+a new HTTP request).
 
-- agent_loop: async orchestrator; async compose → provider.complete →
-  stream consumption → tool_use dispatch to eval worker → loop; drains
-  adapter pending BlockWrites + pending_messages into real TurnOutput.
-- sdk::preamble: builds the Haskell boilerplate shared by all `code`
-  tool evals from each handler's DescribeEffect impl.
-- sdk::code_tool: static CODE_TOOL genai::Tool + source templating
+Model:
+- One user-visible exchange = Session::step = N wire turns = one
+  StepReply containing Vec<TurnOutput>.
+- One wire turn = one provider call = one composer pass = one
+  TurnRecord + checkpoint. Block_writes from turn N flow naturally
+  into turn N+1's segment 2 via TurnHistory + pseudo-message renderer
+  (no special-case wiring).
+- BatchId stable across all wire turns within one step.
+- Mid-stream parallel eval dispatch: we push ToolCall evals onto a
+  FuturesUnordered as the stream emits them; join at wire-turn
+  boundary before building TurnOutput.
+
+Types-layer additions (pattern_core):
+- StopReason enum (EndTurn / ToolUse / MaxTokens / StopSequence /
+  Refusal / PauseTurn) with is_terminal().
+- StepReply struct for the user-visible-exchange return.
+- TurnOutput gains tool_calls, tool_results, stop_reason fields.
+- ToolResult { call_id, outcome: ToolOutcome::{Success, Error} }.
+- TurnInput::from_tool_results(&TurnOutput, BatchId) constructor.
+- TurnSink trait + TurnEvent enum (Text, ToolCall, ToolResult,
+  Display, Stop) for streaming display. Named Turn* rather than
+  Stream* to avoid colliding with traits::data_stream::StreamEvent.
+  DisplayHandler forwards to the sink; orchestrator emits the
+  others. Default NoOpSink; VecSink for tests.
+
+Runtime-layer new modules:
+- agent_loop: one wire turn per call. Stream → accumulate →
+  dispatch evals in parallel → join → build TurnOutput.
+- sdk::preamble: Haskell boilerplate from each handler's
+  DescribeEffect impl.
+- sdk::code_tool: CODE_TOOL genai::Tool static + source templating
   adapted from tidepool_mcp::template_haskell.
-- router: Router trait + RouterRegistry; CliRouter ships as the first
-  scheme handler. Send/Reply/Notify dispatch via registry; unknown
-  schemes return helpful errors.
+- router: Router trait + RouterRegistry; CliRouter ships as the
+  first scheme handler. Send/Reply/Notify dispatch via registry.
 
-Each SDK handler now impl DescribeEffect so the preamble assembler can
-walk the bundle HList to generate Haskell GADT declarations + helpers.
+Each of the 11 SDK handlers impl DescribeEffect. DisplayHandler gains
+a TurnSink constructor arg; forwards Display.Show to the sink.
+
+TidepoolSession::step becomes the wire-turn loop driver: runs
+agent_loop::orchestrate, builds TurnInput::from_tool_results for
+continuation, loops until stop_reason.is_terminal() or no tool_calls.
 
 Ask stays stubbed as candidate-for-removal: v3 agents don't call LLMs
-via effects. LLMs drive agent turns via run_turn; the `code` tool lets
-them invoke SDK capabilities.
+via effects. LLMs drive agent work via Session::step; the `code` tool
+lets them invoke SDK capabilities.
 
 Hybrid pre-baked helpers: sessions accept optional agent_helpers_dir,
 threaded through compile_and_run's include paths. GHC's module cache
 handles the rest.
 
-Depends on Task 4+5 (adapter + TurnHistory) + Task 8-10 (composer).
-Blocks Task 15 (e2e test) and Task 16 (zero-blocks edge).
+Depends on Task 4+5 (adapter + TurnHistory + DB wiring) and Task 8-10
+(composer). Blocks Task 15 (e2e test) and Task 16 (zero-blocks edge).
 ```
+
+### Task 20 execution log
+
+The task landed as a seven-commit chain rather than a single monolithic commit. Documenting the split here so reviewers can walk them in order:
+
+1. **Part 1** — `DescribeEffect` trait + impls on all 11 SDK handlers + `sdk::preamble::build()` assembler.
+2. **Part 2** — `CODE_TOOL` static `genai::Tool` + `template_source()` adapted from `tidepool_mcp::template_haskell` + `CodeToolInput`.
+3. **Part 3** — `Router` trait (takes TARGET only, not full recipient) + `RouterRegistry` with **default-scheme fallback** for malformed/unknown-scheme recipients + `CliRouter` + `MessageHandler.{Send,Reply,Notify}` routing + `Ask` stubbed as candidate-for-removal.
+4. **Part 4 prep** — `PERSONA_LABEL` const + `RuntimeError::ProviderError` variant + `SessionContext::model_id` field + plan re-scope for the new wire-turn-loop architecture (Anthropic's protocol forces one provider call per "turn" — see rationale above).
+5. **Part 5a** — types-layer: `StopReason` + `ToolOutcome`/`ToolResult` + `TurnSink`/`TurnEvent` with `DisplayKind` (Chunk/Final/Note) + Thinking variant + `TurnInput.batch_id` + `TurnOutput.{tool_calls,tool_results,stop_reason}` + `StepReply` + `TurnInput::from_tool_results(prior, batch_id, owner_id)`.
+6. **Part 5b** — `Session::step` signature flip to `StepReply` + `SessionContext::turn_sink` field + `DisplayHandler::forward_to_turn_sink` bridge (TurnSinkForwarder). `TidepoolSession::step` interim wrapper: calls legacy `run_turn`, wraps in one-entry StepReply. Plan entry logs the **genai fork gap** (Anthropic adapter drops thinking content parts on outbound) → tracked in phase 6.
+7. **Part 5c** — `agent_loop::orchestrate` (one wire turn: compose → stream → emit TurnEvents → dispatch evals → build TurnOutput) + `drive_step` (wire-turn-loop driver: chain tool_results via `from_tool_results` until `stop_reason.is_terminal()`) + `EvalDispatcher` trait + `MockProviderClient` (scriptable ProviderClient for integration tests). 10 integration tests cover single-turn, thinking+text, tool_use round-trip, two-turn chain, tool-error recovery.
+8. **Part 5d** — `EvalWorker`: real `EvalDispatcher` backed by `std::thread` + 256 MiB stack + multi-thread tokio runtime (worker_threads=2, needed so `MemoryHandler`-driven async sqlx calls don't deadlock during sync `compile_and_run`) + `tidepool_runtime::compile_and_run`. Per-request: parse `CodeToolInput` → `template_source` → mpsc → worker reconstructs fresh `SdkBundle` with `DisplayHandler` forwarding to session sink → compile + run → oneshot reply. Drop-safe (channel close → worker exits at next `rx.recv()`). Phase 6 notes added for `TIDEPOOL_PRELUDE_DIR` env setup + evaluate rusqlite migration.
+9. **Part 5e** — `TidepoolSession::open_with_agent_loop` spawns `EvalWorker` + builds preamble + wires `DisplayHandler::forward_to_turn_sink` + injects turn_sink. `step_with_agent_loop` method drives the full wire-turn loop via `drive_step`. Legacy `Session::step` stays on the SessionMachine path for test-fixture compat; retirement in phase 6.
+
+### Still deferred from Task 20 (tracked as separate follow-ups)
+
+- **Full composer integration**: `orchestrate` currently builds a minimal `CompletionRequest` (just input messages + `CODE_TOOL`). Segments 1/2/3 (system + persona, conversation history + pseudo-messages, current_state) get wired via `compose::compose` with the pass set in a follow-up refinement — the wire-loop shape doesn't change, just the request construction.
+- **genai fork patch**: Anthropic adapter needs to preserve `ContentPart::{ReasoningContent, ThoughtSignature}` on outbound (currently drops them → Extended Thinking breaks across tool cycles). Phase 6 follow-up.
+- **`TIDEPOOL_PRELUDE_DIR` env wiring**: Nix devshell + preflight + session-open defaults. Phase 6 follow-up.
+- **Rusqlite migration evaluation**: sync MemoryStore would let the eval worker drop the tokio runtime entirely. Phase 6 decision.
 <!-- END_TASK_20 -->
 
 ---
@@ -1718,8 +1952,8 @@ Blocks Task 15 (e2e test) and Task 16 (zero-blocks edge).
 - [ ] Types-layer prep: `BlockCreate` struct bundling `MemoryStore::create_block` args; `BlockWrite::previous_rendered_content` field for diff-style pseudo-messages
 - [ ] `MemoryStoreAdapter` wraps preserved pattern_core storage as Phase 2's trait + holds a pending `Vec<BlockWrite>` buffer that handlers push into as they mutate; session drains at turn close
 - [ ] `TurnHistory` holds in-memory active turns (unbounded at its layer; compaction manages size), `summary_head` vector of recent `ArchiveSummary`s loaded from pattern_db, and a running `estimated_tokens: u64` that combines real counts + heuristic fallback (no `Option`-wrapping at the API)
-- [ ] `run_turn` properly produces real `TurnOutput`s: messages from MessageHandler output, `block_writes` from adapter drain, `usage` from provider response, `cache_metrics` populated (Task 12 feeds in)
-- [ ] Per-turn message persistence to pattern_db `messages` table (`is_archived=0` at turn close; set to `1` during compaction)
+- [ ] Each wire turn produces a real `TurnOutput`: `messages` drained from pending + synthesized assistant msg, `block_writes` from adapter drain, `tool_calls` + `tool_results` from stream/eval, `stop_reason` from stream End, `usage` from provider response, `cache_metrics` populated (Task 12 feeds in). `Session::step` aggregates wire turns into `StepReply`.
+- [ ] Per-wire-turn message persistence to pattern_db `messages` table (`is_archived=0` at turn close; set to `1` during compaction). All wire turns from one `step` share `batch_id`; each has distinct `turn_id`.
 - [ ] Hierarchical archive summaries wired to pattern_db's `archive_summaries` table — depth-0 rows created during compaction, depth-N rollups generated when depth-(N-1) chain grows too long for the summary-head prepend budget
 - [ ] Pseudo-message renderer emits `[memory:written]` / `[memory:updated]` in `<system-reminder>` tags; uses `similar::TextDiff` (existing pattern_core dep) against `previous_rendered_content` for update diffs
 - [ ] `[memory:current_state]` pseudo-turn renderer: block-aware rendering per schema type; empty-case preserved (AC7.6)
@@ -1729,7 +1963,7 @@ Blocks Task 15 (e2e test) and Task 16 (zero-blocks edge).
 - [ ] Compression strategies migrated to async `count_tokens`; budget policy = `context_window - max_output - explicit_buffer`; compaction activates when `TurnHistory.estimated_tokens` approaches budget; batch integrity preserved with pseudo-messages
 - [ ] Block-rendering code removed from all system-prompt paths (AC7.2 guarantee)
 - [ ] Task 19: scope-aware Search + Recall SDK modules + handlers; v2 functional parity preserved (self-always, cross-agent via shared-blocks or group-membership, constellation via broad permission). Recall scope is optional; block-read ops honor `shared_blocks` for cross-agent access. `AiTool` / `ToolContext` Rust infrastructure NOT ported — v3 uses effects + handlers exclusively.
-- [ ] Task 20: agent loop + `code` tool + router registry. `MessageHandler.{Send,Reply,Notify}` dispatch through scheme-keyed router registry; `CliRouter` is the first scheme handler. Agent loop replaces Phase-3 `SessionMachine.run` in `run_turn`'s production path; LLM-emitted `code` tool_use snippets evaluated via `tidepool_runtime::compile_and_run` against the SDK bundle. `Ask` stubbed as candidate-for-removal. `TurnOutput.messages` populated end-to-end. `run_haskell`-esque compile hot path minimized via include-path discipline (GHC module cache + tidepool CBOR cache).
+- [ ] Task 20: agent loop + `code` tool + router. Types-layer: `StopReason` / `StepReply` / `ToolResult` / `ToolOutcome` / `TurnSink` + `TurnEvent` in pattern_core; `TurnOutput` extended with `tool_calls` / `tool_results` / `stop_reason`; `TurnInput::from_tool_results(prior, batch_id)` constructor; `Session::step` returns `StepReply`. Runtime-layer: `agent_loop::orchestrate` runs **one wire turn** (no inner loop) with mid-stream parallel eval dispatch via FuturesUnordered; `TidepoolSession::step` drives the **wire-turn loop** — repeatedly calls orchestrate, threads tool_results through `TurnInput::from_tool_results`, preserves `batch_id` across all wire turns in one step, returns `StepReply` when `stop_reason.is_terminal()`. `MessageHandler.{Send,Reply,Notify}` dispatch through scheme-keyed router registry; `CliRouter` is the first scheme handler. `DisplayHandler` forwards to the session's `TurnSink`. LLM-emitted `code` tool_use snippets evaluated via `tidepool_runtime::compile_and_run` against the SDK bundle. `Ask` stubbed as candidate-for-removal. Compile hot path minimized via include-path discipline (GHC module cache + tidepool CBOR cache).
 - [ ] `cargo check`, `clippy`, `doc` all zero-warning across the narrowed workspace
 - [ ] `bash scripts/audit-rewrite-state.sh` passes
 - [ ] `just pre-commit-all` passes

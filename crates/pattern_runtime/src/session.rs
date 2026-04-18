@@ -52,6 +52,10 @@ use crate::timeout::{Budget, CancelState};
 #[derive(Debug)]
 pub struct SessionContext {
     agent_id: String,
+    /// Model identifier for provider completion requests (e.g.
+    /// `"claude-opus-4-7"`). Set at session open; defaults to
+    /// `"claude-sonnet-4-20250514"` if not specified.
+    model_id: String,
     budget: Budget,
     cancel_state: Arc<CancelState>,
     /// Memory store adapter: delegates to the underlying `MemoryStore` and
@@ -133,6 +137,7 @@ impl SessionContext {
         let adapter = Arc::new(MemoryStoreAdapter::new(memory_store, &agent_id));
         Self {
             agent_id,
+            model_id: "claude-sonnet-4-20250514".to_string(),
             budget,
             cancel_state: Arc::new(CancelState::new()),
             adapter,
@@ -161,6 +166,11 @@ impl SessionContext {
     /// Agent id this session runs as.
     pub fn agent_id(&self) -> &str {
         &self.agent_id
+    }
+
+    /// Model identifier for provider completion requests.
+    pub fn model_id(&self) -> &str {
+        &self.model_id
     }
 
     /// Per-turn budget snapshot.
@@ -211,12 +221,20 @@ impl SessionContext {
     }
 
     /// Pending messages accumulated during the current turn.
-    pub fn pending_messages(&self) -> &Arc<std::sync::Mutex<Vec<pattern_core::types::message::Message>>> {
+    pub fn pending_messages(
+        &self,
+    ) -> &Arc<std::sync::Mutex<Vec<pattern_core::types::message::Message>>> {
         &self.pending_messages
     }
 
-    /// Replace the router registry. Used by session open to inject a
-    /// pre-configured registry.
+    /// Replace the router registry. Used by session open (and tests) to
+    /// inject a pre-configured registry — typically registered with a
+    /// `CliRouter` or other scheme handlers before the session starts.
+    ///
+    /// Currently exercised via `MessageHandler::tests`; production wiring
+    /// in `session::open` lands in Task 20 part 5 (agent_loop
+    /// integration). The `#[allow(dead_code)]` is temporary.
+    #[allow(dead_code)]
     pub(crate) fn with_router(mut self, router: Arc<RouterRegistry>) -> Self {
         self.router = router;
         self

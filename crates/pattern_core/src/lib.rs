@@ -54,6 +54,10 @@ pub mod test_helpers;
 // ── Common re-exports ────────────────────────────────────────────────────────
 
 pub use base_instructions::DEFAULT_BASE_INSTRUCTIONS;
+
+/// Reserved memory-block label for the agent's persona content.
+/// Segment 1 reads this block to inject persona into the system prompt.
+pub const PERSONA_LABEL: &str = "persona";
 pub use error::{
     ConfigError, CoreError, EmbeddingError, MemoryError, ProviderError, Result, RuntimeError,
 };
