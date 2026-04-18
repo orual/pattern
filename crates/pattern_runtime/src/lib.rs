@@ -8,6 +8,7 @@
 //! - Phase 3: Tidepool FFI, timeout harness, SDK effect algebra, agent loop, checkpoint, `time`/`log` handlers.
 //! - Phase 5: Memory adapter (wraps preserved storage), pseudo-message emission, pre-turn `current_state` pseudo-turn.
 
+pub mod agent_loop;
 pub mod checkpoint;
 pub mod memory;
 pub mod preflight;
