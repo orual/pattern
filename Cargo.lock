@@ -5253,6 +5253,8 @@ dependencies = [
  "serde_json",
  "serde_urlencoded",
  "sha2",
+ "similar",
+ "smol_str",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",

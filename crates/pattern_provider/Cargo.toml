@@ -46,6 +46,12 @@ secrecy = { workspace = true }
 jiff = { workspace = true, features = ["serde"] }
 uuid = { workspace = true, features = ["v4", "serde"] }
 
+# Diff generation for memory-block update pseudo-messages.
+similar = "2.6"
+
+# SmolStr for BlockHandle / ids used by pseudo_messages types.
+smol_str = { workspace = true }
+
 # Paths
 dirs = { workspace = true }
 

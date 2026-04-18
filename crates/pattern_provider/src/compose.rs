@@ -42,6 +42,7 @@ pub mod breakpoints;
 pub mod partial_request;
 pub mod pipeline;
 pub mod profile;
+pub mod pseudo_messages;
 
 // Convenience re-exports so call sites can type `compose::ComposerPass`
 // instead of `compose::pipeline::ComposerPass`.
@@ -49,3 +50,4 @@ pub use breakpoints::{BreakpointLocation, BreakpointPlacement, BreakpointTracker
 pub use partial_request::PartialRequest;
 pub use pipeline::{ComposerPass, compose, finalize};
 pub use profile::{CacheProfile, CacheStrategy};
+pub use pseudo_messages::{render_change_event, render_change_events};
