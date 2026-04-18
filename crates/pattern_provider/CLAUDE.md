@@ -13,6 +13,40 @@ migration patches not yet in upstream).
 See `docs/design-plans/2026-04-16-v3-foundation.md` §Provider and §Architecture
 for the auth flow diagram and shaping contract.
 
+## Anthropic auth chain — tier order
+
+`AnthropicAuthChain::resolve()` tries tiers in this order:
+
+1. **Stored OAuth** (keyring primary, JSON fallback). Pattern's own
+   PKCE-minted token. Most explicit user intent — they ran `pattern auth`
+   and deliberately stored a token.
+2. **API key** (`ANTHROPIC_API_KEY` env var, loaded via dotenvy in
+   `pattern-test-cli` when a `.env` is present). Env-level user choice.
+   Takes precedence over session-pickup so `ANTHROPIC_API_KEY=sk-…` in a
+   `.env` actually works without requiring the user to shuffle claude-code
+   state.
+3. **Session-pickup** (reads `~/.claude/.credentials.json`, matching the
+   `claudeAiOauth` wrapper verified on 2026-04-17). Ambient fallback —
+   use whatever claude-code happens to be authed against when neither of
+   the explicit tiers resolves.
+
+**Rationale:** explicit-over-ambient matches Unix convention and the
+mental model every other Anthropic SDK (python, TS) imposes — env vars
+win, config is convenience. The only twist is that pattern's own
+stored OAuth trumps even the env var, because that token was obtained
+via a deliberate PKCE flow the user performed; silently overriding it
+because an env var happens to be set would erase their deliberate action.
+
+**Observability.** `pattern-test-cli auth` always prints which tier
+resolved, so users can verify their environment without guessing. The
+gateway also logs the tier at `info` level on each resolve for request
+correlation.
+
+**Footgun mitigation.** User with both a claude-code session AND an
+`ANTHROPIC_API_KEY` env var gets charged API credit, not subscription
+quota. This is the Unix-convention-correct behaviour but can surprise.
+The `auth` command's tier printout is the documented way to check.
+
 ## ShaperCompatMode — empirical decision (verified 2026-04-17)
 
 Phase 4 Task 20 required an empirical test of `HonestPattern` vs.

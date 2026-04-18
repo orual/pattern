@@ -162,30 +162,44 @@ impl CredentialChain for AnthropicAuthChain {
     }
 
     async fn resolve(&self) -> Result<ResolvedCredential, ProviderError> {
-        // Tier 1: session-pickup (ambient claude-code credentials).
-        #[cfg(feature = "subscription-oauth")]
-        if let Some(oauth) = &self.oauth {
-            if let Some(token) = oauth.session_pickup.pick_up().await? {
-                return Ok(ResolvedCredential {
-                    source: AuthTier::SessionPickup,
-                    token,
-                });
-            }
+        // Tier order: explicit-user-choice before ambient.
+        //
+        // 1. Stored OAuth — pattern's own PKCE token, persisted after a
+        //    deliberate auth flow. Most-explicit user intent.
+        // 2. API key — env-provided, also user-explicit. Takes precedence
+        //    over session-pickup so setting ANTHROPIC_API_KEY actually
+        //    overrides the ambient claude-code session.
+        // 3. Session-pickup — ambient fallback, uses whatever claude-code
+        //    happens to have in ~/.claude/.credentials.json. Last so
+        //    explicit choices always win.
 
-            // Tier 2: stored OAuth with refresh-on-near-expiry.
-            if let Some(stored) = oauth.creds_store.get("anthropic").await? {
-                let token = self.refresh_if_needed(oauth, stored).await?;
-                return Ok(ResolvedCredential {
-                    source: AuthTier::Pkce,
-                    token,
-                });
-            }
+        // Tier 1: stored OAuth with refresh-on-near-expiry.
+        #[cfg(feature = "subscription-oauth")]
+        if let Some(oauth) = &self.oauth
+            && let Some(stored) = oauth.creds_store.get("anthropic").await?
+        {
+            let token = self.refresh_if_needed(oauth, stored).await?;
+            return Ok(ResolvedCredential {
+                source: AuthTier::Pkce,
+                token,
+            });
         }
 
-        // Tier 3: API key (always available; only tier without subscription-oauth).
+        // Tier 2: API key (always available; only tier without subscription-oauth).
         if let Some(token) = self.api_key.resolve() {
             return Ok(ResolvedCredential {
                 source: AuthTier::ApiKey,
+                token,
+            });
+        }
+
+        // Tier 3: session-pickup (ambient claude-code credentials).
+        #[cfg(feature = "subscription-oauth")]
+        if let Some(oauth) = &self.oauth
+            && let Some(token) = oauth.session_pickup.pick_up().await?
+        {
+            return Ok(ResolvedCredential {
+                source: AuthTier::SessionPickup,
                 token,
             });
         }

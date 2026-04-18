@@ -50,6 +50,7 @@ clap             = { workspace = true }
 futures          = { workspace = true }
 secrecy          = { workspace = true }
 tracing-subscriber = { workspace = true }
+dotenvy          = { workspace = true }
 
 [dev-dependencies]
 tokio          = { workspace = true, features = ["rt-multi-thread", "test-util", "macros"] }

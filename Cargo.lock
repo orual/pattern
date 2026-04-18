@@ -5269,6 +5269,7 @@ version = "0.4.0"
 dependencies = [
  "async-trait",
  "clap",
+ "dotenvy",
  "frunk",
  "futures",
  "jiff",

@@ -157,6 +157,16 @@ impl ShaperMode {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Load `.env` from cwd (or parent) before any env reads. Primarily
+    // useful for dropping `ANTHROPIC_API_KEY=...` in a gitignored `.env`
+    // during development without exporting it globally. Silently no-op
+    // when no .env is present.
+    match dotenvy::dotenv() {
+        Ok(path) => eprintln!("loaded env from {}", path.display()),
+        Err(e) if e.not_found() => {}
+        Err(e) => eprintln!("⚠ dotenv load failed: {e}"),
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
