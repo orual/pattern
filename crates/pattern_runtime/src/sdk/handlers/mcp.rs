@@ -19,13 +19,8 @@ impl DescribeEffect for McpHandler {
         EffectDecl {
             type_name: "Mcp",
             description: "Model-Context-Protocol tool calls (Use)",
-            constructors: &[
-                "Use :: Server -> Method -> Mcp ()",
-            ],
-            type_defs: &[
-                "type Server = Text",
-                "type Method = Text",
-            ],
+            constructors: &["Use :: Server -> Method -> Mcp ()"],
+            type_defs: &["type Server = Text", "type Method = Text"],
             helpers: &[
                 "use_ :: Member Mcp effs => Server -> Method -> Eff effs ()\nuse_ s m = send (Use s m)",
             ],

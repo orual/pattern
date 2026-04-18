@@ -7,6 +7,8 @@ module TightCompute (agent) where
 
 import Control.Monad.Freer (Eff)
 import Pattern.Memory
+import Pattern.Search
+import Pattern.Recall
 import Pattern.Message
 import Pattern.Display
 import Pattern.Time
@@ -18,7 +20,7 @@ tightSum :: Int -> Int -> Int
 tightSum !acc 0 = acc
 tightSum !acc n = tightSum (acc + n * n) (n - 1)
 
-agent :: Eff '[Memory, Message, Display, Time, Log] ()
+agent :: Eff '[Memory, Search, Recall, Message, Display, Time, Log] ()
 agent = do
   let !_ = tightSum 0 200000000
   info "done"

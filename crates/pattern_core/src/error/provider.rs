@@ -376,35 +376,6 @@ pub enum ProviderError {
         idx: usize,
     },
 
-    /// A cache_control marker with extended-TTL semantics (`Ephemeral1h`
-    /// or `Ephemeral24h`) was placed but the outbound request lacks the
-    /// required `anthropic-beta: extended-cache-ttl-2025-04-11` header.
-    /// The shaper normally ensures the header is present when the
-    /// session's `CacheProfile::requires_extended_ttl_beta()` is true;
-    /// this variant surfaces when that invariant breaks.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use pattern_core::error::ProviderError;
-    ///
-    /// let err = ProviderError::MissingExtendedCacheTtlBeta;
-    /// assert!(err.to_string().contains("extended-cache-ttl"));
-    /// ```
-    #[error(
-        "composer placed an extended-TTL cache marker but the outbound \
-         request lacks the `extended-cache-ttl-2025-04-11` beta header"
-    )]
-    #[diagnostic(
-        code(pattern_core::provider::missing_extended_cache_ttl_beta),
-        help(
-            "ensure the shaper emits the extended-cache-ttl-2025-04-11 \
-             anthropic-beta marker when CacheProfile::requires_extended_ttl_beta() \
-             is true"
-        )
-    )]
-    MissingExtendedCacheTtlBeta,
-
     /// Cache-breakpoint TTL ordering violated: Anthropic requires
     /// longer-TTL markers (1h, 24h) to appear before shorter-TTL
     /// markers (5m, Ephemeral) in wire-format order (system blocks

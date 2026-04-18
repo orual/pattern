@@ -148,16 +148,24 @@ mod tests {
     fn code_tool_has_correct_name() {
         // ToolName::Custom(String) — check via Display/Debug or direct match.
         let name_str = format!("{:?}", CODE_TOOL.name);
-        assert!(name_str.contains("code"), "tool name should be 'code', got: {name_str}");
+        assert!(
+            name_str.contains("code"),
+            "tool name should be 'code', got: {name_str}"
+        );
     }
 
     #[test]
     fn code_tool_has_description() {
         assert!(CODE_TOOL.description.is_some());
         let desc = CODE_TOOL.description.as_ref().unwrap();
-        assert!(desc.contains("Haskell"), "description should mention Haskell");
-        assert!(desc.contains("Pattern SDK") || desc.contains("effect stack"),
-            "description should mention the SDK or effect stack");
+        assert!(
+            desc.contains("Haskell"),
+            "description should mention Haskell"
+        );
+        assert!(
+            desc.contains("Pattern SDK") || desc.contains("effect stack"),
+            "description should mention the SDK or effect stack"
+        );
     }
 
     #[test]
@@ -166,8 +174,14 @@ mod tests {
         let required = schema["required"].as_array().unwrap();
         let req_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
         assert!(req_strs.contains(&"code"), "schema must require 'code'");
-        assert!(!req_strs.contains(&"imports"), "'imports' should be optional");
-        assert!(!req_strs.contains(&"helpers"), "'helpers' should be optional");
+        assert!(
+            !req_strs.contains(&"imports"),
+            "'imports' should be optional"
+        );
+        assert!(
+            !req_strs.contains(&"helpers"),
+            "'helpers' should be optional"
+        );
     }
 
     #[test]
@@ -197,8 +211,14 @@ mod tests {
         let decls = canonical_effect_decls();
         let pre = preamble::build(&decls);
         let source = template_source(&pre, "pure ()", None, None);
-        assert!(source.contains("module Expr where"), "missing module header");
-        assert!(source.contains("data Memory a where"), "missing Memory GADT");
+        assert!(
+            source.contains("module Expr where"),
+            "missing module header"
+        );
+        assert!(
+            source.contains("data Memory a where"),
+            "missing Memory GADT"
+        );
     }
 
     #[test]
@@ -217,9 +237,15 @@ mod tests {
         let decls = canonical_effect_decls();
         let pre = preamble::build(&decls);
         let source = template_source(&pre, "pure ()", None, None);
-        assert!(source.contains("result :: Eff M Value"), "missing result type sig");
+        assert!(
+            source.contains("result :: Eff M Value"),
+            "missing result type sig"
+        );
         assert!(source.contains("result = do"), "missing result do");
-        assert!(source.contains("paginateResult 4096"), "missing paginateResult tail");
+        assert!(
+            source.contains("paginateResult 4096"),
+            "missing paginateResult tail"
+        );
     }
 
     #[test]
@@ -235,11 +261,17 @@ mod tests {
         let decls = canonical_effect_decls();
         let pre = preamble::build(&decls);
         let source = template_source(&pre, "pure ()", Some("Data.Char"), None);
-        assert!(source.contains("import Data.Char"), "missing injected import");
+        assert!(
+            source.contains("import Data.Char"),
+            "missing injected import"
+        );
         // Import should appear before `default (Int, Text)`.
         let import_pos = source.find("import Data.Char").unwrap();
         let default_pos = source.find("default (Int").unwrap();
-        assert!(import_pos < default_pos, "import should be before default decl");
+        assert!(
+            import_pos < default_pos,
+            "import should be before default decl"
+        );
     }
 
     #[test]
@@ -251,7 +283,10 @@ mod tests {
         // Helper should appear after `-- [user]` marker.
         let marker_pos = source.find("-- [user]").unwrap();
         let helper_pos = source.find("myFn x = x + 1").unwrap();
-        assert!(helper_pos > marker_pos, "helper should be after [user] marker");
+        assert!(
+            helper_pos > marker_pos,
+            "helper should be after [user] marker"
+        );
     }
 
     #[test]
@@ -260,7 +295,13 @@ mod tests {
         let pre = preamble::build(&decls);
         let code = "x <- get \"notes\"\nput \"notes\" (x <> \" updated\")";
         let source = template_source(&pre, code, None, None);
-        assert!(source.contains("    x <- get \"notes\""), "line 1 not indented");
-        assert!(source.contains("    put \"notes\" (x <> \" updated\")"), "line 2 not indented");
+        assert!(
+            source.contains("    x <- get \"notes\""),
+            "line 1 not indented"
+        );
+        assert!(
+            source.contains("    put \"notes\" (x <> \" updated\")"),
+            "line 2 not indented"
+        );
     }
 }

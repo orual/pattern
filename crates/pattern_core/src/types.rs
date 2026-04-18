@@ -12,6 +12,7 @@ pub mod ids;
 pub mod message;
 pub mod origin;
 pub mod provider;
+pub mod search;
 pub mod snapshot;
 pub mod turn;
 
@@ -25,5 +26,6 @@ pub use ids::{
 };
 pub use message::{Message, ResponseMeta};
 pub use origin::{AgentAuthor, Author, Human, MessageOrigin, Partner, Sphere, SystemReason};
+pub use search::SearchScope;
 pub use snapshot::{PersonaConfig, PersonaSnapshot, SessionSnapshot};
 pub use turn::{StepReply, StopReason, TurnCacheMetrics, TurnId, TurnInput, TurnOutput};

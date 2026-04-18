@@ -380,4 +380,32 @@ pub trait MemoryStore: Send + Sync + fmt::Debug {
     ///
     /// Returns the count of inactive updates that can be redone.
     async fn redo_depth(&self, agent_id: &str, label: &str) -> MemoryResult<usize>;
+
+    // ========== Scope Resolution Helpers ==========
+    //
+    // These methods support the scope resolver in `pattern_runtime`.
+    // Default implementations return conservative answers (no permission,
+    // no agents). Implementations backed by pattern_db override these
+    // with real DB queries.
+
+    /// Check whether `target` has shared at least one block with `caller`.
+    ///
+    /// Used by the scope resolver to determine cross-agent search
+    /// permission: sharing a block is treated as a signal that two agents
+    /// cooperate.
+    async fn has_shared_blocks_with(&self, _caller: &str, _target: &str) -> MemoryResult<bool> {
+        Ok(false)
+    }
+
+    /// Check whether `caller` and `target` are members of the same
+    /// agent group.
+    async fn shares_group_with(&self, _caller: &str, _target: &str) -> MemoryResult<bool> {
+        Ok(false)
+    }
+
+    /// List all agent IDs in the constellation. Used for
+    /// `SearchScope::Constellation` resolution.
+    async fn list_constellation_agent_ids(&self) -> MemoryResult<Vec<String>> {
+        Ok(vec![])
+    }
 }

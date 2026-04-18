@@ -93,8 +93,7 @@ impl ToolOutcome {
     /// errors pass through as-is.
     pub fn to_content_string(&self) -> String {
         match self {
-            ToolOutcome::Success(v) => serde_json::to_string(v)
-                .unwrap_or_else(|_| v.to_string()),
+            ToolOutcome::Success(v) => serde_json::to_string(v).unwrap_or_else(|_| v.to_string()),
             ToolOutcome::Error(msg) => msg.clone(),
         }
     }

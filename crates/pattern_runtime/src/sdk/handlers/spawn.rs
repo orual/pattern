@@ -23,10 +23,7 @@ impl DescribeEffect for SpawnHandler {
                 "Start :: AgentSpec -> Spawn AgentId",
                 "Stop  :: AgentId -> Spawn ()",
             ],
-            type_defs: &[
-                "type AgentSpec = Text",
-                "type AgentId = Text",
-            ],
+            type_defs: &["type AgentSpec = Text", "type AgentId = Text"],
             helpers: &[
                 "start :: Member Spawn effs => AgentSpec -> Eff effs AgentId\nstart spec = send (Start spec)",
                 "stop :: Member Spawn effs => AgentId -> Eff effs ()\nstop i = send (Stop i)",

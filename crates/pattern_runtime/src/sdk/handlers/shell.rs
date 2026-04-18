@@ -26,10 +26,7 @@ impl DescribeEffect for ShellHandler {
                 "Kill    :: Pid -> Shell ()",
                 "Status  :: Pid -> Shell Text",
             ],
-            type_defs: &[
-                "type Command = Text",
-                "type Pid = Integer",
-            ],
+            type_defs: &["type Command = Text", "type Pid = Integer"],
             helpers: &[
                 "execute :: Member Shell effs => Command -> Eff effs Text\nexecute c = send (Execute c)",
                 "spawn_ :: Member Shell effs => Command -> Eff effs Pid\nspawn_ c = send (Spawn c)",

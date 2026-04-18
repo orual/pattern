@@ -26,10 +26,7 @@ impl DescribeEffect for TimeHandler {
         EffectDecl {
             type_name: "Time",
             description: "Wall-clock time and bounded sleep (Now/Sleep)",
-            constructors: &[
-                "Now   :: Time Int",
-                "Sleep :: Int -> Time ()",
-            ],
+            constructors: &["Now   :: Time Int", "Sleep :: Int -> Time ()"],
             type_defs: &[],
             helpers: &[
                 "now :: Member Time effs => Eff effs Int\nnow = send Now",

@@ -38,6 +38,9 @@ data SchemaKind
   | SchemaList
   | SchemaLog
 
+-- | Agent identifier (for shared-block access across agents).
+type Owner = Text
+
 -- | Memory effect algebra.
 --
 -- 'Put' takes an optional description — 'Nothing' leaves existing
@@ -46,21 +49,26 @@ data SchemaKind
 --
 -- 'Create' explicitly creates a new block with full metadata control.
 -- 'Replace' does string-replace within an existing block's text.
+--
+-- 'GetShared' retrieves a block owned by another agent that has been
+-- shared with the caller. Permission is checked by the handler against
+-- the shared_blocks table.
 data Memory a where
-  Get     :: BlockHandle -> Memory Content
-  Put     :: BlockHandle -> Content -> Maybe Text -> Memory ()
-  Create  :: BlockHandle
-          -> Text              -- description
-          -> BlockType         -- block type
-          -> SchemaKind        -- schema kind (handler fills nested defaults)
-          -> Maybe Int         -- char_limit (Nothing = runtime default)
-          -> Content           -- initial content
-          -> Memory ()
-  Append  :: BlockHandle -> Content -> Memory ()
-  Replace :: BlockHandle -> Text -> Text -> Memory ()  -- label, old, new
-  Search  :: Query -> Memory [BlockHandle]
-  Recall  :: BlockHandle -> Memory Content
-  Archive :: BlockHandle -> Memory ()
+  Get       :: BlockHandle -> Memory Content
+  Put       :: BlockHandle -> Content -> Maybe Text -> Memory ()
+  Create    :: BlockHandle
+            -> Text              -- description
+            -> BlockType         -- block type
+            -> SchemaKind        -- schema kind (handler fills nested defaults)
+            -> Maybe Int         -- char_limit (Nothing = runtime default)
+            -> Content           -- initial content
+            -> Memory ()
+  Append    :: BlockHandle -> Content -> Memory ()
+  Replace   :: BlockHandle -> Text -> Text -> Memory ()  -- label, old, new
+  Search    :: Query -> Memory [BlockHandle]
+  Recall    :: BlockHandle -> Memory Content
+  Archive   :: BlockHandle -> Memory ()
+  GetShared :: Owner -> BlockHandle -> Memory Content
 
 -- | Fetch a block's rendered content by label.
 get :: Member Memory effs => BlockHandle -> Eff effs Content
@@ -98,3 +106,8 @@ recall h = send (Recall h)
 
 archive :: Member Memory effs => BlockHandle -> Eff effs ()
 archive h = send (Archive h)
+
+-- | Fetch a shared block's content by owner agent id and label.
+-- Errors if the block hasn't been shared with the caller.
+getShared :: Member Memory effs => Owner -> BlockHandle -> Eff effs Content
+getShared o h = send (GetShared o h)

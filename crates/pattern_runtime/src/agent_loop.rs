@@ -46,13 +46,20 @@ use jiff::Timestamp;
 
 use pattern_core::error::RuntimeError;
 use pattern_core::traits::TurnEvent;
-use pattern_core::types::ids::{new_id, AgentId, MessageId};
+use pattern_core::types::ids::{AgentId, MessageId, new_id};
 use pattern_core::types::message::{Message, ResponseMeta};
 use pattern_core::types::provider::{
     ChatMessage, ChatStreamEvent, CompletionRequest, ToolCall, ToolOutcome, ToolResult,
 };
 use pattern_core::types::turn::{StepReply, StopReason, TurnCacheMetrics, TurnInput, TurnOutput};
 
+use pattern_provider::compose::passes::{
+    Segment1Pass, Segment2Pass, Segment3Pass, synthesize_summary_message,
+};
+use pattern_provider::compose::{CacheProfile, ComposerPass, PartialRequest, compose};
+use pattern_provider::shaper::{ShaperCompatMode, build_system_prompt};
+
+use crate::memory::TurnHistory;
 use crate::sdk::CODE_TOOL;
 use crate::session::SessionContext;
 
@@ -118,42 +125,42 @@ impl EvalDispatcher for NoOpDispatcher {
 ///   [`TurnOutput`] invariant.
 /// - `stop_reason` — extracted from `StreamEnd.captured_stop_reason`.
 /// - `usage` — from `StreamEnd.captured_usage`.
+/// - `cache_metrics` — populated from the `Usage.prompt_tokens_details`
+///   fields: `cached_tokens` → `cache_read_input_tokens`,
+///   `cache_creation_tokens` → `cache_creation_input_tokens`, and the
+///   remainder of `prompt_tokens` → `fresh_input_tokens`.
 ///
 /// Errors are returned as `Err(RuntimeError::ProviderError)` for
 /// provider-client failures. Tool evaluation failures ride inside
 /// `ToolOutcome::Error` on successful returns — they're a normal
 /// part of the agent's operation, not orchestrator errors.
+///
+/// # AC8.5 — segment-1 bust warning
+///
+/// When `has_segment_1` is `true` (the request placed a segment-1 cache
+/// boundary, meaning we expected segment 1 to hit) but the response
+/// reports zero `cache_read_input_tokens`, a `tracing::warn!` is emitted
+/// to surface the unexpected cache miss for operator visibility.
 pub async fn orchestrate(
+    req: CompletionRequest,
     input: TurnInput,
     ctx: Arc<SessionContext>,
     dispatcher: &dyn EvalDispatcher,
     preamble: &str,
+    has_segment_1: bool,
 ) -> Result<TurnOutput, RuntimeError> {
-    // 1. Build the CompletionRequest.
-    //
-    // First cut: pass input messages through + inject CODE_TOOL into
-    // the tools array. Segment 1/2/3 composer integration is a
-    // follow-up change (part 5d) — this cut is deliberately minimal
-    // so the wire-loop shape can land first with simple tests.
-    let messages: Vec<ChatMessage> = input
-        .messages
-        .iter()
-        .map(|m| m.chat_message.clone())
-        .collect();
-
-    let req = CompletionRequest::new(ctx.model_id())
-        .with_messages(messages)
-        .with_tools(vec![CODE_TOOL.clone()]);
-
-    // 2. Call the provider, consume the stream.
+    // 1. Call the provider, consume the stream. Caller is responsible
+    //    for having built `req` via the composer pipeline (segments
+    //    1/2/3 + fresh input messages appended) — `orchestrate`
+    //    itself doesn't know about the cache layout.
     let sink = ctx.turn_sink().clone();
-    let mut stream = ctx
-        .provider()
-        .complete(req)
-        .await
-        .map_err(|e| RuntimeError::ProviderError {
-            reason: e.to_string(),
-        })?;
+    let mut stream =
+        ctx.provider()
+            .complete(req)
+            .await
+            .map_err(|e| RuntimeError::ProviderError {
+                reason: e.to_string(),
+            })?;
 
     let mut tool_calls: Vec<ToolCall> = Vec::new();
     let mut captured_reasoning: Option<String> = None;
@@ -245,7 +252,45 @@ pub async fn orchestrate(
     // 5. Drain pending block writes from the memory adapter.
     let block_writes = ctx.adapter().drain_pending();
 
-    // 6. Emit the Stop event and assemble TurnOutput.
+    // 6. Build cache metrics from the captured usage.
+    //
+    // genai's `PromptTokensDetails` uses:
+    //   - `cached_tokens`          → cache_read_input_tokens   (0.1× billed)
+    //   - `cache_creation_tokens`  → cache_creation_input_tokens (1.25–2× billed)
+    //
+    // Fresh input tokens are the residual: total prompt tokens minus the
+    // two cache buckets. We use saturating subtraction to guard against
+    // provider quirks (e.g. zero/None total with non-zero detail fields).
+    let cache_metrics = build_cache_metrics(usage.as_ref());
+
+    // 6a. AC8.5 — warn when we placed segment 1 (expected a cache hit on the
+    //     stable system-prompt prefix) but the response reported zero cache
+    //     reads. This can mean TTL expiry, a content change in segment 1, or
+    //     a provider-side regression — all require operator attention.
+    if has_segment_1 && cache_metrics.cache_read_input_tokens == 0 {
+        tracing::warn!(
+            agent_id = ctx.agent_id(),
+            turn_id = %input.turn_id,
+            fresh = cache_metrics.fresh_input_tokens,
+            cache_create = cache_metrics.cache_creation_input_tokens,
+            "segment-1 cache bust: expected cache hit on stable system prefix \
+             but cache_read_input_tokens == 0 (TTL expiry, content change, or \
+             provider regression)"
+        );
+    }
+
+    // 6b. Emit per-turn cache metric span for observability.
+    tracing::info!(
+        agent_id = ctx.agent_id(),
+        turn_id = %input.turn_id,
+        fresh = cache_metrics.fresh_input_tokens,
+        cache_read = cache_metrics.cache_read_input_tokens,
+        cache_create = cache_metrics.cache_creation_input_tokens,
+        hit_ratio = cache_metrics.hit_ratio(),
+        "turn cache metrics"
+    );
+
+    // 7. Emit the Stop event and assemble TurnOutput.
     sink.emit(TurnEvent::Stop(stop_reason));
 
     let messages = match assistant_message {
@@ -260,7 +305,7 @@ pub async fn orchestrate(
         tool_results,
         stop_reason,
         usage,
-        cache_metrics: TurnCacheMetrics::default(),
+        cache_metrics,
         completed_at: Timestamp::now(),
     })
 }
@@ -282,6 +327,8 @@ pub async fn orchestrate(
 pub async fn drive_step(
     initial_input: TurnInput,
     ctx: Arc<SessionContext>,
+    turn_history: Arc<std::sync::Mutex<TurnHistory>>,
+    cache_profile: CacheProfile,
     dispatcher: &dyn EvalDispatcher,
     preamble: &str,
 ) -> Result<StepReply, RuntimeError> {
@@ -291,10 +338,32 @@ pub async fn drive_step(
     let mut cur_input = initial_input;
 
     loop {
-        let turn = orchestrate(cur_input, ctx.clone(), dispatcher, preamble).await?;
+        // Build the composed CompletionRequest for THIS wire turn:
+        // segments 1 (system + persona + tools) / 2 (prior messages +
+        // summary head + pseudo-messages) / 3 (current_state), then
+        // fresh input messages appended AFTER compose so they stay
+        // uncached (per the three-segment cache layout).
+        let (req, has_segment_1) =
+            compose_request_for_turn(&ctx, &turn_history, &cur_input, &cache_profile).await?;
+
+        let turn = orchestrate(
+            req,
+            cur_input,
+            ctx.clone(),
+            dispatcher,
+            preamble,
+            has_segment_1,
+        )
+        .await?;
         let terminal = turn.stop_reason.is_terminal();
-        let needs_next = matches!(turn.stop_reason, StopReason::ToolUse)
-            && !turn.tool_results.is_empty();
+        let needs_next =
+            matches!(turn.stop_reason, StopReason::ToolUse) && !turn.tool_results.is_empty();
+
+        // Record into TurnHistory so the NEXT wire turn's composer
+        // sees this turn's messages + block_writes in segment 2.
+        if let Ok(mut hist) = turn_history.lock() {
+            hist.record(pattern_core::types::ids::new_id(), turn.clone());
+        }
 
         turns.push(turn);
 
@@ -321,7 +390,195 @@ pub async fn drive_step(
     })
 }
 
+// ---- composer integration ----------------------------------------------
+
+/// Build the composed [`CompletionRequest`] for one wire turn.
+///
+/// Runs the three-segment composer pipeline:
+///
+/// - **Segment 1** — system prompt (persona + [`pattern_core::DEFAULT_BASE_INSTRUCTIONS`]
+///   via [`build_system_prompt`]) + [`CODE_TOOL`] in tools. Cache
+///   boundary marker placed per `cache_profile.segment_1_control()`.
+/// - **Segment 2** — summary-head synthesized from
+///   [`TurnHistory::summary_head`] + prior messages from
+///   [`TurnHistory::active_messages`] +
+///   [`TurnHistory::most_recent_block_writes`] rendered as
+///   pseudo-messages. Cache marker per
+///   `cache_profile.segment_2_control()`.
+/// - **Segment 3** — `[memory:current_state]` pseudo-turn. Phase 5
+///   ships with empty blocks (loaded-blocks concept is future scope);
+///   the pass still emits the tag + boundary marker so cache
+///   placement stays consistent.
+///
+/// Fresh `input.messages` are appended AFTER `compose` returns, so
+/// they sit past the segment-3 cache boundary (stay uncached — fresh
+/// user input bursts cache downstream content by design).
+///
+/// Returns `(request, has_segment_1)` where `has_segment_1` is `true`
+/// when the composer placed at least one system block in segment 1.
+/// The caller passes this flag to [`orchestrate`] for the AC8.5
+/// segment-1 bust warning.
+///
+/// Today's limitations:
+///
+/// - `ShaperCompatMode` is hardcoded to `SubscriptionRoutingShape`.
+///   Session-level override is future work (Phase 5 follow-up).
+/// - Segment 3's `blocks` vec is always empty. When the runtime
+///   grows a "which blocks are loaded in context" registry, wire it
+///   here.
+async fn compose_request_for_turn(
+    ctx: &Arc<SessionContext>,
+    turn_history: &std::sync::Mutex<TurnHistory>,
+    input: &TurnInput,
+    cache_profile: &CacheProfile,
+) -> Result<(CompletionRequest, bool), RuntimeError> {
+    // 1. Load persona from memory (best-effort — no persona block is
+    //    a valid state; the system prompt gracefully degrades to just
+    //    base instructions).
+    let persona_text = ctx
+        .memory_store()
+        .get_block(ctx.agent_id(), pattern_core::PERSONA_LABEL)
+        .await
+        .ok()
+        .flatten()
+        .map(|doc| doc.render())
+        .unwrap_or_default();
+
+    // 2. Build system_blocks via the shaper. ShaperCompatMode is
+    //    hardcoded to SubscriptionRoutingShape today — see function
+    //    doc for the rationale.
+    let mode = default_shaper_mode();
+    let system_blocks = build_system_prompt(
+        mode,
+        pattern_core::DEFAULT_BASE_INSTRUCTIONS,
+        &persona_text,
+        &[],
+    );
+
+    // 3. Snapshot TurnHistory state. Holding the mutex across the
+    //    persona-load await above would be a deadlock risk — we
+    //    acquire briefly here only.
+    let (summary_head_messages, prior_messages, recent_block_writes) = {
+        let hist = turn_history
+            .lock()
+            .map_err(|_| RuntimeError::ProviderError {
+                reason: "turn_history mutex poisoned".into(),
+            })?;
+
+        let summary_head_messages: Vec<ChatMessage> = hist
+            .summary_head()
+            .iter()
+            .map(|s| {
+                synthesize_summary_message(s.depth, &s.start_position, &s.end_position, &s.summary)
+            })
+            .collect();
+
+        let prior_messages: Vec<ChatMessage> = hist
+            .active_messages()
+            .map(|m| m.chat_message.clone())
+            .collect();
+
+        let recent_block_writes = hist.most_recent_block_writes().to_vec();
+
+        (summary_head_messages, prior_messages, recent_block_writes)
+    };
+
+    // 4. Record whether segment 1 has content before `system_blocks`
+    //    is moved into the pass. `build_system_prompt` always emits at
+    //    least base-instructions, so this is almost always `true` — we
+    //    track it explicitly so the AC8.5 bust warning has a reliable
+    //    predicate rather than guessing.
+    let has_segment_1 = !system_blocks.is_empty();
+
+    // 4a. Assemble the pass list. Boxed so the compose() helper can
+    //     iterate a uniform Vec<Box<dyn ComposerPass>>.
+    let passes: Vec<Box<dyn ComposerPass>> = vec![
+        Box::new(Segment1Pass::new(
+            system_blocks,
+            vec![CODE_TOOL.clone()],
+            cache_profile.clone(),
+        )),
+        Box::new(Segment2Pass::new(
+            summary_head_messages,
+            prior_messages,
+            &recent_block_writes,
+            cache_profile.clone(),
+        )),
+        // Segment 3: empty blocks today — see function doc for the
+        // future-work note.
+        Box::new(Segment3Pass::new(Vec::new(), cache_profile.clone())),
+    ];
+
+    let initial = PartialRequest::new(ctx.model_id());
+    let mut req = compose(&passes, initial).map_err(|e| RuntimeError::ProviderError {
+        reason: format!("composer pipeline failed: {e}"),
+    })?;
+
+    // 5. Append fresh input messages AFTER compose so they sit
+    //    beyond the segment-3 cache boundary (uncached by design).
+    for msg in &input.messages {
+        req.chat.messages.push(msg.chat_message.clone());
+    }
+
+    Ok((req, has_segment_1))
+}
+
+/// Default `ShaperCompatMode` used by the composer. Hardcoded to
+/// `SubscriptionRoutingShape` when built with the
+/// `subscription-oauth` feature, `HonestPattern` otherwise. A future
+/// refinement may expose this as a session-level override.
+#[cfg(feature = "subscription-oauth")]
+fn default_shaper_mode() -> ShaperCompatMode {
+    ShaperCompatMode::SubscriptionRoutingShape
+}
+
+#[cfg(not(feature = "subscription-oauth"))]
+fn default_shaper_mode() -> ShaperCompatMode {
+    ShaperCompatMode::HonestPattern
+}
+
 // ---- helpers ------------------------------------------------------------
+
+/// Build [`TurnCacheMetrics`] from an optional genai [`Usage`].
+///
+/// Extracts cache token counts from `usage.prompt_tokens_details`:
+/// - `cached_tokens` → `cache_read_input_tokens`
+/// - `cache_creation_tokens` → `cache_creation_input_tokens`
+///
+/// Fresh input tokens are the residual: `prompt_tokens` minus the two
+/// cache buckets. Saturating subtraction guards against provider quirks
+/// where detail buckets might exceed the reported total.
+///
+/// Returns `TurnCacheMetrics::default()` (all zeroes) when `usage` is
+/// `None` (provider did not report usage for this turn).
+fn build_cache_metrics(usage: Option<&genai::chat::Usage>) -> TurnCacheMetrics {
+    let Some(usage) = usage else {
+        return TurnCacheMetrics::default();
+    };
+
+    let details = usage.prompt_tokens_details.as_ref();
+
+    let cache_read = details
+        .and_then(|d| d.cached_tokens)
+        .map(|v| v.max(0) as u64)
+        .unwrap_or(0);
+
+    let cache_create = details
+        .and_then(|d| d.cache_creation_tokens)
+        .map(|v| v.max(0) as u64)
+        .unwrap_or(0);
+
+    let total_prompt = usage.prompt_tokens.map(|v| v.max(0) as u64).unwrap_or(0);
+
+    // Fresh tokens = total input − cache_read − cache_create.
+    // We use saturating_sub in case the provider's accounting has
+    // rounding quirks.
+    let fresh = total_prompt
+        .saturating_sub(cache_read)
+        .saturating_sub(cache_create);
+
+    TurnCacheMetrics::new(fresh, cache_read, cache_create)
+}
 
 /// Map genai's provider-agnostic `StopReason` → pattern-core's
 /// wire-level `StopReason`.
@@ -437,6 +694,7 @@ fn sum_opt(a: Option<i32>, b: Option<i32>) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracing_test::traced_test;
 
     #[test]
     fn map_stop_reason_covers_known_variants() {
@@ -457,7 +715,9 @@ mod tests {
             StopReason::Refusal
         );
         assert_eq!(
-            map_genai_stop_reason(genai::chat::StopReason::StopSequence("stop_sequence".into())),
+            map_genai_stop_reason(genai::chat::StopReason::StopSequence(
+                "stop_sequence".into()
+            )),
             StopReason::StopSequence
         );
         assert_eq!(
@@ -541,11 +801,11 @@ mod tests {
     // ---- Integration tests: orchestrate + drive_step via MockProviderClient ----
 
     use crate::testing::{InMemoryMemoryStore, MockProviderClient};
+    use pattern_core::ProviderClient;
     use pattern_core::traits::{MemoryStore, TurnSink, VecSink};
-    use pattern_core::types::ids::{new_id, BatchId};
+    use pattern_core::types::ids::{BatchId, new_id};
     use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
     use pattern_core::types::snapshot::PersonaConfig;
-    use pattern_core::ProviderClient;
 
     /// Build a SessionContext wired to a MockProviderClient returning
     /// the given scripted turns. Returns `(ctx, vec_sink, provider)`.
@@ -561,8 +821,7 @@ mod tests {
         let sink_dyn: Arc<dyn TurnSink> = sink.clone();
         let persona = PersonaConfig::new("agent-a", "A", "module X where\nx = pure ()");
         let ctx = Arc::new(
-            SessionContext::from_persona(&persona, store, provider)
-                .with_turn_sink(sink_dyn),
+            SessionContext::from_persona(&persona, store, provider).with_turn_sink(sink_dyn),
         );
         (ctx, sink, provider_concrete)
     }
@@ -581,16 +840,21 @@ mod tests {
         }
     }
 
+    /// Minimal `CompletionRequest` for orchestrate unit tests — they
+    /// exercise stream consumption + tool dispatch, not the composer.
+    fn simple_req() -> CompletionRequest {
+        CompletionRequest::new("claude-sonnet-4-20250514")
+    }
+
     /// NoOpDispatcher returns Error outcomes; useful for tests that
     /// don't exercise the tool path.
     #[tokio::test]
     async fn orchestrate_text_only_turn_produces_end_turn_output() {
-        let (ctx, sink, provider) = mock_session(vec![MockProviderClient::text_turn(
-            "Hello, world!",
-        )]);
+        let (ctx, sink, provider) =
+            mock_session(vec![MockProviderClient::text_turn("Hello, world!")]);
 
         let dispatcher = NoOpDispatcher;
-        let out = orchestrate(test_turn_input(), ctx, &dispatcher, "")
+        let out = orchestrate(simple_req(), test_turn_input(), ctx, &dispatcher, "", false)
             .await
             .expect("orchestrate should succeed");
 
@@ -623,7 +887,7 @@ mod tests {
         )]);
 
         let dispatcher = NoOpDispatcher;
-        let out = orchestrate(test_turn_input(), ctx, &dispatcher, "")
+        let out = orchestrate(simple_req(), test_turn_input(), ctx, &dispatcher, "", false)
             .await
             .expect("orchestrate should succeed");
 
@@ -674,7 +938,7 @@ mod tests {
         )]);
 
         let dispatcher = MockSuccessDispatcher::default();
-        let out = orchestrate(test_turn_input(), ctx, &dispatcher, "")
+        let out = orchestrate(simple_req(), test_turn_input(), ctx, &dispatcher, "", false)
             .await
             .expect("orchestrate should succeed");
 
@@ -694,12 +958,16 @@ mod tests {
 
         // Sink: ToolCall + ToolResult + Stop events.
         let events = sink.snapshot();
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, TurnEvent::ToolCall(tc) if tc.call_id == "toolu_01")));
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, TurnEvent::ToolResult(tr) if tr.call_id == "toolu_01")));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, TurnEvent::ToolCall(tc) if tc.call_id == "toolu_01"))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, TurnEvent::ToolResult(tr) if tr.call_id == "toolu_01"))
+        );
         assert!(matches!(
             events.last(),
             Some(TurnEvent::Stop(StopReason::ToolUse))
@@ -720,9 +988,16 @@ mod tests {
         ]);
 
         let dispatcher = MockSuccessDispatcher::default();
-        let reply = drive_step(test_turn_input(), ctx, &dispatcher, "")
-            .await
-            .expect("drive_step should succeed");
+        let reply = drive_step(
+            test_turn_input(),
+            ctx,
+            Arc::new(std::sync::Mutex::new(crate::memory::TurnHistory::empty())),
+            pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
+            &dispatcher,
+            "",
+        )
+        .await
+        .expect("drive_step should succeed");
 
         assert_eq!(provider.call_count(), 2, "two wire turns expected");
         assert_eq!(reply.turns.len(), 2);
@@ -732,8 +1007,7 @@ mod tests {
 
         // Batch id stable across wire turns.
         assert_eq!(
-            reply.turns[0].messages[0].batch,
-            reply.turns[1].messages[0].batch,
+            reply.turns[0].messages[0].batch, reply.turns[1].messages[0].batch,
             "all wire turns in one step share batch_id"
         );
 
@@ -749,6 +1023,203 @@ mod tests {
             .filter(|e| matches!(e, TurnEvent::Stop(_)))
             .count();
         assert_eq!(stop_count, 2);
+    }
+
+    // ---- Cache metrics tests ------------------------------------------------
+
+    #[tokio::test]
+    async fn orchestrate_populates_cache_metrics_from_usage() {
+        use genai::chat::{PromptTokensDetails, Usage};
+
+        // Build a Usage with known cache fields:
+        //   prompt_tokens = 1000 (total)
+        //   cached_tokens = 800  (cache reads)
+        //   cache_creation_tokens = 50 (new entries)
+        //   fresh = 1000 - 800 - 50 = 150
+        let cache_usage = Usage {
+            prompt_tokens: Some(1000),
+            completion_tokens: Some(50),
+            total_tokens: Some(1050),
+            prompt_tokens_details: Some(PromptTokensDetails {
+                cached_tokens: Some(800),
+                cache_creation_tokens: Some(50),
+                cache_creation_details: None,
+                audio_tokens: None,
+            }),
+            completion_tokens_details: None,
+        };
+
+        let (ctx, _sink, _provider) = mock_session(vec![MockProviderClient::text_turn_with_usage(
+            "cached response",
+            cache_usage,
+        )]);
+
+        let dispatcher = NoOpDispatcher;
+        let out = orchestrate(simple_req(), test_turn_input(), ctx, &dispatcher, "", false)
+            .await
+            .expect("orchestrate should succeed");
+
+        let m = &out.cache_metrics;
+        assert_eq!(m.cache_read_input_tokens, 800, "cache_read should be 800");
+        assert_eq!(
+            m.cache_creation_input_tokens, 50,
+            "cache_creation should be 50"
+        );
+        assert_eq!(m.fresh_input_tokens, 150, "fresh should be 1000-800-50=150");
+        assert_eq!(m.total_input_tokens(), 1000);
+        // hit ratio: 800 / (800+150) ≈ 0.842
+        assert!(
+            (m.hit_ratio() - 800.0 / 950.0).abs() < 1e-9,
+            "hit_ratio mismatch: {}",
+            m.hit_ratio()
+        );
+    }
+
+    #[tokio::test]
+    async fn orchestrate_cache_metrics_default_when_usage_absent() {
+        use genai::chat::{ChatStreamEvent, StreamEnd};
+
+        // Construct a turn that reports no usage at all.
+        let no_usage_turn = vec![
+            ChatStreamEvent::Start,
+            ChatStreamEvent::Chunk(genai::chat::StreamChunk {
+                content: "hello".into(),
+            }),
+            ChatStreamEvent::End(StreamEnd {
+                captured_usage: None,
+                captured_stop_reason: Some(genai::chat::StopReason::Completed("end_turn".into())),
+                captured_content: Some(genai::chat::MessageContent::from_text("hello")),
+                captured_reasoning_content: None,
+                captured_response_id: None,
+            }),
+        ];
+
+        let (ctx, _sink, _) = mock_session(vec![no_usage_turn]);
+        let dispatcher = NoOpDispatcher;
+        let out = orchestrate(simple_req(), test_turn_input(), ctx, &dispatcher, "", false)
+            .await
+            .expect("orchestrate should succeed");
+
+        let m = &out.cache_metrics;
+        assert_eq!(m.cache_read_input_tokens, 0);
+        assert_eq!(m.cache_creation_input_tokens, 0);
+        assert_eq!(m.fresh_input_tokens, 0);
+        assert_eq!(m.hit_ratio(), 0.0);
+    }
+
+    #[tokio::test]
+    async fn orchestrate_cache_metrics_all_fresh_when_no_details() {
+        // Usage with prompt_tokens but no prompt_tokens_details.
+        // All tokens should be counted as fresh.
+        use genai::chat::Usage;
+        let fresh_usage = Usage {
+            prompt_tokens: Some(500),
+            completion_tokens: Some(20),
+            total_tokens: Some(520),
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+        };
+
+        let (ctx, _sink, _) = mock_session(vec![MockProviderClient::text_turn_with_usage(
+            "fresh response",
+            fresh_usage,
+        )]);
+        let dispatcher = NoOpDispatcher;
+        let out = orchestrate(simple_req(), test_turn_input(), ctx, &dispatcher, "", false)
+            .await
+            .expect("orchestrate should succeed");
+
+        let m = &out.cache_metrics;
+        assert_eq!(m.fresh_input_tokens, 500);
+        assert_eq!(m.cache_read_input_tokens, 0);
+        assert_eq!(m.cache_creation_input_tokens, 0);
+        assert_eq!(m.hit_ratio(), 0.0);
+    }
+
+    // ---- AC8.5: segment-1 bust warning tests --------------------------------
+
+    /// When `has_segment_1 = true` and the response reports zero
+    /// `cache_read_input_tokens`, `orchestrate` must emit a `tracing::warn`
+    /// that includes "segment-1 cache bust".
+    #[traced_test]
+    #[tokio::test]
+    async fn orchestrate_emits_segment1_bust_warning_when_cache_read_zero_with_segment1() {
+        use genai::chat::Usage;
+
+        // All-fresh usage: no cache reads, has_segment_1 = true.
+        let fresh_usage = Usage {
+            prompt_tokens: Some(1000),
+            completion_tokens: Some(50),
+            total_tokens: Some(1050),
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+        };
+
+        let (ctx, _sink, _) = mock_session(vec![MockProviderClient::text_turn_with_usage(
+            "segment 1 busted",
+            fresh_usage,
+        )]);
+
+        let dispatcher = NoOpDispatcher;
+        let out = orchestrate(
+            simple_req(),
+            test_turn_input(),
+            ctx,
+            &dispatcher,
+            "",
+            true, // has_segment_1 = true → bust warning expected
+        )
+        .await
+        .expect("orchestrate should succeed");
+
+        assert_eq!(out.cache_metrics.cache_read_input_tokens, 0);
+        assert!(
+            logs_contain("segment-1 cache bust"),
+            "expected segment-1 bust warning in tracing output"
+        );
+    }
+
+    /// When `has_segment_1 = true` but the response reports nonzero
+    /// `cache_read_input_tokens`, no bust warning should be emitted.
+    #[traced_test]
+    #[tokio::test]
+    async fn orchestrate_no_bust_warning_when_cache_read_nonzero() {
+        use genai::chat::{PromptTokensDetails, Usage};
+
+        let cache_usage = Usage {
+            prompt_tokens: Some(1000),
+            completion_tokens: Some(50),
+            total_tokens: Some(1050),
+            prompt_tokens_details: Some(PromptTokensDetails {
+                cached_tokens: Some(900),
+                cache_creation_tokens: None,
+                cache_creation_details: None,
+                audio_tokens: None,
+            }),
+            completion_tokens_details: None,
+        };
+
+        let (ctx, _sink, _) = mock_session(vec![MockProviderClient::text_turn_with_usage(
+            "cache hit response",
+            cache_usage,
+        )]);
+
+        let dispatcher = NoOpDispatcher;
+        let _out = orchestrate(
+            simple_req(),
+            test_turn_input(),
+            ctx,
+            &dispatcher,
+            "",
+            true, // has_segment_1 = true, but cache_read > 0 → no warn
+        )
+        .await
+        .expect("orchestrate should succeed");
+
+        assert!(
+            !logs_contain("segment-1 cache bust"),
+            "should NOT emit bust warning when cache_read > 0"
+        );
     }
 
     /// Dispatcher that always returns Error; exercises the error-path.
@@ -774,9 +1245,16 @@ mod tests {
         ]);
 
         let dispatcher = ErrorDispatcher;
-        let reply = drive_step(test_turn_input(), ctx, &dispatcher, "")
-            .await
-            .expect("drive_step should succeed even when tool errors");
+        let reply = drive_step(
+            test_turn_input(),
+            ctx,
+            Arc::new(std::sync::Mutex::new(crate::memory::TurnHistory::empty())),
+            pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
+            &dispatcher,
+            "",
+        )
+        .await
+        .expect("drive_step should succeed even when tool errors");
 
         assert_eq!(provider.call_count(), 2);
         assert_eq!(reply.turns.len(), 2);

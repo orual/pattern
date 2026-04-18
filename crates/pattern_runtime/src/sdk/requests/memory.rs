@@ -129,4 +129,9 @@ pub enum MemoryReq {
 
     #[core(module = "Pattern.Memory", name = "Archive")]
     Archive(String),
+
+    /// `GetShared owner label` — fetch a block owned by another agent
+    /// that has been shared with the caller.
+    #[core(module = "Pattern.Memory", name = "GetShared")]
+    GetShared(String, String),
 }

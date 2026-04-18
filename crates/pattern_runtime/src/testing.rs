@@ -135,6 +135,28 @@ impl MockProviderClient {
         ]
     }
 
+    /// Build a text turn with caller-supplied [`Usage`].
+    ///
+    /// Useful for integration tests that need to assert on specific cache
+    /// token counts in the returned [`TurnOutput::cache_metrics`].
+    /// The `usage` is placed verbatim in `StreamEnd.captured_usage`.
+    pub fn text_turn_with_usage(text: &str, usage: Usage) -> Vec<ChatStreamEvent> {
+        let text_string = text.to_string();
+        vec![
+            ChatStreamEvent::Start,
+            ChatStreamEvent::Chunk(StreamChunk {
+                content: text_string.clone(),
+            }),
+            ChatStreamEvent::End(StreamEnd {
+                captured_usage: Some(usage),
+                captured_stop_reason: Some(GenaiStopReason::Completed("end_turn".into())),
+                captured_content: Some(MessageContent::from_text(text_string)),
+                captured_reasoning_content: None,
+                captured_response_id: None,
+            }),
+        ]
+    }
+
     /// Build a "thinking + text" turn — thinking chunks + text chunks,
     /// ends with `stop_reason = Completed("end_turn")`. Useful for
     /// asserting `TurnEvent::Thinking` surfaces on the sink

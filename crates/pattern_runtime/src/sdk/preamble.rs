@@ -192,7 +192,10 @@ mod tests {
     fn preamble_contains_module_header() {
         let decls = canonical_effect_decls();
         let preamble = build(&decls);
-        assert!(preamble.contains("module Expr where"), "missing module header");
+        assert!(
+            preamble.contains("module Expr where"),
+            "missing module header"
+        );
     }
 
     #[test]
@@ -222,7 +225,7 @@ mod tests {
         let decls = canonical_effect_decls();
         let preamble = build(&decls);
         assert!(
-            preamble.contains("type M = Eff '[Memory, Message, Display, Time, Log, Shell, File, Sources, Mcp, Rpc, Spawn]"),
+            preamble.contains("type M = Eff '[Memory, Search, Recall, Message, Display, Time, Log, Shell, File, Sources, Mcp, Rpc, Spawn]"),
             "missing or incorrect type M alias"
         );
     }
@@ -231,7 +234,10 @@ mod tests {
     fn preamble_contains_pagination_support() {
         let decls = canonical_effect_decls();
         let preamble = build(&decls);
-        assert!(preamble.contains("paginateResult"), "missing paginateResult");
+        assert!(
+            preamble.contains("paginateResult"),
+            "missing paginateResult"
+        );
         assert!(preamble.contains("valSize"), "missing valSize");
     }
 
@@ -240,18 +246,36 @@ mod tests {
         let decls = canonical_effect_decls();
         let preamble = build(&decls);
         // Spot-check a few helpers.
-        assert!(preamble.contains("get :: Member Memory effs"), "missing Memory.get helper");
-        assert!(preamble.contains("send_ :: Member Message effs"), "missing Message.send_ helper");
-        assert!(preamble.contains("chunk :: Member Display effs"), "missing Display.chunk helper");
+        assert!(
+            preamble.contains("get :: Member Memory effs"),
+            "missing Memory.get helper"
+        );
+        assert!(
+            preamble.contains("send_ :: Member Message effs"),
+            "missing Message.send_ helper"
+        );
+        assert!(
+            preamble.contains("chunk :: Member Display effs"),
+            "missing Display.chunk helper"
+        );
     }
 
     #[test]
     fn preamble_contains_standard_imports() {
         let decls = canonical_effect_decls();
         let preamble = build(&decls);
-        assert!(preamble.contains("import Tidepool.Prelude"), "missing Prelude import");
-        assert!(preamble.contains("import Control.Monad.Freer"), "missing Freer import");
-        assert!(preamble.contains("import qualified Tidepool.Aeson"), "missing Aeson import");
+        assert!(
+            preamble.contains("import Tidepool.Prelude"),
+            "missing Prelude import"
+        );
+        assert!(
+            preamble.contains("import Control.Monad.Freer"),
+            "missing Freer import"
+        );
+        assert!(
+            preamble.contains("import qualified Tidepool.Aeson"),
+            "missing Aeson import"
+        );
     }
 
     #[test]
@@ -269,7 +293,7 @@ mod tests {
     fn build_effect_stack_type_produces_correct_string() {
         let decls = canonical_effect_decls();
         let stack = build_effect_stack_type(&decls);
-        assert!(stack.starts_with("'[Memory, Message, Display"));
+        assert!(stack.starts_with("'[Memory, Search, Recall, Message, Display"));
         assert!(stack.ends_with("Spawn]"));
     }
 

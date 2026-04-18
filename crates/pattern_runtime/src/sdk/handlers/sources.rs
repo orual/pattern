@@ -25,10 +25,7 @@ impl DescribeEffect for SourcesHandler {
                 "Subscribe :: Name -> Cb -> Sources ()",
                 "List      :: Sources [Name]",
             ],
-            type_defs: &[
-                "type Name = Text",
-                "type Cb = Text",
-            ],
+            type_defs: &["type Name = Text", "type Cb = Text"],
             helpers: &[
                 "stream :: Member Sources effs => Name -> Eff effs Text\nstream n = send (Stream n)",
                 "subscribe :: Member Sources effs => Name -> Cb -> Eff effs ()\nsubscribe n c = send (Subscribe n c)",

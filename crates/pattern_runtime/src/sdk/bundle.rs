@@ -1,9 +1,10 @@
-//! Bundle the full 11-handler SDK into a single `DispatchEffect`.
+//! Bundle the full 13-handler SDK into a single `DispatchEffect`.
 //!
 //! Handler position in the HList is the JIT effect tag: agent programs must
 //! declare `Eff '[...]` rows whose head prefix aligns with this order. The
-//! canonical order is Prelude-5 first (`Memory, Message, Display, Time,
-//! Log`), then the rarer effects (`Shell, File, Sources, Mcp, Rpc, Spawn`).
+//! canonical order is: `Memory, Search, Recall` (storage-adjacent), then
+//! `Message, Display, Time, Log` (Prelude-5 minus Memory), then rarer
+//! effects (`Shell, File, Sources, Mcp, Rpc, Spawn`).
 //!
 //! **Why Prelude-5-first (historical note):** originally this ordering was
 //! required to avoid DataCon name collisions: tidepool-bridge looked up
@@ -15,27 +16,29 @@
 //! `Read`/`Write`, so the remaining residual collisions (e.g. both
 //! `Memory.Get` and no `File.Get`) are handled entirely at the
 //! derive-layer disambiguation stage — agent programs can mix
-//! unqualified imports across all eleven modules without ambiguity in
-//! current Pattern. Prelude-5-first is kept for backwards compatibility
-//! and authoring clarity.
+//! unqualified imports across all thirteen modules without ambiguity in
+//! current Pattern. Storage-adjacent grouping is kept for clarity.
 //!
 //! Individual handler structs remain available for ad-hoc bundles (see
 //! `crate::sdk::handlers`).
 
 use crate::sdk::describe::CollectEffectDecls;
 use crate::sdk::handlers::{
-    DisplayHandler, FileHandler, LogHandler, McpHandler, MemoryHandler, MessageHandler, RpcHandler,
-    ShellHandler, SourcesHandler, SpawnHandler, TimeHandler,
+    DisplayHandler, FileHandler, LogHandler, McpHandler, MemoryHandler, MessageHandler,
+    RecallHandler, RpcHandler, SearchHandler, ShellHandler, SourcesHandler, SpawnHandler,
+    TimeHandler,
 };
 
-/// The full 11-handler SDK bundle, typed as a `frunk::HList`.
+/// The full 13-handler SDK bundle, typed as a `frunk::HList`.
 ///
-/// Order (Prelude-5 first, then rarer effects):
-/// `Memory, Message, Display, Time, Log, Shell, File, Sources, Mcp, Rpc,
-/// Spawn`. Agent `Eff '[...]` rows must line up with this order so JIT
-/// effect-tag lookups resolve correctly.
+/// Order: `Memory, Search, Recall, Message, Display, Time, Log, Shell,
+/// File, Sources, Mcp, Rpc, Spawn`. Search and Recall are placed
+/// immediately after Memory (storage-adjacent) so cross-agent search
+/// and archival operations cluster together.
 pub type SdkBundle = frunk::HList![
     MemoryHandler,
+    SearchHandler,
+    RecallHandler,
     MessageHandler,
     DisplayHandler,
     TimeHandler,
@@ -58,8 +61,8 @@ pub fn canonical_effect_decls() -> Vec<crate::sdk::describe::EffectDecl> {
 /// The canonical effect-row type names in bundle order. Useful for
 /// assertions and documentation.
 pub const CANONICAL_EFFECT_ROW: &[&str] = &[
-    "Memory", "Message", "Display", "Time", "Log",
-    "Shell", "File", "Sources", "Mcp", "Rpc", "Spawn",
+    "Memory", "Search", "Recall", "Message", "Display", "Time", "Log", "Shell", "File", "Sources",
+    "Mcp", "Rpc", "Spawn",
 ];
 
 #[cfg(test)]
@@ -67,9 +70,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_decls_has_11_entries() {
+    fn canonical_decls_has_13_entries() {
         let decls = canonical_effect_decls();
-        assert_eq!(decls.len(), 11, "expected 11 handler decls, got {}", decls.len());
+        assert_eq!(
+            decls.len(),
+            13,
+            "expected 13 handler decls, got {}",
+            decls.len()
+        );
     }
 
     #[test]

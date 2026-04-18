@@ -63,21 +63,23 @@ impl DescribeEffect for MemoryHandler {
     fn effect_decl() -> EffectDecl {
         EffectDecl {
             type_name: "Memory",
-            description: "Persistent memory-block operations (Get/Put/Create/Append/Replace/Search/Recall/Archive)",
+            description: "Persistent memory-block operations (Get/Put/Create/Append/Replace/Search/Recall/Archive/GetShared)",
             constructors: &[
-                "Get     :: BlockHandle -> Memory Content",
-                "Put     :: BlockHandle -> Content -> Maybe Text -> Memory ()",
-                "Create  :: BlockHandle -> Text -> BlockType -> SchemaKind -> Maybe Int -> Content -> Memory ()",
-                "Append  :: BlockHandle -> Content -> Memory ()",
-                "Replace :: BlockHandle -> Text -> Text -> Memory ()",
-                "Search  :: Query -> Memory [BlockHandle]",
-                "Recall  :: BlockHandle -> Memory Content",
-                "Archive :: BlockHandle -> Memory ()",
+                "Get       :: BlockHandle -> Memory Content",
+                "Put       :: BlockHandle -> Content -> Maybe Text -> Memory ()",
+                "Create    :: BlockHandle -> Text -> BlockType -> SchemaKind -> Maybe Int -> Content -> Memory ()",
+                "Append    :: BlockHandle -> Content -> Memory ()",
+                "Replace   :: BlockHandle -> Text -> Text -> Memory ()",
+                "Search    :: Query -> Memory [BlockHandle]",
+                "Recall    :: BlockHandle -> Memory Content",
+                "Archive   :: BlockHandle -> Memory ()",
+                "GetShared :: Owner -> BlockHandle -> Memory Content",
             ],
             type_defs: &[
                 "type BlockHandle = Text",
                 "type Content = Text",
                 "type Query = Text",
+                "type Owner = Text",
                 "data BlockType = BlockCore | BlockWorking | BlockArchival | BlockLog",
                 "data SchemaKind = SchemaText | SchemaMap | SchemaList | SchemaLog",
             ],
@@ -91,6 +93,7 @@ impl DescribeEffect for MemoryHandler {
                 "search :: Member Memory effs => Query -> Eff effs [BlockHandle]\nsearch q = send (Search q)",
                 "recall :: Member Memory effs => BlockHandle -> Eff effs Content\nrecall h = send (Recall h)",
                 "archive :: Member Memory effs => BlockHandle -> Eff effs ()\narchive h = send (Archive h)",
+                "getShared :: Member Memory effs => Owner -> BlockHandle -> Eff effs Content\ngetShared o h = send (GetShared o h)",
             ],
         }
     }
@@ -302,6 +305,19 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                     .block_on(store.set_block_type(&agent_id, &label, BlockType::Archival))
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Archive: {e}")))?;
                 cx.respond(())
+            }
+            MemoryReq::GetShared(owner, label) => {
+                let doc = handle
+                    .block_on(store.get_shared_block(&agent_id, &owner, &label))
+                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.GetShared: {e}")))?
+                    .ok_or_else(|| {
+                        EffectError::Handler(format!(
+                            "Pattern.Memory.GetShared: no shared block \
+                             label={label:?} from owner={owner:?} accessible \
+                             to agent={agent_id:?}"
+                        ))
+                    })?;
+                cx.respond(doc.render())
             }
         })();
 

@@ -12,7 +12,9 @@ pub mod log;
 pub mod mcp;
 pub mod memory;
 pub mod message;
+pub mod recall;
 pub mod rpc;
+pub mod search;
 pub mod shell;
 pub mod sources;
 pub mod spawn;
@@ -24,7 +26,9 @@ pub use log::LogReq;
 pub use mcp::McpReq;
 pub use memory::MemoryReq;
 pub use message::MessageReq;
+pub use recall::RecallReq;
 pub use rpc::RpcReq;
+pub use search::SearchReq;
 pub use shell::ShellReq;
 pub use sources::SourcesReq;
 pub use spawn::SpawnReq;
@@ -57,8 +61,24 @@ mod parity {
         (
             "MemoryReq",
             &[
-                "Get", "Put", "Create", "Append", "Replace", "Search", "Recall", "Archive",
+                "Get",
+                "Put",
+                "Create",
+                "Append",
+                "Replace",
+                "Search",
+                "Recall",
+                "Archive",
+                "GetShared",
             ],
+        ),
+        (
+            "SearchReq",
+            &["SearchMessages", "SearchArchival", "SearchAll"],
+        ),
+        (
+            "RecallReq",
+            &["RecallInsert", "RecallSearch", "RecallGet", "RecallDelete"],
         ),
         ("MessageReq", &["Ask", "Send", "Reply", "Notify"]),
         ("ShellReq", &["Execute", "Spawn", "Kill", "Status"]),
@@ -75,8 +95,8 @@ mod parity {
     fn parity_table_is_populated() {
         assert_eq!(
             EXPECTED.len(),
-            11,
-            "expected 11 SDK namespaces; update this test when adding/removing one"
+            13,
+            "expected 13 SDK namespaces; update this test when adding/removing one"
         );
         for (enum_name, variants) in EXPECTED {
             assert!(
@@ -158,7 +178,27 @@ mod parity {
         let _ = MemoryReq::Search(String::new());
         let _ = MemoryReq::Recall(String::new());
         let _ = MemoryReq::Archive(String::new());
-        assert_eq!(count("MemoryReq"), 8);
+        let _ = MemoryReq::GetShared(String::new(), String::new());
+        assert_eq!(count("MemoryReq"), 9);
+    }
+
+    #[test]
+    fn search_req_variants() {
+        use super::SearchReq;
+        let _ = SearchReq::SearchMessages(String::new(), None);
+        let _ = SearchReq::SearchArchival(String::new(), None);
+        let _ = SearchReq::SearchAll(String::new(), None);
+        assert_eq!(count("SearchReq"), 3);
+    }
+
+    #[test]
+    fn recall_req_variants() {
+        use super::RecallReq;
+        let _ = RecallReq::Insert(String::new());
+        let _ = RecallReq::Search(String::new(), None);
+        let _ = RecallReq::Get(String::new());
+        let _ = RecallReq::Delete(String::new());
+        assert_eq!(count("RecallReq"), 4);
     }
 
     #[test]

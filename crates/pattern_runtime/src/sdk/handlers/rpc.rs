@@ -23,10 +23,7 @@ impl DescribeEffect for RpcHandler {
                 "Call :: Target -> Payload -> Rpc Payload",
                 "Recv :: Target -> Rpc Payload",
             ],
-            type_defs: &[
-                "type Target = Text",
-                "type Payload = Text",
-            ],
+            type_defs: &["type Target = Text", "type Payload = Text"],
             helpers: &[
                 "call :: Member Rpc effs => Target -> Payload -> Eff effs Payload\ncall t p = send (Call t p)",
                 "recv :: Member Rpc effs => Target -> Eff effs Payload\nrecv t = send (Recv t)",

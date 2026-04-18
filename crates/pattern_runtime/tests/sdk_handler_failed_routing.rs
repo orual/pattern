@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use pattern_core::error::RuntimeError;
 use pattern_core::traits::{AgentRuntime, Session};
-use pattern_core::types::ids::{new_id, BatchId};
+use pattern_core::types::ids::{BatchId, new_id};
 use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
 use pattern_core::types::snapshot::PersonaConfig;
 use pattern_core::types::turn::TurnInput;

@@ -60,10 +60,11 @@ use tokio::sync::oneshot;
 use pattern_core::types::provider::{ToolCall, ToolOutcome};
 
 use crate::sdk::bundle::SdkBundle;
-use crate::sdk::code_tool::{template_source, CodeToolInput};
+use crate::sdk::code_tool::{CodeToolInput, template_source};
 use crate::sdk::handlers::{
-    DisplayHandler, FileHandler, LogHandler, McpHandler, MemoryHandler, MessageHandler, RpcHandler,
-    ShellHandler, SourcesHandler, SpawnHandler, TimeHandler,
+    DisplayHandler, FileHandler, LogHandler, McpHandler, MemoryHandler, MessageHandler,
+    RecallHandler, RpcHandler, SearchHandler, ShellHandler, SourcesHandler, SpawnHandler,
+    TimeHandler,
 };
 use crate::session::SessionContext;
 
@@ -161,12 +162,8 @@ impl EvalWorker {
 
                 rt.block_on(async move {
                     while let Some(req) = rx.recv().await {
-                        let outcome = run_eval(
-                            &req.source,
-                            &ctx,
-                            &include_paths,
-                            &session_id_for_worker,
-                        );
+                        let outcome =
+                            run_eval(&req.source, &ctx, &include_paths, &session_id_for_worker);
                         // Receiver may have dropped (session cancelled
                         // mid-eval) — that's not an error worth
                         // surfacing; just move on to the next request.
@@ -201,10 +198,7 @@ impl Drop for EvalWorker {
         // terminate soon regardless.
         if let Some(handle) = self.join_handle.take() {
             // Drop sender explicitly to make the intent clear.
-            drop(std::mem::replace(
-                &mut self.tx,
-                mpsc::unbounded_channel().0,
-            ));
+            drop(std::mem::replace(&mut self.tx, mpsc::unbounded_channel().0));
             // Don't join — session teardown shouldn't block on a
             // potentially-in-flight Haskell compile. The thread will
             // terminate when its compile finishes + it sees the
@@ -265,15 +259,18 @@ fn run_eval(
     include_paths: &[PathBuf],
     session_id: &str,
 ) -> ToolOutcome {
-    // Bundle construction is cheap: 10/11 handlers are unit structs
+    // Bundle construction is cheap: 10/13 handlers are unit structs
     // or Arc-wrapped singletons. Fresh DisplayHandler per eval that
     // forwards to the session's TurnSink, so `Pattern.Display.*`
     // output reaches the same sink as LLM text.
     let display = DisplayHandler::new();
     display.forward_to_turn_sink(ctx.turn_sink().clone());
 
+    let store = ctx.memory_store();
     let mut bundle: SdkBundle = frunk::hlist![
-        MemoryHandler::new(ctx.memory_store()),
+        MemoryHandler::new(store.clone()),
+        SearchHandler::new(store.clone()),
+        RecallHandler::new(store),
         MessageHandler,
         display,
         TimeHandler,
@@ -288,8 +285,7 @@ fn run_eval(
 
     // Coerce the owned PathBufs into the &[&Path] slice
     // compile_and_run expects.
-    let include_refs: Vec<&std::path::Path> =
-        include_paths.iter().map(|p| p.as_path()).collect();
+    let include_refs: Vec<&std::path::Path> = include_paths.iter().map(|p| p.as_path()).collect();
 
     match tidepool_runtime::compile_and_run(
         source,
@@ -311,11 +307,11 @@ fn run_eval(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{InMemoryMemoryStore, NopProviderClient};
     use crate::SdkLocation;
+    use crate::testing::{InMemoryMemoryStore, NopProviderClient};
+    use pattern_core::ProviderClient;
     use pattern_core::traits::MemoryStore;
     use pattern_core::types::snapshot::PersonaConfig;
-    use pattern_core::ProviderClient;
 
     fn test_ctx() -> (Arc<SessionContext>, PathBuf) {
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
@@ -339,7 +335,10 @@ mod tests {
         }
         let (ctx, sdk_dir) = test_ctx();
         let worker = EvalWorker::spawn(ctx, sdk_dir, "test-session".into());
-        assert!(worker.is_alive(), "worker should be alive immediately after spawn");
+        assert!(
+            worker.is_alive(),
+            "worker should be alive immediately after spawn"
+        );
         drop(worker);
         // If Drop hangs this test hangs — we don't join, so it must
         // return quickly. Nothing more to assert here.

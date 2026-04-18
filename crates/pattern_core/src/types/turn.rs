@@ -20,7 +20,7 @@ use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::types::block::BlockWrite;
-use crate::types::ids::{new_id, BatchId};
+use crate::types::ids::{BatchId, new_id};
 use crate::types::message::Message;
 use crate::types::origin::MessageOrigin;
 use crate::types::provider::{ToolCall, ToolResult};
@@ -257,26 +257,84 @@ fn default_stop_reason() -> StopReason {
     StopReason::EndTurn
 }
 
-/// Provider-reported cache metrics for a single turn.
+/// Provider-reported cache metrics for a single wire turn.
 ///
-/// Placeholder shape in Phase 2: no fields are surfaced yet, but the struct
-/// reserves a slot on [`TurnOutput`] so that Phase 4 (provider rebase +
-/// prompt-caching integration) can add metrics without breaking the turn
-/// boundary. The type uses `#[non_exhaustive]` so that future fields do not
-/// break exhaustive-construction call sites.
+/// Populated from the `usage` field of the provider's `StreamEnd` event.
+/// For Anthropic, the three token buckets correspond directly to the
+/// fields on the response's `usage` object:
+///
+/// - `fresh_input_tokens` ← `input_tokens` (tokens charged at the base rate)
+/// - `cache_read_input_tokens` ← `cache_read_input_tokens` (billed at 0.1×)
+/// - `cache_creation_input_tokens` ← `cache_creation_input_tokens` (billed at
+///   1.25× for 5-minute TTL or 2× for 1-hour TTL)
+///
+/// The struct uses `#[non_exhaustive]` so that future fields (e.g.
+/// per-TTL creation breakdown) can be added without breaking exhaustive
+/// construction call sites.
 ///
 /// # Examples
 ///
 /// ```
 /// use pattern_core::types::turn::TurnCacheMetrics;
 ///
-/// let m = TurnCacheMetrics::default();
-/// // Placeholder: no observable state in Phase 2.
-/// let _ = m;
+/// let m = TurnCacheMetrics::new(100, 900, 0);
+/// assert!((m.hit_ratio() - 0.9).abs() < 1e-9);
+/// assert_eq!(m.total_input_tokens(), 1000);
 /// ```
 #[non_exhaustive]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct TurnCacheMetrics {}
+pub struct TurnCacheMetrics {
+    /// Tokens charged at the fresh-input rate (no cache involvement).
+    pub fresh_input_tokens: u64,
+    /// Tokens read from existing cache entries. Billed at 0.1× base.
+    pub cache_read_input_tokens: u64,
+    /// Tokens committed to new cache entries this turn. Billed at
+    /// 1.25× (5-minute TTL) or 2× (1-hour TTL).
+    pub cache_creation_input_tokens: u64,
+}
+
+impl TurnCacheMetrics {
+    /// Construct from the three Anthropic billing buckets.
+    ///
+    /// This is the canonical constructor — it is required because the struct
+    /// is `#[non_exhaustive]`, preventing literal construction outside of
+    /// `pattern_core`.
+    pub fn new(
+        fresh_input_tokens: u64,
+        cache_read_input_tokens: u64,
+        cache_creation_input_tokens: u64,
+    ) -> Self {
+        Self {
+            fresh_input_tokens,
+            cache_read_input_tokens,
+            cache_creation_input_tokens,
+        }
+    }
+
+    /// Cache-hit ratio: `cache_read / (cache_read + fresh_input)`.
+    ///
+    /// Returns `0.0` when no input tokens were counted (avoids
+    /// division by zero). Cache-creation tokens are excluded from the
+    /// denominator because they represent new cache writes, not
+    /// re-use of existing content.
+    pub fn hit_ratio(&self) -> f64 {
+        let denominator = self.cache_read_input_tokens + self.fresh_input_tokens;
+        if denominator == 0 {
+            0.0
+        } else {
+            self.cache_read_input_tokens as f64 / denominator as f64
+        }
+    }
+
+    /// Total input tokens: `fresh + cache_read + cache_creation`.
+    ///
+    /// This is the sum over all three billing buckets.
+    pub fn total_input_tokens(&self) -> u64 {
+        self.fresh_input_tokens
+            .saturating_add(self.cache_read_input_tokens)
+            .saturating_add(self.cache_creation_input_tokens)
+    }
+}
 
 /// Why a single **wire-level** turn ended.
 ///
@@ -362,6 +420,85 @@ mod tests {
         assert_eq!(r, StopReason::EndTurn);
         let r: StopReason = serde_json::from_str(r#""tool_use""#).unwrap();
         assert_eq!(r, StopReason::ToolUse);
+    }
+}
+
+#[cfg(test)]
+mod cache_metrics_tests {
+    use super::*;
+
+    #[test]
+    fn hit_ratio_zero_when_no_tokens() {
+        let m = TurnCacheMetrics::default();
+        assert_eq!(m.hit_ratio(), 0.0);
+        assert_eq!(m.total_input_tokens(), 0);
+    }
+
+    #[test]
+    fn hit_ratio_all_cached_returns_one() {
+        let m = TurnCacheMetrics {
+            fresh_input_tokens: 0,
+            cache_read_input_tokens: 1000,
+            cache_creation_input_tokens: 0,
+        };
+        assert!((m.hit_ratio() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn hit_ratio_all_fresh_returns_zero() {
+        let m = TurnCacheMetrics {
+            fresh_input_tokens: 500,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        };
+        assert_eq!(m.hit_ratio(), 0.0);
+    }
+
+    #[test]
+    fn hit_ratio_partial_cache() {
+        // 900 cache_read + 100 fresh → 0.9 hit ratio.
+        let m = TurnCacheMetrics {
+            fresh_input_tokens: 100,
+            cache_read_input_tokens: 900,
+            cache_creation_input_tokens: 0,
+        };
+        assert!((m.hit_ratio() - 0.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn hit_ratio_excludes_cache_creation_from_denominator() {
+        // cache_creation tokens represent write cost, not cache re-use.
+        // Denominator is cache_read + fresh only.
+        let m = TurnCacheMetrics {
+            fresh_input_tokens: 100,
+            cache_read_input_tokens: 900,
+            cache_creation_input_tokens: 5000,
+        };
+        assert!((m.hit_ratio() - 0.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn total_input_tokens_sums_all_buckets() {
+        let m = TurnCacheMetrics {
+            fresh_input_tokens: 100,
+            cache_read_input_tokens: 900,
+            cache_creation_input_tokens: 200,
+        };
+        assert_eq!(m.total_input_tokens(), 1200);
+    }
+
+    #[test]
+    fn serde_round_trips() {
+        let m = TurnCacheMetrics {
+            fresh_input_tokens: 42,
+            cache_read_input_tokens: 100,
+            cache_creation_input_tokens: 25,
+        };
+        let json = serde_json::to_string(&m).expect("serialize");
+        let m2: TurnCacheMetrics = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(m2.fresh_input_tokens, 42);
+        assert_eq!(m2.cache_read_input_tokens, 100);
+        assert_eq!(m2.cache_creation_input_tokens, 25);
     }
 }
 
@@ -463,11 +600,7 @@ impl StepReply {
             .filter_map(|m| m.chat_message.content.joined_texts())
             .collect::<Vec<_>>()
             .join("\n");
-        if text.is_empty() {
-            None
-        } else {
-            Some(text)
-        }
+        if text.is_empty() { None } else { Some(text) }
     }
 }
 
@@ -514,7 +647,7 @@ mod step_reply_tests {
 
     #[test]
     fn all_messages_iterates_in_order_across_turns() {
-        use crate::types::ids::{new_id, AgentId, BatchId, MessageId};
+        use crate::types::ids::{AgentId, BatchId, MessageId, new_id};
 
         fn make_msg(text: &str, batch: &BatchId) -> Message {
             Message {
@@ -553,7 +686,7 @@ mod step_reply_tests {
 
     #[test]
     fn final_text_joins_assistant_messages() {
-        use crate::types::ids::{new_id, AgentId, BatchId, MessageId};
+        use crate::types::ids::{AgentId, BatchId, MessageId, new_id};
 
         let batch = BatchId::from(new_id());
         let make_assistant = |text: &str| Message {

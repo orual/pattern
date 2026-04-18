@@ -96,7 +96,7 @@ setup is wrong. Run it at binary startup before opening any Session.
 Agent programs import from the `Pattern.*` SDK module tree (installed at
 `$PATTERN_SDK_DIR` or `crates/pattern_runtime/haskell/Pattern/` by default).
 `tidepool-extract` compiles agents with the SDK directory on its include
-path — all 11 modules are compiled and linked together.
+path — all 13 modules are compiled and linked together.
 
 The SDK uses distinct constructor names across modules, so `import
 Pattern.Prelude` unqualified works even for agents that mix effects:
@@ -128,6 +128,10 @@ agent = do
 Collision-avoidance decisions on the Haskell side:
 
 - `Memory` uses `Get`/`Put` (KV semantics) — leaving `Read`/`Write` to `File`.
+- `Search` uses `SearchMessages`/`SearchArchival`/`SearchAll` — prefix
+  avoids collision with `Memory.Search`.
+- `Recall` uses `RecallInsert`/`RecallSearch`/`RecallGet`/`RecallDelete` —
+  prefix avoids collision with `Memory.Recall`.
 - `File.List` is `ListDir` — leaves `List` to `Sources` (list all sources).
 - `Rpc.Call` (request/response) — leaves `Send` to `Message` for
   agent-to-agent messaging.
@@ -137,10 +141,48 @@ derive layer (arity disambiguation + `#[core(module = "Pattern.<Module>",
 name = "...")]` on every SDK request variant).
 
 Effect-row ordering matters: handler position in the `SdkBundle` HList
-determines the JIT effect tag. The canonical order is Prelude-5 first,
-then rarer effects:
-`Memory, Message, Display, Time, Log, Shell, File, Sources, Mcp, Rpc,
-Spawn`. Agent `Eff '[...]` rows must line up with this prefix.
+determines the JIT effect tag. The canonical order is storage-adjacent
+first (`Memory, Search, Recall`), then messaging/display (`Message,
+Display, Time, Log`), then rarer effects (`Shell, File, Sources, Mcp,
+Rpc, Spawn`):
+
+```
+Memory, Search, Recall, Message, Display, Time, Log, Shell, File,
+Sources, Mcp, Rpc, Spawn
+```
+
+Agent `Eff '[...]` rows must line up with this prefix.
+
+### Search, recall, and shared-block access
+
+`Pattern.Search` provides scoped search across message history and
+archival entries. Search scope is an optional `Maybe Scope` parameter:
+
+- `Nothing` or `"current"` — current agent only (always allowed).
+- `"agent:<id>"` — specific agent (requires shared-blocks or group
+  membership).
+- `"agents:<id1>,<id2>"` — multiple agents (filters unpermitted).
+- `"constellation"` — all agents in the constellation.
+
+`Pattern.Recall` provides archival-entry CRUD (insert/search/get/delete).
+The search operation takes an optional scope with the same semantics.
+
+`Pattern.Memory.GetShared` allows agents to read blocks shared to them by
+other agents. Permission is checked against the `shared_blocks` table.
+
+#### Permission model
+
+The scope resolver (`handlers/scope.rs`) implements the permission
+checks. For cross-agent access, the ordering of permission signals is:
+
+1. **Self** — always allowed (short-circuit).
+2. **Shared blocks** — if the target agent has shared at least one block
+   with the caller, cross-agent search is allowed.
+3. **Group membership** — if both agents are in the same `agent_group`,
+   cross-agent search is allowed.
+
+This policy is configurable; future phases may add trust-level gates or
+explicit capability flags.
 
 ## Known flakes — MUST fix before GA
 

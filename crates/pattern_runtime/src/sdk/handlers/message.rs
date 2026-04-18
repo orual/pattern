@@ -12,7 +12,7 @@
 //! tool to invoke SDK capabilities.
 
 use jiff::Timestamp;
-use pattern_core::types::ids::{new_id, AgentId, BatchId, MessageId};
+use pattern_core::types::ids::{AgentId, BatchId, MessageId, new_id};
 use pattern_core::types::message::Message;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use tidepool_eval::Value;
@@ -59,7 +59,7 @@ impl DescribeEffect for MessageHandler {
 
 /// Handler position of `MessageHandler` in the canonical
 /// [`crate::sdk::bundle::SdkBundle`] HList.
-const MESSAGE_HANDLER_TAG: u32 = 1;
+const MESSAGE_HANDLER_TAG: u32 = 3;
 
 impl EffectHandler<SessionContext> for MessageHandler {
     type Request = MessageReq;
@@ -71,10 +71,7 @@ impl EffectHandler<SessionContext> for MessageHandler {
     ) -> Result<Value, EffectError> {
         // Soft-cancel check.
         let state = cx.user().cancel_state();
-        if state
-            .cancellation
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
+        if state.cancellation.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(EffectError::Handler(format!(
                 "{}: message handler cancelled at entry",
                 crate::timeout::CANCELLED_SENTINEL,
@@ -166,21 +163,20 @@ fn dispatch_outbound(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use crate::router::cli::CliRouter;
-    use crate::router::RouterRegistry;
-    use crate::testing::{InMemoryMemoryStore, standard_datacon_table};
     use crate::NopProviderClient;
+    use crate::router::RouterRegistry;
+    use crate::router::cli::CliRouter;
+    use crate::testing::{InMemoryMemoryStore, standard_datacon_table};
     use pattern_core::ProviderClient;
     use pattern_core::traits::MemoryStore;
     use pattern_core::types::snapshot::PersonaConfig;
+    use std::sync::Arc;
 
     fn sctx_with_router(registry: RouterRegistry) -> SessionContext {
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
         let provider: Arc<dyn ProviderClient> = Arc::new(NopProviderClient);
         let persona = PersonaConfig::new("agent-a", "A", "module X where\nx = pure ()");
-        SessionContext::from_persona(&persona, store, provider)
-            .with_router(Arc::new(registry))
+        SessionContext::from_persona(&persona, store, provider).with_router(Arc::new(registry))
     }
 
     /// Build a DataConTable that includes the `()` constructor needed by
@@ -207,7 +203,10 @@ mod tests {
         let err = h.handle(MessageReq::Ask("test".into()), &cx).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("candidate for removal"), "got: {msg}");
-        assert!(msg.contains("code"), "should mention the code tool; got: {msg}");
+        assert!(
+            msg.contains("code"),
+            "should mention the code tool; got: {msg}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -234,7 +233,10 @@ mod tests {
 
         // Verify the receiver got the message.
         let received = rx.recv().await.expect("should receive routed message");
-        let text = received.chat_message.content.first_text()
+        let text = received
+            .chat_message
+            .content
+            .first_text()
             .expect("message should have text content");
         assert_eq!(text, "hello world");
     }
@@ -274,11 +276,8 @@ mod tests {
         tokio::task::spawn_blocking(move || {
             let cx = EffectContext::with_user(&table, &ctx);
             let mut h = MessageHandler;
-            h.handle(
-                MessageReq::Send("cli:user".into(), "test body".into()),
-                &cx,
-            )
-            .unwrap();
+            h.handle(MessageReq::Send("cli:user".into(), "test body".into()), &cx)
+                .unwrap();
         })
         .await
         .unwrap();

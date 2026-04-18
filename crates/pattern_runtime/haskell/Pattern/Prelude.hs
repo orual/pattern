@@ -1,13 +1,16 @@
--- | Pattern.Prelude — ergonomic re-export of the full 11-effect SDK.
+-- | Pattern.Prelude — ergonomic re-export of the full 13-effect SDK.
 --
 -- The SDK uses distinct constructor names across modules
 -- (@Memory.Get@/@Put@, @File.Read@/@Write@/@ListDir@, @Rpc.Call@/@Recv@,
--- @Message.Send@, …), so @import Pattern.Prelude@ unqualified works even
--- when agents use several effects together. Qualified imports remain a
--- fine stylistic choice when you want explicit module attribution at the
--- call site (@Memory.Get \"label\"@ vs. @get \"label\"@).
+-- @Search.SearchMessages@, @Recall.RecallInsert@, @Message.Send@, …),
+-- so @import Pattern.Prelude@ unqualified works even when agents use
+-- several effects together. Qualified imports remain a fine stylistic
+-- choice when you want explicit module attribution at the call site
+-- (@Memory.Get \"label\"@ vs. @get \"label\"@).
 module Pattern.Prelude
   ( module Pattern.Memory
+  , module Pattern.Search
+  , module Pattern.Recall
   , module Pattern.Message
   , module Pattern.Display
   , module Pattern.Time
@@ -21,6 +24,8 @@ module Pattern.Prelude
   ) where
 
 import Pattern.Memory
+import Pattern.Search
+import Pattern.Recall
 import Pattern.Message
 import Pattern.Display
 import Pattern.Time

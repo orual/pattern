@@ -56,7 +56,7 @@ impl Router for CliRouter {
 mod tests {
     use super::*;
     use jiff::Timestamp;
-    use pattern_core::types::ids::{new_id, AgentId, BatchId, MessageId};
+    use pattern_core::types::ids::{AgentId, BatchId, MessageId, new_id};
 
     fn test_message(text: &str) -> Message {
         Message {
@@ -81,7 +81,10 @@ mod tests {
 
         let received = rx.recv().await.unwrap();
         // Verify the message content was preserved.
-        let text = received.chat_message.content.first_text()
+        let text = received
+            .chat_message
+            .content
+            .first_text()
             .expect("message should have text content");
         assert_eq!(text, "hello from agent");
     }

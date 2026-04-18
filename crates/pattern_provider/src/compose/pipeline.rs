@@ -85,9 +85,11 @@ pub fn compose(
 /// Assemble a completed [`PartialRequest`] into a [`CompletionRequest`].
 ///
 /// Validates breakpoint budget, applies `cache_control` markers to
-/// their indexed targets, checks for the extended-TTL beta header
-/// when needed, and validates TTL ordering (Anthropic's wire-format
-/// constraint). See [module docs][self] for the full list.
+/// their indexed targets, and validates TTL ordering (Anthropic's
+/// wire-format constraint). The extended-TTL beta header check that
+/// used to live here was retired in Phase 5 Task 20 — Anthropic
+/// dropped the header as a routing requirement in late 2025. See
+/// [module docs][self] for the full list.
 pub fn finalize(partial: PartialRequest) -> Result<CompletionRequest, ProviderError> {
     let PartialRequest {
         model,
@@ -95,7 +97,12 @@ pub fn finalize(partial: PartialRequest) -> Result<CompletionRequest, ProviderEr
         mut messages,
         tools,
         options,
-        extra_headers,
+        // `extra_headers` is consumed by the gateway shaper at wire
+        // serialisation time, not by finalize itself. The
+        // `extended-cache-ttl-2025-04-11` check that used to read
+        // this field was retired (header no longer required by
+        // Anthropic).
+        extra_headers: _,
         breakpoints,
     } = partial;
 
@@ -147,22 +154,17 @@ pub fn finalize(partial: PartialRequest) -> Result<CompletionRequest, ProviderEr
         }
     }
 
-    // 3. Extended-TTL beta header check (AC7.5b).
-    let needs_extended = breakpoints.placements().iter().any(|p| {
-        matches!(
-            p.control,
-            CacheControl::Ephemeral1h | CacheControl::Ephemeral24h
-        )
-    });
-    if needs_extended {
-        let present = extra_headers
-            .get("anthropic-beta")
-            .map(|v| v.contains("extended-cache-ttl-2025-04-11"))
-            .unwrap_or(false);
-        if !present {
-            return Err(ProviderError::MissingExtendedCacheTtlBeta);
-        }
-    }
+    // 3. Extended-TTL beta header check (AC7.5b) — RETIRED.
+    //
+    // Anthropic dropped the `extended-cache-ttl-2025-04-11` beta as
+    // a routing requirement in late 2025. Current endpoints accept
+    // `cache_control: { "ttl": "1h" }` directly without the header.
+    // The check was defensive redundancy; see the
+    // `docs/notes/2026-04-18-cache-ttl-research.md` investigation
+    // for the evidence trail. Retired here to unblock agent-loop
+    // paths that don't flow through the gateway's shaper (which
+    // still emits the marker as a no-op for defence in depth when
+    // the beta flag is configured).
 
     // 4. TTL ordering (Anthropic wire-format constraint).
     validate_ttl_ordering(&system_blocks, &messages, &breakpoints)?;
@@ -539,49 +541,42 @@ mod tests {
         }
     }
 
-    // ---- Missing beta header for extended TTL ----
+    // ---- Extended-TTL no longer requires the beta header ----
+    //
+    // Anthropic dropped the `extended-cache-ttl-2025-04-11` beta as
+    // a routing requirement in late 2025; current endpoints accept
+    // `cache_control: { "ttl": "1h" }` directly. The old
+    // "rejects without header" + "accepts with header" pair has been
+    // replaced with a single test confirming extended TTL succeeds
+    // WITHOUT the header. See
+    // `docs/notes/2026-04-18-cache-ttl-research.md`.
 
     #[test]
-    fn finalize_rejects_extended_ttl_without_beta_header() {
+    fn finalize_accepts_extended_ttl_without_beta_header() {
         let p = partial_with_markers(
             &[CacheControl::Ephemeral1h],
             &[],
             &["seg1"],
-            false, // no beta header
+            false, // no beta header — no longer required
         );
-        let err = finalize(p).expect_err("extended TTL without beta must fail");
-        assert!(
-            matches!(err, ProviderError::MissingExtendedCacheTtlBeta),
-            "expected MissingExtendedCacheTtlBeta, got {err:?}"
-        );
-    }
-
-    // ---- Beta header present: extended TTL succeeds ----
-
-    #[test]
-    fn finalize_accepts_extended_ttl_with_beta_header() {
-        let p = partial_with_markers(
-            &[CacheControl::Ephemeral1h],
-            &[CacheControl::Ephemeral5m],
-            &["seg1", "seg2"],
-            true, // beta header present
-        );
-        let out = finalize(p).expect("finalize with beta should succeed");
+        let out = finalize(p).expect("extended TTL without beta should succeed");
         let blocks = out.chat.system_blocks.unwrap();
         assert_eq!(blocks[0].cache_control, Some(CacheControl::Ephemeral1h));
     }
 
-    // ---- Beta header with other markers too ----
-
+    /// Beta-header-present still accepted (back-compat: gateway may
+    /// still emit the marker as a no-op).
     #[test]
-    fn finalize_accepts_extended_ttl_with_mixed_beta_value() {
-        let mut p = partial_with_markers(&[CacheControl::Ephemeral1h], &[], &["seg1"], false);
-        // Include extended-cache-ttl alongside other beta markers.
-        p.extra_headers.insert(
-            "anthropic-beta".into(),
-            "extended-cache-ttl-2025-04-11,some-other-beta".into(),
+    fn finalize_accepts_extended_ttl_with_beta_header() {
+        let p = partial_with_markers(
+            &[CacheControl::Ephemeral1h],
+            &[CacheControl::Ephemeral1h],
+            &["seg1", "seg2"],
+            true,
         );
-        finalize(p).expect("mixed beta value should succeed");
+        let out = finalize(p).expect("finalize with beta should still succeed");
+        let blocks = out.chat.system_blocks.unwrap();
+        assert_eq!(blocks[0].cache_control, Some(CacheControl::Ephemeral1h));
     }
 
     // ---- TTL ordering: natural case succeeds (1h before 5m) ----

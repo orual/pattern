@@ -24,9 +24,7 @@ impl DescribeEffect for FileHandler {
                 "Write   :: Path -> Content -> File ()",
                 "ListDir :: Path -> File [Path]",
             ],
-            type_defs: &[
-                "type Path = Text",
-            ],
+            type_defs: &["type Path = Text"],
             helpers: &[
                 "read_ :: Member File effs => Path -> Eff effs Content\nread_ p = send (Read p)",
                 "write :: Member File effs => Path -> Content -> Eff effs ()\nwrite p c = send (Write p c)",

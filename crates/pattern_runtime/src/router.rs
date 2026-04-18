@@ -188,16 +188,13 @@ impl std::fmt::Debug for RouterRegistry {
 mod tests {
     use super::*;
     use jiff::Timestamp;
-    use pattern_core::types::ids::{new_id, AgentId, BatchId, MessageId};
+    use pattern_core::types::ids::{AgentId, BatchId, MessageId, new_id};
     use pattern_core::types::message::Message;
 
     /// Create a minimal test message.
     fn test_message() -> Message {
         Message {
-            chat_message: genai::chat::ChatMessage::new(
-                genai::chat::ChatRole::User,
-                "hello",
-            ),
+            chat_message: genai::chat::ChatMessage::new(genai::chat::ChatRole::User, "hello"),
             id: MessageId::from(new_id().to_string()),
             owner_id: AgentId::from("test-agent"),
             created_at: Timestamp::now(),
@@ -338,7 +335,10 @@ mod tests {
         let msg = test_message();
         registry.route("agent:pattern-entropy", &msg).await.unwrap();
 
-        assert!(cli.calls().is_empty(), "default must NOT be used when scheme matches");
+        assert!(
+            cli.calls().is_empty(),
+            "default must NOT be used when scheme matches"
+        );
         assert_eq!(agent.calls().len(), 1);
         assert_eq!(agent.calls()[0], "pattern-entropy");
     }
@@ -367,7 +367,10 @@ mod tests {
         let msg = test_message();
         registry.route("test:x", &msg).await.unwrap();
 
-        assert!(first.calls().is_empty(), "first router should not be called");
+        assert!(
+            first.calls().is_empty(),
+            "first router should not be called"
+        );
         assert_eq!(second.calls().len(), 1, "second router should be called");
     }
 }

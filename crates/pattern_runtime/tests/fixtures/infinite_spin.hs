@@ -20,6 +20,8 @@ module InfiniteSpin (agent) where
 
 import Control.Monad.Freer (Eff)
 import Pattern.Memory
+import Pattern.Search
+import Pattern.Recall
 import Pattern.Message
 import Pattern.Display
 import Pattern.Time
@@ -30,7 +32,7 @@ import Pattern.Log
 spinForever :: Int -> ()
 spinForever !n = spinForever (n + 1)
 
-agent :: Eff '[Memory, Message, Display, Time, Log] ()
+agent :: Eff '[Memory, Search, Recall, Message, Display, Time, Log] ()
 agent = do
   let !_ = spinForever 0
   info "unreachable"

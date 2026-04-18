@@ -8,9 +8,6 @@
 //! 3. [`TidepoolSession::checkpoint`] / [`TidepoolSession::restore`] —
 //!    event-log based (Phase 3 Task 15).
 //!
-//! Phase 3 scope: MemoryHandler dispatches to the session's
-//! `Arc<dyn MemoryStore>`; MessageHandler is stubbed; handlers
-//! co-operatively check [`SessionContext::cancel_state`] at entry.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -31,26 +28,15 @@ use crate::router::RouterRegistry;
 use crate::sdk::SdkLocation;
 use crate::sdk::bundle::SdkBundle;
 use crate::sdk::handlers::{
-    DisplayHandler, FileHandler, LogHandler, McpHandler, MemoryHandler, MessageHandler, RpcHandler,
-    ShellHandler, SourcesHandler, SpawnHandler, TimeHandler,
+    DisplayHandler, FileHandler, LogHandler, McpHandler, MemoryHandler, MessageHandler,
+    RecallHandler, RpcHandler, SearchHandler, ShellHandler, SourcesHandler, SpawnHandler,
+    TimeHandler,
 };
 use crate::tidepool::{CancelHandle, SessionMachine, compile_program};
 use crate::timeout::{Budget, CancelState};
 
 /// Session-scoped context threaded into every handler as the
 /// [`tidepool_effect::EffectContext::user`] value.
-///
-/// Phase 3 fields:
-/// - [`SessionContext::agent_id`] — stable agent identifier, needed by
-///   MemoryHandler to disambiguate memory blocks.
-/// - [`SessionContext::budget`] — per-turn budget snapshot from PersonaConfig.
-/// - [`SessionContext::cancel_state`] — shared atomic flag + handler gate
-///   driving the two-path cancellation harness (Task 16).
-/// - [`SessionContext::memory_store`] — `Arc<dyn MemoryStore>` that the
-///   MemoryHandler dispatches reads/writes to. Trait-object dispatch is
-///   deliberate: `pattern_runtime` must not compile-link to any concrete
-///   memory backend (Phase 2 architecture rule).
-///
 #[derive(Debug)]
 pub struct SessionContext {
     agent_id: String,
@@ -317,6 +303,15 @@ pub struct TidepoolSession {
     /// [`crate::sdk::bundle::canonical_effect_decls`]. Passed verbatim
     /// to every [`EvalWorker::dispatch`] call. `None` on the legacy path.
     preamble: Option<String>,
+    /// Session-latched cache profile. Consumed by the composer
+    /// pipeline inside [`crate::agent_loop::drive_step`] to place
+    /// segment-1/2/3 `cache_control` markers with the configured
+    /// TTLs. Latched at open-time to prevent mid-session TTL flips
+    /// (which cause ~20K-token cache busts on Anthropic's
+    /// subscription tier). Default:
+    /// [`CacheProfile::default_anthropic_subscriber`] — all-1h per
+    /// the research note in `docs/notes/2026-04-18-cache-ttl-research.md`.
+    cache_profile: pattern_provider::compose::CacheProfile,
 }
 
 /// Mutable per-session state guarded by [`TidepoolSession::inner`].
@@ -414,11 +409,14 @@ impl TidepoolSession {
         );
 
         let display = DisplayHandler::new();
-        // Bundle order: Prelude-5 first, then rarer effects. See
-        // `crates/pattern_runtime/src/sdk/bundle.rs` for the ordering
-        // rationale (arity-aware DataCon disambiguation + backwards compat).
+        // Bundle order: Memory, Search, Recall (storage-adjacent), then
+        // Message, Display, Time, Log (Prelude-5), then rarer effects.
+        // Must match SdkBundle in `crates/pattern_runtime/src/sdk/bundle.rs`
+        // — handler position == JIT effect tag.
         let bundle: SdkBundle = frunk::hlist![
             MemoryHandler::new(ctx.memory_store()),
+            SearchHandler::new(ctx.memory_store()),
+            RecallHandler::new(ctx.memory_store()),
             MessageHandler,
             display.clone(),
             TimeHandler,
@@ -447,6 +445,7 @@ impl TidepoolSession {
             turn_history: Arc::new(std::sync::Mutex::new(TurnHistory::empty())),
             eval_worker: None,
             preamble: None,
+            cache_profile: pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
         })
     }
 
@@ -501,8 +500,8 @@ impl TidepoolSession {
         // Replace the NoOpSink on the freshly constructed SessionContext.
         // We have exclusive ownership of `session` here (just returned
         // from open), so Arc::try_unwrap on ctx will always succeed.
-        let ctx_owned = Arc::try_unwrap(session.ctx)
-            .expect("ctx has no other clones immediately after open()");
+        let ctx_owned =
+            Arc::try_unwrap(session.ctx).expect("ctx has no other clones immediately after open()");
         let ctx_with_sink = ctx_owned.with_turn_sink(turn_sink.clone());
         session.ctx = Arc::new(ctx_with_sink);
 
@@ -545,20 +544,27 @@ impl TidepoolSession {
     /// StepReply), this drives the full wire-turn loop: compose →
     /// provider.complete → stream → tool dispatch → chain
     /// tool_results → repeat until stop_reason.is_terminal().
-    pub async fn step_with_agent_loop(
-        &self,
-        input: TurnInput,
-    ) -> Result<StepReply, RuntimeError> {
-        let worker = self.eval_worker.as_ref().ok_or_else(|| {
-            RuntimeError::SessionPoisoned {
+    pub async fn step_with_agent_loop(&self, input: TurnInput) -> Result<StepReply, RuntimeError> {
+        let worker = self
+            .eval_worker
+            .as_ref()
+            .ok_or_else(|| RuntimeError::SessionPoisoned {
                 reason: "step_with_agent_loop called on a session \
                          opened without an eval worker; use \
                          TidepoolSession::open_with_agent_loop"
                     .into(),
-            }
-        })?;
+            })?;
         let preamble = self.preamble.as_deref().unwrap_or("");
-        crate::agent_loop::drive_step(input, self.ctx.clone(), worker, preamble).await
+        let cache_profile = self.cache_profile.clone();
+        crate::agent_loop::drive_step(
+            input,
+            self.ctx.clone(),
+            self.turn_history.clone(),
+            cache_profile,
+            worker,
+            preamble,
+        )
+        .await
     }
 
     /// Test-friendly step core: runs the machine, races the watchdog,
@@ -919,12 +925,12 @@ mod tests {
     use super::*;
     use crate::sdk::SdkLocation;
     use crate::testing::{InMemoryMemoryStore, MockProviderClient};
+    use pattern_core::ProviderClient;
     use pattern_core::traits::{MemoryStore, TurnSink, VecSink};
-    use pattern_core::types::ids::{new_id, BatchId};
+    use pattern_core::types::ids::{BatchId, new_id};
     use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
     use pattern_core::types::snapshot::PersonaConfig;
     use pattern_core::types::turn::StopReason;
-    use pattern_core::ProviderClient;
 
     /// Minimal compilable agent program. Needs OverloadedStrings (so string
     /// literals become Text, matching the Log helper signatures) and a
@@ -1045,20 +1051,25 @@ mod tests {
 
         // Two wire turns: tool_use then text.
         assert_eq!(provider.call_count(), 2, "two wire turns expected");
-        assert_eq!(reply.turns.len(), 2, "reply should aggregate two wire turns");
+        assert_eq!(
+            reply.turns.len(),
+            2,
+            "reply should aggregate two wire turns"
+        );
         assert_eq!(reply.turns[0].stop_reason, StopReason::ToolUse);
         assert_eq!(reply.turns[1].stop_reason, StopReason::EndTurn);
         assert_eq!(reply.final_stop_reason, StopReason::EndTurn);
 
         // Batch id stable across wire turns.
         assert_eq!(
-            reply.turns[0].messages[0].batch,
-            reply.turns[1].messages[0].batch,
+            reply.turns[0].messages[0].batch, reply.turns[1].messages[0].batch,
             "all wire turns in one step share batch_id"
         );
 
         // Aggregate usage sums both turns.
-        let agg = reply.total_usage.expect("aggregated usage should be present");
+        let agg = reply
+            .total_usage
+            .expect("aggregated usage should be present");
         // tool_use_turn: prompt=50; text_turn: prompt=10 → 60 total
         assert_eq!(agg.prompt_tokens, Some(60));
 
@@ -1071,10 +1082,13 @@ mod tests {
         assert_eq!(stop_count, 2, "each wire turn emits one Stop event");
 
         // The sink should also capture the TurnEvent::Text for the final turn.
-        let has_final_text = events.iter().any(|e| {
-            matches!(e, pattern_core::traits::TurnEvent::Text(s) if s.contains("42"))
-        });
-        assert!(has_final_text, "sink should contain text with '42' from final turn");
+        let has_final_text = events
+            .iter()
+            .any(|e| matches!(e, pattern_core::traits::TurnEvent::Text(s) if s.contains("42")));
+        assert!(
+            has_final_text,
+            "sink should contain text with '42' from final turn"
+        );
     }
 
     /// The `NoOpSink` default is replaced by the caller's sink on sessions
@@ -1094,8 +1108,7 @@ mod tests {
         };
 
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
-        let provider: Arc<dyn ProviderClient> =
-            Arc::new(MockProviderClient::with_turns(vec![]));
+        let provider: Arc<dyn ProviderClient> = Arc::new(MockProviderClient::with_turns(vec![]));
         let persona = PersonaConfig::new("agent-a", "A", MINIMAL_AGENT_PROGRAM);
         let sdk = SdkLocation::default();
         let sink = Arc::new(VecSink::new());

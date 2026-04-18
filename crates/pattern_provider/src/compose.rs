@@ -45,6 +45,7 @@
 
 pub mod break_detection;
 pub mod breakpoints;
+pub mod compression;
 pub mod current_state;
 pub mod partial_request;
 pub mod passes;
