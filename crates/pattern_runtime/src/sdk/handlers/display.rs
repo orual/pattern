@@ -4,9 +4,16 @@
 //! event in the order the handler sees it. Subscribers run synchronously
 //! on the effect dispatch thread; work that might block (remote sinks,
 //! slow terminals) should push onto a channel and return immediately.
+//!
+//! The Phase 5 Task 20 agent loop bridges this handler to the session's
+//! [`TurnSink`] via [`TurnSinkForwarder`]: every `DisplayEvent::{Chunk,
+//! Final, Note}` is forwarded to the sink as a [`TurnEvent::Display`]
+//! so CLI / TUI bindings see agent-authored display output in the same
+//! stream as LLM text chunks and tool events.
 
 use std::sync::{Arc, RwLock};
 
+use pattern_core::traits::{DisplayKind, TurnEvent, TurnSink};
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use tidepool_eval::Value;
 
@@ -65,6 +72,42 @@ impl DisplayHandler {
             .read()
             .expect("DisplayHandler subscribers lock poisoned")
             .len()
+    }
+
+    /// Register a [`TurnSinkForwarder`] bridging this handler to the
+    /// session's [`TurnSink`]. Convenience wrapper over
+    /// [`Self::subscribe`] — the resulting subscription forwards every
+    /// `DisplayEvent::{Chunk, Final, Note}` as a
+    /// [`TurnEvent::Display`].
+    pub fn forward_to_turn_sink(&self, sink: Arc<dyn TurnSink>) {
+        self.subscribe(Arc::new(TurnSinkForwarder { sink }));
+    }
+}
+
+/// Adapter that forwards [`DisplayEvent`]s to a [`TurnSink`] as
+/// [`TurnEvent::Display`]. Register via
+/// [`DisplayHandler::forward_to_turn_sink`] (or directly via
+/// [`DisplayHandler::subscribe`] if you need to customise the wrapper).
+#[derive(Debug, Clone)]
+pub struct TurnSinkForwarder {
+    sink: Arc<dyn TurnSink>,
+}
+
+impl TurnSinkForwarder {
+    /// Create a new forwarder for the given sink.
+    pub fn new(sink: Arc<dyn TurnSink>) -> Self {
+        Self { sink }
+    }
+}
+
+impl DisplaySubscriber for TurnSinkForwarder {
+    fn on_event(&self, event: &DisplayEvent) {
+        let (kind, text) = match event {
+            DisplayEvent::Chunk(s) => (DisplayKind::Chunk, s.clone()),
+            DisplayEvent::Final(s) => (DisplayKind::Final, s.clone()),
+            DisplayEvent::Note(s) => (DisplayKind::Note, s.clone()),
+        };
+        self.sink.emit(TurnEvent::Display { kind, text });
     }
 }
 
@@ -196,5 +239,37 @@ mod tests {
         let h2 = h1.clone();
         h1.subscribe(Recorder::new());
         assert_eq!(h2.subscriber_count(), 1);
+    }
+
+    #[test]
+    fn turn_sink_forwarder_bridges_chunk_final_note_to_display_event() {
+        use pattern_core::traits::{DisplayKind, TurnEvent, VecSink};
+
+        let table = unit_table();
+        let cx = EffectContext::with_user(&table, &());
+        let mut h = DisplayHandler::new();
+        let sink = Arc::new(VecSink::new());
+        h.forward_to_turn_sink(sink.clone());
+
+        h.handle(DisplayReq::Chunk("c".into()), &cx).unwrap();
+        h.handle(DisplayReq::Final("f".into()), &cx).unwrap();
+        h.handle(DisplayReq::Note("n".into()), &cx).unwrap();
+
+        let events = sink.snapshot();
+        assert_eq!(events.len(), 3);
+        let expected = [
+            (DisplayKind::Chunk, "c"),
+            (DisplayKind::Final, "f"),
+            (DisplayKind::Note, "n"),
+        ];
+        for (ev, (expected_kind, expected_text)) in events.iter().zip(expected.iter()) {
+            match ev {
+                TurnEvent::Display { kind, text } => {
+                    assert_eq!(kind, expected_kind);
+                    assert_eq!(text, expected_text);
+                }
+                other => panic!("expected TurnEvent::Display, got {other:?}"),
+            }
+        }
     }
 }

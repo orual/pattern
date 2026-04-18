@@ -41,13 +41,13 @@ use crate::types::snapshot::{PersonaConfig, SessionSnapshot};
 /// use pattern_core::error::RuntimeError;
 /// use pattern_core::traits::{AgentRuntime, Session};
 /// use pattern_core::types::snapshot::{PersonaConfig, SessionSnapshot};
-/// use pattern_core::types::turn::{TurnInput, TurnOutput};
+/// use pattern_core::types::turn::{StepReply, TurnInput};
 ///
 /// struct DummySession;
 ///
 /// #[async_trait]
 /// impl Session for DummySession {
-///     async fn step(&mut self, _i: TurnInput) -> Result<TurnOutput, RuntimeError> {
+///     async fn step(&mut self, _i: TurnInput) -> Result<StepReply, RuntimeError> {
 ///         unimplemented!("dummy: satisfaction-only example; AC1.3")
 ///     }
 ///     async fn checkpoint(&self) -> Result<SessionSnapshot, RuntimeError> {

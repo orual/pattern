@@ -31,7 +31,7 @@ use async_trait::async_trait;
 
 use crate::error::RuntimeError;
 use crate::types::snapshot::SessionSnapshot;
-use crate::types::turn::{TurnInput, TurnOutput};
+use crate::types::turn::{StepReply, TurnInput};
 
 /// Per-turn agent execution.
 ///
@@ -41,13 +41,25 @@ use crate::types::turn::{TurnInput, TurnOutput};
 /// dummy impl that satisfies both traits together.
 #[async_trait]
 pub trait Session: Send {
-    /// Execute one agent turn against the given input.
+    /// Execute one user-visible exchange against the given input.
     ///
-    /// A turn begins with the caller-provided [`TurnInput`] and ends when
-    /// the agent loop produces a [`TurnOutput`]. Partial results are not
-    /// exposed through this method; streaming consumers observe them via
-    /// the runtime's endpoint registry instead.
-    async fn step(&mut self, input: TurnInput) -> Result<TurnOutput, RuntimeError>;
+    /// An "exchange" is the user-visible unit: the caller sends a
+    /// message (or tool_results from a prior exchange's continuation,
+    /// though that's internal); the agent loop may issue multiple
+    /// **wire-level** provider turns (chained via `ToolUse` → next
+    /// turn's tool_results) before producing a terminal response.
+    ///
+    /// Every wire turn appears in order in [`StepReply::turns`]; the
+    /// final turn's `stop_reason` is also surfaced as
+    /// `final_stop_reason`. Streaming consumers observe mid-exchange
+    /// progress via the session's [`crate::traits::TurnSink`]; this
+    /// method returns only the aggregated tail-end.
+    ///
+    /// Per-wire-turn [`TurnOutput`](crate::types::turn::TurnOutput)s
+    /// are the checkpoint granularity — a `step` call that produces
+    /// three wire turns writes three `TurnRecord` entries + three
+    /// checkpoints before returning.
+    async fn step(&mut self, input: TurnInput) -> Result<StepReply, RuntimeError>;
 
     /// Capture the session's environment for later restore.
     ///

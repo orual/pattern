@@ -25,4 +25,4 @@ pub use memory_store::MemoryStore;
 pub use provider_client::ProviderClient;
 pub use session::Session;
 pub use source_manager::{SourceManager, SourceName};
-pub use turn_sink::{NoOpSink, TurnEvent, TurnSink, VecSink};
+pub use turn_sink::{DisplayKind, NoOpSink, TurnEvent, TurnSink, VecSink};

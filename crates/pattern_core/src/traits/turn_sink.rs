@@ -34,8 +34,37 @@
 
 use std::sync::{Arc, Mutex};
 
+use serde::{Deserialize, Serialize};
+
 use crate::types::provider::{ToolCall, ToolResult};
 use crate::types::turn::StopReason;
+
+/// Sub-variant of [`TurnEvent::Display`] — which Haskell
+/// `Pattern.Display.*` constructor produced the output.
+///
+/// Preserved through the sink so UIs can render the three styles
+/// distinctly:
+///
+/// - [`Chunk`](DisplayKind::Chunk) — partial streaming text from an
+///   agent's assembled response. UIs typically render these
+///   concatenated into a single growing buffer.
+/// - [`Final`](DisplayKind::Final) — terminal assembled content for
+///   one `Message.Ask` turn. Fires once per round-trip; UIs may
+///   close a "thinking" indicator here.
+/// - [`Note`](DisplayKind::Note) — side-channel status message
+///   (tool-call progress, typing indicator, agent commentary). UIs
+///   typically render these distinctly from main content — dimmer,
+///   parenthesised, or in a separate pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DisplayKind {
+    /// Partial streaming chunk (`Pattern.Display.chunk`).
+    Chunk,
+    /// Terminal assembled content (`Pattern.Display.final_`).
+    Final,
+    /// Side-channel agent note (`Pattern.Display.note`).
+    Note,
+}
 
 /// Fine-grained event emitted during a single wire turn.
 ///
@@ -43,8 +72,15 @@ use crate::types::turn::StopReason;
 /// agent loop:
 ///
 /// - [`Text`](TurnEvent::Text) — the provider stream emitted a chunk
-///   of assistant text. These arrive many times per turn as the model
-///   generates output.
+///   of LLM-authored response text. These arrive many times per turn
+///   as the model generates output. Carry no sub-kind — UIs typically
+///   concatenate them into a streaming buffer.
+/// - [`Thinking`](TurnEvent::Thinking) — the provider stream emitted
+///   a chunk of LLM reasoning content (Anthropic Extended Thinking,
+///   OpenAI o-series reasoning summaries, etc.). Distinct from
+///   `Text`: reasoning is the "how" the model got to its answer;
+///   text is the answer itself. UIs typically dim, collapse, or
+///   hide-by-default thinking chunks.
 /// - [`ToolCall`](TurnEvent::ToolCall) — the provider stream completed
 ///   a tool_use block; the agent loop is about to dispatch it to the
 ///   eval worker. Fires BEFORE the corresponding
@@ -53,20 +89,63 @@ use crate::types::turn::StopReason;
 ///   a result (success or error). Fires after the stream closes and
 ///   the worker replies; callers get a chance to display the result
 ///   before the next wire turn composes.
-/// - [`Display`](TurnEvent::Display) — the Haskell `Display.Show`
-///   effect handler emitted text. Distinct from `Text` because it
-///   comes from the agent's side of the effect boundary, not the raw
-///   LLM output; UIs may render it differently (e.g. without the
-///   streaming-text animation).
+/// - [`Display`](TurnEvent::Display) — the Haskell `Pattern.Display.*`
+///   effect handler emitted text. Semantically distinct from
+///   `Text`: LLM-authored streaming output vs agent-authored
+///   deliberate surfacing. Carries a [`DisplayKind`] so UIs can
+///   further distinguish Chunk / Final / Note.
 /// - [`Stop`](TurnEvent::Stop) — the wire turn completed. Terminal
 ///   reasons (anything except `ToolUse`) mark the end of the
 ///   user-visible exchange; the next `Stop` will belong to a fresh
 ///   `Session::step` call.
+///
+/// # UX guidance for the text-bearing variants
+///
+/// Four variants carry text; distinguishing them in the CLI / TUI
+/// matters because they mean different things:
+///
+/// | Variant           | Source           | Meaning                             |
+/// |-------------------|------------------|-------------------------------------|
+/// | `Text`            | LLM stream       | "model is generating its answer"    |
+/// | `Thinking`        | LLM stream       | "model is reasoning about it"       |
+/// | `Display::Chunk`  | agent's Haskell  | "agent is typing assembled text"    |
+/// | `Display::Final`  | agent's Haskell  | "agent completed an assembled reply"|
+/// | `Display::Note`   | agent's Haskell  | "agent side-channel status"         |
+///
+/// Recommended rendering conventions:
+/// - `Text` — default style, concatenated into a streaming buffer.
+/// - `Thinking` — dimmed / indented / collapsed / hidden-by-default
+///   (operator-configurable). The content is useful for debugging
+///   but often noisy for routine interaction.
+/// - `Display::Chunk` / `::Final` — distinct from both (e.g.
+///   prefixed with a glyph, rendered in a framed block).
+/// - `Display::Note` — dimmed or parenthesised so it doesn't
+///   compete with primary content.
+///
+/// # Thinking preservation across tool cycles
+///
+/// For providers with Extended Thinking (Anthropic) or equivalent,
+/// the reasoning blocks must be echoed back verbatim on the
+/// follow-up tool_result wire turn — otherwise the model can't
+/// continue its reasoning chain, and for Anthropic the signed
+/// blocks will be stripped or rejected. The agent loop handles this
+/// at the message level: the reasoning content + signatures captured
+/// at stream-end ride along on the assistant message's content
+/// parts, and the next wire turn's composer includes them. `Thinking`
+/// events on the sink are for UI display only; the sink doesn't
+/// participate in preservation.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum TurnEvent {
-    /// A chunk of assistant-authored text from the LLM stream.
+    /// A chunk of LLM-authored response text from the provider
+    /// stream. The model's answer, not its reasoning.
     Text(String),
+    /// A chunk of LLM reasoning content (Anthropic Extended Thinking,
+    /// OpenAI o-series reasoning summary, etc.). Semantically
+    /// distinct from [`Self::Text`] — see UX guidance in the enum
+    /// doc. Thought signatures (when present) are carried on the
+    /// assistant message's content parts, not this event.
+    Thinking(String),
     /// The LLM has requested a tool to be executed. The eval is
     /// dispatched in parallel with remaining stream work; pair with
     /// the matching [`ToolResult`](Self::ToolResult) by `call_id`.
@@ -75,10 +154,14 @@ pub enum TurnEvent {
     /// [`ToolCall`](Self::ToolCall). Success / error is encoded on the
     /// outcome.
     ToolResult(ToolResult),
-    /// Text emitted by the Haskell `Display.Show` effect handler.
-    /// Semantically distinct from LLM-authored `Text` chunks.
+    /// Text emitted by the Haskell `Pattern.Display.*` effect
+    /// handler. Distinct from [`Self::Text`]: LLM-authored streaming
+    /// vs agent-authored deliberate output. `kind` distinguishes
+    /// Chunk / Final / Note — see [`DisplayKind`] for UX guidance.
     Display {
-        /// The displayed text, rendered by the handler.
+        /// Which `Pattern.Display.*` constructor produced this.
+        kind: DisplayKind,
+        /// The displayed text.
         text: String,
     },
     /// The wire turn ended. If [`StopReason::is_terminal`] is `true`,
@@ -89,9 +172,12 @@ pub enum TurnEvent {
 
 /// Destination for [`TurnEvent`]s emitted during a wire turn.
 ///
-/// Implementations must be `Send + Sync` because the agent loop and
-/// Haskell handlers run on different tasks / threads.
-pub trait TurnSink: Send + Sync {
+/// Implementations must be `Send + Sync + Debug`:
+/// - `Send + Sync` because the agent loop and Haskell handlers run on
+///   different tasks / threads.
+/// - `Debug` so structs that hold `Arc<dyn TurnSink>` (like
+///   `SessionContext`) can derive `Debug` too.
+pub trait TurnSink: Send + Sync + std::fmt::Debug {
     /// Emit one event. Implementations should NOT block indefinitely;
     /// a bounded queue + drop-oldest or drop-newest policy is
     /// preferable to blocking the agent loop.
@@ -179,11 +265,44 @@ mod tests {
     fn vec_sink_records_events_in_order() {
         let sink = VecSink::new();
         sink.emit(TurnEvent::Text("hello".into()));
+        sink.emit(TurnEvent::Display {
+            kind: DisplayKind::Note,
+            text: "tool running...".into(),
+        });
         sink.emit(TurnEvent::Stop(StopReason::EndTurn));
         let events = sink.snapshot();
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 3);
         assert!(matches!(events[0], TurnEvent::Text(ref s) if s == "hello"));
-        assert!(matches!(events[1], TurnEvent::Stop(StopReason::EndTurn)));
+        assert!(
+            matches!(events[1], TurnEvent::Display { kind: DisplayKind::Note, ref text } if text == "tool running...")
+        );
+        assert!(matches!(events[2], TurnEvent::Stop(StopReason::EndTurn)));
+    }
+
+    #[test]
+    fn display_kind_serde_snake_case() {
+        let j = serde_json::to_string(&DisplayKind::Chunk).unwrap();
+        assert_eq!(j, r#""chunk""#);
+        let j = serde_json::to_string(&DisplayKind::Final).unwrap();
+        assert_eq!(j, r#""final""#);
+        let j = serde_json::to_string(&DisplayKind::Note).unwrap();
+        assert_eq!(j, r#""note""#);
+    }
+
+    #[test]
+    fn vec_sink_distinguishes_text_from_thinking() {
+        let sink = VecSink::new();
+        sink.emit(TurnEvent::Thinking("hmm, the user wants...".into()));
+        sink.emit(TurnEvent::Text("The answer is 42.".into()));
+        sink.emit(TurnEvent::Thinking("also considering...".into()));
+        sink.emit(TurnEvent::Stop(StopReason::EndTurn));
+
+        let events = sink.snapshot();
+        assert_eq!(events.len(), 4);
+        assert!(matches!(events[0], TurnEvent::Thinking(ref s) if s.contains("hmm")));
+        assert!(matches!(events[1], TurnEvent::Text(ref s) if s.starts_with("The answer")));
+        assert!(matches!(events[2], TurnEvent::Thinking(ref s) if s.contains("also")));
+        assert!(matches!(events[3], TurnEvent::Stop(StopReason::EndTurn)));
     }
 
     #[test]

@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use jiff::Timestamp;
 use pattern_core::ProviderClient;
 use pattern_core::error::{CancelPath, RuntimeError};
-use pattern_core::traits::{MemoryStore, Session};
+use pattern_core::traits::{MemoryStore, NoOpSink, Session, TurnSink};
 use pattern_core::types::snapshot::{PersonaConfig, SessionSnapshot};
 use pattern_core::types::turn::{TurnInput, TurnOutput};
 
@@ -76,6 +76,11 @@ pub struct SessionContext {
     /// messages here; the agent loop drains them into `TurnOutput`
     /// at turn close.
     pending_messages: Arc<std::sync::Mutex<Vec<pattern_core::types::message::Message>>>,
+    /// Streaming event sink for the agent loop + Display handler.
+    /// CLI/TUI bindings swap in a real sink; tests use
+    /// `pattern_core::traits::VecSink`; headless runs use
+    /// [`NoOpSink`] (the default).
+    turn_sink: Arc<dyn TurnSink>,
     /// Shared checkpoint log. Handlers record `(request, response)` pairs
     /// after a successful effect dispatch so restart-then-replay can
     /// deterministically re-drive the JIT. Wired to the same `Arc` as
@@ -144,9 +149,23 @@ impl SessionContext {
             provider,
             router: Arc::new(RouterRegistry::new()),
             pending_messages: Arc::new(std::sync::Mutex::new(Vec::new())),
+            turn_sink: Arc::new(NoOpSink),
             checkpoint_log: Arc::new(std::sync::Mutex::new(CheckpointLog::new())),
             current_turn: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Replace the default [`NoOpSink`] with a caller-provided sink.
+    /// Builder style; typical callers:
+    /// `SessionContext::from_persona(...).with_turn_sink(sink)`.
+    ///
+    /// `#[allow(dead_code)]` until the agent-loop wiring in Task 20
+    /// part 5c consumes the session-level plumbing.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn with_turn_sink(mut self, sink: Arc<dyn TurnSink>) -> Self {
+        self.turn_sink = sink;
+        self
     }
 
     /// Replace the checkpoint log handle and turn counter with externally
@@ -225,6 +244,13 @@ impl SessionContext {
         &self,
     ) -> &Arc<std::sync::Mutex<Vec<pattern_core::types::message::Message>>> {
         &self.pending_messages
+    }
+
+    /// Streaming event sink for this session. Handlers + the agent
+    /// loop call `turn_sink().emit(event)` as events happen during a
+    /// wire turn. Never `None` — sessions default to [`NoOpSink`].
+    pub fn turn_sink(&self) -> &Arc<dyn TurnSink> {
+        &self.turn_sink
     }
 
     /// Replace the router registry. Used by session open (and tests) to
@@ -692,10 +718,26 @@ fn is_cancel_sentinel(e: &RuntimeError) -> bool {
 
 #[async_trait]
 impl Session for TidepoolSession {
-    async fn step(&mut self, input: TurnInput) -> Result<TurnOutput, RuntimeError> {
+    async fn step(
+        &mut self,
+        input: TurnInput,
+    ) -> Result<pattern_core::types::turn::StepReply, RuntimeError> {
         // Internally run_turn uses `&self` (interior mutability via the
         // inner mutex); Session::step is `&mut self` per the core trait.
-        self.run_turn(input).await
+        //
+        // Interim impl: the legacy SessionMachine.run path produces a
+        // single wire TurnOutput with stop_reason=EndTurn. Wrap it in
+        // a one-turn StepReply to satisfy the new trait signature.
+        // Task 20 part 5c replaces this with agent_loop::orchestrate
+        // + wire-turn loop driver.
+        let turn = self.run_turn(input).await?;
+        let final_stop_reason = turn.stop_reason;
+        let total_usage = turn.usage.clone();
+        Ok(pattern_core::types::turn::StepReply {
+            turns: vec![turn],
+            final_stop_reason,
+            total_usage,
+        })
     }
 
     async fn checkpoint(&self) -> Result<SessionSnapshot, RuntimeError> {
