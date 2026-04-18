@@ -1363,24 +1363,119 @@ See `test-requirements.md` AC8.* section for the full mapping.
 
 **No commit** — intentional absence.
 <!-- END_TASK_18 -->
+
+<!-- START_TASK_19 -->
+### Task 19: Scope-aware search + recall + block-read functionality (v3 port)
+
+**Verifies:** functional parity with v2's scoped `SearchTool` / `ConstellationSearchTool` / `RecallTool` / `BlockTool` read-ops, rebuilt in the v3 effect-handler architecture.
+
+**Rationale:** v2 agents could (a) search their own conversation history + archival memory, (b) search across constellation peers under permission, (c) search with FTS + time/role filters, (d) retrieve blocks shared to them by other agents. v3's foundation must preserve all of that agent UX — the backend schema (message FTS indexing, `archive_summaries`, `shared_blocks`, `agent_groups` / `group_members`) all already support it; v3 just needs to expose the operations through its Haskell-effect / Rust-handler model. The `AiTool`-trait / `ToolContext` Rust-side framework from v2 is **deliberately not ported** — v3's SDK structure is the Haskell effect GADT + handler dispatch path, not `dyn AiTool`.
+
+**What's in-scope:**
+- Extend the Haskell SDK with scope-aware search + recall operations (new modules, or extensions to existing `Memory`).
+- Extend the Rust handler side to resolve those operations against pattern_db FTS + archive_summaries + shared_blocks + group-membership tables.
+- Permission model: decide + implement the scope → allowed-agents resolution logic (same semantics v2 had — self always allowed, cross-agent requires group membership or explicit share, constellation-wide requires broad permission).
+- Block-read scope: expose shared-to-me blocks through the existing `MemoryStore::list_shared_blocks` + `get_shared_block` methods via the Memory effect's load/info ops.
+
+**What's explicitly NOT in-scope:**
+- Porting the `AiTool` trait, `ToolContext`, `ToolRegistry` Rust infrastructure — v3 uses effects + handlers, not `dyn AiTool` dispatch.
+- Porting the v2 `ImportanceScoringConfig` / keyword-bonus machinery from the old search tools — if importance scoring is wanted, it surfaces later as its own concern.
+- New schema migrations — existing pattern_db schema supports everything below.
+- Cross-constellation-constellation search (if that's ever a thing) — only intra-constellation scope is wired.
+
+**Files:**
+- Create / extend: `crates/pattern_runtime/haskell/Pattern/Search.hs` — new SDK module exposing scoped search over message history + archival entries. GADT shape up to the implementer; v2's `SearchDomain` (ArchivalMemory / Conversations / ConstellationMessages / All) is a good starting point.
+- Create: `crates/pattern_runtime/haskell/Pattern/Recall.hs` — new SDK module for archival-entry insert/search/get/delete. Search op takes `Maybe Scope` (optional per user: recall is usually per-agent; scope is occasional).
+- Extend: `crates/pattern_runtime/haskell/Pattern/Memory.hs` — Block load/info ops optionally take an `Owner` parameter so agents can load blocks shared to them by peers. Existing `Memory.Search` currently returns a handler-unimplemented error; decide whether to absorb it into the new `Pattern/Search.hs` (lean: yes, deprecate `Memory.Search`) or keep it as memory-only search within the current agent.
+- Extend: `crates/pattern_runtime/src/sdk/handlers/memory.rs` — wire block-read ops to consult `shared_blocks` when an owner is specified; reject cross-agent access when no sharing record exists.
+- Create: `crates/pattern_runtime/src/sdk/handlers/search.rs` — new handler implementing the Search effect. Dispatches to `pattern_db::queries` FTS helpers, filtering by resolved agent set based on scope + permission.
+- Create: `crates/pattern_runtime/src/sdk/handlers/recall.rs` — new handler for Recall effect. Thin layer over `MemoryStore::{insert_archival, search_archival, delete_archival}`; scope resolution mirrors the Search handler.
+- Extend: `crates/pattern_core/src/traits/memory_store.rs` — if any new DB-level method is needed (e.g. cross-agent message search by query), add to the trait with a default impl that delegates to existing helpers. `search_archival` already takes `agent_id` so cross-agent works by parameter swap.
+- Extend: `crates/pattern_runtime/src/sdk/mod.rs` (or wherever the `SdkBundle` HList lives) — register the new handlers in the canonical handler order (after `Memory`, before `Spawn` — call it out explicitly in the bundle docs since handler position drives the JIT effect tag).
+- Extend: `crates/pattern_core/src/types/` or `crates/pattern_runtime/src/types/` — a `SearchScope` type (port from `rewrite-staging/agent_runtime/runtime/tool_context.rs:29`) mirroring v2's enum (CurrentAgent / Agent(AgentId) / Agents(Vec<AgentId>) / Constellation). Lives in pattern_core if any cross-crate consumer needs it; pattern_runtime otherwise.
+- Permission-resolution helper: `crates/pattern_runtime/src/sdk/handlers/scope.rs` (or equivalent) — takes a `SearchScope` + caller `AgentId` + `MemoryStore` trait handle, returns `Vec<AgentId>` (the resolved set) or a permission-denied error. Implements the scope → allowed-agents logic:
+  - `CurrentAgent` → `[caller]`
+  - `Agent(target)` → `[target]` iff (a) `target == caller`, OR (b) `target` has shared ≥1 block with `caller` (tolerable heuristic for "these agents cooperate"), OR (c) both are in the same `agent_group`, OR (d) the agent's trust level or group has a `cross_agent_search` flag set
+  - `Agents(ids)` → per-id same check; filters out unpermitted without erroring
+  - `Constellation` → all constellation agents if caller has constellation-wide-search permission (v2's "Archive agent" role), else error
+  Final policy decision on ordering + which signals count (shared-blocks vs group-membership vs explicit flag) made during implementation; the shape matches v2, the exact policy is updatable.
+
+**Implementation notes:**
+
+1. **Haskell module style.** Match the existing `Pattern.Memory` / `Pattern.Message` conventions: GADT with constructor prefixes that avoid `Prelude` collisions (e.g. `SearchMessages` / `SearchArchival` / `SearchAll`). Register each SDK request variant with `#[core(module = "Pattern.Search", name = "Messages")]` on the Rust decode side for arity-aware disambiguation.
+
+2. **Effect row ordering.** Handler position in `SdkBundle` HList determines JIT effect tag. Current order: `Memory, Message, Display, Time, Log, Shell, File, Sources, Mcp, Rpc, Spawn`. Add `Search` + `Recall` at a deliberate position — suggested: `Memory, Search, Recall, Message, …` (adjacent to Memory since they're all storage-adjacent) — and update `pattern_runtime/CLAUDE.md`'s canonical-ordering section accordingly.
+
+3. **Permission model is configurable, not hardcoded.** Permission signals + their ordering are decided at implementation time; future phases may tune them. The scope resolver function should be testable in isolation (accepts a `MemoryStore` trait object + `AgentId` + scope, returns allowed `Vec<AgentId>`).
+
+4. **Search result shapes.** v2 returned `serde_json::Value` blobs from the tool surface. v3's Haskell SDK should return typed results (e.g. `[MessageHit { id :: Text, agentId :: Text, preview :: Text, position :: Text, createdAt :: Text, role :: Text }]`). Handler-side does the shaping against pattern_db's FTS query results.
+
+5. **Porting v2's `SearchDomain` + `ConstellationSearchDomain` precedent:** The union of those (archival / conversations / constellation-messages / constellation-archival / all) is the set of primary operations. Decide whether to collapse into one effect variant (Search takes `domain + scope`) or split (SearchArchival / SearchConversations / SearchAll as separate constructors). Either is defensible; match the style of existing effect modules.
+
+6. **Recall scope is optional.** Per user input: recall tool is "optionally scoped" — the search op takes `Maybe Scope`, defaulting to `CurrentAgent` semantics when absent.
+
+7. **Block read ops on shared blocks.** Existing `Memory.Get` / `Memory.Info` / `Memory.Viewport` ops implicitly target the caller's own blocks. Add an `owner :: Maybe AgentId` parameter (or dedicated ops `GetShared` / `InfoShared` / etc.) so agents can access shared blocks without needing to know the owner's internal representation. Permission check lives in the handler: if `owner != caller`, verify `shared_block_agents` grants the caller read access.
+
+**Testing:**
+
+- Unit tests for the scope resolver (pure function; in-memory `MemoryStore` test fixture with configured sharing / group memberships).
+- Handler tests for Search over message FTS: write N messages across 2 agents, search with each scope variant, assert correct result set.
+- Handler tests for Recall: insert archival entries for 2 agents, search with optional scope, assert results.
+- Integration test that exercises the full effect path: Haskell agent program → JIT → Rust handler → pattern_db query → results back to agent → assertion in Rust.
+- Permission-denied paths: caller tries to search an agent they have no relationship with, handler returns `EffectError::Permission` (or appropriate variant).
+
+**Docs:**
+- Update `crates/pattern_runtime/CLAUDE.md`:
+  - Canonical handler order (new positions for Search + Recall).
+  - New SDK modules + their intent.
+  - Permission model summary + where the policy lives.
+- Update `crates/pattern_provider/CLAUDE.md` only if any composer-side consumer changes (unlikely for Task 19).
+- Update `docs/architecture/message-batching-design.md` or similar to note that scoped search is the agent-facing way to access historical archives.
+
+**Commit:**
+
+```bash
+jj describe -m "[pattern-runtime] Task 19: scope-aware Search + Recall SDK modules + handlers
+
+Ports v2's scoped SearchTool / ConstellationSearchTool / RecallTool
+functionality to v3's Haskell-effect + Rust-handler architecture.
+Adds Pattern.Search and Pattern.Recall Haskell modules with scope-aware
+effect constructors; new handlers in pattern_runtime that dispatch
+against pattern_db FTS + archive_summaries + shared_blocks +
+group-membership tables. Permission model preserves v2 semantics:
+self-always, cross-agent via shared-blocks or group membership,
+constellation requires broad permission.
+
+AiTool Rust trait + ToolContext framework deliberately NOT ported —
+v3 uses effects + handlers exclusively.
+
+Schema migrations: none (existing pattern_db schema supports all paths)."
+jj new
+```
+<!-- END_TASK_19 -->
 <!-- END_SUBCOMPONENT_F -->
 
 ---
 
 ## Phase 5 "Done when" checklist
 
-- [ ] `pattern_core::types::message` re-exports `genai::chat::CacheControl` directly (no pattern-side mirror, no `CacheScope`, no `CacheMarker` wrapper); `genai` is a direct pattern_core dep
+- [x] `pattern_core::types::provider` re-exports `genai::chat::CacheControl` directly (Phase 4 Task 18 already did this; Task 1 is a no-op on arrival at Phase 5)
 - [ ] `CacheProfile` latched at session open; `allow_extended_ttl` respects subscription status
 - [ ] Composer pipeline: `ComposerPass` trait + `PartialRequest` + `BreakpointTracker` + `finalize()` with validation
-- [ ] `MemoryStoreAdapter` wraps preserved pattern_core storage as Phase 2's trait
-- [ ] `ChangeLog` records block writes with turn attribution; prunes to retention window
-- [ ] Pseudo-message renderer emits `[memory:written]` / `[memory:updated]` in `<system-reminder>` tags
-- [ ] `[memory:current_state]` pseudo-turn renderer: block-aware rendering per schema type; empty-case preserved
-- [ ] Segment 1 / 2 / 3 passes with cache_control marker placement
+- [ ] Types-layer prep: `BlockCreate` struct bundling `MemoryStore::create_block` args; `BlockWrite::previous_rendered_content` field for diff-style pseudo-messages
+- [ ] `MemoryStoreAdapter` wraps preserved pattern_core storage as Phase 2's trait + holds a pending `Vec<BlockWrite>` buffer that handlers push into as they mutate; session drains at turn close
+- [ ] `TurnHistory` holds in-memory active turns (unbounded at its layer; compaction manages size), `summary_head` vector of recent `ArchiveSummary`s loaded from pattern_db, and a running `estimated_tokens: u64` that combines real counts + heuristic fallback (no `Option`-wrapping at the API)
+- [ ] `run_turn` properly produces real `TurnOutput`s: messages from MessageHandler output, `block_writes` from adapter drain, `usage` from provider response, `cache_metrics` populated (Task 12 feeds in)
+- [ ] Per-turn message persistence to pattern_db `messages` table (`is_archived=0` at turn close; set to `1` during compaction)
+- [ ] Hierarchical archive summaries wired to pattern_db's `archive_summaries` table — depth-0 rows created during compaction, depth-N rollups generated when depth-(N-1) chain grows too long for the summary-head prepend budget
+- [ ] Pseudo-message renderer emits `[memory:written]` / `[memory:updated]` in `<system-reminder>` tags; uses `similar::TextDiff` (existing pattern_core dep) against `previous_rendered_content` for update diffs
+- [ ] `[memory:current_state]` pseudo-turn renderer: block-aware rendering per schema type; empty-case preserved (AC7.6)
+- [ ] Segment 1 / 2 / 3 passes with cache_control marker placement; segment 2 prepends summary-head vector as synthesized "earlier context" + recent messages + BlockWrite pseudo-messages
 - [ ] Break-detection hashing captures system/tools/cache_control/betas/model state per turn
 - [ ] Cache-hit metrics emitted via tracing; segment-1 bust detection fires loud warning (AC8.5)
-- [ ] Compression strategies migrated to async `count_tokens`; batch integrity preserved with pseudo-messages
+- [ ] Compression strategies migrated to async `count_tokens`; budget policy = `context_window - max_output - explicit_buffer`; compaction activates when `TurnHistory.estimated_tokens` approaches budget; batch integrity preserved with pseudo-messages
 - [ ] Block-rendering code removed from all system-prompt paths (AC7.2 guarantee)
+- [ ] Task 19: scope-aware Search + Recall SDK modules + handlers; v2 functional parity preserved (self-always, cross-agent via shared-blocks or group-membership, constellation via broad permission). Recall scope is optional; block-read ops honor `shared_blocks` for cross-agent access. `AiTool` / `ToolContext` Rust infrastructure NOT ported — v3 uses effects + handlers exclusively.
 - [ ] `cargo check`, `clippy`, `doc` all zero-warning across the narrowed workspace
 - [ ] `bash scripts/audit-rewrite-state.sh` passes
 - [ ] `just pre-commit-all` passes
