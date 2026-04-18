@@ -11,6 +11,7 @@
 pub mod checkpoint;
 pub mod memory;
 pub mod preflight;
+pub mod router;
 pub mod runtime;
 pub mod sdk;
 pub mod session;

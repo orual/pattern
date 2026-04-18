@@ -25,6 +25,7 @@ use pattern_core::types::turn::{TurnInput, TurnOutput};
 
 use crate::checkpoint::{CheckpointEvent, CheckpointLog};
 use crate::memory::{MemoryStoreAdapter, TurnHistory};
+use crate::router::RouterRegistry;
 use crate::sdk::SdkLocation;
 use crate::sdk::bundle::SdkBundle;
 use crate::sdk::handlers::{
@@ -62,8 +63,15 @@ pub struct SessionContext {
     /// Provider-client handle. Phase 5 wires it in; Phase 5 Task 20
     /// consumes it from the agent loop. Held here so the construction
     /// signature is stable across phase boundaries.
-    #[allow(dead_code)]
     provider: Arc<dyn ProviderClient>,
+    /// Scheme-dispatched message router registry. Handlers dispatch
+    /// Send/Reply/Notify through this. Set at session open; read-only
+    /// thereafter.
+    router: Arc<RouterRegistry>,
+    /// Pending messages accumulated during a turn. Handlers push
+    /// messages here; the agent loop drains them into `TurnOutput`
+    /// at turn close.
+    pending_messages: Arc<std::sync::Mutex<Vec<pattern_core::types::message::Message>>>,
     /// Shared checkpoint log. Handlers record `(request, response)` pairs
     /// after a successful effect dispatch so restart-then-replay can
     /// deterministically re-drive the JIT. Wired to the same `Arc` as
@@ -129,6 +137,8 @@ impl SessionContext {
             cancel_state: Arc::new(CancelState::new()),
             adapter,
             provider,
+            router: Arc::new(RouterRegistry::new()),
+            pending_messages: Arc::new(std::sync::Mutex::new(Vec::new())),
             checkpoint_log: Arc::new(std::sync::Mutex::new(CheckpointLog::new())),
             current_turn: Arc::new(AtomicU64::new(0)),
         }
@@ -188,6 +198,28 @@ impl SessionContext {
     /// turn). Handlers read this when stamping recorded events.
     pub fn current_turn(&self) -> u64 {
         self.current_turn.load(Ordering::SeqCst)
+    }
+
+    /// Provider client handle for LLM completion calls.
+    pub fn provider(&self) -> &Arc<dyn ProviderClient> {
+        &self.provider
+    }
+
+    /// Scheme-dispatched router registry for message routing.
+    pub fn router(&self) -> &Arc<RouterRegistry> {
+        &self.router
+    }
+
+    /// Pending messages accumulated during the current turn.
+    pub fn pending_messages(&self) -> &Arc<std::sync::Mutex<Vec<pattern_core::types::message::Message>>> {
+        &self.pending_messages
+    }
+
+    /// Replace the router registry. Used by session open to inject a
+    /// pre-configured registry.
+    pub(crate) fn with_router(mut self, router: Arc<RouterRegistry>) -> Self {
+        self.router = router;
+        self
     }
 }
 

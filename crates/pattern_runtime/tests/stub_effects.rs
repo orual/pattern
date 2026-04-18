@@ -23,6 +23,7 @@
 //! handler type and would otherwise require one typed wrapper function
 //! per namespace.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use pattern_runtime::sdk::handlers::{
@@ -48,13 +49,20 @@ fn preflight_or_fail() {
 ///
 /// Kept as a macro so each invocation instantiates its own
 /// `DispatchEffect` impl for the handler type.
+///
+/// `$user` is the user context passed to `compile_and_run`. Most
+/// handlers impl `EffectHandler<U>` generically (bounded on
+/// `HasCancelState`), so `&()` works. Handlers bound specifically to
+/// `EffectHandler<SessionContext>` (e.g. `MessageHandler` after Task 20
+/// part 3 wired the router) require a real `SessionContext`.
 macro_rules! run_stub_case {
-    ($fixture:expr, $source:expr, $handler:expr, $expect_namespace:expr, $expect_phrase:expr $(,)?) => {{
+    ($fixture:expr, $source:expr, $handler:expr, $user:expr, $expect_namespace:expr, $expect_phrase:expr $(,)?) => {{
         let sdk_dir = pattern_runtime::SdkLocation::default()
             .resolve()
             .expect("SDK dir should exist");
 
         let mut bundle = frunk::hlist![$handler];
+        let user = $user;
 
         let start = Instant::now();
         let result = std::thread::Builder::new()
@@ -66,7 +74,7 @@ macro_rules! run_stub_case {
                     "agent",
                     &[include_path.as_path()],
                     &mut bundle,
-                    &(),
+                    &user,
                 )
             })
             .expect("thread spawn")
@@ -102,6 +110,7 @@ fn shell_stub_reports_not_implemented_hang_free() {
         "shell_stub",
         include_str!("fixtures/shell_stub.hs"),
         ShellHandler,
+        (),
         "Pattern.Shell",
         "not implemented",
     );
@@ -114,6 +123,7 @@ fn file_stub_reports_not_implemented_hang_free() {
         "file_stub",
         include_str!("fixtures/file_read_stub.hs"),
         FileHandler,
+        (),
         "Pattern.File",
         "not implemented",
     );
@@ -126,6 +136,7 @@ fn sources_stub_reports_not_implemented_hang_free() {
         "sources_stub",
         include_str!("fixtures/sources_stub.hs"),
         SourcesHandler,
+        (),
         "Pattern.Sources",
         "not implemented",
     );
@@ -138,6 +149,7 @@ fn mcp_stub_reports_not_implemented_hang_free() {
         "mcp_stub",
         include_str!("fixtures/mcp_stub.hs"),
         McpHandler,
+        (),
         "Pattern.Mcp",
         "not implemented",
     );
@@ -150,6 +162,7 @@ fn rpc_stub_reports_not_implemented_hang_free() {
         "rpc_stub",
         include_str!("fixtures/rpc_stub.hs"),
         RpcHandler,
+        (),
         "Pattern.Rpc",
         "not implemented",
     );
@@ -162,23 +175,45 @@ fn spawn_stub_reports_not_implemented_hang_free() {
         "spawn_stub",
         include_str!("fixtures/spawn_stub.hs"),
         SpawnHandler,
+        (),
         "Pattern.Spawn",
         "not implemented",
     );
 }
 
 #[test]
-fn message_stub_reports_phase3_stub_hang_free() {
+fn message_stub_reports_ask_candidate_for_removal_hang_free() {
     preflight_or_fail();
-    // Message uses "Message handler ... stubbed in phase 3" rather than
-    // the "Pattern.<Ns>.<Req> is not implemented" pattern used by the
-    // other stubs. Either phrasing is valid for AC2.9's hang-free claim;
-    // we keep the distinct wording and assert against it explicitly.
+    // Task 20 part 3 wired Send/Reply/Notify to the router registry, so
+    // they're no longer stubs. `Ask` remains — stubbed as
+    // "candidate-for-removal" per the Task 20 architectural note: v3
+    // agents don't call LLMs via effects; LLMs drive agent work via the
+    // `code` tool + run_turn, and the reverse doesn't fit. We exercise
+    // the Ask path here to defend the AC2.9 "hang-free" claim for the
+    // one still-stubbed Message variant.
+    //
+    // MessageHandler impls EffectHandler<SessionContext> specifically
+    // (it reads router + pending_messages from the context), so the
+    // test constructs a real SessionContext here rather than passing
+    // `&()` like the generically-bound stubs above.
+    use pattern_core::ProviderClient;
+    use pattern_core::traits::MemoryStore;
+    use pattern_core::types::snapshot::PersonaConfig;
+    use pattern_runtime::NopProviderClient;
+    use pattern_runtime::session::SessionContext;
+    use pattern_runtime::testing::InMemoryMemoryStore;
+
+    let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
+    let provider: Arc<dyn ProviderClient> = Arc::new(NopProviderClient);
+    let persona = PersonaConfig::new("agent-a", "A", "module X where\nx = pure ()");
+    let ctx = SessionContext::from_persona(&persona, store, provider);
+
     run_stub_case!(
         "message_stub",
         include_str!("fixtures/message_stub.hs"),
         MessageHandler,
-        "Message handler",
-        "stubbed in phase 3",
+        ctx,
+        "Pattern.Message.Ask",
+        "candidate for removal",
     );
 }
