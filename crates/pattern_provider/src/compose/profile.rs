@@ -86,26 +86,31 @@ impl CacheProfile {
     /// Default profile for an OAuth subscription-tier session with
     /// extended-cache-ttl beta available.
     ///
-    /// All three segments default to `Ephemeral1h`. Rationale:
+    /// All three segments default to `Ephemeral1h`. Rationale + evidence:
+    /// see `docs/notes/2026-04-18-cache-ttl-research.md`. Short version:
     ///
     /// - **Segment 1** — identity + tools + instructions. Changes rarely
     ///   (persona edits, tool-registry tweaks). Long TTL is the point.
     /// - **Segment 2** — message history + recent-edit pseudo-messages.
-    ///   Messages are append-only; a given range of history is effectively
-    ///   immutable once emitted. 1h TTL lets segment 2 survive long
-    ///   activation gaps (scheduled wakeups, sleeptime consolidations).
+    ///   Messages are append-only within a range; a given prefix is
+    ///   effectively immutable once emitted. 1h TTL lets segment 2
+    ///   survive the real-world idle periods (tool latency, user
+    ///   think-time, scheduled wakeups, sleeptime consolidations) that
+    ///   routinely exceed 5m.
     /// - **Segment 3** — `[memory:current_state]` pseudo-turn rendering
     ///   current blocks. Changes only on block edits, not every turn;
-    ///   long TTL lets it cache across multi-hour agent activations.
+    ///   long TTL lets it cache across multi-hour activations.
     ///
-    /// The cache-creation cost is 2x base input rate for 1h vs 1.25x for
-    /// 5m, but for agents with sparse activations (sleeptime / scheduled
-    /// tasks), the hit rate more than compensates.
+    /// All-1h side-steps Anthropic's TTL-ordering constraint (1h entries
+    /// must precede 5m in the wire format) — with all markers at the
+    /// same TTL, any placement order is valid, giving the composer
+    /// maximum flexibility.
     ///
-    /// All-1h also side-steps Anthropic's TTL-ordering constraint (1h
-    /// entries must precede 5m entries in the wire format) — with all
-    /// markers at the same TTL, any placement order is valid, giving
-    /// the composer maximum flexibility.
+    /// A 5m variant is deliberately NOT offered as a default. Claude Code's
+    /// silent downgrade from 1h to 5m on 2026-03-06 caused ~17–32% cost
+    /// inflation before being reverted — the research note captures the
+    /// evidence trail. A mode-aware override for sustained chat-burst
+    /// agents is plausible future work but not part of the foundation.
     pub fn default_anthropic_subscriber() -> Self {
         Self {
             segment_1_ttl: CacheControl::Ephemeral1h,
