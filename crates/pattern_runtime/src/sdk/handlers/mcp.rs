@@ -4,14 +4,34 @@
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use tidepool_eval::Value;
 
+use crate::sdk::describe::{DescribeEffect, EffectDecl};
 use crate::sdk::requests::McpReq;
 use crate::session::HasCancelState;
 use crate::timeout::HandlerGuard;
 
 /// Not-implemented placeholder for the MCP effect. Real implementation
 /// arrives in the post-foundation plugin-system plan.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct McpHandler;
+
+impl DescribeEffect for McpHandler {
+    fn effect_decl() -> EffectDecl {
+        EffectDecl {
+            type_name: "Mcp",
+            description: "Model-Context-Protocol tool calls (Use)",
+            constructors: &[
+                "Use :: Server -> Method -> Mcp ()",
+            ],
+            type_defs: &[
+                "type Server = Text",
+                "type Method = Text",
+            ],
+            helpers: &[
+                "use_ :: Member Mcp effs => Server -> Method -> Eff effs ()\nuse_ s m = send (Use s m)",
+            ],
+        }
+    }
+}
 
 impl<U> EffectHandler<U> for McpHandler
 where

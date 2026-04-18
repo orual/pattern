@@ -4,6 +4,7 @@
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use tidepool_eval::Value;
 
+use crate::sdk::describe::{DescribeEffect, EffectDecl};
 use crate::sdk::requests::ShellReq;
 use crate::session::HasCancelState;
 use crate::timeout::HandlerGuard;
@@ -11,8 +12,33 @@ use crate::timeout::HandlerGuard;
 /// Not-implemented placeholder for the Shell effect. Real implementation
 /// arrives in the post-foundation shell-tool plan (reuses preserved PTY
 /// backend + `ProcessSource`).
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ShellHandler;
+
+impl DescribeEffect for ShellHandler {
+    fn effect_decl() -> EffectDecl {
+        EffectDecl {
+            type_name: "Shell",
+            description: "Shell command execution (Execute/Spawn/Kill/Status)",
+            constructors: &[
+                "Execute :: Command -> Shell Text",
+                "Spawn   :: Command -> Shell Pid",
+                "Kill    :: Pid -> Shell ()",
+                "Status  :: Pid -> Shell Text",
+            ],
+            type_defs: &[
+                "type Command = Text",
+                "type Pid = Integer",
+            ],
+            helpers: &[
+                "execute :: Member Shell effs => Command -> Eff effs Text\nexecute c = send (Execute c)",
+                "spawn_ :: Member Shell effs => Command -> Eff effs Pid\nspawn_ c = send (Spawn c)",
+                "kill :: Member Shell effs => Pid -> Eff effs ()\nkill p = send (Kill p)",
+                "status :: Member Shell effs => Pid -> Eff effs Text\nstatus p = send (Status p)",
+            ],
+        }
+    }
+}
 
 impl<U> EffectHandler<U> for ShellHandler
 where

@@ -9,6 +9,7 @@ use jiff::Timestamp;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use tidepool_eval::Value;
 
+use crate::sdk::describe::{DescribeEffect, EffectDecl};
 use crate::sdk::requests::TimeReq;
 
 /// Maximum in-handler sleep duration. Longer sleeps should use a
@@ -17,8 +18,26 @@ use crate::sdk::requests::TimeReq;
 const MAX_SLEEP_NS: i64 = 100_000_000;
 
 /// Handler for `Pattern.Time`. Stateless.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct TimeHandler;
+
+impl DescribeEffect for TimeHandler {
+    fn effect_decl() -> EffectDecl {
+        EffectDecl {
+            type_name: "Time",
+            description: "Wall-clock time and bounded sleep (Now/Sleep)",
+            constructors: &[
+                "Now   :: Time Int",
+                "Sleep :: Int -> Time ()",
+            ],
+            type_defs: &[],
+            helpers: &[
+                "now :: Member Time effs => Eff effs Int\nnow = send Now",
+                "sleep :: Member Time effs => Int -> Eff effs ()\nsleep ns = send (Sleep ns)",
+            ],
+        }
+    }
+}
 
 impl<U> EffectHandler<U> for TimeHandler
 where

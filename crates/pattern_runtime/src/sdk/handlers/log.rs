@@ -8,12 +8,13 @@ use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use tidepool_eval::Value;
 use tracing::{debug, error, info, warn};
 
+use crate::sdk::describe::{DescribeEffect, EffectDecl};
 use crate::sdk::requests::LogReq;
 
 /// Handler for `Pattern.Log`. Holds an optional session identifier so
 /// correlated turns can be grouped in log output. Set by the `Session`
 /// at open time.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct LogHandler {
     /// Session identifier propagated as a `session` field on every event.
     pub session_id: Option<String>,
@@ -24,6 +25,28 @@ impl LogHandler {
     pub fn for_session(session_id: impl Into<String>) -> Self {
         Self {
             session_id: Some(session_id.into()),
+        }
+    }
+}
+
+impl DescribeEffect for LogHandler {
+    fn effect_decl() -> EffectDecl {
+        EffectDecl {
+            type_name: "Log",
+            description: "Structured agent logging at debug/info/warn/error levels",
+            constructors: &[
+                "Debug :: Text -> Log ()",
+                "Info  :: Text -> Log ()",
+                "Warn  :: Text -> Log ()",
+                "Error :: Text -> Log ()",
+            ],
+            type_defs: &[],
+            helpers: &[
+                "debug :: Member Log effs => Text -> Eff effs ()\ndebug msg = send (Debug msg)",
+                "info :: Member Log effs => Text -> Eff effs ()\ninfo msg = send (Info msg)",
+                "warn :: Member Log effs => Text -> Eff effs ()\nwarn msg = send (Warn msg)",
+                "error_ :: Member Log effs => Text -> Eff effs ()\nerror_ msg = send (Error msg)",
+            ],
         }
     }
 }

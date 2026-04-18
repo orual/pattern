@@ -29,6 +29,7 @@ use smol_str::SmolStr;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use tidepool_eval::Value;
 
+use crate::sdk::describe::{DescribeEffect, EffectDecl};
 use crate::sdk::requests::MemoryReq;
 use crate::session::{SessionContext, record_exchange};
 use crate::timeout::{CANCELLED_SENTINEL, HandlerGuard};
@@ -55,6 +56,43 @@ impl MemoryHandler {
     /// Construct a handler bound to the given store.
     pub fn new(store: Arc<dyn MemoryStore>) -> Self {
         Self { store }
+    }
+}
+
+impl DescribeEffect for MemoryHandler {
+    fn effect_decl() -> EffectDecl {
+        EffectDecl {
+            type_name: "Memory",
+            description: "Persistent memory-block operations (Get/Put/Create/Append/Replace/Search/Recall/Archive)",
+            constructors: &[
+                "Get     :: BlockHandle -> Memory Content",
+                "Put     :: BlockHandle -> Content -> Maybe Text -> Memory ()",
+                "Create  :: BlockHandle -> Text -> BlockType -> SchemaKind -> Maybe Int -> Content -> Memory ()",
+                "Append  :: BlockHandle -> Content -> Memory ()",
+                "Replace :: BlockHandle -> Text -> Text -> Memory ()",
+                "Search  :: Query -> Memory [BlockHandle]",
+                "Recall  :: BlockHandle -> Memory Content",
+                "Archive :: BlockHandle -> Memory ()",
+            ],
+            type_defs: &[
+                "type BlockHandle = Text",
+                "type Content = Text",
+                "type Query = Text",
+                "data BlockType = BlockCore | BlockWorking | BlockArchival | BlockLog",
+                "data SchemaKind = SchemaText | SchemaMap | SchemaList | SchemaLog",
+            ],
+            helpers: &[
+                "get :: Member Memory effs => BlockHandle -> Eff effs Content\nget h = send (Get h)",
+                "put :: Member Memory effs => BlockHandle -> Content -> Eff effs ()\nput h c = send (Put h c Nothing)",
+                "putWithDesc :: Member Memory effs => BlockHandle -> Content -> Text -> Eff effs ()\nputWithDesc h c d = send (Put h c (Just d))",
+                "create :: Member Memory effs => BlockHandle -> Text -> BlockType -> SchemaKind -> Maybe Int -> Content -> Eff effs ()\ncreate h d bt sk cl ic = send (Create h d bt sk cl ic)",
+                "append :: Member Memory effs => BlockHandle -> Content -> Eff effs ()\nappend h c = send (Append h c)",
+                "replace :: Member Memory effs => BlockHandle -> Text -> Text -> Eff effs ()\nreplace h old new = send (Replace h old new)",
+                "search :: Member Memory effs => Query -> Eff effs [BlockHandle]\nsearch q = send (Search q)",
+                "recall :: Member Memory effs => BlockHandle -> Eff effs Content\nrecall h = send (Recall h)",
+                "archive :: Member Memory effs => BlockHandle -> Eff effs ()\narchive h = send (Archive h)",
+            ],
+        }
     }
 }
 

@@ -4,14 +4,37 @@
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use tidepool_eval::Value;
 
+use crate::sdk::describe::{DescribeEffect, EffectDecl};
 use crate::sdk::requests::FileReq;
 use crate::session::HasCancelState;
 use crate::timeout::HandlerGuard;
 
 /// Not-implemented placeholder for the File effect. Real implementation
 /// arrives in the post-foundation filesystem-sandbox plan.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct FileHandler;
+
+impl DescribeEffect for FileHandler {
+    fn effect_decl() -> EffectDecl {
+        EffectDecl {
+            type_name: "File",
+            description: "Sandboxed filesystem access (Read/Write/ListDir)",
+            constructors: &[
+                "Read    :: Path -> File Content",
+                "Write   :: Path -> Content -> File ()",
+                "ListDir :: Path -> File [Path]",
+            ],
+            type_defs: &[
+                "type Path = Text",
+            ],
+            helpers: &[
+                "read_ :: Member File effs => Path -> Eff effs Content\nread_ p = send (Read p)",
+                "write :: Member File effs => Path -> Content -> Eff effs ()\nwrite p c = send (Write p c)",
+                "listDir :: Member File effs => Path -> Eff effs [Path]\nlistDir p = send (ListDir p)",
+            ],
+        }
+    }
+}
 
 impl<U> EffectHandler<U> for FileHandler
 where

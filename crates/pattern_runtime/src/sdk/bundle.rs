@@ -22,6 +22,7 @@
 //! Individual handler structs remain available for ad-hoc bundles (see
 //! `crate::sdk::handlers`).
 
+use crate::sdk::describe::CollectEffectDecls;
 use crate::sdk::handlers::{
     DisplayHandler, FileHandler, LogHandler, McpHandler, MemoryHandler, MessageHandler, RpcHandler,
     ShellHandler, SourcesHandler, SpawnHandler, TimeHandler,
@@ -46,3 +47,63 @@ pub type SdkBundle = frunk::HList![
     RpcHandler,
     SpawnHandler,
 ];
+
+/// Collect [`crate::sdk::describe::EffectDecl`] from every handler in
+/// the canonical bundle order. Used by the preamble assembler to
+/// generate the Haskell boilerplate.
+pub fn canonical_effect_decls() -> Vec<crate::sdk::describe::EffectDecl> {
+    SdkBundle::collect_decls()
+}
+
+/// The canonical effect-row type names in bundle order. Useful for
+/// assertions and documentation.
+pub const CANONICAL_EFFECT_ROW: &[&str] = &[
+    "Memory", "Message", "Display", "Time", "Log",
+    "Shell", "File", "Sources", "Mcp", "Rpc", "Spawn",
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_decls_has_11_entries() {
+        let decls = canonical_effect_decls();
+        assert_eq!(decls.len(), 11, "expected 11 handler decls, got {}", decls.len());
+    }
+
+    #[test]
+    fn canonical_decl_order_matches_row() {
+        let decls = canonical_effect_decls();
+        let names: Vec<&str> = decls.iter().map(|d| d.type_name).collect();
+        assert_eq!(names, CANONICAL_EFFECT_ROW);
+    }
+
+    #[test]
+    fn every_decl_has_at_least_one_constructor() {
+        for decl in canonical_effect_decls() {
+            assert!(
+                !decl.constructors.is_empty(),
+                "{} has no constructors",
+                decl.type_name
+            );
+        }
+    }
+
+    #[test]
+    fn every_constructor_parses() {
+        use crate::sdk::describe::parse_constructor;
+        for decl in canonical_effect_decls() {
+            for ctor in decl.constructors {
+                let parsed = parse_constructor(ctor);
+                assert!(
+                    parsed.is_ok(),
+                    "failed to parse constructor {:?} in {}: {}",
+                    ctor,
+                    decl.type_name,
+                    parsed.unwrap_err()
+                );
+            }
+        }
+    }
+}

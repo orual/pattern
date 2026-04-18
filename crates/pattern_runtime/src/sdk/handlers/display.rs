@@ -10,6 +10,7 @@ use std::sync::{Arc, RwLock};
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use tidepool_eval::Value;
 
+use crate::sdk::describe::{DescribeEffect, EffectDecl};
 use crate::sdk::requests::DisplayReq;
 
 /// Subscriber to Display events. Implementors forward chunks / final /
@@ -64,6 +65,26 @@ impl DisplayHandler {
             .read()
             .expect("DisplayHandler subscribers lock poisoned")
             .len()
+    }
+}
+
+impl DescribeEffect for DisplayHandler {
+    fn effect_decl() -> EffectDecl {
+        EffectDecl {
+            type_name: "Display",
+            description: "One-way broadcast of observable agent output to UX surfaces (Chunk/Final/Note)",
+            constructors: &[
+                "Chunk :: Text -> Display ()",
+                "Final :: Text -> Display ()",
+                "Note  :: Text -> Display ()",
+            ],
+            type_defs: &[],
+            helpers: &[
+                "chunk :: Member Display effs => Text -> Eff effs ()\nchunk t = send (Chunk t)",
+                "final_ :: Member Display effs => Text -> Eff effs ()\nfinal_ t = send (Final t)",
+                "note :: Member Display effs => Text -> Eff effs ()\nnote t = send (Note t)",
+            ],
+        }
     }
 }
 

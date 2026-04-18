@@ -4,14 +4,36 @@
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use tidepool_eval::Value;
 
+use crate::sdk::describe::{DescribeEffect, EffectDecl};
 use crate::sdk::requests::SpawnReq;
 use crate::session::HasCancelState;
 use crate::timeout::HandlerGuard;
 
 /// Not-implemented placeholder for the Spawn effect. Real implementation
 /// arrives in the post-foundation constellation-runtime plan.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct SpawnHandler;
+
+impl DescribeEffect for SpawnHandler {
+    fn effect_decl() -> EffectDecl {
+        EffectDecl {
+            type_name: "Spawn",
+            description: "Subagent / child-agent lifecycle (Start/Stop)",
+            constructors: &[
+                "Start :: AgentSpec -> Spawn AgentId",
+                "Stop  :: AgentId -> Spawn ()",
+            ],
+            type_defs: &[
+                "type AgentSpec = Text",
+                "type AgentId = Text",
+            ],
+            helpers: &[
+                "start :: Member Spawn effs => AgentSpec -> Eff effs AgentId\nstart spec = send (Start spec)",
+                "stop :: Member Spawn effs => AgentId -> Eff effs ()\nstop i = send (Stop i)",
+            ],
+        }
+    }
+}
 
 impl<U> EffectHandler<U> for SpawnHandler
 where

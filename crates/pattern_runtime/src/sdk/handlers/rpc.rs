@@ -4,14 +4,36 @@
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use tidepool_eval::Value;
 
+use crate::sdk::describe::{DescribeEffect, EffectDecl};
 use crate::sdk::requests::RpcReq;
 use crate::session::HasCancelState;
 use crate::timeout::HandlerGuard;
 
 /// Not-implemented placeholder for the Rpc effect. Real implementation
 /// arrives in the post-foundation plan covering external-service RPC.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct RpcHandler;
+
+impl DescribeEffect for RpcHandler {
+    fn effect_decl() -> EffectDecl {
+        EffectDecl {
+            type_name: "Rpc",
+            description: "Remote procedure calls to external services (Call/Recv)",
+            constructors: &[
+                "Call :: Target -> Payload -> Rpc Payload",
+                "Recv :: Target -> Rpc Payload",
+            ],
+            type_defs: &[
+                "type Target = Text",
+                "type Payload = Text",
+            ],
+            helpers: &[
+                "call :: Member Rpc effs => Target -> Payload -> Eff effs Payload\ncall t p = send (Call t p)",
+                "recv :: Member Rpc effs => Target -> Eff effs Payload\nrecv t = send (Recv t)",
+            ],
+        }
+    }
+}
 
 impl<U> EffectHandler<U> for RpcHandler
 where
