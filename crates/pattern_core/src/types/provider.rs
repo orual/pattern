@@ -118,7 +118,9 @@ impl ToolOutcome {
 /// };
 /// let wire = r.to_tool_response();
 /// assert_eq!(wire.call_id, "call_123");
-/// assert!(wire.content.contains("\"ok\""));
+/// // to_tool_response wraps the JSON-stringified outcome as Value::String.
+/// let s = wire.content.as_str().unwrap();
+/// assert!(s.contains("\"ok\""));
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
@@ -131,11 +133,18 @@ pub struct ToolResult {
 }
 
 impl ToolResult {
-    /// Convert to [`ToolResponse`] (the genai/wire type). The
-    /// `is_error` signal is currently lost at the boundary since genai
-    /// doesn't surface it; errors are encoded in the content string.
-    /// When genai gains a native `is_error` field we widen this
-    /// conversion.
+    /// Convert to [`ToolResponse`] (the genai/wire type).
+    ///
+    /// Uses the string-accepting `ToolResponse::new()` constructor —
+    /// content is flattened to a JSON-string via
+    /// `outcome.to_content_string()`. For tools that later return
+    /// structured/multi-block payloads (e.g. text+image), switch to
+    /// `ToolResponse::new_content(call_id, serde_json::Value::Array(..))`.
+    ///
+    /// The `is_error` signal is currently lost at the boundary since
+    /// genai doesn't surface it; errors are encoded in the content
+    /// string. When genai gains a native `is_error` field we widen
+    /// this conversion.
     pub fn to_tool_response(&self) -> ToolResponse {
         ToolResponse::new(self.call_id.clone(), self.outcome.to_content_string())
     }
@@ -173,7 +182,11 @@ mod tool_result_tests {
         };
         let wire = r.to_tool_response();
         assert_eq!(wire.call_id, "toolu_01ABC");
-        assert!(wire.content.contains("\"result\":42"));
+        // to_tool_response uses ToolResponse::new() which wraps the
+        // JSON-stringified outcome as Value::String. Extract the string
+        // and check that the serialized JSON is embedded within it.
+        let content_str = wire.content.as_str().expect("expected Value::String");
+        assert!(content_str.contains("\"result\":42"));
     }
 
     #[test]
@@ -184,7 +197,11 @@ mod tool_result_tests {
         };
         let wire = r.to_tool_response();
         assert_eq!(wire.call_id, "toolu_01XYZ");
-        assert_eq!(wire.content, "eval timed out");
+        // Error outcomes are plain strings; Value::String comparison.
+        assert_eq!(
+            wire.content,
+            serde_json::Value::String("eval timed out".into())
+        );
     }
 
     #[test]
