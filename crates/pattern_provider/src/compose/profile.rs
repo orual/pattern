@@ -85,11 +85,32 @@ pub enum CacheStrategy {
 impl CacheProfile {
     /// Default profile for an OAuth subscription-tier session with
     /// extended-cache-ttl beta available.
+    ///
+    /// All three segments default to `Ephemeral1h`. Rationale:
+    ///
+    /// - **Segment 1** — identity + tools + instructions. Changes rarely
+    ///   (persona edits, tool-registry tweaks). Long TTL is the point.
+    /// - **Segment 2** — message history + recent-edit pseudo-messages.
+    ///   Messages are append-only; a given range of history is effectively
+    ///   immutable once emitted. 1h TTL lets segment 2 survive long
+    ///   activation gaps (scheduled wakeups, sleeptime consolidations).
+    /// - **Segment 3** — `[memory:current_state]` pseudo-turn rendering
+    ///   current blocks. Changes only on block edits, not every turn;
+    ///   long TTL lets it cache across multi-hour agent activations.
+    ///
+    /// The cache-creation cost is 2x base input rate for 1h vs 1.25x for
+    /// 5m, but for agents with sparse activations (sleeptime / scheduled
+    /// tasks), the hit rate more than compensates.
+    ///
+    /// All-1h also side-steps Anthropic's TTL-ordering constraint (1h
+    /// entries must precede 5m entries in the wire format) — with all
+    /// markers at the same TTL, any placement order is valid, giving
+    /// the composer maximum flexibility.
     pub fn default_anthropic_subscriber() -> Self {
         Self {
             segment_1_ttl: CacheControl::Ephemeral1h,
-            segment_2_ttl: CacheControl::Ephemeral5m,
-            segment_3_ttl: CacheControl::Ephemeral5m,
+            segment_2_ttl: CacheControl::Ephemeral1h,
+            segment_3_ttl: CacheControl::Ephemeral1h,
             allow_extended_ttl: true,
             strategy: CacheStrategy::Default,
         }
@@ -102,41 +123,48 @@ impl CacheProfile {
     pub fn default_api_key() -> Self {
         Self {
             segment_1_ttl: CacheControl::Ephemeral1h,
-            segment_2_ttl: CacheControl::Ephemeral5m,
-            segment_3_ttl: CacheControl::Ephemeral5m,
+            segment_2_ttl: CacheControl::Ephemeral1h,
+            segment_3_ttl: CacheControl::Ephemeral1h,
             allow_extended_ttl: true,
             strategy: CacheStrategy::Default,
         }
     }
 
-    /// Resolve the effective segment-1 `CacheControl`, respecting
-    /// `allow_extended_ttl`. When extended TTL isn't permitted,
-    /// downgrades `Ephemeral1h` / `Ephemeral24h` → `Ephemeral5m` with a
-    /// `tracing::warn` so cache-break-detection can attribute any
-    /// bust that results.
-    pub fn segment_1_control(&self) -> CacheControl {
-        match (self.allow_extended_ttl, &self.segment_1_ttl) {
+    /// Shared downgrade helper. When `allow_extended_ttl` is false and
+    /// the requested control is an extended-TTL variant, emit a
+    /// `tracing::warn` and downgrade to `Ephemeral5m`. Otherwise return
+    /// the control unchanged.
+    fn downgrade_if_needed(&self, segment: &'static str, requested: &CacheControl) -> CacheControl {
+        match (self.allow_extended_ttl, requested) {
             (false, CacheControl::Ephemeral1h | CacheControl::Ephemeral24h) => {
                 tracing::warn!(
-                    requested = ?self.segment_1_ttl,
+                    segment,
+                    requested = ?requested,
                     applied = "Ephemeral5m",
-                    "segment_1 extended TTL not permitted; downgrading",
+                    "extended TTL not permitted; downgrading",
                 );
                 CacheControl::Ephemeral5m
             }
-            _ => self.segment_1_ttl.clone(),
+            _ => requested.clone(),
         }
     }
 
-    /// Segment-2 effective `CacheControl`. Segments 2 and 3 aren't
-    /// downgrade-gated because `Ephemeral5m` is always permitted.
-    pub fn segment_2_control(&self) -> CacheControl {
-        self.segment_2_ttl.clone()
+    /// Resolve the effective segment-1 `CacheControl`, respecting
+    /// `allow_extended_ttl`.
+    pub fn segment_1_control(&self) -> CacheControl {
+        self.downgrade_if_needed("segment_1", &self.segment_1_ttl)
     }
 
-    /// Segment-3 effective `CacheControl`.
+    /// Resolve the effective segment-2 `CacheControl`, respecting
+    /// `allow_extended_ttl`.
+    pub fn segment_2_control(&self) -> CacheControl {
+        self.downgrade_if_needed("segment_2", &self.segment_2_ttl)
+    }
+
+    /// Resolve the effective segment-3 `CacheControl`, respecting
+    /// `allow_extended_ttl`.
     pub fn segment_3_control(&self) -> CacheControl {
-        self.segment_3_ttl.clone()
+        self.downgrade_if_needed("segment_3", &self.segment_3_ttl)
     }
 
     /// True if any effective segment control requires the
@@ -165,9 +193,11 @@ mod tests {
     #[test]
     fn default_anthropic_subscriber_returns_expected_defaults() {
         let profile = CacheProfile::default_anthropic_subscriber();
+        // All-1h: long-lived cache for long-running agent activations;
+        // side-steps the 1h-before-5m wire-format ordering constraint.
         assert_eq!(profile.segment_1_ttl, CacheControl::Ephemeral1h);
-        assert_eq!(profile.segment_2_ttl, CacheControl::Ephemeral5m);
-        assert_eq!(profile.segment_3_ttl, CacheControl::Ephemeral5m);
+        assert_eq!(profile.segment_2_ttl, CacheControl::Ephemeral1h);
+        assert_eq!(profile.segment_3_ttl, CacheControl::Ephemeral1h);
         assert!(profile.allow_extended_ttl);
         assert_eq!(profile.strategy, CacheStrategy::Default);
     }

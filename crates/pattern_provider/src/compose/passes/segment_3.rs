@@ -166,6 +166,7 @@ mod tests {
         pass.apply(&mut partial).unwrap();
 
         let placements = partial.breakpoints.placements();
-        assert_eq!(placements[0].control, CacheControl::Ephemeral5m);
+        // All-1h default profile per long-running-agent policy.
+        assert_eq!(placements[0].control, CacheControl::Ephemeral1h);
     }
 }
