@@ -678,6 +678,7 @@ jj new
 
 ## Phase 6 "Done when" checklist
 
+- [ ] Retire Phase-3-era static-program session machinery: remove the `SessionMachine` + `SdkBundle` fields kept on `TidepoolSession` under Phase 5 Task 20 for test-fixture compatibility. With the agent-loop production path fully exercised and the smoke test passing, any remaining tests that depend on the pre-compiled-agent-program path get rewritten against the agent-loop entry points, and the dead fields + `InnerState` scaffolding they supported come out. See `crates/pattern_runtime/src/session.rs` for the fields to remove; update call sites accordingly.
 - [ ] `pattern-v3` bin target added to `pattern_runtime` with clap + rustyline-async input
 - [ ] `spawn <persona>` subcommand loads persona, opens session, drives REPL, prints cache metrics per turn
 - [ ] CLI exposes a way to directly edit a memory block (REPL command or separate subcommand) — required by the smoke-test checklist step 7
