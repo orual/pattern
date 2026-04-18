@@ -27,27 +27,27 @@
 //! gets pre-computed by the turn loop and fed into pass constructors,
 //! not looked up from inside `apply`.
 //!
-//! # Phase 5 Task 3 scope
+//! # Finalize
 //!
-//! This module ships the trait + orchestrator + a minimal
-//! [`finalize`] that assembles a `CompletionRequest` without applying
-//! breakpoint markers or running validation. Phase 5 Task 10 expands
-//! `finalize` to:
+//! [`finalize`] converts the accumulated partial into a finished
+//! [`pattern_core::types::provider::CompletionRequest`]:
 //!
-//! - Apply each placement's `control` to its indexed block/message/tool
-//! - Validate breakpoint count ≤ 4 (belt-and-suspenders with the
-//!   tracker's placement-time budget check)
-//! - Validate each index is in-bounds for its collection
-//! - Validate the required `extended-cache-ttl-2025-04-11` beta header
-//!   is present when any placement uses an extended-TTL variant
-//!
-//! Task 3's minimal finalize lets Tasks 4-9 compose end-to-end and
-//! inspect the assembled partial even before Task 10's validation
-//! layer exists — useful for per-pass integration tests.
+//! 1. **Budget recheck** — belt-and-suspenders count validation on
+//!    top of the tracker's placement-time enforcement.
+//! 2. **Marker application** — attaches each placement's
+//!    `CacheControl` to the indexed `SystemBlock.cache_control` or
+//!    `ChatMessage.options.cache_control`.
+//! 3. **Extended-TTL beta header check** — verifies the
+//!    `extended-cache-ttl-2025-04-11` beta header is present when any
+//!    placement uses `Ephemeral1h` or `Ephemeral24h`.
+//! 4. **TTL ordering** — walks the wire-format sequence (system blocks
+//!    → messages) and rejects short-TTL-before-long-TTL patterns.
 
+use genai::chat::{CacheControl, ChatMessage, MessageOptions, SystemBlock};
 use pattern_core::error::ProviderError;
 use pattern_core::types::provider::CompletionRequest;
 
+use super::breakpoints::{BreakpointLocation, BreakpointTracker};
 use super::partial_request::PartialRequest;
 
 /// A single transformation step in the composer pipeline. See
@@ -84,25 +84,91 @@ pub fn compose(
 
 /// Assemble a completed [`PartialRequest`] into a [`CompletionRequest`].
 ///
-/// Phase 5 Task 3 provides a minimal pass-through: collects the
-/// accumulated fields into a [`genai::chat::ChatRequest`] without
-/// applying `cache_control` markers or running validation. See module
-/// docs for the Task 10 expansion plan.
+/// Validates breakpoint budget, applies `cache_control` markers to
+/// their indexed targets, checks for the extended-TTL beta header
+/// when needed, and validates TTL ordering (Anthropic's wire-format
+/// constraint). See [module docs][self] for the full list.
 pub fn finalize(partial: PartialRequest) -> Result<CompletionRequest, ProviderError> {
     let PartialRequest {
         model,
-        system_blocks,
-        messages,
+        mut system_blocks,
+        mut messages,
         tools,
         options,
-        extra_headers: _, // Phase 5 Task 10: merge into outbound header set.
-        breakpoints: _,   // Phase 5 Task 10: walk + apply + validate.
+        extra_headers,
+        breakpoints,
     } = partial;
 
+    // 1. Belt-and-suspenders budget recheck (AC7.5). place() already
+    //    enforces at placement time, but validate here too.
+    if breakpoints.count() > BreakpointTracker::ANTHROPIC_MAX_BREAKPOINTS {
+        return Err(ProviderError::CacheBreakpointBudgetExceeded {
+            budget: BreakpointTracker::ANTHROPIC_MAX_BREAKPOINTS,
+            placed_by: breakpoints
+                .placements()
+                .iter()
+                .map(|p| p.placed_by_pass.to_string())
+                .collect(),
+            attempted_by: "finalize".to_string(),
+        });
+    }
+
+    // 2. Apply each placement to the indexed block/message.
+    for placement in breakpoints.placements() {
+        match placement.location {
+            BreakpointLocation::SystemBlock(idx) => {
+                let block = system_blocks.get_mut(idx).ok_or_else(|| {
+                    ProviderError::InvalidBreakpointLocation {
+                        location: "system".into(),
+                        idx,
+                    }
+                })?;
+                block.cache_control = Some(placement.control.clone());
+            }
+            BreakpointLocation::MessageBlock(idx) => {
+                let msg = messages.get_mut(idx).ok_or_else(|| {
+                    ProviderError::InvalidBreakpointLocation {
+                        location: "message".into(),
+                        idx,
+                    }
+                })?;
+                let opts = msg.options.get_or_insert_with(MessageOptions::default);
+                opts.cache_control = Some(placement.control.clone());
+            }
+            BreakpointLocation::ToolSchema(idx) => {
+                // Phase 5 does not place markers on tools. Reject at
+                // finalize so future passes get a clear error if the
+                // genai Tool type doesn't support cache_control yet.
+                return Err(ProviderError::InvalidBreakpointLocation {
+                    location: "tool (unsupported in Phase 5)".into(),
+                    idx,
+                });
+            }
+        }
+    }
+
+    // 3. Extended-TTL beta header check (AC7.5b).
+    let needs_extended = breakpoints.placements().iter().any(|p| {
+        matches!(
+            p.control,
+            CacheControl::Ephemeral1h | CacheControl::Ephemeral24h
+        )
+    });
+    if needs_extended {
+        let present = extra_headers
+            .get("anthropic-beta")
+            .map(|v| v.contains("extended-cache-ttl-2025-04-11"))
+            .unwrap_or(false);
+        if !present {
+            return Err(ProviderError::MissingExtendedCacheTtlBeta);
+        }
+    }
+
+    // 4. TTL ordering (Anthropic wire-format constraint).
+    validate_ttl_ordering(&system_blocks, &messages, &breakpoints)?;
+
+    // Assemble the final ChatRequest.
     let mut chat = genai::chat::ChatRequest::new(messages);
-    // Always use per-block `system_blocks` (never the legacy single-
-    // string `system` field) so cache_control markers can be attached
-    // per-block at Task 10's finalize expansion.
     if !system_blocks.is_empty() {
         chat.system_blocks = Some(system_blocks);
     }
@@ -115,6 +181,78 @@ pub fn finalize(partial: PartialRequest) -> Result<CompletionRequest, ProviderEr
         chat,
         options,
     })
+}
+
+/// Returns true if the given `CacheControl` is a "short" TTL (5m-class).
+fn is_short_ttl(cc: &CacheControl) -> bool {
+    matches!(
+        cc,
+        CacheControl::Ephemeral | CacheControl::Ephemeral5m | CacheControl::Memory
+    )
+}
+
+/// Returns true if the given `CacheControl` is a "long" TTL (1h/24h-class).
+fn is_long_ttl(cc: &CacheControl) -> bool {
+    matches!(cc, CacheControl::Ephemeral1h | CacheControl::Ephemeral24h)
+}
+
+/// Validate that no short-TTL marker precedes a long-TTL marker in
+/// wire-format order (system blocks first, then messages). Anthropic
+/// requires 1h/24h entries to appear before 5m entries.
+///
+/// Uses the breakpoint tracker to find which pass placed each marker,
+/// enabling actionable error messages.
+fn validate_ttl_ordering(
+    system_blocks: &[SystemBlock],
+    messages: &[ChatMessage],
+    breakpoints: &BreakpointTracker,
+) -> Result<(), ProviderError> {
+    // Build a flat sequence of (CacheControl, pass_name) in wire order:
+    // system blocks first, then messages.
+    let mut ordered: Vec<(&CacheControl, &str)> = Vec::new();
+
+    for (idx, block) in system_blocks.iter().enumerate() {
+        if let Some(ref cc) = block.cache_control {
+            // Find the pass that placed this marker.
+            let pass_name = breakpoints
+                .placements()
+                .iter()
+                .find(|p| p.location == BreakpointLocation::SystemBlock(idx))
+                .map(|p| p.placed_by_pass)
+                .unwrap_or("unknown");
+            ordered.push((cc, pass_name));
+        }
+    }
+    for (idx, msg) in messages.iter().enumerate() {
+        if let Some(cc) = msg.options.as_ref().and_then(|o| o.cache_control.as_ref()) {
+            let pass_name = breakpoints
+                .placements()
+                .iter()
+                .find(|p| p.location == BreakpointLocation::MessageBlock(idx))
+                .map(|p| p.placed_by_pass)
+                .unwrap_or("unknown");
+            ordered.push((cc, pass_name));
+        }
+    }
+
+    // Walk and check: once we see a short-TTL, any subsequent long-TTL
+    // is a violation.
+    let mut first_short: Option<&str> = None;
+    for (cc, pass_name) in &ordered {
+        if is_short_ttl(cc) && first_short.is_none() {
+            first_short = Some(pass_name);
+        }
+        if is_long_ttl(cc)
+            && let Some(short_pass) = first_short
+        {
+            return Err(ProviderError::TtlOrderingViolated {
+                short_ttl_pass: short_pass.to_string(),
+                long_ttl_pass: pass_name.to_string(),
+            });
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -263,5 +401,298 @@ mod tests {
         let out = finalize(p).expect("finalize succeeds");
         assert_eq!(out.chat.system_blocks.as_ref().unwrap().len(), 1);
         assert_eq!(out.chat.messages.len(), 1);
+    }
+
+    // ---- Task 10 finalize tests ----
+
+    // Helper: construct a partial with breakpoints placed on existing
+    // blocks/messages, ready for finalize.
+    fn partial_with_markers(
+        sys_ttls: &[CacheControl],
+        msg_ttls: &[CacheControl],
+        pass_names: &[&'static str],
+        include_beta: bool,
+    ) -> PartialRequest {
+        let mut p = PartialRequest::new("claude-opus-4-7");
+        let mut name_idx = 0;
+
+        for (i, ttl) in sys_ttls.iter().enumerate() {
+            p.system_blocks.push(SystemBlock::new(format!("sys-{i}")));
+            let name = pass_names.get(name_idx).copied().unwrap_or("test");
+            p.breakpoints
+                .place(BreakpointLocation::SystemBlock(i), ttl.clone(), name)
+                .unwrap();
+            name_idx += 1;
+        }
+
+        for (i, ttl) in msg_ttls.iter().enumerate() {
+            p.messages.push(ChatMessage::user(format!("msg-{i}")));
+            let name = pass_names.get(name_idx).copied().unwrap_or("test");
+            p.breakpoints
+                .place(BreakpointLocation::MessageBlock(i), ttl.clone(), name)
+                .unwrap();
+            name_idx += 1;
+        }
+
+        if include_beta {
+            p.extra_headers.insert(
+                "anthropic-beta".into(),
+                "extended-cache-ttl-2025-04-11".into(),
+            );
+        }
+
+        p
+    }
+
+    // ---- Marker application: system block cache_control set ----
+
+    #[test]
+    fn finalize_applies_markers_to_system_blocks() {
+        let p = partial_with_markers(&[CacheControl::Ephemeral5m], &[], &["seg1"], false);
+        let out = finalize(p).expect("finalize succeeds");
+        let blocks = out.chat.system_blocks.unwrap();
+        assert_eq!(blocks[0].cache_control, Some(CacheControl::Ephemeral5m));
+    }
+
+    // ---- Marker application: message cache_control set ----
+
+    #[test]
+    fn finalize_applies_markers_to_messages() {
+        let p = partial_with_markers(&[], &[CacheControl::Ephemeral5m], &["seg2"], false);
+        let out = finalize(p).expect("finalize succeeds");
+        let cc = out.chat.messages[0]
+            .options
+            .as_ref()
+            .and_then(|o| o.cache_control.as_ref());
+        assert_eq!(cc, Some(&CacheControl::Ephemeral5m));
+    }
+
+    // ---- Out-of-bounds system block index ----
+
+    #[test]
+    fn finalize_rejects_out_of_bounds_system_index() {
+        let mut p = PartialRequest::new("claude-opus-4-7");
+        // Place a marker at index 5 but don't add 6 system blocks.
+        p.system_blocks.push(SystemBlock::new("only-one"));
+        p.breakpoints
+            .place(
+                BreakpointLocation::SystemBlock(5),
+                CacheControl::Ephemeral5m,
+                "bad_pass",
+            )
+            .unwrap();
+
+        let err = finalize(p).expect_err("out-of-bounds must fail");
+        match err {
+            ProviderError::InvalidBreakpointLocation { location, idx } => {
+                assert_eq!(location, "system");
+                assert_eq!(idx, 5);
+            }
+            other => panic!("expected InvalidBreakpointLocation, got {other:?}"),
+        }
+    }
+
+    // ---- Out-of-bounds message index ----
+
+    #[test]
+    fn finalize_rejects_out_of_bounds_message_index() {
+        let mut p = PartialRequest::new("claude-opus-4-7");
+        p.breakpoints
+            .place(
+                BreakpointLocation::MessageBlock(0),
+                CacheControl::Ephemeral5m,
+                "bad_pass",
+            )
+            .unwrap();
+        // No messages added.
+
+        let err = finalize(p).expect_err("out-of-bounds must fail");
+        match err {
+            ProviderError::InvalidBreakpointLocation { location, idx } => {
+                assert_eq!(location, "message");
+                assert_eq!(idx, 0);
+            }
+            other => panic!("expected InvalidBreakpointLocation, got {other:?}"),
+        }
+    }
+
+    // ---- ToolSchema rejected at finalize ----
+
+    #[test]
+    fn finalize_rejects_tool_schema_placement() {
+        let mut p = PartialRequest::new("claude-opus-4-7");
+        p.breakpoints
+            .place(
+                BreakpointLocation::ToolSchema(0),
+                CacheControl::Ephemeral5m,
+                "tool_pass",
+            )
+            .unwrap();
+
+        let err = finalize(p).expect_err("ToolSchema must be rejected");
+        match err {
+            ProviderError::InvalidBreakpointLocation { location, idx } => {
+                assert!(location.contains("tool"));
+                assert_eq!(idx, 0);
+            }
+            other => panic!("expected InvalidBreakpointLocation, got {other:?}"),
+        }
+    }
+
+    // ---- Missing beta header for extended TTL ----
+
+    #[test]
+    fn finalize_rejects_extended_ttl_without_beta_header() {
+        let p = partial_with_markers(
+            &[CacheControl::Ephemeral1h],
+            &[],
+            &["seg1"],
+            false, // no beta header
+        );
+        let err = finalize(p).expect_err("extended TTL without beta must fail");
+        assert!(
+            matches!(err, ProviderError::MissingExtendedCacheTtlBeta),
+            "expected MissingExtendedCacheTtlBeta, got {err:?}"
+        );
+    }
+
+    // ---- Beta header present: extended TTL succeeds ----
+
+    #[test]
+    fn finalize_accepts_extended_ttl_with_beta_header() {
+        let p = partial_with_markers(
+            &[CacheControl::Ephemeral1h],
+            &[CacheControl::Ephemeral5m],
+            &["seg1", "seg2"],
+            true, // beta header present
+        );
+        let out = finalize(p).expect("finalize with beta should succeed");
+        let blocks = out.chat.system_blocks.unwrap();
+        assert_eq!(blocks[0].cache_control, Some(CacheControl::Ephemeral1h));
+    }
+
+    // ---- Beta header with other markers too ----
+
+    #[test]
+    fn finalize_accepts_extended_ttl_with_mixed_beta_value() {
+        let mut p = partial_with_markers(&[CacheControl::Ephemeral1h], &[], &["seg1"], false);
+        // Include extended-cache-ttl alongside other beta markers.
+        p.extra_headers.insert(
+            "anthropic-beta".into(),
+            "extended-cache-ttl-2025-04-11,some-other-beta".into(),
+        );
+        finalize(p).expect("mixed beta value should succeed");
+    }
+
+    // ---- TTL ordering: natural case succeeds (1h before 5m) ----
+
+    #[test]
+    fn finalize_accepts_natural_ttl_ordering() {
+        let p = partial_with_markers(
+            &[CacheControl::Ephemeral1h],
+            &[CacheControl::Ephemeral5m, CacheControl::Ephemeral5m],
+            &["seg1", "seg2", "seg3"],
+            true,
+        );
+        finalize(p).expect("1h before 5m is natural ordering");
+    }
+
+    // ---- TTL ordering: violation detected (5m before 1h) ----
+
+    #[test]
+    fn finalize_rejects_reversed_ttl_ordering() {
+        // Place 5m on a system block, then 1h on a message — reversed.
+        let p = partial_with_markers(
+            &[CacheControl::Ephemeral5m],
+            &[CacheControl::Ephemeral1h],
+            &["short_pass", "long_pass"],
+            true,
+        );
+        let err = finalize(p).expect_err("reversed TTL ordering must fail");
+        match err {
+            ProviderError::TtlOrderingViolated {
+                short_ttl_pass,
+                long_ttl_pass,
+            } => {
+                assert_eq!(short_ttl_pass, "short_pass");
+                assert_eq!(long_ttl_pass, "long_pass");
+            }
+            other => panic!("expected TtlOrderingViolated, got {other:?}"),
+        }
+    }
+
+    // ---- TTL ordering: all-5m is fine ----
+
+    #[test]
+    fn finalize_accepts_all_5m_ttls() {
+        let p = partial_with_markers(
+            &[CacheControl::Ephemeral5m],
+            &[CacheControl::Ephemeral5m, CacheControl::Ephemeral5m],
+            &["seg1", "seg2", "seg3"],
+            false,
+        );
+        finalize(p).expect("all 5m is fine");
+    }
+
+    // ---- Happy path: realistic 3-segment pipeline ----
+
+    #[test]
+    fn finalize_happy_path_realistic_3_segment() {
+        let p = partial_with_markers(
+            &[CacheControl::Ephemeral1h],
+            &[CacheControl::Ephemeral5m, CacheControl::Ephemeral5m],
+            &["segment_1", "segment_2", "segment_3"],
+            true,
+        );
+        let out = finalize(p).expect("happy path succeeds");
+
+        // Verify markers applied.
+        let blocks = out.chat.system_blocks.unwrap();
+        assert_eq!(blocks[0].cache_control, Some(CacheControl::Ephemeral1h));
+
+        let msg0_cc = out.chat.messages[0]
+            .options
+            .as_ref()
+            .and_then(|o| o.cache_control.as_ref());
+        let msg1_cc = out.chat.messages[1]
+            .options
+            .as_ref()
+            .and_then(|o| o.cache_control.as_ref());
+        assert_eq!(msg0_cc, Some(&CacheControl::Ephemeral5m));
+        assert_eq!(msg1_cc, Some(&CacheControl::Ephemeral5m));
+    }
+
+    // ---- Belt-and-suspenders budget check at finalize ----
+
+    #[test]
+    fn finalize_budget_recheck_with_custom_tracker() {
+        // Construct a partial with a tracker that has max=5 (so 5
+        // placements are allowed at place-time) but finalize enforces
+        // the ANTHROPIC_MAX_BREAKPOINTS=4 limit.
+        let mut p = PartialRequest::new("claude-opus-4-7");
+        p.breakpoints = BreakpointTracker::with_max(5);
+        for i in 0..5 {
+            p.system_blocks.push(SystemBlock::new(format!("sys-{i}")));
+            p.breakpoints
+                .place(
+                    BreakpointLocation::SystemBlock(i),
+                    CacheControl::Ephemeral5m,
+                    "test_pass",
+                )
+                .unwrap();
+        }
+
+        let err = finalize(p).expect_err("5 markers must exceed budget at finalize");
+        match err {
+            ProviderError::CacheBreakpointBudgetExceeded {
+                budget,
+                attempted_by,
+                ..
+            } => {
+                assert_eq!(budget, 4);
+                assert_eq!(attempted_by, "finalize");
+            }
+            other => panic!("expected CacheBreakpointBudgetExceeded, got {other:?}"),
+        }
     }
 }

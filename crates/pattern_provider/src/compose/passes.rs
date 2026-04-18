@@ -28,7 +28,7 @@ pub mod segment_2;
 pub mod segment_3;
 
 pub use segment_1::Segment1Pass;
-pub use segment_2::{synthesize_summary_message, Segment2Pass};
+pub use segment_2::{Segment2Pass, synthesize_summary_message};
 pub use segment_3::Segment3Pass;
 
 #[cfg(test)]
@@ -41,10 +41,10 @@ mod tests {
     use pattern_core::types::block::{BlockWrite, BlockWriteKind};
     use pattern_core::types::origin::{Author, SystemReason};
 
-    use crate::compose::breakpoints::BreakpointLocation;
-    use crate::compose::pipeline::{compose, ComposerPass};
-    use crate::compose::profile::CacheProfile;
     use crate::compose::PartialRequest;
+    use crate::compose::breakpoints::BreakpointLocation;
+    use crate::compose::pipeline::{ComposerPass, compose};
+    use crate::compose::profile::CacheProfile;
 
     use super::*;
 
@@ -81,6 +81,18 @@ mod tests {
         msg.content.joined_texts().unwrap_or_default()
     }
 
+    /// Create a partial with the extended-cache-ttl beta header set,
+    /// required when using the default profile (which uses Ephemeral1h
+    /// for segment 1).
+    fn partial_with_beta(model: &str) -> PartialRequest {
+        let mut p = PartialRequest::new(model);
+        p.extra_headers.insert(
+            "anthropic-beta".into(),
+            "extended-cache-ttl-2025-04-11".into(),
+        );
+        p
+    }
+
     // ---- AC7.1: exactly 3 cache markers after all three passes ----
 
     #[test]
@@ -99,11 +111,7 @@ mod tests {
         let blocks = vec![make_doc("persona", "I am Sage.")];
 
         let passes: Vec<Box<dyn ComposerPass>> = vec![
-            Box::new(Segment1Pass::new(
-                system_blocks,
-                vec![],
-                profile.clone(),
-            )),
+            Box::new(Segment1Pass::new(system_blocks, vec![], profile.clone())),
             Box::new(Segment2Pass::new(
                 vec![],
                 prior_msgs,
@@ -113,16 +121,37 @@ mod tests {
             Box::new(Segment3Pass::new(blocks, profile)),
         ];
 
-        let partial = PartialRequest::new("claude-opus-4-7");
+        let partial = partial_with_beta("claude-opus-4-7");
         let result = compose(&passes, partial).expect("compose succeeds");
 
-        // Note: finalize in Task 3's stub does NOT apply markers yet
-        // (that's Task 10). So the result won't have cache_control set on
-        // system blocks / messages — that happens after finalize expansion.
-        // For now, verify compose succeeds and the output is sensible.
-        // The marker application check is validated in Task 10's tests.
+        // After finalize expansion (Task 10), markers are now applied.
+        // Verify compose succeeds and the output has markers applied.
         assert!(result.chat.system_blocks.is_some());
         assert!(!result.chat.messages.is_empty());
+
+        // Count applied markers on system blocks + messages.
+        let sys_markers = result
+            .chat
+            .system_blocks
+            .as_ref()
+            .map(|bs| bs.iter().filter(|b| b.cache_control.is_some()).count())
+            .unwrap_or(0);
+        let msg_markers = result
+            .chat
+            .messages
+            .iter()
+            .filter(|m| {
+                m.options
+                    .as_ref()
+                    .and_then(|o| o.cache_control.as_ref())
+                    .is_some()
+            })
+            .count();
+        assert_eq!(
+            sys_markers + msg_markers,
+            3,
+            "exactly 3 cache markers expected (1 sys + 2 msg)"
+        );
     }
 
     // ---- AC7.1 via breakpoints: exactly 3 placements ----
@@ -187,8 +216,8 @@ mod tests {
             Box::new(Segment3Pass::new(blocks, profile)),
         ];
 
-        let result = compose(&passes, PartialRequest::new("claude-opus-4-7"))
-            .expect("compose succeeds");
+        let result =
+            compose(&passes, partial_with_beta("claude-opus-4-7")).expect("compose succeeds");
 
         // The last message should be the current_state pseudo-turn.
         let last = result.chat.messages.last().expect("messages not empty");
@@ -213,17 +242,12 @@ mod tests {
                 vec![],
                 profile.clone(),
             )),
-            Box::new(Segment2Pass::new(
-                vec![],
-                prior,
-                &writes,
-                profile.clone(),
-            )),
+            Box::new(Segment2Pass::new(vec![], prior, &writes, profile.clone())),
             Box::new(Segment3Pass::new(vec![], profile)),
         ];
 
-        let result = compose(&passes, PartialRequest::new("claude-opus-4-7"))
-            .expect("compose succeeds");
+        let result =
+            compose(&passes, partial_with_beta("claude-opus-4-7")).expect("compose succeeds");
 
         // Find a message containing [memory:updated] — should be in
         // the segment 2 region (before the current_state message).

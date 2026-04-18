@@ -404,4 +404,41 @@ pub enum ProviderError {
         )
     )]
     MissingExtendedCacheTtlBeta,
+
+    /// Cache-breakpoint TTL ordering violated: Anthropic requires
+    /// longer-TTL markers (1h, 24h) to appear before shorter-TTL
+    /// markers (5m, Ephemeral) in wire-format order (system blocks
+    /// first, then messages). Detected at finalize time.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::ProviderError;
+    ///
+    /// let err = ProviderError::TtlOrderingViolated {
+    ///     short_ttl_pass: "segment_1".into(),
+    ///     long_ttl_pass: "segment_2".into(),
+    /// };
+    /// assert!(err.to_string().contains("TTL ordering"));
+    /// ```
+    #[error(
+        "cache breakpoint TTL ordering violated: pass '{short_ttl_pass}' placed a \
+         short-TTL marker before pass '{long_ttl_pass}' placed a long-TTL marker"
+    )]
+    #[diagnostic(
+        code(pattern_core::provider::ttl_ordering_violated),
+        help(
+            "anthropic requires longer-TTL cache markers (1h, 24h) to appear \
+             before shorter-TTL markers (5m) in the request; review pass ordering \
+             or TTL configuration in CacheProfile"
+        )
+    )]
+    TtlOrderingViolated {
+        /// Name of the pass that placed the short-TTL marker that
+        /// appears before the long-TTL marker in wire-format order.
+        short_ttl_pass: String,
+        /// Name of the pass that placed the long-TTL marker that
+        /// appears after the short-TTL marker in wire-format order.
+        long_ttl_pass: String,
+    },
 }

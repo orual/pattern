@@ -109,9 +109,7 @@ impl ComposerPass for Segment2Pass {
         partial
             .messages
             .extend(self.summary_head_messages.iter().cloned());
-        partial
-            .messages
-            .extend(self.prior_messages.iter().cloned());
+        partial.messages.extend(self.prior_messages.iter().cloned());
         partial
             .messages
             .extend(self.pseudo_messages.iter().cloned());

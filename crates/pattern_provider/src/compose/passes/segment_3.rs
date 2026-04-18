@@ -55,11 +55,9 @@ impl ComposerPass for Segment3Pass {
         partial.messages.push(msg);
         let idx = partial.messages.len() - 1;
         let control = self.profile.segment_3_control();
-        partial.breakpoints.place(
-            BreakpointLocation::MessageBlock(idx),
-            control,
-            self.name(),
-        )?;
+        partial
+            .breakpoints
+            .place(BreakpointLocation::MessageBlock(idx), control, self.name())?;
         Ok(())
     }
 }
@@ -125,7 +123,11 @@ mod tests {
             text.contains("(no blocks loaded)"),
             "empty blocks must produce (no blocks loaded): {text}"
         );
-        assert_eq!(partial.breakpoints.count(), 1, "marker must still be placed");
+        assert_eq!(
+            partial.breakpoints.count(),
+            1,
+            "marker must still be placed"
+        );
     }
 
     // ---- Marker placed on the current_state message -------------------------
