@@ -13,13 +13,22 @@ use std::collections::VecDeque;
 
 use pattern_core::types::block::BlockWrite;
 use pattern_core::types::message::Message;
-use pattern_core::types::turn::{TurnId, TurnOutput};
+use pattern_core::types::turn::{TurnId, TurnInput, TurnOutput};
 use pattern_db::models::ArchiveSummary;
 
-/// Pairs a turn's id with its output for session-retained in-memory history.
+/// Pairs a turn's id with its full round-trip for session-retained in-memory history.
+///
+/// Stores both the input (user/system messages that triggered this turn) and
+/// the output (assistant reply + inlined tool_result message when applicable).
+/// The [`TurnHistory::active_messages`] iterator interleaves input and output
+/// messages in order so the composer's Segment 2 pass replays the complete
+/// conversational context correctly.
 #[derive(Debug, Clone)]
 pub struct TurnRecord {
     pub turn_id: TurnId,
+    /// Messages delivered to the agent for this activation (the "user" side).
+    pub input: TurnInput,
+    /// Messages produced by the agent (assistant reply + tool_result if ToolUse).
     pub output: TurnOutput,
 }
 
@@ -67,14 +76,25 @@ impl TurnHistory {
         })
     }
 
-    /// Record a completed turn. Updates estimated_tokens heuristically
-    /// using the output's usage (when populated) + heuristic fallback
-    /// for the turn's messages. Task 12 populates usage; until then,
-    /// fallback is always taken.
-    pub fn record(&mut self, turn_id: TurnId, output: TurnOutput) {
+    /// Record a completed turn's full round-trip (input + output).
+    ///
+    /// The `input` carries the user/system messages that triggered this turn;
+    /// the `output` carries the assistant reply and (on tool-use turns) the
+    /// inlined tool_result message. Both are stored atomically in one
+    /// [`TurnRecord`] so [`Self::active_messages`] can interleave them
+    /// correctly for the composer's Segment 2 pass.
+    ///
+    /// Updates `estimated_tokens` heuristically using the output's usage (when
+    /// populated) + a heuristic fallback for turns without usage data. Task 12
+    /// populates usage; until then, the fallback is always taken.
+    pub fn record(&mut self, turn_id: TurnId, input: TurnInput, output: TurnOutput) {
         let delta = estimate_turn_tokens(&output);
         self.estimated_tokens = self.estimated_tokens.saturating_add(delta);
-        self.active.push_back(TurnRecord { turn_id, output });
+        self.active.push_back(TurnRecord {
+            turn_id,
+            input,
+            output,
+        });
     }
 
     /// Replace the running estimate with an authoritative real count
@@ -90,10 +110,19 @@ impl TurnHistory {
         self.estimated_tokens
     }
 
-    /// Messages from active turns in chronological order. Composer's
-    /// Segment 2 pass iterates over this.
+    /// Messages from active turns in chronological order.
+    ///
+    /// Interleaves input and output messages per turn so the composer's
+    /// Segment 2 pass sees the complete conversational round-trip:
+    /// `[turn_0.input, turn_0.output, turn_1.input, turn_1.output, ...]`.
+    ///
+    /// On a tool-use turn the output contains both the assistant message and
+    /// the tool_result message, giving the correct Anthropic wire shape:
+    /// `[user_msg, assistant(tool_use), tool_result, user_msg_2, ...]`.
     pub fn active_messages(&self) -> impl Iterator<Item = &Message> {
-        self.active.iter().flat_map(|tr| tr.output.messages.iter())
+        self.active
+            .iter()
+            .flat_map(|tr| tr.input.messages.iter().chain(tr.output.messages.iter()))
     }
 
     /// Block writes from the immediately-prior turn, used by Segment 2
@@ -194,11 +223,28 @@ mod tests {
                 .collect(),
             block_writes,
             tool_calls: vec![],
-            tool_results: vec![],
             stop_reason: StopReason::EndTurn,
             usage: None,
             cache_metrics: Default::default(),
             completed_at: Timestamp::now(),
+        }
+    }
+
+    /// Build a minimal `TurnInput` for tests that don't care about
+    /// the input shape — uses `continuation` so no message content
+    /// is fabricated.
+    fn make_turn_input_empty() -> TurnInput {
+        use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
+        TurnInput {
+            turn_id: new_id(),
+            batch_id: new_id(),
+            origin: MessageOrigin::new(
+                Author::System {
+                    reason: SystemReason::Wakeup,
+                },
+                Sphere::System,
+            ),
+            messages: vec![],
         }
     }
 
@@ -224,10 +270,75 @@ mod tests {
         assert_eq!(hist.active_len(), 0);
         assert!(hist.most_recent_block_writes().is_empty());
 
+        // Record with 0 input messages and 2 output messages.
         let output = make_turn_output(2, vec![]);
-        hist.record(new_id(), output);
+        hist.record(new_id(), make_turn_input_empty(), output);
         assert_eq!(hist.active_len(), 1);
+        // active_messages interleaves input (0) + output (2) = 2.
         assert_eq!(hist.active_messages().count(), 2);
+    }
+
+    #[test]
+    fn active_messages_interleaves_input_and_output() {
+        // Verify that input messages appear BEFORE output messages for
+        // each turn — the correct wire order for the composer.
+        use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
+
+        let batch = new_id();
+
+        let make_msg = |text: &str, role: genai::chat::ChatRole| Message {
+            chat_message: genai::chat::ChatMessage::new(role, text.to_string()),
+            id: new_id(),
+            owner_id: SmolStr::new("agent-a"),
+            created_at: Timestamp::now(),
+            batch: batch.clone(),
+            response_meta: None,
+            block_refs: vec![],
+        };
+
+        let user_msg = make_msg("user says hi", genai::chat::ChatRole::User);
+        let assistant_msg = make_msg("agent replies", genai::chat::ChatRole::Assistant);
+
+        let input = TurnInput {
+            turn_id: new_id(),
+            batch_id: batch.clone(),
+            origin: MessageOrigin::new(
+                Author::System {
+                    reason: SystemReason::Wakeup,
+                },
+                Sphere::System,
+            ),
+            messages: vec![user_msg],
+        };
+
+        let output = {
+            use pattern_core::types::turn::StopReason;
+            TurnOutput {
+                messages: vec![assistant_msg],
+                block_writes: vec![],
+                tool_calls: vec![],
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+                cache_metrics: Default::default(),
+                completed_at: Timestamp::now(),
+            }
+        };
+
+        let mut hist = TurnHistory::empty();
+        hist.record(new_id(), input, output);
+
+        let msgs: Vec<_> = hist.active_messages().collect();
+        assert_eq!(msgs.len(), 2, "one input + one output message");
+        assert_eq!(
+            msgs[0].chat_message.role,
+            genai::chat::ChatRole::User,
+            "input message comes first"
+        );
+        assert_eq!(
+            msgs[1].chat_message.role,
+            genai::chat::ChatRole::Assistant,
+            "output message comes second"
+        );
     }
 
     #[test]
@@ -236,11 +347,19 @@ mod tests {
         assert_eq!(hist.estimated_tokens(), 0);
 
         // Record turns with heuristic fallback.
-        hist.record(new_id(), make_turn_output(1, vec![]));
+        hist.record(
+            new_id(),
+            make_turn_input_empty(),
+            make_turn_output(1, vec![]),
+        );
         let after_one = hist.estimated_tokens();
         assert!(after_one > 0, "heuristic should produce nonzero count");
 
-        hist.record(new_id(), make_turn_output(1, vec![]));
+        hist.record(
+            new_id(),
+            make_turn_input_empty(),
+            make_turn_output(1, vec![]),
+        );
         let after_two = hist.estimated_tokens();
         assert!(after_two > after_one, "should accumulate");
 
@@ -255,12 +374,20 @@ mod tests {
         assert!(hist.most_recent_block_writes().is_empty());
 
         // First turn: no block writes.
-        hist.record(new_id(), make_turn_output(0, vec![]));
+        hist.record(
+            new_id(),
+            make_turn_input_empty(),
+            make_turn_output(0, vec![]),
+        );
         assert!(hist.most_recent_block_writes().is_empty());
 
         // Second turn: has block writes.
         let writes = vec![make_block_write("notes"), make_block_write("tasks")];
-        hist.record(new_id(), make_turn_output(0, writes));
+        hist.record(
+            new_id(),
+            make_turn_input_empty(),
+            make_turn_output(0, writes),
+        );
         assert_eq!(hist.most_recent_block_writes().len(), 2);
         assert_eq!(hist.most_recent_block_writes()[0].handle.as_str(), "notes");
     }
@@ -268,9 +395,21 @@ mod tests {
     #[test]
     fn take_oldest_removes_and_recomputes() {
         let mut hist = TurnHistory::empty();
-        hist.record(new_id(), make_turn_output(3, vec![]));
-        hist.record(new_id(), make_turn_output(3, vec![]));
-        hist.record(new_id(), make_turn_output(3, vec![]));
+        hist.record(
+            new_id(),
+            make_turn_input_empty(),
+            make_turn_output(3, vec![]),
+        );
+        hist.record(
+            new_id(),
+            make_turn_input_empty(),
+            make_turn_output(3, vec![]),
+        );
+        hist.record(
+            new_id(),
+            make_turn_input_empty(),
+            make_turn_output(3, vec![]),
+        );
         assert_eq!(hist.active_len(), 3);
 
         let taken = hist.take_oldest(2);
@@ -284,7 +423,11 @@ mod tests {
     #[test]
     fn take_oldest_more_than_available() {
         let mut hist = TurnHistory::empty();
-        hist.record(new_id(), make_turn_output(1, vec![]));
+        hist.record(
+            new_id(),
+            make_turn_input_empty(),
+            make_turn_output(1, vec![]),
+        );
 
         let taken = hist.take_oldest(5);
         assert_eq!(taken.len(), 1);

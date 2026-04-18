@@ -15,6 +15,18 @@
 //!
 //! The [`TurnId`] serves as a checkpoint key: `block_changes_since(turn)` can
 //! reconstruct exactly which blocks changed during that turn.
+//!
+//! # Multi-turn tool-use round-trips
+//!
+//! [`TurnHistory`] stores both the input and output for each turn as a
+//! [`TurnRecord`], so the full conversational round-trip is preserved: user
+//! message → assistant reply → tool_result. On a tool-use turn, `orchestrate`
+//! synthesises a `ChatRole::Tool` message from the dispatched results and
+//! appends it to `TurnOutput.messages`. Continuation turns are built via
+//! [`TurnInput::continuation`] with empty `messages`; the prior turn's
+//! tool_result message lives in history and is replayed by the composer.
+//!
+//! [`TurnHistory`]: crate::memory
 
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
@@ -23,7 +35,7 @@ use crate::types::block::BlockWrite;
 use crate::types::ids::{BatchId, new_id};
 use crate::types::message::Message;
 use crate::types::origin::MessageOrigin;
-use crate::types::provider::{ToolCall, ToolResult};
+use crate::types::provider::{ToolCall, ToolOutcome, ToolResult};
 
 // `TurnId` is defined in `types::ids` as a `SmolStr` type alias. Mint fresh
 // turn ids via `pattern_core::types::ids::new_id()`.
@@ -34,8 +46,10 @@ pub use crate::types::ids::TurnId;
 /// A "wire turn" corresponds to one provider API call. One user-visible
 /// exchange (one `Session::step` invocation) produces N wire turns — the
 /// first wire turn's input carries the caller's messages, and each
-/// subsequent wire turn's input carries the prior turn's tool_results
-/// (via [`TurnInput::from_tool_results`]).
+/// subsequent wire turn is a continuation (via [`TurnInput::continuation`])
+/// with empty `messages`. The prior turn's assistant reply and tool_result
+/// message already live in [`TurnHistory`] and are replayed by the composer's
+/// Segment 2 pass; no new messages are needed on the continuation input.
 ///
 /// All wire turns within a single `Session::step` share the same
 /// [`BatchId`]. Each gets a freshly-minted [`TurnId`] at construction.
@@ -74,95 +88,35 @@ pub struct TurnInput {
 }
 
 impl TurnInput {
-    /// Build the next wire turn's input from a prior wire turn's
-    /// tool_results.
+    /// Build a continuation input (zero new user messages).
     ///
-    /// Used by the agent-loop driver in `TidepoolSession::step` to chain
-    /// tool_use cycles. Each `ToolResult` becomes a `ToolResponse`
-    /// content part on a single `ChatRole::Tool` message; the wire
-    /// format puts all tool_result blocks into one user-role message
-    /// per Anthropic's tool-use protocol.
+    /// Used on agent-loop iterations after a tool_use turn. The prior turn's
+    /// assistant message and synthesized tool_result message have already been
+    /// recorded to [`TurnHistory`] by `drive_step` via `hist.record`, so the
+    /// composer's Segment 2 pass replays them from history — this continuation
+    /// input contributes no fresh messages of its own.
     ///
     /// Preserves `batch_id` — all wire turns in one step share a batch.
     /// Mints a fresh `turn_id`.
     ///
-    /// # Panics
-    ///
-    /// Panics if `prior.tool_results` is empty. Callers should only
-    /// invoke this when the prior turn's `stop_reason == ToolUse` and
-    /// there is at least one tool_result to deliver.
+    /// Origin: System-authored (pattern synthesised this as a follow-up),
+    /// System sphere.
     ///
     /// # Examples
     ///
     /// ```
-    /// use jiff::Timestamp;
     /// use pattern_core::types::ids::{new_id, AgentId, BatchId};
-    /// use pattern_core::types::provider::{ToolOutcome, ToolResult};
-    /// use pattern_core::types::turn::{StopReason, TurnInput, TurnOutput};
+    /// use pattern_core::types::turn::TurnInput;
     ///
     /// let batch = BatchId::from(new_id());
-    /// let prior = TurnOutput {
-    ///     messages: vec![],
-    ///     block_writes: vec![],
-    ///     tool_calls: vec![],
-    ///     tool_results: vec![ToolResult {
-    ///         call_id: "toolu_01".into(),
-    ///         outcome: ToolOutcome::Success(serde_json::json!({"ok": true})),
-    ///     }],
-    ///     stop_reason: StopReason::ToolUse,
-    ///     usage: None,
-    ///     cache_metrics: Default::default(),
-    ///     completed_at: Timestamp::now(),
-    /// };
-    /// let next = TurnInput::from_tool_results(
-    ///     &prior,
-    ///     batch.clone(),
-    ///     AgentId::from("agent-a"),
-    /// );
+    /// let next = TurnInput::continuation(batch.clone(), AgentId::from("agent-a"));
     /// assert_eq!(next.batch_id, batch);
-    /// assert_eq!(next.messages.len(), 1);
+    /// assert!(next.messages.is_empty(), "continuation carries no fresh messages");
     /// ```
-    pub fn from_tool_results(
-        prior: &TurnOutput,
-        batch_id: BatchId,
-        owner_id: crate::types::ids::AgentId,
-    ) -> Self {
-        assert!(
-            !prior.tool_results.is_empty(),
-            "from_tool_results called with no tool_results — \
-             the caller should check stop_reason first"
-        );
-
-        // Build one ChatMessage::Tool carrying all tool_result blocks.
-        // genai's ChatRole::Tool + ToolResponse content parts maps 1:1
-        // to Anthropic's user-role message with tool_result content
-        // blocks (the provider adapter handles the role translation).
-        use genai::chat::{ChatMessage, ChatRole, ContentPart, MessageContent};
-        let parts: Vec<ContentPart> = prior
-            .tool_results
-            .iter()
-            .map(|r| ContentPart::from(r.to_tool_response()))
-            .collect();
-
-        let chat_message = ChatMessage {
-            role: ChatRole::Tool,
-            content: MessageContent::from_parts(parts),
-            options: Default::default(),
-        };
-
-        let now = Timestamp::now();
-        let message = Message {
-            chat_message,
-            id: crate::types::ids::MessageId::from(new_id()),
-            owner_id,
-            created_at: now,
-            batch: batch_id.clone(),
-            response_meta: None,
-            block_refs: vec![],
-        };
-
-        // Origin for a tool-result turn: system-authored (pattern
-        // delivered the results, not a human), system-visibility.
+    ///
+    /// [`TurnHistory`]: crate::memory
+    pub fn continuation(batch_id: BatchId, owner_id: crate::types::ids::AgentId) -> Self {
+        let _ = owner_id; // stored in the origin; field unused at construction
         let origin = MessageOrigin::new(
             crate::types::origin::Author::System {
                 reason: crate::types::origin::SystemReason::ToolCall,
@@ -174,7 +128,7 @@ impl TurnInput {
             turn_id: new_id(),
             batch_id,
             origin,
-            messages: vec![message],
+            messages: Vec::new(), // empty — continuation content is in history
         }
     }
 }
@@ -183,18 +137,28 @@ impl TurnInput {
 ///
 /// Collects everything one provider-call activation produced: reply
 /// messages, memory block writes, tool_use blocks the LLM requested,
-/// tool_results the agent loop executed, the provider's `stop_reason`,
-/// token usage if reported, cache metrics, and the wall-clock
-/// completion time.
+/// the provider's `stop_reason`, token usage if reported, cache metrics,
+/// and the wall-clock completion time.
+///
+/// # Stored message sequence
+///
+/// On a tool-use turn, `messages` carries the full round-trip in order:
+/// 1. The assistant message (with tool_use content parts).
+/// 2. A `ChatRole::Tool` message carrying all tool_result blocks for
+///    this turn, synthesised by `orchestrate` after dispatching the
+///    tool calls.
+///
+/// On an `EndTurn` turn, `messages` contains only the assistant message.
+/// Together with the turn's `TurnInput.messages` (stored alongside by
+/// `TurnHistory`), this gives the composer everything it needs to replay
+/// a complete conversational round-trip.
 ///
 /// # Invariants
 ///
-/// - `tool_calls.len() == tool_results.len()` and both are non-empty
-///   IFF `stop_reason == StopReason::ToolUse`. When the stream ended
-///   for any other reason, both vectors are empty.
-/// - `tool_calls[i]` and `tool_results[i]` share the same `call_id`
-///   (paired 1:1 in the order the provider emitted the tool_use
-///   blocks).
+/// - `tool_calls` is non-empty IFF `stop_reason == StopReason::ToolUse`.
+/// - When `stop_reason == ToolUse`, `messages` contains both an assistant
+///   message and a tool_result message (the latter holds one
+///   `ContentPart::ToolResponse` per dispatched call, 1:1 with `tool_calls`).
 /// - `block_writes` is the authoritative record of memory mutations
 ///   within this wire turn, drained from the adapter's pending buffer
 ///   at turn close.
@@ -209,7 +173,6 @@ impl TurnInput {
 ///     messages: vec![],
 ///     block_writes: vec![],
 ///     tool_calls: vec![],
-///     tool_results: vec![],
 ///     stop_reason: StopReason::EndTurn,
 ///     usage: None,
 ///     cache_metrics: Default::default(),
@@ -221,20 +184,19 @@ impl TurnInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnOutput {
     /// Reply messages produced during this turn (assistant + tool responses).
+    ///
+    /// On a tool-use turn this is `[assistant_msg, tool_result_msg]` in order;
+    /// on an `EndTurn` turn it is `[assistant_msg]`. The composer's Segment 2
+    /// pass replays these from `TurnHistory` on subsequent wire turns.
     pub messages: Vec<Message>,
     /// Memory block writes that occurred during this turn, in order.
     pub block_writes: Vec<BlockWrite>,
-    /// Tool calls the LLM requested during this wire turn. Paired 1:1
-    /// by index (and `call_id`) with `tool_results`. Empty unless
-    /// `stop_reason == ToolUse`.
+    /// Tool calls the LLM requested during this wire turn. Non-empty only
+    /// when `stop_reason == ToolUse`. Documents what the model requested;
+    /// the corresponding results are inlined into `messages` as the
+    /// tool_result message.
     #[serde(default)]
     pub tool_calls: Vec<ToolCall>,
-    /// Results from executing `tool_calls`. Paired 1:1 by index (and
-    /// `call_id`) with `tool_calls`. Empty unless `stop_reason ==
-    /// ToolUse`. Each result's outcome distinguishes success
-    /// (JSON payload) from error (string message).
-    #[serde(default)]
-    pub tool_results: Vec<ToolResult>,
     /// Why this wire turn's stream terminated. Drives the agent-loop
     /// driver's decision to loop (ToolUse) or return (everything
     /// else).
@@ -247,6 +209,42 @@ pub struct TurnOutput {
     pub cache_metrics: TurnCacheMetrics,
     /// Wall-clock time at which the turn completed.
     pub completed_at: Timestamp,
+}
+
+impl TurnOutput {
+    /// Reconstruct [`ToolResult`] views from the inlined tool_result
+    /// message in [`Self::messages`].
+    ///
+    /// Walks `messages`, finds the `ChatRole::Tool` message (if any),
+    /// and collects one `ToolResult` per `ContentPart::ToolResponse`
+    /// part. Callers that need direct `ToolResult` access without
+    /// re-walking messages themselves can use this convenience accessor.
+    ///
+    /// Returns `ToolOutcome::Success(content)` for every result — the
+    /// error/success distinction is not round-tripped through the message
+    /// representation at this layer. Callers that need to distinguish
+    /// error outcomes should retain the original `Vec<ToolResult>` before
+    /// it is inlined (e.g. from `orchestrate`'s local variable).
+    ///
+    /// Returns an empty `Vec` when `stop_reason != ToolUse`.
+    pub fn tool_results(&self) -> Vec<ToolResult> {
+        use genai::chat::{ChatRole, ContentPart};
+        self.messages
+            .iter()
+            .filter(|m| m.chat_message.role == ChatRole::Tool)
+            .flat_map(|m| m.chat_message.content.parts().iter())
+            .filter_map(|part| {
+                if let ContentPart::ToolResponse(tr) = part {
+                    Some(ToolResult {
+                        call_id: tr.call_id.clone(),
+                        outcome: ToolOutcome::Success(tr.content.clone()),
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
 }
 
 /// Default stop reason for deserialisation — used when reading
@@ -528,7 +526,6 @@ mod cache_metrics_tests {
 ///     messages: vec![],
 ///     block_writes: vec![],
 ///     tool_calls: vec![],
-///     tool_results: vec![],
 ///     stop_reason: StopReason::EndTurn,
 ///     usage: None,
 ///     cache_metrics: Default::default(),
@@ -576,13 +573,19 @@ impl StepReply {
         self.turns.iter().flat_map(|t| t.block_writes.iter())
     }
 
-    /// Iterator over every `ToolCall` / `ToolResult` pair across all
-    /// wire turns, in order. The pair always matches by `call_id` per
-    /// [`TurnOutput`]'s invariant.
-    pub fn all_tool_exchanges(&self) -> impl Iterator<Item = (&ToolCall, &ToolResult)> {
+    /// All `ToolCall` / `ToolResult` pairs across all wire turns, in order.
+    ///
+    /// Returns owned pairs. The `call_id` fields match per [`TurnOutput`]'s
+    /// invariant. `ToolResult.outcome` is reconstructed from the inlined
+    /// tool_result message (always `Success` — see [`TurnOutput::tool_results`]).
+    pub fn all_tool_exchanges(&self) -> Vec<(ToolCall, ToolResult)> {
         self.turns
             .iter()
-            .flat_map(|t| t.tool_calls.iter().zip(t.tool_results.iter()))
+            .flat_map(|t| {
+                let results = t.tool_results();
+                t.tool_calls.iter().cloned().zip(results)
+            })
+            .collect()
     }
 
     /// Concatenated text content of assistant messages across every
@@ -613,7 +616,6 @@ mod step_reply_tests {
             messages: vec![],
             block_writes: vec![],
             tool_calls: vec![],
-            tool_results: vec![],
             stop_reason: stop,
             usage: None,
             cache_metrics: Default::default(),

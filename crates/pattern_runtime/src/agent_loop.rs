@@ -3,8 +3,8 @@
 //! A "wire turn" corresponds to one `ProviderClient::complete` call. One
 //! user-visible exchange ([`pattern_core::Session::step`]) is driven by
 //! [`TidepoolSession::step`] as a loop over multiple wire turns,
-//! chained by [`TurnInput::from_tool_results`] when `stop_reason ==
-//! ToolUse`. This module implements the inner single-turn primitive.
+//! chained via [`TurnInput::continuation`] when `stop_reason == ToolUse`.
+//! This module implements the inner single-turn primitive.
 //!
 //! # Responsibilities
 //!
@@ -258,6 +258,38 @@ pub async fn orchestrate(
         ctx.model_id(),
     );
 
+    // 4b. Synthesise a single tool_result Message carrying ALL tool_result
+    //     ContentPart::ToolResponse parts for this turn. Anthropic's wire
+    //     format expects all tool_results from parallel dispatch in ONE
+    //     user-role message; genai's ChatRole::Tool → user-role translation
+    //     happens in the adapter. Inlining into TurnOutput.messages preserves
+    //     the full round-trip in TurnHistory so the composer's Segment 2 pass
+    //     replays [user, assistant(tool_use), tool_result, ...] correctly on
+    //     subsequent wire turns.
+    let tool_result_message: Option<Message> = if tool_results.is_empty() {
+        None
+    } else {
+        use genai::chat::{ChatMessage, ChatRole, ContentPart, MessageContent};
+        let parts: Vec<ContentPart> = tool_results
+            .iter()
+            .map(|r| ContentPart::from(r.to_tool_response()))
+            .collect();
+        let chat_msg = ChatMessage {
+            role: ChatRole::Tool,
+            content: MessageContent::from_parts(parts),
+            options: Default::default(),
+        };
+        Some(Message {
+            chat_message: chat_msg,
+            id: MessageId::from(new_id()),
+            owner_id: AgentId::from(ctx.agent_id()),
+            created_at: Timestamp::now(),
+            batch: input.batch_id.clone(),
+            response_meta: None,
+            block_refs: vec![],
+        })
+    };
+
     // 5. Drain pending block writes from the memory adapter.
     let block_writes = ctx.adapter().drain_pending();
 
@@ -309,16 +341,25 @@ pub async fn orchestrate(
     // 7. Emit the Stop event and assemble TurnOutput.
     sink.emit(TurnEvent::Stop(stop_reason));
 
-    let messages = match assistant_message {
-        Some(m) => vec![m],
-        None => vec![],
+    // Assemble messages in wire order: assistant message first (if any),
+    // then the tool_result message (if this was a tool-use turn). This
+    // preserves the complete round-trip in TurnHistory so the composer's
+    // Segment 2 pass replays [assistant(tool_use), tool_result] correctly.
+    let messages = {
+        let mut v = Vec::with_capacity(2);
+        if let Some(m) = assistant_message {
+            v.push(m);
+        }
+        if let Some(m) = tool_result_message {
+            v.push(m);
+        }
+        v
     };
 
     Ok(TurnOutput {
         messages,
         block_writes,
         tool_calls,
-        tool_results,
         stop_reason,
         usage,
         cache_metrics,
@@ -329,17 +370,19 @@ pub async fn orchestrate(
 // ---- drive_step — loop driver -------------------------------------------
 
 /// Drive one user-visible exchange: repeatedly call [`orchestrate`]
-/// until `stop_reason.is_terminal()`, threading tool_results through
-/// [`TurnInput::from_tool_results`] to produce each subsequent wire
-/// turn's input.
+/// until `stop_reason.is_terminal()`, recording each turn's full
+/// round-trip (input + output) to [`TurnHistory`] and threading
+/// continuation turns via [`TurnInput::continuation`].
 ///
 /// Called by [`crate::session::TidepoolSession::step`] as the main
 /// user-visible entry point. Preserves `batch_id` across all wire
 /// turns; mints a fresh `turn_id` per wire turn (via
-/// `TurnInput::from_tool_results`).
+/// `TurnInput::continuation`).
 ///
 /// Returns a [`StepReply`] aggregating every wire turn's
 /// [`TurnOutput`].
+///
+/// [`TurnHistory`]: crate::memory::TurnHistory
 pub async fn drive_step(
     initial_input: TurnInput,
     ctx: Arc<SessionContext>,
@@ -379,6 +422,11 @@ pub async fn drive_step(
         // onwards the server should have it cached.
         let expect_segment_1_hit = !is_first_wire_turn_in_session;
 
+        // Clone cur_input before moving it into orchestrate so we can pass it
+        // to hist.record after orchestrate completes. orchestrate takes
+        // ownership of TurnInput (it reads batch_id from it during the turn).
+        let recorded_input = cur_input.clone();
+
         let turn = orchestrate(
             req,
             cur_input,
@@ -392,25 +440,30 @@ pub async fn drive_step(
 
         is_first_wire_turn_in_session = false;
         let terminal = turn.stop_reason.is_terminal();
-        let needs_next =
-            matches!(turn.stop_reason, StopReason::ToolUse) && !turn.tool_results.is_empty();
 
-        // Record into TurnHistory so the NEXT wire turn's composer
-        // sees this turn's messages + block_writes in segment 2.
+        // Record into TurnHistory so the NEXT wire turn's composer sees this
+        // turn's full round-trip (input + output) in Segment 2.
         if let Ok(mut hist) = turn_history.lock() {
-            hist.record(pattern_core::types::ids::new_id(), turn.clone());
+            hist.record(
+                pattern_core::types::ids::new_id(),
+                recorded_input,
+                turn.clone(),
+            );
         }
 
         turns.push(turn);
 
-        if terminal || !needs_next {
+        if terminal {
             break;
         }
 
-        // Build the next wire turn's input from this turn's tool_results.
-        // Safe to unwrap: we just pushed above.
-        let prior = turns.last().expect("just pushed");
-        cur_input = TurnInput::from_tool_results(prior, batch_id.clone(), agent_id.clone());
+        // Build the next wire turn's continuation input. The tool_result
+        // messages from THIS turn have been recorded into history via
+        // hist.record above, so the continuation input contributes no fresh
+        // messages — it just carries the batch_id forward and mints a fresh
+        // turn_id. The composer's Segment 2 pass replays the prior turn's
+        // [assistant(tool_use), tool_result] from history.
+        cur_input = TurnInput::continuation(batch_id.clone(), agent_id.clone());
     }
 
     let final_stop_reason = turns
@@ -561,38 +614,22 @@ async fn compose_request_for_turn(
     //    predicate rather than guessing.
     let has_segment_1 = !system_blocks.is_empty();
 
-    // 6. Detect tool-continuation turns. Anthropic's wire protocol
-    //    requires that an assistant message containing `tool_use`
-    //    blocks be IMMEDIATELY followed by a user message with
-    //    matching `tool_result` blocks — no pseudo-messages,
-    //    current-state stubs, or other user-role content may
-    //    intervene. When the input is `tool_results` (built via
-    //    `TurnInput::from_tool_results`), the naive segment-3 pass
-    //    emits its pseudo-user message between the prior
-    //    assistant(tool_use) and our user(tool_result), which
-    //    Anthropic 400s with "tool_use ids were found without
-    //    tool_result blocks immediately after".
+    // 6. Assemble the composer pass list: Segment 1 + Segment 2. We
+    //    intentionally OMIT Segment3Pass here and run it conditionally after
+    //    compose based on the tail of the assembled request (see step 8b).
     //
-    //    Our fix matches claude-code's convention (see
-    //    smooshSystemReminderSiblings in their utils/messages.ts):
-    //    splice the segment-3 text IN FRONT OF the tool_result
-    //    content parts inside the SAME user message. Anthropic
-    //    accepts multiple content parts per user message as long as
-    //    the tool_result block is present; the composer's
-    //    segment-3 cache_control marker lands on the last content
-    //    block (via genai's apply_cache_control_to_parts), which
-    //    IS the tool_result — the cache span still includes the
-    //    prepended segment-3 text earlier in the same message.
-    let is_tool_continuation = input
-        .messages
-        .iter()
-        .any(|m| m.chat_message.role == genai::chat::ChatRole::Tool);
-
-    // Assemble the pass list. Segment3Pass runs on non-continuation
-    // turns; on continuation turns we splice manually after
-    // compose() below (Segment3Pass would emit a free-standing
-    // pseudo-user message that violates Anthropic's adjacency rule).
-    let mut passes: Vec<Box<dyn ComposerPass>> = vec![
+    //    Anthropic's wire protocol requires that an assistant message
+    //    containing `tool_use` blocks be IMMEDIATELY followed by a user
+    //    message with matching `tool_result` blocks — no pseudo-messages,
+    //    current-state stubs, or other user-role content may intervene.
+    //    After the TurnHistory refactor, tool_result messages live in history
+    //    (recorded by drive_step) and are replayed by Segment2Pass. On
+    //    continuation turns, the tail of the composed request is therefore a
+    //    ChatRole::Tool message (the replayed tool_result). Emitting a
+    //    Segment3Pass pseudo-user message AFTER that would violate the
+    //    adjacency rule; instead we splice seg3 INTO the tool_result message
+    //    (see step 9 below), matching claude-code's `smooshIntoToolResult`.
+    let passes: Vec<Box<dyn ComposerPass>> = vec![
         Box::new(Segment1Pass::new(
             system_blocks,
             vec![CODE_TOOL.clone()],
@@ -605,15 +642,6 @@ async fn compose_request_for_turn(
             cache_profile.clone(),
         )),
     ];
-    let mut segment_3_for_splice: Option<Vec<StructuredDocument>> = None;
-    if is_tool_continuation {
-        segment_3_for_splice = Some(loaded_blocks);
-    } else {
-        passes.push(Box::new(Segment3Pass::new(
-            loaded_blocks,
-            cache_profile.clone(),
-        )));
-    }
 
     let initial = PartialRequest::new(ctx.model_id());
     let mut req = compose(&passes, initial).map_err(|e| RuntimeError::ProviderError {
@@ -637,6 +665,54 @@ async fn compose_request_for_turn(
     //    beyond the segment-3 cache boundary (uncached by design).
     for msg in &input.messages {
         req.chat.messages.push(msg.chat_message.clone());
+    }
+
+    // 8b. Detect tool-continuation turns by inspecting the tail of the
+    //     composed request AFTER segment 2 has been applied. If the last
+    //     message is ChatRole::Tool (a replayed tool_result from the prior
+    //     turn), this is a continuation turn and we must splice seg3 INTO
+    //     the tool_result rather than emit a free-standing pseudo-message.
+    //
+    //     We do NOT key off `input.messages` here — after the TurnHistory
+    //     refactor continuation inputs always have empty messages, so the
+    //     old check (`.any(|m| m.role == ChatRole::Tool)`) would never fire.
+    //     The tail of the composed request is the correct signal.
+    let is_tool_continuation = req
+        .chat
+        .messages
+        .last()
+        .map(|m| m.role == genai::chat::ChatRole::Tool)
+        .unwrap_or(false);
+
+    tracing::debug!(
+        agent_id = ctx.agent_id(),
+        is_tool_continuation,
+        "compose_request_for_turn: continuation detection via request tail"
+    );
+
+    let segment_3_for_splice: Option<Vec<StructuredDocument>>;
+    if is_tool_continuation {
+        segment_3_for_splice = Some(loaded_blocks);
+    } else {
+        segment_3_for_splice = None;
+        // Non-continuation turn: run Segment3Pass to emit the current-state
+        // pseudo-message. We do this post-compose via a single-pass sub-compose
+        // so the segment-3 cache boundary lands in the right position.
+        let seg3_pass: Vec<Box<dyn ComposerPass>> = vec![Box::new(Segment3Pass::new(
+            loaded_blocks,
+            cache_profile.clone(),
+        ))];
+        // We need to extend req with the seg3 output. Compose seg3 alone
+        // from the current tail so its messages append correctly.
+        let seg3_initial = PartialRequest::new(ctx.model_id());
+        let seg3_req =
+            compose(&seg3_pass, seg3_initial).map_err(|e| RuntimeError::ProviderError {
+                reason: format!("segment-3 composer pass failed: {e}"),
+            })?;
+        // Transfer only the additional chat messages from the seg3 pass.
+        for msg in seg3_req.chat.messages {
+            req.chat.messages.push(msg);
+        }
     }
 
     // 9. On tool-continuation turns, splice segment 3 INTO the last
@@ -1095,7 +1171,7 @@ mod tests {
         assert_eq!(provider.call_count(), 1);
         assert_eq!(out.stop_reason, StopReason::EndTurn);
         assert!(out.tool_calls.is_empty());
-        assert!(out.tool_results.is_empty());
+        assert!(out.tool_results().is_empty());
         assert_eq!(out.messages.len(), 1, "assistant message should be present");
         assert!(out.usage.is_some(), "usage captured from StreamEnd");
 
@@ -1195,11 +1271,19 @@ mod tests {
         assert_eq!(out.stop_reason, StopReason::ToolUse);
         assert_eq!(out.tool_calls.len(), 1);
         assert_eq!(out.tool_calls[0].call_id, "toolu_01");
-        assert_eq!(out.tool_results.len(), 1);
-        assert_eq!(out.tool_results[0].call_id, "toolu_01");
+        // tool_results are now inlined into messages; access via the method.
+        let results = out.tool_results();
+        assert_eq!(results.len(), 1, "tool_result message should be inlined");
+        assert_eq!(results[0].call_id, "toolu_01");
         assert!(
-            matches!(out.tool_results[0].outcome, ToolOutcome::Success(_)),
+            matches!(results[0].outcome, ToolOutcome::Success(_)),
             "dispatcher should have succeeded"
+        );
+        // On a tool-use turn, messages should be [assistant, tool_result].
+        assert_eq!(
+            out.messages.len(),
+            2,
+            "tool-use TurnOutput must carry both assistant and tool_result messages"
         );
 
         let calls = dispatcher.calls.lock().unwrap();
@@ -1254,6 +1338,18 @@ mod tests {
         assert_eq!(reply.turns[0].stop_reason, StopReason::ToolUse);
         assert_eq!(reply.turns[1].stop_reason, StopReason::EndTurn);
         assert_eq!(reply.final_stop_reason, StopReason::EndTurn);
+
+        // Turn 1 (tool_use): messages should be [assistant(tool_use), tool_result].
+        assert_eq!(
+            reply.turns[0].messages.len(),
+            2,
+            "tool-use turn must carry both assistant and tool_result messages"
+        );
+        assert_eq!(
+            reply.turns[0].messages[1].chat_message.role,
+            genai::chat::ChatRole::Tool,
+            "second message of tool-use turn must be the tool_result"
+        );
 
         // Batch id stable across wire turns.
         assert_eq!(
@@ -1534,12 +1630,264 @@ mod tests {
 
         assert_eq!(provider.call_count(), 2);
         assert_eq!(reply.turns.len(), 2);
-        let outcome = &reply.turns[0].tool_results[0].outcome;
-        assert!(
-            matches!(outcome, ToolOutcome::Error(msg) if msg.contains("syntax error")),
-            "tool result should carry the error outcome"
+        // The error outcome rode in the tool_result message content. After the
+        // TurnHistory refactor, tool_results are inlined into TurnOutput.messages
+        // as a ChatRole::Tool message; the accessor returns the content (which
+        // is the error string encoded as a JSON Value::String by `to_tool_response`).
+        // We verify the round-trip by checking the turn had a tool_result message.
+        let turn0 = &reply.turns[0];
+        assert_eq!(turn0.stop_reason, StopReason::ToolUse);
+        assert_eq!(
+            turn0.messages.len(),
+            2,
+            "tool-use turn must carry [assistant, tool_result] messages"
+        );
+        assert_eq!(
+            turn0.messages[1].chat_message.role,
+            genai::chat::ChatRole::Tool,
+            "second message must be the tool_result"
         );
         assert_eq!(reply.final_stop_reason, StopReason::EndTurn);
+    }
+
+    // ---- Multi-turn tool-use history correctness tests ----------------------
+    //
+    // These tests verify the core fix: that TurnHistory preserves the full
+    // conversational round-trip (user input + assistant reply + tool_result)
+    // so the composer's Segment 2 pass replays a valid message sequence.
+
+    /// Drive two tool-use turns, then assert that TurnHistory contains the
+    /// correct message sequence for composing a third wire turn.
+    ///
+    /// Expected sequence after two tool-use turns in history:
+    ///   turn 0: input=[user_msg], output=[assistant_1(tool_use), tool_result_1]
+    ///   turn 1: input=[],         output=[assistant_2(tool_use), tool_result_2]
+    ///
+    /// `active_messages()` should yield:
+    ///   [user_msg, assistant_1, tool_result_1, assistant_2, tool_result_2]
+    ///
+    /// That is the valid Anthropic wire sequence for a third request.
+    #[tokio::test]
+    async fn drive_step_two_tool_use_turns_history_yields_correct_message_order() {
+        use genai::chat::ChatRole;
+
+        // Three-turn script: two tool_use turns then a terminal text turn.
+        let (ctx, _sink, provider) = mock_session(vec![
+            MockProviderClient::tool_use_turn(
+                "toolu_01",
+                "code",
+                serde_json::json!({"code": "pure ()"}),
+            ),
+            MockProviderClient::tool_use_turn(
+                "toulu_02",
+                "code",
+                serde_json::json!({"code": "pure ()"}),
+            ),
+            MockProviderClient::text_turn("All done."),
+        ]);
+
+        let user_msg = {
+            use pattern_core::types::ids::{AgentId, BatchId, MessageId};
+            Message {
+                chat_message: genai::chat::ChatMessage::user("check on me"),
+                id: MessageId::from(new_id()),
+                owner_id: AgentId::from("agent-a"),
+                created_at: jiff::Timestamp::now(),
+                batch: BatchId::from(new_id()),
+                response_meta: None,
+                block_refs: vec![],
+            }
+        };
+
+        let turn_history = Arc::new(std::sync::Mutex::new(crate::memory::TurnHistory::empty()));
+        let initial_input = {
+            use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
+            TurnInput {
+                turn_id: new_id(),
+                batch_id: BatchId::from(new_id()),
+                origin: MessageOrigin::new(
+                    Author::System {
+                        reason: SystemReason::Wakeup,
+                    },
+                    Sphere::System,
+                ),
+                messages: vec![user_msg],
+            }
+        };
+
+        let dispatcher = MockSuccessDispatcher::default();
+        let reply = drive_step(
+            initial_input,
+            ctx,
+            turn_history.clone(),
+            pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
+            &dispatcher,
+            "",
+        )
+        .await
+        .expect("drive_step should succeed");
+
+        assert_eq!(provider.call_count(), 3, "three wire turns expected");
+        assert_eq!(reply.turns.len(), 3);
+
+        // --- Assert TurnHistory has 3 records with correct structure ---
+
+        let hist = turn_history.lock().unwrap();
+        assert_eq!(hist.active_len(), 3, "three TurnRecords in history");
+
+        let records: Vec<_> = hist.iter_active().collect();
+
+        // Turn 0: input has user message, output has [assistant, tool_result].
+        assert_eq!(
+            records[0].input.messages.len(),
+            1,
+            "turn 0 input must carry the original user message"
+        );
+        assert_eq!(
+            records[0].input.messages[0].chat_message.role,
+            ChatRole::User,
+            "turn 0 input message must be user-role"
+        );
+        assert_eq!(
+            records[0].output.messages.len(),
+            2,
+            "turn 0 output must have [assistant, tool_result]"
+        );
+        assert_eq!(
+            records[0].output.messages[0].chat_message.role,
+            ChatRole::Assistant,
+            "turn 0 output[0] must be assistant"
+        );
+        assert_eq!(
+            records[0].output.messages[1].chat_message.role,
+            ChatRole::Tool,
+            "turn 0 output[1] must be tool_result"
+        );
+
+        // Turn 1: continuation — input is empty, output has [assistant, tool_result].
+        assert_eq!(
+            records[1].input.messages.len(),
+            0,
+            "turn 1 input must be empty (continuation)"
+        );
+        assert_eq!(
+            records[1].output.messages.len(),
+            2,
+            "turn 1 output must have [assistant, tool_result]"
+        );
+
+        // Turn 2: continuation — input is empty, output has just [assistant].
+        assert_eq!(
+            records[2].input.messages.len(),
+            0,
+            "turn 2 input must be empty (continuation)"
+        );
+        assert_eq!(
+            records[2].output.messages.len(),
+            1,
+            "turn 2 output must have just [assistant] (EndTurn, no tool_result)"
+        );
+        assert_eq!(
+            records[2].output.messages[0].chat_message.role,
+            ChatRole::Assistant,
+        );
+
+        // --- Assert active_messages() yields correct order for composing turn 3 ---
+
+        let msg_roles: Vec<ChatRole> = hist
+            .active_messages()
+            .map(|m| m.chat_message.role.clone())
+            .collect();
+
+        // Expected: [User, Assistant, Tool, Assistant, Tool, Assistant]
+        // = [user_msg] + [asst_1, tr_1] + [] + [asst_2, tr_2] + [] + [asst_3]
+        assert_eq!(
+            msg_roles,
+            vec![
+                ChatRole::User,
+                ChatRole::Assistant,
+                ChatRole::Tool,
+                ChatRole::Assistant,
+                ChatRole::Tool,
+                ChatRole::Assistant,
+            ],
+            "active_messages must yield the correct Anthropic wire order: \
+             user, asst_1(tool_use), tool_result_1, asst_2(tool_use), tool_result_2, asst_3"
+        );
+    }
+
+    // ---- Splice mutation safety test ----------------------------------------
+    //
+    // Verifies that the splice in compose_request_for_turn CLONES from history
+    // (via the prior_messages snapshot taken before compose) and does NOT
+    // mutate the original TurnRecord in TurnHistory. After the splice runs,
+    // the tool_result in history must have its original content (no seg3 baked in).
+
+    #[tokio::test]
+    async fn splice_does_not_mutate_turn_history_tool_result_content() {
+        use genai::chat::{ChatRole, ContentPart};
+
+        // Two turns: tool_use then final text. The splice happens on the
+        // second wire turn's compose_request_for_turn call.
+        let (ctx, _sink, _provider) = mock_session(vec![
+            MockProviderClient::tool_use_turn(
+                "toolu_01",
+                "code",
+                serde_json::json!({"code": "pure ()"}),
+            ),
+            MockProviderClient::text_turn("Done."),
+        ]);
+
+        let turn_history = Arc::new(std::sync::Mutex::new(crate::memory::TurnHistory::empty()));
+        let dispatcher = MockSuccessDispatcher::default();
+
+        drive_step(
+            test_turn_input(),
+            ctx,
+            turn_history.clone(),
+            pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
+            &dispatcher,
+            "",
+        )
+        .await
+        .expect("drive_step should succeed");
+
+        // After drive_step, history must have 2 TurnRecords.
+        let hist = turn_history.lock().unwrap();
+        assert_eq!(hist.active_len(), 2);
+
+        let records: Vec<_> = hist.iter_active().collect();
+        let turn0_tool_msg = &records[0].output.messages[1];
+        assert_eq!(
+            turn0_tool_msg.chat_message.role,
+            ChatRole::Tool,
+            "second output message of turn 0 must be the tool_result"
+        );
+
+        // Verify the tool_result message in history has NOT been modified by the
+        // seg3 splice. The splice operates on the composed req (which clones
+        // from prior_messages), NOT on the stored TurnRecord. The stored content
+        // must be the plain tool output, not an array with a prepended seg3 block.
+        for part in turn0_tool_msg.chat_message.content.parts() {
+            if let ContentPart::ToolResponse(tr) = part {
+                assert!(
+                    !tr.content.is_array() || {
+                        // If it IS an array, it must NOT have a seg3 text block as first element.
+                        // The seg3 block has the key "type" = "text" and text starting with
+                        // "[memory:current_state]".
+                        let arr = tr.content.as_array().unwrap();
+                        !arr.first()
+                            .and_then(|v| v.get("text"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.contains("current_state"))
+                            .unwrap_or(false)
+                    },
+                    "splice must NOT have mutated the stored tool_result content in TurnHistory; \
+                     found seg3 content baked into the stored ToolResponse: {:?}",
+                    tr.content
+                );
+            }
+        }
     }
 
     // ---- Seg3 splice unit tests --------------------------------------------

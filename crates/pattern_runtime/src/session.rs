@@ -512,7 +512,15 @@ impl TidepoolSession {
         // Build the shared preamble once per session.
         let preamble = crate::sdk::preamble::build(&crate::sdk::bundle::canonical_effect_decls());
 
-        // Build include paths: SDK dir + optional tidepool prelude dir.
+        // Build include paths: SDK dir only. Pattern's haskell/Pattern/
+        // tree now includes both the effect GADTs AND the prelude
+        // substitute (ported first-party from tidepool-mcp's
+        // Tidepool.Prelude / Tidepool.Aeson* in Phase 5 Task 15). No
+        // separate "tidepool prelude dir" is needed any more.
+        //
+        // The `prelude_dir` parameter is honoured for back-compat —
+        // callers who still pass one get it appended, but it's
+        // optional.
         let sdk_dir = sdk.resolve()?;
         let mut include_paths = vec![sdk_dir];
         if let Some(dir) = prelude_dir {
@@ -654,7 +662,6 @@ impl TidepoolSession {
                             messages: vec![],
                             block_writes,
                             tool_calls: vec![],
-                            tool_results: vec![],
                             // Legacy SessionMachine.run path: no tool
                             // calls are possible here, so every wire
                             // turn ends with EndTurn semantics.
@@ -665,9 +672,10 @@ impl TidepoolSession {
                         };
 
                         // Record in TurnHistory for the composer and
-                        // compaction strategies.
+                        // compaction strategies. Pass input alongside output
+                        // so active_messages() can interleave them correctly.
                         if let Ok(mut hist) = self.turn_history.lock() {
-                            hist.record(input.turn_id.clone(), output.clone());
+                            hist.record(input.turn_id.clone(), input.clone(), output.clone());
                         }
 
                         Ok(output)
