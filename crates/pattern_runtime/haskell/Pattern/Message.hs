@@ -11,7 +11,8 @@
 -- channel, bluesky handle, cli, etc.) that the runtime parses.
 module Pattern.Message where
 
-import Control.Monad.Freer (Eff, Member, send)
+import Control.Monad.Freer (Eff, Member)
+import qualified Control.Monad.Freer as Freer
 import Data.Text (Text)
 
 -- | Agent-supplied request payload (JSON-ish; shape stabilises in Phase 4).
@@ -46,16 +47,16 @@ data Message a where
   Notify :: ChannelId -> Body -> Message ()
 
 ask :: Member Message effs => Request -> Eff effs (MessageContent, Usage)
-ask r = send (Ask r)
+ask r = Freer.send (Ask r)
 
 -- | Send a message to another agent or endpoint. Caller identity is
 -- attached by the runtime from the session's agent_id; agents only
 -- specify the recipient.
-send_ :: Member Message effs => Recipient -> Body -> Eff effs ()
-send_ r b = send (Send r b)
+send :: Member Message effs => Recipient -> Body -> Eff effs ()
+send r b = Freer.send (Send r b)
 
 reply :: Member Message effs => MessageId -> Body -> Eff effs ()
-reply m b = send (Reply m b)
+reply m b = Freer.send (Reply m b)
 
 notify :: Member Message effs => ChannelId -> Body -> Eff effs ()
-notify c b = send (Notify c b)
+notify c b = Freer.send (Notify c b)

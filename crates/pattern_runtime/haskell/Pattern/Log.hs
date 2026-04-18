@@ -7,7 +7,8 @@
 -- agent-originated log events.
 module Pattern.Log where
 
-import Control.Monad.Freer (Eff, Member, send)
+import Control.Monad.Freer (Eff, Member)
+import qualified Control.Monad.Freer as Freer
 import Data.Text (Text)
 
 -- | Effect algebra.
@@ -18,13 +19,13 @@ data Log a where
   Error :: Text -> Log ()
 
 debug :: Member Log effs => Text -> Eff effs ()
-debug msg = send (Debug msg)
+debug msg = Freer.send (Debug msg)
 
 info :: Member Log effs => Text -> Eff effs ()
-info msg = send (Info msg)
+info msg = Freer.send (Info msg)
 
 warn :: Member Log effs => Text -> Eff effs ()
-warn msg = send (Warn msg)
+warn msg = Freer.send (Warn msg)
 
-error_ :: Member Log effs => Text -> Eff effs ()
-error_ msg = send (Error msg)
+error :: Member Log effs => Text -> Eff effs ()
+error msg = Freer.send (Error msg)

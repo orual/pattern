@@ -8,7 +8,8 @@
 -- (the canonical "list all sources" op).
 module Pattern.File where
 
-import Control.Monad.Freer (Eff, Member, send)
+import Control.Monad.Freer (Eff, Member)
+import qualified Control.Monad.Freer as Freer
 import Data.Text (Text)
 
 type Path    = Text
@@ -20,12 +21,12 @@ data File a where
   Write   :: Path -> Content -> File ()
   ListDir :: Path -> File [Path]
 
-read_ :: Member File effs => Path -> Eff effs Content
-read_ p = send (Read p)
+read :: Member File effs => Path -> Eff effs Content
+read p = Freer.send (Read p)
 
 write :: Member File effs => Path -> Content -> Eff effs ()
-write p c = send (Write p c)
+write p c = Freer.send (Write p c)
 
 -- | List entries of a directory.
 listDir :: Member File effs => Path -> Eff effs [Path]
-listDir p = send (ListDir p)
+listDir p = Freer.send (ListDir p)

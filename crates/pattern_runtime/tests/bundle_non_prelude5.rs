@@ -16,7 +16,7 @@ use pattern_runtime::sdk::handlers::file::FileHandler;
 
 type FileOnlyBundle = frunk::HList![FileHandler];
 
-/// The agent source imports and calls `Pattern.File.read_`. The FileHandler is
+/// The agent source imports and calls `Pattern.File.read`. The FileHandler is
 /// stubbed, so we expect the `compile_and_run` call to surface the handler
 /// error message — proving the stub's "not implemented" path is reachable
 /// from a multi-module-compiled agent.

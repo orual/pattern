@@ -98,43 +98,50 @@ Agent programs import from the `Pattern.*` SDK module tree (installed at
 `tidepool-extract` compiles agents with the SDK directory on its include
 path — all 13 modules are compiled and linked together.
 
-The SDK uses distinct constructor names across modules, so `import
-Pattern.Prelude` unqualified works even for agents that mix effects:
+The SDK uses a hybrid qualified/unqualified import scheme. Modules with
+unambiguous terse verbs are used unqualified; modules with generic verbs
+(get, read, error, search, etc.) are used qualified to avoid collision:
 
 ```haskell
-import Pattern.Prelude
+-- Unqualified: Message, Time, Display, Spawn (terse, no conflicts)
+import Pattern.Message
+import Pattern.Time
+import Pattern.Log   -- use qualified: Log.error avoids shadowing the error shim
 
-agent = do
-  put "notes" "hello"           -- Memory.Put
-  write "/tmp/f" "contents"     -- File.Write  (distinct from Memory.Put)
-  _ <- read_ "/tmp/f"           -- File.Read
-  _ <- get "notes"              -- Memory.Get  (distinct from File.Read)
-  send_ "agent:orual" "ping"    -- Message.Send
-  info "done"                   -- Log.Info
-```
-
-Qualified imports remain a fine stylistic choice when you want explicit
-module attribution at the call site:
-
-```haskell
+-- Qualified: Memory, File, Log, Search, Recall, Sources, Shell, Rpc, Mcp
 import qualified Pattern.Memory as Memory
 import qualified Pattern.File as File
+import qualified Pattern.Log as Log
 
 agent = do
-  Memory.Get "notes"
-  File.Read "/tmp/f"
+  Memory.put "notes" "hello"        -- Memory.Put
+  File.write "/tmp/f" "contents"    -- File.Write
+  _ <- File.read "/tmp/f"           -- File.Read (renamed from read_)
+  _ <- Memory.get "notes"           -- Memory.Get
+  send "agent:orual" "ping"         -- Message.send (renamed from send_)
+  Log.error "oops"                  -- Log.Error (renamed from error_)
 ```
+
+For code-tool (`code` tool eval) programs, the preamble builds the
+hybrid import scheme automatically — agents write bare `send`, `now`,
+`chunk`, `start` for unqualified modules and `Memory.put`, `File.read`,
+`Log.info`, `Search.messages`, `Recall.get` for qualified ones.
 
 Collision-avoidance decisions on the Haskell side:
 
-- `Memory` uses `Get`/`Put` (KV semantics) — leaving `Read`/`Write` to `File`.
-- `Search` uses `SearchMessages`/`SearchArchival`/`SearchAll` — prefix
-  avoids collision with `Memory.Search`.
-- `Recall` uses `RecallInsert`/`RecallSearch`/`RecallGet`/`RecallDelete` —
-  prefix avoids collision with `Memory.Recall`.
-- `File.List` is `ListDir` — leaves `List` to `Sources` (list all sources).
-- `Rpc.Call` (request/response) — leaves `Send` to `Message` for
-  agent-to-agent messaging.
+- `Memory` uses `Get`/`Put` constructors (KV semantics) — leaving
+  `Read`/`Write` constructors to `File`.
+- `Search` helpers are `messages`/`archival`/`all_` (prefix dropped;
+  GADT constructors `SearchMessages`/`SearchArchival`/`SearchAll` retain
+  unique names for the Rust decode layer).
+- `Recall` helpers are `insert`/`search`/`get`/`delete` (prefix dropped;
+  both `Memory.get` and `Recall.get` exist so qualified import is required
+  when both are in scope).
+- `File.read` renamed from `read_` — use qualified `File.read` to avoid
+  shadowing `Prelude.read` in files without `NoImplicitPrelude`.
+- `Message.send` renamed from `send_`; `Log.error` renamed from `error_`.
+- `File.List` is `ListDir` — leaves `List` to `Sources`.
+- `Rpc.Call` (request/response) — leaves `Send` to `Message`.
 
 Defense-in-depth at the host-runtime decode boundary is provided by the
 derive layer (arity disambiguation + `#[core(module = "Pattern.<Module>",

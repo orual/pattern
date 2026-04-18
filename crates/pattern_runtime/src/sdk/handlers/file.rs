@@ -26,9 +26,9 @@ impl DescribeEffect for FileHandler {
             ],
             type_defs: &["type Path = Text"],
             helpers: &[
-                "read_ :: Member File effs => Path -> Eff effs Content\nread_ p = send (Read p)",
-                "write :: Member File effs => Path -> Content -> Eff effs ()\nwrite p c = send (Write p c)",
-                "listDir :: Member File effs => Path -> Eff effs [Path]\nlistDir p = send (ListDir p)",
+                "read :: Member File effs => Path -> Eff effs Content\nread p = Freer.send (Read p)",
+                "write :: Member File effs => Path -> Content -> Eff effs ()\nwrite p c = Freer.send (Write p c)",
+                "listDir :: Member File effs => Path -> Eff effs [Path]\nlistDir p = Freer.send (ListDir p)",
             ],
         }
     }

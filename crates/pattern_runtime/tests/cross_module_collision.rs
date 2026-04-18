@@ -61,7 +61,7 @@ fn fresh_turn_input() -> TurnInput {
 ///      unqualified name from anything in `File`)
 ///   2. `M.get "greeting"`         → `Memory.Get` at arity 1 (distinct
 ///      unqualified name from `File.Read`)
-///   3. `F.read_ "/does/not/exist"` → `File.Read` at arity 1 (distinct
+///   3. `F.read "/does/not/exist"` → `File.Read` at arity 1 (distinct
 ///      unqualified name from `Memory.Get`)
 ///
 /// In the current SDK the three constructor names are already distinct,

@@ -48,10 +48,10 @@ impl DescribeEffect for MessageHandler {
                 "type ChannelId = Text",
             ],
             helpers: &[
-                "ask :: Member Message effs => Request -> Eff effs (MessageContent, Usage)\nask r = send (Ask r)",
-                "send_ :: Member Message effs => Recipient -> Body -> Eff effs ()\nsend_ r b = send (Send r b)",
-                "reply :: Member Message effs => MessageId -> Body -> Eff effs ()\nreply m b = send (Reply m b)",
-                "notify :: Member Message effs => ChannelId -> Body -> Eff effs ()\nnotify c b = send (Notify c b)",
+                "ask :: Member Message effs => Request -> Eff effs (MessageContent, Usage)\nask r = Freer.send (Ask r)",
+                "send :: Member Message effs => Recipient -> Body -> Eff effs ()\nsend r b = Freer.send (Send r b)",
+                "reply :: Member Message effs => MessageId -> Body -> Eff effs ()\nreply m b = Freer.send (Reply m b)",
+                "notify :: Member Message effs => ChannelId -> Body -> Eff effs ()\nnotify c b = Freer.send (Notify c b)",
             ],
         }
     }

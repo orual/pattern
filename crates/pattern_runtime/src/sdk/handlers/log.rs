@@ -42,10 +42,10 @@ impl DescribeEffect for LogHandler {
             ],
             type_defs: &[],
             helpers: &[
-                "debug :: Member Log effs => Text -> Eff effs ()\ndebug msg = send (Debug msg)",
-                "info :: Member Log effs => Text -> Eff effs ()\ninfo msg = send (Info msg)",
-                "warn :: Member Log effs => Text -> Eff effs ()\nwarn msg = send (Warn msg)",
-                "error_ :: Member Log effs => Text -> Eff effs ()\nerror_ msg = send (Error msg)",
+                "debug :: Member Log effs => Text -> Eff effs ()\ndebug msg = Freer.send (Debug msg)",
+                "info :: Member Log effs => Text -> Eff effs ()\ninfo msg = Freer.send (Info msg)",
+                "warn :: Member Log effs => Text -> Eff effs ()\nwarn msg = Freer.send (Warn msg)",
+                "error :: Member Log effs => Text -> Eff effs ()\nerror msg = Freer.send (Error msg)",
             ],
         }
     }

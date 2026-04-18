@@ -1,9 +1,16 @@
 //! Haskell preamble assembler for `code` tool eval source wrapping.
 //!
 //! Produces the static Haskell boilerplate shared by every `code` tool
-//! eval: language pragmas, module header, standard imports, GADT
-//! declarations for each SDK effect, the `type M` effect-row alias,
-//! curried helper definitions, and pagination support.
+//! eval: language pragmas, module header, standard imports, the 13 SDK
+//! effect module imports (hybrid qualified/unqualified scheme), the
+//! `type M` effect-row alias, and pagination support.
+//!
+//! Architecture note: we import the SDK effect modules directly rather
+//! than inlining GADT declarations + helpers. This became viable once
+//! the tidepool DataConTable/CoreExpr multi-module bug was fixed (our
+//! fork — see `flake.nix` for the tidepool pin). The `qualified_imports_direct`
+//! and `unqualified_imports_direct` tests in `tests/multi_module_sdk.rs`
+//! are the live evidence that multi-module compilation works.
 //!
 //! Directly adapted from `tidepool-mcp::build_preamble` (minus
 //! MCP-specific Library import, heuristic combinators, and the
@@ -11,11 +18,14 @@
 
 use crate::sdk::describe::EffectDecl;
 
-/// Build the Haskell preamble string from a set of effect declarations.
+/// Build the Haskell preamble string.
 ///
-/// The caller typically passes the result of
-/// [`crate::sdk::bundle::canonical_effect_decls()`].
-pub fn build(decls: &[EffectDecl]) -> String {
+/// The `decls` parameter is accepted for API compatibility (callers pass
+/// [`crate::sdk::bundle::canonical_effect_decls()`]), but the preamble
+/// now uses static per-module imports rather than emitting GADT
+/// declarations and helpers from the decls. The `type M` alias and
+/// pagination support are hardcoded to match the canonical 13-effect row.
+pub fn build(_decls: &[EffectDecl]) -> String {
     let mut out = String::with_capacity(8192);
 
     // Language pragmas.
@@ -28,63 +38,74 @@ pub fn build(decls: &[EffectDecl]) -> String {
     // Module header.
     out.push_str("module Expr where\n");
 
-    // Standard imports.
-    out.push_str("import Tidepool.Prelude hiding (error)\n");
+    // Standard imports. Pattern.Prelude is the curated prelude substitute
+    // (Text-returning show, list/Map helpers, Aeson construction). It does
+    // NOT re-export the 13 effect modules. The `hiding (error)` suppresses
+    // Prelude.error so agents use the Text-accepting shadow defined below.
+    out.push_str("import Pattern.Prelude hiding (error)\n");
     out.push_str("import qualified Data.Text as T\n");
     out.push_str("import qualified Data.Map.Strict as Map\n");
     out.push_str("import qualified Data.Set as Set\n");
-    out.push_str("import qualified Tidepool.Aeson.KeyMap as KM\n");
+    out.push_str("import qualified Pattern.Aeson.KeyMap as KM\n");
     out.push_str("import qualified Data.List as L\n");
-    out.push_str("import qualified Tidepool.Text as TT\n");
-    out.push_str("import qualified Tidepool.Table as Tab\n");
-    out.push_str("import Control.Monad.Freer hiding (run)\n");
+    out.push_str("import qualified Pattern.Text as TT\n");
+    out.push_str("import qualified Pattern.Table as Tab\n");
+    // Freer: agents use Eff/Member for type annotations; Freer.send is
+    // not directly called — the SDK module helpers dispatch internally.
+    out.push_str("import Control.Monad.Freer (Eff, Member)\n");
 
-    // Qualified aeson imports (matches tidepool-mcp's aeson_imports).
-    out.push_str("import qualified Tidepool.Aeson as Aeson\n");
+    // Qualified aeson imports.
+    out.push_str("import qualified Pattern.Aeson as Aeson\n");
 
     // Prelude escape hatch + defaults.
     out.push_str("import qualified Prelude as P\n");
+
+    // SDK effect module imports — hybrid qualified/unqualified scheme.
+    //
+    // Unqualified: modules whose verbs are unambiguous and terse names are
+    // agent-friendly (send, chunk, now/sleep, start/stop).
+    out.push_str("-- Unqualified SDK effects (terse verbs, no collisions)\n");
+    out.push_str("import Pattern.Message\n");
+    out.push_str("import Pattern.Time\n");
+    out.push_str("import Pattern.Display\n");
+    out.push_str("import Pattern.Spawn\n");
+    //
+    // Qualified: modules with generic verbs (get/put/search/read/write/error)
+    // that would collide with Prelude symbols or with each other if unqualified.
+    // Pattern.Log is qualified because `error` from Log would shadow the Text
+    // shim defined below; File because `read` shadows Prelude.read; Memory and
+    // Recall because both export `get`/`search`; Search because `all_` might
+    // still read ambiguously without context.
+    out.push_str("-- Qualified SDK effects (generic verbs clarified by prefix)\n");
+    out.push_str("import qualified Pattern.Memory as Memory\n");
+    out.push_str("import qualified Pattern.File as File\n");
+    out.push_str("import qualified Pattern.Log as Log\n");
+    out.push_str("import qualified Pattern.Sources as Sources\n");
+    out.push_str("import qualified Pattern.Shell as Shell\n");
+    out.push_str("import qualified Pattern.Rpc as Rpc\n");
+    out.push_str("import qualified Pattern.Mcp as Mcp\n");
+    out.push_str("import qualified Pattern.Search as Search\n");
+    out.push_str("import qualified Pattern.Recall as Recall\n");
+
     out.push_str("default (Int, Text)\n");
+    // Text-accepting error shim. Hides Pattern.Log.error (qualified as
+    // Log.error) and base Prelude.error. Agents should use Log.error for
+    // effect-based logging and this `error` only for fatal abort.
     out.push_str("error :: Text -> a\nerror = P.error . T.unpack\n");
     out.push('\n');
 
-    // Emit each effect's type_defs, then GADT declaration.
-    for eff in decls {
-        for td in eff.type_defs {
-            out.push_str(td);
-            out.push('\n');
-        }
-        out.push_str(&format!("data {} a where\n", eff.type_name));
-        for ctor in eff.constructors {
-            out.push_str(&format!("  {}\n", ctor));
-        }
-        out.push('\n');
-    }
+    // Effect-row type alias with qualified names where required.
+    // Canonical order: Memory, Search, Recall, Message, Display, Time,
+    // Log, Shell, File, Sources, Mcp, Rpc, Spawn.
+    out.push_str(concat!(
+        "type M = Eff '[Memory.Memory, Search.Search, Recall.Recall, ",
+        "Message, Display, Time, Log.Log, Shell.Shell, ",
+        "File.File, Sources.Sources, Mcp.Mcp, Rpc.Rpc, Spawn]\n\n",
+    ));
 
-    // Type alias: `type M = Eff '[Memory, Message, ...]`.
-    if !decls.is_empty() {
-        let names: Vec<&str> = decls.iter().map(|e| e.type_name).collect();
-        out.push_str(&format!("type M = Eff '[{}]\n\n", names.join(", ")));
-    }
-
-    // Emit thin effect helpers.
-    let has_helpers = decls.iter().any(|e| !e.helpers.is_empty());
-    if has_helpers {
-        for eff in decls {
-            for h in eff.helpers {
-                out.push_str(h);
-                out.push('\n');
-            }
-        }
-        out.push('\n');
-    }
-
-    // Pagination support — auto-truncation of large eval results.
-    // Pattern doesn't have Ask, so paginateResult is the simple
-    // non-interactive variant (pure truncation, no stub drill-down).
-    if !decls.is_empty() {
-        emit_pagination_support(&mut out);
-    }
+    // Pagination support — pure Haskell functions (no effect types),
+    // safe to inline. The non-interactive variant (no Ask drill-down).
+    emit_pagination_support(&mut out);
 
     out
 }
@@ -173,14 +194,27 @@ fn emit_pagination_support(out: &mut String) {
     out.push('\n');
 }
 
-/// Build the effect stack type string, e.g. `'[Memory, Message, ...]`.
+/// Build the effect stack type string using qualified names where required.
+///
+/// Returns the canonical 13-effect row string matching the `type M` alias
+/// in the preamble: `'[Memory.Memory, Search.Search, Recall.Recall,
+/// Message, Display, Time, Log.Log, Shell.Shell, File.File,
+/// Sources.Sources, Mcp.Mcp, Rpc.Rpc, Spawn]`.
+///
+/// Returns `'[]` when `decls` is empty (legacy / test use).
 pub fn build_effect_stack_type(decls: &[EffectDecl]) -> String {
     if decls.is_empty() {
-        "'[]".to_string()
-    } else {
-        let names: Vec<&str> = decls.iter().map(|e| e.type_name).collect();
-        format!("'[{}]", names.join(", "))
+        return "'[]".to_string();
     }
+    // The canonical qualified-name row must match the `type M` alias in
+    // `build()`. These are parallel-maintained; if the canonical effect row
+    // in `bundle.rs` ever changes, both must be updated together.
+    concat!(
+        "'[Memory.Memory, Search.Search, Recall.Recall, ",
+        "Message, Display, Time, Log.Log, Shell.Shell, ",
+        "File.File, Sources.Sources, Mcp.Mcp, Rpc.Rpc, Spawn]"
+    )
+    .to_string()
 }
 
 #[cfg(test)]
@@ -206,17 +240,44 @@ mod tests {
         assert!(preamble.contains("DataKinds"), "missing DataKinds pragma");
     }
 
+    /// The preamble imports effect modules rather than inlining GADT
+    /// declarations. Verify the unqualified imports are present.
     #[test]
-    fn preamble_contains_all_gadt_declarations() {
+    fn preamble_contains_unqualified_effect_imports() {
         let decls = canonical_effect_decls();
         let preamble = build(&decls);
-        for decl in &decls {
-            let gadt_header = format!("data {} a where", decl.type_name);
+        for module in &[
+            "Pattern.Message",
+            "Pattern.Time",
+            "Pattern.Display",
+            "Pattern.Spawn",
+        ] {
+            let import_line = format!("import {module}");
             assert!(
-                preamble.contains(&gadt_header),
-                "missing GADT declaration for {}",
-                decl.type_name
+                preamble.contains(&import_line),
+                "missing unqualified import for {module}"
             );
+        }
+    }
+
+    /// Verify that the qualified effect imports are present with the expected aliases.
+    #[test]
+    fn preamble_contains_qualified_effect_imports() {
+        let decls = canonical_effect_decls();
+        let preamble = build(&decls);
+        let expected = &[
+            "import qualified Pattern.Memory as Memory",
+            "import qualified Pattern.File as File",
+            "import qualified Pattern.Log as Log",
+            "import qualified Pattern.Sources as Sources",
+            "import qualified Pattern.Shell as Shell",
+            "import qualified Pattern.Rpc as Rpc",
+            "import qualified Pattern.Mcp as Mcp",
+            "import qualified Pattern.Search as Search",
+            "import qualified Pattern.Recall as Recall",
+        ];
+        for line in expected {
+            assert!(preamble.contains(line), "missing: {line}");
         }
     }
 
@@ -224,9 +285,20 @@ mod tests {
     fn preamble_contains_type_m_alias() {
         let decls = canonical_effect_decls();
         let preamble = build(&decls);
+        // The type M alias uses qualified names for modules with generic-verb
+        // helpers (Memory.Memory, Search.Search, etc.) and bare names for
+        // unambiguous ones (Message, Display, Time, Spawn).
         assert!(
-            preamble.contains("type M = Eff '[Memory, Search, Recall, Message, Display, Time, Log, Shell, File, Sources, Mcp, Rpc, Spawn]"),
-            "missing or incorrect type M alias"
+            preamble.contains("type M = Eff '[Memory.Memory, Search.Search, Recall.Recall"),
+            "missing or incorrect qualified type M alias"
+        );
+        assert!(
+            preamble.contains("Message, Display, Time, Log.Log"),
+            "missing Message/Display/Time/Log.Log in type M"
+        );
+        assert!(
+            preamble.contains("File.File, Sources.Sources, Mcp.Mcp, Rpc.Rpc, Spawn]"),
+            "missing File/Sources/Mcp/Rpc/Spawn in type M"
         );
     }
 
@@ -242,30 +314,11 @@ mod tests {
     }
 
     #[test]
-    fn preamble_contains_helpers() {
-        let decls = canonical_effect_decls();
-        let preamble = build(&decls);
-        // Spot-check a few helpers.
-        assert!(
-            preamble.contains("get :: Member Memory effs"),
-            "missing Memory.get helper"
-        );
-        assert!(
-            preamble.contains("send_ :: Member Message effs"),
-            "missing Message.send_ helper"
-        );
-        assert!(
-            preamble.contains("chunk :: Member Display effs"),
-            "missing Display.chunk helper"
-        );
-    }
-
-    #[test]
     fn preamble_contains_standard_imports() {
         let decls = canonical_effect_decls();
         let preamble = build(&decls);
         assert!(
-            preamble.contains("import Tidepool.Prelude"),
+            preamble.contains("import Pattern.Prelude"),
             "missing Prelude import"
         );
         assert!(
@@ -273,11 +326,13 @@ mod tests {
             "missing Freer import"
         );
         assert!(
-            preamble.contains("import qualified Tidepool.Aeson"),
+            preamble.contains("import qualified Pattern.Aeson"),
             "missing Aeson import"
         );
     }
 
+    /// The canonical effect row order must match the bundle — this is
+    /// used by the JIT effect-tag assignment and must never diverge.
     #[test]
     fn effect_row_order_matches_bundle() {
         let decls = canonical_effect_decls();
@@ -293,8 +348,14 @@ mod tests {
     fn build_effect_stack_type_produces_correct_string() {
         let decls = canonical_effect_decls();
         let stack = build_effect_stack_type(&decls);
-        assert!(stack.starts_with("'[Memory, Search, Recall, Message, Display"));
-        assert!(stack.ends_with("Spawn]"));
+        assert!(
+            stack.starts_with("'[Memory.Memory, Search.Search, Recall.Recall, Message"),
+            "expected qualified form; got: {stack}"
+        );
+        assert!(
+            stack.ends_with("Spawn]"),
+            "expected Spawn] at end; got: {stack}"
+        );
     }
 
     #[test]

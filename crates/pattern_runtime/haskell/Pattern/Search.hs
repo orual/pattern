@@ -36,15 +36,16 @@ data Search a where
 
 -- | Search message history. Scope defaults to current agent when
 -- 'Nothing'.
-searchMessages :: Member Search effs => SearchQuery -> Maybe Scope -> Eff effs [SearchHit]
-searchMessages q s = send (SearchMessages q s)
+messages :: Member Search effs => SearchQuery -> Maybe Scope -> Eff effs [SearchHit]
+messages q s = send (SearchMessages q s)
 
 -- | Search archival entries. Scope defaults to current agent when
 -- 'Nothing'.
-searchArchival :: Member Search effs => SearchQuery -> Maybe Scope -> Eff effs [SearchHit]
-searchArchival q s = send (SearchArchival q s)
+archival :: Member Search effs => SearchQuery -> Maybe Scope -> Eff effs [SearchHit]
+archival q s = send (SearchArchival q s)
 
 -- | Search all domains (messages + archival + blocks). Scope defaults
--- to current agent when 'Nothing'.
-searchAll :: Member Search effs => SearchQuery -> Maybe Scope -> Eff effs [SearchHit]
-searchAll q s = send (SearchAll q s)
+-- to current agent when 'Nothing'. Trailing underscore avoids collision
+-- with 'Pattern.Prelude.all' when this module is imported unqualified.
+all_ :: Member Search effs => SearchQuery -> Maybe Scope -> Eff effs [SearchHit]
+all_ q s = send (SearchAll q s)

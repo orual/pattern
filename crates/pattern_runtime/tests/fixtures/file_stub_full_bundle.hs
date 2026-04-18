@@ -1,6 +1,6 @@
 {-# LANGUAGE DataKinds, TypeOperators, OverloadedStrings #-}
 -- | Minimal agent against the full 13-handler SdkBundle that calls
--- `Pattern.File.read_` — the File stub rejects with "not implemented",
+-- `Pattern.File.read` — the File stub rejects with "not implemented",
 -- which the session should surface as
 -- `RuntimeError::SdkHandlerFailed { handler: "Pattern.File", ... }`.
 --
@@ -18,13 +18,15 @@ import Pattern.Display
 import Pattern.Time
 import Pattern.Log
 import Pattern.Shell
-import Pattern.File
+import qualified Pattern.File as F
 import Pattern.Sources
 import Pattern.Mcp
 import Pattern.Rpc
 import Pattern.Spawn
 
-agent :: Eff '[Memory, Search, Recall, Message, Display, Time, Log, Shell, File, Sources, Mcp, Rpc, Spawn] ()
+-- Qualified import of Pattern.File avoids ambiguity with base Prelude.read
+-- (this fixture has no NoImplicitPrelude pragma).
+agent :: Eff '[Memory, Search, Recall, Message, Display, Time, Log, Shell, F.File, Sources, Mcp, Rpc, Spawn] ()
 agent = do
-  _ <- read_ "/does/not/exist"
+  _ <- F.read "/does/not/exist"
   pure ()

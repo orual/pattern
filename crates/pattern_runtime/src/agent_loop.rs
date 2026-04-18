@@ -45,6 +45,7 @@ use futures::StreamExt;
 use jiff::Timestamp;
 
 use pattern_core::error::RuntimeError;
+use pattern_core::memory::StructuredDocument;
 use pattern_core::traits::TurnEvent;
 use pattern_core::types::ids::{AgentId, MessageId, new_id};
 use pattern_core::types::message::{Message, ResponseMeta};
@@ -148,6 +149,7 @@ pub async fn orchestrate(
     dispatcher: &dyn EvalDispatcher,
     preamble: &str,
     has_segment_1: bool,
+    expect_segment_1_hit: bool,
 ) -> Result<TurnOutput, RuntimeError> {
     // 1. Call the provider, consume the stream. Caller is responsible
     //    for having built `req` via the composer pipeline (segments
@@ -274,7 +276,14 @@ pub async fn orchestrate(
     //     stable system-prompt prefix) but the response reported zero cache
     //     reads. This can mean TTL expiry, a content change in segment 1, or
     //     a provider-side regression — all require operator attention.
-    if has_segment_1 && cache_metrics.cache_read_input_tokens == 0 {
+    //
+    //     Gate on `expect_segment_1_hit` too: the VERY first wire turn in a
+    //     session has nothing to hit (baseline write), so `cache_read == 0`
+    //     there is expected, not a bust. drive_step passes `false` on the
+    //     first turn and `true` on subsequent turns in the same exchange;
+    //     callers driving orchestrate directly (tests) pass whatever's
+    //     semantically correct.
+    if has_segment_1 && expect_segment_1_hit && cache_metrics.cache_read_input_tokens == 0 {
         tracing::warn!(
             agent_id = ctx.agent_id(),
             turn_id = %input.turn_id,
@@ -344,6 +353,18 @@ pub async fn drive_step(
     let mut turns: Vec<TurnOutput> = Vec::new();
     let mut cur_input = initial_input;
 
+    // We expect a cache hit on segment 1 only on turns AFTER the
+    // first one in THIS session. Detect via turn_history: if it
+    // already has any active messages, prior turns have run and
+    // segment 1 SHOULD hit. On a fresh session (empty history +
+    // first wire turn), read==0 is the baseline write, not a bust.
+    let had_prior_turns = turn_history
+        .lock()
+        .map(|h| h.active_messages().next().is_some())
+        .unwrap_or(false);
+
+    let mut is_first_wire_turn_in_session = !had_prior_turns;
+
     loop {
         // Build the composed CompletionRequest for THIS wire turn:
         // segments 1 (system + persona + tools) / 2 (prior messages +
@@ -353,6 +374,11 @@ pub async fn drive_step(
         let (req, has_segment_1) =
             compose_request_for_turn(&ctx, &turn_history, &cur_input, &cache_profile).await?;
 
+        // Expect a segment-1 cache hit on every wire turn AFTER the
+        // very first in the session — seg1 is stable, so from turn 2
+        // onwards the server should have it cached.
+        let expect_segment_1_hit = !is_first_wire_turn_in_session;
+
         let turn = orchestrate(
             req,
             cur_input,
@@ -360,8 +386,11 @@ pub async fn drive_step(
             dispatcher,
             preamble,
             has_segment_1,
+            expect_segment_1_hit,
         )
         .await?;
+
+        is_first_wire_turn_in_session = false;
         let terminal = turn.stop_reason.is_terminal();
         let needs_next =
             matches!(turn.stop_reason, StopReason::ToolUse) && !turn.tool_results.is_empty();
@@ -490,16 +519,80 @@ async fn compose_request_for_turn(
         (summary_head_messages, prior_messages, recent_block_writes)
     };
 
-    // 4. Record whether segment 1 has content before `system_blocks`
+    // 4. Load segment-3 blocks: all agent blocks EXCEPT the persona
+    //    (which already lives in segment 1's system prompt — loading
+    //    it twice would double-count cache + token cost).
+    //
+    //    Today this means "every block attached to this agent" —
+    //    there's no per-conversation selection of which blocks are
+    //    in-context. A more selective loader (only blocks referenced
+    //    in the current turn, or explicitly-loaded blocks tracked
+    //    per session) is future refinement; the current shape at
+    //    least makes segment 3 carry real content so the cache
+    //    behaviour matches the plan's design.
+    let mut loaded_blocks: Vec<StructuredDocument> = Vec::new();
+    let block_list = ctx
+        .memory_store()
+        .list_blocks(ctx.agent_id())
+        .await
+        .map_err(|e| RuntimeError::ProviderError {
+            reason: format!("list_blocks failed: {e}"),
+        })?;
+    for meta in block_list {
+        if meta.label == pattern_core::PERSONA_LABEL {
+            continue;
+        }
+        if let Some(doc) = ctx
+            .memory_store()
+            .get_block(ctx.agent_id(), &meta.label)
+            .await
+            .map_err(|e| RuntimeError::ProviderError {
+                reason: format!("get_block({}) failed: {e}", meta.label),
+            })?
+        {
+            loaded_blocks.push(doc);
+        }
+    }
+
+    // 5. Record whether segment 1 has content before `system_blocks`
     //    is moved into the pass. `build_system_prompt` always emits at
     //    least base-instructions, so this is almost always `true` — we
     //    track it explicitly so the AC8.5 bust warning has a reliable
     //    predicate rather than guessing.
     let has_segment_1 = !system_blocks.is_empty();
 
-    // 4a. Assemble the pass list. Boxed so the compose() helper can
-    //     iterate a uniform Vec<Box<dyn ComposerPass>>.
-    let passes: Vec<Box<dyn ComposerPass>> = vec![
+    // 6. Detect tool-continuation turns. Anthropic's wire protocol
+    //    requires that an assistant message containing `tool_use`
+    //    blocks be IMMEDIATELY followed by a user message with
+    //    matching `tool_result` blocks — no pseudo-messages,
+    //    current-state stubs, or other user-role content may
+    //    intervene. When the input is `tool_results` (built via
+    //    `TurnInput::from_tool_results`), the naive segment-3 pass
+    //    emits its pseudo-user message between the prior
+    //    assistant(tool_use) and our user(tool_result), which
+    //    Anthropic 400s with "tool_use ids were found without
+    //    tool_result blocks immediately after".
+    //
+    //    Our fix matches claude-code's convention (see
+    //    smooshSystemReminderSiblings in their utils/messages.ts):
+    //    splice the segment-3 text IN FRONT OF the tool_result
+    //    content parts inside the SAME user message. Anthropic
+    //    accepts multiple content parts per user message as long as
+    //    the tool_result block is present; the composer's
+    //    segment-3 cache_control marker lands on the last content
+    //    block (via genai's apply_cache_control_to_parts), which
+    //    IS the tool_result — the cache span still includes the
+    //    prepended segment-3 text earlier in the same message.
+    let is_tool_continuation = input
+        .messages
+        .iter()
+        .any(|m| m.chat_message.role == genai::chat::ChatRole::Tool);
+
+    // Assemble the pass list. Segment3Pass runs on non-continuation
+    // turns; on continuation turns we splice manually after
+    // compose() below (Segment3Pass would emit a free-standing
+    // pseudo-user message that violates Anthropic's adjacency rule).
+    let mut passes: Vec<Box<dyn ComposerPass>> = vec![
         Box::new(Segment1Pass::new(
             system_blocks,
             vec![CODE_TOOL.clone()],
@@ -511,20 +604,96 @@ async fn compose_request_for_turn(
             &recent_block_writes,
             cache_profile.clone(),
         )),
-        // Segment 3: empty blocks today — see function doc for the
-        // future-work note.
-        Box::new(Segment3Pass::new(Vec::new(), cache_profile.clone())),
     ];
+    let mut segment_3_for_splice: Option<Vec<StructuredDocument>> = None;
+    if is_tool_continuation {
+        segment_3_for_splice = Some(loaded_blocks);
+    } else {
+        passes.push(Box::new(Segment3Pass::new(
+            loaded_blocks,
+            cache_profile.clone(),
+        )));
+    }
 
     let initial = PartialRequest::new(ctx.model_id());
     let mut req = compose(&passes, initial).map_err(|e| RuntimeError::ProviderError {
         reason: format!("composer pipeline failed: {e}"),
     })?;
 
-    // 5. Append fresh input messages AFTER compose so they sit
+    // 7. Enable capture flags on ChatOptions so the genai streamer
+    //    populates StreamEnd with usage / content / tool_calls /
+    //    reasoning. Without these, the Anthropic streamer silently
+    //    drops the fields and the agent loop sees empty
+    //    TurnOutput.usage / cache_metrics and no captured tool_calls,
+    //    which breaks drive_step's loop termination logic.
+    req.options = req
+        .options
+        .with_capture_usage(true)
+        .with_capture_content(true)
+        .with_capture_tool_calls(true)
+        .with_capture_reasoning_content(true);
+
+    // 8. Append fresh input messages AFTER compose so they sit
     //    beyond the segment-3 cache boundary (uncached by design).
     for msg in &input.messages {
         req.chat.messages.push(msg.chat_message.clone());
+    }
+
+    // 9. On tool-continuation turns, splice segment 3 into the
+    //    tool_result message (the one we just appended). Picks the
+    //    LAST tool-role message since input may contain multiple.
+    if let Some(blocks) = segment_3_for_splice {
+        use genai::chat::{ChatRole, ContentPart, MessageContent};
+
+        let seg3_msg = pattern_provider::compose::current_state::render_current_state(&blocks);
+        let seg3_text = seg3_msg
+            .content
+            .joined_texts()
+            .unwrap_or_else(|| "[memory:current_state]\n(no blocks loaded)".into());
+
+        if let Some(last_tool_msg) = req
+            .chat
+            .messages
+            .iter_mut()
+            .rev()
+            .find(|m| m.role == ChatRole::Tool)
+        {
+            // Prepend the segment-3 text as a text content part,
+            // keeping the tool_result parts afterwards so the
+            // tool_result remains the LAST content block (which is
+            // where genai's apply_cache_control_to_parts lands the
+            // cache_control marker).
+            let mut new_parts: Vec<ContentPart> = vec![ContentPart::Text(seg3_text)];
+            for part in last_tool_msg.content.parts().iter() {
+                new_parts.push(part.clone());
+            }
+            last_tool_msg.content = MessageContent::from_parts(new_parts);
+
+            // Flip role Tool → User so the genai Anthropic adapter serializes
+            // the spliced Text part. The adapter's Tool branch only emits
+            // ToolResponse parts and silently drops Text; the User branch
+            // handles both Text and ToolResponse, emitting the correct
+            // Anthropic wire format (user-role message with text blocks
+            // followed by tool_result blocks). Cache-control still lands on
+            // the last content part (the tool_result) via
+            // apply_cache_control_to_parts, so cache semantics are preserved.
+            last_tool_msg.role = ChatRole::User;
+
+            // Apply segment-3 cache_control so the spliced seg3 +
+            // tool_result message is the cache boundary. Note: this
+            // marker is applied directly to the ChatMessage options
+            // rather than via the composer's BreakpointTracker — it
+            // bypasses the 4-marker budget check, but seg1+seg2+seg3
+            // = 3 markers so we're still under the Anthropic limit.
+            // break-detection hashing won't capture this marker;
+            // observability gap noted for follow-up.
+            let opts = last_tool_msg
+                .options
+                .clone()
+                .unwrap_or_default()
+                .with_cache_control(cache_profile.segment_3_control());
+            last_tool_msg.options = Some(opts);
+        }
     }
 
     Ok((req, has_segment_1))
@@ -861,9 +1030,17 @@ mod tests {
             mock_session(vec![MockProviderClient::text_turn("Hello, world!")]);
 
         let dispatcher = NoOpDispatcher;
-        let out = orchestrate(simple_req(), test_turn_input(), ctx, &dispatcher, "", false)
-            .await
-            .expect("orchestrate should succeed");
+        let out = orchestrate(
+            simple_req(),
+            test_turn_input(),
+            ctx,
+            &dispatcher,
+            "",
+            false,
+            false,
+        )
+        .await
+        .expect("orchestrate should succeed");
 
         assert_eq!(provider.call_count(), 1);
         assert_eq!(out.stop_reason, StopReason::EndTurn);
@@ -894,9 +1071,17 @@ mod tests {
         )]);
 
         let dispatcher = NoOpDispatcher;
-        let out = orchestrate(simple_req(), test_turn_input(), ctx, &dispatcher, "", false)
-            .await
-            .expect("orchestrate should succeed");
+        let out = orchestrate(
+            simple_req(),
+            test_turn_input(),
+            ctx,
+            &dispatcher,
+            "",
+            false,
+            false,
+        )
+        .await
+        .expect("orchestrate should succeed");
 
         assert_eq!(out.stop_reason, StopReason::EndTurn);
         let msg = out.messages.first().expect("assistant message");
@@ -945,9 +1130,17 @@ mod tests {
         )]);
 
         let dispatcher = MockSuccessDispatcher::default();
-        let out = orchestrate(simple_req(), test_turn_input(), ctx, &dispatcher, "", false)
-            .await
-            .expect("orchestrate should succeed");
+        let out = orchestrate(
+            simple_req(),
+            test_turn_input(),
+            ctx,
+            &dispatcher,
+            "",
+            false,
+            false,
+        )
+        .await
+        .expect("orchestrate should succeed");
 
         assert_eq!(out.stop_reason, StopReason::ToolUse);
         assert_eq!(out.tool_calls.len(), 1);
@@ -1062,9 +1255,17 @@ mod tests {
         )]);
 
         let dispatcher = NoOpDispatcher;
-        let out = orchestrate(simple_req(), test_turn_input(), ctx, &dispatcher, "", false)
-            .await
-            .expect("orchestrate should succeed");
+        let out = orchestrate(
+            simple_req(),
+            test_turn_input(),
+            ctx,
+            &dispatcher,
+            "",
+            false,
+            false,
+        )
+        .await
+        .expect("orchestrate should succeed");
 
         let m = &out.cache_metrics;
         assert_eq!(m.cache_read_input_tokens, 800, "cache_read should be 800");
@@ -1103,9 +1304,17 @@ mod tests {
 
         let (ctx, _sink, _) = mock_session(vec![no_usage_turn]);
         let dispatcher = NoOpDispatcher;
-        let out = orchestrate(simple_req(), test_turn_input(), ctx, &dispatcher, "", false)
-            .await
-            .expect("orchestrate should succeed");
+        let out = orchestrate(
+            simple_req(),
+            test_turn_input(),
+            ctx,
+            &dispatcher,
+            "",
+            false,
+            false,
+        )
+        .await
+        .expect("orchestrate should succeed");
 
         let m = &out.cache_metrics;
         assert_eq!(m.cache_read_input_tokens, 0);
@@ -1132,9 +1341,17 @@ mod tests {
             fresh_usage,
         )]);
         let dispatcher = NoOpDispatcher;
-        let out = orchestrate(simple_req(), test_turn_input(), ctx, &dispatcher, "", false)
-            .await
-            .expect("orchestrate should succeed");
+        let out = orchestrate(
+            simple_req(),
+            test_turn_input(),
+            ctx,
+            &dispatcher,
+            "",
+            false,
+            false,
+        )
+        .await
+        .expect("orchestrate should succeed");
 
         let m = &out.cache_metrics;
         assert_eq!(m.fresh_input_tokens, 500);
@@ -1174,7 +1391,8 @@ mod tests {
             ctx,
             &dispatcher,
             "",
-            true, // has_segment_1 = true → bust warning expected
+            true, // has_segment_1 = true
+            true, // expect_segment_1_hit = true → bust warning expected
         )
         .await
         .expect("orchestrate should succeed");
@@ -1218,7 +1436,8 @@ mod tests {
             ctx,
             &dispatcher,
             "",
-            true, // has_segment_1 = true, but cache_read > 0 → no warn
+            true, // has_segment_1 = true
+            true, // expect_segment_1_hit = true, but cache_read > 0 → no warn
         )
         .await
         .expect("orchestrate should succeed");

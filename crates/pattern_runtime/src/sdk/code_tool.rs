@@ -31,9 +31,9 @@ pub static CODE_TOOL: LazyLock<Tool> = LazyLock::new(|| {
              with imports, type signatures, and the effect row already \
              set up — you do NOT need to write the module header, \
              imports, or the type signature for `result`.\n\n\
-             Use Pattern.Memory.put to write a block, \
-             Pattern.Memory.append to add to an existing one, \
-             Pattern.Message.send_ to route a message to another agent \
+             Use Memory.put to write a block, \
+             Memory.append to add to an existing one, \
+             send to route a message to another agent \
              (scheme agent:<id>) or a CLI / external endpoint (scheme \
              cli:<id> etc.).",
         )
@@ -215,9 +215,15 @@ mod tests {
             source.contains("module Expr where"),
             "missing module header"
         );
+        // The preamble imports effect modules rather than inlining GADT
+        // declarations — verify the import scheme is present.
         assert!(
-            source.contains("data Memory a where"),
-            "missing Memory GADT"
+            source.contains("import qualified Pattern.Memory as Memory"),
+            "missing qualified Memory import"
+        );
+        assert!(
+            source.contains("import Pattern.Message"),
+            "missing unqualified Message import"
         );
     }
 

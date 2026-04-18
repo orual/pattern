@@ -58,9 +58,9 @@ impl DescribeEffect for SearchHandler {
                 "type SearchHit = Text",
             ],
             helpers: &[
-                "searchMessages :: Member Search effs => SearchQuery -> Maybe Scope -> Eff effs [SearchHit]\nsearchMessages q s = send (SearchMessages q s)",
-                "searchArchival :: Member Search effs => SearchQuery -> Maybe Scope -> Eff effs [SearchHit]\nsearchArchival q s = send (SearchArchival q s)",
-                "searchAll :: Member Search effs => SearchQuery -> Maybe Scope -> Eff effs [SearchHit]\nsearchAll q s = send (SearchAll q s)",
+                "messages :: Member Search effs => SearchQuery -> Maybe Scope -> Eff effs [SearchHit]\nmessages q s = send (SearchMessages q s)",
+                "archival :: Member Search effs => SearchQuery -> Maybe Scope -> Eff effs [SearchHit]\narchival q s = send (SearchArchival q s)",
+                "all_ :: Member Search effs => SearchQuery -> Maybe Scope -> Eff effs [SearchHit]\nall_ q s = send (SearchAll q s)",
             ],
         }
     }

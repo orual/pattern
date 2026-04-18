@@ -9,7 +9,7 @@
 -- might reintroduce an unqualified-name overlap; the derive layer's
 -- arity disambiguation + module-qualified lookup must continue to work.
 --
--- The agent calls `M.put`, `M.get`, and `F.read_` in sequence. Decode
+-- The agent calls `M.put`, `M.get`, and `F.read` in sequence. Decode
 -- must succeed for all three; dispatch then routes the Memory ops to
 -- the real MemoryHandler (Put auto-creates, Get reads it back) and
 -- File.Read to the stub (which errors with "not implemented" —
@@ -44,5 +44,5 @@ agent = do
   M.put "greeting" "hello"
   -- Both arity-1 Reads. Only module qualification can disambiguate these.
   _ <- M.get "greeting"
-  _ <- F.read_ "/does/not/exist"
+  _ <- F.read "/does/not/exist"
   pure ()

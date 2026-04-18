@@ -35,18 +35,18 @@ data Recall a where
   RecallDelete :: EntryId -> Recall ()
 
 -- | Insert a new archival entry, returning its id.
-recallInsert :: Member Recall effs => ArchivalContent -> Eff effs EntryId
-recallInsert c = send (RecallInsert c)
+insert :: Member Recall effs => ArchivalContent -> Eff effs EntryId
+insert c = send (RecallInsert c)
 
 -- | Search archival entries. Scope defaults to current agent when
 -- 'Nothing'.
-recallSearch :: Member Recall effs => RecallQuery -> Maybe Scope -> Eff effs [ArchivalHit]
-recallSearch q s = send (RecallSearch q s)
+search :: Member Recall effs => RecallQuery -> Maybe Scope -> Eff effs [ArchivalHit]
+search q s = send (RecallSearch q s)
 
 -- | Get a specific archival entry by id.
-recallGet :: Member Recall effs => EntryId -> Eff effs ArchivalContent
-recallGet i = send (RecallGet i)
+get :: Member Recall effs => EntryId -> Eff effs ArchivalContent
+get i = send (RecallGet i)
 
 -- | Delete an archival entry by id.
-recallDelete :: Member Recall effs => EntryId -> Eff effs ()
-recallDelete i = send (RecallDelete i)
+delete :: Member Recall effs => EntryId -> Eff effs ()
+delete i = send (RecallDelete i)

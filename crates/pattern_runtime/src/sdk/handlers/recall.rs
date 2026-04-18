@@ -60,10 +60,10 @@ impl DescribeEffect for RecallHandler {
                 "type ArchivalHit = Text",
             ],
             helpers: &[
-                "recallInsert :: Member Recall effs => ArchivalContent -> Eff effs EntryId\nrecallInsert c = send (RecallInsert c)",
-                "recallSearch :: Member Recall effs => RecallQuery -> Maybe Scope -> Eff effs [ArchivalHit]\nrecallSearch q s = send (RecallSearch q s)",
-                "recallGet :: Member Recall effs => EntryId -> Eff effs ArchivalContent\nrecallGet i = send (RecallGet i)",
-                "recallDelete :: Member Recall effs => EntryId -> Eff effs ()\nrecallDelete i = send (RecallDelete i)",
+                "insert :: Member Recall effs => ArchivalContent -> Eff effs EntryId\ninsert c = send (RecallInsert c)",
+                "search :: Member Recall effs => RecallQuery -> Maybe Scope -> Eff effs [ArchivalHit]\nsearch q s = send (RecallSearch q s)",
+                "get :: Member Recall effs => EntryId -> Eff effs ArchivalContent\nget i = send (RecallGet i)",
+                "delete :: Member Recall effs => EntryId -> Eff effs ()\ndelete i = send (RecallDelete i)",
             ],
         }
     }
