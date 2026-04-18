@@ -10,6 +10,7 @@
 //! stubbed with NotImplemented diagnostics).
 
 pub mod bundle;
+pub mod code_tool;
 pub mod describe;
 pub mod handlers;
 pub mod location;
@@ -17,5 +18,6 @@ pub mod preamble;
 pub mod requests;
 
 pub use bundle::SdkBundle;
+pub use code_tool::CODE_TOOL;
 pub use describe::{CollectEffectDecls, DescribeEffect, EffectDecl};
 pub use location::SdkLocation;
