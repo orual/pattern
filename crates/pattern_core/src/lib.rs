@@ -91,7 +91,7 @@ pub use types::block::{BlockCreate, BlockHandle, BlockWrite, BlockWriteKind};
 pub use types::origin::{AgentAuthor, Author, Human, MessageOrigin, Partner, Sphere, SystemReason};
 
 // Turn types
-pub use types::turn::{TurnCacheMetrics, TurnId, TurnInput, TurnOutput};
+pub use types::turn::{StepReply, StopReason, TurnCacheMetrics, TurnId, TurnInput, TurnOutput};
 
 // Snapshot / persona types (Phase 3 checkpoint stubs)
 pub use types::snapshot::{PersonaConfig, PersonaSnapshot, SessionSnapshot};

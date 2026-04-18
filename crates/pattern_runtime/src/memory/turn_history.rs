@@ -179,6 +179,7 @@ mod tests {
     use smol_str::SmolStr;
 
     fn make_turn_output(msg_count: usize, block_writes: Vec<BlockWrite>) -> TurnOutput {
+        use pattern_core::types::turn::StopReason;
         TurnOutput {
             messages: (0..msg_count)
                 .map(|i| Message {
@@ -192,6 +193,9 @@ mod tests {
                 })
                 .collect(),
             block_writes,
+            tool_calls: vec![],
+            tool_results: vec![],
+            stop_reason: StopReason::EndTurn,
             usage: None,
             cache_metrics: Default::default(),
             completed_at: Timestamp::now(),

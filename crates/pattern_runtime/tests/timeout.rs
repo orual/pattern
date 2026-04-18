@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use pattern_core::error::{CancelPath, RuntimeError};
 use pattern_core::traits::{AgentRuntime, Session};
-use pattern_core::types::ids::new_id;
+use pattern_core::types::ids::{new_id, BatchId};
 use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
 use pattern_core::types::snapshot::PersonaConfig;
 use pattern_core::types::turn::TurnInput;
@@ -29,6 +29,7 @@ fn preflight_or_fail() {
 fn fresh_turn_input() -> TurnInput {
     TurnInput {
         turn_id: new_id(),
+        batch_id: BatchId::from(new_id()),
         origin: MessageOrigin::new(
             Author::System {
                 reason: SystemReason::Wakeup,

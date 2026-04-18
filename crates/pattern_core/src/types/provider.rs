@@ -48,6 +48,160 @@ pub use genai::chat::{
     Tool, ToolCall, ToolChunk, ToolResponse, Usage,
 };
 
+// ---- ToolOutcome / ToolResult (Pattern-side tool-eval bookkeeping) ----
+
+/// Result of executing a single tool call at the agent-loop layer.
+///
+/// [`ToolResponse`] (re-exported from `genai`) only carries
+/// `{ call_id, content }` as a bare string — it cannot distinguish a
+/// success payload from an error. Pattern's agent loop needs that
+/// distinction (so a failed Haskell eval doesn't look like a valid JSON
+/// result to the LLM), so we encode the variant at this layer and
+/// flatten to `ToolResponse` when handing off to the wire. When genai
+/// gains a native `is_error` field we widen this bridge accordingly.
+///
+/// # Examples
+///
+/// ```
+/// use pattern_core::types::provider::ToolOutcome;
+/// use serde_json::json;
+///
+/// let ok = ToolOutcome::Success(json!({"value": 42}));
+/// let err = ToolOutcome::Error("invalid input".into());
+/// assert!(matches!(ok, ToolOutcome::Success(_)));
+/// assert!(matches!(err, ToolOutcome::Error(_)));
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum ToolOutcome {
+    /// Tool ran to completion; payload is the JSON result the agent
+    /// will see.
+    Success(serde_json::Value),
+    /// Tool failed; payload is the human-readable error (sent back
+    /// to the LLM as the tool_result content so it can recover).
+    Error(String),
+}
+
+impl ToolOutcome {
+    /// `true` when this is the error variant.
+    pub fn is_error(&self) -> bool {
+        matches!(self, ToolOutcome::Error(_))
+    }
+
+    /// Render the outcome as a plain string suitable for
+    /// [`ToolResponse::content`]. Success payloads are JSON-serialised;
+    /// errors pass through as-is.
+    pub fn to_content_string(&self) -> String {
+        match self {
+            ToolOutcome::Success(v) => serde_json::to_string(v)
+                .unwrap_or_else(|_| v.to_string()),
+            ToolOutcome::Error(msg) => msg.clone(),
+        }
+    }
+}
+
+/// A single completed tool call paired with its originating call id.
+///
+/// Produced by the Phase 5 agent loop after dispatching a [`ToolCall`]
+/// to the Haskell eval worker. Converts to [`ToolResponse`] via
+/// [`Self::to_tool_response`] when the driver assembles the next wire
+/// turn's request.
+///
+/// # Examples
+///
+/// ```
+/// use pattern_core::types::provider::{ToolOutcome, ToolResult};
+/// use serde_json::json;
+///
+/// let r = ToolResult {
+///     call_id: "call_123".into(),
+///     outcome: ToolOutcome::Success(json!({"ok": true})),
+/// };
+/// let wire = r.to_tool_response();
+/// assert_eq!(wire.call_id, "call_123");
+/// assert!(wire.content.contains("\"ok\""));
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolResult {
+    /// Identifier of the originating [`ToolCall`]. Must round-trip
+    /// through the wire unchanged — Anthropic matches tool_use and
+    /// tool_result by this id.
+    pub call_id: String,
+    /// Outcome of the eval.
+    pub outcome: ToolOutcome,
+}
+
+impl ToolResult {
+    /// Convert to [`ToolResponse`] (the genai/wire type). The
+    /// `is_error` signal is currently lost at the boundary since genai
+    /// doesn't surface it; errors are encoded in the content string.
+    /// When genai gains a native `is_error` field we widen this
+    /// conversion.
+    pub fn to_tool_response(&self) -> ToolResponse {
+        ToolResponse::new(self.call_id.clone(), self.outcome.to_content_string())
+    }
+}
+
+#[cfg(test)]
+mod tool_result_tests {
+    use super::*;
+
+    #[test]
+    fn outcome_is_error_discriminates() {
+        assert!(!ToolOutcome::Success(serde_json::Value::Null).is_error());
+        assert!(ToolOutcome::Error("boom".into()).is_error());
+    }
+
+    #[test]
+    fn outcome_to_content_string_serialises_json() {
+        let outcome = ToolOutcome::Success(serde_json::json!({"x": 1, "y": [2, 3]}));
+        let s = outcome.to_content_string();
+        assert!(s.contains("\"x\":1"));
+        assert!(s.contains("[2,3]"));
+    }
+
+    #[test]
+    fn outcome_to_content_string_passes_error_through() {
+        let outcome = ToolOutcome::Error("file not found".into());
+        assert_eq!(outcome.to_content_string(), "file not found");
+    }
+
+    #[test]
+    fn tool_result_to_tool_response_preserves_call_id_and_content() {
+        let r = ToolResult {
+            call_id: "toolu_01ABC".into(),
+            outcome: ToolOutcome::Success(serde_json::json!({"result": 42})),
+        };
+        let wire = r.to_tool_response();
+        assert_eq!(wire.call_id, "toolu_01ABC");
+        assert!(wire.content.contains("\"result\":42"));
+    }
+
+    #[test]
+    fn tool_result_to_tool_response_on_error() {
+        let r = ToolResult {
+            call_id: "toolu_01XYZ".into(),
+            outcome: ToolOutcome::Error("eval timed out".into()),
+        };
+        let wire = r.to_tool_response();
+        assert_eq!(wire.call_id, "toolu_01XYZ");
+        assert_eq!(wire.content, "eval timed out");
+    }
+
+    #[test]
+    fn tool_outcome_serde_round_trip() {
+        let ok = ToolOutcome::Success(serde_json::json!({"a": 1}));
+        let j = serde_json::to_string(&ok).unwrap();
+        let back: ToolOutcome = serde_json::from_str(&j).unwrap();
+        assert!(matches!(back, ToolOutcome::Success(_)));
+
+        let err = ToolOutcome::Error("oops".into());
+        let j = serde_json::to_string(&err).unwrap();
+        let back: ToolOutcome = serde_json::from_str(&j).unwrap();
+        assert!(matches!(back, ToolOutcome::Error(ref m) if m == "oops"));
+    }
+}
+
 // ---- Serde helpers (SecretString round-trip) ----
 
 /// Serde helper: write a [`SecretString`] as its plaintext string form.

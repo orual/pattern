@@ -515,6 +515,12 @@ impl TidepoolSession {
                         let output = TurnOutput {
                             messages: vec![],
                             block_writes,
+                            tool_calls: vec![],
+                            tool_results: vec![],
+                            // Legacy SessionMachine.run path: no tool
+                            // calls are possible here, so every wire
+                            // turn ends with EndTurn semantics.
+                            stop_reason: pattern_core::types::turn::StopReason::EndTurn,
                             usage: None,
                             cache_metrics: Default::default(),
                             completed_at: Timestamp::now(),

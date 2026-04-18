@@ -14,6 +14,7 @@ pub mod memory_store;
 pub mod provider_client;
 pub mod session;
 pub mod source_manager;
+pub mod turn_sink;
 
 pub use agent_runtime::AgentRuntime;
 pub use data_stream::{DataStream, StreamEvent};
@@ -24,3 +25,4 @@ pub use memory_store::MemoryStore;
 pub use provider_client::ProviderClient;
 pub use session::Session;
 pub use source_manager::{SourceManager, SourceName};
+pub use turn_sink::{NoOpSink, TurnEvent, TurnSink, VecSink};
