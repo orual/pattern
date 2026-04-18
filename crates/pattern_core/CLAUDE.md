@@ -3,12 +3,15 @@
 ⚠️ **CRITICAL WARNING**: DO NOT run `pattern` CLI or test agents during development!
 Production agents are running. CLI commands will disrupt active agents.
 
+Last verified: 2026-04-18
+
 Core agent framework, memory management, and coordination system for Pattern's multi-agent ADHD support.
 
-## Current Status
-- SQLite migration complete, Loro CRDT memory, Jacquard ATProto client
-- Shell tool implemented with PTY backend and security validation
-- Active development: API server, MCP server, data sources
+## Current status
+- SQLite migration complete, Loro CRDT memory, Jacquard ATProto client.
+- Shell tool implemented with PTY backend and security validation.
+- Phase 5 complete: message attachment model, batch-anchored snapshots,
+  turn round-trip recording, `TurnInput::continuation` flow.
 
 ## Tool System Architecture
 
@@ -43,20 +46,54 @@ Following Letta/MemGPT patterns with multi-operation tools:
 - ToolRegistry automatically provides rules to context builder
 - Archival labels included in context for intelligent memory management
 
-## Message System Architecture
+## Message and turn types
 
-### Router Design
-- Each agent has its own router (not singleton)
-- Database queuing provides natural buffering
-- Call chain prevents infinite loops
-- Anti-looping: 30-second cooldown between rapid messages
+### Message attachments (`types/message.rs`)
+
+Messages carry optional `attachments: Vec<MessageAttachment>` — pattern-level
+metadata that renders onto the wire at compose-time but is NOT stored in the
+`ChatMessage`. Keeps the conversational record clean while the wire still gets
+ephemeral context reminders (memory snapshots). Attachments are only set on
+batch-initiating user messages.
+
+Key types:
+- `MessageAttachment::BatchOpeningSnapshot { kind, block_names, blocks, edited_blocks }` —
+  carries either a Full memory dump or a Delta since a prior batch.
+- `SnapshotKind::Full | Delta { since_batch }` — determines rendering scope.
+- `RenderedBlock { label, block_type, rendered: Option<Arc<str>>, content_hash }` —
+  frozen snapshot of one memory block. `rendered=None` means "tracked but silent"
+  (hash present for delta detection, content suppressed on wire).
+- `SnapshotSelection { include_types, include_labels, exclude_labels }` —
+  policy for which blocks appear in snapshots. Default: Core + Working.
+
+### Turn types (`types/turn.rs`)
+
+- `TurnInput` — one wire-level activation. First turn carries caller messages;
+  subsequent turns use `TurnInput::continuation(batch_id, agent_id)` (empty
+  messages — prior turn's tool_result lives in TurnHistory).
+- `TurnOutput.messages` — full round-trip: `[assistant_msg]` on EndTurn,
+  `[assistant_msg, tool_result_msg]` on ToolUse. The tool_result message is a
+  `ChatRole::Tool` synthesised by `orchestrate` after dispatch.
+- `TurnOutput.tool_results()` — accessor that reconstructs `Vec<ToolResult>`
+  by walking the inlined tool_result message. NOT a stored field.
+- `ToolResponse.content` is `serde_json::Value` (not String). The `new()`
+  constructor wraps as `Value::String` for back-compat; `new_content()` accepts
+  raw Value.
+- `StepReply` aggregates N wire turns from one `Session::step`.
+
+### Message router
+
+- Each agent has its own router (not singleton).
+- Database queuing provides natural buffering.
+- Call chain prevents infinite loops.
+- Anti-looping: 30-second cooldown between rapid messages.
 
 ### Endpoints
-- **CliEndpoint**: Terminal output ✅
-- **GroupEndpoint**: Coordination pattern routing ✅
-- **DiscordEndpoint**: Discord integration ✅
+- **CliEndpoint**: Terminal output
+- **GroupEndpoint**: Coordination pattern routing
+- **DiscordEndpoint**: Discord integration
 - **QueueEndpoint**: Database persistence (stub)
-- **BlueskyEndpoint**: ATProto posting ✅
+- **BlueskyEndpoint**: ATProto posting
 
 ## Architecture Overview
 
@@ -81,7 +118,7 @@ Following Letta/MemGPT patterns with multi-operation tools:
    - Type-erased `Arc<dyn Agent>` for group flexibility
    - Message routing and response aggregation
 
-5. **Database** (`../pattern_db`, `../pattern_auth`)
+5. **Database** (`../pattern_db`)
    - SQLite embedded databases
 
 6. **Data Sources** (`data_source/`)

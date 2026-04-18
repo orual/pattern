@@ -70,6 +70,7 @@ mod tests {
             batch: BatchId::from(new_id().to_string()),
             response_meta: None,
             block_refs: vec![],
+            attachments: vec![],
         }
     }
 

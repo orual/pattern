@@ -46,10 +46,18 @@ data Time a where
 
 -- | An absolute point in time (epoch nanoseconds). Agent-facing wrapper
 -- around the raw 'Int' wire format.
+--
+-- Derives 'Show' so agents can casually log timestamps via
+-- @Log.info $ "at " <> show now@. The default derived representation
+-- prints @Instant <nanos>@; format-heavy output should use a dedicated
+-- render helper (TBD; for now prefer the raw nanosecond view).
 newtype Instant = Instant { instantNanos :: Int }
+  deriving Show
 
 -- | A non-negative time span (nanoseconds). Agent-facing wrapper.
+-- Derives 'Show' so agents can log durations via @show dur@.
 newtype Duration = Duration { durationNanos :: Int }
+  deriving Show
 
 -- | Get the current wall-clock instant.
 now :: Member Time effs => Eff effs Instant

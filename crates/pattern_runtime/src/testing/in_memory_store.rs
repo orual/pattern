@@ -24,6 +24,7 @@ use pattern_core::memory::{
 };
 use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::BlockCreate;
+use pattern_core::types::ids::new_id;
 use serde_json::Value as JsonValue;
 
 /// Key used by the in-memory store: `(agent_id, label)` — the shape the
@@ -37,11 +38,23 @@ struct BlockRecord {
     block_type: BlockType,
 }
 
+/// An archival entry indexed by id. `(agent_id, id, content, metadata)`.
+/// Minimal — no FTS; `search_archival` walks all entries for substring
+/// matches.
+#[derive(Debug, Clone)]
+struct ArchivalRecord {
+    agent_id: String,
+    id: String,
+    content: String,
+    metadata: Option<JsonValue>,
+}
+
 /// In-memory MemoryStore double. Cloneable via `Arc`; internal state is
 /// `Mutex<HashMap<_, _>>`.
 #[derive(Debug, Default)]
 pub struct InMemoryMemoryStore {
     blocks: Mutex<HashMap<Key, BlockRecord>>,
+    archival: Mutex<Vec<ArchivalRecord>>,
 }
 
 impl InMemoryMemoryStore {
@@ -161,22 +174,52 @@ impl MemoryStore for InMemoryMemoryStore {
 
     async fn insert_archival(
         &self,
-        _a: &str,
-        _c: &str,
-        _m: Option<JsonValue>,
+        agent_id: &str,
+        content: &str,
+        metadata: Option<JsonValue>,
     ) -> MemoryResult<String> {
-        unimplemented!("in-memory store: insert_archival not needed by Phase 3 tests")
+        let id = new_id().to_string();
+        let mut guard = self.archival.lock().unwrap();
+        guard.push(ArchivalRecord {
+            agent_id: agent_id.to_string(),
+            id: id.clone(),
+            content: content.to_string(),
+            metadata,
+        });
+        Ok(id)
     }
     async fn search_archival(
         &self,
-        _a: &str,
-        _q: &str,
-        _n: usize,
+        agent_id: &str,
+        query: &str,
+        n: usize,
     ) -> MemoryResult<Vec<ArchivalEntry>> {
-        unimplemented!("in-memory store: search_archival not needed by Phase 3 tests")
+        // Naive substring scan. No FTS/BM25 — just case-insensitive
+        // contains(). Good enough for test fidelity; real store uses
+        // pattern_db's FTS5 index.
+        let guard = self.archival.lock().unwrap();
+        let q_lower = query.to_lowercase();
+        let mut hits: Vec<ArchivalEntry> = guard
+            .iter()
+            .filter(|r| r.agent_id == agent_id && r.content.to_lowercase().contains(&q_lower))
+            .take(n)
+            .map(|r| ArchivalEntry {
+                id: r.id.clone(),
+                agent_id: r.agent_id.clone(),
+                content: r.content.clone(),
+                metadata: r.metadata.clone(),
+                // Default is epoch; stub doesn't track real timestamps.
+                created_at: Default::default(),
+            })
+            .collect();
+        // Keep most-recent-first (insertion order is append; reverse gives recency).
+        hits.reverse();
+        Ok(hits)
     }
-    async fn delete_archival(&self, _id: &str) -> MemoryResult<()> {
-        unimplemented!("in-memory store: delete_archival not needed by Phase 3 tests")
+    async fn delete_archival(&self, id: &str) -> MemoryResult<()> {
+        let mut guard = self.archival.lock().unwrap();
+        guard.retain(|r| r.id != id);
+        Ok(())
     }
     async fn search(
         &self,
@@ -204,7 +247,19 @@ impl MemoryStore for InMemoryMemoryStore {
     ) -> MemoryResult<Option<StructuredDocument>> {
         Ok(None)
     }
-    async fn set_block_pinned(&self, _a: &str, _l: &str, _p: bool) -> MemoryResult<()> {
+    async fn set_block_pinned(
+        &self,
+        agent_id: &str,
+        label: &str,
+        pinned: bool,
+    ) -> MemoryResult<()> {
+        let mut guard = self.blocks.lock().unwrap();
+        if let Some(r) = guard.get_mut(&(agent_id.to_string(), label.to_string())) {
+            // StructuredDocument's metadata is Arc-shared with the cached
+            // document — mutating here propagates to every holder of the
+            // Arc (matching the real cache's live-share semantics).
+            r.document.metadata_mut().pinned = pinned;
+        }
         Ok(())
     }
     async fn set_block_type(
@@ -219,7 +274,16 @@ impl MemoryStore for InMemoryMemoryStore {
         }
         Ok(())
     }
-    async fn update_block_schema(&self, _a: &str, _l: &str, _s: BlockSchema) -> MemoryResult<()> {
+    async fn update_block_schema(
+        &self,
+        agent_id: &str,
+        label: &str,
+        schema: BlockSchema,
+    ) -> MemoryResult<()> {
+        let mut guard = self.blocks.lock().unwrap();
+        if let Some(r) = guard.get_mut(&(agent_id.to_string(), label.to_string())) {
+            r.document.metadata_mut().schema = schema;
+        }
         Ok(())
     }
     async fn update_block_description(

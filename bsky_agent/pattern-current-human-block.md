@@ -1,3 +1,3 @@
 # Current Human Block
 
-[no one currently - this space holds who we're talking to when someone's here]
+[orual — partner/architect. active in this session. see partner block for relationship context.]

@@ -18,39 +18,117 @@ use std::sync::LazyLock;
 use pattern_core::types::provider::Tool;
 use serde_json::json;
 
+use crate::sdk::bundle::canonical_effect_decls;
+
+/// Build the full tool description, including:
+/// - The boilerplate summary
+/// - Import / name conventions (qualified vs unqualified)
+/// - Full API reference assembled from each effect's helpers
+/// - Common Haskell gotchas the LLM has hit in practice
+///
+/// Built once at process startup and served in segment 1 (cached).
+/// Long by design: the LLM has to know what's callable BEFORE writing
+/// code; compile errors surface the info too late (after wasted cycles).
+fn build_code_tool_description() -> String {
+    let mut s = String::with_capacity(8192);
+
+    s.push_str(
+        "Execute a Haskell code snippet against the Pattern SDK. \
+         The snippet is templated into a complete Haskell module with \
+         pragmas, imports, effect-row type alias, and the `result` binding \
+         already set up. You write only the body of a `do` block; the \
+         preamble handles everything else.\n\n",
+    );
+
+    s.push_str(
+        "=== Effect row ===\n\
+         `type M = '[Memory.Memory, Search.Search, Recall.Recall, Message, \
+         Display, Time, Log.Log, Shell.Shell, File.File, Sources.Sources, \
+         Mcp.Mcp, Rpc.Rpc, Spawn]`\n\
+         Your snippet's final expression must have type `Eff M Value` (use \
+         `toJSON x` to return any JSON-serializable value; return unit with \
+         `pure ()` — NOT `return unit`).\n\n",
+    );
+
+    s.push_str(
+        "=== Import scheme ===\n\
+         Four modules are imported UNQUALIFIED (terse verbs): Message, Time, \
+         Display, Spawn. Call them bare: `send \"agent:x\" \"hi\"`, \
+         `now`, `chunk \"msg\"`, `start spec`.\n\
+         Nine modules are QUALIFIED-ONLY (generic verb names): Memory, File, \
+         Log, Sources, Shell, Rpc, Mcp, Search, Recall. Always prefix: \
+         `Memory.put`, `File.read`, `Log.info`, `Search.messages`.\n\
+         Every module is ALSO imported qualified, so you can use either \
+         style for terse modules (`send` and `Message.send` both work).\n\n",
+    );
+
+    s.push_str("=== Available functions ===\n");
+
+    let decls = canonical_effect_decls();
+    for eff in &decls {
+        s.push_str(&format!("\n--- {} ({}) ---\n", eff.type_name, eff.description));
+        for h in eff.helpers {
+            // Each helper is "signature\nbody"; grab signature line only.
+            if let Some(sig) = h.lines().next() {
+                s.push_str(sig);
+                s.push('\n');
+            }
+        }
+    }
+
+    s.push_str(
+        "\n=== Common gotchas ===\n\
+         * `Memory.get :: BlockHandle -> Eff effs Content` returns Content \
+           (= Text) DIRECTLY, not `Maybe Content`. Don't pattern-match on \
+           Just/Nothing — the call either succeeds with text or the handler \
+           errors.\n\
+         * Return unit with `pure ()` not `return unit` (there is no `unit` \
+           identifier).\n\
+         * `Time.now :: Eff effs Instant`. `Instant` and `Duration` derive \
+           `Show`, so `show instant` works for logging: \
+           `Log.info $ \"tick \" <> show now`.\n\
+         * `Memory.list` does not exist. To discover blocks, check the \
+           `Available blocks:` list in the `[memory:current_state]` \
+           system-reminder near the top of your context; that's the source \
+           of truth. If you need programmatic enumeration, ask the user or \
+           use `Sources.list` (which is a DIFFERENT thing — agent data \
+           sources, not memory blocks).\n\
+         * `Display.info` doesn't exist. Display has `chunk`/`final`/`note`; \
+           for log-style output use `Log.info`/`Log.debug`/`Log.warn`/`Log.error`.\n\
+         * Qualified-only modules: writing `memory.put` (lowercase) or \
+           `Memory.set` (wrong verb) WILL FAIL. Use the exact names listed \
+           above.\n\
+         * `show x` returns Text (not String) — our Prelude overrides it. \
+           Concatenation: `Log.info $ \"x=\" <> show x`.\n\n\
+         === Recovery from errors ===\n\
+         If a compile error says \"Not in scope: Foo.bar\" — LOOK AT THE \
+         FUNCTION LIST ABOVE rather than guessing another name. GHC's \
+         \"Perhaps use one of these\" suggestions are often unrelated to \
+         what you want.",
+    );
+
+    s
+}
+
 /// The `code` tool definition exposed to the LLM via the composer's
 /// tool list (segment 1). Constructed once at process startup.
 pub static CODE_TOOL: LazyLock<Tool> = LazyLock::new(|| {
     Tool::new("code")
-        .with_description(
-            "Execute a Haskell code snippet against the Pattern SDK. \
-             The snippet runs with full access to the effect stack: \
-             Memory, Message, Display, Time, Log, Shell, File, Sources, \
-             Mcp, Rpc, Spawn. Write do-notation; return a Value (or \
-             unit). The code is templated into a complete Haskell module \
-             with imports, type signatures, and the effect row already \
-             set up — you do NOT need to write the module header, \
-             imports, or the type signature for `result`.\n\n\
-             Use Memory.put to write a block, \
-             Memory.append to add to an existing one, \
-             send to route a message to another agent \
-             (scheme agent:<id>) or a CLI / external endpoint (scheme \
-             cli:<id> etc.).",
-        )
+        .with_description(build_code_tool_description())
         .with_schema(json!({
             "type": "object",
             "properties": {
                 "code": {
                     "type": "string",
-                    "description": "Haskell snippet in do-notation"
+                    "description": "Haskell snippet in do-notation. The final expression must have type `Eff M Value`; wrap any non-Value result with `toJSON`, or end with `pure ()` for unit."
                 },
                 "imports": {
                     "type": "string",
-                    "description": "Extra `import X.Y.Z` lines (optional)"
+                    "description": "Extra `import X.Y.Z` lines (optional). Use only for additional Haskell modules beyond the standard Pattern SDK imports, which are already in scope."
                 },
                 "helpers": {
                     "type": "string",
-                    "description": "Extra helper definitions, compiled before the snippet (optional)"
+                    "description": "Extra helper definitions, compiled before the snippet (optional). Use for local let-bindings you want to reuse across turns if you find yourself rewriting the same helper."
                 }
             },
             "required": ["code"]

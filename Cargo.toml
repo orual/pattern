@@ -137,6 +137,12 @@ whoami = "1"
 governor = "0.8"
 secrecy = { version = "0.10", features = ["serde"] }
 sha2 = "0.10"
+# pattern_runtime — stable content hashing for snapshot delta detection.
+# Purpose-built non-crypto hash: faster than sha2, stable across
+# platforms + compiler versions. Required for correct session-resume
+# behaviour if/when active TurnHistory turns gain persistence (not
+# today, but future-proofing — see RenderedBlock.content_hash).
+blake3 = "1"
 base64 = "0.22"
 url = "2"
 serde_urlencoded = "0.7"

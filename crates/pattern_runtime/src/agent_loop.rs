@@ -48,17 +48,17 @@ use pattern_core::error::RuntimeError;
 use pattern_core::memory::StructuredDocument;
 use pattern_core::traits::TurnEvent;
 use pattern_core::types::ids::{AgentId, MessageId, new_id};
-use pattern_core::types::message::{Message, ResponseMeta};
+use pattern_core::types::message::{
+    Message, MessageAttachment, RenderedBlock, ResponseMeta, SnapshotKind,
+};
 use pattern_core::types::provider::{
     ChatMessage, ChatStreamEvent, CompletionRequest, ToolCall, ToolOutcome, ToolResult,
 };
 use pattern_core::types::turn::{StepReply, StopReason, TurnCacheMetrics, TurnInput, TurnOutput};
 
-use pattern_provider::compose::passes::{
-    Segment1Pass, Segment2Pass, Segment3Pass, synthesize_summary_message,
-};
+use pattern_provider::compose::passes::{Segment1Pass, Segment2Pass, synthesize_summary_message};
 use pattern_provider::compose::{CacheProfile, ComposerPass, PartialRequest, compose};
-use pattern_provider::shaper::{ShaperCompatMode, build_system_prompt};
+use pattern_provider::shaper::{ShaperCompatMode, build_system_prompt, wrap_system_reminder};
 
 use crate::memory::TurnHistory;
 use crate::sdk::CODE_TOOL;
@@ -287,6 +287,7 @@ pub async fn orchestrate(
             batch: input.batch_id.clone(),
             response_meta: None,
             block_refs: vec![],
+            attachments: vec![],
         })
     };
 
@@ -367,6 +368,336 @@ pub async fn orchestrate(
     })
 }
 
+// ---- snapshot builder ---------------------------------------------------
+
+/// Stable content hash of rendered text for delta comparison.
+///
+/// Uses blake3 (purpose-built non-crypto hash: stable across Rust
+/// compiler versions, platforms, and process restarts) and truncates
+/// the 32-byte digest to a u64 for storage. Collision probability at
+/// our scale (tens of blocks across tens of snapshots per session) is
+/// negligible — birthday attack for u64 requires ~2^32 ≈ 4 billion
+/// entries before a 50% collision chance.
+///
+/// Cross-version stability isn't strictly needed today (active
+/// TurnHistory turns don't persist across process restarts — see
+/// `TurnHistory::load` which always starts `active` empty), but the
+/// blake3 output is stable so if active-turn persistence lands later,
+/// resumed sessions will still recognize prior-turn hashes correctly.
+fn content_hash(text: &str) -> u64 {
+    let digest = blake3::hash(text.as_bytes());
+    let bytes = digest.as_bytes();
+    // Truncate to u64 via little-endian first 8 bytes.
+    u64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ])
+}
+
+/// Render a block into the `<block:label ...>` tagged format, producing
+/// a [`RenderedBlock`] with visibility determined by the `visible`
+/// parameter.
+///
+/// Freezes the live `StructuredDocument` content into an owned
+/// `Arc<str>` snapshot when `visible` is true. When false, the block
+/// is tracked (hash present) but rendered content is `None`.
+fn render_block_for_snapshot(block: &StructuredDocument, visible: bool) -> RenderedBlock {
+    let label = smol_str::SmolStr::new(block.label());
+    let bt = block.block_type();
+    let block_type_str = match bt {
+        pattern_core::memory::BlockType::Core => "core",
+        pattern_core::memory::BlockType::Working => "working",
+        pattern_core::memory::BlockType::Archival => "archival",
+        pattern_core::memory::BlockType::Log => "log",
+    };
+    let permission = block.permission().to_string();
+    let content = block.render();
+    let description = block.description();
+
+    let open_tag = format!("<block:{label} type=\"{block_type_str}\" permission=\"{permission}\">");
+    let close_tag = format!("</block:{label}>");
+    let inner = if description.is_empty() {
+        content
+    } else {
+        format!("{description}\n\n{content}")
+    };
+    let rendered_str = format!("{open_tag}\n{inner}\n{close_tag}");
+    let hash = content_hash(&rendered_str);
+
+    RenderedBlock {
+        label,
+        block_type: bt,
+        rendered: if visible {
+            Some(std::sync::Arc::from(rendered_str.as_str()))
+        } else {
+            None
+        },
+        content_hash: hash,
+    }
+}
+
+/// Build a [`MessageAttachment::BatchOpeningSnapshot`] from the current
+/// memory blocks and the prior snapshot (if any, for delta computation).
+///
+/// For `SnapshotKind::Full`: bundles all blocks.
+/// For `SnapshotKind::Delta`: includes only blocks whose content hash
+/// differs from the prior snapshot.
+fn build_snapshot_attachment(
+    kind: SnapshotKind,
+    current_blocks: Vec<RenderedBlock>,
+    prior_tracked_hashes: Option<std::collections::HashMap<String, u64>>,
+) -> MessageAttachment {
+    let block_names: Vec<smol_str::SmolStr> =
+        current_blocks.iter().map(|b| b.label.clone()).collect();
+
+    match &kind {
+        SnapshotKind::Full => MessageAttachment::BatchOpeningSnapshot {
+            kind,
+            block_names,
+            blocks: current_blocks,
+            edited_blocks: vec![],
+        },
+        SnapshotKind::Delta { .. } => {
+            // Use the pre-collected prior_hashes map. This map walks the
+            // FULL history (latest-wins per label), not just the most-recent
+            // attachment — critical because an immediate-prior Delta with
+            // empty `blocks` would otherwise leave prior_hashes empty and
+            // cause every current block to spuriously appear "new or changed".
+            let prior_hashes = prior_tracked_hashes.unwrap_or_default();
+
+            let mut edited_blocks = Vec::new();
+            let mut delta_blocks = Vec::new();
+
+            for block in &current_blocks {
+                let is_new_or_changed = prior_hashes
+                    .get(block.label.as_str())
+                    .map(|&prev_hash| prev_hash != block.content_hash)
+                    .unwrap_or(true); // truly new block (never seen) = include
+                if is_new_or_changed {
+                    edited_blocks.push(block.label.clone());
+                    delta_blocks.push(block.clone());
+                }
+            }
+
+            MessageAttachment::BatchOpeningSnapshot {
+                kind,
+                block_names,
+                blocks: delta_blocks,
+                edited_blocks,
+            }
+        }
+    }
+}
+
+
+/// Render a [`MessageAttachment::BatchOpeningSnapshot`] into a
+/// `<system-reminder>`-wrapped text block for compose-time splicing.
+fn render_snapshot_attachment(attachment: &MessageAttachment) -> String {
+    let MessageAttachment::BatchOpeningSnapshot {
+        kind,
+        block_names,
+        blocks,
+        edited_blocks,
+    } = attachment;
+
+    let mut parts = Vec::new();
+
+    // Header.
+    parts.push("[memory:current_state]".to_string());
+
+    // Kind indicator.
+    match kind {
+        SnapshotKind::Full => {
+            parts.push("(full snapshot)".to_string());
+        }
+        SnapshotKind::Delta { since_batch } => {
+            parts.push(format!("(delta since batch {since_batch})"));
+            if !edited_blocks.is_empty() {
+                let names: Vec<&str> = edited_blocks.iter().map(|s| s.as_str()).collect();
+                parts.push(format!(
+                    "[memory:updated] blocks changed: {}",
+                    names.join(", ")
+                ));
+            }
+        }
+    }
+
+    // Block namespace.
+    if block_names.is_empty() {
+        parts.push("(no blocks loaded)".to_string());
+    } else {
+        let names: Vec<&str> = block_names.iter().map(|s| s.as_str()).collect();
+        parts.push(format!("Available blocks: {}", names.join(", ")));
+    }
+
+    // Block contents (only render visible blocks).
+    for block in blocks {
+        if let Some(ref rendered) = block.rendered {
+            parts.push(rendered.to_string());
+        }
+    }
+
+    let body = parts.join("\n\n");
+    wrap_system_reminder(&body)
+}
+
+/// Collect the most recent rendered content hash for each block label
+/// from the turn history's attachments. Used to determine "last shown"
+/// state for the visibility decision. Call while holding the history
+/// lock; the result is a map from label -> hash.
+fn collect_last_shown_hashes(history: &TurnHistory) -> std::collections::HashMap<String, u64> {
+    let mut map = std::collections::HashMap::new();
+    for record in history.iter_active().rev() {
+        // Check output then input messages (most recent first).
+        let all_msgs = record
+            .output
+            .messages
+            .iter()
+            .rev()
+            .chain(record.input.messages.iter().rev());
+        for msg in all_msgs {
+            for att in &msg.attachments {
+                let MessageAttachment::BatchOpeningSnapshot { blocks, .. } = att;
+                for bs in blocks {
+                    if bs.rendered.is_some() && !map.contains_key(bs.label.as_str()) {
+                        map.insert(bs.label.to_string(), bs.content_hash);
+                    }
+                }
+            }
+        }
+    }
+    map
+}
+
+/// Walk prior attachments and build a label -> content_hash map of the
+/// most-recent TRACKED hash per label (including blocks whose rendering
+/// was suppressed via the visibility gate). Latest-wins per label.
+///
+/// Used by `build_snapshot_attachment` to detect which blocks changed
+/// since they were last tracked. Distinct from `collect_last_shown_hashes`,
+/// which filters to only rendered entries (for the visibility-gating
+/// decision of whether to surface a changed block's content inline).
+fn collect_last_tracked_hashes(history: &TurnHistory) -> std::collections::HashMap<String, u64> {
+    let mut map = std::collections::HashMap::new();
+    for record in history.iter_active().rev() {
+        let all_msgs = record
+            .output
+            .messages
+            .iter()
+            .rev()
+            .chain(record.input.messages.iter().rev());
+        for msg in all_msgs {
+            for att in &msg.attachments {
+                let MessageAttachment::BatchOpeningSnapshot { blocks, .. } = att;
+                for bs in blocks {
+                    // Track EVERY block regardless of rendering — the hash
+                    // is present for delta detection even when rendered=None.
+                    if !map.contains_key(bs.label.as_str()) {
+                        map.insert(bs.label.to_string(), bs.content_hash);
+                    }
+                }
+            }
+        }
+    }
+    map
+}
+
+/// Load memory blocks for snapshot construction, filtered by the given
+/// [`SnapshotSelection`] policy. Persona is always excluded (it lives
+/// in segment 1's system prompt).
+///
+/// Block visibility (rendered vs tracked-but-silent) is determined by:
+/// - **Core** blocks: always visible.
+/// - **Working** blocks: visible when pinned or block_ref'd, AND content
+///   changed since last shown (or never shown). Otherwise tracked-but-silent.
+///
+/// `shown_hashes` maps block label -> last rendered content hash (from
+/// [`collect_last_shown_hashes`]).
+async fn load_snapshot_blocks_with_visibility(
+    ctx: &SessionContext,
+    kind: &SnapshotKind,
+    selection: &pattern_core::types::message::SnapshotSelection,
+    block_refs: &[pattern_core::types::block_ref::BlockRef],
+    shown_hashes: &std::collections::HashMap<String, u64>,
+) -> Result<Vec<RenderedBlock>, RuntimeError> {
+    let block_list = ctx
+        .memory_store()
+        .list_blocks(ctx.agent_id())
+        .await
+        .map_err(|e| RuntimeError::ProviderError {
+            reason: format!("list_blocks failed: {e}"),
+        })?;
+    let is_full = matches!(kind, SnapshotKind::Full);
+    let mut blocks = Vec::new();
+    for meta in block_list {
+        // Persona lives in segment 1 (system prompt); don't duplicate its
+        // content in segment 3. Still include its LABEL in the snapshot
+        // (as rendered=None) so the model sees the full block namespace
+        // and future delta checks can detect persona edits.
+        let is_persona = meta.label == pattern_core::PERSONA_LABEL;
+        if !is_persona && !selection.accepts(&meta.label, meta.block_type) {
+            continue;
+        }
+        if let Some(doc) = ctx
+            .memory_store()
+            .get_block(ctx.agent_id(), &meta.label)
+            .await
+            .map_err(|e| RuntimeError::ProviderError {
+                reason: format!("get_block({}) failed: {e}", meta.label),
+            })?
+        {
+            // Always render to get the content hash for tracking.
+            let rendered = render_block_for_snapshot(&doc, true);
+
+            // Persona is NEVER rendered inline (already in segment 1).
+            // Otherwise: Full always renders everything; Delta applies
+            // the pinned/block_refs visibility gate for Working blocks.
+            let visible = if is_persona {
+                false
+            } else if is_full {
+                true
+            } else {
+                block_visibility_from_hashes(&doc, block_refs, shown_hashes, rendered.content_hash)
+            };
+
+            if visible {
+                blocks.push(rendered);
+            } else {
+                blocks.push(RenderedBlock {
+                    rendered: None,
+                    ..rendered
+                });
+            }
+        }
+    }
+    Ok(blocks)
+}
+
+/// Determine block visibility from pre-collected shown hashes.
+/// Same logic as `block_visibility` but without requiring TurnHistory.
+fn block_visibility_from_hashes(
+    block: &StructuredDocument,
+    block_refs: &[pattern_core::types::block_ref::BlockRef],
+    shown_hashes: &std::collections::HashMap<String, u64>,
+    current_hash: u64,
+) -> bool {
+    use pattern_core::memory::BlockType;
+    match block.block_type() {
+        BlockType::Core => true,
+        BlockType::Working => {
+            let label = block.label();
+            let is_pinned = block.is_pinned();
+            let is_refd = block_refs.iter().any(|r| r.label.as_str() == label);
+            if is_pinned || is_refd {
+                // Visible unless unchanged since last shown.
+                !matches!(shown_hashes.get(label), Some(&prev) if prev == current_hash)
+            } else {
+                false
+            }
+        }
+        BlockType::Archival | BlockType::Log => false,
+    }
+}
+
 // ---- drive_step — loop driver -------------------------------------------
 
 /// Drive one user-visible exchange: repeatedly call [`orchestrate`]
@@ -408,6 +739,86 @@ pub async fn drive_step(
 
     let mut is_first_wire_turn_in_session = !had_prior_turns;
 
+    // ---- Attach batch-opening snapshot to the first user message ----
+    //
+    // This is a new batch (drive_step = one batch). Build a snapshot
+    // attachment and attach it to the first user message in the input.
+    // Continuation turns within this batch don't get new attachments
+    // — the batch-opening attachment is already in history.
+    if !cur_input.messages.is_empty() {
+        // Determine snapshot kind.
+        let (snapshot_kind, prior_tracked_hashes) = {
+            let hist = turn_history
+                .lock()
+                .map_err(|_| RuntimeError::ProviderError {
+                    reason: "turn_history mutex poisoned".into(),
+                })?;
+
+            let kind = if hist.active_len() == 0
+                || hist.post_compaction_pending()
+                || hist.batches_since_last_full() >= 10
+            {
+                SnapshotKind::Full
+            } else {
+                SnapshotKind::Delta {
+                    since_batch: hist
+                        .most_recent_batch_id()
+                        .cloned()
+                        .unwrap_or_else(|| batch_id.clone()),
+                }
+            };
+
+            // For Delta, walk FULL history for a latest-wins per-label hash
+            // map. Using just `find_prior_snapshot` would regress when the
+            // most-recent attachment was itself an empty Delta — leaving
+            // prior_hashes empty and making every block appear new.
+            let prior_hashes = if matches!(kind, SnapshotKind::Delta { .. }) {
+                Some(collect_last_tracked_hashes(&hist))
+            } else {
+                None
+            };
+
+            (kind, prior_hashes)
+        };
+
+        // Fetch current memory blocks, filtered by snapshot selection
+        // policy. Persona is always excluded (lives in seg1).
+        // Extract the "last shown" hash map from history while holding
+        // the lock briefly, then release before async calls.
+        let selection = ctx.snapshot_selection().clone();
+        let first_msg_block_refs: Vec<pattern_core::types::block_ref::BlockRef> = cur_input
+            .messages
+            .first()
+            .map(|m| m.block_refs.clone())
+            .unwrap_or_default();
+        let shown_hashes: std::collections::HashMap<String, u64> = turn_history
+            .lock()
+            .map(|h| collect_last_shown_hashes(&h))
+            .unwrap_or_default();
+        let current_blocks = load_snapshot_blocks_with_visibility(
+            &ctx,
+            &snapshot_kind,
+            &selection,
+            &first_msg_block_refs,
+            &shown_hashes,
+        )
+        .await?;
+
+        let is_full = matches!(snapshot_kind, SnapshotKind::Full);
+        let attachment =
+            build_snapshot_attachment(snapshot_kind, current_blocks, prior_tracked_hashes);
+
+        // Attach to the first user message.
+        if let Some(first_msg) = cur_input.messages.first_mut() {
+            first_msg.attachments.push(attachment);
+        }
+
+        // Update TurnHistory snapshot tracking.
+        if is_full && let Ok(mut hist) = turn_history.lock() {
+            hist.note_full_snapshot_emitted();
+        }
+    }
+
     loop {
         // Build the composed CompletionRequest for THIS wire turn:
         // segments 1 (system + persona + tools) / 2 (prior messages +
@@ -440,6 +851,95 @@ pub async fn drive_step(
 
         is_first_wire_turn_in_session = false;
         let terminal = turn.stop_reason.is_terminal();
+
+        // ---- Mid-batch delta attachment ----
+        //
+        // On non-terminal turns (tool_use), check if memory state has
+        // changed since the last attachment in this batch. If external
+        // actors or tool execution mutated memory, attach a Delta to the
+        // tool_result message so the model sees the changes on the next
+        // wire turn. Intra-step cache churn is acceptable (steps are
+        // short, TTL is longer).
+        let mut turn = turn;
+        if !terminal && !turn.messages.is_empty() {
+            // Find the tool_result message (last message with Role::Tool).
+            let tool_msg_idx = turn
+                .messages
+                .iter()
+                .rposition(|m| m.chat_message.role == genai::chat::ChatRole::Tool);
+
+            if let Some(idx) = tool_msg_idx {
+                // Fetch current memory blocks (filtered by selection).
+                // For mid-batch deltas, use the tool_result message's
+                // block_refs for visibility decisions.
+                let tool_block_refs = turn.messages[idx].block_refs.clone();
+                let mid_shown_hashes: std::collections::HashMap<String, u64> = turn_history
+                    .lock()
+                    .map(|h| collect_last_shown_hashes(&h))
+                    .unwrap_or_default();
+                // Mid-batch snapshots are always Delta (the batch-opening
+                // Full was already attached on the batch's user message).
+                // Use the most recent BatchId as the delta baseline; this
+                // parameter isn't read by the visibility logic (only by
+                // build_snapshot_attachment's delta diff), but we include
+                // it for consistency.
+                let mid_kind = SnapshotKind::Delta {
+                    since_batch: recorded_input.batch_id.clone(),
+                };
+                if let Ok(current_blocks) = load_snapshot_blocks_with_visibility(
+                    &ctx,
+                    &mid_kind,
+                    ctx.snapshot_selection(),
+                    &tool_block_refs,
+                    &mid_shown_hashes,
+                )
+                .await
+                {
+                    // Build the prior-tracked-hashes map by walking FULL
+                    // turn_history (latest-wins per label) and then folding
+                    // in any attachments from recorded_input that haven't
+                    // been pushed to history yet (this wire turn's input).
+                    let mut prior_hashes: std::collections::HashMap<String, u64> = turn_history
+                        .lock()
+                        .map(|h| collect_last_tracked_hashes(&h))
+                        .unwrap_or_default();
+                    for msg in &recorded_input.messages {
+                        for att in &msg.attachments {
+                            let MessageAttachment::BatchOpeningSnapshot { blocks, .. } = att;
+                            for bs in blocks {
+                                // recorded_input is MORE recent than history,
+                                // so it overwrites.
+                                prior_hashes
+                                    .insert(bs.label.to_string(), bs.content_hash);
+                            }
+                        }
+                    }
+
+                    // Check if any blocks changed vs the walked prior.
+                    let has_changes = current_blocks.iter().any(|b| {
+                        prior_hashes
+                            .get(b.label.as_str())
+                            .map(|&h| h != b.content_hash)
+                            .unwrap_or(true)
+                    });
+
+                    if has_changes {
+                        let delta = build_snapshot_attachment(
+                            SnapshotKind::Delta {
+                                since_batch: batch_id.clone(),
+                            },
+                            current_blocks,
+                            Some(prior_hashes),
+                        );
+                        turn.messages[idx].attachments.push(delta);
+                        tracing::debug!(
+                            agent_id = ctx.agent_id(),
+                            "mid-batch delta attached to tool_result message"
+                        );
+                    }
+                }
+            }
+        }
 
         // Record into TurnHistory so the NEXT wire turn's composer sees this
         // turn's full round-trip (input + output) in Segment 2.
@@ -483,7 +983,7 @@ pub async fn drive_step(
 
 /// Build the composed [`CompletionRequest`] for one wire turn.
 ///
-/// Runs the three-segment composer pipeline:
+/// Runs the two-segment composer pipeline plus attachment splice:
 ///
 /// - **Segment 1** — system prompt (persona + [`pattern_core::DEFAULT_BASE_INSTRUCTIONS`]
 ///   via [`build_system_prompt`]) + [`CODE_TOOL`] in tools. Cache
@@ -494,13 +994,21 @@ pub async fn drive_step(
 ///   [`TurnHistory::most_recent_block_writes`] rendered as
 ///   pseudo-messages. Cache marker per
 ///   `cache_profile.segment_2_control()`.
-/// - **Segment 3** — `[memory:current_state]` pseudo-turn. Phase 5
-///   ships with empty blocks (loaded-blocks concept is future scope);
-///   the pass still emits the tag + boundary marker so cache
-///   placement stays consistent.
+/// - **Segment 3 (attachment splice)** — memory snapshots are attached
+///   to batch-opening user messages (and optionally to mid-batch
+///   tool_result messages when external memory changes are detected)
+///   as `MessageAttachment::BatchOpeningSnapshot`. These are spliced
+///   onto the corresponding ChatMessages at compose-time, producing
+///   `<system-reminder>`-wrapped content. The segment-3 cache boundary
+///   is placed on the last message with a spliced attachment.
+///
+/// This architecture keeps historical messages' wire content stable
+/// across turns (the attachment is frozen at Message creation time),
+/// enabling better cache hit rates than the old approach of splicing
+/// into the "last message" which changed identity between turns.
 ///
 /// Fresh `input.messages` are appended AFTER `compose` returns, so
-/// they sit past the segment-3 cache boundary (stay uncached — fresh
+/// they sit past the segment-2 cache boundary (stay uncached — fresh
 /// user input bursts cache downstream content by design).
 ///
 /// Returns `(request, has_segment_1)` where `has_segment_1` is `true`
@@ -512,9 +1020,6 @@ pub async fn drive_step(
 ///
 /// - `ShaperCompatMode` is hardcoded to `SubscriptionRoutingShape`.
 ///   Session-level override is future work (Phase 5 follow-up).
-/// - Segment 3's `blocks` vec is always empty. When the runtime
-///   grows a "which blocks are loaded in context" registry, wire it
-///   here.
 async fn compose_request_for_turn(
     ctx: &Arc<SessionContext>,
     turn_history: &std::sync::Mutex<TurnHistory>,
@@ -572,63 +1077,17 @@ async fn compose_request_for_turn(
         (summary_head_messages, prior_messages, recent_block_writes)
     };
 
-    // 4. Load segment-3 blocks: all agent blocks EXCEPT the persona
-    //    (which already lives in segment 1's system prompt — loading
-    //    it twice would double-count cache + token cost).
-    //
-    //    Today this means "every block attached to this agent" —
-    //    there's no per-conversation selection of which blocks are
-    //    in-context. A more selective loader (only blocks referenced
-    //    in the current turn, or explicitly-loaded blocks tracked
-    //    per session) is future refinement; the current shape at
-    //    least makes segment 3 carry real content so the cache
-    //    behaviour matches the plan's design.
-    let mut loaded_blocks: Vec<StructuredDocument> = Vec::new();
-    let block_list = ctx
-        .memory_store()
-        .list_blocks(ctx.agent_id())
-        .await
-        .map_err(|e| RuntimeError::ProviderError {
-            reason: format!("list_blocks failed: {e}"),
-        })?;
-    for meta in block_list {
-        if meta.label == pattern_core::PERSONA_LABEL {
-            continue;
-        }
-        if let Some(doc) = ctx
-            .memory_store()
-            .get_block(ctx.agent_id(), &meta.label)
-            .await
-            .map_err(|e| RuntimeError::ProviderError {
-                reason: format!("get_block({}) failed: {e}", meta.label),
-            })?
-        {
-            loaded_blocks.push(doc);
-        }
-    }
-
-    // 5. Record whether segment 1 has content before `system_blocks`
-    //    is moved into the pass. `build_system_prompt` always emits at
-    //    least base-instructions, so this is almost always `true` — we
-    //    track it explicitly so the AC8.5 bust warning has a reliable
-    //    predicate rather than guessing.
+    // 4. Record whether segment 1 has content before `system_blocks`
+    //    is moved into the pass.
     let has_segment_1 = !system_blocks.is_empty();
 
-    // 6. Assemble the composer pass list: Segment 1 + Segment 2. We
-    //    intentionally OMIT Segment3Pass here and run it conditionally after
-    //    compose based on the tail of the assembled request (see step 8b).
-    //
-    //    Anthropic's wire protocol requires that an assistant message
-    //    containing `tool_use` blocks be IMMEDIATELY followed by a user
-    //    message with matching `tool_result` blocks — no pseudo-messages,
-    //    current-state stubs, or other user-role content may intervene.
-    //    After the TurnHistory refactor, tool_result messages live in history
-    //    (recorded by drive_step) and are replayed by Segment2Pass. On
-    //    continuation turns, the tail of the composed request is therefore a
-    //    ChatRole::Tool message (the replayed tool_result). Emitting a
-    //    Segment3Pass pseudo-user message AFTER that would violate the
-    //    adjacency rule; instead we splice seg3 INTO the tool_result message
-    //    (see step 9 below), matching claude-code's `smooshIntoToolResult`.
+    // 5. Assemble the composer pass list: Segment 1 + Segment 2.
+    //    Segment 3 is NO LONGER a separate composer pass — memory
+    //    snapshots are now attached to batch-opening user messages as
+    //    `MessageAttachment::BatchOpeningSnapshot` and spliced onto
+    //    the wire at compose-time (step 8 below). This eliminates
+    //    the cache-busting problem where the old seg3 pseudo-message
+    //    changed the "last message" identity across turns.
     let passes: Vec<Box<dyn ComposerPass>> = vec![
         Box::new(Segment1Pass::new(
             system_blocks,
@@ -648,12 +1107,7 @@ async fn compose_request_for_turn(
         reason: format!("composer pipeline failed: {e}"),
     })?;
 
-    // 7. Enable capture flags on ChatOptions so the genai streamer
-    //    populates StreamEnd with usage / content / tool_calls /
-    //    reasoning. Without these, the Anthropic streamer silently
-    //    drops the fields and the agent loop sees empty
-    //    TurnOutput.usage / cache_metrics and no captured tool_calls,
-    //    which breaks drive_step's loop termination logic.
+    // 6. Enable capture flags on ChatOptions.
     req.options = req
         .options
         .with_capture_usage(true)
@@ -661,128 +1115,150 @@ async fn compose_request_for_turn(
         .with_capture_tool_calls(true)
         .with_capture_reasoning_content(true);
 
-    // 8. Append fresh input messages AFTER compose so they sit
-    //    beyond the segment-3 cache boundary (uncached by design).
+    // 7. Append fresh input messages AFTER compose so they sit
+    //    beyond the cache boundary (uncached by design).
     for msg in &input.messages {
         req.chat.messages.push(msg.chat_message.clone());
     }
 
-    // 8b. Detect tool-continuation turns by inspecting the tail of the
-    //     composed request AFTER segment 2 has been applied. If the last
-    //     message is ChatRole::Tool (a replayed tool_result from the prior
-    //     turn), this is a continuation turn and we must splice seg3 INTO
-    //     the tool_result rather than emit a free-standing pseudo-message.
+    // 8. Splice attachment content onto the composed request.
     //
-    //     We do NOT key off `input.messages` here — after the TurnHistory
-    //     refactor continuation inputs always have empty messages, so the
-    //     old check (`.any(|m| m.role == ChatRole::Tool)`) would never fire.
-    //     The tail of the composed request is the correct signal.
-    let is_tool_continuation = req
-        .chat
-        .messages
-        .last()
-        .map(|m| m.role == genai::chat::ChatRole::Tool)
-        .unwrap_or(false);
+    //    Walk ALL pattern-level Messages that contributed to this request
+    //    (both from history via Segment2Pass and from fresh input). For
+    //    each message with non-empty attachments, render the attachment
+    //    and splice it onto the corresponding ChatMessage in the composed
+    //    request.
+    //
+    //    History messages were added by Segment2Pass as plain ChatMessages
+    //    (no attachments — those live on the Pattern Message). We need to
+    //    find the corresponding ChatMessage in the composed request for
+    //    each history message that has attachments, and splice there.
+    //
+    //    Strategy: walk the history messages in order and match them to
+    //    composed messages by content identity (same ChatMessage reference).
+    //    For fresh input messages, they were just appended above — their
+    //    position is known.
+    //
+    //    Simpler approach: since attachments are only on batch-opening
+    //    user messages, we look for them in:
+    //    (a) History messages from Segment2Pass — these appear as
+    //        ChatMessages in the composed request. We need to find them.
+    //    (b) Fresh input messages — these were just appended.
+    //
+    //    For (a), we walk the history and track which composed message
+    //    index each history message maps to. For (b), fresh messages are
+    //    at known indices: composed_len_after_seg2 .. composed_len_after_seg2 + input.messages.len().
 
-    tracing::debug!(
-        agent_id = ctx.agent_id(),
-        is_tool_continuation,
-        "compose_request_for_turn: continuation detection via request tail"
-    );
+    let num_fresh = input.messages.len();
+    let total_composed = req.chat.messages.len();
+    let seg2_end = total_composed - num_fresh; // index range [0..seg2_end) is from composer
 
-    let segment_3_for_splice: Option<Vec<StructuredDocument>>;
-    if is_tool_continuation {
-        segment_3_for_splice = Some(loaded_blocks);
-    } else {
-        segment_3_for_splice = None;
-        // Non-continuation turn: run Segment3Pass to emit the current-state
-        // pseudo-message. We do this post-compose via a single-pass sub-compose
-        // so the segment-3 cache boundary lands in the right position.
-        let seg3_pass: Vec<Box<dyn ComposerPass>> = vec![Box::new(Segment3Pass::new(
-            loaded_blocks,
-            cache_profile.clone(),
-        ))];
-        // We need to extend req with the seg3 output. Compose seg3 alone
-        // from the current tail so its messages append correctly.
-        let seg3_initial = PartialRequest::new(ctx.model_id());
-        let seg3_req =
-            compose(&seg3_pass, seg3_initial).map_err(|e| RuntimeError::ProviderError {
-                reason: format!("segment-3 composer pass failed: {e}"),
-            })?;
-        // Transfer only the additional chat messages from the seg3 pass.
-        for msg in seg3_req.chat.messages {
-            req.chat.messages.push(msg);
+    // Splice attachments from fresh input messages.
+    // Fresh messages are at indices [seg2_end..total_composed).
+    let mut last_spliced_idx: Option<usize> = None;
+    for (i, msg) in input.messages.iter().enumerate() {
+        let composed_idx = seg2_end + i;
+        for attachment in &msg.attachments {
+            let rendered = render_snapshot_attachment(attachment);
+            // Append as a new ContentPart::Text after existing content.
+            splice_text_onto_message(&mut req.chat.messages[composed_idx], &rendered);
+            last_spliced_idx = Some(composed_idx);
         }
     }
 
-    // 9. On tool-continuation turns, splice segment 3 INTO the last
-    //    ToolResponse's content array. We fold the seg3 text as a
-    //    nested block inside tool_result.content rather than emitting
-    //    it as a preceding sibling content part.
-    //
-    //    Anthropic's docs ("Important formatting requirements") state:
-    //    "In the user message containing tool results, the tool_result
-    //    blocks must come FIRST in the content array. Any text must
-    //    come AFTER all tool results." Prepending a Text sibling before
-    //    tool_result causes a 400. Folding into tool_result.content
-    //    matches Anthropic's documented format (tool_result.content
-    //    may be a string OR an array of text/image/document blocks)
-    //    and mirrors claude-code's production `smooshIntoToolResult`
-    //    pattern. Role stays ChatRole::Tool — no flip needed.
-    if let Some(blocks) = segment_3_for_splice {
-        use genai::chat::{ChatRole, ContentPart, MessageContent};
+    // Splice attachments from history messages (Segment2Pass output).
+    // History messages were collected via active_messages() which yields
+    // them in order. Segment2Pass pushes summary_head messages first,
+    // then prior_messages, then pseudo-messages (block writes). The
+    // prior_messages correspond 1:1 to active_messages() in order.
+    // We need to find the offset where prior_messages start in the
+    // composed request.
+    {
+        let hist = turn_history
+            .lock()
+            .map_err(|_| RuntimeError::ProviderError {
+                reason: "turn_history mutex poisoned".into(),
+            })?;
 
-        let seg3_msg = pattern_provider::compose::current_state::render_current_state(&blocks);
-        let seg3_text = seg3_msg
-            .content
-            .joined_texts()
-            .unwrap_or_else(|| "[memory:current_state]\n(no blocks loaded)".into());
+        // Count summary head messages that were prepended.
+        let summary_count = hist.summary_head().len();
+        // Count block-write pseudo-messages from the most recent turn.
+        let pseudo_count = hist.most_recent_block_writes().len();
 
-        if let Some(last_tool_msg) = req
-            .chat
-            .messages
-            .iter_mut()
-            .rev()
-            .find(|m| m.role == ChatRole::Tool)
-        {
-            // Walk the parts in reverse to find the LAST ToolResponse
-            // and fold seg3 into its content. We rebuild the parts vec
-            // so we can replace the matched part in place.
-            let original_parts = last_tool_msg.content.parts().clone();
+        // Prior messages start at index summary_count in the composed
+        // message list (after summary head messages, before pseudo-messages).
+        let prior_start = summary_count;
+
+        for (i, msg) in hist.active_messages().enumerate() {
+            if msg.attachments.is_empty() {
+                continue;
+            }
+            let composed_idx = prior_start + i;
+            if composed_idx >= seg2_end {
+                // Out of range for Segment2Pass — skip (shouldn't happen).
+                continue;
+            }
+            for attachment in &msg.attachments {
+                let rendered = render_snapshot_attachment(attachment);
+                splice_text_onto_message(&mut req.chat.messages[composed_idx], &rendered);
+                last_spliced_idx = Some(composed_idx);
+            }
+        }
+
+        // Suppress "unused" warning — pseudo_count is used conceptually
+        // for understanding the composed message layout, but not directly
+        // in index arithmetic (pseudo-messages come AFTER prior_messages).
+        let _ = pseudo_count;
+    }
+
+    // 9. Place cache_control marker on the LAST message that had an
+    //    attachment spliced (the new seg3 boundary). If no attachments
+    //    were spliced (continuation turn with no fresh input), fall
+    //    through — the seg2 marker is the last cache boundary.
+    if let Some(idx) = last_spliced_idx {
+        let opts = req.chat.messages[idx]
+            .options
+            .clone()
+            .unwrap_or_default()
+            .with_cache_control(cache_profile.segment_3_control());
+        req.chat.messages[idx].options = Some(opts);
+    }
+
+    Ok((req, has_segment_1))
+}
+
+/// Splice rendered text onto a `ChatMessage`'s content.
+///
+/// For user-role messages: appends as a `ContentPart::Text` AFTER existing
+/// content. For tool-role messages: folds into the LAST `ToolResponse`'s
+/// content array (same as the old `smooshIntoToolResult` pattern), preserving
+/// Anthropic's wire-format constraint that `tool_result` blocks come first.
+fn splice_text_onto_message(msg: &mut ChatMessage, text: &str) {
+    use genai::chat::{ChatRole, ContentPart, MessageContent};
+
+    match msg.role {
+        ChatRole::Tool => {
+            // Fold into the last ToolResponse's content array.
+            let original_parts = msg.content.parts().clone();
             let mut new_parts: Vec<ContentPart> = Vec::with_capacity(original_parts.len());
             let mut folded = false;
 
-            // Iterate in reverse, fold once on the first (last) ToolResponse.
             for part in original_parts.into_iter().rev() {
                 if !folded && let ContentPart::ToolResponse(mut tr) = part {
-                    // Build the folded content array:
-                    //   - First element: seg3 text block (so it appears
-                    //     "first" within tool_result.content when read
-                    //     top-to-bottom — Anthropic renders inner blocks
-                    //     in order, and prepending gives the model context
-                    //     before the tool result).
-                    //   - Remaining elements: original content preserved
-                    //     verbatim per its existing shape.
-                    let seg3_block = serde_json::json!({"type": "text", "text": seg3_text});
-
+                    let seg3_block = serde_json::json!({"type": "text", "text": text});
                     let folded_content = match tr.content {
-                        // Plain string → wrap as a text block after seg3.
                         serde_json::Value::String(ref s) => {
                             serde_json::json!([
                                 seg3_block,
                                 {"type": "text", "text": s},
                             ])
                         }
-                        // Existing array → prepend seg3 block.
                         serde_json::Value::Array(ref items) => {
                             let mut arr = Vec::with_capacity(items.len() + 1);
                             arr.push(seg3_block);
                             arr.extend(items.iter().cloned());
                             serde_json::Value::Array(arr)
                         }
-                        // Null, Object, Bool, Number → stringify and
-                        // wrap as text; shouldn't occur in practice but
-                        // handled explicitly to avoid silent loss.
                         ref other => {
                             serde_json::json!([
                                 seg3_block,
@@ -793,36 +1269,20 @@ async fn compose_request_for_turn(
                     tr.content = folded_content;
                     new_parts.push(ContentPart::ToolResponse(tr));
                     folded = true;
-                } else {
-                    new_parts.push(part);
+                    continue;
                 }
+                new_parts.push(part);
             }
-            // Restore forward order (we iterated in reverse).
             new_parts.reverse();
-            last_tool_msg.content = MessageContent::from_parts(new_parts);
-
-            // Role stays ChatRole::Tool. The Anthropic adapter serializes
-            // Tool-role messages correctly as user-role "tool_result"
-            // blocks on the wire. There is no need to flip to User.
-
-            // Apply segment-3 cache_control so the spliced seg3 +
-            // tool_result message is the cache boundary. Note: this
-            // marker is applied directly to the ChatMessage options
-            // rather than via the composer's BreakpointTracker — it
-            // bypasses the 4-marker budget check, but seg1+seg2+seg3
-            // = 3 markers so we're still under the Anthropic limit.
-            // Break-detection hashing won't capture this marker;
-            // observability gap noted for follow-up.
-            let opts = last_tool_msg
-                .options
-                .clone()
-                .unwrap_or_default()
-                .with_cache_control(cache_profile.segment_3_control());
-            last_tool_msg.options = Some(opts);
+            msg.content = MessageContent::from_parts(new_parts);
+        }
+        _ => {
+            // User, Assistant, System: append as text part.
+            let mut parts = msg.content.parts().clone();
+            parts.push(ContentPart::Text(text.to_string()));
+            msg.content = MessageContent::from_parts(parts);
         }
     }
-
-    Ok((req, has_segment_1))
 }
 
 /// Default `ShaperCompatMode` used by the composer. Hardcoded to
@@ -946,6 +1406,7 @@ fn build_assistant_message(
         batch: batch_id,
         response_meta,
         block_refs: vec![],
+        attachments: vec![],
     })
 }
 
@@ -1696,6 +2157,7 @@ mod tests {
                 batch: BatchId::from(new_id()),
                 response_meta: None,
                 block_refs: vec![],
+                attachments: vec![],
             }
         };
 
@@ -1999,58 +2461,23 @@ mod tests {
 
         // Construct a Tool-role message with one ToolResponse part.
         let tool_response = ToolResponse::new("toolu_01", "initial tool output");
-        let original_msg = ChatMessage {
+        let mut msg = ChatMessage {
             role: ChatRole::Tool,
             content: MessageContent::from_parts(vec![ContentPart::ToolResponse(tool_response)]),
             options: None,
         };
 
-        // Simulate the splice (inline, not via compose_request_for_turn which
-        // requires full async SessionContext setup).
-        let seg3_text = "seg3 memory context";
-        let original_parts = original_msg.content.parts().clone();
-        let mut new_parts: Vec<ContentPart> = Vec::with_capacity(original_parts.len());
-        let mut folded = false;
-
-        for part in original_parts.into_iter().rev() {
-            if !folded && let ContentPart::ToolResponse(mut tr) = part {
-                let seg3_block = serde_json::json!({"type": "text", "text": seg3_text});
-                let folded_content = match tr.content {
-                    serde_json::Value::String(ref s) => {
-                        serde_json::json!([seg3_block, {"type": "text", "text": s}])
-                    }
-                    serde_json::Value::Array(ref items) => {
-                        let mut arr = Vec::with_capacity(items.len() + 1);
-                        arr.push(seg3_block);
-                        arr.extend(items.iter().cloned());
-                        serde_json::Value::Array(arr)
-                    }
-                    ref other => {
-                        serde_json::json!([seg3_block, {"type": "text", "text": other.to_string()}])
-                    }
-                };
-                tr.content = folded_content;
-                new_parts.push(ContentPart::ToolResponse(tr));
-                folded = true;
-            } else {
-                new_parts.push(part);
-            }
-        }
-        new_parts.reverse();
-
-        let mut result_msg = original_msg.clone();
-        result_msg.content = MessageContent::from_parts(new_parts);
-        // Role must NOT be flipped — this is the regression guard.
-        result_msg.role = original_msg.role; // already Tool; explicit to make intent clear
+        // Use the production splice function.
+        splice_text_onto_message(&mut msg, "seg3 memory context");
 
         assert_eq!(
-            result_msg.role,
+            msg.role,
             ChatRole::Tool,
             "role MUST remain Tool after splice — flipping to User causes Anthropic 400"
         );
 
         // Verify the content was actually folded.
-        let parts = result_msg.content.parts();
+        let parts = msg.content.parts();
         assert_eq!(parts.len(), 1, "still one ToolResponse part");
         let ContentPart::ToolResponse(ref tr) = parts[0] else {
             panic!("expected ToolResponse part");
@@ -2062,5 +2489,181 @@ mod tests {
         assert_eq!(content_arr.len(), 2, "seg3 block + original content block");
         assert_eq!(content_arr[0]["text"], "seg3 memory context");
         assert_eq!(content_arr[1]["text"], "initial tool output");
+    }
+
+    // ---- Attachment + snapshot tests ----------------------------------------
+
+    /// Test helper: build a RenderedBlock with Working type.
+    /// Test helper: build a visible RenderedBlock with Working type.
+    fn test_block(label: &str, rendered: &str, hash: u64) -> RenderedBlock {
+        RenderedBlock {
+            label: smol_str::SmolStr::new(label),
+            block_type: pattern_core::memory::BlockType::Working,
+            rendered: Some(std::sync::Arc::from(rendered)),
+            content_hash: hash,
+        }
+    }
+
+    #[test]
+    fn render_snapshot_attachment_full_contains_block_content() {
+        let blocks = vec![test_block(
+            "notes",
+            "<block:notes type=\"working\" permission=\"read_write\">\nhello\n</block:notes>",
+            12345,
+        )];
+        let attachment = MessageAttachment::BatchOpeningSnapshot {
+            kind: SnapshotKind::Full,
+            block_names: vec!["notes".into()],
+            blocks,
+            edited_blocks: vec![],
+        };
+        let rendered = render_snapshot_attachment(&attachment);
+        assert!(
+            rendered.contains("<system-reminder>"),
+            "must wrap in system-reminder"
+        );
+        assert!(
+            rendered.contains("[memory:current_state]"),
+            "must contain tag"
+        );
+        assert!(rendered.contains("(full snapshot)"), "must indicate full");
+        assert!(
+            rendered.contains("<block:notes"),
+            "must contain block content"
+        );
+    }
+
+    #[test]
+    fn render_snapshot_attachment_delta_shows_edited_blocks() {
+        let blocks = vec![test_block(
+            "tasks",
+            "<block:tasks>changed content</block:tasks>",
+            99999,
+        )];
+        let attachment = MessageAttachment::BatchOpeningSnapshot {
+            kind: SnapshotKind::Delta {
+                since_batch: "batch-prev".into(),
+            },
+            block_names: vec!["notes".into(), "tasks".into()],
+            blocks,
+            edited_blocks: vec!["tasks".into()],
+        };
+        let rendered = render_snapshot_attachment(&attachment);
+        assert!(
+            rendered.contains("(delta since batch batch-prev)"),
+            "must indicate delta"
+        );
+        assert!(
+            rendered.contains("[memory:updated]"),
+            "must have updated marker"
+        );
+        assert!(rendered.contains("tasks"), "must mention edited block");
+        assert!(
+            rendered.contains("Available blocks: notes, tasks"),
+            "must list all blocks"
+        );
+    }
+
+    #[test]
+    fn build_snapshot_full_includes_all_blocks() {
+        let blocks = vec![
+            test_block("a", "content-a", 1),
+            test_block("b", "content-b", 2),
+        ];
+        let att = build_snapshot_attachment(SnapshotKind::Full, blocks, None);
+        let MessageAttachment::BatchOpeningSnapshot {
+            kind,
+            block_names,
+            blocks,
+            edited_blocks,
+        } = &att;
+        assert_eq!(*kind, SnapshotKind::Full);
+        assert_eq!(block_names.len(), 2);
+        assert_eq!(blocks.len(), 2);
+        assert!(edited_blocks.is_empty());
+    }
+
+    #[test]
+    fn build_snapshot_delta_only_includes_changed_blocks() {
+        // Prior: {"a" => hash 1, "b" => hash 2}
+        let mut prior_hashes = std::collections::HashMap::new();
+        prior_hashes.insert("a".to_string(), 1u64);
+        prior_hashes.insert("b".to_string(), 2u64);
+
+        // Current: "a" unchanged (hash=1), "b" changed (hash=99), "c" new.
+        let current = vec![
+            test_block("a", "content-a", 1),
+            test_block("b", "content-b-v2", 99),
+            test_block("c", "content-c", 3),
+        ];
+
+        let att = build_snapshot_attachment(
+            SnapshotKind::Delta {
+                since_batch: "prev".into(),
+            },
+            current,
+            Some(prior_hashes),
+        );
+        let MessageAttachment::BatchOpeningSnapshot {
+            block_names,
+            blocks,
+            edited_blocks,
+            ..
+        } = &att;
+
+        // block_names always has ALL current blocks.
+        assert_eq!(block_names.len(), 3);
+        // Only "b" (changed) and "c" (new) should be in the delta.
+        assert_eq!(edited_blocks.len(), 2);
+        assert!(edited_blocks.contains(&smol_str::SmolStr::new("b")));
+        assert!(edited_blocks.contains(&smol_str::SmolStr::new("c")));
+        assert_eq!(blocks.len(), 2);
+    }
+
+    #[test]
+    fn content_hash_stable_for_same_input() {
+        let h1 = content_hash("hello world");
+        let h2 = content_hash("hello world");
+        assert_eq!(h1, h2, "same input must produce same hash");
+    }
+
+    #[test]
+    fn content_hash_differs_for_different_input() {
+        let h1 = content_hash("hello");
+        let h2 = content_hash("world");
+        assert_ne!(h1, h2, "different inputs should produce different hashes");
+    }
+
+    // ---- Cache stability: attachment on batch-opening message stays stable ---
+
+    #[test]
+    fn splice_text_onto_user_message_appends_text_part() {
+        let mut msg = ChatMessage::user("original");
+        splice_text_onto_message(&mut msg, "appended");
+        let parts = msg.content.parts();
+        assert_eq!(parts.len(), 2, "original text + appended text");
+        assert_eq!(msg.role, genai::chat::ChatRole::User);
+    }
+
+    #[test]
+    fn splice_text_onto_tool_message_folds_into_tool_response() {
+        use genai::chat::{ChatRole, ContentPart, MessageContent, ToolResponse};
+
+        let tr = ToolResponse::new("call_01", "result");
+        let mut msg = ChatMessage {
+            role: ChatRole::Tool,
+            content: MessageContent::from_parts(vec![ContentPart::ToolResponse(tr)]),
+            options: None,
+        };
+        splice_text_onto_message(&mut msg, "memory snapshot");
+
+        assert_eq!(msg.role, ChatRole::Tool);
+        let ContentPart::ToolResponse(ref tr) = msg.content.parts()[0] else {
+            panic!("expected ToolResponse");
+        };
+        let arr = tr.content.as_array().expect("must be array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["text"], "memory snapshot");
+        assert_eq!(arr[1]["text"], "result");
     }
 }

@@ -5,6 +5,8 @@ LLM provider integration for Pattern v3. Owns Anthropic authentication
 identification), per-provider rate limiting, provider-reported token counting,
 and the request composer that emits the three-segment cache layout.
 
+Last verified: 2026-04-18
+
 Absorbs the Anthropic-facing bits of the retired `pattern_auth` crate. Depends
 on `pattern_core` for trait definitions; carries its own rebased fork of
 `rust-genai` (auth-only patches on current upstream, plus any Opus-4.7
@@ -155,6 +157,66 @@ pressure warnings, tool-result framing) into a user-message position
 where Anthropic treats the tag as system-side framing rather than
 persona identity. Phase 4 ships the helper + a round-trip test; Phase 5
 wires it into the composer.
+
+## Composer pipeline (`compose/`)
+
+The composer assembles a `CompletionRequest` from a sequence of
+`ComposerPass` implementations applied to a `PartialRequest`. Each
+pass appends content and places one cache-breakpoint marker. The
+canonical three-pass layout:
+
+1. **`Segment1Pass`** — system prompt (via shaper) + tool schemas.
+2. **`Segment2Pass`** — summary-head messages + prior-turn history +
+   memory-change pseudo-messages (block writes).
+3. **`Segment3Pass`** — `[memory:current_state]` pseudo-turn (rendered
+   block content).
+
+After all passes, the caller appends fresh user input (uncached), then
+`finalize` applies breakpoint markers and assembles the final
+`CompletionRequest`.
+
+**Important:** the agent loop in `pattern_runtime` no longer uses
+`Segment3Pass` at compose time. Memory snapshots are instead attached
+as `MessageAttachment::BatchOpeningSnapshot` on batch-opening user
+messages and spliced onto the wire post-compose. `Segment3Pass` remains
+in this crate for standalone compose-pipeline tests and as the
+reference implementation. See `crates/pattern_runtime/CLAUDE.md` for
+the batch-anchored snapshot architecture.
+
+### Segment2Pass index-correspondence caveat
+
+`Segment2Pass` prepends `summary_head` messages, then appends
+`prior_messages`, then `pseudo_messages` (block writes). The agent
+loop's post-compose attachment-splice logic (in `pattern_runtime`)
+relies on the fact that `prior_messages` start at index `summary_count`
+in the composed message list. This positional correspondence is FRAGILE
+-- if any future pass reorders, inserts, or removes messages from the
+composed list, the runtime's splice indices will be wrong. This is a
+known design concern; a tracked follow-up should replace index math
+with content-identity matching or explicit position tags.
+
+### CacheProfile latching
+
+`CacheProfile` is computed once at session open and used for all turns
+in that session. The profile determines which cache-control markers
+(`ephemeral`, `breakpoint`) are placed by each pass. Changing the
+profile mid-session would shift breakpoint positions and bust the cache
+(see break-detection below).
+
+### Break-detection (`compose/break_detection.rs`)
+
+`BreakDetectionSnapshot` is a cheap per-turn hash snapshot of
+cache-bust-sensitive dimensions: system content, cache_control markers,
+tools, beta headers, model, and message-level markers. Diffing two
+consecutive snapshots attributes an unexpected `cache_read_input_tokens`
+drop to the specific subsystem that changed, surfaced as a single
+`tracing::warn!` line.
+
+Phase 5 added `message_markers_hash` and `compute_from_chat()` to
+capture post-compose message-level marker state (including any markers
+the agent loop's splice logic adds). This covers the gap between
+compose-time intent (from `BreakpointTracker`) and actualised wire
+state (from `ChatRequest.messages`).
 
 ## What lives elsewhere
 

@@ -140,6 +140,7 @@ fn dispatch_outbound(
         batch: BatchId::from(new_id().to_string()),
         response_meta: None,
         block_refs: vec![],
+        attachments: vec![],
     };
 
     // Push into pending_messages for turn-close drain.

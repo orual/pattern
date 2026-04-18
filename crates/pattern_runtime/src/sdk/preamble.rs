@@ -20,12 +20,15 @@ use crate::sdk::describe::EffectDecl;
 
 /// Build the Haskell preamble string.
 ///
-/// The `decls` parameter is accepted for API compatibility (callers pass
-/// [`crate::sdk::bundle::canonical_effect_decls()`]), but the preamble
-/// now uses static per-module imports rather than emitting GADT
-/// declarations and helpers from the decls. The `type M` alias and
-/// pagination support are hardcoded to match the canonical 13-effect row.
-pub fn build(_decls: &[EffectDecl]) -> String {
+/// The `decls` parameter (callers pass [`crate::sdk::bundle::canonical_effect_decls()`])
+/// is used to emit an API-documentation comment block listing each effect's
+/// helper signatures — the LLM reads these to discover what operations are
+/// available per effect. GADT declarations and helper bodies are NOT
+/// inlined (the effect modules are imported directly; tidepool's
+/// multi-module compilation works since the DataConTable/CoreExpr bug
+/// was fixed in our fork). The `type M` alias is hardcoded to match the
+/// canonical 13-effect row.
+pub fn build(decls: &[EffectDecl]) -> String {
     let mut out = String::with_capacity(8192);
 
     // Language pragmas.
@@ -62,21 +65,31 @@ pub fn build(_decls: &[EffectDecl]) -> String {
 
     // SDK effect module imports — hybrid qualified/unqualified scheme.
     //
-    // Unqualified: modules whose verbs are unambiguous and terse names are
-    // agent-friendly (send, chunk, now/sleep, start/stop).
-    out.push_str("-- Unqualified SDK effects (terse verbs, no collisions)\n");
+    // DUAL-IMPORT strategy: every module is imported BOTH unqualified
+    // (for terse call sites) AND qualified under its module alias (for
+    // disambiguation at call sites). The four "terse" modules (Message,
+    // Time, Display, Spawn) have helper names that don't collide with
+    // Prelude or other effects — agents can write bare `send`, `now`,
+    // `chunk`, `start`. The other nine have generic verbs (`get`,
+    // `read`, `error`, etc.) that WOULD collide unqualified, so they
+    // ARE ONLY imported qualified (not both). This also gives the LLM
+    // a single consistent style (`Memory.put`, `Display.chunk`,
+    // `Log.info`) when it pattern-matches off other SDK conventions.
+    out.push_str(
+        "-- Terse-import SDK effects (also qualified for explicit-attribution call sites)\n",
+    );
     out.push_str("import Pattern.Message\n");
+    out.push_str("import qualified Pattern.Message as Message\n");
     out.push_str("import Pattern.Time\n");
+    out.push_str("import qualified Pattern.Time as Time\n");
     out.push_str("import Pattern.Display\n");
+    out.push_str("import qualified Pattern.Display as Display\n");
     out.push_str("import Pattern.Spawn\n");
+    out.push_str("import qualified Pattern.Spawn as Spawn\n");
     //
-    // Qualified: modules with generic verbs (get/put/search/read/write/error)
+    // Qualified-only: modules with generic verbs (get/put/search/read/write/error)
     // that would collide with Prelude symbols or with each other if unqualified.
-    // Pattern.Log is qualified because `error` from Log would shadow the Text
-    // shim defined below; File because `read` shadows Prelude.read; Memory and
-    // Recall because both export `get`/`search`; Search because `all_` might
-    // still read ambiguously without context.
-    out.push_str("-- Qualified SDK effects (generic verbs clarified by prefix)\n");
+    out.push_str("-- Qualified-only SDK effects (generic verbs clarified by prefix)\n");
     out.push_str("import qualified Pattern.Memory as Memory\n");
     out.push_str("import qualified Pattern.File as File\n");
     out.push_str("import qualified Pattern.Log as Log\n");
@@ -94,11 +107,39 @@ pub fn build(_decls: &[EffectDecl]) -> String {
     out.push_str("error :: Text -> a\nerror = P.error . T.unpack\n");
     out.push('\n');
 
-    // Effect-row type alias with qualified names where required.
-    // Canonical order: Memory, Search, Recall, Message, Display, Time,
-    // Log, Shell, File, Sources, Mcp, Rpc, Spawn.
+    // API documentation for the LLM — emit each effect's helper
+    // signatures as comments so the LLM has a complete reference for
+    // what operations exist on each module. The signatures come from
+    // each handler's `DescribeEffect::effect_decl()`.helpers and are
+    // comment-only (no semantic effect on compilation) but are visible
+    // in the source the LLM sees when errors quote file content.
+    out.push_str("-- === Pattern SDK API reference ===\n");
+    out.push_str("-- The effects below are available in the `M` row.\n");
+    out.push_str("-- See each module's docs; signatures shown here for reference.\n");
+    for eff in decls {
+        out.push_str("-- \n");
+        out.push_str(&format!("-- {} ({}):\n", eff.type_name, eff.description));
+        for h in eff.helpers {
+            // Helpers are emitted as "sig\nbody" strings — we want the
+            // signature line only (first line) for the docs.
+            if let Some(sig) = h.lines().next() {
+                out.push_str("--   ");
+                out.push_str(sig);
+                out.push('\n');
+            }
+        }
+    }
+    out.push_str("-- === end API reference ===\n\n");
+
+    // Effect-row type synonym. NOTE: `M` is the effect LIST (kind
+    // `[* -> *]`), NOT `Eff '[...]`. The result binding in generated
+    // snippets is `result :: Eff M Value`, which expands to
+    // `Eff '[Memory.Memory, ...] Value`. Wrapping `Eff` into the
+    // synonym here would produce `Eff (Eff '[...]) Value` — a kind
+    // error. Canonical order: Memory, Search, Recall, Message,
+    // Display, Time, Log, Shell, File, Sources, Mcp, Rpc, Spawn.
     out.push_str(concat!(
-        "type M = Eff '[Memory.Memory, Search.Search, Recall.Recall, ",
+        "type M = '[Memory.Memory, Search.Search, Recall.Recall, ",
         "Message, Display, Time, Log.Log, Shell.Shell, ",
         "File.File, Sources.Sources, Mcp.Mcp, Rpc.Rpc, Spawn]\n\n",
     ));
@@ -185,8 +226,11 @@ fn emit_pagination_support(out: &mut String) {
         "truncVal budget val = let (v, _, stubs) = truncGo budget 0 val in (v, stubs)\n",
     ));
     // Non-interactive paginateResult: pure truncation, no Ask drill-down.
+    // Return type is `Eff M Value` — `M` is the effect LIST (kind
+    // `[* -> *]`), not an `Eff` already. `Eff M Value` expands to
+    // `Eff '[Memory.Memory, ...] Value`.
     out.push_str(concat!(
-        "paginateResult :: Int -> Value -> M Value\n",
+        "paginateResult :: Int -> Value -> Eff M Value\n",
         "paginateResult budget val\n",
         "  | valSize val <= budget = pure val\n",
         "  | otherwise = let (truncated, _) = truncVal budget val in pure truncated\n",
@@ -285,12 +329,17 @@ mod tests {
     fn preamble_contains_type_m_alias() {
         let decls = canonical_effect_decls();
         let preamble = build(&decls);
-        // The type M alias uses qualified names for modules with generic-verb
-        // helpers (Memory.Memory, Search.Search, etc.) and bare names for
-        // unambiguous ones (Message, Display, Time, Spawn).
+        // The type M alias is the effect LIST (kind `[* -> *]`) — NOT
+        // `Eff '[...]`. The `result :: Eff M Value` binding expands this
+        // to `Eff '[...] Value`. Wrapping `Eff` into the synonym would
+        // produce a kind error (Eff expects a list, not another Eff).
         assert!(
-            preamble.contains("type M = Eff '[Memory.Memory, Search.Search, Recall.Recall"),
-            "missing or incorrect qualified type M alias"
+            preamble.contains("type M = '[Memory.Memory, Search.Search, Recall.Recall"),
+            "missing or incorrect type M list alias"
+        );
+        assert!(
+            !preamble.contains("type M = Eff '["),
+            "type M must NOT wrap Eff — that's a kind error. type M should be the bare effect list."
         );
         assert!(
             preamble.contains("Message, Display, Time, Log.Log"),
@@ -300,6 +349,49 @@ mod tests {
             preamble.contains("File.File, Sources.Sources, Mcp.Mcp, Rpc.Rpc, Spawn]"),
             "missing File/Sources/Mcp/Rpc/Spawn in type M"
         );
+    }
+
+    /// Verify the API-reference comment block is present with each effect's
+    /// helper signatures — the LLM relies on these to discover what
+    /// operations exist.
+    #[test]
+    fn preamble_contains_api_reference_docs() {
+        let decls = canonical_effect_decls();
+        let preamble = build(&decls);
+        assert!(
+            preamble.contains("-- === Pattern SDK API reference ==="),
+            "missing API reference banner"
+        );
+        // Spot-check a known helper from each of three effect modules.
+        assert!(
+            preamble.contains("--   get :: Member Memory effs"),
+            "missing Memory.get in API reference"
+        );
+        assert!(
+            preamble.contains("--   send :: Member Message effs"),
+            "missing Message.send in API reference"
+        );
+        assert!(
+            preamble.contains("--   info :: Member Log effs"),
+            "missing Log.info in API reference"
+        );
+    }
+
+    /// Verify the terse-import modules ALSO have qualified aliases — the
+    /// LLM can write either `send "..."` or `Message.send "..."`; both
+    /// resolve correctly.
+    #[test]
+    fn preamble_dual_imports_terse_modules() {
+        let decls = canonical_effect_decls();
+        let preamble = build(&decls);
+        for line in &[
+            "import qualified Pattern.Message as Message",
+            "import qualified Pattern.Time as Time",
+            "import qualified Pattern.Display as Display",
+            "import qualified Pattern.Spawn as Spawn",
+        ] {
+            assert!(preamble.contains(line), "missing qualified alias: {line}");
+        }
     }
 
     #[test]

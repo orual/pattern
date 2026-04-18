@@ -5271,6 +5271,7 @@ name = "pattern-runtime"
 version = "0.4.0"
 dependencies = [
  "async-trait",
+ "blake3",
  "chrono",
  "clap",
  "dotenvy",

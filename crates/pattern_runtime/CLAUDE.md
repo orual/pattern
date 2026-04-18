@@ -4,6 +4,8 @@ Agent runtime for Pattern v3. Houses Tidepool (Haskell-in-Rust) embedding, the
 agent turn loop, `freer-simple` effect handlers, and turn-level checkpoint
 machinery. Depends only on `pattern_core` trait definitions.
 
+Last verified: 2026-04-18
+
 See the v3 foundation design at
 `docs/design-plans/2026-04-16-v3-foundation.md` for the substrate choice,
 SDK hierarchy, and phase ordering.
@@ -89,6 +91,102 @@ place the resulting binary on `$PATH` or export
 reachable and returns a structured error pointing at this section when the
 setup is wrong. Run it at binary startup before opening any Session.
 
+## Agent loop architecture (`agent_loop.rs`)
+
+The agent loop is split into two layers:
+
+- **`orchestrate`** — executes one wire turn: compose request, stream
+  provider response, emit `TurnEvent`s to the session's `TurnSink`,
+  dispatch tool_use evals, synthesize a `ChatRole::Tool` message with
+  all `ToolResponse` parts, and append it to `TurnOutput.messages`.
+  The tool_result message is built by `orchestrate` after dispatch --
+  NOT by the caller.
+
+- **`drive_step`** — wire-turn loop driver. Chains tool_use cycles via
+  `TurnInput::continuation(batch_id, agent_id)` (empty messages --
+  prior tool_result lives in TurnHistory). Records `(input, output)`
+  pairs atomically via `hist.record()`. Returns `StepReply` when
+  `stop_reason.is_terminal()`.
+
+### Batch-anchored snapshot attachments
+
+Memory snapshots are NOT a separate Segment 3 composer pass (the old
+`Segment3Pass` pseudo-message approach is retired from the agent loop).
+Instead, snapshots are attached to batch-opening user messages as
+`MessageAttachment::BatchOpeningSnapshot` and spliced onto the wire at
+compose-time by `compose_request_for_turn` (step 8). This eliminates
+the cache-busting problem where the old seg3 pseudo-message changed
+"last message" identity across turns.
+
+Snapshot kind decision (`build_snapshot_attachment`):
+- **Full** — emitted when `batches_since_last_full` hits threshold, or
+  `post_compaction_pending` is set, or history is empty.
+- **Delta** — emitted otherwise; includes only blocks whose
+  `content_hash` changed since the prior full/delta baseline.
+
+The delta baseline is computed by `collect_last_tracked_hashes`, which
+walks the full history latest-wins per label (not just the most recent
+attachment). `content_hash` uses `blake3::hash(...).as_bytes()[..8]`
+(not `DefaultHasher`) for cross-process stability.
+
+`Segment3Pass` still exists in `pattern_provider` for standalone
+compose-pipeline tests, but the agent loop does NOT use it -- it places
+the seg3 cache marker directly on the last message that had an
+attachment spliced (see `last_spliced_idx` in `compose_request_for_turn`).
+
+**Index-correspondence caveat:** the mapping between Pattern `Message`s
+(from `TurnHistory::active_messages()`) and composed `ChatMessage`s
+depends on `Segment2Pass` prepending `summary_head` messages at known
+offsets. History messages start at index `summary_count` in the
+composed message list. This correspondence is FRAGILE -- any future
+pass that reorders messages would break the splice logic. This is a
+known design concern tracked for follow-up.
+
+### MemoryStoreAdapter (`memory/adapter.rs`)
+
+Thin wrapper over `Arc<dyn MemoryStore>` with a pending `BlockWrite`
+buffer. Handlers call `record_write()` explicitly after mutations
+(they hold the semantic context: Create vs Replace, pre-content state).
+The session drains the buffer at turn close to populate
+`TurnOutput.block_writes` and feed pseudo-message emission.
+
+Design choice: the adapter does NOT intercept trait-method calls to
+auto-record writes. It is a simple, auditable passthrough plus a
+pending buffer.
+
+### TurnHistory (`memory/turn_history.rs`)
+
+`TurnRecord` stores both `input: TurnInput` and `output: TurnOutput`
+for each turn. `active_messages()` interleaves input and output
+messages in order so `Segment2Pass` replays the complete conversational
+context.
+
+Snapshot-related state tracked by `TurnHistory`:
+- `batches_since_last_full: u32` — reset on Full, incremented on new batch.
+- `post_compaction_pending: bool` — set by compaction layer, consumed
+  by `drive_step` to force a Full on next batch.
+- `most_recent_batch_id: Option<BatchId>` — detects new-batch transitions.
+
+### Eval worker (`agent_loop/eval_worker.rs`)
+
+`EvalWorker` spawns a long-lived thread with a 256 MiB stack (GHC
+continuation frames need it) and a multi-thread tokio runtime (sqlx
+`spawn_blocking` calls need actual worker threads; current-thread
+would deadlock).
+
+**`block_in_place` wrapping:** the `run_eval` call inside the worker's
+dispatch loop is wrapped in `tokio::task::block_in_place`. Without it,
+handlers that call `Handle::current().block_on(...)` panic with
+"Cannot start a runtime from within a runtime" because the evaluation
+runs on a multi-thread tokio worker thread. `block_in_place` relocates
+other tasks off the current worker thread before blocking.
+
+### SessionContext (`session.rs`)
+
+Gains `snapshot_selection: SnapshotSelection` field (controls which
+block types/labels appear in batch-opening snapshot attachments).
+Defaults to Core + Working blocks.
+
 ## Authoring agent programs
 
 ### SDK imports
@@ -96,7 +194,8 @@ setup is wrong. Run it at binary startup before opening any Session.
 Agent programs import from the `Pattern.*` SDK module tree (installed at
 `$PATTERN_SDK_DIR` or `crates/pattern_runtime/haskell/Pattern/` by default).
 `tidepool-extract` compiles agents with the SDK directory on its include
-path — all 13 modules are compiled and linked together.
+path -- all 13 effect modules plus vendored utility modules are compiled
+and linked together.
 
 The SDK uses a hybrid qualified/unqualified import scheme. Modules with
 unambiguous terse verbs are used unqualified; modules with generic verbs
@@ -159,6 +258,48 @@ Sources, Mcp, Rpc, Spawn
 ```
 
 Agent `Eff '[...]` rows must line up with this prefix.
+
+### Vendored utility modules
+
+The SDK vendors several utility modules so agents are fully
+self-contained (no tidepool-mcp dependency):
+
+- `Pattern.Prelude` — curated prelude (Text-returning `show`, list/Map
+  helpers, Aeson construction). Does NOT re-export the 13 effect modules.
+- `Pattern.Aeson`, `Pattern.Aeson.Value`, `Pattern.Aeson.KeyMap`,
+  `Pattern.Aeson.Lens` — JSON construction + traversal.
+- `Pattern.Table` — tabular text formatting.
+- `Pattern.Text` — Text utilities.
+
+Notable: `Instant` and `Duration` (from `Pattern.Time`) derive `Show`,
+so agents can `show now` in log lines.
+
+### Code-tool description and preamble
+
+The `code` tool's description (`sdk/code_tool.rs`) is ~6.4 KB and built
+once at process startup from `canonical_effect_decls()`. It contains:
+- Full API reference (every helper signature across all 13 effects).
+- Effect-row and import-scheme conventions.
+- Common gotchas section (e.g. `Memory.get` returns `Content` not
+  `Maybe`, `pure ()` not `return unit`, `Show Instant` works,
+  `Memory.list` does not exist).
+
+The preamble (`sdk/preamble.rs`) builds the Haskell module header for
+each eval: pragmas, `Pattern.Prelude` import, SDK effect imports via
+the hybrid qualified/unqualified scheme, `type M` effect-row alias,
+and an API documentation comment block assembled from `EffectDecl.helpers`
+for LLM discoverability. GADT declarations are NOT inlined -- the
+effect modules are imported directly (viable since the tidepool
+multi-module compilation bug was fixed in our fork).
+
+### In-memory test double (`testing/in_memory_store.rs`)
+
+Minimal `MemoryStore` implementation for integration tests. Phase 5
+wired previously-stubbed methods:
+- `set_block_pinned` — mutates metadata via Arc-shared `metadata_mut`.
+- `insert_archival` / `search_archival` / `delete_archival` — stored
+  in `Vec<ArchivalRecord>` with naive `contains()` search.
+- `update_block_schema` — mutates `metadata.schema`.
 
 ### Search, recall, and shared-block access
 

@@ -35,13 +35,15 @@ Agents may be running in production. Any CLI invocation will disrupt active agen
 pattern/
 ├── crates/
 │   ├── pattern_api/      # Shared API types and contracts
-│   ├── pattern_auth/     # Credential storage (ATProto, Discord, providers)
 │   ├── pattern_cli/      # CLI with TUI builders
 │   ├── pattern_core/     # Agent framework, memory, tools, coordination
 │   ├── pattern_db/       # SQLite with FTS5 and vector search
 │   ├── pattern_discord/  # Discord bot integration
+│   ├── pattern_macros/   # Derive macros (effect handler codegen)
 │   ├── pattern_mcp/      # MCP client and server
 │   ├── pattern_nd/       # ADHD-specific tools and personalities
+│   ├── pattern_provider/ # LLM provider integration, auth, request shaping
+│   ├── pattern_runtime/  # Agent runtime (Tidepool, turn loop, SDK)
 │   └── pattern_server/   # Backend API server
 ├── docs/                 # Architecture docs and guides
 └── justfile              # Build automation
@@ -131,7 +133,6 @@ cargo clippy --all-features --all-targets
 
 # Database operations (from crate directory!)
 cd crates/pattern_db && cargo sqlx prepare
-cd crates/pattern_auth && cargo sqlx prepare
 # NEVER use --workspace flag with sqlx prepare
 ```
 

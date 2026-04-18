@@ -162,8 +162,20 @@ impl EvalWorker {
 
                 rt.block_on(async move {
                     while let Some(req) = rx.recv().await {
-                        let outcome =
-                            run_eval(&req.source, &ctx, &include_paths, &session_id_for_worker);
+                        // Wrap the sync eval work in `block_in_place` so
+                        // tokio moves other tasks off this worker before
+                        // we block it for the duration of the Haskell
+                        // compile + JIT run. Without this, effect
+                        // handlers inside the JIT that call
+                        // `Handle::current().block_on(...)` to drive async
+                        // store operations panic with "Cannot start a
+                        // runtime from within a runtime" because they
+                        // can't block_on the same runtime's worker
+                        // they're currently running on. `block_in_place`
+                        // is the documented tokio pattern for this.
+                        let outcome = tokio::task::block_in_place(|| {
+                            run_eval(&req.source, &ctx, &include_paths, &session_id_for_worker)
+                        });
                         // Receiver may have dropped (session cancelled
                         // mid-eval) — that's not an error worth
                         // surfacing; just move on to the next request.

@@ -78,6 +78,10 @@ pub struct SessionContext {
     /// before each turn; read by handlers when stamping recorded
     /// exchanges.
     current_turn: Arc<AtomicU64>,
+    /// Policy for which blocks appear in memory snapshot attachments.
+    /// Default includes Core and Working blocks; Archival and Log
+    /// are excluded. Future: per-agent/constellation config overrides.
+    snapshot_selection: pattern_core::types::message::SnapshotSelection,
 }
 
 /// Handlers call this to decide whether to short-circuit on soft-cancel.
@@ -140,6 +144,7 @@ impl SessionContext {
             turn_sink: Arc::new(NoOpSink),
             checkpoint_log: Arc::new(std::sync::Mutex::new(CheckpointLog::new())),
             current_turn: Arc::new(AtomicU64::new(0)),
+            snapshot_selection: pattern_core::types::message::SnapshotSelection::default(),
         }
     }
 
@@ -216,6 +221,12 @@ impl SessionContext {
     /// Provider client handle for LLM completion calls.
     pub fn provider(&self) -> &Arc<dyn ProviderClient> {
         &self.provider
+    }
+
+    /// Snapshot selection policy for memory attachments. Controls which
+    /// blocks appear in `MessageAttachment::BatchOpeningSnapshot`.
+    pub fn snapshot_selection(&self) -> &pattern_core::types::message::SnapshotSelection {
+        &self.snapshot_selection
     }
 
     /// Scheme-dispatched router registry for message routing.

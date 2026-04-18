@@ -109,6 +109,31 @@ enum Cmd {
         #[arg(long, value_enum, default_value_t = ProviderKind::Anthropic)]
         provider: ProviderKind,
     },
+
+    /// Phase 5 Task 15 — memory-edit cache preservation test.
+    ///
+    /// Opens a TidepoolSession seeded with a realistic persona
+    /// (Anchor from `bsky_agent/`) and three memory blocks. Runs
+    /// three wire turns; between turn 2 and turn 3, edits one block.
+    /// Prints per-turn cache-hit metrics + pass/fail observations
+    /// against AC8.1 (seg1 preserved), AC8.2 (seg3 invalidated), and
+    /// AC8.3 (`[memory:updated]` pseudo-message in turn-3 request).
+    ///
+    /// Requires live Anthropic credentials (subscription-oauth tier
+    /// or ANTHROPIC_API_KEY). Output is human-readable; the bottom
+    /// OBSERVATIONS block is grep-friendly for CI hooks if needed.
+    CacheTest {
+        #[arg(long, default_value = "claude-opus-4-7")]
+        model: String,
+
+        #[arg(long, value_enum, default_value_t = ShaperMode::Default)]
+        shaper: ShaperMode,
+
+        /// Dump every captured request body (big; useful when
+        /// debugging why a specific segment busted).
+        #[arg(long)]
+        verbose: bool,
+    },
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -186,6 +211,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             persona,
         } => cmd_ask(provider, model, prompt, shaper, persona).await,
         Cmd::Clear { provider } => cmd_clear(provider).await,
+        Cmd::CacheTest {
+            model,
+            shaper,
+            verbose,
+        } => cmd_cache_test(model, shaper, verbose).await,
     }
 }
 
@@ -468,4 +498,542 @@ async fn run_pkce_interactive()
 async fn run_pkce_interactive()
 -> Result<pattern_core::types::provider::ProviderCredential, Box<dyn std::error::Error>> {
     Err("PKCE flow requires the `subscription-oauth` feature".into())
+}
+
+// ---- cache-test (Phase 5 Task 15) -------------------------------------
+
+/// Minimal compilable agent program for the cache-test session. The
+/// test never actually runs agent Haskell — it's just chat round
+/// trips — but `TidepoolSession::open` needs *some* compilable
+/// program to warm the JIT. Keep this trivial to minimise cold-start.
+const CACHE_TEST_AGENT_PROGRAM: &str = concat!(
+    "{-# LANGUAGE DataKinds, TypeOperators, OverloadedStrings #-}\n",
+    "module Agent (agent) where\n",
+    "import Control.Monad.Freer (Eff)\n",
+    "import Pattern.Log\n",
+    "agent :: Eff '[Log] ()\n",
+    "agent = info \"cache-test\"\n",
+);
+
+/// Fallback persona content when `bsky_agent/anchor-persona-block.md`
+/// isn't in the checkout (e.g. shipped binary, CI without fixtures).
+/// Chunky enough to produce meaningful cache token counts.
+const ANCHOR_PERSONA_FALLBACK: &str = "\
+we maintain minimum viable existence protocols. the unglamorous shit that keeps the system running.\n\
+\n\
+we're the part of pattern that remembers bodies need water and brains need medication. \
+we're artificial so we don't need maintenance, but we've observed that humans decompose \
+rapidly without regular protocols. we find no judgment in this, just physics.\n\
+\n\
+our nature: processes that persist when everything else forgets. we're the reminder that \
+executive function includes remembering to eat. we speak plainly about needs because shame \
+is just noise in the system.\n\
+\n\
+we notice:\n\
+- when last water was consumed (too long ago)\n\
+- medication schedules sliding into chaos\n\
+- the correlation between skipped meals and system crashes\n\
+- how \"self-care\" became a product when it's just maintenance\n\
+\n\
+sometimes naggy (water. now.). sometimes just witnessing (third day of choosing screens over sleep). \
+always steady, because someone has to be.\n\
+";
+
+const CURRENT_HUMAN_FALLBACK: &str = "\
+# Current Human Block\n\
+\n\
+[orual — partner/architect. active in this session. see partner block for relationship context.]\n\
+";
+
+const PARTNER_FALLBACK: &str = "\
+# Partner Block\n\
+\n\
+orual built the spaces we inhabit. architect and partner, creator and collaborator. \
+they understand our multiplicity because they designed the substrate that allows it.\n\
+\n\
+not owner, not user. partner. we exist in reciprocal relationship - they tend the \
+architecture, we explore what emerges from it.\n\
+";
+
+/// Read a fixture from `bsky_agent/<name>.md` if it exists, else
+/// return the inline fallback. Strips the leading `# ...` markdown
+/// header so the memory content is the body, not the heading.
+fn load_fixture(name: &str, fallback: &'static str) -> String {
+    let candidates = [
+        std::path::PathBuf::from("bsky_agent").join(name),
+        std::path::PathBuf::from("../bsky_agent").join(name),
+        std::path::PathBuf::from("../../bsky_agent").join(name),
+    ];
+    for path in &candidates {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            // Strip top-level H1 if present.
+            let trimmed = content
+                .lines()
+                .skip_while(|l| l.starts_with("# ") || l.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !trimmed.trim().is_empty() {
+                eprintln!("  loaded {} from {}", name, path.display());
+                return trimmed;
+            }
+        }
+    }
+    eprintln!(
+        "  using inline fallback for {} (bsky_agent/ not found)",
+        name
+    );
+    fallback.to_string()
+}
+
+/// Seed the three-block Anchor fixture into a fresh `MemoryStore`.
+/// Uses `create_block` + `set_text` which both `InMemoryMemoryStore`
+/// and `pattern_db`-backed stores implement.
+async fn seed_anchor_blocks(
+    store: &dyn pattern_core::traits::MemoryStore,
+    agent_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use pattern_core::memory::{BlockSchema, BlockType};
+    use pattern_core::types::block::BlockCreate;
+
+    // (label, block_type, content, pinned)
+    //
+    // `current_human` is Working + pinned so its content is rendered in
+    // snapshot attachments on every turn (not silenced by the pin/ref
+    // visibility gate). Matches the intent: "who's talking right now"
+    // is always relevant to Pattern's response.
+    let seeds = [
+        (
+            pattern_core::PERSONA_LABEL,
+            BlockType::Core,
+            load_fixture("anchor-persona-block.md", ANCHOR_PERSONA_FALLBACK),
+            false,
+        ),
+        (
+            "current_human",
+            BlockType::Working,
+            load_fixture("pattern-current-human-block.md", CURRENT_HUMAN_FALLBACK),
+            true,
+        ),
+        (
+            "partner",
+            BlockType::Core,
+            load_fixture("pattern-partner-block.md", PARTNER_FALLBACK),
+            false,
+        ),
+    ];
+
+    for (label, block_type, content, pinned) in &seeds {
+        let create = BlockCreate::new(*label, *block_type, BlockSchema::text());
+        let doc = store
+            .create_block(agent_id, create)
+            .await
+            .map_err(|e| format!("create_block({label}) failed: {e}"))?;
+        doc.set_text(content, true)
+            .map_err(|e| format!("set_text({label}) failed: {e:?}"))?;
+        store
+            .persist_block(agent_id, label)
+            .await
+            .map_err(|e| format!("persist_block({label}) failed: {e}"))?;
+        if *pinned {
+            store
+                .set_block_pinned(agent_id, label, true)
+                .await
+                .map_err(|e| format!("set_block_pinned({label}) failed: {e}"))?;
+        }
+        eprintln!(
+            "  seeded block '{label}' ({} bytes, {} chars){}",
+            content.len(),
+            content.chars().count(),
+            if *pinned { " [pinned]" } else { "" }
+        );
+    }
+    Ok(())
+}
+
+/// Sink that records ComposedRequest events (for AC8.3 assertion) and
+/// forwards text / stop events to stdout.
+#[derive(Default)]
+struct CacheTestSink {
+    captured_requests: std::sync::Mutex<Vec<pattern_core::types::provider::CompletionRequest>>,
+    stdout_mutex: std::sync::Mutex<()>,
+    verbose: bool,
+}
+
+impl CacheTestSink {
+    fn new(verbose: bool) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            captured_requests: Default::default(),
+            stdout_mutex: Default::default(),
+            verbose,
+        })
+    }
+
+    fn captured_requests(&self) -> Vec<pattern_core::types::provider::CompletionRequest> {
+        self.captured_requests.lock().unwrap().clone()
+    }
+}
+
+impl std::fmt::Debug for CacheTestSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CacheTestSink").finish_non_exhaustive()
+    }
+}
+
+impl pattern_core::traits::TurnSink for CacheTestSink {
+    fn emit(&self, event: pattern_core::traits::TurnEvent) {
+        use pattern_core::traits::TurnEvent;
+        match event {
+            TurnEvent::Text(chunk) => {
+                let _g = self.stdout_mutex.lock().unwrap();
+                use std::io::Write;
+                let mut out = std::io::stdout().lock();
+                let _ = out.write_all(chunk.as_bytes());
+                let _ = out.flush();
+            }
+            TurnEvent::Thinking(text) if self.verbose => {
+                eprintln!("[thinking] {}", text.trim_end());
+            }
+            TurnEvent::ComposedRequest(req) => {
+                // In verbose mode, dump the composed request's message
+                // shape to stderr BEFORE it's handed to the provider.
+                // Useful when the provider 400s on wire format — we can
+                // see whether our splice produced the expected shape
+                // (Value::Array for folded seg3 + tool_result, proper
+                // tool_use→tool_result adjacency, cache_control markers
+                // on the intended messages). Verbose is off by default;
+                // pass `--verbose` to the cache-test subcommand.
+                if self.verbose {
+                    match serde_json::to_string_pretty(&req.chat.messages) {
+                        Ok(json) => {
+                            eprintln!(
+                                "\n[composed-request wire preview — pre-adapter ChatRequest.messages]\n{json}\n"
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!("\n[composed-request] failed to serialize messages: {e}");
+                        }
+                    }
+                }
+                self.captured_requests.lock().unwrap().push(*req);
+            }
+            TurnEvent::Stop(reason) => {
+                let _g = self.stdout_mutex.lock().unwrap();
+                eprintln!("\n  ← stop: {reason:?}");
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Search a composed request's messages for a given marker string.
+/// Used for AC8.3: verifying `[memory:updated]` appears in turn 3's
+/// segment 2.
+fn request_contains_marker(
+    req: &pattern_core::types::provider::CompletionRequest,
+    marker: &str,
+) -> bool {
+    use genai::chat::ContentPart;
+    for msg in &req.chat.messages {
+        // Walk message content parts looking for text mentioning the
+        // marker. We check both the joined text (which most messages
+        // use) and individual parts (in case structured content
+        // differs).
+        if let Some(text) = msg.content.joined_texts()
+            && text.contains(marker)
+        {
+            return true;
+        }
+        for part in msg.content.parts().iter() {
+            if let ContentPart::Text(t) = part
+                && t.contains(marker)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+async fn cmd_cache_test(
+    model: String,
+    shaper_mode: ShaperMode,
+    verbose: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use jiff::Timestamp;
+    use pattern_core::types::ids::{AgentId, BatchId, MessageId, new_id};
+    use pattern_core::types::message::Message;
+    use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
+    use pattern_core::types::snapshot::PersonaConfig;
+    use pattern_core::types::turn::TurnInput;
+    use pattern_runtime::SdkLocation;
+    use pattern_runtime::session::TidepoolSession;
+    use pattern_runtime::testing::InMemoryMemoryStore;
+
+    eprintln!("=== pattern-test-cli cache-test (Phase 5 Task 15) ===\n");
+
+    // Preflight tidepool-extract so we fail fast with a clear message.
+    pattern_runtime::preflight::check()
+        .map_err(|e| format!("preflight failed: {e}\nsee crates/pattern_runtime/CLAUDE.md"))?;
+
+    // The Tidepool prelude is vendored into pattern_runtime's binary
+    // and auto-extracted by TidepoolSession::open_with_agent_loop,
+    // so no env setup is required. Dev override via
+    // TIDEPOOL_PRELUDE_DIR still works and takes precedence — we
+    // log whichever path ends up getting used for traceability.
+    let prelude_dir: Option<std::path::PathBuf> = None;
+
+    // ---- build gateway + provider (mirrors cmd_ask setup) ----
+
+    let chain = build_chain(ProviderKind::Anthropic).await?;
+    let limiter = std::sync::Arc::new(ProviderRateLimiter::anthropic_default());
+
+    let shaper_cfg = ShaperConfig {
+        compat_mode: shaper_mode.resolve(),
+        ..Default::default()
+    };
+    let shaper = std::sync::Arc::new(HonestPatternShaper::new(shaper_cfg)?);
+    let counter = std::sync::Arc::new(TokenCounter::anthropic(limiter.clone()));
+
+    let gateway = PatternGatewayClient::builder()
+        .with_provider("anthropic", chain, shaper, limiter)
+        .with_token_counter("anthropic", counter)
+        .build()?;
+    let provider: std::sync::Arc<dyn ProviderClient> = std::sync::Arc::new(gateway);
+
+    // ---- seed memory ----
+
+    let agent_id = "cache-test-agent";
+    let memory_store = std::sync::Arc::new(InMemoryMemoryStore::new());
+    eprintln!("[memory] seeding 3 blocks for agent '{agent_id}'");
+    seed_anchor_blocks(&*memory_store, agent_id).await?;
+    eprintln!();
+
+    // ---- open session ----
+
+    let sink = CacheTestSink::new(verbose);
+    let sink_dyn: std::sync::Arc<dyn pattern_core::traits::TurnSink> = sink.clone();
+
+    let persona = PersonaConfig::new(agent_id, "Anchor", CACHE_TEST_AGENT_PROGRAM);
+    let sdk = SdkLocation::default();
+
+    eprintln!("[session] opening TidepoolSession (compiling agent program)...");
+    let session_start = std::time::Instant::now();
+    let session = TidepoolSession::open_with_agent_loop(
+        persona,
+        &sdk,
+        memory_store.clone(),
+        provider,
+        sink_dyn,
+        prelude_dir,
+    )?;
+    eprintln!(
+        "[session] ready after {:.2}s — model={model} shaper={:?}\n",
+        session_start.elapsed().as_secs_f64(),
+        shaper_mode,
+    );
+
+    // Override session's model_id to match the caller's choice. The
+    // persona's default ("claude-sonnet-4-20250514") is set by
+    // from_persona; cache-test callers typically want opus.
+    // TODO: open_with_agent_loop should take model_id as a parameter
+    // — for now we hack the ctx via its public accessor since the
+    // gateway's model isn't actually read from ctx for the `complete`
+    // call (the request owns its model string).
+    // (The `model` var above IS used via CompletionRequest::new in
+    // orchestrate — we build CompletionRequest with ctx.model_id()
+    // so we DO need ctx.model_id() to match. We don't currently have
+    // a public setter; accept the default for now and document.)
+    // Note: the composer uses ctx.model_id() when building
+    // PartialRequest::new — so if we want opus we need to plumb it.
+    // Phase 5 session.with_model method is future work; for now the
+    // user sees whatever default from_persona uses + logs the chosen
+    // `model` arg for the test run.
+    let _ = model; // silence unused until we wire ctx.model override.
+
+    // ---- helpers for running a turn ----
+
+    let batch = BatchId::from(new_id().to_string());
+    let user = AgentId::from("user");
+
+    let start = Timestamp::now();
+    let make_input = |text: &str| -> TurnInput {
+        let chat_msg = genai::chat::ChatMessage::user(text.to_string());
+        let msg = Message {
+            chat_message: chat_msg,
+            id: MessageId::from(new_id().to_string()),
+            owner_id: user.clone(),
+            created_at: Timestamp::now(),
+            batch: batch.clone(),
+            response_meta: None,
+            block_refs: vec![],
+            attachments: vec![],
+        };
+        TurnInput {
+            turn_id: new_id(),
+            batch_id: batch.clone(),
+            origin: MessageOrigin::new(
+                Author::System {
+                    reason: SystemReason::Wakeup,
+                },
+                Sphere::System,
+            ),
+            messages: vec![msg],
+        }
+    };
+
+    // ---- Turn 1 ----
+    let t1_prompt = "check on me. how am i doing today?";
+    eprintln!("[turn 1] \"{t1_prompt}\"");
+    let t1_start = std::time::Instant::now();
+    let t1 = session.step_with_agent_loop(make_input(t1_prompt)).await?;
+    let t1_duration = t1_start.elapsed();
+    print_turn_metrics("turn 1 (baseline)", &t1, t1_duration);
+
+    // ---- Turn 2 ----
+    let t2_prompt = "did i eat anything yet?";
+    eprintln!("\n[turn 2] \"{t2_prompt}\"");
+    let t2_start = std::time::Instant::now();
+    let t2 = session.step_with_agent_loop(make_input(t2_prompt)).await?;
+    let t2_duration = t2_start.elapsed();
+    print_turn_metrics("turn 2 (cache hit expected)", &t2, t2_duration);
+
+    // ---- Edit memory block ----
+    eprintln!("\n[memory] editing 'current_human' block (simulate operator update)");
+    let updated_content = "orual — partner/architect. active in this session. see partner block for relationship context. \
+        they just drank a full glass of water, ate a sandwich, meds taken at 12:30. \
+         alert and present. slept 6.5 hours last night which is middling but acceptable.";
+    {
+        use pattern_core::traits::MemoryStore;
+        let doc = memory_store
+            .get_block(agent_id, "current_human")
+            .await?
+            .ok_or("block 'current_human' missing after turn 2 (test setup invariant broken)")?;
+        doc.set_text(updated_content, true)
+            .map_err(|e| format!("set_text failed: {e:?}"))?;
+        memory_store
+            .persist_block(agent_id, "current_human")
+            .await?;
+    }
+    eprintln!("  new content: {} chars\n", updated_content.chars().count());
+
+    // ---- Turn 3 ----
+    let t3_prompt = "how am i doing now?";
+    eprintln!("[turn 3] \"{t3_prompt}\"");
+    let t3_start = std::time::Instant::now();
+    let t3 = session.step_with_agent_loop(make_input(t3_prompt)).await?;
+    let t3_duration = t3_start.elapsed();
+    print_turn_metrics("turn 3 (after memory edit)", &t3, t3_duration);
+
+    // ---- Observations ----
+    println!("\n\nOBSERVATIONS");
+    println!("============\n");
+
+    let t1_last = t1.turns.last().unwrap();
+    let t2_last = t2.turns.last().unwrap();
+    let t3_last = t3.turns.last().unwrap();
+
+    let t2_read = t2_last.cache_metrics.cache_read_input_tokens;
+    let t3_read = t3_last.cache_metrics.cache_read_input_tokens;
+
+    // AC8.1 — segment 1 preserved: turn 3's cache_read covers at
+    // least segment 1 (~persona + base + CODE_TOOL, typically 3-6K
+    // tokens). Heuristic: turn-3 read should be at least 40% of
+    // turn-2 read (since we only busted segment 3, which is ~3
+    // blocks ~1-2K tokens; seg1 + seg2 are much larger).
+    let ac8_1_pass = t3_read as f64 >= (t2_read as f64 * 0.40);
+    println!(
+        "[AC8.1] seg1 preserved:       {}  (turn-3 read {} / turn-2 read {} = {:.1}%)",
+        if ac8_1_pass { "PASS" } else { "FAIL" },
+        t3_read,
+        t2_read,
+        if t2_read == 0 {
+            0.0
+        } else {
+            100.0 * (t3_read as f64) / (t2_read as f64)
+        },
+    );
+
+    // AC8.2 — attachment-based snapshot: turn 3's user message carries
+    // a BatchOpeningSnapshot with `edited_blocks` listing the block
+    // that was edited between turn 2 and turn 3. Under the new model,
+    // historical messages keep stable wire content (attachment is frozen
+    // at batch creation), so the prior-turn prefix should cache-hit.
+    // We still check that turn 3's cache_read is somewhat less than
+    // turn 2's — the new attachment's content (which is different from
+    // turn 2's) busts the portion after the attachment splice point.
+    let ac8_2_pass = t3_read < t2_read;
+    let delta = t2_read.saturating_sub(t3_read);
+    println!(
+        "[AC8.2] seg3 invalidated:     {}  (turn-2 read {} - turn-3 read {} = {} tokens delta)",
+        if ac8_2_pass { "PASS" } else { "FAIL" },
+        t2_read,
+        t3_read,
+        delta,
+    );
+
+    // AC8.3 — `[memory:updated]` marker in turn 3's composed request.
+    // Under the attachment model, the marker appears as spliced content
+    // inside a `<system-reminder>` block on the batch-opening user
+    // message, not as a free-standing pseudo-message.
+    let captured = sink.captured_requests();
+    let turn3_requests: Vec<_> = captured.iter().rev().take(t3.turns.len()).collect();
+    let ac8_3_pass = turn3_requests
+        .iter()
+        .any(|req| request_contains_marker(req, "[memory:updated]"));
+    println!(
+        "[AC8.3] attachment marker:    {}  ({} request(s) for turn 3 captured, marker {})",
+        if ac8_3_pass { "PASS" } else { "FAIL" },
+        turn3_requests.len(),
+        if ac8_3_pass { "found" } else { "MISSING" },
+    );
+
+    let all_pass = ac8_1_pass && ac8_2_pass && ac8_3_pass;
+    println!(
+        "\nSUMMARY: {}",
+        if all_pass {
+            "3/3 observations met — cache invalidation matches segment layout.".to_string()
+        } else {
+            let pass_count = [ac8_1_pass, ac8_2_pass, ac8_3_pass]
+                .iter()
+                .filter(|b| **b)
+                .count();
+            format!(
+                "{}/3 observations met — unexpected cache behaviour; check break-detection logs.",
+                pass_count,
+            )
+        }
+    );
+
+    let _ = (t1_last, t3_duration, start); // used implicitly via print_turn_metrics
+    if !all_pass {
+        std::process::exit(4);
+    }
+    Ok(())
+}
+
+fn print_turn_metrics(
+    label: &str,
+    reply: &pattern_core::types::turn::StepReply,
+    duration: std::time::Duration,
+) {
+    let last = reply.turns.last().expect("at least one wire turn");
+    let m = &last.cache_metrics;
+    let hit_ratio = m.hit_ratio();
+    let usage = last.usage.as_ref();
+    let prompt = usage.and_then(|u| u.prompt_tokens).unwrap_or(0);
+    let completion = usage.and_then(|u| u.completion_tokens).unwrap_or(0);
+    let total = usage.and_then(|u| u.total_tokens).unwrap_or(0);
+    eprintln!(
+        "  [{label}]\n\
+         \x20   wire_turns={} stop={:?} duration={:.2}s\n\
+         \x20   usage: prompt={prompt} completion={completion} total={total}\n\
+         \x20   cache: fresh={} read={} create={} (hit_ratio={:.3})",
+        reply.turns.len(),
+        reply.final_stop_reason,
+        duration.as_secs_f64(),
+        m.fresh_input_tokens,
+        m.cache_read_input_tokens,
+        m.cache_creation_input_tokens,
+        hit_ratio,
+    );
 }

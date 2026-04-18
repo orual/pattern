@@ -12,6 +12,7 @@
 use std::collections::VecDeque;
 
 use pattern_core::types::block::BlockWrite;
+use pattern_core::types::ids::BatchId;
 use pattern_core::types::message::Message;
 use pattern_core::types::turn::{TurnId, TurnInput, TurnOutput};
 use pattern_db::models::ArchiveSummary;
@@ -49,6 +50,17 @@ pub struct TurnHistory {
     /// data. Always a u64 (no Option); callers don't handle
     /// "missing data" cases — the heuristic covers it.
     estimated_tokens: u64,
+    /// Number of batches recorded since the last Full snapshot was
+    /// emitted. Reset to 0 when a Full is emitted; incremented when
+    /// a new batch starts (batch_id differs from prior record).
+    batches_since_last_full: u32,
+    /// Set to `true` by the compaction layer when turns are archived;
+    /// consumed (and cleared) by `drive_step` to trigger a Full
+    /// snapshot on the next batch.
+    post_compaction_pending: bool,
+    /// The batch_id of the most recently recorded turn, used to detect
+    /// new-batch transitions.
+    most_recent_batch_id: Option<BatchId>,
 }
 
 impl TurnHistory {
@@ -58,6 +70,9 @@ impl TurnHistory {
             active: VecDeque::new(),
             summary_head: Vec::new(),
             estimated_tokens: 0,
+            batches_since_last_full: 0,
+            post_compaction_pending: false,
+            most_recent_batch_id: None,
         }
     }
 
@@ -73,6 +88,9 @@ impl TurnHistory {
             active: VecDeque::new(),
             summary_head,
             estimated_tokens: 0,
+            batches_since_last_full: 0,
+            post_compaction_pending: false,
+            most_recent_batch_id: None,
         })
     }
 
@@ -90,6 +108,18 @@ impl TurnHistory {
     pub fn record(&mut self, turn_id: TurnId, input: TurnInput, output: TurnOutput) {
         let delta = estimate_turn_tokens(&output);
         self.estimated_tokens = self.estimated_tokens.saturating_add(delta);
+
+        // Detect new-batch transition for snapshot scheduling.
+        let is_new_batch = self
+            .most_recent_batch_id
+            .as_ref()
+            .map(|prev| *prev != input.batch_id)
+            .unwrap_or(true);
+        if is_new_batch {
+            self.batches_since_last_full = self.batches_since_last_full.saturating_add(1);
+            self.most_recent_batch_id = Some(input.batch_id.clone());
+        }
+
         self.active.push_back(TurnRecord {
             turn_id,
             input,
@@ -157,6 +187,11 @@ impl TurnHistory {
                 break;
             }
         }
+        if !out.is_empty() {
+            // Signal that a compaction occurred — next batch should
+            // emit a Full snapshot so the model gets a complete view.
+            self.post_compaction_pending = true;
+        }
         // Recompute estimated_tokens from remaining active via the
         // heuristic. Task 13's next real-count refresh will overwrite.
         self.estimated_tokens = self
@@ -169,13 +204,45 @@ impl TurnHistory {
 
     /// All retained turns in chronological order. Task 13's compaction
     /// strategies walk this.
-    pub fn iter_active(&self) -> impl Iterator<Item = &TurnRecord> {
+    pub fn iter_active(&self) -> impl DoubleEndedIterator<Item = &TurnRecord> {
         self.active.iter()
     }
 
     /// Number of active turns currently retained.
     pub fn active_len(&self) -> usize {
         self.active.len()
+    }
+
+    // ---- Snapshot scheduling accessors ----
+
+    /// Number of batches recorded since the last Full snapshot was emitted.
+    pub fn batches_since_last_full(&self) -> u32 {
+        self.batches_since_last_full
+    }
+
+    /// Whether a compaction has occurred since the last Full snapshot,
+    /// signalling that the next batch should emit a Full.
+    pub fn post_compaction_pending(&self) -> bool {
+        self.post_compaction_pending
+    }
+
+    /// Mark that a compaction has occurred. The next batch's snapshot
+    /// will be a Full. Consumed by `clear_post_compaction`.
+    pub fn set_post_compaction_pending(&mut self) {
+        self.post_compaction_pending = true;
+    }
+
+    /// Clear the post-compaction flag after a Full snapshot has been
+    /// emitted. Also resets `batches_since_last_full` to 0.
+    pub fn note_full_snapshot_emitted(&mut self) {
+        self.post_compaction_pending = false;
+        self.batches_since_last_full = 0;
+    }
+
+    /// The batch_id of the most recently recorded turn. Returns `None`
+    /// on a fresh (empty) history.
+    pub fn most_recent_batch_id(&self) -> Option<&BatchId> {
+        self.most_recent_batch_id.as_ref()
     }
 }
 
@@ -219,6 +286,7 @@ mod tests {
                     batch: new_id(),
                     response_meta: None,
                     block_refs: vec![],
+                    attachments: vec![],
                 })
                 .collect(),
             block_writes,
@@ -294,6 +362,7 @@ mod tests {
             batch: batch.clone(),
             response_meta: None,
             block_refs: vec![],
+            attachments: vec![],
         };
 
         let user_msg = make_msg("user says hi", genai::chat::ChatRole::User);
@@ -454,5 +523,105 @@ mod tests {
         hist.set_summary_head(summaries);
         assert_eq!(hist.summary_head().len(), 1);
         assert_eq!(hist.summary_head()[0].id, "s1");
+    }
+
+    // ---- Batch tracking tests ----
+
+    fn make_turn_input_with_batch(batch_id: &str) -> TurnInput {
+        use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
+        TurnInput {
+            turn_id: new_id(),
+            batch_id: SmolStr::new(batch_id),
+            origin: MessageOrigin::new(
+                Author::System {
+                    reason: SystemReason::Wakeup,
+                },
+                Sphere::System,
+            ),
+            messages: vec![],
+        }
+    }
+
+    #[test]
+    fn batches_since_last_full_increments_on_new_batch() {
+        let mut hist = TurnHistory::empty();
+        assert_eq!(hist.batches_since_last_full(), 0);
+
+        hist.record(
+            new_id(),
+            make_turn_input_with_batch("batch-1"),
+            make_turn_output(1, vec![]),
+        );
+        assert_eq!(hist.batches_since_last_full(), 1);
+
+        // Same batch_id = no increment.
+        hist.record(
+            new_id(),
+            make_turn_input_with_batch("batch-1"),
+            make_turn_output(1, vec![]),
+        );
+        assert_eq!(hist.batches_since_last_full(), 1);
+
+        // New batch_id = increment.
+        hist.record(
+            new_id(),
+            make_turn_input_with_batch("batch-2"),
+            make_turn_output(1, vec![]),
+        );
+        assert_eq!(hist.batches_since_last_full(), 2);
+    }
+
+    #[test]
+    fn note_full_snapshot_resets_counter() {
+        let mut hist = TurnHistory::empty();
+        hist.record(
+            new_id(),
+            make_turn_input_with_batch("batch-1"),
+            make_turn_output(1, vec![]),
+        );
+        hist.record(
+            new_id(),
+            make_turn_input_with_batch("batch-2"),
+            make_turn_output(1, vec![]),
+        );
+        assert_eq!(hist.batches_since_last_full(), 2);
+
+        hist.note_full_snapshot_emitted();
+        assert_eq!(hist.batches_since_last_full(), 0);
+        assert!(!hist.post_compaction_pending());
+    }
+
+    #[test]
+    fn take_oldest_sets_post_compaction_pending() {
+        let mut hist = TurnHistory::empty();
+        assert!(!hist.post_compaction_pending());
+
+        hist.record(
+            new_id(),
+            make_turn_input_with_batch("batch-1"),
+            make_turn_output(1, vec![]),
+        );
+        hist.take_oldest(1);
+        assert!(hist.post_compaction_pending());
+    }
+
+    #[test]
+    fn most_recent_batch_id_tracks_latest() {
+        let mut hist = TurnHistory::empty();
+        assert!(hist.most_recent_batch_id().is_none());
+
+        hist.record(
+            new_id(),
+            make_turn_input_with_batch("batch-1"),
+            make_turn_output(1, vec![]),
+        );
+        assert_eq!(hist.most_recent_batch_id().unwrap().as_str(), "batch-1");
+
+        hist.record(
+            new_id(),
+            make_turn_input_with_batch("batch-2"),
+            make_turn_output(1, vec![]),
+        );
+        assert_eq!(hist.most_recent_batch_id().unwrap().as_str(), "batch-2");
     }
 }

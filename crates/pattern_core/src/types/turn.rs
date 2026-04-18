@@ -504,8 +504,8 @@ mod cache_metrics_tests {
 /// of [`crate::traits::Session::step`].
 ///
 /// One `Session::step` call drives N wire turns: the first carries
-/// the caller's input, each subsequent wire turn carries the prior
-/// turn's tool_results (via [`TurnInput::from_tool_results`]). This
+/// the caller's input, each subsequent wire turn is a continuation
+/// (via [`TurnInput::continuation`]) with empty messages. This
 /// struct collects every wire turn's [`TurnOutput`] in order plus
 /// convenience accessors + aggregates.
 ///
@@ -663,6 +663,7 @@ mod step_reply_tests {
                 batch: batch.clone(),
                 response_meta: None,
                 block_refs: vec![],
+                attachments: vec![],
             }
         }
 
@@ -702,6 +703,7 @@ mod step_reply_tests {
             batch: batch.clone(),
             response_meta: None,
             block_refs: vec![],
+            attachments: vec![],
         };
         let make_tool = || Message {
             chat_message: genai::chat::ChatMessage::new(
@@ -714,6 +716,7 @@ mod step_reply_tests {
             batch: batch.clone(),
             response_meta: None,
             block_refs: vec![],
+            attachments: vec![],
         };
 
         let mut t1 = make_turn(StopReason::ToolUse);
