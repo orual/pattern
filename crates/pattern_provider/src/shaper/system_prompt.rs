@@ -47,18 +47,33 @@ pub fn build_system_prompt(
     persona: &str,
     extra_long_lived: &[String],
 ) -> Vec<SystemBlock> {
+    /// Join a sequence of non-empty fragments with "\n\n". Empty fragments
+    /// are dropped — Anthropic rejects system blocks with empty `text`
+    /// ("system: text content blocks must be non-empty"), and empty
+    /// fragments would otherwise leave a stray trailing or leading "\n\n"
+    /// in the final block.
+    fn join_non_empty(fragments: &[&str]) -> String {
+        fragments
+            .iter()
+            .filter(|s| !s.is_empty())
+            .copied()
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
     match mode {
         ShaperCompatMode::HonestPattern => {
-            let mut text = system_instructions.to_string();
-            if !text.is_empty() {
-                text.push_str("\n\n");
+            let mut fragments: Vec<&str> = vec![system_instructions, persona];
+            fragments.extend(extra_long_lived.iter().map(String::as_str));
+            let text = join_non_empty(&fragments);
+            if text.is_empty() {
+                // All inputs were empty — emit no system block at all
+                // rather than a block with empty text that Anthropic
+                // would reject.
+                Vec::new()
+            } else {
+                vec![SystemBlock::new(text)]
             }
-            text.push_str(persona);
-            for extra in extra_long_lived {
-                text.push_str("\n\n");
-                text.push_str(extra);
-            }
-            vec![SystemBlock::new(text)]
         }
 
         #[cfg(feature = "subscription-oauth")]
@@ -70,13 +85,15 @@ pub fn build_system_prompt(
                 // Slot [1]: identity-override prefix + base instructions.
                 SystemBlock::new(format!("{NEGATION_PREFIX}\n\n{system_instructions}")),
             ];
-            // Slot [2+]: persona + any long-lived content.
-            let mut persona_text = persona.to_string();
-            for extra in extra_long_lived {
-                persona_text.push_str("\n\n");
-                persona_text.push_str(extra);
+            // Slot [2+]: persona + any long-lived content. Empty fragments
+            // drop out so we never emit an empty-text slot that Anthropic
+            // would 400 on.
+            let mut fragments: Vec<&str> = vec![persona];
+            fragments.extend(extra_long_lived.iter().map(String::as_str));
+            let slot2 = join_non_empty(&fragments);
+            if !slot2.is_empty() {
+                blocks.push(SystemBlock::new(slot2));
             }
-            blocks.push(SystemBlock::new(persona_text));
             blocks
         }
 
@@ -169,5 +186,45 @@ mod tests {
         // mode for non-Anthropic providers).
         let blocks = build_system_prompt(ShaperCompatMode::HonestPattern, "base", "persona", &[]);
         assert_eq!(blocks.len(), 1);
+    }
+
+    /// Regression: Anthropic 400s with "system: text content blocks must
+    /// be non-empty" when any system array entry has empty text. Empty
+    /// persona was slipping through as slot[2] under
+    /// SubscriptionRoutingShape.
+    #[cfg(feature = "subscription-oauth")]
+    #[test]
+    fn subscription_routing_skips_slot_2_when_persona_and_extras_empty() {
+        let blocks = build_system_prompt(
+            ShaperCompatMode::SubscriptionRoutingShape,
+            "base instructions",
+            "",
+            &[],
+        );
+        // Only slot[0] (literal) + slot[1] (negation+base); no slot[2].
+        assert_eq!(blocks.len(), 2);
+        assert!(blocks.iter().all(|b| !b.text.is_empty()));
+    }
+
+    /// Empty persona but non-empty extras: slot[2] gets the extras only.
+    #[cfg(feature = "subscription-oauth")]
+    #[test]
+    fn subscription_routing_fills_slot_2_from_extras_when_persona_empty() {
+        let blocks = build_system_prompt(
+            ShaperCompatMode::SubscriptionRoutingShape,
+            "base",
+            "",
+            &["long-lived fact".into()],
+        );
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[2].text, "long-lived fact");
+    }
+
+    /// HonestPattern with all inputs empty emits no system block (empty
+    /// array, not a block with empty text).
+    #[test]
+    fn honest_pattern_skips_block_when_everything_is_empty() {
+        let blocks = build_system_prompt(ShaperCompatMode::HonestPattern, "", "", &[]);
+        assert!(blocks.is_empty());
     }
 }
