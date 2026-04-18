@@ -43,19 +43,28 @@ impl JsonFallbackStore {
         Ok(Self { root })
     }
 
-    fn path_for(&self, provider: &str) -> PathBuf {
-        // Basic safety: refuse path traversal in the provider name.
-        // Provider names come from internal code (AdapterKind -> &str), not
-        // user input, but belt-and-suspenders.
-        debug_assert!(!provider.contains('/') && !provider.contains('\\'));
-        self.root.join(format!("{provider}.json"))
+    fn path_for(&self, provider: &str) -> Result<PathBuf, ProviderError> {
+        // Reject path traversal in the provider name at runtime, not just in
+        // debug builds. Provider names are normally internal constants
+        // (AdapterKind → &str), but a misconfigured chain or a future
+        // user-supplied provider string could slip something through. The
+        // check is cheap; the consequence of skipping it is arbitrary file
+        // reads/writes under the creds directory.
+        if provider.contains('/') || provider.contains('\\') || provider.contains("..") {
+            return Err(ProviderError::CredentialStorage {
+                reason: format!(
+                    "provider name '{provider}' contains path separators or traversal sequences"
+                ),
+            });
+        }
+        Ok(self.root.join(format!("{provider}.json")))
     }
 }
 
 #[async_trait::async_trait]
 impl CredsStore for JsonFallbackStore {
     async fn get(&self, provider: &str) -> Result<Option<ProviderCredential>, ProviderError> {
-        let path = self.path_for(provider);
+        let path = self.path_for(provider)?;
         match tokio::fs::read_to_string(&path).await {
             Ok(json) => {
                 let tok: ProviderCredential =
@@ -70,7 +79,7 @@ impl CredsStore for JsonFallbackStore {
     }
 
     async fn put(&self, token: &ProviderCredential) -> Result<(), ProviderError> {
-        let path = self.path_for(&token.provider);
+        let path = self.path_for(&token.provider)?;
         let tmp = path.with_extension("json.tmp");
 
         let json =
@@ -92,7 +101,7 @@ impl CredsStore for JsonFallbackStore {
     }
 
     async fn delete(&self, provider: &str) -> Result<(), ProviderError> {
-        let path = self.path_for(provider);
+        let path = self.path_for(provider)?;
         match tokio::fs::remove_file(&path).await {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()), // idempotent
@@ -254,6 +263,29 @@ mod tests {
 
         let mode = std::fs::metadata(&creds_dir).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o700, "creds dir must be 0700");
+    }
+
+    #[tokio::test]
+    async fn path_traversal_in_provider_name_is_rejected() {
+        let dir = tempdir().expect("tempdir");
+        let store =
+            JsonFallbackStore::with_root(dir.path().join("creds")).expect("construct store");
+
+        // All three traversal forms must be rejected at runtime.
+        let err = store
+            .get("../etc/passwd")
+            .await
+            .expect_err("traversal must fail");
+        assert!(
+            matches!(err, ProviderError::CredentialStorage { .. }),
+            "expected CredentialStorage, got {err:?}"
+        );
+
+        let err = store
+            .get("..\\windows\\system32")
+            .await
+            .expect_err("backslash traversal must fail");
+        assert!(matches!(err, ProviderError::CredentialStorage { .. }));
     }
 
     #[tokio::test]

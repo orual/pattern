@@ -337,18 +337,21 @@ mod tests {
         );
         assert!(blocks[2].text.contains("I am Pattern."), "slot[2] persona");
 
-        // The shaper is no longer responsible for the `oauth-2025-04-20`
-        // beta marker — that's emitted by `gateway::auth_headers_for_tier`
-        // alongside the Bearer token. Shaper output should NOT contain it
-        // even when the auth_tier says OAuth.
+        // The shaper IS responsible for the `oauth-2025-04-20` beta marker —
+        // it must appear in the same `Anthropic-Beta` header value as any
+        // capability markers (e.g. `prompt-caching-scope`). Emitting it from
+        // `gateway::auth_headers_for_tier` instead would silently overwrite
+        // the shaper's value via BTreeMap::extend (last-insert-wins).
+        // See Phase 4 code-review fix: the shaper is the single source of truth.
         let anthropic_beta = headers
             .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("Anthropic-Beta"))
+            .find(|(k, _)| k.eq_ignore_ascii_case("anthropic-beta"))
             .map(|(_, v)| v.as_str())
             .unwrap_or_default();
         assert!(
-            !anthropic_beta.contains("oauth-2025-04-20"),
-            "shaper output must not contain the OAuth auth marker"
+            anthropic_beta.contains("oauth-2025-04-20"),
+            "shaper must include oauth-2025-04-20 in anthropic-beta for OAuth tiers; \
+             got: {anthropic_beta:?}"
         );
     }
 

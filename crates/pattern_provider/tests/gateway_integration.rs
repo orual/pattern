@@ -293,9 +293,10 @@ async fn anthropic_tool_stream_surfaces_tool_call_chunks() {
 
 // ==== Anthropic: OAuth Bearer auth ====
 
-/// subscription-oauth tier → `Authorization: Bearer` + `anthropic-beta:
-/// oauth-2025-04-20`, NOT `x-api-key`. Same stream payload; verify the
-/// auth shape is distinct from the API-key path.
+/// subscription-oauth tier → `Authorization: Bearer` NOT `x-api-key`.
+/// The shaper owns the `Anthropic-Beta` header (single source of truth),
+/// so we verify Bearer auth works; the header-composition test below
+/// covers the beta-value shape.
 #[cfg(feature = "subscription-oauth")]
 #[tokio::test]
 async fn anthropic_oauth_bearer_auth_round_trip() {
@@ -304,7 +305,6 @@ async fn anthropic_oauth_bearer_auth_round_trip() {
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
         .and(header("Authorization", "Bearer oauth-test-access-token"))
-        .and(header("anthropic-beta", "oauth-2025-04-20"))
         .and(header("anthropic-version", "2023-06-01"))
         .respond_with(
             ResponseTemplate::new(200).set_body_raw(ANTHROPIC_TEXT_STREAM, "text/event-stream"),
@@ -333,6 +333,103 @@ async fn anthropic_oauth_bearer_auth_round_trip() {
 
     assert_eq!(obs.concatenated_text, "Hello there!");
     assert_eq!(obs.end_count, 1);
+}
+
+/// Regression test: OAuth + first-party target must include BOTH
+/// `oauth-2025-04-20` AND `prompt-caching-scope-2026-01-05` in the
+/// same `Anthropic-Beta` header value. Before the Phase 4 code-review
+/// fix, `auth_headers_for_tier` emitted `oauth-2025-04-20` as a separate
+/// header insertion that overwrote the shaper's capability markers via
+/// `BTreeMap::extend` (last-insert-wins), silently dropping
+/// `prompt-caching-scope-2026-01-05` on every subscription-tier call.
+#[cfg(feature = "subscription-oauth")]
+#[tokio::test]
+async fn anthropic_oauth_first_party_beta_header_contains_both_markers() {
+    use std::sync::{Arc, Mutex};
+
+    // Capture the outbound `anthropic-beta` header so we can assert on its
+    // value without needing a wiremock matcher that does substring checks.
+    let captured_beta: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let captured_beta_clone = Arc::clone(&captured_beta);
+
+    let server = MockServer::start().await;
+
+    // Mount a permissive mock — we'll extract the header from wiremock's
+    // received requests after the fact.
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(header("Authorization", "Bearer oauth-first-party-token"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(ANTHROPIC_TEXT_STREAM, "text/event-stream"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    // Build a shaper with `target_is_first_party: true` — this is the
+    // production default for subscription-tier calls and is what caused the
+    // silent drop before the fix.
+    let first_party_shaper: Arc<dyn RequestShaper> = Arc::new(
+        HonestPatternShaper::new(ShaperConfig {
+            x_app: "pattern".into(),
+            compat_mode: ShaperCompatMode::HonestPattern,
+            target_is_first_party: true, // ← enables prompt-caching-scope
+            enable_interleaved_thinking: false,
+            enable_dev_full_thinking: false,
+            enable_context_management: false,
+            enable_extended_cache_ttl: false,
+            enable_1m_context: false,
+        })
+        .expect("valid shaper config"),
+    );
+
+    let chain: Arc<dyn CredentialChain> = Arc::new(StaticOAuthChain {
+        token: token("anthropic", "oauth-first-party-token"),
+    });
+    let gateway = PatternGatewayClient::builder()
+        .with_provider(
+            "anthropic",
+            chain,
+            first_party_shaper,
+            Arc::new(ProviderRateLimiter::anthropic_default()),
+        )
+        .with_provider_base_url("anthropic", server.uri())
+        .build()
+        .expect("gateway builds");
+
+    let req = CompletionRequest::new("claude-opus-4-7").append_message(ChatMessage::user("hi"));
+    let stream = gateway.complete(req).await.expect("complete opens");
+    let obs = drain_stream(stream).await;
+    assert_eq!(obs.end_count, 1, "stream must complete");
+
+    // Inspect what wiremock received. The received_requests() API returns
+    // all matched requests, letting us inspect the actual outbound headers.
+    let requests = server
+        .received_requests()
+        .await
+        .expect("requests available");
+    assert_eq!(requests.len(), 1, "exactly one request must have been sent");
+
+    let beta_header = requests[0]
+        .headers
+        .get("anthropic-beta")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    // Drop the capture — not actually needed since we read from wiremock
+    drop(captured_beta_clone);
+    drop(captured_beta);
+
+    let beta = beta_header.expect("anthropic-beta header must be present on OAuth+1P call");
+    assert!(
+        beta.contains("oauth-2025-04-20"),
+        "anthropic-beta must contain oauth-2025-04-20; got: {beta:?}"
+    );
+    assert!(
+        beta.contains("prompt-caching-scope-2026-01-05"),
+        "anthropic-beta must contain prompt-caching-scope-2026-01-05 \
+         (was silently dropped before the header-collision fix); got: {beta:?}"
+    );
 }
 
 // ==== 429 error surfacing ====

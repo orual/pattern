@@ -203,7 +203,11 @@ impl CompletionRequest {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct TokenCount {
     /// Number of input tokens the provider reports for the composed request.
-    pub input_tokens: u32,
+    ///
+    /// `u64` matches the provider's native type (Anthropic's
+    /// `/v1/messages/count_tokens` returns `u64`). An earlier `u32` would
+    /// silently truncate on overflow for very large contexts.
+    pub input_tokens: u64,
 }
 
 // ---- ProviderCredential ----

@@ -184,10 +184,12 @@ impl ProviderClient for PatternGatewayClient {
         let ident_headers = shaper.shape(&mut chat, &ctx)?;
 
         // Compose the full outbound header set: shaper identification +
-        // per-tier auth headers. BTreeMap's `.extend()` is last-insert-
-        // wins per key — overlapping contributions from the shaper and
-        // auth stages resolve to the auth value (which is the
-        // authoritative layer). No separate de-dup pass needed.
+        // per-tier auth headers. These two sets deliberately do NOT overlap
+        // after the fix in commit 1 of the Phase 4 code review: the shaper
+        // owns `anthropic-beta` (single source of truth, including the OAuth
+        // marker), and `auth_headers_for_tier` owns `authorization` /
+        // `x-api-key` / `anthropic-version`. BTreeMap::extend is still
+        // last-insert-wins, but a collision here would now be a bug.
         let mut outbound_headers = ident_headers;
         outbound_headers.extend(auth_headers_for_tier(&resolved, adapter));
 
@@ -710,13 +712,13 @@ fn auth_headers_for_tier(
         #[cfg(feature = "subscription-oauth")]
         AuthTier::SessionPickup | AuthTier::Pkce => {
             headers.insert("authorization".into(), format!("Bearer {token}"));
-            // `anthropic-beta: oauth-2025-04-20` is auth-tier specific (it
-            // signals "this is an OAuth call" to Anthropic), not a feature
-            // capability. Emitted here alongside the Bearer token rather
-            // than in the shaper's beta bundle.
-            if matches!(adapter, AdapterKind::Anthropic) {
-                headers.insert("anthropic-beta".into(), "oauth-2025-04-20".into());
-            }
+            // NOTE: `anthropic-beta: oauth-2025-04-20` is intentionally NOT
+            // inserted here. It lives in `shaper::headers::build_beta_header_value`
+            // alongside the other beta markers (prompt-caching-scope, etc.).
+            // Emitting it here would cause `BTreeMap::extend` in the caller to
+            // overwrite the shaper's `anthropic-beta` value (last-insert-wins),
+            // silently dropping capability markers on every OAuth-tier call.
+            // The shaper is the single source of truth for the full beta value.
         }
     }
 
@@ -876,12 +878,16 @@ mod tests {
         let hdrs = auth_headers_for_tier(&resolved, AdapterKind::Anthropic);
         // Keys are lowercased (HTTP case-insensitive + BTreeMap-friendly).
         assert!(hdrs.contains_key("authorization"));
-        assert!(hdrs.contains_key("anthropic-beta"));
         assert!(hdrs.contains_key("anthropic-version"));
         assert!(!hdrs.contains_key("x-api-key"));
-        assert_eq!(
-            hdrs.get("anthropic-beta").map(String::as_str),
-            Some("oauth-2025-04-20")
+        // `anthropic-beta` is NOT emitted here — it lives in the shaper's
+        // `build_beta_header_value` as the single source of truth. Emitting
+        // it here would overwrite the shaper's capability markers via
+        // BTreeMap::extend (last-insert-wins). See shaper/headers.rs.
+        assert!(
+            !hdrs.contains_key("anthropic-beta"),
+            "auth_headers_for_tier must not emit anthropic-beta; \
+             the shaper owns that header to prevent silent collision"
         );
     }
 

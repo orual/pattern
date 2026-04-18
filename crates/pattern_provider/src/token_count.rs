@@ -59,8 +59,10 @@ pub struct TokenCountDetails {
 
 impl From<TokenCountDetails> for pattern_core::types::provider::TokenCount {
     fn from(d: TokenCountDetails) -> Self {
+        // TokenCount::input_tokens is u64, matching the provider's native type.
+        // No truncation possible.
         Self {
-            input_tokens: d.input_tokens as u32,
+            input_tokens: d.input_tokens,
         }
     }
 }
@@ -210,19 +212,21 @@ impl TokenCounter {
 
         // Auth — `x-api-key` for API-key tier, `Authorization: Bearer`
         // otherwise (session-pickup / PKCE both produce Bearer tokens on
-        // Anthropic).
+        // Anthropic). Note: the `oauth-2025-04-20` beta marker is handled
+        // by the shaper's identification_headers() call above (via
+        // `build_beta_header_value`) — see the Phase 4 code-review fix for
+        // why it must NOT be set here as a separate header (it would
+        // overwrite the shaper's capability markers).
         req_builder = match auth.source {
             AuthTier::ApiKey => req_builder.header(
                 "x-api-key",
                 auth.token.access_token.expose_secret().to_string(),
             ),
             #[cfg(feature = "subscription-oauth")]
-            AuthTier::SessionPickup | AuthTier::Pkce => req_builder
-                .header(
-                    "Authorization",
-                    format!("Bearer {}", auth.token.access_token.expose_secret()),
-                )
-                .header("anthropic-beta", "oauth-2025-04-20"),
+            AuthTier::SessionPickup | AuthTier::Pkce => req_builder.header(
+                "Authorization",
+                format!("Bearer {}", auth.token.access_token.expose_secret()),
+            ),
         };
 
         let response = req_builder.json(request).send().await.map_err(|e| {

@@ -97,14 +97,20 @@ empty slot[2]. Tests pin this behaviour in
 ## Beta-header allow / deny list
 
 The `Anthropic-Beta` value is curated per-request by
-`shaper::headers::build_beta_header_value`:
+`shaper::headers::build_beta_header_value`. This function is the
+**single source of truth** for the full header value — do NOT emit
+`anthropic-beta` from `gateway::auth_headers_for_tier` or any other
+path, as `BTreeMap::extend` is last-insert-wins per key and would
+silently overwrite the shaper's capability markers.
 
-**Auth-tier-conditional** (lives in `gateway::auth_headers_for_tier`
-alongside the Bearer token, not in the shaper):
+**Auth-tier-conditional** (lives in `shaper::headers::build_beta_header_value`
+alongside the capability markers — NOT in `auth_headers_for_tier`):
 
 - `oauth-2025-04-20` — emitted for the PKCE + session-pickup tiers so
   Anthropic routes the call via its OAuth path. Never emitted for
-  API-key auth.
+  API-key auth. Must appear in the same comma-joined value as any
+  capability markers (e.g. `prompt-caching-scope-2026-01-05`) so they
+  coexist in a single header rather than overwriting each other.
 
 **Capability-conditional** (shaper, driven by `ShaperConfig` flags +
 model inspection):
@@ -125,8 +131,9 @@ model inspection):
 - `token-efficient-tools-2026-03-28`
 
 These are Anthropic's internal CLI markers. Pattern is a distinct
-client and emits none of them regardless of config. Adding any of them
-to `ShaperConfig::extra_beta_markers` fails validation.
+client and emits none of them regardless of config. The deny list is
+enforced both at `ShaperConfig::validate` time and as a defense-in-depth
+strip inside `build_beta_header_value` before joining.
 
 ## Refresh-mutex serialization (AC4.7)
 

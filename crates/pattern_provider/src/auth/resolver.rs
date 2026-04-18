@@ -36,6 +36,28 @@ pub enum AuthTier {
     Pkce,
 }
 
+impl AuthTier {
+    /// Returns `true` if this tier authenticates via OAuth Bearer token (PKCE
+    /// or session-pickup). Used by the shaper to decide whether to include
+    /// `oauth-2025-04-20` in the `Anthropic-Beta` header — that marker must
+    /// appear alongside the other beta markers in one header value, not in a
+    /// separate header that would silently overwrite the shaper's output.
+    ///
+    /// When the `subscription-oauth` feature is disabled this always returns
+    /// `false` (no OAuth tiers are compiled in).
+    pub fn is_oauth(self) -> bool {
+        #[cfg(feature = "subscription-oauth")]
+        {
+            matches!(self, AuthTier::SessionPickup | AuthTier::Pkce)
+        }
+        #[cfg(not(feature = "subscription-oauth"))]
+        {
+            let _ = self;
+            false
+        }
+    }
+}
+
 /// A resolved credential together with the tier it came from.
 #[derive(Debug, Clone)]
 pub struct ResolvedCredential {

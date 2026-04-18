@@ -50,6 +50,7 @@ pub type ChunkStream =
 ///     ChatMessage, ChatStreamEvent, CompletionRequest, TokenCount,
 /// };
 ///
+/// #[derive(Debug)]
 /// struct Dummy;
 ///
 /// #[async_trait]

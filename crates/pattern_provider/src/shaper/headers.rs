@@ -76,17 +76,23 @@ pub(super) fn build_beta_header_value(
 ) -> String {
     let mut betas: Vec<&str> = Vec::new();
 
-    // NOTE: the `oauth-2025-04-20` marker — which signals "this is an
-    // OAuth-tier call" to Anthropic — is auth-specific, not a shaper
-    // capability flag. It lives in
-    // `gateway::auth_headers_for_tier` alongside the Bearer token.
-    // Keeping `auth_tier` in this function signature so future capability
-    // flags that ARE tier-dependent can condition on it without a
-    // retroactive API change.
-    let _ = auth_tier;
+    // The `oauth-2025-04-20` marker signals "OAuth-tier call" to Anthropic's
+    // router. It MUST appear in the same `Anthropic-Beta` header value as the
+    // other markers — placing it in a separate header insertion would silently
+    // overwrite this value (BTreeMap is last-insert-wins per key). Emitting
+    // it here, alongside the capability markers, makes this function the
+    // single source of truth for the full beta header value.
+    if auth_tier.is_oauth() {
+        betas.push("oauth-2025-04-20");
+    }
 
-    // Prompt-caching scope marker — claude-code always sends this on 1P
-    // traffic; the server tolerates the absence but it's expected.
+    // `prompt-caching-scope-2026-01-05` is the only 1P-gated marker.
+    // Capability markers below (interleaved/dev-full thinking,
+    // context-management, extended-cache-ttl, context-1m) emit regardless
+    // of `target_is_first_party` — the provider either honours them, ignores
+    // them, or a proxy handles them appropriately. If you find yourself
+    // adding a new capability flag and reaching for `target_is_first_party`
+    // to gate it, think twice — the current design is deliberate.
     if config.target_is_first_party {
         betas.push("prompt-caching-scope-2026-01-05");
     }
@@ -188,19 +194,37 @@ mod tests {
         assert_eq!(value, "", "no flags + api-key auth → no beta markers");
     }
 
-    /// `oauth-2025-04-20` is an AUTH-tier header, not a shaper capability
-    /// flag — it's emitted by `gateway::auth_headers_for_tier` alongside
-    /// the Bearer token, NOT by the shaper's beta builder. This test
-    /// pins the contract by asserting the shaper does NOT emit it
-    /// regardless of the auth tier.
+    /// `oauth-2025-04-20` must appear in the shaper's beta value for OAuth
+    /// tiers. The shaper is the single source of truth for the
+    /// `Anthropic-Beta` header — emitting it from `auth_headers_for_tier`
+    /// instead would cause it to overwrite the shaper's capability markers
+    /// (BTreeMap last-insert-wins) and silently drop them on every
+    /// subscription-tier call.
     #[cfg(feature = "subscription-oauth")]
     #[test]
-    fn shaper_does_not_emit_oauth_beta_marker() {
+    fn shaper_emits_oauth_beta_marker_for_oauth_tiers() {
         let config = min_config();
         let value = build_beta_header_value(&config, AuthTier::SessionPickup, "claude-opus-4-7");
         assert!(
+            value.contains("oauth-2025-04-20"),
+            "shaper must emit oauth-2025-04-20 for OAuth tiers (single source of truth)"
+        );
+        let value = build_beta_header_value(&config, AuthTier::Pkce, "claude-opus-4-7");
+        assert!(
+            value.contains("oauth-2025-04-20"),
+            "shaper must emit oauth-2025-04-20 for PKCE tier"
+        );
+    }
+
+    /// API-key tier must NOT receive the oauth marker — it's only for
+    /// subscription-tier calls that use Bearer tokens.
+    #[test]
+    fn shaper_does_not_emit_oauth_beta_marker_for_api_key() {
+        let config = min_config();
+        let value = build_beta_header_value(&config, AuthTier::ApiKey, "claude-opus-4-7");
+        assert!(
             !value.contains("oauth-2025-04-20"),
-            "shaper must not emit oauth-2025-04-20; that's auth-tier territory"
+            "shaper must not emit oauth-2025-04-20 for API-key tier"
         );
     }
 
