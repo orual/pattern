@@ -56,6 +56,10 @@ use pattern_core::types::turn::{StepReply, StopReason, TurnCacheMetrics, TurnInp
 use crate::sdk::CODE_TOOL;
 use crate::session::SessionContext;
 
+pub mod eval_worker;
+
+pub use eval_worker::EvalWorker;
+
 // ---- EvalDispatcher -----------------------------------------------------
 
 /// Dispatches a single `code` tool_use to Haskell evaluation, returning
