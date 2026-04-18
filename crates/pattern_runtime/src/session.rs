@@ -24,7 +24,7 @@ use pattern_core::types::snapshot::{PersonaConfig, SessionSnapshot};
 use pattern_core::types::turn::{TurnInput, TurnOutput};
 
 use crate::checkpoint::{CheckpointEvent, CheckpointLog};
-use crate::memory::MemoryStoreAdapter;
+use crate::memory::{MemoryStoreAdapter, TurnHistory};
 use crate::sdk::SdkLocation;
 use crate::sdk::bundle::SdkBundle;
 use crate::sdk::handlers::{
@@ -222,6 +222,12 @@ pub struct TidepoolSession {
     /// them distinct avoids escalating every soft cancel into a
     /// full JIT abort.
     jit_cancel: CancelHandle,
+    /// In-memory active turn history + cached archive-summary head.
+    /// Populated on session open via `TurnHistory::load` (when a DB is
+    /// available) or `TurnHistory::empty` (tests). `run_turn` records
+    /// each completed turn here; Task 13's compaction strategies
+    /// consume the oldest entries.
+    turn_history: Arc<std::sync::Mutex<TurnHistory>>,
 }
 
 /// Mutable per-session state guarded by [`TidepoolSession::inner`].
@@ -348,7 +354,29 @@ impl TidepoolSession {
             current_turn,
             display_handle: display,
             jit_cancel,
+            turn_history: Arc::new(std::sync::Mutex::new(TurnHistory::empty())),
         })
+    }
+
+    /// Load archived summary-head from the constellation DB for the
+    /// composer's segment 2 "earlier context" prepend. Call after `open`
+    /// and before the first `step` when a DB handle is available.
+    /// No-op skip is safe: the composer will simply have no summary head.
+    pub async fn load_turn_history(
+        &self,
+        db: &pattern_db::ConstellationDb,
+    ) -> Result<(), pattern_db::error::DbError> {
+        let history = TurnHistory::load(db, self.ctx.agent_id()).await?;
+        if let Ok(mut guard) = self.turn_history.lock() {
+            *guard = history;
+        }
+        Ok(())
+    }
+
+    /// Access the session's turn history. Exposed for the context
+    /// composer and compaction strategies.
+    pub fn turn_history(&self) -> Arc<std::sync::Mutex<TurnHistory>> {
+        self.turn_history.clone()
     }
 
     /// Test-friendly step core: runs the machine, races the watchdog,
@@ -356,7 +384,7 @@ impl TidepoolSession {
     /// surface rich turn output — `messages`, `block_writes` are empty.
     /// Phase 4+ wire these through the real MessageHandler / block-write
     /// collector.
-    async fn run_turn(&self, _input: TurnInput) -> Result<TurnOutput, RuntimeError> {
+    async fn run_turn(&self, input: TurnInput) -> Result<TurnOutput, RuntimeError> {
         // Scope the guard so we drop it before awaiting the spawn-blocking
         // task (holding a std::sync::MutexGuard across `.await` would
         // block the executor thread).
@@ -434,13 +462,21 @@ impl TidepoolSession {
                         // Drain pending BlockWrites from the adapter into the
                         // TurnOutput. Phase 5: these feed pseudo-message emission.
                         let block_writes = self.ctx.adapter.drain_pending();
-                        Ok(TurnOutput {
+                        let output = TurnOutput {
                             messages: vec![],
                             block_writes,
                             usage: None,
                             cache_metrics: Default::default(),
                             completed_at: Timestamp::now(),
-                        })
+                        };
+
+                        // Record in TurnHistory for the composer and
+                        // compaction strategies.
+                        if let Ok(mut hist) = self.turn_history.lock() {
+                            hist.record(input.turn_id.clone(), output.clone());
+                        }
+
+                        Ok(output)
                     }
                     Err(e) if cancelled && is_cancel_sentinel(&e) => {
                         Err(RuntimeError::Timeout {

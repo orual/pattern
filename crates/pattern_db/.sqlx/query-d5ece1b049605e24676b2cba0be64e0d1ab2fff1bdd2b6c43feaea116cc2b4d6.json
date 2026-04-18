@@ -1,0 +1,68 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        WITH latest_per_depth AS (\n            SELECT depth, MAX(start_position) AS latest_pos\n            FROM archive_summaries\n            WHERE agent_id = ?\n            GROUP BY depth\n        )\n        SELECT\n            a.id as \"id!\",\n            a.agent_id as \"agent_id!\",\n            a.summary as \"summary!\",\n            a.start_position as \"start_position!\",\n            a.end_position as \"end_position!\",\n            a.message_count as \"message_count!\",\n            a.previous_summary_id,\n            a.depth as \"depth!\",\n            a.created_at as \"created_at!: _\"\n        FROM archive_summaries a\n        JOIN latest_per_depth ld ON a.depth = ld.depth AND a.start_position = ld.latest_pos\n        WHERE a.agent_id = ?\n        ORDER BY a.start_position ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "agent_id!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "summary!",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "start_position!",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "end_position!",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "message_count!",
+        "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "previous_summary_id",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "depth!",
+        "ordinal": 7,
+        "type_info": "Integer"
+      },
+      {
+        "name": "created_at!: _",
+        "ordinal": 8,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "d5ece1b049605e24676b2cba0be64e0d1ab2fff1bdd2b6c43feaea116cc2b4d6"
+}

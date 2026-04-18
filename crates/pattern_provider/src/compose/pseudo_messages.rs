@@ -120,9 +120,9 @@ pub fn render_change_events(events: &[BlockWrite]) -> Vec<ChatMessage> {
 fn render_body(event: &BlockWrite) -> String {
     match event.kind {
         BlockWriteKind::Created => render_created(event),
-        BlockWriteKind::Replaced
-        | BlockWriteKind::Appended
-        | BlockWriteKind::Updated => render_updated(event),
+        BlockWriteKind::Replaced | BlockWriteKind::Appended | BlockWriteKind::Updated => {
+            render_updated(event)
+        }
         BlockWriteKind::Deleted => render_deleted(event),
         // Non-exhaustive: forward-compatible for future variants.
         _ => render_unknown(event),
@@ -239,9 +239,7 @@ fn render_author(author: &Author) -> String {
 fn render_local_timestamp(ts: jiff::Timestamp) -> String {
     let zoned = ts.to_zoned(jiff::tz::TimeZone::system());
     // %Z gives the TZ abbreviation; %A gives the full weekday name.
-    zoned
-        .strftime("%Y-%m-%d %H:%M:%S %Z (%A)")
-        .to_string()
+    zoned.strftime("%Y-%m-%d %H:%M:%S %Z (%A)").to_string()
 }
 
 /// Render a preview of `content` truncated to at most `max_chars` characters.
@@ -358,14 +356,23 @@ mod tests {
 
         let text = msg_text(&msg);
         // Must carry the <system-reminder> wrapper.
-        assert!(text.contains("<system-reminder>"), "missing wrapper: {text}");
-        assert!(text.contains("</system-reminder>"), "missing wrapper: {text}");
+        assert!(
+            text.contains("<system-reminder>"),
+            "missing wrapper: {text}"
+        );
+        assert!(
+            text.contains("</system-reminder>"),
+            "missing wrapper: {text}"
+        );
         // Must carry the [memory:written] tag.
         assert!(text.contains("[memory:written]"), "missing tag: {text}");
         // Must carry the block handle.
         assert!(text.contains("task_list"), "missing handle: {text}");
         // Must carry a preview of the content.
-        assert!(text.contains("do the thing"), "missing content preview: {text}");
+        assert!(
+            text.contains("do the thing"),
+            "missing content preview: {text}"
+        );
         // Must carry author.
         assert!(text.contains("system"), "missing author: {text}");
         // Must carry a timestamp with a year (fixture is 2025).
@@ -416,8 +423,10 @@ mod tests {
             "missing hash-fallback marker: {text}"
         );
         // The hash value must appear (in hex form).
-        assert!(text.contains("dead") || text.contains("0xdead") || text.contains("0x000000000000dead"),
-            "hash value missing: {text}");
+        assert!(
+            text.contains("dead") || text.contains("0xdead") || text.contains("0x000000000000dead"),
+            "hash value missing: {text}"
+        );
         // Preview of new content must appear.
         assert!(text.contains("new content here"), "missing preview: {text}");
     }
@@ -481,7 +490,10 @@ mod tests {
         let content: String = "x".repeat(300);
         let result = preview(&content, 240);
         assert!(result.contains("…"), "missing ellipsis: {result}");
-        assert!(result.contains("60 chars elided"), "wrong elided count: {result}");
+        assert!(
+            result.contains("60 chars elided"),
+            "wrong elided count: {result}"
+        );
         // The first 240 chars must be the head.
         let x_count = result.chars().take_while(|c| *c == 'x').count();
         assert_eq!(x_count, 240, "head not 240 chars: got {x_count}");
@@ -518,7 +530,10 @@ mod tests {
         // Must contain the year.
         assert!(rendered.contains("2025"), "year missing: {rendered}");
         // Must contain colons from HH:MM:SS.
-        assert!(rendered.contains(':'), "no colons (HH:MM:SS) in timestamp: {rendered}");
+        assert!(
+            rendered.contains(':'),
+            "no colons (HH:MM:SS) in timestamp: {rendered}"
+        );
     }
 
     // ---- Empty-diff fallback: previous == current ----------------------------
@@ -542,7 +557,10 @@ mod tests {
             "empty-diff fallback missing: {text}"
         );
         // The current content preview must still appear.
-        assert!(text.contains("identical content"), "preview missing: {text}");
+        assert!(
+            text.contains("identical content"),
+            "preview missing: {text}"
+        );
     }
 
     // ---- Partner author attribution ------------------------------------------
@@ -555,11 +573,16 @@ mod tests {
             "content",
             None,
             None,
-            Author::Partner(Partner { user_id: SmolStr::new("user123") }),
+            Author::Partner(Partner {
+                user_id: SmolStr::new("user123"),
+            }),
         );
         let msg = render_change_event(&event);
         let text = msg_text(&msg);
-        assert!(text.contains("partner user123"), "partner attribution missing: {text}");
+        assert!(
+            text.contains("partner user123"),
+            "partner attribution missing: {text}"
+        );
     }
 
     // ---- Human author: display_name preferred over id -----------------------
@@ -587,9 +610,30 @@ mod tests {
     #[test]
     fn render_change_events_preserves_order_and_count() {
         let events = vec![
-            make_event("a", BlockWriteKind::Created, "a content", None, None, system_author()),
-            make_event("b", BlockWriteKind::Created, "b content", None, None, system_author()),
-            make_event("c", BlockWriteKind::Created, "c content", None, None, system_author()),
+            make_event(
+                "a",
+                BlockWriteKind::Created,
+                "a content",
+                None,
+                None,
+                system_author(),
+            ),
+            make_event(
+                "b",
+                BlockWriteKind::Created,
+                "b content",
+                None,
+                None,
+                system_author(),
+            ),
+            make_event(
+                "c",
+                BlockWriteKind::Created,
+                "c content",
+                None,
+                None,
+                system_author(),
+            ),
         ];
         let msgs = render_change_events(&events);
         assert_eq!(msgs.len(), 3);
@@ -614,6 +658,9 @@ mod tests {
         );
         let msg = render_change_event(&event);
         let text = msg_text(&msg);
-        assert!(text.contains("[memory:updated]"), "Replaced must use [memory:updated]: {text}");
+        assert!(
+            text.contains("[memory:updated]"),
+            "Replaced must use [memory:updated]: {text}"
+        );
     }
 }

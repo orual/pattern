@@ -5271,13 +5271,16 @@ name = "pattern-runtime"
 version = "0.4.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "clap",
  "dotenvy",
  "frunk",
  "futures",
+ "genai",
  "jiff",
  "miette",
  "pattern-core",
+ "pattern-db",
  "pattern-provider",
  "pattern-runtime",
  "secrecy",

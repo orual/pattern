@@ -423,6 +423,46 @@ pub async fn upsert_archive_summary(pool: &SqlitePool, summary: &ArchiveSummary)
     Ok(())
 }
 
+/// Get the summary-head vector for an agent: one entry per depth level,
+/// newest at each depth (by `start_position`), chronologically ordered
+/// by `start_position` ascending.
+///
+/// This is the minimal context a composer needs to prepend "earlier
+/// conversation" summaries to segment 2. Task 13's compaction layer
+/// updates the underlying rows; this query reads the current state.
+pub async fn get_summary_head(pool: &SqlitePool, agent_id: &str) -> DbResult<Vec<ArchiveSummary>> {
+    let summaries = sqlx::query_as!(
+        ArchiveSummary,
+        r#"
+        WITH latest_per_depth AS (
+            SELECT depth, MAX(start_position) AS latest_pos
+            FROM archive_summaries
+            WHERE agent_id = ?
+            GROUP BY depth
+        )
+        SELECT
+            a.id as "id!",
+            a.agent_id as "agent_id!",
+            a.summary as "summary!",
+            a.start_position as "start_position!",
+            a.end_position as "end_position!",
+            a.message_count as "message_count!",
+            a.previous_summary_id,
+            a.depth as "depth!",
+            a.created_at as "created_at!: _"
+        FROM archive_summaries a
+        JOIN latest_per_depth ld ON a.depth = ld.depth AND a.start_position = ld.latest_pos
+        WHERE a.agent_id = ?
+        ORDER BY a.start_position ASC
+        "#,
+        agent_id,
+        agent_id
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(summaries)
+}
+
 /// Count messages for an agent (excluding archived and tombstoned).
 pub async fn count_messages(pool: &SqlitePool, agent_id: &str) -> DbResult<i64> {
     let result = sqlx::query!(

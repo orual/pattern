@@ -94,9 +94,7 @@ fn render_block(block: &StructuredDocument) -> String {
     let permission = block.permission().to_string();
     let content = block.render();
 
-    let open_tag = format!(
-        "<block:{label} type=\"{block_type}\" permission=\"{permission}\">"
-    );
+    let open_tag = format!("<block:{label} type=\"{block_type}\" permission=\"{permission}\">");
     let close_tag = format!("</block:{label}>");
 
     let description = block.description();
@@ -213,12 +211,30 @@ mod tests {
         let msg = render_current_state(&blocks);
         let text = msg_text(&msg);
 
-        assert!(text.contains("<block:persona"), "persona open-tag missing: {text}");
-        assert!(text.contains("</block:persona>"), "persona close-tag missing: {text}");
-        assert!(text.contains("<block:task_list"), "task_list open-tag missing: {text}");
-        assert!(text.contains("</block:task_list>"), "task_list close-tag missing: {text}");
-        assert!(text.contains("I am a helpful agent."), "persona content missing: {text}");
-        assert!(text.contains("review PR"), "task_list content missing: {text}");
+        assert!(
+            text.contains("<block:persona"),
+            "persona open-tag missing: {text}"
+        );
+        assert!(
+            text.contains("</block:persona>"),
+            "persona close-tag missing: {text}"
+        );
+        assert!(
+            text.contains("<block:task_list"),
+            "task_list open-tag missing: {text}"
+        );
+        assert!(
+            text.contains("</block:task_list>"),
+            "task_list close-tag missing: {text}"
+        );
+        assert!(
+            text.contains("I am a helpful agent."),
+            "persona content missing: {text}"
+        );
+        assert!(
+            text.contains("review PR"),
+            "task_list content missing: {text}"
+        );
     }
 
     // ---- <system-reminder> present on non-empty path -----------------------
@@ -228,7 +244,10 @@ mod tests {
         let blocks = vec![make_doc("persona", "", "content")];
         let msg = render_current_state(&blocks);
         let text = msg_text(&msg);
-        assert!(text.contains("<system-reminder>"), "missing wrapper: {text}");
+        assert!(
+            text.contains("<system-reminder>"),
+            "missing wrapper: {text}"
+        );
         assert!(text.contains("</system-reminder>"), "missing close: {text}");
     }
 
@@ -236,7 +255,12 @@ mod tests {
 
     #[test]
     fn block_tag_includes_type_attribute() {
-        let blocks = vec![make_doc_with_type("myblock", "", "content", BlockType::Core)];
+        let blocks = vec![make_doc_with_type(
+            "myblock",
+            "",
+            "content",
+            BlockType::Core,
+        )];
         let msg = render_current_state(&blocks);
         let text = msg_text(&msg);
         assert!(
@@ -249,7 +273,11 @@ mod tests {
 
     #[test]
     fn non_empty_description_appears_inside_block() {
-        let blocks = vec![make_doc("myblock", "This block tracks tasks.", "content here")];
+        let blocks = vec![make_doc(
+            "myblock",
+            "This block tracks tasks.",
+            "content here",
+        )];
         let msg = render_current_state(&blocks);
         let text = msg_text(&msg);
         assert!(
@@ -259,10 +287,7 @@ mod tests {
         // Description must appear *before* closing tag.
         let desc_pos = text.find("This block tracks tasks.").unwrap();
         let close_pos = text.find("</block:myblock>").unwrap();
-        assert!(
-            desc_pos < close_pos,
-            "description after close tag: {text}"
-        );
+        assert!(desc_pos < close_pos, "description after close tag: {text}");
     }
 
     // ---- empty description → no stray blank line between tag and content ---

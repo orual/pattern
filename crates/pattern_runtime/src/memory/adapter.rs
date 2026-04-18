@@ -81,7 +81,10 @@ impl std::fmt::Debug for MemoryStoreAdapter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MemoryStoreAdapter")
             .field("agent_id", &self.agent_id)
-            .field("pending_count", &self.pending.lock().map(|v| v.len()).unwrap_or(0))
+            .field(
+                "pending_count",
+                &self.pending.lock().map(|v| v.len()).unwrap_or(0),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -160,7 +163,9 @@ impl MemoryStore for MemoryStoreAdapter {
         content: &str,
         metadata: Option<JsonValue>,
     ) -> MemoryResult<String> {
-        self.inner.insert_archival(agent_id, content, metadata).await
+        self.inner
+            .insert_archival(agent_id, content, metadata)
+            .await
     }
 
     async fn search_archival(
@@ -223,9 +228,7 @@ impl MemoryStore for MemoryStoreAdapter {
         label: &str,
         block_type: BlockType,
     ) -> MemoryResult<()> {
-        self.inner
-            .set_block_type(agent_id, label, block_type)
-            .await
+        self.inner.set_block_type(agent_id, label, block_type).await
     }
 
     async fn update_block_schema(
@@ -234,7 +237,9 @@ impl MemoryStore for MemoryStoreAdapter {
         label: &str,
         schema: BlockSchema,
     ) -> MemoryResult<()> {
-        self.inner.update_block_schema(agent_id, label, schema).await
+        self.inner
+            .update_block_schema(agent_id, label, schema)
+            .await
     }
 
     async fn update_block_description(
@@ -270,7 +275,7 @@ mod tests {
     use super::*;
     use crate::testing::InMemoryMemoryStore;
     use pattern_core::memory::BlockType;
-    use pattern_core::types::block::{BlockWriteKind};
+    use pattern_core::types::block::BlockWriteKind;
     use pattern_core::types::origin::{AgentAuthor, Author};
     use smol_str::SmolStr;
 
