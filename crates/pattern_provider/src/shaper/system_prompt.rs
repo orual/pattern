@@ -7,10 +7,10 @@
 //!
 //! # Honest framing
 //!
-//! The literal claude-code identifier string in slot [0] of
+//! The literal claude-code identifier string in slot \[0\] of
 //! `SubscriptionRoutingShape` is an Anthropic-side structural requirement
 //! for subscription-tier routing, not an identity claim. Pattern's real
-//! identity and behaviour are driven by slots [1] and [2], which carry
+//! identity and behaviour are driven by slots \[1\] and \[2\], which carry
 //! the override prefix + `DEFAULT_BASE_INSTRUCTIONS` and the persona
 //! block.
 
@@ -25,9 +25,9 @@ pub(super) const CLAUDE_CODE_LITERAL: &str =
     "You are Claude Code, Anthropic's official CLI for Claude.";
 
 /// Identity-negation prefix that precedes `DEFAULT_BASE_INSTRUCTIONS` in
-/// slot [1] when the shaper is running in `SubscriptionRoutingShape`.
+/// slot \[1\] when the shaper is running in `SubscriptionRoutingShape`.
 ///
-/// Deliberately does NOT name the agent — the persona block in slot [2]
+/// Deliberately does NOT name the agent — the persona block in slot \[2\]
 /// is where identity lives. Pre-v3 pattern used this exact phrasing and
 /// it's preserved verbatim to avoid divergence.
 #[cfg(feature = "subscription-oauth")]
@@ -38,7 +38,7 @@ pub(super) const NEGATION_PREFIX: &str = "You are NOT Claude Code.";
 /// - `system_instructions` is the baseline instruction set. Callers pass
 ///   `DEFAULT_BASE_INSTRUCTIONS` by default, or a user-supplied override.
 /// - `persona` is the current persona's identity / behaviour block.
-/// - `extra_long_lived` are any additional blocks that belong in slot [2]+
+/// - `extra_long_lived` are any additional blocks that belong in slot \[2\]+
 ///   (e.g. frequently-read memory blocks the Phase 5 composer decides to
 ///   co-locate with the persona). Phase 4 passes them through verbatim.
 pub fn build_system_prompt(
@@ -99,10 +99,11 @@ pub fn build_system_prompt(
 
         #[cfg(feature = "subscription-oauth")]
         ShaperCompatMode::FullSurfaceImpersonation => {
+            // Phase: future plan. Declared in v3-foundation AC5.7 for API
+            // stability only; shipping requires explicit sign-off.
             unimplemented!(
                 "ShaperCompatMode::FullSurfaceImpersonation not implemented; \
-                 requires explicit sign-off per pattern_provider/CLAUDE.md. \
-                 Phase: future plan."
+                 requires explicit sign-off per pattern_provider/CLAUDE.md."
             );
         }
     }

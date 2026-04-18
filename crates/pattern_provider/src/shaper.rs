@@ -8,7 +8,7 @@
 //!   auth tier (subscription OAuth vs API key) and target model.
 //! - Rewrite or restructure the system prompt if the provider requires it
 //!   (Anthropic's `SubscriptionRoutingShape` injects the structural
-//!   claude-code literal in slot [0]).
+//!   claude-code literal in slot \[0\]).
 //!
 //! Two concrete shapers ship in Phase 4:
 //!
@@ -112,7 +112,7 @@ pub struct ShapeContext<'a> {
     pub model: &'a str,
     pub auth_tier: AuthTier,
 
-    /// Persona identity / behaviour block. Rendered into slot [2] of
+    /// Persona identity / behaviour block. Rendered into slot \[2\] of
     /// `SubscriptionRoutingShape` or concatenated into the single block of
     /// `HonestPattern`.
     pub persona: &'a str,
@@ -123,7 +123,7 @@ pub struct ShapeContext<'a> {
     pub system_instructions_override: Option<&'a str>,
 
     /// Additional long-lived content (frequently-read memory blocks,
-    /// etc.). Appended to slot [2] / the trailing single block.
+    /// etc.). Appended to slot \[2\] / the trailing single block.
     pub extra_long_lived_blocks: &'a [String],
 }
 

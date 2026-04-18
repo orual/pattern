@@ -142,12 +142,15 @@ mod tests {
     use secrecy::SecretString;
     use std::sync::Mutex;
 
+    type GetFn = Box<dyn FnMut(&str) -> Result<Option<ProviderCredential>, ProviderError> + Send>;
+    type PutFn = Box<dyn FnMut(&ProviderCredential) -> Result<(), ProviderError> + Send>;
+    type DeleteFn = Box<dyn FnMut(&str) -> Result<(), ProviderError> + Send>;
+
     /// Test double: configurable CredsStore behaviour per-call.
     struct MockStore {
-        get_fn:
-            Mutex<Box<dyn FnMut(&str) -> Result<Option<ProviderCredential>, ProviderError> + Send>>,
-        put_fn: Mutex<Box<dyn FnMut(&ProviderCredential) -> Result<(), ProviderError> + Send>>,
-        delete_fn: Mutex<Box<dyn FnMut(&str) -> Result<(), ProviderError> + Send>>,
+        get_fn: Mutex<GetFn>,
+        put_fn: Mutex<PutFn>,
+        delete_fn: Mutex<DeleteFn>,
     }
 
     impl MockStore {

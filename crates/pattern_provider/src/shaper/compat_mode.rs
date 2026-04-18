@@ -11,7 +11,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ShaperCompatMode {
-    /// system[0] = honest pattern identification; no reference-client literal.
+    /// `system[0]` = honest pattern identification; no reference-client literal.
     ///
     /// Aspirational cleanest posture. Verified by Phase 4 Task 20 against
     /// a real subscription tier; if that verification succeeds, the default
@@ -19,10 +19,10 @@ pub enum ShaperCompatMode {
     /// `subscription-oauth` feature is off.
     HonestPattern,
 
-    /// system[0] = the verbatim identifier string Anthropic's subscription
+    /// `system[0]` = the verbatim identifier string Anthropic's subscription
     /// routing expects (structural API requirement, NOT an identity claim).
-    /// system[1] = identity-override prefix + `DEFAULT_BASE_INSTRUCTIONS`.
-    /// system[2] = persona + long-lived blocks.
+    /// `system[1]` = identity-override prefix + `DEFAULT_BASE_INSTRUCTIONS`.
+    /// `system[2]` = persona + long-lived blocks.
     ///
     /// Phase 4 default when `subscription-oauth` feature is on. Empirically
     /// known-working against subscription tier as of 2026-04-16.

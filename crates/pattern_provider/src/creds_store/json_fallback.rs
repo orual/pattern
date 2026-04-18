@@ -104,7 +104,7 @@ impl CredsStore for JsonFallbackStore {
 // ---- helpers ----
 
 fn default_root() -> Result<PathBuf, ProviderError> {
-    let base = dirs::config_dir().ok_or_else(|| ProviderError::CredentialStoreUnavailable)?;
+    let base = dirs::config_dir().ok_or(ProviderError::CredentialStoreUnavailable)?;
     Ok(base.join("pattern").join("creds"))
 }
 

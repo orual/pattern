@@ -194,7 +194,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn cmd_auth(provider: ProviderKind) -> Result<(), Box<dyn std::error::Error>> {
     let chain = build_chain(provider).await?;
 
-    eprintln!("resolving credential chain for provider={}", provider.as_str());
+    eprintln!(
+        "resolving credential chain for provider={}",
+        provider.as_str()
+    );
     match chain.resolve().await {
         Ok(resolved) => {
             print_resolved(&resolved);
@@ -208,8 +211,18 @@ async fn cmd_auth(provider: ProviderKind) -> Result<(), Box<dyn std::error::Erro
             let token = run_pkce_interactive().await?;
             eprintln!("✓ PKCE flow completed");
             eprintln!("  tier: pkce (freshly obtained, not yet stored)");
-            eprintln!("  access_token_len: {}", token.access_token.expose_secret().len());
-            eprintln!("  refresh_token: {}", if token.refresh_token.is_some() { "present" } else { "absent" });
+            eprintln!(
+                "  access_token_len: {}",
+                token.access_token.expose_secret().len()
+            );
+            eprintln!(
+                "  refresh_token: {}",
+                if token.refresh_token.is_some() {
+                    "present"
+                } else {
+                    "absent"
+                }
+            );
             eprintln!("  expires_at: {:?}", token.expires_at);
             eprintln!("  scope: {:?}", token.scope);
             Ok(())
@@ -355,9 +368,11 @@ async fn cmd_clear(provider: ProviderKind) -> Result<(), Box<dyn std::error::Err
     #[cfg(not(feature = "subscription-oauth"))]
     {
         let _ = provider;
-        Err("clear requires the `subscription-oauth` feature (keyring + JSON fallback are \
+        Err(
+            "clear requires the `subscription-oauth` feature (keyring + JSON fallback are \
              only compiled in under that feature)"
-            .into())
+                .into(),
+        )
     }
 }
 
@@ -382,15 +397,16 @@ async fn build_chain(
                 let creds_store: Arc<dyn CredsStore> =
                     Arc::new(CredsStoreResolver::new(primary, fallback));
 
-                let chain: Arc<dyn CredentialChain> = Arc::new(
-                    AnthropicAuthChain::with_oauth(session_pickup, pkce, creds_store),
-                );
+                let chain: Arc<dyn CredentialChain> = Arc::new(AnthropicAuthChain::with_oauth(
+                    session_pickup,
+                    pkce,
+                    creds_store,
+                ));
                 Ok(chain)
             }
             #[cfg(not(feature = "subscription-oauth"))]
             {
-                let chain: Arc<dyn CredentialChain> =
-                    Arc::new(AnthropicAuthChain::api_key_only());
+                let chain: Arc<dyn CredentialChain> = Arc::new(AnthropicAuthChain::api_key_only());
                 Ok(chain)
             }
         }
@@ -404,10 +420,8 @@ async fn build_chain(
 // ---- interactive PKCE ----
 
 #[cfg(feature = "subscription-oauth")]
-async fn run_pkce_interactive() -> Result<
-    pattern_core::types::provider::ProviderCredential,
-    Box<dyn std::error::Error>,
-> {
+async fn run_pkce_interactive()
+-> Result<pattern_core::types::provider::ProviderCredential, Box<dyn std::error::Error>> {
     use pattern_provider::auth::PkceTier;
     use pattern_provider::creds_store::{
         CredsStore, CredsStoreResolver, JsonFallbackStore, KeyringStore,
@@ -451,9 +465,7 @@ async fn run_pkce_interactive() -> Result<
 }
 
 #[cfg(not(feature = "subscription-oauth"))]
-async fn run_pkce_interactive() -> Result<
-    pattern_core::types::provider::ProviderCredential,
-    Box<dyn std::error::Error>,
-> {
+async fn run_pkce_interactive()
+-> Result<pattern_core::types::provider::ProviderCredential, Box<dyn std::error::Error>> {
     Err("PKCE flow requires the `subscription-oauth` feature".into())
 }

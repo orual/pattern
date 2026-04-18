@@ -93,3 +93,87 @@ empty persona + empty extras in `SubscriptionRoutingShape` produces a
 two-block system (slot[0] + slot[1]), not a three-block system with an
 empty slot[2]. Tests pin this behaviour in
 `shaper/system_prompt.rs::tests::subscription_routing_skips_slot_2_*`.
+
+## Beta-header allow / deny list
+
+The `Anthropic-Beta` value is curated per-request by
+`shaper::headers::build_beta_header_value`:
+
+**Auth-tier-conditional** (lives in `gateway::auth_headers_for_tier`
+alongside the Bearer token, not in the shaper):
+
+- `oauth-2025-04-20` — emitted for the PKCE + session-pickup tiers so
+  Anthropic routes the call via its OAuth path. Never emitted for
+  API-key auth.
+
+**Capability-conditional** (shaper, driven by `ShaperConfig` flags +
+model inspection):
+
+- `prompt-caching-scope-2026-01-05` — always on for first-party traffic.
+- `interleaved-thinking-2025-05-14` — claude-4 opus/sonnet + config opt-in.
+- `dev-full-thinking-2025-05-14` — claude-4 opus/sonnet + config opt-in.
+- `context-management-2025-06-27` — any claude-4-* model + config opt-in.
+- `extended-cache-ttl-2025-04-11` — config opt-in, model-agnostic.
+- `context-1m-2025-08-07` — specific 1M-context models + config opt-in.
+
+**Permanent deny list** (`BANNED_BETA_MARKERS`, enforced both at
+`ShaperConfig::validate` and at emit time as defense-in-depth):
+
+- `claude-code-20250219`
+- `cli-internal-2026-02-09`
+- `summarize-connector-text-2026-03-13`
+- `token-efficient-tools-2026-03-28`
+
+These are Anthropic's internal CLI markers. Pattern is a distinct
+client and emits none of them regardless of config. Adding any of them
+to `ShaperConfig::extra_beta_markers` fails validation.
+
+## Refresh-mutex serialization (AC4.7)
+
+`AnthropicAuthChain` holds a single `tokio::sync::Mutex<()>` guarding
+the OAuth refresh path. When multiple persona requests arrive at the
+same near-expiry token, the first to acquire the mutex performs the
+network round trip + writes the new token to `CredsStore`; subsequent
+tasks re-read the store post-lock and observe the fresh token without
+duplicating the refresh. Unit tests cover the single-path,
+concurrent-refresh-serialization, and refresh-failure cases in
+`auth::resolver::tests::oauth_chain`.
+
+## `<system-reminder>` tag helper
+
+`shaper::wrap_system_reminder(content: &str) -> String` wraps arbitrary
+content in `<system-reminder>...</system-reminder>` tags. Meant for
+the Phase 5 composer to inject transient per-turn metadata (e.g. token
+pressure warnings, tool-result framing) into a user-message position
+where Anthropic treats the tag as system-side framing rather than
+persona identity. Phase 4 ships the helper + a round-trip test; Phase 5
+wires it into the composer.
+
+## What lives elsewhere
+
+- `tidepool-extract` / GHC plugin binary — `pattern_runtime` concern, not
+  this crate. See `crates/pattern_runtime/CLAUDE.md`.
+- Turn-loop / checkpoint machinery — `pattern_runtime`.
+- Compaction + memory-block composer — `pattern_core` (Phase 5 wires
+  the composer against this crate's `ProviderClient::count_tokens`).
+
+## Verifying live auth paths
+
+No env-gated live-credential test suite exists in this crate — live
+paths are exercised manually via `pattern-test-cli` in `pattern_runtime`:
+
+```sh
+# Show which tier resolves (session-pickup / stored-oauth / api-key),
+# print the token prefix + expiry.
+cargo run -p pattern-runtime --bin pattern-test-cli -- auth
+
+# One-shot completion through the full stack.
+cargo run -p pattern-runtime --bin pattern-test-cli -- \
+    ask --shaper subscription "hello?"
+
+# Clear pattern's stored PKCE token (keyring + JSON fallback).
+cargo run -p pattern-runtime --bin pattern-test-cli -- clear
+```
+
+AC9.1/9.2 of the v3-foundation plan documents the checklist this CLI
+satisfies.

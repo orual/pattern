@@ -13,7 +13,7 @@
 //! Entries are stored under the service name `pattern-<provider>` (e.g.
 //! `pattern-anthropic`, `pattern-gemini`). The account name is the
 //! platform user's login name via [`whoami::username`]. This matches the
-//! pre-v3 [`pattern_auth`] convention.
+//! pre-v3 `pattern_auth` convention (that crate has been retired).
 
 use keyring::Entry;
 use pattern_core::error::ProviderError;

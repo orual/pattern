@@ -211,14 +211,7 @@ impl ProviderClient for PatternGatewayClient {
         // first successful event arrives, subsequent errors flow through
         // to the caller — retrying after content emission would duplicate
         // output.
-        open_stream_with_retry(
-            &self.genai,
-            target,
-            chat,
-            options,
-            RetryPolicy::default(),
-        )
-        .await
+        open_stream_with_retry(&self.genai, target, chat, options, RetryPolicy::default()).await
     }
 
     async fn count_tokens(&self, request: &CompletionRequest) -> Result<TokenCount, ProviderError> {
@@ -353,7 +346,7 @@ impl PatternGatewayClientBuilder {
             });
         }
         Ok(PatternGatewayClient {
-            genai: self.genai.unwrap_or_else(genai::Client::default),
+            genai: self.genai.unwrap_or_default(),
             chains: self.chains,
             shapers: self.shapers,
             limiters: self.limiters,
@@ -471,7 +464,9 @@ async fn open_stream_with_retry(
                 // map_webc_error; peek into the error to honour the
                 // server-provided hint when we have one.
                 let server_hint = server_rate_limit_hint(&e);
-                let wait = server_hint.map(|h| h.min(policy.max_delay)).unwrap_or(delay);
+                let wait = server_hint
+                    .map(|h| h.min(policy.max_delay))
+                    .unwrap_or(delay);
                 tracing::warn!(
                     attempt,
                     max = policy.max_attempts,
@@ -584,8 +579,8 @@ fn map_genai_error(err: genai::Error) -> ProviderError {
             headers,
         } => {
             if status.as_u16() == 429 {
-                let retry_after = parse_rate_limit_reset(&headers)
-                    .unwrap_or_else(|| Duration::from_secs(60));
+                let retry_after =
+                    parse_rate_limit_reset(&headers).unwrap_or_else(|| Duration::from_secs(60));
                 ProviderError::RateLimited { retry_after }
             } else {
                 ProviderError::RequestFailed {
@@ -634,8 +629,8 @@ fn map_webc_error(err: genai::webc::Error) -> ProviderError {
             headers,
         } => {
             if status.as_u16() == 429 {
-                let retry_after = parse_rate_limit_reset(&headers)
-                    .unwrap_or_else(|| Duration::from_secs(60));
+                let retry_after =
+                    parse_rate_limit_reset(&headers).unwrap_or_else(|| Duration::from_secs(60));
                 ProviderError::RateLimited { retry_after }
             } else {
                 ProviderError::RequestFailed {
@@ -769,11 +764,10 @@ fn chat_url_for(adapter: AdapterKind, model: &str, base_url_override: Option<&st
             format!("{base}/v1beta/models/{model}:streamGenerateContent")
         }
         _ => {
-            let base = base_url_override.unwrap_or_else(|| {
-                // Surface a clearly-invalid URL so mis-routed calls fail
-                // loudly rather than silently hitting some other service.
-                "https://pattern-gateway-unsupported-adapter.invalid"
-            });
+            // Surface a clearly-invalid URL so mis-routed calls fail loudly
+            // rather than silently hitting some other service.
+            let base =
+                base_url_override.unwrap_or("https://pattern-gateway-unsupported-adapter.invalid");
             format!("{base}/v1/messages")
         }
     }

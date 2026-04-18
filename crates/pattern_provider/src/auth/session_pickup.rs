@@ -445,7 +445,10 @@ mod tests {
             .expect("canonical shape → token present");
 
         assert_eq!(token.provider, "anthropic");
-        assert_eq!(token.access_token.expose_secret(), "sk-ant-oat01-real-shape");
+        assert_eq!(
+            token.access_token.expose_secret(),
+            "sk-ant-oat01-real-shape"
+        );
         assert_eq!(
             token.refresh_token.as_ref().map(|s| s.expose_secret()),
             Some("sk-ant-ort01-real-shape")

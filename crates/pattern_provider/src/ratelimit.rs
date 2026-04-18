@@ -20,7 +20,8 @@
 //! hold when a single request can consume 200k tokens out of a
 //! 20k-tokens-per-minute bucket. Request-metering is honest as "pattern's
 //! polite-client cap" — the server-side Anthropic 429s (surfaced via
-//! [`ProviderError::RateLimited`]) remain the authoritative rate limit.
+//! [`pattern_core::error::ProviderError::RateLimited`]) remain the
+//! authoritative rate limit.
 //!
 //! Waits use `until_ready_with_jitter` — governor wakes callers in
 //! randomised order so concurrent bursts don't thunder back.

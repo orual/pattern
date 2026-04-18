@@ -2085,24 +2085,24 @@ jj new
 
 ## Phase 4 "Done when" checklist
 
-- [ ] rust-genai fork rebased onto current upstream; fork-side patches reduced to: system-prompt-array + version bump + (conditional) Opus/Sonnet 4.7 model IDs
-- [ ] pattern_auth directory deleted in a dedicated retirement commit; `ProviderOAuthToken` now lives in `pattern_core::types::provider`
-- [ ] Three-tier auth resolver with session-pickup (`.credentials.json` primary + `session.json` legacy compat), PKCE, API key
-- [ ] Per-persona refresh mutex serialization (AC4.7 verified)
-- [ ] Keyring + JSON fallback credential store (0600/0700 perms verified)
-- [ ] `RequestShaper` with `ShaperCompatMode::{HonestPattern, SubscriptionRoutingShape, FullSurfaceImpersonation(todo)}`
-- [ ] Beta header registry exclusion of `claude-code-20250219` and other claude-code-specific markers
-- [ ] `<system-reminder>` tag helper in the shaper for user-message metadata injection
-- [ ] Per-provider rate limiter with separate buckets for chat + count_tokens (AC5.*/5b.5)
-- [ ] `count_tokens` async wrapper against `/v1/messages/count_tokens`
-- [ ] `usage` field capture from chat responses (+ streaming end event)
-- [ ] `PatternGatewayClient` implements `pattern_core::traits::ProviderClient`
-- [ ] wiremock integration suite covers all AC paths
-- [ ] Live subscription auth verification (Task 20) determines default `ShaperCompatMode`
-- [ ] All tests pass (`cargo nextest run -p pattern_provider`)
-- [ ] `cargo check -p pattern_provider`, `cargo clippy`, `cargo doc` all zero-warning
-- [ ] `bash scripts/audit-rewrite-state.sh` passes
-- [ ] `just pre-commit-all` passes
+- [x] rust-genai fork rebased onto current upstream; fork-side patches reduced to: system-prompt-array + version bump + Opus/Sonnet 4.7 model IDs + `Error::HttpError{headers}` for rate-limit-reset parsing
+- [x] pattern_auth directory deleted in a dedicated retirement commit; `ProviderCredential` now lives in `pattern_core::types::provider` (renamed from `ProviderOAuthToken` under Task 13)
+- [x] Three-tier auth resolver: stored OAuth (keyring + JSON fallback), PKCE, session-pickup; order finalised to stored > API key > session-pickup (Task 20 follow-up, documented in CLAUDE.md)
+- [x] Per-persona refresh mutex serialization (AC4.7 verified in `auth::resolver::tests::oauth_chain`)
+- [x] Keyring + JSON fallback credential store (0600/0700 perms verified in `creds_store::json_fallback::tests::stored_file_has_0600_perms`)
+- [x] `RequestShaper` with `ShaperCompatMode::{HonestPattern, SubscriptionRoutingShape, FullSurfaceImpersonation(unimplemented)}`
+- [x] Beta header registry exclusion of `claude-code-20250219` + three other CLI-internal markers (`BANNED_BETA_MARKERS`)
+- [x] `<system-reminder>` tag helper in the shaper for user-message metadata injection (`shaper::wrap_system_reminder`)
+- [x] Per-provider rate limiter with separate buckets for chat + count_tokens (AC5.*/5b.5)
+- [x] `count_tokens` async wrapper against `/v1/messages/count_tokens`
+- [x] `usage` field capture from chat responses via `ChatStreamEvent::End.captured_usage`
+- [x] `PatternGatewayClient` implements `pattern_core::traits::ProviderClient` with multi-provider dispatch
+- [x] wiremock integration suite (9 tests) covers anthropic text/tool/oauth, 429/500 error paths, gemini text/thinking, no-credential, provider isolation
+- [x] Live subscription auth verification: `SubscriptionRoutingShape` default confirmed via `pattern-test-cli` against real subscription tier; `HonestPattern` observed to 429 (Anthropic routes non-subscription-shape requests to pay-as-you-go quota). Decision documented in `pattern_provider/CLAUDE.md`.
+- [x] All tests pass (`cargo nextest run -p pattern-provider --all-features`: 104/104)
+- [x] `cargo check`, `cargo clippy --all-features --all-targets -- -D warnings`, `cargo doc --all-features` all zero-warning
+- [x] `bash scripts/audit-rewrite-state.sh` passes (AC1.7–AC1.10 clean)
+- [x] `just pre-commit-all` passes (nixpkgs-fmt + rustfmt)
 
 ## What this phase deliberately does NOT do
 
