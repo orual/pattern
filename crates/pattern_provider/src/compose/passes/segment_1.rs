@@ -11,7 +11,7 @@
 //!
 //! Segment 1 carries no block content (`[memory:*]` pseudo-messages).
 //! Memory-block state lives in segment 3 via
-//! [`super::segment_3::Segment3Pass`]. This separation is deliberate:
+//! `super::segment_3::Segment3Pass` (lands in Task 9). This separation is deliberate:
 //! system instructions are long-lived stable content (`Ephemeral1h`
 //! default) while block content churns per turn (`Ephemeral5m`).
 
@@ -44,11 +44,7 @@ impl Segment1Pass {
     ///
     /// `system_blocks` and `tools` are consumed; the pass stores them
     /// and moves them into the partial during [`ComposerPass::apply`].
-    pub fn new(
-        system_blocks: Vec<SystemBlock>,
-        tools: Vec<Tool>,
-        profile: CacheProfile,
-    ) -> Self {
+    pub fn new(system_blocks: Vec<SystemBlock>, tools: Vec<Tool>, profile: CacheProfile) -> Self {
         Self {
             system_blocks,
             tools,
@@ -106,7 +102,9 @@ mod tests {
     fn segment_1_contains_no_memory_block_content() {
         let system_blocks = vec![
             SystemBlock::new("You are Claude Code, Anthropic's official CLI."),
-            SystemBlock::new("You are NOT Claude Code.\n<base_instructions>...</base_instructions>"),
+            SystemBlock::new(
+                "You are NOT Claude Code.\n<base_instructions>...</base_instructions>",
+            ),
             SystemBlock::new("Persona: a helpful agent named Sage."),
         ];
 
@@ -128,11 +126,7 @@ mod tests {
         }
 
         // Messages must not have been touched by segment 1.
-        assert_eq!(
-            partial.messages.len(),
-            1,
-            "segment 1 must not add messages"
-        );
+        assert_eq!(partial.messages.len(), 1, "segment 1 must not add messages");
     }
 
     // ---- AC7.4: DEFAULT_BASE_INSTRUCTIONS appears within the cached region ----
@@ -217,13 +211,8 @@ mod tests {
 
     #[test]
     fn tools_are_forwarded_to_partial() {
-        let tool = Tool::new("run_haskell")
-            .with_description("Run a Haskell expression");
-        let pass = Segment1Pass::new(
-            vec![SystemBlock::new("sys")],
-            vec![tool],
-            test_profile(),
-        );
+        let tool = Tool::new("run_haskell").with_description("Run a Haskell expression");
+        let pass = Segment1Pass::new(vec![SystemBlock::new("sys")], vec![tool], test_profile());
         let mut partial = PartialRequest::new("claude-opus-4-7");
         pass.apply(&mut partial).unwrap();
 

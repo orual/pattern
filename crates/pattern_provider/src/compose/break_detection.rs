@@ -70,16 +70,15 @@ impl BreakDetectionSnapshot {
             block.text.hash(&mut cc_hasher);
             // Use JSON serialization for stability across compiler versions;
             // CacheControl implements Serialize.
-            let cc_repr = serde_json::to_string(&block.cache_control)
-                .unwrap_or_else(|_| "null".to_owned());
+            let cc_repr =
+                serde_json::to_string(&block.cache_control).unwrap_or_else(|_| "null".to_owned());
             cc_repr.hash(&mut cc_hasher);
         }
 
         let mut tools_hasher = DefaultHasher::new();
         for tool in &partial.tools {
             // JSON serialization is more stable than Debug formatting.
-            let tool_repr =
-                serde_json::to_string(tool).unwrap_or_else(|_| format!("{tool:?}"));
+            let tool_repr = serde_json::to_string(tool).unwrap_or_else(|_| format!("{tool:?}"));
             tool_repr.hash(&mut tools_hasher);
         }
 
@@ -166,7 +165,10 @@ mod tests {
         let p = partial_with_system(vec![SystemBlock::new("hello")]);
         let a = BreakDetectionSnapshot::compute(&p);
         let b = BreakDetectionSnapshot::compute(&p);
-        assert!(a.diff(&b).is_empty(), "identical snapshots should diff to empty");
+        assert!(
+            a.diff(&b).is_empty(),
+            "identical snapshots should diff to empty"
+        );
     }
 
     #[test]
@@ -184,8 +186,7 @@ mod tests {
 
     #[test]
     fn cache_control_only_change_distinguishes_from_content() {
-        let block_a = SystemBlock::new("hello")
-            .with_cache_control(CacheControl::Ephemeral5m);
+        let block_a = SystemBlock::new("hello").with_cache_control(CacheControl::Ephemeral5m);
         let block_b = SystemBlock::new("hello") // same content
             .with_cache_control(CacheControl::Ephemeral1h); // TTL flipped
 
@@ -196,7 +197,8 @@ mod tests {
         let diff = s2.diff(&s1);
 
         assert!(
-            diff.iter().any(|m| m.contains("cache_control markers moved")),
+            diff.iter()
+                .any(|m| m.contains("cache_control markers moved")),
             "expected cache_control markers moved in diff, got: {diff:?}"
         );
         assert!(
@@ -245,17 +247,22 @@ mod tests {
     fn beta_header_change_surfaces() {
         let mut p1 = PartialRequest::new("m");
         let mut p2 = PartialRequest::new("m");
-        p1.extra_headers
-            .insert("anthropic-beta".into(), "prompt-caching-scope-2026-01-05".into());
-        p2.extra_headers
-            .insert("anthropic-beta".into(), "prompt-caching-scope-2026-01-05,interleaved-thinking-2025-05-14".into());
+        p1.extra_headers.insert(
+            "anthropic-beta".into(),
+            "prompt-caching-scope-2026-01-05".into(),
+        );
+        p2.extra_headers.insert(
+            "anthropic-beta".into(),
+            "prompt-caching-scope-2026-01-05,interleaved-thinking-2025-05-14".into(),
+        );
 
         let s1 = BreakDetectionSnapshot::compute(&p1);
         let s2 = BreakDetectionSnapshot::compute(&p2);
         let diff = s2.diff(&s1);
 
         assert!(
-            diff.iter().any(|m| m.contains("anthropic-beta header set changed")),
+            diff.iter()
+                .any(|m| m.contains("anthropic-beta header set changed")),
             "expected beta header change in diff, got: {diff:?}"
         );
     }
@@ -299,10 +306,9 @@ mod tests {
 
     #[test]
     fn content_and_cache_control_both_change() {
-        let block_a = SystemBlock::new("hello")
-            .with_cache_control(CacheControl::Ephemeral5m);
-        let block_b = SystemBlock::new("different content")
-            .with_cache_control(CacheControl::Ephemeral1h);
+        let block_a = SystemBlock::new("hello").with_cache_control(CacheControl::Ephemeral5m);
+        let block_b =
+            SystemBlock::new("different content").with_cache_control(CacheControl::Ephemeral1h);
 
         let p1 = partial_with_system(vec![block_a]);
         let p2 = partial_with_system(vec![block_b]);
