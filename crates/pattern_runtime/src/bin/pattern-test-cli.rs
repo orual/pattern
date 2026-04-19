@@ -1144,24 +1144,35 @@ async fn cmd_spawn(
     std::fs::create_dir_all(&data_dir)
         .map_err(|e| format!("failed to create data_dir {}: {e}", data_dir.display()))?;
 
-    // Honor the --auth override when possible. API-key-only selection
-    // falls through to AnthropicAuthChain::api_key_only(); session-pickup
-    // and pkce-only tier restriction require chain API work that's not
-    // yet landed — for those, we print a warning and fall through to the
-    // default full chain. The flag is never silently ignored.
-    let chain = match auth_override {
+    // Honor the --auth override by constructing a tier-restricted chain.
+    // Each variant forces exactly the specified tier so the user gets
+    // deterministic credential resolution rather than ambient fallbacks.
+    let chain: Arc<dyn CredentialChain> = match auth_override {
         Some(AuthTierCli::ApiKey) => {
             eprintln!("[spawn] --auth api-key: using AnthropicAuthChain::api_key_only()");
-            let c: Arc<dyn CredentialChain> = Arc::new(AnthropicAuthChain::api_key_only());
-            c
+            Arc::new(AnthropicAuthChain::api_key_only())
         }
-        Some(tier @ (AuthTierCli::SessionPickup | AuthTierCli::Pkce)) => {
+        #[cfg(feature = "subscription-oauth")]
+        Some(AuthTierCli::SessionPickup) => {
             eprintln!(
-                "[spawn] warning: --auth {:?} tier-restriction not yet wired; \
-                 falling through to default chain resolution (tiers tried in order)",
-                tier,
+                "[spawn] --auth session-pickup: using AnthropicAuthChain::session_pickup_only()"
             );
-            build_chain(ProviderKind::Anthropic).await?
+            Arc::new(AnthropicAuthChain::session_pickup_only())
+        }
+        #[cfg(feature = "subscription-oauth")]
+        Some(AuthTierCli::Pkce) => {
+            eprintln!(
+                "[spawn] --auth pkce: using AnthropicAuthChain::pkce_only(); interactive PKCE flow will run if no stored token is found"
+            );
+            Arc::new(AnthropicAuthChain::pkce_only())
+        }
+        #[cfg(not(feature = "subscription-oauth"))]
+        Some(AuthTierCli::SessionPickup | AuthTierCli::Pkce) => {
+            eprintln!(
+                "[spawn] warning: --auth session-pickup/pkce requires the `subscription-oauth` \
+                 feature; falling back to api-key only"
+            );
+            Arc::new(AnthropicAuthChain::api_key_only())
         }
         None => build_chain(ProviderKind::Anthropic).await?,
     };

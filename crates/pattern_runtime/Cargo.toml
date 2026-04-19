@@ -16,6 +16,14 @@ default = ["subscription-oauth"]
 # stable API contract.
 test-hooks = []
 
+# Expose the `pattern_runtime::testing` module (MockProviderClient,
+# InMemoryMemoryStore, test_db, etc.) on the public surface. Gated
+# so the test fixtures do not ship in production binaries or library
+# builds used by downstream crates. Enable it in integration tests via
+# the dev-dependency self-ref below; enable it in any binary that needs
+# the test doubles (e.g. `pattern-test-cli`).
+test-support = []
+
 # Forward pattern-provider's subscription-oauth feature. When enabled,
 # the `pattern-test-cli` bin exposes the interactive PKCE flow and the
 # session-pickup + OAuth tiers of the Anthropic credential chain.
@@ -68,9 +76,14 @@ tidepool-testing = { workspace = true }
 tracing-test   = { workspace = true }
 tracing-subscriber = { workspace = true }
 tempfile       = { workspace = true }
-# Self-reference enabling the `test-hooks` feature only for this
-# crate's own integration tests. Cargo permits `dep:self` style
-# reachability: the integration test binaries link against the library
-# crate with the feature enabled, while downstream users of this crate
-# see no feature turned on unless they opt in explicitly.
-pattern-runtime = { path = ".", features = ["test-hooks"] }
+# Self-reference enabling the `test-hooks` and `test-support` features
+# for this crate's own integration tests. Cargo permits `dep:self`
+# style reachability: the integration test binaries link against the
+# library crate with the features enabled, while downstream users see
+# no feature turned on unless they opt in explicitly.
+pattern-runtime = { path = ".", features = ["test-hooks", "test-support"] }
+
+[[bin]]
+name = "pattern-test-cli"
+path = "src/bin/pattern-test-cli.rs"
+required-features = ["test-support"]

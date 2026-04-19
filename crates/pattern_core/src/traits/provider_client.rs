@@ -97,4 +97,20 @@ pub trait ProviderClient: Send + Sync + std::fmt::Debug {
     /// Used pre-request by compaction and context-length decisions; replaces
     /// the pre-v3 heuristic token approximation. See v3-foundation.AC5b.
     async fn count_tokens(&self, request: &CompletionRequest) -> Result<TokenCount, ProviderError>;
+
+    /// Signal a session-UUID rotation boundary to the client.
+    ///
+    /// Called by the compaction layer when `CompactionOutcome::Fired` —
+    /// the compaction cycle end is the primary rotation trigger so the
+    /// provider sees a fresh session UUID after each compaction. Persona
+    /// detach is a secondary trigger handled at the session close path.
+    ///
+    /// The default implementation is a no-op: test doubles and providers
+    /// that do not carry per-session UUID state can leave this unimplemented.
+    /// `PatternGatewayClient` overrides it to forward to its
+    /// [`crate::session_uuid::SessionUuidRotator`].
+    fn rotate_session_uuid(&self) {
+        // No-op by default; concrete clients that carry a session UUID
+        // (PatternGatewayClient) override this.
+    }
 }

@@ -69,6 +69,15 @@ impl SessionPickupTier {
         Self { paths }
     }
 
+    /// Construct a no-op tier that never resolves (empty candidate paths).
+    ///
+    /// Used by [`super::resolver::AnthropicAuthChain::pkce_only`] to prevent
+    /// the session-pickup tier from firing when the caller has explicitly
+    /// requested PKCE-only authentication.
+    pub fn noop() -> Self {
+        Self { paths: vec![] }
+    }
+
     /// Attempt to read a valid ambient credentials session.
     ///
     /// - `Ok(Some(token))` — a valid unexpired credential was found at one

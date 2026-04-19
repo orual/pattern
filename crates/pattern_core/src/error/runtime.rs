@@ -483,4 +483,66 @@ pub enum RuntimeError {
         /// Human-readable reason surfaced by the handler.
         reason: String,
     },
+
+    /// An internal invariant was violated inside the compaction driver.
+    ///
+    /// Produced by `compaction::compute_archive_boundary` when it cannot
+    /// determine a valid archive position (e.g. all archived and kept
+    /// turns have empty message lists). This is a bug in the compaction
+    /// strategy or in how `archived_count` was computed, not a user error.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::RuntimeError;
+    ///
+    /// let err = RuntimeError::CompactionInternalError {
+    ///     reason: "no message positions found in archived turns".to_string(),
+    /// };
+    /// assert!(err.to_string().contains("compaction internal error"));
+    /// ```
+    #[error("compaction internal error: {reason}")]
+    #[diagnostic(code(pattern_core::runtime::compaction_internal_error))]
+    CompactionInternalError {
+        /// Human-readable description of the invariant violation.
+        reason: String,
+    },
+
+    /// A persona TOML declares a `shared_id` on a memory block, which the
+    /// foundation runtime does not yet support.
+    ///
+    /// Shared block references are a planned feature (constellation-level
+    /// cross-agent block sharing) but the resolver that maps a `shared_id`
+    /// to a live `StructuredDocument` is not wired yet. Failing loudly at
+    /// seed time is better than silently ignoring the field (which would
+    /// leave the agent with a wrong memory configuration).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::RuntimeError;
+    ///
+    /// let err = RuntimeError::SharedBlockRefNotSupported {
+    ///     label: "shared_notes".to_string(),
+    ///     shared_id: "mem_01HXYZ".to_string(),
+    /// };
+    /// assert!(err.to_string().contains("shared_notes"));
+    /// assert!(err.to_string().contains("shared block references are not yet supported"));
+    /// ```
+    #[error(
+        "memory block '{label}' (shared_id={shared_id}): shared block references are not yet supported"
+    )]
+    #[diagnostic(
+        code(pattern_core::runtime::shared_block_ref_not_supported),
+        help(
+            "remove `shared_id` from the '{label}' block in the persona TOML; \
+             constellation-level block sharing is planned but not implemented in the foundation runtime"
+        )
+    )]
+    SharedBlockRefNotSupported {
+        /// Human-chosen label of the block that declared `shared_id`.
+        label: String,
+        /// The `shared_id` value from the persona TOML.
+        shared_id: String,
+    },
 }

@@ -144,7 +144,7 @@ impl CredentialChain for StaticOAuthChain {
 
     async fn resolve(&self) -> Result<ResolvedCredential, ProviderError> {
         Ok(ResolvedCredential {
-            source: AuthTier::Pkce,
+            source: AuthTier::StoredOauth,
             token: self.token.clone(),
         })
     }

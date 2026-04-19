@@ -38,6 +38,13 @@ compress_check_message_floor = 50
 # window for output tokens + buffer.
 compress_token_threshold = 150_000
 
+# Mid-batch delta snapshot behaviour.
+# "include_self_edits" (default) — emit delta for all mid-batch changes,
+#   including this turn's own tool writes. Strongest agent trust signal.
+# "filter_self_edits" — skip self-edit deltas; agent relies on tool_result
+#   confirmation. Cache-efficient but less explicit.
+mid_batch = "filter_self_edits"
+
 # RecursiveSummarization is the default agent-session compression path:
 # summarize old turns into a dense prose summary rather than truncating.
 # summarization_model can differ from the primary model — haiku is

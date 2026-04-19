@@ -19,7 +19,7 @@
 //! [`CheckpointEvent::request_repr`] for the shape rationale.
 
 use pattern_core::error::RuntimeError;
-use pattern_core::types::ids::new_id;
+use pattern_core::types::ids::new_snowflake_id;
 use pattern_core::types::snapshot::{PersonaSnapshot, SessionSnapshot};
 use serde::{Deserialize, Serialize};
 use tidepool_eval::Value;
@@ -152,7 +152,10 @@ impl CheckpointLog {
         // the checkpoint path is opaque to it.
         let persona = PersonaSnapshot::new(agent_id, agent_id).with_extra(events_json);
         let mut persona = persona;
-        persona.as_of_turn = Some(new_id());
+        // Use a snowflake ID so the turn cursor is time-ordered and globally
+        // unique (rather than a random UUID), consistent with all other
+        // TurnId minting in the runtime.
+        persona.as_of_turn = Some(new_snowflake_id());
         persona.captured_at = jiff::Timestamp::now();
         Ok(SessionSnapshot::new(
             vec![persona],

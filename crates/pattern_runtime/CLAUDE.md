@@ -439,15 +439,8 @@ change-log debug output shows the `memory.put` effect firing.
 
 **Step 4 — exit + re-spawn against the same data dir (AC9.1 step 5).**
 `:q` or Ctrl+D to exit. Re-run the same `spawn` command with the same
-`--data-dir`; persistence layer (when wired in a future task) will
-preserve state across the restart.
-
-> **Caveat:** `spawn` currently uses `InMemoryMemoryStore` so memory
-> does not actually persist across process invocations. The `--data-dir`
-> flag is parsed but unwired. This is acceptable for Phase 6 smoke scope
-> (the AC9.4 cache-behavior check happens within a single session); full
-> persistence is a follow-up. Update this section when pattern_db is
-> wired to the spawn path.
+`--data-dir`. Memory persists across restart via the DB-backed
+MemoryCache; `--data-dir/constellation.db` is the store.
 
 **Step 5 — recall the stored value (AC9.1 step 6).** Type:
 `what's my favorite color?`. Expect: `teal` in the response.

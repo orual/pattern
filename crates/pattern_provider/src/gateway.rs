@@ -259,6 +259,15 @@ impl ProviderClient for PatternGatewayClient {
             .await?;
         Ok(details.into())
     }
+
+    /// Rotate the per-persona session UUID.
+    ///
+    /// Called by the compaction layer when `CompactionOutcome::Fired` so the
+    /// provider sees a fresh session boundary after each compaction cycle.
+    /// `SessionUuidRotator::rotate` is cheap (one mutex lock + Uuid::new_v4).
+    fn rotate_session_uuid(&self) {
+        self.session_uuid.rotate();
+    }
 }
 
 // ---- Builder ----
@@ -795,7 +804,7 @@ fn auth_headers_for_tier(
             }
         },
         #[cfg(feature = "subscription-oauth")]
-        AuthTier::SessionPickup | AuthTier::Pkce => {
+        AuthTier::SessionPickup | AuthTier::Pkce | AuthTier::StoredOauth => {
             headers.insert("authorization".into(), format!("Bearer {token}"));
             // NOTE: `anthropic-beta: oauth-2025-04-20` is intentionally NOT
             // inserted here. It lives in `shaper::anthropic::headers::build_beta_header_value`
@@ -956,24 +965,33 @@ mod tests {
     #[cfg(feature = "subscription-oauth")]
     #[test]
     fn auth_headers_oauth_anthropic() {
-        let resolved = ResolvedCredential {
-            source: AuthTier::Pkce,
-            token: api_key_auth_token(),
-        };
-        let hdrs = auth_headers_for_tier(&resolved, AdapterKind::Anthropic);
-        // Keys are lowercased (HTTP case-insensitive + BTreeMap-friendly).
-        assert!(hdrs.contains_key("authorization"));
-        assert!(hdrs.contains_key("anthropic-version"));
-        assert!(!hdrs.contains_key("x-api-key"));
-        // `anthropic-beta` is NOT emitted here — it lives in the shaper's
-        // `build_beta_header_value` as the single source of truth. Emitting
-        // it here would overwrite the shaper's capability markers via
-        // BTreeMap::extend (last-insert-wins). See shaper/anthropic/headers.rs.
-        assert!(
-            !hdrs.contains_key("anthropic-beta"),
-            "auth_headers_for_tier must not emit anthropic-beta; \
-             the shaper owns that header to prevent silent collision"
-        );
+        // All OAuth tiers (StoredOauth, Pkce, SessionPickup) should produce
+        // identical Bearer-token auth headers. Test with StoredOauth (the most
+        // common production path) and Pkce (fresh PKCE callback).
+        for source in [
+            AuthTier::StoredOauth,
+            AuthTier::Pkce,
+            AuthTier::SessionPickup,
+        ] {
+            let resolved = ResolvedCredential {
+                source,
+                token: api_key_auth_token(),
+            };
+            let hdrs = auth_headers_for_tier(&resolved, AdapterKind::Anthropic);
+            // Keys are lowercased (HTTP case-insensitive + BTreeMap-friendly).
+            assert!(hdrs.contains_key("authorization"), "source={source:?}");
+            assert!(hdrs.contains_key("anthropic-version"), "source={source:?}");
+            assert!(!hdrs.contains_key("x-api-key"), "source={source:?}");
+            // `anthropic-beta` is NOT emitted here — it lives in the shaper's
+            // `build_beta_header_value` as the single source of truth. Emitting
+            // it here would overwrite the shaper's capability markers via
+            // BTreeMap::extend (last-insert-wins). See shaper/anthropic/headers.rs.
+            assert!(
+                !hdrs.contains_key("anthropic-beta"),
+                "auth_headers_for_tier must not emit anthropic-beta; \
+                 the shaper owns that header to prevent silent collision (source={source:?})"
+            );
+        }
     }
 
     #[test]

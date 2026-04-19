@@ -26,7 +26,7 @@ Pattern v3 Foundation — a minimal-but-usable Pattern runtime rebuilt on the ne
 
 ### Provider
 
-- `pattern_provider` ships rebased `rust-genai` (thin auth-only patches) with three-tier auth resolution: session-pickup (`~/.claude/session.json`) → PKCE fallback → API key
+- `pattern_provider` ships rebased `rust-genai` (thin auth-only patches) with three-tier auth resolution: stored-OAuth (pattern's own keyring/JSON-file token) → API key (`ANTHROPIC_API_KEY`) → session-pickup (`~/.claude/.credentials.json`). Rationale and full tier details in `crates/pattern_provider/CLAUDE.md §Anthropic auth chain — tier order`.
 - Request shaping with honest pattern identification (client identifies itself as pattern rather than impersonating claude-code; appropriate `x-app`, User-Agent, and session-tracking headers populated)
 - Per-provider token-bucket rate limiting
 - Provider-session UUID rotates on configured boundaries
@@ -98,18 +98,27 @@ This is the first of multiple design plans covering the Pattern v3 rewrite. Brai
 
 ### v3-foundation.AC3: Subscription session-pickup authentication
 
-- **v3-foundation.AC3.1 Success:** With a valid unexpired `~/.claude/session.json`, provider makes an authenticated request to Anthropic and returns a real response
+Note: the implemented tier order is stored-OAuth → API key → session-pickup (see
+`crates/pattern_provider/CLAUDE.md §Anthropic auth chain — tier order` for rationale).
+The credential file path is `~/.claude/.credentials.json` (claudeAiOauth wrapper, verified
+2026-04-17), not `~/.claude/session.json`.
+
+- **v3-foundation.AC3.1 Success:** With a valid unexpired session credential from `~/.claude/.credentials.json`, provider makes an authenticated request to Anthropic and returns a real response
 - **v3-foundation.AC3.2 Success:** Session-pickup reads the file atomically; concurrent write from claude-code does not produce a torn read
-- **v3-foundation.AC3.3 Failure:** Missing `~/.claude/session.json` → resolver skips tier without error, falls through to PKCE
-- **v3-foundation.AC3.4 Failure:** Malformed JSON in session file → warning logged, tier skipped, falls through to PKCE
-- **v3-foundation.AC3.5 Failure:** Expired token in session file → tier skipped, falls through to PKCE
+- **v3-foundation.AC3.3 Failure:** Missing `~/.claude/.credentials.json` → resolver skips tier without error, falls through to next tier
+- **v3-foundation.AC3.4 Failure:** Malformed JSON in credentials file → warning logged, tier skipped, falls through
+- **v3-foundation.AC3.5 Failure:** Expired token in credentials file → tier skipped, falls through
 - **v3-foundation.AC3.6 Edge:** Linux host with no pattern keyring entry but a valid claude-code session file → session-pickup succeeds (keyring absence never short-circuits session-pickup)
 
-### v3-foundation.AC4: PKCE and API-key fallback authentication
+### v3-foundation.AC4: Stored OAuth, PKCE, and API-key authentication
 
-- **v3-foundation.AC4.1 Success:** Neither session nor API key present → PKCE opens localhost callback, user completes flow, token stored in keyring, subsequent request succeeds
-- **v3-foundation.AC4.2 Success:** Token within 5-min of expiry → auto-refresh before request; new token stored; request succeeds with refreshed token
-- **v3-foundation.AC4.3 Success:** `ANTHROPIC_API_KEY` set → provider uses it, request succeeds
+Note: tier resolution order is stored-OAuth (pattern's own PKCE-minted token from
+keyring/JSON) → API key (`ANTHROPIC_API_KEY` env var) → session-pickup (claude-code ambient
+session). See `crates/pattern_provider/CLAUDE.md` for the rationale.
+
+- **v3-foundation.AC4.1 Success:** No stored token present → PKCE opens localhost callback, user completes flow, token stored in keyring, subsequent request succeeds; `ResolvedCredential.source` is `AuthTier::Pkce`
+- **v3-foundation.AC4.2 Success:** Pattern's stored OAuth token within 5-min of expiry → auto-refresh before request; new token stored; request succeeds with refreshed token; `source` is `AuthTier::StoredOauth`
+- **v3-foundation.AC4.3 Success:** `ANTHROPIC_API_KEY` set → provider uses it, request succeeds; `source` is `AuthTier::ApiKey`
 - **v3-foundation.AC4.4 Failure:** PKCE callback timeout → `ProviderError::AuthFlowTimeout` surfaced; no silent proceed
 - **v3-foundation.AC4.5 Failure:** Refresh-token endpoint returns error → `ProviderError::RefreshFailed`; no silent degradation
 - **v3-foundation.AC4.6 Failure:** Keyring unavailable AND JSON fallback file unreadable → explicit `ProviderError::CredentialStoreUnavailable`
@@ -227,13 +236,13 @@ Ctx
 
 Namespaces not in scope for this plan (`spawn`, `mcp`, `ipc`) ship as effect declarations with `unimplemented!`-style handlers so the SDK surface is stable. Future design plans fill in handlers without breaking the SDK shape.
 
-**Provider layer**: `pattern_provider` resolves Anthropic authentication across three paths, tried in order:
+**Provider layer**: `pattern_provider` resolves Anthropic authentication across three paths, tried in order (explicit-over-ambient, matching Unix convention):
 
-1. Session-pickup from `~/.claude/session.json` (always read this file path on linux; keyring absence does not mean session absence)
-2. Pattern-owned PKCE flow (`client_id 9d1c250a-…`, scopes per `docs/reference/oauth-and-detection.md`)
-3. Environment API key (`ANTHROPIC_API_KEY`)
+1. Stored OAuth — pattern's own PKCE-minted token from OS keyring / JSON-file fallback (`$XDG_CONFIG_HOME/pattern/creds/anthropic.json`). Most explicit: user ran `pattern auth` deliberately. `ResolvedCredential.source = AuthTier::StoredOauth`.
+2. API key — `ANTHROPIC_API_KEY` env var. Env-level explicit choice. `source = AuthTier::ApiKey`.
+3. Session-pickup from `~/.claude/.credentials.json` (claudeAiOauth wrapper). Ambient fallback — uses whatever claude-code is authenticated as. `source = AuthTier::SessionPickup`.
 
-Tokens for pattern-owned paths live in the OS keyring (`keyring` crate, JSON-file fallback if keyring unavailable). Session-pickup reads but never writes claude-code's session file.
+Tokens for pattern-owned paths live in the OS keyring (`keyring` crate, JSON-file fallback if keyring unavailable). Session-pickup reads but never writes claude-code's credentials file. See `crates/pattern_provider/CLAUDE.md §Anthropic auth chain — tier order` for the full rationale.
 
 Requests are shaped by a `RequestShaper` implementing honest identification: client identifies itself as pattern (specific header values and User-Agent format left to implementation), per-persona session-UUID (rotates on configured boundaries), and pattern-specific system-prompt prefix filling the same structural slot as claude-code's `You are Claude Code` string (per rommie-code proof-of-concept).
 

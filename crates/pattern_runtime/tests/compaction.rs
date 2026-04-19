@@ -176,6 +176,90 @@ fn to_db_message(msg: &Message, agent_id: &str) -> pattern_db::models::Message {
     }
 }
 
+/// Build a TurnHistory with `archived_count` real turns (with messages) followed
+/// by exactly one empty-messages turn (the "first kept" turn). Used to exercise
+/// the `compute_archive_boundary` edge case.
+async fn populate_history_with_empty_kept_turn(
+    db: &pattern_db::ConstellationDb,
+    agent_id: &str,
+    archived_count: usize,
+) -> Arc<std::sync::Mutex<TurnHistory>> {
+    let mut hist = TurnHistory::empty();
+
+    // Add `archived_count` real turns (these will be the ones archivied by
+    // the strategy).
+    for i in 0..archived_count {
+        let batch_id: BatchId = new_snowflake_id();
+        let turn_id = new_snowflake_id();
+
+        let user_msg = Message {
+            chat_message: genai::chat::ChatMessage::user(format!("user {i}")),
+            id: MessageId::from(new_id()),
+            position: new_snowflake_id(),
+            owner_id: AgentId::from(agent_id),
+            created_at: Timestamp::now(),
+            batch: batch_id.clone(),
+            response_meta: None,
+            block_refs: vec![],
+            attachments: vec![],
+        };
+
+        let db_user = to_db_message(&user_msg, agent_id);
+        pattern_db::queries::create_message(db.pool(), &db_user)
+            .await
+            .expect("create_message");
+
+        let input = TurnInput {
+            turn_id: turn_id.clone(),
+            batch_id,
+            origin: MessageOrigin::new(
+                Author::System {
+                    reason: SystemReason::Wakeup,
+                },
+                Sphere::System,
+            ),
+            messages: vec![user_msg],
+        };
+        let output = TurnOutput {
+            messages: vec![],
+            block_writes: vec![],
+            tool_calls: vec![],
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+            cache_metrics: Default::default(),
+            completed_at: Timestamp::now(),
+        };
+        hist.record(turn_id, input, output);
+    }
+
+    // The "first kept" turn: no messages in either input or output.
+    let batch_id: BatchId = new_snowflake_id();
+    let turn_id = new_snowflake_id();
+    let input_empty = TurnInput {
+        turn_id: turn_id.clone(),
+        batch_id,
+        origin: MessageOrigin::new(
+            Author::System {
+                reason: SystemReason::Wakeup,
+            },
+            Sphere::System,
+        ),
+        messages: vec![], // empty — the edge case
+    };
+    let output_empty = TurnOutput {
+        messages: vec![], // empty — the edge case
+        block_writes: vec![],
+        tool_calls: vec![],
+        stop_reason: StopReason::EndTurn,
+        usage: None,
+        cache_metrics: Default::default(),
+        completed_at: Timestamp::now(),
+    };
+    hist.record(turn_id, input_empty, output_empty);
+
+    Arc::new(std::sync::Mutex::new(hist))
+}
+
 // ---- tests ------------------------------------------------------------------
 
 #[tokio::test]
@@ -554,5 +638,121 @@ async fn archived_messages_marked_is_archived() {
     assert_eq!(
         archived_count, 10,
         "should have 10 archived messages (5 archived turns * 2 msgs)"
+    );
+}
+
+/// Regression test for `compute_archive_boundary` edge case: the first kept
+/// turn (at `archived_count`) has empty `input.messages` and `output.messages`.
+///
+/// Before the fix, `min_pos = None` caused a silent fall-through to
+/// `Ok(String::new())`, meaning `archive_messages` matched no rows (position
+/// < "" is never true), compaction reported success but left the context
+/// window unaffected, and the token estimate never decreased.
+///
+/// After the fix, the function either falls through to the "archive-all"
+/// fallback branch (returning a boundary beyond the last archived turn's
+/// messages) or returns `CompactionInternalError` when all turns are empty.
+/// In this test the archived turns DO have messages, so the fallback branch
+/// fires and we get a non-empty boundary.
+#[tokio::test]
+async fn compute_archive_boundary_empty_kept_turn_uses_fallback() {
+    let db = test_db().await;
+    let agent_id = "agent-boundary-edge";
+    create_test_agent(&db, agent_id).await;
+
+    // Build a history: 5 real turns (with messages) + 1 empty-messages turn.
+    // With Truncate { keep_recent: 1 }, archived_count = 5.
+    let archived_count = 5;
+    let hist = populate_history_with_empty_kept_turn(&db, agent_id, archived_count).await;
+
+    let provider = Arc::new(
+        MockProviderClient::with_turns(vec![]).with_token_count(200_000), // force gate to fire
+    );
+    let persona = PersonaSnapshot::new(agent_id, "Test").with_context_policy(
+        ContextPolicy::default()
+            .with_compression(Some(CompressionStrategy::Truncate { keep_recent: 1 }))
+            .with_message_floor(1)
+            .with_token_threshold(1),
+    );
+
+    let (ctx, _db) = setup_with_persona(persona, provider).await;
+    // Provide the already-constructed history so we control the exact shape.
+    let result = maybe_compact(&ctx, &hist, ctx.context_policy()).await;
+
+    // The outcome must not be the silent-skip case: either it fired (fallback
+    // boundary was non-empty so archive_messages ran) or it returned an
+    // explicit CompactionInternalError (all fallback branches exhausted).
+    // Either is correct — what must NOT happen is a silent `Ok(Skipped)` with
+    // reason "strategy archived zero turns" due to a `""` boundary.
+    match result {
+        Ok(CompactionOutcome::Fired {
+            archived_turn_count,
+            ..
+        }) => {
+            // Fallback branch fired. The 5 real turns got archived.
+            assert_eq!(
+                archived_turn_count, archived_count,
+                "fallback boundary should archive all {archived_count} real turns"
+            );
+        }
+        Err(pattern_core::error::RuntimeError::CompactionInternalError { .. }) => {
+            // Also acceptable: explicit error (all fallback branches exhausted).
+        }
+        Ok(CompactionOutcome::Skipped { reason, .. }) => {
+            panic!(
+                "expected Fired or CompactionInternalError, got Skipped: {reason}; \
+                 the empty-kept-turn bug would produce 'strategy archived zero turns'"
+            );
+        }
+        Err(e) => {
+            panic!("unexpected error: {e:?}");
+        }
+    }
+}
+
+/// When compaction fires, `maybe_compact` must call `rotate_session_uuid` on the
+/// provider client. This signals the compaction-cycle boundary to the provider
+/// so it sees a fresh session UUID rather than the pre-compaction UUID.
+///
+/// Regression test for fix #1 (code-review finding: SessionUuidRotator.rotate
+/// not wired into compaction trigger).
+#[tokio::test]
+async fn compaction_fired_rotates_session_uuid() {
+    // Use a token count high enough to trigger the gate, with Truncate strategy
+    // so we exercise the full Fired path without requiring a provider
+    // complete() call.
+    let provider = Arc::new(MockProviderClient::with_turns(vec![]).with_token_count(5000));
+    // Keep a clone before setup_with_persona consumes the Arc.
+    let provider_ref = provider.clone();
+
+    let persona = PersonaSnapshot::new("agent-uuid-rotate", "Test").with_context_policy(
+        ContextPolicy::default()
+            .with_compression(Some(CompressionStrategy::Truncate { keep_recent: 50 }))
+            .with_message_floor(0)
+            .with_token_threshold(100),
+    );
+    let (ctx, db) = setup_with_persona(persona, provider).await;
+    let hist = populate_history(&db, "agent-uuid-rotate", 200).await;
+
+    assert_eq!(
+        provider_ref.rotate_count(),
+        0,
+        "rotate_count must be 0 before compaction"
+    );
+
+    let outcome = maybe_compact(&ctx, &hist, ctx.context_policy())
+        .await
+        .expect("maybe_compact failed");
+
+    // Confirm compaction fired (not skipped).
+    assert!(
+        matches!(outcome, CompactionOutcome::Fired { .. }),
+        "expected Fired outcome to exercise rotation path"
+    );
+
+    assert_eq!(
+        provider_ref.rotate_count(),
+        1,
+        "rotate_session_uuid should have been called exactly once after Fired"
     );
 }

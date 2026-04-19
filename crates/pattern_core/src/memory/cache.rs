@@ -399,6 +399,7 @@ impl MemoryStore for MemoryCache {
             block_type,
             schema,
             char_limit,
+            permission,
         } = create;
 
         // Use default char limit if 0 is passed.
@@ -421,7 +422,10 @@ impl MemoryStore for MemoryCache {
             block_type,
             schema: schema.clone(),
             char_limit: effective_char_limit,
-            permission: pattern_db::models::MemoryPermission::ReadWrite,
+            // Use the permission from BlockCreate rather than hard-coding ReadWrite.
+            // Persona TOML can declare ReadOnly blocks; before this fix they were
+            // silently upgraded to ReadWrite at seed time.
+            permission: permission.into(),
             pinned: false,
             created_at: now,
             updated_at: now,
@@ -451,7 +455,9 @@ impl MemoryStore for MemoryCache {
             description,
             block_type: block_type.into(),
             char_limit: effective_char_limit as i64,
-            permission: pattern_db::models::MemoryPermission::ReadWrite,
+            // Mirror the permission used in BlockMetadata above; both must agree
+            // so the cache and DB rows are consistent.
+            permission: permission.into(),
             pinned: false,
             loro_snapshot,
             content_preview: None,

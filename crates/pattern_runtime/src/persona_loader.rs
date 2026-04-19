@@ -25,6 +25,8 @@
 //! [context]
 //! compress_check_message_floor = 50
 //! compress_token_threshold     = 150_000
+//! # "include_self_edits" (default) or "filter_self_edits"
+//! mid_batch = "filter_self_edits"
 //!
 //! [context.compression]
 //! type                 = "recursive_summarization"
@@ -59,6 +61,7 @@ use genai::chat::{ChatOptions, ReasoningEffort};
 use miette::Diagnostic;
 use pattern_core::memory::{MemoryPermission, MemoryType};
 use pattern_core::types::compression::CompressionStrategy;
+use pattern_core::types::message::MidBatchDeltaBehavior;
 use pattern_core::types::snapshot::{
     ContextPolicy, MemoryBlockSpec, ModelChoice, ModelSpec, PersonaSnapshot,
 };
@@ -116,11 +119,17 @@ pub enum PersonaLoadError {
 
     /// An unknown provider string in `[model].provider`.
     #[error(
-        "persona file at {path}: unknown provider `{provider}` in [model]; expected one of: anthropic, gemini, openai, …"
+        "persona file at {path}: unknown provider `{provider}` in [model]; \
+        expected one of: anthropic, gemini, openai, openai_resp, ollama, ollama_cloud, \
+        fireworks, together, groq, deepseek, xai, cohere, vertex, nebius, \
+        mimo, zai, bigmodel, aliyun, github_copilot"
     )]
     #[diagnostic(
         code(persona::unknown_provider),
-        help("use a lowercase provider name such as \"anthropic\", \"gemini\", or \"openai\"")
+        help(
+            "use a lowercase provider name such as \"anthropic\", \"gemini\", or \"openai\"; \
+            ollama and openai-compatible providers are also supported"
+        )
     )]
     UnknownProvider { path: String, provider: String },
 
@@ -130,6 +139,13 @@ pub enum PersonaLoadError {
     )]
     #[diagnostic(code(persona::unknown_reasoning_effort))]
     UnknownReasoningEffort { path: String, value: String },
+
+    /// An unknown `mid_batch` string in `[context]`.
+    #[error(
+        "persona file at {path}: unknown mid_batch `{value}`; expected: include_self_edits, filter_self_edits"
+    )]
+    #[diagnostic(code(persona::unknown_mid_batch))]
+    UnknownMidBatch { path: String, value: String },
 }
 
 // ==========================================================================
@@ -264,6 +280,18 @@ struct ContextFile {
     /// compression for this persona.
     #[serde(default)]
     compression: Option<CompressionStrategy>,
+
+    /// Mid-batch delta snapshot behaviour. Accepted values:
+    /// - `"include_self_edits"` (default) — emit delta for all mid-batch
+    ///   changes, including this turn's own tool-initiated writes.
+    /// - `"filter_self_edits"` — emit delta only for changes NOT attributable
+    ///   to this turn's own block_writes (cache-efficient; relies on
+    ///   tool_result confirmation instead).
+    ///
+    /// Corresponds to
+    /// [`pattern_core::types::message::MidBatchDeltaBehavior`].
+    #[serde(default)]
+    mid_batch: Option<String>,
 }
 
 /// `[budgets]` table.
@@ -351,11 +379,7 @@ fn convert(
     let model = convert_model(file.model, path_str)?;
 
     // -- context --
-    // ContextPolicy is #[non_exhaustive]; build via Default then mutate.
-    let mut context = ContextPolicy::default();
-    context.compress_check_message_floor = file.context.compress_check_message_floor;
-    context.compress_token_threshold = file.context.compress_token_threshold;
-    context.compression = file.context.compression;
+    let context = convert_context(file.context, path_str)?;
 
     // -- budgets --
     let b = file.budgets;
@@ -427,6 +451,35 @@ fn resolve_string_or_path(
         }
         (None, None) => Ok(None),
     }
+}
+
+fn convert_context(file: ContextFile, path_str: &str) -> Result<ContextPolicy, PersonaLoadError> {
+    // Resolve mid_batch string → enum before building the policy so we can
+    // return an error before constructing a partial ContextPolicy.
+    let mid_batch = match file.mid_batch.as_deref() {
+        None | Some("include_self_edits") => MidBatchDeltaBehavior::IncludeSelfEdits,
+        Some("filter_self_edits") => MidBatchDeltaBehavior::FilterSelfEdits,
+        Some(other) => {
+            return Err(PersonaLoadError::UnknownMidBatch {
+                path: path_str.to_string(),
+                value: other.to_string(),
+            });
+        }
+    };
+
+    // Use builder methods so the compiler catches new ContextPolicy fields
+    // at the call site rather than silently dropping them.
+    let mut policy = ContextPolicy::default().with_mid_batch(mid_batch);
+    if let Some(floor) = file.compress_check_message_floor {
+        policy = policy.with_message_floor(floor);
+    }
+    if let Some(threshold) = file.compress_token_threshold {
+        policy = policy.with_token_threshold(threshold);
+    }
+    if file.compression.is_some() {
+        policy = policy.with_compression(file.compression);
+    }
+    Ok(policy)
 }
 
 fn convert_model(file: ModelFile, path_str: &str) -> Result<ModelSpec, PersonaLoadError> {
@@ -841,6 +894,90 @@ reasoning_effort = "turbo"
         let msg = err.to_string();
         assert!(
             msg.contains("turbo") || msg.contains("reasoning_effort"),
+            "error should mention the bad value, got: {msg}"
+        );
+    }
+
+    /// `mid_batch = "filter_self_edits"` in `[context]` must propagate through
+    /// to `PersonaSnapshot.context.snapshot_policy.mid_batch`.
+    ///
+    /// Regression test for fix #11 (code-review finding: snapshot_policy
+    /// .mid_batch not exposed in persona TOML).
+    #[test]
+    fn mid_batch_filter_self_edits_is_loaded() {
+        use pattern_core::types::message::MidBatchDeltaBehavior;
+
+        let dir = TempDir::new().unwrap();
+        let toml_content = r#"
+name = "mid-batch-test"
+
+[context]
+mid_batch = "filter_self_edits"
+"#;
+        let path = write_file(&dir, "p.toml", toml_content);
+        let snap = load_persona(&path).unwrap();
+        assert_eq!(
+            snap.context.snapshot_policy.mid_batch,
+            MidBatchDeltaBehavior::FilterSelfEdits,
+            "mid_batch should be FilterSelfEdits"
+        );
+    }
+
+    /// `mid_batch = "include_self_edits"` (explicit default) round-trips
+    /// correctly.
+    #[test]
+    fn mid_batch_include_self_edits_is_loaded() {
+        use pattern_core::types::message::MidBatchDeltaBehavior;
+
+        let dir = TempDir::new().unwrap();
+        let toml_content = r#"
+name = "mid-batch-include-test"
+
+[context]
+mid_batch = "include_self_edits"
+"#;
+        let path = write_file(&dir, "p.toml", toml_content);
+        let snap = load_persona(&path).unwrap();
+        assert_eq!(
+            snap.context.snapshot_policy.mid_batch,
+            MidBatchDeltaBehavior::IncludeSelfEdits,
+            "mid_batch should be IncludeSelfEdits"
+        );
+    }
+
+    /// Omitting `mid_batch` from `[context]` defaults to `IncludeSelfEdits`.
+    #[test]
+    fn mid_batch_absent_defaults_to_include_self_edits() {
+        use pattern_core::types::message::MidBatchDeltaBehavior;
+
+        let dir = TempDir::new().unwrap();
+        let toml_content = r#"
+name = "mid-batch-default-test"
+"#;
+        let path = write_file(&dir, "p.toml", toml_content);
+        let snap = load_persona(&path).unwrap();
+        assert_eq!(
+            snap.context.snapshot_policy.mid_batch,
+            MidBatchDeltaBehavior::IncludeSelfEdits,
+            "absent mid_batch should default to IncludeSelfEdits"
+        );
+    }
+
+    /// An unrecognised `mid_batch` string must produce a clear error.
+    #[test]
+    fn invalid_mid_batch_produces_error() {
+        let dir = TempDir::new().unwrap();
+        let toml_content = r#"
+name = "bad-mid-batch"
+
+[context]
+mid_batch = "aggressive"
+"#;
+        let path = write_file(&dir, "p.toml", toml_content);
+        let err = load_persona(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("aggressive") || msg.contains("mid_batch"),
             "error should mention the bad value, got: {msg}"
         );
     }

@@ -42,15 +42,6 @@ tracing-subscriber = { version = "0.3", features = [
     "local-time",
 ] }
 
-# Database
-surrealdb = { version = "2.3", default-features = false, features = [
-    "kv-surrealkv",
-    "kv-mem",
-    "protocol-ws",
-    "rustls",
-    "jwks",
-] }
-
 # AI/LLM
 # Using fork with pattern-v3-foundation patches: per-block cache_control on
 # system prompts (`SystemBlock` / `ChatRequest::system_blocks`) and

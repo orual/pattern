@@ -32,8 +32,16 @@ pub enum AuthTier {
     ApiKey,
     #[cfg(feature = "subscription-oauth")]
     SessionPickup,
+    /// Fresh PKCE callback flow completed this session — user completed the
+    /// browser-based authorization and the token was just minted.
     #[cfg(feature = "subscription-oauth")]
     Pkce,
+    /// Pattern's own PKCE-minted token loaded from keyring or JSON-file
+    /// fallback. Distinct from [`AuthTier::Pkce`] (fresh PKCE flow) — this
+    /// variant covers the case where the user ran `pattern auth` previously
+    /// and the token is being reused from persistent storage.
+    #[cfg(feature = "subscription-oauth")]
+    StoredOauth,
 }
 
 impl AuthTier {
@@ -48,7 +56,10 @@ impl AuthTier {
     pub fn is_oauth(self) -> bool {
         #[cfg(feature = "subscription-oauth")]
         {
-            matches!(self, AuthTier::SessionPickup | AuthTier::Pkce)
+            matches!(
+                self,
+                AuthTier::SessionPickup | AuthTier::Pkce | AuthTier::StoredOauth
+            )
         }
         #[cfg(not(feature = "subscription-oauth"))]
         {
@@ -123,6 +134,32 @@ impl CredentialChain for GeminiAuthChain {
     }
 }
 
+// ---- Tier-forcing helpers ----
+
+/// A [`crate::creds_store::CredsStore`] that always reports "no stored
+/// credential". Used by the `session_pickup_only` and `pkce_only` chains to
+/// ensure the stored-OAuth tier never resolves, leaving only the intended
+/// tier active.
+#[cfg(feature = "subscription-oauth")]
+struct MemOnlyCredsStore;
+
+#[cfg(feature = "subscription-oauth")]
+#[async_trait::async_trait]
+impl crate::creds_store::CredsStore for MemOnlyCredsStore {
+    async fn get(&self, _provider: &str) -> Result<Option<ProviderCredential>, ProviderError> {
+        Ok(None)
+    }
+
+    async fn put(&self, _token: &ProviderCredential) -> Result<(), ProviderError> {
+        // No-op: tier-forcing chains never store tokens.
+        Ok(())
+    }
+
+    async fn delete(&self, _provider: &str) -> Result<(), ProviderError> {
+        Ok(())
+    }
+}
+
 // ---- Anthropic: full three-tier chain ----
 
 /// Anthropic credential chain with session-pickup → stored OAuth → API key
@@ -175,6 +212,56 @@ impl AnthropicAuthChain {
             }),
         }
     }
+
+    /// Session-pickup-only chain. Forces tier 3 (ambient claude-code
+    /// credentials at `~/.claude/.credentials.json`); API-key and stored
+    /// OAuth tiers are not tried. Use when `--auth session-pickup` is
+    /// explicitly requested so the chain resolves exactly one tier.
+    ///
+    /// Requires the `subscription-oauth` feature.
+    #[cfg(feature = "subscription-oauth")]
+    pub fn session_pickup_only() -> Self {
+        use std::sync::Arc;
+        Self {
+            // Disabled API-key tier: ANTHROPIC_API_KEY is not consulted.
+            api_key: ApiKeyTier::disabled("anthropic"),
+            oauth: Some(OAuthChainState {
+                session_pickup: super::session_pickup::SessionPickupTier::default(),
+                // PkceTier is present but never reached — PKCE is not part of
+                // the normal `resolve()` path; it's an interactive flow the
+                // caller triggers explicitly when `NoAuthAvailable` is returned.
+                pkce: Arc::new(super::pkce::PkceTier::anthropic()),
+                // MemOnlyCredsStore: stored-OAuth tier (pattern's own PKCE
+                // token) always misses, so only session-pickup is tried.
+                creds_store: Arc::new(MemOnlyCredsStore),
+                refresh_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            }),
+        }
+    }
+
+    /// API-key-and-session-pickup chain without stored-OAuth. The API-key
+    /// tier is tried first; if absent the chain falls through to
+    /// session-pickup. Use when `--auth pkce` is explicitly requested — the
+    /// caller should trigger the interactive PKCE flow when this chain returns
+    /// [`ProviderError::NoAuthAvailable`].
+    ///
+    /// Requires the `subscription-oauth` feature.
+    #[cfg(feature = "subscription-oauth")]
+    pub fn pkce_only() -> Self {
+        use std::sync::Arc;
+        Self {
+            // Disabled API-key tier: forces the caller to the PKCE flow path.
+            api_key: ApiKeyTier::disabled("anthropic"),
+            oauth: Some(OAuthChainState {
+                // Disabled session-pickup: pick_up always returns None.
+                session_pickup: super::session_pickup::SessionPickupTier::noop(),
+                pkce: Arc::new(super::pkce::PkceTier::anthropic()),
+                // MemOnlyCredsStore: stored-OAuth tier always misses.
+                creds_store: Arc::new(MemOnlyCredsStore),
+                refresh_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            }),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -195,14 +282,17 @@ impl CredentialChain for AnthropicAuthChain {
         //    happens to have in ~/.claude/.credentials.json. Last so
         //    explicit choices always win.
 
-        // Tier 1: stored OAuth with refresh-on-near-expiry.
+        // Tier 1: stored OAuth with refresh-on-near-expiry. Token was
+        // previously minted via a PKCE flow and persisted to the keyring or
+        // JSON-file fallback. Uses `StoredOauth` (not `Pkce`) to distinguish
+        // from a fresh interactive PKCE callback completed in this session.
         #[cfg(feature = "subscription-oauth")]
         if let Some(oauth) = &self.oauth
             && let Some(stored) = oauth.creds_store.get("anthropic").await?
         {
             let token = self.refresh_if_needed(oauth, stored).await?;
             return Ok(ResolvedCredential {
-                source: AuthTier::Pkce,
+                source: AuthTier::StoredOauth,
                 token,
             });
         }
@@ -367,7 +457,10 @@ mod tests {
 
             let _g = EnvGuard::remove("ANTHROPIC_API_KEY");
             let resolved = chain.resolve().await.expect("resolves via stored");
-            assert_eq!(resolved.source, AuthTier::Pkce);
+            // Stored OAuth (previously PKCE-minted, loaded from keyring/JSON)
+            // must report StoredOauth, not Pkce. Fresh PKCE callback flow is
+            // the only case that returns AuthTier::Pkce.
+            assert_eq!(resolved.source, AuthTier::StoredOauth);
             use secrecy::ExposeSecret;
             assert_eq!(resolved.token.access_token.expose_secret(), "at-stored");
         }

@@ -239,6 +239,14 @@ pub async fn maybe_compact(
     // 8. Post-strategy: DB + in-memory updates.
     post_strategy_updates(ctx, turn_history, &result, archived_count).await?;
 
+    // 9. Signal a session-UUID rotation so the provider sees a clean session
+    // boundary after each compaction cycle. The default no-op impl on
+    // ProviderClient makes this safe for test doubles that don't carry session
+    // UUID state; PatternGatewayClient overrides it to call
+    // SessionUuidRotator::rotate.
+    ctx.provider().rotate_session_uuid();
+    tracing::debug!("session UUID rotated after compaction");
+
     Ok(CompactionOutcome::Fired {
         strategy_name,
         archived_turn_count: archived_count,
@@ -454,6 +462,15 @@ async fn post_strategy_updates(
 /// Compute the archive boundary position: the smallest position among the
 /// first kept turn's messages. We use the position of the first message in
 /// the (archived_count)th turn record (i.e., the first kept turn).
+///
+/// # Edge case: first kept turn has empty messages
+///
+/// A synthetic or malformed continuation turn may have no messages in either
+/// `input.messages` or `output.messages`, giving `min_pos = None`. In that
+/// case we fall through to the same "archive everything up through the last
+/// archived turn" branch used when no kept turn exists at all. This prevents
+/// `compute_archive_boundary` from silently returning `""`, which would make
+/// `archive_messages` match no rows and leave the context window unbounded.
 fn compute_archive_boundary(
     turn_history: &Arc<std::sync::Mutex<TurnHistory>>,
     archived_count: usize,
@@ -478,10 +495,14 @@ fn compute_archive_boundary(
         if let Some(pos) = min_pos {
             return Ok(pos.to_string());
         }
+        // `min_pos` is None: the kept turn has no messages at all (synthetic
+        // or malformed continuation turn). Fall through to the archive-all
+        // branch below so we don't silently return `""` and miss archiving.
     }
 
-    // Fallback: if no kept turn exists, use a position beyond the last
-    // archived turn's messages (archive everything).
+    // Fallback: if no kept turn exists (or the kept turn had no messages),
+    // use a position beyond the last archived turn's messages (archive
+    // everything up through the archived chunk).
     if let Some(last_archived) = hist.iter_active().nth(archived_count.saturating_sub(1)) {
         let max_pos = last_archived
             .input
@@ -491,13 +512,19 @@ fn compute_archive_boundary(
             .map(|m| m.position.as_str())
             .max();
         if let Some(pos) = max_pos {
-            // Append a character to make position strictly greater.
+            // Append a character to make position strictly greater than any
+            // message in the archived chunk.
             return Ok(format!("{pos}~"));
         }
     }
 
-    // Should not happen if archived_count > 0, but be safe.
-    Ok(String::new())
+    // Should not happen if archived_count > 0 and turns have messages,
+    // but surface a clear error rather than returning `""` silently.
+    Err(RuntimeError::CompactionInternalError {
+        reason: "compute_archive_boundary: no message positions found in \
+                 archived or kept turns; cannot determine archive boundary"
+            .into(),
+    })
 }
 
 /// Compute (start_position, end_position, message_count) across the

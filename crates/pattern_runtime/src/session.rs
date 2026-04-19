@@ -701,6 +701,17 @@ async fn seed_persona_memory_blocks(
     use pattern_core::types::block::BlockCreate;
 
     for (label, spec) in memory_blocks {
+        // shared_id is a planned feature for constellation-level cross-agent
+        // block sharing. The resolver is not wired yet, so fail loudly rather
+        // than silently ignoring the field and leaving the agent with wrong
+        // memory configuration.
+        if let Some(shared_id) = &spec.shared_id {
+            return Err(RuntimeError::SharedBlockRefNotSupported {
+                label: label.to_string(),
+                shared_id: shared_id.to_string(),
+            });
+        }
+
         // Don't clobber existing blocks — persona is INITIAL intent.
         if store
             .get_block(agent_id, label.as_str())
@@ -720,7 +731,11 @@ async fn seed_persona_memory_blocks(
         };
         let schema = spec.schema.clone().unwrap_or_else(BlockSchema::text);
 
-        let mut create = BlockCreate::new(label.as_str(), block_type, schema);
+        let mut create = BlockCreate::new(label.as_str(), block_type, schema)
+            // Thread the persona-declared permission through to the store.
+            // Without this, BlockCreate defaults to ReadWrite, silently
+            // upgrading any persona-declared ReadOnly block.
+            .with_permission(spec.permission);
         if let Some(desc) = &spec.description {
             create = create.with_description(desc.clone());
         }
@@ -984,5 +999,104 @@ mod tests {
             preamble.contains("paginateResult"),
             "preamble should contain pagination support"
         );
+    }
+
+    /// `seed_persona_memory_blocks` must thread the persona-declared
+    /// `MemoryPermission` through to the underlying store. Without the fix,
+    /// `BlockCreate` always defaulted to `ReadWrite`, silently upgrading any
+    /// persona-declared `ReadOnly` block.
+    ///
+    /// Regression test for fix #2 (code-review finding: MemoryBlockSpec
+    /// .permission not threaded through BlockCreate to MemoryCache).
+    #[tokio::test]
+    async fn seed_persona_memory_blocks_threads_permission_to_store() {
+        use pattern_core::memory::MemoryPermission;
+        use pattern_core::types::snapshot::MemoryBlockSpec;
+
+        let store = Arc::new(InMemoryMemoryStore::new());
+        let store_dyn: Arc<dyn MemoryStore> = store.clone();
+
+        let persona = PersonaSnapshot::new("agent-perm", "Permission test agent")
+            .with_memory_block(
+                "persona",
+                MemoryBlockSpec::text("I am a read-only persona block.")
+                    .with_permission(MemoryPermission::ReadOnly),
+            )
+            .with_memory_block(
+                "scratchpad",
+                MemoryBlockSpec::text("mutable notes").with_permission(MemoryPermission::ReadWrite),
+            );
+
+        seed_persona_memory_blocks(store_dyn.as_ref(), "agent-perm", &persona.memory_blocks)
+            .await
+            .expect("seed should succeed");
+
+        // Check the read-only block — permission must be preserved.
+        let doc = store_dyn
+            .get_block("agent-perm", "persona")
+            .await
+            .expect("get_block should succeed")
+            .expect("persona block should exist");
+        assert_eq!(
+            doc.permission(),
+            pattern_db::models::MemoryPermission::ReadOnly,
+            "persona block should be ReadOnly as declared in the spec"
+        );
+
+        // Check the read-write block — default must round-trip correctly.
+        let doc2 = store_dyn
+            .get_block("agent-perm", "scratchpad")
+            .await
+            .expect("get_block should succeed")
+            .expect("scratchpad block should exist");
+        assert_eq!(
+            doc2.permission(),
+            pattern_db::models::MemoryPermission::ReadWrite,
+            "scratchpad block should be ReadWrite as declared in the spec"
+        );
+    }
+
+    /// `seed_persona_memory_blocks` must reject any block that declares
+    /// `shared_id`. Shared block references are not supported in the
+    /// foundation runtime; silently ignoring the field would leave the agent
+    /// with wrong memory configuration.
+    ///
+    /// Regression test for fix #3 (code-review finding: MemoryBlockSpec
+    /// .shared_id is not validated at seed time).
+    #[tokio::test]
+    async fn seed_persona_memory_blocks_rejects_shared_id() {
+        use pattern_core::error::RuntimeError;
+        use pattern_core::types::snapshot::MemoryBlockSpec;
+        use smol_str::SmolStr;
+
+        let store = Arc::new(InMemoryMemoryStore::new());
+        let store_dyn: Arc<dyn MemoryStore> = store.clone();
+
+        // Build a spec with a shared_id set. We need to go through the
+        // `Default` + field mutation path because `MemoryBlockSpec` is
+        // `#[non_exhaustive]` so struct expressions are not usable outside
+        // `pattern_core`. Use the `with_shared_id` builder if it exists;
+        // otherwise mutate directly via the public field (it is `pub`).
+        let mut spec_with_shared = MemoryBlockSpec::text("this content should never be used");
+        spec_with_shared.shared_id = Some(SmolStr::new("mem_01HXYZ_shared"));
+
+        let persona = PersonaSnapshot::new("agent-shared", "Shared block test agent")
+            .with_memory_block("shared_notes", spec_with_shared);
+
+        let result =
+            seed_persona_memory_blocks(store_dyn.as_ref(), "agent-shared", &persona.memory_blocks)
+                .await;
+
+        match result {
+            Err(RuntimeError::SharedBlockRefNotSupported { label, shared_id }) => {
+                assert_eq!(label, "shared_notes", "error should name the failing block");
+                assert_eq!(
+                    shared_id, "mem_01HXYZ_shared",
+                    "error should include the shared_id value"
+                );
+            }
+            Ok(()) => panic!("expected SharedBlockRefNotSupported error, got Ok"),
+            Err(other) => panic!("expected SharedBlockRefNotSupported, got: {other:?}"),
+        }
     }
 }

@@ -36,6 +36,19 @@ impl ApiKeyTier {
         Self::new("anthropic", "ANTHROPIC_API_KEY")
     }
 
+    /// Construct a tier that is permanently disabled (never resolves). Used
+    /// by tier-forcing chain variants (e.g. `session_pickup_only`) that need
+    /// the API-key slot to be an inert no-op without modifying the struct
+    /// layout.
+    pub fn disabled(provider: impl Into<String>) -> Self {
+        Self {
+            provider: provider.into(),
+            // Sentinel value: resolve() checks this and returns None directly
+            // without calling read_api_key.
+            env_var: String::new(),
+        }
+    }
+
     /// Preset: Gemini reads `GEMINI_API_KEY` (with `GOOGLE_API_KEY` as a
     /// widely-used alternative — checked at resolve-time).
     ///
@@ -52,8 +65,12 @@ impl ApiKeyTier {
 
     /// Resolve the API key. Returns:
     /// - `Some(token)` when the env var is set to a non-empty string.
-    /// - `None` when absent or empty (tier fall-through).
+    /// - `None` when absent, empty, or this tier is disabled (tier fall-through).
     pub fn resolve(&self) -> Option<ProviderCredential> {
+        // Disabled tier (empty env_var sentinel from `ApiKeyTier::disabled`).
+        if self.env_var.is_empty() {
+            return None;
+        }
         let key = read_api_key(&self.env_var).or_else(|| {
             // Gemini-specific compat: fall back to GOOGLE_API_KEY.
             if self.provider == "gemini" {

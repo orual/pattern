@@ -114,6 +114,9 @@ pub struct MockProviderClient {
     /// Configurable token count returned by `count_tokens`. Default: 0.
     /// Set via [`MockProviderClient::with_token_count`].
     token_count: AtomicUsize,
+    /// Counts how many times `rotate_session_uuid` has been called.
+    /// Inspectable via [`MockProviderClient::rotate_count`] in tests.
+    rotate_count: AtomicUsize,
 }
 
 impl MockProviderClient {
@@ -124,6 +127,7 @@ impl MockProviderClient {
             scripts: StdMutex::new(turns.into()),
             call_count: AtomicUsize::new(0),
             token_count: AtomicUsize::new(0),
+            rotate_count: AtomicUsize::new(0),
         }
     }
 
@@ -139,6 +143,12 @@ impl MockProviderClient {
     /// Number of `complete` calls observed so far.
     pub fn call_count(&self) -> usize {
         self.call_count.load(Ordering::SeqCst)
+    }
+
+    /// Number of `rotate_session_uuid` calls observed so far.
+    /// Tests use this to verify the compaction layer signals rotation.
+    pub fn rotate_count(&self) -> usize {
+        self.rotate_count.load(Ordering::SeqCst)
     }
 
     /// Build a "just text" turn — one chunk of assistant text, ends
@@ -284,6 +294,10 @@ impl ProviderClient for MockProviderClient {
         Ok(TokenCount {
             input_tokens: self.token_count.load(Ordering::SeqCst) as u64,
         })
+    }
+
+    fn rotate_session_uuid(&self) {
+        self.rotate_count.fetch_add(1, Ordering::SeqCst);
     }
 }
 

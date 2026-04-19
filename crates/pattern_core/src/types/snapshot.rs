@@ -147,11 +147,6 @@ pub struct PersonaSnapshot {
     #[serde(default)]
     pub budgets: RuntimeBudgets,
 
-    /// Filter for which registered tools this persona is allowed to
-    /// use. `None` = all registered tools available.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enabled_tools: Option<Vec<SmolStr>>,
-
     // -- Escape hatch ----------------------------------------------------
     /// Free-form extra metadata that hasn't earned a first-class field
     /// yet. Intended for experiments and plugin-scope configuration.
@@ -182,7 +177,6 @@ impl PersonaSnapshot {
             router: None,
             context: ContextPolicy::default(),
             budgets: RuntimeBudgets::default(),
-            enabled_tools: None,
             extra: serde_json::Value::Null,
         }
     }
@@ -245,16 +239,6 @@ impl PersonaSnapshot {
     /// Override the context policy.
     pub fn with_context_policy(mut self, context: ContextPolicy) -> Self {
         self.context = context;
-        self
-    }
-
-    /// Restrict which registered tools this persona may use.
-    pub fn with_enabled_tools<I, S>(mut self, tools: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<SmolStr>,
-    {
-        self.enabled_tools = Some(tools.into_iter().map(Into::into).collect());
         self
     }
 }
@@ -519,6 +503,23 @@ impl ContextPolicy {
     /// Set the token threshold for the compression gate. Builder-style.
     pub fn with_token_threshold(mut self, threshold: usize) -> Self {
         self.compress_token_threshold = Some(threshold);
+        self
+    }
+
+    /// Override the snapshot policy (selection filter + mid-batch delta
+    /// behaviour). Builder-style.
+    pub fn with_snapshot_policy(mut self, policy: crate::types::message::SnapshotPolicy) -> Self {
+        self.snapshot_policy = policy;
+        self
+    }
+
+    /// Override only the mid-batch delta behaviour, leaving the rest of the
+    /// snapshot policy unchanged. Builder-style convenience.
+    pub fn with_mid_batch(
+        mut self,
+        mid_batch: crate::types::message::MidBatchDeltaBehavior,
+    ) -> Self {
+        self.snapshot_policy.mid_batch = mid_batch;
         self
     }
 }

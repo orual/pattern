@@ -99,8 +99,9 @@ pub fn build_system_prompt(
 
         #[cfg(feature = "subscription-oauth")]
         ShaperCompatMode::FullSurfaceImpersonation => {
-            // Phase: future plan. Declared in v3-foundation AC5.7 for API
-            // stability only; shipping requires explicit sign-off.
+            // Phase: future plan. Shipping requires explicit sign-off per
+            // `pattern_provider/CLAUDE.md §ShaperCompatMode — empirical decision`.
+            // No AC number assigned; this variant exists for API stability only.
             unimplemented!(
                 "ShaperCompatMode::FullSurfaceImpersonation not implemented; \
                  requires explicit sign-off per pattern_provider/CLAUDE.md."

@@ -77,6 +77,9 @@ impl MemoryStore for InMemoryMemoryStore {
         metadata.description = create.description.clone();
         metadata.block_type = create.block_type;
         metadata.char_limit = create.char_limit;
+        // Honor the caller-supplied permission instead of leaving the default
+        // (which is ReadWrite from BlockMetadata::standalone).
+        metadata.permission = create.permission.into();
         let doc = StructuredDocument::new_with_metadata(metadata, Some(agent_id.to_string()));
         let mut guard = self.blocks.lock().unwrap();
         guard.insert(
@@ -355,7 +358,11 @@ mod tests {
     async fn create_block_returns_arc_shared_loro_doc() {
         let store = InMemoryMemoryStore::new();
 
-        let create = BlockCreate::new("notes", pattern_core::memory::BlockType::Working, BlockSchema::text());
+        let create = BlockCreate::new(
+            "notes",
+            pattern_core::memory::BlockType::Working,
+            BlockSchema::text(),
+        );
 
         // create_block inserts `doc.clone()` in the map and returns `doc`.
         // Because `LoroDoc::clone` is an Arc reference clone, both the

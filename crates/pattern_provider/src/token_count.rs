@@ -223,7 +223,7 @@ impl TokenCounter {
                 auth.token.access_token.expose_secret().to_string(),
             ),
             #[cfg(feature = "subscription-oauth")]
-            AuthTier::SessionPickup | AuthTier::Pkce => req_builder.header(
+            AuthTier::SessionPickup | AuthTier::Pkce | AuthTier::StoredOauth => req_builder.header(
                 "Authorization",
                 format!("Bearer {}", auth.token.access_token.expose_secret()),
             ),

@@ -455,6 +455,27 @@ fn infer_tool_calls(msg: &Message) -> Vec<ToolCall> {
 /// - Tool role → always appends to output (bundles with prior assistant).
 ///
 /// At end of batch: flush remaining buffers as one final `TurnRecord`.
+///
+/// ## Consecutive user-message merge
+///
+/// When two or more User/System messages appear back-to-back without any
+/// intervening Assistant output, they are **merged into the same turn's
+/// input buffer**. The first message is NOT closed off as a separate
+/// `TurnRecord`; both messages become part of `TurnInput::messages` for
+/// a single record.
+///
+/// This matches the canonical Anthropic multi-part user turn pattern
+/// (text + image + text before the model responds) and avoids creating
+/// phantom empty-output `TurnRecord`s for multi-part turns that arrive as
+/// a single batch.
+///
+/// Example:
+/// ```text
+/// [User("text"), User("image"), Assistant("reply")]
+///           └──── merged into one TurnRecord ────┘
+/// ```
+/// produces one `TurnRecord` with two input messages and one output message,
+/// not three records.
 fn build_turn_records_from_batch(
     batch_id: BatchId,
     msgs: Vec<Message>,
@@ -938,5 +959,138 @@ mod tests {
             make_turn_output(1, vec![]),
         );
         assert_eq!(hist.most_recent_batch_id().unwrap().as_str(), "batch-2");
+    }
+
+    // ---- build_turn_records_from_batch tests ----
+
+    /// Helper: build a minimal [`Message`] with the given role.
+    fn make_batch_msg(text: &str, role: ChatRole, batch_id: &SmolStr) -> Message {
+        Message {
+            chat_message: genai::chat::ChatMessage::new(role, text.to_string()),
+            id: new_id(),
+            position: new_snowflake_id(),
+            owner_id: SmolStr::new("agent-a"),
+            created_at: jiff::Timestamp::now(),
+            batch: batch_id.clone(),
+            response_meta: None,
+            block_refs: vec![],
+            attachments: vec![],
+        }
+    }
+
+    /// Two consecutive User messages with no intervening Assistant output must
+    /// be merged into a single `TurnRecord`'s input buffer rather than
+    /// producing two records with phantom empty outputs.
+    ///
+    /// Regression test for code-review finding #16 (document + test
+    /// `build_turn_records_from_batch` consecutive-user-message merge).
+    #[test]
+    fn consecutive_user_messages_merge_into_one_turn() {
+        let batch_id = SmolStr::new("batch-x");
+        let msgs = vec![
+            make_batch_msg("part one", ChatRole::User, &batch_id),
+            make_batch_msg("part two", ChatRole::User, &batch_id),
+            make_batch_msg("assistant reply", ChatRole::Assistant, &batch_id),
+        ];
+
+        let records = build_turn_records_from_batch(batch_id, msgs, BatchType::UserRequest);
+
+        assert_eq!(
+            records.len(),
+            1,
+            "two consecutive user messages + one assistant should produce exactly one TurnRecord"
+        );
+        assert_eq!(
+            records[0].input.messages.len(),
+            2,
+            "both user messages should appear in the input buffer of the single record"
+        );
+        assert_eq!(
+            records[0].output.messages.len(),
+            1,
+            "the assistant reply should be the sole output message"
+        );
+    }
+
+    /// User, Assistant, User produces two turns: the boundary between the
+    /// first assistant output and the second user message must trigger a
+    /// new record.
+    #[test]
+    fn user_assistant_user_produces_two_turns() {
+        let batch_id = SmolStr::new("batch-y");
+        let msgs = vec![
+            make_batch_msg("first question", ChatRole::User, &batch_id),
+            make_batch_msg("first answer", ChatRole::Assistant, &batch_id),
+            make_batch_msg("second question", ChatRole::User, &batch_id),
+            make_batch_msg("second answer", ChatRole::Assistant, &batch_id),
+        ];
+
+        let records = build_turn_records_from_batch(batch_id, msgs, BatchType::UserRequest);
+
+        assert_eq!(
+            records.len(),
+            2,
+            "two question/answer pairs should produce two TurnRecords"
+        );
+        assert_eq!(
+            records[0].input.messages.len(),
+            1,
+            "turn 1: one input message"
+        );
+        assert_eq!(
+            records[0].output.messages.len(),
+            1,
+            "turn 1: one output message"
+        );
+        assert_eq!(
+            records[1].input.messages.len(),
+            1,
+            "turn 2: one input message"
+        );
+        assert_eq!(
+            records[1].output.messages.len(),
+            1,
+            "turn 2: one output message"
+        );
+    }
+
+    /// Tool messages bundle with the preceding assistant output rather than
+    /// starting a new turn.
+    #[test]
+    fn tool_result_bundles_with_assistant_output() {
+        let batch_id = SmolStr::new("batch-z");
+        let msgs = vec![
+            make_batch_msg("user question", ChatRole::User, &batch_id),
+            make_batch_msg("tool_use call", ChatRole::Assistant, &batch_id),
+            make_batch_msg("tool result", ChatRole::Tool, &batch_id),
+            make_batch_msg("final reply", ChatRole::Assistant, &batch_id),
+        ];
+
+        let records = build_turn_records_from_batch(batch_id, msgs, BatchType::UserRequest);
+
+        // The tool result should bundle with the first assistant, then the
+        // second assistant starts a continuation turn (empty input).
+        assert_eq!(
+            records.len(),
+            2,
+            "tool_use + tool_result + continuation assistant = two turns"
+        );
+        // Turn 1: user input + assistant(tool_use) + tool_result.
+        assert_eq!(
+            records[0].output.messages.len(),
+            2,
+            "first turn output: assistant + tool_result"
+        );
+        // Turn 2: continuation (empty input) + final reply.
+        assert_eq!(
+            records[1].input.messages.len(),
+            0,
+            "continuation turn has empty input"
+        );
+        assert_eq!(
+            records[1].output.messages.len(),
+            1,
+            "continuation turn has one output message"
+        );
     }
 }

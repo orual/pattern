@@ -26,7 +26,7 @@ use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
-use crate::memory::{BlockSchema, BlockType};
+use crate::memory::{BlockSchema, BlockType, MemoryPermission};
 use crate::types::ids::MemoryId;
 use crate::types::origin::Author;
 
@@ -56,22 +56,23 @@ pub type BlockHandle = SmolStr;
 ///
 /// Bundles block-creation parameters so call sites don't rely on positional
 /// args — six scalar fields are easy to transpose, and `#[non_exhaustive]`
-/// future-proofs against additions (read_only, permission defaults, initial
-/// content, etc.) without breaking exhaustive-construction call sites.
+/// future-proofs against additions without breaking exhaustive-construction
+/// call sites.
 ///
 /// # Examples
 ///
 /// ```
-/// use pattern_core::memory::{BlockSchema, BlockType};
+/// use pattern_core::memory::{BlockSchema, BlockType, MemoryPermission};
 /// use pattern_core::types::block::BlockCreate;
 ///
-/// // Minimal construction using defaults.
+/// // Minimal construction using defaults (ReadWrite permission).
 /// let create = BlockCreate::new("persona", BlockType::Core, BlockSchema::text());
 ///
 /// // With optional overrides.
 /// let create = BlockCreate::new("task_list", BlockType::Working, BlockSchema::text())
 ///     .with_description("Tasks for this session")
-///     .with_char_limit(2000);
+///     .with_char_limit(2000)
+///     .with_permission(MemoryPermission::ReadOnly);
 /// ```
 #[non_exhaustive]
 #[derive(Debug, Clone)]
@@ -86,12 +87,16 @@ pub struct BlockCreate {
     pub schema: BlockSchema,
     /// Maximum number of characters the block may hold.
     pub char_limit: usize,
+    /// Access permission for this block. Defaults to `ReadWrite`. Use
+    /// `ReadOnly` for persona-declared blocks that agents should not modify.
+    pub permission: MemoryPermission,
 }
 
 impl BlockCreate {
     /// Minimal constructor with sensible defaults:
     /// - `description`: empty string
     /// - `char_limit`: [`crate::memory::DEFAULT_MEMORY_CHAR_LIMIT`]
+    /// - `permission`: `ReadWrite`
     pub fn new(label: impl Into<String>, block_type: BlockType, schema: BlockSchema) -> Self {
         Self {
             label: label.into(),
@@ -99,6 +104,7 @@ impl BlockCreate {
             block_type,
             schema,
             char_limit: crate::memory::DEFAULT_MEMORY_CHAR_LIMIT,
+            permission: MemoryPermission::ReadWrite,
         }
     }
 
@@ -111,6 +117,12 @@ impl BlockCreate {
     /// Override the character limit.
     pub fn with_char_limit(mut self, char_limit: usize) -> Self {
         self.char_limit = char_limit;
+        self
+    }
+
+    /// Set the access permission for this block.
+    pub fn with_permission(mut self, permission: MemoryPermission) -> Self {
+        self.permission = permission;
         self
     }
 }

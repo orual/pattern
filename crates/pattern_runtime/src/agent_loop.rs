@@ -1090,9 +1090,12 @@ pub async fn drive_step(
 
         // Record into TurnHistory so the NEXT wire turn's composer sees this
         // turn's full round-trip (input + output) in Segment 2.
+        // Use new_snowflake_id() for the TurnId: snowflake IDs are time-ordered
+        // and globally unique, consistent with all other TurnId minting in the
+        // runtime. new_id() (UUID-v4) is reserved for MessageId / non-ordered IDs.
         if let Ok(mut hist) = turn_history.lock() {
             hist.record(
-                pattern_core::types::ids::new_id(),
+                pattern_core::types::ids::new_snowflake_id(),
                 recorded_input.clone(),
                 turn.clone(),
             );
@@ -3239,7 +3242,11 @@ mod tests {
         store_concrete
             .create_block(
                 "agent-a",
-                BlockCreate::new(block_label, BlockType::Working, pattern_core::memory::BlockSchema::text()),
+                BlockCreate::new(
+                    block_label,
+                    BlockType::Working,
+                    pattern_core::memory::BlockSchema::text(),
+                ),
             )
             .await
             .expect("pre-create block");
