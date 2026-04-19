@@ -36,7 +36,7 @@ use genai::chat::Usage;
 /// - `position` — lex-sortable ordering key (snowflake, base32-encoded). Used
 ///   by pattern_db's `messages.position` column for absolute ordering and by
 ///   `archive_messages` for range comparisons. Generated via
-///   [`new_snowflake_id()`] at message creation.
+///   [`crate::types::ids::new_snowflake_id`] at message creation.
 /// - `created_at` — human-readable wall-clock timestamp (nanosecond precision).
 ///   Retained for display and auditing; the snowflake timestamp has only
 ///   millisecond resolution.
@@ -50,7 +50,7 @@ pub struct Message {
     /// Unique identifier (UUID). Used for deduplication and DB primary key.
     pub id: MessageId,
     /// Lex-sortable ordering key (snowflake, base32-encoded). Populated via
-    /// [`new_snowflake_id()`] at message creation. Used by pattern_db for
+    /// [`crate::types::ids::new_snowflake_id`] at message creation. Used by pattern_db for
     /// absolute ordering (`messages.position` column) and by
     /// `archive_messages` for range comparisons.
     pub position: SmolStr,

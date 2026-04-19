@@ -159,10 +159,6 @@ impl SessionContext {
         let agent_id = persona.agent_id.to_string();
         let budget = Budget::from_persona(persona);
         let adapter = Arc::new(MemoryStoreAdapter::new(memory_store, &agent_id));
-        // NOTE: `persona.context.max_messages_before_compress` is not yet
-        // consumed — the compaction strategy is selected workspace-wide
-        // in `pattern_provider`. Wire to persona in a follow-up when
-        // per-persona compression overrides land.
         Self {
             agent_id,
             // Thread the caller's declared model through so the composer's
