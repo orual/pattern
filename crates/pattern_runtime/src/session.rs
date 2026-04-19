@@ -40,8 +40,11 @@ use crate::timeout::{Budget, CancelState};
 pub struct SessionContext {
     agent_id: String,
     /// Model identifier for provider completion requests (e.g.
-    /// `"claude-opus-4-7"`). Set at session open; defaults to
-    /// `"claude-sonnet-4-20250514"` if not specified.
+    /// `"claude-opus-4-7"`). Threaded from `persona.model.choice.model_id`
+    /// at session open. Use [`ModelSpec::default`] to get the workspace
+    /// default (`"claude-sonnet-4-6"`).
+    ///
+    /// [`ModelSpec::default`]: pattern_core::types::snapshot::ModelSpec
     model_id: String,
     budget: Budget,
     cancel_state: Arc<CancelState>,
@@ -134,7 +137,12 @@ impl SessionContext {
         let adapter = Arc::new(MemoryStoreAdapter::new(memory_store, &agent_id));
         Self {
             agent_id,
-            model_id: "claude-sonnet-4-20250514".to_string(),
+            // Thread the caller's declared model through so the composer's
+            // `ctx.model_id()` matches the persona's intent. Callers that
+            // want to override a persona's default at open time should
+            // mutate `persona.model.choice` before calling into the
+            // runtime.
+            model_id: persona.model.choice.model_id.to_string(),
             budget,
             cancel_state: Arc::new(CancelState::new()),
             adapter,

@@ -202,6 +202,7 @@ impl MockProviderClient {
             fn_name: fn_name.into(),
             fn_arguments: args,
             thought_signatures: None,
+            thought_signatures_provenance: None,
         };
         vec![
             ChatStreamEvent::Start,

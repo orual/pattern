@@ -371,6 +371,7 @@ mod tests {
             // Missing required `code` field.
             fn_arguments: serde_json::json!({"not_code_field": "oops"}),
             thought_signatures: None,
+            thought_signatures_provenance: None,
         };
         let outcome = worker.dispatch(bad_call, "").await;
         match outcome {
@@ -420,6 +421,7 @@ mod tests {
                 "code": "pure (42 :: Int)"
             }),
             thought_signatures: None,
+            thought_signatures_provenance: None,
         };
         let outcome = worker.dispatch(tc, &preamble).await;
         match outcome {
@@ -477,6 +479,7 @@ mod tests {
             fn_name: "code".into(),
             fn_arguments: serde_json::json!({"code": "pure ()"}),
             thought_signatures: None,
+            thought_signatures_provenance: None,
         };
         let outcome = dead_worker.dispatch(tc, "").await;
         match outcome {

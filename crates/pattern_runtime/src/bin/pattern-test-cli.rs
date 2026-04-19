@@ -852,10 +852,17 @@ async fn cmd_cache_test(
     let sink = CacheTestSink::new(verbose);
     let sink_dyn: std::sync::Arc<dyn pattern_core::traits::TurnSink> = sink.clone();
 
-    let persona = PersonaSnapshot::new(agent_id, "Anchor");
+    // Thread the caller's model choice onto the persona. The composer
+    // reads `ctx.model_id()` which `SessionContext::from_persona` sets
+    // from `persona.model.choice.model_id`.
+    let mut persona = PersonaSnapshot::new(agent_id, "Anchor");
+    persona.model.choice = pattern_core::types::snapshot::ModelChoice {
+        provider: genai::adapter::AdapterKind::Anthropic,
+        model_id: model.clone().into(),
+    };
     let sdk = SdkLocation::default();
 
-    eprintln!("[session] opening TidepoolSession (compiling agent program)...");
+    eprintln!("[session] opening TidepoolSession...");
     let session_start = std::time::Instant::now();
     let session = TidepoolSession::open_with_agent_loop(
         persona,
@@ -870,24 +877,6 @@ async fn cmd_cache_test(
         session_start.elapsed().as_secs_f64(),
         shaper_mode,
     );
-
-    // Override session's model_id to match the caller's choice. The
-    // persona's default ("claude-sonnet-4-20250514") is set by
-    // from_persona; cache-test callers typically want opus.
-    // TODO: open_with_agent_loop should take model_id as a parameter
-    // — for now we hack the ctx via its public accessor since the
-    // gateway's model isn't actually read from ctx for the `complete`
-    // call (the request owns its model string).
-    // (The `model` var above IS used via CompletionRequest::new in
-    // orchestrate — we build CompletionRequest with ctx.model_id()
-    // so we DO need ctx.model_id() to match. We don't currently have
-    // a public setter; accept the default for now and document.)
-    // Note: the composer uses ctx.model_id() when building
-    // PartialRequest::new — so if we want opus we need to plumb it.
-    // Phase 5 session.with_model method is future work; for now the
-    // user sees whatever default from_persona uses + logs the chosen
-    // `model` arg for the test run.
-    let _ = model; // silence unused until we wire ctx.model override.
 
     // ---- helpers for running a turn ----
 

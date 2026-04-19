@@ -1586,6 +1586,7 @@ mod tests {
             fn_name: "code".into(),
             fn_arguments: serde_json::json!({"code": "pure ()"}),
             thought_signatures: None,
+            thought_signatures_provenance: None,
         };
         let outcome = dispatcher.dispatch(tc, "").await;
         match outcome {
