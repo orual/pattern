@@ -183,9 +183,18 @@ other tasks off the current worker thread before blocking.
 
 ### SessionContext (`session.rs`)
 
-Gains `snapshot_selection: SnapshotSelection` field (controls which
-block types/labels appear in batch-opening snapshot attachments).
-Defaults to Core + Working blocks.
+Gains `snapshot_policy: SnapshotPolicy` field wrapping:
+- `selection: SnapshotSelection` — which block types/labels appear in
+  batch-opening snapshot attachments. Defaults to Core + Working.
+- `mid_batch: MidBatchDeltaBehavior` — controls whether a turn's own
+  tool-initiated `block_writes` trigger mid-batch delta attachments on
+  tool_result messages. `IncludeSelfEdits` (default) preserves the
+  agent-trust signal at cache cost; `FilterSelfEdits` skips self-edits
+  for cache-efficient intra-batch turns, relying on tool_result content
+  to confirm the edit landed.
+
+`snapshot_selection()` is retained as a convenience accessor returning
+`&self.snapshot_policy.selection` to minimize call-site churn.
 
 ## Authoring agent programs
 
