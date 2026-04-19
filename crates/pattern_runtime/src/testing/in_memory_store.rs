@@ -335,3 +335,52 @@ impl MemoryStore for InMemoryMemoryStore {
         Ok(0)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pattern_core::memory::BlockSchema;
+    use pattern_core::types::block::BlockCreate;
+
+    /// Verify that `create_block` returns a doc whose internal `LoroDoc` is
+    /// Arc-shared with the copy stored in the map. Mutations via `set_text`
+    /// on the returned doc must be visible when the block is re-read via
+    /// `get_block`.
+    ///
+    /// This confirms the `persist_block` no-op comment: "writes land
+    /// directly via Arc-shared LoroDoc. Nothing to flush." `LoroDoc::clone`
+    /// is documented as a reference clone (not a deep clone), so the
+    /// returned doc and the stored doc share the same underlying state.
+    #[tokio::test]
+    async fn create_block_returns_arc_shared_loro_doc() {
+        let store = InMemoryMemoryStore::new();
+
+        let create = BlockCreate::new("notes", pattern_core::memory::BlockType::Working, BlockSchema::text());
+
+        // create_block inserts `doc.clone()` in the map and returns `doc`.
+        // Because `LoroDoc::clone` is an Arc reference clone, both the
+        // returned doc and the stored entry point at the same state.
+        let returned = store
+            .create_block("agent-test", create)
+            .await
+            .expect("create_block should succeed");
+
+        // Mutate content via the returned handle.
+        returned
+            .set_text("mutated content", false)
+            .expect("set_text should succeed");
+
+        // Re-read from the map — mutation must be visible.
+        let stored = store
+            .get_block("agent-test", "notes")
+            .await
+            .expect("get_block should succeed")
+            .expect("block should exist");
+
+        assert_eq!(
+            stored.text_content(),
+            "mutated content",
+            "mutation on returned doc must propagate to stored doc via Arc-shared LoroDoc"
+        );
+    }
+}
