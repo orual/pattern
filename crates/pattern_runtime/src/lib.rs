@@ -11,6 +11,7 @@
 pub mod agent_loop;
 pub mod checkpoint;
 pub mod memory;
+pub mod persona_loader;
 pub mod preflight;
 pub mod router;
 pub mod runtime;

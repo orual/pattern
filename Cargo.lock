@@ -5351,6 +5351,7 @@ dependencies = [
  "tidepool-runtime",
  "tidepool-testing",
  "tokio",
+ "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
  "tracing-test",

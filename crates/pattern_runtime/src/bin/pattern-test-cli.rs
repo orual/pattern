@@ -42,6 +42,8 @@
 use std::io::Write;
 use std::sync::Arc;
 
+use pattern_runtime::persona_loader;
+
 use clap::{Parser, Subcommand, ValueEnum};
 use futures::StreamExt;
 use pattern_core::traits::provider_client::ProviderClient;
@@ -1087,7 +1089,6 @@ async fn cmd_spawn(
     use pattern_core::types::ids::{AgentId, BatchId, MessageId, new_id};
     use pattern_core::types::message::Message;
     use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
-    use pattern_core::types::snapshot::PersonaSnapshot;
     use pattern_core::types::turn::TurnInput;
     use pattern_runtime::SdkLocation;
     use pattern_runtime::session::TidepoolSession;
@@ -1097,11 +1098,8 @@ async fn cmd_spawn(
     eprintln!("=== pattern-test-cli spawn (Phase 6 Task 1) ===");
     eprintln!();
 
-    // TODO(task 2): load persona from <persona_path> TOML.
-    // For now, use a hardcoded minimal PersonaSnapshot so the session opens
-    // and the REPL can exercise the provider + display path.
-    let _ = persona_path; // will be consumed by the loader in Task 2
-    let persona = PersonaSnapshot::new("spawn-placeholder", "Placeholder");
+    // Load persona from TOML — Task 2.
+    let persona = persona_loader::load_persona(&persona_path)?;
 
     // Resolve data directory; fall back to a temp dir if not provided.
     // Task 3 will wire this to pattern_db so state persists across runs.

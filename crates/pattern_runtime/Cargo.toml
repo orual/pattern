@@ -46,6 +46,7 @@ thiserror        = { workspace = true }
 miette           = { workspace = true }
 serde            = { workspace = true }
 serde_json       = { workspace = true }
+toml             = { workspace = true }
 jiff             = { workspace = true }
 smol_str         = { workspace = true }
 # Stable content hashing for snapshot delta detection.
