@@ -27,6 +27,25 @@ use pattern_core::types::provider::{CompletionRequest, TokenCount};
 #[cfg(test)]
 pub use tidepool_testing::r#gen::standard_datacon_table;
 
+/// Open a fresh in-memory [`pattern_db::ConstellationDb`] for test isolation.
+///
+/// Each call creates a new SQLite in-memory database with all migrations
+/// applied. Tests that need a DB handle should call this rather than
+/// sharing a single instance, so each test starts from a clean state.
+///
+/// # Panics
+///
+/// Panics if the database cannot be opened (migration failure, etc.).
+/// This is appropriate for test setup — a broken DB is not recoverable
+/// and should fail the test immediately.
+pub async fn test_db() -> std::sync::Arc<pattern_db::ConstellationDb> {
+    std::sync::Arc::new(
+        pattern_db::ConstellationDb::open_in_memory()
+            .await
+            .expect("test_db: failed to open in-memory ConstellationDb"),
+    )
+}
+
 pub mod in_memory_store;
 pub use in_memory_store::InMemoryMemoryStore;
 
@@ -92,6 +111,9 @@ use genai::chat::{
 pub struct MockProviderClient {
     scripts: StdMutex<VecDeque<Vec<ChatStreamEvent>>>,
     call_count: AtomicUsize,
+    /// Configurable token count returned by `count_tokens`. Default: 0.
+    /// Set via [`MockProviderClient::with_token_count`].
+    token_count: AtomicUsize,
 }
 
 impl MockProviderClient {
@@ -101,7 +123,17 @@ impl MockProviderClient {
         Self {
             scripts: StdMutex::new(turns.into()),
             call_count: AtomicUsize::new(0),
+            token_count: AtomicUsize::new(0),
         }
+    }
+
+    /// Set the token count returned by `count_tokens`. Builder-style.
+    /// Default is 0. Compaction tests use this to make the gate fire
+    /// (set to a value above the token threshold) or stay below.
+    #[must_use]
+    pub fn with_token_count(self, count: usize) -> Self {
+        self.token_count.store(count, Ordering::SeqCst);
+        self
     }
 
     /// Number of `complete` calls observed so far.
@@ -135,10 +167,10 @@ impl MockProviderClient {
         ]
     }
 
-    /// Build a text turn with caller-supplied [`Usage`].
+    /// Build a text turn with caller-supplied `Usage`.
     ///
     /// Useful for integration tests that need to assert on specific cache
-    /// token counts in the returned [`TurnOutput::cache_metrics`].
+    /// token counts in the `cache_metrics` field of `TurnOutput`.
     /// The `usage` is placed verbatim in `StreamEnd.captured_usage`.
     pub fn text_turn_with_usage(text: &str, usage: Usage) -> Vec<ChatStreamEvent> {
         let text_string = text.to_string();
@@ -249,9 +281,9 @@ impl ProviderClient for MockProviderClient {
     }
 
     async fn count_tokens(&self, _req: &CompletionRequest) -> Result<TokenCount, ProviderError> {
-        // Arbitrary stub — tests that need precise token counts should
-        // override via a custom impl rather than MockProviderClient.
-        Ok(TokenCount { input_tokens: 0 })
+        Ok(TokenCount {
+            input_tokens: self.token_count.load(Ordering::SeqCst) as u64,
+        })
     }
 }
 

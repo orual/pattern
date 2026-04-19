@@ -26,21 +26,37 @@ use genai::chat::Usage;
 /// A message in the agent's conversation log.
 ///
 /// Wraps a `genai::chat::ChatMessage` (which carries role/content/options) and
-/// adds pattern-specific metadata: identity, ownership, global-order timestamp,
-/// batch membership, optional per-response metadata for assistant messages,
-/// and memory block references to load when this message is in-context.
+/// adds pattern-specific metadata: identity, ownership, ordering, batch
+/// membership, optional per-response metadata for assistant messages, and
+/// memory block references to load when this message is in-context.
+///
+/// ## Identifier fields
+///
+/// - `id` — unique identifier (UUID). Used for deduplication and DB primary key.
+/// - `position` — lex-sortable ordering key (snowflake, base32-encoded). Used
+///   by pattern_db's `messages.position` column for absolute ordering and by
+///   `archive_messages` for range comparisons. Generated via
+///   [`new_snowflake_id()`] at message creation.
+/// - `created_at` — human-readable wall-clock timestamp (nanosecond precision).
+///   Retained for display and auditing; the snowflake timestamp has only
+///   millisecond resolution.
 ///
 /// Ordering:
-/// - Within a batch: by `created_at`.
-/// - Across batches: by the first message's `created_at`.
-///
-/// `created_at` is a `jiff::Timestamp` (nanosecond precision). It doubles as
-/// the global monotonic ordering key; replaces the legacy `SnowflakePosition`.
+/// - Within a batch: by `position`.
+/// - Across batches: by the first message's `position`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub chat_message: genai::chat::ChatMessage,
+    /// Unique identifier (UUID). Used for deduplication and DB primary key.
     pub id: MessageId,
+    /// Lex-sortable ordering key (snowflake, base32-encoded). Populated via
+    /// [`new_snowflake_id()`] at message creation. Used by pattern_db for
+    /// absolute ordering (`messages.position` column) and by
+    /// `archive_messages` for range comparisons.
+    pub position: SmolStr,
     pub owner_id: AgentId,
+    /// Human-readable wall-clock timestamp (nanosecond precision). Retained
+    /// for display and auditing; snowflake timestamp has only ms resolution.
     pub created_at: Timestamp,
     pub batch: BatchId,
     /// Populated for assistant messages that originated from a `ChatResponse`.

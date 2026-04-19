@@ -167,6 +167,46 @@ Snapshot-related state tracked by `TurnHistory`:
   by `drive_step` to force a Full on next batch.
 - `most_recent_batch_id: Option<BatchId>` — detects new-batch transitions.
 
+### Compaction (`compaction.rs`)
+
+`maybe_compact(ctx, turn_history, context_policy)` is called from
+`drive_step` before each wire turn's compose step. It checks the
+persona's `ContextPolicy` gate and applies the configured
+`CompressionStrategy` when the gate fires.
+
+**Gate logic** (short-circuits in order):
+1. `compression` is `None` → skip (compression disabled for this persona).
+2. `active_len < compress_check_message_floor` (default 100) → skip.
+3. `count_tokens` (async provider call) below `compress_token_threshold`
+   → skip. Default threshold: `context_window - max_tokens - 8192 buffer`,
+   where context_window falls back to 128k when per-model metadata is
+   unavailable.
+
+**Strategy dispatch matrix:**
+
+| Strategy | Provider call | Summary row | Notes |
+|---|---|---|---|
+| Truncate | gate only | no | keeps N most recent turns |
+| ImportanceBased | gate only | no | scores older turns heuristically |
+| TimeDecay | gate only | no | archives turns older than cutoff |
+| RecursiveSummarization | gate + complete() | depth=0 | calls provider to summarize oldest chunk |
+
+**Post-strategy invariants:**
+- `archive_messages` marks `is_archived=1` for messages with
+  `position < boundary` in pattern_db.
+- `TurnHistory::take_oldest` drops archived turns from the active deque.
+- `post_compaction_pending` is set to `true`, causing the next batch's
+  snapshot to be Full (ensures the model gets a complete context view).
+- For RecursiveSummarization: an `archive_summaries` row (depth=0) is
+  created and `summary_head` is reloaded from `get_summary_head`.
+
+**How to disable compression for a persona:**
+Set `context.compression = None` in the persona TOML (or
+`ContextPolicy::default()` which has `compression: None`).
+
+**Future work:** depth->=1 summary rollup (running RecursiveSummarization
+on accumulated depth=0 summaries) is out of scope for foundation.
+
 ### Eval worker (`agent_loop/eval_worker.rs`)
 
 `EvalWorker` spawns a long-lived thread with a 256 MiB stack (GHC

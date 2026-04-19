@@ -53,9 +53,9 @@ pub struct BreakDetectionSnapshot {
     /// (message_index, role, cache_control) tuples for messages
     /// whose `options.cache_control` is set. Fed by
     /// [`Self::compute`] from the composer's pending
-    /// [`BreakpointTracker`] placements (compose-time intent) and by
+    /// [`crate::compose::breakpoints::BreakpointTracker`] placements (compose-time intent) and by
     /// [`Self::compute_from_chat`] from the post-finalize
-    /// [`ChatRequest.messages`] (actualised state, including any
+    /// `ChatRequest.messages` (actualised state from `genai::chat::ChatRequest`, including any
     /// post-compose splicing the orchestrator does for
     /// tool-continuation turns).
     pub message_markers_hash: u64,
@@ -132,8 +132,8 @@ impl BreakDetectionSnapshot {
         }
     }
 
-    /// Compute a snapshot from a post-finalize [`ChatRequest`] and
-    /// model string. Used by the orchestrator AFTER any post-compose
+    /// Compute a snapshot from a post-finalize `ChatRequest` (from `genai::chat`)
+    /// and model string. Used by the orchestrator AFTER any post-compose
     /// mutations (e.g. the segment-3 splice for tool-continuation
     /// turns) so the `message_markers_hash` reflects what actually
     /// ships on the wire.

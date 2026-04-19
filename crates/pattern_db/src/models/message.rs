@@ -34,10 +34,10 @@ pub struct Message {
 
     /// Message content stored as JSON to support all variants:
     /// - Text(String)
-    /// - Parts(Vec<ContentPart>)
-    /// - ToolCalls(Vec<ToolCall>)
-    /// - ToolResponses(Vec<ToolResponse>)
-    /// - Blocks(Vec<ContentBlock>)
+    /// - Parts(`Vec<ContentPart>`)
+    /// - ToolCalls(`Vec<ToolCall>`)
+    /// - ToolResponses(`Vec<ToolResponse>`)
+    /// - Blocks(`Vec<ContentBlock>`)
     pub content_json: Json<serde_json::Value>,
 
     /// Text preview for FTS and quick access (extracted from content_json)

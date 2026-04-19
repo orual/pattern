@@ -1,7 +1,7 @@
 //! CLI router: routes messages to a CLI consumer via an unbounded channel.
 //!
 //! The caller (CLI binary, test harness) creates a `CliRouter`, registers
-//! it with the [`super::RouterRegistry`], and holds the receiver side to
+//! it with the `RouterRegistry` (from `super`), and holds the receiver side to
 //! consume agent-to-human output.
 //!
 //! Phase 5 foundation: all `cli:*` recipients go to the single registered
@@ -9,7 +9,7 @@
 //! scope; the target is ignored for now.
 //!
 //! Registering a `CliRouter` with
-//! [`super::RouterRegistry::with_default_scheme("cli")`] makes it absorb
+//! `RouterRegistry::with_default_scheme("cli")` makes it absorb
 //! fallback routing for malformed or unknown-scheme recipients —
 //! typically what you want for an interactive session where every
 //! stray message should still reach the operator.
@@ -56,7 +56,7 @@ impl Router for CliRouter {
 mod tests {
     use super::*;
     use jiff::Timestamp;
-    use pattern_core::types::ids::{AgentId, BatchId, MessageId, new_id};
+    use pattern_core::types::ids::{AgentId, BatchId, MessageId, new_id, new_snowflake_id};
 
     fn test_message(text: &str) -> Message {
         Message {
@@ -65,9 +65,10 @@ mod tests {
                 text.to_string(),
             ),
             id: MessageId::from(new_id().to_string()),
+            position: new_snowflake_id(),
             owner_id: AgentId::from("test-agent"),
             created_at: Timestamp::now(),
-            batch: BatchId::from(new_id().to_string()),
+            batch: BatchId::from(new_snowflake_id()),
             response_meta: None,
             block_refs: vec![],
             attachments: vec![],

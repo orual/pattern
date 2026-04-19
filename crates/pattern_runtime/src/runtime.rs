@@ -37,6 +37,9 @@ pub struct TidepoolRuntime {
     /// signature is stable across phase boundaries.
     #[allow(dead_code)]
     provider: Arc<dyn ProviderClient>,
+    /// Constellation database handle. Threaded to every session opened
+    /// by this runtime. Required for message persistence + compaction.
+    db: Arc<pattern_db::ConstellationDb>,
 }
 
 impl TidepoolRuntime {
@@ -45,11 +48,13 @@ impl TidepoolRuntime {
         sdk: SdkLocation,
         memory_store: Arc<dyn MemoryStore>,
         provider: Arc<dyn ProviderClient>,
+        db: Arc<pattern_db::ConstellationDb>,
     ) -> Self {
         Self {
             sdk,
             memory_store,
             provider,
+            db,
         }
     }
 
@@ -57,8 +62,9 @@ impl TidepoolRuntime {
     pub fn with_default_sdk(
         memory_store: Arc<dyn MemoryStore>,
         provider: Arc<dyn ProviderClient>,
+        db: Arc<pattern_db::ConstellationDb>,
     ) -> Self {
-        Self::new(SdkLocation::default(), memory_store, provider)
+        Self::new(SdkLocation::default(), memory_store, provider, db)
     }
 }
 
@@ -74,8 +80,9 @@ impl AgentRuntime for TidepoolRuntime {
         let sdk = self.sdk.clone();
         let memory_store = self.memory_store.clone();
         let provider = self.provider.clone();
+        let db = self.db.clone();
         let mut session = tokio::task::spawn_blocking(move || {
-            TidepoolSession::open(persona, &sdk, memory_store, provider)
+            TidepoolSession::open(persona, &sdk, memory_store, provider, db)
         })
         .await
         .map_err(|e| RuntimeError::JoinError {

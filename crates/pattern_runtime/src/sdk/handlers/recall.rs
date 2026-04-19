@@ -376,18 +376,19 @@ mod tests {
         }
     }
 
-    fn sctx(store: Arc<dyn MemoryStore>) -> SessionContext {
+    fn sctx(store: Arc<dyn MemoryStore>, db: Arc<pattern_db::ConstellationDb>) -> SessionContext {
         let persona = PersonaSnapshot::new("agent-a", "A");
-        SessionContext::from_persona(&persona, store, Arc::new(NopProviderClient))
+        SessionContext::from_persona(&persona, store, Arc::new(NopProviderClient), db)
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn recall_insert_and_search_roundtrip() {
         let store: Arc<dyn MemoryStore> = Arc::new(RecallTestStore::new());
         let store_for_handler = store.clone();
+        let db = crate::testing::test_db().await;
         tokio::task::spawn_blocking(move || {
             let table = handler_table();
-            let ctx = sctx(store.clone());
+            let ctx = sctx(store.clone(), db);
             let cx = EffectContext::with_user(&table, &ctx);
             let mut h = RecallHandler::new(store_for_handler);
 
@@ -415,9 +416,10 @@ mod tests {
     async fn recall_delete_removes_entry() {
         let store: Arc<dyn MemoryStore> = Arc::new(RecallTestStore::new());
         let store_for_handler = store.clone();
+        let db = crate::testing::test_db().await;
         tokio::task::spawn_blocking(move || {
             let table = handler_table();
-            let ctx = sctx(store.clone());
+            let ctx = sctx(store.clone(), db);
             let cx = EffectContext::with_user(&table, &ctx);
             let mut h = RecallHandler::new(store_for_handler);
 
@@ -454,7 +456,8 @@ mod tests {
     async fn recall_cancelled_at_entry() {
         let table = standard_datacon_table();
         let store: Arc<dyn MemoryStore> = Arc::new(RecallTestStore::new());
-        let ctx = sctx(store.clone());
+        let db = crate::testing::test_db().await;
+        let ctx = sctx(store.clone(), db);
         ctx.cancel_state()
             .cancellation
             .store(true, Ordering::SeqCst);

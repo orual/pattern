@@ -51,6 +51,8 @@ jiff             = { workspace = true }
 smol_str         = { workspace = true }
 # Stable content hashing for snapshot delta detection.
 blake3           = { workspace = true }
+# jiff::Timestamp → chrono::DateTime<Utc> conversion for pattern_db persistence.
+chrono           = { workspace = true }
 # Bin-only deps (pattern-test-cli)
 clap             = { workspace = true }
 futures          = { workspace = true }
@@ -61,7 +63,6 @@ dotenvy          = { workspace = true }
 rustyline-async  = "0.4"
 
 [dev-dependencies]
-chrono         = { workspace = true }
 tokio          = { workspace = true, features = ["rt-multi-thread", "test-util", "macros"] }
 tidepool-testing = { workspace = true }
 tracing-test   = { workspace = true }

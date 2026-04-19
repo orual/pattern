@@ -6,7 +6,7 @@
 //! provider's context-window budget, one of these strategies selects which
 //! turns to archive. The caller is responsible for actually writing the
 //! archival records to `pattern_db` and updating the summary-head cache in
-//! [`pattern_runtime::memory::TurnHistory`] — this module only *selects*
+//! the `TurnHistory` type from `pattern_runtime::memory` — this module only *selects*
 //! which turns to keep vs. archive, and provides the async `should_compress`
 //! gate that calls the provider for a real token count rather than using a
 //! word-count heuristic.
@@ -21,30 +21,30 @@
 //!
 //! # Batch integrity (AC8.4)
 //!
-//! A [`MessageBatch`] groups all [`Message`]s produced during a single
-//! `Session::step` activation under the same `batch_id`. These messages form
-//! an atomic unit — partially archiving a batch (keeping some messages while
-//! archiving others) would break the tool-call/response pairing invariant
-//! and corrupt downstream composers.
+//! A `MessageBatch` (from `pattern_db::models::message`) groups all `Message`s
+//! produced during a single `Session::step` activation under the same `batch_id`.
+//! These messages form an atomic unit — partially archiving a batch (keeping
+//! some messages while archiving others) would break the tool-call/response
+//! pairing invariant and corrupt downstream composers.
 //!
 //! Every strategy in this module preserves batch integrity: if the
 //! compression boundary falls mid-batch, the cut is extended to the nearest
 //! whole-batch boundary (compress the entire batch or leave it entirely).
 //!
-//! This invariant is maintained at the [`TurnRecord`] level: one
-//! [`TurnRecord`] corresponds to one wire-level turn, and all records sharing
+//! This invariant is maintained at the `TurnRecord` level (from `pattern_runtime::memory`):
+//! one `TurnRecord` corresponds to one wire-level turn, and all records sharing
 //! the same `batch_id` within a `Session::step` are kept or archived
-//! together. [`find_batch_safe_cut`] implements the boundary extension.
+//! together. `find_batch_safe_cut` implements the boundary extension.
 //!
 //! # Pseudo-message ordering
 //!
 //! When compaction runs mid-history, `[memory:updated]` pseudo-messages that
 //! bracket real messages at specific turn boundaries must retain their
 //! relative ordering. Since pseudo-messages are synthesised at compose time
-//! from [`BlockWrite`] records stored in [`TurnOutput::block_writes`], and
-//! [`TurnRecord`]s are kept intact (never split), ordering is automatically
-//! preserved as long as the strategy does not reorder [`TurnRecord`]s.
-//! All four strategies return turns in chronological order.
+//! from `BlockWrite` records (from `pattern_runtime`) stored in the `block_writes`
+//! field of `TurnOutput`, and `TurnRecord`s are kept intact (never split),
+//! ordering is automatically preserved as long as the strategy does not
+//! reorder `TurnRecord`s. All four strategies return turns in chronological order.
 
 use jiff::Timestamp;
 use pattern_core::error::ProviderError;
@@ -76,79 +76,53 @@ pub struct TurnSlice {
     pub started_at: Timestamp,
 }
 
-/// Strategy for compressing turn history when the context window fills.
+// CompressionStrategy now lives in pattern_core::types::compression so
+// PersonaSnapshot can carry it without a cross-crate cycle. Re-exported
+// here for the benefit of callers that already `use
+// pattern_provider::compose::compression::CompressionStrategy`.
+pub use pattern_core::types::compression::CompressionStrategy;
+
+/// Default *system* prompt for the recursive-summarization strategy
+/// when the persona's
+/// [`CompressionStrategy::RecursiveSummarization::summarization_prompt`]
+/// is `None`. Ported verbatim from v2's compression path (see
+/// `rewrite-staging/context/compression.rs` for the original).
 ///
-/// All four strategies share the same gate: the decision to compress at all
-/// is made by the async [`should_compress`] function, which calls the
-/// provider for a real token count. Strategy-internal ranking heuristics
-/// (used by `ImportanceBased` to score older turns) use cheap approximations.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum CompressionStrategy {
-    /// Keep only the N most recent turns; archive the rest.
-    ///
-    /// Simplest strategy — O(n) with no provider round-trips beyond the
-    /// gate check. Good default for short-lived sessions.
-    Truncate {
-        /// Number of most-recent turns to retain in the active window.
-        keep_recent: usize,
-    },
+/// Pairs with [`DEFAULT_SUMMARIZATION_DIRECTIVE`], which the driver
+/// appends as a user-message directive after the chunk-of-turns
+/// payload.
+pub const DEFAULT_SUMMARIZATION_SYSTEM_PROMPT: &str =
+    "You are a helpful assistant that creates concise summaries of conversations.";
 
-    /// Archive old turns and summarise them with a provider call.
-    ///
-    /// Implements the MemGPT recursive-summarization approach: old turns
-    /// are batched, summarised, and replaced by a compact summary in the
-    /// archive head. The summary is returned in [`CompressionResult`] for
-    /// the caller to write to `pattern_db`.
-    ///
-    /// Requires a model provider call per summarised chunk; prefer
-    /// `Truncate` when latency matters more than summary quality.
-    RecursiveSummarization {
-        /// How many turns to include in each summarization chunk.
-        chunk_size: usize,
-        /// Model string to use for the summarization call (may differ
-        /// from the agent's primary model).
-        summarization_model: String,
-        /// Custom system-prompt override for the summarizer. When
-        /// `None`, a built-in default is used.
-        #[serde(default)]
-        summarization_prompt: Option<String>,
-    },
+/// Default *user-message directive* appended to the summarization
+/// request after the chunk-of-turns payload. Ported verbatim from v2.
+///
+/// The persona's `summarization_prompt` override (if any) replaces the
+/// system prompt only; the directive is always present so the
+/// summarizer has explicit preserve/condense/prioritize/remove
+/// guidance. Voice matches Pattern's agent-context use case
+/// (relationship-aware, crisis-aware, boundary-aware).
+pub const DEFAULT_SUMMARIZATION_DIRECTIVE: &str = "\
+Please summarize all the previous messages, focusing on key information, \
+decisions made, and important context.
 
-    /// Keep recent turns and the highest-scored older turns.
-    ///
-    /// Scores older turns heuristically (role weights, content length,
-    /// keyword bonuses, tool-call bonuses) and retains the
-    /// `keep_important` highest-scoring ones alongside the `keep_recent`
-    /// most-recent. Archived turns are those that scored below the
-    /// retention cutoff.
-    ImportanceBased {
-        /// Number of most-recent turns always kept regardless of score.
-        keep_recent: usize,
-        /// Maximum number of additional high-scoring turns to retain
-        /// from the older portion of the history.
-        keep_important: usize,
-    },
+preserve: novel insights, unique terminology we've developed, \
+relationship evolution patterns, crisis response validations, \
+architectural discoveries
 
-    /// Archive turns older than a time threshold; always keep a minimum.
-    ///
-    /// Each turn whose first message is older than
-    /// `compress_after_hours` is a compression candidate, subject to
-    /// the `min_keep_recent` floor.
-    TimeDecay {
-        /// Age in hours after which a turn is a compression candidate.
-        compress_after_hours: f64,
-        /// Minimum number of most-recent turns to keep regardless of age.
-        min_keep_recent: usize,
-    },
-}
+condense: repetitive status updates, routine sync confirmations, similar \
+conversations that don't add new dimensions
 
-impl Default for CompressionStrategy {
-    fn default() -> Self {
-        Self::Truncate { keep_recent: 100 }
-    }
-}
+prioritize: things that would affect future interactions - social \
+calibration lessons learned, boundary discoveries, successful \
+collaboration patterns, failure modes identified
+
+remove: duplicate information, overly detailed play-by-plays of routine \
+events
+
+If there was a previous summary provided, build upon it, but don't \
+simply extend it. Maintain the conversational style and preserve \
+important details. Keep it as short as reasonable.";
 
 /// Output of a compression run.
 ///
@@ -650,7 +624,7 @@ mod tests {
     use jiff::Timestamp;
     use pattern_core::error::ProviderError;
     use pattern_core::traits::provider_client::{ChunkStream, ProviderClient};
-    use pattern_core::types::ids::{BatchId, new_id};
+    use pattern_core::types::ids::{BatchId, new_snowflake_id};
     use pattern_core::types::provider::{CompletionRequest, TokenCount};
 
     use super::*;
@@ -672,6 +646,8 @@ mod tests {
     #[async_trait]
     impl ProviderClient for MockTokenCounter {
         async fn complete(&self, _r: CompletionRequest) -> Result<ChunkStream, ProviderError> {
+            // Phase 5: test-only mock; compression tests need count_tokens, not
+            // complete. Intentionally left unimplemented for this mock.
             unimplemented!("mock: count_tokens only")
         }
 
@@ -708,7 +684,7 @@ mod tests {
     }
 
     fn make_batch_id() -> BatchId {
-        BatchId::from(new_id())
+        BatchId::from(new_snowflake_id())
     }
 
     // ---- should_compress gate tests -----------------------------------------

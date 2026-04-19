@@ -155,18 +155,21 @@ mod tests {
     use pattern_core::ProviderClient;
     use pattern_core::types::snapshot::PersonaSnapshot;
 
-    fn sctx() -> SessionContext {
+    async fn sctx() -> SessionContext {
+        let db = crate::testing::test_db().await;
         let persona = PersonaSnapshot::new("agent-a", "A");
         SessionContext::from_persona(
             &persona,
             Arc::new(InMemoryMemoryStore::new()),
             Arc::new(NopProviderClient),
+            db,
         )
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn search_messages_current_agent_returns_empty_list() {
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
+        let db = crate::testing::test_db().await;
         let result = tokio::task::spawn_blocking(move || {
             let table = standard_datacon_table();
             let persona = PersonaSnapshot::new("agent-a", "A");
@@ -174,6 +177,7 @@ mod tests {
                 &persona,
                 store.clone(),
                 Arc::new(NopProviderClient) as Arc<dyn ProviderClient>,
+                db,
             );
             let cx = EffectContext::with_user(&table, &ctx);
             let mut h = SearchHandler::new(store);
@@ -190,7 +194,7 @@ mod tests {
     #[tokio::test]
     async fn search_cancelled_at_entry() {
         let table = standard_datacon_table();
-        let ctx = sctx();
+        let ctx = sctx().await;
         ctx.cancel_state()
             .cancellation
             .store(true, Ordering::SeqCst);

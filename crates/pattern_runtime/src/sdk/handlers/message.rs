@@ -12,7 +12,7 @@
 //! tool to invoke SDK capabilities.
 
 use jiff::Timestamp;
-use pattern_core::types::ids::{AgentId, BatchId, MessageId, new_id};
+use pattern_core::types::ids::{AgentId, BatchId, MessageId, new_id, new_snowflake_id};
 use pattern_core::types::message::Message;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use tidepool_eval::Value;
@@ -135,9 +135,10 @@ fn dispatch_outbound(
             body.to_string(),
         ),
         id: MessageId::from(new_id().to_string()),
+        position: new_snowflake_id(),
         owner_id: AgentId::from(agent_id),
         created_at: Timestamp::now(),
-        batch: BatchId::from(new_id().to_string()),
+        batch: BatchId::from(new_snowflake_id()),
         response_meta: None,
         block_refs: vec![],
         attachments: vec![],
@@ -173,11 +174,14 @@ mod tests {
     use pattern_core::types::snapshot::PersonaSnapshot;
     use std::sync::Arc;
 
-    fn sctx_with_router(registry: RouterRegistry) -> SessionContext {
+    fn sctx_with_router(
+        registry: RouterRegistry,
+        db: Arc<pattern_db::ConstellationDb>,
+    ) -> SessionContext {
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
         let provider: Arc<dyn ProviderClient> = Arc::new(NopProviderClient);
         let persona = PersonaSnapshot::new("agent-a", "A");
-        SessionContext::from_persona(&persona, store, provider).with_router(Arc::new(registry))
+        SessionContext::from_persona(&persona, store, provider, db).with_router(Arc::new(registry))
     }
 
     /// Build a DataConTable that includes the `()` constructor needed by
@@ -195,10 +199,11 @@ mod tests {
         table
     }
 
-    #[test]
-    fn ask_returns_candidate_for_removal_error() {
+    #[tokio::test]
+    async fn ask_returns_candidate_for_removal_error() {
         let table = standard_datacon_table();
-        let ctx = sctx_with_router(RouterRegistry::new());
+        let db = crate::testing::test_db().await;
+        let ctx = sctx_with_router(RouterRegistry::new(), db);
         let cx = EffectContext::with_user(&table, &ctx);
         let mut h = MessageHandler;
         let err = h.handle(MessageReq::Ask("test".into()), &cx).unwrap_err();
@@ -215,7 +220,8 @@ mod tests {
         let (cli_router, mut rx) = CliRouter::new();
         let mut registry = RouterRegistry::new();
         registry.register(Arc::new(cli_router));
-        let ctx = sctx_with_router(registry);
+        let db = crate::testing::test_db().await;
+        let ctx = sctx_with_router(registry, db);
 
         let table = handler_table();
 
@@ -244,7 +250,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn send_to_unknown_scheme_returns_error() {
-        let ctx = sctx_with_router(RouterRegistry::new());
+        let db = crate::testing::test_db().await;
+        let ctx = sctx_with_router(RouterRegistry::new(), db);
         let table = handler_table();
 
         let result = tokio::task::spawn_blocking(move || {
@@ -269,7 +276,8 @@ mod tests {
         let (cli_router, _rx) = CliRouter::new();
         let mut registry = RouterRegistry::new();
         registry.register(Arc::new(cli_router));
-        let ctx = sctx_with_router(registry);
+        let db = crate::testing::test_db().await;
+        let ctx = sctx_with_router(registry, db);
         let pending = ctx.pending_messages().clone();
 
         let table = handler_table();

@@ -21,7 +21,7 @@
 //! - Prefix search: `prefix*`
 //! - Column filter: `column:word` (not used since our tables are single-column)
 //!
-//! See: https://www.sqlite.org/fts5.html
+//! See: <https://www.sqlite.org/fts5.html>
 
 use sqlx::SqlitePool;
 

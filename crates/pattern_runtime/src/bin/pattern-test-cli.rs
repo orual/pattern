@@ -803,7 +803,7 @@ async fn cmd_cache_test(
     verbose: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use jiff::Timestamp;
-    use pattern_core::types::ids::{AgentId, BatchId, MessageId, new_id};
+    use pattern_core::types::ids::{AgentId, BatchId, MessageId, new_id, new_snowflake_id};
     use pattern_core::types::message::Message;
     use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
     use pattern_core::types::snapshot::PersonaSnapshot;
@@ -864,6 +864,24 @@ async fn cmd_cache_test(
     };
     let sdk = SdkLocation::default();
 
+    // Cache-test uses InMemoryMemoryStore (the documented test-only
+    // exception), but SessionContext still requires a DB handle.
+    // Open a tempfile DB for session construction.
+    let cache_test_data_dir = std::env::temp_dir().join(format!(
+        "pattern-cache-test-{}",
+        pattern_core::types::ids::new_id()
+    ));
+    std::fs::create_dir_all(&cache_test_data_dir)?;
+    let cache_test_db = std::sync::Arc::new(
+        pattern_db::ConstellationDb::open(
+            cache_test_data_dir
+                .join("constellation.db")
+                .to_string_lossy()
+                .as_ref(),
+        )
+        .await?,
+    );
+
     eprintln!("[session] opening TidepoolSession...");
     let session_start = std::time::Instant::now();
     let session = TidepoolSession::open_with_agent_loop(
@@ -871,9 +889,11 @@ async fn cmd_cache_test(
         &sdk,
         memory_store.clone(),
         provider,
+        cache_test_db,
         sink_dyn,
         prelude_dir,
-    )?;
+    )
+    .await?;
     eprintln!(
         "[session] ready after {:.2}s — model={model} shaper={:?}\n",
         session_start.elapsed().as_secs_f64(),
@@ -882,7 +902,7 @@ async fn cmd_cache_test(
 
     // ---- helpers for running a turn ----
 
-    let batch = BatchId::from(new_id().to_string());
+    let batch = BatchId::from(new_snowflake_id());
     let user = AgentId::from("user");
 
     let start = Timestamp::now();
@@ -891,6 +911,7 @@ async fn cmd_cache_test(
         let msg = Message {
             chat_message: chat_msg,
             id: MessageId::from(new_id().to_string()),
+            position: new_snowflake_id(),
             owner_id: user.clone(),
             created_at: Timestamp::now(),
             batch: batch.clone(),
@@ -899,7 +920,7 @@ async fn cmd_cache_test(
             attachments: vec![],
         };
         TurnInput {
-            turn_id: new_id(),
+            turn_id: new_snowflake_id(),
             batch_id: batch.clone(),
             origin: MessageOrigin::new(
                 Author::System {
@@ -1086,13 +1107,12 @@ async fn cmd_spawn(
     auth_override: Option<AuthTierCli>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use pattern_core::traits::TurnSink;
-    use pattern_core::types::ids::{AgentId, BatchId, MessageId, new_id};
+    use pattern_core::types::ids::{AgentId, BatchId, MessageId, new_id, new_snowflake_id};
     use pattern_core::types::message::Message;
     use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
     use pattern_core::types::turn::TurnInput;
     use pattern_runtime::SdkLocation;
     use pattern_runtime::session::TidepoolSession;
-    use pattern_runtime::testing::InMemoryMemoryStore;
     use rustyline_async::{Readline, ReadlineError};
 
     eprintln!("=== pattern-test-cli spawn (Phase 6 Task 1) ===");
@@ -1102,23 +1122,46 @@ async fn cmd_spawn(
     let persona = persona_loader::load_persona(&persona_path)?;
 
     // Resolve data directory; fall back to a temp dir if not provided.
-    // Task 3 will wire this to pattern_db so state persists across runs.
-    let _data_dir = match data_dir {
+    // The DB-backed MemoryCache persists memory blocks across re-spawns
+    // when --data-dir points at a stable path.
+    let data_dir = match data_dir {
         Some(d) => {
             eprintln!("[spawn] using data_dir: {}", d.display());
             d
         }
         None => {
             let dir = std::env::temp_dir().join(format!("pattern-spawn-{}", new_id()));
-            eprintln!("[spawn] no --data-dir provided; using temp dir: {}", dir.display());
+            eprintln!(
+                "[spawn] no --data-dir provided; using temp dir: {}",
+                dir.display()
+            );
             dir
         }
     };
+    std::fs::create_dir_all(&data_dir)
+        .map_err(|e| format!("failed to create data_dir {}: {e}", data_dir.display()))?;
 
-    // TODO(task 3): honor auth override — today build_chain() always resolves
-    // automatically without consulting `auth_override`.
-    let _ = auth_override; // will be plumbed in Task 3
-    let chain = build_chain(ProviderKind::Anthropic).await?;
+    // Honor the --auth override when possible. API-key-only selection
+    // falls through to AnthropicAuthChain::api_key_only(); session-pickup
+    // and pkce-only tier restriction require chain API work that's not
+    // yet landed — for those, we print a warning and fall through to the
+    // default full chain. The flag is never silently ignored.
+    let chain = match auth_override {
+        Some(AuthTierCli::ApiKey) => {
+            eprintln!("[spawn] --auth api-key: using AnthropicAuthChain::api_key_only()");
+            let c: Arc<dyn CredentialChain> = Arc::new(AnthropicAuthChain::api_key_only());
+            c
+        }
+        Some(tier @ (AuthTierCli::SessionPickup | AuthTierCli::Pkce)) => {
+            eprintln!(
+                "[spawn] warning: --auth {:?} tier-restriction not yet wired; \
+                 falling through to default chain resolution (tiers tried in order)",
+                tier,
+            );
+            build_chain(ProviderKind::Anthropic).await?
+        }
+        None => build_chain(ProviderKind::Anthropic).await?,
+    };
     let limiter = Arc::new(ProviderRateLimiter::anthropic_default());
 
     let shaper_cfg = ShaperConfig {
@@ -1138,11 +1181,22 @@ async fn cmd_spawn(
     pattern_runtime::preflight::check()
         .map_err(|e| format!("preflight failed: {e}\nsee crates/pattern_runtime/CLAUDE.md"))?;
 
-    let memory_store = Arc::new(InMemoryMemoryStore::new());
+    // DB-backed MemoryCache: persists memory blocks across re-spawn
+    // when --data-dir is stable. InMemoryMemoryStore is strictly
+    // test-only — cmd_spawn is user-facing and must use the real store.
+    let db_path = data_dir.join("constellation.db");
+    eprintln!("[spawn] opening constellation DB at {}", db_path.display());
+    let db = Arc::new(
+        pattern_db::ConstellationDb::open(db_path.to_string_lossy().as_ref())
+            .await
+            .map_err(|e| format!("opening constellation DB: {e}"))?,
+    );
+    let memory_cache = Arc::new(pattern_core::memory::MemoryCache::new(db.clone()));
+    let memory_store: Arc<dyn pattern_core::traits::MemoryStore> = memory_cache.clone();
 
-    // Retain a handle to the concrete store for the REPL's `:edit-block`
-    // command. The Arc-shared state means external edits land in the
-    // same backing document the session's handlers read.
+    // Retain a handle for the REPL's `:edit-block` command. Arc-shared
+    // state means external edits land in the same backing document the
+    // session's handlers read.
     let memory_store_for_repl = memory_store.clone();
 
     // Capture the persona's agent_id before the PersonaSnapshot moves
@@ -1163,10 +1217,15 @@ async fn cmd_spawn(
         &sdk,
         memory_store,
         provider,
+        db,
         turn_sink,
         prelude_dir,
-    )?;
-    eprintln!("[spawn] session ready after {:.2}s", open_start.elapsed().as_secs_f64());
+    )
+    .await?;
+    eprintln!(
+        "[spawn] session ready after {:.2}s",
+        open_start.elapsed().as_secs_f64()
+    );
     eprintln!();
 
     // Build the rustyline readline + shared writer.
@@ -1183,7 +1242,7 @@ async fn cmd_spawn(
     session.display().subscribe(subscriber);
 
     // REPL state for constructing TurnInputs.
-    let batch = BatchId::from(new_id().to_string());
+    let batch = BatchId::from(new_snowflake_id());
     let user_agent_id = AgentId::from("user");
 
     let make_turn_input = |line: &str| -> TurnInput {
@@ -1193,6 +1252,7 @@ async fn cmd_spawn(
         let msg = Message {
             chat_message: chat_msg,
             id: MessageId::from(new_id().to_string()),
+            position: new_snowflake_id(),
             owner_id: user_agent_id.clone(),
             created_at: Timestamp::now(),
             batch: batch.clone(),
@@ -1201,7 +1261,7 @@ async fn cmd_spawn(
             attachments: vec![],
         };
         TurnInput {
-            turn_id: new_id(),
+            turn_id: new_snowflake_id(),
             batch_id: batch.clone(),
             origin: MessageOrigin::new(
                 Author::System {
@@ -1245,7 +1305,6 @@ async fn cmd_spawn(
                             continue;
                         }
                     };
-                    use pattern_core::traits::MemoryStore;
                     match memory_store_for_repl
                         .get_block(&persona_agent_id, label)
                         .await

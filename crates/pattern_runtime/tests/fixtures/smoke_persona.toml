@@ -29,7 +29,23 @@ max_tokens  = 4096
 # --------------------------------------------------------------------------
 
 [context]
-max_messages_before_compress = 40
+# Cheap short-circuit: don't even call should_compress until history has
+# 50+ active turns. Avoids count_tokens round-trips on early turns.
+compress_check_message_floor = 50
+
+# Real gate: when active-context tokens exceed this, the strategy fires.
+# 150k leaves plenty of headroom below claude-sonnet-4-6's 200k context
+# window for output tokens + buffer.
+compress_token_threshold = 150_000
+
+# RecursiveSummarization is the default agent-session compression path:
+# summarize old turns into a dense prose summary rather than truncating.
+# summarization_model can differ from the primary model — haiku is
+# sensible for cost.
+[context.compression]
+type                 = "recursive_summarization"
+chunk_size           = 20
+summarization_model  = "claude-haiku-4-5"
 
 # --------------------------------------------------------------------------
 # Runtime budgets (Tidepool JIT)

@@ -7,6 +7,7 @@
 pub mod batch;
 pub mod block;
 pub mod block_ref;
+pub mod compression;
 pub mod embedding;
 pub mod ids;
 pub mod message;
@@ -19,6 +20,7 @@ pub mod turn;
 pub use batch::{BatchType, MessageBatch};
 pub use block::{BlockCreate, BlockHandle, BlockWrite, BlockWriteKind};
 pub use block_ref::BlockRef;
+pub use compression::CompressionStrategy;
 pub use ids::{
     AgentId, BatchId, ConstellationId, ConversationId, DiscordIdentityId, EventId, GroupId,
     MemoryId, MessageId, ModelId, OAuthTokenId, ProjectId, QueuedMessageId, RelationId, RequestId,

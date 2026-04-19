@@ -34,9 +34,9 @@ use pattern_provider::auth::AnthropicAuthChain;
 use pattern_provider::auth::resolver::CredentialChain;
 use pattern_provider::gateway::PatternGatewayClient;
 use pattern_provider::shaper::ShaperConfig;
+use pattern_runtime::SdkLocation;
 use pattern_runtime::checkpoint::CheckpointLog;
 use pattern_runtime::testing::InMemoryMemoryStore;
-use pattern_runtime::SdkLocation;
 
 // ────────────────────────────── helpers ─────────────────────────────────────
 
@@ -209,7 +209,9 @@ fn ac9_5_gateway_builder_with_no_providers_fails_with_shaper_misconfigured() {
     );
     let display = err.to_string();
     assert!(
-        display.contains("shaper") || display.contains("misconfigured") || display.contains("provider"),
+        display.contains("shaper")
+            || display.contains("misconfigured")
+            || display.contains("provider"),
         "Display should describe the misconfiguration step; got: {display}"
     );
 }
@@ -221,7 +223,9 @@ fn ac9_5_shaper_config_empty_x_app_fails_with_shaper_misconfigured() {
         x_app: String::new(),
         ..ShaperConfig::default()
     };
-    let err = config.validate().expect_err("empty x_app must fail validation");
+    let err = config
+        .validate()
+        .expect_err("empty x_app must fail validation");
     assert!(
         matches!(err, ProviderError::ShaperMisconfigured { ref reason } if reason.contains("x_app")),
         "expected ShaperMisconfigured mentioning x_app, got: {err:?}"
@@ -256,18 +260,14 @@ async fn ac9_5_session_open_bad_sdk_path_returns_sdk_not_found() {
     let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
     let provider: Arc<dyn pattern_core::ProviderClient> =
         Arc::new(pattern_runtime::NopProviderClient);
+    let db = pattern_runtime::testing::test_db().await;
     let persona = PersonaSnapshot::new("test-agent", "Test");
-    let sink: Arc<dyn pattern_core::traits::TurnSink> =
-        Arc::new(pattern_core::traits::NoOpSink);
+    let sink: Arc<dyn pattern_core::traits::TurnSink> = Arc::new(pattern_core::traits::NoOpSink);
 
     let err = pattern_runtime::session::TidepoolSession::open_with_agent_loop(
-        persona,
-        &bad_sdk,
-        store,
-        provider,
-        sink,
-        None,
+        persona, &bad_sdk, store, provider, db, sink, None,
     )
+    .await
     .expect_err("bad SDK path must fail session open");
 
     assert!(
@@ -286,7 +286,9 @@ async fn ac9_5_session_open_bad_sdk_path_returns_sdk_not_found() {
 #[test]
 fn ac9_5_sdk_location_bad_path_names_the_missing_directory() {
     let loc = SdkLocation::Directory(PathBuf::from("/nonexistent/sdk/path/ac9_5"));
-    let err = loc.resolve().expect_err("missing directory must fail resolve");
+    let err = loc
+        .resolve()
+        .expect_err("missing directory must fail resolve");
 
     assert!(
         matches!(err, RuntimeError::SdkNotFound { ref path, .. } if path.to_str().unwrap_or("").contains("nonexistent")),
@@ -408,8 +410,8 @@ fn ac9_5_checkpoint_decode_empty_personas_reason_mentions_persona() {
 fn ac9_5_checkpoint_decode_malformed_extra_json_fails() {
     // A persona entry whose `extra` field is not a JSON array (the expected
     // shape for the event log) produces a meaningful decode error.
-    let persona = PersonaSnapshot::new("agent-x", "X")
-        .with_extra(serde_json::json!({ "wrong": "shape" }));
+    let persona =
+        PersonaSnapshot::new("agent-x", "X").with_extra(serde_json::json!({ "wrong": "shape" }));
     let snap = SessionSnapshot::new(vec![persona], serde_json::Value::Null);
 
     let err = CheckpointLog::decode_events(&snap)
@@ -421,7 +423,9 @@ fn ac9_5_checkpoint_decode_malformed_extra_json_fails() {
     );
     let display = err.to_string();
     assert!(
-        display.contains("checkpoint") || display.contains("failed") || display.contains("deserialise"),
+        display.contains("checkpoint")
+            || display.contains("failed")
+            || display.contains("deserialise"),
         "Display should describe the decode failure; got: {display}"
     );
 }

@@ -1,27 +1,27 @@
 //! Agent-loop orchestrator — executes **one wire turn** end-to-end.
 //!
 //! A "wire turn" corresponds to one `ProviderClient::complete` call. One
-//! user-visible exchange ([`pattern_core::Session::step`]) is driven by
-//! [`TidepoolSession::step`] as a loop over multiple wire turns,
-//! chained via [`TurnInput::continuation`] when `stop_reason == ToolUse`.
+//! user-visible exchange (`pattern_core::Session::step`) is driven by
+//! the `TidepoolSession::step` method (from `crate::session`) as a loop over multiple wire turns,
+//! chained via `TurnInput::continuation` when `stop_reason == ToolUse`.
 //! This module implements the inner single-turn primitive.
 //!
 //! # Responsibilities
 //!
-//! 1. Build a [`CompletionRequest`] from the turn's `TurnInput` +
+//! 1. Build a `CompletionRequest` from the turn's `TurnInput` +
 //!    [`crate::sdk::CODE_TOOL`] (full composer integration — segments
 //!    1 / 2 / 3 — is wired in a follow-up change; this cut passes
 //!    input messages through and injects the `code` tool).
-//! 2. Stream the provider response, emitting [`TurnEvent`]s to the
-//!    session's [`TurnSink`] as events arrive: `Text` for LLM
+//! 2. Stream the provider response, emitting `TurnEvent`s (from `pattern_core::traits`)
+//!    to the session's `TurnSink` as events arrive: `Text` for LLM
 //!    response chunks, `Thinking` for reasoning chunks, `ToolCall`
 //!    when tool_use blocks complete, `ToolResult` after eval settles,
 //!    `Stop` when the wire turn closes.
-//! 3. Dispatch each captured tool_use to the provided [`EvalDispatcher`]
+//! 3. Dispatch each captured tool_use to the provided `EvalDispatcher`
 //!    after stream close, collect outcomes, and pair them by
-//!    `call_id` into [`ToolResult`]s.
-//! 4. Drain the memory adapter's pending [`BlockWrite`]s and assemble
-//!    a [`TurnOutput`] with: `messages` (including a reconstructed
+//!    `call_id` into `ToolResult`s.
+//! 4. Drain the memory adapter's pending `BlockWrite`s (from `pattern_runtime::memory`)
+//!    and assemble a `TurnOutput` with: `messages` (including a reconstructed
 //!    assistant message), `block_writes`, `tool_calls`, `tool_results`,
 //!    `stop_reason`, `usage`, and a `completed_at` timestamp.
 //!
@@ -282,6 +282,7 @@ pub async fn orchestrate(
         Some(Message {
             chat_message: chat_msg,
             id: MessageId::from(new_id()),
+            position: pattern_core::types::ids::new_snowflake_id(),
             owner_id: AgentId::from(ctx.agent_id()),
             created_at: Timestamp::now(),
             batch: input.batch_id.clone(),
@@ -697,20 +698,138 @@ fn block_visibility_from_hashes(
     }
 }
 
+// ---- message persistence ------------------------------------------------
+
+/// Map a `genai::chat::ChatRole` to the corresponding
+/// `pattern_db::models::MessageRole` for storage.
+fn map_chat_role(role: genai::chat::ChatRole) -> pattern_db::models::MessageRole {
+    match role {
+        genai::chat::ChatRole::User => pattern_db::models::MessageRole::User,
+        genai::chat::ChatRole::Assistant => pattern_db::models::MessageRole::Assistant,
+        genai::chat::ChatRole::System => pattern_db::models::MessageRole::System,
+        genai::chat::ChatRole::Tool => pattern_db::models::MessageRole::Tool,
+    }
+}
+
+/// Infer a `pattern_db::models::BatchType` from a `MessageOrigin`.
+///
+/// Mapping:
+/// - Partner / Human author → `UserRequest`.
+/// - Agent author → `AgentToAgent`.
+/// - System author with `ToolCall` reason → `Continuation`.
+/// - System author with any other reason → `SystemTrigger`.
+fn infer_batch_type(
+    origin: &pattern_core::types::origin::MessageOrigin,
+) -> pattern_db::models::BatchType {
+    use pattern_core::types::origin::{Author, SystemReason};
+    match &origin.author {
+        Author::Partner(_) | Author::Human(_) => pattern_db::models::BatchType::UserRequest,
+        Author::Agent(_) => pattern_db::models::BatchType::AgentToAgent,
+        Author::System { reason } => match reason {
+            SystemReason::ToolCall => pattern_db::models::BatchType::Continuation,
+            _ => pattern_db::models::BatchType::SystemTrigger,
+        },
+        // Author is #[non_exhaustive]; future variants default to UserRequest.
+        _ => pattern_db::models::BatchType::UserRequest,
+    }
+}
+
+/// Extract a plaintext preview from a `ChatMessage`, truncated to ~200 chars.
+fn content_preview(msg: &genai::chat::ChatMessage) -> Option<String> {
+    let text = msg.content.joined_texts()?;
+    if text.len() <= 200 {
+        Some(text)
+    } else {
+        // Truncate to 200 chars (byte-safe via char boundary).
+        let boundary = text
+            .char_indices()
+            .nth(200)
+            .map(|(i, _)| i)
+            .unwrap_or(text.len());
+        Some(format!("{}…", &text[..boundary]))
+    }
+}
+
+/// Convert a `pattern_core::Message` to a `pattern_db::models::Message` for
+/// storage.
+///
+/// Attachments are intentionally dropped: pattern_db has no attachment column,
+/// and per Phase 6 design, next session rebuilds snapshots from memory_blocks.
+/// Losing them on the DB path is acceptable.
+fn to_db_message(
+    msg: &Message,
+    agent_id: &str,
+    batch_type: pattern_db::models::BatchType,
+) -> Result<pattern_db::models::Message, RuntimeError> {
+    let content_json = serde_json::to_value(&msg.chat_message).map_err(|e| {
+        RuntimeError::DatabasePersistenceFailed {
+            step: "serialize chat_message".into(),
+            reason: e.to_string(),
+        }
+    })?;
+
+    // Convert jiff::Timestamp → chrono::DateTime<Utc>.
+    let epoch_nanos = msg.created_at.as_nanosecond();
+    let secs = (epoch_nanos / 1_000_000_000) as i64;
+    let nanos = (epoch_nanos % 1_000_000_000) as u32;
+    let created_at = chrono::DateTime::from_timestamp(secs, nanos).unwrap_or_else(chrono::Utc::now);
+
+    Ok(pattern_db::models::Message {
+        id: msg.id.to_string(),
+        agent_id: agent_id.to_string(),
+        position: msg.position.to_string(),
+        batch_id: Some(msg.batch.to_string()),
+        sequence_in_batch: None, // position handles ordering; within-batch sequence is redundant.
+        role: map_chat_role(msg.chat_message.role.clone()),
+        content_json: pattern_db::Json(content_json),
+        content_preview: content_preview(&msg.chat_message),
+        batch_type: Some(batch_type),
+        source: None,
+        source_metadata: None,
+        is_archived: false,
+        is_deleted: false,
+        created_at,
+    })
+}
+
+/// Persist a slice of `pattern_core::Message`s to pattern_db via upsert.
+///
+/// Uses `upsert_message` for idempotency: if the same message would be
+/// inserted twice (e.g. restart + replay), the UNIQUE constraint on `id`
+/// is handled gracefully via ON CONFLICT DO UPDATE.
+async fn persist_messages(
+    db: &pattern_db::ConstellationDb,
+    messages: &[Message],
+    agent_id: &str,
+    batch_type: pattern_db::models::BatchType,
+    step_label: &str,
+) -> Result<(), RuntimeError> {
+    for msg in messages {
+        let db_msg = to_db_message(msg, agent_id, batch_type)?;
+        pattern_db::queries::upsert_message(db.pool(), &db_msg)
+            .await
+            .map_err(|e| RuntimeError::DatabasePersistenceFailed {
+                step: step_label.to_string(),
+                reason: e.to_string(),
+            })?;
+    }
+    Ok(())
+}
+
 // ---- drive_step — loop driver -------------------------------------------
 
-/// Drive one user-visible exchange: repeatedly call [`orchestrate`]
+/// Drive one user-visible exchange: repeatedly call `orchestrate`
 /// until `stop_reason.is_terminal()`, recording each turn's full
-/// round-trip (input + output) to [`TurnHistory`] and threading
-/// continuation turns via [`TurnInput::continuation`].
+/// round-trip (input + output) to `TurnHistory` and threading
+/// continuation turns via `TurnInput::continuation`.
 ///
-/// Called by [`crate::session::TidepoolSession::step`] as the main
+/// Called by `crate::session::TidepoolSession::step` as the main
 /// user-visible entry point. Preserves `batch_id` across all wire
 /// turns; mints a fresh `turn_id` per wire turn (via
 /// `TurnInput::continuation`).
 ///
-/// Returns a [`StepReply`] aggregating every wire turn's
-/// [`TurnOutput`].
+/// Returns a `StepReply` aggregating every wire turn's
+/// `TurnOutput`.
 ///
 /// [`TurnHistory`]: crate::memory::TurnHistory
 pub async fn drive_step(
@@ -819,6 +938,14 @@ pub async fn drive_step(
     }
 
     loop {
+        // Compaction gate: check whether the active context needs
+        // compression BEFORE composing the request. This ensures
+        // archived turns are removed from TurnHistory before the
+        // composer reads it for segment 2.
+        let compaction_outcome =
+            crate::compaction::maybe_compact(&ctx, &turn_history, ctx.context_policy()).await?;
+        tracing::debug!(?compaction_outcome, "compaction check");
+
         // Build the composed CompletionRequest for THIS wire turn:
         // segments 1 (system + persona + tools) / 2 (prior messages +
         // summary head + pseudo-messages) / 3 (current_state), then
@@ -966,10 +1093,40 @@ pub async fn drive_step(
         if let Ok(mut hist) = turn_history.lock() {
             hist.record(
                 pattern_core::types::ids::new_id(),
-                recorded_input,
+                recorded_input.clone(),
                 turn.clone(),
             );
         }
+
+        // ---- Persist messages to pattern_db ----
+        //
+        // Upsert every input + output message so the messages table has
+        // actual rows for compression to archive. Attachments are
+        // intentionally dropped (pattern_db has no attachment column;
+        // next session rebuilds snapshots from memory_blocks).
+        let batch_type = infer_batch_type(&recorded_input.origin);
+        let db = ctx.db();
+        let aid = ctx.agent_id();
+
+        // Input messages (from the caller's TurnInput).
+        persist_messages(
+            db,
+            &recorded_input.messages,
+            aid,
+            batch_type,
+            "upsert input messages",
+        )
+        .await?;
+
+        // Output messages (assistant reply + optional tool_result).
+        persist_messages(
+            db,
+            &turn.messages,
+            aid,
+            batch_type,
+            "upsert output messages",
+        )
+        .await?;
 
         turns.push(turn);
 
@@ -1060,14 +1217,13 @@ async fn compose_request_for_turn(
 
     // 2. Build system_blocks via the shaper. ShaperCompatMode is
     //    hardcoded to SubscriptionRoutingShape today — see function
-    //    doc for the rationale.
+    //    doc for the rationale. Persona's optional system_prompt
+    //    replaces DEFAULT_BASE_INSTRUCTIONS in slot[1] when set.
     let mode = default_shaper_mode();
-    let system_blocks = build_system_prompt(
-        mode,
-        pattern_core::DEFAULT_BASE_INSTRUCTIONS,
-        &persona_text,
-        &[],
-    );
+    let base_instructions = ctx
+        .system_prompt()
+        .unwrap_or(pattern_core::DEFAULT_BASE_INSTRUCTIONS);
+    let system_blocks = build_system_prompt(mode, base_instructions, &persona_text, &[]);
 
     // 3. Snapshot TurnHistory state. Holding the mutex across the
     //    persona-load await above would be a deadlock risk — we
@@ -1127,9 +1283,15 @@ async fn compose_request_for_turn(
         reason: format!("composer pipeline failed: {e}"),
     })?;
 
-    // 6. Enable capture flags on ChatOptions.
-    req.options = req
-        .options
+    // 6. Start from the persona's declared chat_options (temperature,
+    //    max_tokens, top_p, reasoning_effort, verbosity, seed,
+    //    stop_sequences, cache_control, prompt_cache_key, etc.) and layer
+    //    on streaming-capture flags. Composer previously started from
+    //    ChatOptions::default() which silently dropped all
+    //    persona-declared sampling knobs.
+    req.options = ctx
+        .chat_options()
+        .clone()
         .with_capture_usage(true)
         .with_capture_content(true)
         .with_capture_tool_calls(true)
@@ -1416,6 +1578,7 @@ fn build_assistant_message(
     Some(Message {
         chat_message,
         id: MessageId::from(new_id()),
+        position: pattern_core::types::ids::new_snowflake_id(),
         owner_id: AgentId::from(agent_id),
         created_at: Timestamp::now(),
         batch: batch_id,
@@ -1739,7 +1902,7 @@ mod tests {
     use crate::testing::{InMemoryMemoryStore, MockProviderClient};
     use pattern_core::ProviderClient;
     use pattern_core::traits::{MemoryStore, TurnSink, VecSink};
-    use pattern_core::types::ids::{BatchId, new_id};
+    use pattern_core::types::ids::{BatchId, new_id, new_snowflake_id};
     use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
     use pattern_core::types::snapshot::PersonaSnapshot;
 
@@ -1747,25 +1910,53 @@ mod tests {
     /// the given scripted turns. Returns `(ctx, vec_sink, provider)`.
     /// The provider is returned separately so tests can assert
     /// `call_count` post-run.
-    fn mock_session(
+    async fn mock_session(
         turns: Vec<Vec<genai::chat::ChatStreamEvent>>,
     ) -> (Arc<SessionContext>, Arc<VecSink>, Arc<MockProviderClient>) {
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
         let provider_concrete = Arc::new(MockProviderClient::with_turns(turns));
         let provider: Arc<dyn ProviderClient> = provider_concrete.clone();
+        let db = crate::testing::test_db().await;
+        // Create the agent row so the FK on messages.agent_id is satisfied
+        // when drive_step persists messages.
+        create_test_agent_row(&db, "agent-a").await;
         let sink = Arc::new(VecSink::new());
         let sink_dyn: Arc<dyn TurnSink> = sink.clone();
         let persona = PersonaSnapshot::new("agent-a", "A");
         let ctx = Arc::new(
-            SessionContext::from_persona(&persona, store, provider).with_turn_sink(sink_dyn),
+            SessionContext::from_persona(&persona, store, provider, db).with_turn_sink(sink_dyn),
         );
         (ctx, sink, provider_concrete)
     }
 
+    /// Insert a minimal agent row to satisfy the FK constraint on
+    /// `messages.agent_id`.
+    async fn create_test_agent_row(db: &pattern_db::ConstellationDb, id: &str) {
+        let agent = pattern_db::models::Agent {
+            id: id.to_string(),
+            name: "Test".to_string(),
+            description: None,
+            model_provider: "test".to_string(),
+            model_name: "test-model".to_string(),
+            system_prompt: "test".to_string(),
+            config: pattern_db::Json(serde_json::json!({})),
+            enabled_tools: pattern_db::Json(vec![]),
+            tool_rules: None,
+            status: pattern_db::models::AgentStatus::Active,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        pattern_db::queries::create_agent(db.pool(), &agent)
+            .await
+            .expect("create_test_agent_row");
+    }
+
     fn test_turn_input() -> TurnInput {
+        // Fresh batch start: turn_id == batch_id (first turn IS the batch).
+        let id = new_snowflake_id();
         TurnInput {
-            turn_id: new_id(),
-            batch_id: BatchId::from(new_id()),
+            turn_id: id.clone(),
+            batch_id: BatchId::from(id),
             origin: MessageOrigin::new(
                 Author::System {
                     reason: SystemReason::Wakeup,
@@ -1787,7 +1978,7 @@ mod tests {
     #[tokio::test]
     async fn orchestrate_text_only_turn_produces_end_turn_output() {
         let (ctx, sink, provider) =
-            mock_session(vec![MockProviderClient::text_turn("Hello, world!")]);
+            mock_session(vec![MockProviderClient::text_turn("Hello, world!")]).await;
 
         let dispatcher = NoOpDispatcher;
         let out = orchestrate(
@@ -1828,7 +2019,8 @@ mod tests {
         let (ctx, sink, _) = mock_session(vec![MockProviderClient::thinking_then_text_turn(
             "The user asks about weather...",
             "It's sunny today.",
-        )]);
+        )])
+        .await;
 
         let dispatcher = NoOpDispatcher;
         let out = orchestrate(
@@ -1887,7 +2079,8 @@ mod tests {
             "toolu_01",
             "code",
             serde_json::json!({"code": "put \"notes\" \"hi\""}),
-        )]);
+        )])
+        .await;
 
         let dispatcher = MockSuccessDispatcher::default();
         let out = orchestrate(
@@ -1953,7 +2146,8 @@ mod tests {
             ),
             // Wire turn 2: final answer
             MockProviderClient::text_turn("I ran your code."),
-        ]);
+        ])
+        .await;
 
         let dispatcher = MockSuccessDispatcher::default();
         let reply = drive_step(
@@ -2032,7 +2226,8 @@ mod tests {
         let (ctx, _sink, _provider) = mock_session(vec![MockProviderClient::text_turn_with_usage(
             "cached response",
             cache_usage,
-        )]);
+        )])
+        .await;
 
         let dispatcher = NoOpDispatcher;
         let out = orchestrate(
@@ -2082,7 +2277,7 @@ mod tests {
             }),
         ];
 
-        let (ctx, _sink, _) = mock_session(vec![no_usage_turn]);
+        let (ctx, _sink, _) = mock_session(vec![no_usage_turn]).await;
         let dispatcher = NoOpDispatcher;
         let out = orchestrate(
             simple_req(),
@@ -2119,7 +2314,8 @@ mod tests {
         let (ctx, _sink, _) = mock_session(vec![MockProviderClient::text_turn_with_usage(
             "fresh response",
             fresh_usage,
-        )]);
+        )])
+        .await;
         let dispatcher = NoOpDispatcher;
         let out = orchestrate(
             simple_req(),
@@ -2162,7 +2358,8 @@ mod tests {
         let (ctx, _sink, _) = mock_session(vec![MockProviderClient::text_turn_with_usage(
             "segment 1 busted",
             fresh_usage,
-        )]);
+        )])
+        .await;
 
         let dispatcher = NoOpDispatcher;
         let out = orchestrate(
@@ -2207,7 +2404,8 @@ mod tests {
         let (ctx, _sink, _) = mock_session(vec![MockProviderClient::text_turn_with_usage(
             "cache hit response",
             cache_usage,
-        )]);
+        )])
+        .await;
 
         let dispatcher = NoOpDispatcher;
         let _out = orchestrate(
@@ -2248,7 +2446,8 @@ mod tests {
                 serde_json::json!({"code": "broken haskell"}),
             ),
             MockProviderClient::text_turn("Sorry, my code was broken."),
-        ]);
+        ])
+        .await;
 
         let dispatcher = ErrorDispatcher;
         let reply = drive_step(
@@ -2318,16 +2517,20 @@ mod tests {
                 serde_json::json!({"code": "pure ()"}),
             ),
             MockProviderClient::text_turn("All done."),
-        ]);
+        ])
+        .await;
 
+        // Fresh batch: batch_id = turn_id = first message's batch, all the same snowflake.
+        let batch_snowflake = new_snowflake_id();
         let user_msg = {
-            use pattern_core::types::ids::{AgentId, BatchId, MessageId};
+            use pattern_core::types::ids::{AgentId, MessageId};
             Message {
                 chat_message: genai::chat::ChatMessage::user("check on me"),
                 id: MessageId::from(new_id()),
+                position: new_snowflake_id(),
                 owner_id: AgentId::from("agent-a"),
                 created_at: jiff::Timestamp::now(),
-                batch: BatchId::from(new_id()),
+                batch: batch_snowflake.clone(),
                 response_meta: None,
                 block_refs: vec![],
                 attachments: vec![],
@@ -2338,8 +2541,8 @@ mod tests {
         let initial_input = {
             use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
             TurnInput {
-                turn_id: new_id(),
-                batch_id: BatchId::from(new_id()),
+                turn_id: batch_snowflake.clone(),
+                batch_id: BatchId::from(batch_snowflake.clone()),
                 origin: MessageOrigin::new(
                     Author::System {
                         reason: SystemReason::Wakeup,
@@ -2471,7 +2674,8 @@ mod tests {
                 serde_json::json!({"code": "pure ()"}),
             ),
             MockProviderClient::text_turn("Done."),
-        ]);
+        ])
+        .await;
 
         let turn_history = Arc::new(std::sync::Mutex::new(crate::memory::TurnHistory::empty()));
         let dispatcher = MockSuccessDispatcher::default();

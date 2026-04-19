@@ -181,8 +181,8 @@ fn spawn_stub_reports_not_implemented_hang_free() {
     );
 }
 
-#[test]
-fn message_stub_reports_ask_candidate_for_removal_hang_free() {
+#[tokio::test]
+async fn message_stub_reports_ask_candidate_for_removal_hang_free() {
     preflight_or_fail();
     // Task 20 part 3 wired Send/Reply/Notify to the router registry, so
     // they're no longer stubs. `Ask` remains — stubbed as
@@ -205,8 +205,9 @@ fn message_stub_reports_ask_candidate_for_removal_hang_free() {
 
     let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
     let provider: Arc<dyn ProviderClient> = Arc::new(NopProviderClient);
+    let db = pattern_runtime::testing::test_db().await;
     let persona = PersonaSnapshot::new("agent-a", "A");
-    let ctx = SessionContext::from_persona(&persona, store, provider);
+    let ctx = SessionContext::from_persona(&persona, store, provider, db);
 
     run_stub_case!(
         "message_stub",

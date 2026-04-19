@@ -11,11 +11,16 @@
 
 use std::collections::VecDeque;
 
+use genai::chat::ChatRole;
+use jiff::Timestamp;
 use pattern_core::types::block::BlockWrite;
-use pattern_core::types::ids::BatchId;
+use pattern_core::types::ids::{AgentId, BatchId, MessageId, new_snowflake_id};
 use pattern_core::types::message::Message;
-use pattern_core::types::turn::{TurnId, TurnInput, TurnOutput};
-use pattern_db::models::ArchiveSummary;
+use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
+use pattern_core::types::provider::ToolCall;
+use pattern_core::types::turn::{StopReason, TurnId, TurnInput, TurnOutput};
+use pattern_db::models::{ArchiveSummary, BatchType};
+use smol_str::SmolStr;
 
 /// Pairs a turn's id with its full round-trip for session-retained in-memory history.
 ///
@@ -76,21 +81,77 @@ impl TurnHistory {
         }
     }
 
-    /// Load cached summary-head from pattern_db for this agent.
-    /// Uses `pattern_db::queries::message::get_summary_head` to
-    /// produce one entry per depth level, chronologically ordered.
+    /// Load cached summary-head and reconstruct active turns from pattern_db.
+    ///
+    /// 1. Loads summary_head (one entry per depth level).
+    /// 2. Queries non-archived messages ordered by position.
+    /// 3. Converts each `pattern_db::models::Message` back to a
+    ///    `pattern_core::types::message::Message`.
+    /// 4. Groups by batch_id, runs turn-boundary detection per batch.
+    /// 5. Populates `active` with reconstructed `TurnRecord`s.
+    /// 6. Initialises `estimated_tokens` from the reconstructed outputs.
     pub async fn load(
         db: &pattern_db::ConstellationDb,
         agent_id: &str,
     ) -> Result<Self, pattern_db::error::DbError> {
         let summary_head = pattern_db::queries::get_summary_head(db.pool(), agent_id).await?;
+
+        // Query non-archived messages. The query returns DESC order; we
+        // reverse to get chronological (ASC by position) order.
+        // Use a generous limit to fetch all active messages.
+        let mut db_messages =
+            pattern_db::queries::get_messages(db.pool(), agent_id, i64::MAX).await?;
+        db_messages.reverse();
+
+        // Convert DB messages to core messages.
+        let core_messages: Vec<Message> = db_messages
+            .iter()
+            .map(db_message_to_core)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Group by batch_id, maintaining position order within each batch.
+        // Use a stable partition: walk messages in order, collecting into
+        // per-batch buckets.
+        let batches = group_by_batch(core_messages);
+
+        // Build TurnRecords from each batch group.
+        let mut active = VecDeque::new();
+        // Also track batch_type per batch_id from the DB messages for
+        // origin inference.
+        let batch_types: std::collections::HashMap<String, BatchType> = db_messages
+            .iter()
+            .filter_map(|m| {
+                let bid = m.batch_id.as_ref()?;
+                let bt = m.batch_type?;
+                Some((bid.clone(), bt))
+            })
+            .collect();
+
+        for (batch_id, msgs) in &batches {
+            let batch_type = batch_types
+                .get(batch_id.as_str())
+                .copied()
+                .unwrap_or(BatchType::UserRequest);
+            let records = build_turn_records_from_batch(batch_id.clone(), msgs.clone(), batch_type);
+            active.extend(records);
+        }
+
+        // Estimate tokens from reconstructed outputs.
+        let estimated_tokens: u64 = active
+            .iter()
+            .map(|tr| estimate_turn_tokens(&tr.output))
+            .sum();
+
+        // Set most_recent_batch_id from the last record.
+        let most_recent_batch_id = active.back().map(|tr| tr.input.batch_id.clone());
+
         Ok(Self {
-            active: VecDeque::new(),
+            active,
             summary_head,
-            estimated_tokens: 0,
+            estimated_tokens,
             batches_since_last_full: 0,
             post_compaction_pending: false,
-            most_recent_batch_id: None,
+            most_recent_batch_id,
         })
     }
 
@@ -246,6 +307,258 @@ impl TurnHistory {
     }
 }
 
+// ---- Turn history restoration helpers ------------------------------------
+
+/// Convert a `pattern_db::models::Message` back to a `pattern_core::types::message::Message`.
+///
+/// Reverses the `to_db_message` conversion in `agent_loop.rs`:
+/// - `content_json` is deserialized back to `genai::chat::ChatMessage`.
+/// - `created_at` is converted from `chrono::DateTime<Utc>` to `jiff::Timestamp`.
+/// - Fields not stored in the DB (`response_meta`, `block_refs`, `attachments`)
+///   are defaulted to empty/None.
+fn db_message_to_core(
+    db_msg: &pattern_db::models::Message,
+) -> Result<Message, pattern_db::error::DbError> {
+    // Deserialize the ChatMessage from the stored JSON value.
+    let chat_message: genai::chat::ChatMessage =
+        serde_json::from_value(db_msg.content_json.0.clone())?;
+
+    // Convert chrono::DateTime<Utc> → jiff::Timestamp.
+    // Reverse of the forward path: epoch_nanos = secs * 1e9 + nanos.
+    let secs = db_msg.created_at.timestamp();
+    let nanos = db_msg.created_at.timestamp_subsec_nanos() as i64;
+    let epoch_nanos: i128 = (secs as i128) * 1_000_000_000 + (nanos as i128);
+    let created_at = Timestamp::from_nanosecond(epoch_nanos).unwrap_or_else(|_| Timestamp::now());
+
+    let batch = db_msg
+        .batch_id
+        .as_deref()
+        .map(SmolStr::new)
+        .unwrap_or_else(|| SmolStr::new("unknown"));
+
+    Ok(Message {
+        chat_message,
+        id: MessageId::from(db_msg.id.as_str()),
+        position: SmolStr::from(db_msg.position.as_str()),
+        owner_id: AgentId::from(db_msg.agent_id.as_str()),
+        created_at,
+        batch: BatchId::from(batch),
+        response_meta: None,
+        block_refs: Vec::new(),
+        attachments: Vec::new(),
+    })
+}
+
+/// Group messages by batch_id, preserving position order within each batch.
+///
+/// Returns a `Vec<(BatchId, Vec<Message>)>` in the order the first message
+/// of each batch appears. Messages with no batch_id are placed in a
+/// synthetic "unknown" batch.
+fn group_by_batch(messages: Vec<Message>) -> Vec<(BatchId, Vec<Message>)> {
+    let mut batch_order: Vec<BatchId> = Vec::new();
+    let mut groups: std::collections::HashMap<BatchId, Vec<Message>> =
+        std::collections::HashMap::new();
+
+    for msg in messages {
+        let bid = msg.batch.clone();
+        groups.entry(bid.clone()).or_default().push(msg);
+        if !batch_order.contains(&bid) {
+            batch_order.push(bid);
+        }
+    }
+
+    batch_order
+        .into_iter()
+        .filter_map(|bid| {
+            let msgs = groups.remove(&bid)?;
+            Some((bid, msgs))
+        })
+        .collect()
+}
+
+/// Infer a `MessageOrigin` from a `pattern_db::models::BatchType`.
+///
+/// Inverse of `infer_batch_type` in `agent_loop.rs`. Since the DB doesn't
+/// store the full author identity, we reconstruct a plausible default:
+/// - `UserRequest` → Partner author (system sphere for simplicity).
+/// - `SystemTrigger` → System/Wakeup.
+/// - `Continuation` → System/ToolCall.
+/// - `AgentToAgent` → Agent author with unknown agent_id.
+fn infer_origin_from_batch_type(batch_type: BatchType) -> MessageOrigin {
+    match batch_type {
+        BatchType::UserRequest => MessageOrigin::new(
+            Author::System {
+                reason: SystemReason::Wakeup,
+            },
+            Sphere::System,
+        ),
+        BatchType::SystemTrigger => MessageOrigin::new(
+            Author::System {
+                reason: SystemReason::Wakeup,
+            },
+            Sphere::System,
+        ),
+        BatchType::Continuation => MessageOrigin::new(
+            Author::System {
+                reason: SystemReason::ToolCall,
+            },
+            Sphere::System,
+        ),
+        BatchType::AgentToAgent => MessageOrigin::new(
+            Author::Agent(pattern_core::types::origin::AgentAuthor {
+                agent_id: AgentId::from("unknown"),
+            }),
+            Sphere::Internal,
+        ),
+    }
+}
+
+/// Infer `StopReason` from the output messages of a reconstructed turn.
+///
+/// If any message has `ChatRole::Tool`, the turn ended with a tool call
+/// (the tool_result message bundles with the prior assistant message).
+/// Otherwise, it's a terminal `EndTurn`.
+fn infer_stop_reason(output_msgs: &[Message]) -> StopReason {
+    if output_msgs
+        .iter()
+        .any(|m| m.chat_message.role == ChatRole::Tool)
+    {
+        StopReason::ToolUse
+    } else {
+        StopReason::EndTurn
+    }
+}
+
+/// Extract `ToolCall` entries from an assistant message's content parts.
+///
+/// Walks `ContentPart::ToolCall` variants in the message's content and
+/// clones them into a vec. Returns empty for non-assistant or text-only
+/// messages.
+fn infer_tool_calls(msg: &Message) -> Vec<ToolCall> {
+    msg.chat_message
+        .content
+        .parts()
+        .iter()
+        .filter_map(|part| part.as_tool_call().cloned())
+        .collect()
+}
+
+/// Run the turn-boundary detection algorithm on a batch of messages
+/// (already ordered by position) to produce `TurnRecord`s.
+///
+/// Algorithm: walk messages in position order, accumulating input
+/// (user/system) and output (assistant/tool) buffers. Boundary triggers:
+/// - User/System role while already in output mode → close current turn,
+///   start new input buffer.
+/// - Assistant role while output buffer is non-empty → close current
+///   turn as continuation (empty input), start new output.
+/// - Tool role → always appends to output (bundles with prior assistant).
+///
+/// At end of batch: flush remaining buffers as one final `TurnRecord`.
+fn build_turn_records_from_batch(
+    batch_id: BatchId,
+    msgs: Vec<Message>,
+    batch_type: BatchType,
+) -> Vec<TurnRecord> {
+    let mut records = Vec::new();
+    let mut current_input: Vec<Message> = Vec::new();
+    let mut current_output: Vec<Message> = Vec::new();
+    let mut in_output = false;
+
+    let origin = infer_origin_from_batch_type(batch_type);
+
+    for msg in msgs {
+        match msg.chat_message.role {
+            ChatRole::User | ChatRole::System => {
+                if in_output {
+                    // Close the previous turn.
+                    records.push(flush_turn_record(
+                        &batch_id,
+                        &origin,
+                        std::mem::take(&mut current_input),
+                        std::mem::take(&mut current_output),
+                    ));
+                    in_output = false;
+                }
+                current_input.push(msg);
+            }
+            ChatRole::Assistant => {
+                if in_output && !current_output.is_empty() {
+                    // Close the previous turn; this assistant message starts
+                    // a continuation turn (empty input).
+                    records.push(flush_turn_record(
+                        &batch_id,
+                        &origin,
+                        std::mem::take(&mut current_input),
+                        std::mem::take(&mut current_output),
+                    ));
+                    // Continuation: input stays empty.
+                }
+                current_output.push(msg);
+                in_output = true;
+            }
+            ChatRole::Tool => {
+                // Tool results bundle with the prior assistant output.
+                current_output.push(msg);
+            }
+        }
+    }
+
+    // Flush any remaining buffers.
+    if !current_input.is_empty() || !current_output.is_empty() {
+        records.push(flush_turn_record(
+            &batch_id,
+            &origin,
+            current_input,
+            current_output,
+        ));
+    }
+
+    records
+}
+
+/// Build a synthetic `TurnRecord` from accumulated input/output buffers.
+fn flush_turn_record(
+    batch_id: &BatchId,
+    origin: &MessageOrigin,
+    input_msgs: Vec<Message>,
+    output_msgs: Vec<Message>,
+) -> TurnRecord {
+    let turn_id = new_snowflake_id();
+    let stop_reason = infer_stop_reason(&output_msgs);
+
+    // Collect tool_calls from assistant messages in the output.
+    let tool_calls: Vec<ToolCall> = output_msgs
+        .iter()
+        .filter(|m| m.chat_message.role == ChatRole::Assistant)
+        .flat_map(infer_tool_calls)
+        .collect();
+
+    let completed_at = output_msgs
+        .last()
+        .map(|m| m.created_at)
+        .unwrap_or_else(Timestamp::now);
+
+    TurnRecord {
+        turn_id: turn_id.clone(),
+        input: TurnInput {
+            turn_id: turn_id.clone(),
+            batch_id: batch_id.clone(),
+            origin: origin.clone(),
+            messages: input_msgs,
+        },
+        output: TurnOutput {
+            messages: output_msgs,
+            block_writes: Vec::new(),
+            tool_calls,
+            stop_reason,
+            usage: None,
+            cache_metrics: Default::default(),
+            completed_at,
+        },
+    }
+}
+
 /// Heuristic per-turn token estimate used when real counts aren't
 /// available. Rough `chars / 4` on message text plus a small flat
 /// overhead per turn. Callers don't see the heuristic; it's internal
@@ -270,7 +583,7 @@ mod tests {
     use super::*;
     use jiff::Timestamp;
     use pattern_core::types::block::BlockWriteKind;
-    use pattern_core::types::ids::new_id;
+    use pattern_core::types::ids::{new_id, new_snowflake_id};
     use pattern_core::types::origin::{AgentAuthor, Author};
     use smol_str::SmolStr;
 
@@ -281,9 +594,10 @@ mod tests {
                 .map(|i| Message {
                     chat_message: genai::chat::ChatMessage::user(format!("msg {i}")),
                     id: new_id(),
+                    position: new_snowflake_id(),
                     owner_id: SmolStr::new("agent-a"),
                     created_at: Timestamp::now(),
-                    batch: new_id(),
+                    batch: new_snowflake_id(),
                     response_meta: None,
                     block_refs: vec![],
                     attachments: vec![],
@@ -304,8 +618,8 @@ mod tests {
     fn make_turn_input_empty() -> TurnInput {
         use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
         TurnInput {
-            turn_id: new_id(),
-            batch_id: new_id(),
+            turn_id: new_snowflake_id(),
+            batch_id: new_snowflake_id(),
             origin: MessageOrigin::new(
                 Author::System {
                     reason: SystemReason::Wakeup,
@@ -357,6 +671,7 @@ mod tests {
         let make_msg = |text: &str, role: genai::chat::ChatRole| Message {
             chat_message: genai::chat::ChatMessage::new(role, text.to_string()),
             id: new_id(),
+            position: new_snowflake_id(),
             owner_id: SmolStr::new("agent-a"),
             created_at: Timestamp::now(),
             batch: batch.clone(),
@@ -369,7 +684,7 @@ mod tests {
         let assistant_msg = make_msg("agent replies", genai::chat::ChatRole::Assistant);
 
         let input = TurnInput {
-            turn_id: new_id(),
+            turn_id: new_snowflake_id(),
             batch_id: batch.clone(),
             origin: MessageOrigin::new(
                 Author::System {
@@ -530,7 +845,7 @@ mod tests {
     fn make_turn_input_with_batch(batch_id: &str) -> TurnInput {
         use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
         TurnInput {
-            turn_id: new_id(),
+            turn_id: new_snowflake_id(),
             batch_id: SmolStr::new(batch_id),
             origin: MessageOrigin::new(
                 Author::System {

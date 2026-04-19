@@ -1,5 +1,6 @@
-//! Persona snapshot — unified type consumed by [`AgentRuntime::open_session`]
-//! and returned by `Session::checkpoint`.
+//! Persona snapshot — unified type consumed by
+//! [`crate::traits::AgentRuntime::open_session`] and returned by
+//! `Session::checkpoint`.
 //!
 //! Earlier drafts of the foundation plan distinguished `PersonaConfig`
 //! (spawn-time) from `PersonaSnapshot` (restore-time). In practice both
@@ -59,6 +60,7 @@ use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
 use crate::memory::{BlockSchema, MemoryPermission, MemoryType};
+use crate::types::compression::CompressionStrategy;
 use crate::types::ids::{AgentId, MemoryId};
 use crate::types::message::SnapshotPolicy;
 use crate::types::turn::TurnId;
@@ -108,7 +110,6 @@ pub struct PersonaSnapshot {
     pub schema_version: u32,
 
     // -- Content ---------------------------------------------------------
-
     /// Slot \[1\] content override. When `Some`, replaces
     /// [`pattern_provider`]'s `DEFAULT_BASE_INSTRUCTIONS` in the
     /// three-segment cache layout's base-instructions slot. Cache-friendly
@@ -126,7 +127,6 @@ pub struct PersonaSnapshot {
     pub memory_blocks: HashMap<SmolStr, MemoryBlockSpec>,
 
     // -- Runtime policy --------------------------------------------------
-
     /// Which model the runtime should dial per request, plus sampling
     /// and reasoning parameters.
     #[serde(default)]
@@ -153,7 +153,6 @@ pub struct PersonaSnapshot {
     pub enabled_tools: Option<Vec<SmolStr>>,
 
     // -- Escape hatch ----------------------------------------------------
-
     /// Free-form extra metadata that hasn't earned a first-class field
     /// yet. Intended for experiments and plugin-scope configuration.
     /// Should not be load-bearing for foundation code paths.
@@ -476,16 +475,27 @@ pub struct OpenAIOverrides {}
 #[non_exhaustive]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ContextPolicy {
-    /// Hard cap on the number of messages retained before compression
-    /// fires. `None` = use runtime default.
+    /// Compression strategy applied when `should_compress` gate fires.
+    /// `None` = compression disabled for this persona (no archival fires
+    /// regardless of context growth). Most persona configurations should
+    /// opt in explicitly; `CompressionStrategy::default()` is
+    /// `RecursiveSummarization` with sensible chunking.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_messages_before_compress: Option<usize>,
+    pub compression: Option<CompressionStrategy>,
 
-    /// Named compression strategy + optional params. The runtime
-    /// resolves the name to a concrete strategy at session open;
-    /// unrecognized names produce an error.
+    /// Cheap short-circuit floor: don't even call `should_compress` until
+    /// the active turn record count reaches this value. Avoids spamming
+    /// `count_tokens` on every early-session turn when history is tiny.
+    /// `None` = use runtime default (100 turns).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compression: Option<CompressionChoice>,
+    pub compress_check_message_floor: Option<usize>,
+
+    /// Real compression gate: when `count_tokens` reports active-context
+    /// tokens above this threshold, the strategy fires. `None` = runtime
+    /// derives a default from the model's advertised context window
+    /// (minus `max_tokens` output reserve minus a safety buffer).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compress_token_threshold: Option<usize>,
 
     /// Snapshot selection and mid-batch delta behaviour (Phase 5's
     /// [`SnapshotPolicy`]).
@@ -493,15 +503,24 @@ pub struct ContextPolicy {
     pub snapshot_policy: SnapshotPolicy,
 }
 
-/// Reference to a named compression strategy defined by the runtime.
-/// Keeps `pattern_core` free of the concrete strategy types (they live
-/// in `pattern_provider`). The runtime looks up `name` and applies
-/// `params` at session open.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompressionChoice {
-    pub name: SmolStr,
-    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
-    pub params: serde_json::Value,
+impl ContextPolicy {
+    /// Set the compression strategy. Builder-style.
+    pub fn with_compression(mut self, compression: Option<CompressionStrategy>) -> Self {
+        self.compression = compression;
+        self
+    }
+
+    /// Set the message floor for the compression gate. Builder-style.
+    pub fn with_message_floor(mut self, floor: usize) -> Self {
+        self.compress_check_message_floor = Some(floor);
+        self
+    }
+
+    /// Set the token threshold for the compression gate. Builder-style.
+    pub fn with_token_threshold(mut self, threshold: usize) -> Self {
+        self.compress_token_threshold = Some(threshold);
+        self
+    }
 }
 
 // ==========================================================================
@@ -647,7 +666,10 @@ mod tests {
         let json = serde_json::to_string(&snap).unwrap();
         let parsed: PersonaSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.agent_id, snap.agent_id);
-        assert_eq!(parsed.system_prompt.as_deref(), Some("you are a helpful assistant"));
+        assert_eq!(
+            parsed.system_prompt.as_deref(),
+            Some("you are a helpful assistant")
+        );
         assert_eq!(parsed.memory_blocks.len(), 1);
         assert_eq!(parsed.budgets.wall_ms, Some(10_000));
     }

@@ -402,6 +402,33 @@ pub enum RuntimeError {
     #[diagnostic(code(pattern_core::runtime::watchdog_failure))]
     WatchdogFailure,
 
+    /// Failed to persist a message or turn-level record to pattern_db.
+    ///
+    /// Produced by the agent loop when `upsert_message` fails during
+    /// post-turn message persistence. The `step` field identifies which
+    /// persistence phase failed for diagnostics.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::RuntimeError;
+    ///
+    /// let err = RuntimeError::DatabasePersistenceFailed {
+    ///     step: "upsert input messages".to_string(),
+    ///     reason: "UNIQUE constraint failed".to_string(),
+    /// };
+    /// assert!(err.to_string().contains("upsert input messages"));
+    /// ```
+    #[error("database persistence failed at {step}: {reason}")]
+    #[diagnostic(code(pattern_core::runtime::database_persistence_failed))]
+    DatabasePersistenceFailed {
+        /// Which persistence step failed (e.g. "upsert input messages",
+        /// "upsert output messages").
+        step: String,
+        /// Human-readable description of the database error.
+        reason: String,
+    },
+
     /// An SDK effect handler reported a failure during turn execution.
     ///
     /// Produced when a handler returns `EffectError::Handler(...)` (or any

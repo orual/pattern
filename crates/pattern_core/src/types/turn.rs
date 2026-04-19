@@ -18,21 +18,20 @@
 //!
 //! # Multi-turn tool-use round-trips
 //!
-//! [`TurnHistory`] stores both the input and output for each turn as a
-//! [`TurnRecord`], so the full conversational round-trip is preserved: user
-//! message → assistant reply → tool_result. On a tool-use turn, `orchestrate`
-//! synthesises a `ChatRole::Tool` message from the dispatched results and
-//! appends it to `TurnOutput.messages`. Continuation turns are built via
-//! [`TurnInput::continuation`] with empty `messages`; the prior turn's
-//! tool_result message lives in history and is replayed by the composer.
-//!
-//! [`TurnHistory`]: crate::memory
+//! `TurnHistory` (in `pattern_runtime`) stores both the input and output
+//! for each turn as a `TurnRecord`, so the full conversational round-trip
+//! is preserved: user message → assistant reply → tool_result. On a
+//! tool-use turn, `orchestrate` synthesises a `ChatRole::Tool` message
+//! from the dispatched results and appends it to `TurnOutput.messages`.
+//! Continuation turns are built via [`TurnInput::continuation`] with
+//! empty `messages`; the prior turn's tool_result message lives in
+//! history and is replayed by the composer.
 
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::types::block::BlockWrite;
-use crate::types::ids::{BatchId, new_id};
+use crate::types::ids::{BatchId, new_snowflake_id};
 use crate::types::message::Message;
 use crate::types::origin::MessageOrigin;
 use crate::types::provider::{ToolCall, ToolOutcome, ToolResult};
@@ -48,8 +47,9 @@ pub use crate::types::ids::TurnId;
 /// first wire turn's input carries the caller's messages, and each
 /// subsequent wire turn is a continuation (via [`TurnInput::continuation`])
 /// with empty `messages`. The prior turn's assistant reply and tool_result
-/// message already live in [`TurnHistory`] and are replayed by the composer's
-/// Segment 2 pass; no new messages are needed on the continuation input.
+/// message already live in `TurnHistory` (in `pattern_runtime`) and are
+/// replayed by the composer's Segment 2 pass; no new messages are needed
+/// on the continuation input.
 ///
 /// All wire turns within a single `Session::step` share the same
 /// [`BatchId`]. Each gets a freshly-minted [`TurnId`] at construction.
@@ -57,20 +57,24 @@ pub use crate::types::ids::TurnId;
 /// # Examples
 ///
 /// ```
-/// use pattern_core::types::ids::{new_id, BatchId};
+/// use pattern_core::types::ids::{new_snowflake_id, BatchId};
 /// use pattern_core::types::turn::TurnInput;
 /// use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
 ///
+/// // Fresh-batch start: turn_id == batch_id (first turn IS the batch).
+/// let id = new_snowflake_id();
 /// let input = TurnInput {
-///     turn_id: new_id(),
-///     batch_id: BatchId::from(new_id()),
+///     turn_id: id.clone(),
+///     batch_id: BatchId::from(id),
 ///     origin: MessageOrigin::new(
 ///         Author::System { reason: SystemReason::Wakeup },
 ///         Sphere::System,
 ///     ),
 ///     messages: vec![],
 /// };
-/// assert_eq!(input.turn_id.len(), 32);
+/// // Fresh-batch: turn_id and batch_id are the same snowflake.
+/// assert_eq!(input.turn_id, input.batch_id);
+/// assert!(input.messages.is_empty());
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnInput {
@@ -105,10 +109,10 @@ impl TurnInput {
     /// # Examples
     ///
     /// ```
-    /// use pattern_core::types::ids::{new_id, AgentId, BatchId};
+    /// use pattern_core::types::ids::{new_snowflake_id, AgentId, BatchId};
     /// use pattern_core::types::turn::TurnInput;
     ///
-    /// let batch = BatchId::from(new_id());
+    /// let batch = BatchId::from(new_snowflake_id());
     /// let next = TurnInput::continuation(batch.clone(), AgentId::from("agent-a"));
     /// assert_eq!(next.batch_id, batch);
     /// assert!(next.messages.is_empty(), "continuation carries no fresh messages");
@@ -125,7 +129,7 @@ impl TurnInput {
         );
 
         Self {
-            turn_id: new_id(),
+            turn_id: new_snowflake_id(),
             batch_id,
             origin,
             messages: Vec::new(), // empty — continuation content is in history
@@ -649,7 +653,7 @@ mod step_reply_tests {
 
     #[test]
     fn all_messages_iterates_in_order_across_turns() {
-        use crate::types::ids::{AgentId, BatchId, MessageId, new_id};
+        use crate::types::ids::{AgentId, BatchId, MessageId, new_id, new_snowflake_id};
 
         fn make_msg(text: &str, batch: &BatchId) -> Message {
             Message {
@@ -658,6 +662,7 @@ mod step_reply_tests {
                     text.to_string(),
                 ),
                 id: MessageId::from(new_id()),
+                position: new_snowflake_id(),
                 owner_id: AgentId::from("agent-a"),
                 created_at: Timestamp::now(),
                 batch: batch.clone(),
@@ -667,7 +672,7 @@ mod step_reply_tests {
             }
         }
 
-        let batch = BatchId::from(new_id());
+        let batch = BatchId::from(new_snowflake_id());
         let mut t1 = make_turn(StopReason::ToolUse);
         t1.messages.push(make_msg("first", &batch));
         let mut t2 = make_turn(StopReason::EndTurn);
@@ -689,15 +694,16 @@ mod step_reply_tests {
 
     #[test]
     fn final_text_joins_assistant_messages() {
-        use crate::types::ids::{AgentId, BatchId, MessageId, new_id};
+        use crate::types::ids::{AgentId, BatchId, MessageId, new_id, new_snowflake_id};
 
-        let batch = BatchId::from(new_id());
+        let batch = BatchId::from(new_snowflake_id());
         let make_assistant = |text: &str| Message {
             chat_message: genai::chat::ChatMessage::new(
                 genai::chat::ChatRole::Assistant,
                 text.to_string(),
             ),
             id: MessageId::from(new_id()),
+            position: new_snowflake_id(),
             owner_id: AgentId::from("agent-a"),
             created_at: Timestamp::now(),
             batch: batch.clone(),
@@ -711,6 +717,7 @@ mod step_reply_tests {
                 "tool noise".to_string(),
             ),
             id: MessageId::from(new_id()),
+            position: new_snowflake_id(),
             owner_id: AgentId::from("agent-a"),
             created_at: Timestamp::now(),
             batch: batch.clone(),

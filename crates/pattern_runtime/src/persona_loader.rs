@@ -1,7 +1,8 @@
 //! Persona TOML loader for `pattern-test-cli`.
 //!
-//! Reads a `.toml` file on disk and converts it into a [`PersonaSnapshot`]
-//! ready to hand to [`TidepoolSession::open_with_agent_loop`].
+//! Reads a `.toml` file on disk and converts it into a `PersonaSnapshot`
+//! (from `pattern_core::types::agent`) ready to hand to the
+//! `open_with_agent_loop` method of `TidepoolSession` (from `crate::session`).
 //!
 //! ## TOML schema
 //!
@@ -22,7 +23,13 @@
 //! # reasoning_effort = "medium"   # None | Low | Medium | High | XHigh | Max
 //!
 //! [context]
-//! max_messages_before_compress = 40
+//! compress_check_message_floor = 50
+//! compress_token_threshold     = 150_000
+//!
+//! [context.compression]
+//! type                 = "recursive_summarization"
+//! chunk_size           = 20
+//! summarization_model  = "claude-haiku-4-5"
 //!
 //! [budgets]
 //! wall_ms = 30_000
@@ -51,6 +58,7 @@ use genai::adapter::AdapterKind;
 use genai::chat::{ChatOptions, ReasoningEffort};
 use miette::Diagnostic;
 use pattern_core::memory::{MemoryPermission, MemoryType};
+use pattern_core::types::compression::CompressionStrategy;
 use pattern_core::types::snapshot::{
     ContextPolicy, MemoryBlockSpec, ModelChoice, ModelSpec, PersonaSnapshot,
 };
@@ -143,12 +151,16 @@ fn load_persona_inner(path: &Path) -> Result<PersonaSnapshot, PersonaLoadError> 
     let path_str = path.display().to_string();
 
     // Read raw bytes.
-    let raw =
-        std::fs::read_to_string(path).map_err(|e| PersonaLoadError::Io { path: path_str.clone(), source: e })?;
+    let raw = std::fs::read_to_string(path).map_err(|e| PersonaLoadError::Io {
+        path: path_str.clone(),
+        source: e,
+    })?;
 
     // Parse into our DTO, rejecting unknown fields.
-    let file: PersonaFile =
-        toml::from_str(&raw).map_err(|e| PersonaLoadError::Parse { path: path_str.clone(), message: e.to_string() })?;
+    let file: PersonaFile = toml::from_str(&raw).map_err(|e| PersonaLoadError::Parse {
+        path: path_str.clone(),
+        message: e.to_string(),
+    })?;
 
     // The directory the TOML lives in — used to resolve relative paths.
     let base_dir = path.parent().unwrap_or(Path::new("."));
@@ -175,7 +187,6 @@ struct PersonaFile {
     agent_id: Option<String>,
 
     // -- System prompt (mutually exclusive) --
-
     /// Inline slot-[1] system prompt override.
     #[serde(default)]
     system_prompt: Option<String>,
@@ -239,8 +250,20 @@ struct ModelFile {
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct ContextFile {
+    /// Cheap short-circuit floor for the compression gate.
     #[serde(default)]
-    max_messages_before_compress: Option<usize>,
+    compress_check_message_floor: Option<usize>,
+
+    /// Real token threshold above which compression fires.
+    #[serde(default)]
+    compress_token_threshold: Option<usize>,
+
+    /// Compression strategy applied when the gate fires. Accepts the
+    /// `CompressionStrategy` tagged enum (`{ type = "truncate", keep_recent = 100 }`,
+    /// `{ type = "recursive_summarization", ... }`, etc.). None disables
+    /// compression for this persona.
+    #[serde(default)]
+    compression: Option<CompressionStrategy>,
 }
 
 /// `[budgets]` table.
@@ -330,7 +353,9 @@ fn convert(
     // -- context --
     // ContextPolicy is #[non_exhaustive]; build via Default then mutate.
     let mut context = ContextPolicy::default();
-    context.max_messages_before_compress = file.context.max_messages_before_compress;
+    context.compress_check_message_floor = file.context.compress_check_message_floor;
+    context.compress_token_threshold = file.context.compress_token_threshold;
+    context.compression = file.context.compression;
 
     // -- budgets --
     let b = file.budgets;
@@ -517,8 +542,10 @@ mod tests {
 
     impl TestDir {
         fn new(test_name: &str) -> Self {
-            let path = std::env::temp_dir()
-                .join(format!("pattern-persona-loader-test-{test_name}-{}", std::process::id()));
+            let path = std::env::temp_dir().join(format!(
+                "pattern-persona-loader-test-{test_name}-{}",
+                std::process::id()
+            ));
             fs::create_dir_all(&path).expect("create test dir");
             Self { path }
         }
@@ -545,9 +572,7 @@ mod tests {
         // Tests run from the workspace root or from the crate root.
         // Try both to find the fixture.
         let candidates = [
-            std::path::PathBuf::from(
-                "crates/pattern_runtime/tests/fixtures/smoke_persona.toml",
-            ),
+            std::path::PathBuf::from("crates/pattern_runtime/tests/fixtures/smoke_persona.toml"),
             std::path::PathBuf::from("tests/fixtures/smoke_persona.toml"),
         ];
         for p in &candidates {
@@ -557,13 +582,14 @@ mod tests {
         }
         // Fallback: cargo sets CARGO_MANIFEST_DIR to the crate root.
         if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
-            let p = std::path::PathBuf::from(manifest)
-                .join("tests/fixtures/smoke_persona.toml");
+            let p = std::path::PathBuf::from(manifest).join("tests/fixtures/smoke_persona.toml");
             if p.exists() {
                 return p;
             }
         }
-        panic!("could not locate smoke_persona.toml fixture — run tests from workspace root or crate root");
+        panic!(
+            "could not locate smoke_persona.toml fixture — run tests from workspace root or crate root"
+        );
     }
 
     // -- Load fixture successfully --
@@ -575,8 +601,14 @@ mod tests {
 
         assert_eq!(snap.name.as_str(), "orual-smoke-test");
         assert_eq!(snap.agent_id.as_str(), "orual-smoke-test");
-        assert!(snap.system_prompt.is_some(), "fixture should have a system_prompt");
-        assert!(!snap.memory_blocks.is_empty(), "fixture should have at least one memory block");
+        assert!(
+            snap.system_prompt.is_some(),
+            "fixture should have a system_prompt"
+        );
+        assert!(
+            !snap.memory_blocks.is_empty(),
+            "fixture should have at least one memory block"
+        );
     }
 
     #[test]
@@ -615,7 +647,10 @@ memory_type  = "working"
         let toml_path = write_file(&dir, "persona.toml", toml_content);
 
         let snap = load_persona(&toml_path).expect("should load with content_path");
-        let block = snap.memory_blocks.get("notes").expect("notes block missing");
+        let block = snap
+            .memory_blocks
+            .get("notes")
+            .expect("notes block missing");
         assert_eq!(
             block.content,
             serde_json::Value::String("hello from notes".to_string())

@@ -188,7 +188,7 @@ impl std::fmt::Debug for RouterRegistry {
 mod tests {
     use super::*;
     use jiff::Timestamp;
-    use pattern_core::types::ids::{AgentId, BatchId, MessageId, new_id};
+    use pattern_core::types::ids::{AgentId, BatchId, MessageId, new_id, new_snowflake_id};
     use pattern_core::types::message::Message;
 
     /// Create a minimal test message.
@@ -196,9 +196,10 @@ mod tests {
         Message {
             chat_message: genai::chat::ChatMessage::new(genai::chat::ChatRole::User, "hello"),
             id: MessageId::from(new_id().to_string()),
+            position: new_snowflake_id(),
             owner_id: AgentId::from("test-agent"),
             created_at: Timestamp::now(),
-            batch: BatchId::from(new_id().to_string()),
+            batch: BatchId::from(new_snowflake_id()),
             response_meta: None,
             block_refs: vec![],
             attachments: vec![],

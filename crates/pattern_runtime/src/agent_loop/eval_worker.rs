@@ -12,22 +12,22 @@
 //! runtime so the handler `Arc<dyn MemoryStore>` can drive async
 //! operations during the sync `compile_and_run` call.
 //!
-//! Tool calls arrive via [`EvalDispatcher::dispatch`] → an
-//! [`tokio::sync::mpsc::UnboundedSender`]. For each request the
+//! Tool calls arrive via `EvalDispatcher::dispatch` → an
+//! `tokio::sync::mpsc::UnboundedSender`. For each request the
 //! worker:
 //!
-//! 1. Parses the `code`-tool JSON arguments into [`CodeToolInput`].
+//! 1. Parses the `code`-tool JSON arguments into `CodeToolInput`.
 //! 2. Wraps the snippet in the shared preamble via
-//!    [`crate::sdk::code_tool::template_source`].
-//! 3. Reconstructs a fresh [`SdkBundle`] — handlers are either unit
+//!    `crate::sdk::code_tool::template_source`.
+//! 3. Reconstructs a fresh `SdkBundle` — handlers are either unit
 //!    structs or `Arc`-wrapped state, so the reconstruction is
 //!    effectively free. The fresh `DisplayHandler` is wired to the
-//!    session's [`TurnSink`] so `Pattern.Display.*` output flows to
+//!    session's `TurnSink` (from `pattern_core::traits`) so `Pattern.Display.*` output flows to
 //!    the same sink as LLM text chunks.
 //! 4. Calls `tidepool_runtime::compile_and_run` against the bundle
-//!    with the [`SessionContext`] as the user value.
-//! 5. Sends the [`ToolOutcome`] (success: JSON payload via
-//!    [`EvalResult::to_json`]; error: diagnostic string) back through
+//!    with the `SessionContext` as the user value.
+//! 5. Sends the `ToolOutcome` (success: JSON payload via
+//!    `EvalResult` serialization; error: diagnostic string) back through
 //!    a `tokio::sync::oneshot` reply channel.
 //!
 //! # Runtime shape
@@ -80,8 +80,8 @@ struct EvalRequest {
 /// Long-lived Haskell eval worker. One per session.
 ///
 /// See the module-level docs for the design rationale. Holds an
-/// [`UnboundedSender`] to the worker thread + the thread's
-/// [`JoinHandle`] (wrapped in `Option` so `Drop` can take it out for
+/// `tokio::sync::mpsc::UnboundedSender` to the worker thread + the thread's
+/// `std::thread::JoinHandle` (wrapped in `Option` so `Drop` can take it out for
 /// the `join` call).
 pub struct EvalWorker {
     tx: UnboundedSender<EvalRequest>,
@@ -323,11 +323,12 @@ mod tests {
     use pattern_core::traits::MemoryStore;
     use pattern_core::types::snapshot::PersonaSnapshot;
 
-    fn test_ctx() -> (Arc<SessionContext>, PathBuf) {
+    async fn test_ctx() -> (Arc<SessionContext>, PathBuf) {
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
         let provider: Arc<dyn ProviderClient> = Arc::new(NopProviderClient);
+        let db = crate::testing::test_db().await;
         let persona = PersonaSnapshot::new("agent-a", "A");
-        let ctx = Arc::new(SessionContext::from_persona(&persona, store, provider));
+        let ctx = Arc::new(SessionContext::from_persona(&persona, store, provider, db));
         let sdk_dir = SdkLocation::default()
             .resolve()
             .expect("SDK dir should resolve for tests");
@@ -338,12 +339,12 @@ mod tests {
     ///
     /// Gated on preflight — skips cleanly when tidepool-extract is
     /// not available.
-    #[test]
-    fn worker_spawns_and_drops_cleanly() {
+    #[tokio::test]
+    async fn worker_spawns_and_drops_cleanly() {
         if crate::preflight::check().is_err() {
             return;
         }
-        let (ctx, sdk_dir) = test_ctx();
+        let (ctx, sdk_dir) = test_ctx().await;
         let worker = EvalWorker::spawn(ctx, sdk_dir, "test-session".into());
         assert!(
             worker.is_alive(),
@@ -362,7 +363,7 @@ mod tests {
         if crate::preflight::check().is_err() {
             return;
         }
-        let (ctx, sdk_dir) = test_ctx();
+        let (ctx, sdk_dir) = test_ctx().await;
         let worker = EvalWorker::spawn(ctx, sdk_dir, "test-session".into());
 
         let bad_call = ToolCall {
@@ -402,13 +403,9 @@ mod tests {
         if crate::preflight::check().is_err() {
             return;
         }
-        let (ctx, sdk_dir) = test_ctx();
+        let (ctx, sdk_dir) = test_ctx().await;
         let session_id = "e2e-test".to_string();
-        let worker = EvalWorker::spawn_with_includes(
-            ctx,
-            vec![sdk_dir],
-            session_id,
-        );
+        let worker = EvalWorker::spawn_with_includes(ctx, vec![sdk_dir], session_id);
         let preamble = crate::sdk::preamble::build(&crate::sdk::bundle::canonical_effect_decls());
 
         let tc = ToolCall {
@@ -449,8 +446,9 @@ mod tests {
         // Don't gate on preflight — we drop before needing tidepool.
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
         let provider: Arc<dyn ProviderClient> = Arc::new(NopProviderClient);
+        let db = crate::testing::test_db().await;
         let persona = PersonaSnapshot::new("agent-a", "A");
-        let ctx = Arc::new(SessionContext::from_persona(&persona, store, provider));
+        let ctx = Arc::new(SessionContext::from_persona(&persona, store, provider, db));
 
         // Stub sdk_dir — we never actually hit the worker thread.
         let worker = EvalWorker {

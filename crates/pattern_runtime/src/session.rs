@@ -46,6 +46,20 @@ pub struct SessionContext {
     ///
     /// [`ModelSpec::default`]: pattern_core::types::snapshot::ModelSpec
     model_id: String,
+    /// Optional slot-\[1\] override for the composer's system prompt.
+    /// Threaded from `persona.system_prompt` at session open. When
+    /// `Some`, the agent-loop composer substitutes this in place of
+    /// [`pattern_core::DEFAULT_BASE_INSTRUCTIONS`]; `None` keeps the
+    /// workspace default.
+    system_prompt: Option<String>,
+    /// Chat-options baseline threaded from `persona.model.chat_options`
+    /// at session open. The agent loop clones this into the composer's
+    /// `PartialRequest.options` and layers on streaming-capture flags
+    /// (capture_usage, capture_content, capture_tool_calls,
+    /// capture_reasoning_content). Persona-declared sampling, reasoning
+    /// effort, verbosity, seed, stop_sequences, cache_control, etc. all
+    /// reach the wire via this path.
+    chat_options: genai::chat::ChatOptions,
     budget: Budget,
     cancel_state: Arc<CancelState>,
     /// Memory store adapter: delegates to the underlying `MemoryStore` and
@@ -58,6 +72,10 @@ pub struct SessionContext {
     /// consumes it from the agent loop. Held here so the construction
     /// signature is stable across phase boundaries.
     provider: Arc<dyn ProviderClient>,
+    /// Constellation database handle. Required for message persistence
+    /// and compaction (Pass B steps). Every session must have DB access;
+    /// in-memory-only sessions are no longer supported.
+    db: Arc<pattern_db::ConstellationDb>,
     /// Scheme-dispatched message router registry. Handlers dispatch
     /// Send/Reply/Notify through this. Set at session open; read-only
     /// thereafter.
@@ -85,6 +103,11 @@ pub struct SessionContext {
     /// Log excluded) with `IncludeSelfEdits` mid-batch behavior.
     /// Future: per-agent/constellation config overrides.
     snapshot_policy: pattern_core::types::message::SnapshotPolicy,
+    /// Per-persona context policy: compression strategy, gate floors,
+    /// and snapshot policy. Threaded from `persona.context` at session
+    /// open. Consumed by the compaction driver (`crate::compaction`)
+    /// before each wire turn.
+    context_policy: pattern_core::types::snapshot::ContextPolicy,
 }
 
 /// Handlers call this to decide whether to short-circuit on soft-cancel.
@@ -131,10 +154,15 @@ impl SessionContext {
         persona: &PersonaSnapshot,
         memory_store: Arc<dyn MemoryStore>,
         provider: Arc<dyn ProviderClient>,
+        db: Arc<pattern_db::ConstellationDb>,
     ) -> Self {
         let agent_id = persona.agent_id.to_string();
         let budget = Budget::from_persona(persona);
         let adapter = Arc::new(MemoryStoreAdapter::new(memory_store, &agent_id));
+        // NOTE: `persona.context.max_messages_before_compress` is not yet
+        // consumed — the compaction strategy is selected workspace-wide
+        // in `pattern_provider`. Wire to persona in a follow-up when
+        // per-persona compression overrides land.
         Self {
             agent_id,
             // Thread the caller's declared model through so the composer's
@@ -143,17 +171,38 @@ impl SessionContext {
             // mutate `persona.model.choice` before calling into the
             // runtime.
             model_id: persona.model.choice.model_id.to_string(),
+            system_prompt: persona.system_prompt.clone(),
+            chat_options: persona.model.chat_options.clone(),
             budget,
             cancel_state: Arc::new(CancelState::new()),
             adapter,
             provider,
+            db,
             router: Arc::new(RouterRegistry::new()),
             pending_messages: Arc::new(std::sync::Mutex::new(Vec::new())),
             turn_sink: Arc::new(NoOpSink),
             checkpoint_log: Arc::new(std::sync::Mutex::new(CheckpointLog::new())),
             current_turn: Arc::new(AtomicU64::new(0)),
-            snapshot_policy: pattern_core::types::message::SnapshotPolicy::default(),
+            snapshot_policy: persona.context.snapshot_policy.clone(),
+            context_policy: persona.context.clone(),
         }
+    }
+
+    /// Persona-supplied slot-\[1\] system prompt override, if any.
+    /// Composer consumes this in `compose_request_for_turn` when
+    /// building the system-blocks array; `None` falls through to
+    /// [`pattern_core::DEFAULT_BASE_INSTRUCTIONS`].
+    pub fn system_prompt(&self) -> Option<&str> {
+        self.system_prompt.as_deref()
+    }
+
+    /// Baseline [`genai::chat::ChatOptions`] for requests composed in
+    /// this session. Callers clone and layer on per-turn overrides
+    /// (streaming capture flags, etc.). Persona-declared temperature,
+    /// reasoning_effort, max_tokens, stop_sequences, etc. originate
+    /// here.
+    pub fn chat_options(&self) -> &genai::chat::ChatOptions {
+        &self.chat_options
     }
 
     /// Replace the default [`NoOpSink`] with a caller-provided sink.
@@ -231,6 +280,12 @@ impl SessionContext {
         &self.provider
     }
 
+    /// Constellation database handle. Used for message persistence,
+    /// turn-history loading, and compaction.
+    pub fn db(&self) -> &Arc<pattern_db::ConstellationDb> {
+        &self.db
+    }
+
     /// Full snapshot policy: block-selection filter + mid-batch delta
     /// behavior. Controls which blocks appear in
     /// `MessageAttachment::BatchOpeningSnapshot` and whether this turn's
@@ -244,6 +299,13 @@ impl SessionContext {
     /// call-site churn for code that only needs the selection filter.
     pub fn snapshot_selection(&self) -> &pattern_core::types::message::SnapshotSelection {
         &self.snapshot_policy.selection
+    }
+
+    /// Per-persona context policy (compression, gate floors, snapshot).
+    /// Consumed by `crate::compaction::maybe_compact` before each wire
+    /// turn in `drive_step`.
+    pub fn context_policy(&self) -> &pattern_core::types::snapshot::ContextPolicy {
+        &self.context_policy
     }
 
     /// Scheme-dispatched router registry for message routing.
@@ -360,6 +422,7 @@ impl TidepoolSession {
         sdk: &SdkLocation,
         memory_store: Arc<dyn MemoryStore>,
         provider: Arc<dyn ProviderClient>,
+        db: Arc<pattern_db::ConstellationDb>,
     ) -> Result<Self, RuntimeError> {
         crate::preflight::check()?;
         let _ = sdk; // sdk.resolve() is deferred to open_with_agent_loop
@@ -374,7 +437,7 @@ impl TidepoolSession {
         // `TidepoolSession` reads it directly in the agent-loop path.
         let current_turn = Arc::new(AtomicU64::new(0));
         let ctx = Arc::new(
-            SessionContext::from_persona(&persona, memory_store, provider.clone())
+            SessionContext::from_persona(&persona, memory_store, provider.clone(), db)
                 .with_checkpoint_log(checkpoint_log.clone(), current_turn),
         );
 
@@ -424,16 +487,36 @@ impl TidepoolSession {
     ///
     /// Use [`Self::step_with_agent_loop`] to drive turns on sessions
     /// opened via this constructor.
-    pub fn open_with_agent_loop(
+    pub async fn open_with_agent_loop(
         persona: PersonaSnapshot,
         sdk: &SdkLocation,
         memory_store: Arc<dyn MemoryStore>,
         provider: Arc<dyn ProviderClient>,
+        db: Arc<pattern_db::ConstellationDb>,
         turn_sink: Arc<dyn TurnSink>,
         prelude_dir: Option<PathBuf>,
     ) -> Result<Self, RuntimeError> {
+        // Capture persona-scoped state we'll seed into the store after the
+        // session is constructed. We consume `persona` via `Self::open`
+        // below; extracting these now keeps the rest of the open path
+        // simple.
+        let agent_id_for_seed = persona.agent_id.to_string();
+        let memory_blocks_for_seed = persona.memory_blocks.clone();
+        let store_for_seed = memory_store.clone();
+
         // Initialise the base session (preflight, context, checkpoint log).
-        let mut session = Self::open(persona, sdk, memory_store, provider)?;
+        let mut session = Self::open(persona, sdk, memory_store, provider, db)?;
+
+        // Seed persona-declared memory blocks into the store. Blocks that
+        // already exist (e.g. restored from a persistent DB on re-spawn)
+        // are left as-is — persona declares INITIAL content; live state
+        // wins.
+        seed_persona_memory_blocks(
+            &*store_for_seed,
+            &agent_id_for_seed,
+            &memory_blocks_for_seed,
+        )
+        .await?;
 
         // Replace the NoOpSink on the freshly constructed SessionContext.
         // We have exclusive ownership of `session` here (just returned
@@ -473,6 +556,15 @@ impl TidepoolSession {
         session.eval_worker = Some(worker);
         session.preamble = Some(preamble);
 
+        // Restore turn history from persisted messages so re-spawning
+        // against the same data-dir resumes conversation state.
+        if let Err(e) = session.load_turn_history(session.ctx.db()).await {
+            tracing::warn!(
+                error = %e,
+                "failed to restore turn history from DB; starting with empty history"
+            );
+        }
+
         Ok(session)
     }
 
@@ -508,7 +600,6 @@ impl TidepoolSession {
         )
         .await
     }
-
 }
 
 #[async_trait]
@@ -588,6 +679,90 @@ pub(crate) fn record_exchange(
     }
 }
 
+/// Seed persona-declared memory blocks into the store at session open.
+///
+/// For each `MemoryBlockSpec` in `persona.memory_blocks`:
+/// - If a block with the same label already exists (e.g. restored from a
+///   persistent DB on re-spawn), leave it untouched. Persona declares
+///   INITIAL content; live state wins.
+/// - Otherwise create the block via the trait's `create_block`, feed
+///   `spec.content` through `StructuredDocument::import_from_json`
+///   (schema-dispatched), apply `pinned` via `set_block_pinned`, then
+///   persist.
+///
+/// `crdt_snapshot` is currently always `None` in foundation; when the
+/// full-CRDT restore path lands, this helper will need to branch on it.
+async fn seed_persona_memory_blocks(
+    store: &dyn MemoryStore,
+    agent_id: &str,
+    memory_blocks: &std::collections::HashMap<
+        smol_str::SmolStr,
+        pattern_core::types::snapshot::MemoryBlockSpec,
+    >,
+) -> Result<(), RuntimeError> {
+    use pattern_core::memory::MemoryType;
+    use pattern_core::memory::{BlockSchema, BlockType};
+    use pattern_core::types::block::BlockCreate;
+
+    for (label, spec) in memory_blocks {
+        // Don't clobber existing blocks — persona is INITIAL intent.
+        if store
+            .get_block(agent_id, label.as_str())
+            .await
+            .map_err(|e| RuntimeError::SessionPoisoned {
+                reason: format!("memory seed: get_block({label}) failed: {e}"),
+            })?
+            .is_some()
+        {
+            continue;
+        }
+
+        let block_type = match spec.memory_type {
+            MemoryType::Core => BlockType::Core,
+            MemoryType::Working => BlockType::Working,
+            MemoryType::Archival => BlockType::Archival,
+        };
+        let schema = spec.schema.clone().unwrap_or_else(BlockSchema::text);
+
+        let mut create = BlockCreate::new(label.as_str(), block_type, schema);
+        if let Some(desc) = &spec.description {
+            create = create.with_description(desc.clone());
+        }
+        if let Some(limit) = spec.char_limit {
+            create = create.with_char_limit(limit);
+        }
+
+        let doc = store.create_block(agent_id, create).await.map_err(|e| {
+            RuntimeError::SessionPoisoned {
+                reason: format!("memory seed: create_block({label}) failed: {e}"),
+            }
+        })?;
+
+        // Schema-dispatched import of the initial content.
+        doc.import_from_json(&spec.content)
+            .map_err(|e| RuntimeError::SessionPoisoned {
+                reason: format!("memory seed: import_from_json({label}) failed: {e:?}"),
+            })?;
+
+        if spec.pinned {
+            store
+                .set_block_pinned(agent_id, label.as_str(), true)
+                .await
+                .map_err(|e| RuntimeError::SessionPoisoned {
+                    reason: format!("memory seed: set_block_pinned({label}) failed: {e}"),
+                })?;
+        }
+
+        store
+            .persist_block(agent_id, label.as_str())
+            .await
+            .map_err(|e| RuntimeError::SessionPoisoned {
+                reason: format!("memory seed: persist_block({label}) failed: {e}"),
+            })?;
+    }
+    Ok(())
+}
+
 // ---- session tests -------------------------------------------------------
 
 #[cfg(test)]
@@ -597,15 +772,17 @@ mod tests {
     use crate::testing::{InMemoryMemoryStore, MockProviderClient};
     use pattern_core::ProviderClient;
     use pattern_core::traits::{MemoryStore, TurnSink, VecSink};
-    use pattern_core::types::ids::{BatchId, new_id};
+    use pattern_core::types::ids::{BatchId, new_snowflake_id};
     use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
     use pattern_core::types::snapshot::PersonaSnapshot;
     use pattern_core::types::turn::StopReason;
 
     fn test_turn_input() -> TurnInput {
+        // Fresh batch start: turn_id == batch_id (first turn IS the batch).
+        let id = new_snowflake_id();
         TurnInput {
-            turn_id: new_id(),
-            batch_id: BatchId::from(new_id()),
+            turn_id: id.clone(),
+            batch_id: BatchId::from(id),
             origin: MessageOrigin::new(
                 Author::System {
                     reason: SystemReason::Wakeup,
@@ -628,10 +805,11 @@ mod tests {
         }
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
         let provider: Arc<dyn ProviderClient> = Arc::new(MockProviderClient::with_turns(vec![]));
+        let db = crate::testing::test_db().await;
         let persona = PersonaSnapshot::new("agent-a", "A");
         let sdk = SdkLocation::default();
 
-        let session = TidepoolSession::open(persona, &sdk, store, provider)
+        let session = TidepoolSession::open(persona, &sdk, store, provider, db)
             .expect("open should succeed when preflight passes");
 
         let result = session.step_with_agent_loop(test_turn_input()).await;
@@ -678,6 +856,28 @@ mod tests {
             MockProviderClient::text_turn("I ran your code. The answer is 42."),
         ]));
         let provider_dyn: Arc<dyn ProviderClient> = provider.clone();
+        let db = crate::testing::test_db().await;
+        // Create the agent row so the FK on messages.agent_id is satisfied
+        // when drive_step persists messages.
+        {
+            let agent = pattern_db::models::Agent {
+                id: "agent-a".to_string(),
+                name: "Test".to_string(),
+                description: None,
+                model_provider: "test".to_string(),
+                model_name: "test-model".to_string(),
+                system_prompt: "test".to_string(),
+                config: pattern_db::Json(serde_json::json!({})),
+                enabled_tools: pattern_db::Json(vec![]),
+                tool_rules: None,
+                status: pattern_db::models::AgentStatus::Active,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            };
+            pattern_db::queries::create_agent(db.pool(), &agent)
+                .await
+                .expect("create test agent");
+        }
 
         let persona = PersonaSnapshot::new("agent-a", "A");
         let sdk = SdkLocation::default();
@@ -689,9 +889,11 @@ mod tests {
             &sdk,
             store,
             provider_dyn,
+            db,
             sink_dyn,
             None,
         )
+        .await
         .expect("open_with_agent_loop should succeed when preflight passes");
 
         let reply = session
@@ -756,19 +958,16 @@ mod tests {
 
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
         let provider: Arc<dyn ProviderClient> = Arc::new(MockProviderClient::with_turns(vec![]));
+        let db = crate::testing::test_db().await;
         let persona = PersonaSnapshot::new("agent-a", "A");
         let sdk = SdkLocation::default();
         let sink = Arc::new(VecSink::new());
         let sink_dyn: Arc<dyn TurnSink> = sink.clone();
 
         let session = TidepoolSession::open_with_agent_loop(
-            persona,
-            &sdk,
-            store,
-            provider,
-            sink_dyn,
-            None,
+            persona, &sdk, store, provider, db, sink_dyn, None,
         )
+        .await
         .expect("open_with_agent_loop should succeed");
 
         // The eval_worker and preamble should both be populated.

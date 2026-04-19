@@ -711,15 +711,21 @@ mod tests {
         }
     }
 
-    fn sctx() -> SessionContext {
+    async fn sctx() -> SessionContext {
+        let db = crate::testing::test_db().await;
         let persona = PersonaSnapshot::new("agent-a", "A");
-        SessionContext::from_persona(&persona, Arc::new(NeverStore), Arc::new(NopProviderClient))
+        SessionContext::from_persona(
+            &persona,
+            Arc::new(NeverStore),
+            Arc::new(NopProviderClient),
+            db,
+        )
     }
 
     #[tokio::test]
     async fn search_returns_phase3_stub_error() {
         let table = standard_datacon_table();
-        let ctx = sctx();
+        let ctx = sctx().await;
         let cx = EffectContext::with_user(&table, &ctx);
         let mut h = MemoryHandler::new(Arc::new(NeverStore));
         let err = h
@@ -732,7 +738,7 @@ mod tests {
     #[tokio::test]
     async fn recall_returns_phase3_stub_error() {
         let table = standard_datacon_table();
-        let ctx = sctx();
+        let ctx = sctx().await;
         let cx = EffectContext::with_user(&table, &ctx);
         let mut h = MemoryHandler::new(Arc::new(NeverStore));
         let err = h
@@ -751,12 +757,13 @@ mod tests {
         use crate::testing::InMemoryMemoryStore;
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
         let provider: Arc<dyn ProviderClient> = Arc::new(NopProviderClient);
+        let db = crate::testing::test_db().await;
         let store_for_ctx = store.clone();
         let provider_for_ctx = provider.clone();
         let err_msg = tokio::task::spawn_blocking(move || {
             let table = standard_datacon_table();
             let persona = PersonaSnapshot::new("agent-a", "A");
-            let ctx = SessionContext::from_persona(&persona, store_for_ctx, provider_for_ctx);
+            let ctx = SessionContext::from_persona(&persona, store_for_ctx, provider_for_ctx, db);
             let cx = EffectContext::with_user(&table, &ctx);
             let mut h = MemoryHandler::new(store);
             let err = h
@@ -782,7 +789,7 @@ mod tests {
     #[tokio::test]
     async fn cancelled_flag_short_circuits_at_entry() {
         let table = standard_datacon_table();
-        let ctx = sctx();
+        let ctx = sctx().await;
         ctx.cancel_state()
             .cancellation
             .store(true, std::sync::atomic::Ordering::SeqCst);

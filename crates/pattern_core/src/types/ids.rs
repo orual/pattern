@@ -100,6 +100,10 @@ pub type DiscordIdentityId = SmolStr;
 
 /// Generate a fresh UUID-v4-based identifier in simple (unhyphenated) form.
 ///
+/// Use for unordered identifiers like agent IDs, tool-call IDs, session IDs.
+/// For identifiers that need lexicographic time-ordering (batch IDs, message
+/// position keys), use [`new_snowflake_id`] instead.
+///
 /// # Examples
 ///
 /// ```
@@ -112,6 +116,24 @@ pub type DiscordIdentityId = SmolStr;
 pub fn new_id() -> SmolStr {
     let uuid = Uuid::new_v4();
     SmolStr::from(uuid.simple().to_string().as_str())
+}
+
+/// Generate a fresh Mastodon-style Snowflake identifier, base32-encoded.
+///
+/// Wraps [`crate::utils::get_next_message_position_sync`] and returns the
+/// base32 string form. The encoding is strictly lexicographically sortable
+/// — later-generated IDs string-compare greater than earlier ones — which
+/// matches the monotonicity requirement for batch / position ordering.
+///
+/// Use for:
+/// - `BatchId` — a batch's identifier is the first message's position.
+/// - Per-message position keys stored on `pattern_db::Message.position`.
+///
+/// Thread-safe and non-blocking in practice; blocks briefly only if the
+/// per-ms sequence counter is exhausted (65k/ms).
+pub fn new_snowflake_id() -> SmolStr {
+    use smol_str::ToSmolStr;
+    crate::utils::get_next_message_position_sync().to_smolstr()
 }
 
 #[cfg(test)]
