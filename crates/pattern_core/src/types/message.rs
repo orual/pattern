@@ -150,6 +150,40 @@ impl Default for SnapshotSelection {
     }
 }
 
+/// Full snapshot policy: which blocks to include + how to handle mid-batch
+/// deltas on tool_use continuation turns.
+#[derive(Debug, Clone, Default)]
+pub struct SnapshotPolicy {
+    /// Block-selection filter for both Full and Delta snapshot construction.
+    pub selection: SnapshotSelection,
+    /// Controls whether a turn's own tool-initiated block writes trigger
+    /// mid-batch delta attachments.
+    pub mid_batch: MidBatchDeltaBehavior,
+}
+
+/// How to handle memory changes detected mid-batch (between wire turns
+/// within a single `Session::step`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MidBatchDeltaBehavior {
+    /// Emit delta for ALL changes detected mid-batch, including this
+    /// turn's own tool-initiated writes. Gives the agent post-edit block
+    /// state so it can verify its changes landed correctly. Cache-costly:
+    /// every memory-editing turn busts segment 3 for that turn. Choose
+    /// this when agents don't trust minimal tool_result confirmations.
+    ///
+    /// Default — preserves current behavior + strongest agent trust signal
+    /// pending empirical data on whether agents need it.
+    #[default]
+    IncludeSelfEdits,
+
+    /// Emit delta only for changes NOT attributable to this turn's own
+    /// `block_writes` (i.e., changes from other agents, data sources, or
+    /// operator edits). Cache-efficient: intra-batch turns stay cacheable
+    /// unless something external happens. Agent relies on tool_result
+    /// content to verify edits landed.
+    FilterSelfEdits,
+}
+
 impl SnapshotSelection {
     /// Test whether a block with the given label and type passes the
     /// selection filter.

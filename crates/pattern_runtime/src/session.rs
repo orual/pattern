@@ -78,10 +78,11 @@ pub struct SessionContext {
     /// before each turn; read by handlers when stamping recorded
     /// exchanges.
     current_turn: Arc<AtomicU64>,
-    /// Policy for which blocks appear in memory snapshot attachments.
-    /// Default includes Core and Working blocks; Archival and Log
-    /// are excluded. Future: per-agent/constellation config overrides.
-    snapshot_selection: pattern_core::types::message::SnapshotSelection,
+    /// Full snapshot policy: block selection filter + mid-batch delta
+    /// behavior. Default includes Core and Working blocks (Archival and
+    /// Log excluded) with `IncludeSelfEdits` mid-batch behavior.
+    /// Future: per-agent/constellation config overrides.
+    snapshot_policy: pattern_core::types::message::SnapshotPolicy,
 }
 
 /// Handlers call this to decide whether to short-circuit on soft-cancel.
@@ -144,7 +145,7 @@ impl SessionContext {
             turn_sink: Arc::new(NoOpSink),
             checkpoint_log: Arc::new(std::sync::Mutex::new(CheckpointLog::new())),
             current_turn: Arc::new(AtomicU64::new(0)),
-            snapshot_selection: pattern_core::types::message::SnapshotSelection::default(),
+            snapshot_policy: pattern_core::types::message::SnapshotPolicy::default(),
         }
     }
 
@@ -223,10 +224,19 @@ impl SessionContext {
         &self.provider
     }
 
-    /// Snapshot selection policy for memory attachments. Controls which
-    /// blocks appear in `MessageAttachment::BatchOpeningSnapshot`.
+    /// Full snapshot policy: block-selection filter + mid-batch delta
+    /// behavior. Controls which blocks appear in
+    /// `MessageAttachment::BatchOpeningSnapshot` and whether this turn's
+    /// own tool writes trigger mid-batch delta attachments.
+    pub fn snapshot_policy(&self) -> &pattern_core::types::message::SnapshotPolicy {
+        &self.snapshot_policy
+    }
+
+    /// Convenience accessor for the block-selection part of the snapshot
+    /// policy. Equivalent to `snapshot_policy().selection`. Minimises
+    /// call-site churn for code that only needs the selection filter.
     pub fn snapshot_selection(&self) -> &pattern_core::types::message::SnapshotSelection {
-        &self.snapshot_selection
+        &self.snapshot_policy.selection
     }
 
     /// Scheme-dispatched router registry for message routing.

@@ -117,8 +117,9 @@ impl SessionMachine {
 /// variants (Eval / Bridge / Unhandled / etc.) we fall back to
 /// `handler = "unknown"` and use the `Display` as the full reason.
 ///
-/// TODO: once `tidepool-effect` surfaces a dedicated handler-id on
-/// `EffectError`, thread it through here and drop the string parse.
+/// TODO(post-foundation): once `tidepool-effect` surfaces a dedicated
+/// handler-id on `EffectError`, thread it through here and drop the
+/// string parse.
 fn sdk_failure_parts(sdk: &crate::tidepool::error_map::SdkError) -> (String, String) {
     use tidepool_effect::EffectError;
     match &sdk.0 {

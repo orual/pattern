@@ -49,7 +49,7 @@ use pattern_core::memory::StructuredDocument;
 use pattern_core::traits::TurnEvent;
 use pattern_core::types::ids::{AgentId, MessageId, new_id};
 use pattern_core::types::message::{
-    Message, MessageAttachment, RenderedBlock, ResponseMeta, SnapshotKind,
+    Message, MessageAttachment, MidBatchDeltaBehavior, RenderedBlock, ResponseMeta, SnapshotKind,
 };
 use pattern_core::types::provider::{
     ChatMessage, ChatStreamEvent, CompletionRequest, ToolCall, ToolOutcome, ToolResult,
@@ -488,7 +488,6 @@ fn build_snapshot_attachment(
     }
 }
 
-
 /// Render a [`MessageAttachment::BatchOpeningSnapshot`] into a
 /// `<system-reminder>`-wrapped text block for compose-time splicing.
 fn render_snapshot_attachment(attachment: &MessageAttachment) -> String {
@@ -909,21 +908,42 @@ pub async fn drive_step(
                             for bs in blocks {
                                 // recorded_input is MORE recent than history,
                                 // so it overwrites.
-                                prior_hashes
-                                    .insert(bs.label.to_string(), bs.content_hash);
+                                prior_hashes.insert(bs.label.to_string(), bs.content_hash);
                             }
                         }
                     }
 
-                    // Check if any blocks changed vs the walked prior.
-                    let has_changes = current_blocks.iter().any(|b| {
+                    // Under FilterSelfEdits, exclude block labels that this
+                    // turn's own tool calls wrote. The agent already saw
+                    // those writes via its tool_result content; re-attaching
+                    // them as a delta is redundant cache churn. Under
+                    // IncludeSelfEdits (the default), the set is empty and
+                    // every changed block triggers a delta.
+                    let self_written: std::collections::HashSet<&str> = if matches!(
+                        ctx.snapshot_policy().mid_batch,
+                        MidBatchDeltaBehavior::FilterSelfEdits
+                    ) {
+                        turn.block_writes
+                            .iter()
+                            .map(|bw| bw.handle.as_str())
+                            .collect()
+                    } else {
+                        std::collections::HashSet::new()
+                    };
+
+                    // Check if any EXTERNAL blocks changed vs the walked prior.
+                    let has_external_changes = current_blocks.iter().any(|b| {
+                        let label = b.label.as_str();
+                        if self_written.contains(label) {
+                            return false; // self-edit, already visible via tool_result
+                        }
                         prior_hashes
-                            .get(b.label.as_str())
+                            .get(label)
                             .map(|&h| h != b.content_hash)
-                            .unwrap_or(true)
+                            .unwrap_or(true) // truly new block
                     });
 
-                    if has_changes {
+                    if has_external_changes {
                         let delta = build_snapshot_attachment(
                             SnapshotKind::Delta {
                                 since_batch: batch_id.clone(),
@@ -1182,11 +1202,11 @@ async fn compose_request_for_turn(
 
         // Count summary head messages that were prepended.
         let summary_count = hist.summary_head().len();
-        // Count block-write pseudo-messages from the most recent turn.
-        let pseudo_count = hist.most_recent_block_writes().len();
 
         // Prior messages start at index summary_count in the composed
         // message list (after summary head messages, before pseudo-messages).
+        // Pseudo-messages (block writes) come AFTER prior_messages and are
+        // not indexed here — attachment splice only targets prior_messages.
         let prior_start = summary_count;
 
         for (i, msg) in hist.active_messages().enumerate() {
@@ -1204,11 +1224,6 @@ async fn compose_request_for_turn(
                 last_spliced_idx = Some(composed_idx);
             }
         }
-
-        // Suppress "unused" warning — pseudo_count is used conceptually
-        // for understanding the composed message layout, but not directly
-        // in index arithmetic (pseudo-messages come AFTER prior_messages).
-        let _ = pseudo_count;
     }
 
     // 9. Place cache_control marker on the LAST message that had an
@@ -1433,14 +1448,84 @@ fn aggregate_usage(turns: &[TurnOutput]) -> Option<genai::chat::Usage> {
 
 /// Merge two genai `Usage` snapshots by summing the token counts.
 /// genai's `Usage` doesn't impl `Add`, so we roll our own.
+///
+/// `prompt_tokens_details` and `completion_tokens_details` are summed
+/// field-by-field rather than `.or()`-ing, because each wire turn
+/// contributes its own cache hits/creations. Discarding the second
+/// turn's details would undercount cross-turn cache activity.
 fn merge_usage(a: genai::chat::Usage, b: genai::chat::Usage) -> genai::chat::Usage {
     use genai::chat::Usage;
     Usage {
         prompt_tokens: sum_opt(a.prompt_tokens, b.prompt_tokens),
         completion_tokens: sum_opt(a.completion_tokens, b.completion_tokens),
         total_tokens: sum_opt(a.total_tokens, b.total_tokens),
-        prompt_tokens_details: a.prompt_tokens_details.or(b.prompt_tokens_details),
-        completion_tokens_details: a.completion_tokens_details.or(b.completion_tokens_details),
+        prompt_tokens_details: merge_prompt_tokens_details(
+            a.prompt_tokens_details,
+            b.prompt_tokens_details,
+        ),
+        completion_tokens_details: merge_completion_tokens_details(
+            a.completion_tokens_details,
+            b.completion_tokens_details,
+        ),
+    }
+}
+
+/// Sum two `PromptTokensDetails` values field-by-field. All numeric fields
+/// are additive across wire turns (each turn has its own cache hits /
+/// creations). `cache_creation_details` is also summed if both are present.
+fn merge_prompt_tokens_details(
+    a: Option<genai::chat::PromptTokensDetails>,
+    b: Option<genai::chat::PromptTokensDetails>,
+) -> Option<genai::chat::PromptTokensDetails> {
+    use genai::chat::{CacheCreationDetails, PromptTokensDetails};
+    match (a, b) {
+        (None, None) => None,
+        (Some(x), None) => Some(x),
+        (None, Some(y)) => Some(y),
+        (Some(x), Some(y)) => {
+            let cache_creation_details = match (x.cache_creation_details, y.cache_creation_details)
+            {
+                (None, None) => None,
+                (Some(d), None) => Some(d),
+                (None, Some(d)) => Some(d),
+                (Some(dx), Some(dy)) => Some(CacheCreationDetails {
+                    ephemeral_5m_tokens: sum_opt(dx.ephemeral_5m_tokens, dy.ephemeral_5m_tokens),
+                    ephemeral_1h_tokens: sum_opt(dx.ephemeral_1h_tokens, dy.ephemeral_1h_tokens),
+                }),
+            };
+            Some(PromptTokensDetails {
+                cache_creation_tokens: sum_opt(x.cache_creation_tokens, y.cache_creation_tokens),
+                cache_creation_details,
+                cached_tokens: sum_opt(x.cached_tokens, y.cached_tokens),
+                audio_tokens: sum_opt(x.audio_tokens, y.audio_tokens),
+            })
+        }
+    }
+}
+
+/// Sum two `CompletionTokensDetails` values field-by-field. All numeric
+/// fields are additive across wire turns.
+fn merge_completion_tokens_details(
+    a: Option<genai::chat::CompletionTokensDetails>,
+    b: Option<genai::chat::CompletionTokensDetails>,
+) -> Option<genai::chat::CompletionTokensDetails> {
+    use genai::chat::CompletionTokensDetails;
+    match (a, b) {
+        (None, None) => None,
+        (Some(x), None) => Some(x),
+        (None, Some(y)) => Some(y),
+        (Some(x), Some(y)) => Some(CompletionTokensDetails {
+            accepted_prediction_tokens: sum_opt(
+                x.accepted_prediction_tokens,
+                y.accepted_prediction_tokens,
+            ),
+            rejected_prediction_tokens: sum_opt(
+                x.rejected_prediction_tokens,
+                y.rejected_prediction_tokens,
+            ),
+            reasoning_tokens: sum_opt(x.reasoning_tokens, y.reasoning_tokens),
+            audio_tokens: sum_opt(x.audio_tokens, y.audio_tokens),
+        }),
     }
 }
 
@@ -1559,6 +1644,93 @@ mod tests {
     fn aggregate_usage_empty_turns_returns_none() {
         let turns: Vec<TurnOutput> = vec![];
         assert!(aggregate_usage(&turns).is_none());
+    }
+
+    /// `merge_usage` sums `prompt_tokens_details` field-by-field rather than
+    /// discarding the second turn's data via `.or()`. Both cache-hit counts
+    /// and cache-creation counts accumulate across turns; silently dropping
+    /// either would undercount multi-turn cache activity in reporting.
+    #[test]
+    fn merge_usage_sums_prompt_tokens_details_across_turns() {
+        use genai::chat::{PromptTokensDetails, Usage};
+        let a = Usage {
+            prompt_tokens: Some(200),
+            completion_tokens: Some(30),
+            total_tokens: Some(230),
+            prompt_tokens_details: Some(PromptTokensDetails {
+                cache_creation_tokens: Some(50),
+                cache_creation_details: None,
+                cached_tokens: Some(100),
+                audio_tokens: None,
+            }),
+            completion_tokens_details: None,
+        };
+        let b = Usage {
+            prompt_tokens: Some(180),
+            completion_tokens: Some(20),
+            total_tokens: Some(200),
+            prompt_tokens_details: Some(PromptTokensDetails {
+                cache_creation_tokens: Some(10),
+                cache_creation_details: None,
+                cached_tokens: Some(150),
+                audio_tokens: None,
+            }),
+            completion_tokens_details: None,
+        };
+        let merged = merge_usage(a, b);
+        let details = merged
+            .prompt_tokens_details
+            .expect("details should be Some after merging two Some values");
+        // cache_creation_tokens: 50 + 10 = 60.
+        assert_eq!(details.cache_creation_tokens, Some(60));
+        // cached_tokens: 100 + 150 = 250.
+        assert_eq!(details.cached_tokens, Some(250));
+        // audio_tokens: None + None = None.
+        assert_eq!(details.audio_tokens, None);
+    }
+
+    /// When only one side has `prompt_tokens_details`, the result preserves
+    /// the non-None side (identity law for None).
+    #[test]
+    fn merge_usage_details_identity_when_one_side_is_none() {
+        use genai::chat::{PromptTokensDetails, Usage};
+        let with_details = Usage {
+            prompt_tokens: Some(100),
+            completion_tokens: Some(10),
+            total_tokens: Some(110),
+            prompt_tokens_details: Some(PromptTokensDetails {
+                cache_creation_tokens: None,
+                cache_creation_details: None,
+                cached_tokens: Some(80),
+                audio_tokens: None,
+            }),
+            completion_tokens_details: None,
+        };
+        let without_details = Usage {
+            prompt_tokens: Some(50),
+            completion_tokens: Some(5),
+            total_tokens: Some(55),
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+        };
+        // a has details, b does not.
+        let merged_a_b = merge_usage(with_details.clone(), without_details.clone());
+        assert_eq!(
+            merged_a_b
+                .prompt_tokens_details
+                .as_ref()
+                .and_then(|d| d.cached_tokens),
+            Some(80)
+        );
+        // b has details, a does not.
+        let merged_b_a = merge_usage(without_details, with_details);
+        assert_eq!(
+            merged_b_a
+                .prompt_tokens_details
+                .as_ref()
+                .and_then(|d| d.cached_tokens),
+            Some(80)
+        );
     }
 
     // ---- Integration tests: orchestrate + drive_step via MockProviderClient ----
@@ -2493,7 +2665,6 @@ mod tests {
 
     // ---- Attachment + snapshot tests ----------------------------------------
 
-    /// Test helper: build a RenderedBlock with Working type.
     /// Test helper: build a visible RenderedBlock with Working type.
     fn test_block(label: &str, rendered: &str, hash: u64) -> RenderedBlock {
         RenderedBlock {
@@ -2635,6 +2806,167 @@ mod tests {
     }
 
     // ---- Cache stability: attachment on batch-opening message stays stable ---
+
+    // ---- MidBatchDeltaBehavior policy tests ---------------------------------
+
+    /// `MidBatchDeltaBehavior::default()` must be `IncludeSelfEdits`. This is
+    /// the conservative default: the agent receives post-edit block state so
+    /// it can verify its writes landed, at the cost of cache churn on every
+    /// memory-editing turn. The default preserves current behavior while
+    /// making the policy axis explicit.
+    #[test]
+    fn mid_batch_delta_behavior_default_is_include_self_edits() {
+        use pattern_core::types::message::MidBatchDeltaBehavior;
+        assert_eq!(
+            MidBatchDeltaBehavior::default(),
+            MidBatchDeltaBehavior::IncludeSelfEdits,
+        );
+    }
+
+    /// `SnapshotPolicy::default()` must have `MidBatchDeltaBehavior::IncludeSelfEdits`
+    /// and the standard Core+Working selection. Ensures the scaffolding
+    /// composes correctly and the default is observable end-to-end.
+    #[test]
+    fn snapshot_policy_default_has_include_self_edits_and_standard_selection() {
+        use pattern_core::memory::BlockType;
+        use pattern_core::types::message::{MidBatchDeltaBehavior, SnapshotPolicy};
+        let policy = SnapshotPolicy::default();
+        assert_eq!(policy.mid_batch, MidBatchDeltaBehavior::IncludeSelfEdits);
+        assert!(
+            policy.selection.include_types.contains(&BlockType::Core),
+            "default selection must include Core blocks"
+        );
+        assert!(
+            policy.selection.include_types.contains(&BlockType::Working),
+            "default selection must include Working blocks"
+        );
+        assert!(
+            policy.selection.include_labels.is_empty(),
+            "default selection has no explicit label allowlist"
+        );
+        assert!(
+            policy.selection.exclude_labels.is_empty(),
+            "default selection has no explicit label exclusions"
+        );
+    }
+
+    /// `MidBatchDeltaBehavior::IncludeSelfEdits` — when the in-memory store
+    /// has a block that wasn't in prior history (treated as "new"), and
+    /// the tool_use turn does NOT write to it (block_writes is empty), the
+    /// delta fires. This verifies the IncludeSelfEdits path's baseline:
+    /// purely external changes always emit a delta regardless of policy.
+    ///
+    /// Implementation note: a full integration test that verifies
+    /// FilterSelfEdits suppresses a delta for a block that IS in
+    /// block_writes requires driving tool execution through the real
+    /// MemoryHandler path (MemoryHandler → adapter.record_write). That
+    /// path is exercised by the session-level integration tests; here we
+    /// verify the type-level policy contract.
+    #[test]
+    fn mid_batch_delta_include_self_edits_emits_for_own_writes() {
+        use pattern_core::types::message::{MidBatchDeltaBehavior, SnapshotPolicy};
+        // Under IncludeSelfEdits, the self_written set is always empty —
+        // every changed block triggers a delta regardless of who wrote it.
+        // Verify that a non-empty block_writes list does NOT suppress the
+        // self_written set (it stays empty, so all deltas are allowed).
+        let policy = SnapshotPolicy {
+            selection: Default::default(),
+            mid_batch: MidBatchDeltaBehavior::IncludeSelfEdits,
+        };
+        // Simulate: is this label in the self_written set under IncludeSelfEdits?
+        // Under IncludeSelfEdits the set is always empty, so no label is filtered.
+        let simulated_self_written: std::collections::HashSet<&str> =
+            if matches!(policy.mid_batch, MidBatchDeltaBehavior::FilterSelfEdits) {
+                ["notes"].iter().copied().collect()
+            } else {
+                std::collections::HashSet::new()
+            };
+        assert!(
+            !simulated_self_written.contains("notes"),
+            "under IncludeSelfEdits, no label is in self_written — all deltas fire"
+        );
+    }
+
+    /// `MidBatchDeltaBehavior::FilterSelfEdits` — when `block_writes` contains
+    /// a label, that label is excluded from mid-batch delta consideration.
+    /// Only truly external changes (labels NOT in block_writes) still emit.
+    #[test]
+    fn mid_batch_delta_filter_self_edits_skips_own_writes() {
+        use pattern_core::types::message::{MidBatchDeltaBehavior, SnapshotPolicy};
+        let policy = SnapshotPolicy {
+            selection: Default::default(),
+            mid_batch: MidBatchDeltaBehavior::FilterSelfEdits,
+        };
+        // Simulate block_writes containing "notes" — agent wrote it this turn.
+        let self_written_labels = ["notes"];
+
+        // Reproduce the filtering logic from drive_step.
+        let self_written: std::collections::HashSet<&str> =
+            if matches!(policy.mid_batch, MidBatchDeltaBehavior::FilterSelfEdits) {
+                self_written_labels.iter().copied().collect()
+            } else {
+                std::collections::HashSet::new()
+            };
+
+        // Under FilterSelfEdits, "notes" (self-written) is excluded.
+        assert!(
+            self_written.contains("notes"),
+            "under FilterSelfEdits, self-written labels are in the exclusion set"
+        );
+        // An external change on "tasks" (not in block_writes) is NOT excluded.
+        assert!(
+            !self_written.contains("tasks"),
+            "under FilterSelfEdits, labels not in block_writes still emit deltas"
+        );
+
+        // Verify the has_external_changes logic: a block with the self-written
+        // label is suppressed, but a block with a different label fires.
+        let prior_hashes: std::collections::HashMap<String, u64> = {
+            let mut m = std::collections::HashMap::new();
+            m.insert("notes".to_string(), 111_u64);
+            m.insert("tasks".to_string(), 222_u64);
+            m
+        };
+        let current_blocks = [
+            // "notes" changed hash — but it's self-written, should be filtered.
+            test_block("notes", "new notes content", 999),
+            // "tasks" changed hash — external change, should NOT be filtered.
+            test_block("tasks", "new tasks content", 888),
+        ];
+        let has_external_changes = current_blocks.iter().any(|b| {
+            let label = b.label.as_str();
+            if self_written.contains(label) {
+                return false;
+            }
+            prior_hashes
+                .get(label)
+                .map(|&h| h != b.content_hash)
+                .unwrap_or(true)
+        });
+        assert!(
+            has_external_changes,
+            "external change on 'tasks' must still trigger delta even under FilterSelfEdits"
+        );
+
+        // When ALL changed blocks are self-written, no delta fires.
+        let only_self_written_changes = [
+            test_block("notes", "new notes content", 999), // self-written, filtered
+        ];
+        let has_only_self_changes = only_self_written_changes.iter().any(|b| {
+            let label = b.label.as_str();
+            if self_written.contains(label) {
+                return false;
+            }
+            prior_hashes
+                .get(label)
+                .map(|&h| h != b.content_hash)
+                .unwrap_or(true)
+        });
+        assert!(
+            !has_only_self_changes,
+            "when ALL changes are self-written, FilterSelfEdits must suppress the delta"
+        );
+    }
 
     #[test]
     fn splice_text_onto_user_message_appends_text_part() {

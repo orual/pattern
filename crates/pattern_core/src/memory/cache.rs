@@ -182,8 +182,8 @@ impl MemoryCache {
         // Override with effective permission (may differ for shared blocks)
         metadata.permission = effective_permission;
 
-        // Get and apply any updates since the snapshot
-        // TODO: use the checkpoint here as the starting snapshot
+        // Get and apply any updates since the snapshot.
+        // TODO(post-foundation / checkpointing): use the checkpoint here as the starting snapshot
         let (_checkpoint, updates) =
             pattern_db::queries::get_checkpoint_and_updates(self.db.pool(), &block.id).await?;
 

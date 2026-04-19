@@ -55,9 +55,9 @@ pub struct CacheProfile {
     pub allow_extended_ttl: bool,
 
     /// Cache-placement strategy. Phase 5 only supports
-    /// [`CacheStrategy::Default`]; `McpAware` and `BedrockExtraBody`
-    /// are declared for API-shape stability against future plans but
-    /// panic via `todo!` if used at composer-pass time.
+    /// [`CacheStrategy::Default`]; other variants are reserved for future
+    /// phases and stored as metadata but not yet interpreted by any
+    /// composer pass (the default three-segment layout applies regardless).
     pub strategy: CacheStrategy,
 }
 
@@ -71,14 +71,16 @@ pub enum CacheStrategy {
     /// memory-current-state. Phase 5 default.
     Default,
 
-    /// Future: MCP integration plan. Adapts cache boundaries when MCP
-    /// tools are dynamically discovered or removed mid-session.
-    /// Currently unimplemented; composer pass panics with `todo!` if
-    /// encountered.
+    /// Reserved for future MCP-aware cache reference integration (see
+    /// post-foundation plugin-system plan). Currently stored but not
+    /// interpreted by any composer pass — the default three-segment
+    /// layout applies regardless of this variant.
     McpAware,
 
-    /// Future: Bedrock provider plan. Different cache-boundary rules
-    /// driven by AWS Bedrock's request shape.
+    /// Reserved for future Bedrock provider integration (see
+    /// post-foundation cloud-provider plan). Currently stored but not
+    /// interpreted by any composer pass — the default three-segment
+    /// layout applies regardless of this variant.
     BedrockExtraBody,
 }
 

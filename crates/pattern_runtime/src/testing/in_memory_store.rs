@@ -254,13 +254,19 @@ impl MemoryStore for InMemoryMemoryStore {
         pinned: bool,
     ) -> MemoryResult<()> {
         let mut guard = self.blocks.lock().unwrap();
-        if let Some(r) = guard.get_mut(&(agent_id.to_string(), label.to_string())) {
-            // StructuredDocument's metadata is Arc-shared with the cached
-            // document — mutating here propagates to every holder of the
-            // Arc (matching the real cache's live-share semantics).
-            r.document.metadata_mut().pinned = pinned;
+        match guard.get_mut(&(agent_id.to_string(), label.to_string())) {
+            Some(r) => {
+                // StructuredDocument's metadata is Arc-shared with the cached
+                // document — mutating here propagates to every holder of the
+                // Arc (matching the real cache's live-share semantics).
+                r.document.metadata_mut().pinned = pinned;
+                Ok(())
+            }
+            None => Err(pattern_core::memory::MemoryError::NotFound {
+                agent_id: agent_id.to_string(),
+                label: label.to_string(),
+            }),
         }
-        Ok(())
     }
     async fn set_block_type(
         &self,
@@ -269,10 +275,16 @@ impl MemoryStore for InMemoryMemoryStore {
         block_type: BlockType,
     ) -> MemoryResult<()> {
         let mut guard = self.blocks.lock().unwrap();
-        if let Some(r) = guard.get_mut(&(agent_id.to_string(), label.to_string())) {
-            r.block_type = block_type;
+        match guard.get_mut(&(agent_id.to_string(), label.to_string())) {
+            Some(r) => {
+                r.block_type = block_type;
+                Ok(())
+            }
+            None => Err(pattern_core::memory::MemoryError::NotFound {
+                agent_id: agent_id.to_string(),
+                label: label.to_string(),
+            }),
         }
-        Ok(())
     }
     async fn update_block_schema(
         &self,
@@ -281,10 +293,16 @@ impl MemoryStore for InMemoryMemoryStore {
         schema: BlockSchema,
     ) -> MemoryResult<()> {
         let mut guard = self.blocks.lock().unwrap();
-        if let Some(r) = guard.get_mut(&(agent_id.to_string(), label.to_string())) {
-            r.document.metadata_mut().schema = schema;
+        match guard.get_mut(&(agent_id.to_string(), label.to_string())) {
+            Some(r) => {
+                r.document.metadata_mut().schema = schema;
+                Ok(())
+            }
+            None => Err(pattern_core::memory::MemoryError::NotFound {
+                agent_id: agent_id.to_string(),
+                label: label.to_string(),
+            }),
         }
-        Ok(())
     }
     async fn update_block_description(
         &self,

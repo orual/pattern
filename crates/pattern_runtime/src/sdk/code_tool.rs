@@ -66,7 +66,10 @@ fn build_code_tool_description() -> String {
 
     let decls = canonical_effect_decls();
     for eff in &decls {
-        s.push_str(&format!("\n--- {} ({}) ---\n", eff.type_name, eff.description));
+        s.push_str(&format!(
+            "\n--- {} ({}) ---\n",
+            eff.type_name, eff.description
+        ));
         for h in eff.helpers {
             // Each helper is "signature\nbody"; grab signature line only.
             if let Some(sig) = h.lines().next() {
