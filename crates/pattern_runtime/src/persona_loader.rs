@@ -83,11 +83,6 @@ pub enum PersonaLoadError {
     )]
     Parse { path: String, message: String },
 
-    /// A required field (`name`) is absent.
-    #[error("persona file at {path} is missing required field `{field}`")]
-    #[diagnostic(code(persona::missing_field))]
-    MissingField { path: String, field: String },
-
     /// Two mutually exclusive fields were both set (e.g. `content` and
     /// `content_path` on the same memory block, or `system_prompt` and
     /// `system_prompt_path`).
