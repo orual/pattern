@@ -3173,6 +3173,218 @@ mod tests {
         );
     }
 
+    // ---- FilterSelfEdits / IncludeSelfEdits integration tests ---------------
+    //
+    // These tests drive `drive_step` end-to-end with a real `SessionContext`
+    // and a `MockProviderClient` scripted to produce a tool_use turn followed
+    // by a final text turn. A `WriteRecordingDispatcher` simulates what
+    // `MemoryHandler` does in production: during tool dispatch it records a
+    // `BlockWrite` on `ctx.adapter()` so `turn.block_writes` is non-empty.
+    //
+    // Combined with a Working block pre-created in the memory store, this
+    // exercises the full mid-batch delta path and verifies that:
+    // - `FilterSelfEdits` suppresses a delta for a block the agent wrote this
+    //   turn (no `BatchOpeningSnapshot` on the tool_result message).
+    // - `IncludeSelfEdits` includes that same block in the delta (a
+    //   `BatchOpeningSnapshot` IS present on the tool_result message).
+
+    /// A dispatcher that, on each dispatch, records a `BlockWrite` for the
+    /// given label on the session's memory adapter. This simulates what
+    /// `MemoryHandler` does during real tool execution without going through
+    /// the Haskell eval path.
+    struct WriteRecordingDispatcher {
+        ctx: Arc<SessionContext>,
+        block_label: String,
+    }
+
+    #[async_trait]
+    impl EvalDispatcher for WriteRecordingDispatcher {
+        async fn dispatch(&self, _tool_call: ToolCall, _preamble: &str) -> ToolOutcome {
+            use jiff::Timestamp;
+            use pattern_core::memory::BlockType;
+            use pattern_core::types::block::{BlockWrite, BlockWriteKind};
+
+            self.ctx.adapter().record_write(BlockWrite {
+                handle: smol_str::SmolStr::new(&self.block_label),
+                memory_id: smol_str::SmolStr::new("mem-test"),
+                block_type: BlockType::Working,
+                rendered_content: "updated content".to_string(),
+                kind: BlockWriteKind::Replaced,
+                previous_content_hash: Some(0xabcd),
+                previous_rendered_content: Some("original content".to_string()),
+                at: Timestamp::now(),
+                author: pattern_core::types::origin::Author::System {
+                    reason: pattern_core::types::origin::SystemReason::ToolCall,
+                },
+            });
+            ToolOutcome::Success(serde_json::json!({"ok": true}))
+        }
+    }
+
+    /// Build a session with a custom `SnapshotPolicy` applied via
+    /// `ContextPolicy::snapshot_policy`. Also pre-creates a Working block
+    /// in the memory store so it appears in the mid-batch delta scan.
+    async fn mock_session_with_policy(
+        turns: Vec<Vec<genai::chat::ChatStreamEvent>>,
+        mid_batch: pattern_core::types::message::MidBatchDeltaBehavior,
+        block_label: &str,
+    ) -> (Arc<SessionContext>, Arc<VecSink>, Arc<MockProviderClient>) {
+        use pattern_core::memory::BlockType;
+        use pattern_core::types::block::BlockCreate;
+        use pattern_core::types::message::SnapshotPolicy;
+        use pattern_core::types::snapshot::ContextPolicy;
+
+        let store_concrete = Arc::new(InMemoryMemoryStore::new());
+        // Pre-create the Working block so it is visible to the snapshot scan.
+        store_concrete
+            .create_block(
+                "agent-a",
+                BlockCreate::new(block_label, BlockType::Working, pattern_core::memory::BlockSchema::text()),
+            )
+            .await
+            .expect("pre-create block");
+
+        let store: Arc<dyn MemoryStore> = store_concrete;
+        let provider_concrete = Arc::new(MockProviderClient::with_turns(turns));
+        let provider: Arc<dyn pattern_core::ProviderClient> = provider_concrete.clone();
+        let db = crate::testing::test_db().await;
+        create_test_agent_row(&db, "agent-a").await;
+        let sink = Arc::new(VecSink::new());
+        let sink_dyn: Arc<dyn TurnSink> = sink.clone();
+
+        let persona = PersonaSnapshot::new("agent-a", "A").with_context_policy({
+            let mut cp = ContextPolicy::default();
+            cp.snapshot_policy = SnapshotPolicy {
+                selection: Default::default(),
+                mid_batch,
+            };
+            cp
+        });
+        let ctx = Arc::new(
+            crate::session::SessionContext::from_persona(&persona, store, provider, db)
+                .with_turn_sink(sink_dyn),
+        );
+        (ctx, sink, provider_concrete)
+    }
+
+    #[tokio::test]
+    async fn drive_step_filter_self_edits_suppresses_delta_for_own_block_write() {
+        use pattern_core::types::message::MidBatchDeltaBehavior;
+
+        let block_label = "notes";
+        let (ctx, _sink, _provider) = mock_session_with_policy(
+            vec![
+                MockProviderClient::tool_use_turn(
+                    "toolu_01",
+                    "code",
+                    serde_json::json!({"code": "Memory.put \"notes\" \"updated content\""}),
+                ),
+                MockProviderClient::text_turn("I updated your notes."),
+            ],
+            MidBatchDeltaBehavior::FilterSelfEdits,
+            block_label,
+        )
+        .await;
+
+        let dispatcher = WriteRecordingDispatcher {
+            ctx: ctx.clone(),
+            block_label: block_label.to_string(),
+        };
+
+        let hist = Arc::new(std::sync::Mutex::new(TurnHistory::empty()));
+        let reply = drive_step(
+            test_turn_input(),
+            ctx,
+            hist,
+            pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
+            &dispatcher,
+            "",
+        )
+        .await
+        .expect("drive_step should succeed");
+
+        // The tool_use turn is turns[0]; its messages are [assistant, tool_result].
+        let tool_result_msg = reply.turns[0]
+            .messages
+            .iter()
+            .find(|m| m.chat_message.role == genai::chat::ChatRole::Tool)
+            .expect("should have a tool_result message");
+
+        // Under FilterSelfEdits the agent's own write to 'notes' is in
+        // self_written; has_external_changes must be false and no
+        // BatchOpeningSnapshot should be attached to the tool_result.
+        let snapshot_attachments: Vec<_> = tool_result_msg
+            .attachments
+            .iter()
+            .filter(|a| matches!(a, MessageAttachment::BatchOpeningSnapshot { .. }))
+            .collect();
+        assert!(
+            snapshot_attachments.is_empty(),
+            "FilterSelfEdits: tool_result message must NOT have a BatchOpeningSnapshot \
+             for a block the agent itself wrote this turn (got {} attachments)",
+            snapshot_attachments.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn drive_step_include_self_edits_emits_delta_for_own_block_write() {
+        use pattern_core::types::message::MidBatchDeltaBehavior;
+
+        let block_label = "notes";
+        let (ctx, _sink, _provider) = mock_session_with_policy(
+            vec![
+                MockProviderClient::tool_use_turn(
+                    "toolu_01",
+                    "code",
+                    serde_json::json!({"code": "Memory.put \"notes\" \"updated content\""}),
+                ),
+                MockProviderClient::text_turn("I updated your notes."),
+            ],
+            MidBatchDeltaBehavior::IncludeSelfEdits,
+            block_label,
+        )
+        .await;
+
+        let dispatcher = WriteRecordingDispatcher {
+            ctx: ctx.clone(),
+            block_label: block_label.to_string(),
+        };
+
+        let hist = Arc::new(std::sync::Mutex::new(TurnHistory::empty()));
+        let reply = drive_step(
+            test_turn_input(),
+            ctx,
+            hist,
+            pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
+            &dispatcher,
+            "",
+        )
+        .await
+        .expect("drive_step should succeed");
+
+        let tool_result_msg = reply.turns[0]
+            .messages
+            .iter()
+            .find(|m| m.chat_message.role == genai::chat::ChatRole::Tool)
+            .expect("should have a tool_result message");
+
+        // Under IncludeSelfEdits the self_written set is always empty, so
+        // the 'notes' block (which is new in the store and thus has no prior
+        // hash) triggers has_external_changes = true and a BatchOpeningSnapshot
+        // is attached to the tool_result message.
+        let snapshot_attachments: Vec<_> = tool_result_msg
+            .attachments
+            .iter()
+            .filter(|a| matches!(a, MessageAttachment::BatchOpeningSnapshot { .. }))
+            .collect();
+        assert_eq!(
+            snapshot_attachments.len(),
+            1,
+            "IncludeSelfEdits: tool_result message MUST have a BatchOpeningSnapshot \
+             even for blocks the agent wrote (self-edits are visible for agent verification)"
+        );
+    }
+
     #[test]
     fn splice_text_onto_user_message_appends_text_part() {
         let mut msg = ChatMessage::user("original");
