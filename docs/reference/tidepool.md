@@ -263,8 +263,8 @@ When embedding, only the Rust crates are compiled; you still need `tidepool-extr
 
 **Customization**:
 - `TIDEPOOL_EXTRACT`: path to binary (defaults to `$PATH` lookup).
-- `TIDEPOOL_PRELUDE_DIR`: override embedded stdlib location.
 - `TIDEPOOL_GHC_LIBDIR`: override GHC's lib directory (avoids `ghc --print-libdir` call).
+
 
 ## Maturity Signals: Alpha-Stage, Actively Maintained
 

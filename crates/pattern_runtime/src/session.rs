@@ -1029,21 +1029,13 @@ mod tests {
     ///
     /// # Environment requirements
     ///
-    /// Gated on both `preflight::check()` and `TIDEPOOL_PRELUDE_DIR`
-    /// (same gates as `eval_worker::tests::dispatch_evaluates_trivial_haskell_snippet_end_to_end`).
-    /// Skips cleanly when either is unavailable.
+    /// Gated on `preflight::check()` only — tidepool-extract bundles
+    /// the prelude internally. Skips cleanly when unavailable.
     #[tokio::test]
     async fn open_with_agent_loop_and_step_drives_two_wire_turns() {
         if crate::preflight::check().is_err() {
             return;
         }
-        let Some(prelude_dir) = std::env::var_os("TIDEPOOL_PRELUDE_DIR") else {
-            eprintln!(
-                "skipping open_with_agent_loop_and_step_drives_two_wire_turns: \
-                 TIDEPOOL_PRELUDE_DIR not set — see phase_06.md"
-            );
-            return;
-        };
 
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
         let provider = Arc::new(MockProviderClient::with_turns(vec![
@@ -1069,7 +1061,7 @@ mod tests {
             store,
             provider_dyn,
             sink_dyn,
-            Some(std::path::PathBuf::from(prelude_dir)),
+            None,
         )
         .expect("open_with_agent_loop should succeed when preflight passes");
 
@@ -1132,9 +1124,6 @@ mod tests {
         if crate::preflight::check().is_err() {
             return;
         }
-        let Some(prelude_dir) = std::env::var_os("TIDEPOOL_PRELUDE_DIR") else {
-            return;
-        };
 
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
         let provider: Arc<dyn ProviderClient> = Arc::new(MockProviderClient::with_turns(vec![]));
@@ -1149,7 +1138,7 @@ mod tests {
             store,
             provider,
             sink_dyn,
-            Some(std::path::PathBuf::from(prelude_dir)),
+            None,
         )
         .expect("open_with_agent_loop should succeed");
 

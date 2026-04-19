@@ -125,10 +125,8 @@ impl EvalWorker {
     /// typical session wires in two entries:
     ///
     /// 1. Pattern's `haskell/` SDK directory (where `Pattern.Time`
-    ///    etc. live).
-    /// 2. Tidepool's `haskell/lib/` directory (where
-    ///    `Tidepool.Prelude`, `Tidepool.Aeson`, etc. live). Resolved
-    ///    via `TIDEPOOL_PRELUDE_DIR` env var in the Nix devshell.
+    ///    etc. live). tidepool-extract now bundles the prelude
+    ///    internally, so only the SDK dir is required in practice.
     ///
     /// See the module-level docs for the eval loop's design.
     pub fn spawn_with_includes(
@@ -392,19 +390,9 @@ mod tests {
     ///
     /// # Environment requirements
     ///
-    /// This test is gated on BOTH:
-    ///
-    /// 1. `tidepool-extract` being available (via `preflight::check`).
-    /// 2. `TIDEPOOL_PRELUDE_DIR` being set to the tidepool haskell
-    ///    `lib/` source tree, which contains `Tidepool.Prelude`,
-    ///    `Tidepool.Aeson`, and their siblings. Our preamble imports
-    ///    these directly (matching tidepool-mcp's convention); GHC
-    ///    needs them on the include path at compile time.
-    ///
-    /// When `TIDEPOOL_PRELUDE_DIR` is not set the test skips cleanly.
-    /// Phase 6 CLI work wires the env var through the Nix devshell
-    /// (see phase_06.md "env setup for Haskell eval worker" note) so
-    /// CI + interactive sessions get the bundled lib automatically.
+    /// Gated only on `tidepool-extract` being available (via
+    /// `preflight::check`). tidepool-extract bundles the prelude
+    /// internally — no external lib directory required.
     ///
     /// The first run absorbs GHC warm-up (~seconds on cold cache,
     /// ~ms on warm).
@@ -413,23 +401,11 @@ mod tests {
         if crate::preflight::check().is_err() {
             return;
         }
-        let Some(prelude_dir) = std::env::var_os("TIDEPOOL_PRELUDE_DIR") else {
-            eprintln!(
-                "skipping dispatch_evaluates_trivial_haskell_snippet_end_to_end: \
-                 TIDEPOOL_PRELUDE_DIR not set — see phase_06.md"
-            );
-            return;
-        };
         let (ctx, sdk_dir) = test_ctx();
-        // Worker's include path is just sdk_dir today; the Tidepool
-        // prelude needs to join it. For this test we swap the
-        // include-path handling with a direct compile path that
-        // includes both — the real session wiring (part 5e) will
-        // bake both in at spawn time.
         let session_id = "e2e-test".to_string();
         let worker = EvalWorker::spawn_with_includes(
             ctx,
-            vec![sdk_dir, PathBuf::from(prelude_dir)],
+            vec![sdk_dir],
             session_id,
         );
         let preamble = crate::sdk::preamble::build(&crate::sdk::bundle::canonical_effect_decls());

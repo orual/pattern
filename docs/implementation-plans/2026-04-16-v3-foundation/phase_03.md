@@ -46,7 +46,7 @@ This phase implements and tests:
 
 **Path-dep policy:** Phase 3 uses Cargo path deps (`tidepool-runtime = { path = "../tidepool/tidepool-runtime" }`) during the v3 rewrite for ease of iteration on both sides; the Nix flake input is pinned via `flake.lock` against the GitHub repo for reproducible devshells. When the foundation lands and tidepool stabilises, convert the Cargo deps to a git dep pinned to commit (or an upstream crates.io release if tidepool publishes one). Tracked as a follow-up in the post-foundation dep-hardening plan.
 
-**Runtime dependency:** `tidepool-extract` GHC plugin binary (~300MB, GHC 9.12) must be on `$PATH` at runtime, or pointed at via `$TIDEPOOL_EXTRACT` (absolute path to the binary). **Reviewer note:** the earlier research notes mentioned `TIDEPOOL_PRELUDE_DIR` and `TIDEPOOL_GHC_LIBDIR` as overrides; verified against tidepool `746da8b`, only `TIDEPOOL_EXTRACT` is read by `tidepool_runtime`. The Nix-built derivation wraps the extractor with a shell script that sets up GHC PATH internally, so no prelude/libdir overrides are needed in practice. Pattern ships a preflight check (Task 5) and flake.nix integration (Task 4) to reduce setup friction.
+**Runtime dependency:** `tidepool-extract` GHC plugin binary (~300MB, GHC 9.12) must be on `$PATH` at runtime, or pointed at via `$TIDEPOOL_EXTRACT` (absolute path to the binary). Only `TIDEPOOL_EXTRACT` is consumed by `tidepool_runtime`; the Nix-built derivation wraps the extractor with a shell script that sets up GHC PATH and the Haskell prelude internally, so no additional env vars are needed. Pattern ships a preflight check (Task 5) and flake.nix integration (Task 4) to reduce setup friction.
 
 **Build tools:**
 - `cargo check -p pattern_runtime`
@@ -378,7 +378,7 @@ Pattern's flake uses `flake-parts` with per-system modules under `nix/modules/`.
    }
    ```
 
-The tidepool-built derivation is a `writeShellScriptBin` wrapper that sets up GHC PATH internally, so no `TIDEPOOL_PRELUDE_DIR` or `TIDEPOOL_GHC_LIBDIR` exports are needed. Only `TIDEPOOL_EXTRACT` is consumed by tidepool-runtime in the current commit.
+The tidepool-built derivation is a `writeShellScriptBin` wrapper that sets up GHC PATH and the Haskell prelude internally. Only `TIDEPOOL_EXTRACT` is consumed by tidepool-runtime.
 
 Developers iterating on tidepool itself should override the flake input locally:
 
@@ -430,9 +430,9 @@ pub fn check() -> Result<(), RuntimeError> {
     // 1. `tidepool-extract` on PATH (or TIDEPOOL_EXTRACT override set and points at an
     //    executable file).
     // 2. Invoke `tidepool-extract --version` with a short timeout; surface stderr on failure.
-    // 3. Warn (don't fail) if TIDEPOOL_PRELUDE_DIR is unset — binary's default may or may
-    //    not be correct depending on how it was built.
     // Return miette::Diagnostic-rich error on failure.
+    // Note: no prelude-dir check needed — tidepool-extract bundles the
+    // prelude internally (Phase 6 Task C).
     todo!("phase: 3; AC: AC2.1 infrastructure")
 }
 ```

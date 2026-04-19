@@ -775,11 +775,9 @@ async fn cmd_cache_test(
     pattern_runtime::preflight::check()
         .map_err(|e| format!("preflight failed: {e}\nsee crates/pattern_runtime/CLAUDE.md"))?;
 
-    // The Tidepool prelude is vendored into pattern_runtime's binary
-    // and auto-extracted by TidepoolSession::open_with_agent_loop,
-    // so no env setup is required. Dev override via
-    // TIDEPOOL_PRELUDE_DIR still works and takes precedence — we
-    // log whichever path ends up getting used for traceability.
+    // tidepool-extract now bundles the prelude internally; no
+    // external directory is needed. Pass None to opt into the
+    // default include-path (sdk_dir only).
     let prelude_dir: Option<std::path::PathBuf> = None;
 
     // ---- build gateway + provider (mirrors cmd_ask setup) ----

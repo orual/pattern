@@ -257,12 +257,9 @@ test-specific. Task 15's CLI subcommand then becomes a consumer.
 - **Task 20 part 5f** (composer integration in drive_step) —
   otherwise the request isn't composed with segments and cache
   behaviour is meaningless. DONE.
-- **TIDEPOOL_PRELUDE_DIR** (phase 6 follow-up) — the session opens
-  an `EvalWorker` which needs the Tidepool prelude on its include
-  path. Without this the session open fails. The CLI should
-  gracefully fall back: if `TIDEPOOL_PRELUDE_DIR` is unset, skip
-  worker setup and use `NoOpDispatcher` (agent can't run `code` tool
-  but this test doesn't need it — the prompts are pure chat).
+- ~~**Prelude dir env var**~~ (resolved Phase 6 Task C) — tidepool-extract
+  now bundles the prelude internally. No env var is needed; the eval
+  worker is always available when `tidepool-extract` is on `$PATH`.
 
 ### Nice to have but not blocking
 
