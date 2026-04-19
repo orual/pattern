@@ -712,7 +712,7 @@ mod tests {
     }
 
     fn sctx() -> SessionContext {
-        let persona = PersonaSnapshot::new("agent-a", "A", "module X where\nx = pure ()");
+        let persona = PersonaSnapshot::new("agent-a", "A");
         SessionContext::from_persona(&persona, Arc::new(NeverStore), Arc::new(NopProviderClient))
     }
 
@@ -755,7 +755,7 @@ mod tests {
         let provider_for_ctx = provider.clone();
         let err_msg = tokio::task::spawn_blocking(move || {
             let table = standard_datacon_table();
-            let persona = PersonaSnapshot::new("agent-a", "A", "module X where\nx = pure ()");
+            let persona = PersonaSnapshot::new("agent-a", "A");
             let ctx = SessionContext::from_persona(&persona, store_for_ctx, provider_for_ctx);
             let cx = EffectContext::with_user(&table, &ctx);
             let mut h = MemoryHandler::new(store);

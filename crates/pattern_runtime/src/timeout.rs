@@ -306,7 +306,7 @@ mod tests {
 
     #[test]
     fn budget_from_persona_uses_defaults_when_unset() {
-        let persona = PersonaSnapshot::new("a", "A", "x");
+        let persona = PersonaSnapshot::new("a", "A");
         let b = Budget::from_persona(&persona);
         let defaults = Budget::default();
         assert_eq!(b.wall, defaults.wall);
@@ -316,7 +316,7 @@ mod tests {
 
     #[test]
     fn budget_from_persona_applies_overrides() {
-        let persona = PersonaSnapshot::new("a", "A", "x")
+        let persona = PersonaSnapshot::new("a", "A")
             .with_wall_budget_ms(1000)
             .with_cpu_budget_ms(500)
             .with_hard_abandon_ms(2000);

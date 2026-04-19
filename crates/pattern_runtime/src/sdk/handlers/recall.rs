@@ -377,7 +377,7 @@ mod tests {
     }
 
     fn sctx(store: Arc<dyn MemoryStore>) -> SessionContext {
-        let persona = PersonaSnapshot::new("agent-a", "A", "module X where\nx = pure ()");
+        let persona = PersonaSnapshot::new("agent-a", "A");
         SessionContext::from_persona(&persona, store, Arc::new(NopProviderClient))
     }
 

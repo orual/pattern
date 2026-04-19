@@ -1754,7 +1754,7 @@ mod tests {
         let provider: Arc<dyn ProviderClient> = provider_concrete.clone();
         let sink = Arc::new(VecSink::new());
         let sink_dyn: Arc<dyn TurnSink> = sink.clone();
-        let persona = PersonaSnapshot::new("agent-a", "A", "module X where\nx = pure ()");
+        let persona = PersonaSnapshot::new("agent-a", "A");
         let ctx = Arc::new(
             SessionContext::from_persona(&persona, store, provider).with_turn_sink(sink_dyn),
         );

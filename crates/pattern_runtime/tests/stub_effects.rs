@@ -205,7 +205,7 @@ fn message_stub_reports_ask_candidate_for_removal_hang_free() {
 
     let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
     let provider: Arc<dyn ProviderClient> = Arc::new(NopProviderClient);
-    let persona = PersonaSnapshot::new("agent-a", "A", "module X where\nx = pure ()");
+    let persona = PersonaSnapshot::new("agent-a", "A");
     let ctx = SessionContext::from_persona(&persona, store, provider);
 
     run_stub_case!(

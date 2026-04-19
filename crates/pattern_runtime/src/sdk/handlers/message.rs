@@ -176,7 +176,7 @@ mod tests {
     fn sctx_with_router(registry: RouterRegistry) -> SessionContext {
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
         let provider: Arc<dyn ProviderClient> = Arc::new(NopProviderClient);
-        let persona = PersonaSnapshot::new("agent-a", "A", "module X where\nx = pure ()");
+        let persona = PersonaSnapshot::new("agent-a", "A");
         SessionContext::from_persona(&persona, store, provider).with_router(Arc::new(registry))
     }
 

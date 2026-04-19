@@ -8,6 +8,12 @@
 //! spawns construct it with `as_of_turn = None`, post-turn checkpoints
 //! overwrite with `Some(turn_id)`.
 //!
+//! ## Agent programs
+//!
+//! Agent programs are not stored in `PersonaSnapshot`. Code-tool snippets are
+//! compiled on demand per turn by the `EvalWorker` inside the agent loop.
+//! The legacy static-program field was removed in Phase 6 Task B.
+//!
 //! ## Structured content lives in memory blocks
 //!
 //! Custom per-persona content — persona text, instructions, working notes
@@ -73,12 +79,8 @@ use crate::types::turn::TurnId;
 /// ```
 /// use pattern_core::types::snapshot::PersonaSnapshot;
 ///
-/// let snap = PersonaSnapshot::new(
-///     "orual-companion",
-///     "Companion",
-///     "module Agent where\nagent = pure ()",
-/// )
-/// .with_wall_budget_ms(30_000);
+/// let snap = PersonaSnapshot::new("orual-companion", "Companion")
+///     .with_wall_budget_ms(30_000);
 /// assert_eq!(snap.agent_id.as_str(), "orual-companion");
 /// assert!(snap.as_of_turn.is_none());
 /// ```
@@ -90,12 +92,6 @@ pub struct PersonaSnapshot {
 
     /// Human-readable name for logs / display.
     pub name: SmolStr,
-
-    /// Legacy Haskell agent program source used by the pre-agent-loop
-    /// static-program session path. Once that path is retired (Phase 6
-    /// Task B), this field goes away. Agent-loop sessions don't consume
-    /// it — code-tool snippets are compiled on demand per turn.
-    pub program: String,
 
     /// Checkpoint cursor. `None` for fresh spawn; `Some(turn_id)` after
     /// the first turn of a restored session.
@@ -171,15 +167,13 @@ fn default_schema_version() -> u32 {
 
 impl PersonaSnapshot {
     /// Build a minimal snapshot with only the required fields.
-    pub fn new(
-        agent_id: impl Into<AgentId>,
-        name: impl Into<SmolStr>,
-        program: impl Into<String>,
-    ) -> Self {
+    ///
+    /// Agent programs are not stored here — code-tool snippets are compiled
+    /// on demand per turn by the `EvalWorker` inside the agent loop.
+    pub fn new(agent_id: impl Into<AgentId>, name: impl Into<SmolStr>) -> Self {
         Self {
             agent_id: agent_id.into(),
             name: name.into(),
-            program: program.into(),
             as_of_turn: None,
             captured_at: Timestamp::now(),
             schema_version: 1,
@@ -584,7 +578,7 @@ mod tests {
 
     #[test]
     fn new_produces_minimal_valid_snapshot() {
-        let snap = PersonaSnapshot::new("orual", "Orual", "module X where\nx = pure ()");
+        let snap = PersonaSnapshot::new("orual", "Orual");
         assert_eq!(snap.agent_id.as_str(), "orual");
         assert_eq!(snap.name.as_str(), "Orual");
         assert!(snap.as_of_turn.is_none());
@@ -595,7 +589,7 @@ mod tests {
 
     #[test]
     fn budget_setters_apply() {
-        let snap = PersonaSnapshot::new("a", "A", "x")
+        let snap = PersonaSnapshot::new("a", "A")
             .with_wall_budget_ms(5_000)
             .with_cpu_budget_ms(2_000)
             .with_hard_abandon_ms(1_000)
@@ -641,7 +635,7 @@ mod tests {
 
     #[test]
     fn round_trip_via_json() {
-        let snap = PersonaSnapshot::new("orual", "Orual", "module X where\nx = pure ()")
+        let snap = PersonaSnapshot::new("orual", "Orual")
             .with_wall_budget_ms(10_000)
             .with_system_prompt("you are a helpful assistant")
             .with_memory_block(

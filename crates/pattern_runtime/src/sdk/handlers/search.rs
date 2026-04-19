@@ -156,7 +156,7 @@ mod tests {
     use pattern_core::types::snapshot::PersonaSnapshot;
 
     fn sctx() -> SessionContext {
-        let persona = PersonaSnapshot::new("agent-a", "A", "module X where\nx = pure ()");
+        let persona = PersonaSnapshot::new("agent-a", "A");
         SessionContext::from_persona(
             &persona,
             Arc::new(InMemoryMemoryStore::new()),
@@ -169,7 +169,7 @@ mod tests {
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
         let result = tokio::task::spawn_blocking(move || {
             let table = standard_datacon_table();
-            let persona = PersonaSnapshot::new("agent-a", "A", "module X where\nx = pure ()");
+            let persona = PersonaSnapshot::new("agent-a", "A");
             let ctx = SessionContext::from_persona(
                 &persona,
                 store.clone(),

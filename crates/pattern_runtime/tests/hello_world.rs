@@ -6,8 +6,12 @@
 //!
 //! Full pipeline exercised: tidepool-extract (multi-module) → JIT → effect
 //! dispatch → value return.
+//!
+//! The `hello_world_runs_end_to_end` test that exercised `SessionMachine`
+//! directly was retired in Phase 6 Task B alongside the public `SessionMachine`
+//! re-export. The `compile_and_run` path below remains as the canonical
+//! integration smoke test for the tidepool substrate.
 
-use pattern_runtime::SessionMachine;
 use pattern_runtime::sdk::handlers::log::LogHandler;
 use pattern_runtime::sdk::handlers::time::TimeHandler;
 
@@ -58,36 +62,4 @@ async fn hello_world_via_tidepool_direct() {
         }
         other => panic!("expected unit, got: {other:?}"),
     }
-}
-
-/// End-to-end test through Pattern's compile_program + SessionMachine wrapper.
-#[tokio::test]
-async fn hello_world_runs_end_to_end() {
-    pattern_runtime::preflight::check()
-        .expect("tidepool-extract must be available; see crates/pattern_runtime/CLAUDE.md");
-
-    let source = include_str!("fixtures/hello.hs");
-    let sdk_dir = pattern_runtime::SdkLocation::default()
-        .resolve()
-        .expect("SDK dir should exist");
-
-    // Compile. `compile_program` uses tidepool's native multi-module path;
-    // Pattern.Time + Pattern.Log resolve against `sdk_dir` on the include path.
-    let program = pattern_runtime::tidepool::compile_program(source, "agent", &sdk_dir)
-        .expect("compile hello.hs");
-
-    // Warm the JIT. 64 MiB nursery (matching tidepool's default).
-    let mut machine = SessionMachine::new(program, 64 * 1024 * 1024).expect("jit machine");
-
-    // Build reduced bundle: Time at tag 0, Log at tag 1.
-    let mut bundle: HelloBundle = frunk::hlist![TimeHandler, LogHandler::default()];
-    let user_ctx = ();
-
-    let result = machine.run(&mut bundle, &user_ctx).expect("run");
-
-    // Verify result is Haskell unit () via FromCore round-trip.
-    <() as tidepool_bridge::FromCore>::from_value(&result, machine.table())
-        .expect("expected unit return from agent");
-
-    eprintln!("hello_world_runs_end_to_end: agent returned unit () successfully");
 }

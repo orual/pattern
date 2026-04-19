@@ -56,6 +56,8 @@ futures          = { workspace = true }
 secrecy          = { workspace = true }
 tracing-subscriber = { workspace = true }
 dotenvy          = { workspace = true }
+# Phase 6 Task 1: spawn subcommand REPL input.
+rustyline-async  = "0.4"
 
 [dev-dependencies]
 chrono         = { workspace = true }

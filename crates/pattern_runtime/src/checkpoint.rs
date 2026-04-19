@@ -148,9 +148,9 @@ impl CheckpointLog {
                 reason: format!("failed to serialise event log: {e}"),
             })?;
         // The checkpoint path stashes its event log on the persona's
-        // `extra` slot. `program` and `name` are foundation-era
-        // required fields; the checkpoint path is opaque to them.
-        let persona = PersonaSnapshot::new(agent_id, agent_id, "")
+        // `extra` slot. `name` is set to `agent_id` as a placeholder;
+        // the checkpoint path is opaque to it.
+        let persona = PersonaSnapshot::new(agent_id, agent_id)
             .with_extra(events_json);
         let mut persona = persona;
         persona.as_of_turn = Some(new_id());

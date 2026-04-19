@@ -134,6 +134,41 @@ enum Cmd {
         #[arg(long)]
         verbose: bool,
     },
+
+    /// Phase 6 Task 1 — interactive REPL session against a persona.
+    ///
+    /// Opens a TidepoolSession for the given persona (TOML path)
+    /// and starts an interactive REPL. Each line is sent as a user
+    /// message; agent responses stream live to stdout via the
+    /// DisplaySubscriber. Cache metrics are printed after each turn.
+    ///
+    /// Requires live Anthropic credentials (subscription-oauth tier
+    /// or ANTHROPIC_API_KEY).
+    ///
+    /// Exit: `:q`, `:quit`, or Ctrl+D.
+    Spawn {
+        /// Path to a persona TOML file.
+        ///
+        /// The file is not yet loaded (persona loader is Task 2's scope).
+        /// A hardcoded minimal `PersonaSnapshot` is used as a placeholder.
+        persona: std::path::PathBuf,
+
+        /// Optional data directory for session state.
+        ///
+        /// If omitted, a temporary directory is created for this session.
+        /// Pass the same path across invocations to persist state between
+        /// runs (once the persistence layer is wired in Task 3+).
+        #[arg(long)]
+        data_dir: Option<std::path::PathBuf>,
+
+        /// Force a specific auth tier instead of resolving automatically.
+        ///
+        /// Actual per-tier enforcement is Task 3's scope.
+        /// Today this flag is accepted and parsed; provider construction
+        /// still goes through the default `build_chain()` path.
+        #[arg(long, value_enum)]
+        auth: Option<AuthTierCli>,
+    },
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -160,6 +195,20 @@ enum ShaperMode {
     Honest,
     /// Force `SubscriptionRoutingShape` (three-block structure).
     Subscription,
+}
+
+/// Auth tier override for the `spawn` subcommand (Phase 6 Task 1).
+///
+/// Wiring each tier to a distinct credential resolver is Task 3's scope.
+/// Defined here so the clap argument is parsed and visible in `--help`.
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum AuthTierCli {
+    /// Use the claude-code session-pickup tier (reads `~/.claude/.credentials.json`).
+    SessionPickup,
+    /// Use the interactive PKCE OAuth flow.
+    Pkce,
+    /// Use an `ANTHROPIC_API_KEY` environment variable.
+    ApiKey,
 }
 
 impl ShaperMode {
@@ -216,6 +265,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             shaper,
             verbose,
         } => cmd_cache_test(model, shaper, verbose).await,
+        Cmd::Spawn {
+            persona,
+            data_dir,
+            auth,
+        } => cmd_spawn(persona, data_dir, auth).await,
     }
 }
 
@@ -501,19 +555,6 @@ async fn run_pkce_interactive()
 }
 
 // ---- cache-test (Phase 5 Task 15) -------------------------------------
-
-/// Minimal compilable agent program for the cache-test session. The
-/// test never actually runs agent Haskell — it's just chat round
-/// trips — but `TidepoolSession::open` needs *some* compilable
-/// program to warm the JIT. Keep this trivial to minimise cold-start.
-const CACHE_TEST_AGENT_PROGRAM: &str = concat!(
-    "{-# LANGUAGE DataKinds, TypeOperators, OverloadedStrings #-}\n",
-    "module Agent (agent) where\n",
-    "import Control.Monad.Freer (Eff)\n",
-    "import Pattern.Log\n",
-    "agent :: Eff '[Log] ()\n",
-    "agent = info \"cache-test\"\n",
-);
 
 /// Fallback persona content when `bsky_agent/anchor-persona-block.md`
 /// isn't in the checkout (e.g. shipped binary, CI without fixtures).
@@ -811,7 +852,7 @@ async fn cmd_cache_test(
     let sink = CacheTestSink::new(verbose);
     let sink_dyn: std::sync::Arc<dyn pattern_core::traits::TurnSink> = sink.clone();
 
-    let persona = PersonaSnapshot::new(agent_id, "Anchor", CACHE_TEST_AGENT_PROGRAM);
+    let persona = PersonaSnapshot::new(agent_id, "Anchor");
     let sdk = SdkLocation::default();
 
     eprintln!("[session] opening TidepoolSession (compiling agent program)...");
@@ -1006,6 +1047,229 @@ async fn cmd_cache_test(
     if !all_pass {
         std::process::exit(4);
     }
+    Ok(())
+}
+
+// ---- spawn (Phase 6 Task 1) -------------------------------------------
+
+/// DisplaySubscriber that streams agent output to the rustyline SharedWriter.
+///
+/// Chunks arrive on the effect-dispatch thread synchronously; we write them
+/// directly to the SharedWriter (which handles terminal interleaving with the
+/// readline prompt internally). No intermediate channel needed because
+/// SharedWriter is `Send + Sync` and its writes are cheap.
+struct CliDisplaySubscriber {
+    writer: Arc<std::sync::Mutex<rustyline_async::SharedWriter>>,
+}
+
+impl pattern_runtime::sdk::handlers::display::DisplaySubscriber for CliDisplaySubscriber {
+    fn on_event(&self, event: &pattern_runtime::sdk::handlers::display::DisplayEvent) {
+        use pattern_runtime::sdk::handlers::display::DisplayEvent;
+        use std::io::Write;
+        let Ok(mut out) = self.writer.lock() else {
+            return;
+        };
+        match event {
+            // Typewriter streaming: write each chunk immediately, no newline.
+            DisplayEvent::Chunk(s) => {
+                let _ = write!(out, "{s}");
+                let _ = out.flush();
+            }
+            // After the full response, move to a new line before the prompt returns.
+            DisplayEvent::Final(_) => {
+                let _ = writeln!(out);
+            }
+            // Agent-visible notes rendered dimmed with a bullet prefix.
+            DisplayEvent::Note(s) => {
+                let _ = writeln!(out, "  (·) {s}");
+            }
+            // Non-exhaustive: ignore any future variants rather than panicking.
+            _ => {}
+        }
+    }
+}
+
+async fn cmd_spawn(
+    persona_path: std::path::PathBuf,
+    data_dir: Option<std::path::PathBuf>,
+    auth_override: Option<AuthTierCli>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use pattern_core::traits::TurnSink;
+    use pattern_core::types::ids::{AgentId, BatchId, MessageId, new_id};
+    use pattern_core::types::message::Message;
+    use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
+    use pattern_core::types::snapshot::PersonaSnapshot;
+    use pattern_core::types::turn::TurnInput;
+    use pattern_runtime::SdkLocation;
+    use pattern_runtime::session::TidepoolSession;
+    use pattern_runtime::testing::InMemoryMemoryStore;
+    use rustyline_async::{Readline, ReadlineError};
+
+    eprintln!("=== pattern-test-cli spawn (Phase 6 Task 1) ===");
+    eprintln!();
+
+    // TODO(task 2): load persona from <persona_path> TOML.
+    // For now, use a hardcoded minimal PersonaSnapshot so the session opens
+    // and the REPL can exercise the provider + display path.
+    let _ = persona_path; // will be consumed by the loader in Task 2
+    let persona = PersonaSnapshot::new("spawn-placeholder", "Placeholder");
+
+    // Resolve data directory; fall back to a temp dir if not provided.
+    // Task 3 will wire this to pattern_db so state persists across runs.
+    let _data_dir = match data_dir {
+        Some(d) => {
+            eprintln!("[spawn] using data_dir: {}", d.display());
+            d
+        }
+        None => {
+            let dir = std::env::temp_dir().join(format!("pattern-spawn-{}", new_id()));
+            eprintln!("[spawn] no --data-dir provided; using temp dir: {}", dir.display());
+            dir
+        }
+    };
+
+    // TODO(task 3): honor auth override — today build_chain() always resolves
+    // automatically without consulting `auth_override`.
+    let _ = auth_override; // will be plumbed in Task 3
+    let chain = build_chain(ProviderKind::Anthropic).await?;
+    let limiter = Arc::new(ProviderRateLimiter::anthropic_default());
+
+    let shaper_cfg = ShaperConfig {
+        compat_mode: ShaperCompatMode::default(),
+        ..Default::default()
+    };
+    let shaper = Arc::new(HonestPatternShaper::new(shaper_cfg)?);
+    let counter = Arc::new(TokenCounter::anthropic(limiter.clone()));
+
+    let gateway = PatternGatewayClient::builder()
+        .with_provider("anthropic", chain, shaper, limiter)
+        .with_token_counter("anthropic", counter)
+        .build()?;
+    let provider: Arc<dyn ProviderClient> = Arc::new(gateway);
+
+    // Preflight tidepool-extract so we fail fast with a clear message.
+    pattern_runtime::preflight::check()
+        .map_err(|e| format!("preflight failed: {e}\nsee crates/pattern_runtime/CLAUDE.md"))?;
+
+    let memory_store = Arc::new(InMemoryMemoryStore::new());
+
+    // Nop sink — display events go via DisplaySubscriber below, not via TurnSink.
+    let turn_sink: Arc<dyn TurnSink> = Arc::new(pattern_core::traits::NoOpSink);
+
+    let sdk = SdkLocation::default();
+    let prelude_dir: Option<std::path::PathBuf> = None;
+
+    eprintln!("[spawn] opening TidepoolSession (compiling placeholder program)...");
+    let open_start = std::time::Instant::now();
+    let session = TidepoolSession::open_with_agent_loop(
+        persona,
+        &sdk,
+        memory_store,
+        provider,
+        turn_sink,
+        prelude_dir,
+    )?;
+    eprintln!("[spawn] session ready after {:.2}s", open_start.elapsed().as_secs_f64());
+    eprintln!();
+
+    // Build the rustyline readline + shared writer.
+    let (mut readline, stdout) = Readline::new("pattern> ".to_string())?;
+    let writer = Arc::new(std::sync::Mutex::new(stdout));
+
+    // Register the CLI display subscriber so agent chunks stream live to the
+    // terminal. The subscriber is Arc-shared; both the subscriber list (via
+    // DisplayHandler) and our local `writer` reference point at the same
+    // SharedWriter.
+    let subscriber = Arc::new(CliDisplaySubscriber {
+        writer: writer.clone(),
+    });
+    session.display().subscribe(subscriber);
+
+    // REPL state for constructing TurnInputs.
+    let batch = BatchId::from(new_id().to_string());
+    let user_agent_id = AgentId::from("user");
+
+    let make_turn_input = |line: &str| -> TurnInput {
+        use jiff::Timestamp;
+
+        let chat_msg = genai::chat::ChatMessage::user(line.to_string());
+        let msg = Message {
+            chat_message: chat_msg,
+            id: MessageId::from(new_id().to_string()),
+            owner_id: user_agent_id.clone(),
+            created_at: Timestamp::now(),
+            batch: batch.clone(),
+            response_meta: None,
+            block_refs: vec![],
+            attachments: vec![],
+        };
+        TurnInput {
+            turn_id: new_id(),
+            batch_id: batch.clone(),
+            origin: MessageOrigin::new(
+                Author::System {
+                    reason: SystemReason::Wakeup,
+                },
+                Sphere::System,
+            ),
+            messages: vec![msg],
+        }
+    };
+
+    // Main REPL loop.
+    loop {
+        match readline.readline().await {
+            Ok(rustyline_async::ReadlineEvent::Line(line)) => {
+                let line = line.trim().to_string();
+                readline.add_history_entry(line.clone());
+
+                if line.is_empty() {
+                    continue;
+                }
+                if line == ":q" || line == ":quit" {
+                    break;
+                }
+
+                let input = make_turn_input(&line);
+                match session.step_with_agent_loop(input).await {
+                    Ok(reply) => {
+                        // Agent output was already streamed via CliDisplaySubscriber.
+                        // Print a one-line cache summary from the last wire turn's metrics.
+                        let last = reply.turns.last().expect("at least one wire turn");
+                        let m = &last.cache_metrics;
+                        let Ok(mut out) = writer.lock() else {
+                            continue;
+                        };
+                        use std::io::Write as _;
+                        let _ = writeln!(
+                            out,
+                            "[cache: fresh={} read={} create={} ratio={:.0}%]",
+                            m.fresh_input_tokens,
+                            m.cache_read_input_tokens,
+                            m.cache_creation_input_tokens,
+                            m.hit_ratio() * 100.0,
+                        );
+                    }
+                    Err(e) => {
+                        let Ok(mut out) = writer.lock() else {
+                            continue;
+                        };
+                        use std::io::Write as _;
+                        let _ = writeln!(out, "error: {e}");
+                    }
+                }
+            }
+            Ok(rustyline_async::ReadlineEvent::Eof) => break,
+            Ok(rustyline_async::ReadlineEvent::Interrupted) => break,
+            Err(ReadlineError::Closed) => break,
+            Err(e) => {
+                eprintln!("readline error: {e}");
+                break;
+            }
+        }
+    }
+
+    eprintln!("[spawn] session ended.");
     Ok(())
 }
 
