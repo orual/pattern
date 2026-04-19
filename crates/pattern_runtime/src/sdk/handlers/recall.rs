@@ -163,7 +163,7 @@ mod tests {
     use super::*;
     use crate::NopProviderClient;
     use crate::testing::standard_datacon_table;
-    use pattern_core::types::snapshot::PersonaConfig;
+    use pattern_core::types::snapshot::PersonaSnapshot;
     use tidepool_repr::{DataCon, DataConId};
 
     /// Standard table extended with `()` for handlers that return unit.
@@ -377,7 +377,7 @@ mod tests {
     }
 
     fn sctx(store: Arc<dyn MemoryStore>) -> SessionContext {
-        let persona = PersonaConfig::new("agent-a", "A", "module X where\nx = pure ()");
+        let persona = PersonaSnapshot::new("agent-a", "A", "module X where\nx = pure ()");
         SessionContext::from_persona(&persona, store, Arc::new(NopProviderClient))
     }
 

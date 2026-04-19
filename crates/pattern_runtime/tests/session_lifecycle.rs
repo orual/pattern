@@ -11,7 +11,7 @@ use jiff::Timestamp;
 use pattern_core::traits::{AgentRuntime, Session};
 use pattern_core::types::ids::{BatchId, new_id};
 use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
-use pattern_core::types::snapshot::PersonaConfig;
+use pattern_core::types::snapshot::PersonaSnapshot;
 use pattern_core::types::turn::TurnInput;
 use pattern_runtime::TidepoolRuntime;
 use pattern_runtime::testing::{InMemoryMemoryStore, NopProviderClient};
@@ -44,7 +44,7 @@ async fn open_then_step_then_drop() {
     let memory = Arc::new(InMemoryMemoryStore::new());
     let provider = Arc::new(NopProviderClient);
     let runtime = TidepoolRuntime::with_default_sdk(memory, provider);
-    let persona = PersonaConfig::new(
+    let persona = PersonaSnapshot::new(
         "open-step-drop",
         "OpenStepDrop",
         include_str!("fixtures/time_log.hs"),
@@ -73,7 +73,7 @@ async fn open_step_twice_does_not_recompile() {
     let memory = Arc::new(InMemoryMemoryStore::new());
     let provider = Arc::new(NopProviderClient);
     let runtime = TidepoolRuntime::with_default_sdk(memory, provider);
-    let persona = PersonaConfig::new(
+    let persona = PersonaSnapshot::new(
         "step-twice",
         "StepTwice",
         include_str!("fixtures/time_log.hs"),
@@ -110,7 +110,7 @@ async fn memory_write_then_read_roundtrips() {
     let runtime = TidepoolRuntime::with_default_sdk(memory.clone(), provider);
 
     // Turn 1: write using the write-agent program.
-    let persona_write = PersonaConfig::new(
+    let persona_write = PersonaSnapshot::new(
         "roundtrip",
         "RoundtripWrite",
         include_str!("fixtures/memory_write.hs"),
@@ -138,7 +138,7 @@ async fn memory_write_then_read_roundtrips() {
 
     // Turn 2: open a fresh session with the same agent id + store and
     // run the read-agent. The read should see the prior write.
-    let persona_read = PersonaConfig::new(
+    let persona_read = PersonaSnapshot::new(
         "roundtrip",
         "RoundtripRead",
         include_str!("fixtures/memory_read.hs"),
@@ -167,7 +167,7 @@ async fn concurrent_sessions_are_isolated() {
     for i in 0..4u32 {
         let rt = runtime.clone();
         handles.push(tokio::spawn(async move {
-            let persona = PersonaConfig::new(
+            let persona = PersonaSnapshot::new(
                 format!("concurrent-{i}"),
                 format!("Concurrent{i}"),
                 include_str!("fixtures/time_log.hs"),
@@ -195,7 +195,7 @@ async fn checkpoint_restore_roundtrip_preserves_events() {
     let memory = Arc::new(InMemoryMemoryStore::new());
     let provider = Arc::new(NopProviderClient);
     let runtime = TidepoolRuntime::with_default_sdk(memory, provider);
-    let persona = PersonaConfig::new(
+    let persona = PersonaSnapshot::new(
         "cp-roundtrip",
         "CpRoundtrip",
         include_str!("fixtures/time_log.hs"),
@@ -239,7 +239,7 @@ async fn checkpoint_restore_roundtrip_preserves_events() {
 
     // Restore into a fresh session; event log should now contain the
     // recovered events.
-    let persona2 = PersonaConfig::new(
+    let persona2 = PersonaSnapshot::new(
         "cp-roundtrip",
         "CpRoundtrip2",
         include_str!("fixtures/time_log.hs"),
@@ -269,7 +269,7 @@ async fn runtime_shares_store_across_sessions() {
     let provider = Arc::new(NopProviderClient);
     let runtime = TidepoolRuntime::with_default_sdk(memory.clone(), provider);
 
-    let persona = PersonaConfig::new(
+    let persona = PersonaSnapshot::new(
         "shared-store",
         "SharedStore",
         include_str!("fixtures/memory_write.hs"),
@@ -279,7 +279,7 @@ async fn runtime_shares_store_across_sessions() {
 
     drop(s1);
 
-    let persona2 = PersonaConfig::new(
+    let persona2 = PersonaSnapshot::new(
         "shared-store",
         "SharedStore",
         include_str!("fixtures/memory_read.hs"),
@@ -302,7 +302,7 @@ async fn memory_create_write_replace_end_to_end() {
     let provider = Arc::new(NopProviderClient);
     let runtime = TidepoolRuntime::with_default_sdk(memory.clone(), provider);
 
-    let persona = PersonaConfig::new(
+    let persona = PersonaSnapshot::new(
         "create-agent",
         "CreateAgent",
         include_str!("fixtures/memory_create.hs"),
@@ -358,7 +358,7 @@ async fn memory_handler_records_exchanges_into_checkpoint_log() {
     let provider = Arc::new(NopProviderClient);
     let runtime = TidepoolRuntime::with_default_sdk(memory, provider);
 
-    let persona = PersonaConfig::new(
+    let persona = PersonaSnapshot::new(
         "cp-wire",
         "CpWire",
         include_str!("fixtures/memory_put_get.hs"),
@@ -406,7 +406,7 @@ async fn memory_handler_records_exchanges_into_checkpoint_log() {
     // Checkpoint → restore round-trip preserves the recorded events in
     // a fresh session.
     let snap = session.checkpoint().await.expect("checkpoint");
-    let persona2 = PersonaConfig::new(
+    let persona2 = PersonaSnapshot::new(
         "cp-wire",
         "CpWire2",
         include_str!("fixtures/memory_put_get.hs"),

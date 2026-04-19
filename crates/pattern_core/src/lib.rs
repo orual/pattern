@@ -94,7 +94,7 @@ pub use types::origin::{AgentAuthor, Author, Human, MessageOrigin, Partner, Sphe
 pub use types::turn::{StepReply, StopReason, TurnCacheMetrics, TurnId, TurnInput, TurnOutput};
 
 // Snapshot / persona types (Phase 3 checkpoint stubs)
-pub use types::snapshot::{PersonaConfig, PersonaSnapshot, SessionSnapshot};
+pub use types::snapshot::{PersonaSnapshot, SessionSnapshot};
 
 // Embedding value types
 pub use types::embedding::{Embedding, EmbeddingResult};

@@ -16,7 +16,7 @@ use pattern_core::error::{CancelPath, RuntimeError};
 use pattern_core::traits::{AgentRuntime, Session};
 use pattern_core::types::ids::{BatchId, new_id};
 use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
-use pattern_core::types::snapshot::PersonaConfig;
+use pattern_core::types::snapshot::PersonaSnapshot;
 use pattern_core::types::turn::TurnInput;
 use pattern_runtime::TidepoolRuntime;
 use pattern_runtime::testing::{InMemoryMemoryStore, NopProviderClient};
@@ -59,7 +59,7 @@ async fn hard_abandon_await_enforces_cancel_grace_ceiling() {
     let memory = Arc::new(InMemoryMemoryStore::new());
     let provider = Arc::new(NopProviderClient);
     let runtime = TidepoolRuntime::with_default_sdk(memory, provider);
-    let persona = PersonaConfig::new(
+    let persona = PersonaSnapshot::new(
         "grace-ceiling",
         "GraceCeiling",
         include_str!("fixtures/infinite_spin.hs"),
@@ -111,7 +111,7 @@ async fn soft_cancel_on_yielding_loop_returns_soft_path() {
     let memory = Arc::new(InMemoryMemoryStore::new());
     let provider = Arc::new(NopProviderClient);
     let runtime = TidepoolRuntime::with_default_sdk(memory, provider);
-    let persona = PersonaConfig::new(
+    let persona = PersonaSnapshot::new(
         "soft-cancel",
         "SoftCancel",
         include_str!("fixtures/yielding_loop.hs"),
@@ -178,7 +178,7 @@ async fn hard_abandon_on_tight_compute_poisons_session() {
     let memory = Arc::new(InMemoryMemoryStore::new());
     let provider = Arc::new(NopProviderClient);
     let runtime = TidepoolRuntime::with_default_sdk(memory, provider);
-    let persona = PersonaConfig::new(
+    let persona = PersonaSnapshot::new(
         "hard-abandon",
         "HardAbandon",
         include_str!("fixtures/infinite_spin.hs"),
@@ -251,7 +251,7 @@ async fn soft_cancel_then_reuse_same_session_resets_cancel_flags() {
     let memory = Arc::new(InMemoryMemoryStore::new());
     let provider = Arc::new(NopProviderClient);
     let runtime = TidepoolRuntime::with_default_sdk(memory, provider);
-    let persona = PersonaConfig::new(
+    let persona = PersonaSnapshot::new(
         "soft-reuse",
         "SoftReuse",
         include_str!("fixtures/yielding_loop.hs"),
@@ -304,7 +304,7 @@ async fn soft_cancel_then_short_turn_succeeds() {
     let provider = Arc::new(NopProviderClient);
     let runtime = TidepoolRuntime::with_default_sdk(memory, provider);
     // First open a session for the infinite loop.
-    let persona = PersonaConfig::new(
+    let persona = PersonaSnapshot::new(
         "soft-then-short",
         "SoftThenShort",
         include_str!("fixtures/yielding_loop.hs"),
@@ -321,7 +321,7 @@ async fn soft_cancel_then_short_turn_succeeds() {
     // with the infinite loop still times out on every step, a fresh
     // session on a fast program is unaffected by the prior soft
     // cancel's state.
-    let persona2 = PersonaConfig::new(
+    let persona2 = PersonaSnapshot::new(
         "soft-then-short",
         "SoftThenShort2",
         include_str!("fixtures/time_log.hs"),

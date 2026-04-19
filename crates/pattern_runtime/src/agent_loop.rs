@@ -1740,7 +1740,7 @@ mod tests {
     use pattern_core::traits::{MemoryStore, TurnSink, VecSink};
     use pattern_core::types::ids::{BatchId, new_id};
     use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
-    use pattern_core::types::snapshot::PersonaConfig;
+    use pattern_core::types::snapshot::PersonaSnapshot;
 
     /// Build a SessionContext wired to a MockProviderClient returning
     /// the given scripted turns. Returns `(ctx, vec_sink, provider)`.
@@ -1754,7 +1754,7 @@ mod tests {
         let provider: Arc<dyn ProviderClient> = provider_concrete.clone();
         let sink = Arc::new(VecSink::new());
         let sink_dyn: Arc<dyn TurnSink> = sink.clone();
-        let persona = PersonaConfig::new("agent-a", "A", "module X where\nx = pure ()");
+        let persona = PersonaSnapshot::new("agent-a", "A", "module X where\nx = pure ()");
         let ctx = Arc::new(
             SessionContext::from_persona(&persona, store, provider).with_turn_sink(sink_dyn),
         );

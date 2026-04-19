@@ -127,7 +127,7 @@ pub struct RenderedBlock {
 /// Applied during both Full and Delta construction. Default includes
 /// Core and Working blocks; Archival (searchable on-demand) and Log
 /// (high-volume) are excluded.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotSelection {
     /// Block types to include. Default: `[Core, Working]`.
     pub include_types: Vec<BlockType>,
@@ -152,7 +152,7 @@ impl Default for SnapshotSelection {
 
 /// Full snapshot policy: which blocks to include + how to handle mid-batch
 /// deltas on tool_use continuation turns.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SnapshotPolicy {
     /// Block-selection filter for both Full and Delta snapshot construction.
     pub selection: SnapshotSelection,
@@ -163,7 +163,7 @@ pub struct SnapshotPolicy {
 
 /// How to handle memory changes detected mid-batch (between wire turns
 /// within a single `Session::step`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MidBatchDeltaBehavior {
     /// Emit delta for ALL changes detected mid-batch, including this
     /// turn's own tool-initiated writes. Gives the agent post-edit block

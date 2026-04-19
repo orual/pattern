@@ -763,7 +763,7 @@ async fn cmd_cache_test(
     use pattern_core::types::ids::{AgentId, BatchId, MessageId, new_id};
     use pattern_core::types::message::Message;
     use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
-    use pattern_core::types::snapshot::PersonaConfig;
+    use pattern_core::types::snapshot::PersonaSnapshot;
     use pattern_core::types::turn::TurnInput;
     use pattern_runtime::SdkLocation;
     use pattern_runtime::session::TidepoolSession;
@@ -811,7 +811,7 @@ async fn cmd_cache_test(
     let sink = CacheTestSink::new(verbose);
     let sink_dyn: std::sync::Arc<dyn pattern_core::traits::TurnSink> = sink.clone();
 
-    let persona = PersonaConfig::new(agent_id, "Anchor", CACHE_TEST_AGENT_PROGRAM);
+    let persona = PersonaSnapshot::new(agent_id, "Anchor", CACHE_TEST_AGENT_PROGRAM);
     let sdk = SdkLocation::default();
 
     eprintln!("[session] opening TidepoolSession (compiling agent program)...");

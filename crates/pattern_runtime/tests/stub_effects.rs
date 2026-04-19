@@ -198,14 +198,14 @@ fn message_stub_reports_ask_candidate_for_removal_hang_free() {
     // `&()` like the generically-bound stubs above.
     use pattern_core::ProviderClient;
     use pattern_core::traits::MemoryStore;
-    use pattern_core::types::snapshot::PersonaConfig;
+    use pattern_core::types::snapshot::PersonaSnapshot;
     use pattern_runtime::NopProviderClient;
     use pattern_runtime::session::SessionContext;
     use pattern_runtime::testing::InMemoryMemoryStore;
 
     let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
     let provider: Arc<dyn ProviderClient> = Arc::new(NopProviderClient);
-    let persona = PersonaConfig::new("agent-a", "A", "module X where\nx = pure ()");
+    let persona = PersonaSnapshot::new("agent-a", "A", "module X where\nx = pure ()");
     let ctx = SessionContext::from_persona(&persona, store, provider);
 
     run_stub_case!(

@@ -1,226 +1,660 @@
-//! Checkpoint snapshot types for persona and session state.
+//! Persona snapshot — unified type consumed by [`AgentRuntime::open_session`]
+//! and returned by `Session::checkpoint`.
 //!
-//! These types are the shapes that `Session::checkpoint()` and
-//! `Session::restore()` (Phase 3) serialize and deserialize. Phase 2 lands the
-//! type shape only; the implementation detail — which fields are populated and
-//! how the CRDT state is serialized — is deferred to Phase 3.
+//! Earlier drafts of the foundation plan distinguished `PersonaConfig`
+//! (spawn-time) from `PersonaSnapshot` (restore-time). In practice both
+//! carry the same bag of persona state; the only difference was a
+//! checkpoint cursor. [`PersonaSnapshot`] is now the single type; fresh
+//! spawns construct it with `as_of_turn = None`, post-turn checkpoints
+//! overwrite with `Some(turn_id)`.
 //!
-//! Callers should treat these types as opaque blobs: construct them via
-//! `Session::checkpoint()` and restore them via `Session::restore()`. Do not
-//! pattern-match on the `data` field directly across crate versions.
+//! ## Structured content lives in memory blocks
+//!
+//! Custom per-persona content — persona text, instructions, working notes
+//! — is carried as [`MemoryBlockSpec`] entries under `memory_blocks`, not
+//! as top-level fields. The persona's identity paragraph, for example,
+//! is typically a memory block at the label `"persona"` with type
+//! [`MemoryType::Core`].
+//!
+//! Exception: [`PersonaSnapshot::system_prompt`] is first-class because
+//! it replaces [`pattern_provider`'s `DEFAULT_BASE_INSTRUCTIONS`](../../../../pattern_provider/shaper/fn.build_system_prompt.html)
+//! in slot \[1\] of the three-segment cache layout when `Some`, and needs
+//! to be a distinct field so the shaper can see it without walking memory.
+//!
+//! ## Forward compatibility
+//!
+//! Most nested structs carry `#[non_exhaustive]` so future fields can be
+//! added without breaking external construction. [`MemoryBlockSpec`] reserves
+//! a `crdt_snapshot: Option<Vec<u8>>` slot for future full-CRDT checkpoint
+//! restore; it's always `None` in the current code path (the `MemoryStore`
+//! synthesizes a fresh `LoroDoc` from `content` on restore).
+//!
+//! ## What's out of scope for foundation
+//!
+//! - Archival entries. They live in `pattern_db`'s archival table and are
+//!   reopened transparently when the store attaches to the same `data_dir`.
+//!   Full-state export to a portable format (future `CAR`-file work) is a
+//!   separate plan.
+//! - Tool rules. v2 had a 13-variant rule enum; the granularity wasn't
+//!   useful and code execution doesn't fit that model. Dropped; revisit
+//!   only if a clear need surfaces.
+//! - Data sources / plugin-scope fields (`bluesky_handle`, Discord, file
+//!   watchers). They'll land once the plugin system does.
+//! - Model routing. [`PersonaSnapshot::router`] is a reserved opaque slot;
+//!   shape is intentionally unspecified until we have a concrete routing
+//!   story.
 
+use std::collections::HashMap;
+
+use genai::adapter::AdapterKind;
+use genai::chat::ChatOptions;
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
+use smol_str::SmolStr;
 
-use crate::types::ids::AgentId;
+use crate::memory::{BlockSchema, MemoryPermission, MemoryType};
+use crate::types::ids::{AgentId, MemoryId};
+use crate::types::message::SnapshotPolicy;
 use crate::types::turn::TurnId;
 
-/// Configuration required to open a new session for an agent.
+// ==========================================================================
+// Top-level PersonaSnapshot
+// ==========================================================================
+
+/// Everything the runtime needs to open (or resume) a single agent's
+/// session.
 ///
-/// [`crate::traits::AgentRuntime::open_session`] consumes a `PersonaConfig`
-/// when constructing a fresh session. Carries the agent's identity, the
-/// Haskell program the runtime will compile, and runtime-policy knobs
-/// (timeout budgets, nursery size). `extra` is a free-form `serde_json::Value`
-/// slot for configuration that hasn't earned a first-class field yet
-/// (persona-specific tool toggles, model-name overrides, experiments).
-///
-/// Construct with [`PersonaConfig::new`] to pick up default optional fields;
-/// use builder-style setters for the optional knobs. `#[non_exhaustive]` so
-/// future fields can be added without breaking callers.
+/// Construct a fresh spawn via [`PersonaSnapshot::new`] plus builder-style
+/// setters. `as_of_turn` is `None` for fresh spawns and overwritten when
+/// a session is checkpointed.
 ///
 /// # Examples
 ///
 /// ```
-/// use pattern_core::types::snapshot::PersonaConfig;
+/// use pattern_core::types::snapshot::PersonaSnapshot;
 ///
-/// let cfg = PersonaConfig::new(
+/// let snap = PersonaSnapshot::new(
 ///     "orual-companion",
 ///     "Companion",
 ///     "module Agent where\nagent = pure ()",
 /// )
-/// .with_wall_budget_ms(30_000)
-/// .with_cpu_budget_ms(10_000);
-/// assert_eq!(cfg.agent_id.as_str(), "orual-companion");
-/// assert_eq!(cfg.wall_budget_ms, Some(30_000));
+/// .with_wall_budget_ms(30_000);
+/// assert_eq!(snap.agent_id.as_str(), "orual-companion");
+/// assert!(snap.as_of_turn.is_none());
 /// ```
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PersonaConfig {
+pub struct PersonaSnapshot {
     /// Stable identifier for this agent.
     pub agent_id: AgentId,
-    /// Human-readable name for logs / display. Smol since it's short and cloned often.
-    pub name: smol_str::SmolStr,
-    /// The Haskell agent program source. The runtime hands it to
-    /// `tidepool-extract` with the SDK directory on the include path; agent
-    /// programs import from the `Pattern.*` module tree directly.
+
+    /// Human-readable name for logs / display.
+    pub name: SmolStr,
+
+    /// Legacy Haskell agent program source used by the pre-agent-loop
+    /// static-program session path. Once that path is retired (Phase 6
+    /// Task B), this field goes away. Agent-loop sessions don't consume
+    /// it — code-tool snippets are compiled on demand per turn.
     pub program: String,
-    /// Wall-clock time-in-JIT budget per turn, in milliseconds. `None` means
-    /// use the runtime's default.
+
+    /// Checkpoint cursor. `None` for fresh spawn; `Some(turn_id)` after
+    /// the first turn of a restored session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wall_budget_ms: Option<u64>,
-    /// CPU time-in-JIT budget per turn, in milliseconds. `None` means use
-    /// the runtime's default.
+    pub as_of_turn: Option<TurnId>,
+
+    /// Wall-clock time this snapshot was captured. For fresh spawns,
+    /// the construction time.
+    #[serde(default = "Timestamp::now")]
+    pub captured_at: Timestamp,
+
+    /// Schema version for forward-compatibility checks. Starts at `1`.
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+
+    // -- Content ---------------------------------------------------------
+
+    /// Slot \[1\] content override. When `Some`, replaces
+    /// [`pattern_provider`]'s `DEFAULT_BASE_INSTRUCTIONS` in the
+    /// three-segment cache layout's base-instructions slot. Cache-friendly
+    /// because slot \[1\] is latched at session open and doesn't change
+    /// mid-session.
+    ///
+    /// [`pattern_provider`]: ../../../../pattern_provider/index.html
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cpu_budget_ms: Option<u64>,
-    /// Additional milliseconds of runaway compute (no effect yields) to
-    /// tolerate after the CPU budget is exhausted before escalating from
-    /// soft-cancel to hard-abandon. `None` means runtime default.
+    pub system_prompt: Option<String>,
+
+    /// Initial memory blocks, keyed by label. Persona text, custom
+    /// instructions, working notes — all live here as
+    /// [`MemoryBlockSpec`] entries.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub memory_blocks: HashMap<SmolStr, MemoryBlockSpec>,
+
+    // -- Runtime policy --------------------------------------------------
+
+    /// Which model the runtime should dial per request, plus sampling
+    /// and reasoning parameters.
+    #[serde(default)]
+    pub model: ModelSpec,
+
+    /// Reserved slot for a future model-router type. Shape is
+    /// intentionally unspecified here; when routing lands, this field
+    /// will become typed. Today, populating it is a no-op.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hard_abandon_ms: Option<u64>,
-    /// After hard-abandon fires and the JIT cancel flag has been
-    /// signalled, how long (in milliseconds) to wait for the blocking
-    /// task to observe cancel and unwind before giving up. Exceeding
-    /// this detaches the task and poisons the session. `None` means
-    /// runtime default (30s). See [`crate::error::RuntimeError`] for
-    /// how the surfaced error signals the overrun.
+    pub router: Option<serde_json::Value>,
+
+    /// Message history and snapshot policy for this persona.
+    #[serde(default)]
+    pub context: ContextPolicy,
+
+    /// Tidepool JIT budgets and nursery size. `None` fields fall back
+    /// to runtime defaults.
+    #[serde(default)]
+    pub budgets: RuntimeBudgets,
+
+    /// Filter for which registered tools this persona is allowed to
+    /// use. `None` = all registered tools available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cancel_grace_ms: Option<u64>,
-    /// JIT nursery size in bytes. `None` means the runtime's default
-    /// (32 MiB per pattern_runtime's `TidepoolSession::open`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub nursery_size: Option<usize>,
-    /// Free-form persona metadata that hasn't earned a first-class field
-    /// yet. Phase 4+ may promote particular keys to named fields.
+    pub enabled_tools: Option<Vec<SmolStr>>,
+
+    // -- Escape hatch ----------------------------------------------------
+
+    /// Free-form extra metadata that hasn't earned a first-class field
+    /// yet. Intended for experiments and plugin-scope configuration.
+    /// Should not be load-bearing for foundation code paths.
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub extra: serde_json::Value,
 }
 
-impl PersonaConfig {
-    /// Build a minimal config with only the required fields; optional knobs
-    /// default to `None` (runtime chooses) and `extra` defaults to `null`.
+fn default_schema_version() -> u32 {
+    1
+}
+
+impl PersonaSnapshot {
+    /// Build a minimal snapshot with only the required fields.
     pub fn new(
         agent_id: impl Into<AgentId>,
-        name: impl Into<smol_str::SmolStr>,
+        name: impl Into<SmolStr>,
         program: impl Into<String>,
     ) -> Self {
         Self {
             agent_id: agent_id.into(),
             name: name.into(),
             program: program.into(),
-            wall_budget_ms: None,
-            cpu_budget_ms: None,
-            hard_abandon_ms: None,
-            cancel_grace_ms: None,
-            nursery_size: None,
+            as_of_turn: None,
+            captured_at: Timestamp::now(),
+            schema_version: 1,
+            system_prompt: None,
+            memory_blocks: HashMap::new(),
+            model: ModelSpec::default(),
+            router: None,
+            context: ContextPolicy::default(),
+            budgets: RuntimeBudgets::default(),
+            enabled_tools: None,
             extra: serde_json::Value::Null,
         }
     }
 
     /// Set the per-turn wall-clock budget in milliseconds.
     pub fn with_wall_budget_ms(mut self, ms: u64) -> Self {
-        self.wall_budget_ms = Some(ms);
+        self.budgets.wall_ms = Some(ms);
         self
     }
 
     /// Set the per-turn CPU budget in milliseconds.
     pub fn with_cpu_budget_ms(mut self, ms: u64) -> Self {
-        self.cpu_budget_ms = Some(ms);
+        self.budgets.cpu_ms = Some(ms);
         self
     }
 
-    /// Set the additional milliseconds of runaway compute tolerated beyond
-    /// the CPU budget before hard-abandonment fires.
+    /// Set the additional milliseconds of runaway compute tolerated
+    /// beyond the CPU budget before hard-abandonment fires.
     pub fn with_hard_abandon_ms(mut self, ms: u64) -> Self {
-        self.hard_abandon_ms = Some(ms);
+        self.budgets.hard_abandon_ms = Some(ms);
         self
     }
 
-    /// Set the post-hard-abandon grace window in milliseconds. See
-    /// [`Self::cancel_grace_ms`] for semantics.
+    /// Set the post-hard-abandon grace window in milliseconds.
     pub fn with_cancel_grace_ms(mut self, ms: u64) -> Self {
-        self.cancel_grace_ms = Some(ms);
+        self.budgets.cancel_grace_ms = Some(ms);
         self
     }
 
     /// Set the JIT nursery size in bytes.
     pub fn with_nursery_size(mut self, bytes: usize) -> Self {
-        self.nursery_size = Some(bytes);
+        self.budgets.nursery_size = Some(bytes);
         self
     }
 
-    /// Attach free-form persona metadata.
+    /// Attach free-form extra metadata.
     pub fn with_extra(mut self, extra: serde_json::Value) -> Self {
         self.extra = extra;
         self
     }
+
+    /// Set the custom slot-\[1\] system prompt.
+    pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
+        self.system_prompt = Some(prompt.into());
+        self
+    }
+
+    /// Add a memory block to the initial block set.
+    pub fn with_memory_block(mut self, label: impl Into<SmolStr>, spec: MemoryBlockSpec) -> Self {
+        self.memory_blocks.insert(label.into(), spec);
+        self
+    }
+
+    /// Override the model specification.
+    pub fn with_model(mut self, model: ModelSpec) -> Self {
+        self.model = model;
+        self
+    }
+
+    /// Override the context policy.
+    pub fn with_context_policy(mut self, context: ContextPolicy) -> Self {
+        self.context = context;
+        self
+    }
+
+    /// Restrict which registered tools this persona may use.
+    pub fn with_enabled_tools<I, S>(mut self, tools: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<SmolStr>,
+    {
+        self.enabled_tools = Some(tools.into_iter().map(Into::into).collect());
+        self
+    }
 }
 
-/// A serializable snapshot of a single agent's persona-scoped state.
+// ==========================================================================
+// Memory block spec
+// ==========================================================================
+
+/// Initial specification for one memory block. At session open time, the
+/// runtime constructs a [`StructuredDocument`] from this spec, feeding
+/// `content` through [`StructuredDocument::import_from_json`] which
+/// dispatches by schema:
 ///
-/// Captures the Loro CRDT snapshot of an agent's memory blocks plus any
-/// persona-level configuration needed to deterministically restart a turn.
+/// - [`BlockSchema::Text`] — `content` as `String` (or object with
+///   `content` key).
+/// - [`BlockSchema::Map`] — `content` as object with field values.
+/// - [`BlockSchema::List`] — `content` as array (or object with `items`).
+/// - [`BlockSchema::Log`] — `content` as array of entries.
+/// - [`BlockSchema::Composite`] — `content` as object with section keys.
 ///
-/// > **Implementation detail deferred to Phase 3.** Phase 2 lands the shape
-/// > only. The `data` field is an opaque `serde_json::Value`; Phase 3 will
-/// > replace it with a typed CRDT-snapshot wrapper.
+/// Hence `content: serde_json::Value` rather than `String` — the block
+/// isn't flat text unless the schema says so.
 ///
-/// # Examples
-///
-/// ```
-/// use jiff::Timestamp;
-/// use pattern_core::types::snapshot::PersonaSnapshot;
-/// use pattern_core::types::ids::{AgentId, new_id};
-/// use smol_str::SmolStr;
-///
-/// let snap = PersonaSnapshot {
-///     agent_id: SmolStr::new("orual-companion"),
-///     as_of_turn: new_id(),
-///     captured_at: Timestamp::now(),
-///     data: serde_json::json!({}),
-/// };
-/// assert_eq!(snap.agent_id.as_str(), "orual-companion");
-/// ```
+/// [`StructuredDocument`]: crate::memory::StructuredDocument
+/// [`StructuredDocument::import_from_json`]: crate::memory::StructuredDocument::import_from_json
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PersonaSnapshot {
-    /// The agent whose persona this snapshot captures.
-    pub agent_id: AgentId,
-    /// The turn after which this snapshot was taken.
-    pub as_of_turn: TurnId,
-    /// Wall-clock time the snapshot was captured.
-    pub captured_at: Timestamp,
-    /// Opaque CRDT / persona data. Implementation defined by Phase 3.
-    pub data: serde_json::Value,
+pub struct MemoryBlockSpec {
+    /// Initial content, shape-dispatched by `schema`. Ignored when
+    /// `crdt_snapshot` is `Some` (snapshot wins).
+    #[serde(default)]
+    pub content: serde_json::Value,
+
+    /// Memory tier. See [`MemoryType`].
+    #[serde(default)]
+    pub memory_type: MemoryType,
+
+    /// Permission level applied to this block.
+    #[serde(default)]
+    pub permission: MemoryPermission,
+
+    /// Human-readable description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+
+    /// Whether the block stays in context unconditionally (pinned) vs.
+    /// being eligible for eviction.
+    #[serde(default)]
+    pub pinned: bool,
+
+    /// Maximum content size in characters. `None` = use runtime default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub char_limit: Option<usize>,
+
+    /// Structural schema. `None` defaults to `BlockSchema::text()` at
+    /// load time — fine for the simple inline-text case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<BlockSchema>,
+
+    /// When `Some`, this block is a reference to a shared block owned
+    /// by another agent. The store resolves the reference at load time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_id: Option<MemoryId>,
+
+    /// Full Loro CRDT snapshot bytes. When `Some`, restore reconstructs
+    /// the `LoroDoc` verbatim (including undo/redo history) and ignores
+    /// `content`. Reserved slot for future full-state checkpointing;
+    /// always `None` in foundation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crdt_snapshot: Option<Vec<u8>>,
 }
 
-/// A serializable snapshot of a complete session (one or more agents).
+impl Default for MemoryBlockSpec {
+    fn default() -> Self {
+        Self {
+            content: serde_json::Value::Null,
+            memory_type: MemoryType::default(),
+            permission: MemoryPermission::default(),
+            description: None,
+            pinned: false,
+            char_limit: None,
+            schema: None,
+            shared_id: None,
+            crdt_snapshot: None,
+        }
+    }
+}
+
+impl MemoryBlockSpec {
+    /// Convenience: construct a text block with inline string content.
+    pub fn text(content: impl Into<String>) -> Self {
+        Self {
+            content: serde_json::Value::String(content.into()),
+            ..Self::default()
+        }
+    }
+
+    pub fn with_memory_type(mut self, ty: MemoryType) -> Self {
+        self.memory_type = ty;
+        self
+    }
+
+    pub fn with_permission(mut self, p: MemoryPermission) -> Self {
+        self.permission = p;
+        self
+    }
+
+    pub fn with_description(mut self, d: impl Into<String>) -> Self {
+        self.description = Some(d.into());
+        self
+    }
+
+    pub fn with_pinned(mut self, pinned: bool) -> Self {
+        self.pinned = pinned;
+        self
+    }
+
+    pub fn with_char_limit(mut self, limit: usize) -> Self {
+        self.char_limit = Some(limit);
+        self
+    }
+
+    pub fn with_schema(mut self, schema: BlockSchema) -> Self {
+        self.schema = Some(schema);
+        self
+    }
+
+    pub fn with_shared_id(mut self, id: impl Into<MemoryId>) -> Self {
+        self.shared_id = Some(id.into());
+        self
+    }
+}
+
+// ==========================================================================
+// Model spec
+// ==========================================================================
+
+/// Per-persona model selection plus sampling / reasoning parameters.
 ///
-/// Combines per-agent [`PersonaSnapshot`]s with session-level metadata needed
-/// to restart an entire multi-agent constellation from a known-good state.
+/// Reuses `genai`'s [`ChatOptions`] for the sampling-and-reasoning surface
+/// so we don't redefine `temperature` / `top_p` / `reasoning_effort` /
+/// `verbosity` / etc. Streaming-capture fields on `ChatOptions`
+/// (`capture_usage` and friends) and `extra_headers` are owned by the
+/// runtime and shaper respectively; settings on them here are ignored.
 ///
-/// > **Implementation detail deferred to Phase 3.** Phase 2 lands the shape
-/// > only. The `data` field is an opaque `serde_json::Value`; Phase 3 will
-/// > replace it with a typed session-state wrapper.
+/// Capability flags that currently live on [`ShaperConfig`]
+/// (`enable_interleaved_thinking`, `enable_extended_cache_ttl`,
+/// `enable_1m_context`, etc.) stay workspace-wide rather than per-persona
+/// — the auth-tier-to-shaper relationship is 1:1 in practice, so
+/// capability envelopes are instance-scoped.
 ///
-/// # Examples
-///
-/// ```
-/// use jiff::Timestamp;
-/// use pattern_core::types::snapshot::{PersonaSnapshot, SessionSnapshot};
-/// use pattern_core::types::ids::{AgentId, new_id};
-/// use smol_str::SmolStr;
-///
-/// let persona = PersonaSnapshot {
-///     agent_id: SmolStr::new("orual-companion"),
-///     as_of_turn: new_id(),
-///     captured_at: Timestamp::now(),
-///     data: serde_json::json!({}),
-/// };
-/// let session = SessionSnapshot {
-///     personas: vec![persona],
-///     captured_at: Timestamp::now(),
-///     schema_version: 1,
-///     data: serde_json::json!({}),
-/// };
-/// assert_eq!(session.schema_version, 1);
-/// ```
+/// [`ChatOptions`]: genai::chat::ChatOptions
+/// [`ShaperConfig`]: ../../../../pattern_provider/shaper/struct.ShaperConfig.html
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModelSpec {
+    /// Which provider + model the request routes to.
+    pub choice: ModelChoice,
+
+    /// Sampling and reasoning parameters. Passed through to `genai`
+    /// per request; defaults = "use the library's defaults."
+    #[serde(default)]
+    pub chat_options: ChatOptions,
+
+    /// Narrow per-provider overrides for behaviour that doesn't fit
+    /// cleanly into [`ChatOptions`]. Kept as empty typed structs for
+    /// now and grown on demand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anthropic_overrides: Option<AnthropicOverrides>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openai_overrides: Option<OpenAIOverrides>,
+}
+
+/// A single model selection (provider + model id).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelChoice {
+    /// Which `genai` adapter handles this model. Reuses the upstream
+    /// [`AdapterKind`] enum so pattern_core doesn't redefine the same
+    /// provider list.
+    pub provider: AdapterKind,
+
+    /// Provider-specific model identifier — e.g. `"claude-sonnet-4-6"`,
+    /// `"gemini-2.5-flash"`, `"gpt-5"`. `genai` additionally supports
+    /// namespace syntax (`vertex::claude-sonnet-4-6`) for routing
+    /// through gateway adapters.
+    pub model_id: SmolStr,
+}
+
+impl Default for ModelChoice {
+    fn default() -> Self {
+        Self {
+            provider: AdapterKind::Anthropic,
+            model_id: SmolStr::new_static("claude-sonnet-4-6"),
+        }
+    }
+}
+
+/// Typed overrides for Anthropic-only knobs not on [`ChatOptions`].
+/// Starts empty; grows when concrete needs surface (e.g. forced beta
+/// headers for emerging capabilities).
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AnthropicOverrides {}
+
+/// Typed overrides for OpenAI-only knobs not on [`ChatOptions`].
+/// Starts empty.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OpenAIOverrides {}
+
+// ==========================================================================
+// Context policy
+// ==========================================================================
+
+/// Per-persona message-history and snapshot policy. `None` / default
+/// fields fall back to the runtime's defaults.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ContextPolicy {
+    /// Hard cap on the number of messages retained before compression
+    /// fires. `None` = use runtime default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_messages_before_compress: Option<usize>,
+
+    /// Named compression strategy + optional params. The runtime
+    /// resolves the name to a concrete strategy at session open;
+    /// unrecognized names produce an error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compression: Option<CompressionChoice>,
+
+    /// Snapshot selection and mid-batch delta behaviour (Phase 5's
+    /// [`SnapshotPolicy`]).
+    #[serde(default)]
+    pub snapshot_policy: SnapshotPolicy,
+}
+
+/// Reference to a named compression strategy defined by the runtime.
+/// Keeps `pattern_core` free of the concrete strategy types (they live
+/// in `pattern_provider`). The runtime looks up `name` and applies
+/// `params` at session open.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompressionChoice {
+    pub name: SmolStr,
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub params: serde_json::Value,
+}
+
+// ==========================================================================
+// Runtime budgets
+// ==========================================================================
+
+/// Tidepool JIT budgets and nursery size. `None` values fall back to
+/// runtime defaults.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RuntimeBudgets {
+    /// Wall-clock time-in-JIT budget per turn, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_ms: Option<u64>,
+
+    /// CPU time-in-JIT budget per turn, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_ms: Option<u64>,
+
+    /// Additional milliseconds of runaway compute tolerated beyond the
+    /// CPU budget before hard-abandon fires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hard_abandon_ms: Option<u64>,
+
+    /// Post-hard-abandon grace window, in milliseconds. Exceeding this
+    /// detaches the task and poisons the session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_grace_ms: Option<u64>,
+
+    /// JIT nursery size in bytes. `None` = runtime default (32 MiB).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nursery_size: Option<usize>,
+}
+
+// ==========================================================================
+// Session snapshot (aggregate of persona snapshots)
+// ==========================================================================
+
+/// A serializable snapshot of a complete session — one or more agents
+/// plus session-level metadata.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSnapshot {
     /// Per-agent persona snapshots included in this session checkpoint.
     pub personas: Vec<PersonaSnapshot>,
+
     /// Wall-clock time the session snapshot was captured.
     pub captured_at: Timestamp,
-    /// Schema version for forward-compatibility checks. Starts at `1`.
+
+    /// Schema version for forward-compatibility checks.
     pub schema_version: u32,
-    /// Opaque session-level data. Implementation defined by Phase 3.
+
+    /// Opaque session-level data (coordination pattern state, routing
+    /// tables, etc.). Shape TBD; currently unused in foundation.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub data: serde_json::Value,
+}
+
+impl SessionSnapshot {
+    /// Build a session snapshot. `schema_version` defaults to 1.
+    pub fn new(personas: Vec<PersonaSnapshot>, data: serde_json::Value) -> Self {
+        Self {
+            personas,
+            captured_at: Timestamp::now(),
+            schema_version: 1,
+            data,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_produces_minimal_valid_snapshot() {
+        let snap = PersonaSnapshot::new("orual", "Orual", "module X where\nx = pure ()");
+        assert_eq!(snap.agent_id.as_str(), "orual");
+        assert_eq!(snap.name.as_str(), "Orual");
+        assert!(snap.as_of_turn.is_none());
+        assert_eq!(snap.schema_version, 1);
+        assert!(snap.memory_blocks.is_empty());
+        assert!(snap.system_prompt.is_none());
+    }
+
+    #[test]
+    fn budget_setters_apply() {
+        let snap = PersonaSnapshot::new("a", "A", "x")
+            .with_wall_budget_ms(5_000)
+            .with_cpu_budget_ms(2_000)
+            .with_hard_abandon_ms(1_000)
+            .with_cancel_grace_ms(30_000)
+            .with_nursery_size(64 * 1024 * 1024);
+        assert_eq!(snap.budgets.wall_ms, Some(5_000));
+        assert_eq!(snap.budgets.cpu_ms, Some(2_000));
+        assert_eq!(snap.budgets.hard_abandon_ms, Some(1_000));
+        assert_eq!(snap.budgets.cancel_grace_ms, Some(30_000));
+        assert_eq!(snap.budgets.nursery_size, Some(64 * 1024 * 1024));
+    }
+
+    #[test]
+    fn memory_block_spec_text_shortcut() {
+        let spec = MemoryBlockSpec::text("hello world");
+        assert_eq!(
+            spec.content,
+            serde_json::Value::String("hello world".to_string())
+        );
+        assert_eq!(spec.memory_type, MemoryType::default());
+    }
+
+    #[test]
+    fn memory_block_spec_builder_chain() {
+        let spec = MemoryBlockSpec::text("base instructions")
+            .with_memory_type(MemoryType::Core)
+            .with_permission(MemoryPermission::ReadOnly)
+            .with_pinned(true)
+            .with_char_limit(4_096);
+        assert_eq!(spec.memory_type, MemoryType::Core);
+        assert_eq!(spec.permission, MemoryPermission::ReadOnly);
+        assert!(spec.pinned);
+        assert_eq!(spec.char_limit, Some(4_096));
+        assert!(spec.crdt_snapshot.is_none());
+    }
+
+    #[test]
+    fn default_model_is_anthropic_sonnet() {
+        let model = ModelSpec::default();
+        assert_eq!(model.choice.provider, AdapterKind::Anthropic);
+        assert_eq!(model.choice.model_id.as_str(), "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn round_trip_via_json() {
+        let snap = PersonaSnapshot::new("orual", "Orual", "module X where\nx = pure ()")
+            .with_wall_budget_ms(10_000)
+            .with_system_prompt("you are a helpful assistant")
+            .with_memory_block(
+                "persona",
+                MemoryBlockSpec::text("I am Orual.")
+                    .with_memory_type(MemoryType::Core)
+                    .with_pinned(true),
+            );
+        let json = serde_json::to_string(&snap).unwrap();
+        let parsed: PersonaSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.agent_id, snap.agent_id);
+        assert_eq!(parsed.system_prompt.as_deref(), Some("you are a helpful assistant"));
+        assert_eq!(parsed.memory_blocks.len(), 1);
+        assert_eq!(parsed.budgets.wall_ms, Some(10_000));
+    }
 }

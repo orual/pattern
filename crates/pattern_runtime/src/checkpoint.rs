@@ -147,20 +147,18 @@ impl CheckpointLog {
             serde_json::to_value(&self.events).map_err(|e| RuntimeError::CheckpointFailed {
                 reason: format!("failed to serialise event log: {e}"),
             })?;
-        let persona = PersonaSnapshot {
-            agent_id: agent_id.into(),
-            // `as_of_turn` is an id; mint a fresh one for this capture so
-            // consumers can trace snapshots back to a specific checkpoint.
-            as_of_turn: new_id(),
-            captured_at: jiff::Timestamp::now(),
-            data: events_json,
-        };
-        Ok(SessionSnapshot {
-            personas: vec![persona],
-            captured_at: jiff::Timestamp::now(),
-            schema_version: 1,
-            data: serde_json::json!({ "session_id": session_id }),
-        })
+        // The checkpoint path stashes its event log on the persona's
+        // `extra` slot. `program` and `name` are foundation-era
+        // required fields; the checkpoint path is opaque to them.
+        let persona = PersonaSnapshot::new(agent_id, agent_id, "")
+            .with_extra(events_json);
+        let mut persona = persona;
+        persona.as_of_turn = Some(new_id());
+        persona.captured_at = jiff::Timestamp::now();
+        Ok(SessionSnapshot::new(
+            vec![persona],
+            serde_json::json!({ "session_id": session_id }),
+        ))
     }
 
     /// Inverse of [`Self::snapshot`]: extract the event list for replay.
@@ -171,7 +169,7 @@ impl CheckpointLog {
             .ok_or_else(|| RuntimeError::CheckpointFailed {
                 reason: "snapshot contains no persona entries; cannot restore".into(),
             })?;
-        serde_json::from_value::<Vec<CheckpointEvent>>(persona.data.clone()).map_err(|e| {
+        serde_json::from_value::<Vec<CheckpointEvent>>(persona.extra.clone()).map_err(|e| {
             RuntimeError::CheckpointFailed {
                 reason: format!("failed to deserialise event log: {e}"),
             }
@@ -227,12 +225,7 @@ mod tests {
 
     #[test]
     fn decode_events_errors_on_empty_personas() {
-        let snap = SessionSnapshot {
-            personas: vec![],
-            captured_at: jiff::Timestamp::now(),
-            schema_version: 1,
-            data: serde_json::Value::Null,
-        };
+        let snap = SessionSnapshot::new(vec![], serde_json::Value::Null);
         let err = CheckpointLog::decode_events(&snap).unwrap_err();
         match err {
             RuntimeError::CheckpointFailed { ref reason } => {

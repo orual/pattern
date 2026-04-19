@@ -33,7 +33,7 @@ use std::sync::Arc;
 use pattern_core::traits::{AgentRuntime, Session};
 use pattern_core::types::ids::{BatchId, new_id};
 use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
-use pattern_core::types::snapshot::PersonaConfig;
+use pattern_core::types::snapshot::PersonaSnapshot;
 use pattern_core::types::turn::TurnInput;
 use pattern_runtime::TidepoolRuntime;
 use pattern_runtime::testing::{InMemoryMemoryStore, NopProviderClient};
@@ -87,7 +87,7 @@ async fn memory_and_file_together_do_not_produce_decode_error() {
     let provider = Arc::new(NopProviderClient);
     let runtime = TidepoolRuntime::with_default_sdk(memory, provider);
 
-    let persona = PersonaConfig::new(
+    let persona = PersonaSnapshot::new(
         "collision-agent",
         "CollisionAgent",
         include_str!("fixtures/cross_module_collision.hs"),

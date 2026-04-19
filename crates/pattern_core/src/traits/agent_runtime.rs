@@ -23,14 +23,14 @@
 //! (for checkpoint-and-replay debugging) and safe to use from a forked
 //! analysis session without corrupting the live state.
 //!
-//! When `None`, a fresh session is opened using [`PersonaConfig`] as the
+//! When `None`, a fresh session is opened using [`PersonaSnapshot`] as the
 //! starting configuration.
 
 use async_trait::async_trait;
 
 use crate::error::RuntimeError;
 use crate::traits::session::Session;
-use crate::types::snapshot::{PersonaConfig, SessionSnapshot};
+use crate::types::snapshot::{PersonaSnapshot, SessionSnapshot};
 
 /// Runtime supervisor that spawns per-agent sessions.
 ///
@@ -40,7 +40,7 @@ use crate::types::snapshot::{PersonaConfig, SessionSnapshot};
 /// use async_trait::async_trait;
 /// use pattern_core::error::RuntimeError;
 /// use pattern_core::traits::{AgentRuntime, Session};
-/// use pattern_core::types::snapshot::{PersonaConfig, SessionSnapshot};
+/// use pattern_core::types::snapshot::{PersonaSnapshot, SessionSnapshot};
 /// use pattern_core::types::turn::{StepReply, TurnInput};
 ///
 /// struct DummySession;
@@ -66,7 +66,7 @@ use crate::types::snapshot::{PersonaConfig, SessionSnapshot};
 ///
 ///     async fn open_session(
 ///         &self,
-///         _persona: PersonaConfig,
+///         _persona: PersonaSnapshot,
 ///         _snapshot: Option<SessionSnapshot>,
 ///     ) -> Result<Self::Session, RuntimeError> {
 ///         unimplemented!("dummy: satisfaction-only example; AC1.3")
@@ -94,7 +94,7 @@ pub trait AgentRuntime: Send + Sync {
     /// that must not affect the live state.
     async fn open_session(
         &self,
-        persona: PersonaConfig,
+        persona: PersonaSnapshot,
         snapshot: Option<SessionSnapshot>,
     ) -> Result<Self::Session, RuntimeError>;
 

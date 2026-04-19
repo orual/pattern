@@ -1,12 +1,18 @@
 //! Concrete [`pattern_core::traits::Session`] impl backed by Tidepool.
 //!
 //! Lifecycle:
-//! 1. [`TidepoolSession::open`] — preflight, compile, warm JIT, construct
-//!    a bundle (handlers parameterised over [`SessionContext`]).
-//! 2. Repeat: [`TidepoolSession::step`] — run the JIT with a turn input
-//!    threaded through effect handlers, collect turn output.
+//! 1. [`TidepoolSession::open_with_agent_loop`] — preflight, construct
+//!    handler bundle, spawn `EvalWorker`, build preamble.
+//! 2. Repeat: [`TidepoolSession::step_with_agent_loop`] — drive the full
+//!    wire-turn loop: compose → provider → stream → tool dispatch → chain.
 //! 3. [`TidepoolSession::checkpoint`] / [`TidepoolSession::restore`] —
-//!    event-log based (Phase 3 Task 15).
+//!    event-log based.
+//!
+//! The legacy static-program path (`TidepoolSession::open` + `Session::step`
+//! driving `SessionMachine.run`) was retired in Phase 6 Task B. The
+//! `TidepoolRuntime::open_session` trait impl now delegates to
+//! `open_with_agent_loop` (or can open a minimal session without an eval
+//! worker for checkpoint-only use). See `runtime.rs` for the trait bridge.
 //!
 
 use std::path::PathBuf;
@@ -14,25 +20,18 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
-use jiff::Timestamp;
 use pattern_core::ProviderClient;
-use pattern_core::error::{CancelPath, RuntimeError};
+use pattern_core::error::RuntimeError;
 use pattern_core::traits::{MemoryStore, NoOpSink, Session, TurnSink};
-use pattern_core::types::snapshot::{PersonaConfig, SessionSnapshot};
-use pattern_core::types::turn::{StepReply, TurnInput, TurnOutput};
+use pattern_core::types::snapshot::{PersonaSnapshot, SessionSnapshot};
+use pattern_core::types::turn::{StepReply, TurnInput};
 
 use crate::agent_loop::EvalWorker;
 use crate::checkpoint::{CheckpointEvent, CheckpointLog};
 use crate::memory::{MemoryStoreAdapter, TurnHistory};
 use crate::router::RouterRegistry;
 use crate::sdk::SdkLocation;
-use crate::sdk::bundle::SdkBundle;
-use crate::sdk::handlers::{
-    DisplayHandler, FileHandler, LogHandler, McpHandler, MemoryHandler, MessageHandler,
-    RecallHandler, RpcHandler, SearchHandler, ShellHandler, SourcesHandler, SpawnHandler,
-    TimeHandler,
-};
-use crate::tidepool::{CancelHandle, SessionMachine, compile_program};
+use crate::sdk::handlers::DisplayHandler;
 use crate::timeout::{Budget, CancelState};
 
 /// Session-scoped context threaded into every handler as the
@@ -126,7 +125,7 @@ impl SessionContext {
     /// a shared log via the crate-private `with_checkpoint_log` builder so
     /// handlers record into the same log the session exposes.
     pub fn from_persona(
-        persona: &PersonaConfig,
+        persona: &PersonaSnapshot,
         memory_store: Arc<dyn MemoryStore>,
         provider: Arc<dyn ProviderClient>,
     ) -> Self {
@@ -272,57 +271,33 @@ impl SessionContext {
     }
 }
 
-/// A running session: owns the JIT machine, handler bundle, cancellation
-/// harness, and checkpoint log.
+/// A running session: owns the handler bundle, eval worker, and checkpoint log.
 ///
-/// The machine is held inside an `Option<Box<...>>` so `step` can move it
-/// into a `spawn_blocking` task (tokio requires `'static` closures) and
-/// move it back on normal completion or soft cancel.
-///
-/// For the Phase 5 wire-turn-loop path, open the session via
-/// [`TidepoolSession::open_with_agent_loop`] and call
-/// [`TidepoolSession::step_with_agent_loop`]. The legacy JIT path
-/// remains via [`Session::step`] for existing tests.
+/// Open via [`TidepoolSession::open_with_agent_loop`] and drive turns with
+/// [`TidepoolSession::step_with_agent_loop`]. The `Session` trait's `step`
+/// method delegates to `step_with_agent_loop`; callers should prefer the
+/// typed method directly for clarity.
 pub struct TidepoolSession {
-    /// JIT machine + bundle held behind a Mutex so the session struct is
-    /// `Sync`. The underlying types are `Send` but not `Sync` (their
-    /// internals hold raw pointers / `RefCell`s); the mutex gives us the
-    /// `Sync` bound the async `Session` trait's `&self`-returning
-    /// futures require.
-    inner: std::sync::Mutex<InnerState>,
     ctx: Arc<SessionContext>,
     session_id: String,
     checkpoint_log: Arc<std::sync::Mutex<CheckpointLog>>,
-    /// Monotonic turn counter exposed to handlers via SessionContext so
-    /// recorded exchanges can be stamped with the current turn. Shared
-    /// `Arc<AtomicU64>` with `ctx.current_turn`.
-    current_turn: Arc<AtomicU64>,
     /// Shared DisplayHandler so callers (CLI, tests) can register
     /// subscribers after `open`.
     display_handle: DisplayHandler,
-    /// External cancel handle for the JIT machine. The watchdog flips
-    /// this on hard-abandon; the JIT observes at its next GC safepoint
-    /// and returns `YieldError::Cancelled`. Separate from
-    /// `SessionContext::cancel_state`: soft-cancel is a handler-level
-    /// early return, hard-cancel is a JIT-level forced unwind. Keeping
-    /// them distinct avoids escalating every soft cancel into a
-    /// full JIT abort.
-    jit_cancel: CancelHandle,
     /// In-memory active turn history + cached archive-summary head.
     /// Populated on session open via `TurnHistory::load` (when a DB is
-    /// available) or `TurnHistory::empty` (tests). `run_turn` records
-    /// each completed turn here; Task 13's compaction strategies
-    /// consume the oldest entries.
+    /// available) or `TurnHistory::empty` (tests). `drive_step` records
+    /// each completed turn here; compaction strategies consume the oldest
+    /// entries.
     turn_history: Arc<std::sync::Mutex<TurnHistory>>,
-    /// Long-lived Haskell eval worker. Present when the session was
-    /// opened via [`TidepoolSession::open_with_agent_loop`]; `None` on
-    /// the legacy [`TidepoolSession::open`] path. Required by
+    /// Long-lived Haskell eval worker. Spawned by
+    /// [`TidepoolSession::open_with_agent_loop`]. Required by
     /// [`TidepoolSession::step_with_agent_loop`].
     eval_worker: Option<EvalWorker>,
     /// Shared Haskell preamble: GADT declarations + effect-row alias +
     /// helpers assembled once at session open from
     /// [`crate::sdk::bundle::canonical_effect_decls`]. Passed verbatim
-    /// to every [`EvalWorker::dispatch`] call. `None` on the legacy path.
+    /// to every [`EvalWorker::dispatch`] call.
     preamble: Option<String>,
     /// Session-latched cache profile. Consumed by the composer
     /// pipeline inside [`crate::agent_loop::drive_step`] to place
@@ -335,22 +310,12 @@ pub struct TidepoolSession {
     cache_profile: pattern_provider::compose::CacheProfile,
 }
 
-/// Mutable per-session state guarded by [`TidepoolSession::inner`].
-struct InnerState {
-    machine: Option<Box<SessionMachine>>,
-    bundle: Option<Box<SdkBundle>>,
-    /// Set when a hard-abandon fires; further `step` calls short-circuit.
-    poisoned: bool,
-    /// Monotonic per-step turn counter for CheckpointEvent sequencing.
-    turn_counter: u64,
-}
-
 impl std::fmt::Debug for TidepoolSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TidepoolSession")
             .field("session_id", &self.session_id)
             .field("agent_id", &self.ctx.agent_id())
-            .field("worker_configured", &self.eval_worker.is_some())
+            .field("eval_worker", &self.eval_worker.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -374,95 +339,44 @@ impl TidepoolSession {
         self.checkpoint_log.clone()
     }
 
-    /// Test-only: flip the session's `poisoned` flag so the next `step`
-    /// short-circuits with `RuntimeError::SessionPoisoned`. Used by the
-    /// Phase 3 Task 18 / AC2.8 integration test to assert the poison
-    /// short-circuit on its own without having to reproduce the exact
-    /// race conditions that cause the real `run_turn` path to flip it
-    /// (the JoinError branch is inherently non-deterministic under
-    /// test).
+    /// Open a minimal session: initialise context, checkpoint log, and handler
+    /// display handle but do NOT spawn an eval worker. Used internally by
+    /// [`Self::open_with_agent_loop`] and by `TidepoolRuntime::open_session`
+    /// for checkpoint-restore use-cases that don't need the eval worker.
     ///
-    /// Feature-gated behind `test-hooks` so this never leaks into
-    /// downstream consumers' builds. Pattern's own integration tests
-    /// enable the feature via the self-dev-dep in `Cargo.toml`.
-    #[cfg(feature = "test-hooks")]
-    #[doc(hidden)]
-    pub fn __poison_for_tests(&self) {
-        if let Ok(mut inner) = self.inner.lock() {
-            inner.poisoned = true;
-        }
-    }
-
-    /// Open a session for `persona`. Compiles the program, warms the JIT,
-    /// constructs the handler bundle wired to `memory_store`, and records
-    /// a fresh session id.
-    ///
-    /// Runs preflight first so missing tidepool-extract produces an
-    /// actionable error before any work happens.
+    /// Runs preflight so missing tidepool-extract produces an actionable error
+    /// before any work happens. The session returned here is not wired for
+    /// `step_with_agent_loop` — call `open_with_agent_loop` for that.
     pub fn open(
-        persona: PersonaConfig,
+        persona: PersonaSnapshot,
         sdk: &SdkLocation,
         memory_store: Arc<dyn MemoryStore>,
         provider: Arc<dyn ProviderClient>,
     ) -> Result<Self, RuntimeError> {
         crate::preflight::check()?;
-        let sdk_dir = sdk.resolve()?;
-        let program = compile_program(&persona.program, "agent", &sdk_dir)?;
-        // 64 MiB matches tidepool-runtime's `DEFAULT_NURSERY_SIZE`. Smaller
-        // nurseries trigger more GC cycles; upstream tidepool has an open bug
-        // where long-running multi-module recursive agents can corrupt closure
-        // pointers during GC in the JIT, manifesting as `[JIT] App: tag 255`.
-        // 64 MiB sidesteps the corruption for the loop sizes used in tests;
-        // reproduction lives at `crates/pattern_runtime/tests/recurse_repro.rs`.
-        let nursery = persona.nursery_size.unwrap_or(64 * 1024 * 1024);
-        let machine = SessionMachine::new(program, nursery)?;
-        let jit_cancel = machine.cancel_handle();
+        let _ = sdk; // sdk.resolve() is deferred to open_with_agent_loop
         let session_id = pattern_core::types::ids::new_id().to_string();
         // Share the checkpoint log + current-turn counter between the
         // session and the handler-facing SessionContext so handlers'
         // `record_exchange` calls land in the same log the session
         // publishes via `TidepoolSession::checkpoint_log`.
         let checkpoint_log = Arc::new(std::sync::Mutex::new(CheckpointLog::new()));
+        // The turn counter is owned by `ctx` via `with_checkpoint_log`; handlers
+        // read it through `SessionContext::current_turn()`. Nothing on
+        // `TidepoolSession` reads it directly in the agent-loop path.
         let current_turn = Arc::new(AtomicU64::new(0));
         let ctx = Arc::new(
             SessionContext::from_persona(&persona, memory_store, provider.clone())
-                .with_checkpoint_log(checkpoint_log.clone(), current_turn.clone()),
+                .with_checkpoint_log(checkpoint_log.clone(), current_turn),
         );
 
         let display = DisplayHandler::new();
-        // Bundle order: Memory, Search, Recall (storage-adjacent), then
-        // Message, Display, Time, Log (Prelude-5), then rarer effects.
-        // Must match SdkBundle in `crates/pattern_runtime/src/sdk/bundle.rs`
-        // — handler position == JIT effect tag.
-        let bundle: SdkBundle = frunk::hlist![
-            MemoryHandler::new(ctx.memory_store()),
-            SearchHandler::new(ctx.memory_store()),
-            RecallHandler::new(ctx.memory_store()),
-            MessageHandler,
-            display.clone(),
-            TimeHandler,
-            LogHandler::for_session(session_id.clone()),
-            ShellHandler,
-            FileHandler,
-            SourcesHandler,
-            McpHandler,
-            RpcHandler,
-            SpawnHandler,
-        ];
 
         Ok(Self {
-            inner: std::sync::Mutex::new(InnerState {
-                machine: Some(Box::new(machine)),
-                bundle: Some(Box::new(bundle)),
-                poisoned: false,
-                turn_counter: 0,
-            }),
             ctx,
             session_id,
             checkpoint_log,
-            current_turn,
             display_handle: display,
-            jit_cancel,
             turn_history: Arc::new(std::sync::Mutex::new(TurnHistory::empty())),
             eval_worker: None,
             preamble: None,
@@ -491,14 +405,10 @@ impl TidepoolSession {
         self.turn_history.clone()
     }
 
-    /// Open a session wired for the Phase 5 wire-turn-loop driver.
+    /// Open a session wired for the agent-loop wire-turn-loop driver.
     ///
-    /// Behaves like [`Self::open`] but also:
-    ///
-    /// - Replaces the default [`NoOpSink`] on the session's
-    ///   [`SessionContext`] with the caller-supplied `turn_sink`.
-    /// - Forwards legacy `SessionMachine.run` Display events to the
-    ///   same sink via [`DisplayHandler::forward_to_turn_sink`].
+    /// - Runs preflight so missing tidepool-extract produces an actionable error.
+    /// - Initialises context with the caller-supplied `turn_sink`.
     /// - Builds the shared Haskell preamble from
     ///   [`crate::sdk::bundle::canonical_effect_decls`].
     /// - Spawns an [`EvalWorker`] with an include path of `[sdk.resolve()]`
@@ -507,15 +417,14 @@ impl TidepoolSession {
     /// Use [`Self::step_with_agent_loop`] to drive turns on sessions
     /// opened via this constructor.
     pub fn open_with_agent_loop(
-        persona: PersonaConfig,
+        persona: PersonaSnapshot,
         sdk: &SdkLocation,
         memory_store: Arc<dyn MemoryStore>,
         provider: Arc<dyn ProviderClient>,
         turn_sink: Arc<dyn TurnSink>,
         prelude_dir: Option<PathBuf>,
     ) -> Result<Self, RuntimeError> {
-        // Build the session via the existing open() path, which handles
-        // preflight, compile, JIT warm-up, and bundle construction.
+        // Initialise the base session (preflight, context, checkpoint log).
         let mut session = Self::open(persona, sdk, memory_store, provider)?;
 
         // Replace the NoOpSink on the freshly constructed SessionContext.
@@ -526,8 +435,8 @@ impl TidepoolSession {
         let ctx_with_sink = ctx_owned.with_turn_sink(turn_sink.clone());
         session.ctx = Arc::new(ctx_with_sink);
 
-        // Forward legacy SessionMachine.run Display events to the same sink
-        // so CLI/TUI gets Display output from JIT-path turns too.
+        // Wire the turn sink into the DisplayHandler so Display events
+        // flow to CLI/TUI subscribers during eval turns.
         session.display_handle.forward_to_turn_sink(turn_sink);
 
         // Build the shared preamble once per session.
@@ -535,9 +444,7 @@ impl TidepoolSession {
 
         // Build include paths: SDK dir only. Pattern's haskell/Pattern/
         // tree now includes both the effect GADTs AND the prelude
-        // substitute (ported first-party from tidepool-mcp's
-        // Tidepool.Prelude / Tidepool.Aeson* in Phase 5 Task 15). No
-        // separate "tidepool prelude dir" is needed any more.
+        // substitute. No separate "tidepool prelude dir" is needed.
         //
         // The `prelude_dir` parameter is honoured for back-compat —
         // callers who still pass one get it appended, but it's
@@ -568,11 +475,9 @@ impl TidepoolSession {
     /// configured, with a message pointing at the correct
     /// constructor.
     ///
-    /// In contrast to [`Session::step`] (which wraps the legacy
-    /// SessionMachine.run single-turn path in a one-entry
-    /// StepReply), this drives the full wire-turn loop: compose →
-    /// provider.complete → stream → tool dispatch → chain
-    /// tool_results → repeat until stop_reason.is_terminal().
+    /// Drives the full wire-turn loop: compose → provider.complete →
+    /// stream → tool dispatch → chain tool_results → repeat until
+    /// `stop_reason.is_terminal()`. [`Session::step`] delegates here.
     pub async fn step_with_agent_loop(&self, input: TurnInput) -> Result<StepReply, RuntimeError> {
         let worker = self
             .eval_worker
@@ -596,265 +501,6 @@ impl TidepoolSession {
         .await
     }
 
-    /// Test-friendly step core: runs the machine, races the watchdog,
-    /// returns a [`TurnOutput`] skeleton on success. Phase 3 does not
-    /// surface rich turn output — `messages`, `block_writes` are empty.
-    /// Phase 4+ wire these through the real MessageHandler / block-write
-    /// collector.
-    async fn run_turn(&self, input: TurnInput) -> Result<TurnOutput, RuntimeError> {
-        // Scope the guard so we drop it before awaiting the spawn-blocking
-        // task (holding a std::sync::MutexGuard across `.await` would
-        // block the executor thread).
-        let (mut machine, mut bundle) = {
-            let mut inner = self.inner.lock().map_err(|_| RuntimeError::JoinError {
-                reason: "inner mutex poisoned".into(),
-            })?;
-            if inner.poisoned {
-                return Err(RuntimeError::SessionPoisoned {
-                    reason:
-                        "previous turn hard-abandoned due to runaway compute without effect yields"
-                            .into(),
-                });
-            }
-            inner.turn_counter += 1;
-            // Publish the new turn number to the shared atomic so
-            // handlers recording exchanges via SessionContext can stamp
-            // them with the current turn.
-            self.current_turn
-                .store(inner.turn_counter, Ordering::SeqCst);
-            let machine = inner
-                .machine
-                .take()
-                .expect("machine present between turns (Option invariant)");
-            let bundle = inner
-                .bundle
-                .take()
-                .expect("bundle present between turns (Option invariant)");
-            (machine, bundle)
-        };
-        let budget = self.ctx.budget();
-        self.ctx.cancel_state.reset();
-        // Clear any lingering cancel request from a previous turn. The
-        // handle is Arc-shared with the JIT machine; resetting on both
-        // ends keeps soft and hard paths independent.
-        self.jit_cancel.reset();
-        let ctx_clone = self.ctx.clone();
-
-        let jit_handle = tokio::task::spawn_blocking(move || {
-            let result = machine.run(&mut *bundle, ctx_clone.as_ref());
-            // Return the moved-in state alongside the result so the
-            // session can reinstate its fields on normal completion /
-            // soft-cancel.
-            (result, machine, bundle)
-        });
-
-        let watchdog_state = self.ctx.cancel_state.clone();
-        let mut watchdog = crate::timeout::spawn_watchdog(
-            watchdog_state.clone(),
-            budget,
-            std::time::Duration::from_millis(25),
-        );
-
-        // Race JIT vs watchdog. On hard-abandon the watchdog returns; we
-        // detach the JIT task (which keeps running in the background
-        // since we have no way to stop it) and poison the session.
-        let mut jit_handle = jit_handle;
-        tokio::select! {
-            biased;
-            join_result = &mut jit_handle => {
-                watchdog.abort();
-                let (run_result, machine, bundle) = join_result
-                    .map_err(|e| RuntimeError::JoinError { reason: e.to_string() })?;
-                // Reinstate state — even on error, so a soft-cancel
-                // caller can step again.
-                if let Ok(mut inner) = self.inner.lock() {
-                    inner.machine = Some(machine);
-                    inner.bundle = Some(bundle);
-                }
-
-                let cancelled = self.ctx.cancel_state.is_cancelled();
-                self.ctx.cancel_state.reset();
-                match run_result {
-                    Ok(_value) => {
-                        // Drain pending BlockWrites from the adapter into the
-                        // TurnOutput. Phase 5: these feed pseudo-message emission.
-                        let block_writes = self.ctx.adapter.drain_pending();
-                        let output = TurnOutput {
-                            messages: vec![],
-                            block_writes,
-                            tool_calls: vec![],
-                            // Legacy SessionMachine.run path: no tool
-                            // calls are possible here, so every wire
-                            // turn ends with EndTurn semantics.
-                            stop_reason: pattern_core::types::turn::StopReason::EndTurn,
-                            usage: None,
-                            cache_metrics: Default::default(),
-                            completed_at: Timestamp::now(),
-                        };
-
-                        // Record in TurnHistory for the composer and
-                        // compaction strategies. Pass input alongside output
-                        // so active_messages() can interleave them correctly.
-                        if let Ok(mut hist) = self.turn_history.lock() {
-                            hist.record(input.turn_id.clone(), input.clone(), output.clone());
-                        }
-
-                        Ok(output)
-                    }
-                    Err(e) if cancelled && is_cancel_sentinel(&e) => {
-                        Err(RuntimeError::Timeout {
-                            wall_ms: budget.wall.as_millis() as u64,
-                            cpu_ms: budget.cpu.as_millis() as u64,
-                            path: CancelPath::Soft,
-                        })
-                    }
-                    Err(e) => Err(e),
-                }
-            }
-            outcome = &mut watchdog => {
-                match outcome {
-                    Ok(crate::timeout::BoundedOutcome::HardAbandoned { wall_ms, cpu_ms }) => {
-                        // The watchdog escalated because cooperative
-                        // cancellation couldn't be delivered: no effect
-                        // entries observed after the soft-cancel flag
-                        // flipped. We flip the tidepool cancel flag; the
-                        // JIT observes it at the next heap check (every
-                        // non-trivial allocation) and unwinds cleanly
-                        // with `YieldError::Cancelled`, which
-                        // `error_map::map_yield_error` promotes to
-                        // `RuntimeError::Timeout { path: HardAbandon }`
-                        // with placeholder zeros. We then await the
-                        // blocking task to reclaim the thread before
-                        // returning. Typical observation latency on
-                        // tight compute loops: ~20ms.
-                        tracing::warn!(
-                            session_id = %self.session_id,
-                            wall_ms,
-                            cpu_ms,
-                            "hard-abandon: signalling tidepool CancelHandle; awaiting JIT unwind",
-                        );
-                        self.jit_cancel.cancel();
-
-                        // Bound the await: a buggy or upstream-broken JIT
-                        // that never reaches a heap-check safepoint would
-                        // otherwise hang the entire runtime forever here.
-                        // If we exceed `cancel_grace`, abort the blocking
-                        // task (which detaches its thread — tokio has no
-                        // way to actually stop blocking work), poison the
-                        // session so no further steps reuse the machine,
-                        // and return a RuntimeCrashed to tell the caller
-                        // this is not a recoverable timeout.
-                        let cancel_grace = budget.cancel_grace;
-                        let join_result = match tokio::time::timeout(
-                            cancel_grace,
-                            &mut jit_handle,
-                        )
-                        .await
-                        {
-                            Ok(r) => r,
-                            Err(_) => {
-                                jit_handle.abort();
-                                if let Ok(mut inner) = self.inner.lock() {
-                                    inner.poisoned = true;
-                                }
-                                tracing::error!(
-                                    session_id = %self.session_id,
-                                    elapsed_ms = cancel_grace.as_millis() as u64,
-                                    thread_id = ?std::thread::current().id(),
-                                    "JIT failed to observe cancel within grace window; session poisoned, thread detached",
-                                );
-                                return Err(RuntimeError::RuntimeCrashed);
-                            }
-                        };
-                        // Reset the cancel flag so a future turn (if the
-                        // session stays clean) is not immediately
-                        // cancelled on entry.
-                        self.jit_cancel.reset();
-                        self.ctx.cancel_state.reset();
-
-                        let (run_result, machine, bundle) = match join_result {
-                            Ok(triple) => triple,
-                            Err(join_err) => {
-                                // Blocking task panicked or was cancelled by
-                                // the runtime — we cannot recover machine
-                                // state. Poison and surface the join error;
-                                // this is distinct from a clean cancel.
-                                if let Ok(mut inner) = self.inner.lock() {
-                                    inner.poisoned = true;
-                                }
-                                return Err(RuntimeError::JoinError {
-                                    reason: join_err.to_string(),
-                                });
-                            }
-                        };
-                        // Reinstate state. Whether the JIT returned
-                        // cleanly or with an unexpected error, the
-                        // machine struct itself is structurally intact
-                        // — unwinding happens through the normal
-                        // Result return, not a panic.
-                        if let Ok(mut inner) = self.inner.lock() {
-                            inner.machine = Some(machine);
-                            inner.bundle = Some(bundle);
-                        }
-
-                        match run_result {
-                            // Expected path: the JIT observed the cancel
-                            // flag at a heap check and returned our
-                            // placeholder `Timeout { HardAbandon }`.
-                            // Session remains clean — the next turn
-                            // will reuse the machine.
-                            Err(RuntimeError::Timeout {
-                                path: CancelPath::HardAbandon,
-                                ..
-                            }) => Err(RuntimeError::Timeout {
-                                wall_ms,
-                                cpu_ms,
-                                path: CancelPath::HardAbandon,
-                            }),
-                            // JIT returned some other error during the
-                            // cancel race (e.g., finished normally
-                            // before observing cancel, or crashed). The
-                            // cancel still succeeded in unblocking us;
-                            // surface the watchdog's verdict.
-                            //
-                            // Belt-and-suspenders poison: if we can't
-                            // confirm clean cancellation we err on the
-                            // side of not reusing the machine state.
-                            _ => {
-                                if let Ok(mut inner) = self.inner.lock() {
-                                    inner.poisoned = true;
-                                }
-                                Err(RuntimeError::Timeout {
-                                    wall_ms,
-                                    cpu_ms,
-                                    path: CancelPath::HardAbandon,
-                                })
-                            }
-                        }
-                    }
-                    Ok(_) => Err(RuntimeError::WatchdogFailure),
-                    Err(_) => Err(RuntimeError::WatchdogFailure),
-                }
-            }
-        }
-    }
-}
-
-/// Examine a `RuntimeError` produced by the JIT run path to decide
-/// whether it was really our cancellation sentinel bubbling back out.
-///
-/// The JIT machine maps effect-handler errors to
-/// `RuntimeError::SdkHandlerFailed { reason, .. }` via `error_map` (as
-/// of the phase-3 review follow-up that split SDK-handler failure out
-/// of CompileInternal); when our handlers emit the sentinel string, it
-/// lands verbatim inside `reason`. We match on the rendered `Display`
-/// rather than the specific variant so a future rehoming of the
-/// sentinel through a different error-mapping still works — the
-/// sentinel is stable-by-design and the predicate stays on its
-/// observable identity. See [`crate::timeout::CANCELLED_SENTINEL`].
-fn is_cancel_sentinel(e: &RuntimeError) -> bool {
-    let s = e.to_string();
-    s.contains(crate::timeout::CANCELLED_SENTINEL)
 }
 
 #[async_trait]
@@ -863,22 +509,9 @@ impl Session for TidepoolSession {
         &mut self,
         input: TurnInput,
     ) -> Result<pattern_core::types::turn::StepReply, RuntimeError> {
-        // Internally run_turn uses `&self` (interior mutability via the
-        // inner mutex); Session::step is `&mut self` per the core trait.
-        //
-        // Interim impl: the legacy SessionMachine.run path produces a
-        // single wire TurnOutput with stop_reason=EndTurn. Wrap it in
-        // a one-turn StepReply to satisfy the new trait signature.
-        // Task 20 part 5c replaces this with agent_loop::orchestrate
-        // + wire-turn loop driver.
-        let turn = self.run_turn(input).await?;
-        let final_stop_reason = turn.stop_reason;
-        let total_usage = turn.usage.clone();
-        Ok(pattern_core::types::turn::StepReply {
-            turns: vec![turn],
-            final_stop_reason,
-            total_usage,
-        })
+        // Delegate to the agent-loop path. `&mut self` satisfies `&self` on
+        // `step_with_agent_loop`.
+        self.step_with_agent_loop(input).await
     }
 
     async fn checkpoint(&self) -> Result<SessionSnapshot, RuntimeError> {
@@ -958,20 +591,8 @@ mod tests {
     use pattern_core::traits::{MemoryStore, TurnSink, VecSink};
     use pattern_core::types::ids::{BatchId, new_id};
     use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
-    use pattern_core::types::snapshot::PersonaConfig;
+    use pattern_core::types::snapshot::PersonaSnapshot;
     use pattern_core::types::turn::StopReason;
-
-    /// Minimal compilable agent program. Needs OverloadedStrings (so string
-    /// literals become Text, matching the Log helper signatures) and a
-    /// type signature to avoid GHC ambiguity.
-    const MINIMAL_AGENT_PROGRAM: &str = concat!(
-        "{-# LANGUAGE DataKinds, TypeOperators, OverloadedStrings #-}\n",
-        "module Agent (agent) where\n",
-        "import Control.Monad.Freer (Eff)\n",
-        "import Pattern.Log\n",
-        "agent :: Eff '[Log] ()\n",
-        "agent = info \"test\"\n",
-    );
 
     fn test_turn_input() -> TurnInput {
         TurnInput {
@@ -987,11 +608,11 @@ mod tests {
         }
     }
 
-    /// `step_with_agent_loop` on a session opened via the legacy
+    /// `step_with_agent_loop` on a session opened via the minimal
     /// `TidepoolSession::open` (no eval worker) returns
     /// `RuntimeError::SessionPoisoned` with a clear message.
     ///
-    /// Gated on preflight so `open` can compile the agent program.
+    /// Gated on preflight so `open` can succeed.
     #[tokio::test]
     async fn step_with_agent_loop_without_worker_returns_session_poisoned_error() {
         if crate::preflight::check().is_err() {
@@ -999,7 +620,7 @@ mod tests {
         }
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
         let provider: Arc<dyn ProviderClient> = Arc::new(MockProviderClient::with_turns(vec![]));
-        let persona = PersonaConfig::new("agent-a", "A", MINIMAL_AGENT_PROGRAM);
+        let persona = PersonaSnapshot::new("agent-a", "A");
         let sdk = SdkLocation::default();
 
         let session = TidepoolSession::open(persona, &sdk, store, provider)
@@ -1050,7 +671,7 @@ mod tests {
         ]));
         let provider_dyn: Arc<dyn ProviderClient> = provider.clone();
 
-        let persona = PersonaConfig::new("agent-a", "A", MINIMAL_AGENT_PROGRAM);
+        let persona = PersonaSnapshot::new("agent-a", "A");
         let sdk = SdkLocation::default();
         let sink = Arc::new(VecSink::new());
         let sink_dyn: Arc<dyn TurnSink> = sink.clone();
@@ -1127,7 +748,7 @@ mod tests {
 
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
         let provider: Arc<dyn ProviderClient> = Arc::new(MockProviderClient::with_turns(vec![]));
-        let persona = PersonaConfig::new("agent-a", "A", MINIMAL_AGENT_PROGRAM);
+        let persona = PersonaSnapshot::new("agent-a", "A");
         let sdk = SdkLocation::default();
         let sink = Arc::new(VecSink::new());
         let sink_dyn: Arc<dyn TurnSink> = sink.clone();

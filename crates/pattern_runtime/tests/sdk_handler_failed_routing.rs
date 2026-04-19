@@ -14,7 +14,7 @@ use pattern_core::error::RuntimeError;
 use pattern_core::traits::{AgentRuntime, Session};
 use pattern_core::types::ids::{BatchId, new_id};
 use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
-use pattern_core::types::snapshot::PersonaConfig;
+use pattern_core::types::snapshot::PersonaSnapshot;
 use pattern_core::types::turn::TurnInput;
 use pattern_runtime::TidepoolRuntime;
 use pattern_runtime::testing::{InMemoryMemoryStore, NopProviderClient};
@@ -47,7 +47,7 @@ async fn file_stub_surface_as_sdk_handler_failed() {
     let memory = Arc::new(InMemoryMemoryStore::new());
     let provider = Arc::new(NopProviderClient);
     let runtime = TidepoolRuntime::with_default_sdk(memory, provider);
-    let persona = PersonaConfig::new(
+    let persona = PersonaSnapshot::new(
         "sdk-fail-routing",
         "SdkFailRouting",
         include_str!("fixtures/file_stub_full_bundle.hs"),

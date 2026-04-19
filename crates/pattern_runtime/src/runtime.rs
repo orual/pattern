@@ -22,7 +22,7 @@ use async_trait::async_trait;
 use pattern_core::ProviderClient;
 use pattern_core::error::RuntimeError;
 use pattern_core::traits::{AgentRuntime, MemoryStore};
-use pattern_core::types::snapshot::{PersonaConfig, SessionSnapshot};
+use pattern_core::types::snapshot::{PersonaSnapshot, SessionSnapshot};
 
 use crate::sdk::SdkLocation;
 use crate::session::TidepoolSession;
@@ -68,7 +68,7 @@ impl AgentRuntime for TidepoolRuntime {
 
     async fn open_session(
         &self,
-        persona: PersonaConfig,
+        persona: PersonaSnapshot,
         snapshot: Option<SessionSnapshot>,
     ) -> Result<Self::Session, RuntimeError> {
         let sdk = self.sdk.clone();

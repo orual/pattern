@@ -321,12 +321,12 @@ mod tests {
     use crate::testing::{InMemoryMemoryStore, NopProviderClient};
     use pattern_core::ProviderClient;
     use pattern_core::traits::MemoryStore;
-    use pattern_core::types::snapshot::PersonaConfig;
+    use pattern_core::types::snapshot::PersonaSnapshot;
 
     fn test_ctx() -> (Arc<SessionContext>, PathBuf) {
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
         let provider: Arc<dyn ProviderClient> = Arc::new(NopProviderClient);
-        let persona = PersonaConfig::new("agent-a", "A", "module X where\nx = pure ()");
+        let persona = PersonaSnapshot::new("agent-a", "A", "module X where\nx = pure ()");
         let ctx = Arc::new(SessionContext::from_persona(&persona, store, provider));
         let sdk_dir = SdkLocation::default()
             .resolve()
@@ -447,7 +447,7 @@ mod tests {
         // Don't gate on preflight — we drop before needing tidepool.
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
         let provider: Arc<dyn ProviderClient> = Arc::new(NopProviderClient);
-        let persona = PersonaConfig::new("agent-a", "A", "module X where\nx = pure ()");
+        let persona = PersonaSnapshot::new("agent-a", "A", "module X where\nx = pure ()");
         let ctx = Arc::new(SessionContext::from_persona(&persona, store, provider));
 
         // Stub sdk_dir — we never actually hit the worker thread.

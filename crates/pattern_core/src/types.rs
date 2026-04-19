@@ -27,5 +27,5 @@ pub use ids::{
 pub use message::{Message, ResponseMeta};
 pub use origin::{AgentAuthor, Author, Human, MessageOrigin, Partner, Sphere, SystemReason};
 pub use search::SearchScope;
-pub use snapshot::{PersonaConfig, PersonaSnapshot, SessionSnapshot};
+pub use snapshot::{PersonaSnapshot, SessionSnapshot};
 pub use turn::{StepReply, StopReason, TurnCacheMetrics, TurnId, TurnInput, TurnOutput};

@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use pattern_core::types::snapshot::PersonaConfig;
+use pattern_core::types::snapshot::PersonaSnapshot;
 
 /// Sentinel string embedded in `EffectError::Handler(...)` to mark a
 /// handler-side cooperative cancellation. The harness matches on this to
@@ -25,7 +25,7 @@ use pattern_core::types::snapshot::PersonaConfig;
 /// only Pattern's own handlers ever emit.
 pub const CANCELLED_SENTINEL: &str = "__pattern_cancelled__";
 
-/// Per-turn execution budget. Derived from [`PersonaConfig`] fields at
+/// Per-turn execution budget. Derived from [`PersonaSnapshot`] fields at
 /// session-open time; persisted on [`crate::session::SessionContext`] for
 /// the lifetime of the session.
 #[derive(Debug, Clone, Copy)]
@@ -64,23 +64,27 @@ impl Default for Budget {
 }
 
 impl Budget {
-    /// Derive a budget from a [`PersonaConfig`], filling unset fields with
+    /// Derive a budget from a [`PersonaSnapshot`], filling unset fields with
     /// the defaults defined in [`Budget::default`].
-    pub fn from_persona(persona: &PersonaConfig) -> Self {
+    pub fn from_persona(persona: &PersonaSnapshot) -> Self {
         let defaults = Self::default();
         let wall = persona
-            .wall_budget_ms
+            .budgets
+            .wall_ms
             .map(Duration::from_millis)
             .unwrap_or(defaults.wall);
         let cpu = persona
-            .cpu_budget_ms
+            .budgets
+            .cpu_ms
             .map(Duration::from_millis)
             .unwrap_or(defaults.cpu);
         let hard_abandon_threshold = persona
+            .budgets
             .hard_abandon_ms
             .map(Duration::from_millis)
             .unwrap_or(cpu * 2);
         let cancel_grace = persona
+            .budgets
             .cancel_grace_ms
             .map(Duration::from_millis)
             .unwrap_or(defaults.cancel_grace);
@@ -302,7 +306,7 @@ mod tests {
 
     #[test]
     fn budget_from_persona_uses_defaults_when_unset() {
-        let persona = PersonaConfig::new("a", "A", "x");
+        let persona = PersonaSnapshot::new("a", "A", "x");
         let b = Budget::from_persona(&persona);
         let defaults = Budget::default();
         assert_eq!(b.wall, defaults.wall);
@@ -312,7 +316,7 @@ mod tests {
 
     #[test]
     fn budget_from_persona_applies_overrides() {
-        let persona = PersonaConfig::new("a", "A", "x")
+        let persona = PersonaSnapshot::new("a", "A", "x")
             .with_wall_budget_ms(1000)
             .with_cpu_budget_ms(500)
             .with_hard_abandon_ms(2000);

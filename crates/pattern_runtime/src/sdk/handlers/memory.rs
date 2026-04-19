@@ -535,7 +535,7 @@ mod tests {
     use crate::testing::standard_datacon_table;
     use crate::timeout::CancelState;
     use pattern_core::ProviderClient;
-    use pattern_core::types::snapshot::PersonaConfig;
+    use pattern_core::types::snapshot::PersonaSnapshot;
 
     /// Minimal in-memory store that errors on any call. Sufficient for
     /// vector-search path tests because those fail before touching the
@@ -712,7 +712,7 @@ mod tests {
     }
 
     fn sctx() -> SessionContext {
-        let persona = PersonaConfig::new("agent-a", "A", "module X where\nx = pure ()");
+        let persona = PersonaSnapshot::new("agent-a", "A", "module X where\nx = pure ()");
         SessionContext::from_persona(&persona, Arc::new(NeverStore), Arc::new(NopProviderClient))
     }
 
@@ -755,7 +755,7 @@ mod tests {
         let provider_for_ctx = provider.clone();
         let err_msg = tokio::task::spawn_blocking(move || {
             let table = standard_datacon_table();
-            let persona = PersonaConfig::new("agent-a", "A", "module X where\nx = pure ()");
+            let persona = PersonaSnapshot::new("agent-a", "A", "module X where\nx = pure ()");
             let ctx = SessionContext::from_persona(&persona, store_for_ctx, provider_for_ctx);
             let cx = EffectContext::with_user(&table, &ctx);
             let mut h = MemoryHandler::new(store);

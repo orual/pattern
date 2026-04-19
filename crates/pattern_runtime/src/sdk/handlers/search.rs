@@ -153,10 +153,10 @@ mod tests {
     use crate::NopProviderClient;
     use crate::testing::{InMemoryMemoryStore, standard_datacon_table};
     use pattern_core::ProviderClient;
-    use pattern_core::types::snapshot::PersonaConfig;
+    use pattern_core::types::snapshot::PersonaSnapshot;
 
     fn sctx() -> SessionContext {
-        let persona = PersonaConfig::new("agent-a", "A", "module X where\nx = pure ()");
+        let persona = PersonaSnapshot::new("agent-a", "A", "module X where\nx = pure ()");
         SessionContext::from_persona(
             &persona,
             Arc::new(InMemoryMemoryStore::new()),
@@ -169,7 +169,7 @@ mod tests {
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
         let result = tokio::task::spawn_blocking(move || {
             let table = standard_datacon_table();
-            let persona = PersonaConfig::new("agent-a", "A", "module X where\nx = pure ()");
+            let persona = PersonaSnapshot::new("agent-a", "A", "module X where\nx = pure ()");
             let ctx = SessionContext::from_persona(
                 &persona,
                 store.clone(),
