@@ -2,7 +2,7 @@
 
 Pattern is a multi-agent ADHD support system providing external executive function through specialized cognitive agents. Each user ("partner") gets their own constellation of agents.
 
-**Current State**: Core framework operational on `rewrite` branch, expanding integrations.
+**Current State**: Core framework operational on `rewrite-v3` branch. V3 foundation rewrite complete (180+ commits, 677/677 tests passing). Expanding integrations.
 
 
 > **For AI Agents**: This is the source of truth for the Pattern codebase. Each crate has its own `CLAUDE.md` with specific implementation guidelines.

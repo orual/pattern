@@ -28,13 +28,16 @@
 //! # Quick start
 //!
 //! ```
-//! use pattern_core::{AgentId, UserId, TurnId, new_id};
+//! use pattern_core::{AgentId, UserId, TurnId, new_id, new_snowflake_id};
 //! use smol_str::SmolStr;
 //!
 //! let _agent: AgentId = SmolStr::new("orual-companion");
+//! // UserId: non-ordered — UUID is fine.
 //! let _user: UserId = new_id();
-//! let turn: TurnId = new_id();
-//! assert_eq!(turn.len(), 32);
+//! // TurnId: lex-sortable — use snowflake (convention: any ID that
+//! // orders turns/batches/messages must be a snowflake, not a UUID).
+//! let turn: TurnId = new_snowflake_id();
+//! assert!(!turn.is_empty());
 //! ```
 
 pub mod base_instructions;
@@ -72,11 +75,14 @@ pub use traits::{
 
 // ── Type re-exports ──────────────────────────────────────────────────────────
 
-// IDs and identity — all `SmolStr` aliases; `new_id()` mints fresh UUIDs.
+// IDs and identity — all `SmolStr` aliases. `new_id()` mints fresh UUIDs
+// for non-ordered IDs; `new_snowflake_id()` mints lex-sortable snowflake
+// IDs for anything that must order by creation time (TurnId, BatchId,
+// message `position`).
 pub use types::ids::{
     AgentId, BatchId, ConstellationId, ConversationId, DiscordIdentityId, EventId, GroupId,
     MemoryId, MessageId, ModelId, OAuthTokenId, ProjectId, QueuedMessageId, RelationId, RequestId,
-    SessionId, TaskId, ToolCallId, UserId, WakeupId, WorkspaceId, new_id,
+    SessionId, TaskId, ToolCallId, UserId, WakeupId, WorkspaceId, new_id, new_snowflake_id,
 };
 
 // Message / batch

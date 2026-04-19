@@ -5,7 +5,7 @@ LLM provider integration for Pattern v3. Owns Anthropic authentication
 identification), per-provider rate limiting, provider-reported token counting,
 and the request composer that emits the three-segment cache layout.
 
-Last verified: 2026-04-18
+Last verified: 2026-04-19
 
 Absorbs the Anthropic-facing bits of the retired `pattern_auth` crate. Depends
 on `pattern_core` for trait definitions; carries its own rebased fork of
@@ -48,6 +48,26 @@ correlation.
 `ANTHROPIC_API_KEY` env var gets charged API credit, not subscription
 quota. This is the Unix-convention-correct behaviour but can surprise.
 The `auth` command's tier printout is the documented way to check.
+
+### AuthTier::StoredOauth (split from Pkce)
+
+Previously both fresh PKCE resolutions and stored-OAuth lookups returned
+`AuthTier::Pkce`. These are now distinct: `AuthTier::StoredOauth` is
+returned when the token comes from keyring/JSON storage, while
+`AuthTier::Pkce` is reserved for a fresh interactive PKCE flow. This
+matters for observability (the `auth` command and gateway logs report
+the actual resolution path) and for beta-header decisions (both tiers
+emit `oauth-2025-04-20`).
+
+### Tier-forcing entry points
+
+`AnthropicAuthChain::session_pickup_only()` and
+`AnthropicAuthChain::pkce_only()` construct chains where all other tiers
+return `None`, forcing resolution to a specific path. Used by
+`pattern-test-cli spawn --auth <tier>`. `ApiKeyTier::disabled()` and
+`SessionPickupTier::noop()` are the building blocks. `MemOnlyCredsStore`
+provides an in-memory-only credential store for test chains that should
+not touch the real keyring.
 
 ## ShaperCompatMode — empirical decision (verified 2026-04-17)
 

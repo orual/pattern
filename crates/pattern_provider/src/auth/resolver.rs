@@ -239,11 +239,13 @@ impl AnthropicAuthChain {
         }
     }
 
-    /// API-key-and-session-pickup chain without stored-OAuth. The API-key
-    /// tier is tried first; if absent the chain falls through to
-    /// session-pickup. Use when `--auth pkce` is explicitly requested — the
-    /// caller should trigger the interactive PKCE flow when this chain returns
-    /// [`ProviderError::NoAuthAvailable`].
+    /// PKCE-forcing chain: disables api-key, session-pickup, and stored-OAuth
+    /// tiers so every resolve returns [`ProviderError::NoAuthAvailable`]. Use
+    /// when `--auth pkce` is explicitly requested — the caller observes the
+    /// `NoAuthAvailable` error and triggers the interactive PKCE flow
+    /// externally. All three disabled tiers are sentinels:
+    /// [`ApiKeyTier::disabled`], [`super::session_pickup::SessionPickupTier::noop`],
+    /// and [`MemOnlyCredsStore`].
     ///
     /// Requires the `subscription-oauth` feature.
     #[cfg(feature = "subscription-oauth")]

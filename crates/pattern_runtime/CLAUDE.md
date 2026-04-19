@@ -4,7 +4,7 @@ Agent runtime for Pattern v3. Houses Tidepool (Haskell-in-Rust) embedding, the
 agent turn loop, `freer-simple` effect handlers, and turn-level checkpoint
 machinery. Depends only on `pattern_core` trait definitions.
 
-Last verified: 2026-04-18
+Last verified: 2026-04-19
 
 See the v3 foundation design at
 `docs/design-plans/2026-04-16-v3-foundation.md` for the substrate choice,
@@ -200,6 +200,14 @@ persona's `ContextPolicy` gate and applies the configured
 - For RecursiveSummarization: an `archive_summaries` row (depth=0) is
   created and `summary_head` is reloaded from `get_summary_head`.
 
+**Session-UUID rotation on compaction:** when `maybe_compact` returns
+`CompactionOutcome::Fired`, the compaction driver calls
+`ctx.provider().rotate_session_uuid()` to cycle the Anthropic session
+UUID. This prevents the post-compaction (shorter) context from being
+confused with the pre-compaction context by Anthropic's server-side
+cache. `ProviderClient::rotate_session_uuid` has a default no-op
+implementation; `PatternGatewayClient` provides the real rotation.
+
 **How to disable compression for a persona:**
 Set `context.compression = None` in the persona TOML (or
 `ContextPolicy::default()` which has `compression: None`).
@@ -343,6 +351,14 @@ multi-module compilation bug was fixed in our fork).
 
 ### In-memory test double (`testing/in_memory_store.rs`)
 
+**Feature gate:** `pub mod testing` is gated behind
+`#[cfg(any(test, feature = "test-support"))]`. External crates that
+import `pattern_runtime::testing::InMemoryMemoryStore` (e.g.
+`pattern-test-cli`) must declare `features = ["test-support"]` on
+their `pattern-runtime` dependency. The `pattern-test-cli` binary
+already uses `required-features = ["test-support"]` in its
+`[[bin]]` manifest entry.
+
 Minimal `MemoryStore` implementation for integration tests. Phase 5
 wired previously-stubbed methods:
 - `set_block_pinned` — mutates metadata via Arc-shared `metadata_mut`.
@@ -382,6 +398,11 @@ This policy is configurable; future phases may add trust-level gates or
 explicit capability flags.
 
 ## Smoke-test procedure (v3 foundation AC9.*)
+
+> **Also see:** `docs/smoke-test-v3-foundation.md` — polished smoke-test
+> cover sheet with tolerances table, failure-diagnosis matrix, and a
+> completion checklist. The section below is the primary source of
+> truth for the procedure; the companion doc references it.
 
 The v3 foundation smoke test is a **manual procedure** driven through the
 `pattern-test-cli spawn` subcommand. Live-credential tests in CI are a
@@ -490,54 +511,30 @@ break-detection output (Phase 5 Task 11).
 - No cross-provider routing demo. Same provider per session.
 - No constellation / multi-agent paths. Foundation is single-agent.
 
-## Known flakes — MUST fix before GA
+## Known flakes — historical note
 
-These tests pass in isolation but intermittently fail under
-`cargo nextest run --workspace` parallel load. Observed 2026-04-17
-during Phase 5 Tier 1 work; different tests fail on different runs,
-so the root cause is load-induced contention rather than a per-test
-regression. **This is tech debt that blocks shipping a stable release**
-— CI that occasionally fails for reasons unrelated to the PR under
-review corrodes trust in the signal.
-
-> **Status note (2026-04-18, Phase 6 Task B):** both previously-named
-> flaky tests (`session_lifecycle::open_step_twice_does_not_recompile`
-> and `timeout::hard_abandon_await_enforces_cancel_grace_ceiling`) were
-> deleted when the SessionMachine static-program path retired. The
-> underlying concurrent-`tidepool-extract` contention hypothesis may
-> still apply to surviving tests that go through the binary; re-audit
-> under load before ship.
-
-**Previously-observed flaky tests (now deleted):**
+Two tests previously flaked intermittently under
+`cargo nextest run --workspace` parallel load:
 
 - `session_lifecycle::open_step_twice_does_not_recompile`
 - `timeout::hard_abandon_await_enforces_cancel_grace_ceiling`
 
-Both touch the `tidepool-extract` subprocess path. Hypothesis: when N
-parallel test binaries spawn `tidepool-extract` concurrently, they
-contend on some combination of:
+Both touched the `tidepool-extract` subprocess path. Hypothesis was
+concurrent `tidepool-extract` spawns contending on shared cache paths /
+lockfiles / wall-clock margins.
 
-- Shared cache / temp-dir paths (spurious "was recompiled" signal when
-  another test touched the cache state between open and step)
-- Wall-clock margins tight enough that scheduler jitter under load
-  pushes grace-ceiling assertions past their threshold
-- Filesystem-level races on the extract binary's lockfile or scratch
-  directory
+**Both were deleted during Phase 6 Task B** when the SessionMachine
+static-program path retired. The 677-test suite has run clean under
+full parallel load across the final review cycles without recurrence.
 
-**Investigation vectors** (pick up when we come back to this):
+If new tests that shell out to `tidepool-extract` land later and show
+similar parallel-load flakes, these investigation vectors apply:
 
-1. Add tracing-level logging to the subprocess spawn / cache-lookup
-   path to see which shared resource is getting hit.
-2. Run the suite under `cargo nextest run --test-threads=1` to confirm
-   single-threaded runs are always clean. If yes, contention is the
-   whole story; if no, there's a second bug.
-3. Check whether per-test tempdirs are actually per-test, or whether
-   something's collapsing to a shared `/tmp` or `$XDG_CACHE_HOME` path.
-4. For the timeout test specifically: widen the grace ceiling to
-   something less schedule-sensitive, or switch from wall-clock to a
-   deterministic tokio-test clock.
-
-**Why not fix it now:** the flake is intermittent, passes on rerun, and
-doesn't block Phase 5 work. Pushing it behind a phase boundary prevents
-scope creep. But it must be addressed before shipping — a flaky CI is
-worse than a slower CI.
+1. Tracing-level logging on subprocess spawn / cache-lookup to identify
+   which shared resource is contending.
+2. `cargo nextest run --test-threads=1` to confirm single-threaded runs
+   are clean — distinguishes contention from a second bug.
+3. Audit per-test tempdirs for accidental collapse to a shared
+   `/tmp` or `$XDG_CACHE_HOME` path.
+4. For wall-clock-timing assertions: widen grace ceilings or switch to
+   a deterministic tokio-test clock.

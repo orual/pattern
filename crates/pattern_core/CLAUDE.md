@@ -3,7 +3,7 @@
 ⚠️ **CRITICAL WARNING**: DO NOT run `pattern` CLI or test agents during development!
 Production agents are running. CLI commands will disrupt active agents.
 
-Last verified: 2026-04-18
+Last verified: 2026-04-19
 
 Core agent framework, memory management, and coordination system for Pattern's multi-agent ADHD support.
 
@@ -159,6 +159,28 @@ return Err(CoreError::tool_not_found(name, available_tools));
 return Err(CoreError::memory_not_found(&agent_id, &block_name, available_blocks));
 ```
 
+### Notable RuntimeError variants (v3 foundation cycle)
+
+- `RuntimeError::SharedBlockRefNotSupported` — persona TOML references a
+  shared block ID at seed time; shared-block refs are rejected early with
+  a clear diagnostic rather than silently failing downstream.
+- `RuntimeError::CompactionInternalError` — wraps unexpected failures
+  inside the compaction pipeline so they don't propagate as generic errors.
+
+### BlockCreate and permission
+
+`BlockCreate` gained a `permission: Option<MemoryPermission>` field with
+a `with_permission()` builder. Persona TOML `permission = "read_only"`
+now actually takes effect at block creation time, threaded through
+`MemoryCache::create_block` and `InMemoryMemoryStore::create_block`.
+
+### PersonaSnapshot — enabled_tools removed
+
+`PersonaSnapshot.enabled_tools` and its `with_enabled_tools()` builder
+were removed. Permission/capability control will return via a different
+mechanism (effect-level prelude filtering + per-effect permission
+structures) in a future phase.
+
 ### Accessing Data Sources from Tools
 Tools that need typed access to specific DataStream implementations use `as_any()` downcast:
 ```rust
@@ -187,11 +209,18 @@ All identifiers (`AgentId`, `MessageId`, `BatchId`, `TurnId`, etc.) are
 no newtype ceremony and no compile-time distinction between kinds:
 aliases exist only for signature readability.
 
-Mint fresh identifiers via `pattern_core::types::ids::new_id()`
-(returns a 32-char unhyphenated UUID-v4 string). When a distinct type
-is genuinely useful (rare — e.g. validation-bearing atproto
-identifiers), wrap locally at the site that needs it rather than
-dragging every ID into the newtype pattern.
+Two minting functions:
+
+- `new_id()` — 32-char unhyphenated UUID-v4 string. Use for unordered
+  identifiers (agent IDs, tool-call IDs, session IDs).
+- `new_snowflake_id()` — monotonic timestamp-based ID. Use for
+  identifiers that must sort by creation time (`BatchId`, `TurnId`,
+  message position keys). Thread-safe; blocks briefly only if the
+  per-ms sequence counter is exhausted (65k/ms).
+
+Convention: `BatchId` and `TurnId` use snowflakes; `MessageId` and
+`AgentId` use UUIDs. The crate-root doctest teaches `new_snowflake_id`
+for `TurnId`.
 
 Rationale: the previous `define_id_type!` macro generated newtypes
 with prefixed-UUID displays, `Display`/`FromStr`/`from_uuid`/`generate`
