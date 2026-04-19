@@ -203,17 +203,15 @@ in this crate for standalone compose-pipeline tests and as the
 reference implementation. See `crates/pattern_runtime/CLAUDE.md` for
 the batch-anchored snapshot architecture.
 
-### Segment2Pass index-correspondence caveat
+### Segment2Pass MessageId origin tagging
 
-`Segment2Pass` prepends `summary_head` messages, then appends
-`prior_messages`, then `pseudo_messages` (block writes). The agent
-loop's post-compose attachment-splice logic (in `pattern_runtime`)
-relies on the fact that `prior_messages` start at index `summary_count`
-in the composed message list. This positional correspondence is FRAGILE
--- if any future pass reorders, inserts, or removes messages from the
-composed list, the runtime's splice indices will be wrong. This is a
-known design concern; a tracked follow-up should replace index math
-with content-identity matching or explicit position tags.
+`Segment2Pass` accepts `prior_messages` as `Vec<(SmolStr, ChatMessage)>`
+and tags each with its Pattern `MessageId` via
+`PartialRequest::push_message(msg, Some(id))`. Summary-head and
+pseudo-messages are tagged with `None`. The parallel
+`PartialRequest.message_origins` vector is returned alongside the
+finalized request in `ComposeOutput.message_origins`, which the runtime
+uses for attachment splicing by MessageId lookup instead of index math.
 
 ### CacheProfile latching
 

@@ -27,6 +27,7 @@
 use std::collections::BTreeMap;
 
 use genai::chat::{ChatMessage, ChatOptions, SystemBlock, Tool};
+use smol_str::SmolStr;
 
 use super::breakpoints::BreakpointTracker;
 
@@ -70,6 +71,20 @@ pub struct PartialRequest {
     /// markers to their target blocks (Task 10) and validates count +
     /// beta-header presence.
     pub breakpoints: BreakpointTracker,
+
+    /// Origin tagging for messages — parallel to `self.messages`.
+    ///
+    /// Each entry maps 1:1 with the corresponding `ChatMessage` in
+    /// `self.messages`. `Some(id)` means the message originated from a
+    /// Pattern `Message` with the given `MessageId`; `None` means the
+    /// message is synthetic (summary-head, pseudo-message, etc.) and
+    /// has no stable identity.
+    ///
+    /// The runtime uses this to locate composed messages by MessageId
+    /// instead of fragile index arithmetic when splicing attachments.
+    /// Use [`push_message`](Self::push_message) to maintain the
+    /// 1:1 invariant between `messages` and `message_origins`.
+    pub message_origins: Vec<Option<SmolStr>>,
 }
 
 impl PartialRequest {
@@ -84,7 +99,19 @@ impl PartialRequest {
             options: ChatOptions::default(),
             extra_headers: BTreeMap::new(),
             breakpoints: BreakpointTracker::new(),
+            message_origins: Vec::new(),
         }
+    }
+
+    /// Append a message with its origin tag, maintaining the 1:1
+    /// invariant between `self.messages` and `self.message_origins`.
+    ///
+    /// `origin` is `Some(message_id)` for messages that originated from
+    /// a Pattern `Message`, or `None` for synthetic messages (summaries,
+    /// pseudo-messages, etc.).
+    pub fn push_message(&mut self, msg: ChatMessage, origin: Option<SmolStr>) {
+        self.messages.push(msg);
+        self.message_origins.push(origin);
     }
 }
 
@@ -101,11 +128,29 @@ mod tests {
         assert!(p.tools.is_empty());
         assert!(p.extra_headers.is_empty());
         assert_eq!(p.breakpoints.count(), 0);
+        assert!(p.message_origins.is_empty());
     }
 
     #[test]
     fn new_accepts_str_and_string() {
         let _ = PartialRequest::new("model-a");
         let _ = PartialRequest::new(String::from("model-b"));
+    }
+
+    #[test]
+    fn push_message_maintains_parallel_invariant() {
+        use genai::chat::ChatMessage;
+        use smol_str::SmolStr;
+
+        let mut p = PartialRequest::new("model");
+        p.push_message(ChatMessage::user("hello"), Some(SmolStr::new("msg-1")));
+        p.push_message(ChatMessage::assistant("hi"), None);
+        p.push_message(ChatMessage::user("bye"), Some(SmolStr::new("msg-2")));
+
+        assert_eq!(p.messages.len(), 3);
+        assert_eq!(p.message_origins.len(), 3);
+        assert_eq!(p.message_origins[0], Some(SmolStr::new("msg-1")));
+        assert_eq!(p.message_origins[1], None);
+        assert_eq!(p.message_origins[2], Some(SmolStr::new("msg-2")));
     }
 }

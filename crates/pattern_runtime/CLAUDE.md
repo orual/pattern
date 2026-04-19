@@ -134,13 +134,13 @@ compose-pipeline tests, but the agent loop does NOT use it -- it places
 the seg3 cache marker directly on the last message that had an
 attachment spliced (see `last_spliced_idx` in `compose_request_for_turn`).
 
-**Index-correspondence caveat:** the mapping between Pattern `Message`s
-(from `TurnHistory::active_messages()`) and composed `ChatMessage`s
-depends on `Segment2Pass` prepending `summary_head` messages at known
-offsets. History messages start at index `summary_count` in the
-composed message list. This correspondence is FRAGILE -- any future
-pass that reorders messages would break the splice logic. This is a
-known design concern tracked for follow-up.
+**MessageId origin tagging:** the runtime locates composed messages
+for attachment splicing via `PartialRequest.message_origins`, a parallel
+vector populated by `Segment2Pass` that maps each composed message back
+to its Pattern `MessageId`. The splice loop builds a `HashMap<SmolStr,
+usize>` from `ComposeOutput.message_origins` for O(1) lookup instead of
+computing indices from `summary_count` offsets. This is robust against
+future pass reordering or insertion.
 
 ### MemoryStoreAdapter (`memory/adapter.rs`)
 

@@ -104,8 +104,8 @@ mod tests {
             SystemBlock::new("persona"),
         ];
         let prior_msgs = vec![
-            ChatMessage::user("hello"),
-            ChatMessage::assistant("hi there"),
+            (SmolStr::new("msg-1"), ChatMessage::user("hello")),
+            (SmolStr::new("msg-2"), ChatMessage::assistant("hi there")),
         ];
         let writes = vec![make_block_write("tasks")];
         let blocks = vec![make_doc("persona", "I am Sage.")];
@@ -122,21 +122,23 @@ mod tests {
         ];
 
         let partial = partial_with_beta("claude-opus-4-7");
-        let result = compose(&passes, partial).expect("compose succeeds");
+        let output = compose(&passes, partial).expect("compose succeeds");
 
         // After finalize expansion (Task 10), markers are now applied.
         // Verify compose succeeds and the output has markers applied.
-        assert!(result.chat.system_blocks.is_some());
-        assert!(!result.chat.messages.is_empty());
+        assert!(output.request.chat.system_blocks.is_some());
+        assert!(!output.request.chat.messages.is_empty());
 
         // Count applied markers on system blocks + messages.
-        let sys_markers = result
+        let sys_markers = output
+            .request
             .chat
             .system_blocks
             .as_ref()
             .map(|bs| bs.iter().filter(|b| b.cache_control.is_some()).count())
             .unwrap_or(0);
-        let msg_markers = result
+        let msg_markers = output
+            .request
             .chat
             .messages
             .iter()
@@ -160,7 +162,7 @@ mod tests {
     fn three_passes_place_exactly_3_breakpoints() {
         let profile = test_profile();
         let system_blocks = vec![SystemBlock::new("sys")];
-        let prior_msgs = vec![ChatMessage::user("hello")];
+        let prior_msgs = vec![(SmolStr::new("msg-1"), ChatMessage::user("hello"))];
         let blocks = vec![make_doc("persona", "content")];
 
         let seg1 = Segment1Pass::new(system_blocks, vec![], profile.clone());
@@ -209,18 +211,23 @@ mod tests {
             )),
             Box::new(Segment2Pass::new(
                 vec![],
-                vec![ChatMessage::user("hello")],
+                vec![(SmolStr::new("msg-1"), ChatMessage::user("hello"))],
                 &[],
                 profile.clone(),
             )),
             Box::new(Segment3Pass::new(blocks, profile)),
         ];
 
-        let result =
+        let output =
             compose(&passes, partial_with_beta("claude-opus-4-7")).expect("compose succeeds");
 
         // The last message should be the current_state pseudo-turn.
-        let last = result.chat.messages.last().expect("messages not empty");
+        let last = output
+            .request
+            .chat
+            .messages
+            .last()
+            .expect("messages not empty");
         let text = msg_text(last);
         assert!(
             text.contains("[memory:current_state]"),
@@ -234,7 +241,7 @@ mod tests {
     fn pipeline_contains_updated_pseudo_message_in_segment_2() {
         let profile = test_profile();
         let writes = vec![make_block_write("task_list")];
-        let prior = vec![ChatMessage::user("msg")];
+        let prior = vec![(SmolStr::new("msg-1"), ChatMessage::user("msg"))];
 
         let passes: Vec<Box<dyn ComposerPass>> = vec![
             Box::new(Segment1Pass::new(
@@ -246,12 +253,13 @@ mod tests {
             Box::new(Segment3Pass::new(vec![], profile)),
         ];
 
-        let result =
+        let output =
             compose(&passes, partial_with_beta("claude-opus-4-7")).expect("compose succeeds");
 
         // Find a message containing [memory:updated] — should be in
         // the segment 2 region (before the current_state message).
-        let found = result
+        let found = output
+            .request
             .chat
             .messages
             .iter()

@@ -67,11 +67,11 @@ fn zero_blocks_emits_present_but_empty_segment_3() {
         Box::new(Segment3Pass::new(vec![], profile)),
     ];
 
-    let req = compose(&passes, initial).expect("compose succeeds with zero blocks");
+    let output = compose(&passes, initial).expect("compose succeeds with zero blocks");
 
     // Segment 2 pushed nothing (empty summary_head + prior + pseudo).
     // Segment 3 pushes exactly one message (the pseudo-turn).
-    let messages = &req.chat.messages;
+    let messages = &output.request.chat.messages;
     assert_eq!(
         messages.len(),
         1,
@@ -109,10 +109,10 @@ fn zero_blocks_still_places_segment_3_cache_marker() {
         Box::new(Segment3Pass::new(vec![], profile)),
     ];
 
-    let req = compose(&passes, initial).expect("compose succeeds");
+    let output = compose(&passes, initial).expect("compose succeeds");
 
     // Pluck the cache_control off the last (only) message.
-    let last = req.chat.messages.last().unwrap();
+    let last = output.request.chat.messages.last().unwrap();
     let cc = last
         .options
         .as_ref()
@@ -148,7 +148,8 @@ fn loading_a_block_changes_segment_3_body_not_marker_shape() {
         Box::new(Segment2Pass::new(vec![], vec![], &[], profile_a.clone())),
         Box::new(Segment3Pass::new(vec![], profile_a)),
     ];
-    let req_a = compose(&passes_a, initial_a).expect("turn A composes");
+    let output_a = compose(&passes_a, initial_a).expect("turn A composes");
+    let req_a = output_a.request;
 
     // Turn B: one block loaded with a unique sentinel.
     let block = make_doc("scratch", "SENTINEL_CONTENT_FOR_TURN_B");
@@ -161,7 +162,8 @@ fn loading_a_block_changes_segment_3_body_not_marker_shape() {
         Box::new(Segment2Pass::new(vec![], vec![], &[], profile_b.clone())),
         Box::new(Segment3Pass::new(vec![block], profile_b)),
     ];
-    let req_b = compose(&passes_b, initial_b).expect("turn B composes");
+    let output_b = compose(&passes_b, initial_b).expect("turn B composes");
+    let req_b = output_b.request;
 
     // Body must differ between turns.
     let text_a = req_a

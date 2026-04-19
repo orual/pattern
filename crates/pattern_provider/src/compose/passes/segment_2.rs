@@ -25,6 +25,7 @@
 use genai::chat::ChatMessage;
 use pattern_core::error::ProviderError;
 use pattern_core::types::block::BlockWrite;
+use smol_str::SmolStr;
 
 use crate::compose::pseudo_messages::render_change_events;
 use crate::compose::{BreakpointLocation, CacheProfile, ComposerPass, PartialRequest};
@@ -67,8 +68,9 @@ pub struct Segment2Pass {
     /// [`synthesize_summary_message`] for each `ArchiveSummary` and
     /// passes the results here.
     summary_head_messages: Vec<ChatMessage>,
-    /// Prior-turn messages from `TurnHistory::active_messages`.
-    prior_messages: Vec<ChatMessage>,
+    /// Prior-turn messages from `TurnHistory::active_messages`,
+    /// paired with their Pattern `MessageId` for origin tagging.
+    prior_messages: Vec<(SmolStr, ChatMessage)>,
     /// Pseudo-messages rendered from the most-recent turn's
     /// `BlockWrite`s via the Task 6 renderer.
     pseudo_messages: Vec<ChatMessage>,
@@ -78,14 +80,18 @@ pub struct Segment2Pass {
 
 impl Segment2Pass {
     /// Construct from pre-rendered summary-head messages and raw
-    /// prior-turn messages + block writes.
+    /// prior-turn messages (with their MessageIds) + block writes.
+    ///
+    /// Each prior message is paired with the Pattern `MessageId` it
+    /// originated from. Summary-head and pseudo-messages have no
+    /// Pattern Message identity and are tagged with `None` origin.
     ///
     /// The block-write → pseudo-message rendering happens inline
     /// (via [`render_change_events`]) so the caller doesn't need to
     /// call the renderer separately.
     pub fn new(
         summary_head_messages: Vec<ChatMessage>,
-        prior_messages: Vec<ChatMessage>,
+        prior_messages: Vec<(SmolStr, ChatMessage)>,
         recent_block_writes: &[BlockWrite],
         profile: CacheProfile,
     ) -> Self {
@@ -105,14 +111,23 @@ impl ComposerPass for Segment2Pass {
     }
 
     fn apply(&self, partial: &mut PartialRequest) -> Result<(), ProviderError> {
-        // Append in canonical order.
-        partial
-            .messages
-            .extend(self.summary_head_messages.iter().cloned());
-        partial.messages.extend(self.prior_messages.iter().cloned());
-        partial
-            .messages
-            .extend(self.pseudo_messages.iter().cloned());
+        // Append in canonical order, using push_message to maintain
+        // the message_origins parallel vector.
+
+        // Summary-head messages have no Pattern Message identity.
+        for msg in &self.summary_head_messages {
+            partial.push_message(msg.clone(), None);
+        }
+
+        // Prior messages carry their Pattern MessageId as origin.
+        for (id, msg) in &self.prior_messages {
+            partial.push_message(msg.clone(), Some(id.clone()));
+        }
+
+        // Pseudo-messages (block-write notifications) are synthetic.
+        for msg in &self.pseudo_messages {
+            partial.push_message(msg.clone(), None);
+        }
 
         // Place marker on the last message we just pushed. If we
         // pushed nothing (empty history + no summaries + no writes),
@@ -207,7 +222,10 @@ mod tests {
     #[test]
     fn pseudo_messages_appear_in_segment_2_for_block_writes() {
         let writes = vec![make_block_write("task_list", BlockWriteKind::Updated)];
-        let prior = vec![ChatMessage::user("hello"), ChatMessage::assistant("hi")];
+        let prior = vec![
+            (SmolStr::new("msg-1"), ChatMessage::user("hello")),
+            (SmolStr::new("msg-2"), ChatMessage::assistant("hi")),
+        ];
 
         let pass = Segment2Pass::new(vec![], prior, &writes, test_profile());
         let mut partial = PartialRequest::new("claude-opus-4-7");
@@ -229,7 +247,7 @@ mod tests {
     #[test]
     fn summary_head_messages_appear_before_prior() {
         let summary = synthesize_summary_message(0, "pos_a", "pos_b", "summary text");
-        let prior = vec![ChatMessage::user("recent message")];
+        let prior = vec![(SmolStr::new("msg-1"), ChatMessage::user("recent message"))];
 
         let pass = Segment2Pass::new(vec![summary], prior, &[], test_profile());
         let mut partial = PartialRequest::new("claude-opus-4-7");
@@ -253,9 +271,9 @@ mod tests {
     #[test]
     fn marker_placed_on_last_message() {
         let prior = vec![
-            ChatMessage::user("msg1"),
-            ChatMessage::assistant("msg2"),
-            ChatMessage::user("msg3"),
+            (SmolStr::new("msg-1"), ChatMessage::user("msg1")),
+            (SmolStr::new("msg-2"), ChatMessage::assistant("msg2")),
+            (SmolStr::new("msg-3"), ChatMessage::user("msg3")),
         ];
 
         let pass = Segment2Pass::new(vec![], prior, &[], test_profile());
@@ -287,9 +305,43 @@ mod tests {
 
     // ---- Cache control from profile -----------------------------------------
 
+    // ---- message_origins populated correctly ----------------------------------
+
+    #[test]
+    fn message_origins_tags_prior_messages_with_ids() {
+        let summary = synthesize_summary_message(0, "pos_a", "pos_b", "summary");
+        let prior = vec![
+            (SmolStr::new("id-aaa"), ChatMessage::user("hello")),
+            (SmolStr::new("id-bbb"), ChatMessage::assistant("hi")),
+        ];
+        let writes = vec![make_block_write("tasks", BlockWriteKind::Updated)];
+
+        let pass = Segment2Pass::new(vec![summary], prior, &writes, test_profile());
+        let mut partial = PartialRequest::new("claude-opus-4-7");
+        pass.apply(&mut partial).unwrap();
+
+        // Expected order: [summary(None), prior-aaa(Some), prior-bbb(Some), pseudo(None)].
+        assert_eq!(partial.messages.len(), 4);
+        assert_eq!(partial.message_origins.len(), 4);
+        assert_eq!(partial.message_origins[0], None, "summary should be None");
+        assert_eq!(
+            partial.message_origins[1],
+            Some(SmolStr::new("id-aaa")),
+            "first prior should carry its id"
+        );
+        assert_eq!(
+            partial.message_origins[2],
+            Some(SmolStr::new("id-bbb")),
+            "second prior should carry its id"
+        );
+        assert_eq!(partial.message_origins[3], None, "pseudo should be None");
+    }
+
+    // ---- Cache control from profile -----------------------------------------
+
     #[test]
     fn cache_control_uses_segment_2_control() {
-        let prior = vec![ChatMessage::user("msg")];
+        let prior = vec![(SmolStr::new("msg-1"), ChatMessage::user("msg"))];
         let pass = Segment2Pass::new(vec![], prior, &[], test_profile());
         let mut partial = PartialRequest::new("claude-opus-4-7");
         pass.apply(&mut partial).unwrap();

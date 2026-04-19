@@ -46,9 +46,24 @@
 use genai::chat::{CacheControl, ChatMessage, MessageOptions, SystemBlock};
 use pattern_core::error::ProviderError;
 use pattern_core::types::provider::CompletionRequest;
+use smol_str::SmolStr;
 
 use super::breakpoints::{BreakpointLocation, BreakpointTracker};
 use super::partial_request::PartialRequest;
+
+/// Finalized compose output: the wire request plus origin tags for
+/// each composed message. The runtime uses `message_origins` to look
+/// up composed messages by Pattern `MessageId` instead of fragile
+/// index arithmetic.
+#[derive(Debug)]
+pub struct ComposeOutput {
+    /// The finalized completion request ready for the provider.
+    pub request: CompletionRequest,
+    /// Origin tags parallel to `request.chat.messages`. Each entry is
+    /// `Some(message_id)` for messages that originated from a Pattern
+    /// `Message`, or `None` for synthetic messages.
+    pub message_origins: Vec<Option<SmolStr>>,
+}
 
 /// A single transformation step in the composer pipeline. See
 /// [module docs][self] for the I/O policy.
@@ -67,10 +82,14 @@ pub trait ComposerPass: Send + Sync {
 /// Run `passes` in order against `initial`, then finalize the result.
 /// Pass errors are wrapped in [`ProviderError::ComposerPassFailed`] so
 /// the failing pass's name survives the bubble-up.
+///
+/// Returns a [`ComposeOutput`] containing the finalized request plus
+/// message-origin tags that map each composed message back to its
+/// Pattern `MessageId` (or `None` for synthetic messages).
 pub fn compose(
     passes: &[Box<dyn ComposerPass>],
     initial: PartialRequest,
-) -> Result<CompletionRequest, ProviderError> {
+) -> Result<ComposeOutput, ProviderError> {
     let mut partial = initial;
     for pass in passes {
         pass.apply(&mut partial)
@@ -79,7 +98,13 @@ pub fn compose(
                 source: Box::new(source),
             })?;
     }
-    finalize(partial)
+    // Extract message_origins before finalize consumes the partial.
+    let message_origins = partial.message_origins.clone();
+    let request = finalize(partial)?;
+    Ok(ComposeOutput {
+        request,
+        message_origins,
+    })
 }
 
 /// Assemble a completed [`PartialRequest`] into a [`CompletionRequest`].
@@ -104,6 +129,9 @@ pub fn finalize(partial: PartialRequest) -> Result<CompletionRequest, ProviderEr
         // Anthropic).
         extra_headers: _,
         breakpoints,
+        // `message_origins` is consumed by the runtime's splice
+        // logic via ComposeOutput — finalize doesn't need it.
+        message_origins: _,
     } = partial;
 
     // 1. Belt-and-suspenders budget recheck (AC7.5). place() already
@@ -302,10 +330,15 @@ mod tests {
             Box::new(TagSystemPass("beta")),
             Box::new(TagSystemPass("gamma")),
         ];
-        let out =
+        let output =
             compose(&passes, PartialRequest::new("claude-opus-4-7")).expect("compose succeeds");
 
-        let blocks = out.chat.system_blocks.as_ref().expect("blocks populated");
+        let blocks = output
+            .request
+            .chat
+            .system_blocks
+            .as_ref()
+            .expect("blocks populated");
         assert_eq!(blocks.len(), 3);
         assert!(blocks[0].text.contains("alpha"));
         assert!(blocks[1].text.contains("beta"));
@@ -331,6 +364,9 @@ mod tests {
             other => panic!("expected ComposerPassFailed, got {other:?}"),
         }
     }
+
+    // NOTE: compose_budget_exceeded_error_survives_wrap returns Err so
+    // the ComposeOutput wrapper doesn't affect it.
 
     #[test]
     fn compose_budget_exceeded_error_survives_wrap() {

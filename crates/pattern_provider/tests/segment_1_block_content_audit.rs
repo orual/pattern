@@ -148,8 +148,9 @@ fn segment_1_contains_no_memory_block_content_or_labels() {
     ];
 
     let initial = partial_with_beta("claude-opus-4-7");
-    let req = pattern_provider::compose::compose(&passes, initial)
+    let output = pattern_provider::compose::compose(&passes, initial)
         .expect("compose with sentinel blocks must succeed");
+    let req = output.request;
 
     // ---- (a + b) Segment 1 invariants: system_blocks contain no block data --
 

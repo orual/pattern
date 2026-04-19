@@ -38,6 +38,7 @@
 //! (model strips prior thinking from context), but the sink still
 //! sees `TurnEvent::Thinking` chunks for UI purposes.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -59,6 +60,7 @@ use pattern_core::types::turn::{StepReply, StopReason, TurnCacheMetrics, TurnInp
 use pattern_provider::compose::passes::{Segment1Pass, Segment2Pass, synthesize_summary_message};
 use pattern_provider::compose::{CacheProfile, ComposerPass, PartialRequest, compose};
 use pattern_provider::shaper::{ShaperCompatMode, build_system_prompt, wrap_system_reminder};
+use smol_str::SmolStr;
 
 use crate::memory::TurnHistory;
 use crate::sdk::CODE_TOOL;
@@ -1246,9 +1248,9 @@ async fn compose_request_for_turn(
             })
             .collect();
 
-        let prior_messages: Vec<ChatMessage> = hist
+        let prior_messages: Vec<(SmolStr, ChatMessage)> = hist
             .active_messages()
-            .map(|m| m.chat_message.clone())
+            .map(|m| (m.id.clone(), m.chat_message.clone()))
             .collect();
 
         let recent_block_writes = hist.most_recent_block_writes().to_vec();
@@ -1282,9 +1284,11 @@ async fn compose_request_for_turn(
     ];
 
     let initial = PartialRequest::new(ctx.model_id());
-    let mut req = compose(&passes, initial).map_err(|e| RuntimeError::ProviderError {
+    let output = compose(&passes, initial).map_err(|e| RuntimeError::ProviderError {
         reason: format!("composer pipeline failed: {e}"),
     })?;
+    let mut req = output.request;
+    let message_origins = output.message_origins;
 
     // 6. Start from the persona's declared chat_options (temperature,
     //    max_tokens, top_p, reasoning_effort, verbosity, seed,
@@ -1352,37 +1356,35 @@ async fn compose_request_for_turn(
     }
 
     // Splice attachments from history messages (Segment2Pass output).
-    // History messages were collected via active_messages() which yields
-    // them in order. Segment2Pass pushes summary_head messages first,
-    // then prior_messages, then pseudo-messages (block writes). The
-    // prior_messages correspond 1:1 to active_messages() in order.
-    // We need to find the offset where prior_messages start in the
-    // composed request.
+    //
+    // Uses MessageId-based lookup via message_origins (populated by
+    // Segment2Pass::apply) instead of fragile index arithmetic. Each
+    // composed message that originated from a Pattern Message has its
+    // MessageId recorded in message_origins; we build a reverse map
+    // and look up each history message's attachment target by id.
     {
+        // Build origin → composed-index map for O(1) lookup.
+        let origin_map: HashMap<SmolStr, usize> = message_origins
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, origin)| origin.as_ref().map(|id| (id.clone(), idx)))
+            .collect();
+
         let hist = turn_history
             .lock()
             .map_err(|_| RuntimeError::ProviderError {
                 reason: "turn_history mutex poisoned".into(),
             })?;
 
-        // Count summary head messages that were prepended.
-        let summary_count = hist.summary_head().len();
-
-        // Prior messages start at index summary_count in the composed
-        // message list (after summary head messages, before pseudo-messages).
-        // Pseudo-messages (block writes) come AFTER prior_messages and are
-        // not indexed here — attachment splice only targets prior_messages.
-        let prior_start = summary_count;
-
-        for (i, msg) in hist.active_messages().enumerate() {
+        for msg in hist.active_messages() {
             if msg.attachments.is_empty() {
                 continue;
             }
-            let composed_idx = prior_start + i;
-            if composed_idx >= seg2_end {
-                // Out of range for Segment2Pass — skip (shouldn't happen).
+            let Some(&composed_idx) = origin_map.get(&msg.id) else {
+                // Message not found in composed output — shouldn't
+                // happen, but skip gracefully rather than panicking.
                 continue;
-            }
+            };
             for attachment in &msg.attachments {
                 let rendered = render_snapshot_attachment(attachment);
                 splice_text_onto_message(&mut req.chat.messages[composed_idx], &rendered);

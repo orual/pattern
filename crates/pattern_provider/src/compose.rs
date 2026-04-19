@@ -59,6 +59,6 @@ pub use break_detection::BreakDetectionSnapshot;
 pub use breakpoints::{BreakpointLocation, BreakpointPlacement, BreakpointTracker};
 pub use current_state::render_current_state;
 pub use partial_request::PartialRequest;
-pub use pipeline::{ComposerPass, compose, finalize};
+pub use pipeline::{ComposeOutput, ComposerPass, compose, finalize};
 pub use profile::{CacheProfile, CacheStrategy};
 pub use pseudo_messages::{render_change_event, render_change_events};
