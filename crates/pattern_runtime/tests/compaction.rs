@@ -376,6 +376,138 @@ async fn recursive_summarization_fires_and_writes_summary() {
 }
 
 #[tokio::test]
+async fn importance_based_strategy_fires_and_drops_old_turns() {
+    // 200 turns, token_count above threshold, ImportanceBased(keep_recent=20,
+    // keep_important=10). Expected: 200 - 20 = 180 older turns scored; top-10
+    // kept; 170 archived; 30 active (10 important + 20 recent).
+    let provider = Arc::new(MockProviderClient::with_turns(vec![]).with_token_count(5000));
+    let persona = PersonaSnapshot::new("agent-a", "Test").with_context_policy(
+        ContextPolicy::default()
+            .with_compression(Some(CompressionStrategy::ImportanceBased {
+                keep_recent: 20,
+                keep_important: 10,
+            }))
+            .with_message_floor(0)
+            .with_token_threshold(100),
+    );
+    let (ctx, db) = setup_with_persona(persona, provider).await;
+    let hist = populate_history(&db, "agent-a", 200).await;
+
+    let outcome = maybe_compact(&ctx, &hist, ctx.context_policy())
+        .await
+        .expect("maybe_compact failed");
+
+    match outcome {
+        CompactionOutcome::Fired {
+            strategy_name,
+            archived_turn_count,
+            summary_written,
+            active_after,
+        } => {
+            assert_eq!(strategy_name, "importance_based");
+            // 180 older turns scored; top-10 kept; 170 archived.
+            assert_eq!(archived_turn_count, 170);
+            // ImportanceBased does not write a summary row.
+            assert!(!summary_written);
+            // 10 important + 20 recent = 30 active.
+            assert_eq!(active_after, 30);
+        }
+        CompactionOutcome::Skipped { reason, .. } => {
+            panic!("expected Fired, got Skipped: {reason}");
+        }
+    }
+
+    // Verify TurnHistory was updated.
+    {
+        let h = hist.lock().unwrap();
+        assert_eq!(h.active_len(), 30);
+        assert!(h.post_compaction_pending());
+    }
+
+    // ImportanceBased does not write archive_summaries rows.
+    let summaries = pattern_db::queries::get_archive_summaries(db.pool(), "agent-a")
+        .await
+        .unwrap();
+    assert!(
+        summaries.is_empty(),
+        "importance_based should not create summary rows"
+    );
+}
+
+#[tokio::test]
+async fn time_decay_strategy_fires_and_drops_old_turns() {
+    // 200 turns, token_count above threshold, TimeDecay with a negative
+    // compress_after_hours so the computed cutoff is in the future — all
+    // turns are considered "old" and eligible for archival.
+    //
+    // Why a negative cutoff instead of past-dated test messages?
+    // `populate_history` stamps every turn with `Timestamp::now()` at fixture
+    // build time; making them look "old" by wall-clock would require either
+    // sleeping between turns or manually rewriting per-message timestamps —
+    // both more fragile than just pulling the cutoff forward so every
+    // now()-stamped turn lands on the "old" side of it. Intentional fixture
+    // trick, not a typo.
+    //
+    // With compress_after_hours = -1.0:
+    //   cutoff = Timestamp::now() - (-3_600_000ms) = 1 hour in the future
+    //   old_count = 200 (all turns pre-date a future cutoff)
+    //   max_archivable = 200 - min_keep_recent(2) = 198
+    //   desired_cut = min(200, 198) = 198
+    //   safe_cut = 198 (every turn has a unique batch_id → no boundary pull-back)
+    // Expected: 198 archived, 2 active.
+    let provider = Arc::new(MockProviderClient::with_turns(vec![]).with_token_count(5000));
+    let persona = PersonaSnapshot::new("agent-a", "Test").with_context_policy(
+        ContextPolicy::default()
+            .with_compression(Some(CompressionStrategy::TimeDecay {
+                compress_after_hours: -1.0,
+                min_keep_recent: 2,
+            }))
+            .with_message_floor(0)
+            .with_token_threshold(100),
+    );
+    let (ctx, db) = setup_with_persona(persona, provider).await;
+    let hist = populate_history(&db, "agent-a", 200).await;
+
+    let outcome = maybe_compact(&ctx, &hist, ctx.context_policy())
+        .await
+        .expect("maybe_compact failed");
+
+    match outcome {
+        CompactionOutcome::Fired {
+            strategy_name,
+            archived_turn_count,
+            summary_written,
+            active_after,
+        } => {
+            assert_eq!(strategy_name, "time_decay");
+            assert_eq!(archived_turn_count, 198);
+            // TimeDecay does not write a summary row.
+            assert!(!summary_written);
+            assert_eq!(active_after, 2);
+        }
+        CompactionOutcome::Skipped { reason, .. } => {
+            panic!("expected Fired, got Skipped: {reason}");
+        }
+    }
+
+    // Verify TurnHistory was updated.
+    {
+        let h = hist.lock().unwrap();
+        assert_eq!(h.active_len(), 2);
+        assert!(h.post_compaction_pending());
+    }
+
+    // TimeDecay does not write archive_summaries rows.
+    let summaries = pattern_db::queries::get_archive_summaries(db.pool(), "agent-a")
+        .await
+        .unwrap();
+    assert!(
+        summaries.is_empty(),
+        "time_decay should not create summary rows"
+    );
+}
+
+#[tokio::test]
 async fn archived_messages_marked_is_archived() {
     let provider = Arc::new(MockProviderClient::with_turns(vec![]).with_token_count(5000));
     let persona = PersonaSnapshot::new("agent-a", "Test").with_context_policy(
