@@ -902,11 +902,14 @@ async fn cmd_cache_test(
 
     // ---- helpers for running a turn ----
 
-    let batch = BatchId::from(new_snowflake_id());
     let user = AgentId::from("user");
 
     let start = Timestamp::now();
     let make_input = |text: &str| -> TurnInput {
+        // Each call mints a fresh batch so every Session::step begins a new
+        // batch. Reusing a single batch_id across calls defeats
+        // `batches_since_last_full` and prevents delta/full snapshot cycling.
+        let batch = BatchId::from(new_snowflake_id());
         let chat_msg = genai::chat::ChatMessage::user(text.to_string());
         let msg = Message {
             chat_message: chat_msg,
@@ -921,7 +924,7 @@ async fn cmd_cache_test(
         };
         TurnInput {
             turn_id: new_snowflake_id(),
-            batch_id: batch.clone(),
+            batch_id: batch,
             origin: MessageOrigin::new(
                 Author::System {
                     reason: SystemReason::Wakeup,
@@ -1242,12 +1245,15 @@ async fn cmd_spawn(
     session.display().subscribe(subscriber);
 
     // REPL state for constructing TurnInputs.
-    let batch = BatchId::from(new_snowflake_id());
     let user_agent_id = AgentId::from("user");
 
     let make_turn_input = |line: &str| -> TurnInput {
         use jiff::Timestamp;
 
+        // Each REPL line is a distinct step — mint a fresh batch per call so
+        // `batches_since_last_full` increments correctly and delta/full
+        // snapshot cycling works during smoke testing.
+        let batch = BatchId::from(new_snowflake_id());
         let chat_msg = genai::chat::ChatMessage::user(line.to_string());
         let msg = Message {
             chat_message: chat_msg,
@@ -1262,7 +1268,7 @@ async fn cmd_spawn(
         };
         TurnInput {
             turn_id: new_snowflake_id(),
-            batch_id: batch.clone(),
+            batch_id: batch,
             origin: MessageOrigin::new(
                 Author::System {
                     reason: SystemReason::Wakeup,
