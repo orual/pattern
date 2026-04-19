@@ -1140,13 +1140,23 @@ async fn cmd_spawn(
 
     let memory_store = Arc::new(InMemoryMemoryStore::new());
 
+    // Retain a handle to the concrete store for the REPL's `:edit-block`
+    // command. The Arc-shared state means external edits land in the
+    // same backing document the session's handlers read.
+    let memory_store_for_repl = memory_store.clone();
+
+    // Capture the persona's agent_id before the PersonaSnapshot moves
+    // into `open_with_agent_loop` — the REPL's `:edit-block` command
+    // needs it to scope memory operations.
+    let persona_agent_id: String = persona.agent_id.to_string();
+
     // Nop sink — display events go via DisplaySubscriber below, not via TurnSink.
     let turn_sink: Arc<dyn TurnSink> = Arc::new(pattern_core::traits::NoOpSink);
 
     let sdk = SdkLocation::default();
     let prelude_dir: Option<std::path::PathBuf> = None;
 
-    eprintln!("[spawn] opening TidepoolSession (compiling placeholder program)...");
+    eprintln!("[spawn] opening TidepoolSession...");
     let open_start = std::time::Instant::now();
     let session = TidepoolSession::open_with_agent_loop(
         persona,
@@ -1215,6 +1225,77 @@ async fn cmd_spawn(
                 }
                 if line == ":q" || line == ":quit" {
                     break;
+                }
+
+                // `:edit-block <label> <content>` — mutate a memory block
+                // externally, between turns. Required by the AC9.4 smoke
+                // checklist (step 7): verify cache preservation when a
+                // block is edited mid-session. The Arc-shared memory
+                // store means the session sees the edit on its next
+                // turn without any explicit notification.
+                if let Some(rest) = line.strip_prefix(":edit-block ") {
+                    let (label, content) = match rest.split_once(' ') {
+                        Some((l, c)) => (l.trim(), c.trim()),
+                        None => {
+                            let Ok(mut out) = writer.lock() else {
+                                continue;
+                            };
+                            use std::io::Write as _;
+                            let _ = writeln!(out, "usage: :edit-block <label> <content>");
+                            continue;
+                        }
+                    };
+                    use pattern_core::traits::MemoryStore;
+                    match memory_store_for_repl
+                        .get_block(&persona_agent_id, label)
+                        .await
+                    {
+                        Ok(Some(doc)) => {
+                            if let Err(e) = doc.set_text(content, true) {
+                                let Ok(mut out) = writer.lock() else {
+                                    continue;
+                                };
+                                use std::io::Write as _;
+                                let _ = writeln!(out, "set_text failed: {e:?}");
+                                continue;
+                            }
+                            if let Err(e) = memory_store_for_repl
+                                .persist_block(&persona_agent_id, label)
+                                .await
+                            {
+                                let Ok(mut out) = writer.lock() else {
+                                    continue;
+                                };
+                                use std::io::Write as _;
+                                let _ = writeln!(out, "persist_block failed: {e}");
+                                continue;
+                            }
+                            let Ok(mut out) = writer.lock() else {
+                                continue;
+                            };
+                            use std::io::Write as _;
+                            let _ = writeln!(
+                                out,
+                                "[edit-block] '{label}' updated ({} chars)",
+                                content.chars().count(),
+                            );
+                        }
+                        Ok(None) => {
+                            let Ok(mut out) = writer.lock() else {
+                                continue;
+                            };
+                            use std::io::Write as _;
+                            let _ = writeln!(out, "block '{label}' not found");
+                        }
+                        Err(e) => {
+                            let Ok(mut out) = writer.lock() else {
+                                continue;
+                            };
+                            use std::io::Write as _;
+                            let _ = writeln!(out, "get_block failed: {e}");
+                        }
+                    }
+                    continue;
                 }
 
                 let input = make_turn_input(&line);

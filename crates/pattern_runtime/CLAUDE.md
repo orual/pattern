@@ -341,6 +341,122 @@ checks. For cross-agent access, the ordering of permission signals is:
 This policy is configurable; future phases may add trust-level gates or
 explicit capability flags.
 
+## Smoke-test procedure (v3 foundation AC9.*)
+
+The v3 foundation smoke test is a **manual procedure** driven through the
+`pattern-test-cli spawn` subcommand. Live-credential tests in CI are a
+foot-gun — credentials rotate + expire, rate-limit noise swamps real
+failures, per-run API cost accumulates — so Phase 6 ships a CLI binary + this
+checklist as the verification vehicle rather than an auto-run
+live-credential test.
+
+The failure-mode tests at `tests/error_clarity.rs` run in CI and verify
+error specificity per step (AC9.5). Everything below is manual; design plan
+AC9.1's "deterministically" is satisfied by the repeatable documented
+procedure rather than an auto-run smoke_e2e.rs.
+
+### Setup (one-time per machine)
+
+1. Ensure `tidepool-extract` is reachable (see Runtime setup §).
+2. Build the bin: `cargo build -p pattern-runtime --bin pattern-test-cli`.
+3. Pick an auth path:
+   - **API key:** export `ANTHROPIC_API_KEY=sk-ant-...`.
+   - **OAuth (subscription):** have an active claude-code session at
+     `~/.claude/.credentials.json` (session-pickup tier resolves it), or
+     run the one-time PKCE flow via `pattern-test-cli auth`.
+
+### DoD flow — AC9.1 (API-key) / AC9.2 (OAuth) / AC9.3 (CLI drives it) / AC9.4 (cache behavior)
+
+**Step 1 — start a fresh session.** The `spawn` subcommand takes a
+persona TOML path; use the smoke fixture at
+`crates/pattern_runtime/tests/fixtures/smoke_persona.toml` as a baseline.
+
+```bash
+TMPDIR=$(mktemp -d)
+cargo run -p pattern-runtime --bin pattern-test-cli -- \
+    spawn crates/pattern_runtime/tests/fixtures/smoke_persona.toml \
+    --data-dir "$TMPDIR"
+# CLI prints "pattern> "
+```
+
+Add `--auth api-key | session-pickup | pkce` to force a specific tier;
+default is whatever `build_chain()` resolves.
+
+**Step 2 — talk to Claude.** Type `hello; what's your role?`. Expect a
+response consistent with the smoke persona. A one-line cache summary
+prints after each turn: `[cache: fresh=N read=N create=N ratio=NN%]`.
+
+**Step 2a (one-time PKCE flow if using `--auth pkce`).** CLI prints an
+auth URL, opens browser, paste back the `code#state` string. Token is
+stored in keyring (or JSON fallback at
+`$XDG_CONFIG_HOME/pattern/creds/anthropic.json`). Subsequent runs reuse
+the stored token.
+
+**Step 3 — write a memory block (AC9.1 step 4).** Type:
+`please remember in your scratchpad: favorite color is teal.`
+Expect: agent confirms + the cache-metrics line. If `verbose=true` the
+change-log debug output shows the `memory.put` effect firing.
+
+**Step 4 — exit + re-spawn against the same data dir (AC9.1 step 5).**
+`:q` or Ctrl+D to exit. Re-run the same `spawn` command with the same
+`--data-dir`; persistence layer (when wired in a future task) will
+preserve state across the restart.
+
+> **Caveat:** `spawn` currently uses `InMemoryMemoryStore` so memory
+> does not actually persist across process invocations. The `--data-dir`
+> flag is parsed but unwired. This is acceptable for Phase 6 smoke scope
+> (the AC9.4 cache-behavior check happens within a single session); full
+> persistence is a follow-up. Update this section when pattern_db is
+> wired to the spawn path.
+
+**Step 5 — recall the stored value (AC9.1 step 6).** Type:
+`what's my favorite color?`. Expect: `teal` in the response.
+
+**Step 6 — capture pre-edit cache metrics (AC9.1 step 7).** Type:
+`ok, thanks`. Note the `read` and `ratio` values printed after the turn.
+
+**Step 7 — edit the block mid-session (AC9.1 step 8, AC9.4).** Use the
+`:edit-block <label> <content>` REPL command:
+
+```
+pattern> :edit-block scratchpad favorite color is actually indigo
+[edit-block] 'scratchpad' updated (35 chars)
+```
+
+The Arc-shared memory store means the session picks up the edit on
+its next turn without explicit reload.
+
+Type: `confirm the update`. Expect:
+- `ratio` ≥ the pre-edit ratio minus 5% (AC8.1 / AC9.4: segment 1
+  prefix preserved across the memory edit)
+- `create` token count spikes (AC8.2: segment 3 invalidated — the
+  new block content has to be cached fresh)
+
+Record the numbers. If `ratio` drops dramatically beyond the
+expected seg3 invalidation, check `tracing::warn!` logs for
+break-detection output (Phase 5 Task 11).
+
+**Step 8 — exit.** `:q`. Session shuts down cleanly.
+
+### When things fail
+
+- Any unclear error surfaced at the CLI is an AC9.5 regression — add a
+  test case at `tests/error_clarity.rs` before debugging further.
+- If `ratio` collapses unexpectedly during step 7, inspect the
+  break-detection warnings and diff the composed requests for
+  segment-1 differences.
+- If the persona TOML fails to load, `persona_loader`'s error messages
+  should name the failing field or step; if they don't, tighten them.
+
+### What the CLI deliberately does NOT do
+
+- No auto-run smoke test with live credentials. The checklist above IS
+  the smoke test.
+- No polished UX. `pattern-test-cli` is a throwaway driver; the real
+  CLI lives in a post-foundation plan (likely rebuilt on ratatui).
+- No cross-provider routing demo. Same provider per session.
+- No constellation / multi-agent paths. Foundation is single-agent.
+
 ## Known flakes — MUST fix before GA
 
 These tests pass in isolation but intermittently fail under
@@ -351,7 +467,15 @@ regression. **This is tech debt that blocks shipping a stable release**
 — CI that occasionally fails for reasons unrelated to the PR under
 review corrodes trust in the signal.
 
-**Flaky tests observed so far:**
+> **Status note (2026-04-18, Phase 6 Task B):** both previously-named
+> flaky tests (`session_lifecycle::open_step_twice_does_not_recompile`
+> and `timeout::hard_abandon_await_enforces_cancel_grace_ceiling`) were
+> deleted when the SessionMachine static-program path retired. The
+> underlying concurrent-`tidepool-extract` contention hypothesis may
+> still apply to surviving tests that go through the binary; re-audit
+> under load before ship.
+
+**Previously-observed flaky tests (now deleted):**
 
 - `session_lifecycle::open_step_twice_does_not_recompile`
 - `timeout::hard_abandon_await_enforces_cancel_grace_ceiling`
