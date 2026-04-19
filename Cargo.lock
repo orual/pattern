@@ -5341,6 +5341,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smol_str",
+ "tempfile",
  "thiserror 1.0.69",
  "tidepool-bridge",
  "tidepool-bridge-derive",

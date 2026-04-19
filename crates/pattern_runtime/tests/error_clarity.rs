@@ -72,95 +72,104 @@ impl Drop for EnvGuard {
 }
 
 // ────────────────────────────── 1. Persona parse failures ───────────────────
+//
+// These tests exercise `persona_loader::load_persona` (the production path)
+// rather than `toml::from_str::<PersonaSnapshot>`. The loader uses an
+// intermediate `PersonaFile` DTO with different schema semantics (e.g.
+// `agent_id` is optional; `[model]` not `[model.choice]`; `[memory]` not
+// `[memory_blocks]`). Writing to a tempfile first ensures we exercise the
+// full I/O → parse → convert pipeline.
 
-/// Parse a TOML string into `PersonaSnapshot`. Returns the `toml::de::Error`
-/// on failure so tests can assert on its contents.
-fn parse_persona_toml(toml: &str) -> Result<PersonaSnapshot, toml::de::Error> {
-    toml::from_str(toml)
+/// Write `content` to a temp file and call `load_persona` on it, returning
+/// the error (as a string) or panicking if it unexpectedly succeeds.
+fn load_bad_persona(content: &str) -> String {
+    let dir = tempfile::TempDir::new().expect("create tempdir");
+    let path = dir.path().join("bad.toml");
+    std::fs::write(&path, content).unwrap();
+    let err = pattern_runtime::persona_loader::load_persona(&path)
+        .expect_err("bad persona TOML must fail to load");
+    err.to_string()
 }
 
 #[test]
 fn ac9_5_persona_malformed_toml_fails_with_parse_error() {
     // Deliberately broken TOML — unclosed bracket.
     let bad_toml = r#"
-        agent_id = "test-agent"
-        name = "Test"
-        [model
-    "#;
-    let err = parse_persona_toml(bad_toml).expect_err("malformed TOML must fail");
-    let display = err.to_string();
-    // The error must point at a parse/syntax problem, not silently succeed.
+name = "Test"
+[model
+"#;
+    let display = load_bad_persona(bad_toml);
+    // The loader wraps this as PersonaLoadError::Parse. The Display must
+    // mention "parsing" or "parse" (from the error template) and describe
+    // the TOML syntax problem.
     assert!(
-        display.contains("expected") || display.contains("parse") || display.contains("TOML"),
+        display.contains("pars") || display.contains("expected"),
         "error message should describe the parse problem; got: {display}"
     );
 }
 
 #[test]
 fn ac9_5_persona_missing_name_field_fails() {
-    // `name` has no serde default — it must be present in the TOML.
+    // `name` is required in PersonaFile — omitting it must produce a Parse
+    // error that names the field.
     let bad_toml = r#"
-        agent_id = "test-agent"
-    "#;
-    let err = parse_persona_toml(bad_toml).expect_err("missing `name` must fail");
-    let display = err.to_string();
+agent_id = "test-agent"
+"#;
+    let display = load_bad_persona(bad_toml);
     assert!(
         display.contains("name") || display.contains("missing"),
-        "error should mention the missing field; got: {display}"
+        "error should mention the missing `name` field; got: {display}"
     );
 }
 
 #[test]
-fn ac9_5_persona_missing_agent_id_field_fails() {
-    // `agent_id` has no serde default — it must be present in the TOML.
-    let bad_toml = r#"
-        name = "Test Agent"
-    "#;
-    let err = parse_persona_toml(bad_toml).expect_err("missing `agent_id` must fail");
-    let display = err.to_string();
+fn ac9_5_persona_missing_name_without_agent_id_fails() {
+    // Both `name` and `agent_id` absent: `name` is required, so this must
+    // fail. This replaces the old `missing_agent_id_field` test — in the
+    // production PersonaFile, `agent_id` is optional and defaults to `name`.
+    // The only way to get a missing-identifier error is to omit `name`
+    // entirely (there is nothing to default from).
+    let bad_toml = "";
+    let display = load_bad_persona(bad_toml);
     assert!(
-        display.contains("agent_id") || display.contains("missing"),
-        "error should mention the missing field; got: {display}"
+        display.contains("name") || display.contains("missing"),
+        "error should mention the missing `name` field; got: {display}"
     );
 }
 
 #[test]
 fn ac9_5_persona_bad_model_provider_string_fails() {
-    // `AdapterKind` derives `Deserialize`; unknown variants must fail.
+    // `PersonaFile` uses `[model]` with a flat `provider` key (not
+    // `[model.choice]` like PersonaSnapshot). The loader converts the
+    // string via `AdapterKind::from_lower_str`, returning
+    // `PersonaLoadError::UnknownProvider` on failure.
     let bad_toml = r#"
-        agent_id = "test-agent"
-        name = "Test"
+name = "Test"
 
-        [model.choice]
-        provider = "invalid-provider"
-        model_id = "claude-sonnet-4-6"
-    "#;
-    let err = parse_persona_toml(bad_toml).expect_err("unknown provider variant must fail");
-    let display = err.to_string();
-    // serde reports the unknown variant — assert the message is specific.
+[model]
+provider = "invalid-provider"
+model_id = "claude-sonnet-4-6"
+"#;
+    let display = load_bad_persona(bad_toml);
     assert!(
-        display.contains("invalid-provider")
-            || display.contains("model")
-            || display.contains("provider")
-            || display.contains("unknown variant"),
-        "error should mention the bad provider or the field path; got: {display}"
+        display.contains("invalid-provider") || display.contains("provider"),
+        "error should mention the bad provider; got: {display}"
     );
 }
 
 #[test]
 fn ac9_5_persona_bad_memory_permission_enum_fails() {
-    // `MemoryPermission` is `serde(rename_all = "snake_case")`; an unknown
-    // variant must fail deserialization.
+    // `PersonaFile` uses `[memory.<label>]` (not `[memory_blocks.<label>]`).
+    // An unknown `permission` variant fails at TOML deserialization time
+    // and is wrapped as `PersonaLoadError::Parse`.
     let bad_toml = r#"
-        agent_id = "test-agent"
-        name = "Test"
+name = "Test"
 
-        [memory_blocks.persona]
-        content = "I am a test agent."
-        permission = "superuser"
-    "#;
-    let err = parse_persona_toml(bad_toml).expect_err("unknown permission variant must fail");
-    let display = err.to_string();
+[memory.persona]
+content = "I am a test agent."
+permission = "superuser"
+"#;
+    let display = load_bad_persona(bad_toml);
     assert!(
         display.contains("superuser")
             || display.contains("permission")

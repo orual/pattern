@@ -533,36 +533,10 @@ fn convert_memory_block(
 mod tests {
     use super::*;
     use std::fs;
-
-    // --- Minimal temp-dir RAII helper (no external crate needed) ---
-
-    struct TestDir {
-        path: std::path::PathBuf,
-    }
-
-    impl TestDir {
-        fn new(test_name: &str) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "pattern-persona-loader-test-{test_name}-{}",
-                std::process::id()
-            ));
-            fs::create_dir_all(&path).expect("create test dir");
-            Self { path }
-        }
-
-        fn path(&self) -> &std::path::Path {
-            &self.path
-        }
-    }
-
-    impl Drop for TestDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.path);
-        }
-    }
+    use tempfile::TempDir;
 
     /// Write a file into `dir` and return its path.
-    fn write_file(dir: &TestDir, name: &str, content: &str) -> std::path::PathBuf {
+    fn write_file(dir: &TempDir, name: &str, content: &str) -> std::path::PathBuf {
         let p = dir.path().join(name);
         fs::write(&p, content).unwrap();
         p
@@ -634,7 +608,7 @@ mod tests {
 
     #[test]
     fn content_path_resolves_relative_to_toml_dir() {
-        let dir = TestDir::new("content_path");
+        let dir = TempDir::new().unwrap();
         write_file(&dir, "notes.txt", "hello from notes");
 
         let toml_content = r#"
@@ -659,7 +633,7 @@ memory_type  = "working"
 
     #[test]
     fn system_prompt_path_resolves() {
-        let dir = TestDir::new("system_prompt_path");
+        let dir = TempDir::new().unwrap();
         write_file(&dir, "prompt.txt", "you are a test assistant.");
         let toml_content = r#"
 name = "prompt-path-test"
@@ -677,7 +651,7 @@ system_prompt_path = "prompt.txt"
 
     #[test]
     fn unknown_top_level_field_is_rejected() {
-        let dir = TestDir::new("unknown_toplevel");
+        let dir = TempDir::new().unwrap();
         let toml_content = r#"
 name = "bad"
 mystery_field = "this should not be accepted"
@@ -694,7 +668,7 @@ mystery_field = "this should not be accepted"
 
     #[test]
     fn unknown_model_field_is_rejected() {
-        let dir = TestDir::new("unknown_model");
+        let dir = TempDir::new().unwrap();
         let toml_content = r#"
 name = "bad"
 
@@ -715,7 +689,7 @@ mystery_model_key = 42
 
     #[test]
     fn malformed_toml_produces_parse_error() {
-        let dir = TestDir::new("malformed");
+        let dir = TempDir::new().unwrap();
         let toml_content = "name = [this is not valid toml";
         let path = write_file(&dir, "bad.toml", toml_content);
         let err = load_persona(&path).unwrap_err();
@@ -730,7 +704,7 @@ mystery_model_key = 42
 
     #[test]
     fn missing_name_field_produces_informative_error() {
-        let dir = TestDir::new("missing_name");
+        let dir = TempDir::new().unwrap();
         // A TOML file with no `name` key.
         let toml_content = r#"
 agent_id = "no-name-here"
@@ -752,7 +726,7 @@ provider = "anthropic"
 
     #[test]
     fn both_content_and_content_path_is_rejected() {
-        let dir = TestDir::new("conflict_content");
+        let dir = TempDir::new().unwrap();
         write_file(&dir, "stuff.txt", "content from file");
         let toml_content = r#"
 name = "conflict-test"
@@ -772,7 +746,7 @@ content_path = "stuff.txt"
 
     #[test]
     fn both_system_prompt_and_system_prompt_path_is_rejected() {
-        let dir = TestDir::new("conflict_prompt");
+        let dir = TempDir::new().unwrap();
         write_file(&dir, "p.txt", "from file");
         let toml_content = r#"
 name = "conflict-test"
@@ -792,7 +766,7 @@ system_prompt_path = "p.txt"
 
     #[test]
     fn unknown_provider_produces_error() {
-        let dir = TestDir::new("unknown_provider");
+        let dir = TempDir::new().unwrap();
         let toml_content = r#"
 name = "bad-provider"
 
@@ -813,7 +787,7 @@ model_id = "some-model"
 
     #[test]
     fn agent_id_defaults_to_name_when_omitted() {
-        let dir = TestDir::new("agent_id_default");
+        let dir = TempDir::new().unwrap();
         let toml_content = r#"name = "my-agent""#;
         let path = write_file(&dir, "p.toml", toml_content);
         let snap = load_persona(&path).unwrap();
@@ -823,7 +797,7 @@ model_id = "some-model"
 
     #[test]
     fn explicit_agent_id_is_used() {
-        let dir = TestDir::new("explicit_agent_id");
+        let dir = TempDir::new().unwrap();
         let toml_content = r#"
 name     = "Display Name"
 agent_id = "stable-id"
@@ -838,7 +812,7 @@ agent_id = "stable-id"
 
     #[test]
     fn valid_reasoning_effort_is_accepted() {
-        let dir = TestDir::new("reasoning_effort_valid");
+        let dir = TempDir::new().unwrap();
         let toml_content = r#"
 name = "reasoning-test"
 
@@ -855,7 +829,7 @@ reasoning_effort = "medium"
 
     #[test]
     fn invalid_reasoning_effort_produces_error() {
-        let dir = TestDir::new("reasoning_effort_bad");
+        let dir = TempDir::new().unwrap();
         let toml_content = r#"
 name = "bad-reasoning"
 
