@@ -152,47 +152,9 @@ impl Display for IsolatePolicy {
     }
 }
 
-/// Error type for memory operations.
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum MemoryError {
-    #[error("block not found: {agent_id}/{label}")]
-    NotFound { agent_id: String, label: String },
-
-    #[error("block is read-only: {0}")]
-    ReadOnly(String),
-
-    #[error(
-        "permission denied for block '{block_label}': required {required:?}, actual {actual:?}"
-    )]
-    PermissionDenied {
-        block_label: String,
-        required: pattern_db::models::MemoryPermission,
-        actual: pattern_db::models::MemoryPermission,
-    },
-
-    #[error(
-        "isolation denied: operation {operation} would cross persona boundary under policy {policy}"
-    )]
-    IsolationDenied {
-        operation: String,
-        policy: IsolatePolicy,
-    },
-
-    #[error("database error: {0}")]
-    Database(#[from] pattern_db::DbError),
-
-    #[error("loro error: {0}")]
-    Loro(String),
-
-    #[error("document error: {0}")]
-    Document(#[from] DocumentError),
-
-    #[error("memory operation failed: {0}")]
-    Other(String),
-}
-
-pub type MemoryResult<T> = Result<T, MemoryError>;
+// `MemoryError` and `MemoryResult` are defined in `crate::error::memory` and
+// re-exported here for backward compatibility with existing import paths.
+pub use crate::error::memory::{MemoryError, MemoryResult};
 
 // ========== Consolidation types (v3-memory-rework Phase 3) ==========
 

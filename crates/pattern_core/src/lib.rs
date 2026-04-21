@@ -62,7 +62,8 @@ pub use base_instructions::DEFAULT_BASE_INSTRUCTIONS;
 /// Segment 1 reads this block to inject persona into the system prompt.
 pub const PERSONA_LABEL: &str = "persona";
 pub use error::{
-    ConfigError, CoreError, EmbeddingError, MemoryError, ProviderError, Result, RuntimeError,
+    ConfigError, CoreError, EmbeddingError, MemoryError, MemoryResult, ProviderError, Result,
+    RuntimeError,
 };
 
 // ── Trait re-exports ─────────────────────────────────────────────────────────

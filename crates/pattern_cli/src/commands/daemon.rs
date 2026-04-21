@@ -249,7 +249,8 @@ fn cmd_status() -> MietteResult<()> {
 /// # Errors
 ///
 /// Returns an error if the global paths cannot be resolved (no home directory).
-fn resolve_default_persona(project_path: &Path) -> MietteResult<PathBuf> {
+/// Returns (persona KDL path, persona agent_id).
+fn resolve_default_persona(project_path: &Path) -> MietteResult<(PathBuf, String)> {
     use pattern_memory::PatternPaths;
     use pattern_memory::config::load_mount_config;
     use pattern_memory::mount::find_mount;
@@ -292,7 +293,7 @@ fn resolve_default_persona(project_path: &Path) -> MietteResult<PathBuf> {
         .map_err(|e| miette!("persona discovery failed: {e}"))?;
 
     if let Some(path) = personas.get(normalized) {
-        return Ok(path.clone());
+        return Ok((path.clone(), normalized.to_string()));
     }
 
     // Persona not found on disk — write the bundled default.
@@ -306,7 +307,7 @@ fn resolve_default_persona(project_path: &Path) -> MietteResult<PathBuf> {
         .into_diagnostic()
         .map_err(|e| miette!("failed to write default persona: {e}"))?;
 
-    Ok(persona_path)
+    Ok((persona_path, "pattern-default".to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -324,24 +325,25 @@ fn resolve_default_persona(project_path: &Path) -> MietteResult<PathBuf> {
 /// - The server binary cannot be found.
 /// - The persona cannot be resolved.
 /// - The daemon fails to start within the timeout.
-pub fn ensure_daemon_running() -> MietteResult<SocketAddr> {
+/// Returns (listen address, persona agent_id).
+pub fn ensure_daemon_running() -> MietteResult<(SocketAddr, String)> {
+    // Resolve persona first — we need the agent_id even on the fast path.
+    let project_path = std::env::current_dir().into_diagnostic()?;
+    let (_persona_path, agent_id) = resolve_default_persona(&project_path)?;
+
     // Fast path: already running.
     if let Ok(state) = DaemonState::load() {
         if state.is_process_alive() {
-            return Ok(state.addr);
+            return Ok((state.addr, agent_id));
         }
         // Stale state — clean up before starting a fresh daemon.
         DaemonState::clear().ok();
     }
 
-    // Resolve project path and persona.
-    let project_path = std::env::current_dir().into_diagnostic()?;
-    let persona_path = resolve_default_persona(&project_path)?;
-
     let server_bin = locate_server_binary()?;
     let mut cmd = std::process::Command::new(&server_bin);
     cmd.arg("start");
-    cmd.arg("--persona").arg(&persona_path);
+    cmd.arg("--persona").arg(&_persona_path);
     cmd.arg("--path").arg(&project_path);
 
     // Redirect all IO to log file — daemon must not write to the TUI terminal.
@@ -363,7 +365,7 @@ pub fn ensure_daemon_running() -> MietteResult<SocketAddr> {
         miette!("daemon failed to start within 10 seconds — check `pattern-server` logs")
     })?;
 
-    Ok(state.addr)
+    Ok((state.addr, agent_id))
 }
 
 // ---------------------------------------------------------------------------

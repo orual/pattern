@@ -42,13 +42,13 @@
 
 mod core;
 pub mod embedding;
-mod memory;
+pub(crate) mod memory;
 mod provider;
 mod runtime;
 
 pub use core::{ConfigError, CoreError};
 pub use embedding::EmbeddingError;
-pub use memory::MemoryError;
+pub use memory::{MemoryError, MemoryResult};
 pub use provider::ProviderError;
 pub use runtime::{CancelPath, RuntimeError, SandboxConstraint};
 

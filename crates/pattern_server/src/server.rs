@@ -286,8 +286,14 @@ impl DaemonServer {
                                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                                 .clone();
 
-                            // Build TurnInput from the client's message.
-                            let turn_input = build_turn_input(&inner, &partner_id);
+                            // Build TurnInput using the persona's agent_id for
+                            // correct memory block ownership — not the client's
+                            // routing key (which may be "default").
+                            let persona_agent_id = self.session_config
+                                .as_ref()
+                                .map(|c| c.persona.agent_id.to_string())
+                                .unwrap_or_else(|| agent_id.to_string());
+                            let turn_input = build_turn_input(&inner, &partner_id, &persona_agent_id);
 
                             // Drive step in a background task so the actor
                             // remains responsive to other messages.
@@ -385,9 +391,12 @@ impl DaemonServer {
 /// Mints fresh turn and batch IDs, wraps the client's content parts into
 /// a user [`ChatMessage`], and sets the origin to `Author::Partner` using
 /// the stable `partner_id` minted once at server spawn time.
-fn build_turn_input(msg: &AgentMessage, partner_id: &SmolStr) -> TurnInput {
+fn build_turn_input(msg: &AgentMessage, partner_id: &SmolStr, session_agent_id: &str) -> TurnInput {
     let batch_id = CoreBatchId::from(msg.batch_id.to_string());
-    let agent_id = CoreAgentId::from(msg.agent_id.to_string());
+    // Use the session's persona agent_id for message ownership — not the
+    // client-sent routing key, which may differ (e.g. "default" vs
+    // "pattern-default").
+    let agent_id = CoreAgentId::from(session_agent_id.to_string());
 
     let chat_msg = ChatMessage::user(
         msg.parts
