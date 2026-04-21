@@ -102,6 +102,10 @@ rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk.git" } # MCP
 # Testing
 mockall = "0.13"
 pretty_assertions = "1.4"
+insta = { version = "1.40", features = ["yaml"] }
+
+# TUI markdown rendering
+tui-markdown = "0.3"
 
 # Additional workspace-level dependencies for binary features
 clap = { version = "4.5", features = ["derive"] }

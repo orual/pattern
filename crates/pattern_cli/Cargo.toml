@@ -38,7 +38,6 @@ jiff = { workspace = true }
 indicatif = "0.17"
 comfy-table = "7.1"
 owo-colors = "4.2"
-termimad = "0.31"
 dialoguer = "0.11"
 dirs = { workspace = true }
 dotenvy = { workspace = true }
@@ -48,7 +47,10 @@ ratatui = "0.30.0"
 ratatui-textarea = "0.9.1"
 ratatui-widgets = { version = "0.3.0" }
 ratatui-crossterm = { version = "0.1.0" }
+crossterm = { version = "0.29", features = ["event-stream"] }
+tui-markdown = { workspace = true }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }
 tempfile = { workspace = true }
+insta = { workspace = true }
