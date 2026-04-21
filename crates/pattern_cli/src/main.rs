@@ -131,6 +131,16 @@ enum ModeArg {
 
 #[tokio::main]
 async fn main() -> MietteResult<()> {
+    // Set up tracing to a log file (not stderr — would corrupt TUI).
+    let log_file = std::fs::File::create("/tmp/pattern-tui.log").ok();
+    if let Some(file) = log_file {
+        tracing_subscriber::fmt()
+            .with_env_filter("pattern=debug,pattern_server=debug")
+            .with_writer(std::sync::Mutex::new(file))
+            .with_ansi(false)
+            .init();
+    }
+
     let cli = Cli::parse();
 
     match cli.command {

@@ -8,10 +8,10 @@
 //! Tests run in the same tokio runtime as the server actor, so async message
 //! passing is exercised without mocking.
 
-use pattern_core::traits::turn_sink::TurnEvent;
 use pattern_core::types::ids::new_snowflake_id;
 use pattern_core::types::provider::ContentPart;
 use pattern_server::client::DaemonClient;
+use pattern_server::protocol::WireTurnEvent;
 use pattern_server::server::DaemonServer;
 use smol_str::SmolStr;
 use tokio::time::{Duration, timeout};
@@ -56,7 +56,7 @@ async fn full_send_subscribe_flow() {
             .expect("recv returned error")
             .expect("channel closed before Stop event");
 
-        let is_stop = matches!(ev.event, TurnEvent::Stop(_));
+        let is_stop = matches!(ev.event, WireTurnEvent::Stop(_));
         received.push(ev);
         if is_stop {
             break;
@@ -79,11 +79,11 @@ async fn full_send_subscribe_flow() {
     assert!(
         received
             .iter()
-            .any(|e| matches!(e.event, TurnEvent::Text(_))),
+            .any(|e| matches!(e.event, WireTurnEvent::Text(_))),
         "expected at least one Text event"
     );
     assert!(
-        matches!(received.last().unwrap().event, TurnEvent::Stop(_)),
+        matches!(received.last().unwrap().event, WireTurnEvent::Stop(_)),
         "last event must be Stop"
     );
 }

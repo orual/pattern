@@ -386,8 +386,8 @@ mod tests {
     use super::*;
     use crate::tui::model::RenderBatch;
     use crate::tui::test_utils::buffer_to_string;
-    use pattern_core::traits::turn_sink::TurnEvent;
     use pattern_core::types::turn::StopReason;
+    use pattern_server::protocol::WireTurnEvent;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -407,18 +407,18 @@ mod tests {
 
     fn make_text_batch() -> RenderBatch {
         let mut batch = RenderBatch::new("batch-1".into(), Some("Hello agent".into()));
-        batch.push_event(&TurnEvent::Text("The answer is **42**.".into()));
-        batch.push_event(&TurnEvent::Stop(StopReason::EndTurn));
+        batch.push_event(&WireTurnEvent::Text("The answer is **42**.".into()));
+        batch.push_event(&WireTurnEvent::Stop(StopReason::EndTurn));
         batch
     }
 
     fn make_thinking_batch(collapsed: bool) -> RenderBatch {
         let mut batch = RenderBatch::new("batch-2".into(), Some("Think about this".into()));
-        batch.push_event(&TurnEvent::Thinking(
+        batch.push_event(&WireTurnEvent::Thinking(
             "Let me consider the options carefully...".into(),
         ));
-        batch.push_event(&TurnEvent::Text("I have thought about it.".into()));
-        batch.push_event(&TurnEvent::Stop(StopReason::EndTurn));
+        batch.push_event(&WireTurnEvent::Text("I have thought about it.".into()));
+        batch.push_event(&WireTurnEvent::Stop(StopReason::EndTurn));
         if !collapsed {
             // Expand the thinking section (index 0).
             batch.sections[0].collapsed = false;
@@ -427,17 +427,14 @@ mod tests {
     }
 
     fn make_tool_call_batch() -> RenderBatch {
-        use pattern_core::types::provider::ToolCall as ProviderToolCall;
         let mut batch = RenderBatch::new("batch-3".into(), Some("Search for info".into()));
-        batch.push_event(&TurnEvent::ToolCall(ProviderToolCall {
+        batch.push_event(&WireTurnEvent::ToolCall {
             call_id: "call-123".into(),
-            fn_name: "search".into(),
-            fn_arguments: serde_json::json!({"query": "pattern"}),
-            thought_signatures: None,
-            thought_signatures_provenance: None,
-        }));
-        batch.push_event(&TurnEvent::Text("Found results.".into()));
-        batch.push_event(&TurnEvent::Stop(StopReason::EndTurn));
+            function_name: "search".into(),
+            arguments_json: serde_json::json!({"query": "pattern"}).to_string(),
+        });
+        batch.push_event(&WireTurnEvent::Text("Found results.".into()));
+        batch.push_event(&WireTurnEvent::Stop(StopReason::EndTurn));
         batch
     }
 
@@ -493,8 +490,8 @@ mod tests {
     fn scroll_offset_skips_first_batch() {
         let batch1 = make_text_batch();
         let mut batch2 = RenderBatch::new("batch-2".into(), Some("Second question".into()));
-        batch2.push_event(&TurnEvent::Text("Second answer.".into()));
-        batch2.push_event(&TurnEvent::Stop(StopReason::EndTurn));
+        batch2.push_event(&WireTurnEvent::Text("Second answer.".into()));
+        batch2.push_event(&WireTurnEvent::Stop(StopReason::EndTurn));
 
         let mut state = ConversationState {
             batches: vec![batch1, batch2],
@@ -554,10 +551,10 @@ mod tests {
         let mut batch = RenderBatch::new("batch-scroll".into(), Some("user question".into()));
         // Five distinct lines in the thinking section. The section starts collapsed,
         // so expand it so the content is visible.
-        batch.push_event(&TurnEvent::Thinking(
+        batch.push_event(&WireTurnEvent::Thinking(
             "line one\nline two\nline three\nline four\nline five".into(),
         ));
-        batch.push_event(&TurnEvent::Stop(StopReason::EndTurn));
+        batch.push_event(&WireTurnEvent::Stop(StopReason::EndTurn));
         // Expand the thinking section so it contributes full height.
         batch.sections[0].collapsed = false;
 
@@ -594,8 +591,8 @@ mod tests {
         for i in 0..10 {
             let mut batch =
                 RenderBatch::new(format!("batch-{i}").into(), Some(format!("Question {i}")));
-            batch.push_event(&TurnEvent::Text(format!("Answer {i}.")));
-            batch.push_event(&TurnEvent::Stop(StopReason::EndTurn));
+            batch.push_event(&WireTurnEvent::Text(format!("Answer {i}.")));
+            batch.push_event(&WireTurnEvent::Stop(StopReason::EndTurn));
             batches.push(batch);
         }
 

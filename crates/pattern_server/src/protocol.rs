@@ -11,8 +11,9 @@ use irpc::{
     channel::{mpsc, oneshot},
     rpc_requests,
 };
-use pattern_core::traits::turn_sink::TurnEvent;
-use pattern_core::types::provider::ContentPart;
+use pattern_core::traits::turn_sink::{DisplayKind, TurnEvent};
+use pattern_core::types::provider::{ContentPart, ToolOutcome};
+use pattern_core::types::turn::StopReason;
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
@@ -50,8 +51,76 @@ pub struct AgentSubscription {
     pub agent_id: AgentId,
 }
 
-/// A [`TurnEvent`] tagged with the batch and agent that produced it.
+/// Wire-safe version of [`TurnEvent`].
 ///
+/// The internal `TurnEvent` contains genai types (`ToolCall`, `ToolResult`,
+/// `CompletionRequest`) that use `serde_json::Value` fields and
+/// `#[serde(skip_serializing_if)]` attributes — both incompatible with
+/// postcard's binary wire format. This enum owns only postcard-safe types
+/// (strings, simple enums, no `Value`).
+///
+/// Conversion from `TurnEvent` happens at the bridge boundary
+/// ([`TurnSinkBridge::emit`]) so the internal runtime never sees this type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum WireTurnEvent {
+    /// Streamed LLM response text.
+    Text(String),
+    /// LLM reasoning content (thinking/chain-of-thought).
+    Thinking(String),
+    /// Tool invocation. Arguments are JSON-stringified.
+    ToolCall {
+        call_id: String,
+        function_name: String,
+        arguments_json: String,
+    },
+    /// Tool result. Content is JSON-stringified.
+    ToolResult {
+        call_id: String,
+        success: bool,
+        content_json: String,
+    },
+    /// Agent display output (chunk/final/note).
+    Display { kind: DisplayKind, text: String },
+    /// Wire turn ended.
+    Stop(StopReason),
+}
+
+impl WireTurnEvent {
+    /// Convert from the internal `TurnEvent`.
+    ///
+    /// `ComposedRequest` is filtered out (returns `None`) — it's a debug-only
+    /// event that contains types incompatible with the wire format.
+    pub fn from_turn_event(event: &TurnEvent) -> Option<Self> {
+        match event {
+            TurnEvent::Text(s) => Some(Self::Text(s.clone())),
+            TurnEvent::Thinking(s) => Some(Self::Thinking(s.clone())),
+            TurnEvent::ToolCall(tc) => Some(Self::ToolCall {
+                call_id: tc.call_id.clone(),
+                function_name: tc.fn_name.clone(),
+                arguments_json: tc.fn_arguments.to_string(),
+            }),
+            TurnEvent::ToolResult(tr) => Some(Self::ToolResult {
+                call_id: tr.call_id.clone(),
+                success: matches!(tr.outcome, ToolOutcome::Success(_)),
+                content_json: match &tr.outcome {
+                    ToolOutcome::Success(val) => val.to_string(),
+                    ToolOutcome::Error(msg) => msg.clone(),
+                },
+            }),
+            TurnEvent::Display { kind, text } => Some(Self::Display {
+                kind: *kind,
+                text: text.clone(),
+            }),
+            TurnEvent::Stop(reason) => Some(Self::Stop(*reason)),
+            TurnEvent::ComposedRequest(_) => None,
+            _ => None, // Forward-compat for future variants.
+        }
+    }
+}
+
+/// A turn event tagged with the batch and agent that produced it.
+///
+/// Uses [`WireTurnEvent`] (postcard-safe) instead of the internal `TurnEvent`.
 /// The daemon's fan-out logic emits one of these per event into every
 /// subscriber channel that matches the `agent_id`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,8 +129,8 @@ pub struct TaggedTurnEvent {
     pub batch_id: BatchId,
     /// Which agent emitted this event.
     pub agent_id: AgentId,
-    /// The underlying turn event.
-    pub event: TurnEvent,
+    /// The wire-safe turn event.
+    pub event: WireTurnEvent,
 }
 
 /// Static metadata about a running agent.
@@ -190,12 +259,12 @@ mod tests {
         let event = TaggedTurnEvent {
             batch_id: "batch-001".into(),
             agent_id: "agent-1".into(),
-            event: TurnEvent::Text("hello world".into()),
+            event: WireTurnEvent::Text("hello world".into()),
         };
         let json = serde_json::to_string(&event).unwrap();
         let decoded: TaggedTurnEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.batch_id, "batch-001");
-        assert!(matches!(decoded.event, TurnEvent::Text(ref s) if s == "hello world"));
+        assert!(matches!(decoded.event, WireTurnEvent::Text(ref s) if s == "hello world"));
     }
 
     #[test]
@@ -203,13 +272,13 @@ mod tests {
         let event = TaggedTurnEvent {
             batch_id: "batch-002".into(),
             agent_id: "agent-2".into(),
-            event: TurnEvent::Stop(StopReason::EndTurn),
+            event: WireTurnEvent::Stop(StopReason::EndTurn),
         };
         let json = serde_json::to_string(&event).unwrap();
         let decoded: TaggedTurnEvent = serde_json::from_str(&json).unwrap();
         assert!(matches!(
             decoded.event,
-            TurnEvent::Stop(StopReason::EndTurn)
+            WireTurnEvent::Stop(StopReason::EndTurn)
         ));
     }
 

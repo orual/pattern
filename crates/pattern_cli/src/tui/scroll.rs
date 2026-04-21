@@ -206,15 +206,17 @@ pub fn apply_action(
 mod tests {
     use super::*;
     use crate::tui::model::RenderBatch;
-    use pattern_core::traits::turn_sink::TurnEvent;
     use pattern_core::types::turn::StopReason;
+    use pattern_server::protocol::WireTurnEvent;
 
     /// Build a state with one batch: user message, thinking, text, stop.
     fn make_state_with_thinking() -> ConversationState {
         let mut batch = RenderBatch::new("b1".into(), Some("question".into()));
-        batch.push_event(&TurnEvent::Thinking("let me think about this...".into()));
-        batch.push_event(&TurnEvent::Text("the answer is 42".into()));
-        batch.push_event(&TurnEvent::Stop(StopReason::EndTurn));
+        batch.push_event(&WireTurnEvent::Thinking(
+            "let me think about this...".into(),
+        ));
+        batch.push_event(&WireTurnEvent::Text("the answer is 42".into()));
+        batch.push_event(&WireTurnEvent::Stop(StopReason::EndTurn));
 
         ConversationState {
             batches: vec![batch],
@@ -344,20 +346,16 @@ mod tests {
 
     /// Build a state with multiple collapsible sections for focus cycling tests.
     fn make_state_with_multiple_sections() -> ConversationState {
-        use pattern_core::types::provider::ToolCall as ProviderToolCall;
-
         let mut batch = RenderBatch::new("b1".into(), Some("question".into()));
         // Three collapsible sections: thinking, tool call, thinking again.
-        batch.push_event(&TurnEvent::Thinking("first thought".into()));
-        batch.push_event(&TurnEvent::ToolCall(ProviderToolCall {
+        batch.push_event(&WireTurnEvent::Thinking("first thought".into()));
+        batch.push_event(&WireTurnEvent::ToolCall {
             call_id: "call-1".into(),
-            fn_name: "search".into(),
-            fn_arguments: serde_json::json!({}),
-            thought_signatures: None,
-            thought_signatures_provenance: None,
-        }));
-        batch.push_event(&TurnEvent::Thinking("second thought".into()));
-        batch.push_event(&TurnEvent::Stop(StopReason::EndTurn));
+            function_name: "search".into(),
+            arguments_json: "{}".into(),
+        });
+        batch.push_event(&WireTurnEvent::Thinking("second thought".into()));
+        batch.push_event(&WireTurnEvent::Stop(StopReason::EndTurn));
 
         ConversationState {
             batches: vec![batch],
@@ -417,8 +415,8 @@ mod tests {
     fn tab_with_no_collapsible_sections_returns_none() {
         // A batch with only a text section — nothing to focus.
         let mut batch = RenderBatch::new("b1".into(), Some("hello".into()));
-        batch.push_event(&TurnEvent::Text("only text here".into()));
-        batch.push_event(&TurnEvent::Stop(StopReason::EndTurn));
+        batch.push_event(&WireTurnEvent::Text("only text here".into()));
+        batch.push_event(&WireTurnEvent::Stop(StopReason::EndTurn));
 
         let state = ConversationState {
             batches: vec![batch],

@@ -77,10 +77,20 @@ impl TurnSinkBridge {
 
 impl TurnSink for TurnSinkBridge {
     fn emit(&self, event: TurnEvent) {
+        // Convert to wire-safe format. Events that can't be represented on
+        // the wire (e.g. ComposedRequest) are filtered out here.
+        let Some(wire_event) = crate::protocol::WireTurnEvent::from_turn_event(&event) else {
+            tracing::trace!(
+                batch_id = %self.batch_id,
+                "event filtered from wire (not wire-representable)"
+            );
+            return;
+        };
+
         let tagged = TaggedTurnEvent {
             batch_id: self.batch_id.clone(),
             agent_id: self.agent_id.clone(),
-            event,
+            event: wire_event,
         };
         // Lock-free, unbounded, never blocks.
         // Failure means the daemon actor has been dropped — discard silently.
@@ -134,6 +144,7 @@ impl TurnSink for MultiplexSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::WireTurnEvent;
     use pattern_core::traits::turn_sink::TurnEvent;
     use pattern_core::types::turn::StopReason;
 
@@ -148,12 +159,15 @@ mod tests {
         let ev1 = rx.try_recv().unwrap();
         assert_eq!(ev1.batch_id, "batch-1");
         assert_eq!(ev1.agent_id, "agent-1");
-        assert!(matches!(ev1.event, TurnEvent::Text(ref s) if s == "hello"));
+        assert!(matches!(ev1.event, WireTurnEvent::Text(ref s) if s == "hello"));
 
         let ev2 = rx.try_recv().unwrap();
         assert_eq!(ev2.batch_id, "batch-1");
         assert_eq!(ev2.agent_id, "agent-1");
-        assert!(matches!(ev2.event, TurnEvent::Stop(StopReason::EndTurn)));
+        assert!(matches!(
+            ev2.event,
+            WireTurnEvent::Stop(StopReason::EndTurn)
+        ));
     }
 
     #[test]
@@ -193,8 +207,8 @@ mod tests {
 
         let ev1 = rx.try_recv().unwrap();
         let ev2 = rx.try_recv().unwrap();
-        assert!(matches!(ev1.event, TurnEvent::Text(ref s) if s == "from 1"));
-        assert!(matches!(ev2.event, TurnEvent::Text(ref s) if s == "from 2"));
+        assert!(matches!(ev1.event, WireTurnEvent::Text(ref s) if s == "from 1"));
+        assert!(matches!(ev2.event, WireTurnEvent::Text(ref s) if s == "from 2"));
     }
 
     // --- MultiplexSink tests ---
@@ -213,7 +227,7 @@ mod tests {
 
         let ev = rx.try_recv().unwrap();
         assert_eq!(ev.batch_id, "batch-1");
-        assert!(matches!(ev.event, TurnEvent::Text(ref s) if s == "delegated"));
+        assert!(matches!(ev.event, WireTurnEvent::Text(ref s) if s == "delegated"));
     }
 
     /// After swapping the inner sink, new events go to the new inner while
@@ -246,14 +260,14 @@ mod tests {
 
         let ev_a = rx_a.try_recv().unwrap();
         assert_eq!(ev_a.batch_id, "batch-a");
-        assert!(matches!(ev_a.event, TurnEvent::Text(ref s) if s == "first"));
+        assert!(matches!(ev_a.event, WireTurnEvent::Text(ref s) if s == "first"));
 
         // rx_a should have nothing more.
         assert!(rx_a.try_recv().is_err());
 
         let ev_b = rx_b.try_recv().unwrap();
         assert_eq!(ev_b.batch_id, "batch-b");
-        assert!(matches!(ev_b.event, TurnEvent::Text(ref s) if s == "second"));
+        assert!(matches!(ev_b.event, WireTurnEvent::Text(ref s) if s == "second"));
     }
 
     /// The default MultiplexSink (backed by NoOpSink) must not panic when

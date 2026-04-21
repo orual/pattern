@@ -17,9 +17,9 @@ use ratatui::widgets::Widget;
 use smol_str::SmolStr;
 use tokio::time;
 
-use pattern_core::traits::turn_sink::{DisplayKind, TurnEvent};
+use pattern_core::traits::turn_sink::DisplayKind;
 use pattern_server::client::DaemonClient;
-use pattern_server::protocol::TaggedTurnEvent;
+use pattern_server::protocol::{TaggedTurnEvent, WireTurnEvent};
 
 use super::autocomplete::{AutocompleteState, AutocompleteWidget, CommandSource, CompletionSource};
 use super::commands::lookup_command;
@@ -153,15 +153,16 @@ impl App {
                 } => {
                     match recv_result {
                         Ok(Some(tagged_event)) => {
+                            tracing::debug!("daemon event received: batch={}", tagged_event.batch_id);
                             self.handle_daemon_event(tagged_event);
                         }
                         Ok(None) => {
-                            // Channel closed — daemon disconnected.
+                            tracing::warn!("daemon subscription channel closed (Ok(None))");
                             self.connected = false;
                             event_rx = None;
                         }
-                        Err(_) => {
-                            // Recv error — treat as disconnect.
+                        Err(e) => {
+                            tracing::warn!("daemon subscription recv error: {e:?}");
                             self.connected = false;
                             event_rx = None;
                         }
@@ -291,8 +292,10 @@ impl App {
                     let client = client.clone();
                     let bid = batch_id;
                     tokio::spawn(async move {
-                        if let Err(e) = client.send_message(bid, agent_id, parts).await {
-                            tracing::error!("send failed: {e}");
+                        tracing::debug!("sending message batch={bid} agent={agent_id}");
+                        match client.send_message(bid.clone(), agent_id, parts).await {
+                            Ok(()) => tracing::debug!("send_message succeeded batch={bid}"),
+                            Err(e) => tracing::error!("send_message failed batch={bid}: {e:?}"),
                         }
                     });
                 }
@@ -442,7 +445,7 @@ impl App {
     fn push_system_message(&mut self, text: String) {
         let batch_id: SmolStr = format!("sys-{}", self.conversation.batches.len()).into();
         let mut batch = RenderBatch::new(batch_id, None);
-        batch.push_event(&TurnEvent::Display {
+        batch.push_event(&WireTurnEvent::Display {
             kind: DisplayKind::Note,
             text,
         });
@@ -601,8 +604,8 @@ fn render_status_bar(area: Rect, buf: &mut Buffer, connected: bool, current_agen
 mod tests {
     use super::*;
     use crate::tui::test_utils::buffer_to_string;
-    use pattern_core::traits::turn_sink::TurnEvent;
     use pattern_core::types::turn::StopReason;
+    use pattern_server::protocol::WireTurnEvent;
     use ratatui::backend::TestBackend;
 
     /// Render the app into a TestBackend and return the buffer as a string.
@@ -626,8 +629,8 @@ mod tests {
 
         // Add a batch with a user message and text response.
         let mut batch = RenderBatch::new("batch-1".into(), Some("Hello agent".into()));
-        batch.push_event(&TurnEvent::Text("The answer is **42**.".into()));
-        batch.push_event(&TurnEvent::Stop(StopReason::EndTurn));
+        batch.push_event(&WireTurnEvent::Text("The answer is **42**.".into()));
+        batch.push_event(&WireTurnEvent::Stop(StopReason::EndTurn));
         app.conversation.batches.push(batch);
 
         let output = render_app(&mut app, 60, 12);

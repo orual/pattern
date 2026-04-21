@@ -192,6 +192,12 @@ impl DaemonServer {
     /// does not block the actor loop. Subscribers that are full (buffer
     /// backpressure) or disconnected are removed.
     async fn fan_out(&mut self, event: TaggedTurnEvent) {
+        tracing::debug!(
+            agent_id = %event.agent_id,
+            batch_id = %event.batch_id,
+            event = ?event.event,
+            "fan_out: dispatching event"
+        );
         let Some(senders) = self.subscribers.get_mut(&event.agent_id) else {
             return;
         };
@@ -539,7 +545,7 @@ mod tests {
         // Receive events — tagged with our batch_id.
         let ev = events.recv().await.unwrap().unwrap();
         assert_eq!(ev.batch_id, batch_id);
-        assert!(matches!(ev.event, TurnEvent::Text(ref s) if s.contains("hello")));
+        assert!(matches!(ev.event, WireTurnEvent::Text(ref s) if s.contains("hello")));
     }
 
     #[tokio::test]

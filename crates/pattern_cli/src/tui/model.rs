@@ -12,8 +12,8 @@
 //! - Height caching uses `Option<u16>` — set to `None` when content
 //!   changes, computed lazily during render.
 
-use pattern_core::traits::turn_sink::{DisplayKind, TurnEvent};
-use pattern_core::types::provider::ToolOutcome;
+use pattern_core::traits::turn_sink::DisplayKind;
+use pattern_server::protocol::WireTurnEvent;
 use smol_str::SmolStr;
 
 use super::markdown;
@@ -158,11 +158,15 @@ impl RenderBatch {
         }
     }
 
-    /// Append a turn event to this batch, extending or creating sections
+    /// Append a wire turn event to this batch, extending or creating sections
     /// as appropriate.
-    pub fn push_event(&mut self, event: &TurnEvent) {
+    ///
+    /// Accepts [`WireTurnEvent`] (the postcard-safe wire format) rather than
+    /// the internal `TurnEvent`, since the TUI receives events over the wire
+    /// from the daemon.
+    pub fn push_event(&mut self, event: &WireTurnEvent) {
         match event {
-            TurnEvent::Text(chunk) => {
+            WireTurnEvent::Text(chunk) => {
                 // Extend the last Text section if one exists, otherwise create new.
                 if let Some(section) = self.sections.last_mut()
                     && let SectionKind::Text(ref mut existing) = section.kind
@@ -174,7 +178,7 @@ impl RenderBatch {
                 self.sections
                     .push(Section::new(SectionKind::Text(chunk.clone())));
             }
-            TurnEvent::Thinking(chunk) => {
+            WireTurnEvent::Thinking(chunk) => {
                 // Extend the last Thinking section if one exists, otherwise create new.
                 if let Some(section) = self.sections.last_mut()
                     && let SectionKind::Thinking(ref mut existing) = section.kind
@@ -186,43 +190,37 @@ impl RenderBatch {
                 self.sections
                     .push(Section::new(SectionKind::Thinking(chunk.clone())));
             }
-            TurnEvent::ToolCall(tc) => {
-                let arguments = serde_json::to_string_pretty(&tc.fn_arguments)
-                    .unwrap_or_else(|_| tc.fn_arguments.to_string());
+            WireTurnEvent::ToolCall {
+                call_id,
+                function_name,
+                arguments_json,
+            } => {
                 self.sections.push(Section::new(SectionKind::ToolCall {
-                    call_id: tc.call_id.clone(),
-                    function_name: tc.fn_name.clone(),
-                    arguments,
+                    call_id: call_id.clone(),
+                    function_name: function_name.clone(),
+                    arguments: arguments_json.clone(),
                 }));
             }
-            TurnEvent::ToolResult(tr) => {
-                let (success, content) = match &tr.outcome {
-                    ToolOutcome::Success(val) => (
-                        true,
-                        serde_json::to_string_pretty(val).unwrap_or_else(|_| val.to_string()),
-                    ),
-                    ToolOutcome::Error(msg) => (false, msg.clone()),
-                };
+            WireTurnEvent::ToolResult {
+                call_id,
+                success,
+                content_json,
+            } => {
                 self.sections.push(Section::new(SectionKind::ToolResult {
-                    call_id: tr.call_id.clone(),
-                    success,
-                    content,
+                    call_id: call_id.clone(),
+                    success: *success,
+                    content: content_json.clone(),
                 }));
             }
-            TurnEvent::Display { kind, text } => {
+            WireTurnEvent::Display { kind, text } => {
                 self.sections.push(Section::new(SectionKind::Display {
                     kind: *kind,
                     text: text.clone(),
                 }));
             }
-            TurnEvent::Stop(_) => {
+            WireTurnEvent::Stop(_) => {
                 self.streaming = false;
             }
-            TurnEvent::ComposedRequest(_) => {
-                // Debug-only event, not rendered.
-            }
-            // TurnEvent is non_exhaustive, so handle unknown variants gracefully.
-            _ => {}
         }
     }
 
@@ -300,8 +298,8 @@ mod tests {
     #[test]
     fn text_events_concatenate_into_single_section() {
         let mut batch = make_batch();
-        batch.push_event(&TurnEvent::Text("Hello ".into()));
-        batch.push_event(&TurnEvent::Text("world".into()));
+        batch.push_event(&WireTurnEvent::Text("Hello ".into()));
+        batch.push_event(&WireTurnEvent::Text("world".into()));
 
         assert_eq!(batch.sections.len(), 1);
         match &batch.sections[0].kind {
@@ -315,7 +313,7 @@ mod tests {
     #[test]
     fn thinking_sections_are_collapsed_by_default() {
         let mut batch = make_batch();
-        batch.push_event(&TurnEvent::Thinking("Let me consider...".into()));
+        batch.push_event(&WireTurnEvent::Thinking("Let me consider...".into()));
 
         assert_eq!(batch.sections.len(), 1);
         assert!(batch.sections[0].collapsed);
@@ -330,8 +328,8 @@ mod tests {
         let mut batch = make_batch();
         assert!(batch.streaming);
 
-        batch.push_event(&TurnEvent::Text("response".into()));
-        batch.push_event(&TurnEvent::Stop(StopReason::EndTurn));
+        batch.push_event(&WireTurnEvent::Text("response".into()));
+        batch.push_event(&WireTurnEvent::Stop(StopReason::EndTurn));
 
         assert!(!batch.streaming);
         // Stop does not create a section.
@@ -339,24 +337,13 @@ mod tests {
     }
 
     #[test]
-    fn composed_request_not_rendered() {
-        use pattern_core::types::provider::CompletionRequest;
-
-        let mut batch = make_batch();
-        let req = CompletionRequest::new("test-model");
-        batch.push_event(&TurnEvent::ComposedRequest(Box::new(req)));
-
-        assert!(batch.sections.is_empty());
-    }
-
-    #[test]
     fn display_events_create_sections() {
         let mut batch = make_batch();
-        batch.push_event(&TurnEvent::Display {
+        batch.push_event(&WireTurnEvent::Display {
             kind: DisplayKind::Note,
             text: "Processing...".into(),
         });
-        batch.push_event(&TurnEvent::Display {
+        batch.push_event(&WireTurnEvent::Display {
             kind: DisplayKind::Final,
             text: "Done!".into(),
         });
@@ -403,10 +390,10 @@ mod tests {
     #[test]
     fn text_interleaved_with_thinking_creates_separate_sections() {
         let mut batch = make_batch();
-        batch.push_event(&TurnEvent::Text("First ".into()));
-        batch.push_event(&TurnEvent::Text("part.".into()));
-        batch.push_event(&TurnEvent::Thinking("hmm...".into()));
-        batch.push_event(&TurnEvent::Text("Second part.".into()));
+        batch.push_event(&WireTurnEvent::Text("First ".into()));
+        batch.push_event(&WireTurnEvent::Text("part.".into()));
+        batch.push_event(&WireTurnEvent::Thinking("hmm...".into()));
+        batch.push_event(&WireTurnEvent::Text("Second part.".into()));
 
         assert_eq!(batch.sections.len(), 3);
         assert!(matches!(&batch.sections[0].kind, SectionKind::Text(s) if s == "First part."));
