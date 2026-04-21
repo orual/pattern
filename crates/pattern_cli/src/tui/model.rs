@@ -1,0 +1,414 @@
+//! Data model for conversation rendering.
+//!
+//! A [`RenderBatch`] represents one user-to-agent exchange. Each batch
+//! contains ordered [`Section`]s representing different types of content
+//! (text, thinking, tool calls, tool results, display output).
+//!
+//! Key design decisions:
+//! - Text and Thinking sections concatenate consecutive same-type events
+//!   into one section (no per-chunk section proliferation).
+//! - Thinking, ToolCall, ToolResult sections are collapsed by default.
+//!   Text and Display sections are never collapsed.
+//! - Height caching uses `Option<u16>` — set to `None` when content
+//!   changes, computed lazily during render.
+
+use pattern_core::traits::turn_sink::{DisplayKind, TurnEvent};
+use pattern_core::types::provider::ToolOutcome;
+use smol_str::SmolStr;
+
+use super::markdown;
+
+// ---------------------------------------------------------------------------
+// Section types
+// ---------------------------------------------------------------------------
+
+/// The kind of content a section holds.
+#[derive(Debug, Clone)]
+pub enum SectionKind {
+    /// Streamed LLM text (the model's answer).
+    Text(String),
+    /// LLM reasoning content (extended thinking).
+    Thinking(String),
+    /// A tool invocation requested by the model.
+    ToolCall {
+        call_id: String,
+        function_name: String,
+        arguments: String,
+    },
+    /// The result of a tool invocation.
+    ToolResult {
+        call_id: String,
+        success: bool,
+        content: String,
+    },
+    /// Agent display output (chunk, final, or note).
+    Display { kind: DisplayKind, text: String },
+}
+
+/// One logical section within a [`RenderBatch`].
+#[derive(Debug, Clone)]
+pub struct Section {
+    /// What kind of content this section holds.
+    pub kind: SectionKind,
+    /// Whether the section is collapsed in the UI. Thinking, ToolCall,
+    /// and ToolResult start collapsed; Text and Display never collapse.
+    pub collapsed: bool,
+    /// Cached rendered height in lines at a specific width. `None` means
+    /// the cache is invalidated and must be recomputed during render.
+    pub cached_height: Option<u16>,
+}
+
+impl Section {
+    /// Create a new section with appropriate default collapsed state.
+    fn new(kind: SectionKind) -> Self {
+        let collapsed = matches!(
+            kind,
+            SectionKind::Thinking(_)
+                | SectionKind::ToolCall { .. }
+                | SectionKind::ToolResult { .. }
+        );
+        Self {
+            kind,
+            collapsed,
+            cached_height: None,
+        }
+    }
+
+    /// One-line summary for collapsed view, prefixed with `▸`.
+    pub fn summary(&self) -> String {
+        match &self.kind {
+            SectionKind::Text(s) => {
+                let preview = truncate_preview(s, 60);
+                format!("▸ text: {preview}")
+            }
+            SectionKind::Thinking(s) => {
+                let preview = truncate_preview(s, 60);
+                format!("▸ thinking: {preview}")
+            }
+            SectionKind::ToolCall { function_name, .. } => {
+                format!("▸ tool: {function_name}")
+            }
+            SectionKind::ToolResult {
+                call_id, success, ..
+            } => {
+                let status = if *success { "ok" } else { "error" };
+                format!("▸ result ({status}): {call_id}")
+            }
+            SectionKind::Display { kind, text } => {
+                let label = match kind {
+                    DisplayKind::Chunk => "chunk",
+                    DisplayKind::Final => "final",
+                    DisplayKind::Note => "note",
+                };
+                let preview = truncate_preview(text, 60);
+                format!("▸ display ({label}): {preview}")
+            }
+        }
+    }
+
+    /// Height in terminal lines. Returns 1 if collapsed, otherwise
+    /// the cached height or 1 as fallback if not yet computed.
+    pub fn height(&self) -> u16 {
+        if self.collapsed {
+            return 1;
+        }
+        self.cached_height.unwrap_or(1)
+    }
+}
+
+/// Truncate a string to at most `max_chars` characters, appending `...`
+/// if truncated. Replaces newlines with spaces for single-line display.
+fn truncate_preview(s: &str, max_chars: usize) -> String {
+    let cleaned: String = s.chars().map(|c| if c == '\n' { ' ' } else { c }).collect();
+    if cleaned.len() <= max_chars {
+        cleaned
+    } else {
+        let truncated: String = cleaned.chars().take(max_chars).collect();
+        format!("{truncated}...")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RenderBatch
+// ---------------------------------------------------------------------------
+
+/// One user-to-agent exchange in the conversation.
+#[derive(Debug, Clone)]
+pub struct RenderBatch {
+    /// Unique identifier for this batch.
+    pub batch_id: SmolStr,
+    /// The user's message that initiated this exchange, if any.
+    pub user_message: Option<String>,
+    /// Ordered sections of agent response content.
+    pub sections: Vec<Section>,
+    /// Whether the agent is still streaming content for this batch.
+    pub streaming: bool,
+}
+
+impl RenderBatch {
+    /// Create a new batch with the given ID and optional user message.
+    pub fn new(batch_id: SmolStr, user_message: Option<String>) -> Self {
+        Self {
+            batch_id,
+            user_message,
+            sections: Vec::new(),
+            streaming: true,
+        }
+    }
+
+    /// Append a turn event to this batch, extending or creating sections
+    /// as appropriate.
+    pub fn push_event(&mut self, event: &TurnEvent) {
+        match event {
+            TurnEvent::Text(chunk) => {
+                // Extend the last Text section if one exists, otherwise create new.
+                if let Some(section) = self.sections.last_mut()
+                    && let SectionKind::Text(ref mut existing) = section.kind
+                {
+                    existing.push_str(chunk);
+                    section.cached_height = None;
+                    return;
+                }
+                self.sections
+                    .push(Section::new(SectionKind::Text(chunk.clone())));
+            }
+            TurnEvent::Thinking(chunk) => {
+                // Extend the last Thinking section if one exists, otherwise create new.
+                if let Some(section) = self.sections.last_mut()
+                    && let SectionKind::Thinking(ref mut existing) = section.kind
+                {
+                    existing.push_str(chunk);
+                    section.cached_height = None;
+                    return;
+                }
+                self.sections
+                    .push(Section::new(SectionKind::Thinking(chunk.clone())));
+            }
+            TurnEvent::ToolCall(tc) => {
+                let arguments = serde_json::to_string_pretty(&tc.fn_arguments)
+                    .unwrap_or_else(|_| tc.fn_arguments.to_string());
+                self.sections.push(Section::new(SectionKind::ToolCall {
+                    call_id: tc.call_id.clone(),
+                    function_name: tc.fn_name.clone(),
+                    arguments,
+                }));
+            }
+            TurnEvent::ToolResult(tr) => {
+                let (success, content) = match &tr.outcome {
+                    ToolOutcome::Success(val) => (
+                        true,
+                        serde_json::to_string_pretty(val).unwrap_or_else(|_| val.to_string()),
+                    ),
+                    ToolOutcome::Error(msg) => (false, msg.clone()),
+                };
+                self.sections.push(Section::new(SectionKind::ToolResult {
+                    call_id: tr.call_id.clone(),
+                    success,
+                    content,
+                }));
+            }
+            TurnEvent::Display { kind, text } => {
+                self.sections.push(Section::new(SectionKind::Display {
+                    kind: *kind,
+                    text: text.clone(),
+                }));
+            }
+            TurnEvent::Stop(_) => {
+                self.streaming = false;
+            }
+            TurnEvent::ComposedRequest(_) => {
+                // Debug-only event, not rendered.
+            }
+            // TurnEvent is non_exhaustive, so handle unknown variants gracefully.
+            _ => {}
+        }
+    }
+
+    /// Compute and cache heights for all sections that have `None` cached height.
+    /// Uses markdown rendering for Text sections and plain line counting for others.
+    pub fn compute_heights(&mut self, width: u16) {
+        for section in &mut self.sections {
+            if section.cached_height.is_some() {
+                continue;
+            }
+            if section.collapsed {
+                section.cached_height = Some(1);
+                continue;
+            }
+            let height = match &section.kind {
+                SectionKind::Text(s) => markdown::markdown_height(s, width),
+                SectionKind::Thinking(s) => plain_text_height(s, width),
+                SectionKind::ToolCall {
+                    arguments,
+                    function_name: _,
+                    ..
+                } => {
+                    // Header line + arguments.
+                    let header_height = 1u16;
+                    let args_height = plain_text_height(arguments, width);
+                    header_height.saturating_add(args_height)
+                }
+                SectionKind::ToolResult { content, .. } => {
+                    // Header line + content.
+                    let header_height = 1u16;
+                    let content_height = plain_text_height(content, width);
+                    header_height.saturating_add(content_height)
+                }
+                SectionKind::Display { text, .. } => plain_text_height(text, width),
+            };
+            section.cached_height = Some(height.max(1));
+        }
+    }
+
+    /// Total height of this batch in terminal lines, including user message line.
+    pub fn total_height(&self) -> u16 {
+        let user_msg_height: u16 = if self.user_message.is_some() { 1 } else { 0 };
+        let sections_height: u16 = self.sections.iter().map(|s| s.height()).sum();
+        user_msg_height.saturating_add(sections_height)
+    }
+}
+
+/// Compute the height of plain text when wrapped at a given width.
+/// Uses ratatui's `Paragraph::line_count` for accurate wrapping.
+fn plain_text_height(text: &str, width: u16) -> u16 {
+    use ratatui::text::Text;
+    use ratatui_widgets::paragraph::{Paragraph, Wrap};
+
+    if text.is_empty() || width == 0 {
+        return 1;
+    }
+    let t = Text::from(text.to_owned());
+    let paragraph = Paragraph::new(t).wrap(Wrap { trim: true });
+    (paragraph.line_count(width) as u16).max(1)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pattern_core::types::turn::StopReason;
+
+    fn make_batch() -> RenderBatch {
+        RenderBatch::new("test-batch-1".into(), Some("Hello agent".into()))
+    }
+
+    #[test]
+    fn text_events_concatenate_into_single_section() {
+        let mut batch = make_batch();
+        batch.push_event(&TurnEvent::Text("Hello ".into()));
+        batch.push_event(&TurnEvent::Text("world".into()));
+
+        assert_eq!(batch.sections.len(), 1);
+        match &batch.sections[0].kind {
+            SectionKind::Text(s) => assert_eq!(s, "Hello world"),
+            other => panic!("expected Text section, got {other:?}"),
+        }
+        // Text sections are never collapsed.
+        assert!(!batch.sections[0].collapsed);
+    }
+
+    #[test]
+    fn thinking_sections_are_collapsed_by_default() {
+        let mut batch = make_batch();
+        batch.push_event(&TurnEvent::Thinking("Let me consider...".into()));
+
+        assert_eq!(batch.sections.len(), 1);
+        assert!(batch.sections[0].collapsed);
+        match &batch.sections[0].kind {
+            SectionKind::Thinking(s) => assert_eq!(s, "Let me consider..."),
+            other => panic!("expected Thinking section, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stop_event_marks_batch_not_streaming() {
+        let mut batch = make_batch();
+        assert!(batch.streaming);
+
+        batch.push_event(&TurnEvent::Text("response".into()));
+        batch.push_event(&TurnEvent::Stop(StopReason::EndTurn));
+
+        assert!(!batch.streaming);
+        // Stop does not create a section.
+        assert_eq!(batch.sections.len(), 1);
+    }
+
+    #[test]
+    fn composed_request_not_rendered() {
+        use pattern_core::types::provider::CompletionRequest;
+
+        let mut batch = make_batch();
+        let req = CompletionRequest::new("test-model");
+        batch.push_event(&TurnEvent::ComposedRequest(Box::new(req)));
+
+        assert!(batch.sections.is_empty());
+    }
+
+    #[test]
+    fn display_events_create_sections() {
+        let mut batch = make_batch();
+        batch.push_event(&TurnEvent::Display {
+            kind: DisplayKind::Note,
+            text: "Processing...".into(),
+        });
+        batch.push_event(&TurnEvent::Display {
+            kind: DisplayKind::Final,
+            text: "Done!".into(),
+        });
+
+        assert_eq!(batch.sections.len(), 2);
+        // Display sections are never collapsed.
+        assert!(!batch.sections[0].collapsed);
+        assert!(!batch.sections[1].collapsed);
+
+        match &batch.sections[0].kind {
+            SectionKind::Display { kind, text } => {
+                assert_eq!(*kind, DisplayKind::Note);
+                assert_eq!(text, "Processing...");
+            }
+            other => panic!("expected Display section, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn thinking_summary_has_triangle_prefix() {
+        let section = Section::new(SectionKind::Thinking("deep thoughts".into()));
+        let summary = section.summary();
+        assert!(summary.starts_with("▸ thinking:"));
+        assert!(summary.contains("deep thoughts"));
+    }
+
+    #[test]
+    fn tool_call_summary_shows_function_name() {
+        let section = Section::new(SectionKind::ToolCall {
+            call_id: "call-1".into(),
+            function_name: "search".into(),
+            arguments: "{}".into(),
+        });
+        assert_eq!(section.summary(), "▸ tool: search");
+    }
+
+    #[test]
+    fn collapsed_section_height_is_one() {
+        let section = Section::new(SectionKind::Thinking("long\nthinking\ncontent".into()));
+        assert!(section.collapsed);
+        assert_eq!(section.height(), 1);
+    }
+
+    #[test]
+    fn text_interleaved_with_thinking_creates_separate_sections() {
+        let mut batch = make_batch();
+        batch.push_event(&TurnEvent::Text("First ".into()));
+        batch.push_event(&TurnEvent::Text("part.".into()));
+        batch.push_event(&TurnEvent::Thinking("hmm...".into()));
+        batch.push_event(&TurnEvent::Text("Second part.".into()));
+
+        assert_eq!(batch.sections.len(), 3);
+        assert!(matches!(&batch.sections[0].kind, SectionKind::Text(s) if s == "First part."));
+        assert!(matches!(&batch.sections[1].kind, SectionKind::Thinking(s) if s == "hmm..."));
+        assert!(matches!(&batch.sections[2].kind, SectionKind::Text(s) if s == "Second part."));
+    }
+}

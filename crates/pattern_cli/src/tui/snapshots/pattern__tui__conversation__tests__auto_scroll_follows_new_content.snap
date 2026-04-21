@@ -1,0 +1,11 @@
+---
+source: crates/pattern_cli/src/tui/conversation.rs
+assertion_line: 534
+expression: output
+---
+[you] Question 7
+Answer 7.
+[you] Question 8
+Answer 8.
+[you] Question 9
+Answer 9.

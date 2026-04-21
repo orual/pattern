@@ -1,0 +1,7 @@
+---
+source: crates/pattern_cli/src/tui/conversation.rs
+assertion_line: 451
+expression: output
+---
+[you] Hello agent
+The answer is 42.

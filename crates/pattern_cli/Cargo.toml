@@ -45,10 +45,12 @@ rustyline-async = "0.4"
 rpassword = "7.3"
 ratatui = "0.30.0"
 ratatui-textarea = "0.9.1"
-ratatui-widgets = { version = "0.3.0" }
+ratatui-widgets = { version = "0.3.0", features = ["unstable-rendered-line-info"] }
 ratatui-crossterm = { version = "0.1.0" }
 crossterm = { version = "0.29", features = ["event-stream"] }
 tui-markdown = { workspace = true }
+smol_str = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }

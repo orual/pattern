@@ -1,0 +1,7 @@
+---
+source: crates/pattern_cli/src/tui/conversation.rs
+assertion_line: 505
+expression: output
+---
+[you] Second question
+Second answer.

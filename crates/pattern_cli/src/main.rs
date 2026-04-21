@@ -5,6 +5,7 @@
 //! run as one-shot operations and exit.
 
 mod commands;
+mod tui;
 
 use std::io;
 use std::path::PathBuf;

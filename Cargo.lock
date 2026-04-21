@@ -6097,6 +6097,8 @@ dependencies = [
  "ratatui-widgets",
  "rpassword",
  "rustyline-async",
+ "serde_json",
+ "smol_str",
  "tempfile",
  "tokio",
  "tracing",
