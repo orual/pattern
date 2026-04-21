@@ -7,7 +7,6 @@
 mod commands;
 mod tui;
 
-use std::io;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -168,7 +167,7 @@ async fn main() -> MietteResult<()> {
         }
         None => {
             // Default: enter TUI mode.
-            run_tui()?;
+            run_tui().await?;
         }
     }
 
@@ -248,56 +247,37 @@ fn resolve_path(path: Option<PathBuf>) -> MietteResult<PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
-// TUI mode (ratatui textarea demo)
+// TUI mode
 // ---------------------------------------------------------------------------
 
-fn run_tui() -> MietteResult<()> {
-    use ratatui::crossterm::event::{DisableMouseCapture, EnableMouseCapture};
-    use ratatui::crossterm::terminal::{
-        EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+/// Enter the interactive TUI.
+///
+/// Tries to connect to a running daemon and subscribe to the default agent's
+/// output. If the daemon is not running, starts in offline mode (no events).
+async fn run_tui() -> MietteResult<()> {
+    use pattern_server::client::DaemonClient;
+
+    // Try to connect to the daemon. Failing is normal (offline mode).
+    let event_rx = match DaemonClient::connect().await {
+        Ok(client) => match client.subscribe_output("default".into()).await {
+            Ok(rx) => Some(rx),
+            Err(_) => None,
+        },
+        Err(_) => None,
     };
-    use ratatui::prelude::*;
-    use ratatui::{Terminal, crossterm};
-    use ratatui_textarea::{Input, Key, TextArea};
-    use ratatui_widgets::block::Block;
-    use ratatui_widgets::borders::Borders;
 
-    let stdout = io::stdout();
-    let mut stdout = stdout.lock();
+    // Set up a panic hook that restores the terminal before printing the
+    // panic message. Without this, panics leave the terminal in raw mode.
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        ratatui::restore();
+        original_hook(panic_info);
+    }));
 
-    enable_raw_mode().into_diagnostic()?;
-    crossterm::execute!(stdout, EnterAlternateScreen, EnableMouseCapture).into_diagnostic()?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut term = Terminal::new(backend).into_diagnostic()?;
+    let mut terminal = ratatui::init();
+    let mut app = tui::app::App::new();
+    let result = app.run(&mut terminal, event_rx).await;
+    ratatui::restore();
 
-    let mut textarea = TextArea::default();
-    textarea.set_block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title("Pattern TUI (press Esc to exit)"),
-    );
-
-    loop {
-        term.draw(|f| {
-            f.render_widget(&textarea, f.area());
-        })
-        .into_diagnostic()?;
-        match crossterm::event::read().into_diagnostic()?.into() {
-            Input { key: Key::Esc, .. } => break,
-            input => {
-                textarea.input(input);
-            }
-        }
-    }
-
-    disable_raw_mode().into_diagnostic()?;
-    crossterm::execute!(
-        term.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )
-    .into_diagnostic()?;
-    term.show_cursor().into_diagnostic()?;
-
-    Ok(())
+    result
 }
