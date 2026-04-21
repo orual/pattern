@@ -76,8 +76,12 @@ pub struct App {
 }
 
 impl App {
-    /// Create a new application.
-    pub fn new() -> Self {
+    /// Create a new application with the given default agent_id.
+    ///
+    /// The `agent_id` is the resolved persona identifier (e.g.
+    /// `"pattern-default"`), used for routing messages and displayed in
+    /// the status bar.
+    pub fn new(agent_id: SmolStr) -> Self {
         Self {
             conversation: ConversationState {
                 batches: Vec::new(),
@@ -91,7 +95,7 @@ impl App {
             should_quit: false,
             focus: Focus::Input,
             client: None,
-            current_agent: SmolStr::new_static("default"),
+            current_agent: agent_id,
             connected: false,
             last_viewport_height: 24,
         }
@@ -611,14 +615,14 @@ mod tests {
 
     #[test]
     fn app_renders_empty_state() {
-        let mut app = App::new();
+        let mut app = App::new(SmolStr::new_static("pattern-default"));
         let output = render_app(&mut app, 60, 12);
         insta::assert_snapshot!(output);
     }
 
     #[test]
     fn app_renders_with_one_batch() {
-        let mut app = App::new();
+        let mut app = App::new(SmolStr::new_static("pattern-default"));
 
         // Add a batch with a user message and text response.
         let mut batch = RenderBatch::new("batch-1".into(), Some("Hello agent".into()));
@@ -632,7 +636,7 @@ mod tests {
 
     #[test]
     fn clear_command_empties_conversation() {
-        let mut app = App::new();
+        let mut app = App::new(SmolStr::new_static("pattern-default"));
 
         // Add some batches.
         app.conversation
@@ -649,7 +653,7 @@ mod tests {
 
     #[test]
     fn quit_command_sets_should_quit() {
-        let mut app = App::new();
+        let mut app = App::new(SmolStr::new_static("pattern-default"));
         assert!(!app.should_quit);
 
         app.dispatch_command("quit", &[]);
@@ -658,7 +662,7 @@ mod tests {
 
     #[test]
     fn unknown_command_shows_error() {
-        let mut app = App::new();
+        let mut app = App::new(SmolStr::new_static("pattern-default"));
         assert!(app.conversation.batches.is_empty());
 
         app.dispatch_command("nonexistent", &[]);
@@ -680,7 +684,7 @@ mod tests {
 
     #[test]
     fn submit_creates_batch_with_user_message() {
-        let mut app = App::new();
+        let mut app = App::new(SmolStr::new_static("pattern-default"));
         assert!(app.conversation.batches.is_empty());
 
         // Simulate submitting text.
@@ -698,8 +702,8 @@ mod tests {
 
     #[test]
     fn front_command_updates_current_agent() {
-        let mut app = App::new();
-        assert_eq!(app.current_agent.as_str(), "default");
+        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        assert_eq!(app.current_agent.as_str(), "pattern-default");
 
         app.dispatch_command("front", &["@supervisor".into()]);
         assert_eq!(app.current_agent.as_str(), "supervisor");
@@ -710,7 +714,7 @@ mod tests {
 
     #[test]
     fn slash_command_from_input_dispatches() {
-        let mut app = App::new();
+        let mut app = App::new(SmolStr::new_static("pattern-default"));
         assert!(!app.should_quit);
 
         // Simulate receiving a SlashCommand action from the input handler.

@@ -114,15 +114,22 @@ async fn cmd_start(
                 )
             })?;
 
-        // Load persona.
-        let persona_path = persona_path
-            .ok_or_else(|| miette::miette!("--persona is required when not in echo mode"))?;
-        let persona = pattern_runtime::persona_loader::load_persona(&persona_path)?;
-        info!(
-            persona = %persona.name,
-            agent_id = %persona.agent_id,
-            "loaded persona"
-        );
+        // Load persona if explicitly provided (optimization hint — the daemon
+        // discovers personas lazily at session-open time regardless).
+        if let Some(ref persona_path) = persona_path {
+            match pattern_runtime::persona_loader::load_persona(persona_path) {
+                Ok(persona) => {
+                    info!(
+                        persona = %persona.name,
+                        agent_id = %persona.agent_id,
+                        "persona hint loaded (will be discovered lazily at session open)"
+                    );
+                }
+                Err(e) => {
+                    info!("--persona hint failed to load (non-fatal, will discover lazily): {e}");
+                }
+            }
+        }
 
         // Mount memory store.
         info!(path = %project_path.display(), "attaching to mount");
@@ -158,7 +165,6 @@ async fn cmd_start(
             memory_store: mounted.cache.clone(),
             provider,
             db: mounted.db.clone(),
-            persona,
             mount_path: Some(mounted.mount_path.clone()),
         };
 

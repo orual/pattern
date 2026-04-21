@@ -431,6 +431,11 @@ impl TidepoolSession {
         &self.session_id
     }
 
+    /// Agent id this session runs as (delegated from [`SessionContext`]).
+    pub fn agent_id(&self) -> &str {
+        self.ctx.agent_id()
+    }
+
     /// Accessor for the checkpoint log — exposed so tests can assert on
     /// recorded events.
     pub fn checkpoint_log(&self) -> Arc<std::sync::Mutex<CheckpointLog>> {

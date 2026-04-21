@@ -48,6 +48,10 @@ use crate::protocol::*;
 /// Configuration for real session mode. When provided to
 /// [`DaemonServer::spawn_with_config`], the server opens
 /// [`TidepoolSession`]s instead of echoing messages.
+///
+/// The daemon is persona-agnostic at startup. Personas are resolved lazily
+/// when a session is first opened for a given `agent_id`, using
+/// [`pattern_memory::persona::discover_personas`].
 pub struct SessionConfig {
     /// SDK location for the Haskell eval worker.
     pub sdk: SdkLocation,
@@ -57,9 +61,9 @@ pub struct SessionConfig {
     pub provider: Arc<dyn ProviderClient>,
     /// Constellation database handle (memory.db + messages.db).
     pub db: Arc<pattern_db::ConstellationDb>,
-    /// Default persona for new sessions. Loaded from a persona KDL file.
-    pub persona: PersonaSnapshot,
-    /// Optional mount path for scope wiring and lib/ include-path extension.
+    /// Mount path for scope wiring, lib/ include-path extension, and persona
+    /// discovery. The daemon discovers personas from global `~/.pattern/`
+    /// and from the project mount's `personas/` directory.
     pub mount_path: Option<PathBuf>,
 }
 
@@ -204,9 +208,10 @@ impl DaemonServer {
         }
     }
 
-    /// Get or open a session for the given agent. In real mode, opens a
-    /// [`TidepoolSession`] via `open_with_agent_loop` on first use and
-    /// caches it. The session is opened with a [`MultiplexSink`] whose
+    /// Get or open a session for the given agent. In real mode, resolves
+    /// the persona lazily via [`pattern_memory::persona::discover_personas`],
+    /// opens a [`TidepoolSession`] via `open_with_agent_loop` on first use,
+    /// and caches it. The session is opened with a [`MultiplexSink`] whose
     /// inner sink is swapped per-batch before each step.
     async fn get_or_open_session(
         &mut self,
@@ -221,11 +226,15 @@ impl DaemonServer {
             .as_ref()
             .ok_or_else(|| "session config not available (echo mode?)".to_string())?;
 
+        // Resolve the persona lazily: discover available personas from global
+        // (~/.pattern/) and project mount scopes, then load the requested one.
+        let persona = self.resolve_persona(agent_id)?;
+
         let mux_sink = Arc::new(MultiplexSink::new());
         let sink_dyn: Arc<dyn TurnSink> = mux_sink.clone();
 
         let session = TidepoolSession::open_with_agent_loop(
-            config.persona.clone(),
+            persona,
             &config.sdk,
             config.memory_store.clone(),
             config.provider.clone(),
@@ -242,6 +251,42 @@ impl DaemonServer {
             .insert(agent_id.clone(), (session.clone(), mux_sink.clone()));
         info!(agent_id = %agent_id, "opened new session");
         Ok((session, mux_sink))
+    }
+
+    /// Resolve a persona by agent_id using `discover_personas`.
+    ///
+    /// Looks up the normalized agent_id (stripped of `@` prefix) in the
+    /// discovery map built from global `~/.pattern/personas/` and the
+    /// project mount's `personas/` directory.
+    fn resolve_persona(&self, agent_id: &AgentId) -> Result<PersonaSnapshot, String> {
+        use pattern_memory::PatternPaths;
+        use pattern_memory::persona::discover_personas;
+
+        let config = self
+            .session_config
+            .as_ref()
+            .ok_or_else(|| "session config not available (echo mode?)".to_string())?;
+
+        let paths = PatternPaths::default_paths()
+            .map_err(|e| format!("failed to resolve pattern home: {e}"))?;
+
+        let personas = discover_personas(&paths, config.mount_path.as_deref())
+            .map_err(|e| format!("persona discovery failed: {e}"))?;
+
+        // Normalize: strip leading '@' from the requested agent_id.
+        let normalized = agent_id.trim_start_matches('@');
+
+        let persona_path = personas.get(normalized).ok_or_else(|| {
+            let available: Vec<_> = personas.keys().collect();
+            format!("persona not found for agent_id '{normalized}'; available: {available:?}")
+        })?;
+
+        pattern_runtime::persona_loader::load_persona(persona_path).map_err(|e| {
+            format!(
+                "failed to load persona from {}: {e}",
+                persona_path.display()
+            )
+        })
     }
 
     /// Dispatch a single incoming message.
@@ -286,14 +331,13 @@ impl DaemonServer {
                                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                                 .clone();
 
-                            // Build TurnInput using the persona's agent_id for
+                            // Build TurnInput using the session's persona agent_id for
                             // correct memory block ownership — not the client's
-                            // routing key (which may be "default").
-                            let persona_agent_id = self.session_config
-                                .as_ref()
-                                .map(|c| c.persona.agent_id.to_string())
-                                .unwrap_or_else(|| agent_id.to_string());
-                            let turn_input = build_turn_input(&inner, &partner_id, &persona_agent_id);
+                            // routing key (which may differ, e.g. "default" vs
+                            // "pattern-default").
+                            let session_agent_id = session.agent_id().to_string();
+                            let turn_input =
+                                build_turn_input(&inner, &partner_id, &session_agent_id);
 
                             // Drive step in a background task so the actor
                             // remains responsive to other messages.

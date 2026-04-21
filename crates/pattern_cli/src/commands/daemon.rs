@@ -317,7 +317,8 @@ fn resolve_default_persona(project_path: &Path) -> MietteResult<(PathBuf, String
 /// Ensure the daemon is running and return its listen address.
 ///
 /// Resolves the project path (cwd) and default persona, then spawns the daemon
-/// with `--persona` and `--path` flags. Used by TUI startup for auto-start.
+/// with `--path`. The daemon discovers personas lazily. Used by TUI startup
+/// for auto-start.
 ///
 /// # Errors
 ///
@@ -325,9 +326,12 @@ fn resolve_default_persona(project_path: &Path) -> MietteResult<(PathBuf, String
 /// - The server binary cannot be found.
 /// - The persona cannot be resolved.
 /// - The daemon fails to start within the timeout.
-/// Returns (listen address, persona agent_id).
+///
+/// Returns `(listen_address, persona_agent_id)`.
 pub fn ensure_daemon_running() -> MietteResult<(SocketAddr, String)> {
-    // Resolve persona first — we need the agent_id even on the fast path.
+    // Resolve persona to discover the agent_id, even on the fast path
+    // (daemon already running). The daemon itself discovers personas
+    // lazily — we don't pass --persona.
     let project_path = std::env::current_dir().into_diagnostic()?;
     let (_persona_path, agent_id) = resolve_default_persona(&project_path)?;
 
@@ -343,7 +347,7 @@ pub fn ensure_daemon_running() -> MietteResult<(SocketAddr, String)> {
     let server_bin = locate_server_binary()?;
     let mut cmd = std::process::Command::new(&server_bin);
     cmd.arg("start");
-    cmd.arg("--persona").arg(&_persona_path);
+    // The daemon discovers personas lazily — just pass the project path.
     cmd.arg("--path").arg(&project_path);
 
     // Redirect all IO to log file — daemon must not write to the TUI terminal.
@@ -539,13 +543,14 @@ mod tests {
 
         // Use a random temp dir with no mount as the project path.
         let project = tempfile::tempdir().unwrap();
-        let result = resolve_default_persona(project.path()).unwrap();
+        let (persona_path, agent_id) = resolve_default_persona(project.path()).unwrap();
 
         let expected = home.path().join("personas/@pattern-default/persona.kdl");
-        assert_eq!(result, expected);
-        assert!(result.is_file(), "persona.kdl should exist on disk");
+        assert_eq!(persona_path, expected);
+        assert_eq!(agent_id, "pattern-default");
+        assert!(persona_path.is_file(), "persona.kdl should exist on disk");
 
-        let content = std::fs::read_to_string(&result).unwrap();
+        let content = std::fs::read_to_string(&persona_path).unwrap();
         assert!(
             content.contains("pattern-default"),
             "written content should contain persona name"
@@ -572,15 +577,16 @@ mod tests {
         // Pre-create a persona with custom content.
         let persona_dir = home.path().join("personas/@pattern-default");
         std::fs::create_dir_all(&persona_dir).unwrap();
-        let persona_path = persona_dir.join("persona.kdl");
-        std::fs::write(&persona_path, "name \"pattern-default\"\n").unwrap();
+        let persona_file = persona_dir.join("persona.kdl");
+        std::fs::write(&persona_file, "name \"pattern-default\"\n").unwrap();
 
         let project = tempfile::tempdir().unwrap();
-        let result = resolve_default_persona(project.path()).unwrap();
-        assert_eq!(result, persona_path);
+        let (result_path, agent_id) = resolve_default_persona(project.path()).unwrap();
+        assert_eq!(result_path, persona_file);
+        assert_eq!(agent_id, "pattern-default");
 
         // Verify it was NOT overwritten.
-        let content = std::fs::read_to_string(&result).unwrap();
+        let content = std::fs::read_to_string(&result_path).unwrap();
         assert_eq!(content, "name \"pattern-default\"\n");
 
         unsafe {
@@ -609,8 +615,9 @@ mod tests {
         let persona_path = persona_dir.join("persona.kdl");
         std::fs::write(&persona_path, "name \"pattern-default\"\n").unwrap();
 
-        let result = resolve_default_persona(project.path()).unwrap();
-        assert_eq!(result, persona_path);
+        let (result_path, agent_id) = resolve_default_persona(project.path()).unwrap();
+        assert_eq!(result_path, persona_path);
+        assert_eq!(agent_id, "pattern-default");
 
         unsafe {
             std::env::remove_var("PATTERN_HOME");

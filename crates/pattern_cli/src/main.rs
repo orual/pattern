@@ -256,10 +256,34 @@ fn resolve_path(path: Option<PathBuf>) -> MietteResult<PathBuf> {
 /// output. If the daemon is not running, starts in offline mode (no events).
 async fn run_tui() -> MietteResult<()> {
     use pattern_server::client::DaemonClient;
+    use std::time::Duration;
 
-    // Connect to daemon (auto-starting if needed), discover the active
-    // persona agent_id, and subscribe to its event stream.
-    let (client, event_rx, agent_id) = connect_to_daemon().await;
+    // Resolve the default persona agent_id from project config.
+    let agent_id = resolve_default_agent_id();
+
+    // Connect to daemon, auto-starting if needed.
+    let (client, event_rx) = match DaemonClient::connect().await {
+        Ok(client) => {
+            let rx = client.subscribe_output(agent_id.clone().into()).await.ok();
+            (Some(client), rx)
+        }
+        Err(_) => {
+            // Daemon not running — try auto-starting it.
+            match commands::daemon::ensure_daemon_running() {
+                Ok((_addr, _resolved_id)) => {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    match DaemonClient::connect().await {
+                        Ok(client) => {
+                            let rx = client.subscribe_output(agent_id.clone().into()).await.ok();
+                            (Some(client), rx)
+                        }
+                        Err(_) => (None, None),
+                    }
+                }
+                Err(_) => (None, None),
+            }
+        }
+    };
 
     // Set up a panic hook that restores the terminal before printing the
     // panic message. Without this, panics leave the terminal in raw mode.
@@ -270,9 +294,45 @@ async fn run_tui() -> MietteResult<()> {
     }));
 
     let mut terminal = ratatui::init();
-    let mut app = tui::app::App::new();
+    let mut app = tui::app::App::new(smol_str::SmolStr::from(agent_id.as_str()));
     let result = app.run(&mut terminal, event_rx, client).await;
     ratatui::restore();
 
     result
+}
+
+/// Resolve the default persona agent_id from project config.
+///
+/// Strategy:
+/// 1. Find the project mount via `find_mount(cwd)`.
+/// 2. Parse `.pattern.kdl` to get the `personas.default` handle.
+/// 3. Strip leading `@` to normalize.
+/// 4. Fall back to `"pattern-default"` if no config found.
+fn resolve_default_agent_id() -> String {
+    use pattern_memory::config::load_mount_config;
+    use pattern_memory::mount::find_mount;
+
+    let cwd = match std::env::current_dir() {
+        Ok(p) => p,
+        Err(_) => return "pattern-default".to_string(),
+    };
+
+    let mount = match find_mount(&cwd) {
+        Ok(m) => m,
+        Err(_) => return "pattern-default".to_string(),
+    };
+
+    let config_path = mount.join(".pattern.kdl");
+    let config = match load_mount_config(&config_path) {
+        Ok(c) => c,
+        Err(_) => return "pattern-default".to_string(),
+    };
+
+    config
+        .personas
+        .entries
+        .iter()
+        .find(|b| b.slot == "default")
+        .map(|b| b.persona.trim_start_matches('@').to_string())
+        .unwrap_or_else(|| "pattern-default".to_string())
 }
