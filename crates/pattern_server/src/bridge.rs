@@ -24,6 +24,8 @@
 //! short-lived and the actor processes events as fast as the runtime produces
 //! them.
 
+use std::sync::Arc;
+
 use pattern_core::traits::turn_sink::{TurnEvent, TurnSink};
 use smol_str::SmolStr;
 
@@ -83,6 +85,43 @@ impl TurnSink for TurnSinkBridge {
         // Lock-free, unbounded, never blocks.
         // Failure means the daemon actor has been dropped — discard silently.
         let _ = self.tx.send(tagged);
+    }
+}
+
+/// Atomically-swappable [`TurnSink`] that delegates to an inner sink.
+///
+/// Used by the daemon to share a single sink reference with a
+/// [`TidepoolSession`] at open time, then swap the inner bridge
+/// before each `step_with_agent_loop` call so events are tagged with
+/// the correct per-batch `batch_id` and `agent_id`.
+///
+/// The inner sink defaults to [`pattern_core::traits::NoOpSink`] and
+/// is swapped via [`MultiplexSink::set_inner`] before each step.
+#[derive(Debug)]
+pub struct MultiplexSink {
+    inner: std::sync::RwLock<Arc<dyn TurnSink>>,
+}
+
+impl MultiplexSink {
+    /// Create a new multiplex sink with a [`NoOpSink`] as the initial delegate.
+    pub fn new() -> Self {
+        Self {
+            inner: std::sync::RwLock::new(Arc::new(pattern_core::traits::NoOpSink)),
+        }
+    }
+
+    /// Swap the inner sink. Subsequent `emit()` calls will be
+    /// forwarded to the new sink. The previous sink is dropped.
+    pub fn set_inner(&self, sink: Arc<dyn TurnSink>) {
+        let mut guard = self.inner.write().expect("multiplex sink lock poisoned");
+        *guard = sink;
+    }
+}
+
+impl TurnSink for MultiplexSink {
+    fn emit(&self, event: TurnEvent) {
+        let guard = self.inner.read().expect("multiplex sink lock poisoned");
+        guard.emit(event);
     }
 }
 
