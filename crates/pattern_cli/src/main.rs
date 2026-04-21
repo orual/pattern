@@ -30,6 +30,8 @@ enum Commands {
     Mount(MountCmd),
     /// Manage messages.db backups (create, list, restore, info).
     Backup(BackupCmd),
+    /// Manage the Pattern daemon (start, stop, status).
+    Daemon(commands::daemon::DaemonCmd),
 }
 
 // ---------------------------------------------------------------------------
@@ -160,6 +162,9 @@ async fn main() -> MietteResult<()> {
                 commands::backup::cmd_backup_info(spec, path)?;
             }
         },
+        Some(Commands::Daemon(daemon)) => {
+            commands::daemon::cmd_daemon(daemon)?;
+        }
         None => {
             // Default: enter TUI mode.
             run_tui()?;

@@ -20,6 +20,9 @@ oauth = ["pattern-core/oauth"]
 pattern-core = { path = "../pattern_core", features = ["export"] }
 pattern-db = { path = "../pattern_db"}
 pattern-memory = { path = "../pattern_memory" }
+pattern-server = { path = "../pattern_server" }
+nix = { version = "0.29", features = ["signal", "process"] }
+which = { workspace = true }
 tokio = { workspace = true }
 miette = { workspace = true, features = ["fancy", "syntect-highlighter"] }
 tracing = { workspace = true }

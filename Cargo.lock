@@ -6143,10 +6143,12 @@ dependencies = [
  "indicatif",
  "jiff",
  "miette",
+ "nix",
  "owo-colors",
  "pattern-core",
  "pattern-db",
  "pattern-memory",
+ "pattern-server",
  "pretty_assertions",
  "ratatui",
  "ratatui-crossterm",
@@ -6160,6 +6162,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "which 8.0.2",
 ]
 
 [[package]]
