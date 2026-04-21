@@ -43,6 +43,9 @@ outputs the full self object as NDJSON. Serde deserialization is forgiving
 - Minimal template fields per call (reduces breakage on jj upgrades).
 - Forgiving serde parse (unknown fields tolerated; missing fields flagged).
 - `--color=never` universally applied via `JjAdapter::cmd()`.
+- `init_repo()` uses `--no-colocate` so the backing git repo stays inside
+  `.jj/repo/` (no top-level `.git/` created). Required for Mode C to avoid
+  host git treating the mount as a nested repository.
 
 **`JjAdapter::detect()` return values:**
 
@@ -88,19 +91,49 @@ workers genuinely need to be killed.
 - Mode A: caller invokes `quiesce` before the host VCS commit.
 - Modes B/C: `JjAdapter::commit` invokes `quiesce` as its first step.
 
-## storage modes (`src/modes.rs`)
+## storage modes (`src/modes.rs`, `src/modes/`)
 
 `StorageMode` enum describing how Pattern manages VCS history for a mount.
-Phase 5 introduces the skeleton; Phase 6 adds per-mode path resolution,
-`.pattern.kdl` config parsing, and attach/detach logic.
 
-- `StorageMode::A { mount_path }` — in-repo; host VCS owns history. No jj.
+- `StorageMode::A { mount_path, project_root }` — in-repo; host VCS owns history. No jj.
 - `StorageMode::B { mount_path, project_id }` — separate Pattern-owned jj repo.
-- `StorageMode::C { mount_path }` — sidecar jj alongside host git. Phase 6 spike.
+- `StorageMode::C { mount_path }` — sidecar jj alongside host git. Validated by Phase 6 spike (2026-04-20, 38 ops, PASS).
 
 Key method: `requires_jj()` — returns `true` for B and C; `false` for A.
 
+Submodules:
+
+- `modes::mode_a` — Mode A init (`init(project_root)` creates `.pattern/shared/` layout + `.pattern.kdl` + `.gitignore` entry).
+- `modes::mode_b` — Mode B init (`init(project_id, &jj_adapter)` creates `~/.pattern/projects/<id>/shared/` + jj repo).
+- `modes::mode_c` — Mode C init (`init(project_root, &jj_adapter)` creates `.pattern/shared/` layout + jj repo + `.gitignore` entries). Sidecar jj inside host git project; validated by Phase 6 spike.
+- `modes::gitignore` — idempotent `.gitignore` append helper.
+- `modes::error` — `ModeError` type.
+
 **Entry point:** `pattern_memory::modes::StorageMode`
+
+## mount (`src/mount.rs`, `src/mount/`)
+
+`MountedStore` is the runtime handle returned from `attach(start_path)`.
+Owns `MemoryCache`, `ConstellationDb`, subscriber supervisor, `MountWatcher`,
+and optional `ReembedQueue` for the mount's lifetime. `detach()` drains
+subscribers, stops the watcher, drops the reembed queue, and releases DB
+references.
+
+**ReembedQueue wiring:** `attach()` calls `ReembedQueue::spawn(None, db)` when
+a tokio runtime is available (provider=None means silent drain until Phase 8
+wires the embedding pipeline). When no runtime is available (sync-only test
+contexts), the receiver is dropped and workers handle SendError gracefully.
+
+- `find_mount(start)` — walk upward for `.pattern/shared/.pattern.kdl`.
+- `attach(start)` — find mount, parse config, resolve DB paths, open DBs, build cache with subscribers, start watcher, spawn reembed queue. Returns `MountedStore`.
+- `MountedStore::detach(self)` — sync teardown: stop watcher, drain subscribers, drop reembed queue, drop resources.
+
+Submodules:
+
+- `mount::attach` — the `attach()` function.
+- `mount::error` — `MountError` type (with `NotFound` diagnostic hinting `pattern mount init`).
+
+**Entry point:** `pattern_memory::mount::attach`
 
 ## Status
 
@@ -112,3 +145,20 @@ completed 2026-04-20.
 
 Phase 5 subcomponent B (`StorageMode` enum, `quiesce()`, CI canary):
 completed 2026-04-20.
+
+Phase 6 subcomponent B (Mode A+B init, MountedStore attach/detach, CLI
+subcommands): completed 2026-04-20.
+
+Phase 6 task 7 (Mode C init, attach, CLI `--mode c`, validation spike):
+completed 2026-04-20. See `docs/notes/2026-04-20-mode-c-spike.md` for
+spike results. Spike expanded 2026-04-20 to 38 ops including attach/detach
+cycles, MemoryStore writes, and external .md edits.
+
+Phase 6 code review fixes (2026-04-20):
+- `attach()` now spawns `ReembedQueue` when tokio runtime is available.
+- `MountedStore.reembed_queue` field stores the queue handle.
+- Mode B tests use `PATTERN_HOME` env var override (no real `~/.pattern/` writes).
+- `paths::pattern_home()` checks `$PATTERN_HOME` before `dirs::home_dir()`.
+- `ModeKind` parse error falls back to Mode B (safer than A — stays in ~/.pattern/).
+- `IsolateSection.policy` validated as one of "none"/"core-only"/"full".
+- CLI integration tests in `crates/pattern_cli/tests/cli_mount.rs`.

@@ -1,8 +1,23 @@
 //! Storage mode for a Pattern mount.
 //!
 //! The `StorageMode` enum describes *how* Pattern manages VCS history for
-//! a given mount. Phase 5 introduces the skeleton; Phase 6 adds per-mode
-//! path resolution, `.pattern.kdl` config parsing, and attach/detach logic.
+//! a given mount. Phase 5 introduced the skeleton; Phase 6 adds per-mode
+//! init logic, `.pattern.kdl` config generation, attach/detach, and the
+//! gitignore helper.
+//!
+//! # Submodules
+//!
+//! - [`error`] — [`ModeError`](error::ModeError) type.
+//! - [`mode_a`] — Mode A initialization (in-repo, host VCS owns history).
+//! - [`mode_b`] — Mode B initialization (separate Pattern-owned jj repo).
+//! - [`mode_c`] — Mode C initialization (sidecar jj inside host git project).
+//! - [`gitignore`] — Idempotent `.gitignore` append helper.
+
+pub mod error;
+pub mod gitignore;
+pub mod mode_a;
+pub mod mode_b;
+pub mod mode_c;
 
 use std::path::{Path, PathBuf};
 
@@ -36,8 +51,12 @@ use std::path::{Path, PathBuf};
 pub enum StorageMode {
     /// In-repo storage; host VCS owns history. Pattern does not run `jj`.
     A {
-        /// Root of the mount — where Pattern writes canonical memory files.
+        /// Root of the mount — where Pattern writes canonical memory files
+        /// (`<project>/.pattern/shared/`).
         mount_path: PathBuf,
+        /// The project repository root containing `.pattern/`. Used to derive
+        /// the project hash for `messages.db` placement.
+        project_root: PathBuf,
     },
     /// Separate Pattern-owned jj repository. Pattern runs `jj commit`.
     B {
@@ -57,7 +76,7 @@ impl StorageMode {
     /// The root directory where Pattern writes canonical memory files.
     pub fn mount_path(&self) -> &Path {
         match self {
-            StorageMode::A { mount_path } => mount_path,
+            StorageMode::A { mount_path, .. } => mount_path,
             StorageMode::B { mount_path, .. } => mount_path,
             StorageMode::C { mount_path } => mount_path,
         }
@@ -83,6 +102,7 @@ mod tests {
     fn mode_a_does_not_require_jj() {
         let mode = StorageMode::A {
             mount_path: PathBuf::from("/tmp/test"),
+            project_root: PathBuf::from("/tmp"),
         };
         assert!(!mode.requires_jj());
     }
@@ -109,6 +129,7 @@ mod tests {
         let path = PathBuf::from("/some/mount");
         let mode_a = StorageMode::A {
             mount_path: path.clone(),
+            project_root: PathBuf::from("/some"),
         };
         assert_eq!(mode_a.mount_path(), path.as_path());
 

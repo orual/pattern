@@ -344,9 +344,7 @@ fn snapshot_log_output_shape() {
 
     // Fetch exactly the parent of the working copy (@-) so we get our known
     // commit rather than the empty working copy.
-    let entries = adapter
-        .log(repo.path(), "@-")
-        .expect("log failed");
+    let entries = adapter.log(repo.path(), "@-").expect("log failed");
 
     // Normalize dynamic IDs to static placeholders.
     let normalized: Vec<NormalizedLogEntry> = entries
@@ -394,7 +392,11 @@ fn snapshot_workspace_list_output_shape() {
 fn snapshot_bookmark_list_output_shape() {
     let adapter = skip_if_no_jj!();
     let repo = init_repo();
-    make_commit(repo.path(), "bm_snapshot_test.txt", "snapshot bookmark test");
+    make_commit(
+        repo.path(),
+        "bm_snapshot_test.txt",
+        "snapshot bookmark test",
+    );
 
     let status = Command::new("jj")
         .args(["bookmark", "set", "snapshot-bookmark", "-r", "@-"])

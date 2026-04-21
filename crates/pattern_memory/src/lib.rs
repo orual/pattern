@@ -15,16 +15,22 @@
 //! Nothing in `pattern_core` depends on this crate.
 
 pub mod cache;
+pub mod config;
 pub mod fs;
 pub mod jj;
 pub mod modes;
+pub mod mount;
+pub mod paths;
 pub mod quiesce;
 pub mod reembed;
 pub mod schema_templates;
 pub mod sharing;
 pub mod subscriber;
 mod types_internal;
+/// Host VCS detection (git, jj).
+pub mod vcs;
 
 pub use cache::{MemoryCache, PauseOutcome};
+pub use paths::PatternPaths;
 pub use schema_templates::templates;
 pub use sharing::{CONSTELLATION_OWNER, SharedBlockManager};

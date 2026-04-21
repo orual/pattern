@@ -411,16 +411,27 @@ impl MemoryCache {
                 label: label.to_string(),
             })?;
 
-        if !entry.dirty {
-            return Ok(());
-        }
-
         // Extract data we need before releasing the entry lock.
         let doc = entry.doc.clone();
         let last_frontier = entry.last_persisted_frontier.clone();
 
         // Release the entry lock before doing work.
         drop(entry);
+
+        // Skip persist only when the doc's version vector equals the last
+        // persisted frontier — meaning no operations have been applied since
+        // the last persist. This is always correct: we do not rely on the
+        // `dirty` flag, which callers may have forgotten to set.
+        //
+        // Even when skipping the write, still attempt to spawn a subscriber so
+        // that "warm-up" persist calls (e.g. after `create_block`) register the
+        // subscriber before content arrives. The spawn is idempotent.
+        if let Some(ref frontier) = last_frontier
+            && doc.current_version() == *frontier
+        {
+            self.maybe_spawn_subscriber_for_block(&block_id);
+            return Ok(());
+        }
 
         // Now work with the doc (LoroDoc is already thread-safe).
         let update_blob = match &last_frontier {
@@ -2011,6 +2022,109 @@ mod tests {
             pattern_db::queries::get_checkpoint_and_updates(&dbs.get().unwrap(), "mem_2").unwrap();
 
         assert!(!updates.is_empty());
+    }
+
+    /// Regression test: `persist` must write data even when `mark_dirty` was
+    /// never called. Previously the dirty-flag check would silently skip the
+    /// write, causing data loss.
+    #[test]
+    fn test_persist_without_mark_dirty_still_writes() {
+        let (_dir, dbs) = test_dbs_with_agent();
+
+        let block = MemoryBlock {
+            id: "mem_nodirty".to_string(),
+            agent_id: "agent_1".to_string(),
+            label: "nodirty".to_string(),
+            description: "Block for no-dirty persist test".to_string(),
+            block_type: MemoryBlockType::Working,
+            char_limit: 5000,
+            permission: MemoryPermission::ReadWrite,
+            pinned: false,
+            loro_snapshot: vec![],
+            content_preview: None,
+            metadata: None,
+            embedding_model: None,
+            is_active: true,
+            frontier: None,
+            last_seq: 0,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        pattern_db::queries::create_block(&dbs.get().unwrap(), &block).unwrap();
+
+        let cache = MemoryCache::new(dbs.clone());
+
+        // Mutate via set_text — intentionally do NOT call mark_dirty.
+        let doc = cache.get("agent_1", "nodirty").unwrap().unwrap();
+        doc.set_text("persisted without mark_dirty", true).unwrap();
+
+        // Persist must detect the version-vector change and write the update.
+        cache.persist("agent_1", "nodirty").unwrap();
+
+        let (_, updates) =
+            pattern_db::queries::get_checkpoint_and_updates(&dbs.get().unwrap(), "mem_nodirty")
+                .unwrap();
+
+        assert!(
+            !updates.is_empty(),
+            "persist should write an update even when mark_dirty was never called"
+        );
+    }
+
+    /// Verify that `persist` is a no-op when the doc has not been mutated
+    /// since the last persist (version vector unchanged).
+    #[test]
+    fn test_persist_skips_when_unchanged() {
+        let (_dir, dbs) = test_dbs_with_agent();
+
+        let block = MemoryBlock {
+            id: "mem_noop".to_string(),
+            agent_id: "agent_1".to_string(),
+            label: "noop".to_string(),
+            description: "Block for no-op persist test".to_string(),
+            block_type: MemoryBlockType::Working,
+            char_limit: 5000,
+            permission: MemoryPermission::ReadWrite,
+            pinned: false,
+            loro_snapshot: vec![],
+            content_preview: None,
+            metadata: None,
+            embedding_model: None,
+            is_active: true,
+            frontier: None,
+            last_seq: 0,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        pattern_db::queries::create_block(&dbs.get().unwrap(), &block).unwrap();
+
+        let cache = MemoryCache::new(dbs.clone());
+
+        // Write content and persist once.
+        let doc = cache.get("agent_1", "noop").unwrap().unwrap();
+        doc.set_text("initial content", true).unwrap();
+        cache.mark_dirty("agent_1", "noop");
+        cache.persist("agent_1", "noop").unwrap();
+
+        let (_, updates_after_first) =
+            pattern_db::queries::get_checkpoint_and_updates(&dbs.get().unwrap(), "mem_noop")
+                .unwrap();
+        let count_first = updates_after_first.len();
+        assert!(count_first > 0, "first persist must store an update");
+
+        // Persist again without any mutations — must be a no-op.
+        cache.persist("agent_1", "noop").unwrap();
+
+        let (_, updates_after_second) =
+            pattern_db::queries::get_checkpoint_and_updates(&dbs.get().unwrap(), "mem_noop")
+                .unwrap();
+        assert_eq!(
+            updates_after_second.len(),
+            count_first,
+            "second persist with no mutations must not store additional updates"
+        );
     }
 
     // ========== MemoryStore trait tests ==========

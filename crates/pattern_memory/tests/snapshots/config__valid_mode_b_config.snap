@@ -1,0 +1,21 @@
+---
+source: crates/pattern_memory/tests/config.rs
+expression: config
+---
+mount:
+  mode: B
+  memory_db: memory.db
+personas:
+  entries:
+    - slot: default
+      persona: "@pattern-default"
+    - slot: focused
+      persona: "@pattern-focus"
+isolate_from_persona:
+  policy: core-only
+jj:
+  enabled: true
+  max_new_file_size: 50MiB
+project:
+  name: pattern-research
+  created_at: "2026-04-20T08:00:00Z"

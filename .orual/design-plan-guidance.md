@@ -116,6 +116,12 @@ During brainstorming, design writing, and execution, actively watch for and refu
 
 6. **Speculative abstraction.** Inventing traits, generics, or flexibility for hypothetical futures. Design for what the plan needs; let future plans add abstraction when their concrete requirements arrive.
 
+7. **"Pre-existing stub, not my problem" rationalisation.** When an implementor encounters a stub, a dropped channel receiver, an `unimplemented!()`, or any gap left by a prior phase — **documenting the gap is never a fix.** A comment saying "TODO: wire this later" or "consumer doesn't exist yet" is not acceptable when the plumbing was supposed to be connected. The fact that a previous implementor missed it (or a previous review didn't catch it) makes fixing it *more* urgent, not less: downstream phases and future code will silently assume the thing works. Concretely:
+   - If the consumer for a channel exists but isn't spawned — spawn it.
+   - If a feature was stubbed in Phase N and the current phase uses it — implement it now, don't propagate the stub.
+   - If wiring the real implementation is genuinely blocked (missing trait impl, external dependency not available yet) — surface the gap as a design question, don't silently paper over it with a comment.
+   - The test for whether you're rationalising: would the next person reading this code know something is broken? If not, you've hidden a bug behind a comment.
+
 ---
 
 ## Stakeholders and priorities

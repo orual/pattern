@@ -1,0 +1,172 @@
+//! Mode A storage initialization.
+//!
+//! Mode A puts block files inside the project repo at
+//! `<project>/.pattern/shared/` and delegates history to the host VCS (git
+//! or jj). `messages.db` lives outside the repo at
+//! `~/.pattern/transient/<project-hash>/`.
+//!
+//! The mount directory layout after init:
+//!
+//! ```text
+//! <project>/
+//! ├── .pattern/
+//! │   └── shared/
+//! │       ├── .pattern.kdl
+//! │       ├── memory.db          (created at attach time by ConstellationDb)
+//! │       ├── blocks/
+//! │       │   ├── core/
+//! │       │   └── working/
+//! │       ├── personas/
+//! │       └── lib/
+//! └── .gitignore                 (`.pattern/transient/` appended)
+//! ```
+
+use std::path::Path;
+
+use chrono::Utc;
+
+use super::StorageMode;
+use super::error::ModeError;
+use super::gitignore;
+
+/// Initialize a Mode A mount at the given project root.
+///
+/// Creates the `.pattern/shared/` directory tree, writes a `.pattern.kdl`
+/// config, and ensures `.pattern/transient/` is in the project's `.gitignore`.
+///
+/// Idempotent for directory creation (re-running on an already-initialized
+/// project only appends to `.gitignore` if the entry is missing).
+///
+/// # Errors
+///
+/// Returns [`ModeError::Io`] on any filesystem failure.
+pub fn init(project_root: &Path) -> Result<StorageMode, ModeError> {
+    let mount_path = project_root.join(".pattern").join("shared");
+
+    // Create the directory structure. `create_dir_all` is race-safe per std docs.
+    for subdir in ["blocks/core", "blocks/working", "personas", "lib"] {
+        std::fs::create_dir_all(mount_path.join(subdir)).map_err(|e| ModeError::Io {
+            path: mount_path.join(subdir),
+            source: e,
+        })?;
+    }
+
+    // Derive project name from the directory name.
+    let project_name = project_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("pattern-project");
+    let now = Utc::now().to_rfc3339();
+
+    // Scaffold .pattern.kdl with Mode A defaults.
+    let kdl = format!(
+        r#"mount mode="A" memory-db="memory.db"
+
+personas {{
+    default "@pattern-default"
+}}
+
+isolate-from-persona policy="none"
+
+jj enabled=false
+
+project name="{project_name}" created-at="{now}"
+"#
+    );
+
+    let kdl_path = mount_path.join(".pattern.kdl");
+    std::fs::write(&kdl_path, kdl).map_err(|e| ModeError::Io {
+        path: kdl_path,
+        source: e,
+    })?;
+
+    // Ensure .pattern/transient/ is gitignored (messages.db lives there,
+    // outside the project repo).
+    gitignore::append_if_missing(project_root, ".pattern/transient/")?;
+
+    Ok(StorageMode::A {
+        mount_path,
+        project_root: project_root.to_owned(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    #[test]
+    fn init_creates_mount_layout() {
+        let tmp = TempDir::new().unwrap();
+        let mode = init(tmp.path()).unwrap();
+
+        let mount_path = tmp.path().join(".pattern").join("shared");
+        assert!(mount_path.join("blocks/core").is_dir());
+        assert!(mount_path.join("blocks/working").is_dir());
+        assert!(mount_path.join("personas").is_dir());
+        assert!(mount_path.join("lib").is_dir());
+        assert!(mount_path.join(".pattern.kdl").is_file());
+
+        match &mode {
+            StorageMode::A {
+                mount_path: mp,
+                project_root: pr,
+            } => {
+                assert_eq!(mp, &mount_path);
+                assert_eq!(pr, tmp.path());
+            }
+            _ => panic!("expected StorageMode::A"),
+        }
+    }
+
+    #[test]
+    fn init_writes_valid_kdl_config() {
+        let tmp = TempDir::new().unwrap();
+        init(tmp.path()).unwrap();
+
+        let kdl_path = tmp.path().join(".pattern/shared/.pattern.kdl");
+        let content = std::fs::read_to_string(&kdl_path).unwrap();
+
+        // Verify key properties are present.
+        assert!(content.contains(r#"mode="A""#));
+        assert!(content.contains(r#"memory-db="memory.db""#));
+        assert!(content.contains("jj enabled=false"));
+        assert!(content.contains("project name="));
+    }
+
+    #[test]
+    fn init_creates_gitignore_entry() {
+        let tmp = TempDir::new().unwrap();
+        init(tmp.path()).unwrap();
+
+        let gitignore = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+        assert!(gitignore.contains(".pattern/transient/"));
+    }
+
+    #[test]
+    fn init_idempotent_gitignore() {
+        let tmp = TempDir::new().unwrap();
+        init(tmp.path()).unwrap();
+        init(tmp.path()).unwrap();
+
+        let gitignore = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+        let count = gitignore
+            .lines()
+            .filter(|l| l.trim() == ".pattern/transient/")
+            .count();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn init_kdl_parseable_by_config_loader() {
+        let tmp = TempDir::new().unwrap();
+        init(tmp.path()).unwrap();
+
+        let kdl_path = tmp.path().join(".pattern/shared/.pattern.kdl");
+        let config = crate::config::load_mount_config(&kdl_path).unwrap();
+        assert_eq!(config.mount.mode, crate::config::ModeKind::A);
+        assert_eq!(config.mount.memory_db, "memory.db");
+        assert!(!config.jj.enabled);
+    }
+}

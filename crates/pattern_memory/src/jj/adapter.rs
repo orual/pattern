@@ -196,20 +196,24 @@ impl JjAdapter {
 
     /// Initialise a new jj git repository at the given path.
     ///
-    /// Invokes `jj git init` at `path`. Intended for Mode B (separate
-    /// pattern-jj repo) and Mode C spike (sidecar over host git).
+    /// Invokes `jj git init --no-colocate` at `path`. The `--no-colocate`
+    /// flag keeps the backing git repository inside `.jj/repo/` rather than
+    /// creating a top-level `.git/` directory. This is important for Mode C
+    /// where a top-level `.git/` would cause the host git to treat the mount
+    /// directory as a nested repository, and harmless for Mode B (which has
+    /// no host VCS to conflict with).
     pub fn init_repo(&self, path: &Path) -> JjResult<()> {
         let _guard = self.mutation_lock.lock().map_err(|_| poisoned())?;
         let output = self
             .cmd()
             .current_dir(path)
-            .args(["git", "init"])
+            .args(["git", "init", "--no-colocate"])
             .output()
             .map_err(|e| JjError::Io {
                 source: e,
-                context: "jj git init".into(),
+                context: "jj git init --no-colocate".into(),
             })?;
-        check_success(&output, "jj git init")
+        check_success(&output, "jj git init --no-colocate")
     }
 
     /// Add a new workspace at `new_workspace_path` linked to the repo at

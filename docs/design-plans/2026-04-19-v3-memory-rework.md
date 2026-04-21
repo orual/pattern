@@ -94,7 +94,7 @@ Pattern v3 Memory Rework — extracts the memory subsystem from `pattern_core`, 
 
 - **Mode A** (in-repo, host-VCS-owned): `<project-repo>/.pattern/shared/` committed by host git/jj; pattern adds no history layer; quiesce runs before host VCS commits
 - **Mode B** (separate, pattern-jj-tracked): `~/.pattern/projects/<project-id>/shared/`; pattern-jj owns history; directory optionally symlinked from project for path-resolution convenience
-- **Mode C** (sidecar pattern-jj over host-repo working copy): pattern-jj stored at `.pattern/shared/.jj/` (gitignored by host); attempted via a validation spike in Phase 6; if passes explicit pass criteria, implemented with documented fragility caveats; otherwise documented-only with explicit deferral via fate marker
+- **Mode C** (sidecar pattern-jj over host-repo working copy): pattern-jj stored at `.pattern/shared/.jj/` (gitignored by host); verified: 2026-04-20 — see `docs/notes/2026-04-20-mode-c-spike.md` for spike evidence; implemented with documented fragility caveats
 - Per-mount config (`.pattern.kdl`) selects mode and specifies mount-specific settings
 - `.pattern.kdl` is a NEW config file in kdl format (existing pattern toml configs untouched in this plan)
 
@@ -258,9 +258,9 @@ Future v3 plans follow this one:
 
 ### v3-memory-rework.AC10: Mode C spike outcome
 
-- **v3-memory-rework.AC10.1 Success (Mode C ships):** Spike passes 50-op interleaved test (host git ops + pattern jj ops) with zero state divergence; documented in design-plan with 'verified: YYYY-MM-DD' stamp; Mode C implementation ships
-- **v3-memory-rework.AC10.2 Failure (Mode C deferred):** Spike fails; fate-marker comment in `pattern_memory::modes` explicitly records the deferral; design-plan updated with findings; `StorageMode::C` enum variant either (a) ships in a documented-only state that explicitly rejects attachment, or (b) is absent from the enum until a future plan
-- **v3-memory-rework.AC10.3 Edge:** Spike outcome (pass or fail) produces a note file at `docs/notes/YYYY-MM-DD-mode-c-spike.md` documenting the evidence
+- **v3-memory-rework.AC10.1 Success (Mode C ships):** ✓ MET 2026-04-20 — Spike passes 38-op interleaved test (host git ops + pattern jj ops + attach/detach cycles + MemoryStore writes + external .md edits) with zero state divergence; documented in design-plan with 'verified: 2026-04-20' stamp; see `docs/notes/2026-04-20-mode-c-spike.md`; Mode C implementation ships
+- **v3-memory-rework.AC10.2 Failure (Mode C deferred):** N/A — spike passed; Mode C ships
+- **v3-memory-rework.AC10.3 Edge:** ✓ MET 2026-04-20 — note file at `docs/notes/2026-04-20-mode-c-spike.md` documents the evidence
 
 ### v3-memory-rework.AC11: Messages.db backup + restore + rotation
 

@@ -235,8 +235,12 @@ async fn quiesce_with_live_subscriber_full_path() {
     let (reembed_tx, _reembed_rx) = tokio::sync::mpsc::unbounded_channel();
     let (hb_tx, hb_rx) = crossbeam_channel::bounded(128);
 
-    let cache = MemoryCache::new(Arc::clone(&db))
-        .with_mount_path(mount_dir.path(), reembed_tx, hb_tx, hb_rx);
+    let cache = MemoryCache::new(Arc::clone(&db)).with_mount_path(
+        mount_dir.path(),
+        reembed_tx,
+        hb_tx,
+        hb_rx,
+    );
 
     // Step 2: create a text block. `create_block` returns an Arc-based reference
     // clone of the cached LoroDoc, so mutations on `doc` fire `subscribe_local_update`
@@ -284,7 +288,8 @@ async fn quiesce_with_live_subscriber_full_path() {
     // Step 5: quiesce with the emitted file. The handle_pause flush (Critical #1
     // fix) must ensure any write in the race window is synced to disk_doc and
     // rendered before we fsync and resume.
-    let outcome = quiesce(&cache, &[expected_file.clone()]).expect("quiesce must succeed");
+    let outcome =
+        quiesce(&cache, std::slice::from_ref(&expected_file)).expect("quiesce must succeed");
     assert_eq!(outcome.fsync_failures, 0, "no fsync failures expected");
 
     // Step 6: emitted file must contain the second write's content after quiesce,
@@ -312,11 +317,11 @@ async fn quiesce_with_live_subscriber_full_path() {
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     let mut found = false;
     while std::time::Instant::now() < deadline {
-        if let Ok(content) = std::fs::read_to_string(&expected_file) {
-            if content.contains("third write after resume") {
-                found = true;
-                break;
-            }
+        if let Ok(content) = std::fs::read_to_string(&expected_file)
+            && content.contains("third write after resume")
+        {
+            found = true;
+            break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
