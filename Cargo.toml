@@ -192,6 +192,9 @@ tracing-test = "0.2"
 # Binary/process utilities
 which = "8.0"
 
+# Fuzzy matching
+nucleo = "0.5"
+
 
 [workspace.lints.clippy]
 mod_module_files = "warn"
