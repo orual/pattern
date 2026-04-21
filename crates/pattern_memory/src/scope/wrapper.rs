@@ -239,7 +239,7 @@ impl<S: MemoryStore> MemoryStore for MemoryScope<S> {
     }
 
     fn get_rendered_content(&self, agent_id: &str, label: &str) -> MemoryResult<Option<String>> {
-        tracing::debug!(
+        tracing::trace!(
             agent_id = %agent_id,
             label = %label,
             passthrough = self.binding.is_passthrough(),
@@ -257,7 +257,7 @@ impl<S: MemoryStore> MemoryStore for MemoryScope<S> {
         // Handle both Ok(None) and Err(NotFound) as "not in project scope."
         if let Some(project_id) = &self.binding.project_id {
             let project_result = self.inner.get_rendered_content(project_id, label);
-            tracing::debug!(
+            tracing::trace!(
                 project_id = %project_id,
                 label = %label,
                 result = ?project_result.as_ref().map(|r| r.is_some()),
@@ -276,7 +276,7 @@ impl<S: MemoryStore> MemoryStore for MemoryScope<S> {
                 .get_rendered_content(&self.binding.persona_id, label),
             IsolatePolicy::Full | _ => Ok(None),
         };
-        tracing::debug!(
+        tracing::trace!(
             persona_id = %self.binding.persona_id,
             label = %label,
             result = ?persona_result.as_ref().map(|r| r.as_ref().map(|s| s.len())),

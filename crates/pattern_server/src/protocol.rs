@@ -176,7 +176,8 @@ pub struct InitSessionRequest {
 /// Response to [`InitSession`](PatternProtocol::InitSession).
 ///
 /// Contains the daemon-resolved agent identity and available personas for the
-/// project.
+/// project. If project mounting failed, `error` is `Some(message)` and the
+/// session is in a degraded state (no memory, no LLM).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfo {
     /// The actual agent_id the daemon resolved.
@@ -185,6 +186,9 @@ pub struct SessionInfo {
     pub persona_name: String,
     /// All available personas discovered for this project.
     pub available_agents: Vec<AgentId>,
+    /// Set when session initialization failed. The session is in a degraded
+    /// state — the TUI should surface this error to the user.
+    pub error: Option<String>,
 }
 
 /// A slash-command invocation forwarded from the TUI.
@@ -365,6 +369,7 @@ mod tests {
             agent_id: "pattern-default".into(),
             persona_name: "Pattern Default".into(),
             available_agents: vec!["pattern-default".into(), "supervisor".into()],
+            error: None,
         };
         let json = serde_json::to_string(&info).unwrap();
         let decoded: SessionInfo = serde_json::from_str(&json).unwrap();

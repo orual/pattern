@@ -51,9 +51,9 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> miette::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter("pattern_server=debug,pattern_runtime::sdk::handlers::memory=debug,pattern_memory::scope=debug")
-        .init();
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "pattern_server=info".into());
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let cli = Cli::parse();
 

@@ -21,6 +21,7 @@ pub enum ArgHint {
     /// Agent name (completable from daemon's agent list).
     AgentName,
     /// Free-form text.
+    #[allow(dead_code)] // used by autocomplete argument completion (future)
     FreeText,
 }
 
@@ -34,6 +35,7 @@ pub struct CommandDef {
     /// Where this command is dispatched.
     pub target: CommandTarget,
     /// What kind of argument the command expects.
+    #[allow(dead_code)] // used by autocomplete argument completion (future)
     pub arg_hint: ArgHint,
 }
 
@@ -55,12 +57,6 @@ pub fn builtin_commands() -> &'static [CommandDef] {
         CommandDef {
             name: "panel",
             description: "Toggle side panel",
-            target: CommandTarget::Local,
-            arg_hint: ArgHint::None,
-        },
-        CommandDef {
-            name: "expand",
-            description: "Expand focused section",
             target: CommandTarget::Local,
             arg_hint: ArgHint::None,
         },

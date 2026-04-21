@@ -75,6 +75,13 @@ pub struct App {
     /// Used by key handlers so scroll calculations use the real terminal size.
     /// Defaults to 24 until the first frame is drawn.
     last_viewport_height: u16,
+    /// Channel for receiving results from spawned async tasks (command results,
+    /// send errors). Spawned tasks hold a clone of the sender; the event loop
+    /// polls the receiver.
+    result_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    /// Available agents discovered during InitSession. Used by /front to
+    /// validate the requested agent name before switching.
+    available_agents: Vec<SmolStr>,
 }
 
 impl App {
@@ -84,6 +91,9 @@ impl App {
     /// `"pattern-default"`), used for routing messages and displayed in
     /// the status bar.
     pub fn new(agent_id: SmolStr) -> Self {
+        // Create the result channel. The sender lives on the struct so
+        // spawned tasks can clone it; the receiver is kept in `run()`.
+        let (result_tx, _result_rx_placeholder) = tokio::sync::mpsc::unbounded_channel();
         Self {
             conversation: ConversationState {
                 batches: Vec::new(),
@@ -101,7 +111,17 @@ impl App {
             current_agent: agent_id,
             connected: false,
             last_viewport_height: 24,
+            result_tx,
+            available_agents: Vec::new(),
         }
+    }
+
+    /// Set the list of available agents from the InitSession response.
+    ///
+    /// Called by the TUI startup after a successful `InitSession` so that
+    /// `/front` can validate agent names against this list.
+    pub fn set_available_agents(&mut self, agents: Vec<SmolStr>) {
+        self.available_agents = agents;
     }
 
     /// Run the async event loop until the user quits.
@@ -119,6 +139,11 @@ impl App {
 
         self.client = client;
         self.connected = event_rx.is_some();
+
+        // Replace the placeholder channel with one whose receiver we own
+        // here in the run loop. Spawned tasks clone `self.result_tx`.
+        let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        self.result_tx = result_tx;
 
         let mut reader = EventStream::new();
         let mut tick = time::interval(Duration::from_millis(100));
@@ -175,6 +200,12 @@ impl App {
                 _ = tick.tick() => {
                     // Just redraw — handles streaming cursor blink,
                     // toast expiry, status bar updates.
+                }
+                // Branch 4: results from spawned async tasks (command results,
+                // send errors). Pushes the formatted message into the conversation
+                // so results are visible to the user rather than only logged.
+                Some(msg) = result_rx.recv() => {
+                    self.push_system_message(msg);
                 }
             }
 
@@ -317,11 +348,12 @@ impl App {
                     let agent_id = self.current_agent.clone();
                     let client = client.clone();
                     let bid = batch_id;
+                    let result_tx = self.result_tx.clone();
                     tokio::spawn(async move {
                         tracing::debug!("sending message batch={bid} agent={agent_id}");
-                        match client.send_message(bid.clone(), agent_id, parts).await {
-                            Ok(()) => tracing::debug!("send_message succeeded batch={bid}"),
-                            Err(e) => tracing::error!("send_message failed batch={bid}: {e:?}"),
+                        if let Err(e) = client.send_message(bid.clone(), agent_id, parts).await {
+                            tracing::error!("send_message failed batch={bid}: {e:?}");
+                            let _ = result_tx.send(format!("send failed: {e}"));
                         }
                     });
                 }
@@ -376,20 +408,6 @@ impl App {
                 // Phase 4 implements the panel. Placeholder acknowledgment.
                 self.push_system_message("panel toggle not yet implemented.".into());
             }
-            "expand" => {
-                // Toggle the focused section's collapsed state, if any.
-                if let Some((_batch_idx, _section_idx)) = self.conversation.focused_section {
-                    // The scroll module's toggle logic handles this. For now,
-                    // acknowledge the command.
-                    self.push_system_message(
-                        "use Tab to focus conversation, then Enter to expand.".into(),
-                    );
-                } else {
-                    self.push_system_message(
-                        "no section focused. Press Tab to focus conversation.".into(),
-                    );
-                }
-            }
             _ => {}
         }
     }
@@ -398,9 +416,28 @@ impl App {
     fn dispatch_runtime_command(&mut self, name: &str, args: &[String]) {
         match name {
             "front" => {
-                // Update the current agent locally.
                 if let Some(agent_name) = args.first() {
                     let agent_name = agent_name.trim_start_matches('@');
+                    // Validate against the available agents list when populated.
+                    // When the list is empty (offline or not yet received), allow
+                    // the switch without validation.
+                    if !self.available_agents.is_empty()
+                        && !self
+                            .available_agents
+                            .iter()
+                            .any(|a| a.as_str() == agent_name)
+                    {
+                        let list = self
+                            .available_agents
+                            .iter()
+                            .map(|a| a.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        self.push_system_message(format!(
+                            "unknown agent '{agent_name}'. available: {list}"
+                        ));
+                        return;
+                    }
                     self.current_agent = SmolStr::from(agent_name);
                     self.push_system_message(format!("switched to agent: {agent_name}"));
                 } else {
@@ -412,13 +449,14 @@ impl App {
                     let client = client.clone();
                     let cmd_name = name.to_string();
                     let args = args.to_vec();
+                    let result_tx = self.result_tx.clone();
                     tokio::spawn(async move {
-                        match client.run_command(cmd_name, args).await {
+                        match client.run_command(cmd_name.clone(), args).await {
                             Ok(result) => {
-                                tracing::info!("command result: {}", result.output);
+                                let _ = result_tx.send(result.output);
                             }
                             Err(e) => {
-                                tracing::error!("command failed: {e}");
+                                let _ = result_tx.send(format!("/{cmd_name} failed: {e}"));
                             }
                         }
                     });
@@ -430,8 +468,11 @@ impl App {
             "shutdown" => {
                 if let Some(client) = &self.client {
                     let client = client.clone();
+                    let result_tx = self.result_tx.clone();
                     tokio::spawn(async move {
-                        let _ = client.run_command("shutdown".into(), Vec::new()).await;
+                        if let Err(e) = client.run_command("shutdown".into(), Vec::new()).await {
+                            let _ = result_tx.send(format!("shutdown failed: {e}"));
+                        }
                     });
                     self.push_system_message("shutdown requested.".into());
                     self.should_quit = true;
@@ -451,13 +492,14 @@ impl App {
             let client = client.clone();
             let cmd_name = name.to_string();
             let args = args.to_vec();
+            let result_tx = self.result_tx.clone();
             tokio::spawn(async move {
-                match client.run_command(cmd_name, args).await {
+                match client.run_command(cmd_name.clone(), args).await {
                     Ok(result) => {
-                        tracing::info!("plugin command result: {}", result.output);
+                        let _ = result_tx.send(result.output);
                     }
                     Err(e) => {
-                        tracing::error!("plugin command failed: {e}");
+                        let _ = result_tx.send(format!("/{cmd_name} failed: {e}"));
                     }
                 }
             });
@@ -468,7 +510,10 @@ impl App {
     }
 
     /// Push a system message (note) into the conversation.
-    fn push_system_message(&mut self, text: String) {
+    ///
+    /// `pub(crate)` so `run_tui()` in `main.rs` can surface session init
+    /// errors as the first message before the event loop starts.
+    pub(crate) fn push_system_message(&mut self, text: String) {
         let batch_id: SmolStr = format!("sys-{}", self.conversation.batches.len()).into();
         let mut batch = RenderBatch::new(batch_id, None);
         batch.push_event(&WireTurnEvent::Display {

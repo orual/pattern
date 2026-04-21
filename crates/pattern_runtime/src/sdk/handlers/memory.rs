@@ -139,13 +139,13 @@ impl EffectHandler<SessionContext> for MemoryHandler {
 
         let result = (|| match req {
             MemoryReq::Get(label) => {
-                tracing::debug!(
+                tracing::trace!(
                     agent_id = %agent_id,
                     label = %label,
                     "Memory.Get: looking up block"
                 );
                 let result = adapter.get_rendered_content(&agent_id, &label);
-                tracing::debug!(
+                tracing::trace!(
                     agent_id = %agent_id,
                     label = %label,
                     result = ?result.as_ref().map(|r| r.as_ref().map(|s| format!("{}...", &s[..s.len().min(50)]))),
@@ -158,7 +158,7 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                             "Pattern.Memory.Get: no block named {label:?} for agent {agent_id:?}"
                         ))
                     })?;
-                tracing::debug!(
+                tracing::trace!(
                     agent_id = %agent_id,
                     label = %label,
                     content_len = text.len(),

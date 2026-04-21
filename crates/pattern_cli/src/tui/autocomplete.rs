@@ -190,18 +190,6 @@ impl AutocompleteState {
     pub fn is_visible(&self) -> bool {
         self.visible
     }
-
-    /// The filtered items (for rendering and testing).
-    #[allow(dead_code)]
-    pub fn items(&self) -> &[CompletionItem] {
-        &self.items
-    }
-
-    /// The currently selected index (for rendering and testing).
-    #[allow(dead_code)]
-    pub fn selected_index(&self) -> usize {
-        self.selected
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -313,7 +301,6 @@ mod tests {
             ("shutdown".into(), "Stop the daemon".into()),
             ("context".into(), "Show context/memory info".into()),
             ("panel".into(), "Toggle side panel".into()),
-            ("expand".into(), "Expand focused section".into()),
         ]
     }
 

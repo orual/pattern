@@ -196,18 +196,34 @@ mod tests {
 
     #[tokio::test]
     async fn connect_without_daemon_returns_clear_error() {
+        use std::sync::Mutex;
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+
         // Point state dir to a temp dir that has no state file.
         let dir = tempfile::tempdir().unwrap();
-        // Safety: nextest runs each test in its own process.
-        unsafe {
-            std::env::set_var("PATTERN_STATE_DIR", dir.path().to_str().unwrap());
+
+        // Set the env var while holding the mutex, then drop the guard
+        // before the async connect call to avoid holding a MutexGuard
+        // across an await point.
+        {
+            let _guard = ENV_LOCK.lock().unwrap();
+            // SAFETY: the mutex ensures no concurrent env reads in this process
+            // during the set window. nextest also isolates per-process.
+            unsafe {
+                std::env::set_var("PATTERN_STATE_DIR", dir.path().to_str().unwrap());
+            }
         }
 
         let result = DaemonClient::connect().await;
-        assert!(matches!(result, Err(DaemonClientError::DaemonNotRunning)));
 
-        unsafe {
-            std::env::remove_var("PATTERN_STATE_DIR");
+        {
+            let _guard = ENV_LOCK.lock().unwrap();
+            // SAFETY: same reasoning as above.
+            unsafe {
+                std::env::remove_var("PATTERN_STATE_DIR");
+            }
         }
+
+        assert!(matches!(result, Err(DaemonClientError::DaemonNotRunning)));
     }
 }

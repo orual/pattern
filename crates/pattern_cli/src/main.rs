@@ -132,10 +132,16 @@ enum ModeArg {
 #[tokio::main]
 async fn main() -> MietteResult<()> {
     // Set up tracing to a log file (not stderr — would corrupt TUI).
-    let log_file = std::fs::File::create("/tmp/pattern-tui.log").ok();
+    // Use the daemon state dir so TUI logs live alongside the daemon log
+    // at `~/.pattern/daemon/tui.log`.
+    let log_path = pattern_server::state::DaemonState::state_dir().join("tui.log");
+    std::fs::create_dir_all(pattern_server::state::DaemonState::state_dir()).ok();
+    let log_file = std::fs::File::create(&log_path).ok();
     if let Some(file) = log_file {
+        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| "pattern=warn".into());
         tracing_subscriber::fmt()
-            .with_env_filter("pattern=debug,pattern_server=debug")
+            .with_env_filter(filter)
             .with_writer(std::sync::Mutex::new(file))
             .with_ansi(false)
             .init();
@@ -282,7 +288,7 @@ async fn run_tui() -> MietteResult<()> {
     commands::daemon::ensure_default_persona(&project_path).ok();
 
     // Connect to daemon, auto-starting if needed.
-    let (client, event_rx, resolved_agent) = match DaemonClient::connect().await {
+    let session = match DaemonClient::connect().await {
         Ok(client) => init_session_and_subscribe(&client, &project_path, &agent_id).await,
         Err(_) => {
             // Daemon not running — try auto-starting it.
@@ -293,10 +299,22 @@ async fn run_tui() -> MietteResult<()> {
                         Ok(client) => {
                             init_session_and_subscribe(&client, &project_path, &agent_id).await
                         }
-                        Err(_) => (None, None, agent_id.clone()),
+                        Err(_) => SessionResult {
+                            client: None,
+                            event_rx: None,
+                            resolved_agent: agent_id.clone(),
+                            error: None,
+                            available_agents: vec![],
+                        },
                     }
                 }
-                Err(_) => (None, None, agent_id.clone()),
+                Err(_) => SessionResult {
+                    client: None,
+                    event_rx: None,
+                    resolved_agent: agent_id.clone(),
+                    error: None,
+                    available_agents: vec![],
+                },
             }
         }
     };
@@ -313,8 +331,21 @@ async fn run_tui() -> MietteResult<()> {
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture).ok();
 
     let mut terminal = ratatui::init();
-    let mut app = tui::app::App::new(smol_str::SmolStr::from(resolved_agent.as_str()));
-    let result = app.run(&mut terminal, event_rx, client).await;
+    let mut app = tui::app::App::new(smol_str::SmolStr::from(session.resolved_agent.as_str()));
+
+    // Populate the available agents list so /front can validate names.
+    if !session.available_agents.is_empty() {
+        app.set_available_agents(session.available_agents);
+    }
+
+    // Surface any session initialization error as the first system message.
+    if let Some(err) = session.error {
+        app.push_system_message(format!("warning: {err}"));
+    }
+
+    let result = app
+        .run(&mut terminal, session.event_rx, session.client)
+        .await;
     ratatui::restore();
 
     // Disable mouse capture after restoring the terminal.
@@ -323,32 +354,54 @@ async fn run_tui() -> MietteResult<()> {
     result
 }
 
+/// Result of a successful (or degraded) `InitSession` + subscribe.
+struct SessionResult {
+    client: Option<pattern_server::client::DaemonClient>,
+    event_rx: Option<tui::app::DaemonEventReceiver>,
+    resolved_agent: String,
+    error: Option<String>,
+    available_agents: Vec<smol_str::SmolStr>,
+}
+
 /// Send `InitSession`, then subscribe to the resolved agent's output.
 ///
-/// Returns `(client, event_rx, resolved_agent_id)`. On failure, falls back to
-/// subscribing with the default agent_id.
+/// On RPC failure or when the daemon reports a mount error, `error` is set —
+/// callers should surface it as a system message in the TUI.
 async fn init_session_and_subscribe(
     client: &pattern_server::client::DaemonClient,
     project_path: &std::path::Path,
     default_agent: &str,
-) -> (
-    Option<pattern_server::client::DaemonClient>,
-    Option<tui::app::DaemonEventReceiver>,
-    String,
-) {
+) -> SessionResult {
     match client
         .init_session(project_path.to_path_buf(), default_agent.into())
         .await
     {
         Ok(info) => {
+            // Surface any mount failure reported by the daemon as a session
+            // error. The TUI will show it as a system message on startup.
+            if let Some(ref err) = info.error {
+                tracing::warn!("InitSession reported error: {err}");
+            }
             let resolved = info.agent_id.clone();
             let rx = client.subscribe_output(resolved.clone()).await.ok();
-            (Some(client.clone()), rx, resolved.to_string())
+            SessionResult {
+                client: Some(client.clone()),
+                event_rx: rx,
+                resolved_agent: resolved.to_string(),
+                error: info.error,
+                available_agents: info.available_agents,
+            }
         }
         Err(e) => {
             tracing::warn!("InitSession failed, falling back to default agent: {e}");
             let rx = client.subscribe_output(default_agent.into()).await.ok();
-            (Some(client.clone()), rx, default_agent.to_string())
+            SessionResult {
+                client: Some(client.clone()),
+                event_rx: rx,
+                resolved_agent: default_agent.to_string(),
+                error: Some(format!("session init failed: {e}")),
+                available_agents: vec![],
+            }
         }
     }
 }

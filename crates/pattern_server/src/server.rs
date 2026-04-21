@@ -414,6 +414,7 @@ impl DaemonServer {
                             agent_id: inner.default_agent,
                             persona_name: "echo".into(),
                             available_agents: vec![],
+                            error: None,
                         })
                         .await;
                     return;
@@ -429,6 +430,10 @@ impl DaemonServer {
                                 agent_id: inner.default_agent,
                                 persona_name: String::new(),
                                 available_agents: vec![],
+                                error: Some(format!(
+                                    "failed to mount project at {}: {e}",
+                                    inner.project_path.display()
+                                )),
                             })
                             .await;
                         return;
@@ -472,6 +477,7 @@ impl DaemonServer {
                         agent_id,
                         persona_name,
                         available_agents: available,
+                        error: None,
                     })
                     .await;
             }
@@ -741,5 +747,6 @@ mod tests {
         assert_eq!(info.agent_id, "my-agent");
         assert_eq!(info.persona_name, "echo");
         assert!(info.available_agents.is_empty());
+        assert!(info.error.is_none());
     }
 }
