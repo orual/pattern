@@ -2,7 +2,13 @@
 
 ## Summary
 
-<!-- TO BE GENERATED after body is written -->
+The Pattern v3 Memory Rework redesigns and extracts the memory subsystem of the Pattern multi-agent system. The work has four structural pillars that land together over nine sequential phases.
+
+First, the memory implementation is extracted from `pattern_core` into a new `pattern_memory` crate, while `pattern_core` retains only the `MemoryStore` trait and shared data types — enforcing a clean dependency graph where nothing flows backward. Second, the database layer migrates from `sqlx` (async, compile-time-verified SQL) to `rusqlite` (synchronous, bundled SQLite), and the `MemoryStore` trait is correspondingly made synchronous. This eliminates an architectural awkwardness where the eval worker had to spin up a nested async runtime inside an already-async context. Connection pooling for async callers is handled via `r2d2-sqlite` and `tokio::task::spawn_blocking`.
+
+Third, block content moves out of the database entirely. Rather than storing block data as blobs in SQLite, each block is now persisted as a human-readable canonical file on disk — Markdown for text, KDL for structured data, JSONL for logs — with a Loro CRDT document as the authoritative merge state. SQLite retains only indexes, metadata, and archival entries. A per-block subscriber task, driven by Loro's own commit callbacks, keeps the file and the search indexes in sync. Human edits to files on disk are reconciled back into Loro as CRDT merges rather than overwrites.
+
+Fourth, version history for the memory state is managed through the `jj` version control system via a thin CLI adapter, with a "quiesce" step that drains in-flight writes and checkpoints the database before any commit. Three storage modes let projects choose whether the host VCS or a Pattern-managed jj repository owns the history.
 
 ## Definition of Done
 
@@ -16,7 +22,7 @@ Pattern v3 Memory Rework — extracts the memory subsystem from `pattern_core`, 
 
 ### Storage backend (sync, rusqlite)
 
-- `pattern_db` migrated from `sqlx` to `rusqlite` across all ~339 queries (~310 compile-time macro-verified + ~29 runtime `query_as`)
+- `pattern_db` migrated from `sqlx` to `rusqlite` across all ~236 queries across `pattern_db/src/` (verified via grep on 2026-04-19)
 - `MemoryStore` trait sync-ified and audited down from 28 methods to ~18 via collapse (`list_blocks` variants merged behind a `BlockFilter` type; `update_block_metadata(id, patch)` replaces four separate setters; `undo_redo(op, label)` and `history_depth` replace four separate methods; `search(scope)` replaces `search` + `search_all`)
 - `async_trait` usage removed from `MemoryStore` specifically; pattern_core retains `async_trait` dep for the 8 other traits with genuine async needs (ProviderClient, DataStream, EmbeddingProvider, etc.)
 - FTS5 + `sqlite-vec` revalidated under rusqlite with regression coverage (BM25 scoring, `highlight`/`snippet`, hybrid score fusion)
@@ -36,7 +42,7 @@ Pattern v3 Memory Rework — extracts the memory subsystem from `pattern_core`, 
 ### Eval worker simplification
 
 - Per-session multi-thread tokio runtime in `eval_worker.rs` removed; worker becomes a plain OS thread with `std::sync::mpsc`
-- All 22 `Handle::current().block_on` sites in memory/recall/search/scope handlers eliminated
+- All `Handle::current().block_on` sites in `handlers/memory.rs`, `handlers/recall.rs`, and `handlers/search.rs` that exist solely to bridge async `MemoryStore` calls are eliminated (~15-16 call pairs). `handlers/message.rs` contains a small number of `block_on` calls that dispatch to the async MessageRouter — these are NOT MemoryStore-related and remain async (router stays async-trait)
 - Tech-debt comment in `eval_worker.rs` flagged by the sqlx→rusqlite evaluation doc is resolved (documented fix)
 - Reply channel hybrid (sync worker + async dispatcher) works cleanly for both sync and async caller contexts
 
@@ -152,11 +158,190 @@ Future v3 plans follow this one:
 
 ## Acceptance Criteria
 
-<!-- TO BE GENERATED and validated before glossary -->
+### v3-memory-rework.AC1: pattern_memory crate extraction is clean and reversible
+
+- **v3-memory-rework.AC1.1 Success:** `cargo check --workspace` passes after extraction
+- **v3-memory-rework.AC1.2 Success:** `cargo nextest run -p pattern-memory` passes every moved test (all memory-domain tests from pattern_core are runnable in pattern_memory)
+- **v3-memory-rework.AC1.3 Success:** `cargo doc -p pattern_memory` produces complete rustdoc for every public item
+- **v3-memory-rework.AC1.4 Success:** Every `pattern_runtime` file importing memory types imports trait types from `pattern_core` and impl types from `pattern_memory`; no `pattern_runtime` file depends on `pattern_memory` private internals
+- **v3-memory-rework.AC1.5 Failure:** A file in pattern_core attempting to import from `pattern_memory` (reverse dependency) fails to compile
+- **v3-memory-rework.AC1.6 Edge:** Workspace `members` list is updated; port-list doc records the extraction with a "completed" note
+
+### v3-memory-rework.AC2: Rusqlite migration preserves query semantics end-to-end
+
+- **v3-memory-rework.AC2.1 Success:** `cargo check --workspace` passes after sqlx → rusqlite swap
+- **v3-memory-rework.AC2.2 Success:** Every pre-existing `pattern_db` integration test passes post-migration without modification to assertions
+- **v3-memory-rework.AC2.3 Success:** FTS5 BM25 snapshot tests (insta) produce identical scoring output on a representative corpus
+- **v3-memory-rework.AC2.4 Success:** Vector KNN regression test returns identical nearest-neighbor ordering on a canonical similarity structure
+- **v3-memory-rework.AC2.5 Success:** All three explicit transaction sites in `queries/memory.rs` port to `rusqlite::Transaction` preserving atomicity
+- **v3-memory-rework.AC2.6 Failure:** A query that previously committed atomically as a transaction, if mid-transaction forced to fail, leaves the database in pre-transaction state (no partial commit)
+- **v3-memory-rework.AC2.7 Failure:** Concurrent pool stress test: 20 concurrent `spawn_blocking` callers making queries complete without deadlock or pool exhaustion
+- **v3-memory-rework.AC2.8 Edge:** Direct `libsqlite3-sys` dep is absent from `pattern_db/Cargo.toml`; rusqlite's bundled SQLite is the sole source
+- **v3-memory-rework.AC2.9 Edge:** sqlite-vec compatibility spike test at `crates/pattern_db/tests/sqlite_vec_smoke.rs` passes: 100 test vectors inserted into a vec0 virtual table return correct KNN ordering
+- **v3-memory-rework.AC2.10 Edge:** `messages.db` splits into its own file; ATTACH statement in `init_connection` succeeds; cross-db queries `SELECT ... FROM main.X JOIN msg.Y` work
+
+### v3-memory-rework.AC3: BlockType simplification is clean across call sites
+
+- **v3-memory-rework.AC3.1 Success:** `BlockType` enum contains only `Core` and `Working` variants after Phase 2
+- **v3-memory-rework.AC3.2 Success:** `cargo check --workspace` produces no errors or warnings referencing removed variants
+- **v3-memory-rework.AC3.3 Success:** Existing blocks with the old `BlockType::Log` classification are migrated to `Working` tier + `BlockSchema::Log` schema via the phase's schema migration
+- **v3-memory-rework.AC3.4 Success:** Existing blocks with the old `BlockType::Archival` classification are converted to archival entries via the phase's schema migration
+- **v3-memory-rework.AC3.5 Failure:** Attempting to deserialize an old record with `BlockType::Archival` or `BlockType::Log` on disk produces a clear migration error pointing to the migrator, not a silent decode
+- **v3-memory-rework.AC3.6 Edge:** A Log-schema block can be loaded into either Core or Working tier (previously ambiguous due to variant conflation)
+
+### v3-memory-rework.AC4: MemoryStore sync-ification + surface audit
+
+- **v3-memory-rework.AC4.1 Success:** `MemoryStore` trait has no `#[async_trait]` decorator
+- **v3-memory-rework.AC4.2 Success:** Trait has 18 methods matching the consolidated surface (audited down from 28); consolidation detail captured in trait-method doc comments
+- **v3-memory-rework.AC4.3 Success:** `list_blocks(BlockFilter)` replaces the three previous variants; every filter combination works
+- **v3-memory-rework.AC4.4 Success:** `update_block_metadata(id, BlockMetadataPatch)` correctly updates specified fields and leaves others untouched
+- **v3-memory-rework.AC4.5 Success:** `undo_redo(label, UndoRedoOp)` + `history_depth(label)` produce equivalent behavior to the four removed methods
+- **v3-memory-rework.AC4.6 Success:** `search(SearchScope)` correctly scopes to persona / project / constellation
+- **v3-memory-rework.AC4.7 Success:** All existing MemoryCache impl tests pass against the new sync trait surface
+- **v3-memory-rework.AC4.8 Failure:** `async_trait` dep is not removed from pattern_core (other 8 traits still use it); `cargo check -p pattern_core` still imports `async_trait`
+- **v3-memory-rework.AC4.9 Edge:** `MemoryStore::delete_archival` method is retained in the trait but is not reachable via any agent SDK effect. Verified via a `trybuild` compile-fail test at `crates/pattern_runtime/tests/trybuild/no_archive_delete.rs` that attempts to construct the removed SDK request variant and confirms the compile error. The Haskell-side `Pattern.Memory.Archive.delete` symbol is removed from the SDK module; existing agent programs invoking it fail at Tidepool compile-time with a 'symbol not found' diagnostic.
+
+### v3-memory-rework.AC5: Eval worker simplification + async callsite migration
+
+- **v3-memory-rework.AC5.1 Success:** `eval_worker.rs` no longer constructs a per-session `tokio::runtime::Builder::new_multi_thread()`
+- **v3-memory-rework.AC5.2 Success:** Worker thread is spawned via `std::thread::spawn` with `std::sync::mpsc::channel` for request intake
+- **v3-memory-rework.AC5.3 Success:** Zero `Handle::current().block_on(...)` call sites remain in memory, recall, search, or scope effect handlers
+- **v3-memory-rework.AC5.4 Success:** Session::step caller-visible signature unchanged (still `async`)
+- **v3-memory-rework.AC5.5 Success:** Pre-existing `spawn_blocking`-related search bug is resolved (regression test passes)
+- **v3-memory-rework.AC5.6 Success:** Async callsites that invoke `MemoryStore` DB operations use `tokio::task::spawn_blocking`; cheap sync operations (metadata reads from in-memory caches) call directly
+- **v3-memory-rework.AC5.7 Failure:** Running a stream of 100 eval requests against the sync worker completes without `cannot start a runtime from within a runtime` panics
+- **v3-memory-rework.AC5.8 Edge:** On eval worker thread panic, a user-visible error surfaces; session becomes unusable (does not silently deadlock)
+
+### v3-memory-rework.AC6: Canonical file serialization round-trips
+
+- **v3-memory-rework.AC6.1 Success:** Text block round-trip: write text, emit `.md`, parse `.md`, import into loro, frontier equals original
+- **v3-memory-rework.AC6.2 Success:** Map block round-trip via KDL: write map fields, emit `.kdl`, parse, re-import, loro state equals original (property-tested with proptest)
+- **v3-memory-rework.AC6.3 Success:** List block round-trip via KDL: nested lists, ordered correctly, survives round-trip
+- **v3-memory-rework.AC6.4 Success:** Log block round-trip via JSONL: entries serialize line-per-entry; parsed back in same order
+- **v3-memory-rework.AC6.5 Success:** Composite block round-trip: sections serialize as top-level KDL nodes; section boundaries preserved
+- **v3-memory-rework.AC6.6 Failure:** LoroValue containing a type kdl cannot represent (if any are discovered) produces a typed `KdlConversionError`; no silent data loss
+- **v3-memory-rework.AC6.7 Edge:** KDL numeric precision: large integers (i128 boundary), floats with special values (#inf, #nan) round-trip exactly per the kdl crate's preservation contract
+- **v3-memory-rework.AC6.8 Edge:** Strings with embedded newlines, quotes, and unicode round-trip correctly through KDL
+
+### v3-memory-rework.AC7: Loro-native subscribers + external edit merge
+
+- **v3-memory-rework.AC7.1 Success:** Write a block, observe emitted file matching block content within 100ms (50ms debounce + overhead)
+- **v3-memory-rework.AC7.2 Success:** Subscriber emits FTS5 row update matching block content
+- **v3-memory-rework.AC7.3 Success:** Subscriber queues vector re-embed only when content hash changes; no spurious re-embeds
+- **v3-memory-rework.AC7.4 Success:** External edit to `.md` via text editor: notify detects, loro merges, re-emission produces canonical content
+- **v3-memory-rework.AC7.5 Success:** Self-emit-echo suppression: write block → observe single emission (not an infinite loop)
+- **v3-memory-rework.AC7.6 Failure:** Invalid KDL from human edit: parse fails, `metrics::counter!("memory.kdl.parse_failed")` increments, no loro merge attempted, prior valid content re-emitted
+- **v3-memory-rework.AC7.7 Failure:** Subscriber panic: supervisor detects heartbeat timeout within 30s, logs ERROR, restarts worker, increments restart counter
+- **v3-memory-rework.AC7.8 Edge:** Concurrent human edit + agent write: loro CRDT merges both; final state reflects both changes
+
+### v3-memory-rework.AC8: jj CLI adapter + pre-commit quiesce
+
+- **v3-memory-rework.AC8.1 Success:** `JjAdapter::detect` returns `Some` on systems with `jj` in PATH and supported version
+- **v3-memory-rework.AC8.2 Success:** All ~15-18 adapter functions execute their jj subcommand and parse JSON-templated output correctly
+- **v3-memory-rework.AC8.3 Success:** `quiesce()` drains all sync_workers, calls `wal_checkpoint(TRUNCATE)`, and fsyncs emitted files before returning
+- **v3-memory-rework.AC8.4 Success:** In Mode A (no jj adapter), `quiesce()` still runs and produces a canonical `memory.db` for host VCS to commit
+- **v3-memory-rework.AC8.5 Failure:** `JjAdapter::detect` returns `None` on systems without `jj`; no panic; Mode A continues working
+- **v3-memory-rework.AC8.6 Failure:** `jj --version` returning an unsupported version surfaces `JjError::UnsupportedVersion` with clear message
+- **v3-memory-rework.AC8.7 Failure:** jj subcommand failure surfaces `JjError::SubprocessFailed` carrying stderr; caller gets typed error, not stringly-typed
+- **v3-memory-rework.AC8.8 Edge:** Adapter respects `--color=never` in all invocations; output parsing doesn't choke on ANSI codes
+
+### v3-memory-rework.AC9: Storage modes A + B
+
+- **v3-memory-rework.AC9.1 Success:** Mode A end-to-end: temp host-git repo + mount init + block write + host git commit + verify state on disk
+- **v3-memory-rework.AC9.2 Success:** Mode B end-to-end: pattern-jj temp repo + mount init + block write + quiesce → jj commit + verify state
+- **v3-memory-rework.AC9.3 Success:** Mode A `messages.db` lives at `~/.pattern/transient/<project-hash>/` (outside the project repo)
+- **v3-memory-rework.AC9.4 Success:** Mode B `messages.db` lives at `~/.pattern/projects/<id>/messages/` (outside pattern-jj worktree)
+- **v3-memory-rework.AC9.5 Success:** `.pattern.kdl` config parses cleanly for representative configs; malformed configs produce clear diagnostics
+- **v3-memory-rework.AC9.6 Success:** `attach(path)` walks upward to find `.pattern.kdl`; sets up subscribers + opens dbs + registers with jj as applicable
+- **v3-memory-rework.AC9.7 Failure:** `attach` on a path with no mount produces a clear "no mount found" error with a suggestion to run `pattern mount init`
+- **v3-memory-rework.AC9.8 Edge:** `detach` + re-`attach` produces identical state (no leaked workers, clean restart)
+
+### v3-memory-rework.AC10: Mode C spike outcome
+
+- **v3-memory-rework.AC10.1 Success (Mode C ships):** Spike passes 50-op interleaved test (host git ops + pattern jj ops) with zero state divergence; documented in design-plan with 'verified: YYYY-MM-DD' stamp; Mode C implementation ships
+- **v3-memory-rework.AC10.2 Failure (Mode C deferred):** Spike fails; fate-marker comment in `pattern_memory::modes` explicitly records the deferral; design-plan updated with findings; `StorageMode::C` enum variant either (a) ships in a documented-only state that explicitly rejects attachment, or (b) is absent from the enum until a future plan
+- **v3-memory-rework.AC10.3 Edge:** Spike outcome (pass or fail) produces a note file at `docs/notes/YYYY-MM-DD-mode-c-spike.md` documenting the evidence
+
+### v3-memory-rework.AC11: Messages.db backup + restore + rotation
+
+- **v3-memory-rework.AC11.1 Success:** `pattern backup create` produces a snapshot at `~/.pattern/backups/<project-id>/messages/<iso8601>.sqlite` using rusqlite's backup API
+- **v3-memory-rework.AC11.2 Success:** Snapshot is a valid SQLite file that opens cleanly with the same schema as the source
+- **v3-memory-rework.AC11.3 Success:** `pattern backup restore <timestamp>` replaces `messages.db` with the snapshot; all messages present + searchable after restore
+- **v3-memory-rework.AC11.4 Success:** Pre-restore safety: current state is auto-snapshotted before replacement; label makes it distinguishable as a rollback point
+- **v3-memory-rework.AC11.5 Success:** Rotation policy retains last N snapshots + thins older per the configured hourly/daily/monthly bands
+- **v3-memory-rework.AC11.6 Failure:** `pattern backup restore <timestamp>` with a non-existent timestamp produces a clear error listing available snapshots
+- **v3-memory-rework.AC11.7 Edge:** Concurrent backup + write: snapshot is atomic; no mid-write corruption observable in the snapshot file
+
+### v3-memory-rework.AC12: MemoryScope + isolate_from_persona
+
+- **v3-memory-rework.AC12.1 Success (`None`):** Reads merge persona + project core; writes to shared handles flow bi-directionally; archival search spans both stores
+- **v3-memory-rework.AC12.2 Success (`CoreOnly`):** Reads see persona core as read-only + project core as read-write; writes to persona-core from within project scope are denied
+- **v3-memory-rework.AC12.3 Success (`Full`):** Persona identity (name, instructions) visible; persona block content not visible; archival search is project-only
+- **v3-memory-rework.AC12.4 Success:** `ctx.memory.write_to_persona(...)` effect succeeds when policy is `None`
+- **v3-memory-rework.AC12.5 Failure:** `ctx.memory.write_to_persona(...)` returns `MemoryError::IsolationDenied` when policy is `CoreOnly` or `Full`
+- **v3-memory-rework.AC12.6 Edge:** Project-level writes in `None` mode default to project scope unless explicit persona-scoped effect is invoked
+
+### v3-memory-rework.AC13: Project-scoped personas
+
+- **v3-memory-rework.AC13.1 Success:** Persona definition at `<mount>/personas/@reviewer.kdl` loads + becomes invokable as `@reviewer` within the project
+- **v3-memory-rework.AC13.2 Success:** `scope: project` persona is not visible when attaching a different project
+- **v3-memory-rework.AC13.3 Success:** `scope: global` (or unspecified) persona at `~/.pattern/personas/@name/` works across projects subject to isolation policy
+- **v3-memory-rework.AC13.4 Failure:** Persona definition missing required fields produces a clear parse error at attach time, not silent misconfiguration
+- **v3-memory-rework.AC13.5 Edge:** Global + project-scoped personas with the same name: project-scoped takes precedence within that project; global available elsewhere
+
+### v3-memory-rework.AC14: Project utilities + Pattern.Diagnostics
+
+- **v3-memory-rework.AC14.1 Success:** `<mount>/lib/Project/Foo.hs` compiles cleanly; main agent program `import Project.Foo qualified as Foo` resolves + runs
+- **v3-memory-rework.AC14.2 Success:** `<mount>/lib/Project/Bar.hs` with a syntax error is excluded from import path; session opens normally; agent program that doesn't import `Project.Bar` runs fine
+- **v3-memory-rework.AC14.3 Success:** `Pattern.Diagnostics.diagnostics` effect returns a list of diagnostic events including the Bar compile failure
+- **v3-memory-rework.AC14.4 Failure:** Main program imports `Project.Bar` (broken): session open fails with clear 'module not found (had compile errors)' diagnostic
+- **v3-memory-rework.AC14.5 Failure:** Compile errors do not crash pattern or produce uninformative errors; every error has source location + message
+- **v3-memory-rework.AC14.6 Edge:** No `lib/` directory on a mount: session opens cleanly; no error; no import path extension
+
+### v3-memory-rework.AC15: End-to-end smoke test
+
+- **v3-memory-rework.AC15.1 Success:** `cargo nextest run -p pattern-memory --test smoke_e2e` passes deterministically in CI
+- **v3-memory-rework.AC15.2 Success:** Test exercises: create persona → attach Mode A project → write Core text + Map + Log blocks → verify files emitted with expected format → external .md edit → loro merge → commit via host git → restart → re-attach → read matches committed state → backup messages.db → clear + restore → messages present
+- **v3-memory-rework.AC15.3 Success:** `cargo nextest run --workspace` passes across all crates after all phases land
+- **v3-memory-rework.AC15.4 Success:** FTS5 + vector regression snapshot suite (insta) is committed and stable across CI runs
+- **v3-memory-rework.AC15.5 Failure:** Any step failing in the smoke flow causes the test to fail loudly with a specific error identifying which step failed
+- **v3-memory-rework.AC15.6 Edge:** Multi-agent concurrent stress test (N MemoryCache instances doing writes against shared memory.db) completes without deadlock or data loss
 
 ## Glossary
 
-<!-- TO BE GENERATED after body is written -->
+- **Tidepool**: Pattern's embedded Haskell evaluation engine, used to compile and run agent programs. Agent behavior is expressed as Haskell programs that call SDK effects; Tidepool handles compilation, import resolution, and execution.
+- **persona**: A named agent identity in Pattern, defined by a set of instructions, memory blocks, and configuration. A persona can be global (shared across projects) or project-scoped (defined inside a mount and invisible to other projects).
+- **mount**: A directory managed by Pattern as a block store for a specific project. Contains block files, a `memory.db`, a `.pattern.kdl` config, and optionally a `personas/` and `lib/` directory.
+- **`.pattern.kdl`**: A new per-mount configuration file in KDL format that specifies the storage mode, persona bindings, isolation policy, and jj options for that mount. Separate from Pattern's existing TOML config files.
+- **MemoryStore**: The central synchronous trait defining the contract for reading and writing memory blocks. After this plan, it has 18 methods and no async trait machinery.
+- **MemoryScope**: A wrapper type around a `MemoryStore` that routes reads and writes according to an `isolate_from_persona` policy, controlling how much of a persona's memory bleeds into a project context.
+- **BlockType**: An enum classifying a memory block as either `Core` (always in context) or `Working` (loaded on demand). This plan removes the previous `Archival` and `Log` variants, which were conflations of tier and schema.
+- **BlockSchema**: The structural shape of a block's content — `Text`, `Map`, `List`, `Log`, or `Composite`. Orthogonal to `BlockType`; a `Log`-schema block can live in either the `Core` or `Working` tier.
+- **archival entry**: An immutable record in `memory.db`'s archival table, searchable via FTS5 and vector similarity. Distinct from memory blocks — not a tier, not editable by agents. Agents can insert and search; only human operators can delete.
+- **loro**: A Rust CRDT (Conflict-free Replicated Data Type) library used to store block content in-process. Loro documents support concurrent edits that merge without conflict. In this plan, the Loro document is the canonical write target; files on disk and SQLite indexes are derived from it.
+- **LoroDoc / LoroValue**: `LoroDoc` is a Loro document instance; `LoroValue` is the Rust value type representing data within it (maps, lists, scalars). The plan hand-writes conversion between `LoroValue` and the KDL document type.
+- **rusqlite**: A synchronous Rust bindings crate for SQLite. Used here with the `bundled-full` feature, which compiles SQLite directly into the binary and removes the need for a system SQLite install or a `libsqlite3-sys` pin.
+- **r2d2-sqlite**: A connection pool adapter that pairs the `r2d2` connection pool with `rusqlite`. Used to manage a pool of SQLite connections for async callers that go through `spawn_blocking`.
+- **sqlx**: The async, compile-time-verified SQL crate being replaced by rusqlite. Previously used across ~339 queries in `pattern_db`.
+- **rusqlite_migration**: A library for managing SQLite schema migrations under rusqlite, replacing the `sqlx-cli prepare` / `sqlx::migrate!` workflow.
+- **sqlite-vec**: A SQLite extension providing vector similarity search (`vec0` virtual tables, KNN queries). Loaded at runtime via `Connection::load_extension`. Used for hybrid search alongside FTS5.
+- **FTS5**: SQLite's built-in full-text search engine (version 5). Used in Pattern for BM25-scored keyword search over memory blocks and messages. Provides `highlight()` and `snippet()` functions for result excerpts.
+- **BM25**: A probabilistic text ranking algorithm used by FTS5. SQLite exposes it via the `rank` column in FTS5 queries. Scores are negative in SQLite's implementation (`rank / -10` normalizes them for fusion).
+- **CRDT**: Conflict-free Replicated Data Type. A data structure designed so that concurrent edits from multiple sources can always be merged deterministically without coordination. Loro implements CRDTs for in-process use.
+- **WAL**: Write-Ahead Logging. A SQLite journal mode that improves concurrency by writing changes to a separate log file before applying them to the main database. Pattern enables WAL for all connections via `PRAGMA journal_mode=WAL`.
+- **ATTACH DATABASE**: A SQLite statement that connects a second SQLite file to an existing connection under a named schema alias. Pattern uses this to attach `messages.db` as schema `msg` on every connection, enabling cross-database queries without opening a second connection.
+- **quiesce**: A pre-commit step that drains all in-flight subscriber tasks, checkpoints the WAL (`PRAGMA wal_checkpoint(TRUNCATE)`), and fsyncs emitted files. Ensures the on-disk state is canonical and resumable before a VCS commit.
+- **sync_worker**: A per-LoroDoc tokio task that receives commit notifications from Loro's `subscribe_root` callback, debounces them 50ms, and then emits the canonical file, updates FTS5 indexes, and queues re-embedding. Supervised for liveness.
+- **jj**: Jujutsu, a modern version control system used by Pattern to manage history for memory state (Modes B and C). Pattern shells out to the `jj` CLI rather than embedding jj-lib.
+- **jj workspace**: A jj concept analogous to a git worktree — a working copy checked out from a jj repository. The jj CLI adapter uses workspace operations to support subagent fork semantics in future plans.
+- **kdl**: The KDL Document Language — a human-readable, typed data format used for Pattern's `.pattern.kdl` config files and for serializing `Map`, `List`, and `Composite` block schemas to disk. The `kdl` Rust crate provides parsing and round-trip-faithful serialization.
+- **notify**: A Rust file-system watching library. Pattern uses `notify 8.2` with `notify-debouncer-full` (500ms debounce) to detect external edits to canonical block files and trigger loro CRDT merges.
+- **insta**: A Rust snapshot testing library. Used in this plan to capture and lock FTS5 BM25 scoring output and vector KNN ordering so that regressions in search behavior are caught automatically.
+- **proptest**: A property-based testing library for Rust. Used to verify that file format round-trips (KDL, JSONL, Markdown) are correct across a large space of generated inputs, not just hand-picked examples.
+- **Mode A / B / C**: The three storage modes for a Pattern mount. Mode A stores block state inside the project repo and delegates history to the host VCS (git or jj). Mode B stores block state in a Pattern-managed directory tracked by a Pattern-owned jj repo. Mode C is an experimental "sidecar" mode where a Pattern-owned jj repo coexists with a host git repo in the same working directory; its viability is gated on a validation spike.
+- **isolate_from_persona**: A policy (`None`, `CoreOnly`, `Full`) controlling how much of a persona's memory is visible within a project context. `None` merges persona and project memory fully; `Full` exposes only the persona's name and instructions, not its memory history.
+- **Pattern.Diagnostics**: A new SDK effect exposed to agent programs that returns accumulated session diagnostics, including compilation errors from project-local Haskell library modules in `<mount>/lib/`.
+- **eval worker**: The component in `pattern_runtime` that runs Tidepool (the Haskell evaluator) as a separate OS thread. This plan simplifies it from a thread with its own tokio runtime to a plain OS thread using `std::sync::mpsc` channels.
 
 ## Architecture
 
@@ -184,14 +369,26 @@ Connection strategy is split by caller pattern:
 pattern_db::ConstellationDb
   ├── pool: r2d2::Pool<SqliteConnectionManager>    // for async callsites via spawn_blocking
   │     max_size: 10, min_idle: 2, connection_timeout: 30s
-  │     each connection passes through init_connection:
-  │       - PRAGMA journal_mode=WAL, foreign_keys=ON, busy_timeout=5000
-  │       - PRAGMA cache_size=-65536 (64 MiB), mmap_size=268435456 (256 MiB)
-  │       - sqlite-vec extension loaded
-  │       - messages.db ATTACHed as schema `msg`
-  └── dedicated_connection()                       // for eval worker (owns for session lifetime)
-        same init_connection hook, NOT pool-managed
+  │     SqliteConnectionManager::with_init(|conn| init_connection(conn, &messages_path))
+  │     — r2d2 invokes init_connection on EVERY newly-opened connection
+  │     (ATTACH state is per-connection; we apply it on creation, not on checkout)
+  │
+  └── dedicated_connection() -> rusqlite::Connection
+        for eval worker; owned by the worker for its session lifetime; not pool-managed
+        same init_connection hook applied
+
+fn init_connection(conn: &mut Connection, messages_path: &Path) -> Result<()>:
+  PRAGMA journal_mode=WAL, foreign_keys=ON, busy_timeout=5000
+  PRAGMA cache_size=-65536 (64 MiB), mmap_size=268435456 (256 MiB)
+  unsafe { conn.load_extension_enable(); sqlite_vec::load(conn); conn.load_extension_disable(); }
+  conn.execute("ATTACH DATABASE ? AS msg", params![messages_path.display()])
 ```
+
+**Messages.db creation and migration semantics:**
+
+- On first session open for a project, `messages.db` does not yet exist. `ATTACH DATABASE` against a non-existent path creates the file automatically (SQLite's standard behavior when the attach target doesn't exist).
+- **Migration runner strategy**: `rusqlite_migration` operates on a single connection but does not have first-class support for attached databases. The design splits migrations into two directories: `pattern_db/migrations/memory/` and `pattern_db/migrations/messages/`. At `ConstellationDb::open`, the memory migrations run against the main connection, then the messages migrations run via a temporarily-opened direct connection to `messages.db` (outside the pool). Both migration runs are complete before the pool hands out any connections.
+- sqlite-vec extensions loaded via `load_extension_enable` apply to all attached databases on that connection, so vector indexes work in both `memory.db` and `messages.db` schemas.
 
 `MemoryStore` is sync-ified. 28 original methods consolidate to ~18:
 
@@ -260,11 +457,36 @@ MemoryStore::put_block(agent_id, label, content)
 
 Key properties:
 
-- **Per-doc parallelism**: N loaded docs = N sync_worker tasks. No central queue contention.
+- **Lazy spawn**: sync_worker is spawned on the first write to a doc, not at doc-load time. Docs loaded read-only (e.g., during context assembly) never pay task overhead until the first write arrives.
+- **Lifecycle tied to LoroDoc**: each sync_worker holds a cancel token owned by its doc; when `MemoryCache.drop_doc(label)` fires (cache eviction, project detach, explicit unload), the cancel token fires and the worker exits cleanly. No leaked tasks across attach/detach.
+- **Per-doc parallelism**: N actively-written docs = N sync_worker tasks. No central queue contention.
 - **Debounce at the subscriber**: rapid writes (streaming text updates, multiple committed fields) coalesce into a single file emission within 50ms. Loro's commit cadence provides the natural event boundary; the subscriber batches further.
+- **Bounded channels with backpressure**: each sync_worker's event channel has a bounded capacity (64-128). If writes outpace the worker, commits block briefly on channel send rather than causing unbounded memory growth — caller observes a slower write, not a silent backlog.
 - **Pool-borrow per work unit**: workers don't hold connections while idle between events.
 - **Idempotent**: on crash, restart emits current doc state. Loro is the truth; files are derived.
-- **Supervisor**: one supervisor per `MemoryCache` instance watches all sync_worker tasks. 30s heartbeat timeout → log ERROR, restart worker, increment `metrics::counter!("memory.sync_worker.restart")`. Bounded channels prevent unbounded growth on backpressure.
+- **Supervisor**: one supervisor per `MemoryCache` instance watches all sync_worker tasks. 30s heartbeat timeout → log ERROR, restart worker, increment `metrics::counter!("memory.sync_worker.restart")`. `metrics::gauge!("memory.sync_worker.active")` exposes active subscriber count for observability and scaling data.
+
+**Scale expectations**: pattern's typical workload is 10-50 active personas × 5-20 loaded blocks = 50-1000 potentially-subscribable docs. Per-task memory is ~2KB (tokio task + channel + debounce timer + doc Arc), giving total subscriber overhead of ~100KB-2MB. Task count well within tokio's operating range. A future pool-of-workers optimization is possible if observability data shows task count becoming meaningful, but it's not part of this plan.
+
+### LoroValue ↔ KDL serialization policy
+
+`LoroValue` variants do not all map trivially to KDL. Policy per variant:
+
+| LoroValue variant | KDL representation | Round-trip strategy |
+|---|---|---|
+| `Null` | KDL `null` keyword | exact |
+| `Bool` | `#true` / `#false` | exact |
+| `Double`, `I64` | KDL number | kdl crate preserves numeric representation |
+| `String` | quoted string | exact |
+| `List` | KDL list node with child entries | recursive |
+| `Map` | KDL map node with keyed entries | recursive |
+| `Binary` | typed annotation `(binary)"base64..."` | base64 encode/decode; verification spike in Phase 1 confirms pattern doesn't actually use Binary in memory blocks — if confirmed, converter rejects Binary loudly with `KdlConversionError::UnsupportedBinary` rather than silently base64-encoding |
+| `Container` (counter) | plain KDL number reflecting current counter value | on external edit: `increment_counter(new - old)` applied via loro's commutative increment semantics; concurrent agent writes merge correctly via CRDT |
+| `Container` (other: LoroMap, LoroList, LoroText) | typed annotation `(container)"🦜:cid:..."` carrying the ContainerID string | ContainerID preserved on round-trip; nested container state is opaque to external file edits (nested state only edited via pattern's own block APIs) |
+
+**Binary usage verification**: Phase 1 (extraction) includes an audit for `LoroValue::Binary` usage across existing `StructuredDocument` call sites. Expected outcome: no usage found, policy is "reject loudly." If usage is found, base64 serialization ships with the converter.
+
+**Counter semantics on external edit**: when a human edits `my_counter 42` to `my_counter 45` in a .kdl file, the file-ingest path computes the delta (3) and calls `increment_counter(3)` on the loro counter. This matches human intuition (they "set" a value, result is a relative increment) and preserves CRDT merge correctness for concurrent agent increments.
 
 ### Canonical file serialization
 
@@ -542,41 +764,56 @@ Nine phases. Sequential dependency chain with Phases 7 and 8 optionally parallel
 <!-- END_PHASE_1 -->
 
 <!-- START_PHASE_2 -->
-### Phase 2: Rusqlite migration + DB split + sqlite-vec spike
+### Phase 2: Rusqlite migration + DB split + sqlite-vec spike + BlockType cleanup
 
-**Goal:** pattern_db runs on rusqlite with pooled connections. `memory.db` and `messages.db` split via ATTACH. sqlite-vec loads cleanly under rusqlite's bundled SQLite. `BlockType::Archival` and `BlockType::Log` variants removed with call-site audit.
+**Goal:** pattern_db runs on rusqlite with pooled connections. `memory.db` and `messages.db` split via ATTACH. sqlite-vec loads cleanly under rusqlite's bundled SQLite. `BlockType::Archival` and `BlockType::Log` variants removed with explicit call-site handling.
 
-**Prerequisites (blocking):** sqlite-vec compatibility spike (Task 2a below). If spike fails, pause; research fallback (version-pin sqlite-vec, bundle our own, etc.) before proceeding.
+**Structured as three sub-tasks with their own verification gates. Implementor can pause between sub-tasks for review.**
 
-**Components:**
-- **Task 2a (blocking spike)**: `crates/pattern_db/tests/sqlite_vec_smoke.rs` — open in-memory db, create vec0 virtual table with 384-dim floats, insert 100 vectors, run KNN query, assert ordering. PASS = bundled SQLite 3.51.3 + sqlite-vec 0.1.7-alpha.2 compatible. FAIL = research fallback before further Phase 2 work.
-- Cargo dep swap: drop `sqlx`, `libsqlite3-sys` direct pin; add `rusqlite 0.39` with `bundled-full` + `load_extension` + `jiff` + `serde_json` features; add `r2d2` + `r2d2-sqlite`; add `rusqlite_migration 1.0`
-- `crates/pattern_db/src/connection.rs`: `ConstellationDb` rewrite with `r2d2::Pool`, `init_connection` hook (WAL, pragmas, sqlite-vec load, messages.db ATTACH), `dedicated_connection()` for eval worker
-- Migration runner: use existing `crates/pattern_db/migrations/*.sql` files (rename if `rusqlite_migration` format requires)
-- Port ~339 queries across `queries/*.rs` and `fts.rs` / `vector.rs` / `search.rs` — each query moves from `sqlx::query!` / `sqlx::query_as!` to rusqlite statement + `from_row` inherent method on the row struct
-- `FromSql` / `ToSql` impls for domain scalar types (`BlockType`, `BlockPermission`, `JsonValue` columns)
-- Port 3 explicit transaction sites in `queries/memory.rs`: `update_block_config`, `insert_memory_block_update`, `consolidate_checkpoint`
-- `BlockType` enum: remove `Archival` and `Log` variants; migrate all usage sites (schema update in a migration file; re-classify any lingering `BlockType::Log` blocks to `Working` tier with `BlockSchema::Log` schema, and move any `BlockType::Archival` blocks to archival entries)
-- Split `messages.db` into its own sqlite file (schema migration: extract messages + message batch tables from current db; data migration deferred to v2→v3 migrator plan — this plan ships the split on new data only)
+**Sub-task 2a (blocking spike): sqlite-vec compatibility validation**
+
+- Deliverable: `crates/pattern_db/tests/sqlite_vec_smoke.rs` — open in-memory db via rusqlite with `bundled-full` + `load_extension`, create vec0 virtual table with 384-dim floats, insert 100 test vectors, run KNN query, assert expected ordering on a known similarity structure
+- PASS = bundled SQLite 3.51.3 + sqlite-vec 0.1.7-alpha.2 compatible. Documented in `docs/notes/YYYY-MM-DD-sqlite-vec-spike.md`. Proceed to 2b.
+- FAIL = pause implementation. Research fallback: (a) pin sqlite-vec to a version compatible with rusqlite's bundled SQLite, (b) downgrade rusqlite to match sqlite-vec's tested SQLite version, or (c) build sqlite-vec against rusqlite's SQLite ourselves. Document decision before 2b begins.
+
+**Gate:** Task 2a PASS documented; spike test committed to the repo.
+
+**Sub-task 2b: Rusqlite migration + DB split + messages.db creation**
+
+- Cargo dep swap in `pattern_db/Cargo.toml`: drop `sqlx`, drop `libsqlite3-sys` direct pin; add `rusqlite 0.39` with features `["bundled-full", "load_extension", "jiff", "serde_json"]`; add `r2d2`; add `r2d2-sqlite`; add `rusqlite_migration 1.0`
+- `crates/pattern_db/src/connection.rs`: `ConstellationDb` rewrite with `r2d2::Pool<SqliteConnectionManager>`; `SqliteConnectionManager::with_init(init_connection)` applies pragmas + sqlite-vec load + `ATTACH DATABASE msg` per new connection; `dedicated_connection()` method returns a non-pool-managed `Connection` with the same init hook for the eval worker
+- Split migration directories: `crates/pattern_db/migrations/memory/` + `crates/pattern_db/migrations/messages/`. At `ConstellationDb::open`, memory migrations run against main connection, messages migrations run via a temporarily-opened direct connection to `messages.db`.
+- Port 236 queries across `queries/*.rs` and `fts.rs` / `vector.rs` — each moves from `sqlx::query!` / `sqlx::query_as!` to rusqlite statement + inherent `fn from_row(row) -> Result<Self>` on the row struct
+- `FromSql` / `ToSql` impls for domain scalar types (`BlockType`, `BlockPermission`, JSON-blob columns as `serde_json::Value`)
+- Port 3 explicit transaction sites in `queries/memory.rs` — `update_block_config`, `insert_memory_block_update`, `consolidate_checkpoint` — to `rusqlite::Transaction`
+- Messages extraction: create messages.db schema via fresh messages/ migrations. Existing data migration deferred to v2→v3 migrator plan — this sub-task ships the split on new data only
+
+**Gate:** `cargo check --workspace` passes; `cargo nextest run -p pattern-db` passes every existing integration test; FTS5 BM25 snapshot tests (insta) committed; vector KNN regression test passes; concurrent pool stress test passes; transaction atomicity tests pass.
+
+**Sub-task 2c: BlockType cleanup across call sites**
+
+Removing `BlockType::Archival` and `BlockType::Log` variants touches 12 files across 5 crates. Explicit handling per file group:
+
+- **`pattern_core/src/memory/types.rs`** — remove enum variants; update `Display`, `FromStr`, `From<pattern_db::MemoryBlockType>` impls
+- **`pattern_core/src/export/letta_convert.rs` + `export/tests.rs`** — update Letta interop conversions; legacy Letta exports with Archival/Log variants translate to ArchivalEntry insertion (for Archival) or Working-tier Log-schema (for Log)
+- **`pattern_runtime/src/session.rs` + `agent_loop.rs`** — remove match arms for removed variants; any code that special-cased Archival routes through archival entry APIs instead
+- **`pattern_runtime/src/sdk/requests/memory.rs`** — remove `BlockTypeReq::Archival` and `BlockTypeReq::Log` variants from the FromCore enum; corresponding Haskell GADT constructors removed from Pattern.Memory SDK module (agent programs referencing them fail to compile with clear diagnostic pointing to the migration)
+- **`pattern_runtime/src/sdk/handlers/memory.rs`** — update dispatch match; handlers for removed variants replaced with typed error surfacing to the agent
+- **`pattern_provider/src/compose/pseudo_messages.rs` + `compose/current_state.rs`** — these render blocks into the cache layout's segment 3. Current implementation filters or labels by tier. Updated rendering treats only `Core` and `Working` tiers; archival entries surface separately (already handled in a different code path; verify). **This is the highest-risk file set for this sub-task** — the compose pipeline's correctness directly affects cache behavior from the foundation plan.
+- **`pattern_cli/src/commands/builder/agent.rs` + `builder/group.rs` + `debug.rs`** — builder UI + debug commands currently expose tier selection; remove Archival + Log options; debug command may expose ArchivalEntry surface separately
+- Schema migration in `migrations/memory/`: ALTER the `memory_blocks` table's tier-classification column type; existing rows with `block_type = 'archival'` convert to ArchivalEntry rows (data migration); rows with `block_type = 'log'` convert to `block_type = 'working'` with `block_schema` updated to reflect Log schema
+
+**Gate:** `cargo check --workspace` produces zero errors or warnings referencing removed variants; migration round-trip test passes (old-schema test fixture migrates cleanly to new schema); compose pipeline snapshot tests unchanged (no rendering regressions in segment 3 output).
 
 **Dependencies:** Phase 1 (pattern_memory crate exists)
 
-**Done when:**
-- Task 2a spike passes; documented in a note file alongside the design plan
-- `cargo check --workspace` passes
-- `cargo nextest run -p pattern-db` passes every pattern_db integration test (regression proof of the port)
-- FTS5 BM25 snapshot tests (insta) land, capturing scoring output for a representative corpus
-- Vector KNN regression test passes against a known similarity structure
-- Concurrent pool stress test: 20 concurrent `spawn_blocking` calls make queries without deadlock or contention-related failures
-- Transaction atomicity tests: intentionally failing a mid-transaction query leaves the database in the pre-transaction state
-- `BlockType` enum has only `Core` + `Working` variants; `cargo check --workspace` confirms no lingering `Archival` or `Log` variant references
-- Covers: `v3-memory-rework.AC2.*`, `v3-memory-rework.AC3.*`
+**Done when:** all three sub-task gates pass. Covers: `v3-memory-rework.AC2.*`, `v3-memory-rework.AC3.*`
 <!-- END_PHASE_2 -->
 
 <!-- START_PHASE_3 -->
 ### Phase 3: MemoryStore sync + surface audit + eval worker simplification + async callsite migration
 
-**Goal:** `MemoryStore` is sync, consolidated down to ~18 methods. Eval worker runs on a plain OS thread. Async callsites use `spawn_blocking` only for DB ops. Session::step's internal path no longer uses `block_on`.
+**Goal:** `MemoryStore` is sync, consolidated down to 18 methods. Eval worker runs on a plain OS thread. Async callsites use `spawn_blocking` only for DB ops. Session::step's internal path no longer uses `block_on`.
 
 **Components:**
 - Desync `MemoryStore` trait: remove `#[async_trait]`, change all 28 methods to `fn` returning `MemoryResult<T>` directly
@@ -590,8 +827,10 @@ Nine phases. Sequential dependency chain with Phases 7 and 8 optionally parallel
 - `MemoryCache` impl updated to match new sync signatures; all internal `sqlx::query*` calls shift to rusqlite (inherited from Phase 2)
 - `pattern_runtime::agent_loop::eval_worker`: drop per-session tokio runtime; worker runs as `std::thread::spawn` with `std::sync::mpsc::channel` for requests; replies via `tokio::sync::oneshot`
 - `pattern_runtime::agent_loop::orchestrate::drive_step` (or `Session::step` impl): send request via sync mpsc, await reply via oneshot. Caller-visible async signature unchanged.
-- All 22 `Handle::current().block_on` sites in `handlers/memory.rs`, `handlers/recall.rs`, `handlers/search.rs`, `handlers/scope.rs`: replaced with direct sync calls
-- Async callsite updates: `pattern_cli` commands (~40-50 sites) wrap `MemoryStore` calls in `tokio::task::spawn_blocking`. Non-DB sync ops (cache metadata, handle validation) call directly.
+- Eliminate `Handle::current().block_on` in MemoryStore-backed handlers: `handlers/memory.rs` (~8-9 pairs), `handlers/recall.rs` (~3 pairs), `handlers/search.rs` (~1-2 pairs). Call sites replaced with direct sync calls against the sync `MemoryStore` trait.
+- **`handlers/message.rs` block_on sites are NOT addressed in this phase**: they dispatch to the async `MessageRouter` (network I/O to endpoints), which stays async. Document this explicitly in the phase commit message so reviewers don't mistake it for a missed conversion.
+- `handlers/scope.rs`: currently has zero `block_on` sites; verified during Phase 2 BlockType audit. No changes required in this file from the sync-ification work.
+- Async callsite updates: `pattern_cli` commands wrap `MemoryStore` calls in `tokio::task::spawn_blocking`. Non-DB sync ops (cache metadata, handle validation) call directly.
 - `pattern_runtime` turn-boundary code: similar `spawn_blocking` wrapping
 
 **Dependencies:** Phase 2 (rusqlite in place, MemoryStore behavior preserved)
@@ -673,7 +912,25 @@ Nine phases. Sequential dependency chain with Phases 7 and 8 optionally parallel
 - Mode C: pattern-jj at `<mount>/.jj/`; host git gitignore for `.jj/`; documented `jj workspace update-stale` reconciliation
 - `pattern_memory/src/modes/attach.rs` — `attach(path: &Path) -> Result<MountedStore>`: walk upward for `.pattern/shared/.pattern.kdl`, parse config, open `memory.db` + `messages.db`, spawn subscribers, return mounted store handle
 - Minimum CLI entry points (in `pattern_memory/bin/` or extended into `pattern-test-cli`): `pattern mount init <mode>` + `pattern attach <path>` sufficient for manual testing + the smoke-test in Phase 9
-- **Task 6a (spike)**: Mode C validation spike — scripted test that initializes host git repo, inits pattern-jj at `.pattern/shared/.jj/`, runs 50 interleaved operations, checks for state divergence. Pass criteria: no user-visible corruption; gitignore + `update-stale` handle typical workflows without manual intervention.
+- **Task 6a (spike)**: Mode C validation spike with explicit operation taxonomy.
+
+  **Operation taxonomy** (50 interleaved ops drawn from these categories):
+  - Host git operations: `git add`, `git commit`, `git checkout <branch>`, `git merge`, `git stash pop`
+  - Pattern memory writes (agent-driven): block put, block metadata update, archival insert
+  - Pattern jj operations: `jj commit`, `jj bookmark set`, `jj log`, `jj workspace update-stale`
+  - Pattern attach/detach: mount a project, write some blocks, detach, re-attach
+  - External .md edits (simulating human editing outside pattern)
+
+  **Divergence check procedure:**
+  - After each host git operation: verify pattern-jj can run `jj log` without errors and sees an up-to-date view (after `jj workspace update-stale` where needed)
+  - After each pattern jj commit: verify host git status is clean with respect to tracked files (pattern-jj's `.jj/` is gitignored)
+  - At checkpoints: compare `memory.db` content + emitted block files against loro's current state — all three must agree
+  - At attach/detach boundaries: verify no leaked subscriber tasks + no stale locks
+  - Final check: run `git log --all --oneline` and `jj log` on their respective views; verify both histories are internally consistent (no orphaned commits, no corrupt refs)
+
+  **Pass criteria**: zero divergence events across all 50 operations; every host git operation followed by one `jj workspace update-stale` produces a clean consistent state; no manual intervention required for any standard developer workflow (pull, merge, checkout, commit).
+
+  **Fail criteria**: any corruption observed; any state divergence that requires manual repair; any scenario where gitignore alone is insufficient and additional config is required by the user.
 
 **Dependencies:** Phase 5 (jj adapter exists for Modes B/C)
 
@@ -696,6 +953,17 @@ Nine phases. Sequential dependency chain with Phases 7 and 8 optionally parallel
 - `pattern_memory/src/backup/snapshot.rs` — uses rusqlite's `backup` feature to atomically copy messages.db to `~/.pattern/backups/<project-id>/messages/<timestamp>.sqlite`
 - `pattern_memory/src/backup/rotation.rs` — policy engine: keep last N, thin hourly-for-day / daily-for-month / monthly-forever
 - `pattern_memory/src/backup/restore.rs` — pre-restore auto-snapshot as rollback safety net; replace messages.db atomically; verify restored db opens cleanly + pragmas apply
+- `pattern_memory/src/backup/scheduler.rs` — tokio task spawned by `MountedStore::new` and tied to mount lifecycle (dropped when mount detaches); runs a scheduling loop
+
+**Scheduler behavior specification:**
+
+- **Scheduler lives in `MountedStore`** (the attached store returned from `attach(path)`); its task cancel-token is owned by the mount, tied to the mount's lifecycle
+- **"Active use" trigger** defined concretely as: at least one message has been written to messages.db in the current scheduling interval
+- **Interval check**: scheduler wakes every `snapshot_interval` (default 1 hour, configurable via `.pattern.kdl`). On wake: query messages.db for "any row added since last snapshot timestamp?" — if yes, create snapshot + apply rotation; if no, skip silently
+- **Startup behavior**: on mount attach, check if last snapshot is older than `snapshot_interval`; if yes, take a snapshot immediately; this catches the case where pattern was offline for a long period
+- **Crash behavior**: between-snapshot crashes are acceptable — messages.db is still the live authoritative store; worst case is losing the last interval's increment before it was snapshotted. Snapshot creation is atomic (sqlite backup API guarantees consistent snapshot even while writers active); no cross-file coordination required.
+- **Manual trigger**: `pattern backup create` CLI invocation runs a snapshot out-of-band immediately; resets the scheduler's last-snapshot-time
+
 - Config integration: `.pattern.kdl` `backup` section for rotation policy + snapshot interval
 - CLI surface: `pattern backup create` + `pattern backup restore <timestamp>` + `pattern backup list` (in `pattern-test-cli` or a new minimum-viable binary)
 
@@ -716,25 +984,28 @@ Nine phases. Sequential dependency chain with Phases 7 and 8 optionally parallel
 
 **Goal:** MemoryScope wrapper routes reads/writes per isolate_from_persona policy. Project-scoped personas load from mount. `<mount>/lib/` Haskell modules importable by agents. Pattern.Diagnostics effect surfaces compile issues.
 
-**Components:**
-- `pattern_memory/src/scope.rs` — `MemoryScope<S: MemoryStore>` wrapper + `ScopeBinding` + `IsolatePolicy` enum. Policy enforcement per read/write call.
-- `pattern_memory/src/persona.rs` — load + validate persona configs from both `~/.pattern/personas/` (global) and `<mount>/personas/` (project-scoped)
+**Structured as two sub-tasks with their own gates. Sub-task 8a is self-contained (MemoryScope is a pure data-transformation layer); sub-task 8b layers on top of an orthogonal concern (agent-program compile path). Bugs in 8b won't block 8a from landing.**
+
+**Sub-task 8a: MemoryScope + isolate_from_persona**
+
+- `pattern_memory/src/scope.rs` — `MemoryScope<S: MemoryStore>` wrapper + `ScopeBinding` + `IsolatePolicy` enum
+- Policy enforcement per read/write call; `MemoryScope` is a pure data-transformation over the underlying MemoryStore
+- `ctx.memory.write_to_persona` agent SDK effect: explicit persona write-back, errors unless `isolate_policy == IsolatePolicy::None`; new handler dispatch in `pattern_runtime/src/sdk/handlers/memory.rs`
+
+**Gate:** MemoryScope policy tests pass for all three `IsolatePolicy` values (None / CoreOnly / Full) across read + write scenarios; `write_to_persona` authorization test passes (succeeds with None, errors with CoreOnly and Full).
+
+**Sub-task 8b: Project-scoped personas + project utilities + Pattern.Diagnostics**
+
+- `pattern_memory/src/persona.rs` — load + validate persona configs from both `~/.pattern/personas/` (global) and `<mount>/personas/` (project-scoped); project-scoped takes precedence within a mount
 - `pattern_runtime/src/sdk/location.rs` modifications: `resolve_import_paths(sdk_location, project_mount) -> Vec<PathBuf>` extends the Tidepool import search path with `<mount>/lib/` when present
 - Lib compile isolation: wrap each `lib/*.hs` module's compile attempt; broken modules excluded from search path; diagnostics captured into session state
 - `pattern_runtime/src/sdk/requests/diagnostics.rs` + `pattern_runtime/src/sdk/handlers/diagnostics.rs` — new `Pattern.Diagnostics` effect; `diagnostics :: Effect [Diagnostic]` returns accumulated session diagnostics
-- `ctx.memory.write_to_persona` agent SDK effect: explicit persona write-back, errors unless `isolate_policy == IsolatePolicy::None`
+
+**Gate:** Project-scoped persona load test passes (place `@reviewer.kdl` in mount, attach, invoke → correct persona instantiated); global vs project-scoped precedence test passes; project-lib compile test passes (broken + working modules coexist; session opens; diagnostics queryable); import-broken-lib-fails test passes with clear diagnostic.
 
 **Dependencies:** Phase 6 (mount structure known)
 
-**Done when:**
-- `cargo check --workspace` passes
-- MemoryScope policy tests: all three `IsolatePolicy` values exercised across read/write scenarios; expected routing + denial behavior verified
-- Project-scoped persona load test: place `@reviewer.kdl` in a mount, attach, invoke `@reviewer` → correct persona instantiated
-- Global vs project-scoped persona resolution precedence test
-- Project-lib compile test: place a working `Project.Foo.hs` in `<mount>/lib/` + a broken `Project.Bar.hs`; verify session opens with Foo importable, Bar excluded, diagnostics effect returns Bar's compile error
-- Import-broken-lib-fails test: main program imports `Project.Bar` (broken), session open fails with clear 'module not found / had errors' diagnostic
-- `ctx.memory.write_to_persona` authorization test: effect succeeds with `None` policy, errors with `CoreOnly` and `Full`
-- Covers: `v3-memory-rework.AC12.*`, `v3-memory-rework.AC13.*`, `v3-memory-rework.AC14.*`
+**Done when:** both sub-task gates pass. Covers: `v3-memory-rework.AC12.*`, `v3-memory-rework.AC13.*`, `v3-memory-rework.AC14.*`
 <!-- END_PHASE_8 -->
 
 <!-- START_PHASE_9 -->
@@ -812,9 +1083,9 @@ Minimum supported jj version documented in `JjAdapter::MIN_SUPPORTED_VERSION`. V
 
 The `kdl` crate's maintainer (zkat) has been publicly hostile to AI-assisted development. She has not (as of this plan's writing) taken hostile actions against downstream users, but the risk is non-zero. Pattern's mitigation: maintain a fork path. If the maintainer ever introduces hostile licensing changes or active deprecation, pattern forks the crate at the last safe version and continues — following the same pattern established with the local `miette` fork. This is a contingency, not a plan; the current crate is used directly.
 
-**pattern_macros deletion:**
+**pattern_macros absent from workspace:**
 
-`pattern_macros` was retired pre-phase. No longer in the workspace. The from_row pattern for rusqlite row structs is intentionally hand-written (explicit, auditable, no proc-macro overhead). If the hand-written boilerplate ever becomes painful at scale, a derive can be added in a future focused pass — at which point the shape will be informed by real usage data.
+`pattern_macros` is not in the workspace as of plan-writing — this is status quo, not a divergence introduced by this plan. The from_row pattern for rusqlite row structs is intentionally hand-written (explicit, auditable, no proc-macro overhead). If the hand-written boilerplate ever becomes painful at scale, a derive crate can be added in a future focused pass — at which point the shape will be informed by real usage data.
 
 **Intermediate code-state policy (carryover from foundation plan):**
 
@@ -822,4 +1093,24 @@ Fate markers (`// MOVING TO:`, `// REPLACED BY:`, `// MOVING WITHIN CRATE:`) app
 
 **Cross-phase dependency audit:**
 
-Phase 1's extraction surfaces all `BlockType::Archival` and `BlockType::Log` usage sites; Phase 2 resolves them via schema migration + variant removal. Phases 4, 5, 6 build on each other's outputs in a clear chain. Phases 7 and 8 are nominally parallelizable but sequenced serially for review simplicity.
+Phase 1's extraction surfaces all `BlockType::Archival` and `BlockType::Log` usage sites (12 files across 5 crates identified in pre-plan investigation). Phase 2's sub-task 2c resolves them via schema migration + variant removal with explicit call-site handling, with particular care for the `pattern_provider::compose` pipeline's tier-filtered rendering. Phases 4, 5, 6 build on each other's outputs in a clear chain. Phases 7 and 8 are nominally parallelizable but sequenced serially for review simplicity.
+
+**Subscriber task scaling posture:**
+
+The per-doc subscriber model ships with lazy-spawn + lifecycle-tied-to-LoroDoc semantics, bounded channels with backpressure, and observability metrics (`memory.sync_worker.active` gauge). Expected scale (50-1000 subscribable docs) is well within tokio's operating range. A pool-of-workers refactor is explicitly deferred as a future optimization — only to be considered if observability data shows task count becoming a meaningful cost. Do not pre-optimize.
+
+**delete_archival SDK removal migration:**
+
+Removing `Pattern.Memory.Archive.delete` from the agent-facing SDK has an explicit migration story: the Haskell symbol is removed in Phase 3. Existing agent programs that invoke it fail at Tidepool compile time with a clear 'symbol not found' diagnostic. This is intentional — surfacing to the agent is preferable to silent no-op or runtime error. The corresponding Rust-side `RecallReq::Delete` variant is removed from the GADT bridge (verified via `trybuild` compile-fail test). Human operators continue to have access via `MemoryStore::delete_archival` through CLI tools (`pattern-test-cli` or the eventual human-ops TUI).
+
+**Naming: sync_worker vs eval worker:**
+
+These are distinct components with superficially similar names. Clarified here for implementor clarity:
+- **eval worker** (singular, per-session): the OS thread in `pattern_runtime::agent_loop::eval_worker` that runs Tidepool's Haskell evaluator. Sync thread, `std::sync::mpsc` intake, no tokio runtime. Runs agent turn-loops.
+- **sync_worker** (plural, per-LoroDoc): tokio tasks in `pattern_memory::subscriber` that receive loro commit events, debounce, and emit canonical files + index updates. Async tasks, tokio channels, borrow from the r2d2 pool per work unit. Run storage sync.
+
+Commit messages and comments should prefer the full names (`eval worker` and `sync_worker`) to avoid confusion.
+
+**LoroValue `Binary` usage verification (Phase 1 sub-task):**
+
+Phase 1 includes a grep pass across all `StructuredDocument` call sites + schema templates for uses of `LoroValue::Binary`. Expected outcome: zero usage; the `Binary` variant is defined in loro but pattern memory blocks do not contain raw bytes. If confirmed, the KDL converter rejects `LoroValue::Binary` loudly with `KdlConversionError::UnsupportedBinary` instead of silently base64-encoding (prevents introducing binary-in-block usage accidentally). If usage is found, base64 serialization ships with the converter.
