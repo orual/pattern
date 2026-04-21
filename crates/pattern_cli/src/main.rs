@@ -259,10 +259,7 @@ async fn run_tui() -> MietteResult<()> {
 
     // Try to connect to the daemon. Failing is normal (offline mode).
     let event_rx = match DaemonClient::connect().await {
-        Ok(client) => match client.subscribe_output("default".into()).await {
-            Ok(rx) => Some(rx),
-            Err(_) => None,
-        },
+        Ok(client) => client.subscribe_output("default".into()).await.ok(),
         Err(_) => None,
     };
 
