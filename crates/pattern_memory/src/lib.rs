@@ -16,12 +16,15 @@
 
 pub mod cache;
 pub mod fs;
+pub mod jj;
+pub mod modes;
+pub mod quiesce;
 pub mod reembed;
 pub mod schema_templates;
 pub mod sharing;
 pub mod subscriber;
 mod types_internal;
 
-pub use cache::MemoryCache;
+pub use cache::{MemoryCache, PauseOutcome};
 pub use schema_templates::templates;
 pub use sharing::{CONSTELLATION_OWNER, SharedBlockManager};

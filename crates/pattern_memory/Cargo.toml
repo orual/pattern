@@ -11,6 +11,10 @@ description = "Memory subsystem implementation for Pattern (MemoryCache, Structu
 pattern-core = { path = "../pattern_core" }
 pattern-db = { path = "../pattern_db" }
 
+# jj CLI adapter
+which = { workspace = true }
+semver = "1"
+
 # Runtime
 tokio = { workspace = true }
 async-trait = { workspace = true }
@@ -35,6 +39,7 @@ notify-debouncer-full = "0.5"
 
 # Errors + logging
 thiserror = { workspace = true }
+miette = { workspace = true }
 tracing = { workspace = true }
 
 # Utilities inherited from the original pattern_core::memory surface

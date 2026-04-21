@@ -5709,11 +5709,13 @@ dependencies = [
  "kdl",
  "loro",
  "metrics",
+ "miette",
  "notify 8.2.0",
  "notify-debouncer-full",
  "pattern-core",
  "pattern-db",
  "proptest",
+ "semver",
  "serde",
  "serde_json",
  "tempfile",
@@ -5722,6 +5724,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+ "which 8.0.2",
 ]
 
 [[package]]

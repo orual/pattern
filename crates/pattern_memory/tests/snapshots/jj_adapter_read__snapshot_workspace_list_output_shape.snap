@@ -1,0 +1,11 @@
+---
+source: crates/pattern_memory/tests/jj_adapter_read.rs
+assertion_line: 386
+expression: normalized
+---
+[
+    NormalizedWorkspace {
+        name: "default",
+        target_commit_id: "<commit_id>",
+    },
+]

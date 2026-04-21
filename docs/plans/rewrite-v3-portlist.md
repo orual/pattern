@@ -96,6 +96,22 @@ Cruft (code with no fate marker, `unimplemented!()`/`todo!()` without phase/AC r
 - Dependency graph: `pattern_memory -> pattern_core + pattern_db`; reverse-dep
   guard is `crates/pattern_core/tests/no_pattern_memory_dep.rs`.
 
+### jj CLI adapter + quiesce + StorageMode (Phase 5 — completed 2026-04-20)
+
+- `pattern_memory::modes::StorageMode` — enum skeleton (A/B/C). Phase 6 adds
+  per-mode path resolution + `.pattern.kdl` config parsing + attach/detach logic.
+- `pattern_memory::quiesce::quiesce()` — universal pre-commit step (all modes):
+  drain subscribers, WAL checkpoint `memory.db`, fsync emitted canonical files.
+  Callers: Mode A host VCS integrations; Modes B/C via `JjAdapter::commit` (Phase 6).
+- `MemoryCache::wal_checkpoint()` — delegates to `ConstellationDb::checkpoint()`
+  which runs `PRAGMA wal_checkpoint(TRUNCATE)`.
+- CI canary added to `.github/workflows/ci.yml`: installs jj 0.40.0 and runs
+  `cargo nextest run -p pattern-memory --test 'jj_adapter_*'` on every CI run.
+- Decision: CLI over jj-lib for on-disk format ownership (Mode A+C format-drift
+  safety). See `docs/implementation-plans/2026-04-19-v3-memory-rework/phase_05.md`.
+- Packaging: non-NixOS distribution bundles must ship the `jj` binary alongside
+  `tidepool-extract`. Tracked as a follow-up in the packaging workstream.
+
 ### Recall SDK surface shrink (Phase 3 — completed 2026-04-19)
 
 - Removed `RecallReq::Delete` variant from the agent-facing SDK

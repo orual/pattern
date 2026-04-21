@@ -91,6 +91,15 @@ pub struct MemoryCache {
     supervisor_task: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// Outcome of [`MemoryCache::pause_subscribers`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PauseOutcome {
+    /// Number of workers that successfully flushed and parked.
+    pub paused: usize,
+    /// Number of workers that did not park within the timeout.
+    pub timed_out: usize,
+}
+
 impl MemoryCache {
     /// Create a new memory cache without embedding support.
     pub fn new(db: Arc<ConstellationDb>) -> Self {
@@ -535,6 +544,155 @@ impl MemoryCache {
             self.blocks.remove(&block_id);
         }
         Ok(())
+    }
+
+    /// Cancel and join all active sync subscribers, draining in-flight work.
+    ///
+    /// Used by [`quiesce`] before WAL checkpoint + fsync to ensure all pending
+    /// file writes have landed. Blocks are NOT removed from the cache — only
+    /// their subscriber workers are stopped. A subsequent `persist()` call will
+    /// lazily re-spawn subscribers if `mount_path` is configured.
+    ///
+    /// Each worker exits within one debounce window (~50ms) after its cancel
+    /// token fires, so the total drain time is bounded by `max(worker_count) *
+    /// 50ms` in the common case (threads join concurrently after all tokens
+    /// are cancelled).
+    pub fn drain_subscribers(&self) {
+        // Phase 1: cancel all tokens without joining yet. This lets workers
+        // begin their shutdown concurrently rather than sequentially.
+        let block_ids: Vec<String> = self.subscribers.iter().map(|e| e.key().clone()).collect();
+        for block_id in &block_ids {
+            if let Some(entry) = self.subscribers.get(block_id) {
+                entry.cancel.cancel();
+            }
+        }
+
+        // Phase 2: remove and join each worker thread.
+        for block_id in &block_ids {
+            if let Some((_, handle)) = self.subscribers.remove(block_id)
+                && let Err(e) = handle.thread.join()
+            {
+                tracing::warn!(
+                    block_id = %block_id,
+                    "subscriber thread panicked during drain: {e:?}"
+                );
+            }
+        }
+
+        tracing::debug!(count = block_ids.len(), "drained all subscribers");
+    }
+
+    /// Flush all pending subscriber work and pause workers.
+    ///
+    /// Each worker: drains its channel, does a final render, then parks.
+    /// Returns when all workers have confirmed they're parked (or the
+    /// timeout expires).
+    ///
+    /// Subscriptions and channels remain alive — writes during the pause
+    /// accumulate in their respective docs (memory_doc for agent writes,
+    /// disk_doc for external edits via watcher) and are reconciled on
+    /// resume via version-vector diff.
+    pub fn pause_subscribers(&self, timeout: std::time::Duration) -> PauseOutcome {
+        let block_ids: Vec<String> = self.subscribers.iter().map(|e| e.key().clone()).collect();
+
+        if block_ids.is_empty() {
+            return PauseOutcome {
+                paused: 0,
+                timed_out: 0,
+            };
+        }
+
+        // Phase 1: set the paused flag on all subscribers. Workers will
+        // enter their pause loop on the next iteration.
+        for block_id in &block_ids {
+            if let Some(entry) = self.subscribers.get(block_id) {
+                entry
+                    .paused
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+
+        // Phase 2: wait for each worker to signal pause_complete.
+        let deadline = std::time::Instant::now() + timeout;
+        let mut paused_count: usize = 0;
+        let mut timed_out_count: usize = 0;
+
+        for block_id in &block_ids {
+            let Some(entry) = self.subscribers.get(block_id) else {
+                continue;
+            };
+            let (lock, cvar) = entry.pause_complete.as_ref();
+            let mut complete = lock.lock().unwrap();
+            while !*complete {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    tracing::warn!(
+                        block_id = %block_id,
+                        "pause_subscribers: worker did not park within timeout"
+                    );
+                    timed_out_count += 1;
+                    break;
+                }
+                let (guard, result) = cvar.wait_timeout(complete, remaining).unwrap();
+                complete = guard;
+                if result.timed_out() && !*complete {
+                    tracing::warn!(
+                        block_id = %block_id,
+                        "pause_subscribers: worker did not park within timeout"
+                    );
+                    timed_out_count += 1;
+                    break;
+                }
+            }
+            if *complete {
+                paused_count += 1;
+            }
+        }
+
+        tracing::debug!(
+            paused = paused_count,
+            timed_out = timed_out_count,
+            "pause_subscribers complete"
+        );
+
+        PauseOutcome {
+            paused: paused_count,
+            timed_out: timed_out_count,
+        }
+    }
+
+    /// Resume all paused subscribers.
+    ///
+    /// Each worker: reconciles any writes that happened during the pause
+    /// via version-vector diff, does one render, then resumes normal
+    /// operation. Returns immediately — workers wake up and reconcile
+    /// asynchronously.
+    pub fn resume_subscribers(&self) {
+        for entry in self.subscribers.iter() {
+            let handle = entry.value();
+            let (lock, cvar) = handle.resume_signal.as_ref();
+            let mut resumed = lock.lock().unwrap();
+            *resumed = true;
+            cvar.notify_one();
+        }
+
+        tracing::debug!("resume_subscribers: all workers signaled");
+    }
+
+    /// Checkpoint the WAL file on the backing `memory.db`.
+    ///
+    /// Runs `PRAGMA wal_checkpoint(TRUNCATE)` which forces all WAL frames to be
+    /// written back into the main database file, then truncates the WAL to zero
+    /// bytes. After this call the on-disk `memory.db` is canonical and can be
+    /// committed by the host VCS without any WAL frames outstanding.
+    ///
+    /// Called by [`quiesce`](crate::quiesce) after [`pause_subscribers`](Self::pause_subscribers)
+    /// to ensure the DB is in a fully-flushed state before a VCS commit. Does not
+    /// touch `messages.db` — messages are not VCS-tracked.
+    pub fn wal_checkpoint(&self) -> MemoryResult<()> {
+        self.db
+            .checkpoint()
+            .map_err(|e| MemoryError::Other(format!("wal_checkpoint failed: {e}")))
     }
 
     /// Spawn a sync subscriber for the given block if one isn't already running.
@@ -1006,18 +1164,28 @@ pub(crate) fn spawn_subscriber_for_block(
     let disk_doc = Arc::new(doc.inner().fork());
     let last_written_mtime: Arc<Mutex<Option<SystemTime>>> = Arc::new(Mutex::new(None));
 
+    // Shared pause state for flush-pause-resume quiesce.
+    let paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let pause_complete = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+    let resume_signal = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+
     // Wire subscribe_local_update on memory_doc: when the agent writes
     // to memory_doc, capture the raw Loro update bytes and forward them
     // to the worker thread for import into disk_doc and file rendering.
+    // When paused, skip try_send — writes accumulate in memory_doc and
+    // are reconciled via version-vector diff on resume.
     let block_id_owned = block_id.to_string();
     let tx_clone = event_tx.clone();
+    let paused_flag = Arc::clone(&paused);
     let subscription = doc
         .inner()
         .subscribe_local_update(Box::new(move |update_bytes| {
-            let _ = tx_clone.try_send(crate::subscriber::event::CommitEvent {
-                block_id: block_id_owned.clone(),
-                update_bytes: update_bytes.clone(),
-            });
+            if !paused_flag.load(std::sync::atomic::Ordering::Acquire) {
+                let _ = tx_clone.try_send(crate::subscriber::event::CommitEvent {
+                    block_id: block_id_owned.clone(),
+                    update_bytes: update_bytes.clone(),
+                });
+            }
             true // Keep subscription active.
         }));
 
@@ -1034,6 +1202,9 @@ pub(crate) fn spawn_subscriber_for_block(
         disk_doc: Arc::clone(&disk_doc),
         doc: doc.clone(),
         last_written_mtime: Arc::clone(&last_written_mtime),
+        paused: Arc::clone(&paused),
+        pause_complete: Arc::clone(&pause_complete),
+        resume_signal: Arc::clone(&resume_signal),
     };
 
     let thread = match std::thread::Builder::new()
@@ -1066,6 +1237,9 @@ pub(crate) fn spawn_subscriber_for_block(
             _subscription: subscription,
             disk_doc,
             last_written_mtime,
+            paused,
+            pause_complete,
+            resume_signal,
         },
     );
 }

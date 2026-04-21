@@ -31,7 +31,8 @@ pub mod worker;
 
 pub use event::{CommitEvent, Heartbeat, ReembedRequest};
 
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::SystemTime;
 
@@ -63,4 +64,14 @@ pub struct SubscriberHandle {
     /// suppression in the watcher. Updated by the worker after each
     /// successful atomic_write.
     pub last_written_mtime: Arc<Mutex<Option<SystemTime>>>,
+    /// When true, the `subscribe_local_update` callback skips `try_send` and
+    /// the worker enters its pause loop. Set by `pause_subscribers`, cleared
+    /// by the worker on resume.
+    pub paused: Arc<AtomicBool>,
+    /// Worker sets the inner bool to true and notifies when it has finished
+    /// flushing and is fully parked.
+    pub pause_complete: Arc<(Mutex<bool>, Condvar)>,
+    /// `resume_subscribers` sets the inner bool to true and notifies to wake
+    /// the parked worker.
+    pub resume_signal: Arc<(Mutex<bool>, Condvar)>,
 }

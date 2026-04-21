@@ -1,0 +1,13 @@
+---
+source: crates/pattern_memory/tests/jj_adapter_read.rs
+assertion_line: 420
+expression: normalized
+---
+[
+    NormalizedBookmark {
+        name: "snapshot-bookmark",
+        target: [
+            "<commit_id>",
+        ],
+    },
+]

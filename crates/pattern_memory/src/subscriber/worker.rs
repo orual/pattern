@@ -11,7 +11,8 @@
 //! 7. Sends a heartbeat to the supervisor.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use crossbeam_channel::Receiver;
@@ -144,6 +145,12 @@ pub(crate) struct WorkerConfig {
     /// successful atomic_write so the watcher can skip re-importing files
     /// we wrote ourselves.
     pub last_written_mtime: Arc<Mutex<Option<SystemTime>>>,
+    /// Shared pause flag — when true, the worker enters its pause loop.
+    pub paused: Arc<AtomicBool>,
+    /// Worker signals pause completion here (sets bool to true, notifies).
+    pub pause_complete: Arc<(Mutex<bool>, Condvar)>,
+    /// Worker waits on this for the resume signal from `resume_subscribers`.
+    pub resume_signal: Arc<(Mutex<bool>, Condvar)>,
 }
 
 /// Debounce window: accumulate events for this long before acting.
@@ -168,6 +175,9 @@ pub(crate) fn run_subscriber(config: WorkerConfig) {
         disk_doc,
         doc,
         last_written_mtime,
+        paused,
+        pause_complete,
+        resume_signal,
     } = config;
 
     let mut last_emitted_hash: Option<[u8; 32]> = None;
@@ -175,6 +185,29 @@ pub(crate) fn run_subscriber(config: WorkerConfig) {
     loop {
         if cancel.is_cancelled() {
             break;
+        }
+
+        // Check if we've been asked to pause (flush-pause-resume for quiesce).
+        if paused.load(Ordering::Acquire) {
+            handle_pause(
+                &block_id,
+                &schema,
+                &rx,
+                &disk_doc,
+                &doc,
+                &mount_path,
+                &last_written_mtime,
+                &db,
+                &reembed_tx,
+                &heartbeat_tx,
+                &paused,
+                &pause_complete,
+                &resume_signal,
+                &cancel,
+                &mut last_emitted_hash,
+            );
+            // After resume, continue the normal loop.
+            continue;
         }
 
         // Block waiting for an event or send a heartbeat on timeout.
@@ -317,6 +350,306 @@ pub(crate) fn run_subscriber(config: WorkerConfig) {
     }
 }
 
+/// Execute one full render cycle from disk_doc to disk: render canonical bytes,
+/// check hash, atomic_write, update mtime, FTS, re-embed, heartbeat.
+///
+/// Returns the new content hash (or the previous one if content was unchanged).
+/// Extracted from the main loop so `handle_pause` can reuse it without
+/// duplicating ~40 lines.
+#[allow(clippy::too_many_arguments)]
+fn render_cycle(
+    block_id: &str,
+    schema: &BlockSchema,
+    disk_doc: &LoroDoc,
+    doc: &StructuredDocument,
+    mount_path: &std::path::Path,
+    last_written_mtime: &Mutex<Option<SystemTime>>,
+    db: &ConstellationDb,
+    reembed_tx: &tokio::sync::mpsc::UnboundedSender<ReembedRequest>,
+    heartbeat_tx: &crossbeam_channel::Sender<Heartbeat>,
+    last_emitted_hash: &mut Option<[u8; 32]>,
+) {
+    let (ext, canonical_bytes) = match render_canonical_from_disk_doc(disk_doc, schema) {
+        Ok(pair) => pair,
+        Err(e) => {
+            metrics::counter!("memory.subscriber.render_failed").increment(1);
+            tracing::error!(
+                block_id = %block_id, error = %e,
+                "canonical render failed during render_cycle"
+            );
+            return;
+        }
+    };
+    let new_hash: [u8; 32] = blake3::hash(&canonical_bytes).into();
+
+    if Some(new_hash) == *last_emitted_hash {
+        let _ = heartbeat_tx.try_send(Heartbeat {
+            block_id: block_id.to_string(),
+            at: Instant::now(),
+        });
+        return;
+    }
+
+    let file_path = mount_path.join(format!("{}.{}", block_id, ext));
+    if let Err(e) = crate::fs::atomic_write(&file_path, &canonical_bytes) {
+        metrics::counter!("memory.subscriber.fs_write_failed").increment(1);
+        tracing::error!(path = ?file_path, error = %e, "atomic_write failed");
+        return;
+    }
+
+    if let Ok(metadata) = std::fs::metadata(&file_path)
+        && let Ok(mtime) = metadata.modified()
+        && let Ok(mut guard) = last_written_mtime.lock()
+    {
+        *guard = Some(mtime);
+    }
+
+    let preview = doc.render();
+    match db.get() {
+        Ok(conn) => {
+            let preview_str = if preview.is_empty() {
+                None
+            } else {
+                Some(preview.as_str())
+            };
+            if let Err(e) = pattern_db::queries::update_block_preview(&conn, block_id, preview_str)
+            {
+                metrics::counter!("memory.subscriber.fts_update_failed").increment(1);
+                tracing::error!(block_id = %block_id, error = %e, "FTS5 update failed");
+            }
+        }
+        Err(e) => {
+            metrics::counter!("memory.subscriber.pool_exhausted").increment(1);
+            tracing::error!(error = %e, "DB pool get failed");
+        }
+    }
+
+    let _ = reembed_tx.send(ReembedRequest {
+        block_id: block_id.to_string(),
+        canonical_bytes: canonical_bytes.clone(),
+        content_hash: new_hash,
+    });
+
+    *last_emitted_hash = Some(new_hash);
+
+    let _ = heartbeat_tx.try_send(Heartbeat {
+        block_id: block_id.to_string(),
+        at: Instant::now(),
+    });
+}
+
+/// Handle a pause request: flush in-flight work, render, park, then reconcile
+/// on resume.
+///
+/// This implements the flush-pause-resume model for quiesce. Instead of killing
+/// the worker (which drops subscriptions and creates a write-loss window), we:
+///
+/// 1. Drain the channel and import all pending updates into disk_doc.
+/// 2. Run one final render cycle so disk is fully up to date.
+/// 3. Record version vectors for both memory_doc and disk_doc.
+/// 4. Signal pause_complete so the caller knows we're parked.
+/// 5. Wait on resume_signal.
+/// 6. On resume: reconcile any writes that happened during the pause via
+///    version-vector diff, render once, then reset and return to normal loop.
+#[allow(clippy::too_many_arguments)]
+fn handle_pause(
+    block_id: &str,
+    schema: &BlockSchema,
+    rx: &Receiver<CommitEvent>,
+    disk_doc: &LoroDoc,
+    doc: &StructuredDocument,
+    mount_path: &std::path::Path,
+    last_written_mtime: &Mutex<Option<SystemTime>>,
+    db: &ConstellationDb,
+    reembed_tx: &tokio::sync::mpsc::UnboundedSender<ReembedRequest>,
+    heartbeat_tx: &crossbeam_channel::Sender<Heartbeat>,
+    paused: &AtomicBool,
+    pause_complete: &(Mutex<bool>, Condvar),
+    resume_signal: &(Mutex<bool>, Condvar),
+    cancel: &CancellationToken,
+    last_emitted_hash: &mut Option<[u8; 32]>,
+) {
+    tracing::debug!(block_id = %block_id, "entering pause: flushing in-flight work");
+
+    // Step 1: drain the channel completely, importing all pending updates.
+    while let Ok(ev) = rx.try_recv() {
+        if let Err(e) = disk_doc.import(&ev.update_bytes) {
+            tracing::warn!(
+                block_id = %block_id, error = %e,
+                "failed to import update bytes into disk_doc during pause flush"
+            );
+        }
+    }
+
+    // Between `paused=true` being set and this point, agent writes may have
+    // occurred that were captured in memory_doc (and thus in its oplog VV)
+    // but never reached the channel — the subscribe_local_update callback
+    // was suppressed during the race window. Sync them into disk_doc now so
+    // the VV snapshot below accurately reflects what disk_doc has received.
+    // Without this, the resume reconciliation sees these writes already in
+    // `pre_pause_memory_vv` and skips them, leaving disk_doc permanently
+    // behind.
+    let disk_vv_pre_flush = disk_doc.oplog_vv();
+    match doc
+        .inner()
+        .export(loro::ExportMode::updates(&disk_vv_pre_flush))
+    {
+        Ok(bytes) => {
+            if !bytes.is_empty()
+                && let Err(e) = disk_doc.import(&bytes)
+            {
+                tracing::warn!(
+                    block_id = %block_id, error = %e,
+                    "failed to sync memory_doc to disk_doc during pause flush"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                block_id = %block_id, error = %e,
+                "failed to export memory_doc updates during pause flush"
+            );
+        }
+    }
+
+    // Step 2: one final render cycle.
+    render_cycle(
+        block_id,
+        schema,
+        disk_doc,
+        doc,
+        mount_path,
+        last_written_mtime,
+        db,
+        reembed_tx,
+        heartbeat_tx,
+        last_emitted_hash,
+    );
+
+    // Step 3: record version vectors for reconciliation on resume.
+    // memory_doc vv: tells us what memory_doc knew at pause time — on resume
+    // we export memory_doc's updates since this vv to catch agent writes.
+    let pre_pause_memory_vv = doc.inner().oplog_vv();
+    // disk_doc vv: tells us what disk_doc knew at pause time — on resume
+    // we export disk_doc's updates since this vv to catch external edits
+    // that the watcher applied to disk_doc during the pause.
+    let pre_pause_disk_vv = disk_doc.oplog_vv();
+
+    // Step 4: signal pause completion.
+    {
+        let (lock, cvar) = pause_complete;
+        let mut complete = lock.lock().unwrap();
+        *complete = true;
+        cvar.notify_one();
+    }
+
+    tracing::debug!(block_id = %block_id, "paused — waiting for resume signal");
+
+    // Step 5: wait for resume (or cancellation).
+    {
+        let (lock, cvar) = resume_signal;
+        let mut resumed = lock.lock().unwrap();
+        // Wait with periodic cancel checks so the worker can still exit
+        // during a long pause (e.g. if the process is shutting down).
+        while !*resumed {
+            if cancel.is_cancelled() {
+                // Shutting down — reset state and return. The outer loop
+                // will break on the cancel check.
+                paused.store(false, Ordering::Release);
+                return;
+            }
+            let (guard, _timeout) = cvar
+                .wait_timeout(resumed, Duration::from_millis(100))
+                .unwrap();
+            resumed = guard;
+        }
+    }
+
+    tracing::debug!(block_id = %block_id, "resumed — reconciling writes from pause window");
+
+    // Step 6: reconcile.
+    // 6a: drain the channel completely and discard — these events are stale
+    // because the vv reconciliation below covers everything.
+    while rx.try_recv().is_ok() {}
+
+    // 6b: memory_doc → disk_doc: export memory_doc's updates since the
+    // pre-pause vv and import them into disk_doc. This catches any agent
+    // writes that happened while we were parked (the subscribe_local_update
+    // callback was suppressed, so those writes never reached the channel).
+    match doc
+        .inner()
+        .export(loro::ExportMode::updates(&pre_pause_memory_vv))
+    {
+        Ok(bytes) => {
+            if !bytes.is_empty()
+                && let Err(e) = disk_doc.import(&bytes)
+            {
+                tracing::warn!(
+                    block_id = %block_id, error = %e,
+                    "failed to import memory_doc updates into disk_doc on resume"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                block_id = %block_id, error = %e,
+                "failed to export memory_doc updates on resume"
+            );
+        }
+    }
+
+    // 6c: disk_doc → memory_doc: export disk_doc's updates since the
+    // pre-pause vv and import them into memory_doc. This catches external
+    // edits that the watcher applied to disk_doc while we were parked.
+    match disk_doc.export(loro::ExportMode::updates(&pre_pause_disk_vv)) {
+        Ok(bytes) => {
+            if !bytes.is_empty()
+                && let Err(e) = doc.inner().import(&bytes)
+            {
+                tracing::warn!(
+                    block_id = %block_id, error = %e,
+                    "failed to import disk_doc updates into memory_doc on resume"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                block_id = %block_id, error = %e,
+                "failed to export disk_doc updates on resume"
+            );
+        }
+    }
+
+    // 6d: one render cycle to commit the reconciled state to disk.
+    render_cycle(
+        block_id,
+        schema,
+        disk_doc,
+        doc,
+        mount_path,
+        last_written_mtime,
+        db,
+        reembed_tx,
+        heartbeat_tx,
+        last_emitted_hash,
+    );
+
+    // 6e: reset all pause state.
+    {
+        let (lock, _) = pause_complete;
+        let mut complete = lock.lock().unwrap();
+        *complete = false;
+    }
+    {
+        let (lock, _) = resume_signal;
+        let mut resumed = lock.lock().unwrap();
+        *resumed = false;
+    }
+    paused.store(false, Ordering::Release);
+
+    tracing::debug!(block_id = %block_id, "pause-resume cycle complete, returning to normal loop");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,6 +695,20 @@ mod tests {
         pattern_db::queries::create_block(&conn, &block).unwrap();
     }
 
+    /// Create default pause state for tests that don't exercise pause/resume.
+    #[allow(clippy::type_complexity)]
+    fn default_pause_state() -> (
+        Arc<AtomicBool>,
+        Arc<(Mutex<bool>, std::sync::Condvar)>,
+        Arc<(Mutex<bool>, std::sync::Condvar)>,
+    ) {
+        (
+            Arc::new(AtomicBool::new(false)),
+            Arc::new((Mutex::new(false), std::sync::Condvar::new())),
+            Arc::new((Mutex::new(false), std::sync::Condvar::new())),
+        )
+    }
+
     /// Run the subscriber with the given doc/schema, send update_bytes,
     /// wait for processing, and return the path to the emitted file.
     fn run_worker_and_get_file(
@@ -378,6 +725,7 @@ mod tests {
         let (hb_tx, _hb_rx) = crossbeam_channel::bounded(64);
         let disk_doc = Arc::new(doc.inner().fork());
         let last_written_mtime = Arc::new(Mutex::new(None));
+        let (paused, pause_complete, resume_signal) = default_pause_state();
 
         let cancel_clone = cancel.clone();
         let mount = Arc::new(dir.path().to_path_buf());
@@ -397,6 +745,9 @@ mod tests {
                 disk_doc,
                 doc,
                 last_written_mtime,
+                paused,
+                pause_complete,
+                resume_signal,
             });
         });
 
@@ -641,6 +992,7 @@ mod tests {
         let doc = StructuredDocument::new_text();
         let disk_doc = Arc::new(doc.inner().fork());
         let last_written_mtime = Arc::new(Mutex::new(None));
+        let (paused, pause_complete, resume_signal) = default_pause_state();
 
         let cancel_clone = cancel.clone();
         let handle = std::thread::spawn(move || {
@@ -656,6 +1008,9 @@ mod tests {
                 disk_doc,
                 doc,
                 last_written_mtime,
+                paused,
+                pause_complete,
+                resume_signal,
             });
         });
 
@@ -675,6 +1030,7 @@ mod tests {
         let doc = StructuredDocument::new_text();
         let disk_doc = Arc::new(doc.inner().fork());
         let last_written_mtime = Arc::new(Mutex::new(None));
+        let (paused, pause_complete, resume_signal) = default_pause_state();
 
         let handle = std::thread::spawn(move || {
             run_subscriber(WorkerConfig {
@@ -689,6 +1045,9 @@ mod tests {
                 disk_doc,
                 doc,
                 last_written_mtime,
+                paused,
+                pause_complete,
+                resume_signal,
             });
         });
 
@@ -750,6 +1109,7 @@ mod tests {
         let doc = StructuredDocument::new_text();
         let disk_doc = Arc::new(doc.inner().fork());
         let last_written_mtime = Arc::new(Mutex::new(None));
+        let (paused, pause_complete, resume_signal) = default_pause_state();
 
         // Capture the update bytes when we write to the memory_doc.
         let update_bytes = {
@@ -776,6 +1136,9 @@ mod tests {
                 disk_doc,
                 doc,
                 last_written_mtime,
+                paused,
+                pause_complete,
+                resume_signal,
             });
         });
 
@@ -858,6 +1221,7 @@ mod tests {
         let doc = StructuredDocument::new_text();
         let disk_doc = Arc::new(doc.inner().fork());
         let last_written_mtime = Arc::new(Mutex::new(None));
+        let (paused, pause_complete, resume_signal) = default_pause_state();
 
         // Capture the update bytes.
         let update_bytes = {
@@ -882,6 +1246,9 @@ mod tests {
                 disk_doc,
                 doc,
                 last_written_mtime,
+                paused,
+                pause_complete,
+                resume_signal,
             });
         });
 
@@ -1015,5 +1382,246 @@ mod tests {
             mem_content.contains("human"),
             "merged content should contain human's edit: {mem_content}"
         );
+    }
+
+    /// Test that writes during a pause window are reconciled on resume.
+    ///
+    /// This test properly clones the StructuredDocument before spawning the
+    /// worker so both the test and the worker share the same underlying LoroDoc.
+    ///
+    /// Sequence:
+    /// 1. Write "first" to memory_doc, send to worker, wait for file.
+    /// 2. Pause the worker.
+    /// 3. Write "second" to memory_doc (callback suppressed, no channel event).
+    /// 4. Resume the worker.
+    /// 5. Verify the emitted file contains "second" (reconciled via vv diff).
+    #[test]
+    fn pause_resume_reconciles_agent_writes_during_pause() {
+        let db = Arc::new(ConstellationDb::open_in_memory().unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        setup_db_block(&db, "pr_block", "agent_pr");
+
+        let doc = StructuredDocument::new_text();
+        // Clone before spawning — both test and worker share the same Arc<LoroDoc>.
+        let doc_clone = doc.clone();
+        let disk_doc = Arc::new(doc.inner().fork());
+
+        let (tx, rx) = crossbeam_channel::bounded(64);
+        let cancel = CancellationToken::new();
+        let (reembed_tx, _reembed_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (hb_tx, _hb_rx) = crossbeam_channel::bounded(64);
+        let last_written_mtime = Arc::new(Mutex::new(None));
+        let paused = Arc::new(AtomicBool::new(false));
+        let pause_complete = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let resume_signal_arc = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let mount = Arc::new(dir.path().to_path_buf());
+
+        // Write "first" and capture update bytes.
+        let vv0 = doc.inner().oplog_vv();
+        doc.set_text("first", true).unwrap();
+        let update1 = doc.inner().export(loro::ExportMode::updates(&vv0)).unwrap();
+
+        let cancel_clone = cancel.clone();
+        let mount_clone = Arc::clone(&mount);
+        let paused_worker = Arc::clone(&paused);
+        let pc_worker = Arc::clone(&pause_complete);
+        let rs_worker = Arc::clone(&resume_signal_arc);
+        let handle = std::thread::spawn(move || {
+            run_subscriber(WorkerConfig {
+                block_id: "pr_block".to_string(),
+                schema: BlockSchema::text(),
+                rx,
+                cancel: cancel_clone,
+                db,
+                reembed_tx,
+                heartbeat_tx: hb_tx,
+                mount_path: mount_clone,
+                disk_doc,
+                doc: doc_clone,
+                last_written_mtime,
+                paused: paused_worker,
+                pause_complete: pc_worker,
+                resume_signal: rs_worker,
+            });
+        });
+
+        // Send "first" to the worker.
+        tx.send(CommitEvent {
+            block_id: "pr_block".to_string(),
+            update_bytes: update1,
+        })
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+
+        let file_path = mount.join("pr_block.md");
+        assert!(file_path.exists(), "file should exist after first write");
+        assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "first");
+
+        // Step 2: pause the worker.
+        paused.store(true, Ordering::Release);
+        {
+            let (lock, cvar) = pause_complete.as_ref();
+            let mut complete = lock.lock().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !*complete {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                assert!(!remaining.is_zero(), "worker did not pause in time");
+                let (guard, _) = cvar.wait_timeout(complete, remaining).unwrap();
+                complete = guard;
+            }
+        }
+
+        // Step 3: write "second" to memory_doc while paused. The callback
+        // is suppressed, so no CommitEvent reaches the channel. The write
+        // only exists in memory_doc's LoroDoc.
+        doc.set_text("second", true).unwrap();
+
+        // Step 4: resume.
+        {
+            let (lock, cvar) = resume_signal_arc.as_ref();
+            let mut resumed = lock.lock().unwrap();
+            *resumed = true;
+            cvar.notify_one();
+        }
+
+        // Wait for the worker to reconcile and render.
+        std::thread::sleep(Duration::from_millis(300));
+
+        // Step 5: verify the file contains "second".
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(
+            content, "second",
+            "file should contain 'second' after pause-resume reconciliation"
+        );
+
+        // Clean up.
+        cancel.cancel();
+        drop(tx);
+        handle.join().expect("worker should not panic");
+    }
+
+    /// Test that external edits to disk_doc during a pause are reconciled
+    /// back to memory_doc on resume.
+    ///
+    /// Sequence:
+    /// 1. Write "initial" to memory_doc, send to worker, wait for file.
+    /// 2. Pause the worker.
+    /// 3. Apply an external edit to disk_doc (simulating a watcher-applied
+    ///    human edit).
+    /// 4. Resume the worker.
+    /// 5. Verify memory_doc contains the external edit.
+    #[test]
+    fn pause_resume_reconciles_disk_doc_edits() {
+        let db = Arc::new(ConstellationDb::open_in_memory().unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        setup_db_block(&db, "ext_block", "agent_ext");
+
+        let doc = StructuredDocument::new_text();
+        let doc_clone = doc.clone();
+        let disk_doc = Arc::new(doc.inner().fork());
+        let disk_doc_test = Arc::clone(&disk_doc);
+
+        let (tx, rx) = crossbeam_channel::bounded(64);
+        let cancel = CancellationToken::new();
+        let (reembed_tx, _reembed_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (hb_tx, _hb_rx) = crossbeam_channel::bounded(64);
+        let last_written_mtime = Arc::new(Mutex::new(None));
+        let paused = Arc::new(AtomicBool::new(false));
+        let pause_complete = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let resume_signal_arc = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let mount = Arc::new(dir.path().to_path_buf());
+
+        // Write "initial" and capture update bytes.
+        let vv0 = doc.inner().oplog_vv();
+        doc.set_text("initial", true).unwrap();
+        let update1 = doc.inner().export(loro::ExportMode::updates(&vv0)).unwrap();
+
+        let cancel_clone = cancel.clone();
+        let mount_clone = Arc::clone(&mount);
+        let paused_worker = Arc::clone(&paused);
+        let pc_worker = Arc::clone(&pause_complete);
+        let rs_worker = Arc::clone(&resume_signal_arc);
+        let handle = std::thread::spawn(move || {
+            run_subscriber(WorkerConfig {
+                block_id: "ext_block".to_string(),
+                schema: BlockSchema::text(),
+                rx,
+                cancel: cancel_clone,
+                db,
+                reembed_tx,
+                heartbeat_tx: hb_tx,
+                mount_path: mount_clone,
+                disk_doc,
+                doc: doc_clone,
+                last_written_mtime,
+                paused: paused_worker,
+                pause_complete: pc_worker,
+                resume_signal: rs_worker,
+            });
+        });
+
+        // Send "initial" to the worker.
+        tx.send(CommitEvent {
+            block_id: "ext_block".to_string(),
+            update_bytes: update1,
+        })
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+
+        let file_path = mount.join("ext_block.md");
+        assert!(file_path.exists(), "file should exist after initial write");
+        assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "initial");
+
+        // Step 2: pause the worker.
+        paused.store(true, Ordering::Release);
+        {
+            let (lock, cvar) = pause_complete.as_ref();
+            let mut complete = lock.lock().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !*complete {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                assert!(!remaining.is_zero(), "worker did not pause in time");
+                let (guard, _) = cvar.wait_timeout(complete, remaining).unwrap();
+                complete = guard;
+            }
+        }
+
+        // Step 3: apply an external edit directly to disk_doc (simulating
+        // what the watcher would do when it detects a human file edit).
+        {
+            let text = disk_doc_test.get_text("content");
+            text.update("human edited", Default::default()).unwrap();
+            disk_doc_test.commit();
+        }
+
+        // Step 4: resume.
+        {
+            let (lock, cvar) = resume_signal_arc.as_ref();
+            let mut resumed = lock.lock().unwrap();
+            *resumed = true;
+            cvar.notify_one();
+        }
+
+        // Wait for the worker to reconcile.
+        std::thread::sleep(Duration::from_millis(300));
+
+        // Step 5: verify memory_doc has the external edit.
+        let mem_content = doc.text_content();
+        assert_eq!(
+            mem_content, "human edited",
+            "memory_doc should contain the external edit after pause-resume reconciliation"
+        );
+
+        // Also verify the file on disk was updated.
+        let file_content = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(
+            file_content, "human edited",
+            "file should contain the external edit after reconciliation"
+        );
+
+        // Clean up.
+        cancel.cancel();
+        drop(tx);
+        handle.join().expect("worker should not panic");
     }
 }
