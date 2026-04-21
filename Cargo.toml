@@ -7,6 +7,7 @@ members = [
     "crates/pattern_provider",
     "crates/pattern_db",
     "crates/pattern_cli",
+    "crates/pattern_server",
 ]
 
 
@@ -142,6 +143,11 @@ serde_urlencoded = "0.7"
 
 # Regex for GHC error location parsing (pattern_runtime lib_modules).
 regex = "1"
+
+# IRPC daemon transport
+irpc = "0.14"
+noq = "0.18"
+n0-future = "0.3"
 
 # dev-only
 wiremock = "0.6"
