@@ -14,12 +14,17 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
-use ratatui_widgets::paragraph::Paragraph;
+use smol_str::SmolStr;
 use tokio::time;
 
+use pattern_core::traits::turn_sink::{DisplayKind, TurnEvent};
+use pattern_server::client::DaemonClient;
 use pattern_server::protocol::TaggedTurnEvent;
 
+use super::autocomplete::{AutocompleteState, AutocompleteWidget, CommandSource, CompletionSource};
+use super::commands::lookup_command;
 use super::conversation::{ConversationState, ConversationView};
+use super::input::{InputAction, InputHandler};
 use super::layout::compute_layout;
 use super::model::RenderBatch;
 use super::scroll::{apply_action, map_key_to_action};
@@ -36,7 +41,7 @@ pub type DaemonEventReceiver = irpc::channel::mpsc::Receiver<TaggedTurnEvent>;
 enum Focus {
     /// Arrow keys scroll the conversation; Enter toggles sections.
     Conversation,
-    /// Keystrokes go to the input area (Phase 3).
+    /// Keystrokes go to the input area.
     Input,
 }
 
@@ -48,10 +53,20 @@ enum Focus {
 pub struct App {
     /// Conversation rendering state (batches, scroll, focus).
     conversation: ConversationState,
+    /// Input handler wrapping TextArea with history and submit semantics.
+    input: InputHandler,
+    /// Autocomplete popup state.
+    autocomplete: AutocompleteState,
+    /// Command completion source.
+    command_source: CommandSource,
     /// Whether the event loop should exit.
     should_quit: bool,
     /// Which panel has keyboard focus.
     focus: Focus,
+    /// Connection to the daemon, if available.
+    client: Option<DaemonClient>,
+    /// The agent currently receiving messages.
+    current_agent: SmolStr,
     /// Whether we are connected to the daemon.
     connected: bool,
     /// Height of the conversation viewport from the last rendered frame.
@@ -70,8 +85,13 @@ impl App {
                 auto_scroll: true,
                 focused_section: None,
             },
+            input: InputHandler::new(),
+            autocomplete: AutocompleteState::new(),
+            command_source: CommandSource,
             should_quit: false,
             focus: Focus::Input,
+            client: None,
+            current_agent: SmolStr::new_static("default"),
             connected: false,
             last_viewport_height: 24,
         }
@@ -80,14 +100,17 @@ impl App {
     /// Run the async event loop until the user quits.
     ///
     /// `event_rx` is the daemon subscription channel. `None` means offline
-    /// mode (no daemon connected).
+    /// mode (no daemon connected). `client` is the daemon RPC client for
+    /// sending messages and commands.
     pub async fn run(
         &mut self,
         terminal: &mut Terminal<ratatui::prelude::CrosstermBackend<std::io::Stdout>>,
         mut event_rx: Option<DaemonEventReceiver>,
+        client: Option<DaemonClient>,
     ) -> miette::Result<()> {
         use miette::IntoDiagnostic;
 
+        self.client = client;
         self.connected = event_rx.is_some();
 
         let mut reader = EventStream::new();
@@ -202,21 +225,240 @@ impl App {
                 }
             }
             Focus::Input => {
-                match key.code {
-                    KeyCode::Esc => {
-                        // Esc from input quits the app.
-                        self.should_quit = true;
+                // When autocomplete is visible, intercept navigation keys.
+                if self.autocomplete.is_visible() {
+                    match key.code {
+                        KeyCode::Tab | KeyCode::Down => {
+                            self.autocomplete.next();
+                            return;
+                        }
+                        KeyCode::BackTab | KeyCode::Up => {
+                            self.autocomplete.prev();
+                            return;
+                        }
+                        KeyCode::Enter => {
+                            // Accept the selected completion.
+                            if let Some(value) = self.autocomplete.accept() {
+                                let replacement = format!("/{value} ");
+                                self.input.set_text(&replacement);
+                            }
+                            self.autocomplete.hide();
+                            return;
+                        }
+                        KeyCode::Esc => {
+                            self.autocomplete.hide();
+                            return;
+                        }
+                        _ => {
+                            // Fall through to normal input handling, then
+                            // update autocomplete below.
+                        }
                     }
-                    KeyCode::Tab => {
-                        // Switch to conversation focus.
-                        self.focus = Focus::Conversation;
-                    }
-                    _ => {
-                        // Phase 3 handles actual text input. No-op for now.
-                    }
+                }
+
+                // Tab switches focus to conversation when autocomplete is hidden.
+                if key.code == KeyCode::Tab && !self.autocomplete.is_visible() {
+                    self.focus = Focus::Conversation;
+                    return;
+                }
+
+                // Route to input handler.
+                let action = self.input.handle_key(key);
+                self.handle_input_action(action);
+            }
+        }
+    }
+
+    /// Process an [`InputAction`] returned by the input handler.
+    fn handle_input_action(&mut self, action: InputAction) {
+        match action {
+            InputAction::Submit(parts) => {
+                // Extract display text from parts.
+                let user_text = text_from_parts(&parts);
+
+                // Add user message to conversation.
+                let batch_id: SmolStr = format!("user-{}", self.conversation.batches.len()).into();
+                let batch = RenderBatch::new(batch_id.clone(), Some(user_text));
+                self.conversation.batches.push(batch);
+
+                // Send to daemon if connected.
+                if let Some(client) = &self.client {
+                    let agent_id = self.current_agent.clone();
+                    let client = client.clone();
+                    let bid = batch_id;
+                    tokio::spawn(async move {
+                        if let Err(e) = client.send_message(bid, agent_id, parts).await {
+                            tracing::error!("send failed: {e}");
+                        }
+                    });
+                }
+
+                // Hide autocomplete on submit.
+                self.autocomplete.hide();
+            }
+            InputAction::SlashCommand { name, args } => {
+                self.dispatch_command(&name, &args);
+                self.autocomplete.hide();
+            }
+            InputAction::Changed => {
+                self.update_autocomplete();
+            }
+            InputAction::None => {}
+        }
+    }
+
+    /// Dispatch a slash command by name.
+    fn dispatch_command(&mut self, name: &str, args: &[String]) {
+        match lookup_command(name) {
+            Some(cmd) => {
+                use super::commands::CommandTarget;
+                match cmd.target {
+                    CommandTarget::Local => self.dispatch_local_command(name, args),
+                    CommandTarget::Runtime => self.dispatch_runtime_command(name, args),
+                }
+            }
+            None => {
+                // Check for plugin-namespaced command (contains ':').
+                if name.contains(':') {
+                    self.dispatch_namespaced_command(name, args);
+                } else {
+                    self.push_system_message(format!(
+                        "unknown command: /{name}. Type / for available commands."
+                    ));
                 }
             }
         }
+    }
+
+    /// Handle a local command (no daemon interaction).
+    fn dispatch_local_command(&mut self, name: &str, _args: &[String]) {
+        match name {
+            "clear" => {
+                self.conversation.batches.clear();
+            }
+            "quit" => {
+                self.should_quit = true;
+            }
+            "panel" => {
+                // Phase 4 implements the panel. Placeholder acknowledgment.
+                self.push_system_message("panel toggle not yet implemented.".into());
+            }
+            "expand" => {
+                // Toggle the focused section's collapsed state, if any.
+                if let Some((_batch_idx, _section_idx)) = self.conversation.focused_section {
+                    // The scroll module's toggle logic handles this. For now,
+                    // acknowledge the command.
+                    self.push_system_message(
+                        "use Tab to focus conversation, then Enter to expand.".into(),
+                    );
+                } else {
+                    self.push_system_message(
+                        "no section focused. Press Tab to focus conversation.".into(),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Handle a runtime command (requires daemon).
+    fn dispatch_runtime_command(&mut self, name: &str, args: &[String]) {
+        match name {
+            "front" => {
+                // Update the current agent locally.
+                if let Some(agent_name) = args.first() {
+                    let agent_name = agent_name.trim_start_matches('@');
+                    self.current_agent = SmolStr::from(agent_name);
+                    self.push_system_message(format!("switched to agent: {agent_name}"));
+                } else {
+                    self.push_system_message(format!("current agent: {}", self.current_agent));
+                }
+            }
+            "agents" | "status" | "context" => {
+                if let Some(client) = &self.client {
+                    let client = client.clone();
+                    let cmd_name = name.to_string();
+                    let args = args.to_vec();
+                    tokio::spawn(async move {
+                        match client.run_command(cmd_name, args).await {
+                            Ok(result) => {
+                                tracing::info!("command result: {}", result.output);
+                            }
+                            Err(e) => {
+                                tracing::error!("command failed: {e}");
+                            }
+                        }
+                    });
+                    self.push_system_message(format!("/{name} sent to daemon..."));
+                } else {
+                    self.push_system_message("not connected to daemon.".into());
+                }
+            }
+            "shutdown" => {
+                if let Some(client) = &self.client {
+                    let client = client.clone();
+                    tokio::spawn(async move {
+                        let _ = client.run_command("shutdown".into(), Vec::new()).await;
+                    });
+                    self.push_system_message("shutdown requested.".into());
+                    self.should_quit = true;
+                } else {
+                    self.push_system_message("not connected to daemon.".into());
+                }
+            }
+            _ => {
+                self.push_system_message(format!("unknown runtime command: /{name}"));
+            }
+        }
+    }
+
+    /// Forward a plugin-namespaced command to the daemon.
+    fn dispatch_namespaced_command(&mut self, name: &str, args: &[String]) {
+        if let Some(client) = &self.client {
+            let client = client.clone();
+            let cmd_name = name.to_string();
+            let args = args.to_vec();
+            tokio::spawn(async move {
+                match client.run_command(cmd_name, args).await {
+                    Ok(result) => {
+                        tracing::info!("plugin command result: {}", result.output);
+                    }
+                    Err(e) => {
+                        tracing::error!("plugin command failed: {e}");
+                    }
+                }
+            });
+            self.push_system_message(format!("/{name} sent to daemon..."));
+        } else {
+            self.push_system_message("not connected to daemon.".into());
+        }
+    }
+
+    /// Push a system message (note) into the conversation.
+    fn push_system_message(&mut self, text: String) {
+        let batch_id: SmolStr = format!("sys-{}", self.conversation.batches.len()).into();
+        let mut batch = RenderBatch::new(batch_id, None);
+        batch.push_event(&TurnEvent::Display {
+            kind: DisplayKind::Note,
+            text,
+        });
+        batch.streaming = false;
+        self.conversation.batches.push(batch);
+    }
+
+    /// Update autocomplete based on current input text.
+    fn update_autocomplete(&mut self) {
+        let text = self.input.current_text();
+        if let Some(without_slash) = text.strip_prefix('/')
+            && !without_slash.is_empty()
+            && !without_slash.contains(' ')
+        {
+            // Completing a command name.
+            let candidates = self.command_source.candidates();
+            self.autocomplete.update(without_slash, &candidates);
+            return;
+        }
+        self.autocomplete.hide();
     }
 
     /// Handle a tagged turn event from the daemon.
@@ -230,8 +472,8 @@ impl App {
         {
             Some(b) => b,
             None => {
-                // New batch — create with no user message (the TUI will set
-                // the user message when it sends, in Phase 3).
+                // New batch — create with no user message (the TUI set
+                // the user message when it sent, above).
                 let new_batch = RenderBatch::new(tagged.batch_id.clone(), None);
                 self.conversation.batches.push(new_batch);
                 self.conversation.batches.last_mut().unwrap()
@@ -258,51 +500,93 @@ impl App {
             &mut self.conversation,
         );
 
-        // Input area — placeholder until Phase 3.
-        render_input_placeholder(layout.input, frame.buffer_mut(), self.focus);
+        // Input area — render the real textarea.
+        render_input_area(layout.input, frame.buffer_mut(), self.focus, &self.input);
 
         // Status bar.
-        render_status_bar(layout.status_bar, frame.buffer_mut(), self.connected);
+        render_status_bar(
+            layout.status_bar,
+            frame.buffer_mut(),
+            self.connected,
+            &self.current_agent,
+        );
+
+        // Autocomplete popup (rendered on top of conversation).
+        if self.autocomplete.is_visible() {
+            let widget = AutocompleteWidget::new(&self.autocomplete);
+            widget.render_above(layout.input, frame.buffer_mut());
+        }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Helper functions
+// ---------------------------------------------------------------------------
+
+/// Extract plain text from content parts for display as a user message.
+fn text_from_parts(parts: &[pattern_core::types::provider::ContentPart]) -> String {
+    use pattern_core::types::provider::ContentPart;
+    parts
+        .iter()
+        .filter_map(|p| match p {
+            ContentPart::Text(t) => Some(t.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 // ---------------------------------------------------------------------------
 // Rendering helpers
 // ---------------------------------------------------------------------------
 
-/// Render a placeholder input area with a prompt glyph, no background.
-fn render_input_placeholder(area: Rect, buf: &mut Buffer, focus: Focus) {
+/// Render the input area with the InputHandler's textarea.
+fn render_input_area(area: Rect, buf: &mut Buffer, focus: Focus, input: &InputHandler) {
     let prompt_colour = if focus == Focus::Input {
         Color::Cyan
     } else {
         Color::DarkGray
     };
 
-    let hint = Paragraph::new(Line::from(vec![
-        Span::styled("❯ ", Style::default().fg(prompt_colour)),
-        Span::styled("type here...", Style::default().fg(Color::DarkGray)),
-    ]));
+    // Render prompt glyph in first column.
+    let prompt_line = Line::from(vec![Span::styled("❯ ", Style::default().fg(prompt_colour))]);
+    buf.set_line(area.x, area.y, &prompt_line, area.width);
 
-    hint.render(area, buf);
+    // Render the textarea to the right of the prompt.
+    if area.width > 2 {
+        let textarea_area = Rect {
+            x: area.x + 2,
+            y: area.y,
+            width: area.width.saturating_sub(2),
+            height: area.height,
+        };
+        input.widget().render(textarea_area, buf);
+    }
 }
 
 /// Render the status bar — subdued text on subtle background.
 /// Uses ANSI `Black` bg which is typically slightly distinct from the terminal's
 /// default background in most themes, giving a gentle visual separation.
-fn render_status_bar(area: Rect, buf: &mut Buffer, connected: bool) {
+fn render_status_bar(area: Rect, buf: &mut Buffer, connected: bool, current_agent: &str) {
     let bar_bg = Color::Black;
     // Fill entire bar width with background.
     for x in area.x..area.x + area.width {
         buf[(x, area.y)].set_style(Style::default().bg(bar_bg));
     }
 
-    let (text, fg) = if connected {
-        (" pattern", Color::DarkGray)
+    let (status_text, fg) = if connected {
+        (format!(" pattern [{current_agent}]"), Color::DarkGray)
     } else {
-        (" pattern (offline)", Color::DarkGray)
+        (
+            format!(" pattern (offline) [{current_agent}]"),
+            Color::DarkGray,
+        )
     };
 
-    let line = Line::from(vec![Span::styled(text, Style::default().fg(fg).bg(bar_bg))]);
+    let line = Line::from(vec![Span::styled(
+        status_text,
+        Style::default().fg(fg).bg(bar_bg),
+    )]);
     buf.set_line(area.x, area.y, &line, area.width);
 }
 
@@ -345,5 +629,96 @@ mod tests {
 
         let output = render_app(&mut app, 60, 12);
         insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn clear_command_empties_conversation() {
+        let mut app = App::new();
+
+        // Add some batches.
+        app.conversation
+            .batches
+            .push(RenderBatch::new("b1".into(), Some("hello".into())));
+        app.conversation
+            .batches
+            .push(RenderBatch::new("b2".into(), Some("world".into())));
+        assert_eq!(app.conversation.batches.len(), 2);
+
+        app.dispatch_command("clear", &[]);
+        assert!(app.conversation.batches.is_empty());
+    }
+
+    #[test]
+    fn quit_command_sets_should_quit() {
+        let mut app = App::new();
+        assert!(!app.should_quit);
+
+        app.dispatch_command("quit", &[]);
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn unknown_command_shows_error() {
+        let mut app = App::new();
+        assert!(app.conversation.batches.is_empty());
+
+        app.dispatch_command("nonexistent", &[]);
+        assert_eq!(app.conversation.batches.len(), 1);
+
+        // The system message should contain the unknown command name.
+        let batch = &app.conversation.batches[0];
+        assert!(!batch.sections.is_empty());
+        match &batch.sections[0].kind {
+            super::super::model::SectionKind::Display { text, .. } => {
+                assert!(
+                    text.contains("unknown command: /nonexistent"),
+                    "error message should mention the unknown command, got: {text}"
+                );
+            }
+            other => panic!("expected Display section, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn submit_creates_batch_with_user_message() {
+        let mut app = App::new();
+        assert!(app.conversation.batches.is_empty());
+
+        // Simulate submitting text.
+        let parts = vec![pattern_core::types::provider::ContentPart::Text(
+            "hello world".into(),
+        )];
+        app.handle_input_action(InputAction::Submit(parts));
+
+        assert_eq!(app.conversation.batches.len(), 1);
+        assert_eq!(
+            app.conversation.batches[0].user_message.as_deref(),
+            Some("hello world")
+        );
+    }
+
+    #[test]
+    fn front_command_updates_current_agent() {
+        let mut app = App::new();
+        assert_eq!(app.current_agent.as_str(), "default");
+
+        app.dispatch_command("front", &["@supervisor".into()]);
+        assert_eq!(app.current_agent.as_str(), "supervisor");
+
+        // Should also push a system message confirming the switch.
+        assert!(!app.conversation.batches.is_empty());
+    }
+
+    #[test]
+    fn slash_command_from_input_dispatches() {
+        let mut app = App::new();
+        assert!(!app.should_quit);
+
+        // Simulate receiving a SlashCommand action from the input handler.
+        app.handle_input_action(InputAction::SlashCommand {
+            name: "quit".into(),
+            args: vec![],
+        });
+        assert!(app.should_quit);
     }
 }

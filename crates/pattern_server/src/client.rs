@@ -56,6 +56,7 @@ pub type Result<T> = std::result::Result<T, DaemonClientError>;
 ///
 /// All RPC methods map 1:1 to [`PatternProtocol`] variants. Error handling
 /// is unified through [`DaemonClientError`].
+#[derive(Clone)]
 pub struct DaemonClient {
     inner: Client<PatternProtocol>,
 }

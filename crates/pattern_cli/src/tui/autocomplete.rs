@@ -88,7 +88,7 @@ pub fn filter_candidates(pattern: &str, candidates: &[(String, String)]) -> Vec<
         })
         .collect();
 
-    results.sort_by(|a, b| b.score.cmp(&a.score));
+    results.sort_by_key(|item| std::cmp::Reverse(item.score));
     results
 }
 
@@ -174,7 +174,9 @@ impl AutocompleteState {
         if !self.visible {
             return None;
         }
-        self.items.get(self.selected).map(|item| item.value.as_str())
+        self.items
+            .get(self.selected)
+            .map(|item| item.value.as_str())
     }
 
     /// Whether the popup is currently visible.
@@ -182,12 +184,14 @@ impl AutocompleteState {
         self.visible
     }
 
-    /// The filtered items (for rendering).
+    /// The filtered items (for rendering and testing).
+    #[allow(dead_code)]
     pub fn items(&self) -> &[CompletionItem] {
         &self.items
     }
 
-    /// The currently selected index (for rendering).
+    /// The currently selected index (for rendering and testing).
+    #[allow(dead_code)]
     pub fn selected_index(&self) -> usize {
         self.selected
     }

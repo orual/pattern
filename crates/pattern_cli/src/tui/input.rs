@@ -111,6 +111,13 @@ impl InputHandler {
         &self.textarea
     }
 
+    /// Replace the textarea content with the given string.
+    ///
+    /// Used by autocomplete to replace the input with the accepted value.
+    pub fn set_text(&mut self, content: &str) {
+        self.set_textarea_content(content);
+    }
+
     // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------

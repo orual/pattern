@@ -258,9 +258,12 @@ async fn run_tui() -> MietteResult<()> {
     use pattern_server::client::DaemonClient;
 
     // Try to connect to the daemon. Failing is normal (offline mode).
-    let event_rx = match DaemonClient::connect().await {
-        Ok(client) => client.subscribe_output("default".into()).await.ok(),
-        Err(_) => None,
+    let (client, event_rx) = match DaemonClient::connect().await {
+        Ok(client) => {
+            let rx = client.subscribe_output("default".into()).await.ok();
+            (Some(client), rx)
+        }
+        Err(_) => (None, None),
     };
 
     // Set up a panic hook that restores the terminal before printing the
@@ -273,7 +276,7 @@ async fn run_tui() -> MietteResult<()> {
 
     let mut terminal = ratatui::init();
     let mut app = tui::app::App::new();
-    let result = app.run(&mut terminal, event_rx).await;
+    let result = app.run(&mut terminal, event_rx, client).await;
     ratatui::restore();
 
     result
