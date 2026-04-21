@@ -168,9 +168,10 @@ impl<S: MemoryStore> MemoryStore for MemoryScope<S> {
 
         // Same routing as get_block but for metadata.
         if let Some(project_id) = &self.binding.project_id
-            && let Some(meta) = self.inner.get_block_metadata(project_id, label)? {
-                return Ok(Some(meta));
-            }
+            && let Some(meta) = self.inner.get_block_metadata(project_id, label)?
+        {
+            return Ok(Some(meta));
+        }
 
         match self.binding.policy {
             IsolatePolicy::None | IsolatePolicy::CoreOnly => self
@@ -237,9 +238,10 @@ impl<S: MemoryStore> MemoryStore for MemoryScope<S> {
 
         // Same routing logic as get_block: project first, then persona.
         if let Some(project_id) = &self.binding.project_id
-            && let Some(content) = self.inner.get_rendered_content(project_id, label)? {
-                return Ok(Some(content));
-            }
+            && let Some(content) = self.inner.get_rendered_content(project_id, label)?
+        {
+            return Ok(Some(content));
+        }
 
         match self.binding.policy {
             IsolatePolicy::None | IsolatePolicy::CoreOnly => self

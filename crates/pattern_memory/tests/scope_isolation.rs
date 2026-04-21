@@ -5,7 +5,9 @@
 
 use pattern_core::MemoryStore;
 use pattern_core::types::block::BlockCreate;
-use pattern_core::types::memory_types::{BlockFilter, BlockMetadataPatch, BlockSchema, BlockType, IsolatePolicy, MemoryError};
+use pattern_core::types::memory_types::{
+    BlockFilter, BlockMetadataPatch, BlockSchema, BlockType, IsolatePolicy, MemoryError,
+};
 use pattern_memory::scope::{MemoryScope, ScopeBinding};
 use pattern_memory::testing::ScopeTestStore;
 

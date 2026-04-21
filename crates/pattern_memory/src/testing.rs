@@ -61,16 +61,13 @@ impl ScopeTestStore {
     /// Useful when the test needs to set `agent_id` precisely (e.g. to
     /// pre-populate entries for the persona agent before creating the scope).
     pub fn seed_archival(&self, agent_id: &str, id: &str, content: &str) {
-        self.archival
-            .lock()
-            .unwrap()
-            .push(ArchivalEntry {
-                id: id.to_string(),
-                agent_id: agent_id.to_string(),
-                content: content.to_string(),
-                metadata: None,
-                created_at: chrono::Utc::now(),
-            });
+        self.archival.lock().unwrap().push(ArchivalEntry {
+            id: id.to_string(),
+            agent_id: agent_id.to_string(),
+            content: content.to_string(),
+            metadata: None,
+            created_at: chrono::Utc::now(),
+        });
     }
 }
 
