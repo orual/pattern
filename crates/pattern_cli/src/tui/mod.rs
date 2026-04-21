@@ -4,7 +4,9 @@
 //! markdown display, virtual scrolling, and layout management.
 
 pub mod app;
+pub mod commands;
 pub mod conversation;
+pub mod input;
 pub mod layout;
 pub mod markdown;
 pub mod model;
