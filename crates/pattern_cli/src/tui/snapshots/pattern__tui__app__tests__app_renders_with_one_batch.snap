@@ -1,6 +1,5 @@
 ---
 source: crates/pattern_cli/src/tui/app.rs
-assertion_line: 364
 expression: output
 ---
 [you] Hello agent
@@ -11,7 +10,7 @@ The answer is 42.
 
 
 
-┌input─────────────────────────────────────────────────────┐
-│type here...                                              │
-└──────────────────────────────────────────────────────────┘
+
+❯ type here...
+
 pattern (offline)

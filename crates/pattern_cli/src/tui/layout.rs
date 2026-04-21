@@ -27,7 +27,7 @@ pub struct TuiLayout {
 ///
 /// The layout uses three vertical chunks:
 /// - Conversation: `Constraint::Min(1)` — grows to fill available space.
-/// - Input: `Constraint::Length(3)` — fixed 3-row box (border + 1 line of text).
+/// - Input: `Constraint::Length(2)` — prompt line + 1 line of text.
 /// - Status bar: `Constraint::Length(1)` — single-line indicator.
 ///
 /// On very small terminals (height < 5) ratatui will clamp rectangles to zero
@@ -38,7 +38,7 @@ pub fn compute_layout(area: Rect) -> TuiLayout {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(1),    // conversation (grows)
-            Constraint::Length(3), // input area (fixed)
+            Constraint::Length(2), // input area (fixed)
             Constraint::Length(1), // status bar
         ])
         .split(area);
@@ -66,7 +66,7 @@ mod tests {
     #[test]
     fn layout_allocates_input_area() {
         let layout = compute_layout(area(80, 24));
-        assert_eq!(layout.input.height, 3, "input area must be exactly 3 rows");
+        assert_eq!(layout.input.height, 2, "input area must be exactly 2 rows");
     }
 
     #[test]
@@ -74,7 +74,7 @@ mod tests {
         let terminal_height = 24u16;
         let layout = compute_layout(area(80, terminal_height));
 
-        // conversation + input (3) + status_bar (1) == terminal height
+        // conversation + input (2) + status_bar (1) == terminal height
         let total = layout.conversation.height + layout.input.height + layout.status_bar.height;
         assert_eq!(
             total, terminal_height,
@@ -83,7 +83,7 @@ mod tests {
         // Conversation takes everything except the two fixed regions.
         assert_eq!(
             layout.conversation.height,
-            terminal_height - 3 - 1,
+            terminal_height - 2 - 1,
             "conversation should fill remaining rows"
         );
     }

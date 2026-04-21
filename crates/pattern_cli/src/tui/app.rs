@@ -15,7 +15,6 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use ratatui_widgets::block::Block;
-use ratatui_widgets::borders::Borders;
 use ratatui_widgets::paragraph::Paragraph;
 use tokio::time;
 
@@ -265,23 +264,22 @@ impl App {
 // Rendering helpers
 // ---------------------------------------------------------------------------
 
-/// Render a placeholder input area with a bordered block and grey hint text.
+/// Render a placeholder input area with a prompt glyph and subtle background.
 fn render_input_placeholder(area: Rect, buf: &mut Buffer, focus: Focus) {
-    let border_style = if focus == Focus::Input {
-        Style::default().fg(Color::Cyan)
+    // Subtle background to distinguish input from conversation.
+    let bg = Color::Rgb(30, 30, 40);
+    let block = Block::default().style(Style::default().bg(bg));
+
+    let prompt_colour = if focus == Focus::Input {
+        Color::Cyan
     } else {
-        Style::default().fg(Color::DarkGray)
+        Color::DarkGray
     };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(border_style)
-        .title("input");
-
-    let hint = Paragraph::new(Line::from(vec![Span::styled(
-        "type here...",
-        Style::default().fg(Color::DarkGray),
-    )]))
+    let hint = Paragraph::new(Line::from(vec![
+        Span::styled("❯ ", Style::default().fg(prompt_colour)),
+        Span::styled("type here...", Style::default().fg(Color::DarkGray)),
+    ]))
     .block(block);
 
     hint.render(area, buf);
