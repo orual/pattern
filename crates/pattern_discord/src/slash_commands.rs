@@ -256,8 +256,7 @@ pub async fn handle_status_command(
                 if let Ok(memory_blocks) = agent
                     .runtime()
                     .memory()
-                    .list_blocks(agent.id().as_str())
-                    .await
+                    .list_blocks(pattern_core::types::memory_types::BlockFilter::by_agent(agent.id().as_str()))
                 {
                     embed = embed.field("Memory Blocks", memory_blocks.len().to_string(), true);
                 }
@@ -626,8 +625,7 @@ pub async fn handle_memory_command(
             match agent
                 .runtime()
                 .memory()
-                .list_blocks(agent.id().as_str())
-                .await
+                .list_blocks(pattern_core::types::memory_types::BlockFilter::by_agent(agent.id().as_str()))
             {
                 Ok(blocks) => {
                     if blocks.is_empty() {

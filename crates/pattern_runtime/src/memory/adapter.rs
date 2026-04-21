@@ -14,13 +14,13 @@
 
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 
 use pattern_core::memory::StructuredDocument;
 use pattern_core::types::memory_types::{
-    ArchivalEntry, BlockMetadata, BlockSchema, BlockType, MemoryResult, MemorySearchResult,
-    SearchOptions, SharedBlockInfo,
+    ArchivalEntry, BlockFilter, BlockMetadata, BlockMetadataPatch, MemoryResult,
+    MemorySearchResult, MemorySearchScope, SearchOptions, SharedBlockInfo, UndoRedoDepth,
+    UndoRedoOp,
 };
 use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::{BlockCreate, BlockWrite};
@@ -32,9 +32,7 @@ use pattern_core::types::block::{BlockCreate, BlockWrite};
 ///
 /// The adapter holds the caller's `agent_id` at construction so
 /// mutations can be attributed without threading auth context through
-/// the `MemoryStore` trait. Author attribution is `Author::Agent(AgentAuthor)`
-/// for handler-driven mutations; external paths (partner/scheduler)
-/// would wrap their own adapter or use a different path — future work.
+/// the `MemoryStore` trait.
 pub struct MemoryStoreAdapter {
     inner: Arc<dyn MemoryStore>,
     agent_id: String,
@@ -53,9 +51,6 @@ impl MemoryStoreAdapter {
     }
 
     /// Handlers call this after a successful mutation to record the write.
-    /// The `BlockWrite` should carry pre-write state (`previous_rendered_content`,
-    /// `previous_content_hash`) when available; handler-level code knows best
-    /// what pre-state it had access to.
     pub fn record_write(&self, write: BlockWrite) {
         self.pending.lock().unwrap().push(write);
     }
@@ -70,9 +65,7 @@ impl MemoryStoreAdapter {
         &self.agent_id
     }
 
-    /// Access the underlying store. Used when callers need the trait
-    /// object directly (e.g. for operations that don't go through the
-    /// adapter's delegated methods).
+    /// Access the underlying store.
     pub fn inner(&self) -> &Arc<dyn MemoryStore> {
         &self.inner
     }
@@ -93,117 +86,91 @@ impl std::fmt::Debug for MemoryStoreAdapter {
 // Delegate all MemoryStore methods to inner. No write-interception at
 // this level — handlers know the semantic context of each mutation and
 // call record_write() themselves.
-#[async_trait]
 impl MemoryStore for MemoryStoreAdapter {
-    async fn create_block(
+    fn create_block(
         &self,
         agent_id: &str,
         create: BlockCreate,
     ) -> MemoryResult<StructuredDocument> {
-        self.inner.create_block(agent_id, create).await
+        self.inner.create_block(agent_id, create)
     }
 
-    async fn get_block(
+    fn get_block(
         &self,
         agent_id: &str,
         label: &str,
     ) -> MemoryResult<Option<StructuredDocument>> {
-        self.inner.get_block(agent_id, label).await
+        self.inner.get_block(agent_id, label)
     }
 
-    async fn get_block_metadata(
+    fn get_block_metadata(
         &self,
         agent_id: &str,
         label: &str,
     ) -> MemoryResult<Option<BlockMetadata>> {
-        self.inner.get_block_metadata(agent_id, label).await
+        self.inner.get_block_metadata(agent_id, label)
     }
 
-    async fn list_blocks(&self, agent_id: &str) -> MemoryResult<Vec<BlockMetadata>> {
-        self.inner.list_blocks(agent_id).await
+    fn list_blocks(&self, filter: BlockFilter) -> MemoryResult<Vec<BlockMetadata>> {
+        self.inner.list_blocks(filter)
     }
 
-    async fn list_blocks_by_type(
-        &self,
-        agent_id: &str,
-        block_type: BlockType,
-    ) -> MemoryResult<Vec<BlockMetadata>> {
-        self.inner.list_blocks_by_type(agent_id, block_type).await
+    fn delete_block(&self, agent_id: &str, label: &str) -> MemoryResult<()> {
+        self.inner.delete_block(agent_id, label)
     }
 
-    async fn list_all_blocks_by_label_prefix(
-        &self,
-        prefix: &str,
-    ) -> MemoryResult<Vec<BlockMetadata>> {
-        self.inner.list_all_blocks_by_label_prefix(prefix).await
-    }
-
-    async fn delete_block(&self, agent_id: &str, label: &str) -> MemoryResult<()> {
-        self.inner.delete_block(agent_id, label).await
-    }
-
-    async fn get_rendered_content(
+    fn get_rendered_content(
         &self,
         agent_id: &str,
         label: &str,
     ) -> MemoryResult<Option<String>> {
-        self.inner.get_rendered_content(agent_id, label).await
+        self.inner.get_rendered_content(agent_id, label)
     }
 
-    async fn persist_block(&self, agent_id: &str, label: &str) -> MemoryResult<()> {
-        self.inner.persist_block(agent_id, label).await
+    fn persist_block(&self, agent_id: &str, label: &str) -> MemoryResult<()> {
+        self.inner.persist_block(agent_id, label)
     }
 
     fn mark_dirty(&self, agent_id: &str, label: &str) {
         self.inner.mark_dirty(agent_id, label);
     }
 
-    async fn insert_archival(
+    fn insert_archival(
         &self,
         agent_id: &str,
         content: &str,
         metadata: Option<JsonValue>,
     ) -> MemoryResult<String> {
-        self.inner
-            .insert_archival(agent_id, content, metadata)
-            .await
+        self.inner.insert_archival(agent_id, content, metadata)
     }
 
-    async fn search_archival(
+    fn search_archival(
         &self,
         agent_id: &str,
         query: &str,
         limit: usize,
     ) -> MemoryResult<Vec<ArchivalEntry>> {
-        self.inner.search_archival(agent_id, query, limit).await
+        self.inner.search_archival(agent_id, query, limit)
     }
 
-    async fn delete_archival(&self, id: &str) -> MemoryResult<()> {
-        self.inner.delete_archival(id).await
+    fn delete_archival(&self, id: &str) -> MemoryResult<()> {
+        self.inner.delete_archival(id)
     }
 
-    async fn search(
-        &self,
-        agent_id: &str,
-        query: &str,
-        options: SearchOptions,
-    ) -> MemoryResult<Vec<MemorySearchResult>> {
-        self.inner.search(agent_id, query, options).await
-    }
-
-    async fn search_all(
+    fn search(
         &self,
         query: &str,
         options: SearchOptions,
+        scope: MemorySearchScope,
     ) -> MemoryResult<Vec<MemorySearchResult>> {
-        self.inner.search_all(query, options).await
+        self.inner.search(query, options, scope)
     }
 
-    async fn list_shared_blocks(&self, agent_id: &str) -> MemoryResult<Vec<SharedBlockInfo>> {
-        self.inner.list_shared_blocks(agent_id).await
+    fn list_shared_blocks(&self, agent_id: &str) -> MemoryResult<Vec<SharedBlockInfo>> {
+        self.inner.list_shared_blocks(agent_id)
     }
 
-    async fn get_shared_block(
+    fn get_shared_block(
         &self,
         requester_agent_id: &str,
         owner_agent_id: &str,
@@ -211,63 +178,23 @@ impl MemoryStore for MemoryStoreAdapter {
     ) -> MemoryResult<Option<StructuredDocument>> {
         self.inner
             .get_shared_block(requester_agent_id, owner_agent_id, label)
-            .await
     }
 
-    async fn set_block_pinned(
+    fn update_block_metadata(
         &self,
         agent_id: &str,
         label: &str,
-        pinned: bool,
+        patch: BlockMetadataPatch,
     ) -> MemoryResult<()> {
-        self.inner.set_block_pinned(agent_id, label, pinned).await
+        self.inner.update_block_metadata(agent_id, label, patch)
     }
 
-    async fn set_block_type(
-        &self,
-        agent_id: &str,
-        label: &str,
-        block_type: BlockType,
-    ) -> MemoryResult<()> {
-        self.inner.set_block_type(agent_id, label, block_type).await
+    fn undo_redo(&self, agent_id: &str, label: &str, op: UndoRedoOp) -> MemoryResult<bool> {
+        self.inner.undo_redo(agent_id, label, op)
     }
 
-    async fn update_block_schema(
-        &self,
-        agent_id: &str,
-        label: &str,
-        schema: BlockSchema,
-    ) -> MemoryResult<()> {
-        self.inner
-            .update_block_schema(agent_id, label, schema)
-            .await
-    }
-
-    async fn update_block_description(
-        &self,
-        agent_id: &str,
-        label: &str,
-        description: &str,
-    ) -> MemoryResult<()> {
-        self.inner
-            .update_block_description(agent_id, label, description)
-            .await
-    }
-
-    async fn undo_block(&self, agent_id: &str, label: &str) -> MemoryResult<bool> {
-        self.inner.undo_block(agent_id, label).await
-    }
-
-    async fn redo_block(&self, agent_id: &str, label: &str) -> MemoryResult<bool> {
-        self.inner.redo_block(agent_id, label).await
-    }
-
-    async fn undo_depth(&self, agent_id: &str, label: &str) -> MemoryResult<usize> {
-        self.inner.undo_depth(agent_id, label).await
-    }
-
-    async fn redo_depth(&self, agent_id: &str, label: &str) -> MemoryResult<usize> {
-        self.inner.redo_depth(agent_id, label).await
+    fn history_depth(&self, agent_id: &str, label: &str) -> MemoryResult<UndoRedoDepth> {
+        self.inner.history_depth(agent_id, label)
     }
 }
 
@@ -275,7 +202,7 @@ impl MemoryStore for MemoryStoreAdapter {
 mod tests {
     use super::*;
     use crate::testing::InMemoryMemoryStore;
-    use pattern_core::types::memory_types::BlockType;
+    use pattern_core::types::memory_types::{BlockSchema, BlockType};
     use pattern_core::types::block::BlockWriteKind;
     use pattern_core::types::origin::{AgentAuthor, Author};
     use smol_str::SmolStr;
@@ -316,17 +243,17 @@ mod tests {
         assert!(again.is_empty());
     }
 
-    #[tokio::test]
-    async fn adapter_delegates_create_block() {
+    #[test]
+    fn adapter_delegates_create_block() {
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
         let adapter = MemoryStoreAdapter::new(store, "agent-a");
 
         let create = BlockCreate::new("notes", BlockType::Working, BlockSchema::text());
-        let doc = adapter.create_block("agent-a", create).await.unwrap();
+        let doc = adapter.create_block("agent-a", create).unwrap();
         assert_eq!(doc.metadata().label, "notes");
 
         // Verify read-through also works.
-        let fetched = adapter.get_block("agent-a", "notes").await.unwrap();
+        let fetched = adapter.get_block("agent-a", "notes").unwrap();
         assert!(fetched.is_some());
     }
 

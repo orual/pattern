@@ -7,11 +7,11 @@ use std::sync::Arc;
 use pattern_core::memory::StructuredDocument;
 use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::BlockCreate;
-use pattern_core::types::memory_types::{BlockSchema, BlockType};
+use pattern_core::types::memory_types::{BlockFilter, BlockSchema, BlockType};
 use pattern_memory::{MemoryCache, SharedBlockManager};
 
 /// Create a temporary on-disk ConstellationDb for testing.
-async fn test_db() -> (tempfile::TempDir, Arc<pattern_db::ConstellationDb>) {
+fn test_db() -> (tempfile::TempDir, Arc<pattern_db::ConstellationDb>) {
     let dir = tempfile::tempdir().unwrap();
     let _db_path = dir.path().join("constellation.db");
     let db = Arc::new(
@@ -22,7 +22,7 @@ async fn test_db() -> (tempfile::TempDir, Arc<pattern_db::ConstellationDb>) {
 }
 
 /// Seed a minimal agent row in the DB so FK constraints are satisfied.
-async fn seed_agent(db: &pattern_db::ConstellationDb, agent_id: &str) {
+fn seed_agent(db: &pattern_db::ConstellationDb, agent_id: &str) {
     let agent = pattern_db::models::Agent {
         id: agent_id.to_string(),
         name: format!("smoke-test-{agent_id}"),
@@ -41,48 +41,48 @@ async fn seed_agent(db: &pattern_db::ConstellationDb, agent_id: &str) {
         .expect("failed to seed agent");
 }
 
-#[tokio::test]
-async fn memory_cache_create_get_list_round_trip() {
-    let (_dir, db) = test_db().await;
+#[test]
+fn memory_cache_create_get_list_round_trip() {
+    let (_dir, db) = test_db();
     let cache = MemoryCache::new(db.clone());
     let agent = "api-parity-agent";
-    seed_agent(&db, agent).await;
+    seed_agent(&db, agent);
 
     // create_block — returns a StructuredDocument.
     let create = BlockCreate::new("notes", BlockType::Working, BlockSchema::text());
-    let doc: StructuredDocument = cache.create_block(agent, create).await.unwrap();
+    let doc: StructuredDocument = cache.create_block(agent, create).unwrap();
     assert_eq!(doc.label(), "notes");
     assert_eq!(doc.block_type(), BlockType::Working);
 
     // get_block — round-trips.
-    let fetched = cache.get_block(agent, "notes").await.unwrap();
+    let fetched = cache.get_block(agent, "notes").unwrap();
     assert!(fetched.is_some());
 
     // list_blocks — includes the newly created block.
-    let all = cache.list_blocks(agent).await.unwrap();
+    let all = cache.list_blocks(BlockFilter::by_agent(agent)).unwrap();
     assert!(!all.is_empty());
     assert!(all.iter().any(|m| m.label == "notes"));
 
     // mark_dirty + persist_block — non-panicking.
     cache.mark_dirty(agent, "notes");
-    cache.persist_block(agent, "notes").await.unwrap();
+    cache.persist_block(agent, "notes").unwrap();
 
     // default_char_limit accessor.
     let limit = cache.default_char_limit();
     assert!(limit > 0);
 }
 
-#[tokio::test]
-async fn memory_cache_builder_methods() {
-    let (_dir, db) = test_db().await;
+#[test]
+fn memory_cache_builder_methods() {
+    let (_dir, db) = test_db();
 
     // with_default_char_limit — builder-style.
     let cache = MemoryCache::new(db).with_default_char_limit(4096);
     assert_eq!(cache.default_char_limit(), 4096);
 }
 
-#[tokio::test]
-async fn structured_document_text_round_trip() {
+#[test]
+fn structured_document_text_round_trip() {
     // StructuredDocument is re-exported from pattern_memory.
     let doc = StructuredDocument::new_text();
     let rendered = doc.render();
@@ -95,8 +95,8 @@ async fn structured_document_text_round_trip() {
     assert!(rendered.contains("hello world"));
 }
 
-#[tokio::test]
-async fn shared_block_manager_permission_helpers() {
+#[test]
+fn shared_block_manager_permission_helpers() {
     use pattern_db::models::MemoryPermission;
     // Static permission helpers (no DB needed).
     assert!(SharedBlockManager::can_write(MemoryPermission::ReadWrite));
@@ -106,9 +106,9 @@ async fn shared_block_manager_permission_helpers() {
 
 #[tokio::test]
 async fn shared_block_manager_constructs_with_db() {
-    let (_dir, db) = test_db().await;
+    let (_dir, db) = test_db();
     let agent = "sbm-agent";
-    seed_agent(&db, agent).await;
+    seed_agent(&db, agent);
 
     let sbm = SharedBlockManager::new(db.clone());
 

@@ -18,8 +18,4 @@ pub enum RecallReq {
     /// `RecallGet :: EntryId -> Recall ArchivalContent`
     #[core(module = "Pattern.Recall", name = "RecallGet")]
     Get(String),
-
-    /// `RecallDelete :: EntryId -> Recall ()`
-    #[core(module = "Pattern.Recall", name = "RecallDelete")]
-    Delete(String),
 }

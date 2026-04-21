@@ -85,7 +85,6 @@ impl EffectHandler<SessionContext> for SearchHandler {
         let agent_id = cx.user().agent_id().to_string();
         let store = self.store.clone();
         let request_repr = format!("{req:?}");
-        let handle = tokio::runtime::Handle::current();
 
         let result = (|| {
             let (query, scope_str, domain) = match &req {
@@ -95,7 +94,7 @@ impl EffectHandler<SessionContext> for SearchHandler {
             };
 
             let scope = parse_scope(scope_str.as_deref())?;
-            let agents = handle.block_on(resolve_scope(&scope, &agent_id, &*store))?;
+            let agents = resolve_scope(&scope, &agent_id, &*store)?;
 
             let options = match domain {
                 SearchDomain::Messages => SearchOptions::new().messages_only(),
@@ -106,8 +105,12 @@ impl EffectHandler<SessionContext> for SearchHandler {
             // Collect results across all permitted agents.
             let mut hits: Vec<serde_json::Value> = Vec::new();
             for target_agent in &agents {
-                let results = handle
-                    .block_on(store.search(target_agent, &query, options.clone()))
+                let results = store
+                    .search(
+                        &query,
+                        options.clone(),
+                        pattern_core::types::memory_types::MemorySearchScope::Agent(target_agent.as_str().into()),
+                    )
                     .map_err(|e| {
                         EffectError::Handler(format!("Pattern.Search: search failed: {e}"))
                     })?;

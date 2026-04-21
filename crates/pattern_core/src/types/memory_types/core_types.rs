@@ -12,6 +12,8 @@ pub const CONSTELLATION_OWNER: &str = "_constellation_";
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::BlockSchema;
+
 /// Errors that can occur during document operations.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -156,6 +158,172 @@ pub enum MemoryError {
 
 pub type MemoryResult<T> = Result<T, MemoryError>;
 
+// ========== Consolidation types (v3-memory-rework Phase 3) ==========
+
+/// Filter predicate for [`crate::traits::MemoryStore::list_blocks`].
+///
+/// Replaces the pre-Phase-3 `list_blocks`, `list_blocks_by_type`, and
+/// `list_all_blocks_by_label_prefix` methods with a single entry point.
+/// Each `Some(...)` field narrows the results; `None` fields impose no
+/// constraint.
+///
+/// # Examples
+///
+/// ```
+/// use pattern_core::types::memory_types::BlockFilter;
+///
+/// // All blocks for a single agent.
+/// let f = BlockFilter::by_agent("agent-1");
+/// assert!(f.agent_id.is_some());
+/// assert!(f.block_type.is_none());
+///
+/// // Only Core blocks for an agent.
+/// let f = BlockFilter::by_type("agent-1", pattern_core::types::memory_types::BlockType::Core);
+/// assert_eq!(f.block_type, Some(pattern_core::types::memory_types::BlockType::Core));
+///
+/// // Constellation-wide label prefix scan.
+/// let f = BlockFilter::by_prefix("ds:");
+/// assert!(f.agent_id.is_none());
+/// assert_eq!(f.label_prefix.as_deref(), Some("ds:"));
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct BlockFilter {
+    /// If set, only blocks owned by this agent are returned.
+    /// If `None`, blocks from every agent are returned (use for
+    /// constellation-wide listings).
+    pub agent_id: Option<String>,
+    /// If set, only blocks with this type are returned.
+    pub block_type: Option<BlockType>,
+    /// If set, only blocks whose label starts with this prefix
+    /// are returned.
+    pub label_prefix: Option<String>,
+}
+
+impl BlockFilter {
+    /// Filter to a single agent's blocks.
+    pub fn by_agent(agent_id: impl Into<String>) -> Self {
+        Self {
+            agent_id: Some(agent_id.into()),
+            ..Self::default()
+        }
+    }
+
+    /// Filter to a single agent's blocks of a specific type.
+    pub fn by_type(agent_id: impl Into<String>, block_type: BlockType) -> Self {
+        Self {
+            agent_id: Some(agent_id.into()),
+            block_type: Some(block_type),
+            ..Self::default()
+        }
+    }
+
+    /// Filter by label prefix across all agents.
+    pub fn by_prefix(prefix: impl Into<String>) -> Self {
+        Self {
+            label_prefix: Some(prefix.into()),
+            ..Self::default()
+        }
+    }
+
+    /// No filter — returns all blocks.
+    pub fn all() -> Self {
+        Self::default()
+    }
+}
+
+/// Sparse patch for [`crate::traits::MemoryStore::update_block_metadata`].
+///
+/// Each `Some(...)` field is applied; `None` fields leave the stored
+/// value unchanged. Replaces the pre-Phase-3 `set_block_pinned`,
+/// `set_block_type`, `update_block_schema`, and `update_block_description`
+/// methods.
+///
+/// Uses builder-style chaining for ergonomic construction:
+///
+/// ```
+/// use pattern_core::types::memory_types::{BlockMetadataPatch, BlockType};
+///
+/// let patch = BlockMetadataPatch::default()
+///     .pinned(true)
+///     .block_type(BlockType::Working);
+///
+/// assert_eq!(patch.pinned, Some(true));
+/// assert!(!patch.is_empty());
+/// ```
+#[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
+pub struct BlockMetadataPatch {
+    /// If set, update the block's pinned flag.
+    pub pinned: Option<bool>,
+    /// If set, change the block's type.
+    pub block_type: Option<BlockType>,
+    /// If set, update the block's schema.
+    pub schema: Option<BlockSchema>,
+    /// If set, update the block's human-readable description.
+    pub description: Option<String>,
+}
+
+impl BlockMetadataPatch {
+    /// Set the pinned flag.
+    pub fn pinned(mut self, pinned: bool) -> Self {
+        self.pinned = Some(pinned);
+        self
+    }
+
+    /// Set the block type.
+    pub fn block_type(mut self, bt: BlockType) -> Self {
+        self.block_type = Some(bt);
+        self
+    }
+
+    /// Set the block schema.
+    pub fn schema(mut self, sch: BlockSchema) -> Self {
+        self.schema = Some(sch);
+        self
+    }
+
+    /// Set the block description.
+    pub fn description(mut self, d: impl Into<String>) -> Self {
+        self.description = Some(d.into());
+        self
+    }
+
+    /// Returns `true` if no fields are set (the patch would be a no-op).
+    pub fn is_empty(&self) -> bool {
+        self.pinned.is_none()
+            && self.block_type.is_none()
+            && self.schema.is_none()
+            && self.description.is_none()
+    }
+}
+
+/// Direction for [`crate::traits::MemoryStore::undo_redo`].
+///
+/// Replaces the pre-Phase-3 separate `undo_block` and `redo_block`
+/// methods.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum UndoRedoOp {
+    /// Undo the last persisted change.
+    Undo,
+    /// Redo a previously undone change.
+    Redo,
+}
+
+/// Combined undo/redo depth returned by
+/// [`crate::traits::MemoryStore::history_depth`].
+///
+/// Replaces the pre-Phase-3 separate `undo_depth` and `redo_depth`
+/// methods.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UndoRedoDepth {
+    /// Number of available undo steps.
+    pub undo: usize,
+    /// Number of available redo steps.
+    pub redo: usize,
+}
+
 /// Permission levels for memory operations (most to least restrictive)
 #[derive(
     Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq, PartialOrd, Ord, JsonSchema,
@@ -255,5 +423,102 @@ impl std::fmt::Display for MemoryType {
             MemoryType::Working => write!(f, "working"),
             MemoryType::Archival => write!(f, "recall"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- BlockFilter tests ----
+
+    #[test]
+    fn block_filter_all_is_default() {
+        let f = BlockFilter::all();
+        assert_eq!(f, BlockFilter::default());
+        assert!(f.agent_id.is_none());
+        assert!(f.block_type.is_none());
+        assert!(f.label_prefix.is_none());
+    }
+
+    #[test]
+    fn block_filter_by_agent() {
+        let f = BlockFilter::by_agent("agent-1");
+        assert_eq!(f.agent_id.as_deref(), Some("agent-1"));
+        assert!(f.block_type.is_none());
+        assert!(f.label_prefix.is_none());
+    }
+
+    #[test]
+    fn block_filter_by_type() {
+        let f = BlockFilter::by_type("agent-1", BlockType::Core);
+        assert_eq!(f.agent_id.as_deref(), Some("agent-1"));
+        assert_eq!(f.block_type, Some(BlockType::Core));
+        assert!(f.label_prefix.is_none());
+    }
+
+    #[test]
+    fn block_filter_by_prefix() {
+        let f = BlockFilter::by_prefix("ds:");
+        assert!(f.agent_id.is_none());
+        assert!(f.block_type.is_none());
+        assert_eq!(f.label_prefix.as_deref(), Some("ds:"));
+    }
+
+    // ---- BlockMetadataPatch tests ----
+
+    #[test]
+    fn patch_empty_by_default() {
+        let p = BlockMetadataPatch::default();
+        assert!(p.is_empty());
+    }
+
+    #[test]
+    fn patch_builder_chaining() {
+        let p = BlockMetadataPatch::default()
+            .pinned(true)
+            .block_type(BlockType::Working)
+            .description("test description");
+        assert_eq!(p.pinned, Some(true));
+        assert_eq!(p.block_type, Some(BlockType::Working));
+        assert_eq!(p.description.as_deref(), Some("test description"));
+        assert!(p.schema.is_none());
+        assert!(!p.is_empty());
+    }
+
+    #[test]
+    fn patch_single_field_not_empty() {
+        let p = BlockMetadataPatch::default().pinned(false);
+        assert!(!p.is_empty());
+    }
+
+    #[test]
+    fn patch_schema_field() {
+        let p = BlockMetadataPatch::default().schema(BlockSchema::text());
+        assert!(p.schema.is_some());
+        assert!(!p.is_empty());
+    }
+
+    // ---- UndoRedoOp tests ----
+
+    #[test]
+    fn undo_redo_op_variants() {
+        assert_ne!(UndoRedoOp::Undo, UndoRedoOp::Redo);
+        // Verify Copy.
+        let op = UndoRedoOp::Undo;
+        let op2 = op;
+        assert_eq!(op, op2);
+    }
+
+    // ---- UndoRedoDepth tests ----
+
+    #[test]
+    fn undo_redo_depth_fields() {
+        let d = UndoRedoDepth { undo: 3, redo: 1 };
+        assert_eq!(d.undo, 3);
+        assert_eq!(d.redo, 1);
+        // Verify Copy.
+        let d2 = d;
+        assert_eq!(d, d2);
     }
 }

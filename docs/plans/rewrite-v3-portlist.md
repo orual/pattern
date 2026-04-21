@@ -96,6 +96,19 @@ Cruft (code with no fate marker, `unimplemented!()`/`todo!()` without phase/AC r
 - Dependency graph: `pattern_memory -> pattern_core + pattern_db`; reverse-dep
   guard is `crates/pattern_core/tests/no_pattern_memory_dep.rs`.
 
+### Recall SDK surface shrink (Phase 3 — completed 2026-04-19)
+
+- Removed `RecallReq::Delete` variant from the agent-facing SDK
+  (`pattern_runtime::sdk::requests::recall`).
+- Removed `Pattern.Recall.delete` Haskell symbol and its Recall GADT
+  constructor (`RecallDelete`).
+- `MemoryStore::delete_archival` retained in the trait for human-operator
+  tooling (CLI / TUI).
+- Agent programs referencing `Pattern.Recall.delete` fail at Tidepool
+  compile time with a 'variable not in scope' diagnostic.
+- Trybuild compile-fail test at
+  `crates/pattern_runtime/tests/trybuild/no_archive_delete.rs`.
+
 ## Retired-directory deletion policy
 
 Crates marked `retire` keep their source on disk (excluded from `members`) until their responsibilities have fully migrated. Deletion happens in a dedicated commit with subject:

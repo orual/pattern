@@ -118,7 +118,6 @@ async fn memory_round_trip_through_session() {
     // After open, the persona-declared block should be seeded into the store.
     let block = store
         .get_block("agent-mem", "scratch")
-        .await
         .expect("get_block should succeed")
         .expect("scratch block should exist after session open");
 
@@ -143,7 +142,6 @@ async fn memory_round_trip_through_session() {
     // After the step, the memory block should still be accessible.
     let block_post = store
         .get_block("agent-mem", "scratch")
-        .await
         .expect("get_block should succeed after step")
         .expect("scratch block should survive the step");
     assert_eq!(

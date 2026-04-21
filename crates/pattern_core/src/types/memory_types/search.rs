@@ -1,6 +1,8 @@
 //! Search-related types that appear in [`crate::traits::MemoryStore`]
 //! signatures.
 
+use crate::types::ids::AgentId;
+
 /// Search mode configuration
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchMode {
@@ -108,6 +110,26 @@ impl Default for SearchOptions {
     }
 }
 
+/// Scope for [`crate::traits::MemoryStore::search`].
+///
+/// Replaces the pre-Phase-3 separate `search` (agent-scoped) and
+/// `search_all` (constellation-scoped) methods. This is the
+/// **storage-layer** scope — a simpler type than the handler-level
+/// [`crate::types::SearchScope`] which includes `CurrentAgent` and
+/// `Agents` variants resolved by the scope resolver before reaching
+/// the store.
+///
+/// Phase 8's `MemoryScope` layers additional routing (persona + project)
+/// on top of this.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MemorySearchScope {
+    /// Search only this agent's data.
+    Agent(AgentId),
+    /// Search all agents in the constellation.
+    Constellation,
+}
+
 /// Search result from memory operations
 #[derive(Debug, Clone)]
 pub struct MemorySearchResult {
@@ -136,5 +158,23 @@ impl MemorySearchResult {
             content: result.content,
             score: result.score,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn memory_search_scope_agent_variant() {
+        let scope = MemorySearchScope::Agent("agent-1".into());
+        assert_eq!(scope, MemorySearchScope::Agent("agent-1".into()));
+        assert_ne!(scope, MemorySearchScope::Constellation);
+    }
+
+    #[test]
+    fn memory_search_scope_constellation_variant() {
+        let scope = MemorySearchScope::Constellation;
+        assert_eq!(scope, MemorySearchScope::Constellation);
     }
 }

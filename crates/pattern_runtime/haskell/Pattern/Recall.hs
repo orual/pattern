@@ -1,12 +1,17 @@
 {-# LANGUAGE GADTs #-}
 -- | Pattern.Recall — archival-entry CRUD with optional scope.
 --
--- Provides insert\/search\/get\/delete operations over the archival
--- storage backend. Search takes an optional scope ('Maybe Scope');
--- when absent it defaults to the current agent's archival entries.
+-- Provides insert\/search\/get operations over the archival storage
+-- backend. Search takes an optional scope ('Maybe Scope'); when
+-- absent it defaults to the current agent's archival entries.
 --
 -- Constructor names use the @Recall@-prefix to avoid collisions with
 -- @Pattern.Memory@ constructors (@Get@, @Search@, @Archive@).
+--
+-- Note: @RecallDelete@ / @delete@ were removed in v3-memory-rework
+-- Phase 3 (AC4.9). 'MemoryStore::delete_archival' is retained on the
+-- Rust side for human-operator tooling (CLI / TUI) but is not
+-- reachable via the agent SDK.
 module Pattern.Recall where
 
 import Control.Monad.Freer (Eff, Member, send)
@@ -32,7 +37,6 @@ data Recall a where
   RecallInsert :: ArchivalContent -> Recall EntryId
   RecallSearch :: RecallQuery -> Maybe Scope -> Recall [ArchivalHit]
   RecallGet    :: EntryId -> Recall ArchivalContent
-  RecallDelete :: EntryId -> Recall ()
 
 -- | Insert a new archival entry, returning its id.
 insert :: Member Recall effs => ArchivalContent -> Eff effs EntryId
@@ -46,7 +50,3 @@ search q s = send (RecallSearch q s)
 -- | Get a specific archival entry by id.
 get :: Member Recall effs => EntryId -> Eff effs ArchivalContent
 get i = send (RecallGet i)
-
--- | Delete an archival entry by id.
-delete :: Member Recall effs => EntryId -> Eff effs ()
-delete i = send (RecallDelete i)

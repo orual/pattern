@@ -669,19 +669,20 @@ async fn seed_anchor_blocks(
         let create = BlockCreate::new(*label, *block_type, BlockSchema::text());
         let doc = store
             .create_block(agent_id, create)
-            .await
             .map_err(|e| format!("create_block({label}) failed: {e}"))?;
         doc.set_text(content, true)
             .map_err(|e| format!("set_text({label}) failed: {e:?}"))?;
         store
             .persist_block(agent_id, label)
-            .await
             .map_err(|e| format!("persist_block({label}) failed: {e}"))?;
         if *pinned {
             store
-                .set_block_pinned(agent_id, label, true)
-                .await
-                .map_err(|e| format!("set_block_pinned({label}) failed: {e}"))?;
+                .update_block_metadata(
+                    agent_id,
+                    label,
+                    pattern_core::types::memory_types::BlockMetadataPatch::default().pinned(true),
+                )
+                .map_err(|e| format!("update_block_metadata({label}) failed: {e}"))?;
         }
         eprintln!(
             "  seeded block '{label}' ({} bytes, {} chars){}",
@@ -956,14 +957,12 @@ async fn cmd_cache_test(
     {
         use pattern_core::traits::MemoryStore;
         let doc = memory_store
-            .get_block(agent_id, "current_human")
-            .await?
+            .get_block(agent_id, "current_human")?
             .ok_or("block 'current_human' missing after turn 2 (test setup invariant broken)")?;
         doc.set_text(updated_content, true)
             .map_err(|e| format!("set_text failed: {e:?}"))?;
         memory_store
-            .persist_block(agent_id, "current_human")
-            .await?;
+            .persist_block(agent_id, "current_human")?;
     }
     eprintln!("  new content: {} chars\n", updated_content.chars().count());
 
@@ -1330,7 +1329,6 @@ async fn cmd_spawn(
                     };
                     match memory_store_for_repl
                         .get_block(&persona_agent_id, label)
-                        .await
                     {
                         Ok(Some(doc)) => {
                             if let Err(e) = doc.set_text(content, true) {
@@ -1343,7 +1341,6 @@ async fn cmd_spawn(
                             }
                             if let Err(e) = memory_store_for_repl
                                 .persist_block(&persona_agent_id, label)
-                                .await
                             {
                                 let Ok(mut out) = writer.lock() else {
                                     continue;

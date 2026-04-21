@@ -217,17 +217,20 @@ on accumulated depth=0 summaries) is out of scope for foundation.
 
 ### Eval worker (`agent_loop/eval_worker.rs`)
 
-`EvalWorker` spawns a long-lived thread with a 256 MiB stack (GHC
-continuation frames need it) and a multi-thread tokio runtime (sqlx
-`spawn_blocking` calls need actual worker threads; current-thread
-would deadlock).
+Eval worker is a plain OS thread spawned via `std::thread::spawn` with a
+256 MiB stack (GHC continuation frames need it). Intake channel is
+`std::sync::mpsc::Sender<EvalRequest>` owned by `EvalWorker`; reply
+channel is `tokio::sync::oneshot::Sender<ToolOutcome>` per request. The
+worker runs Tidepool's Haskell evaluator directly against the sync
+`MemoryStore` surface — no nested tokio runtime, no `block_in_place`,
+no `Handle::current().block_on`.
 
-**`block_in_place` wrapping:** the `run_eval` call inside the worker's
-dispatch loop is wrapped in `tokio::task::block_in_place`. Without it,
-handlers that call `Handle::current().block_on(...)` panic with
-"Cannot start a runtime from within a runtime" because the evaluation
-runs on a multi-thread tokio worker thread. `block_in_place` relocates
-other tasks off the current worker thread before blocking.
+Panic handling: worker thread panic terminates the thread; session
+becomes unusable (channel closed); callers observe channel-closed errors
+on the next dispatch. This is the intended failure mode (fail loud; no
+silent deadlock).
+
+Freshness date: 2026-04-19 (v3-memory-rework Phase 3).
 
 ### SessionContext (`session.rs`)
 

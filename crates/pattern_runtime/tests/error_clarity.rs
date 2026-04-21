@@ -312,17 +312,20 @@ fn ac9_5_sdk_location_bad_path_names_the_missing_directory() {
 
 // ────────────────────────────── 5. Memory write to unknown handle ────────────
 
-#[tokio::test]
-async fn ac9_5_memory_write_to_unknown_label_returns_not_found() {
+#[test]
+fn ac9_5_memory_write_to_unknown_label_returns_not_found() {
     let store = InMemoryMemoryStore::new();
     let agent_id = "test-agent-ac9-5";
     let missing_label = "nonexistent-block";
 
-    // `set_block_pinned` on a non-existent label returns `MemoryError::NotFound`
+    // `update_block_metadata` on a non-existent label returns `MemoryError::NotFound`
     // with the agent_id and label populated — giving a specific, actionable error.
     let err = store
-        .set_block_pinned(agent_id, missing_label, true)
-        .await
+        .update_block_metadata(
+            agent_id,
+            missing_label,
+            pattern_core::types::memory_types::BlockMetadataPatch::default().pinned(true),
+        )
         .expect_err("write to unknown label must return NotFound");
 
     // Assert the correct error variant with populated context fields.
@@ -351,16 +354,20 @@ async fn ac9_5_memory_write_to_unknown_label_returns_not_found() {
     );
 }
 
-#[tokio::test]
-async fn ac9_5_memory_update_description_unknown_label_returns_not_found() {
+#[test]
+fn ac9_5_memory_update_description_unknown_label_returns_not_found() {
     let store = InMemoryMemoryStore::new();
     let agent_id = "test-agent-ac9-5-desc";
     let missing_label = "nonexistent-block-desc";
 
     let err = store
-        .update_block_description(agent_id, missing_label, "new description")
-        .await
-        .expect_err("update_block_description on unknown label must return NotFound");
+        .update_block_metadata(
+            agent_id,
+            missing_label,
+            pattern_core::types::memory_types::BlockMetadataPatch::default()
+                .description("new description"),
+        )
+        .expect_err("update_block_metadata on unknown label must return NotFound");
 
     match &err {
         pattern_core::types::memory_types::MemoryError::NotFound {

@@ -1,0 +1,5 @@
+error[E0599]: no variant, associated function, or constant named `Delete` found for enum `RecallReq` in the current scope
+ --> tests/trybuild/no_archive_delete.rs:6:24
+  |
+6 |     let _ = RecallReq::Delete("should-not-compile".into());
+  |                        ^^^^^^ variant, associated function, or constant not found in `RecallReq`

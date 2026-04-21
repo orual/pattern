@@ -613,7 +613,9 @@ fn collect_last_tracked_hashes(history: &TurnHistory) -> std::collections::HashM
 ///
 /// `shown_hashes` maps block label -> last rendered content hash (from
 /// [`collect_last_shown_hashes`]).
-async fn load_snapshot_blocks_with_visibility(
+/// Sync because all MemoryStore methods are sync (v3-memory-rework
+/// Phase 3). Called from async contexts via `spawn_blocking`.
+fn load_snapshot_blocks_with_visibility(
     ctx: &SessionContext,
     kind: &SnapshotKind,
     selection: &pattern_core::types::message::SnapshotSelection,
@@ -622,8 +624,7 @@ async fn load_snapshot_blocks_with_visibility(
 ) -> Result<Vec<RenderedBlock>, RuntimeError> {
     let block_list = ctx
         .memory_store()
-        .list_blocks(ctx.agent_id())
-        .await
+        .list_blocks(pattern_core::types::memory_types::BlockFilter::by_agent(ctx.agent_id()))
         .map_err(|e| RuntimeError::ProviderError {
             reason: format!("list_blocks failed: {e}"),
         })?;
@@ -641,7 +642,6 @@ async fn load_snapshot_blocks_with_visibility(
         if let Some(doc) = ctx
             .memory_store()
             .get_block(ctx.agent_id(), &meta.label)
-            .await
             .map_err(|e| RuntimeError::ProviderError {
                 reason: format!("get_block({}) failed: {e}", meta.label),
             })?
@@ -916,14 +916,25 @@ pub async fn drive_step(
             .lock()
             .map(|h| collect_last_shown_hashes(&h))
             .unwrap_or_default();
-        let current_blocks = load_snapshot_blocks_with_visibility(
-            &ctx,
-            &snapshot_kind,
-            &selection,
-            &first_msg_block_refs,
-            &shown_hashes,
-        )
-        .await?;
+        // Wrapped in spawn_blocking: list_blocks + get_block hit DB.
+        let current_blocks = {
+            let ctx = ctx.clone();
+            let snapshot_kind = snapshot_kind.clone();
+            let selection = selection.clone();
+            tokio::task::spawn_blocking(move || {
+                load_snapshot_blocks_with_visibility(
+                    &ctx,
+                    &snapshot_kind,
+                    &selection,
+                    &first_msg_block_refs,
+                    &shown_hashes,
+                )
+            })
+            .await
+            .map_err(|e| RuntimeError::JoinError {
+                reason: format!("spawn_blocking load_snapshot_blocks: {e}"),
+            })??
+        };
 
         let is_full = matches!(snapshot_kind, SnapshotKind::Full);
         let attachment =
@@ -1015,15 +1026,28 @@ pub async fn drive_step(
                 let mid_kind = SnapshotKind::Delta {
                     since_batch: recorded_input.batch_id.clone(),
                 };
-                if let Ok(current_blocks) = load_snapshot_blocks_with_visibility(
-                    &ctx,
-                    &mid_kind,
-                    ctx.snapshot_selection(),
-                    &tool_block_refs,
-                    &mid_shown_hashes,
-                )
-                .await
-                {
+                // Wrapped in spawn_blocking: hits DB via list_blocks + get_block.
+                let mid_blocks_result = {
+                    let ctx = ctx.clone();
+                    let mid_kind = mid_kind.clone();
+                    let selection = ctx.snapshot_selection().clone();
+                    tokio::task::spawn_blocking(move || {
+                        load_snapshot_blocks_with_visibility(
+                            &ctx,
+                            &mid_kind,
+                            &selection,
+                            &tool_block_refs,
+                            &mid_shown_hashes,
+                        )
+                    })
+                    .await
+                };
+                let mid_blocks_result = mid_blocks_result
+                    .map_err(|e| RuntimeError::JoinError {
+                        reason: format!("spawn_blocking mid-batch snapshot: {e}"),
+                    })
+                    .and_then(|r| r);
+                if let Ok(current_blocks) = mid_blocks_result {
                     // Build the prior-tracked-hashes map by walking FULL
                     // turn_history (latest-wins per label) and then folding
                     // in any attachments from recorded_input that haven't
@@ -1211,15 +1235,21 @@ async fn compose_request_for_turn(
 ) -> Result<(CompletionRequest, bool), RuntimeError> {
     // 1. Load persona from memory (best-effort — no persona block is
     //    a valid state; the system prompt gracefully degrades to just
-    //    base instructions).
-    let persona_text = ctx
-        .memory_store()
-        .get_block(ctx.agent_id(), pattern_core::PERSONA_LABEL)
+    //    base instructions). Wrapped in spawn_blocking because get_block
+    //    hits the DB (rusqlite) and we're in an async context.
+    let persona_text = {
+        let ctx = ctx.clone();
+        tokio::task::spawn_blocking(move || {
+            ctx.memory_store()
+                .get_block(ctx.agent_id(), pattern_core::PERSONA_LABEL)
+                .ok()
+                .flatten()
+                .map(|doc| doc.render())
+                .unwrap_or_default()
+        })
         .await
-        .ok()
-        .flatten()
-        .map(|doc| doc.render())
-        .unwrap_or_default();
+        .unwrap_or_default()
+    };
 
     // 2. Build system_blocks via the shaper. ShaperCompatMode is
     //    hardcoded to SubscriptionRoutingShape today — see function
@@ -3250,7 +3280,6 @@ mod tests {
                     BlockSchema::text(),
                 ),
             )
-            .await
             .expect("pre-create block");
 
         let store: Arc<dyn MemoryStore> = store_concrete;

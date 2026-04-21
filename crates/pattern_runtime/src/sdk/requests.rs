@@ -78,7 +78,7 @@ mod parity {
         ),
         (
             "RecallReq",
-            &["RecallInsert", "RecallSearch", "RecallGet", "RecallDelete"],
+            &["RecallInsert", "RecallSearch", "RecallGet"],
         ),
         ("MessageReq", &["Ask", "Send", "Reply", "Notify"]),
         ("ShellReq", &["Execute", "Spawn", "Kill", "Status"]),
@@ -197,8 +197,7 @@ mod parity {
         let _ = RecallReq::Insert(String::new());
         let _ = RecallReq::Search(String::new(), None);
         let _ = RecallReq::Get(String::new());
-        let _ = RecallReq::Delete(String::new());
-        assert_eq!(count("RecallReq"), 4);
+        assert_eq!(count("RecallReq"), 3);
     }
 
     #[test]

@@ -511,8 +511,7 @@ impl TidepoolSession {
             &*store_for_seed,
             &agent_id_for_seed,
             &memory_blocks_for_seed,
-        )
-        .await?;
+        )?;
 
         // Replace the NoOpSink on the freshly constructed SessionContext.
         // We have exclusive ownership of `session` here (just returned
@@ -688,7 +687,7 @@ pub(crate) fn record_exchange(
 ///
 /// `crdt_snapshot` is currently always `None` in foundation; when the
 /// full-CRDT restore path lands, this helper will need to branch on it.
-async fn seed_persona_memory_blocks(
+fn seed_persona_memory_blocks(
     store: &dyn MemoryStore,
     agent_id: &str,
     memory_blocks: &std::collections::HashMap<
@@ -714,7 +713,6 @@ async fn seed_persona_memory_blocks(
         // Don't clobber existing blocks — persona is INITIAL intent.
         if store
             .get_block(agent_id, label.as_str())
-            .await
             .map_err(|e| RuntimeError::SessionPoisoned {
                 reason: format!("memory seed: get_block({label}) failed: {e}"),
             })?
@@ -743,7 +741,7 @@ async fn seed_persona_memory_blocks(
             create = create.with_char_limit(limit);
         }
 
-        let doc = store.create_block(agent_id, create).await.map_err(|e| {
+        let doc = store.create_block(agent_id, create).map_err(|e| {
             RuntimeError::SessionPoisoned {
                 reason: format!("memory seed: create_block({label}) failed: {e}"),
             }
@@ -757,16 +755,18 @@ async fn seed_persona_memory_blocks(
 
         if spec.pinned {
             store
-                .set_block_pinned(agent_id, label.as_str(), true)
-                .await
+                .update_block_metadata(
+                    agent_id,
+                    label.as_str(),
+                    pattern_core::types::memory_types::BlockMetadataPatch::default().pinned(true),
+                )
                 .map_err(|e| RuntimeError::SessionPoisoned {
-                    reason: format!("memory seed: set_block_pinned({label}) failed: {e}"),
+                    reason: format!("memory seed: update_block_metadata({label}) failed: {e}"),
                 })?;
         }
 
         store
             .persist_block(agent_id, label.as_str())
-            .await
             .map_err(|e| RuntimeError::SessionPoisoned {
                 reason: format!("memory seed: persist_block({label}) failed: {e}"),
             })?;
@@ -1027,13 +1027,12 @@ mod tests {
             );
 
         seed_persona_memory_blocks(store_dyn.as_ref(), "agent-perm", &persona.memory_blocks)
-            .await
+            
             .expect("seed should succeed");
 
         // Check the read-only block — permission must be preserved.
         let doc = store_dyn
             .get_block("agent-perm", "persona")
-            .await
             .expect("get_block should succeed")
             .expect("persona block should exist");
         assert_eq!(
@@ -1045,7 +1044,6 @@ mod tests {
         // Check the read-write block — default must round-trip correctly.
         let doc2 = store_dyn
             .get_block("agent-perm", "scratchpad")
-            .await
             .expect("get_block should succeed")
             .expect("scratchpad block should exist");
         assert_eq!(
@@ -1084,7 +1082,7 @@ mod tests {
 
         let result =
             seed_persona_memory_blocks(store_dyn.as_ref(), "agent-shared", &persona.memory_blocks)
-                .await;
+                ;
 
         match result {
             Err(RuntimeError::SharedBlockRefNotSupported { label, shared_id }) => {

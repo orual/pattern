@@ -8,13 +8,12 @@
 //! thread has a 256 MiB stack (matches tidepool-mcp's convention for
 //! GHC-compiled code — the nested continuation frames produced by
 //! `do`-notation Haskell easily blow past the default 8 MiB on
-//! moderately complex snippets) and owns a small current-thread tokio
-//! runtime so the handler `Arc<dyn MemoryStore>` can drive async
-//! operations during the sync `compile_and_run` call.
+//! moderately complex snippets) and runs directly against the sync
+//! `MemoryStore` surface — no nested tokio runtime, no
+//! `block_in_place`, no `Handle::current().block_on`.
 //!
-//! Tool calls arrive via `EvalDispatcher::dispatch` → an
-//! `tokio::sync::mpsc::UnboundedSender`. For each request the
-//! worker:
+//! Tool calls arrive via `EvalDispatcher::dispatch` → a
+//! `std::sync::mpsc::Sender`. For each request the worker:
 //!
 //! 1. Parses the `code`-tool JSON arguments into `CodeToolInput`.
 //! 2. Wraps the snippet in the shared preamble via
@@ -30,31 +29,29 @@
 //!    `EvalResult` serialization; error: diagnostic string) back through
 //!    a `tokio::sync::oneshot` reply channel.
 //!
-//! # Runtime shape
+//! # Runtime shape (post-v3-memory-rework Phase 3)
 //!
-//! The worker owns a **multi-thread** tokio runtime (small worker
-//! pool, default blocking threads). Single-thread wouldn't work:
-//! `MemoryHandler` delegates memory reads/writes to `sqlx`, which
-//! issues `tokio::task::spawn_blocking` calls internally on the
-//! SQLite path. Those need actual worker threads to run on — a
-//! current-thread runtime would deadlock when the handler's sync
-//! `compile_and_run` body tries to `block_on` an async sqlx call
-//! that itself spawns a blocking task. A multi-thread runtime with
-//! modest parallelism (default: `num_cpus`, capped by the runtime
-//! builder) sidesteps this cleanly at the cost of a few extra
-//! threads per session.
+//! The worker is a plain OS thread spawned via `std::thread::spawn`.
+//! Intake channel is `std::sync::mpsc::Receiver<EvalRequest>`;
+//! reply channel is `tokio::sync::oneshot::Sender<ToolOutcome>` per
+//! request. The worker runs Tidepool's Haskell evaluator directly
+//! against the sync `MemoryStore` surface — no nested tokio runtime.
+//!
+//! Panic handling: worker thread panic terminates the thread; session
+//! becomes unusable (channel closed); callers observe channel-closed
+//! errors on the next dispatch. This is the intended failure mode
+//! (fail loud; no silent deadlock).
 //!
 //! Dropping [`EvalWorker`] closes the request channel, which causes
 //! the worker to exit cleanly at its next `rx.recv()` iteration; the
-//! join handle is awaited in `Drop` with a short timeout (best-effort
-//! — if the worker is mid-compile it may outlive the session, which
-//! is acceptable since tidepool operations are bounded).
+//! join handle is dropped without joining (best-effort — if the
+//! worker is mid-compile it may outlive the session, which is
+//! acceptable since tidepool operations are bounded).
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::sync::oneshot;
 
 use pattern_core::types::provider::{ToolCall, ToolOutcome};
@@ -79,13 +76,13 @@ struct EvalRequest {
 
 /// Long-lived Haskell eval worker. One per session.
 ///
-/// See the module-level docs for the design rationale. Holds an
-/// `tokio::sync::mpsc::UnboundedSender` to the worker thread + the thread's
-/// `std::thread::JoinHandle` (wrapped in `Option` so `Drop` can take it out for
-/// the `join` call).
+/// See the module-level docs for the design rationale. Holds a
+/// `std::sync::mpsc::Sender` to the worker thread + the thread's
+/// `std::thread::JoinHandle` (wrapped in `Option` so `Drop` can take
+/// it out for the detach).
 pub struct EvalWorker {
-    tx: UnboundedSender<EvalRequest>,
-    /// `Option` so `Drop` can move the handle into `join`.
+    tx: std::sync::mpsc::Sender<EvalRequest>,
+    /// `Option` so `Drop` can move the handle out for detach.
     join_handle: Option<std::thread::JoinHandle<()>>,
     /// Snapshot of the worker's session_id for diagnostics.
     session_id: String,
@@ -134,52 +131,27 @@ impl EvalWorker {
         include_paths: Vec<PathBuf>,
         session_id: String,
     ) -> Self {
-        let (tx, mut rx) = mpsc::unbounded_channel::<EvalRequest>();
+        let (tx, rx) = std::sync::mpsc::channel::<EvalRequest>();
         let session_id_for_worker = session_id.clone();
 
         let join_handle = std::thread::Builder::new()
             .name(format!("pattern-eval-worker-{session_id_for_worker}"))
             .stack_size(256 * 1024 * 1024)
             .spawn(move || {
-                // Multi-thread runtime — see module docs. Modest
-                // worker count since the worker thread itself mostly
-                // blocks on GHC compile; the async tasks we run are
-                // sqlx operations driven by handlers during eval.
-                let rt = match tokio::runtime::Builder::new_multi_thread()
-                    .worker_threads(2)
-                    .enable_all()
-                    .thread_name(format!("pattern-eval-rt-{session_id_for_worker}"))
-                    .build()
-                {
-                    Ok(rt) => rt,
-                    Err(e) => {
-                        tracing::error!("eval worker failed to build tokio runtime: {e}");
-                        return;
-                    }
-                };
-
-                rt.block_on(async move {
-                    while let Some(req) = rx.recv().await {
-                        // Wrap the sync eval work in `block_in_place` so
-                        // tokio moves other tasks off this worker before
-                        // we block it for the duration of the Haskell
-                        // compile + JIT run. Without this, effect
-                        // handlers inside the JIT that call
-                        // `Handle::current().block_on(...)` to drive async
-                        // store operations panic with "Cannot start a
-                        // runtime from within a runtime" because they
-                        // can't block_on the same runtime's worker
-                        // they're currently running on. `block_in_place`
-                        // is the documented tokio pattern for this.
-                        let outcome = tokio::task::block_in_place(|| {
-                            run_eval(&req.source, &ctx, &include_paths, &session_id_for_worker)
-                        });
-                        // Receiver may have dropped (session cancelled
-                        // mid-eval) — that's not an error worth
-                        // surfacing; just move on to the next request.
-                        let _ = req.reply.send(outcome);
-                    }
-                });
+                // Plain OS thread — no nested tokio runtime. The
+                // MemoryStore trait is sync (v3-memory-rework Phase 3),
+                // so handlers call store methods directly without any
+                // async bridging. The `for req in rx` loop blocks on
+                // the std::sync::mpsc channel; when all senders are
+                // dropped the iterator ends and the thread exits.
+                for req in rx {
+                    let outcome =
+                        run_eval(&req.source, &ctx, &include_paths, &session_id_for_worker);
+                    // Receiver may have dropped (session cancelled
+                    // mid-eval) — that's not an error worth
+                    // surfacing; just move on to the next request.
+                    let _ = req.reply.send(outcome);
+                }
             })
             .expect("failed to spawn eval worker thread");
 
@@ -199,20 +171,17 @@ impl EvalWorker {
 
 impl Drop for EvalWorker {
     fn drop(&mut self) {
-        // Dropping `tx` closes the channel; the worker's `rx.recv()`
-        // returns `None`, exits the loop, drops the tokio runtime, and
-        // the thread returns. Join best-effort — if a compile is in
-        // flight we let the thread outlive the session rather than
-        // blocking the caller indefinitely. compile_and_run is
-        // bounded by tidepool's own timeout, so the worker will
-        // terminate soon regardless.
+        // Dropping `tx` closes the channel; the worker's `for req in rx`
+        // iterator ends and the thread returns. Don't join — session
+        // teardown shouldn't block on a potentially-in-flight Haskell
+        // compile. The thread will terminate when its compile finishes +
+        // it sees the closed channel. Detach by letting the handle drop.
         if let Some(handle) = self.join_handle.take() {
-            // Drop sender explicitly to make the intent clear.
-            drop(std::mem::replace(&mut self.tx, mpsc::unbounded_channel().0));
-            // Don't join — session teardown shouldn't block on a
-            // potentially-in-flight Haskell compile. The thread will
-            // terminate when its compile finishes + it sees the
-            // closed channel. Detach by letting the handle drop.
+            // Drop sender explicitly to close the channel.
+            drop(std::mem::replace(
+                &mut self.tx,
+                std::sync::mpsc::channel().0,
+            ));
             drop(handle);
         }
     }
@@ -240,7 +209,8 @@ impl EvalDispatcher for EvalWorker {
             params.helpers.as_deref(),
         );
 
-        // 3. Send to worker, await reply.
+        // 3. Send to worker via std::sync::mpsc, await reply via
+        //    tokio::sync::oneshot.
         let (reply_tx, reply_rx) = oneshot::channel();
         let request = EvalRequest {
             source,
@@ -261,8 +231,7 @@ impl EvalDispatcher for EvalWorker {
 }
 
 /// Inner eval: build a fresh bundle, compile+run the source, render
-/// the result. Called synchronously on the worker thread inside the
-/// worker's tokio runtime.
+/// the result. Called synchronously on the plain OS worker thread.
 fn run_eval(
     source: &str,
     ctx: &Arc<SessionContext>,
@@ -448,23 +417,13 @@ mod tests {
         let provider: Arc<dyn ProviderClient> = Arc::new(NopProviderClient);
         let db = crate::testing::test_db().await;
         let persona = PersonaSnapshot::new("agent-a", "A");
-        let ctx = Arc::new(SessionContext::from_persona(&persona, store, provider, db));
+        // ctx is needed for its Drop to run after the test body.
+        let _ctx = Arc::new(SessionContext::from_persona(&persona, store, provider, db));
 
-        // Stub sdk_dir — we never actually hit the worker thread.
-        let worker = EvalWorker {
-            tx: {
-                let (tx, _rx) = mpsc::unbounded_channel::<EvalRequest>();
-                tx
-            },
-            join_handle: None,
-            session_id: "stub".into(),
-        };
-        drop(worker.tx.clone()); // doesn't close — we have the original
-        // Force close by dropping the receiver-holding worker.
-        // Actually, explicit: create a worker whose tx leads to a
-        // dropped receiver. Simulate by dropping the receiver
-        // manually via a one-off channel.
-        let (dead_tx, dead_rx) = mpsc::unbounded_channel::<EvalRequest>();
+        // Create a worker whose sender leads to a dropped receiver.
+        // Simulate by dropping the receiver manually via a one-off
+        // channel.
+        let (dead_tx, dead_rx) = std::sync::mpsc::channel::<EvalRequest>();
         drop(dead_rx);
         let dead_worker = EvalWorker {
             tx: dead_tx,
@@ -489,6 +448,6 @@ mod tests {
             }
             other => panic!("expected Error outcome, got {other:?}"),
         }
-        drop(ctx);
+        drop(_ctx);
     }
 }

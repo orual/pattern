@@ -45,12 +45,11 @@ impl DescribeEffect for RecallHandler {
     fn effect_decl() -> EffectDecl {
         EffectDecl {
             type_name: "Recall",
-            description: "Archival-entry CRUD with optional scope (RecallInsert/RecallSearch/RecallGet/RecallDelete)",
+            description: "Archival-entry CRUD with optional scope (RecallInsert/RecallSearch/RecallGet)",
             constructors: &[
                 "RecallInsert :: ArchivalContent -> Recall EntryId",
                 "RecallSearch :: RecallQuery -> Maybe Scope -> Recall [ArchivalHit]",
                 "RecallGet    :: EntryId -> Recall ArchivalContent",
-                "RecallDelete :: EntryId -> Recall ()",
             ],
             type_defs: &[
                 "type ArchivalContent = Text",
@@ -63,7 +62,6 @@ impl DescribeEffect for RecallHandler {
                 "insert :: Member Recall effs => ArchivalContent -> Eff effs EntryId\ninsert c = send (RecallInsert c)",
                 "search :: Member Recall effs => RecallQuery -> Maybe Scope -> Eff effs [ArchivalHit]\nsearch q s = send (RecallSearch q s)",
                 "get :: Member Recall effs => EntryId -> Eff effs ArchivalContent\nget i = send (RecallGet i)",
-                "delete :: Member Recall effs => EntryId -> Eff effs ()\ndelete i = send (RecallDelete i)",
             ],
         }
     }
@@ -88,24 +86,23 @@ impl EffectHandler<SessionContext> for RecallHandler {
         let agent_id = cx.user().agent_id().to_string();
         let store = self.store.clone();
         let request_repr = format!("{req:?}");
-        let handle = tokio::runtime::Handle::current();
 
         let result = (|| match req {
             RecallReq::Insert(content) => {
-                let id = handle
-                    .block_on(store.insert_archival(&agent_id, &content, None))
+                let id = store
+                    .insert_archival(&agent_id, &content, None)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Recall.Insert: {e}")))?;
                 cx.respond(id)
             }
 
             RecallReq::Search(query, scope_str) => {
                 let scope = parse_scope(scope_str.as_deref())?;
-                let agents = handle.block_on(resolve_scope(&scope, &agent_id, &*store))?;
+                let agents = resolve_scope(&scope, &agent_id, &*store)?;
 
                 let mut hits: Vec<String> = Vec::new();
                 for target_agent in &agents {
-                    let results = handle
-                        .block_on(store.search_archival(target_agent, &query, 10))
+                    let results = store
+                        .search_archival(target_agent, &query, 10)
                         .map_err(|e| EffectError::Handler(format!("Pattern.Recall.Search: {e}")))?;
                     for r in results {
                         let hit = serde_json::json!({
@@ -122,17 +119,10 @@ impl EffectHandler<SessionContext> for RecallHandler {
             }
 
             RecallReq::Get(id) => {
-                // Get retrieves by entry id; the store checks existence.
-                // We search for the entry across the caller's archival entries.
-                // Since archival entries have globally unique IDs, we search
-                // the caller's entries. If not found, return an error.
-                let results = handle
-                    .block_on(store.search_archival(&agent_id, &id, 1))
+                let results = store
+                    .search_archival(&agent_id, &id, 1)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Recall.Get: {e}")))?;
 
-                // search_archival does FTS, not exact-id lookup. For now, return
-                // not-found and note this as a limitation for follow-up (an
-                // exact get_archival_by_id method would be cleaner).
                 let entry = results.into_iter().find(|e| e.id == id).ok_or_else(|| {
                     EffectError::Handler(format!(
                         "Pattern.Recall.Get: no archival entry with id {id:?}"
@@ -141,12 +131,9 @@ impl EffectHandler<SessionContext> for RecallHandler {
                 cx.respond(entry.content)
             }
 
-            RecallReq::Delete(id) => {
-                handle
-                    .block_on(store.delete_archival(&id))
-                    .map_err(|e| EffectError::Handler(format!("Pattern.Recall.Delete: {e}")))?;
-                cx.respond(())
-            }
+            // RecallReq::Delete removed (v3-memory-rework Phase 3, AC4.9).
+            // MemoryStore::delete_archival retained for human-operator
+            // tooling (CLI / TUI); agents cannot reach it via the SDK.
         })();
 
         if let Ok(ref value) = result {
@@ -193,187 +180,36 @@ mod tests {
         }
     }
 
-    #[async_trait::async_trait]
     impl MemoryStore for RecallTestStore {
-        async fn insert_archival(
-            &self,
-            agent_id: &str,
-            content: &str,
-            _metadata: Option<serde_json::Value>,
-        ) -> pattern_core::types::memory_types::MemoryResult<String> {
-            let id = format!(
-                "arch-{}",
-                self.next_id
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            );
-            self.entries
-                .lock()
-                .unwrap()
-                .push(pattern_core::types::memory_types::ArchivalEntry {
-                    id: id.clone(),
-                    agent_id: agent_id.to_string(),
-                    content: content.to_string(),
-                    metadata: None,
-                    created_at: chrono::Utc::now(),
-                });
+        fn insert_archival(&self, agent_id: &str, content: &str, _metadata: Option<serde_json::Value>) -> pattern_core::types::memory_types::MemoryResult<String> {
+            let id = format!("arch-{}", self.next_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst));
+            self.entries.lock().unwrap().push(pattern_core::types::memory_types::ArchivalEntry {
+                id: id.clone(), agent_id: agent_id.to_string(), content: content.to_string(), metadata: None, created_at: chrono::Utc::now(),
+            });
             Ok(id)
         }
-
-        async fn search_archival(
-            &self,
-            agent_id: &str,
-            query: &str,
-            limit: usize,
-        ) -> pattern_core::types::memory_types::MemoryResult<Vec<pattern_core::types::memory_types::ArchivalEntry>> {
+        fn search_archival(&self, agent_id: &str, query: &str, limit: usize) -> pattern_core::types::memory_types::MemoryResult<Vec<pattern_core::types::memory_types::ArchivalEntry>> {
             let guard = self.entries.lock().unwrap();
-            let results: Vec<_> = guard
-                .iter()
-                .filter(|e| e.agent_id == agent_id && e.content.contains(query))
-                .take(limit)
-                .cloned()
-                .collect();
-            Ok(results)
+            Ok(guard.iter().filter(|e| e.agent_id == agent_id && e.content.contains(query)).take(limit).cloned().collect())
         }
-
-        async fn delete_archival(&self, id: &str) -> pattern_core::types::memory_types::MemoryResult<()> {
-            self.entries.lock().unwrap().retain(|e| e.id != id);
-            Ok(())
+        fn delete_archival(&self, id: &str) -> pattern_core::types::memory_types::MemoryResult<()> {
+            self.entries.lock().unwrap().retain(|e| e.id != id); Ok(())
         }
-
-        // ---- Stubs for the rest ----
-        async fn create_block(
-            &self,
-            _: &str,
-            _: pattern_core::types::block::BlockCreate,
-        ) -> pattern_core::types::memory_types::MemoryResult<pattern_core::memory::StructuredDocument> {
-            panic!()
-        }
-        async fn get_block(
-            &self,
-            _: &str,
-            _: &str,
-        ) -> pattern_core::types::memory_types::MemoryResult<Option<pattern_core::memory::StructuredDocument>>
-        {
-            panic!()
-        }
-        async fn get_block_metadata(
-            &self,
-            _: &str,
-            _: &str,
-        ) -> pattern_core::types::memory_types::MemoryResult<Option<pattern_core::types::memory_types::BlockMetadata>>
-        {
-            panic!()
-        }
-        async fn list_blocks(
-            &self,
-            _: &str,
-        ) -> pattern_core::types::memory_types::MemoryResult<Vec<pattern_core::types::memory_types::BlockMetadata>> {
-            panic!()
-        }
-        async fn list_blocks_by_type(
-            &self,
-            _: &str,
-            _: pattern_core::types::memory_types::BlockType,
-        ) -> pattern_core::types::memory_types::MemoryResult<Vec<pattern_core::types::memory_types::BlockMetadata>> {
-            panic!()
-        }
-        async fn list_all_blocks_by_label_prefix(
-            &self,
-            _: &str,
-        ) -> pattern_core::types::memory_types::MemoryResult<Vec<pattern_core::types::memory_types::BlockMetadata>> {
-            panic!()
-        }
-        async fn delete_block(&self, _: &str, _: &str) -> pattern_core::types::memory_types::MemoryResult<()> {
-            panic!()
-        }
-        async fn get_rendered_content(
-            &self,
-            _: &str,
-            _: &str,
-        ) -> pattern_core::types::memory_types::MemoryResult<Option<String>> {
-            panic!()
-        }
-        async fn persist_block(&self, _: &str, _: &str) -> pattern_core::types::memory_types::MemoryResult<()> {
-            panic!()
-        }
+        // ---- Stubs ----
+        fn create_block(&self, _: &str, _: pattern_core::types::block::BlockCreate) -> pattern_core::types::memory_types::MemoryResult<pattern_core::memory::StructuredDocument> { panic!() }
+        fn get_block(&self, _: &str, _: &str) -> pattern_core::types::memory_types::MemoryResult<Option<pattern_core::memory::StructuredDocument>> { panic!() }
+        fn get_block_metadata(&self, _: &str, _: &str) -> pattern_core::types::memory_types::MemoryResult<Option<pattern_core::types::memory_types::BlockMetadata>> { panic!() }
+        fn list_blocks(&self, _: pattern_core::types::memory_types::BlockFilter) -> pattern_core::types::memory_types::MemoryResult<Vec<pattern_core::types::memory_types::BlockMetadata>> { panic!() }
+        fn delete_block(&self, _: &str, _: &str) -> pattern_core::types::memory_types::MemoryResult<()> { panic!() }
+        fn get_rendered_content(&self, _: &str, _: &str) -> pattern_core::types::memory_types::MemoryResult<Option<String>> { panic!() }
+        fn persist_block(&self, _: &str, _: &str) -> pattern_core::types::memory_types::MemoryResult<()> { panic!() }
         fn mark_dirty(&self, _: &str, _: &str) {}
-        async fn search(
-            &self,
-            _: &str,
-            _: &str,
-            _: pattern_core::types::memory_types::SearchOptions,
-        ) -> pattern_core::types::memory_types::MemoryResult<Vec<pattern_core::types::memory_types::MemorySearchResult>>
-        {
-            Ok(vec![])
-        }
-        async fn search_all(
-            &self,
-            _: &str,
-            _: pattern_core::types::memory_types::SearchOptions,
-        ) -> pattern_core::types::memory_types::MemoryResult<Vec<pattern_core::types::memory_types::MemorySearchResult>>
-        {
-            Ok(vec![])
-        }
-        async fn list_shared_blocks(
-            &self,
-            _: &str,
-        ) -> pattern_core::types::memory_types::MemoryResult<Vec<pattern_core::types::memory_types::SharedBlockInfo>>
-        {
-            Ok(vec![])
-        }
-        async fn get_shared_block(
-            &self,
-            _: &str,
-            _: &str,
-            _: &str,
-        ) -> pattern_core::types::memory_types::MemoryResult<Option<pattern_core::memory::StructuredDocument>>
-        {
-            Ok(None)
-        }
-        async fn set_block_pinned(
-            &self,
-            _: &str,
-            _: &str,
-            _: bool,
-        ) -> pattern_core::types::memory_types::MemoryResult<()> {
-            Ok(())
-        }
-        async fn set_block_type(
-            &self,
-            _: &str,
-            _: &str,
-            _: pattern_core::types::memory_types::BlockType,
-        ) -> pattern_core::types::memory_types::MemoryResult<()> {
-            Ok(())
-        }
-        async fn update_block_schema(
-            &self,
-            _: &str,
-            _: &str,
-            _: pattern_core::types::memory_types::BlockSchema,
-        ) -> pattern_core::types::memory_types::MemoryResult<()> {
-            Ok(())
-        }
-        async fn update_block_description(
-            &self,
-            _: &str,
-            _: &str,
-            _: &str,
-        ) -> pattern_core::types::memory_types::MemoryResult<()> {
-            Ok(())
-        }
-        async fn undo_block(&self, _: &str, _: &str) -> pattern_core::types::memory_types::MemoryResult<bool> {
-            Ok(false)
-        }
-        async fn redo_block(&self, _: &str, _: &str) -> pattern_core::types::memory_types::MemoryResult<bool> {
-            Ok(false)
-        }
-        async fn undo_depth(&self, _: &str, _: &str) -> pattern_core::types::memory_types::MemoryResult<usize> {
-            Ok(0)
-        }
-        async fn redo_depth(&self, _: &str, _: &str) -> pattern_core::types::memory_types::MemoryResult<usize> {
-            Ok(0)
-        }
+        fn search(&self, _: &str, _: pattern_core::types::memory_types::SearchOptions, _: pattern_core::types::memory_types::MemorySearchScope) -> pattern_core::types::memory_types::MemoryResult<Vec<pattern_core::types::memory_types::MemorySearchResult>> { Ok(vec![]) }
+        fn list_shared_blocks(&self, _: &str) -> pattern_core::types::memory_types::MemoryResult<Vec<pattern_core::types::memory_types::SharedBlockInfo>> { Ok(vec![]) }
+        fn get_shared_block(&self, _: &str, _: &str, _: &str) -> pattern_core::types::memory_types::MemoryResult<Option<pattern_core::memory::StructuredDocument>> { Ok(None) }
+        fn update_block_metadata(&self, _: &str, _: &str, _: pattern_core::types::memory_types::BlockMetadataPatch) -> pattern_core::types::memory_types::MemoryResult<()> { Ok(()) }
+        fn undo_redo(&self, _: &str, _: &str, _: pattern_core::types::memory_types::UndoRedoOp) -> pattern_core::types::memory_types::MemoryResult<bool> { Ok(false) }
+        fn history_depth(&self, _: &str, _: &str) -> pattern_core::types::memory_types::MemoryResult<pattern_core::types::memory_types::UndoRedoDepth> { Ok(pattern_core::types::memory_types::UndoRedoDepth { undo: 0, redo: 0 }) }
     }
 
     fn sctx(store: Arc<dyn MemoryStore>, db: Arc<pattern_db::ConstellationDb>) -> SessionContext {
@@ -412,45 +248,10 @@ mod tests {
         .expect("spawn_blocking panicked");
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn recall_delete_removes_entry() {
-        let store: Arc<dyn MemoryStore> = Arc::new(RecallTestStore::new());
-        let store_for_handler = store.clone();
-        let db = crate::testing::test_db().await;
-        tokio::task::spawn_blocking(move || {
-            let table = handler_table();
-            let ctx = sctx(store.clone(), db);
-            let cx = EffectContext::with_user(&table, &ctx);
-            let mut h = RecallHandler::new(store_for_handler);
-
-            // Insert then delete.
-            let _ = h
-                .handle(RecallReq::Insert("ephemeral data".into()), &cx)
-                .unwrap();
-            let delete_result = h.handle(RecallReq::Delete("arch-0".into()), &cx);
-            assert!(
-                delete_result.is_ok(),
-                "delete failed: {:?}",
-                delete_result.err()
-            );
-
-            // Search should find nothing.
-            let search_result = h
-                .handle(RecallReq::Search("ephemeral".into(), None), &cx)
-                .unwrap();
-            // The result should be an empty list.
-            match &search_result {
-                Value::Con(_, fields) if fields.is_empty() => {
-                    // Empty list [] constructor.
-                }
-                _ => {
-                    // May be a different encoding; just ensure no panic.
-                }
-            }
-        })
-        .await
-        .expect("spawn_blocking panicked");
-    }
+    // recall_delete_removes_entry test removed: RecallReq::Delete
+    // variant was removed in v3-memory-rework Phase 3, AC4.9.
+    // MemoryStore::delete_archival is retained for human-operator
+    // tooling but is no longer reachable via the SDK.
 
     #[tokio::test]
     async fn recall_cancelled_at_entry() {

@@ -76,7 +76,7 @@ pub fn parse_scope(scope: Option<&str>) -> Result<SearchScope, EffectError> {
 ///
 /// Returns `Err(EffectError::Handler)` when the caller lacks permission
 /// for any of the requested agents.
-pub async fn resolve_scope(
+pub fn resolve_scope(
     scope: &SearchScope,
     caller: &str,
     store: &dyn MemoryStore,
@@ -89,7 +89,7 @@ pub async fn resolve_scope(
             if target_str == caller {
                 return Ok(vec![caller.to_string()]);
             }
-            if check_cross_agent_permission(caller, target_str, store).await? {
+            if check_cross_agent_permission(caller, target_str, store)? {
                 Ok(vec![target_str.to_string()])
             } else {
                 Err(EffectError::Handler(format!(
@@ -105,7 +105,7 @@ pub async fn resolve_scope(
                 let id_str = id.as_str();
                 if id_str == caller {
                     allowed.push(caller.to_string());
-                } else if check_cross_agent_permission(caller, id_str, store).await? {
+                } else if check_cross_agent_permission(caller, id_str, store)? {
                     allowed.push(id_str.to_string());
                 }
                 // Silently filter out agents the caller cannot access.
@@ -122,10 +122,8 @@ pub async fn resolve_scope(
         SearchScope::Constellation => {
             let agents = store
                 .list_constellation_agent_ids()
-                .await
                 .map_err(|e| EffectError::Handler(format!("constellation lookup failed: {e}")))?;
             if agents.is_empty() {
-                // Fall back to just the caller if the store has no agents listed.
                 Ok(vec![caller.to_string()])
             } else {
                 Ok(agents)
@@ -137,7 +135,7 @@ pub async fn resolve_scope(
 /// Check whether `caller` has cross-agent permission to access
 /// `target`'s data. Checks shared-blocks first (stronger signal),
 /// then group membership.
-async fn check_cross_agent_permission(
+fn check_cross_agent_permission(
     caller: &str,
     target: &str,
     store: &dyn MemoryStore,
@@ -145,7 +143,6 @@ async fn check_cross_agent_permission(
     // Check shared blocks.
     let shared = store
         .has_shared_blocks_with(caller, target)
-        .await
         .map_err(|e| EffectError::Handler(format!("shared-block check failed: {e}")))?;
     if shared {
         return Ok(true);
@@ -154,7 +151,6 @@ async fn check_cross_agent_permission(
     // Check group membership.
     let in_group = store
         .shares_group_with(caller, target)
-        .await
         .map_err(|e| EffectError::Handler(format!("group-membership check failed: {e}")))?;
     Ok(in_group)
 }
@@ -165,7 +161,6 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::Mutex;
 
-    use async_trait::async_trait;
     use pattern_core::memory::StructuredDocument;
     use pattern_core::types::memory_types::*;
     use pattern_core::traits::MemoryStore;
@@ -208,12 +203,11 @@ mod tests {
         }
     }
 
-    #[async_trait]
     impl MemoryStore for ScopeTestStore {
-        // Scope resolution only uses the three new methods; everything
+        // Scope resolution only uses the three default methods; everything
         // else can panic.
 
-        async fn has_shared_blocks_with(&self, caller: &str, target: &str) -> MemoryResult<bool> {
+        fn has_shared_blocks_with(&self, caller: &str, target: &str) -> MemoryResult<bool> {
             Ok(self
                 .shared_blocks
                 .lock()
@@ -221,7 +215,7 @@ mod tests {
                 .contains(&(caller.to_string(), target.to_string())))
         }
 
-        async fn shares_group_with(&self, caller: &str, target: &str) -> MemoryResult<bool> {
+        fn shares_group_with(&self, caller: &str, target: &str) -> MemoryResult<bool> {
             Ok(self
                 .shared_groups
                 .lock()
@@ -229,122 +223,29 @@ mod tests {
                 .contains(&(caller.to_string(), target.to_string())))
         }
 
-        async fn list_constellation_agent_ids(&self) -> MemoryResult<Vec<String>> {
+        fn list_constellation_agent_ids(&self) -> MemoryResult<Vec<String>> {
             Ok(self.constellation_agents.lock().unwrap().clone())
         }
 
         // ---- Stubs for the rest of MemoryStore ----
 
-        async fn create_block(&self, _: &str, _: BlockCreate) -> MemoryResult<StructuredDocument> {
-            panic!("not used in scope tests")
-        }
-        async fn get_block(&self, _: &str, _: &str) -> MemoryResult<Option<StructuredDocument>> {
-            panic!("not used in scope tests")
-        }
-        async fn get_block_metadata(
-            &self,
-            _: &str,
-            _: &str,
-        ) -> MemoryResult<Option<BlockMetadata>> {
-            panic!()
-        }
-        async fn list_blocks(&self, _: &str) -> MemoryResult<Vec<BlockMetadata>> {
-            panic!()
-        }
-        async fn list_blocks_by_type(
-            &self,
-            _: &str,
-            _: BlockType,
-        ) -> MemoryResult<Vec<BlockMetadata>> {
-            panic!()
-        }
-        async fn list_all_blocks_by_label_prefix(
-            &self,
-            _: &str,
-        ) -> MemoryResult<Vec<BlockMetadata>> {
-            panic!()
-        }
-        async fn delete_block(&self, _: &str, _: &str) -> MemoryResult<()> {
-            panic!()
-        }
-        async fn get_rendered_content(&self, _: &str, _: &str) -> MemoryResult<Option<String>> {
-            panic!()
-        }
-        async fn persist_block(&self, _: &str, _: &str) -> MemoryResult<()> {
-            panic!()
-        }
-        fn mark_dirty(&self, _: &str, _: &str) {
-            panic!()
-        }
-        async fn insert_archival(
-            &self,
-            _: &str,
-            _: &str,
-            _: Option<JsonValue>,
-        ) -> MemoryResult<String> {
-            panic!()
-        }
-        async fn search_archival(
-            &self,
-            _: &str,
-            _: &str,
-            _: usize,
-        ) -> MemoryResult<Vec<ArchivalEntry>> {
-            panic!()
-        }
-        async fn delete_archival(&self, _: &str) -> MemoryResult<()> {
-            panic!()
-        }
-        async fn search(
-            &self,
-            _: &str,
-            _: &str,
-            _: SearchOptions,
-        ) -> MemoryResult<Vec<MemorySearchResult>> {
-            panic!()
-        }
-        async fn search_all(
-            &self,
-            _: &str,
-            _: SearchOptions,
-        ) -> MemoryResult<Vec<MemorySearchResult>> {
-            panic!()
-        }
-        async fn list_shared_blocks(&self, _: &str) -> MemoryResult<Vec<SharedBlockInfo>> {
-            panic!()
-        }
-        async fn get_shared_block(
-            &self,
-            _: &str,
-            _: &str,
-            _: &str,
-        ) -> MemoryResult<Option<StructuredDocument>> {
-            panic!()
-        }
-        async fn set_block_pinned(&self, _: &str, _: &str, _: bool) -> MemoryResult<()> {
-            panic!()
-        }
-        async fn set_block_type(&self, _: &str, _: &str, _: BlockType) -> MemoryResult<()> {
-            panic!()
-        }
-        async fn update_block_schema(&self, _: &str, _: &str, _: BlockSchema) -> MemoryResult<()> {
-            panic!()
-        }
-        async fn update_block_description(&self, _: &str, _: &str, _: &str) -> MemoryResult<()> {
-            panic!()
-        }
-        async fn undo_block(&self, _: &str, _: &str) -> MemoryResult<bool> {
-            panic!()
-        }
-        async fn redo_block(&self, _: &str, _: &str) -> MemoryResult<bool> {
-            panic!()
-        }
-        async fn undo_depth(&self, _: &str, _: &str) -> MemoryResult<usize> {
-            panic!()
-        }
-        async fn redo_depth(&self, _: &str, _: &str) -> MemoryResult<usize> {
-            panic!()
-        }
+        fn create_block(&self, _: &str, _: BlockCreate) -> MemoryResult<StructuredDocument> { panic!("not used in scope tests") }
+        fn get_block(&self, _: &str, _: &str) -> MemoryResult<Option<StructuredDocument>> { panic!("not used in scope tests") }
+        fn get_block_metadata(&self, _: &str, _: &str) -> MemoryResult<Option<BlockMetadata>> { panic!() }
+        fn list_blocks(&self, _: BlockFilter) -> MemoryResult<Vec<BlockMetadata>> { panic!() }
+        fn delete_block(&self, _: &str, _: &str) -> MemoryResult<()> { panic!() }
+        fn get_rendered_content(&self, _: &str, _: &str) -> MemoryResult<Option<String>> { panic!() }
+        fn persist_block(&self, _: &str, _: &str) -> MemoryResult<()> { panic!() }
+        fn mark_dirty(&self, _: &str, _: &str) { panic!() }
+        fn insert_archival(&self, _: &str, _: &str, _: Option<JsonValue>) -> MemoryResult<String> { panic!() }
+        fn search_archival(&self, _: &str, _: &str, _: usize) -> MemoryResult<Vec<ArchivalEntry>> { panic!() }
+        fn delete_archival(&self, _: &str) -> MemoryResult<()> { panic!() }
+        fn search(&self, _: &str, _: SearchOptions, _: MemorySearchScope) -> MemoryResult<Vec<MemorySearchResult>> { panic!() }
+        fn list_shared_blocks(&self, _: &str) -> MemoryResult<Vec<SharedBlockInfo>> { panic!() }
+        fn get_shared_block(&self, _: &str, _: &str, _: &str) -> MemoryResult<Option<StructuredDocument>> { panic!() }
+        fn update_block_metadata(&self, _: &str, _: &str, _: BlockMetadataPatch) -> MemoryResult<()> { panic!() }
+        fn undo_redo(&self, _: &str, _: &str, _: UndoRedoOp) -> MemoryResult<bool> { panic!() }
+        fn history_depth(&self, _: &str, _: &str) -> MemoryResult<UndoRedoDepth> { panic!() }
     }
 
     // ---- parse_scope tests ----
@@ -409,55 +310,55 @@ mod tests {
 
     // ---- resolve_scope tests ----
 
-    #[tokio::test]
-    async fn resolve_current_agent_always_returns_caller() {
+    #[test]
+    fn resolve_current_agent_always_returns_caller() {
         let store = ScopeTestStore::new();
         let result = resolve_scope(&SearchScope::CurrentAgent, "alice", &store)
-            .await
+            
             .unwrap();
         assert_eq!(result, vec!["alice"]);
     }
 
-    #[tokio::test]
-    async fn resolve_agent_self_always_allowed() {
+    #[test]
+    fn resolve_agent_self_always_allowed() {
         let store = ScopeTestStore::new();
         let result = resolve_scope(&SearchScope::Agent("alice".into()), "alice", &store)
-            .await
+            
             .unwrap();
         assert_eq!(result, vec!["alice"]);
     }
 
-    #[tokio::test]
-    async fn resolve_agent_denied_without_relationship() {
+    #[test]
+    fn resolve_agent_denied_without_relationship() {
         let store = ScopeTestStore::new();
         let err = resolve_scope(&SearchScope::Agent("bob".into()), "alice", &store)
-            .await
+            
             .unwrap_err();
         assert!(err.to_string().contains("permission denied"), "got: {err}");
     }
 
-    #[tokio::test]
-    async fn resolve_agent_allowed_via_shared_blocks() {
+    #[test]
+    fn resolve_agent_allowed_via_shared_blocks() {
         let store = ScopeTestStore::new();
         store.add_shared_blocks("alice", "bob");
         let result = resolve_scope(&SearchScope::Agent("bob".into()), "alice", &store)
-            .await
+            
             .unwrap();
         assert_eq!(result, vec!["bob"]);
     }
 
-    #[tokio::test]
-    async fn resolve_agent_allowed_via_group_membership() {
+    #[test]
+    fn resolve_agent_allowed_via_group_membership() {
         let store = ScopeTestStore::new();
         store.add_group_membership("alice", "bob");
         let result = resolve_scope(&SearchScope::Agent("bob".into()), "alice", &store)
-            .await
+            
             .unwrap();
         assert_eq!(result, vec!["bob"]);
     }
 
-    #[tokio::test]
-    async fn resolve_agents_filters_unpermitted() {
+    #[test]
+    fn resolve_agents_filters_unpermitted() {
         let store = ScopeTestStore::new();
         store.add_shared_blocks("alice", "bob");
         // charlie has no relationship with alice.
@@ -466,26 +367,26 @@ mod tests {
             "alice",
             &store,
         )
-        .await
+        
         .unwrap();
         assert_eq!(result, vec!["bob"]);
     }
 
-    #[tokio::test]
-    async fn resolve_agents_all_denied_errors() {
+    #[test]
+    fn resolve_agents_all_denied_errors() {
         let store = ScopeTestStore::new();
         let err = resolve_scope(
             &SearchScope::Agents(vec!["bob".into(), "charlie".into()]),
             "alice",
             &store,
         )
-        .await
+        
         .unwrap_err();
         assert!(err.to_string().contains("permission denied"), "got: {err}");
     }
 
-    #[tokio::test]
-    async fn resolve_agents_includes_self() {
+    #[test]
+    fn resolve_agents_includes_self() {
         let store = ScopeTestStore::new();
         // alice is always allowed.
         let result = resolve_scope(
@@ -493,26 +394,26 @@ mod tests {
             "alice",
             &store,
         )
-        .await
+        
         .unwrap();
         assert_eq!(result, vec!["alice"]);
     }
 
-    #[tokio::test]
-    async fn resolve_constellation_returns_all_agents() {
+    #[test]
+    fn resolve_constellation_returns_all_agents() {
         let store = ScopeTestStore::new();
         store.set_constellation_agents(vec!["alice", "bob", "charlie"]);
         let result = resolve_scope(&SearchScope::Constellation, "alice", &store)
-            .await
+            
             .unwrap();
         assert_eq!(result, vec!["alice", "bob", "charlie"]);
     }
 
-    #[tokio::test]
-    async fn resolve_constellation_empty_falls_back_to_caller() {
+    #[test]
+    fn resolve_constellation_empty_falls_back_to_caller() {
         let store = ScopeTestStore::new();
         let result = resolve_scope(&SearchScope::Constellation, "alice", &store)
-            .await
+            
             .unwrap();
         assert_eq!(result, vec!["alice"]);
     }

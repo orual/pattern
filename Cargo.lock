@@ -5718,6 +5718,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tracing-test",
+ "trybuild",
  "which 8.0.2",
 ]
 
