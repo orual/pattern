@@ -25,10 +25,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use dashmap::DashMap;
 use irpc::{Client, WithChannels};
 use pattern_core::ProviderClient;
 use pattern_core::traits::MemoryStore;
-use pattern_core::traits::turn_sink::{TurnEvent, TurnSink};
+use pattern_core::traits::turn_sink::{DisplayKind, TurnEvent, TurnSink};
 use pattern_core::types::ids::{
     AgentId as CoreAgentId, BatchId as CoreBatchId, MessageId, new_id, new_snowflake_id,
 };
@@ -67,11 +68,25 @@ pub struct SessionConfig {
     pub mount_path: Option<PathBuf>,
 }
 
+/// A cached agent session: the tidepool session and its multiplexing sink.
+///
+/// Stored in a shared [`DashMap`] so spawned tasks can look up and insert
+/// sessions without going through the actor loop.
+#[derive(Clone)]
+struct AgentSession {
+    session: Arc<TidepoolSession>,
+    mux_sink: Arc<MultiplexSink>,
+}
+
 /// The daemon server actor.
 ///
 /// Receives [`PatternMessage`]s from clients (local or remote) and events from
 /// [`TurnSinkBridge`]s. Fans events out to all subscribers that match the
 /// event's `agent_id`.
+///
+/// Session lifecycle (opening, compilation) happens in spawned tasks using
+/// the shared [`DashMap`]-backed caches, so the actor loop never blocks on
+/// slow operations like tidepool Haskell compilation.
 pub struct DaemonServer {
     recv: tokio::sync::mpsc::Receiver<PatternMessage>,
     event_rx: EventRx,
@@ -85,17 +100,18 @@ pub struct DaemonServer {
     echo: bool,
     /// Session infrastructure for real mode. `None` in echo mode.
     session_config: Option<Arc<SessionConfig>>,
-    /// Open sessions keyed by agent ID. Each session uses a [`MultiplexSink`]
-    /// whose inner sink is swapped to a per-batch [`TurnSinkBridge`] before
-    /// each `step_with_agent_loop` call.
-    sessions: HashMap<AgentId, (Arc<TidepoolSession>, Arc<MultiplexSink>)>,
-    /// Per-agent mutex that serializes the `set_inner` + `spawn` sequence.
+    /// Open sessions keyed by agent ID, shared with spawned tasks.
+    /// Each session uses a [`MultiplexSink`] whose inner sink is swapped to
+    /// a per-batch [`TurnSinkBridge`] before each `step_with_agent_loop` call.
+    sessions: Arc<DashMap<AgentId, AgentSession>>,
+    /// Per-agent mutex that serializes session opening and the
+    /// `set_inner` + `step` sequence. Shared with spawned tasks.
     ///
     /// Without this lock, two concurrent `SendMessage` calls for the same
     /// agent could race: the first call's `set_inner` might be overwritten by
     /// the second before the first task begins executing, causing that step's
     /// events to be tagged with the wrong `batch_id`.
-    session_locks: HashMap<AgentId, Arc<tokio::sync::Mutex<()>>>,
+    session_locks: Arc<DashMap<AgentId, Arc<tokio::sync::Mutex<()>>>>,
     /// Stable partner identity for this daemon session.
     ///
     /// Minted once at spawn time so all messages from this session carry the
@@ -142,8 +158,8 @@ impl DaemonServer {
             started_at: Instant::now(),
             echo,
             session_config,
-            sessions: HashMap::new(),
-            session_locks: HashMap::new(),
+            sessions: Arc::new(DashMap::new()),
+            session_locks: Arc::new(DashMap::new()),
             partner_id: new_id(),
         };
         tokio::spawn(server.run());
@@ -208,87 +224,6 @@ impl DaemonServer {
         }
     }
 
-    /// Get or open a session for the given agent. In real mode, resolves
-    /// the persona lazily via [`pattern_memory::persona::discover_personas`],
-    /// opens a [`TidepoolSession`] via `open_with_agent_loop` on first use,
-    /// and caches it. The session is opened with a [`MultiplexSink`] whose
-    /// inner sink is swapped per-batch before each step.
-    async fn get_or_open_session(
-        &mut self,
-        agent_id: &AgentId,
-    ) -> Result<(Arc<TidepoolSession>, Arc<MultiplexSink>), String> {
-        if let Some(entry) = self.sessions.get(agent_id) {
-            return Ok(entry.clone());
-        }
-
-        let config = self
-            .session_config
-            .as_ref()
-            .ok_or_else(|| "session config not available (echo mode?)".to_string())?;
-
-        // Resolve the persona lazily: discover available personas from global
-        // (~/.pattern/) and project mount scopes, then load the requested one.
-        let persona = self.resolve_persona(agent_id)?;
-
-        let mux_sink = Arc::new(MultiplexSink::new());
-        let sink_dyn: Arc<dyn TurnSink> = mux_sink.clone();
-
-        let session = TidepoolSession::open_with_agent_loop(
-            persona,
-            &config.sdk,
-            config.memory_store.clone(),
-            config.provider.clone(),
-            config.db.clone(),
-            sink_dyn,
-            None, // prelude_dir — SDK bundles the prelude internally.
-            config.mount_path.clone(),
-        )
-        .await
-        .map_err(|e| format!("failed to open session for {agent_id}: {e}"))?;
-
-        let session = Arc::new(session);
-        self.sessions
-            .insert(agent_id.clone(), (session.clone(), mux_sink.clone()));
-        info!(agent_id = %agent_id, "opened new session");
-        Ok((session, mux_sink))
-    }
-
-    /// Resolve a persona by agent_id using `discover_personas`.
-    ///
-    /// Looks up the normalized agent_id (stripped of `@` prefix) in the
-    /// discovery map built from global `~/.pattern/personas/` and the
-    /// project mount's `personas/` directory.
-    fn resolve_persona(&self, agent_id: &AgentId) -> Result<PersonaSnapshot, String> {
-        use pattern_memory::PatternPaths;
-        use pattern_memory::persona::discover_personas;
-
-        let config = self
-            .session_config
-            .as_ref()
-            .ok_or_else(|| "session config not available (echo mode?)".to_string())?;
-
-        let paths = PatternPaths::default_paths()
-            .map_err(|e| format!("failed to resolve pattern home: {e}"))?;
-
-        let personas = discover_personas(&paths, config.mount_path.as_deref())
-            .map_err(|e| format!("persona discovery failed: {e}"))?;
-
-        // Normalize: strip leading '@' from the requested agent_id.
-        let normalized = agent_id.trim_start_matches('@');
-
-        let persona_path = personas.get(normalized).ok_or_else(|| {
-            let available: Vec<_> = personas.keys().collect();
-            format!("persona not found for agent_id '{normalized}'; available: {available:?}")
-        })?;
-
-        pattern_runtime::persona_loader::load_persona(persona_path).map_err(|e| {
-            format!(
-                "failed to load persona from {}: {e}",
-                persona_path.display()
-            )
-        })
-    }
-
     /// Dispatch a single incoming message.
     async fn handle(&mut self, msg: PatternMessage) {
         match msg {
@@ -302,6 +237,7 @@ impl DaemonServer {
 
                 if self.echo {
                     // Echo mode: extract text from parts, emit "echo: {text}" + Stop.
+                    // This is instant so it stays inline in the actor loop.
                     let bridge = TurnSinkBridge::new(batch_id, agent_id, self.event_tx.clone());
                     let text = inner
                         .parts
@@ -315,72 +251,79 @@ impl DaemonServer {
                     bridge.emit(TurnEvent::Text(format!("echo: {text}")));
                     bridge.emit(TurnEvent::Stop(StopReason::EndTurn));
                 } else {
-                    // Real session mode: open or reuse session, drive step.
+                    // Real session mode: spawn a task to handle session open
+                    // and step. The actor loop stays responsive — session open
+                    // may trigger tidepool Haskell compilation (5-10s).
+                    let sessions = self.sessions.clone();
+                    let session_locks = self.session_locks.clone();
+                    let config = self.session_config.clone().unwrap();
                     let event_tx = self.event_tx.clone();
                     let partner_id = self.partner_id.clone();
-                    match self.get_or_open_session(&agent_id).await {
-                        Ok((session, mux_sink)) => {
-                            // Acquire (or create) the per-agent serialization lock.
-                            // This serializes the set_inner + spawn sequence so that
-                            // two concurrent SendMessage calls for the same agent
-                            // cannot interleave their bridge swaps, which would cause
-                            // one batch's events to be tagged with the other's batch_id.
-                            let agent_lock = self
-                                .session_locks
-                                .entry(agent_id.clone())
-                                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                                .clone();
 
-                            // Build TurnInput using the session's persona agent_id for
-                            // correct memory block ownership — not the client's
-                            // routing key (which may differ, e.g. "default" vs
-                            // "pattern-default").
-                            let session_agent_id = session.agent_id().to_string();
-                            let turn_input =
-                                build_turn_input(&inner, &partner_id, &session_agent_id);
+                    tokio::spawn(async move {
+                        // 1. Get or open session (may block during compilation).
+                        let agent_session = match get_or_open_session(
+                            &agent_id,
+                            &sessions,
+                            &session_locks,
+                            &config,
+                        )
+                        .await
+                        {
+                            Ok(s) => s,
+                            Err(e) => {
+                                warn!(agent_id = %agent_id, error = %e, "failed to open session");
+                                let bridge = TurnSinkBridge::new(batch_id, agent_id, event_tx);
+                                bridge.emit(TurnEvent::Display {
+                                    kind: DisplayKind::Note,
+                                    text: format!("error: {e}"),
+                                });
+                                bridge.emit(TurnEvent::Stop(StopReason::EndTurn));
+                                return;
+                            }
+                        };
 
-                            // Drive step in a background task so the actor
-                            // remains responsive to other messages.
-                            tokio::spawn(async move {
-                                // Hold the per-agent lock for the entire set_inner
-                                // + step sequence. This ensures only one batch at a
-                                // time drives the agent in phase 1.
-                                let _guard = agent_lock.lock().await;
+                        // 2. Acquire the per-agent serialization lock. This
+                        //    serializes set_inner + step so concurrent
+                        //    SendMessage calls for the same agent don't
+                        //    interleave bridge swaps.
+                        let agent_lock = session_locks
+                            .entry(agent_id.clone())
+                            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                            .clone();
+                        let _guard = agent_lock.lock().await;
 
-                                // Build a per-batch bridge and swap it into the
-                                // session's MultiplexSink so events from this step
-                                // are tagged with the correct batch_id.
-                                let bridge = Arc::new(TurnSinkBridge::new(
-                                    batch_id.clone(),
-                                    agent_id.clone(),
-                                    event_tx,
-                                ));
-                                mux_sink.set_inner(bridge.clone());
+                        // 3. Build bridge and swap into mux sink.
+                        let bridge = Arc::new(TurnSinkBridge::new(
+                            batch_id.clone(),
+                            agent_id.clone(),
+                            event_tx,
+                        ));
+                        agent_session.mux_sink.set_inner(bridge.clone());
 
-                                match session.step_with_agent_loop(turn_input).await {
-                                    Ok(_reply) => {
-                                        // Events already emitted via the bridge.
-                                    }
-                                    Err(e) => {
-                                        warn!(
-                                            agent_id = %agent_id,
-                                            batch_id = %batch_id,
-                                            error = %e,
-                                            "step_with_agent_loop failed"
-                                        );
-                                        bridge.emit(TurnEvent::Text(format!("error: {e}")));
-                                        bridge.emit(TurnEvent::Stop(StopReason::EndTurn));
-                                    }
-                                }
-                            });
+                        // 4. Build turn input and drive step.
+                        let session_agent_id = agent_session.session.agent_id().to_string();
+                        let turn_input = build_turn_input(&inner, &partner_id, &session_agent_id);
+
+                        match agent_session.session.step_with_agent_loop(turn_input).await {
+                            Ok(_reply) => {
+                                // Events already emitted via the bridge.
+                            }
+                            Err(e) => {
+                                warn!(
+                                    agent_id = %agent_id,
+                                    batch_id = %batch_id,
+                                    error = %e,
+                                    "step_with_agent_loop failed"
+                                );
+                                bridge.emit(TurnEvent::Display {
+                                    kind: DisplayKind::Note,
+                                    text: format!("error: {e}"),
+                                });
+                                bridge.emit(TurnEvent::Stop(StopReason::EndTurn));
+                            }
                         }
-                        Err(e) => {
-                            warn!(agent_id = %agent_id, error = %e, "failed to open session");
-                            let bridge = TurnSinkBridge::new(batch_id, agent_id, event_tx);
-                            bridge.emit(TurnEvent::Text(format!("error: {e}")));
-                            bridge.emit(TurnEvent::Stop(StopReason::EndTurn));
-                        }
-                    }
+                    });
                 }
             }
             PatternMessage::SubscribeOutput(req) => {
@@ -393,9 +336,9 @@ impl DaemonServer {
                 let WithChannels { tx, .. } = req;
                 let agents: Vec<AgentInfo> = self
                     .sessions
-                    .keys()
-                    .map(|id| AgentInfo {
-                        agent_id: id.clone(),
+                    .iter()
+                    .map(|entry| AgentInfo {
+                        agent_id: entry.key().clone(),
                         persona_name: String::new(), // Populated when multi-agent lands.
                         active_batches: vec![],
                     })
@@ -428,6 +371,95 @@ impl DaemonServer {
             }
         }
     }
+}
+
+/// Get or open a session for the given agent.
+///
+/// Fast path: returns immediately if the session is already cached.
+/// Slow path: acquires a per-agent lock, double-checks, then resolves the
+/// persona and opens a [`TidepoolSession`] via `open_with_agent_loop`.
+/// The lock prevents two concurrent tasks from racing to open the same session.
+async fn get_or_open_session(
+    agent_id: &AgentId,
+    sessions: &DashMap<AgentId, AgentSession>,
+    session_locks: &DashMap<AgentId, Arc<tokio::sync::Mutex<()>>>,
+    config: &SessionConfig,
+) -> Result<AgentSession, String> {
+    // Fast path: session already exists. Clone immediately, drop ref.
+    if let Some(entry) = sessions.get(agent_id) {
+        return Ok(entry.clone());
+    }
+
+    // Slow path: need to open. Acquire per-agent lock to prevent races.
+    let lock = session_locks
+        .entry(agent_id.clone())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+    let _guard = lock.lock().await;
+
+    // Double-check after acquiring lock (another task may have opened it).
+    if let Some(entry) = sessions.get(agent_id) {
+        return Ok(entry.clone());
+    }
+
+    // Resolve persona and open session.
+    let persona = resolve_persona(agent_id, config)?;
+    let mux_sink = Arc::new(MultiplexSink::new());
+    let sink_dyn: Arc<dyn TurnSink> = mux_sink.clone();
+
+    let session = TidepoolSession::open_with_agent_loop(
+        persona,
+        &config.sdk,
+        config.memory_store.clone(),
+        config.provider.clone(),
+        config.db.clone(),
+        sink_dyn,
+        None, // prelude_dir — SDK bundles the prelude internally.
+        config.mount_path.clone(),
+    )
+    .await
+    .map_err(|e| format!("failed to open session for {agent_id}: {e}"))?;
+
+    let agent_session = AgentSession {
+        session: Arc::new(session),
+        mux_sink,
+    };
+
+    sessions.insert(agent_id.clone(), agent_session.clone());
+    info!(agent_id = %agent_id, "opened new session");
+
+    Ok(agent_session)
+}
+
+/// Resolve a persona by agent_id using `discover_personas`.
+///
+/// Looks up the normalized agent_id (stripped of `@` prefix) in the
+/// discovery map built from global `~/.pattern/personas/` and the
+/// project mount's `personas/` directory.
+fn resolve_persona(agent_id: &AgentId, config: &SessionConfig) -> Result<PersonaSnapshot, String> {
+    use pattern_memory::PatternPaths;
+    use pattern_memory::persona::discover_personas;
+
+    let paths = PatternPaths::default_paths()
+        .map_err(|e| format!("failed to resolve pattern home: {e}"))?;
+
+    let personas = discover_personas(&paths, config.mount_path.as_deref())
+        .map_err(|e| format!("persona discovery failed: {e}"))?;
+
+    // Normalize: strip leading '@' from the requested agent_id.
+    let normalized = agent_id.trim_start_matches('@');
+
+    let persona_path = personas.get(normalized).ok_or_else(|| {
+        let available: Vec<_> = personas.keys().collect();
+        format!("persona not found for agent_id '{normalized}'; available: {available:?}")
+    })?;
+
+    pattern_runtime::persona_loader::load_persona(persona_path).map_err(|e| {
+        format!(
+            "failed to load persona from {}: {e}",
+            persona_path.display()
+        )
+    })
 }
 
 /// Build a [`TurnInput`] from an [`AgentMessage`].

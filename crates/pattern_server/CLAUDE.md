@@ -25,9 +25,15 @@ Phase 1 of the v3-TUI plan is complete. The daemon provides:
 - `recv`: incoming `PatternMessage`s from irpc clients
 - `event_rx`: tagged events from `TurnSinkBridge`s (unbounded mpsc)
 - `subscribers`: `HashMap<AgentId, Vec<irpc::channel::mpsc::Sender<TaggedTurnEvent>>>`
-- `sessions`: `HashMap<AgentId, (Arc<TidepoolSession>, Arc<MultiplexSink>)>`
-- `session_locks`: `HashMap<AgentId, Arc<tokio::sync::Mutex<()>>>` — per-agent mutex serializing the `set_inner` + `spawn` sequence to prevent race conditions on concurrent messages
+- `sessions`: `Arc<DashMap<AgentId, AgentSession>>` — shared with spawned tasks so session open doesn't block the actor loop
+- `session_locks`: `Arc<DashMap<AgentId, Arc<tokio::sync::Mutex<()>>>>` — per-agent mutex serializing session open + `set_inner` + step to prevent race conditions on concurrent messages
 - `partner_id`: stable `SmolStr` minted once at spawn; all messages from this session share one partner identity
+
+Session lifecycle (including tidepool Haskell compilation) runs entirely in
+spawned tasks. The actor loop only handles echo mode inline; real-mode
+`SendMessage` immediately acknowledges and spawns a task. The free functions
+`get_or_open_session` and `resolve_persona` encapsulate session cache logic
+with double-checked locking.
 
 ### IRPC protocol (`protocol.rs`)
 

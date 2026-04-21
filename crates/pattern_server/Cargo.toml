@@ -31,6 +31,7 @@ thiserror = { workspace = true }
 miette = { workspace = true, features = ["fancy"] }
 dirs = { workspace = true }
 smol_str = { workspace = true }
+dashmap = "6.1"
 clap = { workspace = true }
 jiff = { workspace = true }
 nix = { version = "0.29", features = ["signal", "process"] }

@@ -6358,6 +6358,7 @@ name = "pattern-server"
 version = "0.4.0"
 dependencies = [
  "clap",
+ "dashmap",
  "dirs 5.0.1",
  "irpc",
  "jiff",
