@@ -116,8 +116,12 @@ impl<S: MemoryStore> MemoryScope<S> {
         // check both project and persona.
         if let Some(project_id) = &self.binding.project_id {
             // Check project scope first (project wins on collision).
-            if let Some(doc) = self.inner.get_block(project_id, label)? {
-                return Ok(Some(doc));
+            // Handle both Ok(None) and Err(NotFound) as "not in project scope,
+            // fall through to persona."
+            match self.inner.get_block(project_id, label) {
+                Ok(Some(doc)) => return Ok(Some(doc)),
+                Ok(None) | Err(MemoryError::NotFound { .. }) => {}
+                Err(e) => return Err(e),
             }
         }
 
