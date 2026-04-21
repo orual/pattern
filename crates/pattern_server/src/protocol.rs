@@ -7,6 +7,8 @@
 //! uses serde_json for round-trip validation — serde_json and postcard both
 //! honour the same `Serialize`/`Deserialize` impls, so this is correct.
 
+use std::path::PathBuf;
+
 use irpc::{
     channel::{mpsc, oneshot},
     rpc_requests,
@@ -158,6 +160,33 @@ pub struct ListAgentsRequest;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetStatusRequest;
 
+/// Request payload for [`PatternProtocol::InitSession`].
+///
+/// The TUI sends this after connecting to tell the daemon which project it is
+/// working in. The daemon mounts the project on demand (or reuses a cached
+/// mount) and resolves the requested persona.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InitSessionRequest {
+    /// Project root path for memory mount.
+    pub project_path: PathBuf,
+    /// Preferred agent_id (resolved from config by the client).
+    pub default_agent: AgentId,
+}
+
+/// Response to [`InitSession`](PatternProtocol::InitSession).
+///
+/// Contains the daemon-resolved agent identity and available personas for the
+/// project.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionInfo {
+    /// The actual agent_id the daemon resolved.
+    pub agent_id: AgentId,
+    /// Persona display name.
+    pub persona_name: String,
+    /// All available personas discovered for this project.
+    pub available_agents: Vec<AgentId>,
+}
+
 /// A slash-command invocation forwarded from the TUI.
 ///
 /// Full typed command dispatch (e.g. `/switch-persona`) will be added when
@@ -219,6 +248,14 @@ pub enum PatternProtocol {
     /// Execute a slash command and return the result.
     #[rpc(tx = oneshot::Sender<CommandResult>)]
     RunCommand(SlashCommand),
+
+    /// Initialize a session for a project.
+    ///
+    /// The TUI sends this after connecting. The daemon mounts the project on
+    /// demand (or reuses a cached mount), discovers personas, and returns
+    /// [`SessionInfo`] with the resolved agent identity and available agents.
+    #[rpc(tx = oneshot::Sender<SessionInfo>)]
+    InitSession(InitSessionRequest),
 }
 
 #[cfg(test)]
@@ -305,5 +342,34 @@ mod tests {
         let decoded: SlashCommand = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.command, "switch-persona");
         assert_eq!(decoded.args, ["orual"]);
+    }
+
+    #[test]
+    fn init_session_request_roundtrip() {
+        let req = InitSessionRequest {
+            project_path: std::path::PathBuf::from("/home/user/project"),
+            default_agent: "pattern-default".into(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let decoded: InitSessionRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            decoded.project_path,
+            std::path::PathBuf::from("/home/user/project")
+        );
+        assert_eq!(decoded.default_agent, "pattern-default");
+    }
+
+    #[test]
+    fn session_info_roundtrip() {
+        let info = SessionInfo {
+            agent_id: "pattern-default".into(),
+            persona_name: "Pattern Default".into(),
+            available_agents: vec!["pattern-default".into(), "supervisor".into()],
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let decoded: SessionInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.agent_id, "pattern-default");
+        assert_eq!(decoded.persona_name, "Pattern Default");
+        assert_eq!(decoded.available_agents.len(), 2);
     }
 }

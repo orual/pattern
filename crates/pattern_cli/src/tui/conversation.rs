@@ -30,6 +30,10 @@ pub struct ConversationState {
     pub auto_scroll: bool,
     /// Currently focused (batch_idx, section_idx) for expand/collapse.
     pub focused_section: Option<(usize, usize)>,
+    /// Click targets populated during render: `(batch_idx, section_idx, y_position)`.
+    /// Used by mouse click handlers to map a row to a collapsible section.
+    /// Cleared and repopulated on every frame.
+    pub click_targets: Vec<(usize, usize, u16)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -47,6 +51,9 @@ impl StatefulWidget for ConversationView {
         if area.width == 0 || area.height == 0 {
             return;
         }
+
+        // Clear click targets from the previous frame.
+        state.click_targets.clear();
 
         // Step 1: compute any uncached heights.
         for batch in &mut state.batches {
@@ -71,7 +78,7 @@ impl StatefulWidget for ConversationView {
         let mut current_y = area.y;
         let viewport_bottom = area.y + area.height;
 
-        for batch in &state.batches {
+        for (batch_idx, batch) in state.batches.iter().enumerate() {
             let batch_height = batch.total_height() as usize;
 
             // Skip batches entirely above the viewport.
@@ -83,8 +90,17 @@ impl StatefulWidget for ConversationView {
             // How many lines of this batch are above the viewport?
             let skip_lines = state.scroll_offset.saturating_sub(accumulated);
 
-            // Step 5: render this batch.
-            current_y = render_batch(batch, area, buf, current_y, viewport_bottom, skip_lines);
+            // Step 5: render this batch, collecting click targets for collapsed sections.
+            current_y = render_batch(
+                batch,
+                batch_idx,
+                area,
+                buf,
+                current_y,
+                viewport_bottom,
+                skip_lines,
+                &mut state.click_targets,
+            );
 
             accumulated += batch_height;
 
@@ -112,13 +128,19 @@ impl StatefulWidget for ConversationView {
 
 /// Render a single batch into the buffer, starting at `start_y`, skipping
 /// `skip_lines` from the top of the batch. Returns the next Y position.
+///
+/// Records click targets for collapsible sections (collapsed or expandable)
+/// into `click_targets` as `(batch_idx, section_idx, y_position)`.
+#[allow(clippy::too_many_arguments)]
 fn render_batch(
     batch: &RenderBatch,
+    batch_idx: usize,
     area: Rect,
     buf: &mut Buffer,
     mut current_y: u16,
     viewport_bottom: u16,
     mut skip_lines: usize,
+    click_targets: &mut Vec<(usize, usize, u16)>,
 ) -> u16 {
     // Render user message line.
     if let Some(ref msg) = batch.user_message {
@@ -140,7 +162,7 @@ fn render_batch(
     }
 
     // Render each section.
-    for section in &batch.sections {
+    for (section_idx, section) in batch.sections.iter().enumerate() {
         if current_y >= viewport_bottom {
             break;
         }
@@ -155,6 +177,14 @@ fn render_batch(
 
         let lines_to_skip_in_section = skip_lines;
         skip_lines = 0;
+
+        // Record click target for collapsible sections. The section's first
+        // visible line (current_y) is the click target row. Sections that can
+        // be collapsed (thinking, tool call/result) are always clickable —
+        // whether currently collapsed or expanded, clicking toggles the state.
+        if section.is_collapsible() && lines_to_skip_in_section == 0 {
+            click_targets.push((batch_idx, section_idx, current_y));
+        }
 
         current_y = render_section(
             section,
@@ -445,6 +475,7 @@ mod tests {
             auto_scroll: false,
             scroll_offset: 0,
             focused_section: None,
+            click_targets: Vec::new(),
         };
         let output = render_to_string(&mut state, 50, 10);
         insta::assert_snapshot!(output);
@@ -457,6 +488,7 @@ mod tests {
             auto_scroll: false,
             scroll_offset: 0,
             focused_section: None,
+            click_targets: Vec::new(),
         };
         let output = render_to_string(&mut state, 60, 10);
         insta::assert_snapshot!(output);
@@ -469,6 +501,7 @@ mod tests {
             auto_scroll: false,
             scroll_offset: 0,
             focused_section: None,
+            click_targets: Vec::new(),
         };
         let output = render_to_string(&mut state, 60, 10);
         insta::assert_snapshot!(output);
@@ -481,6 +514,7 @@ mod tests {
             auto_scroll: false,
             scroll_offset: 0,
             focused_section: None,
+            click_targets: Vec::new(),
         };
         let output = render_to_string(&mut state, 50, 10);
         insta::assert_snapshot!(output);
@@ -499,6 +533,7 @@ mod tests {
             // Offset past the first batch (user_message + text = 2 lines).
             scroll_offset: 2,
             focused_section: None,
+            click_targets: Vec::new(),
         };
         let output = render_to_string(&mut state, 50, 10);
         insta::assert_snapshot!(output);
@@ -514,6 +549,7 @@ mod tests {
             auto_scroll: false,
             scroll_offset: 0,
             focused_section: None,
+            click_targets: Vec::new(),
         };
 
         let backend = TestBackend::new(50, 10);
@@ -566,6 +602,7 @@ mod tests {
             auto_scroll: false,
             scroll_offset: 2,
             focused_section: None,
+            click_targets: Vec::new(),
         };
 
         let output = render_to_string(&mut state, 50, 4);
@@ -601,6 +638,7 @@ mod tests {
             auto_scroll: true,
             scroll_offset: 0,
             focused_section: None,
+            click_targets: Vec::new(),
         };
 
         // Render with a small viewport.

@@ -9,6 +9,8 @@
 //!   file, validates the process is alive, loads the self-signed certificate,
 //!   and connects over QUIC.
 
+use std::path::PathBuf;
+
 use irpc::Client;
 use irpc::channel::mpsc;
 use smol_str::SmolStr;
@@ -165,6 +167,26 @@ impl DaemonClient {
     pub async fn run_command(&self, command: String, args: Vec<String>) -> Result<CommandResult> {
         let result = self.inner.rpc(SlashCommand { command, args }).await?;
         Ok(result)
+    }
+
+    /// Initialize a session for a project.
+    ///
+    /// Tells the daemon which project the TUI is working in. The daemon mounts
+    /// the project on demand and returns session info with the resolved agent
+    /// identity and available personas.
+    pub async fn init_session(
+        &self,
+        project_path: PathBuf,
+        default_agent: SmolStr,
+    ) -> Result<SessionInfo> {
+        let info = self
+            .inner
+            .rpc(InitSessionRequest {
+                project_path,
+                default_agent,
+            })
+            .await?;
+        Ok(info)
     }
 }
 

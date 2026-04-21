@@ -249,7 +249,7 @@ fn run_eval(
     let diagnostics_handler =
         crate::sdk::handlers::DiagnosticsHandler::new(ctx.diagnostics().clone());
     let mut bundle: SdkBundle = frunk::hlist![
-        MemoryHandler::new(store.clone()),
+        MemoryHandler::new(),
         SearchHandler::new(store.clone()),
         RecallHandler::new(store),
         MessageHandler,

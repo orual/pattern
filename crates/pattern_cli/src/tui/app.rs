@@ -6,7 +6,9 @@
 
 use std::time::Duration;
 
-use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    Event, EventStream, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use futures::StreamExt;
 use ratatui::Terminal;
 use ratatui::buffer::Buffer;
@@ -88,6 +90,7 @@ impl App {
                 scroll_offset: 0,
                 auto_scroll: true,
                 focused_section: None,
+                click_targets: Vec::new(),
             },
             input: InputHandler::new(),
             autocomplete: AutocompleteState::new(),
@@ -189,6 +192,7 @@ impl App {
     fn handle_terminal_event(&mut self, event: Event) {
         match event {
             Event::Key(key) => self.handle_key(key),
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
             Event::Resize(_, _) => {
                 // Invalidate all cached heights — the width may have changed.
                 for batch in &mut self.conversation.batches {
@@ -197,8 +201,30 @@ impl App {
                     }
                 }
             }
-            // Mouse events and others are ignored for now.
             _ => {}
+        }
+    }
+
+    /// Handle a mouse event: left-click toggles collapsible sections.
+    fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+            let click_row = mouse.row;
+
+            // Find a click target whose y position matches the clicked row.
+            if let Some(&(batch_idx, section_idx, _y)) = self
+                .conversation
+                .click_targets
+                .iter()
+                .find(|&&(_, _, y)| y == click_row)
+            {
+                // Toggle the section's collapsed state.
+                if let Some(batch) = self.conversation.batches.get_mut(batch_idx)
+                    && let Some(section) = batch.sections.get_mut(section_idx)
+                {
+                    section.collapsed = !section.collapsed;
+                    section.cached_height = None;
+                }
+            }
         }
     }
 

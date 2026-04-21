@@ -236,6 +236,17 @@ fn cmd_status() -> MietteResult<()> {
 // Persona resolution
 // ---------------------------------------------------------------------------
 
+/// Ensure that a default persona exists on disk for the given project.
+///
+/// Delegates to [`resolve_default_persona`], which writes the bundled default
+/// to `~/.pattern/personas/@pattern-default/persona.kdl` if no persona is
+/// found. Called by the TUI before sending `InitSession` so the daemon can
+/// discover at least one persona.
+pub fn ensure_default_persona(project_path: &Path) -> MietteResult<()> {
+    let _ = resolve_default_persona(project_path)?;
+    Ok(())
+}
+
 /// Resolve the default persona KDL path for daemon auto-start.
 ///
 /// Resolution strategy:
@@ -316,29 +327,21 @@ fn resolve_default_persona(project_path: &Path) -> MietteResult<(PathBuf, String
 
 /// Ensure the daemon is running and return its listen address.
 ///
-/// Resolves the project path (cwd) and default persona, then spawns the daemon
-/// with `--path`. The daemon discovers personas lazily. Used by TUI startup
-/// for auto-start.
+/// The daemon starts project-agnostic. The TUI sends an `InitSession` RPC
+/// after connecting to tell the daemon which project it is working in.
 ///
 /// # Errors
 ///
 /// Returns an error if:
 /// - The server binary cannot be found.
-/// - The persona cannot be resolved.
 /// - The daemon fails to start within the timeout.
 ///
-/// Returns `(listen_address, persona_agent_id)`.
-pub fn ensure_daemon_running() -> MietteResult<(SocketAddr, String)> {
-    // Resolve persona to discover the agent_id, even on the fast path
-    // (daemon already running). The daemon itself discovers personas
-    // lazily — we don't pass --persona.
-    let project_path = std::env::current_dir().into_diagnostic()?;
-    let (_persona_path, agent_id) = resolve_default_persona(&project_path)?;
-
+/// Returns the listen address.
+pub fn ensure_daemon_running() -> MietteResult<SocketAddr> {
     // Fast path: already running.
     if let Ok(state) = DaemonState::load() {
         if state.is_process_alive() {
-            return Ok((state.addr, agent_id));
+            return Ok(state.addr);
         }
         // Stale state — clean up before starting a fresh daemon.
         DaemonState::clear().ok();
@@ -347,8 +350,8 @@ pub fn ensure_daemon_running() -> MietteResult<(SocketAddr, String)> {
     let server_bin = locate_server_binary()?;
     let mut cmd = std::process::Command::new(&server_bin);
     cmd.arg("start");
-    // The daemon discovers personas lazily — just pass the project path.
-    cmd.arg("--path").arg(&project_path);
+    // The daemon starts bare — no --path or --persona needed.
+    // Projects are mounted on demand via InitSession from the TUI.
 
     // Redirect all IO to log file — daemon must not write to the TUI terminal.
     let log_path = DaemonState::state_dir().join("daemon.log");
@@ -369,7 +372,7 @@ pub fn ensure_daemon_running() -> MietteResult<(SocketAddr, String)> {
         miette!("daemon failed to start within 10 seconds — check `pattern-server` logs")
     })?;
 
-    Ok((state.addr, agent_id))
+    Ok(state.addr)
 }
 
 // ---------------------------------------------------------------------------

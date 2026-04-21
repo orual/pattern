@@ -25,6 +25,8 @@ Phase 1 of the v3-TUI plan is complete. The daemon provides:
 - `recv`: incoming `PatternMessage`s from irpc clients
 - `event_rx`: tagged events from `TurnSinkBridge`s (unbounded mpsc)
 - `subscribers`: `HashMap<AgentId, Vec<irpc::channel::mpsc::Sender<TaggedTurnEvent>>>`
+- `project_mounts`: `Arc<DashMap<PathBuf, Arc<ProjectMount>>>` — cached project mounts keyed by canonical path; populated by `InitSession`, used by `SendMessage`
+- `current_mount`: `Option<Arc<ProjectMount>>` — the active project (last `InitSession` wins; one project at a time for now)
 - `sessions`: `Arc<DashMap<AgentId, AgentSession>>` — shared with spawned tasks so session open doesn't block the actor loop
 - `session_locks`: `Arc<DashMap<AgentId, Arc<tokio::sync::Mutex<()>>>>` — per-agent mutex serializing session open + `set_inner` + step to prevent race conditions on concurrent messages
 - `partner_id`: stable `SmolStr` minted once at spawn; all messages from this session share one partner identity
@@ -39,6 +41,7 @@ with double-checked locking.
 
 Defines `PatternProtocol` (the irpc service) and the message types:
 
+- `InitSession` — TUI handshake: sends project path + preferred agent_id, daemon mounts the project on demand and returns `SessionInfo` (resolved agent, persona name, available agents)
 - `SendMessage` — client sends `AgentMessage`, server acknowledges immediately then drives the step
 - `SubscribeOutput` — client opens a streaming channel to receive `TaggedTurnEvent`s
 - `ListAgents` — returns `Vec<AgentInfo>`
@@ -55,7 +58,7 @@ Defines `PatternProtocol` (the irpc service) and the message types:
 ### Client (`client.rs`)
 
 `DaemonClient` wraps `irpc::Client<PatternProtocol>` with typed helper methods:
-`send_message`, `subscribe_output`, `list_agents`, `get_status`.
+`init_session`, `send_message`, `subscribe_output`, `list_agents`, `get_status`.
 
 ### State (`state.rs`)
 
@@ -96,8 +99,8 @@ The CLI finds `pattern-server` as a sibling binary (same directory) or via `PATH
 Forwarded flags from `pattern daemon start`:
 - `--port N` — QUIC listen port (0 = OS-assigned)
 - `--echo` — run in echo mode
-- `--persona PATH` — path to persona KDL file (required unless `--echo`)
-- `--path DIR` — project root for memory mount
+- `--path DIR` — (legacy, ignored) project root; projects are now mounted on demand via `InitSession`
+- `--persona PATH` — (legacy, ignored) persona KDL file; personas are discovered lazily
 
 ## Development guidelines
 

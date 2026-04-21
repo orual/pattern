@@ -88,6 +88,26 @@ async fn full_send_subscribe_flow() {
     );
 }
 
+/// InitSession in echo mode returns synthetic session info with the requested
+/// agent_id and empty persona name.
+#[tokio::test]
+async fn init_session_echo_mode() {
+    let handle = DaemonServer::spawn();
+    let client = DaemonClient::from_local(handle.client);
+
+    let info = client
+        .init_session(
+            std::path::PathBuf::from("/tmp/test-project"),
+            "pattern-default".into(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(info.agent_id, "pattern-default");
+    assert_eq!(info.persona_name, "echo");
+    assert!(info.available_agents.is_empty());
+}
+
 /// A subscriber registered for agent-1 must not receive events emitted for
 /// agent-2, and must receive events emitted for agent-1.
 ///

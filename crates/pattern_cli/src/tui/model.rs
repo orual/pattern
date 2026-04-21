@@ -116,6 +116,19 @@ impl Section {
         }
         self.cached_height.unwrap_or(1)
     }
+
+    /// Whether this section type supports collapsing.
+    ///
+    /// Thinking, ToolCall, and ToolResult sections are collapsible.
+    /// Text and Display sections are not.
+    pub fn is_collapsible(&self) -> bool {
+        matches!(
+            self.kind,
+            SectionKind::Thinking(_)
+                | SectionKind::ToolCall { .. }
+                | SectionKind::ToolResult { .. }
+        )
+    }
 }
 
 /// Truncate a string to at most `max_chars` characters, appending `...`

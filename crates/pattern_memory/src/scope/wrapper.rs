@@ -170,11 +170,14 @@ impl<S: MemoryStore> MemoryStore for MemoryScope<S> {
             return self.inner.get_block_metadata(agent_id, label);
         }
 
-        // Same routing as get_block but for metadata.
-        if let Some(project_id) = &self.binding.project_id
-            && let Some(meta) = self.inner.get_block_metadata(project_id, label)?
-        {
-            return Ok(Some(meta));
+        // Same routing as get_block but for metadata. Handle both
+        // Ok(None) and Err(NotFound) as "not in project scope."
+        if let Some(project_id) = &self.binding.project_id {
+            match self.inner.get_block_metadata(project_id, label) {
+                Ok(Some(meta)) => return Ok(Some(meta)),
+                Ok(None) | Err(MemoryError::NotFound { .. }) => {}
+                Err(e) => return Err(e),
+            }
         }
 
         match self.binding.policy {
@@ -241,10 +244,13 @@ impl<S: MemoryStore> MemoryStore for MemoryScope<S> {
         }
 
         // Same routing logic as get_block: project first, then persona.
-        if let Some(project_id) = &self.binding.project_id
-            && let Some(content) = self.inner.get_rendered_content(project_id, label)?
-        {
-            return Ok(Some(content));
+        // Handle both Ok(None) and Err(NotFound) as "not in project scope."
+        if let Some(project_id) = &self.binding.project_id {
+            match self.inner.get_rendered_content(project_id, label) {
+                Ok(Some(content)) => return Ok(Some(content)),
+                Ok(None) | Err(MemoryError::NotFound { .. }) => {}
+                Err(e) => return Err(e),
+            }
         }
 
         match self.binding.policy {

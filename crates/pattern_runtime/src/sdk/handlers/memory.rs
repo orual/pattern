@@ -1,22 +1,18 @@
 //! Fully-wired handler for `Pattern.Memory`.
 //!
-//! Dispatches reads / writes / appends against an `Arc<dyn MemoryStore>`
-//! obtained from [`crate::session::SessionContext::memory_store`]. The
-//! store trait is defined in `pattern_core::traits::memory_store` and is
-//! dyn-compatible (its methods are `async_trait` + `Send + Sync + Debug`).
+//! All memory operations go through the session context's adapter,
+//! which wraps the scoped store (`MemoryScope`). The handler itself
+//! is stateless — it does not hold a store reference.
 //!
-//! Not wired in Phase 3 (returns
-//! `EffectError::Handler("vector search not yet available in phase 3")`):
-//! - [`MemoryReq::Search`] (semantic / vector search)
-//! - [`MemoryReq::Recall`] (vector recall)
-//! - [`MemoryReq::Archive`] is wired: it sets block type to Archival.
+//! Search and Recall delegate to the store's `search()` and
+//! `search_archival()` methods respectively, which fall back to FTS5
+//! when no embedding provider is configured.
 //!
 //! All MemoryStore methods are sync (Phase 3 desync) — direct calls,
 //! no `block_on` needed.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use pattern_core::memory::StructuredDocument;
@@ -38,12 +34,11 @@ use crate::timeout::{CANCELLED_SENTINEL, HandlerGuard};
 /// checkpoint log. Keep in sync with `bundle::SdkBundle`'s ordering.
 const MEMORY_HANDLER_TAG: u32 = 0;
 
-/// Handler for `Pattern.Memory`. Holds an `Arc<dyn MemoryStore>` handed
-/// over by `TidepoolSession::open`; cheap to clone (Arc-share).
+/// Handler for `Pattern.Memory`. All memory operations go through the
+/// session context's adapter, which wraps the scoped store. The handler
+/// itself is stateless.
 #[derive(Clone)]
-pub struct MemoryHandler {
-    store: Arc<dyn MemoryStore>,
-}
+pub struct MemoryHandler;
 
 impl std::fmt::Debug for MemoryHandler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -51,10 +46,17 @@ impl std::fmt::Debug for MemoryHandler {
     }
 }
 
+impl Default for MemoryHandler {
+    fn default() -> Self {
+        Self
+    }
+}
+
 impl MemoryHandler {
-    /// Construct a handler bound to the given store.
-    pub fn new(store: Arc<dyn MemoryStore>) -> Self {
-        Self { store }
+    /// Construct a handler. All operations are routed through the
+    /// session context's adapter (the scoped `MemoryStore`).
+    pub fn new() -> Self {
+        Self
     }
 }
 
@@ -122,7 +124,6 @@ impl EffectHandler<SessionContext> for MemoryHandler {
         let _guard = HandlerGuard::enter(&state.gate);
 
         let agent_id = cx.user().agent_id().to_string();
-        let store = self.store.clone();
 
         // Capture the typed request's Debug form up front — we consume
         // `req` below, so we need the string before the match arms move
@@ -131,11 +132,14 @@ impl EffectHandler<SessionContext> for MemoryHandler {
 
         // MemoryStore is now sync — direct calls, no block_on needed.
 
+        // Use the adapter from session context. The adapter wraps the
+        // MemoryScope (scoped store), ensuring all reads/writes respect
+        // the IsolatePolicy.
         let adapter = cx.user().adapter().clone();
 
         let result = (|| match req {
             MemoryReq::Get(label) => {
-                let text = store
+                let text = adapter
                     .get_rendered_content(&agent_id, &label)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Get: {e}")))?
                     .ok_or_else(|| {
@@ -147,10 +151,16 @@ impl EffectHandler<SessionContext> for MemoryHandler {
             }
             MemoryReq::Put(label, content, description) => {
                 // Capture pre-write state for BlockWrite record.
-                let pre = pre_write_state(&*store, &agent_id, &label)
+                let pre = pre_write_state(&*adapter, &agent_id, &label)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Put: {e}")))?;
-                upsert_block_content(&*store, &agent_id, &label, &content, description.as_deref())
-                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Put: {e}")))?;
+                upsert_block_content(
+                    &*adapter,
+                    &agent_id,
+                    &label,
+                    &content,
+                    description.as_deref(),
+                )
+                .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Put: {e}")))?;
 
                 // Record the write.
                 let kind = if pre.existed {
@@ -167,7 +177,7 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                         kind,
                         pre: &pre,
                     },
-                    &*store,
+                    &*adapter,
                 );
                 cx.respond(())
             }
@@ -181,13 +191,13 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                     pattern_core::types::block::BlockCreate::new(label.clone(), bt, schema)
                         .with_description(description)
                         .with_char_limit(limit);
-                let doc = store
+                let doc = adapter
                     .create_block(&agent_id, create)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Create: {e}")))?;
                 write_text_into(&doc, &initial)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Create: {e}")))?;
-                store.mark_dirty(&agent_id, &label);
-                store
+                adapter.mark_dirty(&agent_id, &label);
+                adapter
                     .persist_block(&agent_id, &label)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Create: {e}")))?;
 
@@ -210,7 +220,7 @@ impl EffectHandler<SessionContext> for MemoryHandler {
             }
             MemoryReq::Append(label, content) => {
                 // Capture pre-write state.
-                let pre = pre_write_state(&*store, &agent_id, &label)
+                let pre = pre_write_state(&*adapter, &agent_id, &label)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Append: {e}")))?;
                 let existing = pre
                     .rendered_content
@@ -222,7 +232,7 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                 } else {
                     format!("{existing}{content}")
                 };
-                upsert_block_content(&*store, &agent_id, &label, &combined, None)
+                upsert_block_content(&*adapter, &agent_id, &label, &combined, None)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Append: {e}")))?;
 
                 record_block_write(
@@ -234,13 +244,13 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                         kind: BlockWriteKind::Appended,
                         pre: &pre,
                     },
-                    &*store,
+                    &*adapter,
                 );
                 cx.respond(())
             }
             MemoryReq::Replace(label, old, new) => {
                 // Capture pre-write state (also validates existence).
-                let existing = store
+                let existing = adapter
                     .get_rendered_content(&agent_id, &label)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Replace: {e}")))?
                     .ok_or_else(|| {
@@ -250,7 +260,7 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                     })?;
                 let pre_hash = content_hash(&existing);
                 let replaced = existing.replace(&old, &new);
-                upsert_block_content(&*store, &agent_id, &label, &replaced, None)
+                upsert_block_content(&*adapter, &agent_id, &label, &replaced, None)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Replace: {e}")))?;
 
                 // We already have the pre-content from the existence check.
@@ -270,18 +280,45 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                         kind: BlockWriteKind::Replaced,
                         pre: &pre,
                     },
-                    &*store,
+                    &*adapter,
                 );
                 cx.respond(())
             }
-            MemoryReq::Search(_query) => Err(EffectError::Handler(
-                "vector search not yet available in phase 3".to_string(),
-            )),
-            MemoryReq::Recall(_handle) => Err(EffectError::Handler(
-                "vector search not yet available in phase 3".to_string(),
-            )),
+            MemoryReq::Search(query) => {
+                // Delegate to the store's search method, which already
+                // falls back to FTS5 when no embedding provider is
+                // configured. Use Auto mode and agent-scoped search.
+                let options = pattern_core::types::memory_types::SearchOptions::new();
+                let scope = pattern_core::types::memory_types::MemorySearchScope::Agent(
+                    SmolStr::new(&agent_id),
+                );
+                let results = adapter
+                    .search(&query, options, scope)
+                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Search: {e}")))?;
+                // Return the list of matching block handles / content IDs
+                // as a JSON array of strings so the agent can reference them.
+                let handles: Vec<String> = results.iter().map(|r| r.id.clone()).collect();
+                cx.respond(serde_json::to_string(&handles).unwrap_or_else(|_| "[]".to_string()))
+            }
+            MemoryReq::Recall(handle) => {
+                // Recall retrieves archival content by searching archival
+                // entries. Use the store's search_archival method which is
+                // backed by FTS5.
+                let entries = adapter
+                    .search_archival(&agent_id, &handle, 1)
+                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Recall: {e}")))?;
+                let content = entries
+                    .first()
+                    .map(|e| e.content.clone())
+                    .ok_or_else(|| {
+                        EffectError::Handler(format!(
+                            "Pattern.Memory.Recall: no archival entry matching {handle:?} for agent {agent_id:?}"
+                        ))
+                    })?;
+                cx.respond(content)
+            }
             MemoryReq::Archive(label) => {
-                let doc = store
+                let doc = adapter
                     .get_block(&agent_id, &label)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Archive: {e}")))?
                     .ok_or_else(|| {
@@ -290,13 +327,13 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                         ))
                     })?;
                 let content = doc.render();
-                store
+                adapter
                     .insert_archival(&agent_id, &content, None)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Archive: {e}")))?;
                 cx.respond(())
             }
             MemoryReq::GetShared(owner, label) => {
-                let doc = store
+                let doc = adapter
                     .get_shared_block(&agent_id, &owner, &label)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.GetShared: {e}")))?
                     .ok_or_else(|| {
@@ -321,11 +358,11 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                 // (passthrough case).
                 let persona_id = cx.user().agent_id().to_string();
 
-                let pre = pre_write_state(&*store, &persona_id, &label).map_err(|e| {
+                let pre = pre_write_state(&*adapter, &persona_id, &label).map_err(|e| {
                     EffectError::Handler(format!("Pattern.Memory.WriteToPersona: {e}"))
                 })?;
 
-                upsert_block_content(&*store, &persona_id, &label, &content, None).map_err(
+                upsert_block_content(&*adapter, &persona_id, &label, &content, None).map_err(
                     |e| EffectError::Handler(format!("Pattern.Memory.WriteToPersona: {e}")),
                 )?;
 
@@ -343,7 +380,7 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                         kind,
                         pre: &pre,
                     },
-                    &*store,
+                    &*adapter,
                 );
                 cx.respond(())
             }
@@ -548,13 +585,14 @@ fn record_block_write(params: RecordBlockWriteParams<'_>, store: &dyn MemoryStor
 
 #[cfg(test)]
 mod tests {
-    //! Unit tests for MemoryHandler's not-yet-wired paths.
+    //! Unit tests for MemoryHandler.
     //!
     //! End-to-end round-trip tests live in
     //! `tests/session_lifecycle.rs::memory_write_then_read_roundtrips` —
-    //! they exercise real agent programs through the JIT. Here we only
-    //! verify that the vector-search paths produce the documented
-    //! Phase-3 stub error.
+    //! they exercise real agent programs through the JIT. These tests
+    //! verify search/recall delegation and edge-case error surfaces.
+
+    use std::sync::Arc;
 
     use super::*;
     use crate::NopProviderClient;
@@ -716,29 +754,47 @@ mod tests {
         )
     }
 
-    #[tokio::test]
-    async fn search_returns_phase3_stub_error() {
-        let table = standard_datacon_table();
-        let ctx = sctx().await;
-        let cx = EffectContext::with_user(&table, &ctx);
-        let mut h = MemoryHandler::new(Arc::new(NeverStore));
-        let err = h
-            .handle(MemoryReq::Search("anything".into()), &cx)
-            .unwrap_err();
-        assert!(err.to_string().contains("vector search"), "got: {err}");
-        assert!(err.to_string().contains("phase 3"), "got: {err}");
+    /// Helper for tests that need an actual (non-panicking) store.
+    async fn sctx_with_store() -> (SessionContext, Arc<dyn MemoryStore>) {
+        use crate::testing::InMemoryMemoryStore;
+        let db = crate::testing::test_db().await;
+        let persona = PersonaSnapshot::new("agent-a", "A");
+        let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
+        let ctx =
+            SessionContext::from_persona(&persona, store.clone(), Arc::new(NopProviderClient), db);
+        (ctx, store)
     }
 
     #[tokio::test]
-    async fn recall_returns_phase3_stub_error() {
+    async fn search_delegates_to_store_fts() {
         let table = standard_datacon_table();
-        let ctx = sctx().await;
+        let (ctx, _store) = sctx_with_store().await;
         let cx = EffectContext::with_user(&table, &ctx);
-        let mut h = MemoryHandler::new(Arc::new(NeverStore));
+        let mut h = MemoryHandler::new();
+        // Search should succeed (returning empty results from the in-memory store)
+        // rather than returning a "vector search not available" stub error.
+        let result = h.handle(MemoryReq::Search("anything".into()), &cx);
+        assert!(result.is_ok(), "search should succeed, got: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn recall_returns_not_found_when_no_archival() {
+        let table = standard_datacon_table();
+        let (ctx, _store) = sctx_with_store().await;
+        let cx = EffectContext::with_user(&table, &ctx);
+        let mut h = MemoryHandler::new();
+        // Recall on a non-existent handle should produce a clear error.
         let err = h
             .handle(MemoryReq::Recall("block".into()), &cx)
             .unwrap_err();
-        assert!(err.to_string().contains("vector search"), "got: {err}");
+        assert!(
+            err.to_string().contains("Pattern.Memory.Recall"),
+            "error should identify op; got: {err}"
+        );
+        assert!(
+            err.to_string().contains("block"),
+            "error should identify handle; got: {err}"
+        );
     }
 
     /// Replace on a block that does not exist surfaces a handler error
@@ -752,14 +808,13 @@ mod tests {
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
         let provider: Arc<dyn ProviderClient> = Arc::new(NopProviderClient);
         let db = crate::testing::test_db().await;
-        let store_for_ctx = store.clone();
         let provider_for_ctx = provider.clone();
         let err_msg = tokio::task::spawn_blocking(move || {
             let table = standard_datacon_table();
             let persona = PersonaSnapshot::new("agent-a", "A");
-            let ctx = SessionContext::from_persona(&persona, store_for_ctx, provider_for_ctx, db);
+            let ctx = SessionContext::from_persona(&persona, store, provider_for_ctx, db);
             let cx = EffectContext::with_user(&table, &ctx);
-            let mut h = MemoryHandler::new(store);
+            let mut h = MemoryHandler::new();
             let err = h
                 .handle(
                     MemoryReq::Replace("ghost".into(), "a".into(), "b".into()),
@@ -788,7 +843,7 @@ mod tests {
             .cancellation
             .store(true, std::sync::atomic::Ordering::SeqCst);
         let cx = EffectContext::with_user(&table, &ctx);
-        let mut h = MemoryHandler::new(Arc::new(NeverStore));
+        let mut h = MemoryHandler::new();
         // Even though NeverStore panics on any call, this should not
         // reach the store — the sentinel short-circuits at entry.
         let err = h.handle(MemoryReq::Get("any".into()), &cx).unwrap_err();

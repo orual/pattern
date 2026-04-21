@@ -223,6 +223,7 @@ mod tests {
             scroll_offset: 10,
             auto_scroll: false,
             focused_section: None,
+            click_targets: Vec::new(),
         }
     }
 
@@ -362,6 +363,7 @@ mod tests {
             scroll_offset: 0,
             auto_scroll: false,
             focused_section: None,
+            click_targets: Vec::new(),
         }
     }
 
@@ -423,6 +425,7 @@ mod tests {
             scroll_offset: 0,
             auto_scroll: false,
             focused_section: None,
+            click_targets: Vec::new(),
         };
 
         let action = map_key_to_action(

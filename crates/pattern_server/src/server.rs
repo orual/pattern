@@ -50,22 +50,31 @@ use crate::protocol::*;
 /// [`DaemonServer::spawn_with_config`], the server opens
 /// [`TidepoolSession`]s instead of echoing messages.
 ///
-/// The daemon is persona-agnostic at startup. Personas are resolved lazily
-/// when a session is first opened for a given `agent_id`, using
-/// [`pattern_memory::persona::discover_personas`].
+/// The daemon is persona-agnostic and project-agnostic at startup. Projects
+/// are mounted on demand via [`InitSession`](crate::protocol::PatternProtocol::InitSession),
+/// and personas are resolved lazily when a session is first opened for a given
+/// `agent_id`.
 pub struct SessionConfig {
     /// SDK location for the Haskell eval worker.
     pub sdk: SdkLocation,
-    /// Memory store (typically an `Arc<MemoryCache>` from a mounted store).
-    pub memory_store: Arc<dyn MemoryStore>,
     /// LLM provider client (e.g. `PatternGatewayClient`).
     pub provider: Arc<dyn ProviderClient>,
+}
+
+/// Cached project mount state.
+///
+/// Wraps the resources needed for sessions within a project. The
+/// [`MountedStore`](pattern_memory::mount::MountedStore) is kept alive for
+/// RAII (filesystem watcher, backup scheduler).
+pub(crate) struct ProjectMount {
+    /// The in-memory cache backing the `MemoryStore` trait.
+    pub cache: Arc<dyn MemoryStore>,
     /// Constellation database handle (memory.db + messages.db).
     pub db: Arc<pattern_db::ConstellationDb>,
-    /// Mount path for scope wiring, lib/ include-path extension, and persona
-    /// discovery. The daemon discovers personas from global `~/.pattern/`
-    /// and from the project mount's `personas/` directory.
-    pub mount_path: Option<PathBuf>,
+    /// Mount root directory.
+    pub mount_path: PathBuf,
+    /// Keeps the `MountedStore` alive for RAII (watcher, backup scheduler).
+    _mounted: pattern_memory::mount::MountedStore,
 }
 
 /// A cached agent session: the tidepool session and its multiplexing sink.
@@ -100,6 +109,14 @@ pub struct DaemonServer {
     echo: bool,
     /// Session infrastructure for real mode. `None` in echo mode.
     session_config: Option<Arc<SessionConfig>>,
+    /// Cached project mounts keyed by canonical project path.
+    /// Each mount owns a `MountedStore` (memory cache, DB, watcher).
+    project_mounts: Arc<DashMap<PathBuf, Arc<ProjectMount>>>,
+    /// The currently active project mount. Set by `InitSession`, used by
+    /// `SendMessage` for session creation. One project at a time for now;
+    /// multi-project support can be added later by keying sessions on
+    /// `(project_path, agent_id)`.
+    current_mount: Option<Arc<ProjectMount>>,
     /// Open sessions keyed by agent ID, shared with spawned tasks.
     /// Each session uses a [`MultiplexSink`] whose inner sink is swapped to
     /// a per-batch [`TurnSinkBridge`] before each `step_with_agent_loop` call.
@@ -158,6 +175,8 @@ impl DaemonServer {
             started_at: Instant::now(),
             echo,
             session_config,
+            project_mounts: Arc::new(DashMap::new()),
+            current_mount: None,
             sessions: Arc::new(DashMap::new()),
             session_locks: Arc::new(DashMap::new()),
             partner_id: new_id(),
@@ -256,7 +275,7 @@ impl DaemonServer {
                         .join("");
                     bridge.emit(TurnEvent::Text(format!("echo: {text}")));
                     bridge.emit(TurnEvent::Stop(StopReason::EndTurn));
-                } else {
+                } else if let Some(mount) = &self.current_mount {
                     // Real session mode: spawn a task to handle session open
                     // and step. The actor loop stays responsive — session open
                     // may trigger tidepool Haskell compilation (5-10s).
@@ -265,6 +284,7 @@ impl DaemonServer {
                     let config = self.session_config.clone().unwrap();
                     let event_tx = self.event_tx.clone();
                     let partner_id = self.partner_id.clone();
+                    let mount = mount.clone();
 
                     tokio::spawn(async move {
                         // 1. Get or open session (may block during compilation).
@@ -273,6 +293,7 @@ impl DaemonServer {
                             &sessions,
                             &session_locks,
                             &config,
+                            &mount,
                         )
                         .await
                         {
@@ -330,6 +351,14 @@ impl DaemonServer {
                             }
                         }
                     });
+                } else {
+                    // No mount available — send InitSession first.
+                    let bridge = TurnSinkBridge::new(batch_id, agent_id, self.event_tx.clone());
+                    bridge.emit(TurnEvent::Display {
+                        kind: DisplayKind::Note,
+                        text: "no project mounted — send InitSession first".into(),
+                    });
+                    bridge.emit(TurnEvent::Stop(StopReason::EndTurn));
                 }
             }
             PatternMessage::SubscribeOutput(req) => {
@@ -375,7 +404,112 @@ impl DaemonServer {
                 };
                 let _ = tx.send(result).await;
             }
+            PatternMessage::InitSession(req) => {
+                let WithChannels { tx, inner, .. } = req;
+
+                if self.echo {
+                    // Echo mode: return synthetic session info.
+                    let _ = tx
+                        .send(SessionInfo {
+                            agent_id: inner.default_agent,
+                            persona_name: "echo".into(),
+                            available_agents: vec![],
+                        })
+                        .await;
+                    return;
+                }
+
+                // Mount or reuse the project.
+                let mount = match self.get_or_mount_project(&inner.project_path) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        warn!(path = %inner.project_path.display(), error = %e, "failed to mount project");
+                        let _ = tx
+                            .send(SessionInfo {
+                                agent_id: inner.default_agent,
+                                persona_name: String::new(),
+                                available_agents: vec![],
+                            })
+                            .await;
+                        return;
+                    }
+                };
+
+                // Store as the current mount for subsequent SendMessage calls.
+                self.current_mount = Some(mount.clone());
+
+                // Discover personas from global + project scopes.
+                let paths = pattern_memory::PatternPaths::default_paths();
+                let personas = paths
+                    .ok()
+                    .and_then(|p| {
+                        pattern_memory::persona::discover_personas(&p, Some(&mount.mount_path)).ok()
+                    })
+                    .unwrap_or_default();
+
+                // Resolve the requested agent.
+                let agent_id = inner.default_agent.clone();
+                let normalized = agent_id.trim_start_matches('@');
+                let persona_name = personas
+                    .get(normalized)
+                    .and_then(|p| pattern_runtime::persona_loader::load_persona(p).ok())
+                    .map(|p| p.name.to_string())
+                    .unwrap_or_else(|| agent_id.to_string());
+
+                let available: Vec<AgentId> =
+                    personas.keys().map(|k| SmolStr::from(k.as_str())).collect();
+
+                info!(
+                    agent_id = %agent_id,
+                    persona = %persona_name,
+                    project = %inner.project_path.display(),
+                    agents = ?available,
+                    "session initialized"
+                );
+
+                let _ = tx
+                    .send(SessionInfo {
+                        agent_id,
+                        persona_name,
+                        available_agents: available,
+                    })
+                    .await;
+            }
         }
+    }
+
+    /// Get or create a cached project mount for the given path.
+    ///
+    /// If the project is already mounted, returns the cached handle. Otherwise,
+    /// canonicalizes the path, calls [`pattern_memory::mount::attach`], and
+    /// caches the result.
+    fn get_or_mount_project(
+        &self,
+        project_path: &std::path::Path,
+    ) -> Result<Arc<ProjectMount>, String> {
+        // Canonicalize for consistent cache keys.
+        let canonical = project_path
+            .canonicalize()
+            .unwrap_or_else(|_| project_path.to_path_buf());
+
+        // Fast path: already mounted.
+        if let Some(entry) = self.project_mounts.get(&canonical) {
+            return Ok(entry.clone());
+        }
+
+        // Slow path: mount the project.
+        let mounted = pattern_memory::mount::attach(&canonical)
+            .map_err(|e| format!("failed to attach mount at {}: {e}", canonical.display()))?;
+
+        let mount = Arc::new(ProjectMount {
+            cache: mounted.cache.clone(),
+            db: mounted.db.clone(),
+            mount_path: mounted.mount_path.clone(),
+            _mounted: mounted,
+        });
+
+        self.project_mounts.insert(canonical, mount.clone());
+        Ok(mount)
     }
 }
 
@@ -385,11 +519,16 @@ impl DaemonServer {
 /// Slow path: acquires a per-agent lock, double-checks, then resolves the
 /// persona and opens a [`TidepoolSession`] via `open_with_agent_loop`.
 /// The lock prevents two concurrent tasks from racing to open the same session.
+///
+/// Project-specific state (memory store, DB, mount path) comes from the
+/// `project_mount` parameter, which is populated by `InitSession`. The
+/// `config` provides project-independent state (SDK, provider).
 async fn get_or_open_session(
     agent_id: &AgentId,
     sessions: &DashMap<AgentId, AgentSession>,
     session_locks: &DashMap<AgentId, Arc<tokio::sync::Mutex<()>>>,
     config: &SessionConfig,
+    project_mount: &ProjectMount,
 ) -> Result<AgentSession, String> {
     // Fast path: session already exists. Clone immediately, drop ref.
     if let Some(entry) = sessions.get(agent_id) {
@@ -409,19 +548,19 @@ async fn get_or_open_session(
     }
 
     // Resolve persona and open session.
-    let persona = resolve_persona(agent_id, config)?;
+    let persona = resolve_persona(agent_id, Some(&project_mount.mount_path))?;
     let mux_sink = Arc::new(MultiplexSink::new());
     let sink_dyn: Arc<dyn TurnSink> = mux_sink.clone();
 
     let session = TidepoolSession::open_with_agent_loop(
         persona,
         &config.sdk,
-        config.memory_store.clone(),
+        project_mount.cache.clone(),
         config.provider.clone(),
-        config.db.clone(),
+        project_mount.db.clone(),
         sink_dyn,
         None, // prelude_dir — SDK bundles the prelude internally.
-        config.mount_path.clone(),
+        Some(project_mount.mount_path.clone()),
     )
     .await
     .map_err(|e| format!("failed to open session for {agent_id}: {e}"))?;
@@ -442,14 +581,17 @@ async fn get_or_open_session(
 /// Looks up the normalized agent_id (stripped of `@` prefix) in the
 /// discovery map built from global `~/.pattern/personas/` and the
 /// project mount's `personas/` directory.
-fn resolve_persona(agent_id: &AgentId, config: &SessionConfig) -> Result<PersonaSnapshot, String> {
+fn resolve_persona(
+    agent_id: &AgentId,
+    mount_path: Option<&std::path::Path>,
+) -> Result<PersonaSnapshot, String> {
     use pattern_memory::PatternPaths;
     use pattern_memory::persona::discover_personas;
 
     let paths = PatternPaths::default_paths()
         .map_err(|e| format!("failed to resolve pattern home: {e}"))?;
 
-    let personas = discover_personas(&paths, config.mount_path.as_deref())
+    let personas = discover_personas(&paths, mount_path)
         .map_err(|e| format!("persona discovery failed: {e}"))?;
 
     // Normalize: strip leading '@' from the requested agent_id.
@@ -581,5 +723,23 @@ mod tests {
         assert_eq!(status.agent_count, 0);
         // Uptime should be very small but non-negative.
         assert!(status.uptime_secs < 5);
+    }
+
+    #[tokio::test]
+    async fn init_session_echo_mode_returns_requested_agent() {
+        let handle = DaemonServer::spawn();
+        let client = DaemonClient::from_local(handle.client);
+
+        let info = client
+            .init_session(
+                std::path::PathBuf::from("/tmp/test-project"),
+                "my-agent".into(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(info.agent_id, "my-agent");
+        assert_eq!(info.persona_name, "echo");
+        assert!(info.available_agents.is_empty());
     }
 }

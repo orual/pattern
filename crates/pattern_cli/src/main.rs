@@ -264,33 +264,39 @@ fn resolve_path(path: Option<PathBuf>) -> MietteResult<PathBuf> {
 ///
 /// Tries to connect to a running daemon and subscribe to the default agent's
 /// output. If the daemon is not running, starts in offline mode (no events).
+///
+/// After connecting, sends an `InitSession` RPC to tell the daemon which
+/// project the TUI is working in. The daemon mounts the project on demand
+/// and returns the resolved agent identity and available personas.
 async fn run_tui() -> MietteResult<()> {
     use pattern_server::client::DaemonClient;
     use std::time::Duration;
 
     // Resolve the default persona agent_id from project config.
     let agent_id = resolve_default_agent_id();
+    let project_path = std::env::current_dir().unwrap_or_default();
+
+    // Ensure the default persona exists on disk so the daemon can discover it.
+    // This writes `~/.pattern/personas/@pattern-default/persona.kdl` if no
+    // persona is found for the resolved agent_id.
+    commands::daemon::ensure_default_persona(&project_path).ok();
 
     // Connect to daemon, auto-starting if needed.
-    let (client, event_rx) = match DaemonClient::connect().await {
-        Ok(client) => {
-            let rx = client.subscribe_output(agent_id.clone().into()).await.ok();
-            (Some(client), rx)
-        }
+    let (client, event_rx, resolved_agent) = match DaemonClient::connect().await {
+        Ok(client) => init_session_and_subscribe(&client, &project_path, &agent_id).await,
         Err(_) => {
             // Daemon not running — try auto-starting it.
             match commands::daemon::ensure_daemon_running() {
-                Ok((_addr, _resolved_id)) => {
+                Ok(_addr) => {
                     tokio::time::sleep(Duration::from_millis(200)).await;
                     match DaemonClient::connect().await {
                         Ok(client) => {
-                            let rx = client.subscribe_output(agent_id.clone().into()).await.ok();
-                            (Some(client), rx)
+                            init_session_and_subscribe(&client, &project_path, &agent_id).await
                         }
-                        Err(_) => (None, None),
+                        Err(_) => (None, None, agent_id.clone()),
                     }
                 }
-                Err(_) => (None, None),
+                Err(_) => (None, None, agent_id.clone()),
             }
         }
     };
@@ -303,12 +309,48 @@ async fn run_tui() -> MietteResult<()> {
         original_hook(panic_info);
     }));
 
+    // Enable mouse capture so clicks can toggle collapsible sections.
+    crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture).ok();
+
     let mut terminal = ratatui::init();
-    let mut app = tui::app::App::new(smol_str::SmolStr::from(agent_id.as_str()));
+    let mut app = tui::app::App::new(smol_str::SmolStr::from(resolved_agent.as_str()));
     let result = app.run(&mut terminal, event_rx, client).await;
     ratatui::restore();
 
+    // Disable mouse capture after restoring the terminal.
+    crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture).ok();
+
     result
+}
+
+/// Send `InitSession`, then subscribe to the resolved agent's output.
+///
+/// Returns `(client, event_rx, resolved_agent_id)`. On failure, falls back to
+/// subscribing with the default agent_id.
+async fn init_session_and_subscribe(
+    client: &pattern_server::client::DaemonClient,
+    project_path: &std::path::Path,
+    default_agent: &str,
+) -> (
+    Option<pattern_server::client::DaemonClient>,
+    Option<tui::app::DaemonEventReceiver>,
+    String,
+) {
+    match client
+        .init_session(project_path.to_path_buf(), default_agent.into())
+        .await
+    {
+        Ok(info) => {
+            let resolved = info.agent_id.clone();
+            let rx = client.subscribe_output(resolved.clone()).await.ok();
+            (Some(client.clone()), rx, resolved.to_string())
+        }
+        Err(e) => {
+            tracing::warn!("InitSession failed, falling back to default agent: {e}");
+            let rx = client.subscribe_output(default_agent.into()).await.ok();
+            (Some(client.clone()), rx, default_agent.to_string())
+        }
+    }
 }
 
 /// Resolve the default persona agent_id from project config.

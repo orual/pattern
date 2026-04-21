@@ -14,7 +14,6 @@
 //! 7. Blocks until SIGTERM or Ctrl-C, then cleans up state.
 
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
@@ -43,15 +42,6 @@ enum Command {
         /// Run in echo mode (no LLM, echoes messages back). Used for testing.
         #[arg(long)]
         echo: bool,
-
-        /// Project path for memory mount. Defaults to current directory.
-        /// Ignored in echo mode.
-        #[arg(long)]
-        path: Option<PathBuf>,
-
-        /// Path to a persona KDL file. Required unless running in echo mode.
-        #[arg(long)]
-        persona: Option<PathBuf>,
     },
     /// Stop a running daemon.
     Stop,
@@ -68,23 +58,13 @@ async fn main() -> miette::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Start {
-            port,
-            echo,
-            path,
-            persona,
-        } => cmd_start(port, echo, path, persona).await,
+        Command::Start { port, echo } => cmd_start(port, echo).await,
         Command::Stop => cmd_stop(),
         Command::Status => cmd_status(),
     }
 }
 
-async fn cmd_start(
-    port: u16,
-    echo: bool,
-    project_path: Option<PathBuf>,
-    persona_path: Option<PathBuf>,
-) -> miette::Result<()> {
+async fn cmd_start(port: u16, echo: bool) -> miette::Result<()> {
     // Check if already running.
     if let Ok(state) = DaemonState::load() {
         if state.is_process_alive() {
@@ -99,44 +79,11 @@ async fn cmd_start(
     }
 
     // Spawn the server actor — echo mode or real session mode.
-    // `_mounted` keeps the MountedStore alive (watcher + backup scheduler) until
-    // the daemon shuts down. Dropping it triggers clean RAII teardown.
-    let (handle, _mounted) = if echo {
+    // Projects are mounted on demand via InitSession from the TUI client.
+    let handle = if echo {
         info!("starting daemon in echo mode");
-        (DaemonServer::spawn(), None)
+        DaemonServer::spawn()
     } else {
-        // Resolve project path.
-        let project_path = project_path
-            .or_else(|| std::env::current_dir().ok())
-            .ok_or_else(|| {
-                miette::miette!(
-                    "could not determine project path; pass --path or run from a project directory"
-                )
-            })?;
-
-        // Load persona if explicitly provided (optimization hint — the daemon
-        // discovers personas lazily at session-open time regardless).
-        if let Some(ref persona_path) = persona_path {
-            match pattern_runtime::persona_loader::load_persona(persona_path) {
-                Ok(persona) => {
-                    info!(
-                        persona = %persona.name,
-                        agent_id = %persona.agent_id,
-                        "persona hint loaded (will be discovered lazily at session open)"
-                    );
-                }
-                Err(e) => {
-                    info!("--persona hint failed to load (non-fatal, will discover lazily): {e}");
-                }
-            }
-        }
-
-        // Mount memory store.
-        info!(path = %project_path.display(), "attaching to mount");
-        let mounted = pattern_memory::mount::attach(&project_path).map_err(|e| {
-            miette::miette!("failed to attach mount at {}: {e}", project_path.display())
-        })?;
-
         // Build provider with the full auth chain: stored OAuth (keyring/JSON
         // fallback) → API key env var → session pickup (~/.claude/.credentials.json).
         // This mirrors pattern-test-cli's `build_chain` — the daemon should try
@@ -183,18 +130,10 @@ async fn cmd_start(
         // Resolve SDK location.
         let sdk = pattern_runtime::sdk::SdkLocation::default();
 
-        let config = SessionConfig {
-            sdk,
-            memory_store: mounted.cache.clone(),
-            provider,
-            db: mounted.db.clone(),
-            mount_path: Some(mounted.mount_path.clone()),
-        };
+        let config = SessionConfig { sdk, provider };
 
-        info!("starting daemon with real session infrastructure");
-        let handle = DaemonServer::spawn_with_config(config);
-
-        (handle, Some(mounted))
+        info!("starting daemon");
+        DaemonServer::spawn_with_config(config)
     };
 
     // Create QUIC endpoint with a self-signed certificate.

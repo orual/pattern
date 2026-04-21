@@ -24,6 +24,7 @@ This phase implements and tests:
 - **v3-tui.AC6.5 Success:** `zellij attach pattern-{project}` reconnects to existing session with panes intact
 - **v3-tui.AC6.6 Success:** Running `pattern chat` without zellij available launches standalone single-pane TUI (no error, full functionality minus multi-pane)
 - **v3-tui.AC6.7 Edge:** `--stop-daemon-on-exit` flag: daemon stops when last TUI with this flag disconnects and no other clients are connected
+- **v3-tui.AC6.8 Success:** When zellij is available, `ensure_daemon_running` starts the daemon in a background zellij pane (`zellij action new-tab -- pattern-server start`) instead of a headless child process. Daemon logs are visible in the zellij tab; user can switch to it for live log viewing.
 
 ---
 
