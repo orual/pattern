@@ -181,7 +181,7 @@ impl App {
                 } => {
                     match recv_result {
                         Ok(Some(tagged_event)) => {
-                            tracing::debug!("daemon event received: batch={}", tagged_event.batch_id);
+                            tracing::trace!("daemon event received: batch={}", tagged_event.batch_id);
                             self.handle_daemon_event(tagged_event);
                         }
                         Ok(None) => {

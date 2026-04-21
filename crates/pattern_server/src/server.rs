@@ -211,7 +211,7 @@ impl DaemonServer {
     /// does not block the actor loop. Subscribers that are full (buffer
     /// backpressure) or disconnected are removed.
     async fn fan_out(&mut self, event: TaggedTurnEvent) {
-        tracing::debug!(
+        tracing::trace!(
             agent_id = %event.agent_id,
             batch_id = %event.batch_id,
             event = ?event.event,
