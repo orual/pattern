@@ -48,7 +48,8 @@
 //! `Segment3Pass`.
 
 use genai::chat::{SystemBlock, Tool};
-use pattern_core::memory::{BlockMetadata, BlockSchema, BlockType, StructuredDocument};
+use pattern_core::memory::StructuredDocument;
+use pattern_core::types::memory_types::{BlockMetadata, BlockSchema, BlockType};
 use pattern_provider::compose::{
     BreakpointLocation, CacheProfile, ComposerPass, PartialRequest,
     passes::{Segment1Pass, Segment2Pass, Segment3Pass},

@@ -10,9 +10,11 @@ pub mod memory {
     use chrono::Utc;
     use serde_json::Value as JsonValue;
 
-    use crate::memory::{
+    use crate::memory::StructuredDocument;
+    use crate::traits::MemoryStore;
+    use crate::types::memory_types::{
         ArchivalEntry, BlockMetadata, BlockSchema, BlockType, MemoryResult, MemorySearchResult,
-        MemoryStore, SearchOptions, SharedBlockInfo, StructuredDocument,
+        SearchOptions, SharedBlockInfo,
     };
     use crate::types::block::BlockCreate;
 

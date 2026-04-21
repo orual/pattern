@@ -26,7 +26,7 @@ use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
-use crate::memory::{BlockSchema, BlockType, MemoryPermission};
+use crate::types::memory_types::{BlockSchema, BlockType, MemoryPermission};
 use crate::types::ids::MemoryId;
 use crate::types::origin::Author;
 
@@ -62,7 +62,7 @@ pub type BlockHandle = SmolStr;
 /// # Examples
 ///
 /// ```
-/// use pattern_core::memory::{BlockSchema, BlockType, MemoryPermission};
+/// use pattern_core::types::memory_types::{BlockSchema, BlockType, MemoryPermission};
 /// use pattern_core::types::block::BlockCreate;
 ///
 /// // Minimal construction using defaults (ReadWrite permission).
@@ -95,7 +95,7 @@ pub struct BlockCreate {
 impl BlockCreate {
     /// Minimal constructor with sensible defaults:
     /// - `description`: empty string
-    /// - `char_limit`: [`crate::memory::DEFAULT_MEMORY_CHAR_LIMIT`]
+    /// - `char_limit`: [`crate::types::memory_types::DEFAULT_MEMORY_CHAR_LIMIT`]
     /// - `permission`: `ReadWrite`
     pub fn new(label: impl Into<String>, block_type: BlockType, schema: BlockSchema) -> Self {
         Self {
@@ -103,7 +103,7 @@ impl BlockCreate {
             description: String::new(),
             block_type,
             schema,
-            char_limit: crate::memory::DEFAULT_MEMORY_CHAR_LIMIT,
+            char_limit: crate::types::memory_types::DEFAULT_MEMORY_CHAR_LIMIT,
             permission: MemoryPermission::ReadWrite,
         }
     }
@@ -175,7 +175,7 @@ pub enum BlockWriteKind {
 /// use jiff::Timestamp;
 /// use smol_str::SmolStr;
 ///
-/// use pattern_core::memory::BlockType;
+/// use pattern_core::types::memory_types::BlockType;
 /// use pattern_core::types::block::{BlockHandle, BlockWrite, BlockWriteKind};
 /// use pattern_core::types::origin::{Author, SystemReason};
 ///

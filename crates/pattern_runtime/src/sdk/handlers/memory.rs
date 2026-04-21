@@ -21,7 +21,8 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use pattern_core::memory::{BlockSchema, BlockType, StructuredDocument};
+use pattern_core::memory::StructuredDocument;
+use pattern_core::types::memory_types::{BlockSchema, BlockType};
 use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::{BlockWrite, BlockWriteKind};
 use pattern_core::types::origin::{AgentAuthor, Author};
@@ -549,14 +550,14 @@ mod tests {
             &self,
             _a: &str,
             _create: pattern_core::types::block::BlockCreate,
-        ) -> pattern_core::memory::MemoryResult<pattern_core::memory::StructuredDocument> {
+        ) -> pattern_core::types::memory_types::MemoryResult<pattern_core::memory::StructuredDocument> {
             panic!("NeverStore should not be called in this test")
         }
         async fn get_block(
             &self,
             _a: &str,
             _l: &str,
-        ) -> pattern_core::memory::MemoryResult<Option<pattern_core::memory::StructuredDocument>>
+        ) -> pattern_core::types::memory_types::MemoryResult<Option<pattern_core::memory::StructuredDocument>>
         {
             panic!("NeverStore should not be called in this test")
         }
@@ -564,44 +565,44 @@ mod tests {
             &self,
             _a: &str,
             _l: &str,
-        ) -> pattern_core::memory::MemoryResult<Option<pattern_core::memory::BlockMetadata>>
+        ) -> pattern_core::types::memory_types::MemoryResult<Option<pattern_core::types::memory_types::BlockMetadata>>
         {
             panic!()
         }
         async fn list_blocks(
             &self,
             _a: &str,
-        ) -> pattern_core::memory::MemoryResult<Vec<pattern_core::memory::BlockMetadata>> {
+        ) -> pattern_core::types::memory_types::MemoryResult<Vec<pattern_core::types::memory_types::BlockMetadata>> {
             panic!()
         }
         async fn list_blocks_by_type(
             &self,
             _a: &str,
-            _t: pattern_core::memory::BlockType,
-        ) -> pattern_core::memory::MemoryResult<Vec<pattern_core::memory::BlockMetadata>> {
+            _t: pattern_core::types::memory_types::BlockType,
+        ) -> pattern_core::types::memory_types::MemoryResult<Vec<pattern_core::types::memory_types::BlockMetadata>> {
             panic!()
         }
         async fn list_all_blocks_by_label_prefix(
             &self,
             _p: &str,
-        ) -> pattern_core::memory::MemoryResult<Vec<pattern_core::memory::BlockMetadata>> {
+        ) -> pattern_core::types::memory_types::MemoryResult<Vec<pattern_core::types::memory_types::BlockMetadata>> {
             panic!()
         }
-        async fn delete_block(&self, _a: &str, _l: &str) -> pattern_core::memory::MemoryResult<()> {
+        async fn delete_block(&self, _a: &str, _l: &str) -> pattern_core::types::memory_types::MemoryResult<()> {
             panic!()
         }
         async fn get_rendered_content(
             &self,
             _a: &str,
             _l: &str,
-        ) -> pattern_core::memory::MemoryResult<Option<String>> {
+        ) -> pattern_core::types::memory_types::MemoryResult<Option<String>> {
             panic!()
         }
         async fn persist_block(
             &self,
             _a: &str,
             _l: &str,
-        ) -> pattern_core::memory::MemoryResult<()> {
+        ) -> pattern_core::types::memory_types::MemoryResult<()> {
             panic!()
         }
         fn mark_dirty(&self, _a: &str, _l: &str) {}
@@ -610,7 +611,7 @@ mod tests {
             _a: &str,
             _c: &str,
             _m: Option<serde_json::Value>,
-        ) -> pattern_core::memory::MemoryResult<String> {
+        ) -> pattern_core::types::memory_types::MemoryResult<String> {
             panic!()
         }
         async fn search_archival(
@@ -618,33 +619,33 @@ mod tests {
             _a: &str,
             _q: &str,
             _n: usize,
-        ) -> pattern_core::memory::MemoryResult<Vec<pattern_core::memory::ArchivalEntry>> {
+        ) -> pattern_core::types::memory_types::MemoryResult<Vec<pattern_core::types::memory_types::ArchivalEntry>> {
             panic!()
         }
-        async fn delete_archival(&self, _id: &str) -> pattern_core::memory::MemoryResult<()> {
+        async fn delete_archival(&self, _id: &str) -> pattern_core::types::memory_types::MemoryResult<()> {
             panic!()
         }
         async fn search(
             &self,
             _a: &str,
             _q: &str,
-            _o: pattern_core::memory::SearchOptions,
-        ) -> pattern_core::memory::MemoryResult<Vec<pattern_core::memory::MemorySearchResult>>
+            _o: pattern_core::types::memory_types::SearchOptions,
+        ) -> pattern_core::types::memory_types::MemoryResult<Vec<pattern_core::types::memory_types::MemorySearchResult>>
         {
             panic!()
         }
         async fn search_all(
             &self,
             _q: &str,
-            _o: pattern_core::memory::SearchOptions,
-        ) -> pattern_core::memory::MemoryResult<Vec<pattern_core::memory::MemorySearchResult>>
+            _o: pattern_core::types::memory_types::SearchOptions,
+        ) -> pattern_core::types::memory_types::MemoryResult<Vec<pattern_core::types::memory_types::MemorySearchResult>>
         {
             panic!()
         }
         async fn list_shared_blocks(
             &self,
             _a: &str,
-        ) -> pattern_core::memory::MemoryResult<Vec<pattern_core::memory::SharedBlockInfo>>
+        ) -> pattern_core::types::memory_types::MemoryResult<Vec<pattern_core::types::memory_types::SharedBlockInfo>>
         {
             panic!()
         }
@@ -653,7 +654,7 @@ mod tests {
             _r: &str,
             _o: &str,
             _l: &str,
-        ) -> pattern_core::memory::MemoryResult<Option<pattern_core::memory::StructuredDocument>>
+        ) -> pattern_core::types::memory_types::MemoryResult<Option<pattern_core::memory::StructuredDocument>>
         {
             panic!()
         }
@@ -662,23 +663,23 @@ mod tests {
             _a: &str,
             _l: &str,
             _p: bool,
-        ) -> pattern_core::memory::MemoryResult<()> {
+        ) -> pattern_core::types::memory_types::MemoryResult<()> {
             panic!()
         }
         async fn set_block_type(
             &self,
             _a: &str,
             _l: &str,
-            _t: pattern_core::memory::BlockType,
-        ) -> pattern_core::memory::MemoryResult<()> {
+            _t: pattern_core::types::memory_types::BlockType,
+        ) -> pattern_core::types::memory_types::MemoryResult<()> {
             panic!()
         }
         async fn update_block_schema(
             &self,
             _a: &str,
             _l: &str,
-            _s: pattern_core::memory::BlockSchema,
-        ) -> pattern_core::memory::MemoryResult<()> {
+            _s: pattern_core::types::memory_types::BlockSchema,
+        ) -> pattern_core::types::memory_types::MemoryResult<()> {
             panic!()
         }
         async fn update_block_description(
@@ -686,27 +687,27 @@ mod tests {
             _a: &str,
             _l: &str,
             _d: &str,
-        ) -> pattern_core::memory::MemoryResult<()> {
+        ) -> pattern_core::types::memory_types::MemoryResult<()> {
             panic!()
         }
-        async fn undo_block(&self, _a: &str, _l: &str) -> pattern_core::memory::MemoryResult<bool> {
+        async fn undo_block(&self, _a: &str, _l: &str) -> pattern_core::types::memory_types::MemoryResult<bool> {
             panic!()
         }
-        async fn redo_block(&self, _a: &str, _l: &str) -> pattern_core::memory::MemoryResult<bool> {
+        async fn redo_block(&self, _a: &str, _l: &str) -> pattern_core::types::memory_types::MemoryResult<bool> {
             panic!()
         }
         async fn undo_depth(
             &self,
             _a: &str,
             _l: &str,
-        ) -> pattern_core::memory::MemoryResult<usize> {
+        ) -> pattern_core::types::memory_types::MemoryResult<usize> {
             panic!()
         }
         async fn redo_depth(
             &self,
             _a: &str,
             _l: &str,
-        ) -> pattern_core::memory::MemoryResult<usize> {
+        ) -> pattern_core::types::memory_types::MemoryResult<usize> {
             panic!()
         }
     }

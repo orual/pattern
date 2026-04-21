@@ -5,7 +5,8 @@
 //! changing the marker shape.
 
 use genai::chat::{CacheControl, SystemBlock};
-use pattern_core::memory::{BlockMetadata, BlockSchema, BlockType, StructuredDocument};
+use pattern_core::memory::StructuredDocument;
+use pattern_core::types::memory_types::{BlockMetadata, BlockSchema, BlockType};
 use pattern_provider::compose::{
     CacheProfile, ComposerPass, PartialRequest,
     passes::{Segment1Pass, Segment2Pass, Segment3Pass},

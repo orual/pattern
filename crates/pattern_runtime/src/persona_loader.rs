@@ -59,7 +59,7 @@ use std::path::Path;
 use genai::adapter::AdapterKind;
 use genai::chat::{ChatOptions, ReasoningEffort};
 use miette::Diagnostic;
-use pattern_core::memory::{MemoryPermission, MemoryType};
+use pattern_core::types::memory_types::{MemoryPermission, MemoryType};
 use pattern_core::types::compression::CompressionStrategy;
 use pattern_core::types::message::MidBatchDeltaBehavior;
 use pattern_core::types::snapshot::{

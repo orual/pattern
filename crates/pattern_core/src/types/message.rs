@@ -17,7 +17,7 @@ use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
-use crate::memory::BlockType;
+use crate::types::memory_types::BlockType;
 use crate::types::block_ref::BlockRef;
 use crate::types::ids::{AgentId, BatchId, MessageId};
 use genai::ModelIden;

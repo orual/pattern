@@ -30,8 +30,9 @@ test-support = []
 subscription-oauth = ["pattern-provider/subscription-oauth"]
 
 [dependencies]
-pattern-core = { path = "../pattern_core" }
-pattern-db   = { path = "../pattern_db" }
+pattern-core   = { path = "../pattern_core" }
+pattern-db     = { path = "../pattern_db" }
+pattern-memory = { path = "../pattern_memory" }
 # pattern-provider: consumed by the `pattern-test-cli` bin for live-tier
 # auth + completion verification (AC3.1, AC4.1, AC4.3, Task 20). Phase 5
 # integrates it into the TidepoolRuntime proper; holding the dep here

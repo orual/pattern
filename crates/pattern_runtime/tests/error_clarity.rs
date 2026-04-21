@@ -327,7 +327,7 @@ async fn ac9_5_memory_write_to_unknown_label_returns_not_found() {
 
     // Assert the correct error variant with populated context fields.
     match &err {
-        pattern_core::memory::MemoryError::NotFound {
+        pattern_core::types::memory_types::MemoryError::NotFound {
             agent_id: got_agent,
             label: got_label,
         } => {
@@ -363,7 +363,7 @@ async fn ac9_5_memory_update_description_unknown_label_returns_not_found() {
         .expect_err("update_block_description on unknown label must return NotFound");
 
     match &err {
-        pattern_core::memory::MemoryError::NotFound {
+        pattern_core::types::memory_types::MemoryError::NotFound {
             agent_id: got_agent,
             label: got_label,
         } => {

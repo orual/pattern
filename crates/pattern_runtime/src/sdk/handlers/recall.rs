@@ -183,7 +183,7 @@ mod tests {
     /// In-memory store with archival support for recall tests.
     #[derive(Debug, Default)]
     struct RecallTestStore {
-        entries: std::sync::Mutex<Vec<pattern_core::memory::ArchivalEntry>>,
+        entries: std::sync::Mutex<Vec<pattern_core::types::memory_types::ArchivalEntry>>,
         next_id: std::sync::atomic::AtomicU64,
     }
 
@@ -200,7 +200,7 @@ mod tests {
             agent_id: &str,
             content: &str,
             _metadata: Option<serde_json::Value>,
-        ) -> pattern_core::memory::MemoryResult<String> {
+        ) -> pattern_core::types::memory_types::MemoryResult<String> {
             let id = format!(
                 "arch-{}",
                 self.next_id
@@ -209,7 +209,7 @@ mod tests {
             self.entries
                 .lock()
                 .unwrap()
-                .push(pattern_core::memory::ArchivalEntry {
+                .push(pattern_core::types::memory_types::ArchivalEntry {
                     id: id.clone(),
                     agent_id: agent_id.to_string(),
                     content: content.to_string(),
@@ -224,7 +224,7 @@ mod tests {
             agent_id: &str,
             query: &str,
             limit: usize,
-        ) -> pattern_core::memory::MemoryResult<Vec<pattern_core::memory::ArchivalEntry>> {
+        ) -> pattern_core::types::memory_types::MemoryResult<Vec<pattern_core::types::memory_types::ArchivalEntry>> {
             let guard = self.entries.lock().unwrap();
             let results: Vec<_> = guard
                 .iter()
@@ -235,7 +235,7 @@ mod tests {
             Ok(results)
         }
 
-        async fn delete_archival(&self, id: &str) -> pattern_core::memory::MemoryResult<()> {
+        async fn delete_archival(&self, id: &str) -> pattern_core::types::memory_types::MemoryResult<()> {
             self.entries.lock().unwrap().retain(|e| e.id != id);
             Ok(())
         }
@@ -245,14 +245,14 @@ mod tests {
             &self,
             _: &str,
             _: pattern_core::types::block::BlockCreate,
-        ) -> pattern_core::memory::MemoryResult<pattern_core::memory::StructuredDocument> {
+        ) -> pattern_core::types::memory_types::MemoryResult<pattern_core::memory::StructuredDocument> {
             panic!()
         }
         async fn get_block(
             &self,
             _: &str,
             _: &str,
-        ) -> pattern_core::memory::MemoryResult<Option<pattern_core::memory::StructuredDocument>>
+        ) -> pattern_core::types::memory_types::MemoryResult<Option<pattern_core::memory::StructuredDocument>>
         {
             panic!()
         }
@@ -260,40 +260,40 @@ mod tests {
             &self,
             _: &str,
             _: &str,
-        ) -> pattern_core::memory::MemoryResult<Option<pattern_core::memory::BlockMetadata>>
+        ) -> pattern_core::types::memory_types::MemoryResult<Option<pattern_core::types::memory_types::BlockMetadata>>
         {
             panic!()
         }
         async fn list_blocks(
             &self,
             _: &str,
-        ) -> pattern_core::memory::MemoryResult<Vec<pattern_core::memory::BlockMetadata>> {
+        ) -> pattern_core::types::memory_types::MemoryResult<Vec<pattern_core::types::memory_types::BlockMetadata>> {
             panic!()
         }
         async fn list_blocks_by_type(
             &self,
             _: &str,
-            _: pattern_core::memory::BlockType,
-        ) -> pattern_core::memory::MemoryResult<Vec<pattern_core::memory::BlockMetadata>> {
+            _: pattern_core::types::memory_types::BlockType,
+        ) -> pattern_core::types::memory_types::MemoryResult<Vec<pattern_core::types::memory_types::BlockMetadata>> {
             panic!()
         }
         async fn list_all_blocks_by_label_prefix(
             &self,
             _: &str,
-        ) -> pattern_core::memory::MemoryResult<Vec<pattern_core::memory::BlockMetadata>> {
+        ) -> pattern_core::types::memory_types::MemoryResult<Vec<pattern_core::types::memory_types::BlockMetadata>> {
             panic!()
         }
-        async fn delete_block(&self, _: &str, _: &str) -> pattern_core::memory::MemoryResult<()> {
+        async fn delete_block(&self, _: &str, _: &str) -> pattern_core::types::memory_types::MemoryResult<()> {
             panic!()
         }
         async fn get_rendered_content(
             &self,
             _: &str,
             _: &str,
-        ) -> pattern_core::memory::MemoryResult<Option<String>> {
+        ) -> pattern_core::types::memory_types::MemoryResult<Option<String>> {
             panic!()
         }
-        async fn persist_block(&self, _: &str, _: &str) -> pattern_core::memory::MemoryResult<()> {
+        async fn persist_block(&self, _: &str, _: &str) -> pattern_core::types::memory_types::MemoryResult<()> {
             panic!()
         }
         fn mark_dirty(&self, _: &str, _: &str) {}
@@ -301,23 +301,23 @@ mod tests {
             &self,
             _: &str,
             _: &str,
-            _: pattern_core::memory::SearchOptions,
-        ) -> pattern_core::memory::MemoryResult<Vec<pattern_core::memory::MemorySearchResult>>
+            _: pattern_core::types::memory_types::SearchOptions,
+        ) -> pattern_core::types::memory_types::MemoryResult<Vec<pattern_core::types::memory_types::MemorySearchResult>>
         {
             Ok(vec![])
         }
         async fn search_all(
             &self,
             _: &str,
-            _: pattern_core::memory::SearchOptions,
-        ) -> pattern_core::memory::MemoryResult<Vec<pattern_core::memory::MemorySearchResult>>
+            _: pattern_core::types::memory_types::SearchOptions,
+        ) -> pattern_core::types::memory_types::MemoryResult<Vec<pattern_core::types::memory_types::MemorySearchResult>>
         {
             Ok(vec![])
         }
         async fn list_shared_blocks(
             &self,
             _: &str,
-        ) -> pattern_core::memory::MemoryResult<Vec<pattern_core::memory::SharedBlockInfo>>
+        ) -> pattern_core::types::memory_types::MemoryResult<Vec<pattern_core::types::memory_types::SharedBlockInfo>>
         {
             Ok(vec![])
         }
@@ -326,7 +326,7 @@ mod tests {
             _: &str,
             _: &str,
             _: &str,
-        ) -> pattern_core::memory::MemoryResult<Option<pattern_core::memory::StructuredDocument>>
+        ) -> pattern_core::types::memory_types::MemoryResult<Option<pattern_core::memory::StructuredDocument>>
         {
             Ok(None)
         }
@@ -335,23 +335,23 @@ mod tests {
             _: &str,
             _: &str,
             _: bool,
-        ) -> pattern_core::memory::MemoryResult<()> {
+        ) -> pattern_core::types::memory_types::MemoryResult<()> {
             Ok(())
         }
         async fn set_block_type(
             &self,
             _: &str,
             _: &str,
-            _: pattern_core::memory::BlockType,
-        ) -> pattern_core::memory::MemoryResult<()> {
+            _: pattern_core::types::memory_types::BlockType,
+        ) -> pattern_core::types::memory_types::MemoryResult<()> {
             Ok(())
         }
         async fn update_block_schema(
             &self,
             _: &str,
             _: &str,
-            _: pattern_core::memory::BlockSchema,
-        ) -> pattern_core::memory::MemoryResult<()> {
+            _: pattern_core::types::memory_types::BlockSchema,
+        ) -> pattern_core::types::memory_types::MemoryResult<()> {
             Ok(())
         }
         async fn update_block_description(
@@ -359,19 +359,19 @@ mod tests {
             _: &str,
             _: &str,
             _: &str,
-        ) -> pattern_core::memory::MemoryResult<()> {
+        ) -> pattern_core::types::memory_types::MemoryResult<()> {
             Ok(())
         }
-        async fn undo_block(&self, _: &str, _: &str) -> pattern_core::memory::MemoryResult<bool> {
+        async fn undo_block(&self, _: &str, _: &str) -> pattern_core::types::memory_types::MemoryResult<bool> {
             Ok(false)
         }
-        async fn redo_block(&self, _: &str, _: &str) -> pattern_core::memory::MemoryResult<bool> {
+        async fn redo_block(&self, _: &str, _: &str) -> pattern_core::types::memory_types::MemoryResult<bool> {
             Ok(false)
         }
-        async fn undo_depth(&self, _: &str, _: &str) -> pattern_core::memory::MemoryResult<usize> {
+        async fn undo_depth(&self, _: &str, _: &str) -> pattern_core::types::memory_types::MemoryResult<usize> {
             Ok(0)
         }
-        async fn redo_depth(&self, _: &str, _: &str) -> pattern_core::memory::MemoryResult<usize> {
+        async fn redo_depth(&self, _: &str, _: &str) -> pattern_core::types::memory_types::MemoryResult<usize> {
             Ok(0)
         }
     }

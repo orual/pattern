@@ -65,7 +65,8 @@ impl ComposerPass for Segment3Pass {
 #[cfg(test)]
 mod tests {
     use genai::chat::{CacheControl, ChatMessage};
-    use pattern_core::memory::{BlockMetadata, BlockSchema, BlockType, StructuredDocument};
+    use pattern_core::memory::StructuredDocument;
+    use pattern_core::types::memory_types::{BlockMetadata, BlockSchema, BlockType};
 
     use crate::compose::breakpoints::BreakpointLocation;
     use crate::compose::profile::CacheProfile;

@@ -696,8 +696,7 @@ async fn seed_persona_memory_blocks(
         pattern_core::types::snapshot::MemoryBlockSpec,
     >,
 ) -> Result<(), RuntimeError> {
-    use pattern_core::memory::MemoryType;
-    use pattern_core::memory::{BlockSchema, BlockType};
+    use pattern_core::types::memory_types::{BlockSchema, BlockType, MemoryType};
     use pattern_core::types::block::BlockCreate;
 
     for (label, spec) in memory_blocks {
@@ -1010,7 +1009,7 @@ mod tests {
     /// .permission not threaded through BlockCreate to MemoryCache).
     #[tokio::test]
     async fn seed_persona_memory_blocks_threads_permission_to_store() {
-        use pattern_core::memory::MemoryPermission;
+        use pattern_core::types::memory_types::MemoryPermission;
         use pattern_core::types::snapshot::MemoryBlockSpec;
 
         let store = Arc::new(InMemoryMemoryStore::new());

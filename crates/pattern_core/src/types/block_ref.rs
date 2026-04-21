@@ -3,7 +3,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::memory::CONSTELLATION_OWNER;
+use crate::types::memory_types::CONSTELLATION_OWNER;
 
 /// Reference to a memory block for loading into context.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, JsonSchema)]

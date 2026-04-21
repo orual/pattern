@@ -10,6 +10,7 @@ pub mod block_ref;
 pub mod compression;
 pub mod embedding;
 pub mod ids;
+pub mod memory_types;
 pub mod message;
 pub mod origin;
 pub mod provider;
@@ -24,7 +25,7 @@ pub use compression::CompressionStrategy;
 pub use ids::{
     AgentId, BatchId, ConstellationId, ConversationId, DiscordIdentityId, EventId, GroupId,
     MemoryId, MessageId, ModelId, OAuthTokenId, ProjectId, QueuedMessageId, RelationId, RequestId,
-    SessionId, TaskId, ToolCallId, UserId, WakeupId, WorkspaceId, new_id,
+    SessionId, TaskId, ToolCallId, UserId, WakeupId, WorkspaceId, new_id, new_snowflake_id,
 };
 pub use message::{Message, ResponseMeta};
 pub use origin::{AgentAuthor, Author, Human, MessageOrigin, Partner, Sphere, SystemReason};

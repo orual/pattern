@@ -1,7 +1,8 @@
 //! Integration test for memory block field permissions.
 
-use pattern_core::memory::{
-    BlockSchema, CompositeSection, DocumentError, FieldDef, FieldType, StructuredDocument,
+use pattern_core::memory::StructuredDocument;
+use pattern_core::types::memory_types::{
+    BlockSchema, CompositeSection, DocumentError, FieldDef, FieldType,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};

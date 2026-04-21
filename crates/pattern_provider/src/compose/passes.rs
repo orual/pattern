@@ -37,7 +37,8 @@ mod tests {
     use jiff::Timestamp;
     use smol_str::SmolStr;
 
-    use pattern_core::memory::{BlockMetadata, BlockSchema, BlockType, StructuredDocument};
+    use pattern_core::memory::StructuredDocument;
+    use pattern_core::types::memory_types::{BlockMetadata, BlockSchema, BlockType};
     use pattern_core::types::block::{BlockWrite, BlockWriteKind};
     use pattern_core::types::origin::{Author, SystemReason};
 

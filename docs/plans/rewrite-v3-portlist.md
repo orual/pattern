@@ -85,6 +85,17 @@ Cruft (code with no fate marker, `unimplemented!()`/`todo!()` without phase/AC r
 - **Location:** `crates/pattern_surreal_compat/`.
 - **Notes:** v2 SurrealDB compatibility shim. Not needed in v3. Directory deleted in a dedicated commit alongside `pattern_macros` once the v2→v3 data migrator plan has either landed or concluded it doesn't need this shim.
 
+## v3-memory-rework additions
+
+### pattern_memory (Phase 1 — completed 2026-04-19)
+- Extracted from `pattern_core::memory::*` during the v3-memory-rework plan, Phase 1.
+- Hosts `MemoryCache`, `SharedBlockManager`, schema templates.
+- `StructuredDocument` remains in `pattern_core::memory` (trait-signature type).
+- `pattern_core` retains the `MemoryStore` trait + trait-signature data types
+  under `pattern_core::types::memory_types::*`.
+- Dependency graph: `pattern_memory -> pattern_core + pattern_db`; reverse-dep
+  guard is `crates/pattern_core/tests/no_pattern_memory_dep.rs`.
+
 ## Retired-directory deletion policy
 
 Crates marked `retire` keep their source on disk (excluded from `members`) until their responsibilities have fully migrated. Deletion happens in a dedicated commit with subject:

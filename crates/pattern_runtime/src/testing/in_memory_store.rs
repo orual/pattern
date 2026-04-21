@@ -18,9 +18,10 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use pattern_core::memory::{
+use pattern_core::memory::StructuredDocument;
+use pattern_core::types::memory_types::{
     ArchivalEntry, BlockMetadata, BlockSchema, BlockType, MemoryResult, MemorySearchResult,
-    SearchOptions, SharedBlockInfo, StructuredDocument,
+    SearchOptions, SharedBlockInfo,
 };
 use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::BlockCreate;
@@ -265,7 +266,7 @@ impl MemoryStore for InMemoryMemoryStore {
                 r.document.metadata_mut().pinned = pinned;
                 Ok(())
             }
-            None => Err(pattern_core::memory::MemoryError::NotFound {
+            None => Err(pattern_core::types::memory_types::MemoryError::NotFound {
                 agent_id: agent_id.to_string(),
                 label: label.to_string(),
             }),
@@ -283,7 +284,7 @@ impl MemoryStore for InMemoryMemoryStore {
                 r.block_type = block_type;
                 Ok(())
             }
-            None => Err(pattern_core::memory::MemoryError::NotFound {
+            None => Err(pattern_core::types::memory_types::MemoryError::NotFound {
                 agent_id: agent_id.to_string(),
                 label: label.to_string(),
             }),
@@ -301,7 +302,7 @@ impl MemoryStore for InMemoryMemoryStore {
                 r.document.metadata_mut().schema = schema;
                 Ok(())
             }
-            None => Err(pattern_core::memory::MemoryError::NotFound {
+            None => Err(pattern_core::types::memory_types::MemoryError::NotFound {
                 agent_id: agent_id.to_string(),
                 label: label.to_string(),
             }),
@@ -319,7 +320,7 @@ impl MemoryStore for InMemoryMemoryStore {
                 r.document.metadata_mut().description = description.to_string();
                 Ok(())
             }
-            None => Err(pattern_core::memory::MemoryError::NotFound {
+            None => Err(pattern_core::types::memory_types::MemoryError::NotFound {
                 agent_id: agent_id.to_string(),
                 label: label.to_string(),
             }),
@@ -342,7 +343,7 @@ impl MemoryStore for InMemoryMemoryStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pattern_core::memory::BlockSchema;
+    use pattern_core::types::memory_types::BlockSchema;
     use pattern_core::types::block::BlockCreate;
 
     /// Verify that `create_block` returns a doc whose internal `LoroDoc` is
@@ -360,7 +361,7 @@ mod tests {
 
         let create = BlockCreate::new(
             "notes",
-            pattern_core::memory::BlockType::Working,
+            pattern_core::types::memory_types::BlockType::Working,
             BlockSchema::text(),
         );
 

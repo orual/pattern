@@ -635,7 +635,7 @@ async fn seed_anchor_blocks(
     store: &dyn pattern_core::traits::MemoryStore,
     agent_id: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use pattern_core::memory::{BlockSchema, BlockType};
+    use pattern_core::types::memory_types::{BlockSchema, BlockType};
     use pattern_core::types::block::BlockCreate;
 
     // (label, block_type, content, pinned)
@@ -1205,7 +1205,7 @@ async fn cmd_spawn(
             .await
             .map_err(|e| format!("opening constellation DB: {e}"))?,
     );
-    let memory_cache = Arc::new(pattern_core::memory::MemoryCache::new(db.clone()));
+    let memory_cache = Arc::new(pattern_memory::MemoryCache::new(db.clone()));
     let memory_store: Arc<dyn pattern_core::traits::MemoryStore> = memory_cache.clone();
 
     // Retain a handle for the REPL's `:edit-block` command. Arc-shared

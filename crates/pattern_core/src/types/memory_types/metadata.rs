@@ -1,19 +1,12 @@
-//! Supporting value types for the [`MemoryStore`] trait.
+//! Metadata types for memory blocks, archival entries, and shared blocks.
 //!
-//! The `MemoryStore` trait itself lives in [`crate::traits::memory_store`];
-//! this file keeps the metadata / archival / shared-block value types that
-//! storage implementations and consumers share. Concrete `MemoryStore`
-//! implementations (e.g. `MemoryCache`) continue to live in this crate and
-//! implement the trait at `crate::traits::MemoryStore`.
+//! These types appear in [`crate::traits::MemoryStore`] method return types
+//! and are shared across crate boundaries.
 
 use chrono::{DateTime, Utc};
 use serde_json::Value as JsonValue;
 
-use crate::memory::{BlockSchema, BlockType};
-
-// Re-export the trait so downstream consumers that imported
-// `crate::memory::store::MemoryStore` before the relocation still compile.
-pub use crate::traits::memory_store::MemoryStore;
+use super::{BlockSchema, BlockType};
 
 /// Block metadata (without loading the full document).
 #[derive(Debug, Clone)]
@@ -72,12 +65,4 @@ pub struct SharedBlockInfo {
     pub description: String,
     pub block_type: BlockType,
     pub permission: pattern_db::models::MemoryPermission,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // Just verify the trait is object-safe.
-    fn _assert_object_safe(_: &dyn MemoryStore) {}
 }

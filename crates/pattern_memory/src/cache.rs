@@ -5,24 +5,25 @@
 //! access. Memory operations don't need the auth DB; consumers that require
 //! both wire them separately.
 
-use crate::memory::{
-    ArchivalEntry, BlockMetadata, BlockSchema, BlockType, CachedBlock, MemoryError, MemoryResult,
-    MemorySearchResult, MemoryStore, SearchMode, SearchOptions, SharedBlockInfo,
-    StructuredDocument,
-};
-use crate::traits::EmbeddingProvider;
-use crate::types::block::BlockCreate;
+use crate::types_internal::CachedBlock;
 use async_trait::async_trait;
 use chrono::Utc;
 use dashmap::DashMap;
+use pattern_core::memory::StructuredDocument;
+use pattern_core::traits::EmbeddingProvider;
+use pattern_core::traits::MemoryStore;
+use pattern_core::types::block::BlockCreate;
+use pattern_core::types::memory_types::{
+    ArchivalEntry, BlockMetadata, BlockSchema, BlockType, MemoryError, MemoryResult,
+    MemorySearchResult, SearchMode, SearchOptions, SharedBlockInfo,
+};
 use pattern_db::ConstellationDb;
 use serde_json::Value as JsonValue;
 use sqlx::types::Json as SqlxJson;
 use std::sync::Arc;
 use uuid::Uuid;
 
-/// Default character limit for memory blocks when not specified
-pub const DEFAULT_MEMORY_CHAR_LIMIT: usize = 5000;
+use pattern_core::types::memory_types::DEFAULT_MEMORY_CHAR_LIMIT;
 
 /// In-memory cache of LoroDoc instances with lazy loading
 #[derive(Debug)]
@@ -400,6 +401,7 @@ impl MemoryStore for MemoryCache {
             schema,
             char_limit,
             permission,
+            ..
         } = create;
 
         // Use default char limit if 0 is passed.
@@ -1621,7 +1623,7 @@ mod tests {
 
     // ========== Search functionality tests ==========
 
-    use crate::memory::{SearchContentType, SearchMode, SearchOptions};
+    use pattern_core::types::memory_types::{SearchContentType, SearchMode, SearchOptions};
 
     #[tokio::test]
     async fn test_search_memory_blocks_fts() {

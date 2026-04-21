@@ -5,8 +5,10 @@ use loro::{
 };
 use serde_json::Value as JsonValue;
 
-use crate::memory::schema::{BlockSchema, FieldType, LogEntrySchema};
-use crate::memory::{BlockMetadata, BlockType};
+use crate::types::memory_types::{
+    BlockMetadata, BlockSchema, BlockType, CompositeSection, DocumentError, FieldType,
+    LogEntrySchema,
+};
 
 /// Wrapper around LoroDoc for schema-aware operations.
 ///
@@ -23,43 +25,6 @@ pub struct StructuredDocument {
 
     /// Block metadata including schema, permissions, and identity.
     metadata: BlockMetadata,
-}
-
-/// Errors that can occur during document operations
-#[derive(Debug, thiserror::Error)]
-pub enum DocumentError {
-    #[error("Failed to import document: {0}")]
-    ImportFailed(String),
-
-    #[error("Failed to export document: {0}")]
-    ExportFailed(String),
-
-    #[error("Field not found: {0}")]
-    FieldNotFound(String),
-
-    #[error("Schema mismatch: expected {expected}, got {actual}")]
-    SchemaMismatch { expected: String, actual: String },
-
-    #[error("Field '{0}' is read-only and cannot be modified by agent")]
-    ReadOnlyField(String),
-
-    #[error("Section '{0}' is read-only and cannot be modified by agent")]
-    ReadOnlySection(String),
-
-    #[error("Operation '{operation}' not supported for schema {schema}")]
-    InvalidSchemaForOperation { operation: String, schema: String },
-
-    #[error(
-        "Permission denied: {operation} requires {required} permission, but block has {actual}"
-    )]
-    PermissionDenied {
-        operation: String,
-        required: pattern_db::models::MemoryPermission,
-        actual: pattern_db::models::MemoryPermission,
-    },
-
-    #[error("{0}")]
-    Other(String),
 }
 
 impl StructuredDocument {
@@ -1018,7 +983,7 @@ impl StructuredDocument {
     }
 
     /// Render a Composite schema's sections recursively
-    fn render_composite(&self, sections: &[crate::memory::schema::CompositeSection]) -> String {
+    fn render_composite(&self, sections: &[CompositeSection]) -> String {
         let mut output = Vec::new();
 
         for section in sections {
@@ -1293,7 +1258,7 @@ pub fn text_from_snapshot(snapshot: &[u8]) -> Result<String, DocumentError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::schema::{FieldDef, LogEntrySchema};
+    use crate::types::memory_types::{FieldDef, LogEntrySchema};
 
     #[test]
     fn test_text_document() {
@@ -1661,7 +1626,7 @@ mod tests {
 
     #[test]
     fn test_structured_document_section_operations() {
-        use crate::memory::schema::CompositeSection;
+        use crate::types::memory_types::CompositeSection;
 
         let schema = BlockSchema::Composite {
             sections: vec![
@@ -1710,7 +1675,7 @@ mod tests {
 
     #[test]
     fn test_section_field_level_read_only() {
-        use crate::memory::schema::CompositeSection;
+        use crate::types::memory_types::CompositeSection;
 
         let schema = BlockSchema::Composite {
             sections: vec![CompositeSection {
@@ -1769,7 +1734,7 @@ mod tests {
 
     #[test]
     fn test_section_not_found() {
-        use crate::memory::schema::CompositeSection;
+        use crate::types::memory_types::CompositeSection;
 
         let schema = BlockSchema::Composite {
             sections: vec![CompositeSection {
@@ -1910,7 +1875,7 @@ mod tests {
 
     #[test]
     fn test_render_composite_read_only_section_indicator() {
-        use crate::memory::schema::CompositeSection;
+        use crate::types::memory_types::CompositeSection;
 
         let schema = BlockSchema::Composite {
             sections: vec![

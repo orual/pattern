@@ -65,7 +65,7 @@ const PREVIEW_MAX_CHARS: usize = 240;
 /// use jiff::Timestamp;
 /// use smol_str::SmolStr;
 ///
-/// use pattern_core::memory::BlockType;
+/// use pattern_core::types::memory_types::BlockType;
 /// use pattern_core::types::block::{BlockHandle, BlockWrite, BlockWriteKind};
 /// use pattern_core::types::origin::{Author, SystemReason};
 /// use pattern_provider::compose::pseudo_messages::render_change_event;
@@ -102,7 +102,7 @@ pub fn render_change_event(event: &BlockWrite) -> ChatMessage {
 /// use jiff::Timestamp;
 /// use smol_str::SmolStr;
 ///
-/// use pattern_core::memory::BlockType;
+/// use pattern_core::types::memory_types::BlockType;
 /// use pattern_core::types::block::{BlockHandle, BlockWrite, BlockWriteKind};
 /// use pattern_core::types::origin::{Author, SystemReason};
 /// use pattern_provider::compose::pseudo_messages::render_change_events;
@@ -274,9 +274,9 @@ fn render_diff(previous: &str, current: &str) -> String {
     out
 }
 
-/// Human-readable label for a [`pattern_core::memory::BlockType`].
-fn render_block_type(bt: pattern_core::memory::BlockType) -> &'static str {
-    use pattern_core::memory::BlockType;
+/// Human-readable label for a [`pattern_core::types::memory_types::BlockType`].
+fn render_block_type(bt: pattern_core::types::memory_types::BlockType) -> &'static str {
+    use pattern_core::types::memory_types::BlockType;
     match bt {
         BlockType::Core => "core",
         BlockType::Working => "working",
@@ -293,7 +293,7 @@ mod tests {
     use jiff::Timestamp;
     use smol_str::SmolStr;
 
-    use pattern_core::memory::BlockType;
+    use pattern_core::types::memory_types::BlockType;
     use pattern_core::types::block::{BlockWrite, BlockWriteKind};
     use pattern_core::types::ids::new_id;
     use pattern_core::types::origin::{AgentAuthor, Author, Human, Partner, SystemReason};

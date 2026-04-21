@@ -47,6 +47,7 @@ use jiff::Timestamp;
 
 use pattern_core::error::RuntimeError;
 use pattern_core::memory::StructuredDocument;
+use pattern_core::types::memory_types::BlockType;
 use pattern_core::traits::TurnEvent;
 use pattern_core::types::ids::{AgentId, MessageId, new_id};
 use pattern_core::types::message::{
@@ -407,10 +408,10 @@ fn render_block_for_snapshot(block: &StructuredDocument, visible: bool) -> Rende
     let label = smol_str::SmolStr::new(block.label());
     let bt = block.block_type();
     let block_type_str = match bt {
-        pattern_core::memory::BlockType::Core => "core",
-        pattern_core::memory::BlockType::Working => "working",
-        pattern_core::memory::BlockType::Archival => "archival",
-        pattern_core::memory::BlockType::Log => "log",
+        BlockType::Core => "core",
+        BlockType::Working => "working",
+        BlockType::Archival => "archival",
+        BlockType::Log => "log",
     };
     let permission = block.permission().to_string();
     let content = block.render();
@@ -682,7 +683,7 @@ fn block_visibility_from_hashes(
     shown_hashes: &std::collections::HashMap<String, u64>,
     current_hash: u64,
 ) -> bool {
-    use pattern_core::memory::BlockType;
+    use pattern_core::types::memory_types::BlockType;
     match block.block_type() {
         BlockType::Core => true,
         BlockType::Working => {
@@ -2879,7 +2880,7 @@ mod tests {
     fn test_block(label: &str, rendered: &str, hash: u64) -> RenderedBlock {
         RenderedBlock {
             label: smol_str::SmolStr::new(label),
-            block_type: pattern_core::memory::BlockType::Working,
+            block_type: BlockType::Working,
             rendered: Some(std::sync::Arc::from(rendered)),
             content_hash: hash,
         }
@@ -3038,7 +3039,7 @@ mod tests {
     /// composes correctly and the default is observable end-to-end.
     #[test]
     fn snapshot_policy_default_has_include_self_edits_and_standard_selection() {
-        use pattern_core::memory::BlockType;
+        use pattern_core::types::memory_types::BlockType;
         use pattern_core::types::message::{MidBatchDeltaBehavior, SnapshotPolicy};
         let policy = SnapshotPolicy::default();
         assert_eq!(policy.mid_batch, MidBatchDeltaBehavior::IncludeSelfEdits);
@@ -3206,7 +3207,7 @@ mod tests {
     impl EvalDispatcher for WriteRecordingDispatcher {
         async fn dispatch(&self, _tool_call: ToolCall, _preamble: &str) -> ToolOutcome {
             use jiff::Timestamp;
-            use pattern_core::memory::BlockType;
+            use pattern_core::types::memory_types::BlockType;
             use pattern_core::types::block::{BlockWrite, BlockWriteKind};
 
             self.ctx.adapter().record_write(BlockWrite {
@@ -3234,7 +3235,7 @@ mod tests {
         mid_batch: pattern_core::types::message::MidBatchDeltaBehavior,
         block_label: &str,
     ) -> (Arc<SessionContext>, Arc<VecSink>, Arc<MockProviderClient>) {
-        use pattern_core::memory::BlockType;
+        use pattern_core::types::memory_types::{BlockSchema, BlockType};
         use pattern_core::types::block::BlockCreate;
         use pattern_core::types::message::SnapshotPolicy;
         use pattern_core::types::snapshot::ContextPolicy;
@@ -3247,7 +3248,7 @@ mod tests {
                 BlockCreate::new(
                     block_label,
                     BlockType::Working,
-                    pattern_core::memory::BlockSchema::text(),
+                    BlockSchema::text(),
                 ),
             )
             .await

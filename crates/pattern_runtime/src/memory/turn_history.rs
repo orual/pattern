@@ -655,7 +655,7 @@ mod tests {
         BlockWrite {
             handle: SmolStr::new(handle),
             memory_id: SmolStr::new("mem_01"),
-            block_type: pattern_core::memory::BlockType::Working,
+            block_type: pattern_core::types::memory_types::BlockType::Working,
             rendered_content: "content".to_string(),
             kind: BlockWriteKind::Created,
             previous_content_hash: None,

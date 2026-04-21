@@ -27,9 +27,9 @@ pub enum BlockTypeReq {
     Log,
 }
 
-impl From<BlockTypeReq> for pattern_core::memory::BlockType {
+impl From<BlockTypeReq> for pattern_core::types::memory_types::BlockType {
     fn from(req: BlockTypeReq) -> Self {
-        use pattern_core::memory::BlockType;
+        use pattern_core::types::memory_types::BlockType;
         match req {
             BlockTypeReq::Core => BlockType::Core,
             BlockTypeReq::Working => BlockType::Working,
@@ -53,9 +53,9 @@ pub enum SchemaKindReq {
     Log,
 }
 
-impl From<SchemaKindReq> for pattern_core::memory::BlockSchema {
+impl From<SchemaKindReq> for pattern_core::types::memory_types::BlockSchema {
     fn from(req: SchemaKindReq) -> Self {
-        use pattern_core::memory::{BlockSchema, LogEntrySchema};
+        use pattern_core::types::memory_types::{BlockSchema, LogEntrySchema};
         match req {
             SchemaKindReq::Text => BlockSchema::text(),
             SchemaKindReq::Map => BlockSchema::Map { fields: vec![] },

@@ -12,38 +12,23 @@ name = "pattern"
 path = "src/main.rs"
 
 [features]
-default = ["oauth", "discord"]
+default = ["oauth"]
 oauth = ["pattern-core/oauth"]
-discord = ["pattern-discord"]
-legacy-convert = ["dep:pattern-surreal-compat"]
 
 [dependencies]
 # Workspace dependencies
 pattern-core = { path = "../pattern_core", features = ["export"] }
-pattern-discord = { path = "../pattern_discord", optional = true }
 pattern-db = { path = "../pattern_db"}
-pattern-surreal-compat = { path = "../pattern_surreal_compat", optional = true }
-pattern-auth = { path = "../pattern_auth" }
-genai = { workspace = true }
 tokio = { workspace = true }
-tokio-stream = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-toml = { workspace = true }
-toml_edit = "0.22"
 miette = { workspace = true, features = ["fancy", "syntect-highlighter"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
 clap = { workspace = true }
-uuid = { workspace = true }
-chrono = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
 
 # CLI-specific dependencies
-crossterm = "0.28"
-ratatui = "0.29"
 indicatif = "0.17"
 comfy-table = "7.1"
 owo-colors = "4.2"
@@ -53,10 +38,10 @@ dirs = { workspace = true }
 dotenvy = { workspace = true }
 rustyline-async = "0.4"
 rpassword = "7.3"
-
-# ATProto dependencies
-reqwest = { workspace = true }
-jacquard.workspace = true
+ratatui = "0.30.0"
+ratatui-textarea = "0.9.1"
+ratatui-widgets = { version = "0.3.0" }
+ratatui-crossterm = { version = "0.1.0" }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }

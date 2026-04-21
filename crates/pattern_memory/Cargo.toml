@@ -1,0 +1,37 @@
+[package]
+name = "pattern-memory"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Memory subsystem implementation for Pattern (MemoryCache, StructuredDocument, SharedBlockManager)"
+
+[dependencies]
+pattern-core = { path = "../pattern_core" }
+pattern-db = { path = "../pattern_db" }
+
+# Runtime
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# Data
+loro = { version = "1.10", features = ["counter"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Errors + logging
+tracing = { workspace = true }
+
+# Utilities inherited from the original pattern_core::memory surface
+dashmap = { version = "6.1.0", features = ["serde"] }
+chrono = { workspace = true }
+uuid = { workspace = true }
+sqlx = { version = "0.8", features = ["json"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

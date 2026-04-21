@@ -17,9 +17,10 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 
-use pattern_core::memory::{
+use pattern_core::memory::StructuredDocument;
+use pattern_core::types::memory_types::{
     ArchivalEntry, BlockMetadata, BlockSchema, BlockType, MemoryResult, MemorySearchResult,
-    SearchOptions, SharedBlockInfo, StructuredDocument,
+    SearchOptions, SharedBlockInfo,
 };
 use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::{BlockCreate, BlockWrite};
@@ -274,7 +275,7 @@ impl MemoryStore for MemoryStoreAdapter {
 mod tests {
     use super::*;
     use crate::testing::InMemoryMemoryStore;
-    use pattern_core::memory::BlockType;
+    use pattern_core::types::memory_types::BlockType;
     use pattern_core::types::block::BlockWriteKind;
     use pattern_core::types::origin::{AgentAuthor, Author};
     use smol_str::SmolStr;

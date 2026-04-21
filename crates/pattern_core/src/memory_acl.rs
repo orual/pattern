@@ -1,4 +1,4 @@
-use crate::memory::MemoryPermission;
+use crate::types::memory_types::MemoryPermission;
 
 /// Memory operation types we gate by permission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

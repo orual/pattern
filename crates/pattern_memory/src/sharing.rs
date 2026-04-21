@@ -3,14 +3,14 @@
 //! Enables explicit sharing of blocks between agents with controlled access levels.
 //! Uses MemoryPermission from pattern_db for access control granularity.
 
-use crate::memory::{MemoryError, MemoryResult};
+use pattern_core::types::memory_types::{MemoryError, MemoryResult};
 use pattern_db::ConstellationDb;
 use pattern_db::models::MemoryPermission;
 use pattern_db::queries;
 use std::sync::Arc;
 
-/// Special agent ID for constellation-level blocks (readable by all agents)
-pub const CONSTELLATION_OWNER: &str = "_constellation_";
+// Re-export the constant from pattern_core for backward compatibility.
+pub use pattern_core::types::memory_types::CONSTELLATION_OWNER;
 
 /// Manager for shared memory blocks
 #[derive(Debug)]

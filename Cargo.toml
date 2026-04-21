@@ -2,9 +2,11 @@
 resolver = "3"
 members = [
     "crates/pattern_core",
+    "crates/pattern_memory",
     "crates/pattern_runtime",
     "crates/pattern_provider",
     "crates/pattern_db",
+    "crates/pattern_cli",
 ]
 
 

@@ -59,7 +59,7 @@ use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
-use crate::memory::{BlockSchema, MemoryPermission, MemoryType};
+use crate::types::memory_types::{BlockSchema, MemoryPermission, MemoryType};
 use crate::types::compression::CompressionStrategy;
 use crate::types::ids::{AgentId, MemoryId};
 use crate::types::message::SnapshotPolicy;

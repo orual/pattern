@@ -3,14 +3,11 @@
 //! This trait is the interface that tools (context, recall, search) use to
 //! read and write memory blocks. It abstracts over storage implementations
 //! (cache-backed, direct DB, in-memory stub, etc.). The canonical
-//! implementation lives in `crate::memory` alongside the supporting
-//! value types ([`crate::memory::BlockMetadata`], [`crate::memory::ArchivalEntry`],
-//! [`crate::memory::SharedBlockInfo`]).
-//!
-//! The trait is relocated here unchanged from its pre-v3 location in
-//! `crate::memory::store`. No method signatures were added, removed, or
-//! renamed. Supporting types remain in `crate::memory::*` so storage impls
-//! need not import from `traits::`.
+//! implementation lives in `pattern_memory::MemoryCache`. Supporting
+//! value types ([`crate::types::memory_types::BlockMetadata`],
+//! [`crate::types::memory_types::ArchivalEntry`],
+//! [`crate::types::memory_types::SharedBlockInfo`]) live in
+//! `crate::types::memory_types`.
 //!
 //! # Example dummy impl (AC1.3)
 //!
@@ -21,11 +18,12 @@ use core::fmt;
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 
-use crate::memory::{
-    ArchivalEntry, BlockMetadata, BlockSchema, BlockType, MemoryResult, MemorySearchResult,
-    SearchOptions, SharedBlockInfo, StructuredDocument,
-};
+use crate::memory::StructuredDocument;
 use crate::types::block::BlockCreate;
+use crate::types::memory_types::{
+    ArchivalEntry, BlockMetadata, BlockSchema, BlockType, MemoryResult, MemorySearchResult,
+    SearchOptions, SharedBlockInfo,
+};
 
 /// Storage-agnostic contract for reading and writing memory blocks.
 ///
@@ -39,9 +37,10 @@ use crate::types::block::BlockCreate;
 /// ```no_run
 /// use async_trait::async_trait;
 /// use serde_json::Value as JsonValue;
-/// use pattern_core::memory::{
+/// use pattern_core::memory::StructuredDocument;
+/// use pattern_core::types::memory_types::{
 ///     ArchivalEntry, BlockMetadata, BlockSchema, BlockType, MemoryResult,
-///     MemorySearchResult, SearchOptions, SharedBlockInfo, StructuredDocument,
+///     MemorySearchResult, SearchOptions, SharedBlockInfo,
 /// };
 /// use pattern_core::traits::MemoryStore;
 /// use pattern_core::types::block::BlockCreate;
@@ -408,4 +407,12 @@ pub trait MemoryStore: Send + Sync + fmt::Debug {
     async fn list_constellation_agent_ids(&self) -> MemoryResult<Vec<String>> {
         Ok(vec![])
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MemoryStore;
+
+    // Verify the trait is object-safe (dyn-compatible).
+    fn _assert_object_safe(_: &dyn MemoryStore) {}
 }

@@ -166,7 +166,8 @@ mod tests {
     use std::sync::Mutex;
 
     use async_trait::async_trait;
-    use pattern_core::memory::*;
+    use pattern_core::memory::StructuredDocument;
+    use pattern_core::types::memory_types::*;
     use pattern_core::traits::MemoryStore;
     use pattern_core::types::block::BlockCreate;
     use serde_json::Value as JsonValue;

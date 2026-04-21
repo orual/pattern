@@ -41,6 +41,7 @@
 
 use genai::chat::ChatMessage;
 use pattern_core::memory::StructuredDocument;
+use pattern_core::types::memory_types::BlockType;
 
 use crate::shaper::wrap_system_reminder;
 
@@ -65,7 +66,7 @@ use crate::shaper::wrap_system_reminder;
 /// # Examples
 ///
 /// ```
-/// use pattern_core::memory::StructuredDocument;
+/// use pattern_core::memory::StructuredDocument; // trait-signature type
 /// use pattern_provider::compose::current_state::render_current_state;
 ///
 /// let msg = render_current_state(&[]);
@@ -108,9 +109,8 @@ fn render_block(block: &StructuredDocument) -> String {
     format!("{open_tag}\n{inner}\n{close_tag}")
 }
 
-/// Human-readable label for a [`pattern_core::memory::BlockType`].
-fn render_block_type(bt: pattern_core::memory::BlockType) -> &'static str {
-    use pattern_core::memory::BlockType;
+/// Human-readable label for a [`BlockType`].
+fn render_block_type(bt: BlockType) -> &'static str {
     match bt {
         BlockType::Core => "core",
         BlockType::Working => "working",
@@ -124,7 +124,8 @@ fn render_block_type(bt: pattern_core::memory::BlockType) -> &'static str {
 #[cfg(test)]
 mod tests {
     use genai::chat::ChatRole;
-    use pattern_core::memory::{BlockMetadata, BlockSchema, BlockType, StructuredDocument};
+    use pattern_core::memory::StructuredDocument;
+    use pattern_core::types::memory_types::{BlockMetadata, BlockSchema, BlockType};
 
     use super::*;
 

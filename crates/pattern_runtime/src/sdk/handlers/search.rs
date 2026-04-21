@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use pattern_core::memory::SearchOptions;
+use pattern_core::types::memory_types::SearchOptions;
 use pattern_core::traits::MemoryStore;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use tidepool_eval::Value;
