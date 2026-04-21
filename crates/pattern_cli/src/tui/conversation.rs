@@ -334,19 +334,23 @@ fn render_paragraph_lines(
     // then copy the visible ones. This is simpler and more correct than
     // trying to manually split wrapped lines.
     let total_lines = paragraph.line_count(area.width) as u16;
-    let render_height =
-        total_lines.min(viewport_bottom.saturating_sub(start_y) + skip_lines as u16);
+
+    // Only allocate enough rows to cover the visible window: the lines we
+    // skip plus the lines we actually need to paint. Allocating the full
+    // paragraph height for every section every frame can OOM on large sections.
+    let needed_lines = (skip_lines as u16).saturating_add(viewport_bottom.saturating_sub(start_y));
+    let render_height = total_lines.min(needed_lines);
 
     if render_height == 0 {
         return start_y;
     }
 
-    // Create a temporary buffer large enough for the full paragraph.
+    // Create a temporary buffer sized to just what we need.
     let temp_area = Rect {
         x: 0,
         y: 0,
         width: area.width,
-        height: total_lines,
+        height: render_height,
     };
 
     if temp_area.width == 0 || temp_area.height == 0 {
@@ -357,8 +361,9 @@ fn render_paragraph_lines(
     paragraph.clone().render(temp_area, &mut temp_buf);
 
     // Copy visible lines from temp buffer to real buffer.
+    // The temp buffer only contains `render_height` rows, so cap the loop.
     let mut y = start_y;
-    for line_idx in skip_lines..(total_lines as usize) {
+    for line_idx in skip_lines..(render_height as usize) {
         if y >= viewport_bottom {
             break;
         }
@@ -380,6 +385,7 @@ fn render_paragraph_lines(
 mod tests {
     use super::*;
     use crate::tui::model::RenderBatch;
+    use crate::tui::test_utils::buffer_to_string;
     use pattern_core::traits::turn_sink::TurnEvent;
     use pattern_core::types::turn::StopReason;
     use ratatui::Terminal;
@@ -397,26 +403,6 @@ mod tests {
             .unwrap();
 
         buffer_to_string(terminal.backend().buffer())
-    }
-
-    /// Convert a Buffer to a trimmed-right string representation,
-    /// one line per row. This gives us a clean snapshot target.
-    fn buffer_to_string(buf: &Buffer) -> String {
-        let mut lines = Vec::new();
-        for y in 0..buf.area.height {
-            let mut line = String::new();
-            for x in 0..buf.area.width {
-                let cell = &buf[(x, y)];
-                line.push_str(cell.symbol());
-            }
-            // Trim trailing spaces for cleaner snapshots.
-            lines.push(line.trim_end().to_string());
-        }
-        // Join with newlines, but trim trailing empty lines.
-        while lines.last().is_some_and(|l| l.is_empty()) {
-            lines.pop();
-        }
-        lines.join("\n")
     }
 
     fn make_text_batch() -> RenderBatch {
@@ -518,6 +504,86 @@ mod tests {
             focused_section: None,
         };
         let output = render_to_string(&mut state, 50, 10);
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn user_message_has_bold_green_prefix() {
+        // Render a batch with a user message and verify the style of the
+        // `[you] ` prefix cells: they must be bold and green.
+        let batch = make_text_batch();
+        let mut state = ConversationState {
+            batches: vec![batch],
+            auto_scroll: false,
+            scroll_offset: 0,
+            focused_section: None,
+        };
+
+        let backend = TestBackend::new(50, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                f.render_stateful_widget(ConversationView, f.area(), &mut state);
+            })
+            .unwrap();
+
+        // The user message is the first row. The `[you] ` prefix is at x=0, y=0.
+        // Check that the first cell carries bold + green styling.
+        let buf = terminal.backend().buffer();
+        let cell = &buf[(0u16, 0u16)];
+        assert!(
+            cell.style()
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD),
+            "user prefix must be bold, got style: {:?}",
+            cell.style()
+        );
+        assert_eq!(
+            cell.style().fg,
+            Some(ratatui::style::Color::Green),
+            "user prefix must be green, got style: {:?}",
+            cell.style()
+        );
+    }
+
+    #[test]
+    fn scroll_mid_section_shows_correct_lines() {
+        // A thinking section with multiple lines, used because Thinking uses
+        // plain_text_height which correctly counts newlines as separate lines.
+        // (Text sections use markdown rendering where single newlines collapse.)
+        let mut batch = RenderBatch::new("batch-scroll".into(), Some("user question".into()));
+        // Five distinct lines in the thinking section. The section starts collapsed,
+        // so expand it so the content is visible.
+        batch.push_event(&TurnEvent::Thinking(
+            "line one\nline two\nline three\nline four\nline five".into(),
+        ));
+        batch.push_event(&TurnEvent::Stop(StopReason::EndTurn));
+        // Expand the thinking section so it contributes full height.
+        batch.sections[0].collapsed = false;
+
+        // Total content: 1 user_msg + 5 thinking lines = 6 lines.
+        // scroll_offset=2 skips the user message line and "line one",
+        // so the viewport should start at "line two".
+        let mut state = ConversationState {
+            batches: vec![batch],
+            auto_scroll: false,
+            scroll_offset: 2,
+            focused_section: None,
+        };
+
+        let output = render_to_string(&mut state, 50, 4);
+        assert!(
+            output.contains("line two"),
+            "partial scroll should show lines starting at the correct offset; got: {output:?}"
+        );
+        assert!(
+            !output.contains("user question"),
+            "user message should be scrolled off-screen; got: {output:?}"
+        );
+        assert!(
+            !output.contains("line one"),
+            "first thinking line should be scrolled off-screen; got: {output:?}"
+        );
         insta::assert_snapshot!(output);
     }
 

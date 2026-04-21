@@ -31,6 +31,8 @@ pub enum SectionKind {
     Thinking(String),
     /// A tool invocation requested by the model.
     ToolCall {
+        /// Retained for future expand view rendering.
+        #[allow(dead_code)]
         call_id: String,
         function_name: String,
         arguments: String,
@@ -120,7 +122,7 @@ impl Section {
 /// if truncated. Replaces newlines with spaces for single-line display.
 fn truncate_preview(s: &str, max_chars: usize) -> String {
     let cleaned: String = s.chars().map(|c| if c == '\n' { ' ' } else { c }).collect();
-    if cleaned.len() <= max_chars {
+    if cleaned.chars().count() <= max_chars {
         cleaned
     } else {
         let truncated: String = cleaned.chars().take(max_chars).collect();

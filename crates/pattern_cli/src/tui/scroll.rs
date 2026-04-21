@@ -93,20 +93,9 @@ fn collapsible_positions(state: &ConversationState) -> Vec<(usize, usize)> {
     positions
 }
 
-/// Cycle the focused section in the given direction, returning the action that
-/// sets `state.focused_section`. Because `map_key_to_action` takes `&ConversationState`
-/// (not `&mut`), we return the new focus position embedded in a `ConversationAction`
-/// via a dedicated variant — but rather than adding an extra variant for focus changes
-/// we apply the focus update inline during `apply_action`. For the mapping step we
-/// return `None` and let `apply_action` handle Tab/BackTab separately.
-///
-/// Actually, to keep the design clean we encode the new focus as a sentinel:
-/// we store it in a `ToggleSection` with `usize::MAX` as a marker? That is awkward.
-///
-/// Simpler: add `MoveFocus(Option<(usize, usize)>)` as a private action variant,
-/// but since `ConversationAction` is the public API we use `None` here and handle
-/// Tab directly in `apply_action`. The key mapping still needs to return something,
-/// so we expose a `MoveFocus` variant.
+/// Cycle the focused section in the given direction through all collapsible sections in
+/// the conversation. Returns `MoveFocus` with the new position, or `None` if there are
+/// no collapsible sections.
 fn cycle_focus(state: &ConversationState, direction: Direction) -> ConversationAction {
     let positions = collapsible_positions(state);
     if positions.is_empty() {
@@ -194,12 +183,12 @@ pub fn apply_action(
             state.auto_scroll = true;
         }
         ConversationAction::ToggleSection(batch_idx, section_idx) => {
-            if let Some(batch) = state.batches.get_mut(batch_idx) {
-                if let Some(section) = batch.sections.get_mut(section_idx) {
-                    section.collapsed = !section.collapsed;
-                    // Invalidate height cache so the next render recomputes.
-                    section.cached_height = None;
-                }
+            if let Some(batch) = state.batches.get_mut(batch_idx)
+                && let Some(section) = batch.sections.get_mut(section_idx)
+            {
+                section.collapsed = !section.collapsed;
+                // Invalidate height cache so the next render recomputes.
+                section.cached_height = None;
             }
         }
         ConversationAction::MoveFocus(pos) => {
@@ -311,5 +300,141 @@ mod tests {
             state.batches[0].sections[0].cached_height, None,
             "cached_height must be invalidated after toggle"
         );
+    }
+
+    #[test]
+    fn scroll_down_increases_offset() {
+        let mut state = make_state_with_thinking();
+        state.scroll_offset = 0;
+        state.auto_scroll = false;
+
+        apply_action(ConversationAction::ScrollDown(3), &mut state, 24);
+
+        // The total content height is 3 lines (user_msg + thinking + text),
+        // so bottom = 3.saturating_sub(24) = 0. ScrollDown clamps to bottom = 0.
+        // For a test that actually moves the offset, use a tiny viewport.
+        // Reset: use viewport_height=1 to make bottom = 3-1 = 2.
+        state.scroll_offset = 0;
+        apply_action(ConversationAction::ScrollDown(1), &mut state, 1);
+        assert!(
+            state.scroll_offset > 0,
+            "scroll down should increase offset when content exceeds viewport"
+        );
+    }
+
+    #[test]
+    fn scroll_down_at_bottom_engages_auto_scroll() {
+        let mut state = make_state_with_thinking();
+        // With viewport_height=1, bottom = 3-1=2. Start one short of bottom.
+        state.scroll_offset = 1;
+        state.auto_scroll = false;
+
+        // Scroll down enough to hit or exceed the bottom.
+        apply_action(ConversationAction::ScrollDown(5), &mut state, 1);
+
+        assert!(
+            state.auto_scroll,
+            "auto_scroll must re-engage when scrolled to the bottom"
+        );
+        assert_eq!(
+            state.scroll_offset, 2,
+            "offset must be clamped to content bottom"
+        );
+    }
+
+    /// Build a state with multiple collapsible sections for focus cycling tests.
+    fn make_state_with_multiple_sections() -> ConversationState {
+        use pattern_core::types::provider::ToolCall as ProviderToolCall;
+
+        let mut batch = RenderBatch::new("b1".into(), Some("question".into()));
+        // Three collapsible sections: thinking, tool call, thinking again.
+        batch.push_event(&TurnEvent::Thinking("first thought".into()));
+        batch.push_event(&TurnEvent::ToolCall(ProviderToolCall {
+            call_id: "call-1".into(),
+            fn_name: "search".into(),
+            fn_arguments: serde_json::json!({}),
+            thought_signatures: None,
+            thought_signatures_provenance: None,
+        }));
+        batch.push_event(&TurnEvent::Thinking("second thought".into()));
+        batch.push_event(&TurnEvent::Stop(StopReason::EndTurn));
+
+        ConversationState {
+            batches: vec![batch],
+            scroll_offset: 0,
+            auto_scroll: false,
+            focused_section: None,
+        }
+    }
+
+    #[test]
+    fn tab_cycles_focus_forward() {
+        let state = make_state_with_multiple_sections();
+        // Three collapsible sections: (0,0), (0,1), (0,2).
+        // Starting from None, forward Tab should pick (0,0).
+        let action = map_key_to_action(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Tab,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            &state,
+        );
+        assert_eq!(action, ConversationAction::MoveFocus(Some((0, 0))));
+
+        // Apply it, then Tab again → (0,1).
+        let mut state2 = state;
+        apply_action(action, &mut state2, 24);
+        assert_eq!(state2.focused_section, Some((0, 0)));
+
+        let action2 = map_key_to_action(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Tab,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            &state2,
+        );
+        assert_eq!(action2, ConversationAction::MoveFocus(Some((0, 1))));
+    }
+
+    #[test]
+    fn shift_tab_cycles_focus_backward() {
+        let mut state = make_state_with_multiple_sections();
+        // Start focused on first section (0,0).
+        state.focused_section = Some((0, 0));
+
+        // Shift+Tab should wrap backward to the last section (0,2).
+        let action = map_key_to_action(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::BackTab,
+                crossterm::event::KeyModifiers::SHIFT,
+            ),
+            &state,
+        );
+        assert_eq!(action, ConversationAction::MoveFocus(Some((0, 2))));
+    }
+
+    #[test]
+    fn tab_with_no_collapsible_sections_returns_none() {
+        // A batch with only a text section — nothing to focus.
+        let mut batch = RenderBatch::new("b1".into(), Some("hello".into()));
+        batch.push_event(&TurnEvent::Text("only text here".into()));
+        batch.push_event(&TurnEvent::Stop(StopReason::EndTurn));
+
+        let state = ConversationState {
+            batches: vec![batch],
+            scroll_offset: 0,
+            auto_scroll: false,
+            focused_section: None,
+        };
+
+        let action = map_key_to_action(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Tab,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            &state,
+        );
+        // No collapsible sections → action is None, not MoveFocus.
+        assert_eq!(action, ConversationAction::None);
     }
 }

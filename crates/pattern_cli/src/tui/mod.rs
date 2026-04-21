@@ -9,3 +9,6 @@ pub mod layout;
 pub mod markdown;
 pub mod model;
 pub mod scroll;
+
+#[cfg(test)]
+pub mod test_utils;

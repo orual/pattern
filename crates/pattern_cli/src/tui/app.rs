@@ -14,7 +14,6 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
-use ratatui_widgets::block::Block;
 use ratatui_widgets::paragraph::Paragraph;
 use tokio::time;
 
@@ -55,6 +54,10 @@ pub struct App {
     focus: Focus,
     /// Whether we are connected to the daemon.
     connected: bool,
+    /// Height of the conversation viewport from the last rendered frame.
+    /// Used by key handlers so scroll calculations use the real terminal size.
+    /// Defaults to 24 until the first frame is drawn.
+    last_viewport_height: u16,
 }
 
 impl App {
@@ -70,6 +73,7 @@ impl App {
             should_quit: false,
             focus: Focus::Input,
             connected: false,
+            last_viewport_height: 24,
         }
     }
 
@@ -191,10 +195,9 @@ impl App {
                     _ => {
                         // Route to conversation scroll/expand actions.
                         let action = map_key_to_action(key, &self.conversation);
-                        // Use a reasonable default viewport height; the actual
-                        // height is set during draw, but for action computation
-                        // we use the last known offset logic which is still valid.
-                        apply_action(action, &mut self.conversation, 24);
+                        // Use the height from the last rendered frame so that
+                        // scroll boundary calculations are correct on any terminal size.
+                        apply_action(action, &mut self.conversation, self.last_viewport_height);
                     }
                 }
             }
@@ -244,6 +247,9 @@ impl App {
     fn render_frame(&mut self, frame: &mut ratatui::Frame<'_>) {
         let layout = compute_layout(frame.area());
 
+        // Record the viewport height so key handlers can use the real size.
+        self.last_viewport_height = layout.conversation.height;
+
         // Conversation area.
         ratatui::widgets::StatefulWidget::render(
             ConversationView,
@@ -264,12 +270,8 @@ impl App {
 // Rendering helpers
 // ---------------------------------------------------------------------------
 
-/// Render a placeholder input area with a prompt glyph and subtle background.
+/// Render a placeholder input area with a prompt glyph, no background.
 fn render_input_placeholder(area: Rect, buf: &mut Buffer, focus: Focus) {
-    // Subtle background to distinguish input from conversation.
-    let bg = Color::Rgb(30, 30, 40);
-    let block = Block::default().style(Style::default().bg(bg));
-
     let prompt_colour = if focus == Focus::Input {
         Color::Cyan
     } else {
@@ -279,21 +281,28 @@ fn render_input_placeholder(area: Rect, buf: &mut Buffer, focus: Focus) {
     let hint = Paragraph::new(Line::from(vec![
         Span::styled("❯ ", Style::default().fg(prompt_colour)),
         Span::styled("type here...", Style::default().fg(Color::DarkGray)),
-    ]))
-    .block(block);
+    ]));
 
     hint.render(area, buf);
 }
 
-/// Render the status bar.
+/// Render the status bar — subdued text on subtle background.
+/// Uses ANSI `Black` bg which is typically slightly distinct from the terminal's
+/// default background in most themes, giving a gentle visual separation.
 fn render_status_bar(area: Rect, buf: &mut Buffer, connected: bool) {
-    let (text, style) = if connected {
-        ("pattern", Style::default().fg(Color::Green))
+    let bar_bg = Color::Black;
+    // Fill entire bar width with background.
+    for x in area.x..area.x + area.width {
+        buf[(x, area.y)].set_style(Style::default().bg(bar_bg));
+    }
+
+    let (text, fg) = if connected {
+        (" pattern", Color::DarkGray)
     } else {
-        ("pattern (offline)", Style::default().fg(Color::DarkGray))
+        (" pattern (offline)", Color::DarkGray)
     };
 
-    let line = Line::from(vec![Span::styled(text, style)]);
+    let line = Line::from(vec![Span::styled(text, Style::default().fg(fg).bg(bar_bg))]);
     buf.set_line(area.x, area.y, &line, area.width);
 }
 
@@ -304,26 +313,10 @@ fn render_status_bar(area: Rect, buf: &mut Buffer, connected: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::test_utils::buffer_to_string;
     use pattern_core::traits::turn_sink::TurnEvent;
     use pattern_core::types::turn::StopReason;
     use ratatui::backend::TestBackend;
-
-    /// Convert a Buffer to a trimmed-right string representation.
-    fn buffer_to_string(buf: &Buffer) -> String {
-        let mut lines = Vec::new();
-        for y in 0..buf.area.height {
-            let mut line = String::new();
-            for x in 0..buf.area.width {
-                let cell = &buf[(x, y)];
-                line.push_str(cell.symbol());
-            }
-            lines.push(line.trim_end().to_string());
-        }
-        while lines.last().is_some_and(|l| l.is_empty()) {
-            lines.pop();
-        }
-        lines.join("\n")
-    }
 
     /// Render the app into a TestBackend and return the buffer as a string.
     fn render_app(app: &mut App, width: u16, height: u16) -> String {
