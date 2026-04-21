@@ -14,10 +14,7 @@ use pattern_memory::{MemoryCache, SharedBlockManager};
 fn test_db() -> (tempfile::TempDir, Arc<pattern_db::ConstellationDb>) {
     let dir = tempfile::tempdir().unwrap();
     let _db_path = dir.path().join("constellation.db");
-    let db = Arc::new(
-        pattern_db::ConstellationDb::open_in_memory()
-            .unwrap(),
-    );
+    let db = Arc::new(pattern_db::ConstellationDb::open_in_memory().unwrap());
     (dir, db)
 }
 
@@ -37,8 +34,7 @@ fn seed_agent(db: &pattern_db::ConstellationDb, agent_id: &str) {
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
-    pattern_db::queries::create_agent(&db.get().unwrap(), &agent)
-        .expect("failed to seed agent");
+    pattern_db::queries::create_agent(&db.get().unwrap(), &agent).expect("failed to seed agent");
 }
 
 #[test]

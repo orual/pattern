@@ -37,9 +37,7 @@ pub use json_wrapper::Json;
 pub use queries::stats::DbStats;
 
 // Re-export vector module types.
-pub use vector::{
-    ContentType, DEFAULT_EMBEDDING_DIMENSIONS, EmbeddingStats, VectorSearchResult,
-};
+pub use vector::{ContentType, DEFAULT_EMBEDDING_DIMENSIONS, EmbeddingStats, VectorSearchResult};
 
 // Re-export FTS module types.
 pub use fts::{FtsContentType, FtsMatch, FtsSearchResult, FtsStats};

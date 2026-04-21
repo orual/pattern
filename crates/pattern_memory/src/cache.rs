@@ -5,6 +5,9 @@
 //! access. Memory operations don't need the auth DB; consumers that require
 //! both wire them separately.
 
+use crate::subscriber::SubscriberHandle;
+use crate::subscriber::event::{Heartbeat, ReembedRequest};
+use crate::subscriber::supervisor::{SupervisorState, run_supervisor};
 use crate::types_internal::CachedBlock;
 use chrono::Utc;
 use dashmap::DashMap;
@@ -14,45 +17,99 @@ use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::BlockCreate;
 use pattern_core::types::memory_types::{
     ArchivalEntry, BlockFilter, BlockMetadata, BlockMetadataPatch, BlockSchema, MemoryError,
-    MemoryResult, MemorySearchResult, MemorySearchScope, SearchMode, SearchOptions, SharedBlockInfo,
-    UndoRedoDepth, UndoRedoOp,
+    MemoryResult, MemorySearchResult, MemorySearchScope, SearchMode, SearchOptions,
+    SharedBlockInfo, UndoRedoDepth, UndoRedoOp,
 };
 use pattern_db::ConstellationDb;
 use pattern_db::Json;
 use serde_json::Value as JsonValue;
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use pattern_core::types::memory_types::DEFAULT_MEMORY_CHAR_LIMIT;
 
-/// In-memory cache of LoroDoc instances with lazy loading
+/// In-memory cache of LoroDoc instances with lazy loading.
+///
+/// Each cached document may have an associated sync subscriber (OS thread) that
+/// keeps the canonical file and FTS5 indexes in sync. The subscriber registry
+/// tracks active workers so that [`MemoryCache::drop_doc`] can cancel and join
+/// them before evicting the document from the cache.
+///
+/// Subscribers are lazily spawned on the first successful persist if
+/// [`with_mount_path`](MemoryCache::with_mount_path) has been configured.
 #[derive(Debug)]
 pub struct MemoryCache {
     /// Constellation database for persistence.
     db: Arc<ConstellationDb>,
 
-    /// Optional embedding provider for vector/hybrid search
+    /// Optional embedding provider for vector/hybrid search.
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
 
-    /// Cached blocks: block_id -> CachedBlock
-    blocks: DashMap<String, CachedBlock>,
+    /// Cached blocks: block_id -> CachedBlock.
+    ///
+    /// Arc-wrapped so the respawn closure in `with_mount_path` can hold a
+    /// reference to the live map without requiring `MemoryCache` to be
+    /// Arc-shared itself.
+    blocks: Arc<DashMap<String, CachedBlock>>,
 
-    /// Default character limit for new memory blocks
+    /// Per-doc sync subscriber registry: block_id -> SubscriberHandle.
+    ///
+    /// Wrapped in Arc so the supervisor task can hold a reference to the same
+    /// map without requiring `MemoryCache` itself to be Arc-shared.
+    /// Subscribers are lazily spawned on the first write to a doc and
+    /// cancelled + joined on [`drop_doc`] or cache shutdown.
+    subscribers: Arc<DashMap<String, SubscriberHandle>>,
+
+    /// Default character limit for new memory blocks.
     default_char_limit: usize,
+
+    /// Base path for canonical file output. When `Some`, subscribers are
+    /// lazily spawned on the first successful persist for each block.
+    /// When `None`, the subscriber machinery is disabled (backward-compat for
+    /// tests and embedded usage that don't need file emission).
+    mount_path: Option<Arc<PathBuf>>,
+
+    /// Sender for re-embed requests from subscriber workers to the async
+    /// re-embed queue. Must be set alongside `mount_path`.
+    reembed_tx: Option<tokio::sync::mpsc::UnboundedSender<ReembedRequest>>,
+
+    /// Sender for subscriber heartbeats to the supervisor task.
+    /// Must be set alongside `mount_path`.
+    heartbeat_tx: Option<crossbeam_channel::Sender<Heartbeat>>,
+
+    /// Cancellation token for the supervisor tokio task.
+    /// Cancelled when the cache is dropped.
+    supervisor_cancel: CancellationToken,
+
+    /// Shared supervisor state (heartbeat tracking).
+    supervisor_state: Arc<SupervisorState>,
+
+    /// Join handle for the supervisor tokio task, if spawned.
+    supervisor_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl MemoryCache {
-    /// Create a new memory cache without embedding support
+    /// Create a new memory cache without embedding support.
     pub fn new(db: Arc<ConstellationDb>) -> Self {
         Self {
             db,
             embedding_provider: None,
-            blocks: DashMap::new(),
+            blocks: Arc::new(DashMap::new()),
+            subscribers: Arc::new(DashMap::new()),
             default_char_limit: DEFAULT_MEMORY_CHAR_LIMIT,
+            mount_path: None,
+            reembed_tx: None,
+            heartbeat_tx: None,
+            supervisor_cancel: CancellationToken::new(),
+            supervisor_state: Arc::new(SupervisorState::new()),
+            supervisor_task: None,
         }
     }
 
-    /// Create a new memory cache with an embedding provider for vector/hybrid search
+    /// Create a new memory cache with an embedding provider for vector/hybrid search.
     pub fn with_embedding_provider(
         db: Arc<ConstellationDb>,
         provider: Arc<dyn EmbeddingProvider>,
@@ -60,14 +117,129 @@ impl MemoryCache {
         Self {
             db,
             embedding_provider: Some(provider),
-            blocks: DashMap::new(),
+            blocks: Arc::new(DashMap::new()),
+            subscribers: Arc::new(DashMap::new()),
             default_char_limit: DEFAULT_MEMORY_CHAR_LIMIT,
+            mount_path: None,
+            reembed_tx: None,
+            heartbeat_tx: None,
+            supervisor_cancel: CancellationToken::new(),
+            supervisor_state: Arc::new(SupervisorState::new()),
+            supervisor_task: None,
         }
     }
 
     /// Set a custom default character limit for new memory blocks
     pub fn with_default_char_limit(mut self, limit: usize) -> Self {
         self.default_char_limit = limit;
+        self
+    }
+
+    /// Enable subscriber file emission by setting the mount path and the
+    /// channels needed to communicate with the re-embed queue and supervisor.
+    ///
+    /// Once configured, subscribers are lazily spawned on the first successful
+    /// persist for each block. Blocks with no content (freshly created) do not
+    /// get a subscriber until they have been written and persisted at least
+    /// once.
+    ///
+    /// This also spawns the supervisor tokio task if a tokio runtime is
+    /// available. The supervisor watches heartbeats from subscriber workers
+    /// and restarts any that become unresponsive. If no runtime is available
+    /// (e.g., in pure-sync tests), the supervisor is skipped with a warning.
+    ///
+    /// If `mount_path` is not called, no subscribers are spawned — this is the
+    /// backward-compatible default for tests and embedded usage.
+    pub fn with_mount_path(
+        mut self,
+        path: impl Into<PathBuf>,
+        reembed_tx: tokio::sync::mpsc::UnboundedSender<ReembedRequest>,
+        heartbeat_tx: crossbeam_channel::Sender<Heartbeat>,
+        heartbeat_rx: crossbeam_channel::Receiver<Heartbeat>,
+    ) -> Self {
+        self.mount_path = Some(Arc::new(path.into()));
+        self.reembed_tx = Some(reembed_tx.clone());
+        self.heartbeat_tx = Some(heartbeat_tx.clone());
+
+        // Spawn the supervisor as a tokio task if a runtime is available.
+        // The supervisor needs: heartbeat_rx, subscribers map, cancel token,
+        // state, and a respawn callback.
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                let subscribers = Arc::clone(&self.subscribers);
+                let cancel = self.supervisor_cancel.clone();
+                let state = self.supervisor_state.clone();
+
+                // Capture everything the respawn closure needs to re-spawn a
+                // crashed worker. We capture Arc clones so the closure can be
+                // called from the supervisor task without a reference to `self`.
+                let respawn_blocks = Arc::clone(&self.blocks);
+                let respawn_subscribers = Arc::clone(&self.subscribers);
+                let respawn_db = Arc::clone(&self.db);
+                let respawn_mount_path = Arc::clone(
+                    self.mount_path
+                        .as_ref()
+                        .expect("mount_path is set just above"),
+                );
+                let respawn_reembed_tx = reembed_tx;
+                let respawn_heartbeat_tx = heartbeat_tx;
+
+                let respawn_fn: Arc<dyn Fn(&str) + Send + Sync> =
+                    Arc::new(move |block_id: &str| {
+                        // Look up the live doc and schema from the cache. If
+                        // the block has been evicted we skip the respawn — a
+                        // future persist() will re-spawn when it's needed.
+                        let (doc, schema) = {
+                            let Some(cached) = respawn_blocks.get(block_id) else {
+                                tracing::warn!(
+                                    block_id = %block_id,
+                                    "supervisor respawn: block not in cache, skipping"
+                                );
+                                return;
+                            };
+                            (cached.doc.clone(), cached.doc.schema().clone())
+                        }; // DashMap lock released here.
+
+                        // Guard against a race where another thread already
+                        // respawned this subscriber between the supervisor's
+                        // remove() and this closure running.
+                        if respawn_subscribers.contains_key(block_id) {
+                            tracing::debug!(
+                                block_id = %block_id,
+                                "supervisor respawn: subscriber already exists, skipping"
+                            );
+                            return;
+                        }
+
+                        spawn_subscriber_for_block(
+                            block_id,
+                            schema,
+                            &doc,
+                            respawn_reembed_tx.clone(),
+                            respawn_heartbeat_tx.clone(),
+                            Arc::clone(&respawn_mount_path),
+                            Arc::clone(&respawn_db),
+                            Arc::clone(&respawn_subscribers),
+                        );
+                    });
+
+                let task = handle.spawn(run_supervisor(
+                    heartbeat_rx,
+                    subscribers,
+                    cancel,
+                    state,
+                    respawn_fn,
+                ));
+                self.supervisor_task = Some(task);
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "no tokio runtime available when configuring mount path; \
+                     supervisor will not run — subscriber heartbeat timeouts will not be detected"
+                );
+            }
+        }
+
         self
     }
 
@@ -79,11 +251,7 @@ impl MemoryCache {
     /// Get or load a block owned by agent_id.
     /// Returns a cloned StructuredDocument (cheap - LoroDoc internally Arc'd).
     /// For owned blocks, the effective permission is the block's inherent permission.
-    pub fn get(
-        &self,
-        agent_id: &str,
-        label: &str,
-    ) -> MemoryResult<Option<StructuredDocument>> {
+    pub fn get(&self, agent_id: &str, label: &str) -> MemoryResult<Option<StructuredDocument>> {
         // 1. Check access FIRST (always) - DB is source of truth.
         let access_result = pattern_db::queries::check_block_access(
             &*self.db.get()?,
@@ -164,8 +332,7 @@ impl MemoryCache {
         effective_permission: pattern_db::models::MemoryPermission,
     ) -> MemoryResult<Option<CachedBlock>> {
         // Get block from database.
-        let block =
-            pattern_db::queries::get_block_by_label(&*self.db.get()?, agent_id, label)?;
+        let block = pattern_db::queries::get_block_by_label(&*self.db.get()?, agent_id, label)?;
 
         let block = match block {
             Some(b) if b.is_active => b,
@@ -216,8 +383,7 @@ impl MemoryCache {
     /// Persist changes for a block (export delta, write to DB).
     pub fn persist(&self, agent_id: &str, label: &str) -> MemoryResult<()> {
         // Get block_id from DB first.
-        let block =
-            pattern_db::queries::get_block_by_label(&*self.db.get()?, agent_id, label)?;
+        let block = pattern_db::queries::get_block_by_label(&*self.db.get()?, agent_id, label)?;
         let block_id = match block {
             Some(b) => b.id,
             None => {
@@ -299,13 +465,21 @@ impl MemoryCache {
         entry.last_persisted_frontier = Some(new_frontier);
         entry.dirty = false;
 
+        // Release the mutable lock before spawning the subscriber, which
+        // needs to acquire its own read lock on `self.blocks`.
+        drop(entry);
+
+        // Lazily spawn a subscriber on the first successful persist.
+        // A freshly created block with no content doesn't need a subscriber
+        // until it has real data to emit — this is that moment.
+        self.maybe_spawn_subscriber_for_block(&block_id);
+
         Ok(())
     }
 
     /// Helper to get block_id from agent_id and label.
     fn get_block_id(&self, agent_id: &str, label: &str) -> MemoryResult<Option<String>> {
-        let block =
-            pattern_db::queries::get_block_by_label(&*self.db.get()?, agent_id, label)?;
+        let block = pattern_db::queries::get_block_by_label(&*self.db.get()?, agent_id, label)?;
         Ok(block.map(|b| b.id))
     }
 
@@ -335,15 +509,295 @@ impl MemoryCache {
         }
     }
 
-    /// Evict a block from cache (persists first if dirty).
-    pub fn evict(&self, agent_id: &str, label: &str) -> MemoryResult<()> {
+    /// Drop a document from the cache, persisting it first if dirty.
+    ///
+    /// If a sync subscriber is running for this doc, cancels it and joins the
+    /// worker thread before removing the block from the cache. This ensures
+    /// no in-flight writes after the doc is evicted.
+    pub fn drop_doc(&self, agent_id: &str, label: &str) -> MemoryResult<()> {
         // Persist first if dirty.
         self.persist(agent_id, label)?;
 
         if let Some(block_id) = self.get_block_id(agent_id, label)? {
+            // Cancel and join the subscriber before removing from cache.
+            // The join is bounded: the cancellation token causes the worker
+            // to exit on the next DEBOUNCE_MS (50ms) timeout iteration, so
+            // this join completes within ~50ms in the normal case.
+            if let Some((_, handle)) = self.subscribers.remove(&block_id) {
+                handle.cancel.cancel();
+                if let Err(e) = handle.thread.join() {
+                    tracing::warn!(
+                        block_id = %block_id,
+                        "subscriber thread panicked during drop_doc join: {e:?}"
+                    );
+                }
+            }
             self.blocks.remove(&block_id);
         }
         Ok(())
+    }
+
+    /// Spawn a sync subscriber for the given block if one isn't already running.
+    ///
+    /// Creates a `disk_doc` by forking the memory_doc, then wires
+    /// `subscribe_local_update` on memory_doc to push raw Loro update bytes
+    /// into the worker's event channel. The worker imports those bytes into
+    /// disk_doc and renders it to the canonical file on disk.
+    ///
+    /// `schema` determines the output file format:
+    /// - `Text` → `.md`
+    /// - `Map` / `List` / `Composite` → `.kdl`
+    /// - `Log` → `.jsonl`
+    pub(crate) fn spawn_subscriber(
+        &self,
+        block_id: &str,
+        schema: BlockSchema,
+        doc: &StructuredDocument,
+        reembed_tx: tokio::sync::mpsc::UnboundedSender<ReembedRequest>,
+        heartbeat_tx: crossbeam_channel::Sender<Heartbeat>,
+        mount_path: Arc<PathBuf>,
+    ) {
+        spawn_subscriber_for_block(
+            block_id,
+            schema,
+            doc,
+            reembed_tx,
+            heartbeat_tx,
+            mount_path,
+            Arc::clone(&self.db),
+            Arc::clone(&self.subscribers),
+        );
+    }
+
+    /// Apply an externally-edited file's content into the cached LoroDoc.
+    ///
+    /// Called by the filesystem watcher when it detects a change to a block
+    /// file that was not written by our own `atomic_write` (i.e., a human
+    /// editor changed the file).
+    ///
+    /// ## Two-doc merge flow
+    ///
+    /// 1. Parse the file content according to the block's schema.
+    /// 2. Apply the parsed content to `disk_doc` via Loro text operations.
+    ///    This generates Loro update operations on disk_doc.
+    /// 3. Export disk_doc's updates and import them into memory_doc.
+    ///    Loro CRDT merge preserves both the agent's and human's edits.
+    /// 4. Mark the block dirty for the next persist.
+    ///
+    /// If the block is not currently loaded in the cache or has no subscriber,
+    /// the edit is silently skipped.
+    pub(crate) fn apply_external_edit(&self, block_id: &str, content: &[u8]) {
+        // Look up the block in the cache; if not loaded, skip.
+        let Some(cached) = self.blocks.get(block_id) else {
+            tracing::debug!(
+                block_id = %block_id,
+                "external edit for unloaded block; skipping merge"
+            );
+            return;
+        };
+
+        let doc = cached.doc.clone();
+        drop(cached); // Release the DashMap lock before doing work.
+
+        // Get the subscriber's disk_doc. Without a subscriber there's no
+        // disk_doc to apply the external edit to.
+        let Some(subscriber) = self.subscribers.get(block_id) else {
+            tracing::debug!(
+                block_id = %block_id,
+                "external edit for block without subscriber; skipping merge"
+            );
+            return;
+        };
+
+        let disk_doc = Arc::clone(&subscriber.disk_doc);
+        drop(subscriber); // Release the DashMap lock.
+
+        let schema = doc.schema().clone();
+
+        // Capture disk_doc's version before applying the external edit,
+        // so we can export only the new operations afterward.
+        let disk_vv_before = disk_doc.oplog_vv();
+
+        let result: Result<(), String> = (|| {
+            match &schema {
+                pattern_core::types::memory_types::BlockSchema::Text { .. } => {
+                    // Text blocks: file content is the raw markdown, import as text.
+                    let text = String::from_utf8(content.to_vec())
+                        .map_err(|e| format!("UTF-8 decode failed: {e}"))?;
+                    let stripped = crate::fs::markdown::markdown_to_text(&text);
+                    let disk_text = disk_doc.get_text("content");
+                    disk_text
+                        .update(&stripped, Default::default())
+                        .map_err(|e| format!("disk_doc text update failed: {e}"))?;
+                    disk_doc.commit();
+                }
+                pattern_core::types::memory_types::BlockSchema::Map { .. }
+                | pattern_core::types::memory_types::BlockSchema::Composite { .. } => {
+                    // Map/Composite blocks: parse KDL with Map shape, import via JSON.
+                    let text = String::from_utf8(content.to_vec())
+                        .map_err(|e| format!("UTF-8 decode failed: {e}"))?;
+                    let kdl_doc = crate::fs::kdl::parse_kdl(&text)
+                        .map_err(|e| format!("KDL parse failed: {e}"))?;
+                    let loro_value =
+                        crate::fs::kdl::kdl_to_loro_value(&kdl_doc, crate::fs::kdl::TopShape::Map)
+                            .map_err(|e| format!("KDL→LoroValue failed: {e}"))?;
+                    let json = crate::fs::kdl::loro_value_to_json(&loro_value)
+                        .ok_or_else(|| "LoroValue→JSON conversion failed".to_string())?;
+                    // Apply to disk_doc via JSON import. Since disk_doc doesn't
+                    // have a StructuredDocument wrapper, we use the LoroDoc
+                    // JSON import mechanism directly.
+                    apply_json_to_loro_doc(&disk_doc, &json, &schema)
+                        .map_err(|e| format!("disk_doc JSON import failed: {e}"))?;
+                    disk_doc.commit();
+                }
+                pattern_core::types::memory_types::BlockSchema::List { .. } => {
+                    // List blocks: parse KDL with List shape, import via JSON.
+                    let text = String::from_utf8(content.to_vec())
+                        .map_err(|e| format!("UTF-8 decode failed: {e}"))?;
+                    let kdl_doc = crate::fs::kdl::parse_kdl(&text)
+                        .map_err(|e| format!("KDL parse failed: {e}"))?;
+                    let loro_value =
+                        crate::fs::kdl::kdl_to_loro_value(&kdl_doc, crate::fs::kdl::TopShape::List)
+                            .map_err(|e| format!("KDL→LoroValue failed: {e}"))?;
+                    let json = crate::fs::kdl::loro_value_to_json(&loro_value)
+                        .ok_or_else(|| "LoroValue→JSON conversion failed".to_string())?;
+                    apply_json_to_loro_doc(&disk_doc, &json, &schema)
+                        .map_err(|e| format!("disk_doc JSON import failed: {e}"))?;
+                    disk_doc.commit();
+                }
+                pattern_core::types::memory_types::BlockSchema::Log { .. } => {
+                    // Log blocks: parse JSONL entries and import.
+                    let text = String::from_utf8(content.to_vec())
+                        .map_err(|e| format!("UTF-8 decode failed: {e}"))?;
+                    let entries = crate::fs::jsonl::jsonl_to_log_entries(&text)
+                        .map_err(|e| format!("JSONL parse failed: {e}"))?;
+                    let arr = serde_json::Value::Array(entries);
+                    apply_json_to_loro_doc(&disk_doc, &arr, &schema)
+                        .map_err(|e| format!("disk_doc JSON import failed: {e}"))?;
+                    disk_doc.commit();
+                }
+            }
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                // Export the updates that disk_doc generated and import them
+                // into memory_doc. This is the CRDT merge: memory_doc will
+                // reconcile its own operations with the disk_doc operations.
+                match disk_doc.export(loro::ExportMode::updates(&disk_vv_before)) {
+                    Ok(update_bytes) if !update_bytes.is_empty() => {
+                        if let Err(e) = doc.inner().import(&update_bytes) {
+                            tracing::error!(
+                                block_id = %block_id,
+                                error = %e,
+                                "failed to import disk_doc updates into memory_doc"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            block_id = %block_id,
+                            error = %e,
+                            "failed to export disk_doc updates"
+                        );
+                    }
+                    _ => {} // Empty update bytes — no-op.
+                }
+
+                // Update the FTS5 preview column so external edits are
+                // visible to search. The worker does this on every subscriber
+                // cycle; we mirror that here for the external-edit path.
+                let preview = doc.render();
+                match self.db.get() {
+                    Ok(conn) => {
+                        let preview_str = if preview.is_empty() {
+                            None
+                        } else {
+                            Some(preview.as_str())
+                        };
+                        if let Err(e) =
+                            pattern_db::queries::update_block_preview(&conn, block_id, preview_str)
+                        {
+                            metrics::counter!("memory.external_edit.fts_update_failed")
+                                .increment(1);
+                            tracing::error!(
+                                block_id = %block_id,
+                                error = %e,
+                                "FTS5 update failed after external edit merge"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "DB pool get failed during external edit FTS update"
+                        );
+                    }
+                }
+
+                // Mark the block dirty so the next persist stores the update.
+                if let Some(mut cached) = self.blocks.get_mut(block_id) {
+                    cached.dirty = true;
+                }
+                tracing::debug!(
+                    block_id = %block_id,
+                    "external edit imported via two-doc CRDT merge"
+                );
+                metrics::counter!("memory.external_edit.crdt_merged").increment(1);
+            }
+            Err(e) => {
+                tracing::error!(
+                    block_id = %block_id,
+                    error = %e,
+                    "external edit import failed"
+                );
+                metrics::counter!("memory.external_edit.import_failed").increment(1);
+            }
+        }
+    }
+
+    /// Get a reference to a subscriber handle by block_id.
+    ///
+    /// Used by the watcher for self-echo suppression (mtime comparison).
+    pub(crate) fn subscriber_handle(
+        &self,
+        block_id: &str,
+    ) -> Option<dashmap::mapref::one::Ref<'_, String, SubscriberHandle>> {
+        self.subscribers.get(block_id)
+    }
+
+    /// Lazily spawn a subscriber for a cached block using the cache's own
+    /// mount_path, reembed_tx, and heartbeat_tx.
+    ///
+    /// Does nothing if:
+    /// - `mount_path` was not configured (subscriber machinery disabled).
+    /// - The block is not currently loaded in the in-memory cache.
+    /// - A subscriber for this block is already running.
+    fn maybe_spawn_subscriber_for_block(&self, block_id: &str) {
+        let (Some(mount_path), Some(reembed_tx), Some(heartbeat_tx)) = (
+            self.mount_path.clone(),
+            self.reembed_tx.clone(),
+            self.heartbeat_tx.clone(),
+        ) else {
+            return;
+        };
+
+        // Don't double-spawn — checked again inside spawn_subscriber, but skip
+        // the lock on blocks if we can bail out early.
+        if self.subscribers.contains_key(block_id) {
+            return;
+        }
+
+        let Some(cached) = self.blocks.get(block_id) else {
+            return;
+        };
+
+        let doc = cached.doc.clone();
+        let schema = doc.schema().clone();
+        drop(cached); // Release DashMap lock before spawning.
+
+        self.spawn_subscriber(block_id, schema, &doc, reembed_tx, heartbeat_tx, mount_path);
     }
 
     /// Internal search implementation shared by agent-scoped and
@@ -368,9 +822,8 @@ impl MemoryCache {
                         match std::thread::scope(|s| {
                             let provider = provider.clone();
                             let query = query.to_string();
-                            s.spawn(move || {
-                                handle.block_on(provider.embed_query(&query))
-                            }).join()
+                            s.spawn(move || handle.block_on(provider.embed_query(&query)))
+                                .join()
                         }) {
                             Ok(Ok(embedding)) => Some(embedding),
                             Ok(Err(e)) => {
@@ -381,9 +834,7 @@ impl MemoryCache {
                                 None
                             }
                             Err(_) => {
-                                tracing::warn!(
-                                    "Embedding thread panicked, falling back to FTS"
-                                );
+                                tracing::warn!("Embedding thread panicked, falling back to FTS");
                                 None
                             }
                         }
@@ -500,6 +951,209 @@ impl MemoryCache {
             .into_iter()
             .map(MemorySearchResult::from_db_result)
             .collect())
+    }
+}
+
+impl Drop for MemoryCache {
+    fn drop(&mut self) {
+        // Cancel the supervisor task when the cache is dropped.
+        self.supervisor_cancel.cancel();
+        if let Some(task) = self.supervisor_task.take() {
+            // The task will notice the cancellation on its next tick.
+            // We do not block on it here — fire and forget is sufficient
+            // because the supervisor only holds soft references.
+            task.abort();
+        }
+    }
+}
+
+/// Spawn a sync subscriber worker for a block, inserting the resulting handle
+/// into `subscribers`.
+///
+/// This is the core spawning logic extracted from `MemoryCache::spawn_subscriber`
+/// so that both the method and the supervisor respawn closure can call the same
+/// code without either holding `&self`.
+///
+/// Does nothing if a subscriber for `block_id` is already present in
+/// `subscribers` (double-spawn guard).
+///
+/// # Note on argument count
+/// The eight parameters represent distinct, non-composable dependencies — each
+/// is an independent `Arc`-wrapped resource that must be provided separately.
+/// Grouping them into a helper struct would add indirection without reducing
+/// the caller's need to supply each piece individually.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_subscriber_for_block(
+    block_id: &str,
+    schema: BlockSchema,
+    doc: &StructuredDocument,
+    reembed_tx: tokio::sync::mpsc::UnboundedSender<ReembedRequest>,
+    heartbeat_tx: crossbeam_channel::Sender<Heartbeat>,
+    mount_path: Arc<PathBuf>,
+    db: Arc<ConstellationDb>,
+    subscribers: Arc<DashMap<String, SubscriberHandle>>,
+) {
+    // Don't double-spawn.
+    if subscribers.contains_key(block_id) {
+        return;
+    }
+
+    let (event_tx, event_rx) = crossbeam_channel::bounded(64);
+    let cancel = CancellationToken::new();
+
+    // Fork the memory_doc to create the disk_doc. The fork starts with
+    // the same state as memory_doc at this point in time.
+    let disk_doc = Arc::new(doc.inner().fork());
+    let last_written_mtime: Arc<Mutex<Option<SystemTime>>> = Arc::new(Mutex::new(None));
+
+    // Wire subscribe_local_update on memory_doc: when the agent writes
+    // to memory_doc, capture the raw Loro update bytes and forward them
+    // to the worker thread for import into disk_doc and file rendering.
+    let block_id_owned = block_id.to_string();
+    let tx_clone = event_tx.clone();
+    let subscription = doc
+        .inner()
+        .subscribe_local_update(Box::new(move |update_bytes| {
+            let _ = tx_clone.try_send(crate::subscriber::event::CommitEvent {
+                block_id: block_id_owned.clone(),
+                update_bytes: update_bytes.clone(),
+            });
+            true // Keep subscription active.
+        }));
+
+    // Spawn the worker OS thread.
+    let config = crate::subscriber::worker::WorkerConfig {
+        block_id: block_id.to_string(),
+        schema,
+        rx: event_rx,
+        cancel: cancel.clone(),
+        db,
+        reembed_tx,
+        heartbeat_tx,
+        mount_path,
+        disk_doc: Arc::clone(&disk_doc),
+        doc: doc.clone(),
+        last_written_mtime: Arc::clone(&last_written_mtime),
+    };
+
+    let thread = match std::thread::Builder::new()
+        .name(format!("sync-sub-{}", block_id))
+        .spawn(move || {
+            crate::subscriber::worker::run_subscriber(config);
+        }) {
+        Ok(t) => t,
+        Err(e) => {
+            // Thread spawn failed (OS resource limits, etc.). Log the
+            // error and return without registering the subscriber. The
+            // cache continues to function; the block simply won't have a
+            // backing file until the next persist attempt.
+            tracing::error!(
+                block_id = %block_id,
+                error = %e,
+                "failed to spawn subscriber thread; file sync disabled for this block"
+            );
+            metrics::counter!("memory.sync_worker.spawn_failed").increment(1);
+            return;
+        }
+    };
+
+    subscribers.insert(
+        block_id.to_string(),
+        SubscriberHandle {
+            cancel,
+            thread,
+            event_tx,
+            _subscription: subscription,
+            disk_doc,
+            last_written_mtime,
+        },
+    );
+}
+
+/// Apply a JSON value to a raw LoroDoc (without StructuredDocument wrapper).
+///
+/// This is used by `apply_external_edit` to apply parsed file content to
+/// the disk_doc. For text blocks, use `LoroText::update` directly instead
+/// of this function. For structured blocks (Map/List/Log/Composite), this
+/// function handles the JSON import using the correct container names.
+///
+/// Container names must match StructuredDocument's conventions exactly:
+/// - Map: `"fields"` (LoroMap)
+/// - Composite: `"root"` (LoroMap)
+/// - List: `"items"` (LoroList)
+/// - Log: `"entries"` (LoroList)
+fn apply_json_to_loro_doc(
+    doc: &loro::LoroDoc,
+    json: &serde_json::Value,
+    schema: &pattern_core::types::memory_types::BlockSchema,
+) -> Result<(), String> {
+    // Import JSON by applying it to the appropriate containers.
+    // Container names mirror StructuredDocument's conventions exactly —
+    // mismatches here cause silent data loss as writes go to an orphan container.
+    use pattern_core::types::memory_types::BlockSchema;
+    match (json, schema) {
+        (serde_json::Value::Object(map), BlockSchema::Map { .. }) => {
+            let loro_map = doc.get_map("fields");
+            for (key, value) in map {
+                let json_str = serde_json::to_string(value)
+                    .map_err(|e| format!("JSON serialize failed: {e}"))?;
+                loro_map
+                    .insert(key, json_str)
+                    .map_err(|e| format!("LoroMap insert failed: {e}"))?;
+            }
+            Ok(())
+        }
+        (serde_json::Value::Object(map), BlockSchema::Composite { .. }) => {
+            let loro_map = doc.get_map("root");
+            for (key, value) in map {
+                let json_str = serde_json::to_string(value)
+                    .map_err(|e| format!("JSON serialize failed: {e}"))?;
+                loro_map
+                    .insert(key, json_str)
+                    .map_err(|e| format!("LoroMap insert failed: {e}"))?;
+            }
+            Ok(())
+        }
+        (serde_json::Value::Array(entries), BlockSchema::List { .. }) => {
+            let loro_list = doc.get_list("items");
+            // Clear existing entries and re-insert.
+            let len = loro_list.len();
+            if len > 0 {
+                loro_list
+                    .delete(0, len)
+                    .map_err(|e| format!("LoroList delete failed: {e}"))?;
+            }
+            for entry in entries {
+                let json_str = serde_json::to_string(entry)
+                    .map_err(|e| format!("JSON serialize failed: {e}"))?;
+                loro_list
+                    .push(json_str)
+                    .map_err(|e| format!("LoroList push failed: {e}"))?;
+            }
+            Ok(())
+        }
+        (serde_json::Value::Array(entries), BlockSchema::Log { .. }) => {
+            let loro_list = doc.get_list("entries");
+            // Clear existing entries and re-insert.
+            let len = loro_list.len();
+            if len > 0 {
+                loro_list
+                    .delete(0, len)
+                    .map_err(|e| format!("LoroList delete failed: {e}"))?;
+            }
+            for entry in entries {
+                let json_str = serde_json::to_string(entry)
+                    .map_err(|e| format!("JSON serialize failed: {e}"))?;
+                loro_list
+                    .push(json_str)
+                    .map_err(|e| format!("LoroList push failed: {e}"))?;
+            }
+            Ok(())
+        }
+        _ => Err(format!(
+            "unexpected JSON shape for schema {:?}: expected object for Map/Composite, array for List/Log",
+            schema
+        )),
     }
 }
 
@@ -634,11 +1288,7 @@ impl MemoryStore for MemoryCache {
         Ok(doc)
     }
 
-    fn get_block(
-        &self,
-        agent_id: &str,
-        label: &str,
-    ) -> MemoryResult<Option<StructuredDocument>> {
+    fn get_block(&self, agent_id: &str, label: &str) -> MemoryResult<Option<StructuredDocument>> {
         // Delegate to existing get method.
         self.get(agent_id, label)
     }
@@ -649,8 +1299,7 @@ impl MemoryStore for MemoryCache {
         label: &str,
     ) -> MemoryResult<Option<BlockMetadata>> {
         // Query DB for block metadata without loading full document.
-        let block =
-            pattern_db::queries::get_block_by_label(&*self.db.get()?, agent_id, label)?;
+        let block = pattern_db::queries::get_block_by_label(&*self.db.get()?, agent_id, label)?;
 
         Ok(block.as_ref().map(db_block_to_metadata))
     }
@@ -661,11 +1310,7 @@ impl MemoryStore for MemoryCache {
         let base = if let Some(ref agent) = filter.agent_id {
             if let Some(bt) = filter.block_type {
                 // Optimized path: agent + type.
-                pattern_db::queries::list_blocks_by_type(
-                    &*self.db.get()?,
-                    agent,
-                    bt.into(),
-                )?
+                pattern_db::queries::list_blocks_by_type(&*self.db.get()?, agent, bt.into())?
             } else {
                 pattern_db::queries::list_blocks(&*self.db.get()?, agent)?
             }
@@ -676,8 +1321,7 @@ impl MemoryStore for MemoryCache {
             pattern_db::queries::list_blocks_by_label_prefix(&*self.db.get()?, "")?
         };
 
-        let mut results: Vec<BlockMetadata> =
-            base.iter().map(db_block_to_metadata).collect();
+        let mut results: Vec<BlockMetadata> = base.iter().map(db_block_to_metadata).collect();
 
         // Apply in-memory filters for fields that weren't part of the DB query.
         if let Some(bt) = filter.block_type {
@@ -699,13 +1343,12 @@ impl MemoryStore for MemoryCache {
 
     fn delete_block(&self, agent_id: &str, label: &str) -> MemoryResult<()> {
         // Get block ID first.
-        let block =
-            pattern_db::queries::get_block_by_label(&*self.db.get()?, agent_id, label)?;
+        let block = pattern_db::queries::get_block_by_label(&*self.db.get()?, agent_id, label)?;
 
         if let Some(block) = block {
-            // Evict from cache first (will persist if dirty).
+            // Drop from cache first (will persist if dirty and cancel subscriber).
             if self.blocks.contains_key(&block.id) {
-                self.evict(agent_id, label)?;
+                self.drop_doc(agent_id, label)?;
             }
 
             // Soft-delete in DB.
@@ -715,11 +1358,7 @@ impl MemoryStore for MemoryCache {
         Ok(())
     }
 
-    fn get_rendered_content(
-        &self,
-        agent_id: &str,
-        label: &str,
-    ) -> MemoryResult<Option<String>> {
+    fn get_rendered_content(&self, agent_id: &str, label: &str) -> MemoryResult<Option<String>> {
         // Get doc, call doc.render().
         let doc = self.get(agent_id, label)?;
         Ok(doc.map(|d| d.render()))
@@ -779,8 +1418,7 @@ impl MemoryStore for MemoryCache {
         // Convert search results to ArchivalEntry.
         let mut entries = Vec::new();
         for result in results {
-            if let Some(entry) =
-                pattern_db::queries::get_archival_entry(&search_conn, &result.id)?
+            if let Some(entry) = pattern_db::queries::get_archival_entry(&search_conn, &result.id)?
             {
                 entries.push(db_archival_to_archival(&entry));
             }
@@ -804,9 +1442,7 @@ impl MemoryStore for MemoryCache {
             MemorySearchScope::Agent(ref agent_id) => {
                 self.search_impl(Some(agent_id.as_str()), query, options)
             }
-            MemorySearchScope::Constellation => {
-                self.search_impl(None, query, options)
-            }
+            MemorySearchScope::Constellation => self.search_impl(None, query, options),
             _ => Err(MemoryError::Other(
                 "unsupported search scope variant".into(),
             )),
@@ -900,8 +1536,7 @@ impl MemoryStore for MemoryCache {
         }
 
         // Get block from DB.
-        let block =
-            pattern_db::queries::get_block_by_label(&*self.db.get()?, agent_id, label)?;
+        let block = pattern_db::queries::get_block_by_label(&*self.db.get()?, agent_id, label)?;
 
         let block = block.ok_or_else(|| MemoryError::NotFound {
             agent_id: agent_id.to_string(),
@@ -991,8 +1626,7 @@ impl MemoryStore for MemoryCache {
 
     fn undo_redo(&self, agent_id: &str, label: &str, op: UndoRedoOp) -> MemoryResult<bool> {
         // Get block ID from DB.
-        let block =
-            pattern_db::queries::get_block_by_label(&*self.db.get()?, agent_id, label)?;
+        let block = pattern_db::queries::get_block_by_label(&*self.db.get()?, agent_id, label)?;
 
         let block = block.ok_or_else(|| MemoryError::NotFound {
             agent_id: agent_id.to_string(),
@@ -1022,11 +1656,7 @@ impl MemoryStore for MemoryCache {
                     }
                 } else {
                     // No active updates left - clear frontier to initial state.
-                    pattern_db::queries::update_block_frontier(
-                        &*self.db.get()?,
-                        &block.id,
-                        &[],
-                    )?;
+                    pattern_db::queries::update_block_frontier(&*self.db.get()?, &block.id, &[])?;
                 }
 
                 // Evict from cache - next access will load the undone state from DB.
@@ -1066,8 +1696,7 @@ impl MemoryStore for MemoryCache {
     }
 
     fn history_depth(&self, agent_id: &str, label: &str) -> MemoryResult<UndoRedoDepth> {
-        let block =
-            pattern_db::queries::get_block_by_label(&*self.db.get()?, agent_id, label)?;
+        let block = pattern_db::queries::get_block_by_label(&*self.db.get()?, agent_id, label)?;
 
         let block = block.ok_or_else(|| MemoryError::NotFound {
             agent_id: agent_id.to_string(),
@@ -1146,8 +1775,7 @@ mod tests {
             updated_at: chrono::Utc::now(),
         };
 
-        pattern_db::queries::create_block(&dbs.get().unwrap(), &block)
-            .unwrap();
+        pattern_db::queries::create_block(&dbs.get().unwrap(), &block).unwrap();
 
         // Create cache and load.
         let cache = MemoryCache::new(dbs);
@@ -1191,8 +1819,7 @@ mod tests {
             updated_at: chrono::Utc::now(),
         };
 
-        pattern_db::queries::create_block(&dbs.get().unwrap(), &block)
-            .unwrap();
+        pattern_db::queries::create_block(&dbs.get().unwrap(), &block).unwrap();
 
         let cache = MemoryCache::new(dbs.clone());
 
@@ -1206,8 +1833,8 @@ mod tests {
         cache.persist("agent_1", "scratch").unwrap();
 
         // Verify update was stored.
-        let (_, updates) = pattern_db::queries::get_checkpoint_and_updates(&dbs.get().unwrap(), "mem_2")
-            .unwrap();
+        let (_, updates) =
+            pattern_db::queries::get_checkpoint_and_updates(&dbs.get().unwrap(), "mem_2").unwrap();
 
         assert!(!updates.is_empty());
     }
@@ -1278,9 +1905,7 @@ mod tests {
             .unwrap();
 
         // List all blocks.
-        let all_blocks = cache
-            .list_blocks(BlockFilter::by_agent("agent_1"))
-            .unwrap();
+        let all_blocks = cache.list_blocks(BlockFilter::by_agent("agent_1")).unwrap();
         assert_eq!(all_blocks.len(), 3);
 
         // List blocks by type.
@@ -1323,9 +1948,7 @@ mod tests {
         assert!(doc.is_err());
 
         // List should not include deleted block.
-        let blocks = cache
-            .list_blocks(BlockFilter::by_agent("agent_1"))
-            .unwrap();
+        let blocks = cache.list_blocks(BlockFilter::by_agent("agent_1")).unwrap();
         assert_eq!(blocks.len(), 0);
     }
 
@@ -1345,17 +1968,12 @@ mod tests {
             .unwrap();
 
         // Get and modify.
-        let doc = cache
-            .get_block("agent_1", "content_test")
-            .unwrap()
-            .unwrap();
+        let doc = cache.get_block("agent_1", "content_test").unwrap().unwrap();
         doc.set_text("Hello, world!", true).unwrap();
 
         // Mark dirty and persist.
         cache.mark_dirty("agent_1", "content_test");
-        cache
-            .persist_block("agent_1", "content_test")
-            .unwrap();
+        cache.persist_block("agent_1", "content_test").unwrap();
 
         // Get rendered content.
         let content = cache
@@ -1386,14 +2004,10 @@ mod tests {
         assert!(id2.starts_with("arch_"));
 
         // Search archival (simple substring match).
-        let results = cache
-            .search_archival("agent_1", "archival", 10)
-            .unwrap();
+        let results = cache.search_archival("agent_1", "archival", 10).unwrap();
         assert_eq!(results.len(), 2);
 
-        let results = cache
-            .search_archival("agent_1", "metadata", 10)
-            .unwrap();
+        let results = cache.search_archival("agent_1", "metadata", 10).unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].metadata.is_some());
 
@@ -1405,9 +2019,7 @@ mod tests {
         assert_eq!(results.len(), 0);
 
         // Second entry should still be there.
-        let results = cache
-            .search_archival("agent_1", "Second", 10)
-            .unwrap();
+        let results = cache.search_archival("agent_1", "Second", 10).unwrap();
         assert_eq!(results.len(), 1);
     }
 
@@ -1459,10 +2071,7 @@ mod tests {
             )
             .unwrap();
 
-        let doc = cache
-            .get_block("agent_1", "persona")
-            .unwrap()
-            .unwrap();
+        let doc = cache.get_block("agent_1", "persona").unwrap().unwrap();
         doc.set_text(
             "I am a helpful assistant specializing in Rust programming",
             true,
@@ -1536,7 +2145,11 @@ mod tests {
         };
 
         let results = cache
-            .search("development", opts, MemorySearchScope::Agent("agent_1".into()))
+            .search(
+                "development",
+                opts,
+                MemorySearchScope::Agent("agent_1".into()),
+            )
             .unwrap();
         assert!(!results.is_empty());
     }
@@ -1579,7 +2192,11 @@ mod tests {
         };
 
         let results = cache
-            .search("authentication", opts, MemorySearchScope::Agent("agent_1".into()))
+            .search(
+                "authentication",
+                opts,
+                MemorySearchScope::Agent("agent_1".into()),
+            )
             .unwrap();
         assert_eq!(results.len(), 2);
 
@@ -1632,10 +2249,7 @@ mod tests {
             )
             .unwrap();
 
-        let doc = cache
-            .get_block("agent_1", "persona")
-            .unwrap()
-            .unwrap();
+        let doc = cache.get_block("agent_1", "persona").unwrap().unwrap();
         doc.set_text("I specialize in Rust programming and system design", true)
             .unwrap();
         cache.mark_dirty("agent_1", "persona");
@@ -1696,7 +2310,11 @@ mod tests {
         };
 
         let results = cache
-            .search("secret", opts.clone(), MemorySearchScope::Agent("agent_1".into()))
+            .search(
+                "secret",
+                opts.clone(),
+                MemorySearchScope::Agent("agent_1".into()),
+            )
             .unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].content.as_ref().unwrap().contains("Agent 1"));
@@ -1753,10 +2371,7 @@ mod tests {
             )
             .unwrap();
 
-        let doc = cache
-            .get_block("agent_1", "test_block")
-            .unwrap()
-            .unwrap();
+        let doc = cache.get_block("agent_1", "test_block").unwrap().unwrap();
         doc.set_text("Searchable block content", true).unwrap();
         cache.mark_dirty("agent_1", "test_block");
         cache.persist_block("agent_1", "test_block").unwrap();
@@ -1773,7 +2388,11 @@ mod tests {
         };
 
         let results = cache
-            .search("Searchable", opts, MemorySearchScope::Agent("agent_1".into()))
+            .search(
+                "Searchable",
+                opts,
+                MemorySearchScope::Agent("agent_1".into()),
+            )
             .unwrap();
         assert_eq!(results.len(), 2);
     }
@@ -2033,5 +2652,116 @@ mod tests {
             "Hello 🌎 world",
             "Content should correctly replace emoji with different emoji"
         );
+    }
+
+    /// Test that `spawn_subscriber_for_block` creates a fresh subscriber handle.
+    ///
+    /// This exercises the supervisor respawn path: the supervisor cancels and
+    /// removes a crashed worker, then calls the respawn closure (which calls
+    /// `spawn_subscriber_for_block` with the same arguments). The test verifies
+    /// that after the initial handle is manually removed, calling the function
+    /// again inserts a new handle into the registry.
+    #[test]
+    fn spawn_subscriber_for_block_creates_and_respawns() {
+        use pattern_core::memory::StructuredDocument;
+        use pattern_core::types::memory_types::BlockSchema;
+
+        let (_dir, db) = test_dbs();
+        let block_id = "respawn_test_block";
+        let agent_id = "respawn_test_agent";
+        create_test_agent(&db, agent_id);
+
+        // Create a block row so the DB constraint is satisfied.
+        {
+            let conn = db.get().unwrap();
+            let block = pattern_db::models::MemoryBlock {
+                id: block_id.to_string(),
+                agent_id: agent_id.to_string(),
+                label: block_id.to_string(),
+                description: "Respawn test block".to_string(),
+                block_type: pattern_db::models::MemoryBlockType::Working,
+                char_limit: 5000,
+                permission: pattern_db::models::MemoryPermission::ReadWrite,
+                pinned: false,
+                loro_snapshot: vec![],
+                content_preview: None,
+                metadata: None,
+                embedding_model: None,
+                is_active: true,
+                frontier: None,
+                last_seq: 0,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            };
+            pattern_db::queries::create_block(&conn, &block).unwrap();
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mount_path = Arc::new(temp_dir.path().to_path_buf());
+        let (reembed_tx, _reembed_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (hb_tx, _hb_rx) = crossbeam_channel::bounded(64);
+        let subscribers: Arc<DashMap<String, SubscriberHandle>> = Arc::new(DashMap::new());
+
+        let schema = BlockSchema::text();
+        let doc = StructuredDocument::new_text();
+
+        // Step 1: Spawn the initial subscriber.
+        spawn_subscriber_for_block(
+            block_id,
+            schema.clone(),
+            &doc,
+            reembed_tx.clone(),
+            hb_tx.clone(),
+            Arc::clone(&mount_path),
+            Arc::clone(&db),
+            Arc::clone(&subscribers),
+        );
+        assert!(
+            subscribers.contains_key(block_id),
+            "initial subscriber should be registered"
+        );
+
+        // Step 2: Simulate a crash — cancel the worker, join it, and remove
+        // the handle from the registry (exactly what the supervisor does).
+        let (_, old_handle) = subscribers.remove(block_id).unwrap();
+        old_handle.cancel.cancel();
+        // Drop the subscription before joining so the channel sender is gone.
+        drop(old_handle._subscription);
+        drop(old_handle.event_tx);
+        old_handle
+            .thread
+            .join()
+            .expect("worker thread should not panic on cancel");
+
+        assert!(
+            !subscribers.contains_key(block_id),
+            "subscriber should be absent after simulated crash removal"
+        );
+
+        // Step 3: Respawn — mirrors what the respawn closure does.
+        spawn_subscriber_for_block(
+            block_id,
+            schema,
+            &doc,
+            reembed_tx,
+            hb_tx,
+            Arc::clone(&mount_path),
+            Arc::clone(&db),
+            Arc::clone(&subscribers),
+        );
+        assert!(
+            subscribers.contains_key(block_id),
+            "respawned subscriber should be registered after crash"
+        );
+
+        // Clean up: cancel and join the respawned worker.
+        let (_, respawned) = subscribers.remove(block_id).unwrap();
+        respawned.cancel.cancel();
+        drop(respawned._subscription);
+        drop(respawned.event_tx);
+        respawned
+            .thread
+            .join()
+            .expect("respawned worker thread should not panic");
     }
 }

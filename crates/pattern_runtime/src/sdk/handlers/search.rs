@@ -8,8 +8,8 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use pattern_core::types::memory_types::SearchOptions;
 use pattern_core::traits::MemoryStore;
+use pattern_core::types::memory_types::SearchOptions;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use tidepool_eval::Value;
 
@@ -109,7 +109,9 @@ impl EffectHandler<SessionContext> for SearchHandler {
                     .search(
                         &query,
                         options.clone(),
-                        pattern_core::types::memory_types::MemorySearchScope::Agent(target_agent.as_str().into()),
+                        pattern_core::types::memory_types::MemorySearchScope::Agent(
+                            target_agent.as_str().into(),
+                        ),
                     )
                     .map_err(|e| {
                         EffectError::Handler(format!("Pattern.Search: search failed: {e}"))

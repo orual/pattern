@@ -414,10 +414,11 @@ async fn post_strategy_updates(
     })?;
 
     // Archive messages in DB.
-    pattern_db::queries::archive_messages(&conn, ctx.agent_id(), &before_position)
-        .map_err(|e| RuntimeError::ProviderError {
+    pattern_db::queries::archive_messages(&conn, ctx.agent_id(), &before_position).map_err(
+        |e| RuntimeError::ProviderError {
             reason: format!("archive_messages failed: {e}"),
-        })?;
+        },
+    )?;
 
     // Write summary row if present (RecursiveSummarization).
     if let Some(ref summary_text) = result.summary {
@@ -435,17 +436,19 @@ async fn post_strategy_updates(
             depth: 0,
             created_at: chrono::Utc::now(),
         };
-        pattern_db::queries::create_archive_summary(&conn, &summary)
-            .map_err(|e| RuntimeError::ProviderError {
+        pattern_db::queries::create_archive_summary(&conn, &summary).map_err(|e| {
+            RuntimeError::ProviderError {
                 reason: format!("create_archive_summary failed: {e}"),
-            })?;
+            }
+        })?;
     }
 
     // Reload summary head from DB.
-    let head = pattern_db::queries::get_summary_head(&conn, ctx.agent_id())
-        .map_err(|e| RuntimeError::ProviderError {
+    let head = pattern_db::queries::get_summary_head(&conn, ctx.agent_id()).map_err(|e| {
+        RuntimeError::ProviderError {
             reason: format!("get_summary_head failed: {e}"),
-        })?;
+        }
+    })?;
 
     // Update in-memory TurnHistory.
     {

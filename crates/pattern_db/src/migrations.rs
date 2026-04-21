@@ -17,12 +17,24 @@ static MEMORY_MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/memory/0002_fts5.sql")),
         M::up(include_str!("../migrations/memory/0003_model_fields.sql")),
         M::up(include_str!("../migrations/memory/0004_memory_updates.sql")),
-        M::up(include_str!("../migrations/memory/0005_archival_fts_metadata.sql")),
-        M::up(include_str!("../migrations/memory/0006_agent_atproto_endpoints.sql")),
-        M::up(include_str!("../migrations/memory/0007_add_session_id_to_atproto_endpoints.sql")),
-        M::up(include_str!("../migrations/memory/0008_member_capabilities.sql")),
-        M::up(include_str!("../migrations/memory/0009_update_frontiers.sql")),
-        M::up(include_str!("../migrations/memory/0010_collapse_block_types.sql")),
+        M::up(include_str!(
+            "../migrations/memory/0005_archival_fts_metadata.sql"
+        )),
+        M::up(include_str!(
+            "../migrations/memory/0006_agent_atproto_endpoints.sql"
+        )),
+        M::up(include_str!(
+            "../migrations/memory/0007_add_session_id_to_atproto_endpoints.sql"
+        )),
+        M::up(include_str!(
+            "../migrations/memory/0008_member_capabilities.sql"
+        )),
+        M::up(include_str!(
+            "../migrations/memory/0009_update_frontiers.sql"
+        )),
+        M::up(include_str!(
+            "../migrations/memory/0010_collapse_block_types.sql"
+        )),
     ])
 });
 
@@ -31,9 +43,9 @@ static MEMORY_MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
 // ---------------------------------------------------------------------------
 
 static MESSAGES_MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
-    Migrations::new(vec![
-        M::up(include_str!("../migrations/messages/0001_messages_init.sql")),
-    ])
+    Migrations::new(vec![M::up(include_str!(
+        "../migrations/messages/0001_messages_init.sql"
+    ))])
 });
 
 /// Apply all pending memory database migrations.
@@ -45,7 +57,6 @@ pub fn run_memory_migrations(conn: &mut Connection) -> Result<(), rusqlite_migra
 pub fn run_messages_migrations(conn: &mut Connection) -> Result<(), rusqlite_migration::Error> {
     MESSAGES_MIGRATIONS.to_latest(conn)
 }
-
 
 #[cfg(test)]
 mod tests {

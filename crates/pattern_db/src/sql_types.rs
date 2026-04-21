@@ -449,7 +449,8 @@ mod tests {
     {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute("CREATE TABLE t (v TEXT)", []).unwrap();
-        conn.execute("INSERT INTO t (v) VALUES (?1)", [&value]).unwrap();
+        conn.execute("INSERT INTO t (v) VALUES (?1)", [&value])
+            .unwrap();
 
         let stored: String = conn.query_row("SELECT v FROM t", [], |r| r.get(0)).unwrap();
         assert_eq!(stored, expected_text, "stored text mismatch for {value:?}");
@@ -465,7 +466,8 @@ mod tests {
     {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute("CREATE TABLE t (v TEXT)", []).unwrap();
-        conn.execute("INSERT INTO t (v) VALUES (?1)", [garbage]).unwrap();
+        conn.execute("INSERT INTO t (v) VALUES (?1)", [garbage])
+            .unwrap();
 
         let result = conn.query_row("SELECT v FROM t", [], |r| r.get::<_, T>(0));
         assert!(result.is_err(), "expected error for garbage '{garbage}'");

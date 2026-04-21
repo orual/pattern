@@ -233,7 +233,10 @@ fn store_update_rolls_back_seq_increment_on_insert_failure() {
 
     // store_update should fail on the UNIQUE violation.
     let result = queries::store_update(&mut conn, "block-1", &[1, 2, 3], None, None);
-    assert!(result.is_err(), "store_update should fail on UNIQUE violation");
+    assert!(
+        result.is_err(),
+        "store_update should fail on UNIQUE violation"
+    );
 
     // The critical check: last_seq must NOT have been incremented.
     // If the transaction rolled back properly, last_seq stays at 0.

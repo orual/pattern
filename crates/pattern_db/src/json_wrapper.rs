@@ -82,10 +82,12 @@ mod tests {
         conn.execute("CREATE TABLE t (data TEXT)", []).unwrap();
 
         let val = Json(serde_json::json!({"key": "value", "n": 42}));
-        conn.execute("INSERT INTO t (data) VALUES (?1)", [&val]).unwrap();
+        conn.execute("INSERT INTO t (data) VALUES (?1)", [&val])
+            .unwrap();
 
-        let result: Json<serde_json::Value> =
-            conn.query_row("SELECT data FROM t", [], |r| r.get(0)).unwrap();
+        let result: Json<serde_json::Value> = conn
+            .query_row("SELECT data FROM t", [], |r| r.get(0))
+            .unwrap();
 
         assert_eq!(result.0["key"], "value");
         assert_eq!(result.0["n"], 42);
@@ -97,10 +99,12 @@ mod tests {
         conn.execute("CREATE TABLE t (data TEXT)", []).unwrap();
 
         let val = Json(vec!["alpha".to_string(), "beta".to_string()]);
-        conn.execute("INSERT INTO t (data) VALUES (?1)", [&val]).unwrap();
+        conn.execute("INSERT INTO t (data) VALUES (?1)", [&val])
+            .unwrap();
 
-        let result: Json<Vec<String>> =
-            conn.query_row("SELECT data FROM t", [], |r| r.get(0)).unwrap();
+        let result: Json<Vec<String>> = conn
+            .query_row("SELECT data FROM t", [], |r| r.get(0))
+            .unwrap();
 
         assert_eq!(result.0, vec!["alpha", "beta"]);
     }

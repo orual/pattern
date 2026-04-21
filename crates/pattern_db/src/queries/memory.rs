@@ -103,7 +103,9 @@ pub fn get_block(conn: &rusqlite::Connection, id: &str) -> DbResult<Option<Memor
                 embedding_model, is_active, frontier, last_seq, created_at, updated_at
          FROM memory_blocks WHERE id = ?1",
     )?;
-    let result = stmt.query_row(rusqlite::params![id], MemoryBlock::from_row).optional()?;
+    let result = stmt
+        .query_row(rusqlite::params![id], MemoryBlock::from_row)
+        .optional()?;
     Ok(result)
 }
 
@@ -153,7 +155,10 @@ pub fn list_blocks_by_type(
                 embedding_model, is_active, frontier, last_seq, created_at, updated_at
          FROM memory_blocks WHERE agent_id = ?1 AND block_type = ?2 AND is_active = 1 ORDER BY label",
     )?;
-    let rows = stmt.query_map(rusqlite::params![agent_id, block_type], MemoryBlock::from_row)?;
+    let rows = stmt.query_map(
+        rusqlite::params![agent_id, block_type],
+        MemoryBlock::from_row,
+    )?;
     let mut blocks = Vec::new();
     for row in rows {
         blocks.push(row?);
@@ -424,11 +429,7 @@ pub fn update_block_pinned(conn: &rusqlite::Connection, id: &str, pinned: bool) 
 ///
 /// Note: This only updates the label in the database. The caller is responsible
 /// for ensuring no other block with the same label exists for this agent.
-pub fn update_block_label(
-    conn: &rusqlite::Connection,
-    id: &str,
-    new_label: &str,
-) -> DbResult<()> {
+pub fn update_block_label(conn: &rusqlite::Connection, id: &str, new_label: &str) -> DbResult<()> {
     conn.execute(
         "UPDATE memory_blocks SET label = ?1, updated_at = datetime('now') WHERE id = ?2",
         rusqlite::params![new_label, id],
@@ -1238,8 +1239,8 @@ pub fn get_shared_blocks(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::Agent;
     use crate::ConstellationDb;
+    use crate::models::Agent;
 
     fn setup_test_db() -> ConstellationDb {
         ConstellationDb::open_in_memory().unwrap()
@@ -1411,16 +1412,7 @@ mod tests {
 
         let original = get_block(&conn, "test-block").unwrap().unwrap();
 
-        update_block_config(
-            &mut conn,
-            "test-block",
-            None,
-            None,
-            None,
-            Some(true),
-            None,
-        )
-        .unwrap();
+        update_block_config(&mut conn, "test-block", None, None, None, Some(true), None).unwrap();
 
         let block = get_block(&conn, "test-block").unwrap().unwrap();
         assert_eq!(block.permission, original.permission);

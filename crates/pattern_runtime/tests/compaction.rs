@@ -202,8 +202,7 @@ async fn populate_history_with_empty_kept_turn(
         };
 
         let db_user = to_db_message(&user_msg, agent_id);
-        pattern_db::queries::create_message(&db.get().unwrap(), &db_user)
-            .expect("create_message");
+        pattern_db::queries::create_message(&db.get().unwrap(), &db_user).expect("create_message");
 
         let input = TurnInput {
             turn_id: turn_id.clone(),
@@ -376,8 +375,8 @@ async fn truncate_strategy_fires_and_drops_old_turns() {
     }
 
     // Verify no archive_summaries row was created.
-    let summaries = pattern_db::queries::get_archive_summaries(&db.get().unwrap(), "agent-a")
-        .unwrap();
+    let summaries =
+        pattern_db::queries::get_archive_summaries(&db.get().unwrap(), "agent-a").unwrap();
     assert!(summaries.is_empty(), "truncate should not create summaries");
 }
 
@@ -435,8 +434,8 @@ async fn recursive_summarization_fires_and_writes_summary() {
     }
 
     // Verify archive_summaries row was created.
-    let summaries = pattern_db::queries::get_archive_summaries(&db.get().unwrap(), "agent-a")
-        .unwrap();
+    let summaries =
+        pattern_db::queries::get_archive_summaries(&db.get().unwrap(), "agent-a").unwrap();
     assert_eq!(summaries.len(), 1);
     assert_eq!(summaries[0].depth, 0);
     assert!(
@@ -503,8 +502,8 @@ async fn importance_based_strategy_fires_and_drops_old_turns() {
     }
 
     // ImportanceBased does not write archive_summaries rows.
-    let summaries = pattern_db::queries::get_archive_summaries(&db.get().unwrap(), "agent-a")
-        .unwrap();
+    let summaries =
+        pattern_db::queries::get_archive_summaries(&db.get().unwrap(), "agent-a").unwrap();
     assert!(
         summaries.is_empty(),
         "importance_based should not create summary rows"
@@ -575,8 +574,8 @@ async fn time_decay_strategy_fires_and_drops_old_turns() {
     }
 
     // TimeDecay does not write archive_summaries rows.
-    let summaries = pattern_db::queries::get_archive_summaries(&db.get().unwrap(), "agent-a")
-        .unwrap();
+    let summaries =
+        pattern_db::queries::get_archive_summaries(&db.get().unwrap(), "agent-a").unwrap();
     assert!(
         summaries.is_empty(),
         "time_decay should not create summary rows"
@@ -596,8 +595,8 @@ async fn archived_messages_marked_is_archived() {
     let hist = populate_history(&db, "agent-a", 10).await;
 
     // Before compaction: all 20 messages (10 turns * 2 msgs) are non-archived.
-    let non_archived = pattern_db::queries::get_messages(&db.get().unwrap(), "agent-a", i64::MAX)
-        .unwrap();
+    let non_archived =
+        pattern_db::queries::get_messages(&db.get().unwrap(), "agent-a", i64::MAX).unwrap();
     assert_eq!(non_archived.len(), 20);
 
     let outcome = maybe_compact(&ctx, &hist, ctx.context_policy())
@@ -607,8 +606,8 @@ async fn archived_messages_marked_is_archived() {
     assert!(matches!(outcome, CompactionOutcome::Fired { .. }));
 
     // After compaction: only the kept messages should be non-archived.
-    let non_archived_after = pattern_db::queries::get_messages(&db.get().unwrap(), "agent-a", i64::MAX)
-        .unwrap();
+    let non_archived_after =
+        pattern_db::queries::get_messages(&db.get().unwrap(), "agent-a", i64::MAX).unwrap();
     // 5 kept turns * 2 messages = 10 non-archived.
     assert_eq!(
         non_archived_after.len(),

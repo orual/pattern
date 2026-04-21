@@ -154,7 +154,14 @@ pub fn update_embedding(
     content_hash: Option<&str>,
 ) -> DbResult<i64> {
     delete_embeddings(conn, content_type, content_id)?;
-    insert_embedding(conn, content_type, content_id, embedding, chunk_index, content_hash)
+    insert_embedding(
+        conn,
+        content_type,
+        content_id,
+        embedding,
+        chunk_index,
+        content_hash,
+    )
 }
 
 /// Perform KNN search over embeddings.
@@ -330,14 +337,38 @@ mod tests {
         ensure_embeddings_table(&conn, 4).unwrap();
 
         let embedding = vec![1.0f32, 0.0, 0.0, 0.0];
-        let rowid = insert_embedding(&conn, ContentType::Message, "msg_123", &embedding, None, Some("abc123")).unwrap();
+        let rowid = insert_embedding(
+            &conn,
+            ContentType::Message,
+            "msg_123",
+            &embedding,
+            None,
+            Some("abc123"),
+        )
+        .unwrap();
         assert!(rowid >= 0);
 
         let embedding2 = vec![0.9f32, 0.1, 0.0, 0.0];
-        insert_embedding(&conn, ContentType::Message, "msg_456", &embedding2, None, None).unwrap();
+        insert_embedding(
+            &conn,
+            ContentType::Message,
+            "msg_456",
+            &embedding2,
+            None,
+            None,
+        )
+        .unwrap();
 
         let embedding3 = vec![0.0f32, 0.0, 1.0, 0.0];
-        insert_embedding(&conn, ContentType::MemoryBlock, "block_789", &embedding3, Some(0), None).unwrap();
+        insert_embedding(
+            &conn,
+            ContentType::MemoryBlock,
+            "block_789",
+            &embedding3,
+            Some(0),
+            None,
+        )
+        .unwrap();
 
         let query = vec![1.0f32, 0.0, 0.0, 0.0];
         let results = knn_search(&conn, &query, 3, None).unwrap();
@@ -350,7 +381,11 @@ mod tests {
         // Search with content type filter.
         let results = knn_search(&conn, &query, 3, Some(ContentType::Message)).unwrap();
         assert_eq!(results.len(), 2);
-        assert!(results.iter().all(|r| r.content_type == ContentType::Message));
+        assert!(
+            results
+                .iter()
+                .all(|r| r.content_type == ContentType::Message)
+        );
     }
 
     #[test]
@@ -360,7 +395,15 @@ mod tests {
         ensure_embeddings_table(&conn, 4).unwrap();
 
         let embedding = vec![1.0f32, 0.0, 0.0, 0.0];
-        insert_embedding(&conn, ContentType::Message, "msg_delete_me", &embedding, None, None).unwrap();
+        insert_embedding(
+            &conn,
+            ContentType::Message,
+            "msg_delete_me",
+            &embedding,
+            None,
+            None,
+        )
+        .unwrap();
 
         let deleted = delete_embeddings(&conn, ContentType::Message, "msg_delete_me").unwrap();
         assert_eq!(deleted, 1);

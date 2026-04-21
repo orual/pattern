@@ -162,9 +162,9 @@ mod tests {
     use std::sync::Mutex;
 
     use pattern_core::memory::StructuredDocument;
-    use pattern_core::types::memory_types::*;
     use pattern_core::traits::MemoryStore;
     use pattern_core::types::block::BlockCreate;
+    use pattern_core::types::memory_types::*;
     use serde_json::Value as JsonValue;
 
     /// Test double for scope resolution. Tracks shared-blocks and group
@@ -229,23 +229,72 @@ mod tests {
 
         // ---- Stubs for the rest of MemoryStore ----
 
-        fn create_block(&self, _: &str, _: BlockCreate) -> MemoryResult<StructuredDocument> { panic!("not used in scope tests") }
-        fn get_block(&self, _: &str, _: &str) -> MemoryResult<Option<StructuredDocument>> { panic!("not used in scope tests") }
-        fn get_block_metadata(&self, _: &str, _: &str) -> MemoryResult<Option<BlockMetadata>> { panic!() }
-        fn list_blocks(&self, _: BlockFilter) -> MemoryResult<Vec<BlockMetadata>> { panic!() }
-        fn delete_block(&self, _: &str, _: &str) -> MemoryResult<()> { panic!() }
-        fn get_rendered_content(&self, _: &str, _: &str) -> MemoryResult<Option<String>> { panic!() }
-        fn persist_block(&self, _: &str, _: &str) -> MemoryResult<()> { panic!() }
-        fn mark_dirty(&self, _: &str, _: &str) { panic!() }
-        fn insert_archival(&self, _: &str, _: &str, _: Option<JsonValue>) -> MemoryResult<String> { panic!() }
-        fn search_archival(&self, _: &str, _: &str, _: usize) -> MemoryResult<Vec<ArchivalEntry>> { panic!() }
-        fn delete_archival(&self, _: &str) -> MemoryResult<()> { panic!() }
-        fn search(&self, _: &str, _: SearchOptions, _: MemorySearchScope) -> MemoryResult<Vec<MemorySearchResult>> { panic!() }
-        fn list_shared_blocks(&self, _: &str) -> MemoryResult<Vec<SharedBlockInfo>> { panic!() }
-        fn get_shared_block(&self, _: &str, _: &str, _: &str) -> MemoryResult<Option<StructuredDocument>> { panic!() }
-        fn update_block_metadata(&self, _: &str, _: &str, _: BlockMetadataPatch) -> MemoryResult<()> { panic!() }
-        fn undo_redo(&self, _: &str, _: &str, _: UndoRedoOp) -> MemoryResult<bool> { panic!() }
-        fn history_depth(&self, _: &str, _: &str) -> MemoryResult<UndoRedoDepth> { panic!() }
+        fn create_block(&self, _: &str, _: BlockCreate) -> MemoryResult<StructuredDocument> {
+            panic!("not used in scope tests")
+        }
+        fn get_block(&self, _: &str, _: &str) -> MemoryResult<Option<StructuredDocument>> {
+            panic!("not used in scope tests")
+        }
+        fn get_block_metadata(&self, _: &str, _: &str) -> MemoryResult<Option<BlockMetadata>> {
+            panic!()
+        }
+        fn list_blocks(&self, _: BlockFilter) -> MemoryResult<Vec<BlockMetadata>> {
+            panic!()
+        }
+        fn delete_block(&self, _: &str, _: &str) -> MemoryResult<()> {
+            panic!()
+        }
+        fn get_rendered_content(&self, _: &str, _: &str) -> MemoryResult<Option<String>> {
+            panic!()
+        }
+        fn persist_block(&self, _: &str, _: &str) -> MemoryResult<()> {
+            panic!()
+        }
+        fn mark_dirty(&self, _: &str, _: &str) {
+            panic!()
+        }
+        fn insert_archival(&self, _: &str, _: &str, _: Option<JsonValue>) -> MemoryResult<String> {
+            panic!()
+        }
+        fn search_archival(&self, _: &str, _: &str, _: usize) -> MemoryResult<Vec<ArchivalEntry>> {
+            panic!()
+        }
+        fn delete_archival(&self, _: &str) -> MemoryResult<()> {
+            panic!()
+        }
+        fn search(
+            &self,
+            _: &str,
+            _: SearchOptions,
+            _: MemorySearchScope,
+        ) -> MemoryResult<Vec<MemorySearchResult>> {
+            panic!()
+        }
+        fn list_shared_blocks(&self, _: &str) -> MemoryResult<Vec<SharedBlockInfo>> {
+            panic!()
+        }
+        fn get_shared_block(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> MemoryResult<Option<StructuredDocument>> {
+            panic!()
+        }
+        fn update_block_metadata(
+            &self,
+            _: &str,
+            _: &str,
+            _: BlockMetadataPatch,
+        ) -> MemoryResult<()> {
+            panic!()
+        }
+        fn undo_redo(&self, _: &str, _: &str, _: UndoRedoOp) -> MemoryResult<bool> {
+            panic!()
+        }
+        fn history_depth(&self, _: &str, _: &str) -> MemoryResult<UndoRedoDepth> {
+            panic!()
+        }
     }
 
     // ---- parse_scope tests ----
@@ -313,27 +362,21 @@ mod tests {
     #[test]
     fn resolve_current_agent_always_returns_caller() {
         let store = ScopeTestStore::new();
-        let result = resolve_scope(&SearchScope::CurrentAgent, "alice", &store)
-            
-            .unwrap();
+        let result = resolve_scope(&SearchScope::CurrentAgent, "alice", &store).unwrap();
         assert_eq!(result, vec!["alice"]);
     }
 
     #[test]
     fn resolve_agent_self_always_allowed() {
         let store = ScopeTestStore::new();
-        let result = resolve_scope(&SearchScope::Agent("alice".into()), "alice", &store)
-            
-            .unwrap();
+        let result = resolve_scope(&SearchScope::Agent("alice".into()), "alice", &store).unwrap();
         assert_eq!(result, vec!["alice"]);
     }
 
     #[test]
     fn resolve_agent_denied_without_relationship() {
         let store = ScopeTestStore::new();
-        let err = resolve_scope(&SearchScope::Agent("bob".into()), "alice", &store)
-            
-            .unwrap_err();
+        let err = resolve_scope(&SearchScope::Agent("bob".into()), "alice", &store).unwrap_err();
         assert!(err.to_string().contains("permission denied"), "got: {err}");
     }
 
@@ -341,9 +384,7 @@ mod tests {
     fn resolve_agent_allowed_via_shared_blocks() {
         let store = ScopeTestStore::new();
         store.add_shared_blocks("alice", "bob");
-        let result = resolve_scope(&SearchScope::Agent("bob".into()), "alice", &store)
-            
-            .unwrap();
+        let result = resolve_scope(&SearchScope::Agent("bob".into()), "alice", &store).unwrap();
         assert_eq!(result, vec!["bob"]);
     }
 
@@ -351,9 +392,7 @@ mod tests {
     fn resolve_agent_allowed_via_group_membership() {
         let store = ScopeTestStore::new();
         store.add_group_membership("alice", "bob");
-        let result = resolve_scope(&SearchScope::Agent("bob".into()), "alice", &store)
-            
-            .unwrap();
+        let result = resolve_scope(&SearchScope::Agent("bob".into()), "alice", &store).unwrap();
         assert_eq!(result, vec!["bob"]);
     }
 
@@ -367,7 +406,6 @@ mod tests {
             "alice",
             &store,
         )
-        
         .unwrap();
         assert_eq!(result, vec!["bob"]);
     }
@@ -380,7 +418,6 @@ mod tests {
             "alice",
             &store,
         )
-        
         .unwrap_err();
         assert!(err.to_string().contains("permission denied"), "got: {err}");
     }
@@ -394,7 +431,6 @@ mod tests {
             "alice",
             &store,
         )
-        
         .unwrap();
         assert_eq!(result, vec!["alice"]);
     }
@@ -403,18 +439,14 @@ mod tests {
     fn resolve_constellation_returns_all_agents() {
         let store = ScopeTestStore::new();
         store.set_constellation_agents(vec!["alice", "bob", "charlie"]);
-        let result = resolve_scope(&SearchScope::Constellation, "alice", &store)
-            
-            .unwrap();
+        let result = resolve_scope(&SearchScope::Constellation, "alice", &store).unwrap();
         assert_eq!(result, vec!["alice", "bob", "charlie"]);
     }
 
     #[test]
     fn resolve_constellation_empty_falls_back_to_caller() {
         let store = ScopeTestStore::new();
-        let result = resolve_scope(&SearchScope::Constellation, "alice", &store)
-            
-            .unwrap();
+        let result = resolve_scope(&SearchScope::Constellation, "alice", &store).unwrap();
         assert_eq!(result, vec!["alice"]);
     }
 }

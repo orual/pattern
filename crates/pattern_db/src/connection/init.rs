@@ -53,7 +53,10 @@ pub(crate) fn init_connection(conn: &mut Connection, messages_path: &Path) -> ru
 /// Used for test databases where both memory and messages live in shared-cache
 /// in-memory URIs. The pragmas are the same as production minus WAL/mmap
 /// (irrelevant for in-memory databases).
-pub(crate) fn init_connection_in_memory(conn: &mut Connection, msg_uri: &str) -> rusqlite::Result<()> {
+pub(crate) fn init_connection_in_memory(
+    conn: &mut Connection,
+    msg_uri: &str,
+) -> rusqlite::Result<()> {
     conn.execute_batch(
         "
         PRAGMA foreign_keys = ON;
@@ -63,10 +66,7 @@ pub(crate) fn init_connection_in_memory(conn: &mut Connection, msg_uri: &str) ->
     )?;
 
     // Attach the messages shared-cache URI as `msg`.
-    conn.execute(
-        "ATTACH DATABASE ?1 AS msg",
-        rusqlite::params![msg_uri],
-    )?;
+    conn.execute("ATTACH DATABASE ?1 AS msg", rusqlite::params![msg_uri])?;
 
     Ok(())
 }
@@ -86,17 +86,20 @@ mod tests {
         init_connection(&mut conn, &msg_path).unwrap();
 
         // Check main database pragmas.
-        let journal_mode: String =
-            conn.query_row("PRAGMA main.journal_mode", [], |r| r.get(0)).unwrap();
+        let journal_mode: String = conn
+            .query_row("PRAGMA main.journal_mode", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(journal_mode.to_lowercase(), "wal");
 
-        let fk: i64 =
-            conn.query_row("PRAGMA main.foreign_keys", [], |r| r.get(0)).unwrap();
+        let fk: i64 = conn
+            .query_row("PRAGMA main.foreign_keys", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(fk, 1);
 
         // Check msg database pragmas.
-        let msg_journal: String =
-            conn.query_row("PRAGMA msg.journal_mode", [], |r| r.get(0)).unwrap();
+        let msg_journal: String = conn
+            .query_row("PRAGMA msg.journal_mode", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(msg_journal.to_lowercase(), "wal");
     }
 
@@ -118,6 +121,7 @@ mod tests {
         assert!(msg_path.exists());
 
         // Clean up the temp table.
-        conn.execute("DROP TABLE IF EXISTS msg._init_check", []).unwrap();
+        conn.execute("DROP TABLE IF EXISTS msg._init_check", [])
+            .unwrap();
     }
 }

@@ -15,8 +15,11 @@
 //! Nothing in `pattern_core` depends on this crate.
 
 pub mod cache;
+pub mod fs;
+pub mod reembed;
 pub mod schema_templates;
 pub mod sharing;
+pub mod subscriber;
 mod types_internal;
 
 pub use cache::MemoryCache;

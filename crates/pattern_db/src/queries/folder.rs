@@ -84,7 +84,9 @@ pub fn get_folder(conn: &rusqlite::Connection, id: &str) -> DbResult<Option<Fold
         "SELECT id, name, description, path_type, path_value, embedding_model, created_at
          FROM folders WHERE id = ?1",
     )?;
-    let result = stmt.query_row(rusqlite::params![id], Folder::from_row).optional()?;
+    let result = stmt
+        .query_row(rusqlite::params![id], Folder::from_row)
+        .optional()?;
     Ok(result)
 }
 
@@ -94,7 +96,9 @@ pub fn get_folder_by_name(conn: &rusqlite::Connection, name: &str) -> DbResult<O
         "SELECT id, name, description, path_type, path_value, embedding_model, created_at
          FROM folders WHERE name = ?1",
     )?;
-    let result = stmt.query_row(rusqlite::params![name], Folder::from_row).optional()?;
+    let result = stmt
+        .query_row(rusqlite::params![name], Folder::from_row)
+        .optional()?;
     Ok(result)
 }
 
@@ -106,7 +110,9 @@ pub fn list_folders(conn: &rusqlite::Connection) -> DbResult<Vec<Folder>> {
     )?;
     let rows = stmt.query_map([], Folder::from_row)?;
     let mut folders = Vec::new();
-    for row in rows { folders.push(row?); }
+    for row in rows {
+        folders.push(row?);
+    }
     Ok(folders)
 }
 
@@ -141,29 +147,42 @@ pub fn get_file(conn: &rusqlite::Connection, id: &str) -> DbResult<Option<Folder
         "SELECT id, folder_id, name, content_type, size_bytes, content, uploaded_at, indexed_at
          FROM folder_files WHERE id = ?1",
     )?;
-    let result = stmt.query_row(rusqlite::params![id], FolderFile::from_row).optional()?;
+    let result = stmt
+        .query_row(rusqlite::params![id], FolderFile::from_row)
+        .optional()?;
     Ok(result)
 }
 
 /// Get a file by folder and name.
-pub fn get_file_by_name(conn: &rusqlite::Connection, folder_id: &str, name: &str) -> DbResult<Option<FolderFile>> {
+pub fn get_file_by_name(
+    conn: &rusqlite::Connection,
+    folder_id: &str,
+    name: &str,
+) -> DbResult<Option<FolderFile>> {
     let mut stmt = conn.prepare(
         "SELECT id, folder_id, name, content_type, size_bytes, content, uploaded_at, indexed_at
          FROM folder_files WHERE folder_id = ?1 AND name = ?2",
     )?;
-    let result = stmt.query_row(rusqlite::params![folder_id, name], FolderFile::from_row).optional()?;
+    let result = stmt
+        .query_row(rusqlite::params![folder_id, name], FolderFile::from_row)
+        .optional()?;
     Ok(result)
 }
 
 /// List files in a folder.
-pub fn list_files_in_folder(conn: &rusqlite::Connection, folder_id: &str) -> DbResult<Vec<FolderFile>> {
+pub fn list_files_in_folder(
+    conn: &rusqlite::Connection,
+    folder_id: &str,
+) -> DbResult<Vec<FolderFile>> {
     let mut stmt = conn.prepare(
         "SELECT id, folder_id, name, content_type, size_bytes, content, uploaded_at, indexed_at
          FROM folder_files WHERE folder_id = ?1 ORDER BY name",
     )?;
     let rows = stmt.query_map(rusqlite::params![folder_id], FolderFile::from_row)?;
     let mut files = Vec::new();
-    for row in rows { files.push(row?); }
+    for row in rows {
+        files.push(row?);
+    }
     Ok(files)
 }
 
@@ -179,7 +198,10 @@ pub fn mark_file_indexed(conn: &rusqlite::Connection, file_id: &str) -> DbResult
 
 /// Delete a file (cascades to passages).
 pub fn delete_file(conn: &rusqlite::Connection, id: &str) -> DbResult<bool> {
-    let count = conn.execute("DELETE FROM folder_files WHERE id = ?1", rusqlite::params![id])?;
+    let count = conn.execute(
+        "DELETE FROM folder_files WHERE id = ?1",
+        rusqlite::params![id],
+    )?;
     Ok(count > 0)
 }
 
@@ -192,7 +214,14 @@ pub fn create_passage(conn: &rusqlite::Connection, passage: &FilePassage) -> DbR
     conn.execute(
         "INSERT INTO file_passages (id, file_id, content, start_line, end_line, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params![passage.id, passage.file_id, passage.content, passage.start_line, passage.end_line, passage.created_at],
+        rusqlite::params![
+            passage.id,
+            passage.file_id,
+            passage.content,
+            passage.start_line,
+            passage.end_line,
+            passage.created_at
+        ],
     )?;
     Ok(())
 }
@@ -205,13 +234,18 @@ pub fn get_file_passages(conn: &rusqlite::Connection, file_id: &str) -> DbResult
     )?;
     let rows = stmt.query_map(rusqlite::params![file_id], FilePassage::from_row)?;
     let mut passages = Vec::new();
-    for row in rows { passages.push(row?); }
+    for row in rows {
+        passages.push(row?);
+    }
     Ok(passages)
 }
 
 /// Delete passages for a file (used before re-indexing).
 pub fn delete_file_passages(conn: &rusqlite::Connection, file_id: &str) -> DbResult<u64> {
-    let count = conn.execute("DELETE FROM file_passages WHERE file_id = ?1", rusqlite::params![file_id])?;
+    let count = conn.execute(
+        "DELETE FROM file_passages WHERE file_id = ?1",
+        rusqlite::params![file_id],
+    )?;
     Ok(count as u64)
 }
 
@@ -220,7 +254,12 @@ pub fn delete_file_passages(conn: &rusqlite::Connection, file_id: &str) -> DbRes
 // ============================================================================
 
 /// Attach a folder to an agent.
-pub fn attach_folder_to_agent(conn: &rusqlite::Connection, folder_id: &str, agent_id: &str, access: FolderAccess) -> DbResult<()> {
+pub fn attach_folder_to_agent(
+    conn: &rusqlite::Connection,
+    folder_id: &str,
+    agent_id: &str,
+    access: FolderAccess,
+) -> DbResult<()> {
     let now = Utc::now();
     conn.execute(
         "INSERT INTO folder_attachments (folder_id, agent_id, access, attached_at)
@@ -232,7 +271,11 @@ pub fn attach_folder_to_agent(conn: &rusqlite::Connection, folder_id: &str, agen
 }
 
 /// Detach a folder from an agent.
-pub fn detach_folder_from_agent(conn: &rusqlite::Connection, folder_id: &str, agent_id: &str) -> DbResult<bool> {
+pub fn detach_folder_from_agent(
+    conn: &rusqlite::Connection,
+    folder_id: &str,
+    agent_id: &str,
+) -> DbResult<bool> {
     let count = conn.execute(
         "DELETE FROM folder_attachments WHERE folder_id = ?1 AND agent_id = ?2",
         rusqlite::params![folder_id, agent_id],
@@ -241,23 +284,33 @@ pub fn detach_folder_from_agent(conn: &rusqlite::Connection, folder_id: &str, ag
 }
 
 /// Get folders attached to an agent.
-pub fn get_agent_folders(conn: &rusqlite::Connection, agent_id: &str) -> DbResult<Vec<FolderAttachment>> {
+pub fn get_agent_folders(
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+) -> DbResult<Vec<FolderAttachment>> {
     let mut stmt = conn.prepare(
         "SELECT folder_id, agent_id, access, attached_at FROM folder_attachments WHERE agent_id = ?1",
     )?;
     let rows = stmt.query_map(rusqlite::params![agent_id], FolderAttachment::from_row)?;
     let mut attachments = Vec::new();
-    for row in rows { attachments.push(row?); }
+    for row in rows {
+        attachments.push(row?);
+    }
     Ok(attachments)
 }
 
 /// Get agents with access to a folder.
-pub fn get_folder_agents(conn: &rusqlite::Connection, folder_id: &str) -> DbResult<Vec<FolderAttachment>> {
+pub fn get_folder_agents(
+    conn: &rusqlite::Connection,
+    folder_id: &str,
+) -> DbResult<Vec<FolderAttachment>> {
     let mut stmt = conn.prepare(
         "SELECT folder_id, agent_id, access, attached_at FROM folder_attachments WHERE folder_id = ?1",
     )?;
     let rows = stmt.query_map(rusqlite::params![folder_id], FolderAttachment::from_row)?;
     let mut attachments = Vec::new();
-    for row in rows { attachments.push(row?); }
+    for row in rows {
+        attachments.push(row?);
+    }
     Ok(attachments)
 }

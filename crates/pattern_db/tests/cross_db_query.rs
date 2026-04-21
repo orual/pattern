@@ -7,7 +7,9 @@
 use chrono::Utc;
 use pattern_db::{
     ConstellationDb,
-    models::{Agent, AgentStatus, MemoryBlock, MemoryBlockType, MemoryPermission, Message, MessageRole},
+    models::{
+        Agent, AgentStatus, MemoryBlock, MemoryBlockType, MemoryPermission, Message, MessageRole,
+    },
     queries,
 };
 

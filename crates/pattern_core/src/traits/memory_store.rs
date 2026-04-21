@@ -57,18 +57,11 @@ pub trait MemoryStore: Send + Sync + fmt::Debug + 'static {
     /// The returned document includes all metadata and is already cached.
     /// Construction parameters are bundled in [`BlockCreate`] to prevent
     /// positional-argument transposition across the six scalar fields.
-    fn create_block(
-        &self,
-        agent_id: &str,
-        create: BlockCreate,
-    ) -> MemoryResult<StructuredDocument>;
+    fn create_block(&self, agent_id: &str, create: BlockCreate)
+    -> MemoryResult<StructuredDocument>;
 
     /// Get a block's document for reading/writing.
-    fn get_block(
-        &self,
-        agent_id: &str,
-        label: &str,
-    ) -> MemoryResult<Option<StructuredDocument>>;
+    fn get_block(&self, agent_id: &str, label: &str) -> MemoryResult<Option<StructuredDocument>>;
 
     /// Get block metadata without loading the document.
     fn get_block_metadata(
@@ -95,11 +88,7 @@ pub trait MemoryStore: Send + Sync + fmt::Debug + 'static {
     // ========== Content Operations ==========
 
     /// Get rendered content for context (respects schema).
-    fn get_rendered_content(
-        &self,
-        agent_id: &str,
-        label: &str,
-    ) -> MemoryResult<Option<String>>;
+    fn get_rendered_content(&self, agent_id: &str, label: &str) -> MemoryResult<Option<String>>;
 
     /// Persist any pending changes for a block.
     fn persist_block(&self, agent_id: &str, label: &str) -> MemoryResult<()>;

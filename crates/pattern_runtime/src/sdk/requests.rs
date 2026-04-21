@@ -76,10 +76,7 @@ mod parity {
             "SearchReq",
             &["SearchMessages", "SearchArchival", "SearchAll"],
         ),
-        (
-            "RecallReq",
-            &["RecallInsert", "RecallSearch", "RecallGet"],
-        ),
+        ("RecallReq", &["RecallInsert", "RecallSearch", "RecallGet"]),
         ("MessageReq", &["Ask", "Send", "Reply", "Notify"]),
         ("ShellReq", &["Execute", "Spawn", "Kill", "Status"]),
         ("FileReq", &["Read", "Write", "ListDir"]),

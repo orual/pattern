@@ -695,8 +695,8 @@ fn seed_persona_memory_blocks(
         pattern_core::types::snapshot::MemoryBlockSpec,
     >,
 ) -> Result<(), RuntimeError> {
-    use pattern_core::types::memory_types::{BlockSchema, BlockType, MemoryType};
     use pattern_core::types::block::BlockCreate;
+    use pattern_core::types::memory_types::{BlockSchema, BlockType, MemoryType};
 
     for (label, spec) in memory_blocks {
         // shared_id is a planned feature for constellation-level cross-agent
@@ -741,11 +741,12 @@ fn seed_persona_memory_blocks(
             create = create.with_char_limit(limit);
         }
 
-        let doc = store.create_block(agent_id, create).map_err(|e| {
-            RuntimeError::SessionPoisoned {
-                reason: format!("memory seed: create_block({label}) failed: {e}"),
-            }
-        })?;
+        let doc =
+            store
+                .create_block(agent_id, create)
+                .map_err(|e| RuntimeError::SessionPoisoned {
+                    reason: format!("memory seed: create_block({label}) failed: {e}"),
+                })?;
 
         // Schema-dispatched import of the initial content.
         doc.import_from_json(&spec.content)
@@ -765,11 +766,11 @@ fn seed_persona_memory_blocks(
                 })?;
         }
 
-        store
-            .persist_block(agent_id, label.as_str())
-            .map_err(|e| RuntimeError::SessionPoisoned {
+        store.persist_block(agent_id, label.as_str()).map_err(|e| {
+            RuntimeError::SessionPoisoned {
                 reason: format!("memory seed: persist_block({label}) failed: {e}"),
-            })?;
+            }
+        })?;
     }
     Ok(())
 }
@@ -1027,7 +1028,6 @@ mod tests {
             );
 
         seed_persona_memory_blocks(store_dyn.as_ref(), "agent-perm", &persona.memory_blocks)
-            
             .expect("seed should succeed");
 
         // Check the read-only block — permission must be preserved.
@@ -1081,8 +1081,7 @@ mod tests {
             .with_memory_block("shared_notes", spec_with_shared);
 
         let result =
-            seed_persona_memory_blocks(store_dyn.as_ref(), "agent-shared", &persona.memory_blocks)
-                ;
+            seed_persona_memory_blocks(store_dyn.as_ref(), "agent-shared", &persona.memory_blocks);
 
         match result {
             Err(RuntimeError::SharedBlockRefNotSupported { label, shared_id }) => {

@@ -20,7 +20,21 @@ loro = { version = "1.10", features = ["counter"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+# Serialization formats
+kdl = "6"
+blake3 = { workspace = true }
+
+# Sync subscriber worker
+crossbeam-channel = "0.5"
+tokio-util = { version = "0.7", features = ["rt"] }
+metrics = "0.24"
+
+# File system watcher
+notify = "8"
+notify-debouncer-full = "0.5"
+
 # Errors + logging
+thiserror = { workspace = true }
 tracing = { workspace = true }
 
 # Utilities inherited from the original pattern_core::memory surface
@@ -31,6 +45,8 @@ uuid = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 tempfile = { workspace = true }
+proptest = "1"
+insta = { version = "1", features = ["yaml"] }
 
 [lints]
 workspace = true

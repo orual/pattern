@@ -19,11 +19,7 @@ async fn twenty_concurrent_callers_complete_without_deadlock() {
             tokio::task::spawn_blocking(move || {
                 let conn = db.get().expect("failed to get connection from pool");
                 let val: i64 = conn
-                    .query_row(
-                        "SELECT ?1",
-                        rusqlite::params![i as i64],
-                        |r| r.get(0),
-                    )
+                    .query_row("SELECT ?1", rusqlite::params![i as i64], |r| r.get(0))
                     .expect("query failed");
                 assert_eq!(val, i as i64);
             })
@@ -33,14 +29,11 @@ async fn twenty_concurrent_callers_complete_without_deadlock() {
     }
 
     // All 20 tasks must complete within 10 seconds.
-    let timeout_result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        async {
-            for handle in handles {
-                handle.await.expect("task panicked");
-            }
-        },
-    )
+    let timeout_result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        for handle in handles {
+            handle.await.expect("task panicked");
+        }
+    })
     .await;
 
     assert!(

@@ -23,7 +23,7 @@ Pattern v3 Memory Rework — extracts the memory subsystem from `pattern_core`, 
 ### Storage backend (sync, rusqlite)
 
 - `pattern_db` migrated from `sqlx` to `rusqlite` across all ~236 queries across `pattern_db/src/` (verified via grep on 2026-04-19)
-- `MemoryStore` trait sync-ified and audited down from 28 methods to ~18 via collapse (`list_blocks` variants merged behind a `BlockFilter` type; `update_block_metadata(id, patch)` replaces four separate setters; `undo_redo(op, label)` and `history_depth` replace four separate methods; `search(scope)` replaces `search` + `search_all`)
+- `MemoryStore` trait sync-ified and audited down from 28 methods to 19 via collapse (`list_blocks` variants merged behind a `BlockFilter` type; `update_block_metadata(id, patch)` replaces four separate setters; `undo_redo(op, label)` and `history_depth` replace four separate methods; `search(scope)` replaces `search` + `search_all`)
 - `async_trait` usage removed from `MemoryStore` specifically; pattern_core retains `async_trait` dep for the 8 other traits with genuine async needs (ProviderClient, DataStream, EmbeddingProvider, etc.)
 - FTS5 + `sqlite-vec` revalidated under rusqlite with regression coverage (BM25 scoring, `highlight`/`snippet`, hybrid score fusion)
 - Connection pooling via `r2d2-sqlite` for async callsites (wrapped in `spawn_blocking` only for DB operations, not for cheap sync calls); eval worker owns a dedicated `Connection` outside the pool for its session lifetime
@@ -61,7 +61,7 @@ Pattern v3 Memory Rework — extracts the memory subsystem from `pattern_core`, 
   - Skill blocks (Plan 2) → `.md` with YAML frontmatter
 - Loro snapshots persisted alongside as the merge-authoritative CRDT state for concurrent-write resolution
 - `memory.db` holds: FTS5 indexes, vector embeddings, archival entries, block metadata, loro update log — **not** block content
-- Storage topology: **loro-primary with per-doc subscribers**. Writes go to loro; `doc.subscribe_root` callbacks fire post-commit; per-doc `sync_worker` tokio tasks emit the canonical file and update indexes (debounced 50ms). See Architecture for full detail.
+- Storage topology: **loro-primary with per-doc subscribers**. Writes go to loro; `doc.subscribe_local_update` callbacks fire post-commit; per-doc `sync_worker` OS threads emit the canonical file and update indexes (debounced 50ms). See Architecture for full detail. (Note: design originally referenced `subscribe_root`; the implementation uses `subscribe_local_update` which carries the actual update bytes needed by the worker channel, avoiding a separate export step.)
 - `LoroValue ↔ KdlDocument` conversion is hand-written (no serde); uses the kdl crate's `KdlDocument`/`KdlNode`/`KdlEntry` types; round-trip fidelity per the crate's format-preservation contract
 - Disk ↔ memory synchronization adapted from `rewrite-staging/runtime_subsystems/data_source/file_source.rs` (notify-watcher, conflict detection, bidirectional subscriptions)
 - Human edits to canonical files reconciled via loro CRDT merge on read (concurrent-write treatment, not overwrite)
@@ -192,7 +192,7 @@ Future v3 plans follow this one:
 ### v3-memory-rework.AC4: MemoryStore sync-ification + surface audit
 
 - **v3-memory-rework.AC4.1 Success:** `MemoryStore` trait has no `#[async_trait]` decorator
-- **v3-memory-rework.AC4.2 Success:** Trait has 18 methods matching the consolidated surface (audited down from 28); consolidation detail captured in trait-method doc comments
+- **v3-memory-rework.AC4.2 Success:** Trait has 19 methods matching the consolidated surface (audited down from 28); consolidation detail captured in trait-method doc comments
 - **v3-memory-rework.AC4.3 Success:** `list_blocks(BlockFilter)` replaces the three previous variants; every filter combination works
 - **v3-memory-rework.AC4.4 Success:** `update_block_metadata(id, BlockMetadataPatch)` correctly updates specified fields and leaves others untouched
 - **v3-memory-rework.AC4.5 Success:** `undo_redo(label, UndoRedoOp)` + `history_depth(label)` produce equivalent behavior to the four removed methods
@@ -313,7 +313,7 @@ Future v3 plans follow this one:
 - **persona**: A named agent identity in Pattern, defined by a set of instructions, memory blocks, and configuration. A persona can be global (shared across projects) or project-scoped (defined inside a mount and invisible to other projects).
 - **mount**: A directory managed by Pattern as a block store for a specific project. Contains block files, a `memory.db`, a `.pattern.kdl` config, and optionally a `personas/` and `lib/` directory.
 - **`.pattern.kdl`**: A new per-mount configuration file in KDL format that specifies the storage mode, persona bindings, isolation policy, and jj options for that mount. Separate from Pattern's existing TOML config files.
-- **MemoryStore**: The central synchronous trait defining the contract for reading and writing memory blocks. After this plan, it has 18 methods and no async trait machinery.
+- **MemoryStore**: The central synchronous trait defining the contract for reading and writing memory blocks. After this plan, it has 19 methods and no async trait machinery.
 - **MemoryScope**: A wrapper type around a `MemoryStore` that routes reads and writes according to an `isolate_from_persona` policy, controlling how much of a persona's memory bleeds into a project context.
 - **BlockType**: An enum classifying a memory block as either `Core` (always in context) or `Working` (loaded on demand). This plan removes the previous `Archival` and `Log` variants, which were conflations of tier and schema.
 - **BlockSchema**: The structural shape of a block's content — `Text`, `Map`, `List`, `Log`, or `Composite`. Orthogonal to `BlockType`; a `Log`-schema block can live in either the `Core` or `Working` tier.
@@ -331,7 +331,7 @@ Future v3 plans follow this one:
 - **WAL**: Write-Ahead Logging. A SQLite journal mode that improves concurrency by writing changes to a separate log file before applying them to the main database. Pattern enables WAL for all connections via `PRAGMA journal_mode=WAL`.
 - **ATTACH DATABASE**: A SQLite statement that connects a second SQLite file to an existing connection under a named schema alias. Pattern uses this to attach `messages.db` as schema `msg` on every connection, enabling cross-database queries without opening a second connection.
 - **quiesce**: A pre-commit step that drains all in-flight subscriber tasks, checkpoints the WAL (`PRAGMA wal_checkpoint(TRUNCATE)`), and fsyncs emitted files. Ensures the on-disk state is canonical and resumable before a VCS commit.
-- **sync_worker**: A per-LoroDoc tokio task that receives commit notifications from Loro's `subscribe_root` callback, debounces them 50ms, and then emits the canonical file, updates FTS5 indexes, and queues re-embedding. Supervised for liveness.
+- **sync_worker**: A per-LoroDoc OS thread that receives commit notifications from Loro's `subscribe_local_update` callback via a crossbeam channel, debounces them 50ms, and then emits the canonical file, updates FTS5 indexes, and queues re-embedding. Supervised for liveness by an async tokio task. (`subscribe_local_update` replaced `subscribe_root` in the implementation because it delivers the update bytes directly, eliminating a redundant export step.)
 - **jj**: Jujutsu, a modern version control system used by Pattern to manage history for memory state (Modes B and C). Pattern shells out to the `jj` CLI rather than embedding jj-lib.
 - **jj workspace**: A jj concept analogous to a git worktree — a working copy checked out from a jj repository. The jj CLI adapter uses workspace operations to support subagent fork semantics in future plans.
 - **kdl**: The KDL Document Language — a human-readable, typed data format used for Pattern's `.pattern.kdl` config files and for serializing `Map`, `List`, and `Composite` block schemas to disk. The `kdl` Rust crate provides parsing and round-trip-faithful serialization.
@@ -390,7 +390,7 @@ fn init_connection(conn: &mut Connection, messages_path: &Path) -> Result<()>:
 - **Migration runner strategy**: `rusqlite_migration` operates on a single connection but does not have first-class support for attached databases. The design splits migrations into two directories: `pattern_db/migrations/memory/` and `pattern_db/migrations/messages/`. At `ConstellationDb::open`, the memory migrations run against the main connection, then the messages migrations run via a temporarily-opened direct connection to `messages.db` (outside the pool). Both migration runs are complete before the pool hands out any connections.
 - sqlite-vec extensions loaded via `load_extension_enable` apply to all attached databases on that connection, so vector indexes work in both `memory.db` and `messages.db` schemas.
 
-`MemoryStore` is sync-ified. 28 original methods consolidate to ~18:
+`MemoryStore` is sync-ified. 28 original methods consolidate to 19:
 
 - `list_blocks`, `list_blocks_by_type`, `list_all_blocks_by_label_prefix` → one `list_blocks(filter: BlockFilter)`
 - `set_block_pinned`, `set_block_type`, `update_block_schema`, `update_block_description` → one `update_block_metadata(id, patch: BlockMetadataPatch)`
@@ -439,13 +439,13 @@ Block writes apply to a LoroDoc and commit. The LoroDoc's own subscription machi
 ```
 MemoryStore::put_block(agent_id, label, content)
   1. apply change to LoroDoc (in-memory)
-  2. doc.commit()  ─────────────┐  fires doc.subscribe_root callbacks
+  2. doc.commit()  ─────────────┐  fires doc.subscribe_local_update callbacks
   3. persist loro delta         │
      to memory.db updates log   │
   4. return to caller           │
                                 ▼
-                   sync_worker task per loaded doc
-                     (tokio task; supervised)
+                   sync_worker per loaded doc
+                     (OS thread; supervised by async task)
                      ├── debounce 50ms
                      ├── borrow pool connection
                      ├── emit canonical file (md/kdl/jsonl)
@@ -466,7 +466,9 @@ Key properties:
 - **Idempotent**: on crash, restart emits current doc state. Loro is the truth; files are derived.
 - **Supervisor**: one supervisor per `MemoryCache` instance watches all sync_worker tasks. 30s heartbeat timeout → log ERROR, restart worker, increment `metrics::counter!("memory.sync_worker.restart")`. `metrics::gauge!("memory.sync_worker.active")` exposes active subscriber count for observability and scaling data.
 
-**Scale expectations**: pattern's typical workload is 10-50 active personas × 5-20 loaded blocks = 50-1000 potentially-subscribable docs. Per-task memory is ~2KB (tokio task + channel + debounce timer + doc Arc), giving total subscriber overhead of ~100KB-2MB. Task count well within tokio's operating range. A future pool-of-workers optimization is possible if observability data shows task count becoming meaningful, but it's not part of this plan.
+**Why OS threads, not tokio tasks** (2026-04 implementation note): sync_worker workload is sync-dominant — rusqlite FTS5 updates, file I/O, blake3 hashing. A tokio task wrapping `spawn_blocking` for every step would be needless overhead for a 50-sub-1000 active-worker scale. Loro's `subscribe_local_update` callback is already synchronous. The supervisor that watches heartbeats is async (tokio task) because it naturally multiplexes across N workers; the workers themselves are plain `std::thread::spawn`ed with `crossbeam-channel` intake + `tokio_util::sync::CancellationToken` for cross-thread cancel. The library-first survey (`docs/implementation-plans/2026-04-19-v3-memory-rework/phase_04.md` -- Task 5's library-first audit block) confirmed no single focused crate wraps this pattern; we compose stdlib threads + crossbeam + tokio-util + a hand-rolled ~60-line supervisor.
+
+**Scale expectations**: pattern's typical workload is 10-50 active personas x 5-20 loaded blocks = 50-1000 potentially-subscribable docs. Per-thread memory is ~8KB (OS thread stack + channel + debounce timer + doc Arc), giving total subscriber overhead of ~400KB-8MB. Thread count well within OS limits. A future pool-of-workers optimization is possible if observability data shows thread count becoming meaningful, but it's not part of this plan.
 
 ### LoroValue ↔ KDL serialization policy
 
@@ -721,7 +723,7 @@ The foundation plan established the three-segment cache layout (system + instruc
 
 - **`pattern_memory` is a new crate**, extracted from `pattern_core::memory::*`. `pattern_core` shrinks to trait-only deepened: the memory trait + data types stay; all implementation code moves.
 - **`pattern_db` backend swap**: `sqlx` → `rusqlite`. All ~339 queries rewrite. Pool management shifts from `sqlx::SqlitePool` to `r2d2::Pool<SqliteConnectionManager>`. Migration runner shifts from `sqlx-cli prepare` to `rusqlite_migration`.
-- **`MemoryStore` becomes sync**. `async_trait` removed from the trait; 28 async methods become sync; trait surface audited from 28 → ~18 via consolidation.
+- **`MemoryStore` becomes sync**. `async_trait` removed from the trait; 28 async methods become sync; trait surface audited from 28 → 19 via consolidation.
 - **Eval worker loses its tokio runtime**. Multi-thread tokio + block_on bridging replaced by a plain OS thread driven by `std::sync::mpsc`.
 - **Block content moves out of `memory.db`**. Storage becomes file-system canonical (md/kdl/jsonl); `memory.db` holds indexes + archival + metadata only.
 - **Messages storage splits from memory storage**. New `messages.db` attached via `ATTACH DATABASE`. Backup/restore machinery is new surface.
@@ -813,7 +815,7 @@ Removing `BlockType::Archival` and `BlockType::Log` variants touches 12 files ac
 <!-- START_PHASE_3 -->
 ### Phase 3: MemoryStore sync + surface audit + eval worker simplification + async callsite migration
 
-**Goal:** `MemoryStore` is sync, consolidated down to 18 methods. Eval worker runs on a plain OS thread. Async callsites use `spawn_blocking` only for DB ops. Session::step's internal path no longer uses `block_on`.
+**Goal:** `MemoryStore` is sync, consolidated down to 19 methods. Eval worker runs on a plain OS thread. Async callsites use `spawn_blocking` only for DB ops. Session::step's internal path no longer uses `block_on`.
 
 **Components:**
 - Desync `MemoryStore` trait: remove `#[async_trait]`, change all 28 methods to `fn` returning `MemoryResult<T>` directly
@@ -1107,7 +1109,7 @@ Removing `Pattern.Memory.Archive.delete` from the agent-facing SDK has an explic
 
 These are distinct components with superficially similar names. Clarified here for implementor clarity:
 - **eval worker** (singular, per-session): the OS thread in `pattern_runtime::agent_loop::eval_worker` that runs Tidepool's Haskell evaluator. Sync thread, `std::sync::mpsc` intake, no tokio runtime. Runs agent turn-loops.
-- **sync_worker** (plural, per-LoroDoc): tokio tasks in `pattern_memory::subscriber` that receive loro commit events, debounce, and emit canonical files + index updates. Async tasks, tokio channels, borrow from the r2d2 pool per work unit. Run storage sync.
+- **sync_worker** (plural, per-LoroDoc): OS threads in `pattern_memory::subscriber` that receive loro commit events via crossbeam channels, debounce, and emit canonical files + index updates. Sync threads, crossbeam channels, borrow from the r2d2 pool per work unit. Supervised by an async tokio task that watches heartbeats. Run storage sync.
 
 Commit messages and comments should prefer the full names (`eval worker` and `sync_worker`) to avoid confusion.
 

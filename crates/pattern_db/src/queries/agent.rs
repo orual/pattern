@@ -2,9 +2,9 @@
 
 use rusqlite::OptionalExtension;
 
+use crate::Json;
 use crate::error::DbResult;
 use crate::models::{Agent, AgentGroup, AgentStatus, GroupMember, GroupMemberRole};
-use crate::Json;
 
 // ============================================================================
 // from_row implementations
@@ -66,7 +66,9 @@ pub fn get_agent(conn: &rusqlite::Connection, id: &str) -> DbResult<Option<Agent
                 config, enabled_tools, tool_rules, status, created_at, updated_at
          FROM agents WHERE id = ?1",
     )?;
-    let result = stmt.query_row(rusqlite::params![id], Agent::from_row).optional()?;
+    let result = stmt
+        .query_row(rusqlite::params![id], Agent::from_row)
+        .optional()?;
     Ok(result)
 }
 
@@ -77,7 +79,9 @@ pub fn get_agent_by_name(conn: &rusqlite::Connection, name: &str) -> DbResult<Op
                 config, enabled_tools, tool_rules, status, created_at, updated_at
          FROM agents WHERE name = ?1",
     )?;
-    let result = stmt.query_row(rusqlite::params![name], Agent::from_row).optional()?;
+    let result = stmt
+        .query_row(rusqlite::params![name], Agent::from_row)
+        .optional()?;
     Ok(result)
 }
 
@@ -245,7 +249,9 @@ pub fn get_group(conn: &rusqlite::Connection, id: &str) -> DbResult<Option<Agent
         "SELECT id, name, description, pattern_type, pattern_config, created_at, updated_at
          FROM agent_groups WHERE id = ?1",
     )?;
-    let result = stmt.query_row(rusqlite::params![id], AgentGroup::from_row).optional()?;
+    let result = stmt
+        .query_row(rusqlite::params![id], AgentGroup::from_row)
+        .optional()?;
     Ok(result)
 }
 
@@ -255,7 +261,9 @@ pub fn get_group_by_name(conn: &rusqlite::Connection, name: &str) -> DbResult<Op
         "SELECT id, name, description, pattern_type, pattern_config, created_at, updated_at
          FROM agent_groups WHERE name = ?1",
     )?;
-    let result = stmt.query_row(rusqlite::params![name], AgentGroup::from_row).optional()?;
+    let result = stmt
+        .query_row(rusqlite::params![name], AgentGroup::from_row)
+        .optional()?;
     Ok(result)
 }
 
@@ -528,8 +536,8 @@ pub fn agents_share_group(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{AgentStatus, PatternType};
     use crate::ConstellationDb;
+    use crate::models::{AgentStatus, PatternType};
     use chrono::Utc;
 
     fn setup_test_db() -> ConstellationDb {
@@ -666,21 +674,29 @@ mod tests {
         make_test_group(&conn, "group1", "Group 1");
         make_test_group(&conn, "group2", "Group 2");
 
-        add_group_member(&conn, &GroupMember {
-            group_id: "group1".to_string(),
-            agent_id: "agent1".to_string(),
-            role: Some(Json(GroupMemberRole::Regular)),
-            capabilities: Json(vec![]),
-            joined_at: Utc::now(),
-        }).unwrap();
+        add_group_member(
+            &conn,
+            &GroupMember {
+                group_id: "group1".to_string(),
+                agent_id: "agent1".to_string(),
+                role: Some(Json(GroupMemberRole::Regular)),
+                capabilities: Json(vec![]),
+                joined_at: Utc::now(),
+            },
+        )
+        .unwrap();
 
-        add_group_member(&conn, &GroupMember {
-            group_id: "group2".to_string(),
-            agent_id: "agent2".to_string(),
-            role: Some(Json(GroupMemberRole::Regular)),
-            capabilities: Json(vec![]),
-            joined_at: Utc::now(),
-        }).unwrap();
+        add_group_member(
+            &conn,
+            &GroupMember {
+                group_id: "group2".to_string(),
+                agent_id: "agent2".to_string(),
+                role: Some(Json(GroupMemberRole::Regular)),
+                capabilities: Json(vec![]),
+                joined_at: Utc::now(),
+            },
+        )
+        .unwrap();
 
         assert!(!agents_share_group(&conn, "agent1", "agent2").unwrap());
     }

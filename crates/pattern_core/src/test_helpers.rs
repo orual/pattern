@@ -11,12 +11,12 @@ pub mod memory {
 
     use crate::memory::StructuredDocument;
     use crate::traits::MemoryStore;
+    use crate::types::block::BlockCreate;
     use crate::types::memory_types::{
         ArchivalEntry, BlockFilter, BlockMetadata, BlockMetadataPatch, BlockSchema, BlockType,
         MemoryResult, MemorySearchResult, MemorySearchScope, SearchOptions, SharedBlockInfo,
         UndoRedoDepth, UndoRedoOp,
     };
-    use crate::types::block::BlockCreate;
 
     /// Configurable mock MemoryStore for testing different block configurations.
     ///

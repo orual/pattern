@@ -182,8 +182,7 @@ fn create_test_archival_entry(
         parent_entry_id: parent_id.map(|s| s.to_string()),
         created_at: Utc::now(),
     };
-    queries::create_archival_entry(&db.get().unwrap(), &entry)
-        .unwrap();
+    queries::create_archival_entry(&db.get().unwrap(), &entry).unwrap();
     entry
 }
 
@@ -206,8 +205,7 @@ fn create_test_archive_summary(
         depth: if previous_id.is_some() { 1 } else { 0 },
         created_at: Utc::now(),
     };
-    queries::create_archive_summary(&db.get().unwrap(), &summary)
-        .unwrap();
+    queries::create_archive_summary(&db.get().unwrap(), &summary).unwrap();
     summary
 }
 
@@ -590,8 +588,7 @@ async fn test_agent_export_import_roundtrip() {
     assert_agents_match(&agent, &imported_agent, true);
 
     // Verify memory blocks
-    let imported_blocks = queries::list_blocks(&target_db.get().unwrap(), "agent-001")
-        .unwrap();
+    let imported_blocks = queries::list_blocks(&target_db.get().unwrap(), "agent-001").unwrap();
     assert_eq!(imported_blocks.len(), 3);
 
     for original in [&block_persona, &block_scratchpad, &block_archive] {
@@ -603,18 +600,18 @@ async fn test_agent_export_import_roundtrip() {
     }
 
     // Verify messages
-    let imported_messages = queries::get_messages_with_archived(&target_db.get().unwrap(), "agent-001", 100)
-        .unwrap();
+    let imported_messages =
+        queries::get_messages_with_archived(&target_db.get().unwrap(), "agent-001", 100).unwrap();
     assert_eq!(imported_messages.len(), 20);
 
     // Verify archival entries
-    let imported_entries = queries::list_archival_entries(&target_db.get().unwrap(), "agent-001", 100, 0)
-        .unwrap();
+    let imported_entries =
+        queries::list_archival_entries(&target_db.get().unwrap(), "agent-001", 100, 0).unwrap();
     assert_eq!(imported_entries.len(), 2);
 
     // Verify archive summaries
-    let imported_summaries = queries::get_archive_summaries(&target_db.get().unwrap(), "agent-001")
-        .unwrap();
+    let imported_summaries =
+        queries::get_archive_summaries(&target_db.get().unwrap(), "agent-001").unwrap();
     assert_eq!(imported_summaries.len(), 2);
 }
 
@@ -717,8 +714,8 @@ async fn test_group_full_export_import_roundtrip() {
     assert_groups_match(&group, &imported_group, true);
 
     // Verify members
-    let imported_members = queries::get_group_members(&target_db.get().unwrap(), "group-001")
-        .unwrap();
+    let imported_members =
+        queries::get_group_members(&target_db.get().unwrap(), "group-001").unwrap();
     assert_eq!(imported_members.len(), 2);
 
     // Verify agents
@@ -742,8 +739,7 @@ async fn test_group_thin_export() {
     create_test_agent(&source_db, "agent-002", "Agent Two");
     create_test_messages(&source_db, "agent-001", 50);
 
-    let group =
-        create_test_group(&source_db, "group-001", "Test Group", PatternType::Dynamic);
+    let group = create_test_group(&source_db, "group-001", "Test Group", PatternType::Dynamic);
     add_agent_to_group(&source_db, "group-001", "agent-001", None, vec![]);
     add_agent_to_group(&source_db, "group-001", "agent-002", None, vec![]);
 
@@ -843,8 +839,7 @@ async fn test_constellation_export_import_roundtrip() {
         "Group One",
         PatternType::RoundRobin,
     );
-    let _group2 =
-        create_test_group(&source_db, "group-002", "Group Two", PatternType::Pipeline);
+    let _group2 = create_test_group(&source_db, "group-002", "Group Two", PatternType::Pipeline);
 
     // Agent 1 is in both groups, Agent 2 is only in group 1
     add_agent_to_group(
@@ -910,10 +905,10 @@ async fn test_constellation_export_import_roundtrip() {
     assert_eq!(imported_groups.len(), 2);
 
     // Verify group membership
-    let group1_members = queries::get_group_members(&target_db.get().unwrap(), "group-001")
-        .unwrap();
-    let group2_members = queries::get_group_members(&target_db.get().unwrap(), "group-002")
-        .unwrap();
+    let group1_members =
+        queries::get_group_members(&target_db.get().unwrap(), "group-001").unwrap();
+    let group2_members =
+        queries::get_group_members(&target_db.get().unwrap(), "group-002").unwrap();
     assert_eq!(group1_members.len(), 2);
     assert_eq!(group2_members.len(), 1);
 }
@@ -1000,8 +995,8 @@ async fn test_shared_memory_block_roundtrip() {
     assert_memory_blocks_match(&shared_block, &imported_block, true);
 
     // Verify sharing relationships
-    let attachments = queries::list_block_shared_agents(&target_db.get().unwrap(), "shared-block-001")
-        .unwrap();
+    let attachments =
+        queries::list_block_shared_agents(&target_db.get().unwrap(), "shared-block-001").unwrap();
     assert_eq!(attachments.len(), 2);
 
     let agent2_attachment = attachments
@@ -1177,8 +1172,7 @@ async fn test_message_chunking() {
 
     // Verify all messages imported correctly and in order
     let imported_messages =
-        queries::get_messages_with_archived(&target_db.get().unwrap(), "agent-001", 10000)
-            .unwrap();
+        queries::get_messages_with_archived(&target_db.get().unwrap(), "agent-001", 10000).unwrap();
     assert_eq!(imported_messages.len(), message_count);
 
     // Messages should be in order by position
@@ -1235,13 +1229,11 @@ async fn test_import_with_id_remapping() {
     assert_ne!(result.agent_ids[0], "original-agent-id");
 
     // Original ID should not exist
-    let original = queries::get_agent(&target_db.get().unwrap(), "original-agent-id")
-        .unwrap();
+    let original = queries::get_agent(&target_db.get().unwrap(), "original-agent-id").unwrap();
     assert!(original.is_none());
 
     // New ID should exist
-    let new_agent = queries::get_agent(&target_db.get().unwrap(), &result.agent_ids[0])
-        .unwrap();
+    let new_agent = queries::get_agent(&target_db.get().unwrap(), &result.agent_ids[0]).unwrap();
     assert!(new_agent.is_some());
     let new_agent = new_agent.unwrap();
 
@@ -1328,12 +1320,11 @@ async fn test_export_without_messages() {
     assert_eq!(result.message_count, 0);
 
     // Agent exists but no messages
-    let agent = queries::get_agent(&target_db.get().unwrap(), "agent-001")
-        .unwrap();
+    let agent = queries::get_agent(&target_db.get().unwrap(), "agent-001").unwrap();
     assert!(agent.is_some());
 
-    let messages = queries::get_messages_with_archived(&target_db.get().unwrap(), "agent-001", 100)
-        .unwrap();
+    let messages =
+        queries::get_messages_with_archived(&target_db.get().unwrap(), "agent-001", 100).unwrap();
     assert!(messages.is_empty());
 }
 
@@ -1377,8 +1368,8 @@ async fn test_export_without_archival() {
     // No archival entries imported
     assert_eq!(result.archival_entry_count, 0);
 
-    let entries = queries::list_archival_entries(&target_db.get().unwrap(), "agent-001", 100, 0)
-        .unwrap();
+    let entries =
+        queries::list_archival_entries(&target_db.get().unwrap(), "agent-001", 100, 0).unwrap();
     assert!(entries.is_empty());
 }
 
@@ -1413,8 +1404,7 @@ async fn test_batch_id_consistency_across_chunks() {
             is_deleted: false,
             created_at: Utc::now(),
         };
-        queries::create_message(&source_db.get().unwrap(), &msg)
-            .unwrap();
+        queries::create_message(&source_db.get().unwrap(), &msg).unwrap();
     }
 
     // Export with small chunk size to force multiple chunks
@@ -1446,12 +1436,7 @@ async fn test_batch_id_consistency_across_chunks() {
     // All messages in the batch should have the same (new) batch_id
     let conn = target_db.get().unwrap();
     let agent_id = queries::list_agents(&conn).unwrap()[0].id.clone();
-    let imported_messages = queries::get_messages_with_archived(
-        &conn,
-        &agent_id,
-        100,
-    )
-    .unwrap();
+    let imported_messages = queries::get_messages_with_archived(&conn, &agent_id, 100).unwrap();
 
     let batch_ids: std::collections::HashSet<_> = imported_messages
         .iter()

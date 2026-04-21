@@ -22,7 +22,10 @@ fn insert_canonical_corpus(conn: &rusqlite::Connection) {
     let messages = [
         ("msg_01", "memory blocks are fundamental to agent cognition"),
         ("msg_02", "the weather today is sunny with a chance of rain"),
-        ("msg_03", "ADHD executive function support through structured routines"),
+        (
+            "msg_03",
+            "ADHD executive function support through structured routines",
+        ),
         ("msg_04", "memory consolidation happens during sleep cycles"),
         ("msg_05", "blocks of code should be well documented"),
         ("msg_06", "the agent's working memory holds current context"),
@@ -46,10 +49,18 @@ fn insert_canonical_corpus(conn: &rusqlite::Connection) {
     // Memory blocks with Loro snapshot placeholder.
     let blocks = [
         ("blk_01", "persona", "agent personality and identity"),
-        ("blk_02", "scratchpad", "working notes and current task tracking"),
+        (
+            "blk_02",
+            "scratchpad",
+            "working notes and current task tracking",
+        ),
         ("blk_03", "human", "information about the human partner"),
         ("blk_04", "system", "system configuration and guidelines"),
-        ("blk_05", "project_notes", "project-specific memory blocks and context"),
+        (
+            "blk_05",
+            "project_notes",
+            "project-specific memory blocks and context",
+        ),
     ];
 
     for (id, label, preview) in &blocks {

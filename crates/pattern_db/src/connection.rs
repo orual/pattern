@@ -6,10 +6,10 @@
 
 mod init;
 
-use std::path::{Path, PathBuf};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::Connection;
+use std::path::{Path, PathBuf};
 use tracing::{debug, info};
 
 use crate::error::{DbError, DbResult};
@@ -51,8 +51,11 @@ impl ConstellationDb {
             }
         }
 
-        info!("opening constellation databases: memory={}, messages={}",
-            memory_path.display(), messages_path.display());
+        info!(
+            "opening constellation databases: memory={}, messages={}",
+            memory_path.display(),
+            messages_path.display()
+        );
 
         // Process-global sqlite-vec registration. After this call every
         // subsequently-opened connection auto-loads sqlite-vec.
@@ -105,9 +108,7 @@ impl ConstellationDb {
         let msg_uri_owned = msg_uri.clone();
         let manager = SqliteConnectionManager::file(&mem_uri)
             .with_flags(uri_flags)
-            .with_init(move |conn| {
-                init::init_connection_in_memory(conn, &msg_uri_owned)
-            });
+            .with_init(move |conn| init::init_connection_in_memory(conn, &msg_uri_owned));
 
         let pool = Pool::builder()
             .max_size(4)
@@ -234,9 +235,7 @@ impl ConstellationDb {
     ) -> DbResult<Pool<SqliteConnectionManager>> {
         let messages_path_owned = messages_path.to_path_buf();
         let manager = SqliteConnectionManager::file(memory_path)
-            .with_init(move |conn| {
-                init::init_connection(conn, &messages_path_owned)
-            });
+            .with_init(move |conn| init::init_connection(conn, &messages_path_owned));
 
         Pool::builder()
             .max_size(10)
@@ -260,16 +259,14 @@ fn register_sqlite_vec() {
             // Safety: sqlite3_vec_init matches the auto-extension function signature.
             // The transmute converts from *const () to the C callback type expected
             // by sqlite3_auto_extension.
-            rusqlite::ffi::sqlite3_auto_extension(Some(
-                std::mem::transmute::<
-                    *const (),
-                    unsafe extern "C" fn(
-                        *mut rusqlite::ffi::sqlite3,
-                        *mut *mut i8,
-                        *const rusqlite::ffi::sqlite3_api_routines,
-                    ) -> i32,
-                >(init_fn),
-            ));
+            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
+                *const (),
+                unsafe extern "C" fn(
+                    *mut rusqlite::ffi::sqlite3,
+                    *mut *mut i8,
+                    *const rusqlite::ffi::sqlite3_api_routines,
+                ) -> i32,
+            >(init_fn)));
         }
         tracing::debug!("sqlite-vec extension registered globally");
     });

@@ -18,14 +18,14 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use pattern_core::memory::StructuredDocument;
+use pattern_core::traits::MemoryStore;
+use pattern_core::types::block::BlockCreate;
+use pattern_core::types::ids::new_id;
 use pattern_core::types::memory_types::{
     ArchivalEntry, BlockFilter, BlockMetadata, BlockMetadataPatch, MemoryResult,
     MemorySearchResult, MemorySearchScope, SearchOptions, SharedBlockInfo, UndoRedoDepth,
     UndoRedoOp,
 };
-use pattern_core::traits::MemoryStore;
-use pattern_core::types::block::BlockCreate;
-use pattern_core::types::ids::new_id;
 use serde_json::Value as JsonValue;
 
 /// Key used by the in-memory store: `(agent_id, label)` — the shape the
@@ -89,11 +89,7 @@ impl MemoryStore for InMemoryMemoryStore {
         Ok(doc)
     }
 
-    fn get_block(
-        &self,
-        agent_id: &str,
-        label: &str,
-    ) -> MemoryResult<Option<StructuredDocument>> {
+    fn get_block(&self, agent_id: &str, label: &str) -> MemoryResult<Option<StructuredDocument>> {
         let guard = self.blocks.lock().unwrap();
         Ok(guard
             .get(&(agent_id.to_string(), label.to_string()))
@@ -136,11 +132,7 @@ impl MemoryStore for InMemoryMemoryStore {
         Ok(())
     }
 
-    fn get_rendered_content(
-        &self,
-        agent_id: &str,
-        label: &str,
-    ) -> MemoryResult<Option<String>> {
+    fn get_rendered_content(&self, agent_id: &str, label: &str) -> MemoryResult<Option<String>> {
         let guard = self.blocks.lock().unwrap();
         Ok(guard
             .get(&(agent_id.to_string(), label.to_string()))
@@ -267,8 +259,8 @@ impl MemoryStore for InMemoryMemoryStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pattern_core::types::memory_types::BlockSchema;
     use pattern_core::types::block::BlockCreate;
+    use pattern_core::types::memory_types::BlockSchema;
 
     /// Verify that `create_block` returns a doc whose internal `LoroDoc` is
     /// Arc-shared with the copy stored in the map.

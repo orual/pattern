@@ -163,7 +163,10 @@ mod tests {
         assert_eq!(retrieved.agent_id, "test-agent");
         assert_eq!(retrieved.did, "did:plc:testuser123");
         assert_eq!(retrieved.endpoint_type, "bluesky_post");
-        assert_eq!(retrieved.config, Some(r#"{"auto_reply": true}"#.to_string()));
+        assert_eq!(
+            retrieved.config,
+            Some(r#"{"auto_reply": true}"#.to_string())
+        );
         assert!(retrieved.created_at > 0);
 
         // Update the endpoint (upsert).

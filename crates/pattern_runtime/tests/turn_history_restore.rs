@@ -376,8 +376,9 @@ async fn load_excludes_archived_messages() {
     .expect("step 2 should succeed");
 
     // Count total messages before archiving.
-    let all_msgs = pattern_db::queries::get_messages_with_archived(&db.get().unwrap(), "agent-a", 1000)
-        .expect("query should succeed");
+    let all_msgs =
+        pattern_db::queries::get_messages_with_archived(&db.get().unwrap(), "agent-a", 1000)
+            .expect("query should succeed");
     assert_eq!(all_msgs.len(), 4, "4 total messages before archiving");
 
     // Archive the first batch's messages. Find the highest position in

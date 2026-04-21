@@ -56,12 +56,18 @@ pub fn get_user_task(conn: &rusqlite::Connection, id: &str) -> DbResult<Option<T
                 created_at, updated_at
          FROM tasks WHERE id = ?1",
     )?;
-    let result = stmt.query_row(rusqlite::params![id], Task::from_row).optional()?;
+    let result = stmt
+        .query_row(rusqlite::params![id], Task::from_row)
+        .optional()?;
     Ok(result)
 }
 
 /// List tasks for an agent (or constellation-level if agent_id is None).
-pub fn list_tasks(conn: &rusqlite::Connection, agent_id: Option<&str>, include_completed: bool) -> DbResult<Vec<Task>> {
+pub fn list_tasks(
+    conn: &rusqlite::Connection,
+    agent_id: Option<&str>,
+    include_completed: bool,
+) -> DbResult<Vec<Task>> {
     let sql = match (agent_id, include_completed) {
         (Some(_), true) => {
             "SELECT id, agent_id, title, description, status, priority,
@@ -100,11 +106,15 @@ pub fn list_tasks(conn: &rusqlite::Connection, agent_id: Option<&str>, include_c
     match agent_id {
         Some(aid) => {
             let rows = stmt.query_map(rusqlite::params![aid], Task::from_row)?;
-            for row in rows { tasks.push(row?); }
+            for row in rows {
+                tasks.push(row?);
+            }
         }
         None => {
             let rows = stmt.query_map([], Task::from_row)?;
-            for row in rows { tasks.push(row?); }
+            for row in rows {
+                tasks.push(row?);
+            }
         }
     }
     Ok(tasks)
@@ -121,7 +131,9 @@ pub fn get_subtasks(conn: &rusqlite::Connection, parent_id: &str) -> DbResult<Ve
     )?;
     let rows = stmt.query_map(rusqlite::params![parent_id], Task::from_row)?;
     let mut tasks = Vec::new();
-    for row in rows { tasks.push(row?); }
+    for row in rows {
+        tasks.push(row?);
+    }
     Ok(tasks)
 }
 
@@ -139,14 +151,24 @@ pub fn get_tasks_due_soon(conn: &rusqlite::Connection, hours: i64) -> DbResult<V
     )?;
     let rows = stmt.query_map(rusqlite::params![deadline], Task::from_row)?;
     let mut tasks = Vec::new();
-    for row in rows { tasks.push(row?); }
+    for row in rows {
+        tasks.push(row?);
+    }
     Ok(tasks)
 }
 
 /// Update user task status.
-pub fn update_user_task_status(conn: &rusqlite::Connection, id: &str, status: UserTaskStatus) -> DbResult<bool> {
+pub fn update_user_task_status(
+    conn: &rusqlite::Connection,
+    id: &str,
+    status: UserTaskStatus,
+) -> DbResult<bool> {
     let now = Utc::now();
-    let completed_at = if status == UserTaskStatus::Completed { Some(now) } else { None };
+    let completed_at = if status == UserTaskStatus::Completed {
+        Some(now)
+    } else {
+        None
+    };
     let count = conn.execute(
         "UPDATE tasks SET status = ?1, completed_at = COALESCE(?2, completed_at), updated_at = ?3 WHERE id = ?4",
         rusqlite::params![status, completed_at, now, id],
@@ -155,7 +177,11 @@ pub fn update_user_task_status(conn: &rusqlite::Connection, id: &str, status: Us
 }
 
 /// Update user task priority.
-pub fn update_user_task_priority(conn: &rusqlite::Connection, id: &str, priority: UserTaskPriority) -> DbResult<bool> {
+pub fn update_user_task_priority(
+    conn: &rusqlite::Connection,
+    id: &str,
+    priority: UserTaskPriority,
+) -> DbResult<bool> {
     let now = Utc::now();
     let count = conn.execute(
         "UPDATE tasks SET priority = ?1, updated_at = ?2 WHERE id = ?3",
@@ -171,7 +197,18 @@ pub fn update_user_task(conn: &rusqlite::Connection, task: &Task) -> DbResult<bo
              due_at = ?5, scheduled_at = ?6, completed_at = ?7,
              parent_task_id = ?8, updated_at = ?9
          WHERE id = ?10",
-        rusqlite::params![task.title, task.description, task.status, task.priority, task.due_at, task.scheduled_at, task.completed_at, task.parent_task_id, task.updated_at, task.id],
+        rusqlite::params![
+            task.title,
+            task.description,
+            task.status,
+            task.priority,
+            task.due_at,
+            task.scheduled_at,
+            task.completed_at,
+            task.parent_task_id,
+            task.updated_at,
+            task.id
+        ],
     )?;
     Ok(count > 0)
 }
@@ -183,7 +220,10 @@ pub fn delete_user_task(conn: &rusqlite::Connection, id: &str) -> DbResult<bool>
 }
 
 /// Get task summaries for quick listing.
-pub fn get_task_summaries(conn: &rusqlite::Connection, agent_id: Option<&str>) -> DbResult<Vec<TaskSummary>> {
+pub fn get_task_summaries(
+    conn: &rusqlite::Connection,
+    agent_id: Option<&str>,
+) -> DbResult<Vec<TaskSummary>> {
     let sql = match agent_id {
         Some(_) => {
             "SELECT t.id, t.title, t.status, t.priority, t.due_at, t.parent_task_id,
@@ -218,11 +258,15 @@ pub fn get_task_summaries(conn: &rusqlite::Connection, agent_id: Option<&str>) -
     match agent_id {
         Some(aid) => {
             let rows = stmt.query_map(rusqlite::params![aid], mapper)?;
-            for row in rows { summaries.push(row?); }
+            for row in rows {
+                summaries.push(row?);
+            }
         }
         None => {
             let rows = stmt.query_map([], mapper)?;
-            for row in rows { summaries.push(row?); }
+            for row in rows {
+                summaries.push(row?);
+            }
         }
     }
     Ok(summaries)

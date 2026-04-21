@@ -151,8 +151,8 @@ mod tests {
     use jiff::Timestamp;
     use smol_str::SmolStr;
 
-    use pattern_core::types::memory_types::BlockType;
     use pattern_core::types::block::{BlockWrite, BlockWriteKind};
+    use pattern_core::types::memory_types::BlockType;
     use pattern_core::types::origin::{Author, SystemReason};
 
     use crate::compose::breakpoints::BreakpointLocation;

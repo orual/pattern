@@ -66,7 +66,9 @@ pub fn get_event(conn: &rusqlite::Connection, id: &str) -> DbResult<Option<Event
                 all_day, location, external_id, external_source, created_at, updated_at
          FROM events WHERE id = ?1",
     )?;
-    let result = stmt.query_row(rusqlite::params![id], Event::from_row).optional()?;
+    let result = stmt
+        .query_row(rusqlite::params![id], Event::from_row)
+        .optional()?;
     Ok(result)
 }
 
@@ -81,7 +83,9 @@ pub fn list_events(conn: &rusqlite::Connection, agent_id: Option<&str>) -> DbRes
                  FROM events WHERE agent_id = ?1 ORDER BY starts_at ASC",
             )?;
             let rows = stmt.query_map(rusqlite::params![aid], Event::from_row)?;
-            for row in rows { events.push(row?); }
+            for row in rows {
+                events.push(row?);
+            }
         }
         None => {
             let mut stmt = conn.prepare(
@@ -90,14 +94,20 @@ pub fn list_events(conn: &rusqlite::Connection, agent_id: Option<&str>) -> DbRes
                  FROM events WHERE agent_id IS NULL ORDER BY starts_at ASC",
             )?;
             let rows = stmt.query_map([], Event::from_row)?;
-            for row in rows { events.push(row?); }
+            for row in rows {
+                events.push(row?);
+            }
         }
     }
     Ok(events)
 }
 
 /// Get events in a time range.
-pub fn get_events_in_range(conn: &rusqlite::Connection, start: DateTime<Utc>, end: DateTime<Utc>) -> DbResult<Vec<Event>> {
+pub fn get_events_in_range(
+    conn: &rusqlite::Connection,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> DbResult<Vec<Event>> {
     let mut stmt = conn.prepare(
         "SELECT id, agent_id, title, description, starts_at, ends_at, rrule, reminder_minutes,
                 all_day, location, external_id, external_source, created_at, updated_at
@@ -105,7 +115,9 @@ pub fn get_events_in_range(conn: &rusqlite::Connection, start: DateTime<Utc>, en
     )?;
     let rows = stmt.query_map(rusqlite::params![start, end], Event::from_row)?;
     let mut events = Vec::new();
-    for row in rows { events.push(row?); }
+    for row in rows {
+        events.push(row?);
+    }
     Ok(events)
 }
 
@@ -120,7 +132,9 @@ pub fn get_upcoming_events(conn: &rusqlite::Connection, hours: i64) -> DbResult<
     )?;
     let rows = stmt.query_map(rusqlite::params![now, deadline], Event::from_row)?;
     let mut events = Vec::new();
-    for row in rows { events.push(row?); }
+    for row in rows {
+        events.push(row?);
+    }
     Ok(events)
 }
 
@@ -138,7 +152,9 @@ pub fn get_events_needing_reminders(conn: &rusqlite::Connection) -> DbResult<Vec
     )?;
     let rows = stmt.query_map(rusqlite::params![now, now], Event::from_row)?;
     let mut events = Vec::new();
-    for row in rows { events.push(row?); }
+    for row in rows {
+        events.push(row?);
+    }
     Ok(events)
 }
 
@@ -148,7 +164,16 @@ pub fn update_event(conn: &rusqlite::Connection, event: &Event) -> DbResult<bool
         "UPDATE events SET title = ?1, description = ?2, starts_at = ?3, ends_at = ?4,
              rrule = ?5, reminder_minutes = ?6, updated_at = ?7
          WHERE id = ?8",
-        rusqlite::params![event.title, event.description, event.starts_at, event.ends_at, event.rrule, event.reminder_minutes, event.updated_at, event.id],
+        rusqlite::params![
+            event.title,
+            event.description,
+            event.starts_at,
+            event.ends_at,
+            event.rrule,
+            event.reminder_minutes,
+            event.updated_at,
+            event.id
+        ],
     )?;
     Ok(count > 0)
 }
@@ -164,7 +189,10 @@ pub fn delete_event(conn: &rusqlite::Connection, id: &str) -> DbResult<bool> {
 // ============================================================================
 
 /// Create an event occurrence.
-pub fn create_occurrence(conn: &rusqlite::Connection, occurrence: &EventOccurrence) -> DbResult<()> {
+pub fn create_occurrence(
+    conn: &rusqlite::Connection,
+    occurrence: &EventOccurrence,
+) -> DbResult<()> {
     conn.execute(
         "INSERT INTO event_occurrences (id, event_id, starts_at, ends_at, status, notes, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -174,19 +202,28 @@ pub fn create_occurrence(conn: &rusqlite::Connection, occurrence: &EventOccurren
 }
 
 /// Get occurrences for an event.
-pub fn get_event_occurrences(conn: &rusqlite::Connection, event_id: &str) -> DbResult<Vec<EventOccurrence>> {
+pub fn get_event_occurrences(
+    conn: &rusqlite::Connection,
+    event_id: &str,
+) -> DbResult<Vec<EventOccurrence>> {
     let mut stmt = conn.prepare(
         "SELECT id, event_id, starts_at, ends_at, status, notes, created_at
          FROM event_occurrences WHERE event_id = ?1 ORDER BY starts_at ASC",
     )?;
     let rows = stmt.query_map(rusqlite::params![event_id], EventOccurrence::from_row)?;
     let mut occurrences = Vec::new();
-    for row in rows { occurrences.push(row?); }
+    for row in rows {
+        occurrences.push(row?);
+    }
     Ok(occurrences)
 }
 
 /// Update occurrence status.
-pub fn update_occurrence_status(conn: &rusqlite::Connection, id: &str, status: OccurrenceStatus) -> DbResult<bool> {
+pub fn update_occurrence_status(
+    conn: &rusqlite::Connection,
+    id: &str,
+    status: OccurrenceStatus,
+) -> DbResult<bool> {
     let count = conn.execute(
         "UPDATE event_occurrences SET status = ?1 WHERE id = ?2",
         rusqlite::params![status, id],

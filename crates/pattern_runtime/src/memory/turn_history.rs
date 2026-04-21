@@ -100,8 +100,7 @@ impl TurnHistory {
         // Query non-archived messages. The query returns DESC order; we
         // reverse to get chronological (ASC by position) order.
         // Use a generous limit to fetch all active messages.
-        let mut db_messages =
-            pattern_db::queries::get_messages(&conn, agent_id, i64::MAX)?;
+        let mut db_messages = pattern_db::queries::get_messages(&conn, agent_id, i64::MAX)?;
         db_messages.reverse();
 
         // Convert DB messages to core messages.

@@ -42,7 +42,9 @@ impl From<BlockTypeReq> for pattern_core::types::memory_types::BlockType {
             BlockTypeReq::Core => BlockType::Core,
             // Archival and Log map to Working; archival storage uses the
             // archival_entries table, log blocks use Working + log-schema.
-            BlockTypeReq::Working | BlockTypeReq::Archival | BlockTypeReq::Log => BlockType::Working,
+            BlockTypeReq::Working | BlockTypeReq::Archival | BlockTypeReq::Log => {
+                BlockType::Working
+            }
         }
     }
 }

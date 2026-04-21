@@ -62,8 +62,7 @@ async fn create_agent_row(db: &pattern_db::ConstellationDb, agent_id: &str) {
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
-    pattern_db::queries::create_agent(&db.get().unwrap(), &agent)
-        .expect("create test agent row");
+    pattern_db::queries::create_agent(&db.get().unwrap(), &agent).expect("create test agent row");
 }
 
 // ── 1. memory round-trip through a session ───────────────────────────────────

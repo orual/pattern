@@ -28,8 +28,7 @@ fn insert_clustered_vectors(conn: &rusqlite::Connection) {
                 cw + offset * 0.1,
             ];
             let id = format!("cluster_{ci}_vec_{j}");
-            insert_embedding(conn, ContentType::MemoryBlock, &id, &embedding, None, None)
-                .unwrap();
+            insert_embedding(conn, ContentType::MemoryBlock, &id, &embedding, None, None).unwrap();
         }
     }
 }
@@ -46,7 +45,12 @@ fn knn_ordering_cluster_a_snapshot() {
 
     let snapshot: Vec<(String, f32)> = results
         .iter()
-        .map(|r| (r.content_id.clone(), (r.distance * 10000.0).round() / 10000.0))
+        .map(|r| {
+            (
+                r.content_id.clone(),
+                (r.distance * 10000.0).round() / 10000.0,
+            )
+        })
         .collect();
 
     insta::assert_yaml_snapshot!("knn_cluster_a_nearest_10", snapshot);
@@ -63,7 +67,12 @@ fn knn_ordering_cluster_b_snapshot() {
 
     let snapshot: Vec<(String, f32)> = results
         .iter()
-        .map(|r| (r.content_id.clone(), (r.distance * 10000.0).round() / 10000.0))
+        .map(|r| {
+            (
+                r.content_id.clone(),
+                (r.distance * 10000.0).round() / 10000.0,
+            )
+        })
         .collect();
 
     insta::assert_yaml_snapshot!("knn_cluster_b_nearest_5", snapshot);

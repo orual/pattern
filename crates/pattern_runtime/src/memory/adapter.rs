@@ -17,13 +17,13 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value as JsonValue;
 
 use pattern_core::memory::StructuredDocument;
+use pattern_core::traits::MemoryStore;
+use pattern_core::types::block::{BlockCreate, BlockWrite};
 use pattern_core::types::memory_types::{
     ArchivalEntry, BlockFilter, BlockMetadata, BlockMetadataPatch, MemoryResult,
     MemorySearchResult, MemorySearchScope, SearchOptions, SharedBlockInfo, UndoRedoDepth,
     UndoRedoOp,
 };
-use pattern_core::traits::MemoryStore;
-use pattern_core::types::block::{BlockCreate, BlockWrite};
 
 /// Wraps a concrete `MemoryStore` implementation and intercepts mutations
 /// to record `BlockWrite` entries for the current turn. Session drains
@@ -95,11 +95,7 @@ impl MemoryStore for MemoryStoreAdapter {
         self.inner.create_block(agent_id, create)
     }
 
-    fn get_block(
-        &self,
-        agent_id: &str,
-        label: &str,
-    ) -> MemoryResult<Option<StructuredDocument>> {
+    fn get_block(&self, agent_id: &str, label: &str) -> MemoryResult<Option<StructuredDocument>> {
         self.inner.get_block(agent_id, label)
     }
 
@@ -119,11 +115,7 @@ impl MemoryStore for MemoryStoreAdapter {
         self.inner.delete_block(agent_id, label)
     }
 
-    fn get_rendered_content(
-        &self,
-        agent_id: &str,
-        label: &str,
-    ) -> MemoryResult<Option<String>> {
+    fn get_rendered_content(&self, agent_id: &str, label: &str) -> MemoryResult<Option<String>> {
         self.inner.get_rendered_content(agent_id, label)
     }
 
@@ -202,8 +194,8 @@ impl MemoryStore for MemoryStoreAdapter {
 mod tests {
     use super::*;
     use crate::testing::InMemoryMemoryStore;
-    use pattern_core::types::memory_types::{BlockSchema, BlockType};
     use pattern_core::types::block::BlockWriteKind;
+    use pattern_core::types::memory_types::{BlockSchema, BlockType};
     use pattern_core::types::origin::{AgentAuthor, Author};
     use smol_str::SmolStr;
 

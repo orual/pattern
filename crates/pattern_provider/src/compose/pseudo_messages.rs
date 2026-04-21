@@ -291,9 +291,9 @@ mod tests {
     use jiff::Timestamp;
     use smol_str::SmolStr;
 
-    use pattern_core::types::memory_types::BlockType;
     use pattern_core::types::block::{BlockWrite, BlockWriteKind};
     use pattern_core::types::ids::new_id;
+    use pattern_core::types::memory_types::BlockType;
     use pattern_core::types::origin::{AgentAuthor, Author, Human, Partner, SystemReason};
 
     use super::*;

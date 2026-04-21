@@ -20,9 +20,9 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use pattern_core::memory::StructuredDocument;
-use pattern_core::types::memory_types::{BlockSchema, BlockType};
 use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::{BlockWrite, BlockWriteKind};
+use pattern_core::types::memory_types::{BlockSchema, BlockType};
 use pattern_core::types::origin::{AgentAuthor, Author};
 use smol_str::SmolStr;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
@@ -147,14 +147,8 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                 // Capture pre-write state for BlockWrite record.
                 let pre = pre_write_state(&*store, &agent_id, &label)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Put: {e}")))?;
-                upsert_block_content(
-                    &*store,
-                    &agent_id,
-                    &label,
-                    &content,
-                    description.as_deref(),
-                )
-                .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Put: {e}")))?;
+                upsert_block_content(&*store, &agent_id, &label, &content, description.as_deref())
+                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Put: {e}")))?;
 
                 // Record the write.
                 let kind = if pre.existed {
@@ -226,10 +220,8 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                 } else {
                     format!("{existing}{content}")
                 };
-                upsert_block_content(
-                    &*store, &agent_id, &label, &combined, None,
-                )
-                .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Append: {e}")))?;
+                upsert_block_content(&*store, &agent_id, &label, &combined, None)
+                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Append: {e}")))?;
 
                 record_block_write(
                     RecordBlockWriteParams {
@@ -256,10 +248,8 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                     })?;
                 let pre_hash = content_hash(&existing);
                 let replaced = existing.replace(&old, &new);
-                upsert_block_content(
-                    &*store, &agent_id, &label, &replaced, None,
-                )
-                .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Replace: {e}")))?;
+                upsert_block_content(&*store, &agent_id, &label, &replaced, None)
+                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Replace: {e}")))?;
 
                 // We already have the pre-content from the existence check.
                 let pre = PreWriteState {
@@ -382,8 +372,7 @@ fn upsert_block_content(
         store.update_block_metadata(
             agent_id,
             label,
-            pattern_core::types::memory_types::BlockMetadataPatch::default()
-                .description(desc),
+            pattern_core::types::memory_types::BlockMetadataPatch::default().description(desc),
         )?;
     }
     store.mark_dirty(agent_id, label);
@@ -476,10 +465,7 @@ struct RecordBlockWriteParams<'a> {
 /// Resolves memory_id and block_type from the store if not already
 /// captured in the pre-write state (e.g. for newly-created blocks via
 /// upsert auto-create).
-fn record_block_write(
-    params: RecordBlockWriteParams<'_>,
-    store: &dyn MemoryStore,
-) {
+fn record_block_write(params: RecordBlockWriteParams<'_>, store: &dyn MemoryStore) {
     let RecordBlockWriteParams {
         adapter,
         agent_id,
@@ -543,23 +529,139 @@ mod tests {
     struct NeverStore;
 
     impl MemoryStore for NeverStore {
-        fn create_block(&self, _a: &str, _create: pattern_core::types::block::BlockCreate) -> pattern_core::types::memory_types::MemoryResult<pattern_core::memory::StructuredDocument> { panic!("NeverStore") }
-        fn get_block(&self, _a: &str, _l: &str) -> pattern_core::types::memory_types::MemoryResult<Option<pattern_core::memory::StructuredDocument>> { panic!("NeverStore") }
-        fn get_block_metadata(&self, _a: &str, _l: &str) -> pattern_core::types::memory_types::MemoryResult<Option<pattern_core::types::memory_types::BlockMetadata>> { panic!() }
-        fn list_blocks(&self, _f: pattern_core::types::memory_types::BlockFilter) -> pattern_core::types::memory_types::MemoryResult<Vec<pattern_core::types::memory_types::BlockMetadata>> { panic!() }
-        fn delete_block(&self, _a: &str, _l: &str) -> pattern_core::types::memory_types::MemoryResult<()> { panic!() }
-        fn get_rendered_content(&self, _a: &str, _l: &str) -> pattern_core::types::memory_types::MemoryResult<Option<String>> { panic!() }
-        fn persist_block(&self, _a: &str, _l: &str) -> pattern_core::types::memory_types::MemoryResult<()> { panic!() }
+        fn create_block(
+            &self,
+            _a: &str,
+            _create: pattern_core::types::block::BlockCreate,
+        ) -> pattern_core::types::memory_types::MemoryResult<pattern_core::memory::StructuredDocument>
+        {
+            panic!("NeverStore")
+        }
+        fn get_block(
+            &self,
+            _a: &str,
+            _l: &str,
+        ) -> pattern_core::types::memory_types::MemoryResult<
+            Option<pattern_core::memory::StructuredDocument>,
+        > {
+            panic!("NeverStore")
+        }
+        fn get_block_metadata(
+            &self,
+            _a: &str,
+            _l: &str,
+        ) -> pattern_core::types::memory_types::MemoryResult<
+            Option<pattern_core::types::memory_types::BlockMetadata>,
+        > {
+            panic!()
+        }
+        fn list_blocks(
+            &self,
+            _f: pattern_core::types::memory_types::BlockFilter,
+        ) -> pattern_core::types::memory_types::MemoryResult<
+            Vec<pattern_core::types::memory_types::BlockMetadata>,
+        > {
+            panic!()
+        }
+        fn delete_block(
+            &self,
+            _a: &str,
+            _l: &str,
+        ) -> pattern_core::types::memory_types::MemoryResult<()> {
+            panic!()
+        }
+        fn get_rendered_content(
+            &self,
+            _a: &str,
+            _l: &str,
+        ) -> pattern_core::types::memory_types::MemoryResult<Option<String>> {
+            panic!()
+        }
+        fn persist_block(
+            &self,
+            _a: &str,
+            _l: &str,
+        ) -> pattern_core::types::memory_types::MemoryResult<()> {
+            panic!()
+        }
         fn mark_dirty(&self, _a: &str, _l: &str) {}
-        fn insert_archival(&self, _a: &str, _c: &str, _m: Option<serde_json::Value>) -> pattern_core::types::memory_types::MemoryResult<String> { panic!() }
-        fn search_archival(&self, _a: &str, _q: &str, _n: usize) -> pattern_core::types::memory_types::MemoryResult<Vec<pattern_core::types::memory_types::ArchivalEntry>> { panic!() }
-        fn delete_archival(&self, _id: &str) -> pattern_core::types::memory_types::MemoryResult<()> { panic!() }
-        fn search(&self, _q: &str, _o: pattern_core::types::memory_types::SearchOptions, _s: pattern_core::types::memory_types::MemorySearchScope) -> pattern_core::types::memory_types::MemoryResult<Vec<pattern_core::types::memory_types::MemorySearchResult>> { panic!() }
-        fn list_shared_blocks(&self, _a: &str) -> pattern_core::types::memory_types::MemoryResult<Vec<pattern_core::types::memory_types::SharedBlockInfo>> { panic!() }
-        fn get_shared_block(&self, _r: &str, _o: &str, _l: &str) -> pattern_core::types::memory_types::MemoryResult<Option<pattern_core::memory::StructuredDocument>> { panic!() }
-        fn update_block_metadata(&self, _a: &str, _l: &str, _p: pattern_core::types::memory_types::BlockMetadataPatch) -> pattern_core::types::memory_types::MemoryResult<()> { panic!() }
-        fn undo_redo(&self, _a: &str, _l: &str, _op: pattern_core::types::memory_types::UndoRedoOp) -> pattern_core::types::memory_types::MemoryResult<bool> { panic!() }
-        fn history_depth(&self, _a: &str, _l: &str) -> pattern_core::types::memory_types::MemoryResult<pattern_core::types::memory_types::UndoRedoDepth> { panic!() }
+        fn insert_archival(
+            &self,
+            _a: &str,
+            _c: &str,
+            _m: Option<serde_json::Value>,
+        ) -> pattern_core::types::memory_types::MemoryResult<String> {
+            panic!()
+        }
+        fn search_archival(
+            &self,
+            _a: &str,
+            _q: &str,
+            _n: usize,
+        ) -> pattern_core::types::memory_types::MemoryResult<
+            Vec<pattern_core::types::memory_types::ArchivalEntry>,
+        > {
+            panic!()
+        }
+        fn delete_archival(
+            &self,
+            _id: &str,
+        ) -> pattern_core::types::memory_types::MemoryResult<()> {
+            panic!()
+        }
+        fn search(
+            &self,
+            _q: &str,
+            _o: pattern_core::types::memory_types::SearchOptions,
+            _s: pattern_core::types::memory_types::MemorySearchScope,
+        ) -> pattern_core::types::memory_types::MemoryResult<
+            Vec<pattern_core::types::memory_types::MemorySearchResult>,
+        > {
+            panic!()
+        }
+        fn list_shared_blocks(
+            &self,
+            _a: &str,
+        ) -> pattern_core::types::memory_types::MemoryResult<
+            Vec<pattern_core::types::memory_types::SharedBlockInfo>,
+        > {
+            panic!()
+        }
+        fn get_shared_block(
+            &self,
+            _r: &str,
+            _o: &str,
+            _l: &str,
+        ) -> pattern_core::types::memory_types::MemoryResult<
+            Option<pattern_core::memory::StructuredDocument>,
+        > {
+            panic!()
+        }
+        fn update_block_metadata(
+            &self,
+            _a: &str,
+            _l: &str,
+            _p: pattern_core::types::memory_types::BlockMetadataPatch,
+        ) -> pattern_core::types::memory_types::MemoryResult<()> {
+            panic!()
+        }
+        fn undo_redo(
+            &self,
+            _a: &str,
+            _l: &str,
+            _op: pattern_core::types::memory_types::UndoRedoOp,
+        ) -> pattern_core::types::memory_types::MemoryResult<bool> {
+            panic!()
+        }
+        fn history_depth(
+            &self,
+            _a: &str,
+            _l: &str,
+        ) -> pattern_core::types::memory_types::MemoryResult<
+            pattern_core::types::memory_types::UndoRedoDepth,
+        > {
+            panic!()
+        }
     }
 
     async fn sctx() -> SessionContext {

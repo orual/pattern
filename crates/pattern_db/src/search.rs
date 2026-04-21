@@ -401,8 +401,7 @@ impl<'a> HybridSearchBuilder<'a> {
                 results.extend(msgs.into_iter().map(|m| (SearchContentType::Message, m)));
             }
             Some(SearchContentType::MemoryBlock) => {
-                let blocks =
-                    fts::search_memory_blocks(self.conn, query, agent_id, fetch_limit)?;
+                let blocks = fts::search_memory_blocks(self.conn, query, agent_id, fetch_limit)?;
                 results.extend(
                     blocks
                         .into_iter()

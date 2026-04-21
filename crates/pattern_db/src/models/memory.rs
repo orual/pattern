@@ -122,9 +122,7 @@ impl std::fmt::Display for MemoryBlockType {
 ///
 /// Ordered from most restrictive to least restrictive.
 /// This determines what operations an agent can perform on a block.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
 pub enum MemoryPermission {

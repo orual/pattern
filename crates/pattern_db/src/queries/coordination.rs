@@ -4,8 +4,8 @@ use rusqlite::OptionalExtension;
 
 use crate::error::DbResult;
 use crate::models::{
-    ActivityEvent, AgentSummary, ConstellationSummary, CoordinationState,
-    CoordinationTask, EventImportance, HandoffNote, NotableEvent, TaskStatus,
+    ActivityEvent, AgentSummary, ConstellationSummary, CoordinationState, CoordinationTask,
+    EventImportance, HandoffNote, NotableEvent, TaskStatus,
 };
 
 // ============================================================================
@@ -185,10 +185,7 @@ pub fn get_agent_activity(
 }
 
 /// Create an activity event.
-pub fn create_activity_event(
-    conn: &rusqlite::Connection,
-    event: &ActivityEvent,
-) -> DbResult<()> {
+pub fn create_activity_event(conn: &rusqlite::Connection, event: &ActivityEvent) -> DbResult<()> {
     conn.execute(
         "INSERT INTO activity_events (id, timestamp, agent_id, event_type, details, importance)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -224,10 +221,7 @@ pub fn get_agent_summary(
 }
 
 /// Upsert an agent summary.
-pub fn upsert_agent_summary(
-    conn: &rusqlite::Connection,
-    summary: &AgentSummary,
-) -> DbResult<()> {
+pub fn upsert_agent_summary(conn: &rusqlite::Connection, summary: &AgentSummary) -> DbResult<()> {
     conn.execute(
         "INSERT INTO agent_summaries (agent_id, summary, messages_covered, generated_at, last_active)
          VALUES (?1, ?2, ?3, ?4, ?5)
@@ -305,10 +299,7 @@ pub fn create_constellation_summary(
 // ============================================================================
 
 /// Get recent notable events.
-pub fn get_notable_events(
-    conn: &rusqlite::Connection,
-    limit: i64,
-) -> DbResult<Vec<NotableEvent>> {
+pub fn get_notable_events(conn: &rusqlite::Connection, limit: i64) -> DbResult<Vec<NotableEvent>> {
     let mut stmt = conn.prepare(
         "SELECT id, timestamp, event_type, description, agents_involved, importance, created_at
          FROM notable_events ORDER BY timestamp DESC LIMIT ?1",
@@ -344,10 +335,7 @@ pub fn create_notable_event(conn: &rusqlite::Connection, event: &NotableEvent) -
 // ============================================================================
 
 /// Get a coordination task by ID.
-pub fn get_task(
-    conn: &rusqlite::Connection,
-    id: &str,
-) -> DbResult<Option<CoordinationTask>> {
+pub fn get_task(conn: &rusqlite::Connection, id: &str) -> DbResult<Option<CoordinationTask>> {
     let mut stmt = conn.prepare(
         "SELECT id, description, assigned_to, status, priority, created_at, updated_at
          FROM coordination_tasks WHERE id = ?1",
@@ -426,11 +414,7 @@ pub fn update_task_status(
 }
 
 /// Assign a task to an agent.
-pub fn assign_task(
-    conn: &rusqlite::Connection,
-    id: &str,
-    agent_id: Option<&str>,
-) -> DbResult<()> {
+pub fn assign_task(conn: &rusqlite::Connection, id: &str, agent_id: Option<&str>) -> DbResult<()> {
     conn.execute(
         "UPDATE coordination_tasks SET assigned_to = ?1, updated_at = datetime('now') WHERE id = ?2",
         rusqlite::params![agent_id, id],
@@ -492,10 +476,7 @@ pub fn mark_handoff_read(conn: &rusqlite::Connection, id: &str) -> DbResult<()> 
 // ============================================================================
 
 /// Get a coordination state value.
-pub fn get_state(
-    conn: &rusqlite::Connection,
-    key: &str,
-) -> DbResult<Option<CoordinationState>> {
+pub fn get_state(conn: &rusqlite::Connection, key: &str) -> DbResult<Option<CoordinationState>> {
     let mut stmt = conn.prepare(
         "SELECT key, value, updated_at, updated_by
          FROM coordination_state WHERE key = ?1",

@@ -56,17 +56,24 @@ pub fn get_data_source(conn: &rusqlite::Connection, id: &str) -> DbResult<Option
         "SELECT id, name, source_type, config, last_sync_at, sync_cursor, enabled, created_at, updated_at
          FROM data_sources WHERE id = ?1",
     )?;
-    let result = stmt.query_row(rusqlite::params![id], DataSource::from_row).optional()?;
+    let result = stmt
+        .query_row(rusqlite::params![id], DataSource::from_row)
+        .optional()?;
     Ok(result)
 }
 
 /// Get a data source by name.
-pub fn get_data_source_by_name(conn: &rusqlite::Connection, name: &str) -> DbResult<Option<DataSource>> {
+pub fn get_data_source_by_name(
+    conn: &rusqlite::Connection,
+    name: &str,
+) -> DbResult<Option<DataSource>> {
     let mut stmt = conn.prepare(
         "SELECT id, name, source_type, config, last_sync_at, sync_cursor, enabled, created_at, updated_at
          FROM data_sources WHERE name = ?1",
     )?;
-    let result = stmt.query_row(rusqlite::params![name], DataSource::from_row).optional()?;
+    let result = stmt
+        .query_row(rusqlite::params![name], DataSource::from_row)
+        .optional()?;
     Ok(result)
 }
 
@@ -78,7 +85,9 @@ pub fn list_data_sources(conn: &rusqlite::Connection) -> DbResult<Vec<DataSource
     )?;
     let rows = stmt.query_map([], DataSource::from_row)?;
     let mut sources = Vec::new();
-    for row in rows { sources.push(row?); }
+    for row in rows {
+        sources.push(row?);
+    }
     Ok(sources)
 }
 
@@ -90,7 +99,9 @@ pub fn list_enabled_data_sources(conn: &rusqlite::Connection) -> DbResult<Vec<Da
     )?;
     let rows = stmt.query_map([], DataSource::from_row)?;
     let mut sources = Vec::new();
-    for row in rows { sources.push(row?); }
+    for row in rows {
+        sources.push(row?);
+    }
     Ok(sources)
 }
 
@@ -104,7 +115,11 @@ pub fn update_data_source(conn: &rusqlite::Connection, source: &DataSource) -> D
 }
 
 /// Update sync state for a data source.
-pub fn update_sync_state(conn: &rusqlite::Connection, id: &str, cursor: Option<&str>) -> DbResult<bool> {
+pub fn update_sync_state(
+    conn: &rusqlite::Connection,
+    id: &str,
+    cursor: Option<&str>,
+) -> DbResult<bool> {
     let now = Utc::now();
     let count = conn.execute(
         "UPDATE data_sources SET last_sync_at = ?1, sync_cursor = ?2, updated_at = ?3 WHERE id = ?4",
@@ -114,7 +129,11 @@ pub fn update_sync_state(conn: &rusqlite::Connection, id: &str, cursor: Option<&
 }
 
 /// Enable or disable a data source.
-pub fn set_data_source_enabled(conn: &rusqlite::Connection, id: &str, enabled: bool) -> DbResult<bool> {
+pub fn set_data_source_enabled(
+    conn: &rusqlite::Connection,
+    id: &str,
+    enabled: bool,
+) -> DbResult<bool> {
     let now = Utc::now();
     let count = conn.execute(
         "UPDATE data_sources SET enabled = ?1, updated_at = ?2 WHERE id = ?3",
@@ -125,7 +144,10 @@ pub fn set_data_source_enabled(conn: &rusqlite::Connection, id: &str, enabled: b
 
 /// Delete a data source.
 pub fn delete_data_source(conn: &rusqlite::Connection, id: &str) -> DbResult<bool> {
-    let count = conn.execute("DELETE FROM data_sources WHERE id = ?1", rusqlite::params![id])?;
+    let count = conn.execute(
+        "DELETE FROM data_sources WHERE id = ?1",
+        rusqlite::params![id],
+    )?;
     Ok(count > 0)
 }
 
@@ -134,7 +156,12 @@ pub fn delete_data_source(conn: &rusqlite::Connection, id: &str) -> DbResult<boo
 // ============================================================================
 
 /// Subscribe an agent to a data source.
-pub fn subscribe_agent_to_source(conn: &rusqlite::Connection, agent_id: &str, source_id: &str, notification_template: Option<&str>) -> DbResult<()> {
+pub fn subscribe_agent_to_source(
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+    source_id: &str,
+    notification_template: Option<&str>,
+) -> DbResult<()> {
     conn.execute(
         "INSERT INTO agent_data_sources (agent_id, source_id, notification_template)
          VALUES (?1, ?2, ?3)
@@ -145,7 +172,11 @@ pub fn subscribe_agent_to_source(conn: &rusqlite::Connection, agent_id: &str, so
 }
 
 /// Unsubscribe an agent from a data source.
-pub fn unsubscribe_agent_from_source(conn: &rusqlite::Connection, agent_id: &str, source_id: &str) -> DbResult<bool> {
+pub fn unsubscribe_agent_from_source(
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+    source_id: &str,
+) -> DbResult<bool> {
     let count = conn.execute(
         "DELETE FROM agent_data_sources WHERE agent_id = ?1 AND source_id = ?2",
         rusqlite::params![agent_id, source_id],
@@ -154,23 +185,33 @@ pub fn unsubscribe_agent_from_source(conn: &rusqlite::Connection, agent_id: &str
 }
 
 /// Get all subscriptions for an agent.
-pub fn get_agent_subscriptions(conn: &rusqlite::Connection, agent_id: &str) -> DbResult<Vec<AgentDataSource>> {
+pub fn get_agent_subscriptions(
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+) -> DbResult<Vec<AgentDataSource>> {
     let mut stmt = conn.prepare(
         "SELECT agent_id, source_id, notification_template FROM agent_data_sources WHERE agent_id = ?1",
     )?;
     let rows = stmt.query_map(rusqlite::params![agent_id], AgentDataSource::from_row)?;
     let mut subs = Vec::new();
-    for row in rows { subs.push(row?); }
+    for row in rows {
+        subs.push(row?);
+    }
     Ok(subs)
 }
 
 /// Get all agents subscribed to a source.
-pub fn get_source_subscribers(conn: &rusqlite::Connection, source_id: &str) -> DbResult<Vec<AgentDataSource>> {
+pub fn get_source_subscribers(
+    conn: &rusqlite::Connection,
+    source_id: &str,
+) -> DbResult<Vec<AgentDataSource>> {
     let mut stmt = conn.prepare(
         "SELECT agent_id, source_id, notification_template FROM agent_data_sources WHERE source_id = ?1",
     )?;
     let rows = stmt.query_map(rusqlite::params![source_id], AgentDataSource::from_row)?;
     let mut subs = Vec::new();
-    for row in rows { subs.push(row?); }
+    for row in rows {
+        subs.push(row?);
+    }
     Ok(subs)
 }

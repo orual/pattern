@@ -88,10 +88,11 @@ impl Exporter {
         let start_time = Utc::now();
 
         // Load agent
-        let agent = queries::get_agent(&*self.db.get()?, agent_id)?
-            .ok_or_else(|| CoreError::AgentNotFound {
+        let agent = queries::get_agent(&*self.db.get()?, agent_id)?.ok_or_else(|| {
+            CoreError::AgentNotFound {
                 identifier: agent_id.to_string(),
-            })?;
+            }
+        })?;
 
         // Export agent data to blocks
         let (agent_export, blocks, stats) = self.export_agent_data(&agent, options).await?;
@@ -125,10 +126,11 @@ impl Exporter {
         let start_time = Utc::now();
 
         // Load group
-        let group = queries::get_group(&*self.db.get()?, group_id)?
-            .ok_or_else(|| CoreError::GroupNotFound {
+        let group = queries::get_group(&*self.db.get()?, group_id)?.ok_or_else(|| {
+            CoreError::GroupNotFound {
                 identifier: group_id.to_string(),
-            })?;
+            }
+        })?;
 
         // Load members
         let members = queries::get_group_members(&*self.db.get()?, group_id)?;
@@ -171,9 +173,11 @@ impl Exporter {
             let mut agent_exports = Vec::with_capacity(members.len());
 
             for member in &members {
-                let agent = queries::get_agent(&*self.db.get()?, &member.agent_id)?
-                    .ok_or_else(|| CoreError::AgentNotFound {
-                        identifier: member.agent_id.clone(),
+                let agent =
+                    queries::get_agent(&*self.db.get()?, &member.agent_id)?.ok_or_else(|| {
+                        CoreError::AgentNotFound {
+                            identifier: member.agent_id.clone(),
+                        }
                     })?;
 
                 let (agent_export, agent_blocks, agent_stats) =

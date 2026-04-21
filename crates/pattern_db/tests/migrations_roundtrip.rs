@@ -88,11 +88,21 @@ fn pre_collapse_migrations() -> Migrations<'static> {
         M::up(include_str!("../migrations/memory/0002_fts5.sql")),
         M::up(include_str!("../migrations/memory/0003_model_fields.sql")),
         M::up(include_str!("../migrations/memory/0004_memory_updates.sql")),
-        M::up(include_str!("../migrations/memory/0005_archival_fts_metadata.sql")),
-        M::up(include_str!("../migrations/memory/0006_agent_atproto_endpoints.sql")),
-        M::up(include_str!("../migrations/memory/0007_add_session_id_to_atproto_endpoints.sql")),
-        M::up(include_str!("../migrations/memory/0008_member_capabilities.sql")),
-        M::up(include_str!("../migrations/memory/0009_update_frontiers.sql")),
+        M::up(include_str!(
+            "../migrations/memory/0005_archival_fts_metadata.sql"
+        )),
+        M::up(include_str!(
+            "../migrations/memory/0006_agent_atproto_endpoints.sql"
+        )),
+        M::up(include_str!(
+            "../migrations/memory/0007_add_session_id_to_atproto_endpoints.sql"
+        )),
+        M::up(include_str!(
+            "../migrations/memory/0008_member_capabilities.sql"
+        )),
+        M::up(include_str!(
+            "../migrations/memory/0009_update_frontiers.sql"
+        )),
     ])
 }
 
@@ -103,12 +113,24 @@ fn all_memory_migrations() -> Migrations<'static> {
         M::up(include_str!("../migrations/memory/0002_fts5.sql")),
         M::up(include_str!("../migrations/memory/0003_model_fields.sql")),
         M::up(include_str!("../migrations/memory/0004_memory_updates.sql")),
-        M::up(include_str!("../migrations/memory/0005_archival_fts_metadata.sql")),
-        M::up(include_str!("../migrations/memory/0006_agent_atproto_endpoints.sql")),
-        M::up(include_str!("../migrations/memory/0007_add_session_id_to_atproto_endpoints.sql")),
-        M::up(include_str!("../migrations/memory/0008_member_capabilities.sql")),
-        M::up(include_str!("../migrations/memory/0009_update_frontiers.sql")),
-        M::up(include_str!("../migrations/memory/0010_collapse_block_types.sql")),
+        M::up(include_str!(
+            "../migrations/memory/0005_archival_fts_metadata.sql"
+        )),
+        M::up(include_str!(
+            "../migrations/memory/0006_agent_atproto_endpoints.sql"
+        )),
+        M::up(include_str!(
+            "../migrations/memory/0007_add_session_id_to_atproto_endpoints.sql"
+        )),
+        M::up(include_str!(
+            "../migrations/memory/0008_member_capabilities.sql"
+        )),
+        M::up(include_str!(
+            "../migrations/memory/0009_update_frontiers.sql"
+        )),
+        M::up(include_str!(
+            "../migrations/memory/0010_collapse_block_types.sql"
+        )),
     ])
 }
 

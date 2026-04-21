@@ -115,9 +115,7 @@ impl std::fmt::Display for UserTaskStatus {
 /// User task priority.
 ///
 /// Distinguishes between importance and urgency (Eisenhower matrix style).
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
 pub enum UserTaskPriority {

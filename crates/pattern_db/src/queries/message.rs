@@ -6,9 +6,9 @@
 
 use rusqlite::OptionalExtension;
 
+use crate::Json;
 use crate::error::DbResult;
 use crate::models::{ArchiveSummary, Message, MessageSummary};
-use crate::Json;
 
 // ============================================================================
 // from_row implementations
@@ -76,7 +76,9 @@ pub fn get_message(conn: &rusqlite::Connection, id: &str) -> DbResult<Option<Mes
                 source, source_metadata, is_archived, is_deleted, created_at
          FROM messages WHERE id = ?1 AND is_deleted = 0",
     )?;
-    let result = stmt.query_row(rusqlite::params![id], Message::from_row).optional()?;
+    let result = stmt
+        .query_row(rusqlite::params![id], Message::from_row)
+        .optional()?;
     Ok(result)
 }
 
@@ -151,10 +153,7 @@ pub fn get_messages_after(
 }
 
 /// Get messages in a specific batch (excludes tombstoned).
-pub fn get_batch_messages(
-    conn: &rusqlite::Connection,
-    batch_id: &str,
-) -> DbResult<Vec<Message>> {
+pub fn get_batch_messages(conn: &rusqlite::Connection, batch_id: &str) -> DbResult<Vec<Message>> {
     let mut stmt = conn.prepare(
         "SELECT id, agent_id, position, batch_id, sequence_in_batch,
                 role, content_json, content_preview, batch_type,

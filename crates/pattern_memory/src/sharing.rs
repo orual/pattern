@@ -193,8 +193,8 @@ mod tests {
     }
 
     async fn create_test_agent(dbs: &ConstellationDb, id: &str, name: &str) {
-        use pattern_db::models::{Agent, AgentStatus};
         use pattern_db::Json;
+        use pattern_db::models::{Agent, AgentStatus};
         let agent = Agent {
             id: id.to_string(),
             name: name.to_string(),

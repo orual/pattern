@@ -277,17 +277,12 @@ pub struct FtsStats {
 /// Get statistics about FTS indexes.
 pub fn get_fts_stats(conn: &Connection) -> DbResult<FtsStats> {
     // Use unqualified name: SQLite searches temp -> main -> attached schemas.
-    let messages: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM messages_fts",
-        [],
-        |r| r.get(0),
-    )?;
+    let messages: i64 = conn.query_row("SELECT COUNT(*) FROM messages_fts", [], |r| r.get(0))?;
 
     let memory_blocks: i64 =
         conn.query_row("SELECT COUNT(*) FROM memory_blocks_fts", [], |r| r.get(0))?;
 
-    let archival: i64 =
-        conn.query_row("SELECT COUNT(*) FROM archival_fts", [], |r| r.get(0))?;
+    let archival: i64 = conn.query_row("SELECT COUNT(*) FROM archival_fts", [], |r| r.get(0))?;
 
     Ok(FtsStats {
         messages_indexed: messages as u64,
@@ -312,9 +307,7 @@ pub fn validate_fts_query(query: &str) -> DbResult<()> {
     let open_parens = query.chars().filter(|c| *c == '(').count();
     let close_parens = query.chars().filter(|c| *c == ')').count();
     if open_parens != close_parens {
-        return Err(DbError::invalid_data(
-            "Unbalanced parentheses in FTS query",
-        ));
+        return Err(DbError::invalid_data("Unbalanced parentheses in FTS query"));
     }
 
     Ok(())

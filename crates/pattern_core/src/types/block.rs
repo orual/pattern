@@ -26,8 +26,8 @@ use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
-use crate::types::memory_types::{BlockSchema, BlockType, MemoryPermission};
 use crate::types::ids::MemoryId;
+use crate::types::memory_types::{BlockSchema, BlockType, MemoryPermission};
 use crate::types::origin::Author;
 
 /// A lightweight, stable identifier for a memory block as seen by agents.

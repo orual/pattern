@@ -24,11 +24,9 @@ pub struct AgentActivity {
 /// Messages live in the attached `msg` schema; unqualified table names
 /// resolve via SQLite's schema search order (temp -> main -> attached).
 pub fn get_stats(conn: &rusqlite::Connection) -> DbResult<DbStats> {
-    let agent_count: i64 =
-        conn.query_row("SELECT COUNT(*) FROM agents", [], |r| r.get(0))?;
+    let agent_count: i64 = conn.query_row("SELECT COUNT(*) FROM agents", [], |r| r.get(0))?;
 
-    let group_count: i64 =
-        conn.query_row("SELECT COUNT(*) FROM agent_groups", [], |r| r.get(0))?;
+    let group_count: i64 = conn.query_row("SELECT COUNT(*) FROM agent_groups", [], |r| r.get(0))?;
 
     let message_count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM messages WHERE is_deleted = 0",
@@ -59,8 +57,7 @@ pub fn get_most_active_agents(
     conn: &rusqlite::Connection,
     limit: i64,
 ) -> DbResult<Vec<AgentActivity>> {
-    let sql =
-        "SELECT a.name, COUNT(m.id) as msg_count
+    let sql = "SELECT a.name, COUNT(m.id) as msg_count
          FROM agents a
          LEFT JOIN messages m ON a.id = m.agent_id AND m.is_deleted = 0
          GROUP BY a.id

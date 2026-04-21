@@ -8,8 +8,8 @@ use std::collections::{HashMap, HashSet};
 use chrono::Utc;
 use cid::Cid;
 use iroh_car::CarReader;
-use serde_ipld_dagcbor::from_slice as decode_dag_cbor;
 use pattern_db::Json;
+use serde_ipld_dagcbor::from_slice as decode_dag_cbor;
 // TODO(v3-memory-rework): port to ConstellationDb after Tasks 6-9 complete.
 use pattern_db::ConstellationDb;
 use tokio::io::AsyncRead;

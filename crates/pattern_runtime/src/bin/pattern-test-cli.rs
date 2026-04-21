@@ -635,8 +635,8 @@ async fn seed_anchor_blocks(
     store: &dyn pattern_core::traits::MemoryStore,
     agent_id: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use pattern_core::types::memory_types::{BlockSchema, BlockType};
     use pattern_core::types::block::BlockCreate;
+    use pattern_core::types::memory_types::{BlockSchema, BlockType};
 
     // (label, block_type, content, pinned)
     //
@@ -873,12 +873,10 @@ async fn cmd_cache_test(
         pattern_core::types::ids::new_id()
     ));
     std::fs::create_dir_all(&cache_test_data_dir)?;
-    let cache_test_db = std::sync::Arc::new(
-        pattern_db::ConstellationDb::open(
-            cache_test_data_dir.join("memory.db"),
-            cache_test_data_dir.join("messages.db"),
-        )?,
-    );
+    let cache_test_db = std::sync::Arc::new(pattern_db::ConstellationDb::open(
+        cache_test_data_dir.join("memory.db"),
+        cache_test_data_dir.join("messages.db"),
+    )?);
 
     eprintln!("[session] opening TidepoolSession...");
     let session_start = std::time::Instant::now();
@@ -961,8 +959,7 @@ async fn cmd_cache_test(
             .ok_or("block 'current_human' missing after turn 2 (test setup invariant broken)")?;
         doc.set_text(updated_content, true)
             .map_err(|e| format!("set_text failed: {e:?}"))?;
-        memory_store
-            .persist_block(agent_id, "current_human")?;
+        memory_store.persist_block(agent_id, "current_human")?;
     }
     eprintln!("  new content: {} chars\n", updated_content.chars().count());
 
@@ -1196,20 +1193,15 @@ async fn cmd_spawn(
     // test-only — cmd_spawn is user-facing and must use the real store.
     let db_path = data_dir.join("constellation.db");
     eprintln!("[spawn] opening constellation DB at {}", db_path.display());
-    let db = Arc::new(
-        {
-            let db_path_str = db_path.to_string_lossy().to_string();
-            let parent = std::path::Path::new(&db_path_str)
-                .parent()
-                .unwrap_or(std::path::Path::new("."))
-                .to_path_buf();
-            pattern_db::ConstellationDb::open(
-                parent.join("memory.db"),
-                parent.join("messages.db"),
-            )
+    let db = Arc::new({
+        let db_path_str = db_path.to_string_lossy().to_string();
+        let parent = std::path::Path::new(&db_path_str)
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .to_path_buf();
+        pattern_db::ConstellationDb::open(parent.join("memory.db"), parent.join("messages.db"))
             .map_err(|e| format!("opening constellation DB: {e}"))?
-        },
-    );
+    });
     let memory_cache = Arc::new(pattern_memory::MemoryCache::new(db.clone()));
     let memory_store: Arc<dyn pattern_core::traits::MemoryStore> = memory_cache.clone();
 
@@ -1327,9 +1319,7 @@ async fn cmd_spawn(
                             continue;
                         }
                     };
-                    match memory_store_for_repl
-                        .get_block(&persona_agent_id, label)
-                    {
+                    match memory_store_for_repl.get_block(&persona_agent_id, label) {
                         Ok(Some(doc)) => {
                             if let Err(e) = doc.set_text(content, true) {
                                 let Ok(mut out) = writer.lock() else {
@@ -1339,8 +1329,8 @@ async fn cmd_spawn(
                                 let _ = writeln!(out, "set_text failed: {e:?}");
                                 continue;
                             }
-                            if let Err(e) = memory_store_for_repl
-                                .persist_block(&persona_agent_id, label)
+                            if let Err(e) =
+                                memory_store_for_repl.persist_block(&persona_agent_id, label)
                             {
                                 let Ok(mut out) = writer.lock() else {
                                     continue;

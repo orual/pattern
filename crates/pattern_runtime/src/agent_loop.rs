@@ -47,9 +47,9 @@ use jiff::Timestamp;
 
 use pattern_core::error::RuntimeError;
 use pattern_core::memory::StructuredDocument;
-use pattern_core::types::memory_types::BlockType;
 use pattern_core::traits::TurnEvent;
 use pattern_core::types::ids::{AgentId, MessageId, new_id};
+use pattern_core::types::memory_types::BlockType;
 use pattern_core::types::message::{
     Message, MessageAttachment, MidBatchDeltaBehavior, RenderedBlock, ResponseMeta, SnapshotKind,
 };
@@ -624,7 +624,9 @@ fn load_snapshot_blocks_with_visibility(
 ) -> Result<Vec<RenderedBlock>, RuntimeError> {
     let block_list = ctx
         .memory_store()
-        .list_blocks(pattern_core::types::memory_types::BlockFilter::by_agent(ctx.agent_id()))
+        .list_blocks(pattern_core::types::memory_types::BlockFilter::by_agent(
+            ctx.agent_id(),
+        ))
         .map_err(|e| RuntimeError::ProviderError {
             reason: format!("list_blocks failed: {e}"),
         })?;
@@ -804,17 +806,20 @@ async fn persist_messages(
     batch_type: pattern_db::models::BatchType,
     step_label: &str,
 ) -> Result<(), RuntimeError> {
-    let conn = db.get().map_err(|e| RuntimeError::DatabasePersistenceFailed {
-        step: step_label.to_string(),
-        reason: e.to_string(),
-    })?;
+    let conn = db
+        .get()
+        .map_err(|e| RuntimeError::DatabasePersistenceFailed {
+            step: step_label.to_string(),
+            reason: e.to_string(),
+        })?;
     for msg in messages {
         let db_msg = to_db_message(msg, agent_id, batch_type)?;
-        pattern_db::queries::upsert_message(&conn, &db_msg)
-            .map_err(|e| RuntimeError::DatabasePersistenceFailed {
+        pattern_db::queries::upsert_message(&conn, &db_msg).map_err(|e| {
+            RuntimeError::DatabasePersistenceFailed {
                 step: step_label.to_string(),
                 reason: e.to_string(),
-            })?;
+            }
+        })?;
     }
     Ok(())
 }
@@ -3236,8 +3241,8 @@ mod tests {
     impl EvalDispatcher for WriteRecordingDispatcher {
         async fn dispatch(&self, _tool_call: ToolCall, _preamble: &str) -> ToolOutcome {
             use jiff::Timestamp;
-            use pattern_core::types::memory_types::BlockType;
             use pattern_core::types::block::{BlockWrite, BlockWriteKind};
+            use pattern_core::types::memory_types::BlockType;
 
             self.ctx.adapter().record_write(BlockWrite {
                 handle: smol_str::SmolStr::new(&self.block_label),
@@ -3264,8 +3269,8 @@ mod tests {
         mid_batch: pattern_core::types::message::MidBatchDeltaBehavior,
         block_label: &str,
     ) -> (Arc<SessionContext>, Arc<VecSink>, Arc<MockProviderClient>) {
-        use pattern_core::types::memory_types::{BlockSchema, BlockType};
         use pattern_core::types::block::BlockCreate;
+        use pattern_core::types::memory_types::{BlockSchema, BlockType};
         use pattern_core::types::message::SnapshotPolicy;
         use pattern_core::types::snapshot::ContextPolicy;
 
@@ -3274,11 +3279,7 @@ mod tests {
         store_concrete
             .create_block(
                 "agent-a",
-                BlockCreate::new(
-                    block_label,
-                    BlockType::Working,
-                    BlockSchema::text(),
-                ),
+                BlockCreate::new(block_label, BlockType::Working, BlockSchema::text()),
             )
             .expect("pre-create block");
 
