@@ -44,8 +44,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 // genai types directly.
 pub use genai::chat::{
     CacheControl, ChatMessage, ChatOptions, ChatRequest, ChatResponse, ChatRole, ChatStream,
-    ChatStreamEvent, ChatStreamResponse, ReasoningEffort, StreamChunk, StreamEnd, SystemBlock,
-    Tool, ToolCall, ToolChunk, ToolResponse, Usage,
+    ChatStreamEvent, ChatStreamResponse, ContentPart, ReasoningEffort, StreamChunk, StreamEnd,
+    SystemBlock, Tool, ToolCall, ToolChunk, ToolResponse, Usage,
 };
 
 // ---- ToolOutcome / ToolResult (Pattern-side tool-eval bookkeeping) ----

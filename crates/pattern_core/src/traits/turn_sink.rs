@@ -139,7 +139,7 @@ pub enum DisplayKind {
 /// parts, and the next wire turn's composer includes them. `Thinking`
 /// events on the sink are for UI display only; the sink doesn't
 /// participate in preservation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum TurnEvent {
     /// A chunk of LLM-authored response text from the provider
