@@ -102,6 +102,12 @@ pub struct MultiplexSink {
     inner: std::sync::RwLock<Arc<dyn TurnSink>>,
 }
 
+impl Default for MultiplexSink {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MultiplexSink {
     /// Create a new multiplex sink with a [`NoOpSink`] as the initial delegate.
     pub fn new() -> Self {

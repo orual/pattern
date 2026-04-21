@@ -9,17 +9,58 @@
 //! [`DaemonHandle`] containing an [`irpc::Client`] for making requests.
 //! In-process tests use `Client::local`; the daemon binary adds a QUIC
 //! listener that forwards remote messages into the same channel.
+//!
+//! ## Echo mode vs real session mode
+//!
+//! When `echo` is `true` (the default when no runtime config is provided),
+//! the server echoes messages back without invoking the LLM. This mode is
+//! used by integration tests that run in CI without provider credentials.
+//!
+//! When real session infrastructure is provided via [`SessionConfig`], the
+//! server opens [`TidepoolSession`]s and drives them via
+//! [`step_with_agent_loop`](TidepoolSession::step_with_agent_loop).
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 use irpc::{Client, WithChannels};
+use pattern_core::ProviderClient;
+use pattern_core::traits::MemoryStore;
 use pattern_core::traits::turn_sink::{TurnEvent, TurnSink};
-use pattern_core::types::provider::ContentPart;
-use pattern_core::types::turn::StopReason;
-use tracing::warn;
+use pattern_core::types::ids::{
+    AgentId as CoreAgentId, BatchId as CoreBatchId, MessageId, new_id, new_snowflake_id,
+};
+use pattern_core::types::message::Message;
+use pattern_core::types::origin::{Author, MessageOrigin, Partner, Sphere};
+use pattern_core::types::provider::{ChatMessage, ContentPart};
+use pattern_core::types::snapshot::PersonaSnapshot;
+use pattern_core::types::turn::{StopReason, TurnInput};
+use pattern_runtime::sdk::SdkLocation;
+use pattern_runtime::session::TidepoolSession;
+use tracing::{info, warn};
 
-use crate::bridge::{EventRx, EventTx, TurnSinkBridge, new_event_channel};
+use crate::bridge::{EventRx, EventTx, MultiplexSink, TurnSinkBridge, new_event_channel};
 use crate::protocol::*;
+
+/// Configuration for real session mode. When provided to
+/// [`DaemonServer::spawn_with_config`], the server opens
+/// [`TidepoolSession`]s instead of echoing messages.
+pub struct SessionConfig {
+    /// SDK location for the Haskell eval worker.
+    pub sdk: SdkLocation,
+    /// Memory store (typically an `Arc<MemoryCache>` from a mounted store).
+    pub memory_store: Arc<dyn MemoryStore>,
+    /// LLM provider client (e.g. `PatternGatewayClient`).
+    pub provider: Arc<dyn ProviderClient>,
+    /// Constellation database handle (memory.db + messages.db).
+    pub db: Arc<pattern_db::ConstellationDb>,
+    /// Default persona for new sessions. Loaded from a persona KDL file.
+    pub persona: PersonaSnapshot,
+    /// Optional mount path for scope wiring and lib/ include-path extension.
+    pub mount_path: Option<PathBuf>,
+}
 
 /// The daemon server actor.
 ///
@@ -35,6 +76,14 @@ pub struct DaemonServer {
     /// streaming RPC — the client holds the corresponding `Receiver`.
     subscribers: Vec<(AgentId, irpc::channel::mpsc::Sender<TaggedTurnEvent>)>,
     started_at: Instant,
+    /// When true, messages are echoed back without invoking the LLM.
+    echo: bool,
+    /// Session infrastructure for real mode. `None` in echo mode.
+    session_config: Option<Arc<SessionConfig>>,
+    /// Open sessions keyed by agent ID. Each session uses a [`MultiplexSink`]
+    /// whose inner sink is swapped to a per-batch [`TurnSinkBridge`] before
+    /// each `step_with_agent_loop` call.
+    sessions: HashMap<AgentId, (Arc<TidepoolSession>, Arc<MultiplexSink>)>,
 }
 
 /// Handle returned by [`DaemonServer::spawn`].
@@ -48,12 +97,24 @@ pub struct DaemonHandle {
 }
 
 impl DaemonServer {
-    /// Spawn the daemon server actor on the tokio runtime.
+    /// Spawn the daemon server actor in echo mode.
     ///
-    /// Returns a [`DaemonHandle`] with an irpc [`Client`] connected to the
-    /// actor via an in-process channel. The caller may extract the local
-    /// sender from the client (via `as_local()`) to set up a QUIC listener.
+    /// Messages are echoed back without invoking the LLM. Used by tests
+    /// and when the `--echo` flag is passed to the daemon binary.
     pub fn spawn() -> DaemonHandle {
+        Self::spawn_inner(true, None)
+    }
+
+    /// Spawn the daemon server actor with real session infrastructure.
+    ///
+    /// The server will open [`TidepoolSession`]s and drive them via
+    /// `step_with_agent_loop` when messages arrive.
+    pub fn spawn_with_config(config: SessionConfig) -> DaemonHandle {
+        Self::spawn_inner(false, Some(Arc::new(config)))
+    }
+
+    /// Internal spawn helper.
+    fn spawn_inner(echo: bool, session_config: Option<Arc<SessionConfig>>) -> DaemonHandle {
         let (msg_tx, msg_rx) = tokio::sync::mpsc::channel(64);
         let (event_tx, event_rx) = new_event_channel();
         let server = Self {
@@ -62,6 +123,9 @@ impl DaemonServer {
             event_tx,
             subscribers: Vec::new(),
             started_at: Instant::now(),
+            echo,
+            session_config,
+            sessions: HashMap::new(),
         };
         tokio::spawn(server.run());
         DaemonHandle {
@@ -105,33 +169,117 @@ impl DaemonServer {
         }
     }
 
+    /// Get or open a session for the given agent. In real mode, opens a
+    /// [`TidepoolSession`] via `open_with_agent_loop` on first use and
+    /// caches it. The session is opened with a [`MultiplexSink`] whose
+    /// inner sink is swapped per-batch before each step.
+    async fn get_or_open_session(
+        &mut self,
+        agent_id: &AgentId,
+    ) -> Result<(Arc<TidepoolSession>, Arc<MultiplexSink>), String> {
+        if let Some(entry) = self.sessions.get(agent_id) {
+            return Ok(entry.clone());
+        }
+
+        let config = self
+            .session_config
+            .as_ref()
+            .ok_or_else(|| "session config not available (echo mode?)".to_string())?;
+
+        let mux_sink = Arc::new(MultiplexSink::new());
+        let sink_dyn: Arc<dyn TurnSink> = mux_sink.clone();
+
+        let session = TidepoolSession::open_with_agent_loop(
+            config.persona.clone(),
+            &config.sdk,
+            config.memory_store.clone(),
+            config.provider.clone(),
+            config.db.clone(),
+            sink_dyn,
+            None, // prelude_dir — SDK bundles the prelude internally.
+            config.mount_path.clone(),
+        )
+        .await
+        .map_err(|e| format!("failed to open session for {agent_id}: {e}"))?;
+
+        let session = Arc::new(session);
+        self.sessions
+            .insert(agent_id.clone(), (session.clone(), mux_sink.clone()));
+        info!(agent_id = %agent_id, "opened new session");
+        Ok((session, mux_sink))
+    }
+
     /// Dispatch a single incoming message.
     async fn handle(&mut self, msg: PatternMessage) {
         match msg {
             PatternMessage::SendMessage(req) => {
                 let WithChannels { tx, inner, .. } = req;
                 let batch_id = inner.batch_id.clone();
+                let agent_id = inner.agent_id.clone();
 
                 // Acknowledge receipt — the client unblocks immediately.
                 let _ = tx.send(()).await;
 
-                // Build a TurnSinkBridge for this batch to route events
-                // back through the actor's fan-out mechanism.
-                let bridge = TurnSinkBridge::new(batch_id, inner.agent_id, self.event_tx.clone());
+                if self.echo {
+                    // Echo mode: extract text from parts, emit "echo: {text}" + Stop.
+                    let bridge = TurnSinkBridge::new(batch_id, agent_id, self.event_tx.clone());
+                    let text = inner
+                        .parts
+                        .iter()
+                        .filter_map(|p| match p {
+                            ContentPart::Text(s) => Some(s.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("");
+                    bridge.emit(TurnEvent::Text(format!("echo: {text}")));
+                    bridge.emit(TurnEvent::Stop(StopReason::EndTurn));
+                } else {
+                    // Real session mode: open or reuse session, drive step.
+                    let event_tx = self.event_tx.clone();
+                    match self.get_or_open_session(&agent_id).await {
+                        Ok((session, mux_sink)) => {
+                            // Build a per-batch bridge and swap it into the
+                            // session's MultiplexSink so events from this step
+                            // are tagged with the correct batch_id.
+                            let bridge = Arc::new(TurnSinkBridge::new(
+                                batch_id.clone(),
+                                agent_id.clone(),
+                                event_tx,
+                            ));
+                            mux_sink.set_inner(bridge.clone());
 
-                // Echo stub: extract text from parts, emit "echo: {text}" + Stop.
-                // Real session integration is wired in Task 9.
-                let text = inner
-                    .parts
-                    .iter()
-                    .filter_map(|p| match p {
-                        ContentPart::Text(s) => Some(s.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("");
-                bridge.emit(TurnEvent::Text(format!("echo: {text}")));
-                bridge.emit(TurnEvent::Stop(StopReason::EndTurn));
+                            // Build TurnInput from the client's message.
+                            let turn_input = build_turn_input(&inner);
+
+                            // Drive step in a background task so the actor
+                            // remains responsive to other messages.
+                            tokio::spawn(async move {
+                                match session.step_with_agent_loop(turn_input).await {
+                                    Ok(_reply) => {
+                                        // Events already emitted via the bridge.
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            agent_id = %agent_id,
+                                            batch_id = %batch_id,
+                                            error = %e,
+                                            "step_with_agent_loop failed"
+                                        );
+                                        bridge.emit(TurnEvent::Text(format!("error: {e}")));
+                                        bridge.emit(TurnEvent::Stop(StopReason::EndTurn));
+                                    }
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            warn!(agent_id = %agent_id, error = %e, "failed to open session");
+                            let bridge = TurnSinkBridge::new(batch_id, agent_id, event_tx);
+                            bridge.emit(TurnEvent::Text(format!("error: {e}")));
+                            bridge.emit(TurnEvent::Stop(StopReason::EndTurn));
+                        }
+                    }
+                }
             }
             PatternMessage::SubscribeOutput(req) => {
                 let WithChannels { tx, inner, .. } = req;
@@ -141,13 +289,21 @@ impl DaemonServer {
             }
             PatternMessage::ListAgents(req) => {
                 let WithChannels { tx, .. } = req;
-                // Stub: return empty agent list. Wired to runtime in Task 9.
-                let _ = tx.send(vec![]).await;
+                let agents: Vec<AgentInfo> = self
+                    .sessions
+                    .keys()
+                    .map(|id| AgentInfo {
+                        agent_id: id.clone(),
+                        persona_name: String::new(), // Populated when multi-agent lands.
+                        active_batches: vec![],
+                    })
+                    .collect();
+                let _ = tx.send(agents).await;
             }
             PatternMessage::GetStatus(req) => {
                 let WithChannels { tx, .. } = req;
                 let status = RuntimeStatus {
-                    agent_count: 0,
+                    agent_count: self.sessions.len(),
                     active_batch_count: 0,
                     uptime_secs: self.started_at.elapsed().as_secs(),
                 };
@@ -155,7 +311,7 @@ impl DaemonServer {
             }
             PatternMessage::CancelBatch(req) => {
                 let WithChannels { tx, .. } = req;
-                // Stub: acknowledge but do nothing. Wired in Task 9.
+                // TODO: cancel via session CancelState.
                 let _ = tx.send(()).await;
             }
             PatternMessage::RunCommand(req) => {
@@ -167,6 +323,48 @@ impl DaemonServer {
                 let _ = tx.send(result).await;
             }
         }
+    }
+}
+
+/// Build a [`TurnInput`] from an [`AgentMessage`].
+///
+/// Mints fresh turn and batch IDs, wraps the client's content parts into
+/// a user [`ChatMessage`], and sets the origin to `Author::Partner`.
+fn build_turn_input(msg: &AgentMessage) -> TurnInput {
+    let batch_id = CoreBatchId::from(msg.batch_id.to_string());
+    let agent_id = CoreAgentId::from(msg.agent_id.to_string());
+
+    let chat_msg = ChatMessage::user(
+        msg.parts
+            .iter()
+            .filter_map(|p| match p {
+                ContentPart::Text(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(""),
+    );
+
+    let message = Message {
+        chat_message: chat_msg,
+        id: MessageId::from(new_id().to_string()),
+        position: new_snowflake_id(),
+        owner_id: agent_id,
+        created_at: jiff::Timestamp::now(),
+        batch: batch_id.clone(),
+        response_meta: None,
+        block_refs: vec![],
+        attachments: vec![],
+    };
+
+    TurnInput {
+        turn_id: new_snowflake_id(),
+        batch_id,
+        origin: MessageOrigin::new(
+            Author::Partner(Partner { user_id: new_id() }),
+            Sphere::Private,
+        ),
+        messages: vec![message],
     }
 }
 

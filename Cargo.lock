@@ -6394,6 +6394,7 @@ dependencies = [
  "clap",
  "dirs 5.0.1",
  "irpc",
+ "jiff",
  "miette",
  "n0-future 0.3.2",
  "nix",
