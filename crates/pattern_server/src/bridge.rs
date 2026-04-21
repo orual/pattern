@@ -196,4 +196,73 @@ mod tests {
         assert!(matches!(ev1.event, TurnEvent::Text(ref s) if s == "from 1"));
         assert!(matches!(ev2.event, TurnEvent::Text(ref s) if s == "from 2"));
     }
+
+    // --- MultiplexSink tests ---
+
+    /// Emitting to a MultiplexSink with an inner set forwards the event
+    /// to that inner sink.
+    #[test]
+    fn multiplex_sink_delegates_to_inner() {
+        let (tx, mut rx) = new_event_channel();
+        let bridge = Arc::new(TurnSinkBridge::new("batch-1".into(), "agent-1".into(), tx));
+
+        let mux = MultiplexSink::new();
+        mux.set_inner(bridge);
+
+        mux.emit(TurnEvent::Text("delegated".into()));
+
+        let ev = rx.try_recv().unwrap();
+        assert_eq!(ev.batch_id, "batch-1");
+        assert!(matches!(ev.event, TurnEvent::Text(ref s) if s == "delegated"));
+    }
+
+    /// After swapping the inner sink, new events go to the new inner while
+    /// events emitted before the swap went to the old inner.
+    #[test]
+    fn multiplex_sink_swap_routes_to_new_inner() {
+        let (tx_a, mut rx_a) = new_event_channel();
+        let (tx_b, mut rx_b) = new_event_channel();
+
+        let bridge_a = Arc::new(TurnSinkBridge::new(
+            "batch-a".into(),
+            "agent-1".into(),
+            tx_a,
+        ));
+        let bridge_b = Arc::new(TurnSinkBridge::new(
+            "batch-b".into(),
+            "agent-1".into(),
+            tx_b,
+        ));
+
+        let mux = MultiplexSink::new();
+
+        // First inner — event goes to rx_a.
+        mux.set_inner(bridge_a);
+        mux.emit(TurnEvent::Text("first".into()));
+
+        // Swap inner — event goes to rx_b.
+        mux.set_inner(bridge_b);
+        mux.emit(TurnEvent::Text("second".into()));
+
+        let ev_a = rx_a.try_recv().unwrap();
+        assert_eq!(ev_a.batch_id, "batch-a");
+        assert!(matches!(ev_a.event, TurnEvent::Text(ref s) if s == "first"));
+
+        // rx_a should have nothing more.
+        assert!(rx_a.try_recv().is_err());
+
+        let ev_b = rx_b.try_recv().unwrap();
+        assert_eq!(ev_b.batch_id, "batch-b");
+        assert!(matches!(ev_b.event, TurnEvent::Text(ref s) if s == "second"));
+    }
+
+    /// The default MultiplexSink (backed by NoOpSink) must not panic when
+    /// events are emitted before any inner is installed.
+    #[test]
+    fn multiplex_sink_default_drops_events() {
+        let mux = MultiplexSink::new();
+        // Must not panic — NoOpSink discards events silently.
+        mux.emit(TurnEvent::Text("before any inner".into()));
+        mux.emit(TurnEvent::Stop(StopReason::EndTurn));
+    }
 }

@@ -34,6 +34,14 @@ pub enum DaemonSub {
         /// Path to the project root (defaults to the current directory).
         #[arg(long)]
         path: Option<PathBuf>,
+
+        /// Run in echo mode (no LLM, echoes messages back). Used for testing.
+        #[arg(long)]
+        echo: bool,
+
+        /// Path to a persona KDL file. Required unless running in echo mode.
+        #[arg(long)]
+        persona: Option<PathBuf>,
     },
     /// Stop the running daemon.
     Stop,
@@ -43,7 +51,12 @@ pub enum DaemonSub {
 
 pub fn cmd_daemon(cmd: DaemonCmd) -> MietteResult<()> {
     match cmd.sub {
-        DaemonSub::Start { port, path } => cmd_start(port, path),
+        DaemonSub::Start {
+            port,
+            path,
+            echo,
+            persona,
+        } => cmd_start(port, path, echo, persona),
         DaemonSub::Stop => cmd_stop(),
         DaemonSub::Status => cmd_status(),
     }
@@ -53,7 +66,12 @@ pub fn cmd_daemon(cmd: DaemonCmd) -> MietteResult<()> {
 // start
 // ---------------------------------------------------------------------------
 
-fn cmd_start(port: u16, _path: Option<PathBuf>) -> MietteResult<()> {
+fn cmd_start(
+    port: u16,
+    path: Option<PathBuf>,
+    echo: bool,
+    persona: Option<PathBuf>,
+) -> MietteResult<()> {
     // Check for an already-running daemon.
     if let Ok(state) = DaemonState::load() {
         if state.is_process_alive() {
@@ -75,6 +93,15 @@ fn cmd_start(port: u16, _path: Option<PathBuf>) -> MietteResult<()> {
     cmd.arg("start");
     if port != 0 {
         cmd.arg("--port").arg(port.to_string());
+    }
+    if echo {
+        cmd.arg("--echo");
+    }
+    if let Some(persona_path) = &persona {
+        cmd.arg("--persona").arg(persona_path);
+    }
+    if let Some(project_path) = &path {
+        cmd.arg("--path").arg(project_path);
     }
 
     // Detach: don't inherit stdin; inherit stdout/stderr so early errors are
@@ -215,12 +242,12 @@ pub fn ensure_daemon_running() -> MietteResult<SocketAddr> {
 /// 2. `PATH` via `which`.
 fn locate_server_binary() -> MietteResult<PathBuf> {
     // Try sibling binary first — most reliable for dev + installed layouts.
-    if let Ok(current_exe) = std::env::current_exe() {
-        if let Some(dir) = current_exe.parent() {
-            let candidate = dir.join("pattern-server");
-            if candidate.exists() {
-                return Ok(candidate);
-            }
+    if let Ok(current_exe) = std::env::current_exe()
+        && let Some(dir) = current_exe.parent()
+    {
+        let candidate = dir.join("pattern-server");
+        if candidate.exists() {
+            return Ok(candidate);
         }
     }
 
@@ -238,10 +265,10 @@ fn wait_for_state_file(timeout: Duration) -> MietteResult<DaemonState> {
     let poll_interval = Duration::from_millis(100);
 
     while std::time::Instant::now() < deadline {
-        if let Ok(state) = DaemonState::load() {
-            if state.is_process_alive() {
-                return Ok(state);
-            }
+        if let Ok(state) = DaemonState::load()
+            && state.is_process_alive()
+        {
+            return Ok(state);
         }
         std::thread::sleep(poll_interval);
     }
@@ -272,7 +299,9 @@ mod tests {
             w.sub,
             DaemonSub::Start {
                 port: 0,
-                path: None
+                path: None,
+                echo: false,
+                persona: None,
             }
         ));
     }
@@ -292,7 +321,9 @@ mod tests {
             w.sub,
             DaemonSub::Start {
                 port: 9001,
-                path: None
+                path: None,
+                echo: false,
+                persona: None,
             }
         ));
     }

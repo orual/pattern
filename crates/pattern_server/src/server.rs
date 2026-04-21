@@ -39,6 +39,7 @@ use pattern_core::types::snapshot::PersonaSnapshot;
 use pattern_core::types::turn::{StopReason, TurnInput};
 use pattern_runtime::sdk::SdkLocation;
 use pattern_runtime::session::TidepoolSession;
+use smol_str::SmolStr;
 use tracing::{info, warn};
 
 use crate::bridge::{EventRx, EventTx, MultiplexSink, TurnSinkBridge, new_event_channel};
@@ -71,10 +72,10 @@ pub struct DaemonServer {
     recv: tokio::sync::mpsc::Receiver<PatternMessage>,
     event_rx: EventRx,
     event_tx: EventTx,
-    /// Active subscribers: `(agent_id_filter, irpc_mpsc_sender)`.
-    /// The `irpc::channel::mpsc::Sender` is the server-side half of the
-    /// streaming RPC — the client holds the corresponding `Receiver`.
-    subscribers: Vec<(AgentId, irpc::channel::mpsc::Sender<TaggedTurnEvent>)>,
+    /// Active subscribers keyed by `agent_id`. Each entry is a list of irpc
+    /// mpsc senders — the server-side half of the streaming RPC. Using a
+    /// `HashMap` avoids the O(n) linear scan on every fan-out event.
+    subscribers: HashMap<AgentId, Vec<irpc::channel::mpsc::Sender<TaggedTurnEvent>>>,
     started_at: Instant,
     /// When true, messages are echoed back without invoking the LLM.
     echo: bool,
@@ -84,6 +85,18 @@ pub struct DaemonServer {
     /// whose inner sink is swapped to a per-batch [`TurnSinkBridge`] before
     /// each `step_with_agent_loop` call.
     sessions: HashMap<AgentId, (Arc<TidepoolSession>, Arc<MultiplexSink>)>,
+    /// Per-agent mutex that serializes the `set_inner` + `spawn` sequence.
+    ///
+    /// Without this lock, two concurrent `SendMessage` calls for the same
+    /// agent could race: the first call's `set_inner` might be overwritten by
+    /// the second before the first task begins executing, causing that step's
+    /// events to be tagged with the wrong `batch_id`.
+    session_locks: HashMap<AgentId, Arc<tokio::sync::Mutex<()>>>,
+    /// Stable partner identity for this daemon session.
+    ///
+    /// Minted once at spawn time so all messages from this session carry the
+    /// same `Author::Partner` identity, rather than minting a fresh ID per message.
+    partner_id: SmolStr,
 }
 
 /// Handle returned by [`DaemonServer::spawn`].
@@ -121,11 +134,13 @@ impl DaemonServer {
             recv: msg_rx,
             event_rx,
             event_tx,
-            subscribers: Vec::new(),
+            subscribers: HashMap::new(),
             started_at: Instant::now(),
             echo,
             session_config,
             sessions: HashMap::new(),
+            session_locks: HashMap::new(),
+            partner_id: new_id(),
         };
         tokio::spawn(server.run());
         DaemonHandle {
@@ -152,20 +167,40 @@ impl DaemonServer {
         }
     }
 
-    /// Fan out a tagged event to all subscribers whose `agent_id` filter
-    /// matches the event's `agent_id`. Disconnected subscribers (send
-    /// returns error) are removed in-place.
+    /// Fan out a tagged event to all subscribers whose `agent_id` matches the
+    /// event's `agent_id`. Uses `try_send` so that a slow or full subscriber
+    /// does not block the actor loop. Subscribers that are full (buffer
+    /// backpressure) or disconnected are removed.
     async fn fan_out(&mut self, event: TaggedTurnEvent) {
+        let Some(senders) = self.subscribers.get_mut(&event.agent_id) else {
+            return;
+        };
+
         let mut i = 0;
-        while i < self.subscribers.len() {
-            let (ref agent_filter, ref tx) = self.subscribers[i];
-            if *agent_filter == event.agent_id && tx.send(event.clone()).await.is_err() {
-                // Subscriber disconnected — remove.
-                warn!(agent_id = %agent_filter, "subscriber disconnected, removing");
-                self.subscribers.swap_remove(i);
-                continue;
+        while i < senders.len() {
+            let tx = &senders[i];
+            match tx.try_send(event.clone()).await {
+                Ok(true) => {
+                    // Delivered successfully.
+                    i += 1;
+                }
+                Ok(false) => {
+                    // Subscriber's buffer is full — disconnect rather than block.
+                    warn!(
+                        agent_id = %event.agent_id,
+                        "subscriber buffer full, removing slow subscriber"
+                    );
+                    senders.swap_remove(i);
+                }
+                Err(_) => {
+                    // Subscriber's receiver has been dropped.
+                    warn!(
+                        agent_id = %event.agent_id,
+                        "subscriber disconnected, removing"
+                    );
+                    senders.swap_remove(i);
+                }
             }
-            i += 1;
         }
     }
 
@@ -237,24 +272,41 @@ impl DaemonServer {
                 } else {
                     // Real session mode: open or reuse session, drive step.
                     let event_tx = self.event_tx.clone();
+                    let partner_id = self.partner_id.clone();
                     match self.get_or_open_session(&agent_id).await {
                         Ok((session, mux_sink)) => {
-                            // Build a per-batch bridge and swap it into the
-                            // session's MultiplexSink so events from this step
-                            // are tagged with the correct batch_id.
-                            let bridge = Arc::new(TurnSinkBridge::new(
-                                batch_id.clone(),
-                                agent_id.clone(),
-                                event_tx,
-                            ));
-                            mux_sink.set_inner(bridge.clone());
+                            // Acquire (or create) the per-agent serialization lock.
+                            // This serializes the set_inner + spawn sequence so that
+                            // two concurrent SendMessage calls for the same agent
+                            // cannot interleave their bridge swaps, which would cause
+                            // one batch's events to be tagged with the other's batch_id.
+                            let agent_lock = self
+                                .session_locks
+                                .entry(agent_id.clone())
+                                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                                .clone();
 
                             // Build TurnInput from the client's message.
-                            let turn_input = build_turn_input(&inner);
+                            let turn_input = build_turn_input(&inner, &partner_id);
 
                             // Drive step in a background task so the actor
                             // remains responsive to other messages.
                             tokio::spawn(async move {
+                                // Hold the per-agent lock for the entire set_inner
+                                // + step sequence. This ensures only one batch at a
+                                // time drives the agent in phase 1.
+                                let _guard = agent_lock.lock().await;
+
+                                // Build a per-batch bridge and swap it into the
+                                // session's MultiplexSink so events from this step
+                                // are tagged with the correct batch_id.
+                                let bridge = Arc::new(TurnSinkBridge::new(
+                                    batch_id.clone(),
+                                    agent_id.clone(),
+                                    event_tx,
+                                ));
+                                mux_sink.set_inner(bridge.clone());
+
                                 match session.step_with_agent_loop(turn_input).await {
                                     Ok(_reply) => {
                                         // Events already emitted via the bridge.
@@ -285,7 +337,7 @@ impl DaemonServer {
                 let WithChannels { tx, inner, .. } = req;
                 // Register this subscriber. The actor's `fan_out()` method
                 // will forward matching events to this irpc mpsc sender.
-                self.subscribers.push((inner.agent_id, tx));
+                self.subscribers.entry(inner.agent_id).or_default().push(tx);
             }
             PatternMessage::ListAgents(req) => {
                 let WithChannels { tx, .. } = req;
@@ -311,7 +363,9 @@ impl DaemonServer {
             }
             PatternMessage::CancelBatch(req) => {
                 let WithChannels { tx, .. } = req;
-                // TODO: cancel via session CancelState.
+                // TODO(phase-2): wire cancellation — call session.cancel_batch(inner.batch_id)
+                // using TidepoolSession's CancelState so the TUI's Esc key can stop a running
+                // step. For phase 1, we acknowledge immediately and take no other action.
                 let _ = tx.send(()).await;
             }
             PatternMessage::RunCommand(req) => {
@@ -329,8 +383,9 @@ impl DaemonServer {
 /// Build a [`TurnInput`] from an [`AgentMessage`].
 ///
 /// Mints fresh turn and batch IDs, wraps the client's content parts into
-/// a user [`ChatMessage`], and sets the origin to `Author::Partner`.
-fn build_turn_input(msg: &AgentMessage) -> TurnInput {
+/// a user [`ChatMessage`], and sets the origin to `Author::Partner` using
+/// the stable `partner_id` minted once at server spawn time.
+fn build_turn_input(msg: &AgentMessage, partner_id: &SmolStr) -> TurnInput {
     let batch_id = CoreBatchId::from(msg.batch_id.to_string());
     let agent_id = CoreAgentId::from(msg.agent_id.to_string());
 
@@ -361,7 +416,9 @@ fn build_turn_input(msg: &AgentMessage) -> TurnInput {
         turn_id: new_snowflake_id(),
         batch_id,
         origin: MessageOrigin::new(
-            Author::Partner(Partner { user_id: new_id() }),
+            Author::Partner(Partner {
+                user_id: partner_id.clone(),
+            }),
             Sphere::Private,
         ),
         messages: vec![message],

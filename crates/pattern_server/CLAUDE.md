@@ -1,189 +1,102 @@
-# CLAUDE.md - Pattern Server
+# CLAUDE.md - pattern_server
 
-Backend API server for Pattern, providing HTTP/WebSocket APIs for multi-user hosting.
+Daemon server for Pattern, exposing agent runtime over IRPC (QUIC transport).
+The binary is `pattern-server`. The CLI manages it via `pattern daemon {start,stop,status}`.
 
-## Current Status
+Last verified: 2026-04-21
 
-### 🚧 MOSTLY STUB - IN DEVELOPMENT
+## Current status
 
-#### ✅ Implemented
-- Basic Axum server setup with state management
-- JWT-based authentication (access + refresh tokens)
-- Password hashing with bcrypt
-- Health check endpoint
-- Auth middleware for protected routes
-- CORS configuration
-- Database connection pool
+Phase 1 of the v3-TUI plan is complete. The daemon provides:
 
-#### 🔴 Not Implemented (Stubs/TODOs)
-- Most API endpoints beyond auth
-- WebSocket support for real-time updates
-- Agent management endpoints
-- Message handling endpoints
-- Group coordination endpoints
-- MCP integration
-- Rate limiting
-- Metrics and monitoring
+- IRPC-based message routing over QUIC (localhost)
+- Actor model: `DaemonServer` owns the event bus and dispatches protocol messages
+- Echo mode for CI (no LLM, reflects messages back)
+- Real session mode: `TidepoolSession` via `SessionConfig`
+- Subscriber fan-out to TUI clients via `TaggedTurnEvent`
+- State persistence: `~/.pattern/daemon/state.json` (PID + listen address)
 
 ## Architecture
 
-### Server Structure
-```rust
-pub struct AppState {
-    pub db: SurrealDB,
-    pub config: ServerConfig,
-    pub jwt_encoding_key: EncodingKey,
-    pub jwt_decoding_key: DecodingKey,
-    pub agent_registry: Arc<DashMap<String, Arc<dyn Agent>>>,
-}
+### Actor model
+
+`DaemonServer` is a tokio actor that runs the server event loop. It owns:
+
+- `recv`: incoming `PatternMessage`s from irpc clients
+- `event_rx`: tagged events from `TurnSinkBridge`s (unbounded mpsc)
+- `subscribers`: `HashMap<AgentId, Vec<irpc::channel::mpsc::Sender<TaggedTurnEvent>>>`
+- `sessions`: `HashMap<AgentId, (Arc<TidepoolSession>, Arc<MultiplexSink>)>`
+- `session_locks`: `HashMap<AgentId, Arc<tokio::sync::Mutex<()>>>` — per-agent mutex serializing the `set_inner` + `spawn` sequence to prevent race conditions on concurrent messages
+- `partner_id`: stable `SmolStr` minted once at spawn; all messages from this session share one partner identity
+
+### IRPC protocol (`protocol.rs`)
+
+Defines `PatternProtocol` (the irpc service) and the message types:
+
+- `SendMessage` — client sends `AgentMessage`, server acknowledges immediately then drives the step
+- `SubscribeOutput` — client opens a streaming channel to receive `TaggedTurnEvent`s
+- `ListAgents` — returns `Vec<AgentInfo>`
+- `GetStatus` — returns `RuntimeStatus` (uptime, agent count)
+- `CancelBatch` — phase 2: will cancel a running step via `CancelState`
+- `RunCommand` — reserved for future use
+
+### Event routing (`bridge.rs`)
+
+- `TurnSinkBridge`: per-batch `TurnSink` that tags events with `batch_id` + `agent_id` and forwards them on an unbounded mpsc to the daemon actor
+- `MultiplexSink`: atomically-swappable `TurnSink` held by each `TidepoolSession`. Before each step, the daemon swaps the inner to a fresh `TurnSinkBridge` for that batch.
+- Fan-out uses `try_send` — slow subscribers (buffer full) are disconnected rather than blocking the actor loop.
+
+### Client (`client.rs`)
+
+`DaemonClient` wraps `irpc::Client<PatternProtocol>` with typed helper methods:
+`send_message`, `subscribe_output`, `list_agents`, `get_status`.
+
+### State (`state.rs`)
+
+`DaemonState` persists `{ pid, addr }` to `~/.pattern/daemon/state.json` (or
+`$PATTERN_STATE_DIR/state.json` for tests). `is_process_alive()` checks via `kill(pid, 0)`.
+
+## Module overview
+
 ```
-
-### Authentication Flow
-1. User logs in with username/password
-2. Server validates credentials against database
-3. Returns JWT access token (15min) + refresh token (7 days)
-4. Client includes access token in Authorization header
-5. Refresh token used to get new access token when expired
-
-### Middleware Stack
-- CORS handling
-- Request ID generation
-- Authentication verification
-- Rate limiting (planned)
-- Error handling
-
-## Implementation Roadmap
-
-### Phase 1: Core API (Current)
-- [x] Authentication endpoints
-- [x] Health check
-- [ ] User management
-- [ ] Agent CRUD operations
-- [ ] Basic message handling
-
-### Phase 2: Real-time Features
-- [ ] WebSocket support
-- [ ] Live message streaming
-- [ ] Agent status updates
-- [ ] Typing indicators
-- [ ] Presence system
-
-### Phase 3: Advanced Features
-- [ ] Group management
-- [ ] Data source configuration
-- [ ] MCP tool management
-- [ ] Export/import functionality
-- [ ] Admin dashboard API
-
-### Phase 4: Production Ready
-- [ ] Rate limiting
-- [ ] Metrics (Prometheus)
-- [ ] Audit logging
-- [ ] Backup/restore
-- [ ] Multi-tenancy
-
-## Development Guidelines
-
-### Adding New Endpoints
-1. Define request/response types in pattern_api
-2. Create handler function in appropriate module
-3. Add route to router in handlers/mod.rs
-4. Implement business logic
-5. Add tests
-
-### Handler Pattern
-```rust
-pub async fn create_agent(
-    State(state): State<AppState>,
-    Extension(user_id): Extension<UserId>,
-    Json(request): Json<CreateAgentRequest>,
-) -> Result<Json<AgentResponse>, ApiError> {
-    // Validate request
-    // Perform database operations
-    // Return response
-}
+src/
+├── bridge.rs    # TurnSinkBridge, MultiplexSink, event channel types
+├── client.rs    # DaemonClient (typed irpc client)
+├── main.rs      # pattern-server binary entry point
+├── protocol.rs  # PatternProtocol, PatternMessage, TaggedTurnEvent, request/response types
+├── server.rs    # DaemonServer actor
+└── state.rs     # DaemonState (PID + addr persistence)
 ```
-
-### Error Handling
-- Use pattern_api::ApiError for all errors
-- Include helpful error messages
-- Log errors with appropriate level
-- Return proper HTTP status codes
 
 ## Testing
 
-### Unit Tests
+Echo mode is designed for CI. Tests in `server.rs` and `bridge.rs` use it.
+
 ```bash
-cargo test --package pattern-server --lib
+# Run all tests for this crate
+cargo nextest run -p pattern-server
+
+# With output
+cargo nextest run -p pattern-server --nocapture
 ```
 
-### Integration Tests
-```bash
-# Start test database
-surreal start --log debug memory
+No external services needed — echo mode runs without LLM credentials.
 
-# Run integration tests
-cargo test --package pattern-server --test '*'
-```
+## CLI integration
 
-### Manual Testing
-```bash
-# Start server
-cargo run --bin pattern-server
+The `pattern-cli` crate manages the daemon process via `pattern daemon {start,stop,status}`.
+The CLI finds `pattern-server` as a sibling binary (same directory) or via `PATH`.
 
-# Test health endpoint
-curl http://localhost:3000/api/health
+Forwarded flags from `pattern daemon start`:
+- `--port N` — QUIC listen port (0 = OS-assigned)
+- `--echo` — run in echo mode
+- `--persona PATH` — path to persona KDL file (required unless `--echo`)
+- `--path DIR` — project root for memory mount
 
-# Test auth
-curl -X POST http://localhost:3000/api/auth \
-  -H "Content-Type: application/json" \
-  -d '{"username":"test","password":"test123"}'
-```
+## Development guidelines
 
-## Configuration
-
-### Environment Variables
-```bash
-# Required
-DATABASE_URL=surreal://localhost:8000
-JWT_SECRET=your-secret-key
-
-# Optional
-PORT=3000
-ACCESS_TOKEN_TTL=900
-REFRESH_TOKEN_TTL=604800
-BCRYPT_COST=12
-```
-
-### Config File
-```toml
-[server]
-port = 3000
-host = "0.0.0.0"
-
-[database]
-url = "surreal://localhost:8000"
-namespace = "pattern"
-database = "main"
-
-[auth]
-access_token_ttl = 900
-refresh_token_ttl = 604800
-bcrypt_cost = 12
-```
-
-## Security Considerations
-
-- JWT secrets must be strong and rotated
-- Passwords hashed with bcrypt (cost 12)
-- CORS configured for specific origins
-- Rate limiting on auth endpoints (TODO)
-- SQL injection prevented via parameterized queries
-- XSS prevention via proper escaping
-
-## Known Issues
-
-- Token refresh doesn't check if family is revoked
-- No rate limiting implemented yet
-- WebSocket support not implemented
-- Some error messages may leak information
+- Do not run `pattern` or `pattern-server` during development. Production agents may be running.
+- Use `DaemonServer::spawn()` (echo mode) for in-process integration tests.
+- The actor loop must remain non-blocking: all heavy work goes in `tokio::spawn`.
+- `fan_out` uses `try_send` to avoid blocking on slow TUI clients.
+- Per-agent mutex (`session_locks`) serializes `set_inner` + step to prevent batch_id misrouting.
