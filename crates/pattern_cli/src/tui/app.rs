@@ -450,10 +450,9 @@ impl App {
     fn update_autocomplete(&mut self) {
         let text = self.input.current_text();
         if let Some(without_slash) = text.strip_prefix('/')
-            && !without_slash.is_empty()
             && !without_slash.contains(' ')
         {
-            // Completing a command name.
+            // Completing a command name. Empty pattern shows all commands.
             let candidates = self.command_source.candidates();
             self.autocomplete.update(without_slash, &candidates);
             return;

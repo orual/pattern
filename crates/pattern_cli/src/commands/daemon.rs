@@ -9,12 +9,56 @@
 //! ownership lives in `pattern_server`.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::Subcommand;
 use miette::{IntoDiagnostic, Result as MietteResult, miette};
 use pattern_server::state::DaemonState;
+
+// ---------------------------------------------------------------------------
+// Default persona
+// ---------------------------------------------------------------------------
+
+/// Bundled default persona KDL, written to `~/.pattern/personas/@pattern-default/persona.kdl`
+/// on first run if no persona is found.
+const DEFAULT_PERSONA_KDL: &str = r#"name "pattern-default"
+agent-id "pattern-default"
+
+system-prompt "You are Pattern, an ADHD support assistant providing external executive function. Be helpful, concise, and proactive."
+
+model provider="anthropic" model-id="claude-sonnet-4-6" {
+    temperature 0.7
+    max-tokens 4096
+}
+
+context {
+    compress-check-message-floor 50
+    compress-token-threshold 150000
+    mid-batch "filter_self_edits"
+    compression type="recursive_summarization" {
+        chunk-size 20
+        summarization-model "claude-haiku-4-5"
+    }
+}
+
+budgets {
+    wall-ms 30000
+    cpu-ms 10000
+}
+
+memory {
+    persona content="I am Pattern, an ADHD support assistant. I provide external executive function through structured support, gentle reminders, and adaptive task management." {
+        memory-type "core"
+        permission "read_only"
+        pinned true
+    }
+    scratchpad content="Working notes for the current session." {
+        memory-type "working"
+        permission "read_write"
+    }
+}
+"#;
 
 /// Manage the Pattern daemon.
 #[derive(clap::Args)]
@@ -185,21 +229,97 @@ fn cmd_status() -> MietteResult<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Persona resolution
+// ---------------------------------------------------------------------------
+
+/// Resolve the default persona KDL path for daemon auto-start.
+///
+/// Resolution strategy:
+/// 1. Try to find a project mount via `find_mount(project_path)`.
+/// 2. If found, parse `.pattern.kdl` to get the `default` persona binding.
+/// 3. Use `discover_personas` to map the handle to a file path.
+/// 4. If no persona is found on disk, write the bundled default to
+///    `~/.pattern/personas/@pattern-default/persona.kdl`.
+/// 5. If no mount is found (no project), resolve from global `~/.pattern/personas/`.
+///
+/// # Errors
+///
+/// Returns an error if the global paths cannot be resolved (no home directory).
+fn resolve_default_persona(project_path: &Path) -> MietteResult<PathBuf> {
+    use pattern_memory::PatternPaths;
+    use pattern_memory::config::load_mount_config;
+    use pattern_memory::mount::find_mount;
+    use pattern_memory::persona::discover_personas;
+
+    let paths = PatternPaths::default_paths()
+        .map_err(|e| miette!("could not resolve pattern home directory: {e}"))?;
+
+    // Try to find a project mount and extract the default persona handle.
+    let (persona_handle, mount_path) = match find_mount(project_path) {
+        Ok(mount) => {
+            let config_path = mount.join(".pattern.kdl");
+            match load_mount_config(&config_path) {
+                Ok(config) => {
+                    // Find the "default" slot in the personas section.
+                    let handle = config
+                        .personas
+                        .entries
+                        .iter()
+                        .find(|b| b.slot == "default")
+                        .map(|b| b.persona.clone());
+                    (handle, Some(mount))
+                }
+                Err(_) => {
+                    // Config unreadable — fall back to default handle.
+                    (None, Some(mount))
+                }
+            }
+        }
+        Err(_) => (None, None),
+    };
+
+    let persona_handle = persona_handle.unwrap_or_else(|| "@pattern-default".to_string());
+
+    // Normalize: strip leading '@' for the discovery map key.
+    let normalized = persona_handle.trim_start_matches('@');
+
+    // Discover available personas from global + project scopes.
+    let personas = discover_personas(&paths, mount_path.as_deref())
+        .map_err(|e| miette!("persona discovery failed: {e}"))?;
+
+    if let Some(path) = personas.get(normalized) {
+        return Ok(path.clone());
+    }
+
+    // Persona not found on disk — write the bundled default.
+    let persona_dir = paths.base().join("personas").join("@pattern-default");
+    std::fs::create_dir_all(&persona_dir)
+        .into_diagnostic()
+        .map_err(|e| miette!("failed to create default persona directory: {e}"))?;
+
+    let persona_path = persona_dir.join("persona.kdl");
+    std::fs::write(&persona_path, DEFAULT_PERSONA_KDL)
+        .into_diagnostic()
+        .map_err(|e| miette!("failed to write default persona: {e}"))?;
+
+    Ok(persona_path)
+}
+
+// ---------------------------------------------------------------------------
 // ensure_daemon_running
 // ---------------------------------------------------------------------------
 
 /// Ensure the daemon is running and return its listen address.
 ///
-/// Used by TUI startup (Phase 2) for AC1.7: `pattern chat` auto-starts the
-/// daemon if it is not already running, then connects.
+/// Resolves the project path (cwd) and default persona, then spawns the daemon
+/// with `--persona` and `--path` flags. Used by TUI startup for auto-start.
 ///
 /// # Errors
 ///
 /// Returns an error if:
 /// - The server binary cannot be found.
+/// - The persona cannot be resolved.
 /// - The daemon fails to start within the timeout.
-// Phase 2 (TUI startup) uses this function. Allow dead_code until then.
-#[allow(dead_code)]
 pub fn ensure_daemon_running() -> MietteResult<SocketAddr> {
     // Fast path: already running.
     if let Ok(state) = DaemonState::load() {
@@ -210,10 +330,15 @@ pub fn ensure_daemon_running() -> MietteResult<SocketAddr> {
         DaemonState::clear().ok();
     }
 
-    // Spawn the daemon server binary detached.
+    // Resolve project path and persona.
+    let project_path = std::env::current_dir().into_diagnostic()?;
+    let persona_path = resolve_default_persona(&project_path)?;
+
     let server_bin = locate_server_binary()?;
     let mut cmd = std::process::Command::new(&server_bin);
     cmd.arg("start");
+    cmd.arg("--persona").arg(&persona_path);
+    cmd.arg("--path").arg(&project_path);
     cmd.stdin(std::process::Stdio::null());
 
     let child = cmd.spawn().into_diagnostic()?;
@@ -382,5 +507,109 @@ mod tests {
         }
 
         assert!(result.is_err(), "expected error when binary not found");
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_default_persona tests
+    // -----------------------------------------------------------------------
+
+    /// When no mount exists and no global persona is present, the bundled
+    /// default is written to `~/.pattern/personas/@pattern-default/persona.kdl`.
+    #[test]
+    fn resolve_writes_bundled_default_when_no_persona_exists() {
+        let home = tempfile::tempdir().unwrap();
+        // Safety: nextest isolates each test in its own process.
+        unsafe {
+            std::env::set_var("PATTERN_HOME", home.path().to_str().unwrap());
+        }
+
+        // Use a random temp dir with no mount as the project path.
+        let project = tempfile::tempdir().unwrap();
+        let result = resolve_default_persona(project.path()).unwrap();
+
+        let expected = home.path().join("personas/@pattern-default/persona.kdl");
+        assert_eq!(result, expected);
+        assert!(result.is_file(), "persona.kdl should exist on disk");
+
+        let content = std::fs::read_to_string(&result).unwrap();
+        assert!(
+            content.contains("pattern-default"),
+            "written content should contain persona name"
+        );
+        assert!(
+            content.contains("ADHD support assistant"),
+            "written content should contain system prompt"
+        );
+
+        unsafe {
+            std::env::remove_var("PATTERN_HOME");
+        }
+    }
+
+    /// When a global persona already exists at the expected path,
+    /// `resolve_default_persona` returns that path without overwriting.
+    #[test]
+    fn resolve_finds_existing_global_persona() {
+        let home = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("PATTERN_HOME", home.path().to_str().unwrap());
+        }
+
+        // Pre-create a persona with custom content.
+        let persona_dir = home.path().join("personas/@pattern-default");
+        std::fs::create_dir_all(&persona_dir).unwrap();
+        let persona_path = persona_dir.join("persona.kdl");
+        std::fs::write(&persona_path, "name \"pattern-default\"\n").unwrap();
+
+        let project = tempfile::tempdir().unwrap();
+        let result = resolve_default_persona(project.path()).unwrap();
+        assert_eq!(result, persona_path);
+
+        // Verify it was NOT overwritten.
+        let content = std::fs::read_to_string(&result).unwrap();
+        assert_eq!(content, "name \"pattern-default\"\n");
+
+        unsafe {
+            std::env::remove_var("PATTERN_HOME");
+        }
+    }
+
+    /// When a project mount exists with a `.pattern.kdl` config that references
+    /// a persona, and that persona exists in the project mount, it is resolved
+    /// from the project scope.
+    #[test]
+    fn resolve_finds_project_scoped_persona() {
+        let home = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("PATTERN_HOME", home.path().to_str().unwrap());
+        }
+
+        // Set up a Mode A mount structure.
+        let project = tempfile::tempdir().unwrap();
+        pattern_memory::modes::mode_a::init(project.path()).unwrap();
+
+        // Create a persona in the mount.
+        let mount_path = project.path().join(".pattern/shared");
+        let persona_dir = mount_path.join("personas/@pattern-default");
+        std::fs::create_dir_all(&persona_dir).unwrap();
+        let persona_path = persona_dir.join("persona.kdl");
+        std::fs::write(&persona_path, "name \"pattern-default\"\n").unwrap();
+
+        let result = resolve_default_persona(project.path()).unwrap();
+        assert_eq!(result, persona_path);
+
+        unsafe {
+            std::env::remove_var("PATTERN_HOME");
+        }
+    }
+
+    /// Bundled default persona KDL is valid — it should contain expected fields.
+    #[test]
+    fn default_persona_kdl_has_required_fields() {
+        assert!(DEFAULT_PERSONA_KDL.contains("name \"pattern-default\""));
+        assert!(DEFAULT_PERSONA_KDL.contains("agent-id \"pattern-default\""));
+        assert!(DEFAULT_PERSONA_KDL.contains("system-prompt"));
+        assert!(DEFAULT_PERSONA_KDL.contains("model provider="));
+        assert!(DEFAULT_PERSONA_KDL.contains("memory {"));
     }
 }

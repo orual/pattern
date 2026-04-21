@@ -65,10 +65,17 @@ impl CompletionSource for CommandSource {
 /// Filter and score candidates against a fuzzy pattern using nucleo.
 ///
 /// Returns matching items sorted by score descending (best match first).
-/// An empty pattern returns no matches (caller should hide the popup).
+/// An empty pattern returns all candidates (for bare `/` command listing).
 pub fn filter_candidates(pattern: &str, candidates: &[(String, String)]) -> Vec<CompletionItem> {
     if pattern.is_empty() {
-        return Vec::new();
+        return candidates
+            .iter()
+            .map(|(value, desc)| CompletionItem {
+                value: value.clone(),
+                description: desc.clone(),
+                score: 0,
+            })
+            .collect();
     }
 
     let mut matcher = Matcher::new(nucleo::Config::DEFAULT);

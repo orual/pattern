@@ -257,13 +257,30 @@ fn resolve_path(path: Option<PathBuf>) -> MietteResult<PathBuf> {
 async fn run_tui() -> MietteResult<()> {
     use pattern_server::client::DaemonClient;
 
-    // Try to connect to the daemon. Failing is normal (offline mode).
+    // Ensure the daemon is running, auto-starting in echo mode if needed.
+    // Then connect and subscribe.
     let (client, event_rx) = match DaemonClient::connect().await {
         Ok(client) => {
             let rx = client.subscribe_output("default".into()).await.ok();
             (Some(client), rx)
         }
-        Err(_) => (None, None),
+        Err(_) => {
+            // Daemon not running — try to auto-start it.
+            match commands::daemon::ensure_daemon_running() {
+                Ok(_addr) => {
+                    // Give the QUIC endpoint a moment to be ready for connections.
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    match DaemonClient::connect().await {
+                        Ok(client) => {
+                            let rx = client.subscribe_output("default".into()).await.ok();
+                            (Some(client), rx)
+                        }
+                        Err(_) => (None, None),
+                    }
+                }
+                Err(_) => (None, None),
+            }
+        }
     };
 
     // Set up a panic hook that restores the terminal before printing the
