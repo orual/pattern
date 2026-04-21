@@ -239,6 +239,16 @@ impl<S: MemoryStore> MemoryStore for MemoryScope<S> {
     }
 
     fn get_rendered_content(&self, agent_id: &str, label: &str) -> MemoryResult<Option<String>> {
+        tracing::debug!(
+            agent_id = %agent_id,
+            label = %label,
+            passthrough = self.binding.is_passthrough(),
+            persona_id = %self.binding.persona_id,
+            project_id = ?self.binding.project_id,
+            policy = ?self.binding.policy,
+            "scope::get_rendered_content called"
+        );
+
         if self.binding.is_passthrough() {
             return self.inner.get_rendered_content(agent_id, label);
         }
@@ -246,19 +256,33 @@ impl<S: MemoryStore> MemoryStore for MemoryScope<S> {
         // Same routing logic as get_block: project first, then persona.
         // Handle both Ok(None) and Err(NotFound) as "not in project scope."
         if let Some(project_id) = &self.binding.project_id {
-            match self.inner.get_rendered_content(project_id, label) {
+            let project_result = self.inner.get_rendered_content(project_id, label);
+            tracing::debug!(
+                project_id = %project_id,
+                label = %label,
+                result = ?project_result.as_ref().map(|r| r.is_some()),
+                "scope: project lookup"
+            );
+            match project_result {
                 Ok(Some(content)) => return Ok(Some(content)),
                 Ok(None) | Err(MemoryError::NotFound { .. }) => {}
                 Err(e) => return Err(e),
             }
         }
 
-        match self.binding.policy {
+        let persona_result = match self.binding.policy {
             IsolatePolicy::None | IsolatePolicy::CoreOnly => self
                 .inner
                 .get_rendered_content(&self.binding.persona_id, label),
             IsolatePolicy::Full | _ => Ok(None),
-        }
+        };
+        tracing::debug!(
+            persona_id = %self.binding.persona_id,
+            label = %label,
+            result = ?persona_result.as_ref().map(|r| r.as_ref().map(|s| s.len())),
+            "scope: persona lookup"
+        );
+        persona_result
     }
 
     fn persist_block(&self, agent_id: &str, label: &str) -> MemoryResult<()> {

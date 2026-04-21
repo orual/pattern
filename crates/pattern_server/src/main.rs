@@ -52,7 +52,7 @@ enum Command {
 #[tokio::main]
 async fn main() -> miette::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter("pattern_server=debug")
+        .with_env_filter("pattern_server=debug,pattern_runtime::sdk::handlers::memory=debug,pattern_memory::scope=debug")
         .init();
 
     let cli = Cli::parse();

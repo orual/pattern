@@ -1460,10 +1460,18 @@ impl MemoryStore for MemoryCache {
         pattern_db::queries::create_block(&*self.db.get()?, &db_block)?;
 
         // Add to cache (metadata is embedded in doc).
+        //
+        // `last_persisted_frontier` is set to `None` rather than `Some(vv)`
+        // so that the first `persist()` call always performs a full snapshot
+        // export instead of attempting a delta. This is a defensive choice:
+        // callers typically mutate the returned doc (e.g. `import_from_json`)
+        // before calling `persist_block`, and the full-snapshot path
+        // guarantees the content reaches the DB regardless of version-vector
+        // comparison subtleties with the empty initial doc.
         let cached_block = CachedBlock {
             doc: doc.clone(),
             last_seq: 0,
-            last_persisted_frontier: Some(doc.current_version()),
+            last_persisted_frontier: None,
             dirty: false,
             last_accessed: now,
         };

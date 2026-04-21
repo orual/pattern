@@ -139,14 +139,32 @@ impl EffectHandler<SessionContext> for MemoryHandler {
 
         let result = (|| match req {
             MemoryReq::Get(label) => {
-                let text = adapter
-                    .get_rendered_content(&agent_id, &label)
+                tracing::debug!(
+                    agent_id = %agent_id,
+                    label = %label,
+                    "Memory.Get: looking up block"
+                );
+                let result = adapter.get_rendered_content(&agent_id, &label);
+                tracing::debug!(
+                    agent_id = %agent_id,
+                    label = %label,
+                    result = ?result.as_ref().map(|r| r.as_ref().map(|s| format!("{}...", &s[..s.len().min(50)]))),
+                    "Memory.Get: get_rendered_content returned"
+                );
+                let text = result
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Get: {e}")))?
                     .ok_or_else(|| {
                         EffectError::Handler(format!(
                             "Pattern.Memory.Get: no block named {label:?} for agent {agent_id:?}"
                         ))
                     })?;
+                tracing::debug!(
+                    agent_id = %agent_id,
+                    label = %label,
+                    content_len = text.len(),
+                    content_preview = %&text[..text.len().min(80)],
+                    "Memory.Get: responding with content"
+                );
                 cx.respond(text)
             }
             MemoryReq::Put(label, content, description) => {
