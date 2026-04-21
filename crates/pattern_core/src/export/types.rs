@@ -10,6 +10,17 @@ use chrono::{DateTime, Utc};
 use cid::Cid;
 use serde::{Deserialize, Serialize};
 
+/// Convert a `jiff::Timestamp` to `chrono::DateTime<Utc>` for export serialization.
+///
+/// The export format uses chrono's `DateTime<Utc>` for timestamps, which serializes
+/// to RFC 3339. jiff timestamps from the DB (now stored as jiff::Timestamp) are
+/// converted here at the export boundary to avoid changing the serialized format.
+fn jiff_to_chrono(ts: jiff::Timestamp) -> DateTime<Utc> {
+    let secs = ts.as_second();
+    let nanos = (ts.as_nanosecond() - (secs as i128) * 1_000_000_000) as u32;
+    chrono::DateTime::from_timestamp(secs, nanos).unwrap_or_else(Utc::now)
+}
+
 use pattern_db::models::{
     Agent, AgentGroup, AgentStatus, ArchivalEntry, ArchiveSummary, BatchType, GroupMember,
     GroupMemberRole, MemoryBlock, MemoryBlockType, MemoryPermission, Message, MessageRole,
@@ -426,7 +437,8 @@ impl From<Message> for MessageExport {
             source_metadata: msg.source_metadata.map(|j| j.0),
             is_archived: msg.is_archived,
             is_deleted: msg.is_deleted,
-            created_at: msg.created_at,
+            // Convert jiff::Timestamp (DB format) to chrono::DateTime<Utc> (export format).
+            created_at: jiff_to_chrono(msg.created_at),
         }
     }
 }
@@ -447,7 +459,8 @@ impl From<&Message> for MessageExport {
             source_metadata: msg.source_metadata.as_ref().map(|j| j.0.clone()),
             is_archived: msg.is_archived,
             is_deleted: msg.is_deleted,
-            created_at: msg.created_at,
+            // Convert jiff::Timestamp (DB format) to chrono::DateTime<Utc> (export format).
+            created_at: jiff_to_chrono(msg.created_at),
         }
     }
 }
@@ -498,7 +511,8 @@ impl From<ArchiveSummary> for ArchiveSummaryExport {
             message_count: summary.message_count,
             previous_summary_id: summary.previous_summary_id,
             depth: summary.depth,
-            created_at: summary.created_at,
+            // Convert jiff::Timestamp (DB format) to chrono::DateTime<Utc> (export format).
+            created_at: jiff_to_chrono(summary.created_at),
         }
     }
 }
@@ -514,7 +528,8 @@ impl From<&ArchiveSummary> for ArchiveSummaryExport {
             message_count: summary.message_count,
             previous_summary_id: summary.previous_summary_id.clone(),
             depth: summary.depth,
-            created_at: summary.created_at,
+            // Convert jiff::Timestamp (DB format) to chrono::DateTime<Utc> (export format).
+            created_at: jiff_to_chrono(summary.created_at),
         }
     }
 }

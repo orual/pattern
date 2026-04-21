@@ -149,12 +149,6 @@ fn to_db_message(msg: &Message, agent_id: &str) -> pattern_db::models::Message {
     let content_json = serde_json::to_value(&msg.chat_message).unwrap_or_default();
     let content_preview = msg.chat_message.content.joined_texts();
 
-    // Convert jiff::Timestamp -> chrono::DateTime<Utc>.
-    let nanos = msg.created_at.as_nanosecond();
-    let secs = (nanos / 1_000_000_000) as i64;
-    let nsecs = (nanos % 1_000_000_000) as u32;
-    let created_at = chrono::DateTime::from_timestamp(secs, nsecs).unwrap_or_else(chrono::Utc::now);
-
     pattern_db::models::Message {
         id: msg.id.to_string(),
         agent_id: agent_id.to_string(),
@@ -169,7 +163,8 @@ fn to_db_message(msg: &Message, agent_id: &str) -> pattern_db::models::Message {
         source_metadata: None,
         is_archived: false,
         is_deleted: false,
-        created_at,
+        // pattern_core::Message.created_at is already jiff::Timestamp; store directly.
+        created_at: msg.created_at,
     }
 }
 

@@ -434,7 +434,7 @@ async fn post_strategy_updates(
             message_count: message_count as i64,
             previous_summary_id: None,
             depth: 0,
-            created_at: chrono::Utc::now(),
+            created_at: Timestamp::now(),
         };
         pattern_db::queries::create_archive_summary(&conn, &summary).map_err(|e| {
             RuntimeError::ProviderError {

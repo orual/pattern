@@ -135,6 +135,47 @@ Submodules:
 
 **Entry point:** `pattern_memory::mount::attach`
 
+## backup (`src/backup.rs`, `src/backup/`)
+
+Atomic `messages.db` snapshot, GFS-style rotation, and safe restore. All
+functions are pure library — no global state, no process-level assumptions.
+
+### Key invariants
+
+- **Pre-restore safety**: `restore_snapshot` always copies the current
+  `messages.db` to a `.pre-restore-<ns>` file (using nanosecond timestamps to
+  guarantee uniqueness even across rapid successive restores) before any swap.
+- **WAL strip**: every snapshot and restore destination runs
+  `PRAGMA journal_mode = DELETE` after the Backup API finishes, so files are
+  clean single-file SQLite databases that do not create a `-wal` sidecar on
+  next open.
+- **Pool-closed requirement**: `restore_snapshot` must be called with no active
+  r2d2 pool open on `messages.db`. Production: CLI runs in a separate one-shot
+  process. Tests: `drop(db)` before calling restore.
+
+### Public entry points
+
+- `backup::snapshot::create_snapshot(source, paths, project_id)` — atomic
+  snapshot via rusqlite Backup API; returns `SnapshotInfo`.
+- `backup::rotation::list_snapshots(paths, project_id)` — `Vec<SnapshotInfo>`,
+  newest-first; skips non-sqlite and non-timestamp-named files.
+- `backup::rotation::select_deletions(snapshots, policy, now)` — GFS keep set:
+  keep-N + hourly/daily/monthly bands. Always keeps ≥1.
+- `backup::rotation::apply_rotation(paths, project_id, policy)` — list +
+  select + delete; returns deleted count.
+- `backup::restore::restore_snapshot(messages_db_path, snapshot_path)` —
+  integrity-check + safety-copy + atomic swap; returns pre-restore path.
+- `backup::restore::resolve_snapshot(paths, project_id, spec)` — resolves
+  `"latest"`, exact stem, or `YYYY-MM-DD` prefix to a `SnapshotInfo`.
+
+### Filename format
+
+`YYYY-MM-DDTHHMMSSZ` (e.g. `2026-04-19T120000Z`). No colons — Windows-safe.
+Pre-restore safety copies use nanosecond decimal suffixes (not this format) so
+`list_snapshots` skips them cleanly.
+
+**Entry point:** `pattern_memory::backup`
+
 ## Status
 
 Created 2026-04-19 during v3-memory-rework Phase 1; populated incrementally
@@ -157,8 +198,16 @@ cycles, MemoryStore writes, and external .md edits.
 Phase 6 code review fixes (2026-04-20):
 - `attach()` now spawns `ReembedQueue` when tokio runtime is available.
 - `MountedStore.reembed_queue` field stores the queue handle.
-- Mode B tests use `PATTERN_HOME` env var override (no real `~/.pattern/` writes).
-- `paths::pattern_home()` checks `$PATTERN_HOME` before `dirs::home_dir()`.
+- Mode B tests use `PatternPaths::with_base(tempdir)` (no unsafe env var, no real `~/.pattern/` writes).
+- `PatternPaths` struct replaced free path functions; `default_paths()` for production, `with_base()` for tests.
+- `attach_with_paths()` accepts injectable `PatternPaths` for test isolation.
+- `persist()` uses version-vector comparison instead of dirty flag — prevents silent data loss.
 - `ModeKind` parse error falls back to Mode B (safer than A — stays in ~/.pattern/).
 - `IsolateSection.policy` validated as one of "none"/"core-only"/"full".
 - CLI integration tests in `crates/pattern_cli/tests/cli_mount.rs`.
+
+Phase 7 subcomponent A (backup::snapshot, backup::rotation, backup::restore):
+completed 2026-04-20. AC11.1–11.7 implemented and passing (23 tests: 13 unit
++ 10 integration). Root bug fixed: pre-restore safety copies used second-
+precision timestamps causing name collision when rollback restore happened
+in the same second; switched to nanosecond decimal suffix.

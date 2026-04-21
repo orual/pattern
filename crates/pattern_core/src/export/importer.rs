@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use cid::Cid;
 use iroh_car::CarReader;
 use pattern_db::Json;
@@ -29,6 +29,17 @@ use super::{
     },
 };
 use crate::error::{CoreError, Result};
+
+/// Convert a `chrono::DateTime<Utc>` (from export format) to `jiff::Timestamp` (DB format).
+///
+/// The export format uses chrono timestamps; the DB stores jiff timestamps.
+/// This conversion is lossless to nanosecond precision.
+fn chrono_to_jiff(dt: DateTime<Utc>) -> jiff::Timestamp {
+    let epoch_nanos =
+        (dt.timestamp() as i128) * 1_000_000_000 + (dt.timestamp_subsec_nanos() as i128);
+    jiff::Timestamp::from_nanosecond(epoch_nanos)
+        .unwrap_or_else(|_| jiff::Timestamp::now())
+}
 
 /// Result of an import operation.
 #[derive(Debug, Clone, Default)]
@@ -475,7 +486,8 @@ impl Importer {
             source_metadata: export.source_metadata.clone().map(Json),
             is_archived: export.is_archived,
             is_deleted: export.is_deleted,
-            created_at: export.created_at,
+            // Export format uses chrono::DateTime<Utc>; DB uses jiff::Timestamp.
+            created_at: chrono_to_jiff(export.created_at),
         };
 
         queries::upsert_message(&*self.db.get()?, &message)?;
@@ -576,7 +588,8 @@ impl Importer {
             message_count: export.message_count,
             previous_summary_id,
             depth: export.depth,
-            created_at: export.created_at,
+            // Export format uses chrono::DateTime<Utc>; DB uses jiff::Timestamp.
+            created_at: chrono_to_jiff(export.created_at),
         };
 
         queries::upsert_archive_summary(&*self.db.get()?, &summary)?;

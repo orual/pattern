@@ -11,7 +11,9 @@
 //! so `memory_db` → `memory-db`, `isolate_from_persona` → `isolate-from-persona`,
 //! `max_new_file_size` → `max-new-file-size`, `created_at` → `created-at`.
 
-use pattern_memory::config::{ConfigError, ModeKind, load_mount_config};
+use pattern_memory::config::{
+    BackupSection, ConfigError, ModeKind, load_mount_config, parse_duration_str,
+};
 use tempfile::TempDir;
 
 // ---------------------------------------------------------------------------
@@ -237,4 +239,127 @@ fn io_error_on_missing_file() {
         matches!(err, ConfigError::Io { .. }),
         "expected ConfigError::Io, got {err:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Backup section tests
+// ---------------------------------------------------------------------------
+
+const VALID_MODE_A_WITH_BACKUP: &str = r#"
+mount mode="A" memory-db="memory.db"
+
+project name="pattern-dev" created-at="2026-04-19T12:00:00Z"
+
+backup snapshot-interval="30m" {
+    keep-recent 12
+    hourly-days 2
+    daily-months 3
+    monthly-forever false
+}
+"#;
+
+#[test]
+fn parse_backup_section_present() {
+    let tmp = TempDir::new().unwrap();
+    let path = write_config(&tmp, VALID_MODE_A_WITH_BACKUP);
+    let config = load_mount_config(&path).expect("config with backup section should parse");
+
+    let backup = config
+        .backup
+        .as_ref()
+        .expect("backup section should be present");
+    assert_eq!(backup.snapshot_interval, "30m");
+    assert_eq!(backup.keep_recent, 12);
+    assert_eq!(backup.hourly_days, 2);
+    assert_eq!(backup.daily_months, 3);
+    assert!(!backup.monthly_forever);
+}
+
+#[test]
+fn missing_backup_section_is_none() {
+    let tmp = TempDir::new().unwrap();
+    let path = write_config(
+        &tmp,
+        r#"
+mount mode="A" memory-db="memory.db"
+project name="minimal" created-at="2026-01-01T00:00:00Z"
+"#,
+    );
+    let config = load_mount_config(&path).expect("minimal config should parse");
+    assert!(
+        config.backup.is_none(),
+        "absent backup section should be None"
+    );
+}
+
+#[test]
+fn backup_section_defaults_applied_for_omitted_children() {
+    let tmp = TempDir::new().unwrap();
+    // Only the snapshot-interval property; all children omitted → use defaults.
+    let path = write_config(
+        &tmp,
+        r#"
+mount mode="A" memory-db="memory.db"
+project name="defaults" created-at="2026-01-01T00:00:00Z"
+backup snapshot-interval="2h"
+"#,
+    );
+    let config = load_mount_config(&path).expect("backup with defaults should parse");
+    let backup = config
+        .backup
+        .as_ref()
+        .expect("backup section should be present");
+    assert_eq!(backup.snapshot_interval, "2h");
+    assert_eq!(backup.keep_recent, 24, "default keep_recent");
+    assert_eq!(backup.hourly_days, 1, "default hourly_days");
+    assert_eq!(backup.daily_months, 1, "default daily_months");
+    assert!(backup.monthly_forever, "default monthly_forever");
+}
+
+#[test]
+fn backup_section_defaults_from_default_impl() {
+    let section = BackupSection::default();
+    assert_eq!(section.snapshot_interval, "1h");
+    assert_eq!(section.keep_recent, 24);
+    assert_eq!(section.hourly_days, 1);
+    assert_eq!(section.daily_months, 1);
+    assert!(section.monthly_forever);
+    // parse_interval should produce a 1-hour duration.
+    let dur = section
+        .parse_interval()
+        .expect("default interval must be valid");
+    assert_eq!(dur.as_secs(), 3600);
+}
+
+// ---------------------------------------------------------------------------
+// parse_duration_str tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parse_duration_str_hours() {
+    assert_eq!(parse_duration_str("1h").unwrap().as_secs(), 3600);
+    assert_eq!(parse_duration_str("2h").unwrap().as_secs(), 7200);
+    assert_eq!(parse_duration_str("24h").unwrap().as_secs(), 86400);
+}
+
+#[test]
+fn parse_duration_str_minutes() {
+    assert_eq!(parse_duration_str("30m").unwrap().as_secs(), 1800);
+    assert_eq!(parse_duration_str("1m").unwrap().as_secs(), 60);
+}
+
+#[test]
+fn parse_duration_str_seconds() {
+    assert_eq!(parse_duration_str("60s").unwrap().as_secs(), 60);
+    assert_eq!(parse_duration_str("3600s").unwrap().as_secs(), 3600);
+}
+
+#[test]
+fn parse_duration_str_rejects_invalid() {
+    assert!(parse_duration_str("").is_err(), "empty string must fail");
+    assert!(parse_duration_str("0h").is_err(), "zero must fail");
+    assert!(parse_duration_str("1d").is_err(), "days not supported");
+    assert!(parse_duration_str("abc").is_err(), "no digits must fail");
+    assert!(parse_duration_str("-1h").is_err(), "negative must fail");
+    assert!(parse_duration_str("1hour").is_err(), "word unit must fail");
 }

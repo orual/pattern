@@ -5,10 +5,35 @@
 //! resolves them to `msg.messages` etc. automatically.
 
 use rusqlite::OptionalExtension;
+use rusqlite::types::FromSqlError;
 
 use crate::Json;
 use crate::error::DbResult;
 use crate::models::{ArchiveSummary, Message, MessageSummary};
+
+// ============================================================================
+// Timestamp helpers
+// ============================================================================
+
+/// Parse a TEXT column to `jiff::Timestamp`.
+///
+/// The column stores an RFC 3339 UTC string produced by `jiff::Timestamp`'s
+/// `Display` impl (e.g. `"2026-04-19T12:00:00.000000000Z"`). The rusqlite
+/// orphan rule prevents implementing `FromSql` for `jiff::Timestamp` directly,
+/// so the conversion is done explicitly here.
+fn parse_timestamp(row: &rusqlite::Row, col: &str) -> rusqlite::Result<jiff::Timestamp> {
+    let s: String = row.get(col)?;
+    s.parse::<jiff::Timestamp>().map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(FromSqlError::Other(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid jiff::Timestamp {s:?}: {e}"),
+            )))),
+        )
+    })
+}
 
 // ============================================================================
 // from_row implementations
@@ -30,7 +55,7 @@ impl Message {
             source_metadata: row.get("source_metadata")?,
             is_archived: row.get("is_archived")?,
             is_deleted: row.get("is_deleted")?,
-            created_at: row.get("created_at")?,
+            created_at: parse_timestamp(row, "created_at")?,
         })
     }
 }
@@ -46,7 +71,7 @@ impl ArchiveSummary {
             message_count: row.get("message_count")?,
             previous_summary_id: row.get("previous_summary_id")?,
             depth: row.get("depth")?,
-            created_at: row.get("created_at")?,
+            created_at: parse_timestamp(row, "created_at")?,
         })
     }
 }
@@ -59,7 +84,7 @@ impl MessageSummary {
             role: row.get("role")?,
             content_preview: row.get("content_preview")?,
             source: row.get("source")?,
-            created_at: row.get("created_at")?,
+            created_at: parse_timestamp(row, "created_at")?,
         })
     }
 }
@@ -172,6 +197,10 @@ pub fn get_batch_messages(conn: &rusqlite::Connection, batch_id: &str) -> DbResu
 
 /// Create a new message.
 pub fn create_message(conn: &rusqlite::Connection, msg: &Message) -> DbResult<()> {
+    // jiff::Timestamp does not implement rusqlite's ToSql (orphan rule), so
+    // convert to RFC 3339 string explicitly. The stored format is
+    // "YYYY-MM-DDTHH:MM:SS.NNNNNNNNNZ" which sorts correctly as TEXT.
+    let created_at = msg.created_at.to_string();
     conn.execute(
         "INSERT INTO messages (id, agent_id, position, batch_id, sequence_in_batch,
                               role, content_json, content_preview, batch_type,
@@ -191,7 +220,7 @@ pub fn create_message(conn: &rusqlite::Connection, msg: &Message) -> DbResult<()
             msg.source_metadata,
             msg.is_archived,
             msg.is_deleted,
-            msg.created_at,
+            created_at,
         ],
     )?;
     Ok(())
@@ -202,6 +231,9 @@ pub fn create_message(conn: &rusqlite::Connection, msg: &Message) -> DbResult<()
 /// If a message with the same ID exists, it will be updated in place.
 /// Used by import to handle re-imports idempotently.
 pub fn upsert_message(conn: &rusqlite::Connection, msg: &Message) -> DbResult<()> {
+    // jiff::Timestamp does not implement rusqlite's ToSql (orphan rule), so
+    // convert to RFC 3339 string explicitly.
+    let created_at = msg.created_at.to_string();
     conn.execute(
         "INSERT INTO messages (id, agent_id, position, batch_id, sequence_in_batch,
                               role, content_json, content_preview, batch_type,
@@ -234,7 +266,7 @@ pub fn upsert_message(conn: &rusqlite::Connection, msg: &Message) -> DbResult<()
             msg.source_metadata,
             msg.is_archived,
             msg.is_deleted,
-            msg.created_at,
+            created_at,
         ],
     )?;
     Ok(())
@@ -336,6 +368,8 @@ pub fn create_archive_summary(
     conn: &rusqlite::Connection,
     summary: &ArchiveSummary,
 ) -> DbResult<()> {
+    // jiff::Timestamp does not implement rusqlite's ToSql (orphan rule); convert explicitly.
+    let created_at = summary.created_at.to_string();
     conn.execute(
         "INSERT INTO archive_summaries (id, agent_id, summary, start_position, end_position,
                                         message_count, previous_summary_id, depth, created_at)
@@ -349,7 +383,7 @@ pub fn create_archive_summary(
             summary.message_count,
             summary.previous_summary_id,
             summary.depth,
-            summary.created_at,
+            created_at,
         ],
     )?;
     Ok(())
@@ -363,6 +397,8 @@ pub fn upsert_archive_summary(
     conn: &rusqlite::Connection,
     summary: &ArchiveSummary,
 ) -> DbResult<()> {
+    // jiff::Timestamp does not implement rusqlite's ToSql (orphan rule); convert explicitly.
+    let created_at = summary.created_at.to_string();
     conn.execute(
         "INSERT INTO archive_summaries (id, agent_id, summary, start_position, end_position,
                                         message_count, previous_summary_id, depth, created_at)
@@ -384,7 +420,7 @@ pub fn upsert_archive_summary(
             summary.message_count,
             summary.previous_summary_id,
             summary.depth,
-            summary.created_at,
+            created_at,
         ],
     )?;
     Ok(())

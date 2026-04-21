@@ -75,6 +75,7 @@ impl PatternPaths {
     pub fn default_paths() -> Result<Self, PathError> {
         let base = std::env::var("PATTERN_HOME")
             .ok()
+            .filter(|s| !s.is_empty())
             .map(PathBuf::from)
             .or_else(|| dirs::home_dir().map(|h| h.join(".pattern")))
             .ok_or(PathError::NoHome)?;
@@ -122,6 +123,24 @@ impl PatternPaths {
             .join(project_id)
             .join("messages")
             .join("messages.db")
+    }
+
+    /// Directory where `messages.db` snapshots are stored for a given project ID.
+    ///
+    /// Returns `<base>/backups/<id>/messages/`. Created on first snapshot if
+    /// it does not yet exist.
+    pub fn backup_dir(&self, project_id: &str) -> PathBuf {
+        self.base.join("backups").join(project_id).join("messages")
+    }
+
+    /// Full path for a snapshot file for the given project ID and timestamp.
+    ///
+    /// Returns `<backup_dir>/<timestamp>.sqlite` where `<timestamp>` is
+    /// formatted per [`crate::backup::snapshot::SNAPSHOT_FILENAME_FORMAT`]
+    /// (e.g. `2026-04-19T120000Z.sqlite`).
+    pub fn backup_snapshot_path(&self, project_id: &str, ts: &jiff::Timestamp) -> PathBuf {
+        let name = crate::backup::snapshot::format_snapshot_name(ts);
+        self.backup_dir(project_id).join(format!("{name}.sqlite"))
     }
 }
 

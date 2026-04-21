@@ -4,6 +4,16 @@
 //! Each enum that appears in a SQLite column needs these impls for rusqlite
 //! to bind and extract values. All TEXT-encoded enums use their canonical
 //! database string form (typically snake_case).
+//!
+//! # Timestamp storage
+//!
+//! `jiff::Timestamp` fields (used in message-related models) are stored as
+//! RFC 3339 UTC strings (e.g. `"2026-04-19T12:00:00.000000000Z"`). Because
+//! the orphan rule prevents implementing rusqlite's `ToSql`/`FromSql` for
+//! `jiff::Timestamp` directly, the conversion is done explicitly in each
+//! query function (`from_row` reads the TEXT column and parses it;
+//! `create_message` etc. call `.to_string()` when binding). See
+//! `queries/message.rs` and `queries/queue.rs` for the concrete conversions.
 
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 

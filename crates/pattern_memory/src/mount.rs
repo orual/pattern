@@ -18,7 +18,7 @@
 pub mod attach;
 pub mod error;
 
-pub use attach::attach;
+pub use attach::{attach, attach_with_paths};
 pub use error::MountError;
 
 use std::path::{Path, PathBuf};
@@ -26,6 +26,7 @@ use std::sync::Arc;
 
 use pattern_db::ConstellationDb;
 
+use crate::backup::scheduler::BackupScheduler;
 use crate::cache::MemoryCache;
 use crate::config::MountConfig;
 use crate::fs::watcher::MountWatcher;
@@ -60,18 +61,59 @@ pub struct MountedStore {
     /// correct order: after draining subscribers, ensuring no new reembed
     /// requests are in-flight before the queue is released.
     pub(crate) reembed_queue: Option<ReembedQueue>,
+    /// The backup scheduler task (if the `.pattern.kdl` has a `backup`
+    /// section with a `snapshot_interval`). `Option` so `detach` can take and
+    /// cancel it.
+    pub(crate) backup_scheduler: Option<BackupScheduler>,
 }
 
 impl MountedStore {
     /// Cleanly shut down all mount resources.
     ///
-    /// 1. Stops the filesystem watcher (no more external-edit events).
-    /// 2. Drains all subscriber workers (cancels tokens, joins threads).
-    /// 3. Drops the re-embed queue handle.
-    /// 4. Drops the cache and database pool references.
+    /// 1. Cancels and joins the backup scheduler task (if running).
+    /// 2. Stops the filesystem watcher (no more external-edit events).
+    /// 3. Drains all subscriber workers (cancels tokens, joins threads).
+    /// 4. Drops the re-embed queue handle.
+    /// 5. Drops the cache and database pool references.
     ///
     /// This is intentionally synchronous — all teardown operations are sync.
+    /// The backup scheduler is an async tokio task; if a tokio runtime is
+    /// available, it is cancelled and joined with a 5-second timeout. If no
+    /// runtime is available (sync-only test contexts), the cancel signal is
+    /// sent and the handle is dropped — the task will be cleaned up when the
+    /// runtime itself shuts down.
     pub fn detach(mut self) {
+        // Cancel + join the backup scheduler before stopping the watcher,
+        // so any in-flight snapshot completes cleanly.
+        if let Some(scheduler) = self.backup_scheduler.take() {
+            scheduler.cancel();
+            match tokio::runtime::Handle::try_current() {
+                Ok(handle) => {
+                    // Block on the join with a short timeout to avoid hanging
+                    // on a misbehaving task.
+                    //
+                    // `handle.block_on()` panics when called from within a
+                    // tokio worker thread (e.g. the CLI uses `#[tokio::main]`).
+                    // `block_in_place` moves the current worker to a blocking
+                    // context first, making `block_on` safe to call from any
+                    // tokio multi-thread runtime thread.
+                    let _ = tokio::task::block_in_place(|| {
+                        handle.block_on(async {
+                            tokio::time::timeout(
+                                std::time::Duration::from_secs(5),
+                                scheduler.join(),
+                            )
+                            .await
+                        })
+                    });
+                }
+                Err(_) => {
+                    // No tokio runtime — cancel was already sent above; the
+                    // task will be dropped when the runtime shuts down.
+                    drop(scheduler);
+                }
+            }
+        }
         // Stop the watcher first so no new events arrive.
         drop(self.watcher.take());
         // Drain all subscriber workers (cancels tokens, joins OS threads).

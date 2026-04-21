@@ -14,6 +14,7 @@
 //! All data-contract types live in [`pattern_core::types::memory_types`].
 //! Nothing in `pattern_core` depends on this crate.
 
+pub mod backup;
 pub mod cache;
 pub mod config;
 pub mod fs;

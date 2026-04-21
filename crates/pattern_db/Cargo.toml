@@ -33,6 +33,7 @@ tracing = { workspace = true }
 
 # Utilities
 chrono = { workspace = true, features = ["serde"] }
+jiff = { workspace = true }
 uuid = { workspace = true }
 
 # Loro for CRDT memory blocks

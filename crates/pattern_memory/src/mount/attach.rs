@@ -12,6 +12,7 @@ use pattern_db::ConstellationDb;
 
 use super::MountedStore;
 use super::error::MountError;
+use crate::backup::scheduler::{BackupPolicy, BackupScheduler};
 use crate::cache::MemoryCache;
 use crate::config::{ModeKind, load_mount_config};
 use crate::fs::watcher::{MountWatcher, WatcherConfig};
@@ -19,27 +20,31 @@ use crate::modes::StorageMode;
 use crate::paths::PatternPaths;
 use crate::reembed::ReembedQueue;
 
-/// Attach to the nearest mount at or above `start`.
+/// Attach to the nearest mount at or above `start` using the default
+/// [`PatternPaths`] resolution (`~/.pattern/`).
 ///
-/// Walks upward from `start` to find `.pattern/shared/.pattern.kdl`, parses
-/// the config, resolves database paths per mode, opens the databases, builds
-/// a [`MemoryCache`] with subscriber support, starts a filesystem watcher,
-/// and returns a [`MountedStore`] handle.
+/// This is the production entry point. For tests that need a custom base
+/// directory, use [`attach_with_paths`].
 ///
 /// # Errors
 ///
 /// - [`MountError::NotFound`] if no mount is found.
 /// - [`MountError::Config`] if the `.pattern.kdl` is invalid.
-/// - [`MountError::ModeUnavailable`] if Mode C is requested.
 /// - [`MountError::Db`] if the databases cannot be opened.
 /// - [`MountError::Watcher`] if the filesystem watcher fails to start.
 pub fn attach(start: &Path) -> Result<MountedStore, MountError> {
+    let paths = PatternPaths::default_paths()?;
+    attach_with_paths(start, &paths)
+}
+
+/// Attach to the nearest mount at or above `start` with an explicit
+/// [`PatternPaths`] base directory.
+///
+/// Use [`PatternPaths::with_base`] in tests to avoid writing to the real
+/// `~/.pattern/` directory.
+pub fn attach_with_paths(start: &Path, paths: &PatternPaths) -> Result<MountedStore, MountError> {
     let mount_path = super::find_mount(start)?;
     let config = load_mount_config(&mount_path.join(".pattern.kdl"))?;
-
-    // Resolve the Pattern home directory for modes that need it (B uses
-    // ~/.pattern/projects/<id>/; A and C use it only for messages.db placement).
-    let paths = PatternPaths::default_paths()?;
 
     // Resolve DB paths per mode.
     let (memory_db_path, messages_db_path, mode) = match config.mount.mode {
@@ -140,6 +145,40 @@ pub fn attach(start: &Path) -> Result<MountedStore, MountError> {
         cache: Arc::clone(&cache),
     })?;
 
+    // Spawn the backup scheduler if a `backup` section is configured and a
+    // tokio runtime is available. One-shot CLI commands (e.g. `pattern backup
+    // create`) don't need the scheduler — they create snapshots directly.
+    let backup_scheduler = if let Some(backup_cfg) = &config.backup {
+        match tokio::runtime::Handle::try_current() {
+            Ok(_) => {
+                let interval = backup_cfg.parse_interval().unwrap_or_else(|e| {
+                    tracing::warn!(
+                        "invalid snapshot_interval in .pattern.kdl: {e}; using 1h default"
+                    );
+                    std::time::Duration::from_secs(3600)
+                });
+                let policy = Arc::new(BackupPolicy {
+                    snapshot_interval: interval,
+                    retention: crate::backup::types::RetentionPolicy {
+                        keep_recent: backup_cfg.keep_recent,
+                        hourly_days: backup_cfg.hourly_days,
+                        daily_months: backup_cfg.daily_months,
+                        monthly_forever: backup_cfg.monthly_forever,
+                    },
+                });
+                Some(BackupScheduler::spawn(
+                    Arc::new(messages_db_path.clone()),
+                    config.project.name.clone(),
+                    policy,
+                    Arc::new(paths.clone()),
+                ))
+            }
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
     Ok(MountedStore {
         mount_path,
         config,
@@ -148,5 +187,6 @@ pub fn attach(start: &Path) -> Result<MountedStore, MountError> {
         db,
         watcher: Some(watcher),
         reembed_queue,
+        backup_scheduler,
     })
 }

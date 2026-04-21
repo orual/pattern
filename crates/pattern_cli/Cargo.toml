@@ -29,6 +29,8 @@ clap = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
 
+jiff = { workspace = true }
+
 # CLI-specific dependencies
 indicatif = "0.17"
 comfy-table = "7.1"

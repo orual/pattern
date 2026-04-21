@@ -1,8 +1,10 @@
 //! Pattern CLI entry point.
 //!
 //! Default invocation (no subcommand) enters a TUI demo. Named subcommands
-//! (`pattern mount init`, `pattern mount attach`) run as one-shot operations
-//! and exit.
+//! (`pattern mount init`, `pattern mount attach`, `pattern backup create`, …)
+//! run as one-shot operations and exit.
+
+mod commands;
 
 use std::io;
 use std::path::PathBuf;
@@ -26,6 +28,56 @@ struct Cli {
 enum Commands {
     /// Manage memory mounts.
     Mount(MountCmd),
+    /// Manage messages.db backups (create, list, restore, info).
+    Backup(BackupCmd),
+}
+
+// ---------------------------------------------------------------------------
+// Backup subcommand types
+// ---------------------------------------------------------------------------
+
+#[derive(clap::Args)]
+struct BackupCmd {
+    #[command(subcommand)]
+    sub: BackupSub,
+}
+
+#[derive(Subcommand)]
+enum BackupSub {
+    /// Create an immediate snapshot of messages.db for the nearest mount.
+    Create {
+        /// Path to start the mount search from (defaults to the current directory).
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
+    /// List all snapshots for the nearest mount (newest first).
+    List {
+        /// Path to start the mount search from (defaults to the current directory).
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
+    /// Restore messages.db from a snapshot.
+    ///
+    /// The current state is saved to a `.pre-restore-<ts>` file before the
+    /// swap. Supported TIMESTAMP values: `latest`, an exact filename stem
+    /// (`2026-04-19T120000Z`), or a date prefix (`2026-04-19`).
+    Restore {
+        /// Snapshot to restore: `latest`, exact timestamp, or date prefix.
+        #[arg(value_name = "TIMESTAMP")]
+        spec: String,
+        /// Path to start the mount search from (defaults to the current directory).
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
+    /// Show metadata and integrity status for a specific snapshot.
+    Info {
+        /// Snapshot to inspect: `latest`, exact timestamp, or date prefix.
+        #[arg(value_name = "TIMESTAMP")]
+        spec: String,
+        /// Path to start the mount search from (defaults to the current directory).
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
 }
 
 #[derive(clap::Args)]
@@ -92,6 +144,20 @@ async fn main() -> MietteResult<()> {
             MountSub::Attach { path } => {
                 let target = resolve_path(path)?;
                 cmd_attach(&target)?;
+            }
+        },
+        Some(Commands::Backup(backup)) => match backup.sub {
+            BackupSub::Create { path } => {
+                commands::backup::cmd_backup_create(path)?;
+            }
+            BackupSub::List { path } => {
+                commands::backup::cmd_backup_list(path)?;
+            }
+            BackupSub::Restore { spec, path } => {
+                commands::backup::cmd_backup_restore(spec, path)?;
+            }
+            BackupSub::Info { spec, path } => {
+                commands::backup::cmd_backup_info(spec, path)?;
             }
         },
         None => {

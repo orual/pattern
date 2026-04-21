@@ -31,6 +31,8 @@ blake3 = { workspace = true }
 # Sync subscriber worker
 crossbeam-channel = "0.5"
 tokio-util = { version = "0.7", features = ["rt"] }
+jiff = { workspace = true }
+rusqlite = { version = "0.39", features = ["bundled-full"] }
 metrics = "0.24"
 
 # File system watcher
@@ -51,6 +53,10 @@ dirs = { workspace = true }
 # Config parsing + VCS detection
 knus = "3.3"
 gix-discover = { version = "0.49", features = ["sha1"] }
+
+# Atomic rename-into-place for snapshot writes (must be a regular dep,
+# not dev-dep, because create_snapshot uses NamedTempFile in production code).
+tempfile = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

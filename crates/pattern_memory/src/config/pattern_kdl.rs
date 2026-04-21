@@ -73,6 +73,22 @@ pub struct MountConfig {
     /// KDL: `project name="my-project" created-at="2026-04-19T12:00:00Z"`
     #[knus(child)]
     pub project: ProjectSection,
+
+    /// `backup` node — snapshot scheduling and retention policy.
+    ///
+    /// Optional; when absent, no automatic snapshots are taken.
+    ///
+    /// KDL (optional):
+    /// ```text
+    /// backup snapshot-interval="1h" {
+    ///     keep-recent 24
+    ///     hourly-days 1
+    ///     daily-months 1
+    ///     monthly-forever true
+    /// }
+    /// ```
+    #[knus(child)]
+    pub backup: Option<BackupSection>,
 }
 
 // ---------------------------------------------------------------------------
@@ -265,6 +281,139 @@ pub struct ProjectSection {
     pub created_at: String,
 }
 
+/// The `backup` node: snapshot scheduling and retention policy configuration.
+///
+/// Optional — when absent, no automatic snapshots are taken (manual-only via
+/// `pattern backup create`).
+///
+/// KDL example:
+/// ```text
+/// backup snapshot-interval="1h" {
+///     keep-recent 24
+///     hourly-days 1
+///     daily-months 1
+///     monthly-forever true
+/// }
+/// ```
+#[derive(Debug, Clone, Decode, Serialize)]
+pub struct BackupSection {
+    /// How often the scheduler wakes up and checks for new messages to snapshot.
+    ///
+    /// Accepts duration strings: `"1h"`, `"30m"`, `"3600s"`.
+    ///
+    /// KDL property: `snapshot-interval`
+    #[knus(property, default = "1h".to_string())]
+    pub snapshot_interval: String,
+
+    /// Keep this many recent snapshots unconditionally.
+    ///
+    /// KDL child: `keep-recent 24`
+    #[knus(child, unwrap(argument), default = 24usize)]
+    pub keep_recent: usize,
+
+    /// Keep one snapshot per hour for this many days back.
+    ///
+    /// KDL child: `hourly-days 1`
+    #[knus(child, unwrap(argument), default = 1u32)]
+    pub hourly_days: u32,
+
+    /// Keep one snapshot per day for this many months back (1 month ≈ 30 days).
+    ///
+    /// KDL child: `daily-months 1`
+    #[knus(child, unwrap(argument), default = 1u32)]
+    pub daily_months: u32,
+
+    /// Keep one snapshot per calendar month indefinitely.
+    ///
+    /// KDL child: `monthly-forever #true`
+    #[knus(child, unwrap(argument), default = true)]
+    pub monthly_forever: bool,
+}
+
+impl Default for BackupSection {
+    fn default() -> Self {
+        Self {
+            snapshot_interval: "1h".to_string(),
+            keep_recent: 24,
+            hourly_days: 1,
+            daily_months: 1,
+            monthly_forever: true,
+        }
+    }
+}
+
+impl BackupSection {
+    /// Parse the `snapshot_interval` string into a [`std::time::Duration`].
+    ///
+    /// Accepted formats: `"Xh"` (hours), `"Xm"` (minutes), `"Xs"` (seconds).
+    /// Returns an error string if the format is not recognised.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use pattern_memory::config::BackupSection;
+    /// let s = BackupSection::default();
+    /// assert_eq!(s.parse_interval().unwrap().as_secs(), 3600);
+    /// ```
+    pub fn parse_interval(&self) -> Result<std::time::Duration, String> {
+        parse_duration_str(&self.snapshot_interval)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Duration string parsing
+// ---------------------------------------------------------------------------
+
+/// Parse a simple duration string into a [`std::time::Duration`].
+///
+/// Accepted formats: `"Xh"` (hours), `"Xm"` (minutes), `"Xs"` (seconds)
+/// where `X` is a positive integer. Whitespace is not accepted.
+///
+/// This is intentionally minimal — it handles the values users will
+/// realistically enter in `.pattern.kdl`. For complex duration formats, callers
+/// should wrap `parse_duration_str` in a higher-level validator.
+///
+/// # Errors
+///
+/// Returns a human-readable error string if the format is not recognised.
+pub fn parse_duration_str(s: &str) -> Result<std::time::Duration, String> {
+    if s.is_empty() {
+        return Err("duration string must not be empty".to_string());
+    }
+
+    let (digits, unit) = if let Some(rest) = s.strip_suffix('h') {
+        (rest, 'h')
+    } else if let Some(rest) = s.strip_suffix('m') {
+        (rest, 'm')
+    } else if let Some(rest) = s.strip_suffix('s') {
+        (rest, 's')
+    } else {
+        return Err(format!(
+            "unrecognised duration format {s:?}; expected a positive integer followed by \
+             'h' (hours), 'm' (minutes), or 's' (seconds), e.g. \"1h\", \"30m\", \"3600s\""
+        ));
+    };
+
+    let n: u64 = digits.parse().map_err(|_| {
+        format!("invalid duration {s:?}: {digits:?} is not a valid positive integer")
+    })?;
+
+    if n == 0 {
+        return Err(format!(
+            "invalid duration {s:?}: value must be greater than zero"
+        ));
+    }
+
+    let secs = match unit {
+        'h' => n * 3600,
+        'm' => n * 60,
+        's' => n,
+        _ => unreachable!(),
+    };
+
+    Ok(std::time::Duration::from_secs(secs))
+}
+
 // ---------------------------------------------------------------------------
 // Loader
 // ---------------------------------------------------------------------------
@@ -306,6 +455,10 @@ pub fn load_mount_config(path: &Path) -> Result<MountConfig, ConfigError> {
 /// - Mode C requires `jj enabled=true` (sidecar jj must be active).
 /// - `isolate-from-persona policy` must be one of `"none"`, `"core-only"`,
 ///   or `"full"`.
+/// - `backup.snapshot-interval`, when present, must be a recognised duration
+///   string (e.g. `"1h"`, `"30m"`, `"3600s"`). Validating at parse time
+///   surfaces bad config immediately rather than silently falling back to a
+///   1-hour default at attach time.
 ///
 /// Path-level constraints (e.g. Mode A requiring a hashable project root)
 /// are deferred to attach time, since parse time does not know the project
@@ -338,6 +491,18 @@ fn validate_config(config: &MountConfig, path: &Path) -> Result<(), ConfigError>
                 "isolate-from-persona policy must be \"none\", \"core-only\", or \"full\", got \"{policy}\""
             ),
         });
+    }
+
+    // Validate backup.snapshot-interval at config-load time so the error is
+    // surfaced immediately with a clear diagnostic rather than silently
+    // falling back to the 1h default in attach().
+    if let Some(backup) = &config.backup {
+        if let Err(e) = parse_duration_str(&backup.snapshot_interval) {
+            return Err(ConfigError::Validation {
+                path: path.to_owned(),
+                reason: format!("backup.snapshot-interval is invalid: {e}"),
+            });
+        }
     }
 
     Ok(())

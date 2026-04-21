@@ -1,7 +1,7 @@
 //! Message-related models.
 
 use crate::Json;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 /// A message in an agent's conversation history.
@@ -58,8 +58,8 @@ pub struct Message {
     /// Tombstoned messages should be treated as if they don't exist.
     pub is_deleted: bool,
 
-    /// Creation timestamp
-    pub created_at: DateTime<Utc>,
+    /// Creation timestamp (RFC 3339 UTC, stored as TEXT in SQLite).
+    pub created_at: Timestamp,
 }
 
 /// Message roles.
@@ -139,8 +139,8 @@ pub struct ArchiveSummary {
     /// Depth of summary chain (0 = direct message summary, 1+ = summary of summaries)
     pub depth: i64,
 
-    /// Creation timestamp
-    pub created_at: DateTime<Utc>,
+    /// Creation timestamp (RFC 3339 UTC, stored as TEXT in SQLite).
+    pub created_at: Timestamp,
 }
 
 /// Lightweight message projection for listing/searching.
@@ -161,8 +161,8 @@ pub struct MessageSummary {
     /// Source platform
     pub source: Option<String>,
 
-    /// Creation timestamp
-    pub created_at: DateTime<Utc>,
+    /// Creation timestamp (RFC 3339 UTC, stored as TEXT in SQLite).
+    pub created_at: Timestamp,
 }
 
 /// A queued message for agent-to-agent communication.
@@ -192,11 +192,11 @@ pub struct QueuedMessage {
     /// Priority (higher = more urgent)
     pub priority: i64,
 
-    /// Creation timestamp
-    pub created_at: DateTime<Utc>,
+    /// Creation timestamp (RFC 3339 UTC, stored as TEXT in SQLite).
+    pub created_at: Timestamp,
 
-    /// Processing timestamp (NULL until processed)
-    pub processed_at: Option<DateTime<Utc>>,
+    /// Processing timestamp (RFC 3339 UTC, NULL until processed).
+    pub processed_at: Option<Timestamp>,
 
     // === New fields for full message preservation ===
     /// Full MessageContent as JSON (Text, Parts, ToolCalls, etc.)

@@ -5,6 +5,7 @@
 //! JOINs produce correct results.
 
 use chrono::Utc;
+use jiff::Timestamp;
 use pattern_db::{
     ConstellationDb,
     models::{
@@ -90,7 +91,7 @@ fn insert_test_message(
         source_metadata: None,
         is_archived: false,
         is_deleted: false,
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
     queries::create_message(conn, &msg).unwrap();
     msg

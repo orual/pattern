@@ -313,7 +313,7 @@ impl TurnHistory {
 ///
 /// Reverses the `to_db_message` conversion in `agent_loop.rs`:
 /// - `content_json` is deserialized back to `genai::chat::ChatMessage`.
-/// - `created_at` is converted from `chrono::DateTime<Utc>` to `jiff::Timestamp`.
+/// - `created_at` is a `jiff::Timestamp` in both the DB model and the core type; copied directly.
 /// - Fields not stored in the DB (`response_meta`, `block_refs`, `attachments`)
 ///   are defaulted to empty/None.
 fn db_message_to_core(
@@ -323,12 +323,8 @@ fn db_message_to_core(
     let chat_message: genai::chat::ChatMessage =
         serde_json::from_value(db_msg.content_json.0.clone())?;
 
-    // Convert chrono::DateTime<Utc> → jiff::Timestamp.
-    // Reverse of the forward path: epoch_nanos = secs * 1e9 + nanos.
-    let secs = db_msg.created_at.timestamp();
-    let nanos = db_msg.created_at.timestamp_subsec_nanos() as i64;
-    let epoch_nanos: i128 = (secs as i128) * 1_000_000_000 + (nanos as i128);
-    let created_at = Timestamp::from_nanosecond(epoch_nanos).unwrap_or_else(|_| Timestamp::now());
+    // db_msg.created_at is jiff::Timestamp; copy directly into the core message.
+    let created_at = db_msg.created_at;
 
     let batch = db_msg
         .batch_id
@@ -854,7 +850,7 @@ mod tests {
             message_count: 10,
             previous_summary_id: None,
             depth: 0,
-            created_at: chrono::Utc::now(),
+            created_at: Timestamp::now(),
         }];
         hist.set_summary_head(summaries);
         assert_eq!(hist.summary_head().len(), 1);

@@ -6,6 +6,7 @@
 use std::io::Cursor;
 
 use chrono::Utc;
+use jiff::Timestamp;
 use pattern_db::Json;
 
 use pattern_db::ConstellationDb;
@@ -157,7 +158,7 @@ fn create_test_messages(db: &ConstellationDb, agent_id: &str, count: usize) -> V
             source_metadata: Some(Json(serde_json::json!({"test_id": i}))),
             is_archived: i < count / 4, // First quarter is archived
             is_deleted: false,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
         queries::create_message(&db.get().unwrap(), &msg).unwrap();
         messages.push(msg);
@@ -203,7 +204,7 @@ fn create_test_archive_summary(
         message_count: 10,
         previous_summary_id: previous_id.map(|s| s.to_string()),
         depth: if previous_id.is_some() { 1 } else { 0 },
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
     queries::create_archive_summary(&db.get().unwrap(), &summary).unwrap();
     summary
@@ -1402,7 +1403,7 @@ async fn test_batch_id_consistency_across_chunks() {
             source_metadata: None,
             is_archived: false,
             is_deleted: false,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
         queries::create_message(&source_db.get().unwrap(), &msg).unwrap();
     }
