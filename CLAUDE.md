@@ -2,7 +2,9 @@
 
 Pattern is a multi-agent ADHD support system providing external executive function through specialized cognitive agents. Each user ("partner") gets their own constellation of agents.
 
-**Current State**: Core framework operational on `rewrite-v3` branch. V3 foundation rewrite complete (180+ commits, 677/677 tests passing). Expanding integrations.
+**Current State**: Core framework operational on `rewrite-v3` branch. V3 foundation + v3-memory-rework (8-phase plan) complete. `pattern_memory` crate extracted, rusqlite migration done, 1066/1066 tests passing.
+
+Last verified: 2026-04-20
 
 
 > **For AI Agents**: This is the source of truth for the Pattern codebase. Each crate has its own `CLAUDE.md` with specific implementation guidelines.
@@ -35,12 +37,13 @@ Agents may be running in production. Any CLI invocation will disrupt active agen
 pattern/
 ├── crates/
 │   ├── pattern_api/      # Shared API types and contracts
-│   ├── pattern_cli/      # CLI with TUI builders
-│   ├── pattern_core/     # Agent framework, memory, tools, coordination
-│   ├── pattern_db/       # SQLite with FTS5 and vector search
+│   ├── pattern_cli/      # CLI with TUI builders, mount + backup commands
+│   ├── pattern_core/     # Agent framework, memory traits, tools, coordination
+│   ├── pattern_db/       # SQLite (rusqlite) with FTS5 and vector search
 │   ├── pattern_discord/  # Discord bot integration
 │   ├── pattern_macros/   # Derive macros (effect handler codegen)
 │   ├── pattern_mcp/      # MCP client and server
+│   ├── pattern_memory/   # Memory subsystem: cache, CRDT sync, VCS, backup
 │   ├── pattern_nd/       # ADHD-specific tools and personalities
 │   ├── pattern_provider/ # LLM provider integration, auth, request shaping
 │   ├── pattern_runtime/  # Agent runtime (Tidepool, turn loop, SDK)
@@ -131,9 +134,7 @@ cargo fmt
 # Lint
 cargo clippy --all-features --all-targets
 
-# Database operations (from crate directory!)
-cd crates/pattern_db && cargo sqlx prepare
-# NEVER use --workspace flag with sqlx prepare
+# No sqlx prepare needed — pattern_db uses rusqlite (no compile-time macros)
 ```
 
 ## Commit Message Style
@@ -158,8 +159,11 @@ Examples:
 ## Key Dependencies
 
 - **tokio**: Async runtime.
-- **sqlx**: Compile-time verified SQL queries.
+- **rusqlite**: Synchronous SQLite (replaced sqlx in v3-memory-rework).
+- **r2d2**: Connection pooling for rusqlite.
 - **loro**: CRDT for versioned memory blocks.
+- **jiff**: Timestamp handling (messages.db, backup filenames).
+- **knus**: Typed KDL parsing (persona files, `.pattern.kdl` config).
 - **thiserror/miette**: Error handling and diagnostics.
 - **serde**: Serialization.
 - **clap**: CLI parsing.

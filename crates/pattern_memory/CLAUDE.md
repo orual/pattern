@@ -176,10 +176,67 @@ Pre-restore safety copies use nanosecond decimal suffixes (not this format) so
 
 **Entry point:** `pattern_memory::backup`
 
+## scope (`src/scope/`)
+
+`MemoryScope` is a `MemoryStore`-wrapping layer that routes reads and writes
+between persona and project scopes according to an `IsolatePolicy`.
+
+- `ScopeBinding` — config struct: `persona_id`, optional `project_id`, `policy`.
+  `passthrough(persona_id)` creates a no-op binding.
+- `MemoryScope` — implements `MemoryStore`; wraps an inner store and applies
+  policy-based routing. Under `IsolatePolicy::None`, all calls pass through.
+  Under `CoreOnly`, persona core blocks are read-only from project context.
+  Under `Full`, persona memory is not carried over at all.
+- `WriteToPersona` (SDK effect in pattern_runtime) is only allowed when
+  `IsolatePolicy::None` is active; otherwise returns `MemoryError::IsolationDenied`.
+
+**Entry point:** `pattern_memory::scope::MemoryScope`
+
+## subscriber (`src/subscriber/`)
+
+Loro-native CRDT sync between in-memory `MemoryCache` docs and on-disk files.
+Each document gets a dedicated OS thread (`SyncWorker`) that watches for
+mutations via `crossbeam-channel`, debounces, renders the canonical file format,
+and updates FTS5 indexes.
+
+- `subscriber::worker` — `SyncWorker` with two-doc model (memory_doc + disk_doc).
+- `subscriber::supervisor` — respawns crashed workers automatically.
+- `subscriber::event` — `SyncEvent` enum for the channel protocol.
+
+Workers support pause/resume for quiesce (see above) and drain for shutdown.
+
+**Entry point:** `pattern_memory::subscriber`
+
+## config (`src/config/`)
+
+Typed parsing of `.pattern.kdl` config files via `knus` (KDL derive decoder).
+Validates storage mode, project identity, isolation policy, and backup schedule.
+
+**Entry point:** `pattern_memory::config::pattern_kdl::PatternConfig`
+
+## persona (`src/persona/`)
+
+Persona discovery: scans a mount's `personas/` directory for `.kdl` files,
+validates each against the persona loader, and returns a manifest of available
+personas with their paths and metadata.
+
+**Entry point:** `pattern_memory::persona::discover::discover_personas`
+
+## reembed (`src/reembed.rs`)
+
+Background re-embedding queue. `ReembedQueue::spawn()` creates a tokio task
+that drains embedding requests from a channel. Provider is `Option` — when
+`None`, requests are silently drained (placeholder until the embedding pipeline
+is wired).
+
+**Entry point:** `pattern_memory::reembed::ReembedQueue`
+
 ## Status
 
+Last verified: 2026-04-20
+
 Created 2026-04-19 during v3-memory-rework Phase 1; populated incrementally
-in Phases 1-8.
+in Phases 1-8. All 8 phases complete.
 
 Phase 5 subcomponent A (jj adapter + error types + all adapter functions):
 completed 2026-04-20.

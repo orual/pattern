@@ -207,10 +207,131 @@ pub trait MemoryStore: Send + Sync + fmt::Debug + 'static {
     }
 }
 
+// Blanket delegation for `Arc<dyn MemoryStore>` so wrappers like
+// `MemoryScope<Arc<dyn MemoryStore>>` can satisfy the `S: MemoryStore`
+// bound without a newtype shim.
+impl MemoryStore for std::sync::Arc<dyn MemoryStore> {
+    fn create_block(
+        &self,
+        agent_id: &str,
+        create: BlockCreate,
+    ) -> MemoryResult<StructuredDocument> {
+        (**self).create_block(agent_id, create)
+    }
+
+    fn get_block(&self, agent_id: &str, label: &str) -> MemoryResult<Option<StructuredDocument>> {
+        (**self).get_block(agent_id, label)
+    }
+
+    fn get_block_metadata(
+        &self,
+        agent_id: &str,
+        label: &str,
+    ) -> MemoryResult<Option<BlockMetadata>> {
+        (**self).get_block_metadata(agent_id, label)
+    }
+
+    fn list_blocks(&self, filter: BlockFilter) -> MemoryResult<Vec<BlockMetadata>> {
+        (**self).list_blocks(filter)
+    }
+
+    fn delete_block(&self, agent_id: &str, label: &str) -> MemoryResult<()> {
+        (**self).delete_block(agent_id, label)
+    }
+
+    fn get_rendered_content(&self, agent_id: &str, label: &str) -> MemoryResult<Option<String>> {
+        (**self).get_rendered_content(agent_id, label)
+    }
+
+    fn persist_block(&self, agent_id: &str, label: &str) -> MemoryResult<()> {
+        (**self).persist_block(agent_id, label)
+    }
+
+    fn mark_dirty(&self, agent_id: &str, label: &str) {
+        (**self).mark_dirty(agent_id, label);
+    }
+
+    fn insert_archival(
+        &self,
+        agent_id: &str,
+        content: &str,
+        metadata: Option<JsonValue>,
+    ) -> MemoryResult<String> {
+        (**self).insert_archival(agent_id, content, metadata)
+    }
+
+    fn search_archival(
+        &self,
+        agent_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> MemoryResult<Vec<ArchivalEntry>> {
+        (**self).search_archival(agent_id, query, limit)
+    }
+
+    fn delete_archival(&self, id: &str) -> MemoryResult<()> {
+        (**self).delete_archival(id)
+    }
+
+    fn search(
+        &self,
+        query: &str,
+        options: SearchOptions,
+        scope: MemorySearchScope,
+    ) -> MemoryResult<Vec<MemorySearchResult>> {
+        (**self).search(query, options, scope)
+    }
+
+    fn list_shared_blocks(&self, agent_id: &str) -> MemoryResult<Vec<SharedBlockInfo>> {
+        (**self).list_shared_blocks(agent_id)
+    }
+
+    fn get_shared_block(
+        &self,
+        requester_agent_id: &str,
+        owner_agent_id: &str,
+        label: &str,
+    ) -> MemoryResult<Option<StructuredDocument>> {
+        (**self).get_shared_block(requester_agent_id, owner_agent_id, label)
+    }
+
+    fn update_block_metadata(
+        &self,
+        agent_id: &str,
+        label: &str,
+        patch: BlockMetadataPatch,
+    ) -> MemoryResult<()> {
+        (**self).update_block_metadata(agent_id, label, patch)
+    }
+
+    fn undo_redo(&self, agent_id: &str, label: &str, op: UndoRedoOp) -> MemoryResult<bool> {
+        (**self).undo_redo(agent_id, label, op)
+    }
+
+    fn history_depth(&self, agent_id: &str, label: &str) -> MemoryResult<UndoRedoDepth> {
+        (**self).history_depth(agent_id, label)
+    }
+
+    fn has_shared_blocks_with(&self, caller: &str, target: &str) -> MemoryResult<bool> {
+        (**self).has_shared_blocks_with(caller, target)
+    }
+
+    fn shares_group_with(&self, caller: &str, target: &str) -> MemoryResult<bool> {
+        (**self).shares_group_with(caller, target)
+    }
+
+    fn list_constellation_agent_ids(&self) -> MemoryResult<Vec<String>> {
+        (**self).list_constellation_agent_ids()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::MemoryStore;
 
     // Verify the trait is object-safe (dyn-compatible).
     fn _assert_object_safe(_: &dyn MemoryStore) {}
+
+    // Verify Arc<dyn MemoryStore> also implements MemoryStore.
+    fn _assert_arc_impl(_: &std::sync::Arc<dyn MemoryStore>) {}
 }

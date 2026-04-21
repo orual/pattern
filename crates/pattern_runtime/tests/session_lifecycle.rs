@@ -110,6 +110,7 @@ async fn memory_round_trip_through_session() {
         db,
         sink,
         None,
+        None,
     )
     .await
     .expect("open should succeed");
@@ -187,6 +188,7 @@ async fn checkpoint_and_restore_round_trips() {
         db.clone(),
         sink,
         None,
+        None,
     )
     .await
     .expect("open should succeed");
@@ -214,10 +216,11 @@ async fn checkpoint_and_restore_round_trips() {
     let provider2: Arc<dyn ProviderClient> = Arc::new(MockProviderClient::with_turns(vec![]));
     let sink2: Arc<dyn TurnSink> = Arc::new(VecSink::new());
 
-    let mut session2 =
-        TidepoolSession::open_with_agent_loop(persona, &sdk, store2, provider2, db, sink2, None)
-            .await
-            .expect("second open should succeed");
+    let mut session2 = TidepoolSession::open_with_agent_loop(
+        persona, &sdk, store2, provider2, db, sink2, None, None,
+    )
+    .await
+    .expect("second open should succeed");
 
     // Restore should succeed.
     session2
@@ -278,6 +281,7 @@ async fn concurrent_session_isolation() {
         db.clone(),
         sink_a,
         None,
+        None,
     )
     .await
     .expect("open A");
@@ -297,6 +301,7 @@ async fn concurrent_session_isolation() {
         provider_b,
         db.clone(),
         sink_b,
+        None,
         None,
     )
     .await

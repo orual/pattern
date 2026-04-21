@@ -108,6 +108,10 @@ pub struct SessionContext {
     /// open. Consumed by the compaction driver (`crate::compaction`)
     /// before each wire turn.
     context_policy: pattern_core::types::snapshot::ContextPolicy,
+    /// Session-scoped diagnostic events. Populated during session
+    /// construction (e.g. lib-module compile failures) and read by the
+    /// `Pattern.Diagnostics` effect handler. Read-only after construction.
+    diagnostics: Arc<std::sync::Mutex<Vec<crate::sdk::handlers::diagnostics::DiagnosticEvent>>>,
 }
 
 /// Handlers call this to decide whether to short-circuit on soft-cancel.
@@ -181,6 +185,7 @@ impl SessionContext {
             current_turn: Arc::new(AtomicU64::new(0)),
             snapshot_policy: persona.context.snapshot_policy.clone(),
             context_policy: persona.context.clone(),
+            diagnostics: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -199,6 +204,24 @@ impl SessionContext {
     /// here.
     pub fn chat_options(&self) -> &genai::chat::ChatOptions {
         &self.chat_options
+    }
+
+    /// Wrap the underlying memory store in a [`pattern_memory::scope::MemoryScope`]
+    /// with the given binding. This inserts the scope layer between the
+    /// adapter and the raw store, enabling persona isolation per the
+    /// [`IsolatePolicy`](pattern_core::types::memory_types::IsolatePolicy).
+    ///
+    /// Must be called before the session is shared (i.e., before
+    /// `Arc::new(ctx)` in `TidepoolSession::open`). Calling after the
+    /// adapter has been cloned elsewhere is a logic error (but harmless —
+    /// only the original adapter sees the scope).
+    #[must_use]
+    pub fn with_scope_binding(mut self, binding: pattern_memory::scope::ScopeBinding) -> Self {
+        use pattern_memory::scope::MemoryScope;
+        let old_inner = self.adapter.inner().clone();
+        let scoped: Arc<dyn MemoryStore> = Arc::new(MemoryScope::new(old_inner, binding));
+        self.adapter = Arc::new(MemoryStoreAdapter::new(scoped, &self.agent_id));
+        self
     }
 
     /// Replace the default [`NoOpSink`] with a caller-provided sink.
@@ -302,6 +325,14 @@ impl SessionContext {
     /// turn in `drive_step`.
     pub fn context_policy(&self) -> &pattern_core::types::snapshot::ContextPolicy {
         &self.context_policy
+    }
+
+    /// Session diagnostics. Accumulated during construction; read by
+    /// the `Pattern.Diagnostics` handler.
+    pub fn diagnostics(
+        &self,
+    ) -> &Arc<std::sync::Mutex<Vec<crate::sdk::handlers::diagnostics::DiagnosticEvent>>> {
+        &self.diagnostics
     }
 
     /// Scheme-dispatched router registry for message routing.
@@ -483,6 +514,7 @@ impl TidepoolSession {
     ///
     /// Use [`Self::step_with_agent_loop`] to drive turns on sessions
     /// opened via this constructor.
+    #[allow(clippy::too_many_arguments)]
     pub async fn open_with_agent_loop(
         persona: PersonaSnapshot,
         sdk: &SdkLocation,
@@ -491,6 +523,7 @@ impl TidepoolSession {
         db: Arc<pattern_db::ConstellationDb>,
         turn_sink: Arc<dyn TurnSink>,
         prelude_dir: Option<PathBuf>,
+        mount_path: Option<PathBuf>,
     ) -> Result<Self, RuntimeError> {
         // Capture persona-scoped state we'll seed into the store after the
         // session is constructed. We consume `persona` via `Self::open`
@@ -519,7 +552,52 @@ impl TidepoolSession {
         let ctx_owned =
             Arc::try_unwrap(session.ctx).expect("ctx has no other clones immediately after open()");
         let ctx_with_sink = ctx_owned.with_turn_sink(turn_sink.clone());
-        session.ctx = Arc::new(ctx_with_sink);
+
+        // Wire MemoryScope if a mount config declares an isolation policy.
+        // Must happen before Arc::new(ctx) so the scope wraps the store
+        // before any other reference to ctx exists.
+        let ctx_with_scope = if let Some(mount) = mount_path.as_deref() {
+            let kdl_path = mount.join(".pattern.kdl");
+            match pattern_memory::config::load_mount_config(&kdl_path) {
+                Ok(mount_config) => {
+                    // Resolve the policy; default to None on validation error
+                    // (log the issue but don't abort session open).
+                    let policy = match mount_config.isolate_from_persona.resolve() {
+                        Ok(p) => p,
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "failed to resolve isolate_from_persona policy; \
+                                 defaulting to IsolatePolicy::None"
+                            );
+                            pattern_core::types::memory_types::IsolatePolicy::None
+                        }
+                    };
+                    let binding = pattern_memory::scope::ScopeBinding::with_project(
+                        agent_id_for_seed.clone(),
+                        mount_config.project.name.clone(),
+                        policy,
+                    );
+                    ctx_with_sink.with_scope_binding(binding)
+                }
+                Err(e) => {
+                    // Mount config missing or malformed. Log a warning and
+                    // proceed without a scope: the session is still valid,
+                    // just without project isolation.
+                    tracing::warn!(
+                        path = %kdl_path.display(),
+                        error = %e,
+                        "could not load .pattern.kdl for scope wiring; \
+                         proceeding without MemoryScope"
+                    );
+                    ctx_with_sink
+                }
+            }
+        } else {
+            ctx_with_sink
+        };
+
+        session.ctx = Arc::new(ctx_with_scope);
 
         // Wire the turn sink into the DisplayHandler so Display events
         // flow to CLI/TUI subscribers during eval turns.
@@ -539,6 +617,29 @@ impl TidepoolSession {
         let mut include_paths = vec![sdk_dir];
         if let Some(dir) = prelude_dir {
             include_paths.push(dir);
+        }
+
+        // Extend include path with `<mount>/lib/` if present.
+        // Approach A: probe-compile each module individually via
+        // compile_haskell. See `sdk::lib_modules` for details.
+        if let Some(mount) = mount_path.as_deref() {
+            let lib_validation =
+                crate::sdk::lib_modules::validate_and_resolve(mount, &include_paths);
+            include_paths.extend(lib_validation.successful_paths);
+            // Stash failures into diagnostics for Pattern.Diagnostics.
+            if !lib_validation.failures.is_empty() {
+                let mut diags = session
+                    .ctx
+                    .diagnostics
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                diags.extend(
+                    lib_validation
+                        .failures
+                        .into_iter()
+                        .map(crate::sdk::handlers::diagnostics::DiagnosticEvent::from),
+                );
+            }
         }
 
         // Spawn the eval worker.
@@ -903,6 +1004,7 @@ mod tests {
             db,
             sink_dyn,
             None,
+            None,
         )
         .await
         .expect("open_with_agent_loop should succeed when preflight passes");
@@ -976,7 +1078,7 @@ mod tests {
         let sink_dyn: Arc<dyn TurnSink> = sink.clone();
 
         let session = TidepoolSession::open_with_agent_loop(
-            persona, &sdk, store, provider, db, sink_dyn, None,
+            persona, &sdk, store, provider, db, sink_dyn, None, None,
         )
         .await
         .expect("open_with_agent_loop should succeed");

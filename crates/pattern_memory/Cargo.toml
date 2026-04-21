@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 description = "Memory subsystem implementation for Pattern (MemoryCache, StructuredDocument, SharedBlockManager)"
 
+[features]
+default = []
+test-support = []
+
 [dependencies]
 pattern-core = { path = "../pattern_core" }
 pattern-db = { path = "../pattern_db" }
@@ -58,11 +62,16 @@ gix-discover = { version = "0.49", features = ["sha1"] }
 # not dev-dep, because create_snapshot uses NamedTempFile in production code).
 tempfile = { workspace = true }
 
+[[test]]
+name = "scope_isolation"
+required-features = ["test-support"]
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 tempfile = { workspace = true }
 proptest = "1"
 insta = { version = "1", features = ["yaml"] }
+futures = { workspace = true }
 
 [lints]
 workspace = true

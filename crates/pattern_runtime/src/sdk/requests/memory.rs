@@ -144,4 +144,10 @@ pub enum MemoryReq {
     /// that has been shared with the caller.
     #[core(module = "Pattern.Memory", name = "GetShared")]
     GetShared(String, String),
+
+    /// `WriteToPersona label content` �� explicitly write to the persona
+    /// scope. Succeeds when `IsolatePolicy::None`; returns
+    /// `MemoryError::IsolationDenied` under `CoreOnly` or `Full`.
+    #[core(module = "Pattern.Memory", name = "WriteToPersona")]
+    WriteToPersona(String, String),
 }

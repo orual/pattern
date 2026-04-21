@@ -15,9 +15,13 @@
 //! ```text
 //! project/
 //! ├── .git/                    ← host git
-//! ├── .gitignore               (`.pattern/shared/.jj/` appended)
+//! ├── .gitignore               (`.pattern/shared/.jj/`, `.pattern/transient/`,
+//! │                             and WAL sidecars appended)
 //! ├── .pattern/
+//! │   ├── transient/
+//! │   │   └── messages.db      (created at attach time by ConstellationDb)
 //! │   └── shared/
+//! │       ├── .gitignore       (WAL sidecars — jj reads this)
 //! │       ├── .pattern.kdl
 //! │       ├── .jj/             ← pattern-jj, gitignored by host
 //! │       ├── memory.db        (created at attach time by ConstellationDb)
@@ -45,9 +49,9 @@ use crate::jj::JjAdapter;
 /// repository inside `.pattern/shared/`, and appends `.pattern/shared/.jj/`
 /// to the project root's `.gitignore`.
 ///
-/// `messages.db` placement follows Mode A's convention: it lives outside the
-/// project repo at `~/.pattern/transient/<hash>/messages.db` so that
-/// ephemeral conversation data is never committed.
+/// `messages.db` placement follows Mode A's convention: it lives inside the
+/// project repo at `<project>/.pattern/transient/messages.db`, gitignored so
+/// that ephemeral conversation data is never committed.
 ///
 /// # Errors
 ///
@@ -105,9 +109,19 @@ project name="{project_name}" created-at="{now}"
     // git repo lives inside `.jj/repo/` (no top-level `.git/` is created).
     gitignore::append_if_missing(project_root, ".pattern/shared/.jj/")?;
 
-    // Also ensure .pattern/transient/ is gitignored (messages.db lives there,
-    // outside the project repo, same convention as Mode A).
+    // Ensure .pattern/transient/ is gitignored (messages.db lives there,
+    // inside the project but outside VCS history).
     gitignore::append_if_missing(project_root, ".pattern/transient/")?;
+
+    // WAL sidecar files appear during SQLite writes and must not be committed
+    // by the host git repo.
+    gitignore::append_if_missing(project_root, ".pattern/shared/memory.db-wal")?;
+    gitignore::append_if_missing(project_root, ".pattern/shared/memory.db-shm")?;
+
+    // Also write a .gitignore inside .pattern/shared/ so that jj (which reads
+    // gitignore files) excludes WAL sidecars from sidecar-jj commits as well.
+    gitignore::append_if_missing(&mount_path, "memory.db-wal")?;
+    gitignore::append_if_missing(&mount_path, "memory.db-shm")?;
 
     Ok(StorageMode::C { mount_path })
 }
@@ -190,6 +204,37 @@ mod tests {
         assert!(
             gitignore.contains(".pattern/transient/"),
             "gitignore should contain .pattern/transient/"
+        );
+        assert!(
+            gitignore.contains(".pattern/shared/memory.db-wal"),
+            "gitignore should contain WAL sidecar entry"
+        );
+        assert!(
+            gitignore.contains(".pattern/shared/memory.db-shm"),
+            "gitignore should contain SHM sidecar entry"
+        );
+    }
+
+    #[test]
+    fn init_creates_shared_gitignore_for_jj() {
+        let Some(adapter) = skip_if_no_jj() else {
+            return;
+        };
+
+        let tmp = TempDir::new().unwrap();
+        init(tmp.path(), &adapter).unwrap();
+
+        // jj reads .gitignore files in the working-copy directories. The shared
+        // .gitignore ensures WAL sidecars are excluded from jj commits.
+        let shared_gitignore =
+            std::fs::read_to_string(tmp.path().join(".pattern/shared/.gitignore")).unwrap();
+        assert!(
+            shared_gitignore.contains("memory.db-wal"),
+            "shared .gitignore should exclude memory.db-wal"
+        );
+        assert!(
+            shared_gitignore.contains("memory.db-shm"),
+            "shared .gitignore should exclude memory.db-shm"
         );
     }
 

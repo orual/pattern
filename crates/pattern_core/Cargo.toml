@@ -118,7 +118,6 @@ pretty_assertions = "1.4"
 tempfile = "3.0"
 serial_test = "3.1"
 tracing-test = "0.2"
-trybuild = "1.0"
 proc-macro2-diagnostics = "0.10"
 miette = { workspace = true, features = ["fancy"] }
 proptest = "1"

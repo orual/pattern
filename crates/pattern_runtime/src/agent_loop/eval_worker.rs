@@ -246,6 +246,8 @@ fn run_eval(
     display.forward_to_turn_sink(ctx.turn_sink().clone());
 
     let store = ctx.memory_store();
+    let diagnostics_handler =
+        crate::sdk::handlers::DiagnosticsHandler::new(ctx.diagnostics().clone());
     let mut bundle: SdkBundle = frunk::hlist![
         MemoryHandler::new(store.clone()),
         SearchHandler::new(store.clone()),
@@ -260,6 +262,7 @@ fn run_eval(
         McpHandler,
         RpcHandler,
         SpawnHandler,
+        diagnostics_handler,
     ];
 
     // Coerce the owned PathBufs into the &[&Path] slice

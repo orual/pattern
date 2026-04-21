@@ -56,4 +56,15 @@ pub enum MountError {
     #[error("watcher error: {0}")]
     #[diagnostic(code(pattern_memory::mount::watcher))]
     Watcher(#[from] crate::fs::FsError),
+
+    /// Filesystem I/O error during directory creation or other setup.
+    #[error("failed to create directory {path}: {source}")]
+    #[diagnostic(code(pattern_memory::mount::io))]
+    Io {
+        /// The path involved in the failure.
+        path: std::path::PathBuf,
+        /// Underlying I/O error.
+        #[source]
+        source: std::io::Error,
+    },
 }

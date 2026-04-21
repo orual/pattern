@@ -112,6 +112,19 @@ Cruft (code with no fate marker, `unimplemented!()`/`todo!()` without phase/AC r
 - Packaging: non-NixOS distribution bundles must ship the `jj` binary alongside
   `tidepool-extract`. Tracked as a follow-up in the packaging workstream.
 
+### Scopes + project personas + lib modules + Pattern.Diagnostics (Phase 8 — completed 2026-04-20)
+
+- `pattern_memory::scope::MemoryScope<S>` wraps any `MemoryStore` with
+  IsolatePolicy routing (None / CoreOnly / Full).
+- Persona discovery across global (`~/.pattern/personas/`) + project
+  (`<mount>/personas/`) scopes; project-scoped takes precedence on collision.
+- `<mount>/lib/*.hs` include-path extension (Approach A: per-module probe-compile validation via `tidepool_runtime::compile_haskell`;
+  broken modules surface as `DiagnosticEvent` entries via `Pattern.Diagnostics`).
+- `Pattern.Diagnostics.diagnostics` SDK effect returns a JSON-encoded list
+  of session diagnostic events (lib-compile failures + handler errors).
+- `ctx.memory.writeToPersona` effect allows explicit persona-scope write
+  when policy is None; rejects under CoreOnly or Full with IsolationDenied.
+
 ### Recall SDK surface shrink (Phase 3 — completed 2026-04-19)
 
 - Removed `RecallReq::Delete` variant from the agent-facing SDK

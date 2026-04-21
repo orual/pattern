@@ -5,6 +5,7 @@
 //! `shell`, `file`, `sources`, `mcp`, `rpc`, and `spawn` are stubbed out to
 //! return an actionable `EffectError::Handler("…not yet implemented…")`.
 
+pub mod diagnostics;
 pub mod display;
 pub mod file;
 pub mod log;
@@ -20,6 +21,7 @@ pub mod sources;
 pub mod spawn;
 pub mod time;
 
+pub use diagnostics::DiagnosticsHandler;
 pub use display::DisplayHandler;
 pub use file::FileHandler;
 pub use log::LogHandler;

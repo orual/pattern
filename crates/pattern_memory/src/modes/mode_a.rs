@@ -2,14 +2,17 @@
 //!
 //! Mode A puts block files inside the project repo at
 //! `<project>/.pattern/shared/` and delegates history to the host VCS (git
-//! or jj). `messages.db` lives outside the repo at
-//! `~/.pattern/transient/<project-hash>/`.
+//! or jj). `messages.db` lives inside the project at
+//! `<project>/.pattern/transient/messages.db`, gitignored so it is never
+//! committed, but project-adjacent for discoverability.
 //!
 //! The mount directory layout after init:
 //!
 //! ```text
 //! <project>/
 //! ├── .pattern/
+//! │   ├── transient/
+//! │   │   └── messages.db        (created at attach time by ConstellationDb)
 //! │   └── shared/
 //! │       ├── .pattern.kdl
 //! │       ├── memory.db          (created at attach time by ConstellationDb)
@@ -18,7 +21,7 @@
 //! │       │   └── working/
 //! │       ├── personas/
 //! │       └── lib/
-//! └── .gitignore                 (`.pattern/transient/` appended)
+//! └── .gitignore                 (`.pattern/transient/` + WAL sidecars appended)
 //! ```
 
 use std::path::Path;
@@ -81,8 +84,11 @@ project name="{project_name}" created-at="{now}"
     })?;
 
     // Ensure .pattern/transient/ is gitignored (messages.db lives there,
-    // outside the project repo).
+    // inside the project but outside VCS history).
     gitignore::append_if_missing(project_root, ".pattern/transient/")?;
+    // WAL sidecar files appear during SQLite writes and must not be committed.
+    gitignore::append_if_missing(project_root, ".pattern/shared/memory.db-wal")?;
+    gitignore::append_if_missing(project_root, ".pattern/shared/memory.db-shm")?;
 
     Ok(StorageMode::A {
         mount_path,
@@ -141,7 +147,18 @@ mod tests {
         init(tmp.path()).unwrap();
 
         let gitignore = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
-        assert!(gitignore.contains(".pattern/transient/"));
+        assert!(
+            gitignore.contains(".pattern/transient/"),
+            "gitignore should exclude .pattern/transient/"
+        );
+        assert!(
+            gitignore.contains(".pattern/shared/memory.db-wal"),
+            "gitignore should exclude WAL sidecar"
+        );
+        assert!(
+            gitignore.contains(".pattern/shared/memory.db-shm"),
+            "gitignore should exclude SHM sidecar"
+        );
     }
 
     #[test]

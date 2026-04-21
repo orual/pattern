@@ -4,7 +4,7 @@ Agent runtime for Pattern v3. Houses Tidepool (Haskell-in-Rust) embedding, the
 agent turn loop, `freer-simple` effect handlers, and turn-level checkpoint
 machinery. Depends only on `pattern_core` trait definitions.
 
-Last verified: 2026-04-19
+Last verified: 2026-04-20 (post v3-memory-rework Phase 8)
 
 See the v3 foundation design at
 `docs/design-plans/2026-04-16-v3-foundation.md` for the substrate choice,
@@ -209,7 +209,7 @@ cache. `ProviderClient::rotate_session_uuid` has a default no-op
 implementation; `PatternGatewayClient` provides the real rotation.
 
 **How to disable compression for a persona:**
-Set `context.compression = None` in the persona TOML (or
+Omit the `compression` block in the persona KDL (or
 `ContextPolicy::default()` which has `compression: None`).
 
 **Future work:** depth->=1 summary rollup (running RecursiveSummarization
@@ -230,7 +230,32 @@ becomes unusable (channel closed); callers observe channel-closed errors
 on the next dispatch. This is the intended failure mode (fail loud; no
 silent deadlock).
 
-Freshness date: 2026-04-19 (v3-memory-rework Phase 3).
+Freshness date: 2026-04-20 (v3-memory-rework Phase 8).
+
+### `<mount>/lib/` include-path extension
+
+When a mount provides a `lib/` directory, each `.hs` file is
+probe-compiled individually via `tidepool_runtime::compile_haskell`
+(Approach A). The probe generates a minimal Haskell source that imports
+the module qualified and calls `pure ()`, exercising GHC's parser and
+type-checker without executing effects. Modules that pass the probe
+cause `lib/` to be added to the eval worker's include path; modules
+that fail are recorded as `LibCompileFailure` and surfaced to agents
+via `Pattern.Diagnostics`.
+
+Entry point: `crate::sdk::lib_modules::validate_and_resolve(mount_path, base_include_paths)`.
+
+### Pattern.Diagnostics + WriteToPersona (Phase 8)
+
+**Pattern.Diagnostics:** `GetDiagnostics` returns a JSON-encoded list of
+session diagnostic events (lib-compile failures, handler errors). Handler
+at `sdk/handlers/diagnostics.rs`; Haskell module at
+`haskell/Pattern/Diagnostics.hs`. The diagnostics list is accumulated
+during session construction and exposed read-only to agents.
+
+**WriteToPersona:** Part of `Pattern.Memory` — allows explicit writes to
+the persona scope when `IsolatePolicy::None` is active. Under
+`CoreOnly` or `Full`, returns `MemoryError::IsolationDenied`.
 
 ### SessionContext (`session.rs`)
 
@@ -254,7 +279,7 @@ Gains `snapshot_policy: SnapshotPolicy` field wrapping:
 Agent programs import from the `Pattern.*` SDK module tree (installed at
 `$PATTERN_SDK_DIR` or `crates/pattern_runtime/haskell/Pattern/` by default).
 `tidepool-extract` compiles agents with the SDK directory on its include
-path -- all 13 effect modules plus vendored utility modules are compiled
+path -- all 14 effect modules plus vendored utility modules are compiled
 and linked together.
 
 The SDK uses a hybrid qualified/unqualified import scheme. Modules with
@@ -314,7 +339,7 @@ Rpc, Spawn`):
 
 ```
 Memory, Search, Recall, Message, Display, Time, Log, Shell, File,
-Sources, Mcp, Rpc, Spawn
+Sources, Mcp, Rpc, Spawn, Diagnostics
 ```
 
 Agent `Eff '[...]` rows must line up with this prefix.
@@ -325,7 +350,7 @@ The SDK vendors several utility modules so agents are fully
 self-contained (no tidepool-mcp dependency):
 
 - `Pattern.Prelude` — curated prelude (Text-returning `show`, list/Map
-  helpers, Aeson construction). Does NOT re-export the 13 effect modules.
+  helpers, Aeson construction). Does NOT re-export the 14 effect modules.
 - `Pattern.Aeson`, `Pattern.Aeson.Value`, `Pattern.Aeson.KeyMap`,
   `Pattern.Aeson.Lens` — JSON construction + traversal.
 - `Pattern.Table` — tabular text formatting.
@@ -338,7 +363,7 @@ so agents can `show now` in log lines.
 
 The `code` tool's description (`sdk/code_tool.rs`) is ~6.4 KB and built
 once at process startup from `canonical_effect_decls()`. It contains:
-- Full API reference (every helper signature across all 13 effects).
+- Full API reference (every helper signature across all 14 effects).
 - Effect-row and import-scheme conventions.
 - Common gotchas section (e.g. `Memory.get` returns `Content` not
   `Maybe`, `pure ()` not `return unit`, `Show Instant` works,
@@ -432,8 +457,8 @@ procedure rather than an auto-run smoke_e2e.rs.
 ### DoD flow — AC9.1 (API-key) / AC9.2 (OAuth) / AC9.3 (CLI drives it) / AC9.4 (cache behavior)
 
 **Step 1 — start a fresh session.** The `spawn` subcommand takes a
-persona TOML path; use the smoke fixture at
-`crates/pattern_runtime/tests/fixtures/smoke_persona.toml` as a baseline.
+persona KDL path; use the smoke fixture at
+`crates/pattern_runtime/tests/fixtures/smoke_persona.kdl` as a baseline.
 
 ```bash
 TMPDIR=$(mktemp -d)
@@ -502,7 +527,7 @@ break-detection output (Phase 5 Task 11).
 - If `ratio` collapses unexpectedly during step 7, inspect the
   break-detection warnings and diff the composed requests for
   segment-1 differences.
-- If the persona TOML fails to load, `persona_loader`'s error messages
+- If the persona KDL fails to load, `persona_loader`'s error messages
   should name the failing field or step; if they don't, tighten them.
 
 ### What the CLI deliberately does NOT do

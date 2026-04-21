@@ -54,8 +54,8 @@ pub enum StorageMode {
         /// Root of the mount — where Pattern writes canonical memory files
         /// (`<project>/.pattern/shared/`).
         mount_path: PathBuf,
-        /// The project repository root containing `.pattern/`. Used to derive
-        /// the project hash for `messages.db` placement.
+        /// The project repository root containing `.pattern/`. Used to resolve
+        /// the `messages.db` path at `<project_root>/.pattern/transient/messages.db`.
         project_root: PathBuf,
     },
     /// Separate Pattern-owned jj repository. Pattern runs `jj commit`.

@@ -363,3 +363,103 @@ fn parse_duration_str_rejects_invalid() {
     assert!(parse_duration_str("-1h").is_err(), "negative must fail");
     assert!(parse_duration_str("1hour").is_err(), "word unit must fail");
 }
+
+#[test]
+fn invalid_backup_interval_fails_config_validation() {
+    let dir = tempfile::tempdir().unwrap();
+    let kdl_path = dir.path().join(".pattern.kdl");
+    std::fs::write(
+        &kdl_path,
+        r#"
+mount mode="A" memory-db="memory.db"
+project name="test" created-at="2026-04-20T00:00:00Z"
+backup snapshot-interval="banana"
+"#,
+    )
+    .unwrap();
+    let err = pattern_memory::config::load_mount_config(&kdl_path);
+    assert!(err.is_err(), "invalid interval must fail validation");
+    let msg = err.unwrap_err().to_string();
+    assert!(
+        msg.contains("banana") || msg.contains("snapshot-interval") || msg.contains("duration"),
+        "error should mention the invalid value: {msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// IsolateSection.resolve() tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn isolate_section_resolve_none() {
+    use pattern_core::types::memory_types::IsolatePolicy;
+    use pattern_memory::config::IsolateSection;
+
+    let section = IsolateSection::default();
+    assert_eq!(section.resolve().unwrap(), IsolatePolicy::None);
+}
+
+#[test]
+fn isolate_section_resolve_core_only() {
+    use pattern_core::types::memory_types::IsolatePolicy;
+
+    let tmp = TempDir::new().unwrap();
+    let path = write_config(
+        &tmp,
+        r#"
+mount mode="A" memory-db="memory.db"
+isolate-from-persona policy="core-only"
+project name="test" created-at="2026-01-01T00:00:00Z"
+"#,
+    );
+    let config = load_mount_config(&path).expect("core-only config should parse");
+    assert_eq!(
+        config.isolate_from_persona.resolve().unwrap(),
+        IsolatePolicy::CoreOnly
+    );
+}
+
+#[test]
+fn isolate_section_resolve_full() {
+    use pattern_core::types::memory_types::IsolatePolicy;
+
+    let tmp = TempDir::new().unwrap();
+    let path = write_config(
+        &tmp,
+        r#"
+mount mode="A" memory-db="memory.db"
+isolate-from-persona policy="full"
+project name="test" created-at="2026-01-01T00:00:00Z"
+"#,
+    );
+    let config = load_mount_config(&path).expect("full config should parse");
+    assert_eq!(
+        config.isolate_from_persona.resolve().unwrap(),
+        IsolatePolicy::Full
+    );
+}
+
+#[test]
+fn isolate_section_resolve_invalid_rejected_at_parse() {
+    // Invalid policy strings are caught by validate_config at parse time,
+    // not by resolve(). Verify parse-time rejection.
+    let tmp = TempDir::new().unwrap();
+    let path = write_config(
+        &tmp,
+        r#"
+mount mode="A" memory-db="memory.db"
+isolate-from-persona policy="bogus"
+project name="test" created-at="2026-01-01T00:00:00Z"
+"#,
+    );
+    let err = load_mount_config(&path).expect_err("bogus policy should fail validation");
+    match err {
+        ConfigError::Validation { reason, .. } => {
+            assert!(
+                reason.contains("isolate-from-persona"),
+                "validation should mention field: {reason}"
+            );
+        }
+        other => panic!("expected Validation error, got: {other:?}"),
+    }
+}

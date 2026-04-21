@@ -60,7 +60,13 @@ pub fn attach_with_paths(start: &Path, paths: &PatternPaths) -> Result<MountedSt
                 })?
                 .to_owned();
             let memory_db = mount_path.join(&config.mount.memory_db);
-            let messages_db = paths.mode_a_messages_path(&project_root)?;
+            let messages_db = PatternPaths::mode_a_messages_path(&project_root);
+            // Create the transient directory so ConstellationDb can open the DB there.
+            let transient_dir = project_root.join(".pattern").join("transient");
+            std::fs::create_dir_all(&transient_dir).map_err(|e| MountError::Io {
+                path: transient_dir,
+                source: e,
+            })?;
             (
                 memory_db,
                 messages_db,
@@ -94,7 +100,13 @@ pub fn attach_with_paths(start: &Path, paths: &PatternPaths) -> Result<MountedSt
                 })?
                 .to_owned();
             let memory_db = mount_path.join(&config.mount.memory_db);
-            let messages_db = paths.mode_a_messages_path(&project_root)?;
+            let messages_db = PatternPaths::mode_a_messages_path(&project_root);
+            // Create the transient directory so ConstellationDb can open the DB there.
+            let transient_dir = project_root.join(".pattern").join("transient");
+            std::fs::create_dir_all(&transient_dir).map_err(|e| MountError::Io {
+                path: transient_dir,
+                source: e,
+            })?;
             (
                 memory_db,
                 messages_db,

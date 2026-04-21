@@ -74,34 +74,34 @@ impl Drop for EnvGuard {
 // ────────────────────────────── 1. Persona parse failures ───────────────────
 //
 // These tests exercise `persona_loader::load_persona` (the production path)
-// rather than `toml::from_str::<PersonaSnapshot>`. The loader uses an
-// intermediate `PersonaFile` DTO with different schema semantics (e.g.
-// `agent_id` is optional; `[model]` not `[model.choice]`; `[memory]` not
-// `[memory_blocks]`). Writing to a tempfile first ensures we exercise the
+// rather than parsing directly. The loader uses an intermediate `PersonaFile`
+// DTO parsed via knus with different schema semantics (e.g. `agent-id` is
+// optional; `model` not `model.choice`; `memory` children not
+// `memory_blocks`). Writing to a tempfile first ensures we exercise the
 // full I/O → parse → convert pipeline.
 
 /// Write `content` to a temp file and call `load_persona` on it, returning
 /// the error (as a string) or panicking if it unexpectedly succeeds.
 fn load_bad_persona(content: &str) -> String {
     let dir = tempfile::TempDir::new().expect("create tempdir");
-    let path = dir.path().join("bad.toml");
+    let path = dir.path().join("bad.kdl");
     std::fs::write(&path, content).unwrap();
     let err = pattern_runtime::persona_loader::load_persona(&path)
-        .expect_err("bad persona TOML must fail to load");
+        .expect_err("bad persona KDL must fail to load");
     err.to_string()
 }
 
 #[test]
-fn ac9_5_persona_malformed_toml_fails_with_parse_error() {
-    // Deliberately broken TOML — unclosed bracket.
-    let bad_toml = r#"
-name = "Test"
-[model
+fn ac9_5_persona_malformed_kdl_fails_with_parse_error() {
+    // Deliberately broken KDL — unclosed brace.
+    let bad_kdl = r#"
+name "Test"
+model {
 "#;
-    let display = load_bad_persona(bad_toml);
+    let display = load_bad_persona(bad_kdl);
     // The loader wraps this as PersonaLoadError::Parse. The Display must
-    // mention "parsing" or "parse" (from the error template) and describe
-    // the TOML syntax problem.
+    // mention "parsing" (from the error template) and describe the KDL
+    // syntax problem.
     assert!(
         display.contains("pars") || display.contains("expected"),
         "error message should describe the parse problem; got: {display}"
@@ -112,10 +112,10 @@ name = "Test"
 fn ac9_5_persona_missing_name_field_fails() {
     // `name` is required in PersonaFile — omitting it must produce a Parse
     // error that names the field.
-    let bad_toml = r#"
-agent_id = "test-agent"
+    let bad_kdl = r#"
+agent-id "test-agent"
 "#;
-    let display = load_bad_persona(bad_toml);
+    let display = load_bad_persona(bad_kdl);
     assert!(
         display.contains("name") || display.contains("missing"),
         "error should mention the missing `name` field; got: {display}"
@@ -129,8 +129,8 @@ fn ac9_5_persona_missing_name_without_agent_id_fails() {
     // production PersonaFile, `agent_id` is optional and defaults to `name`.
     // The only way to get a missing-identifier error is to omit `name`
     // entirely (there is nothing to default from).
-    let bad_toml = "";
-    let display = load_bad_persona(bad_toml);
+    let bad_kdl = "";
+    let display = load_bad_persona(bad_kdl);
     assert!(
         display.contains("name") || display.contains("missing"),
         "error should mention the missing `name` field; got: {display}"
@@ -139,18 +139,16 @@ fn ac9_5_persona_missing_name_without_agent_id_fails() {
 
 #[test]
 fn ac9_5_persona_bad_model_provider_string_fails() {
-    // `PersonaFile` uses `[model]` with a flat `provider` key (not
-    // `[model.choice]` like PersonaSnapshot). The loader converts the
-    // string via `AdapterKind::from_lower_str`, returning
+    // `PersonaFile` uses `model` with a `provider` property. The loader
+    // converts the string via `AdapterKind::from_lower_str`, returning
     // `PersonaLoadError::UnknownProvider` on failure.
-    let bad_toml = r#"
-name = "Test"
+    let bad_kdl = r#"
+name "Test"
 
-[model]
-provider = "invalid-provider"
-model_id = "claude-sonnet-4-6"
+model provider="invalid-provider" model-id="claude-sonnet-4-6" {
+}
 "#;
-    let display = load_bad_persona(bad_toml);
+    let display = load_bad_persona(bad_kdl);
     assert!(
         display.contains("invalid-provider") || display.contains("provider"),
         "error should mention the bad provider; got: {display}"
@@ -159,21 +157,23 @@ model_id = "claude-sonnet-4-6"
 
 #[test]
 fn ac9_5_persona_bad_memory_permission_enum_fails() {
-    // `PersonaFile` uses `[memory.<label>]` (not `[memory_blocks.<label>]`).
-    // An unknown `permission` variant fails at TOML deserialization time
-    // and is wrapped as `PersonaLoadError::Parse`.
-    let bad_toml = r#"
-name = "Test"
+    // Memory blocks use named children inside `memory { ... }`.
+    // An unknown `permission` value fails at conversion time and is
+    // wrapped as `PersonaLoadError::UnknownPermission`.
+    let bad_kdl = r#"
+name "Test"
 
-[memory.persona]
-content = "I am a test agent."
-permission = "superuser"
+memory {
+    persona content="I am a test agent." {
+        permission "superuser"
+    }
+}
 "#;
-    let display = load_bad_persona(bad_toml);
+    let display = load_bad_persona(bad_kdl);
     assert!(
         display.contains("superuser")
             || display.contains("permission")
-            || display.contains("unknown variant"),
+            || display.contains("unknown"),
         "error should mention the bad permission value; got: {display}"
     );
 }
@@ -274,7 +274,7 @@ async fn ac9_5_session_open_bad_sdk_path_returns_sdk_not_found() {
     let sink: Arc<dyn pattern_core::traits::TurnSink> = Arc::new(pattern_core::traits::NoOpSink);
 
     let err = pattern_runtime::session::TidepoolSession::open_with_agent_loop(
-        persona, &bad_sdk, store, provider, db, sink, None,
+        persona, &bad_sdk, store, provider, db, sink, None, None,
     )
     .await
     .expect_err("bad SDK path must fail session open");

@@ -27,3 +27,4 @@ mcp-wrapper.sh
 
 # Deciduous database (local)
 .deciduous/
+.pattern/transient/

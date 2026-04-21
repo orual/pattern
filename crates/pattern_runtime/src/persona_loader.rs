@@ -1,63 +1,64 @@
-//! Persona TOML loader for `pattern-test-cli`.
+//! Persona KDL loader for `pattern-test-cli`.
 //!
-//! Reads a `.toml` file on disk and converts it into a `PersonaSnapshot`
+//! Reads a `.kdl` file on disk and converts it into a `PersonaSnapshot`
 //! (from `pattern_core::types::agent`) ready to hand to the
 //! `open_with_agent_loop` method of `TidepoolSession` (from `crate::session`).
 //!
-//! ## TOML schema
+//! ## KDL schema
 //!
-//! ```toml
-//! name = "orual-smoke-test"
-//! agent_id = "orual-smoke-test"   # optional; defaults to `name` if omitted
+//! ```kdl
+//! name "orual-smoke-test"
+//! agent-id "orual-smoke-test"   // optional; defaults to `name` if omitted
 //!
-//! # Optional slot[1] override.
-//! system_prompt = "You are a helpful test assistant."
-//! # OR: system_prompt_path = "./system_prompt.txt"
+//! // Optional slot[1] override.
+//! system-prompt "You are a helpful test assistant."
+//! // OR: system-prompt-path "./system_prompt.txt"
 //!
-//! [model]
-//! provider  = "anthropic"         # case-insensitive lowercase AdapterKind
-//! model_id  = "claude-sonnet-4-6"
-//! # Sampling knobs (all optional):
-//! temperature = 0.7
-//! max_tokens  = 4096
-//! # reasoning_effort = "medium"   # None | Low | Medium | High | XHigh | Max
+//! model provider="anthropic" model-id="claude-sonnet-4-6" {
+//!     temperature 0.7
+//!     max-tokens 4096
+//!     // reasoning-effort "medium"   // none | low | medium | high | xhigh | max
+//! }
 //!
-//! [context]
-//! compress_check_message_floor = 50
-//! compress_token_threshold     = 150_000
-//! # "include_self_edits" (default) or "filter_self_edits"
-//! mid_batch = "filter_self_edits"
+//! context {
+//!     compress-check-message-floor 50
+//!     compress-token-threshold 150000
+//!     // "include_self_edits" (default) or "filter_self_edits"
+//!     mid-batch "filter_self_edits"
 //!
-//! [context.compression]
-//! type                 = "recursive_summarization"
-//! chunk_size           = 20
-//! summarization_model  = "claude-haiku-4-5"
+//!     compression type="recursive_summarization" {
+//!         chunk-size 20
+//!         summarization-model "claude-haiku-4-5"
+//!     }
+//! }
 //!
-//! [budgets]
-//! wall_ms = 30_000
-//! cpu_ms  = 10_000
+//! budgets {
+//!     wall-ms 30000
+//!     cpu-ms 10000
+//! }
 //!
-//! [memory.persona]
-//! content      = "I am a minimal smoke-test persona."
-//! memory_type  = "core"
-//! permission   = "read_write"
-//! pinned       = true
-//!
-//! [memory.scratchpad]
-//! content_path = "./scratchpad.txt"   # resolved relative to the TOML file
-//! memory_type  = "working"
-//! permission   = "read_write"
+//! memory {
+//!     persona content="I am a minimal smoke-test persona." {
+//!         memory-type "core"
+//!         permission "read_write"
+//!         pinned true
+//!     }
+//!     scratchpad content-path="./scratchpad.txt" {
+//!         memory-type "working"
+//!         permission "read_write"
+//!     }
+//! }
 //! ```
 //!
 //! Unknown top-level or section keys are rejected with an error that names the
 //! offending key. Missing required fields (`name`) produce an error that names
 //! the field.
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use genai::adapter::AdapterKind;
 use genai::chat::{ChatOptions, ReasoningEffort};
+use knus::Decode;
 use miette::Diagnostic;
 use pattern_core::types::compression::CompressionStrategy;
 use pattern_core::types::memory_types::{MemoryPermission, MemoryType};
@@ -65,7 +66,6 @@ use pattern_core::types::message::MidBatchDeltaBehavior;
 use pattern_core::types::snapshot::{
     ContextPolicy, MemoryBlockSpec, ModelChoice, ModelSpec, PersonaSnapshot,
 };
-use serde::Deserialize;
 use smol_str::SmolStr;
 use thiserror::Error;
 
@@ -73,7 +73,7 @@ use thiserror::Error;
 // Public error type
 // ==========================================================================
 
-/// Errors that can occur while loading a persona TOML file.
+/// Errors that can occur while loading a persona KDL file.
 #[non_exhaustive]
 #[derive(Debug, Error, Diagnostic)]
 pub enum PersonaLoadError {
@@ -86,8 +86,8 @@ pub enum PersonaLoadError {
         source: std::io::Error,
     },
 
-    /// The file content is not valid TOML, or has unknown fields.
-    #[error("error parsing persona TOML at {path}: {message}")]
+    /// The file content is not valid KDL, or has unknown fields.
+    #[error("error parsing persona KDL at {path}: {message}")]
     #[diagnostic(
         code(persona::parse_error),
         help("check that all keys are valid; unknown fields are not allowed")
@@ -117,9 +117,9 @@ pub enum PersonaLoadError {
         source: std::io::Error,
     },
 
-    /// An unknown provider string in `[model].provider`.
+    /// An unknown provider string in `model`.
     #[error(
-        "persona file at {path}: unknown provider `{provider}` in [model]; \
+        "persona file at {path}: unknown provider `{provider}` in model; \
         expected one of: anthropic, gemini, openai, openai_resp, ollama, ollama_cloud, \
         fireworks, together, groq, deepseek, xai, cohere, vertex, nebius, \
         mimo, zai, bigmodel, aliyun, github_copilot"
@@ -140,27 +140,116 @@ pub enum PersonaLoadError {
     #[diagnostic(code(persona::unknown_reasoning_effort))]
     UnknownReasoningEffort { path: String, value: String },
 
-    /// An unknown `mid_batch` string in `[context]`.
+    /// An unknown `mid_batch` string in `context`.
     #[error(
         "persona file at {path}: unknown mid_batch `{value}`; expected: include_self_edits, filter_self_edits"
     )]
     #[diagnostic(code(persona::unknown_mid_batch))]
     UnknownMidBatch { path: String, value: String },
+
+    /// Persona discovery failed (I/O or other error scanning directories).
+    #[error("persona discovery failed: {0}")]
+    #[diagnostic(code(persona::discovery))]
+    Discovery(#[from] pattern_memory::persona::PersonaDiscoveryError),
+
+    /// The requested persona name was not found in any scanned directory.
+    #[error("persona `{name}` not found; searched directories contained: {searched:?}")]
+    #[diagnostic(
+        code(persona::not_found),
+        help(
+            "ensure a directory named @{name} with a persona.kdl exists in ~/.pattern/personas/ or <mount>/personas/"
+        )
+    )]
+    NotFound { name: String, searched: Vec<String> },
+
+    /// An unknown compression type string.
+    #[error(
+        "persona file at {path}: unknown compression type `{value}`; expected: truncate, recursive_summarization, importance_based, time_decay"
+    )]
+    #[diagnostic(code(persona::unknown_compression_type))]
+    UnknownCompressionType { path: String, value: String },
+
+    /// A required field was missing from the compression node.
+    #[error(
+        "persona file at {path}: compression type `{compression_type}` requires field `{field}`"
+    )]
+    #[diagnostic(code(persona::missing_compression_field))]
+    MissingCompressionField {
+        path: String,
+        compression_type: String,
+        field: String,
+    },
+
+    /// An unknown memory_type string.
+    #[error(
+        "persona file at {path}: unknown memory_type `{value}` for block `{label}`; expected: core, working, archival"
+    )]
+    #[diagnostic(code(persona::unknown_memory_type))]
+    UnknownMemoryType {
+        path: String,
+        label: String,
+        value: String,
+    },
+
+    /// An unknown permission string.
+    #[error(
+        "persona file at {path}: unknown permission `{value}` for block `{label}`; expected: read_only, partner, human, append, read_write, admin"
+    )]
+    #[diagnostic(code(persona::unknown_permission))]
+    UnknownPermission {
+        path: String,
+        label: String,
+        value: String,
+    },
 }
 
 // ==========================================================================
 // Public entry point
 // ==========================================================================
 
-/// Load a [`PersonaSnapshot`] from a TOML file at `path`.
+/// Load a [`PersonaSnapshot`] from a KDL file at `path`.
 ///
 /// # Errors
 ///
 /// Returns a [`PersonaLoadError`] (wrapped in [`miette::Report`]) if the file
-/// cannot be read, contains invalid TOML, uses unknown fields, is missing the
+/// cannot be read, contains invalid KDL, uses unknown fields, is missing the
 /// required `name` field, or has conflicting / unresolvable content references.
 pub fn load_persona(path: &Path) -> miette::Result<PersonaSnapshot> {
     load_persona_inner(path).map_err(miette::Report::new)
+}
+
+/// Discover a persona by name across global and project scopes, then load it.
+///
+/// Scans `<paths.base()>/personas/` (global) and `<project_mount>/personas/`
+/// (project-scoped) for a directory named `@<name>` (or `<name>`) containing
+/// `persona.kdl`. Project-scoped takes precedence on collision.
+///
+/// # Errors
+///
+/// Returns [`PersonaLoadError::NotFound`] if no matching persona is found,
+/// [`PersonaLoadError::Discovery`] if the directory scan fails, or a parse
+/// error if the KDL is invalid.
+pub fn discover_and_load(
+    name: &str,
+    paths: &pattern_memory::PatternPaths,
+    project_mount: Option<&Path>,
+) -> miette::Result<PersonaSnapshot> {
+    discover_and_load_inner(name, paths, project_mount).map_err(miette::Report::new)
+}
+
+fn discover_and_load_inner(
+    name: &str,
+    paths: &pattern_memory::PatternPaths,
+    project_mount: Option<&Path>,
+) -> Result<PersonaSnapshot, PersonaLoadError> {
+    let personas = pattern_memory::persona::discover_personas(paths, project_mount)?;
+    let path = personas
+        .get(name)
+        .ok_or_else(|| PersonaLoadError::NotFound {
+            name: name.to_owned(),
+            searched: personas.keys().cloned().collect(),
+        })?;
+    load_persona_inner(path)
 }
 
 fn load_persona_inner(path: &Path) -> Result<PersonaSnapshot, PersonaLoadError> {
@@ -173,182 +262,304 @@ fn load_persona_inner(path: &Path) -> Result<PersonaSnapshot, PersonaLoadError> 
     })?;
 
     // Parse into our DTO, rejecting unknown fields.
-    let file: PersonaFile = toml::from_str(&raw).map_err(|e| PersonaLoadError::Parse {
-        path: path_str.clone(),
-        message: e.to_string(),
-    })?;
+    let file: PersonaFile =
+        knus::parse::<PersonaFile>(&path_str, &raw).map_err(|e| PersonaLoadError::Parse {
+            path: path_str.clone(),
+            message: format_knus_error(&e),
+        })?;
 
-    // The directory the TOML lives in — used to resolve relative paths.
+    // The directory the KDL file lives in — used to resolve relative paths.
     let base_dir = path.parent().unwrap_or(Path::new("."));
 
     convert(file, base_dir, &path_str)
 }
 
+/// Format a knus parse error including related sub-errors.
+///
+/// The top-level `knus::errors::Error` displays as the terse "error parsing KDL".
+/// Detailed field-level diagnostics live in its `#[related]` errors. This
+/// function concatenates them so the `PersonaLoadError::Parse` message
+/// contains actionable information.
+fn format_knus_error(err: &knus::errors::Error) -> String {
+    use miette::Diagnostic;
+    let mut parts = vec![err.to_string()];
+    if let Some(related) = err.related() {
+        for sub in related {
+            parts.push(sub.to_string());
+        }
+    }
+    parts.join("; ")
+}
+
 // ==========================================================================
-// TOML DTO types
+// KDL DTO types (parsed via knus derive)
 // ==========================================================================
 
-/// Top-level structure of a persona TOML file.
+/// Top-level structure of a persona KDL file.
 ///
-/// `#[serde(deny_unknown_fields)]` ensures that typos or unrecognised keys
-/// are caught at parse time rather than silently dropped.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// Each top-level KDL node maps to a field. knus automatically converts
+/// snake_case Rust field names to kebab-case KDL node names.
+///
+/// Required: `name` node.
+/// Optional: `agent-id`, `system-prompt`, `system-prompt-path`, `model`,
+/// `context`, `budgets`, `memory`.
+#[derive(Debug, Decode)]
 struct PersonaFile {
     /// Display name and (if `agent_id` is absent) the agent identifier.
+    ///
+    /// KDL: `name "orual-smoke-test"`
+    #[knus(child, unwrap(argument))]
     name: String,
 
     /// Stable agent identifier. Defaults to `name` when absent.
-    #[serde(default)]
+    ///
+    /// KDL: `agent-id "orual-smoke-test"`
+    #[knus(child, unwrap(argument), default)]
     agent_id: Option<String>,
 
     // -- System prompt (mutually exclusive) --
     /// Inline slot-[1] system prompt override.
-    #[serde(default)]
+    ///
+    /// KDL: `system-prompt "You are a helpful test assistant."`
+    #[knus(child, unwrap(argument), default)]
     system_prompt: Option<String>,
 
     /// Path to a file whose content becomes the slot-[1] system prompt.
-    /// Resolved relative to the persona TOML's directory.
-    #[serde(default)]
+    /// Resolved relative to the persona KDL's directory.
+    ///
+    /// KDL: `system-prompt-path "./system_prompt.txt"`
+    #[knus(child, unwrap(argument), default)]
     system_prompt_path: Option<String>,
 
-    // -- Sub-tables --
-    #[serde(default)]
-    model: ModelFile,
+    // -- Sub-sections --
+    /// `model` node — provider, model ID, and sampling knobs.
+    #[knus(child, default)]
+    model: ModelSection,
 
-    #[serde(default)]
-    context: ContextFile,
+    /// `context` node — compression and snapshot policies.
+    #[knus(child, default)]
+    context: ContextSection,
 
-    #[serde(default)]
-    budgets: BudgetsFile,
+    /// `budgets` node — runtime resource limits.
+    #[knus(child, default)]
+    budgets: BudgetsSection,
 
-    /// Memory block definitions keyed by label.
-    #[serde(default)]
-    memory: HashMap<String, MemoryBlockFile>,
+    /// `memory` node containing named memory block children.
+    #[knus(child, default)]
+    memory: MemorySection,
 }
 
-/// `[model]` table.
+/// `model` node.
 ///
-/// Sampling knobs are listed explicitly here (instead of `#[serde(flatten)]`
-/// wrapping `ChatOptions`) because TOML's flatten support has edge-case
-/// interactions with `deny_unknown_fields`. Explicit fields produce clearer
-/// error messages.
-#[derive(Debug, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct ModelFile {
+/// KDL:
+/// ```text
+/// model provider="anthropic" model-id="claude-sonnet-4-6" {
+///     temperature 0.7
+///     max-tokens 4096
+///     reasoning-effort "medium"
+///     top-p 0.9
+///     seed 42
+/// }
+/// ```
+///
+/// Provider and model ID are properties on the node itself. Sampling knobs
+/// are child nodes with single arguments, matching the knus pattern for
+/// scalar child values.
+#[derive(Debug, Decode, Default)]
+struct ModelSection {
     /// Provider name — case-insensitive lowercase, e.g. `"anthropic"`.
-    #[serde(default)]
+    #[knus(property, default)]
     provider: Option<String>,
 
     /// Provider-specific model identifier.
-    #[serde(default)]
+    #[knus(property, default)]
     model_id: Option<String>,
 
-    // -- ChatOptions fields --
-    #[serde(default)]
+    // -- ChatOptions fields as children --
+    #[knus(child, unwrap(argument), default)]
     temperature: Option<f64>,
 
-    #[serde(default)]
+    #[knus(child, unwrap(argument), default)]
     max_tokens: Option<u32>,
 
-    #[serde(default)]
+    #[knus(child, unwrap(argument), default)]
     top_p: Option<f64>,
 
     /// Reasoning effort level: "none", "low", "medium", "high", "xhigh", "max".
-    #[serde(default)]
+    #[knus(child, unwrap(argument), default)]
     reasoning_effort: Option<String>,
 
-    #[serde(default)]
+    #[knus(child, unwrap(argument), default)]
     seed: Option<u64>,
 }
 
-/// `[context]` table.
-#[derive(Debug, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct ContextFile {
+/// `context` node.
+///
+/// KDL:
+/// ```text
+/// context {
+///     compress-check-message-floor 50
+///     compress-token-threshold 150000
+///     mid-batch "filter_self_edits"
+///     compression type="recursive_summarization" {
+///         chunk-size 20
+///         summarization-model "claude-haiku-4-5"
+///     }
+/// }
+/// ```
+#[derive(Debug, Decode, Default)]
+struct ContextSection {
     /// Cheap short-circuit floor for the compression gate.
-    #[serde(default)]
+    #[knus(child, unwrap(argument), default)]
     compress_check_message_floor: Option<usize>,
 
     /// Real token threshold above which compression fires.
-    #[serde(default)]
+    #[knus(child, unwrap(argument), default)]
     compress_token_threshold: Option<usize>,
 
-    /// Compression strategy applied when the gate fires. Accepts the
-    /// `CompressionStrategy` tagged enum (`{ type = "truncate", keep_recent = 100 }`,
-    /// `{ type = "recursive_summarization", ... }`, etc.). None disables
-    /// compression for this persona.
-    #[serde(default)]
-    compression: Option<CompressionStrategy>,
-
     /// Mid-batch delta snapshot behaviour. Accepted values:
-    /// - `"include_self_edits"` (default) — emit delta for all mid-batch
-    ///   changes, including this turn's own tool-initiated writes.
-    /// - `"filter_self_edits"` — emit delta only for changes NOT attributable
-    ///   to this turn's own block_writes (cache-efficient; relies on
-    ///   tool_result confirmation instead).
-    ///
-    /// Corresponds to
-    /// [`pattern_core::types::message::MidBatchDeltaBehavior`].
-    #[serde(default)]
+    /// - `"include_self_edits"` (default)
+    /// - `"filter_self_edits"`
+    #[knus(child, unwrap(argument), default)]
     mid_batch: Option<String>,
+
+    /// Compression strategy node. Parsed as an intermediate DTO because
+    /// `CompressionStrategy` uses serde tagged unions which knus cannot
+    /// derive directly. The `type` property selects the strategy variant;
+    /// variant-specific fields are children.
+    #[knus(child)]
+    compression: Option<CompressionSection>,
 }
 
-/// `[budgets]` table.
-#[derive(Debug, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct BudgetsFile {
-    #[serde(default)]
+/// `compression` child of `context`.
+///
+/// KDL:
+/// ```text
+/// compression type="recursive_summarization" {
+///     chunk-size 20
+///     summarization-model "claude-haiku-4-5"
+///     summarization-prompt "Custom prompt for summarizer"
+/// }
+/// ```
+/// or:
+/// ```text
+/// compression type="truncate" {
+///     keep-recent 100
+/// }
+/// ```
+#[derive(Debug, Decode)]
+struct CompressionSection {
+    /// Strategy discriminator: "truncate", "recursive_summarization",
+    /// "importance_based", "time_decay".
+    #[knus(property(name = "type"))]
+    strategy_type: String,
+
+    // -- Fields for various strategy variants --
+    #[knus(child, unwrap(argument), default)]
+    keep_recent: Option<usize>,
+
+    #[knus(child, unwrap(argument), default)]
+    chunk_size: Option<usize>,
+
+    #[knus(child, unwrap(argument), default)]
+    summarization_model: Option<String>,
+
+    #[knus(child, unwrap(argument), default)]
+    summarization_prompt: Option<String>,
+}
+
+/// `budgets` node.
+///
+/// KDL:
+/// ```text
+/// budgets {
+///     wall-ms 30000
+///     cpu-ms 10000
+/// }
+/// ```
+#[derive(Debug, Decode, Default)]
+struct BudgetsSection {
+    #[knus(child, unwrap(argument), default)]
     wall_ms: Option<u64>,
 
-    #[serde(default)]
+    #[knus(child, unwrap(argument), default)]
     cpu_ms: Option<u64>,
 
-    #[serde(default)]
+    #[knus(child, unwrap(argument), default)]
     hard_abandon_ms: Option<u64>,
 
-    #[serde(default)]
+    #[knus(child, unwrap(argument), default)]
     cancel_grace_ms: Option<u64>,
 
-    #[serde(default)]
+    #[knus(child, unwrap(argument), default)]
     nursery_size: Option<usize>,
 }
 
-/// One `[memory.<label>]` block.
+/// `memory` node containing named memory block children.
 ///
-/// Exactly one of `content` or `content_path` should be provided. Both
-/// absent results in a null/empty block. Both present is an error caught
-/// at conversion time.
-#[derive(Debug, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct MemoryBlockFile {
+/// KDL:
+/// ```text
+/// memory {
+///     persona content="I am a minimal persona." {
+///         memory-type "core"
+///         permission "read_write"
+///         pinned true
+///     }
+///     scratchpad content-path="./scratchpad.txt" {
+///         memory-type "working"
+///         permission "read_write"
+///     }
+/// }
+/// ```
+///
+/// Each child node inside `memory` is a memory block. The node name is the
+/// block label. Content is provided via the `content` or `content-path`
+/// property on the node itself.
+#[derive(Debug, Decode, Default)]
+struct MemorySection {
+    /// Each child is a [`MemoryBlockNode`] whose KDL node name is the label.
+    #[knus(children)]
+    blocks: Vec<MemoryBlockNode>,
+}
+
+/// One named memory block inside the `memory` section.
+///
+/// The KDL node name is captured as the `label` field. Content source is
+/// a property on the node (`content="..."` or `content-path="./file.txt"`).
+/// Block metadata fields are children.
+#[derive(Debug, Decode)]
+struct MemoryBlockNode {
+    /// The block label, taken from the KDL node name.
+    #[knus(node_name)]
+    label: String,
+
     /// Inline text content.
-    #[serde(default)]
+    #[knus(property, default)]
     content: Option<String>,
 
     /// Path to a file whose text content is used.
-    /// Resolved relative to the persona TOML's directory.
-    #[serde(default)]
+    /// Resolved relative to the persona KDL's directory.
+    #[knus(property, default)]
     content_path: Option<String>,
 
-    /// Memory tier.  Serialised as "core", "working", "archival".
-    #[serde(default)]
-    memory_type: Option<MemoryType>,
+    /// Memory tier. Serialised as "core", "working", "archival".
+    #[knus(child, unwrap(argument), default)]
+    memory_type: Option<String>,
 
-    /// Permission level.  Serialised as "read_write", "read_only", etc.
-    #[serde(default)]
-    permission: Option<MemoryPermission>,
+    /// Permission level. Serialised as "read_write", "read_only", etc.
+    #[knus(child, unwrap(argument), default)]
+    permission: Option<String>,
 
     /// Human-readable description.
-    #[serde(default)]
+    #[knus(child, unwrap(argument), default)]
     description: Option<String>,
 
     /// Whether the block is pinned in context unconditionally.
-    #[serde(default)]
+    #[knus(child, unwrap(argument), default)]
     pinned: Option<bool>,
 
     /// Maximum content size in characters.
-    #[serde(default)]
+    #[knus(child, unwrap(argument), default)]
     char_limit: Option<usize>,
 }
 
@@ -409,8 +620,9 @@ fn convert(
     }
 
     // -- memory blocks --
-    for (label, block_file) in file.memory {
-        let spec = convert_memory_block(block_file, base_dir, path_str, &label)?;
+    for block_node in file.memory.blocks {
+        let label = block_node.label.clone();
+        let spec = convert_memory_block(block_node, base_dir, path_str)?;
         snap = snap.with_memory_block(SmolStr::from(label), spec);
     }
 
@@ -453,7 +665,10 @@ fn resolve_string_or_path(
     }
 }
 
-fn convert_context(file: ContextFile, path_str: &str) -> Result<ContextPolicy, PersonaLoadError> {
+fn convert_context(
+    file: ContextSection,
+    path_str: &str,
+) -> Result<ContextPolicy, PersonaLoadError> {
     // Resolve mid_batch string → enum before building the policy so we can
     // return an error before constructing a partial ContextPolicy.
     let mid_batch = match file.mid_batch.as_deref() {
@@ -476,13 +691,59 @@ fn convert_context(file: ContextFile, path_str: &str) -> Result<ContextPolicy, P
     if let Some(threshold) = file.compress_token_threshold {
         policy = policy.with_token_threshold(threshold);
     }
-    if file.compression.is_some() {
-        policy = policy.with_compression(file.compression);
+    if let Some(section) = file.compression {
+        let strategy = convert_compression(section, path_str)?;
+        policy = policy.with_compression(Some(strategy));
     }
     Ok(policy)
 }
 
-fn convert_model(file: ModelFile, path_str: &str) -> Result<ModelSpec, PersonaLoadError> {
+fn convert_compression(
+    section: CompressionSection,
+    path_str: &str,
+) -> Result<CompressionStrategy, PersonaLoadError> {
+    match section.strategy_type.as_str() {
+        "truncate" => {
+            let keep_recent =
+                section
+                    .keep_recent
+                    .ok_or_else(|| PersonaLoadError::MissingCompressionField {
+                        path: path_str.to_string(),
+                        compression_type: "truncate".to_string(),
+                        field: "keep-recent".to_string(),
+                    })?;
+            Ok(CompressionStrategy::Truncate { keep_recent })
+        }
+        "recursive_summarization" => {
+            let chunk_size =
+                section
+                    .chunk_size
+                    .ok_or_else(|| PersonaLoadError::MissingCompressionField {
+                        path: path_str.to_string(),
+                        compression_type: "recursive_summarization".to_string(),
+                        field: "chunk-size".to_string(),
+                    })?;
+            let summarization_model = section.summarization_model.ok_or_else(|| {
+                PersonaLoadError::MissingCompressionField {
+                    path: path_str.to_string(),
+                    compression_type: "recursive_summarization".to_string(),
+                    field: "summarization-model".to_string(),
+                }
+            })?;
+            Ok(CompressionStrategy::RecursiveSummarization {
+                chunk_size,
+                summarization_model,
+                summarization_prompt: section.summarization_prompt,
+            })
+        }
+        other => Err(PersonaLoadError::UnknownCompressionType {
+            path: path_str.to_string(),
+            value: other.to_string(),
+        }),
+    }
+}
+
+fn convert_model(file: ModelSection, path_str: &str) -> Result<ModelSpec, PersonaLoadError> {
     // Resolve provider.
     let provider = if let Some(ref p) = file.provider {
         AdapterKind::from_lower_str(p).ok_or_else(|| PersonaLoadError::UnknownProvider {
@@ -533,18 +794,19 @@ fn convert_model(file: ModelFile, path_str: &str) -> Result<ModelSpec, PersonaLo
 }
 
 fn convert_memory_block(
-    file: MemoryBlockFile,
+    block: MemoryBlockNode,
     base_dir: &Path,
     persona_path: &str,
-    label: &str,
 ) -> Result<MemoryBlockSpec, PersonaLoadError> {
+    let label = &block.label;
+
     // Inline content key for the error message context.
     let inline_key = format!("memory.{label}.content");
     let path_key = format!("memory.{label}.content_path");
 
     let content_str = resolve_string_or_path(
-        file.content,
-        file.content_path,
+        block.content,
+        block.content_path,
         &inline_key,
         &path_key,
         base_dir,
@@ -552,30 +814,58 @@ fn convert_memory_block(
     )?;
 
     // Wrap the resolved string as a JSON string value, or use Null when absent.
-    // MemoryBlockSpec::text() wraps a String as JsonValue::String; for the
-    // absent-content case we use Default (which sets content = Null).
     let mut spec = match content_str {
         Some(s) => MemoryBlockSpec::text(s),
         None => MemoryBlockSpec::default(),
     };
 
-    if let Some(mt) = file.memory_type {
+    if let Some(mt_str) = block.memory_type {
+        let mt = parse_memory_type(&mt_str, label, persona_path)?;
         spec = spec.with_memory_type(mt);
     }
-    if let Some(perm) = file.permission {
+    if let Some(perm_str) = block.permission {
+        let perm = parse_permission(&perm_str, label, persona_path)?;
         spec = spec.with_permission(perm);
     }
-    if let Some(desc) = file.description {
+    if let Some(desc) = block.description {
         spec = spec.with_description(desc);
     }
-    if let Some(pinned) = file.pinned {
+    if let Some(pinned) = block.pinned {
         spec = spec.with_pinned(pinned);
     }
-    if let Some(limit) = file.char_limit {
+    if let Some(limit) = block.char_limit {
         spec = spec.with_char_limit(limit);
     }
 
     Ok(spec)
+}
+
+/// Parse a memory type string into a [`MemoryType`].
+fn parse_memory_type(s: &str, label: &str, path_str: &str) -> Result<MemoryType, PersonaLoadError> {
+    match s {
+        "core" => Ok(MemoryType::Core),
+        "working" => Ok(MemoryType::Working),
+        "archival" => Ok(MemoryType::Archival),
+        _ => Err(PersonaLoadError::UnknownMemoryType {
+            path: path_str.to_string(),
+            label: label.to_string(),
+            value: s.to_string(),
+        }),
+    }
+}
+
+/// Parse a permission string into a [`MemoryPermission`].
+fn parse_permission(
+    s: &str,
+    label: &str,
+    path_str: &str,
+) -> Result<MemoryPermission, PersonaLoadError> {
+    s.parse::<MemoryPermission>()
+        .map_err(|_| PersonaLoadError::UnknownPermission {
+            path: path_str.to_string(),
+            label: label.to_string(),
+            value: s.to_string(),
+        })
 }
 
 // ==========================================================================
@@ -599,8 +889,8 @@ mod tests {
         // Tests run from the workspace root or from the crate root.
         // Try both to find the fixture.
         let candidates = [
-            std::path::PathBuf::from("crates/pattern_runtime/tests/fixtures/smoke_persona.toml"),
-            std::path::PathBuf::from("tests/fixtures/smoke_persona.toml"),
+            std::path::PathBuf::from("crates/pattern_runtime/tests/fixtures/smoke_persona.kdl"),
+            std::path::PathBuf::from("tests/fixtures/smoke_persona.kdl"),
         ];
         for p in &candidates {
             if p.exists() {
@@ -609,13 +899,13 @@ mod tests {
         }
         // Fallback: cargo sets CARGO_MANIFEST_DIR to the crate root.
         if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
-            let p = std::path::PathBuf::from(manifest).join("tests/fixtures/smoke_persona.toml");
+            let p = std::path::PathBuf::from(manifest).join("tests/fixtures/smoke_persona.kdl");
             if p.exists() {
                 return p;
             }
         }
         panic!(
-            "could not locate smoke_persona.toml fixture — run tests from workspace root or crate root"
+            "could not locate smoke_persona.kdl fixture — run tests from workspace root or crate root"
         );
     }
 
@@ -660,20 +950,22 @@ mod tests {
     // -- content_path resolution --
 
     #[test]
-    fn content_path_resolves_relative_to_toml_dir() {
+    fn content_path_resolves_relative_to_kdl_dir() {
         let dir = TempDir::new().unwrap();
         write_file(&dir, "notes.txt", "hello from notes");
 
-        let toml_content = r#"
-name = "content-path-test"
+        let kdl_content = r#"
+name "content-path-test"
 
-[memory.notes]
-content_path = "notes.txt"
-memory_type  = "working"
+memory {
+    notes content-path="notes.txt" {
+        memory-type "working"
+    }
+}
 "#;
-        let toml_path = write_file(&dir, "persona.toml", toml_content);
+        let kdl_path = write_file(&dir, "persona.kdl", kdl_content);
 
-        let snap = load_persona(&toml_path).expect("should load with content_path");
+        let snap = load_persona(&kdl_path).expect("should load with content_path");
         let block = snap
             .memory_blocks
             .get("notes")
@@ -688,12 +980,12 @@ memory_type  = "working"
     fn system_prompt_path_resolves() {
         let dir = TempDir::new().unwrap();
         write_file(&dir, "prompt.txt", "you are a test assistant.");
-        let toml_content = r#"
-name = "prompt-path-test"
-system_prompt_path = "prompt.txt"
+        let kdl_content = r#"
+name "prompt-path-test"
+system-prompt-path "prompt.txt"
 "#;
-        let toml_path = write_file(&dir, "persona.toml", toml_content);
-        let snap = load_persona(&toml_path).expect("should resolve system_prompt_path");
+        let kdl_path = write_file(&dir, "persona.kdl", kdl_content);
+        let snap = load_persona(&kdl_path).expect("should resolve system_prompt_path");
         assert_eq!(
             snap.system_prompt.as_deref(),
             Some("you are a test assistant.")
@@ -705,16 +997,16 @@ system_prompt_path = "prompt.txt"
     #[test]
     fn unknown_top_level_field_is_rejected() {
         let dir = TempDir::new().unwrap();
-        let toml_content = r#"
-name = "bad"
-mystery_field = "this should not be accepted"
+        let kdl_content = r#"
+name "bad"
+mystery-field "this should not be accepted"
 "#;
-        let path = write_file(&dir, "bad.toml", toml_content);
+        let path = write_file(&dir, "bad.kdl", kdl_content);
         let err = load_persona(&path).unwrap_err();
         let msg = err.to_string();
         // The error must be a parse error that mentions the unknown key.
         assert!(
-            msg.contains("parse") || msg.contains("unknown") || msg.contains("mystery_field"),
+            msg.contains("parsing") || msg.contains("unknown") || msg.contains("mystery-field"),
             "expected parse/unknown error, got: {msg}"
         );
     }
@@ -722,33 +1014,33 @@ mystery_field = "this should not be accepted"
     #[test]
     fn unknown_model_field_is_rejected() {
         let dir = TempDir::new().unwrap();
-        let toml_content = r#"
-name = "bad"
+        let kdl_content = r#"
+name "bad"
 
-[model]
-provider = "anthropic"
-mystery_model_key = 42
+model provider="anthropic" {
+    mystery-model-key 42
+}
 "#;
-        let path = write_file(&dir, "bad.toml", toml_content);
+        let path = write_file(&dir, "bad.kdl", kdl_content);
         let err = load_persona(&path).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("parse") || msg.contains("unknown") || msg.contains("mystery_model_key"),
+            msg.contains("parsing") || msg.contains("unknown") || msg.contains("mystery-model-key"),
             "expected parse/unknown error for model section, got: {msg}"
         );
     }
 
-    // -- Bad TOML produces an error mentioning "persona" or "parsing" --
+    // -- Bad KDL produces an error mentioning "persona" or "parsing" --
 
     #[test]
-    fn malformed_toml_produces_parse_error() {
+    fn malformed_kdl_produces_parse_error() {
         let dir = TempDir::new().unwrap();
-        let toml_content = "name = [this is not valid toml";
-        let path = write_file(&dir, "bad.toml", toml_content);
+        let kdl_content = "name = [this is not valid kdl";
+        let path = write_file(&dir, "bad.kdl", kdl_content);
         let err = load_persona(&path).unwrap_err();
         let msg = err.to_string().to_lowercase();
         assert!(
-            msg.contains("persona") || msg.contains("parsing") || msg.contains("parse"),
+            msg.contains("persona") || msg.contains("parsing"),
             "error should mention 'persona' or 'parsing', got: {msg}"
         );
     }
@@ -758,19 +1050,19 @@ mystery_model_key = 42
     #[test]
     fn missing_name_field_produces_informative_error() {
         let dir = TempDir::new().unwrap();
-        // A TOML file with no `name` key.
-        let toml_content = r#"
-agent_id = "no-name-here"
+        // A KDL file with no `name` node.
+        let kdl_content = r#"
+agent-id "no-name-here"
 
-[model]
-provider = "anthropic"
+model provider="anthropic" {
+}
 "#;
-        let path = write_file(&dir, "no_name.toml", toml_content);
+        let path = write_file(&dir, "no_name.kdl", kdl_content);
         let err = load_persona(&path).unwrap_err();
         let msg = err.to_string();
         // The error should mention the missing field in some form.
         assert!(
-            msg.contains("name") || msg.contains("missing field"),
+            msg.contains("name") || msg.contains("missing"),
             "error should mention 'name', got: {msg}"
         );
     }
@@ -781,14 +1073,15 @@ provider = "anthropic"
     fn both_content_and_content_path_is_rejected() {
         let dir = TempDir::new().unwrap();
         write_file(&dir, "stuff.txt", "content from file");
-        let toml_content = r#"
-name = "conflict-test"
+        let kdl_content = r#"
+name "conflict-test"
 
-[memory.block]
-content      = "inline content"
-content_path = "stuff.txt"
+memory {
+    block content="inline content" content-path="stuff.txt" {
+    }
+}
 "#;
-        let path = write_file(&dir, "conflict.toml", toml_content);
+        let path = write_file(&dir, "conflict.kdl", kdl_content);
         let err = load_persona(&path).unwrap_err();
         let msg = err.to_string();
         assert!(
@@ -801,12 +1094,12 @@ content_path = "stuff.txt"
     fn both_system_prompt_and_system_prompt_path_is_rejected() {
         let dir = TempDir::new().unwrap();
         write_file(&dir, "p.txt", "from file");
-        let toml_content = r#"
-name = "conflict-test"
-system_prompt      = "inline"
-system_prompt_path = "p.txt"
+        let kdl_content = r#"
+name "conflict-test"
+system-prompt "inline"
+system-prompt-path "p.txt"
 "#;
-        let path = write_file(&dir, "conflict.toml", toml_content);
+        let path = write_file(&dir, "conflict.kdl", kdl_content);
         let err = load_persona(&path).unwrap_err();
         let msg = err.to_string();
         assert!(
@@ -820,14 +1113,13 @@ system_prompt_path = "p.txt"
     #[test]
     fn unknown_provider_produces_error() {
         let dir = TempDir::new().unwrap();
-        let toml_content = r#"
-name = "bad-provider"
+        let kdl_content = r#"
+name "bad-provider"
 
-[model]
-provider = "notareal"
-model_id = "some-model"
+model provider="notareal" model-id="some-model" {
+}
 "#;
-        let path = write_file(&dir, "bad_provider.toml", toml_content);
+        let path = write_file(&dir, "bad_provider.kdl", kdl_content);
         let err = load_persona(&path).unwrap_err();
         let msg = err.to_string();
         assert!(
@@ -841,8 +1133,8 @@ model_id = "some-model"
     #[test]
     fn agent_id_defaults_to_name_when_omitted() {
         let dir = TempDir::new().unwrap();
-        let toml_content = r#"name = "my-agent""#;
-        let path = write_file(&dir, "p.toml", toml_content);
+        let kdl_content = r#"name "my-agent""#;
+        let path = write_file(&dir, "p.kdl", kdl_content);
         let snap = load_persona(&path).unwrap();
         assert_eq!(snap.agent_id.as_str(), "my-agent");
         assert_eq!(snap.name.as_str(), "my-agent");
@@ -851,11 +1143,11 @@ model_id = "some-model"
     #[test]
     fn explicit_agent_id_is_used() {
         let dir = TempDir::new().unwrap();
-        let toml_content = r#"
-name     = "Display Name"
-agent_id = "stable-id"
+        let kdl_content = r#"
+name "Display Name"
+agent-id "stable-id"
 "#;
-        let path = write_file(&dir, "p.toml", toml_content);
+        let path = write_file(&dir, "p.kdl", kdl_content);
         let snap = load_persona(&path).unwrap();
         assert_eq!(snap.agent_id.as_str(), "stable-id");
         assert_eq!(snap.name.as_str(), "Display Name");
@@ -866,13 +1158,14 @@ agent_id = "stable-id"
     #[test]
     fn valid_reasoning_effort_is_accepted() {
         let dir = TempDir::new().unwrap();
-        let toml_content = r#"
-name = "reasoning-test"
+        let kdl_content = r#"
+name "reasoning-test"
 
-[model]
-reasoning_effort = "medium"
+model {
+    reasoning-effort "medium"
+}
 "#;
-        let path = write_file(&dir, "p.toml", toml_content);
+        let path = write_file(&dir, "p.kdl", kdl_content);
         let snap = load_persona(&path).unwrap();
         assert!(
             snap.model.chat_options.reasoning_effort.is_some(),
@@ -883,13 +1176,14 @@ reasoning_effort = "medium"
     #[test]
     fn invalid_reasoning_effort_produces_error() {
         let dir = TempDir::new().unwrap();
-        let toml_content = r#"
-name = "bad-reasoning"
+        let kdl_content = r#"
+name "bad-reasoning"
 
-[model]
-reasoning_effort = "turbo"
+model {
+    reasoning-effort "turbo"
+}
 "#;
-        let path = write_file(&dir, "p.toml", toml_content);
+        let path = write_file(&dir, "p.kdl", kdl_content);
         let err = load_persona(&path).unwrap_err();
         let msg = err.to_string();
         assert!(
@@ -898,23 +1192,21 @@ reasoning_effort = "turbo"
         );
     }
 
-    /// `mid_batch = "filter_self_edits"` in `[context]` must propagate through
+    /// `mid-batch "filter_self_edits"` in `context` must propagate through
     /// to `PersonaSnapshot.context.snapshot_policy.mid_batch`.
-    ///
-    /// Regression test for fix #11 (code-review finding: snapshot_policy
-    /// .mid_batch not exposed in persona TOML).
     #[test]
     fn mid_batch_filter_self_edits_is_loaded() {
         use pattern_core::types::message::MidBatchDeltaBehavior;
 
         let dir = TempDir::new().unwrap();
-        let toml_content = r#"
-name = "mid-batch-test"
+        let kdl_content = r#"
+name "mid-batch-test"
 
-[context]
-mid_batch = "filter_self_edits"
+context {
+    mid-batch "filter_self_edits"
+}
 "#;
-        let path = write_file(&dir, "p.toml", toml_content);
+        let path = write_file(&dir, "p.kdl", kdl_content);
         let snap = load_persona(&path).unwrap();
         assert_eq!(
             snap.context.snapshot_policy.mid_batch,
@@ -923,20 +1215,21 @@ mid_batch = "filter_self_edits"
         );
     }
 
-    /// `mid_batch = "include_self_edits"` (explicit default) round-trips
+    /// `mid-batch "include_self_edits"` (explicit default) round-trips
     /// correctly.
     #[test]
     fn mid_batch_include_self_edits_is_loaded() {
         use pattern_core::types::message::MidBatchDeltaBehavior;
 
         let dir = TempDir::new().unwrap();
-        let toml_content = r#"
-name = "mid-batch-include-test"
+        let kdl_content = r#"
+name "mid-batch-include-test"
 
-[context]
-mid_batch = "include_self_edits"
+context {
+    mid-batch "include_self_edits"
+}
 "#;
-        let path = write_file(&dir, "p.toml", toml_content);
+        let path = write_file(&dir, "p.kdl", kdl_content);
         let snap = load_persona(&path).unwrap();
         assert_eq!(
             snap.context.snapshot_policy.mid_batch,
@@ -945,16 +1238,16 @@ mid_batch = "include_self_edits"
         );
     }
 
-    /// Omitting `mid_batch` from `[context]` defaults to `IncludeSelfEdits`.
+    /// Omitting `mid-batch` from `context` defaults to `IncludeSelfEdits`.
     #[test]
     fn mid_batch_absent_defaults_to_include_self_edits() {
         use pattern_core::types::message::MidBatchDeltaBehavior;
 
         let dir = TempDir::new().unwrap();
-        let toml_content = r#"
-name = "mid-batch-default-test"
+        let kdl_content = r#"
+name "mid-batch-default-test"
 "#;
-        let path = write_file(&dir, "p.toml", toml_content);
+        let path = write_file(&dir, "p.kdl", kdl_content);
         let snap = load_persona(&path).unwrap();
         assert_eq!(
             snap.context.snapshot_policy.mid_batch,
@@ -963,17 +1256,18 @@ name = "mid-batch-default-test"
         );
     }
 
-    /// An unrecognised `mid_batch` string must produce a clear error.
+    /// An unrecognised `mid-batch` string must produce a clear error.
     #[test]
     fn invalid_mid_batch_produces_error() {
         let dir = TempDir::new().unwrap();
-        let toml_content = r#"
-name = "bad-mid-batch"
+        let kdl_content = r#"
+name "bad-mid-batch"
 
-[context]
-mid_batch = "aggressive"
+context {
+    mid-batch "aggressive"
+}
 "#;
-        let path = write_file(&dir, "p.toml", toml_content);
+        let path = write_file(&dir, "p.kdl", kdl_content);
         let err = load_persona(&path).unwrap_err();
         let msg = err.to_string();
         assert!(

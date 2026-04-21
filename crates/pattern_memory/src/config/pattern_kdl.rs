@@ -224,6 +224,30 @@ pub struct IsolateSection {
     pub policy: String,
 }
 
+impl IsolateSection {
+    /// Convert the validated policy string into a typed [`IsolatePolicy`].
+    ///
+    /// The policy string is already validated at parse time (see
+    /// [`validate_config`]), so this method only needs to handle the known
+    /// values. Unknown values produce a [`ConfigError::Validation`] with a
+    /// helpful message.
+    pub fn resolve(&self) -> Result<pattern_core::types::memory_types::IsolatePolicy, ConfigError> {
+        use pattern_core::types::memory_types::IsolatePolicy;
+        match self.policy.as_str() {
+            "none" => Ok(IsolatePolicy::None),
+            "core-only" => Ok(IsolatePolicy::CoreOnly),
+            "full" => Ok(IsolatePolicy::Full),
+            other => Err(ConfigError::Validation {
+                path: std::path::PathBuf::from(".pattern.kdl"),
+                reason: format!(
+                    "invalid isolate_from_persona.policy: {other:?}; \
+                     expected none | core-only | full"
+                ),
+            }),
+        }
+    }
+}
+
 impl Default for IsolateSection {
     fn default() -> Self {
         Self {
@@ -496,13 +520,13 @@ fn validate_config(config: &MountConfig, path: &Path) -> Result<(), ConfigError>
     // Validate backup.snapshot-interval at config-load time so the error is
     // surfaced immediately with a clear diagnostic rather than silently
     // falling back to the 1h default in attach().
-    if let Some(backup) = &config.backup {
-        if let Err(e) = parse_duration_str(&backup.snapshot_interval) {
-            return Err(ConfigError::Validation {
-                path: path.to_owned(),
-                reason: format!("backup.snapshot-interval is invalid: {e}"),
-            });
-        }
+    if let Some(backup) = &config.backup
+        && let Err(e) = parse_duration_str(&backup.snapshot_interval)
+    {
+        return Err(ConfigError::Validation {
+            path: path.to_owned(),
+            reason: format!("backup.snapshot-interval is invalid: {e}"),
+        });
     }
 
     Ok(())

@@ -1,0 +1,83 @@
+// smoke_persona.kdl — minimal viable persona for Phase 6 smoke-test runs.
+//
+// Loadable end-to-end via `pattern-test-cli spawn` and drives a real
+// TidepoolSession against Claude. Keep this file minimal: it exercises the
+// full loader code path without requiring any external sidecar files.
+//
+// Usage:
+//   cargo run --bin pattern-test-cli -- spawn crates/pattern_runtime/tests/fixtures/smoke_persona.kdl
+
+name "orual-smoke-test"
+agent-id "orual-smoke-test"
+
+// Slot-[1] system prompt override. Replaces DEFAULT_BASE_INSTRUCTIONS in the
+// three-segment cache layout when present.
+system-prompt "You are a minimal smoke-test assistant for the Pattern project. Be concise."
+
+// --------------------------------------------------------------------------
+// Model selection and sampling parameters
+// --------------------------------------------------------------------------
+
+model provider="anthropic" model-id="claude-sonnet-4-6" {
+    temperature 0.7
+    max-tokens 4096
+}
+
+// --------------------------------------------------------------------------
+// Context policy
+// --------------------------------------------------------------------------
+
+context {
+    // Cheap short-circuit: don't even call should_compress until history has
+    // 50+ active turns. Avoids count_tokens round-trips on early turns.
+    compress-check-message-floor 50
+
+    // Real gate: when active-context tokens exceed this, the strategy fires.
+    // 150k leaves plenty of headroom below claude-sonnet-4-6's 200k context
+    // window for output tokens + buffer.
+    compress-token-threshold 150000
+
+    // Mid-batch delta snapshot behaviour.
+    // "include_self_edits" (default) — emit delta for all mid-batch changes,
+    //   including this turn's own tool writes. Strongest agent trust signal.
+    // "filter_self_edits" — skip self-edit deltas; agent relies on tool_result
+    //   confirmation. Cache-efficient but less explicit.
+    mid-batch "filter_self_edits"
+
+    // RecursiveSummarization is the default agent-session compression path:
+    // summarize old turns into a dense prose summary rather than truncating.
+    // summarization_model can differ from the primary model — haiku is
+    // sensible for cost.
+    compression type="recursive_summarization" {
+        chunk-size 20
+        summarization-model "claude-haiku-4-5"
+    }
+}
+
+// --------------------------------------------------------------------------
+// Runtime budgets (Tidepool JIT)
+// --------------------------------------------------------------------------
+
+budgets {
+    wall-ms 30000
+    cpu-ms 10000
+}
+
+// --------------------------------------------------------------------------
+// Initial memory blocks
+// --------------------------------------------------------------------------
+
+memory {
+    // Core persona identity block (always in context, never evicted).
+    persona content="I am a minimal smoke-test persona for the Pattern project. My purpose is to verify that the persona loader, session open, and provider call chain all work end-to-end." {
+        memory-type "core"
+        permission "read_only"
+        pinned true
+    }
+
+    // Working scratchpad (active working memory, may be swapped out).
+    scratchpad content="Scratch space for the current session." {
+        memory-type "working"
+        permission "read_write"
+    }
+}

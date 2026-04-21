@@ -4,6 +4,8 @@
 > Production agents are running. Any CLI invocation will disrupt active agents.
 > Testing must be done offline after stopping production agents.
 
+Last verified: 2026-04-20
+
 Command-line interface for the Pattern ADHD support system. Binary output: `pattern`.
 
 ## CLI Command Reference
@@ -126,6 +128,35 @@ pattern debug show-context <agent>
 pattern debug context-cleanup <agent> --dry-run
 ```
 
+### Mount commands (v3-memory-rework)
+
+```bash
+# Initialize a memory mount in the current project
+pattern mount init                 # Mode A (in-repo, host VCS)
+pattern mount init --mode b        # Mode B (separate Pattern-owned jj repo)
+pattern mount init --mode c        # Mode C (sidecar jj alongside host git)
+
+# Show mount status
+pattern mount status
+```
+
+### Backup commands (v3-memory-rework)
+
+```bash
+# Create a messages.db snapshot
+pattern backup create
+
+# List available snapshots
+pattern backup list
+
+# Restore from a snapshot
+pattern backup restore latest
+pattern backup restore 2026-04-19T120000Z
+
+# Run rotation (prune old snapshots per GFS policy)
+pattern backup rotate
+```
+
 ### ATProto/Bluesky Commands
 
 ```bash
@@ -191,6 +222,8 @@ enum Commands {
     Atproto { cmd: AtprotoCommands },
     Config { cmd: ConfigCommands },
     Db { cmd: DbCommands },
+    Mount { cmd: MountCommands },
+    Backup { cmd: BackupCommands },
 }
 ```
 

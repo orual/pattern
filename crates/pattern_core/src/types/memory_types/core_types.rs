@@ -124,6 +124,34 @@ impl From<BlockType> for pattern_db::models::MemoryBlockType {
     }
 }
 
+/// Persona isolation policy for project-scoped memory routing.
+///
+/// Controls how reads and writes are routed when a persona is attached to a
+/// project: `None` merges both scopes bidirectionally, `CoreOnly` makes
+/// persona core blocks read-only from within the project, and `Full`
+/// hides persona block content entirely (only identity metadata is visible).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum IsolatePolicy {
+    /// Persona + project merged; bidirectional writes.
+    None,
+    /// Persona core read-only from project; project writes stay project-scoped.
+    CoreOnly,
+    /// Persona identity only; no persona memory carryover.
+    Full,
+}
+
+impl Display for IsolatePolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => write!(f, "none"),
+            Self::CoreOnly => write!(f, "core-only"),
+            Self::Full => write!(f, "full"),
+        }
+    }
+}
+
 /// Error type for memory operations.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -141,6 +169,14 @@ pub enum MemoryError {
         block_label: String,
         required: pattern_db::models::MemoryPermission,
         actual: pattern_db::models::MemoryPermission,
+    },
+
+    #[error(
+        "isolation denied: operation {operation} would cross persona boundary under policy {policy}"
+    )]
+    IsolationDenied {
+        operation: String,
+        policy: IsolatePolicy,
     },
 
     #[error("database error: {0}")]

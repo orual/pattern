@@ -1,0 +1,14 @@
+//! Persona discovery across global and project scopes.
+//!
+//! Scans `<pattern_home>/personas/@<name>/persona.kdl` (global) and
+//! `<mount>/personas/@<name>/persona.kdl` (project-scoped) directories.
+//! Project-scoped personas take precedence on name collision.
+//!
+//! # Module layout
+//!
+//! - `persona.rs` — this file; re-exports public API.
+//! - `persona/discover.rs` — [`discover_personas`] scan + error types.
+
+mod discover;
+
+pub use discover::{PersonaDiscoveryError, discover_personas};

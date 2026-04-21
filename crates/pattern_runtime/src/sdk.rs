@@ -13,6 +13,7 @@ pub mod bundle;
 pub mod code_tool;
 pub mod describe;
 pub mod handlers;
+pub mod lib_modules;
 pub mod location;
 pub mod preamble;
 pub mod requests;

@@ -3,15 +3,18 @@
 ⚠️ **CRITICAL WARNING**: DO NOT run `pattern` CLI or test agents during development!
 Production agents are running. CLI commands will disrupt active agents.
 
-Last verified: 2026-04-19
+Last verified: 2026-04-20
 
-Core agent framework, memory management, and coordination system for Pattern's multi-agent ADHD support.
+Core agent framework, memory trait definitions, tools, and coordination system for Pattern's multi-agent ADHD support. The `MemoryStore` trait is defined here; the canonical implementation (`MemoryCache`) lives in `pattern_memory`.
 
 ## Current status
-- SQLite migration complete, Loro CRDT memory, Jacquard ATProto client.
+- Loro CRDT memory, Jacquard ATProto client.
 - Shell tool implemented with PTY backend and security validation.
 - Phase 5 complete: message attachment model, batch-anchored snapshots,
   turn round-trip recording, `TurnInput::continuation` flow.
+- v3-memory-rework complete: `MemoryStore` desynced (28->19 methods),
+  `MemoryCache` + `SharedBlockManager` extracted to `pattern_memory`,
+  `IsolatePolicy` + consolidation types added to `types/memory_types`.
 
 ## Tool System Architecture
 
@@ -104,9 +107,16 @@ Key types:
    - DatabaseAgent using `pattern-db`
    - AgentType enum with feature-gated ADHD variants
 
-2. **Memory System** (`memory/`)
-   - Loro CRDT based in-memory cache backed by `pattern-db`
-   - **StructuredDocument sharing**: `MemoryCache::get_block()` returns a `StructuredDocument` where the internal `LoroDoc` is Arc-shared with the cache. Mutations via `set_text()`, `import_from_json()`, etc. propagate to the cached version. However, metadata fields (permission, label, accessor_agent_id) are *not* shared—they're cloned. After mutating, call `mark_dirty()` + `persist_block()` to save.
+2. **Memory System** (`memory/` + `traits/memory_store.rs` + `types/memory_types/`)
+   - `MemoryStore` trait: sync (no async), 19 methods (consolidated from 28).
+   - `StructuredDocument` remains here (trait signature dependency).
+   - Consolidation types: `BlockFilter`, `BlockMetadataPatch`, `UndoRedoOp`,
+     `UndoRedoDepth`, `MemorySearchScope`, `IsolatePolicy`.
+   - `IsolatePolicy` enum (`None`, `CoreOnly`, `Full`) governs scope routing
+     between persona and project memory in `pattern_memory::scope`.
+   - **Canonical implementation** (`MemoryCache`, `SharedBlockManager`) lives
+     in `pattern_memory`. `pattern_core` must never depend on `pattern_memory`
+     (enforced by trybuild compile-fail test).
 
 3. **Tool System** (`tool/`)
    - Type-safe `AiTool<Input, Output>` trait

@@ -62,17 +62,18 @@ impl DescribeEffect for MemoryHandler {
     fn effect_decl() -> EffectDecl {
         EffectDecl {
             type_name: "Memory",
-            description: "Persistent memory-block operations (Get/Put/Create/Append/Replace/Search/Recall/Archive/GetShared)",
+            description: "Persistent memory-block operations (Get/Put/Create/Append/Replace/Search/Recall/Archive/GetShared/WriteToPersona)",
             constructors: &[
-                "Get       :: BlockHandle -> Memory Content",
-                "Put       :: BlockHandle -> Content -> Maybe Text -> Memory ()",
-                "Create    :: BlockHandle -> Text -> BlockType -> SchemaKind -> Maybe Int -> Content -> Memory ()",
-                "Append    :: BlockHandle -> Content -> Memory ()",
-                "Replace   :: BlockHandle -> Text -> Text -> Memory ()",
-                "Search    :: Query -> Memory [BlockHandle]",
-                "Recall    :: BlockHandle -> Memory Content",
-                "Archive   :: BlockHandle -> Memory ()",
-                "GetShared :: Owner -> BlockHandle -> Memory Content",
+                "Get            :: BlockHandle -> Memory Content",
+                "Put            :: BlockHandle -> Content -> Maybe Text -> Memory ()",
+                "Create         :: BlockHandle -> Text -> BlockType -> SchemaKind -> Maybe Int -> Content -> Memory ()",
+                "Append         :: BlockHandle -> Content -> Memory ()",
+                "Replace        :: BlockHandle -> Text -> Text -> Memory ()",
+                "Search         :: Query -> Memory [BlockHandle]",
+                "Recall         :: BlockHandle -> Memory Content",
+                "Archive        :: BlockHandle -> Memory ()",
+                "GetShared      :: Owner -> BlockHandle -> Memory Content",
+                "WriteToPersona :: BlockHandle -> Content -> Memory ()",
             ],
             type_defs: &[
                 "type BlockHandle = Text",
@@ -93,6 +94,7 @@ impl DescribeEffect for MemoryHandler {
                 "recall :: Member Memory effs => BlockHandle -> Eff effs Content\nrecall h = send (Recall h)",
                 "archive :: Member Memory effs => BlockHandle -> Eff effs ()\narchive h = send (Archive h)",
                 "getShared :: Member Memory effs => Owner -> BlockHandle -> Eff effs Content\ngetShared o h = send (GetShared o h)",
+                "writeToPersona :: Member Memory effs => BlockHandle -> Content -> Eff effs ()\nwriteToPersona h c = send (WriteToPersona h c)",
             ],
         }
     }
@@ -305,6 +307,45 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                         ))
                     })?;
                 cx.respond(doc.render())
+            }
+            MemoryReq::WriteToPersona(label, content) => {
+                // Explicitly target the persona scope. The MemoryScope
+                // wrapper enforces policy — under CoreOnly/Full this
+                // call returns IsolationDenied; under None it passes
+                // through to the persona's store.
+                //
+                // We derive the persona_id from the scope binding on
+                // the adapter's inner store. If the store is a
+                // MemoryScope, the persona_id is the binding's
+                // persona_id; otherwise, we fall back to agent_id
+                // (passthrough case).
+                let persona_id = cx.user().agent_id().to_string();
+
+                let pre = pre_write_state(&*store, &persona_id, &label).map_err(|e| {
+                    EffectError::Handler(format!("Pattern.Memory.WriteToPersona: {e}"))
+                })?;
+
+                upsert_block_content(&*store, &persona_id, &label, &content, None).map_err(
+                    |e| EffectError::Handler(format!("Pattern.Memory.WriteToPersona: {e}")),
+                )?;
+
+                let kind = if pre.existed {
+                    BlockWriteKind::Replaced
+                } else {
+                    BlockWriteKind::Created
+                };
+                record_block_write(
+                    RecordBlockWriteParams {
+                        adapter: &adapter,
+                        agent_id: &persona_id,
+                        label: &label,
+                        post_content: &content,
+                        kind,
+                        pre: &pre,
+                    },
+                    &*store,
+                );
+                cx.respond(())
             }
         })();
 

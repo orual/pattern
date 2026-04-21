@@ -4,9 +4,14 @@
 //! encapsulated in [`PatternPaths`]:
 //!
 //! - `base()` — `~/.pattern/`
-//! - `mode_a_messages_path()` — `~/.pattern/transient/<hash>/messages.db`
+//! - `mode_a_messages_path()` — `<project>/.pattern/transient/messages.db`
 //! - `mode_b_mount_path()` — `~/.pattern/projects/<id>/shared/`
 //! - `mode_b_messages_path()` — `~/.pattern/projects/<id>/messages/messages.db`
+//!
+//! For Mode A and Mode C, messages.db lives inside the project repo at
+//! `<project>/.pattern/transient/` (gitignored so it is never committed, but
+//! project-adjacent for discoverability). The `.pattern/transient/` entry in
+//! the project's `.gitignore` keeps it out of VCS history.
 //!
 //! [`project_hash`] is a free function because it does not depend on the base
 //! directory — it only hashes the project root path.
@@ -95,14 +100,22 @@ impl PatternPaths {
         &self.base
     }
 
-    /// Path where Mode A stores `messages.db` for the given project root.
+    /// Path where Mode A (and Mode C) stores `messages.db` for a project.
     ///
-    /// Returns `<base>/transient/<hash>/messages.db`. The `transient/`
-    /// subtree is deliberately outside the project repo so that `git`/`jj`
-    /// history never tracks ephemeral conversation data.
-    pub fn mode_a_messages_path(&self, project_root: &Path) -> Result<PathBuf, PathError> {
-        let hash = project_hash(project_root)?;
-        Ok(self.base.join("transient").join(hash).join("messages.db"))
+    /// Returns `<project_root>/.pattern/transient/messages.db`.
+    ///
+    /// The file lives inside the project at `.pattern/transient/` — gitignored
+    /// so it is never committed, but project-adjacent for discoverability. The
+    /// caller is responsible for creating the directory before opening the DB.
+    ///
+    /// This method does not use `&self` (no `~/.pattern/` path is involved for
+    /// Mode A/C); it is kept as an associated method for symmetry with
+    /// `mode_b_messages_path`.
+    pub fn mode_a_messages_path(project_root: &Path) -> PathBuf {
+        project_root
+            .join(".pattern")
+            .join("transient")
+            .join("messages.db")
     }
 
     /// Path where Mode B stores its mount directory for a given project ID.
@@ -127,10 +140,26 @@ impl PatternPaths {
 
     /// Directory where `messages.db` snapshots are stored for a given project ID.
     ///
-    /// Returns `<base>/backups/<id>/messages/`. Created on first snapshot if
-    /// it does not yet exist.
+    /// Returns `<base>/backups/<id>/messages/`. Used by Mode B, which has no
+    /// host repo to put backup files in. Created on first snapshot if it does
+    /// not yet exist.
     pub fn backup_dir(&self, project_id: &str) -> PathBuf {
         self.base.join("backups").join(project_id).join("messages")
+    }
+
+    /// Directory where Mode A/C stores `messages.db` snapshots for a project.
+    ///
+    /// Returns `<project_root>/.pattern/transient/backups/<project_name>/messages/`.
+    /// Kept inside `.pattern/transient/` so it is gitignored by the same rule
+    /// that covers the live `messages.db`. Created on first snapshot if it does
+    /// not yet exist.
+    pub fn project_backup_dir(&self, project_root: &Path, project_name: &str) -> PathBuf {
+        project_root
+            .join(".pattern")
+            .join("transient")
+            .join("backups")
+            .join(project_name)
+            .join("messages")
     }
 
     /// Full path for a snapshot file for the given project ID and timestamp.
@@ -242,29 +271,53 @@ mod tests {
 
     #[test]
     fn mode_a_messages_path_structure() {
-        let tmp = TempDir::new().unwrap();
-        let base = TempDir::new().unwrap();
-        let paths = PatternPaths::with_base(base.path());
-        let path = paths.mode_a_messages_path(tmp.path()).unwrap();
-        // Should be: <base>/transient/<16-char-hash>/messages.db
+        let project = TempDir::new().unwrap();
+        let path = PatternPaths::mode_a_messages_path(project.path());
+        // Should be: <project>/.pattern/transient/messages.db
         assert_eq!(
             path.file_name().and_then(|n| n.to_str()),
             Some("messages.db")
         );
-        let hash_component = path
-            .parent()
-            .unwrap()
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap();
-        assert_eq!(hash_component.len(), 16);
-        let transient = path.parent().unwrap().parent().unwrap();
+        let transient = path.parent().unwrap();
         assert_eq!(
             transient.file_name().and_then(|n| n.to_str()),
             Some("transient")
         );
-        // Verify it's rooted under our custom base.
-        assert!(path.starts_with(base.path()));
+        let dot_pattern = transient.parent().unwrap();
+        assert_eq!(
+            dot_pattern.file_name().and_then(|n| n.to_str()),
+            Some(".pattern")
+        );
+        // Verify it's rooted under the project directory, not somewhere in ~/.pattern/.
+        assert!(path.starts_with(project.path()));
+    }
+
+    #[test]
+    fn project_backup_dir_structure() {
+        let project = TempDir::new().unwrap();
+        let base = TempDir::new().unwrap();
+        let paths = PatternPaths::with_base(base.path());
+        let dir = paths.project_backup_dir(project.path(), "my-project");
+        // Should be: <project>/.pattern/transient/backups/my-project/messages
+        assert_eq!(dir.file_name().and_then(|n| n.to_str()), Some("messages"));
+        let project_name_dir = dir.parent().unwrap();
+        assert_eq!(
+            project_name_dir.file_name().and_then(|n| n.to_str()),
+            Some("my-project")
+        );
+        let backups_dir = project_name_dir.parent().unwrap();
+        assert_eq!(
+            backups_dir.file_name().and_then(|n| n.to_str()),
+            Some("backups")
+        );
+        let transient = backups_dir.parent().unwrap();
+        assert_eq!(
+            transient.file_name().and_then(|n| n.to_str()),
+            Some("transient")
+        );
+        // Verify it's inside the project, not the base (~/.pattern/).
+        assert!(dir.starts_with(project.path()));
+        assert!(!dir.starts_with(base.path()));
     }
 
     #[test]

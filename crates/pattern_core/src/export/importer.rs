@@ -37,8 +37,7 @@ use crate::error::{CoreError, Result};
 fn chrono_to_jiff(dt: DateTime<Utc>) -> jiff::Timestamp {
     let epoch_nanos =
         (dt.timestamp() as i128) * 1_000_000_000 + (dt.timestamp_subsec_nanos() as i128);
-    jiff::Timestamp::from_nanosecond(epoch_nanos)
-        .unwrap_or_else(|_| jiff::Timestamp::now())
+    jiff::Timestamp::from_nanosecond(epoch_nanos).unwrap_or_else(|_| jiff::Timestamp::now())
 }
 
 /// Result of an import operation.

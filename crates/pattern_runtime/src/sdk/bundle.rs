@@ -24,17 +24,18 @@
 
 use crate::sdk::describe::CollectEffectDecls;
 use crate::sdk::handlers::{
-    DisplayHandler, FileHandler, LogHandler, McpHandler, MemoryHandler, MessageHandler,
-    RecallHandler, RpcHandler, SearchHandler, ShellHandler, SourcesHandler, SpawnHandler,
-    TimeHandler,
+    DiagnosticsHandler, DisplayHandler, FileHandler, LogHandler, McpHandler, MemoryHandler,
+    MessageHandler, RecallHandler, RpcHandler, SearchHandler, ShellHandler, SourcesHandler,
+    SpawnHandler, TimeHandler,
 };
 
-/// The full 13-handler SDK bundle, typed as a `frunk::HList`.
+/// The full 14-handler SDK bundle, typed as a `frunk::HList`.
 ///
 /// Order: `Memory, Search, Recall, Message, Display, Time, Log, Shell,
-/// File, Sources, Mcp, Rpc, Spawn`. Search and Recall are placed
-/// immediately after Memory (storage-adjacent) so cross-agent search
-/// and archival operations cluster together.
+/// File, Sources, Mcp, Rpc, Spawn, Diagnostics`. Search and Recall are
+/// placed immediately after Memory (storage-adjacent) so cross-agent
+/// search and archival operations cluster together. Diagnostics is last
+/// (rarely used; session-level introspection only).
 pub type SdkBundle = frunk::HList![
     MemoryHandler,
     SearchHandler,
@@ -49,6 +50,7 @@ pub type SdkBundle = frunk::HList![
     McpHandler,
     RpcHandler,
     SpawnHandler,
+    DiagnosticsHandler,
 ];
 
 /// Collect [`crate::sdk::describe::EffectDecl`] from every handler in
@@ -61,8 +63,20 @@ pub fn canonical_effect_decls() -> Vec<crate::sdk::describe::EffectDecl> {
 /// The canonical effect-row type names in bundle order. Useful for
 /// assertions and documentation.
 pub const CANONICAL_EFFECT_ROW: &[&str] = &[
-    "Memory", "Search", "Recall", "Message", "Display", "Time", "Log", "Shell", "File", "Sources",
-    "Mcp", "Rpc", "Spawn",
+    "Memory",
+    "Search",
+    "Recall",
+    "Message",
+    "Display",
+    "Time",
+    "Log",
+    "Shell",
+    "File",
+    "Sources",
+    "Mcp",
+    "Rpc",
+    "Spawn",
+    "Diagnostics",
 ];
 
 #[cfg(test)]
@@ -70,12 +84,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_decls_has_13_entries() {
+    fn canonical_decls_has_14_entries() {
         let decls = canonical_effect_decls();
         assert_eq!(
             decls.len(),
-            13,
-            "expected 13 handler decls, got {}",
+            14,
+            "expected 14 handler decls, got {}",
             decls.len()
         );
     }

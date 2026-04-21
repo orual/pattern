@@ -22,11 +22,15 @@ pub mod jj;
 pub mod modes;
 pub mod mount;
 pub mod paths;
+pub mod persona;
 pub mod quiesce;
 pub mod reembed;
 pub mod schema_templates;
+pub mod scope;
 pub mod sharing;
 pub mod subscriber;
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing;
 mod types_internal;
 /// Host VCS detection (git, jj).
 pub mod vcs;

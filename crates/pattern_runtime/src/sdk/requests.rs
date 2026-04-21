@@ -6,6 +6,7 @@
 //! below matches the actual enum variants; drift here must be paired
 //! with the matching Haskell edit.
 
+pub mod diagnostics;
 pub mod display;
 pub mod file;
 pub mod log;
@@ -20,6 +21,7 @@ pub mod sources;
 pub mod spawn;
 pub mod time;
 
+pub use diagnostics::DiagnosticsReq;
 pub use display::DisplayReq;
 pub use file::FileReq;
 pub use log::LogReq;
@@ -84,6 +86,7 @@ mod parity {
         ("McpReq", &["Use"]),
         ("RpcReq", &["Call", "Recv"]),
         ("SpawnReq", &["Start", "Stop"]),
+        ("DiagnosticsReq", &["GetDiagnostics"]),
     ];
 
     /// Sanity check: the table isn't empty and each entry lists at least
@@ -92,8 +95,8 @@ mod parity {
     fn parity_table_is_populated() {
         assert_eq!(
             EXPECTED.len(),
-            13,
-            "expected 13 SDK namespaces; update this test when adding/removing one"
+            14,
+            "expected 14 SDK namespaces; update this test when adding/removing one"
         );
         for (enum_name, variants) in EXPECTED {
             assert!(
@@ -256,6 +259,13 @@ mod parity {
         let _ = SpawnReq::Start(String::new());
         let _ = SpawnReq::Stop(String::new());
         assert_eq!(count("SpawnReq"), 2);
+    }
+
+    #[test]
+    fn diagnostics_req_variants() {
+        use super::DiagnosticsReq;
+        let _ = DiagnosticsReq::GetDiagnostics;
+        assert_eq!(count("DiagnosticsReq"), 1);
     }
 
     /// Look up the expected variant count from the table.

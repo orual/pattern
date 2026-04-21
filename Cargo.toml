@@ -140,6 +140,9 @@ base64 = "0.22"
 url = "2"
 serde_urlencoded = "0.7"
 
+# Regex for GHC error location parsing (pattern_runtime lib_modules).
+regex = "1"
+
 # dev-only
 wiremock = "0.6"
 tempfile = "3"
@@ -183,3 +186,12 @@ which = "8.0"
 [workspace.lints.clippy]
 mod_module_files = "warn"
 manual_range_contains = "allow"
+
+[profile.dev.package.tidepool-runtime]
+opt-level = 2
+
+[profile.dev.package.tidepool-codegen]
+opt-level = 2
+
+[profile.dev.package.tidepool-eval]
+opt-level = 2
