@@ -30,6 +30,7 @@ tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
 clap = { workspace = true }
 futures = { workspace = true }
+irpc = { workspace = true }
 async-trait = { workspace = true }
 
 jiff = { workspace = true }

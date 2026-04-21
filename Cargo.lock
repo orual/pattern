@@ -6082,6 +6082,7 @@ dependencies = [
  "futures",
  "indicatif",
  "insta",
+ "irpc",
  "jiff",
  "miette",
  "nix",

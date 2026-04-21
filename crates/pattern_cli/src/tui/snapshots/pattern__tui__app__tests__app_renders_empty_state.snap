@@ -1,0 +1,17 @@
+---
+source: crates/pattern_cli/src/tui/app.rs
+assertion_line: 350
+expression: output
+---
+
+
+
+
+
+
+
+
+┌input─────────────────────────────────────────────────────┐
+│type here...                                              │
+└──────────────────────────────────────────────────────────┘
+pattern (offline)
