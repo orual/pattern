@@ -23,6 +23,7 @@ use async_trait::async_trait;
 use pattern_core::ProviderClient;
 use pattern_core::error::RuntimeError;
 use pattern_core::traits::{MemoryStore, NoOpSink, Session, TurnSink};
+use pattern_core::types::memory_types::MemoryError;
 use pattern_core::types::snapshot::{PersonaSnapshot, SessionSnapshot};
 use pattern_core::types::turn::{StepReply, TurnInput};
 
@@ -812,14 +813,18 @@ fn seed_persona_memory_blocks(
         }
 
         // Don't clobber existing blocks — persona is INITIAL intent.
-        if store
-            .get_block(agent_id, label.as_str())
-            .map_err(|e| RuntimeError::SessionPoisoned {
-                reason: format!("memory seed: get_block({label}) failed: {e}"),
-            })?
-            .is_some()
-        {
-            continue;
+        // The store may return Err(NotFound) or Ok(None) for missing blocks
+        // depending on the implementation. Both mean "create it".
+        match store.get_block(agent_id, label.as_str()) {
+            Ok(Some(_)) => continue, // Already exists — preserve live state.
+            Ok(None) => {}           // Doesn't exist — create below.
+            Err(MemoryError::NotFound { .. }) => {} // Store returns Err for missing — treat as "create."
+            Err(e) => {
+                return Err(RuntimeError::MemorySeedFailed {
+                    label: label.to_string(),
+                    reason: format!("get_block failed: {e}"),
+                });
+            }
         }
 
         let block_type = match spec.memory_type {
@@ -845,14 +850,16 @@ fn seed_persona_memory_blocks(
         let doc =
             store
                 .create_block(agent_id, create)
-                .map_err(|e| RuntimeError::SessionPoisoned {
-                    reason: format!("memory seed: create_block({label}) failed: {e}"),
+                .map_err(|e| RuntimeError::MemorySeedFailed {
+                    label: label.to_string(),
+                    reason: format!("create_block failed: {e}"),
                 })?;
 
         // Schema-dispatched import of the initial content.
         doc.import_from_json(&spec.content)
-            .map_err(|e| RuntimeError::SessionPoisoned {
-                reason: format!("memory seed: import_from_json({label}) failed: {e:?}"),
+            .map_err(|e| RuntimeError::MemorySeedFailed {
+                label: label.to_string(),
+                reason: format!("import_from_json failed: {e:?}"),
             })?;
 
         if spec.pinned {
@@ -862,14 +869,16 @@ fn seed_persona_memory_blocks(
                     label.as_str(),
                     pattern_core::types::memory_types::BlockMetadataPatch::default().pinned(true),
                 )
-                .map_err(|e| RuntimeError::SessionPoisoned {
-                    reason: format!("memory seed: update_block_metadata({label}) failed: {e}"),
+                .map_err(|e| RuntimeError::MemorySeedFailed {
+                    label: label.to_string(),
+                    reason: format!("update_block_metadata failed: {e}"),
                 })?;
         }
 
         store.persist_block(agent_id, label.as_str()).map_err(|e| {
-            RuntimeError::SessionPoisoned {
-                reason: format!("memory seed: persist_block({label}) failed: {e}"),
+            RuntimeError::MemorySeedFailed {
+                label: label.to_string(),
+                reason: format!("persist_block failed: {e}"),
             }
         })?;
     }

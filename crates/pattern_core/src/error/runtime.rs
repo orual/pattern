@@ -342,6 +342,38 @@ pub enum RuntimeError {
         reason: String,
     },
 
+    /// Persona memory block seeding failed during session open.
+    ///
+    /// The persona declares initial memory blocks (e.g. persona, scratchpad)
+    /// that are created in the store on first use. This error fires when the
+    /// store rejects the create or the block content cannot be imported.
+    ///
+    /// Unlike [`SessionPoisoned`], this is an initialization failure — the
+    /// session never started, so there is no corrupt state to recover from.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::RuntimeError;
+    ///
+    /// let err = RuntimeError::MemorySeedFailed {
+    ///     label: "scratchpad".into(),
+    ///     reason: "store rejected create".into(),
+    /// };
+    /// assert!(err.to_string().contains("scratchpad"));
+    /// ```
+    #[error("memory seed failed for block '{label}': {reason}")]
+    #[diagnostic(
+        code(pattern_core::runtime::memory_seed_failed),
+        help("check persona KDL block definitions and store permissions")
+    )]
+    MemorySeedFailed {
+        /// The block label that failed to seed.
+        label: String,
+        /// Why the seed failed.
+        reason: String,
+    },
+
     /// The LLM provider returned an error during completion.
     ///
     /// Produced by the agent loop when `ProviderClient::complete` fails

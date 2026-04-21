@@ -148,11 +148,15 @@ fn cmd_start(
         cmd.arg("--path").arg(project_path);
     }
 
-    // Detach: don't inherit stdin; inherit stdout/stderr so early errors are
-    // visible. The server will eventually daemonize itself if needed, but for
-    // now we spawn it as a background child and let the terminal session
-    // determine its lifetime.
+    // Detach fully: no stdin, stdout/stderr to log file so daemon output
+    // doesn't corrupt the TUI or clutter the terminal.
+    let log_path = DaemonState::state_dir().join("daemon.log");
+    std::fs::create_dir_all(DaemonState::state_dir()).into_diagnostic()?;
+    let log_file = std::fs::File::create(&log_path).into_diagnostic()?;
+    let log_err = log_file.try_clone().into_diagnostic()?;
     cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::from(log_file));
+    cmd.stderr(std::process::Stdio::from(log_err));
 
     let child = cmd.spawn().into_diagnostic()?;
     let child_pid = child.id();
@@ -339,7 +343,15 @@ pub fn ensure_daemon_running() -> MietteResult<SocketAddr> {
     cmd.arg("start");
     cmd.arg("--persona").arg(&persona_path);
     cmd.arg("--path").arg(&project_path);
+
+    // Redirect all IO to log file — daemon must not write to the TUI terminal.
+    let log_path = DaemonState::state_dir().join("daemon.log");
+    std::fs::create_dir_all(DaemonState::state_dir()).into_diagnostic()?;
+    let log_file = std::fs::File::create(&log_path).into_diagnostic()?;
+    let log_err = log_file.try_clone().into_diagnostic()?;
     cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::from(log_file));
+    cmd.stderr(std::process::Stdio::from(log_err));
 
     let child = cmd.spawn().into_diagnostic()?;
     // Detach: don't wait on the child handle.
