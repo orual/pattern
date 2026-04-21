@@ -4,6 +4,7 @@
 //! markdown display, virtual scrolling, and layout management.
 
 pub mod app;
+pub mod autocomplete;
 pub mod commands;
 pub mod conversation;
 pub mod input;
