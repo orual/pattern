@@ -137,9 +137,32 @@ async fn cmd_start(
             miette::miette!("failed to attach mount at {}: {e}", project_path.display())
         })?;
 
-        // Build provider (Anthropic auth chain + gateway).
-        let chain: Arc<dyn pattern_provider::auth::CredentialChain> =
-            Arc::new(pattern_provider::auth::AnthropicAuthChain::api_key_only());
+        // Build provider with the full auth chain: stored OAuth (keyring/JSON
+        // fallback) → API key env var → session pickup (~/.claude/.credentials.json).
+        // This mirrors pattern-test-cli's `build_chain` — the daemon should try
+        // every credential source the user might have configured.
+        let chain: Arc<dyn pattern_provider::auth::CredentialChain> = {
+            use pattern_provider::auth::{PkceTier, SessionPickupTier};
+            use pattern_provider::creds_store::{
+                CredsStore, CredsStoreResolver, JsonFallbackStore, KeyringStore,
+            };
+
+            let session_pickup = SessionPickupTier::default();
+            let pkce = Arc::new(PkceTier::anthropic());
+            let primary: Arc<dyn CredsStore> = Arc::new(KeyringStore::new());
+            let fallback: Arc<dyn CredsStore> = Arc::new(
+                JsonFallbackStore::new()
+                    .map_err(|e| miette::miette!("failed to init creds fallback store: {e}"))?,
+            );
+            let creds_store: Arc<dyn CredsStore> =
+                Arc::new(CredsStoreResolver::new(primary, fallback));
+
+            Arc::new(pattern_provider::auth::AnthropicAuthChain::with_oauth(
+                session_pickup,
+                pkce,
+                creds_store,
+            ))
+        };
         let limiter =
             Arc::new(pattern_provider::ratelimit::ProviderRateLimiter::anthropic_default());
         let shaper_cfg = pattern_provider::shaper::ShaperConfig::default();
