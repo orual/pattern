@@ -99,9 +99,11 @@ async fn cmd_start(
     }
 
     // Spawn the server actor — echo mode or real session mode.
-    let handle = if echo {
+    // `_mounted` keeps the MountedStore alive (watcher + backup scheduler) until
+    // the daemon shuts down. Dropping it triggers clean RAII teardown.
+    let (handle, _mounted) = if echo {
         info!("starting daemon in echo mode");
-        DaemonServer::spawn()
+        (DaemonServer::spawn(), None)
     } else {
         // Resolve project path.
         let project_path = project_path
@@ -163,11 +165,7 @@ async fn cmd_start(
         info!("starting daemon with real session infrastructure");
         let handle = DaemonServer::spawn_with_config(config);
 
-        // Leak the MountedStore to keep it alive for the daemon's lifetime.
-        // The watcher and backup scheduler live inside it and must not be dropped.
-        std::mem::forget(mounted);
-
-        handle
+        (handle, Some(mounted))
     };
 
     // Create QUIC endpoint with a self-signed certificate.
