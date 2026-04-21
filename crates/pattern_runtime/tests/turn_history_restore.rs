@@ -36,8 +36,7 @@ async fn create_test_agent(db: &pattern_db::ConstellationDb, id: &str) {
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
-    pattern_db::queries::create_agent(db.pool(), &agent)
-        .await
+    pattern_db::queries::create_agent(&db.get().unwrap(), &agent)
         .expect("create_test_agent failed");
 }
 
@@ -377,8 +376,7 @@ async fn load_excludes_archived_messages() {
     .expect("step 2 should succeed");
 
     // Count total messages before archiving.
-    let all_msgs = pattern_db::queries::get_messages_with_archived(db.pool(), "agent-a", 1000)
-        .await
+    let all_msgs = pattern_db::queries::get_messages_with_archived(&db.get().unwrap(), "agent-a", 1000)
         .expect("query should succeed");
     assert_eq!(all_msgs.len(), 4, "4 total messages before archiving");
 
@@ -405,8 +403,7 @@ async fn load_excludes_archived_messages() {
         min_batch2.to_string()
     };
     let archived_count =
-        pattern_db::queries::archive_messages(db.pool(), "agent-a", &archive_before)
-            .await
+        pattern_db::queries::archive_messages(&db.get().unwrap(), "agent-a", &archive_before)
             .expect("archive should succeed");
     assert_eq!(archived_count, 2, "should archive 2 messages from batch1");
 

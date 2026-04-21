@@ -6,16 +6,15 @@
 //! - Tasks for structured work assignment
 //! - Handoff notes for agent-to-agent communication
 
+use crate::Json;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
-use sqlx::types::Json;
 
 /// An event in the constellation's activity stream.
 ///
 /// The activity stream provides a unified timeline of events for
 /// coordinating agents and enabling catch-up for returning agents.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActivityEvent {
     /// Unique identifier
     pub id: String,
@@ -37,8 +36,7 @@ pub struct ActivityEvent {
 }
 
 /// Activity event types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
-#[sqlx(type_name = "TEXT", rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActivityEventType {
     /// Agent sent a message
@@ -61,9 +59,8 @@ pub enum ActivityEventType {
 
 /// Event importance levels.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, sqlx::Type,
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
 )]
-#[sqlx(type_name = "TEXT", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
 pub enum EventImportance {
@@ -82,7 +79,7 @@ pub enum EventImportance {
 ///
 /// LLM-generated summary of an agent's recent activity,
 /// used to help other agents understand what this agent has been doing.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSummary {
     /// Agent this summary is for (also the primary key)
     pub agent_id: String,
@@ -104,7 +101,7 @@ pub struct AgentSummary {
 ///
 /// Periodic roll-up of activity across all agents,
 /// used for long-term context and catch-up.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConstellationSummary {
     /// Unique identifier
     pub id: String,
@@ -132,7 +129,7 @@ pub struct ConstellationSummary {
 ///
 /// Unlike regular activity events, notable events are explicitly
 /// preserved for historical context and agent training.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NotableEvent {
     /// Unique identifier
     pub id: String,
@@ -160,7 +157,7 @@ pub struct NotableEvent {
 ///
 /// Structured task assignment for cross-agent work.
 /// More formal than handoff notes, used for tracked deliverables.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoordinationTask {
     /// Unique identifier
     pub id: String,
@@ -185,8 +182,7 @@ pub struct CoordinationTask {
 }
 
 /// Task status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
-#[sqlx(type_name = "TEXT", rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
 pub enum TaskStatus {
@@ -203,9 +199,8 @@ pub enum TaskStatus {
 
 /// Task priority.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, sqlx::Type,
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
 )]
-#[sqlx(type_name = "TEXT", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
 pub enum TaskPriority {
@@ -224,7 +219,7 @@ pub enum TaskPriority {
 ///
 /// Used for informal agent-to-agent communication,
 /// like leaving a note for the next shift.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandoffNote {
     /// Unique identifier
     pub id: String,
@@ -249,7 +244,7 @@ pub struct HandoffNote {
 ///
 /// Flexible shared state for coordination patterns.
 /// Used for things like round-robin counters, vote tallies, etc.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoordinationState {
     /// Key for this state entry
     pub key: String,

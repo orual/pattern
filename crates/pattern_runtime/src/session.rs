@@ -725,8 +725,9 @@ async fn seed_persona_memory_blocks(
 
         let block_type = match spec.memory_type {
             MemoryType::Core => BlockType::Core,
-            MemoryType::Working => BlockType::Working,
-            MemoryType::Archival => BlockType::Archival,
+            // Archival persona specs create Working-tier blocks; true
+            // archival storage lives in archival_entries (separate table).
+            MemoryType::Working | MemoryType::Archival => BlockType::Working,
         };
         let schema = spec.schema.clone().unwrap_or_else(BlockSchema::text);
 
@@ -884,8 +885,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             };
-            pattern_db::queries::create_agent(db.pool(), &agent)
-                .await
+            pattern_db::queries::create_agent(&db.get().unwrap(), &agent)
                 .expect("create test agent");
         }
 

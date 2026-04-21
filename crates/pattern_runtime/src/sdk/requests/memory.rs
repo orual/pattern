@@ -15,14 +15,22 @@ use tidepool_bridge_derive::FromCore;
 
 /// Block classification. Mirrors Haskell `Pattern.Memory.BlockType`.
 /// The `Block` prefix is deliberate — see module docs.
+///
+/// `BlockArchival` and `BlockLog` are kept in the Haskell SDK for
+/// backwards compatibility but map to `Working` on the Rust side.
+/// Archival storage uses the `archival_entries` table; log-type blocks
+/// use `Working` tier with `BlockSchema::Log`. Full SDK-side removal
+/// is tracked for v3-memory-rework Phase 3.
 #[derive(Debug, FromCore)]
 pub enum BlockTypeReq {
     #[core(module = "Pattern.Memory", name = "BlockCore")]
     Core,
     #[core(module = "Pattern.Memory", name = "BlockWorking")]
     Working,
+    /// Legacy: maps to Working. Archival storage uses archival_entries.
     #[core(module = "Pattern.Memory", name = "BlockArchival")]
     Archival,
+    /// Legacy: maps to Working with log-schema metadata.
     #[core(module = "Pattern.Memory", name = "BlockLog")]
     Log,
 }
@@ -32,9 +40,9 @@ impl From<BlockTypeReq> for pattern_core::types::memory_types::BlockType {
         use pattern_core::types::memory_types::BlockType;
         match req {
             BlockTypeReq::Core => BlockType::Core,
-            BlockTypeReq::Working => BlockType::Working,
-            BlockTypeReq::Archival => BlockType::Archival,
-            BlockTypeReq::Log => BlockType::Log,
+            // Archival and Log map to Working; archival storage uses the
+            // archival_entries table, log blocks use Working + log-schema.
+            BlockTypeReq::Working | BlockTypeReq::Archival | BlockTypeReq::Log => BlockType::Working,
         }
     }
 }

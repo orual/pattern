@@ -1,0 +1,9 @@
+---
+source: crates/pattern_db/tests/fts5_regression.rs
+assertion_line: 107
+expression: ids
+---
+- msg_07
+- msg_04
+- msg_01
+- msg_06

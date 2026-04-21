@@ -30,7 +30,7 @@ pub enum SearchContentType {
 }
 
 impl SearchContentType {
-    /// Convert to pattern_db SearchContentType
+    /// Convert to pattern_db SearchContentType.
     pub fn to_db_content_type(self) -> pattern_db::search::SearchContentType {
         match self {
             Self::Blocks => pattern_db::search::SearchContentType::MemoryBlock,
@@ -122,7 +122,7 @@ pub struct MemorySearchResult {
 }
 
 impl MemorySearchResult {
-    /// Convert from pattern_db SearchResult
+    /// Convert from pattern_db SearchResult.
     pub fn from_db_result(result: pattern_db::search::SearchResult) -> Self {
         let content_type = match result.content_type {
             pattern_db::search::SearchContentType::Message => SearchContentType::Messages,

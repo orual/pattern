@@ -829,8 +829,10 @@ fn label_to_block_type(label: &str) -> MemoryBlockType {
     match label.to_lowercase().as_str() {
         "persona" | "human" | "system" => MemoryBlockType::Core,
         "scratchpad" | "working" | "notes" => MemoryBlockType::Working,
-        "archival" | "archive" | "long_term" => MemoryBlockType::Archival,
-        _ => MemoryBlockType::Working, // Default to working memory
+        // Archival-labelled blocks become Working-tier; true archival
+        // storage lives in archival_entries (separate table).
+        "archival" | "archive" | "long_term" => MemoryBlockType::Working,
+        _ => MemoryBlockType::Working, // Default to working memory.
     }
 }
 
@@ -930,7 +932,7 @@ mod tests {
         ));
         assert!(matches!(
             label_to_block_type("archival"),
-            MemoryBlockType::Archival
+            MemoryBlockType::Working
         ));
         assert!(matches!(
             label_to_block_type("random"),

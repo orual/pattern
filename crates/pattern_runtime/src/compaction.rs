@@ -408,9 +408,13 @@ async fn post_strategy_updates(
     // get archived.
     let before_position = compute_archive_boundary(turn_history, archived_count)?;
 
+    // Get a DB connection for the archive operations.
+    let conn = ctx.db().get().map_err(|e| RuntimeError::ProviderError {
+        reason: format!("db connection failed: {e}"),
+    })?;
+
     // Archive messages in DB.
-    pattern_db::queries::archive_messages(ctx.db().pool(), ctx.agent_id(), &before_position)
-        .await
+    pattern_db::queries::archive_messages(&conn, ctx.agent_id(), &before_position)
         .map_err(|e| RuntimeError::ProviderError {
             reason: format!("archive_messages failed: {e}"),
         })?;
@@ -431,16 +435,14 @@ async fn post_strategy_updates(
             depth: 0,
             created_at: chrono::Utc::now(),
         };
-        pattern_db::queries::create_archive_summary(ctx.db().pool(), &summary)
-            .await
+        pattern_db::queries::create_archive_summary(&conn, &summary)
             .map_err(|e| RuntimeError::ProviderError {
                 reason: format!("create_archive_summary failed: {e}"),
             })?;
     }
 
     // Reload summary head from DB.
-    let head = pattern_db::queries::get_summary_head(ctx.db().pool(), ctx.agent_id())
-        .await
+    let head = pattern_db::queries::get_summary_head(&conn, ctx.agent_id())
         .map_err(|e| RuntimeError::ProviderError {
             reason: format!("get_summary_head failed: {e}"),
         })?;

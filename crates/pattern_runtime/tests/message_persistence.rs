@@ -35,8 +35,7 @@ async fn create_test_agent(db: &pattern_db::ConstellationDb, id: &str) {
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
-    pattern_db::queries::create_agent(db.pool(), &agent)
-        .await
+    pattern_db::queries::create_agent(&db.get().unwrap(), &agent)
         .expect("create_test_agent failed");
 }
 
@@ -120,8 +119,7 @@ async fn single_text_turn_persists_user_and_assistant_messages() {
     assert_eq!(reply.turns[0].messages.len(), 1, "one assistant message");
 
     // Query the DB for persisted messages.
-    let rows = pattern_db::queries::get_messages(db.pool(), "agent-a", 100)
-        .await
+    let rows = pattern_db::queries::get_messages(&db.get().unwrap(), "agent-a", 100)
         .expect("query should succeed");
 
     // Expect 2 rows: 1 user input + 1 assistant output.
@@ -213,8 +211,7 @@ async fn two_step_exchange_accumulates_messages_in_db() {
     .expect("step 2 should succeed");
 
     // Query all messages (including archived, just in case).
-    let rows = pattern_db::queries::get_messages_with_archived(db.pool(), "agent-a", 100)
-        .await
+    let rows = pattern_db::queries::get_messages_with_archived(&db.get().unwrap(), "agent-a", 100)
         .expect("query should succeed");
 
     // 2 user + 2 assistant = 4 messages.
@@ -301,8 +298,7 @@ async fn tool_use_turn_persists_assistant_and_tool_result_messages() {
     assert_eq!(reply.turns.len(), 2);
 
     // Query DB.
-    let rows = pattern_db::queries::get_messages(db.pool(), "agent-a", 100)
-        .await
+    let rows = pattern_db::queries::get_messages(&db.get().unwrap(), "agent-a", 100)
         .expect("query should succeed");
 
     // Expected:
@@ -362,8 +358,7 @@ async fn upsert_idempotency_does_not_duplicate_messages() {
     .await
     .expect("step 1 should succeed");
 
-    let count_after_1 = pattern_db::queries::count_all_messages(db.pool(), "agent-a")
-        .await
+    let count_after_1 = pattern_db::queries::count_all_messages(&db.get().unwrap(), "agent-a")
         .expect("count should succeed");
     assert_eq!(count_after_1, 2, "2 messages after step 1");
 
@@ -381,8 +376,7 @@ async fn upsert_idempotency_does_not_duplicate_messages() {
     .await
     .expect("step 2 should succeed");
 
-    let count_after_2 = pattern_db::queries::count_all_messages(db.pool(), "agent-a")
-        .await
+    let count_after_2 = pattern_db::queries::count_all_messages(&db.get().unwrap(), "agent-a")
         .expect("count should succeed");
     assert_eq!(count_after_2, 4, "4 messages after step 2 (no duplicates)");
 }

@@ -114,8 +114,7 @@ fn render_block_type(bt: BlockType) -> &'static str {
     match bt {
         BlockType::Core => "core",
         BlockType::Working => "working",
-        BlockType::Archival => "archival",
-        BlockType::Log => "log",
+        _ => "working",
     }
 }
 

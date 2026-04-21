@@ -19,10 +19,9 @@ mcp-wrapper.sh
 **.car
 **.log.**
 **.json
-!**/.sqlx/*.json
 !crates/*/tests/data/*.json
 **.sql
-!**/migrations/*.sql
+!**/migrations/**/*.sql
 **.surql
 **/**.output
 

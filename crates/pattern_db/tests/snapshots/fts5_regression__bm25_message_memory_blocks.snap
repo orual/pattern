@@ -1,0 +1,7 @@
+---
+source: crates/pattern_db/tests/fts5_regression.rs
+assertion_line: 79
+expression: snapshot
+---
+- - msg_01
+  - -1.582

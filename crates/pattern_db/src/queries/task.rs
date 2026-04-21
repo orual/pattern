@@ -1,393 +1,229 @@
 //! ADHD task queries.
 
 use chrono::Utc;
-use sqlx::SqlitePool;
+use rusqlite::OptionalExtension;
 
 use crate::error::DbResult;
 use crate::models::{Task, TaskSummary, UserTaskPriority, UserTaskStatus};
+
+// ============================================================================
+// from_row implementations
+// ============================================================================
+
+impl Task {
+    pub(crate) fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get("id")?,
+            agent_id: row.get("agent_id")?,
+            title: row.get("title")?,
+            description: row.get("description")?,
+            status: row.get("status")?,
+            priority: row.get("priority")?,
+            due_at: row.get("due_at")?,
+            scheduled_at: row.get("scheduled_at")?,
+            completed_at: row.get("completed_at")?,
+            parent_task_id: row.get("parent_task_id")?,
+            tags: row.get("tags")?,
+            estimated_minutes: row.get("estimated_minutes")?,
+            actual_minutes: row.get("actual_minutes")?,
+            notes: row.get("notes")?,
+            created_at: row.get("created_at")?,
+            updated_at: row.get("updated_at")?,
+        })
+    }
+}
 
 // ============================================================================
 // Task CRUD
 // ============================================================================
 
 /// Create a new user task.
-pub async fn create_user_task(pool: &SqlitePool, task: &Task) -> DbResult<()> {
-    sqlx::query!(
-        r#"
-        INSERT INTO tasks (id, agent_id, title, description, status, priority, due_at, scheduled_at, completed_at, parent_task_id, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        "#,
-        task.id,
-        task.agent_id,
-        task.title,
-        task.description,
-        task.status,
-        task.priority,
-        task.due_at,
-        task.scheduled_at,
-        task.completed_at,
-        task.parent_task_id,
-        task.created_at,
-        task.updated_at,
-    )
-    .execute(pool)
-    .await?;
+pub fn create_user_task(conn: &rusqlite::Connection, task: &Task) -> DbResult<()> {
+    conn.execute(
+        "INSERT INTO tasks (id, agent_id, title, description, status, priority, due_at, scheduled_at, completed_at, parent_task_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        rusqlite::params![task.id, task.agent_id, task.title, task.description, task.status, task.priority, task.due_at, task.scheduled_at, task.completed_at, task.parent_task_id, task.created_at, task.updated_at],
+    )?;
     Ok(())
 }
 
 /// Get a user task by ID.
-pub async fn get_user_task(pool: &SqlitePool, id: &str) -> DbResult<Option<Task>> {
-    let task = sqlx::query_as!(
-        Task,
-        r#"
-        SELECT
-            id as "id!",
-            agent_id,
-            title as "title!",
-            description,
-            status as "status!: UserTaskStatus",
-            priority as "priority!: UserTaskPriority",
-            due_at as "due_at: _",
-            scheduled_at as "scheduled_at: _",
-            completed_at as "completed_at: _",
-            parent_task_id,
-            tags as "tags: _",
-            estimated_minutes,
-            actual_minutes,
-            notes,
-            created_at as "created_at!: _",
-            updated_at as "updated_at!: _"
-        FROM tasks WHERE id = ?
-        "#,
-        id
-    )
-    .fetch_optional(pool)
-    .await?;
-    Ok(task)
+pub fn get_user_task(conn: &rusqlite::Connection, id: &str) -> DbResult<Option<Task>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, agent_id, title, description, status, priority,
+                due_at, scheduled_at, completed_at, parent_task_id,
+                tags, estimated_minutes, actual_minutes, notes,
+                created_at, updated_at
+         FROM tasks WHERE id = ?1",
+    )?;
+    let result = stmt.query_row(rusqlite::params![id], Task::from_row).optional()?;
+    Ok(result)
 }
 
 /// List tasks for an agent (or constellation-level if agent_id is None).
-pub async fn list_tasks(
-    pool: &SqlitePool,
-    agent_id: Option<&str>,
-    include_completed: bool,
-) -> DbResult<Vec<Task>> {
-    let tasks = if include_completed {
-        match agent_id {
-            Some(aid) => {
-                sqlx::query_as!(
-                    Task,
-                    r#"
-                    SELECT
-                        id as "id!",
-                        agent_id,
-                        title as "title!",
-                        description,
-                        status as "status!: UserTaskStatus",
-                        priority as "priority!: UserTaskPriority",
-                        due_at as "due_at: _",
-                        scheduled_at as "scheduled_at: _",
-                        completed_at as "completed_at: _",
-                        parent_task_id,
-                        tags as "tags: _",
-                        estimated_minutes,
-                        actual_minutes,
-                        notes,
-                        created_at as "created_at!: _",
-                        updated_at as "updated_at!: _"
-                    FROM tasks WHERE agent_id = ? ORDER BY priority DESC, due_at ASC NULLS LAST
-                    "#,
-                    aid
-                )
-                .fetch_all(pool)
-                .await?
-            }
-            None => {
-                sqlx::query_as!(
-                    Task,
-                    r#"
-                    SELECT
-                        id as "id!",
-                        agent_id,
-                        title as "title!",
-                        description,
-                        status as "status!: UserTaskStatus",
-                        priority as "priority!: UserTaskPriority",
-                        due_at as "due_at: _",
-                        scheduled_at as "scheduled_at: _",
-                        completed_at as "completed_at: _",
-                        parent_task_id,
-                        tags as "tags: _",
-                        estimated_minutes,
-                        actual_minutes,
-                        notes,
-                        created_at as "created_at!: _",
-                        updated_at as "updated_at!: _"
-                    FROM tasks WHERE agent_id IS NULL ORDER BY priority DESC, due_at ASC NULLS LAST
-                    "#
-                )
-                .fetch_all(pool)
-                .await?
-            }
+pub fn list_tasks(conn: &rusqlite::Connection, agent_id: Option<&str>, include_completed: bool) -> DbResult<Vec<Task>> {
+    let sql = match (agent_id, include_completed) {
+        (Some(_), true) => {
+            "SELECT id, agent_id, title, description, status, priority,
+                    due_at, scheduled_at, completed_at, parent_task_id,
+                    tags, estimated_minutes, actual_minutes, notes,
+                    created_at, updated_at
+             FROM tasks WHERE agent_id = ?1 ORDER BY priority DESC, due_at ASC NULLS LAST"
         }
-    } else {
-        match agent_id {
-            Some(aid) => {
-                sqlx::query_as!(
-                    Task,
-                    r#"
-                    SELECT
-                        id as "id!",
-                        agent_id,
-                        title as "title!",
-                        description,
-                        status as "status!: UserTaskStatus",
-                        priority as "priority!: UserTaskPriority",
-                        due_at as "due_at: _",
-                        scheduled_at as "scheduled_at: _",
-                        completed_at as "completed_at: _",
-                        parent_task_id,
-                        tags as "tags: _",
-                        estimated_minutes,
-                        actual_minutes,
-                        notes,
-                        created_at as "created_at!: _",
-                        updated_at as "updated_at!: _"
-                    FROM tasks WHERE agent_id = ? AND status NOT IN ('completed', 'cancelled')
-                    ORDER BY priority DESC, due_at ASC NULLS LAST
-                    "#,
-                    aid
-                )
-                .fetch_all(pool)
-                .await?
-            }
-            None => {
-                sqlx::query_as!(
-                    Task,
-                    r#"
-                    SELECT
-                        id as "id!",
-                        agent_id,
-                        title as "title!",
-                        description,
-                        status as "status!: UserTaskStatus",
-                        priority as "priority!: UserTaskPriority",
-                        due_at as "due_at: _",
-                        scheduled_at as "scheduled_at: _",
-                        completed_at as "completed_at: _",
-                        parent_task_id,
-                        tags as "tags: _",
-                        estimated_minutes,
-                        actual_minutes,
-                        notes,
-                        created_at as "created_at!: _",
-                        updated_at as "updated_at!: _"
-                    FROM tasks WHERE agent_id IS NULL AND status NOT IN ('completed', 'cancelled')
-                    ORDER BY priority DESC, due_at ASC NULLS LAST
-                    "#
-                )
-                .fetch_all(pool)
-                .await?
-            }
+        (Some(_), false) => {
+            "SELECT id, agent_id, title, description, status, priority,
+                    due_at, scheduled_at, completed_at, parent_task_id,
+                    tags, estimated_minutes, actual_minutes, notes,
+                    created_at, updated_at
+             FROM tasks WHERE agent_id = ?1 AND status NOT IN ('completed', 'cancelled')
+             ORDER BY priority DESC, due_at ASC NULLS LAST"
+        }
+        (None, true) => {
+            "SELECT id, agent_id, title, description, status, priority,
+                    due_at, scheduled_at, completed_at, parent_task_id,
+                    tags, estimated_minutes, actual_minutes, notes,
+                    created_at, updated_at
+             FROM tasks WHERE agent_id IS NULL ORDER BY priority DESC, due_at ASC NULLS LAST"
+        }
+        (None, false) => {
+            "SELECT id, agent_id, title, description, status, priority,
+                    due_at, scheduled_at, completed_at, parent_task_id,
+                    tags, estimated_minutes, actual_minutes, notes,
+                    created_at, updated_at
+             FROM tasks WHERE agent_id IS NULL AND status NOT IN ('completed', 'cancelled')
+             ORDER BY priority DESC, due_at ASC NULLS LAST"
         }
     };
+
+    let mut stmt = conn.prepare(sql)?;
+    let mut tasks = Vec::new();
+    match agent_id {
+        Some(aid) => {
+            let rows = stmt.query_map(rusqlite::params![aid], Task::from_row)?;
+            for row in rows { tasks.push(row?); }
+        }
+        None => {
+            let rows = stmt.query_map([], Task::from_row)?;
+            for row in rows { tasks.push(row?); }
+        }
+    }
     Ok(tasks)
 }
 
 /// Get subtasks of a parent task.
-pub async fn get_subtasks(pool: &SqlitePool, parent_id: &str) -> DbResult<Vec<Task>> {
-    let tasks = sqlx::query_as!(
-        Task,
-        r#"
-        SELECT
-            id as "id!",
-            agent_id,
-            title as "title!",
-            description,
-            status as "status!: UserTaskStatus",
-            priority as "priority!: UserTaskPriority",
-            due_at as "due_at: _",
-            scheduled_at as "scheduled_at: _",
-            completed_at as "completed_at: _",
-            parent_task_id,
-            tags as "tags: _",
-            estimated_minutes,
-            actual_minutes,
-            notes,
-            created_at as "created_at!: _",
-            updated_at as "updated_at!: _"
-        FROM tasks WHERE parent_task_id = ? ORDER BY priority DESC, created_at ASC
-        "#,
-        parent_id
-    )
-    .fetch_all(pool)
-    .await?;
+pub fn get_subtasks(conn: &rusqlite::Connection, parent_id: &str) -> DbResult<Vec<Task>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, agent_id, title, description, status, priority,
+                due_at, scheduled_at, completed_at, parent_task_id,
+                tags, estimated_minutes, actual_minutes, notes,
+                created_at, updated_at
+         FROM tasks WHERE parent_task_id = ?1 ORDER BY priority DESC, created_at ASC",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![parent_id], Task::from_row)?;
+    let mut tasks = Vec::new();
+    for row in rows { tasks.push(row?); }
     Ok(tasks)
 }
 
 /// Get tasks due soon (within the next N hours).
-pub async fn get_tasks_due_soon(pool: &SqlitePool, hours: i64) -> DbResult<Vec<Task>> {
-    let now = Utc::now();
-    let deadline = now + chrono::Duration::hours(hours);
-    let tasks = sqlx::query_as!(
-        Task,
-        r#"
-        SELECT
-            id as "id!",
-            agent_id,
-            title as "title!",
-            description,
-            status as "status!: UserTaskStatus",
-            priority as "priority!: UserTaskPriority",
-            due_at as "due_at: _",
-            scheduled_at as "scheduled_at: _",
-            completed_at as "completed_at: _",
-            parent_task_id,
-            tags as "tags: _",
-            estimated_minutes,
-            actual_minutes,
-            notes,
-            created_at as "created_at!: _",
-            updated_at as "updated_at!: _"
-        FROM tasks
-        WHERE due_at IS NOT NULL
-          AND due_at <= ?
-          AND status NOT IN ('completed', 'cancelled')
-        ORDER BY due_at ASC
-        "#,
-        deadline
-    )
-    .fetch_all(pool)
-    .await?;
+pub fn get_tasks_due_soon(conn: &rusqlite::Connection, hours: i64) -> DbResult<Vec<Task>> {
+    let deadline = Utc::now() + chrono::Duration::hours(hours);
+    let mut stmt = conn.prepare(
+        "SELECT id, agent_id, title, description, status, priority,
+                due_at, scheduled_at, completed_at, parent_task_id,
+                tags, estimated_minutes, actual_minutes, notes,
+                created_at, updated_at
+         FROM tasks
+         WHERE due_at IS NOT NULL AND due_at <= ?1 AND status NOT IN ('completed', 'cancelled')
+         ORDER BY due_at ASC",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![deadline], Task::from_row)?;
+    let mut tasks = Vec::new();
+    for row in rows { tasks.push(row?); }
     Ok(tasks)
 }
 
 /// Update user task status.
-pub async fn update_user_task_status(
-    pool: &SqlitePool,
-    id: &str,
-    status: UserTaskStatus,
-) -> DbResult<bool> {
+pub fn update_user_task_status(conn: &rusqlite::Connection, id: &str, status: UserTaskStatus) -> DbResult<bool> {
     let now = Utc::now();
-    let completed_at = if status == UserTaskStatus::Completed {
-        Some(now)
-    } else {
-        None
-    };
-
-    let result = sqlx::query!(
-        r#"
-        UPDATE tasks SET status = ?, completed_at = COALESCE(?, completed_at), updated_at = ? WHERE id = ?
-        "#,
-        status,
-        completed_at,
-        now,
-        id,
-    )
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected() > 0)
+    let completed_at = if status == UserTaskStatus::Completed { Some(now) } else { None };
+    let count = conn.execute(
+        "UPDATE tasks SET status = ?1, completed_at = COALESCE(?2, completed_at), updated_at = ?3 WHERE id = ?4",
+        rusqlite::params![status, completed_at, now, id],
+    )?;
+    Ok(count > 0)
 }
 
 /// Update user task priority.
-pub async fn update_user_task_priority(
-    pool: &SqlitePool,
-    id: &str,
-    priority: UserTaskPriority,
-) -> DbResult<bool> {
+pub fn update_user_task_priority(conn: &rusqlite::Connection, id: &str, priority: UserTaskPriority) -> DbResult<bool> {
     let now = Utc::now();
-    let result = sqlx::query!(
-        "UPDATE tasks SET priority = ?, updated_at = ? WHERE id = ?",
-        priority,
-        now,
-        id,
-    )
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected() > 0)
+    let count = conn.execute(
+        "UPDATE tasks SET priority = ?1, updated_at = ?2 WHERE id = ?3",
+        rusqlite::params![priority, now, id],
+    )?;
+    Ok(count > 0)
 }
 
 /// Update a user task.
-pub async fn update_user_task(pool: &SqlitePool, task: &Task) -> DbResult<bool> {
-    let result = sqlx::query!(
-        r#"
-        UPDATE tasks
-        SET title = ?, description = ?, status = ?, priority = ?,
-            due_at = ?, scheduled_at = ?, completed_at = ?,
-            parent_task_id = ?, updated_at = ?
-        WHERE id = ?
-        "#,
-        task.title,
-        task.description,
-        task.status,
-        task.priority,
-        task.due_at,
-        task.scheduled_at,
-        task.completed_at,
-        task.parent_task_id,
-        task.updated_at,
-        task.id,
-    )
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected() > 0)
+pub fn update_user_task(conn: &rusqlite::Connection, task: &Task) -> DbResult<bool> {
+    let count = conn.execute(
+        "UPDATE tasks SET title = ?1, description = ?2, status = ?3, priority = ?4,
+             due_at = ?5, scheduled_at = ?6, completed_at = ?7,
+             parent_task_id = ?8, updated_at = ?9
+         WHERE id = ?10",
+        rusqlite::params![task.title, task.description, task.status, task.priority, task.due_at, task.scheduled_at, task.completed_at, task.parent_task_id, task.updated_at, task.id],
+    )?;
+    Ok(count > 0)
 }
 
 /// Delete a user task (and its subtasks via CASCADE).
-pub async fn delete_user_task(pool: &SqlitePool, id: &str) -> DbResult<bool> {
-    let result = sqlx::query!("DELETE FROM tasks WHERE id = ?", id)
-        .execute(pool)
-        .await?;
-    Ok(result.rows_affected() > 0)
+pub fn delete_user_task(conn: &rusqlite::Connection, id: &str) -> DbResult<bool> {
+    let count = conn.execute("DELETE FROM tasks WHERE id = ?1", rusqlite::params![id])?;
+    Ok(count > 0)
 }
 
 /// Get task summaries for quick listing.
-pub async fn get_task_summaries(
-    pool: &SqlitePool,
-    agent_id: Option<&str>,
-) -> DbResult<Vec<TaskSummary>> {
-    let summaries = match agent_id {
-        Some(aid) => {
-            sqlx::query_as!(
-                TaskSummary,
-                r#"
-                SELECT
-                    t.id as "id!",
-                    t.title as "title!",
-                    t.status as "status!: UserTaskStatus",
-                    t.priority as "priority!: UserTaskPriority",
-                    t.due_at as "due_at: _",
-                    t.parent_task_id,
-                    (SELECT COUNT(*) FROM tasks WHERE parent_task_id = t.id) as "subtask_count: i64"
-                FROM tasks t
-                WHERE t.agent_id = ? AND t.status NOT IN ('completed', 'cancelled')
-                ORDER BY t.priority DESC, t.due_at ASC NULLS LAST
-                "#,
-                aid
-            )
-            .fetch_all(pool)
-            .await?
+pub fn get_task_summaries(conn: &rusqlite::Connection, agent_id: Option<&str>) -> DbResult<Vec<TaskSummary>> {
+    let sql = match agent_id {
+        Some(_) => {
+            "SELECT t.id, t.title, t.status, t.priority, t.due_at, t.parent_task_id,
+                    (SELECT COUNT(*) FROM tasks WHERE parent_task_id = t.id) as subtask_count
+             FROM tasks t
+             WHERE t.agent_id = ?1 AND t.status NOT IN ('completed', 'cancelled')
+             ORDER BY t.priority DESC, t.due_at ASC NULLS LAST"
         }
         None => {
-            sqlx::query_as!(
-                TaskSummary,
-                r#"
-                SELECT
-                    t.id as "id!",
-                    t.title as "title!",
-                    t.status as "status!: UserTaskStatus",
-                    t.priority as "priority!: UserTaskPriority",
-                    t.due_at as "due_at: _",
-                    t.parent_task_id,
-                    (SELECT COUNT(*) FROM tasks WHERE parent_task_id = t.id) as "subtask_count: i64"
-                FROM tasks t
-                WHERE t.agent_id IS NULL AND t.status NOT IN ('completed', 'cancelled')
-                ORDER BY t.priority DESC, t.due_at ASC NULLS LAST
-                "#
-            )
-            .fetch_all(pool)
-            .await?
+            "SELECT t.id, t.title, t.status, t.priority, t.due_at, t.parent_task_id,
+                    (SELECT COUNT(*) FROM tasks WHERE parent_task_id = t.id) as subtask_count
+             FROM tasks t
+             WHERE t.agent_id IS NULL AND t.status NOT IN ('completed', 'cancelled')
+             ORDER BY t.priority DESC, t.due_at ASC NULLS LAST"
         }
     };
+
+    let mut stmt = conn.prepare(sql)?;
+    let mapper = |row: &rusqlite::Row| {
+        Ok(TaskSummary {
+            id: row.get("id")?,
+            title: row.get("title")?,
+            status: row.get("status")?,
+            priority: row.get("priority")?,
+            due_at: row.get("due_at")?,
+            parent_task_id: row.get("parent_task_id")?,
+            subtask_count: row.get("subtask_count")?,
+        })
+    };
+
+    let mut summaries = Vec::new();
+    match agent_id {
+        Some(aid) => {
+            let rows = stmt.query_map(rusqlite::params![aid], mapper)?;
+            for row in rows { summaries.push(row?); }
+        }
+        None => {
+            let rows = stmt.query_map([], mapper)?;
+            for row in rows { summaries.push(row?); }
+        }
+    }
     Ok(summaries)
 }

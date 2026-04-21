@@ -409,9 +409,7 @@ fn render_block_for_snapshot(block: &StructuredDocument, visible: bool) -> Rende
     let bt = block.block_type();
     let block_type_str = match bt {
         BlockType::Core => "core",
-        BlockType::Working => "working",
-        BlockType::Archival => "archival",
-        BlockType::Log => "log",
+        BlockType::Working | _ => "working",
     };
     let permission = block.permission().to_string();
     let content = block.render();
@@ -686,7 +684,7 @@ fn block_visibility_from_hashes(
     use pattern_core::types::memory_types::BlockType;
     match block.block_type() {
         BlockType::Core => true,
-        BlockType::Working => {
+        BlockType::Working | _ => {
             let label = block.label();
             let is_pinned = block.is_pinned();
             let is_refd = block_refs.iter().any(|r| r.label.as_str() == label);
@@ -697,7 +695,6 @@ fn block_visibility_from_hashes(
                 false
             }
         }
-        BlockType::Archival | BlockType::Log => false,
     }
 }
 
@@ -807,10 +804,13 @@ async fn persist_messages(
     batch_type: pattern_db::models::BatchType,
     step_label: &str,
 ) -> Result<(), RuntimeError> {
+    let conn = db.get().map_err(|e| RuntimeError::DatabasePersistenceFailed {
+        step: step_label.to_string(),
+        reason: e.to_string(),
+    })?;
     for msg in messages {
         let db_msg = to_db_message(msg, agent_id, batch_type)?;
-        pattern_db::queries::upsert_message(db.pool(), &db_msg)
-            .await
+        pattern_db::queries::upsert_message(&conn, &db_msg)
             .map_err(|e| RuntimeError::DatabasePersistenceFailed {
                 step: step_label.to_string(),
                 reason: e.to_string(),
@@ -1952,8 +1952,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
-        pattern_db::queries::create_agent(db.pool(), &agent)
-            .await
+        pattern_db::queries::create_agent(&db.get().unwrap(), &agent)
             .expect("create_test_agent_row");
     }
 

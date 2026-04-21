@@ -159,7 +159,6 @@ pub mod memory {
                         ])
                     }
                 }
-                _ => Ok(Vec::new()),
             }
         }
 

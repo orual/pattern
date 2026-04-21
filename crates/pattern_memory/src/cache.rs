@@ -19,7 +19,7 @@ use pattern_core::types::memory_types::{
 };
 use pattern_db::ConstellationDb;
 use serde_json::Value as JsonValue;
-use sqlx::types::Json as SqlxJson;
+use pattern_db::Json;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -86,12 +86,11 @@ impl MemoryCache {
     ) -> MemoryResult<Option<StructuredDocument>> {
         // 1. Check access FIRST (always) - DB is source of truth
         let access_result = pattern_db::queries::check_block_access(
-            self.db.pool(),
+            &*self.db.get()?,
             agent_id, // requester
             agent_id, // owner (same for owned blocks)
             label,
-        )
-        .await?;
+        )?;
 
         tracing::debug!(
             "Access Result: {:?}, agent: {}, label: {}",
@@ -119,7 +118,7 @@ impl MemoryCache {
 
             // Check for new updates from DB since we last synced
             let updates =
-                pattern_db::queries::get_updates_since(self.db.pool(), &block_id, last_seq).await?;
+                pattern_db::queries::get_updates_since(&*self.db.get()?, &block_id, last_seq)?;
 
             // Re-acquire mutable lock to apply updates and update permission from DB
             {
@@ -166,7 +165,7 @@ impl MemoryCache {
     ) -> MemoryResult<Option<CachedBlock>> {
         // Get block from database
         let block =
-            pattern_db::queries::get_block_by_label(self.db.pool(), agent_id, label).await?;
+            pattern_db::queries::get_block_by_label(&*self.db.get()?, agent_id, label)?;
 
         let block = match block {
             Some(b) if b.is_active => b,
@@ -186,7 +185,7 @@ impl MemoryCache {
         // Get and apply any updates since the snapshot.
         // TODO(post-foundation / checkpointing): use the checkpoint here as the starting snapshot
         let (_checkpoint, updates) =
-            pattern_db::queries::get_checkpoint_and_updates(self.db.pool(), &block.id).await?;
+            pattern_db::queries::get_checkpoint_and_updates(&*self.db.get()?, &block.id)?;
 
         // Create StructuredDocument from snapshot with metadata
         let doc = if block.loro_snapshot.is_empty() {
@@ -219,7 +218,7 @@ impl MemoryCache {
     pub async fn persist(&self, agent_id: &str, label: &str) -> MemoryResult<()> {
         // Get block_id from DB first
         let block =
-            pattern_db::queries::get_block_by_label(self.db.pool(), agent_id, label).await?;
+            pattern_db::queries::get_block_by_label(&*self.db.get()?, agent_id, label)?;
         let block_id = match block {
             Some(b) => b.id,
             None => {
@@ -266,13 +265,12 @@ impl MemoryCache {
             // Encode the frontier for storage (enables undo to this exact state)
             let frontier_bytes = new_frontier.encode();
             let seq = pattern_db::queries::store_update(
-                self.db.pool(),
+                &mut *self.db.get()?,
                 &block_id,
                 &blob,
                 Some(&frontier_bytes),
                 Some("agent"),
-            )
-            .await?;
+            )?;
 
             new_seq = Some(seq);
         }
@@ -287,7 +285,7 @@ impl MemoryCache {
         // Only update the preview, don't touch loro_snapshot.
         // The snapshot may contain imported data (e.g., from CAR files) that
         // we must not overwrite. Incremental updates go to memory_block_updates.
-        pattern_db::queries::update_block_preview(self.db.pool(), &block_id, preview_str).await?;
+        pattern_db::queries::update_block_preview(&*self.db.get()?, &block_id, preview_str)?;
 
         // Now re-acquire the lock to update the cache entry
         let mut entry = self
@@ -310,7 +308,7 @@ impl MemoryCache {
     /// Helper to get block_id from agent_id and label
     async fn get_block_id(&self, agent_id: &str, label: &str) -> MemoryResult<Option<String>> {
         let block =
-            pattern_db::queries::get_block_by_label(self.db.pool(), agent_id, label).await?;
+            pattern_db::queries::get_block_by_label(&*self.db.get()?, agent_id, label)?;
         Ok(block.map(|b| b.id))
     }
 
@@ -463,7 +461,7 @@ impl MemoryStore for MemoryCache {
             pinned: false,
             loro_snapshot,
             content_preview: None,
-            metadata: Some(SqlxJson(metadata_json)),
+            metadata: Some(Json(metadata_json)),
             embedding_model: None,
             is_active: true,
             frontier: Some(frontier.encode()),
@@ -473,7 +471,7 @@ impl MemoryStore for MemoryCache {
         };
 
         // Store in DB
-        pattern_db::queries::create_block(self.db.pool(), &db_block).await?;
+        pattern_db::queries::create_block(&*self.db.get()?, &db_block)?;
 
         // Add to cache (metadata is embedded in doc)
         let cached_block = CachedBlock {
@@ -505,14 +503,14 @@ impl MemoryStore for MemoryCache {
     ) -> MemoryResult<Option<BlockMetadata>> {
         // Query DB for block metadata without loading full document
         let block =
-            pattern_db::queries::get_block_by_label(self.db.pool(), agent_id, label).await?;
+            pattern_db::queries::get_block_by_label(&*self.db.get()?, agent_id, label)?;
 
         Ok(block.as_ref().map(db_block_to_metadata))
     }
 
     async fn list_blocks(&self, agent_id: &str) -> MemoryResult<Vec<BlockMetadata>> {
         // Query DB for all blocks for agent
-        let blocks = pattern_db::queries::list_blocks(self.db.pool(), agent_id).await?;
+        let blocks = pattern_db::queries::list_blocks(&*self.db.get()?, agent_id)?;
 
         Ok(blocks.iter().map(db_block_to_metadata).collect())
     }
@@ -524,8 +522,7 @@ impl MemoryStore for MemoryCache {
     ) -> MemoryResult<Vec<BlockMetadata>> {
         // Query DB filtered by type
         let blocks =
-            pattern_db::queries::list_blocks_by_type(self.db.pool(), agent_id, block_type.into())
-                .await?;
+            pattern_db::queries::list_blocks_by_type(&*self.db.get()?, agent_id, block_type.into())?;
 
         Ok(blocks.iter().map(db_block_to_metadata).collect())
     }
@@ -536,7 +533,7 @@ impl MemoryStore for MemoryCache {
     ) -> MemoryResult<Vec<BlockMetadata>> {
         // Query DB for all blocks with matching label prefix (across all agents)
         let blocks =
-            pattern_db::queries::list_blocks_by_label_prefix(self.db.pool(), prefix).await?;
+            pattern_db::queries::list_blocks_by_label_prefix(&*self.db.get()?, prefix)?;
 
         Ok(blocks.iter().map(db_block_to_metadata).collect())
     }
@@ -544,7 +541,7 @@ impl MemoryStore for MemoryCache {
     async fn delete_block(&self, agent_id: &str, label: &str) -> MemoryResult<()> {
         // Get block ID first
         let block =
-            pattern_db::queries::get_block_by_label(self.db.pool(), agent_id, label).await?;
+            pattern_db::queries::get_block_by_label(&*self.db.get()?, agent_id, label)?;
 
         if let Some(block) = block {
             // Evict from cache first (will persist if dirty)
@@ -553,7 +550,7 @@ impl MemoryStore for MemoryCache {
             }
 
             // Soft-delete in DB
-            pattern_db::queries::deactivate_block(self.db.pool(), &block.id).await?;
+            pattern_db::queries::deactivate_block(&*self.db.get()?, &block.id)?;
         }
 
         Ok(())
@@ -593,14 +590,14 @@ impl MemoryStore for MemoryCache {
             id: entry_id.clone(),
             agent_id: agent_id.to_string(),
             content: content.to_string(),
-            metadata: metadata.map(sqlx::types::Json),
+            metadata: metadata.map(pattern_db::Json),
             chunk_index: 0,
             parent_entry_id: None,
             created_at: Utc::now(),
         };
 
         // Store in DB
-        pattern_db::queries::create_archival_entry(self.db.pool(), &entry).await?;
+        pattern_db::queries::create_archival_entry(&*self.db.get()?, &entry)?;
 
         Ok(entry_id)
     }
@@ -612,20 +609,21 @@ impl MemoryStore for MemoryCache {
         limit: usize,
     ) -> MemoryResult<Vec<ArchivalEntry>> {
         // Use rich search with FTS mode (no embedder available in MemoryCache yet)
-        let results = pattern_db::search::search(self.db.pool())
+        let search_conn = self.db.get()?;
+        let results = pattern_db::search::search(&search_conn)
             .text(query)
             .mode(pattern_db::search::SearchMode::FtsOnly)
             .limit(limit as i64)
             .filter(pattern_db::search::ContentFilter::archival(Some(agent_id)))
-            .execute()
-            .await?;
+            .execute()?;
 
-        // Convert search results to ArchivalEntry
+        // Convert search results to ArchivalEntry.
         let mut entries = Vec::new();
         for result in results {
-            // Get the full archival entry from DB by ID
+            // Get the full archival entry from DB by ID.
+            // Reuse search_conn to avoid deadlocking the pool.
             if let Some(entry) =
-                pattern_db::queries::get_archival_entry(self.db.pool(), &result.id).await?
+                pattern_db::queries::get_archival_entry(&search_conn, &result.id)?
             {
                 entries.push(db_archival_to_archival(&entry));
             }
@@ -637,7 +635,7 @@ impl MemoryStore for MemoryCache {
     async fn delete_archival(&self, id: &str) -> MemoryResult<()> {
         // Delete from DB
         // NOTE fix to soft-delete
-        pattern_db::queries::delete_archival_entry(self.db.pool(), id).await?;
+        pattern_db::queries::delete_archival_entry(&*self.db.get()?, id)?;
         Ok(())
     }
 
@@ -699,7 +697,8 @@ impl MemoryStore for MemoryCache {
         };
 
         // Build search with pattern_db
-        let mut builder = pattern_db::search::search(self.db.pool())
+        let search_conn = self.db.get()?;
+        let mut builder = pattern_db::search::search(&search_conn)
             .text(query)
             .mode(effective_mode)
             .limit(options.limit as i64);
@@ -724,12 +723,14 @@ impl MemoryStore for MemoryCache {
                 agent_id: Some(agent_id.to_string()),
             });
         } else {
-            // Multiple content types - execute separate queries and combine results
+            // Multiple content types - execute separate queries and combine results.
+            // Drop the builder (and its borrow on search_conn) before reusing the connection.
+            drop(builder);
             let mut all_results = Vec::new();
 
             for content_type in &options.content_types {
                 let db_content_type = content_type.to_db_content_type();
-                let mut type_builder = pattern_db::search::search(self.db.pool())
+                let mut type_builder = pattern_db::search::search(&search_conn)
                     .text(query)
                     .mode(effective_mode)
                     .limit(options.limit as i64)
@@ -743,7 +744,7 @@ impl MemoryStore for MemoryCache {
                     type_builder = type_builder.embedding(embedding);
                 }
 
-                let results = type_builder.execute().await?;
+                let results = type_builder.execute()?;
                 all_results.extend(results);
             }
 
@@ -763,7 +764,7 @@ impl MemoryStore for MemoryCache {
         }
 
         // Execute search
-        let results = builder.execute().await?;
+        let results = builder.execute()?;
 
         // Convert to MemorySearchResult
         Ok(results
@@ -827,7 +828,8 @@ impl MemoryStore for MemoryCache {
         };
 
         // Build search with pattern_db (no agent_id filter for constellation-wide search)
-        let mut builder = pattern_db::search::search(self.db.pool())
+        let search_conn = self.db.get()?;
+        let mut builder = pattern_db::search::search(&search_conn)
             .text(query)
             .mode(effective_mode)
             .limit(options.limit as i64);
@@ -852,12 +854,14 @@ impl MemoryStore for MemoryCache {
                 agent_id: None, // No agent_id filter = constellation-wide
             });
         } else {
-            // Multiple content types - execute separate queries and combine results
+            // Multiple content types - execute separate queries and combine results.
+            // Drop the builder (and its borrow on search_conn) before reusing the connection.
+            drop(builder);
             let mut all_results = Vec::new();
 
             for content_type in &options.content_types {
                 let db_content_type = content_type.to_db_content_type();
-                let mut type_builder = pattern_db::search::search(self.db.pool())
+                let mut type_builder = pattern_db::search::search(&search_conn)
                     .text(query)
                     .mode(effective_mode)
                     .limit(options.limit as i64)
@@ -871,7 +875,7 @@ impl MemoryStore for MemoryCache {
                     type_builder = type_builder.embedding(embedding);
                 }
 
-                let results = type_builder.execute().await?;
+                let results = type_builder.execute()?;
                 all_results.extend(results);
             }
 
@@ -891,7 +895,7 @@ impl MemoryStore for MemoryCache {
         }
 
         // Execute search
-        let results = builder.execute().await?;
+        let results = builder.execute()?;
 
         // Convert to MemorySearchResult
         Ok(results
@@ -901,7 +905,7 @@ impl MemoryStore for MemoryCache {
     }
 
     async fn list_shared_blocks(&self, agent_id: &str) -> MemoryResult<Vec<SharedBlockInfo>> {
-        let shared = pattern_db::queries::get_shared_blocks(self.db.pool(), agent_id).await?;
+        let shared = pattern_db::queries::get_shared_blocks(&*self.db.get()?, agent_id)?;
 
         Ok(shared
             .into_iter()
@@ -925,12 +929,11 @@ impl MemoryStore for MemoryCache {
     ) -> MemoryResult<Option<StructuredDocument>> {
         // 1. Check access FIRST - DB is source of truth
         let access_result = pattern_db::queries::check_block_access(
-            self.db.pool(),
+            &*self.db.get()?,
             requester_agent_id,
             owner_agent_id,
             label,
-        )
-        .await?;
+        )?;
 
         let (block_id, shared_permission) = match access_result {
             Some((id, perm)) => (id, perm),
@@ -947,7 +950,7 @@ impl MemoryStore for MemoryCache {
 
             // Check for new updates from DB since we last synced
             let updates =
-                pattern_db::queries::get_updates_since(self.db.pool(), &block_id, last_seq).await?;
+                pattern_db::queries::get_updates_since(&*self.db.get()?, &block_id, last_seq)?;
 
             // Re-acquire mutable lock to apply updates
             let mut entry = self.blocks.get_mut(&block_id).unwrap();
@@ -990,7 +993,7 @@ impl MemoryStore for MemoryCache {
     ) -> MemoryResult<()> {
         // Get block ID from DB
         let block =
-            pattern_db::queries::get_block_by_label(self.db.pool(), agent_id, label).await?;
+            pattern_db::queries::get_block_by_label(&*self.db.get()?, agent_id, label)?;
 
         let block = block.ok_or_else(|| MemoryError::NotFound {
             agent_id: agent_id.to_string(),
@@ -998,7 +1001,7 @@ impl MemoryStore for MemoryCache {
         })?;
 
         // Update in database
-        pattern_db::queries::update_block_pinned(self.db.pool(), &block.id, pinned).await?;
+        pattern_db::queries::update_block_pinned(&*self.db.get()?, &block.id, pinned)?;
 
         // Update in cache if loaded
         if let Some(mut cached) = self.blocks.get_mut(&block.id) {
@@ -1017,7 +1020,7 @@ impl MemoryStore for MemoryCache {
     ) -> MemoryResult<()> {
         // Get block ID from DB
         let block =
-            pattern_db::queries::get_block_by_label(self.db.pool(), agent_id, label).await?;
+            pattern_db::queries::get_block_by_label(&*self.db.get()?, agent_id, label)?;
 
         let block = block.ok_or_else(|| MemoryError::NotFound {
             agent_id: agent_id.to_string(),
@@ -1025,8 +1028,7 @@ impl MemoryStore for MemoryCache {
         })?;
 
         // Update in database
-        pattern_db::queries::update_block_type(self.db.pool(), &block.id, block_type.into())
-            .await?;
+        pattern_db::queries::update_block_type(&*self.db.get()?, &block.id, block_type.into())?;
 
         // Update in cache if loaded
         if let Some(mut cached) = self.blocks.get_mut(&block.id) {
@@ -1045,7 +1047,7 @@ impl MemoryStore for MemoryCache {
     ) -> MemoryResult<()> {
         // Get block from DB
         let block =
-            pattern_db::queries::get_block_by_label(self.db.pool(), agent_id, label).await?;
+            pattern_db::queries::get_block_by_label(&*self.db.get()?, agent_id, label)?;
 
         let block = block.ok_or_else(|| MemoryError::NotFound {
             agent_id: agent_id.to_string(),
@@ -1081,8 +1083,7 @@ impl MemoryStore for MemoryCache {
         let metadata_json = serde_json::Value::Object(metadata);
 
         // Update in database
-        pattern_db::queries::update_block_metadata(self.db.pool(), &block.id, &metadata_json)
-            .await?;
+        pattern_db::queries::update_block_metadata(&*self.db.get()?, &block.id, &metadata_json)?;
 
         // Update in cache if loaded - need to update the document's schema
         if let Some(mut cached) = self.blocks.get_mut(&block.id) {
@@ -1101,7 +1102,7 @@ impl MemoryStore for MemoryCache {
     ) -> MemoryResult<()> {
         // Get block from DB
         let block =
-            pattern_db::queries::get_block_by_label(self.db.pool(), agent_id, label).await?;
+            pattern_db::queries::get_block_by_label(&*self.db.get()?, agent_id, label)?;
 
         let block = block.ok_or_else(|| MemoryError::NotFound {
             agent_id: agent_id.to_string(),
@@ -1111,15 +1112,14 @@ impl MemoryStore for MemoryCache {
         // Update in database via the shared update_block_config helper
         // (only description is set; other fields are preserved).
         pattern_db::queries::update_block_config(
-            self.db.pool(),
+            &mut *self.db.get()?,
             &block.id,
             None,
             None,
             Some(description),
             None,
             None,
-        )
-        .await?;
+        )?;
 
         // Update in cache if loaded.
         if let Some(mut cached) = self.blocks.get_mut(&block.id) {
@@ -1133,7 +1133,7 @@ impl MemoryStore for MemoryCache {
     async fn undo_block(&self, agent_id: &str, label: &str) -> MemoryResult<bool> {
         // Get block ID from DB
         let block =
-            pattern_db::queries::get_block_by_label(self.db.pool(), agent_id, label).await?;
+            pattern_db::queries::get_block_by_label(&*self.db.get()?, agent_id, label)?;
 
         let block = block.ok_or_else(|| MemoryError::NotFound {
             agent_id: agent_id.to_string(),
@@ -1142,27 +1142,26 @@ impl MemoryStore for MemoryCache {
 
         // Deactivate the latest update (marks it as not on active branch)
         let deactivated_seq =
-            pattern_db::queries::deactivate_latest_update(self.db.pool(), &block.id).await?;
+            pattern_db::queries::deactivate_latest_update(&*self.db.get()?, &block.id)?;
 
         if deactivated_seq.is_none() {
             return Ok(false); // Nothing to undo
         }
 
         // Update the block's frontier to the new latest active update's frontier
-        let new_latest = pattern_db::queries::get_latest_update(self.db.pool(), &block.id).await?;
+        let new_latest = pattern_db::queries::get_latest_update(&*self.db.get()?, &block.id)?;
 
         if let Some(update) = new_latest {
             if let Some(frontier_bytes) = &update.frontier {
                 pattern_db::queries::update_block_frontier(
-                    self.db.pool(),
+                    &*self.db.get()?,
                     &block.id,
                     frontier_bytes,
-                )
-                .await?;
+                )?;
             }
         } else {
             // No active updates left - clear frontier to initial state
-            pattern_db::queries::update_block_frontier(self.db.pool(), &block.id, &[]).await?;
+            pattern_db::queries::update_block_frontier(&*self.db.get()?, &block.id, &[])?;
         }
 
         // Evict from cache - next access will load the undone state from DB.
@@ -1176,7 +1175,7 @@ impl MemoryStore for MemoryCache {
     async fn redo_block(&self, agent_id: &str, label: &str) -> MemoryResult<bool> {
         // Get block ID from DB
         let block =
-            pattern_db::queries::get_block_by_label(self.db.pool(), agent_id, label).await?;
+            pattern_db::queries::get_block_by_label(&*self.db.get()?, agent_id, label)?;
 
         let block = block.ok_or_else(|| MemoryError::NotFound {
             agent_id: agent_id.to_string(),
@@ -1185,20 +1184,19 @@ impl MemoryStore for MemoryCache {
 
         // Reactivate the next inactive update
         let reactivated_seq =
-            pattern_db::queries::reactivate_next_update(self.db.pool(), &block.id).await?;
+            pattern_db::queries::reactivate_next_update(&*self.db.get()?, &block.id)?;
 
         if reactivated_seq.is_none() {
             return Ok(false); // Nothing to redo
         }
 
         // Update the block's frontier to the new latest active update's frontier
-        let new_latest = pattern_db::queries::get_latest_update(self.db.pool(), &block.id).await?;
+        let new_latest = pattern_db::queries::get_latest_update(&*self.db.get()?, &block.id)?;
 
         if let Some(update) = new_latest
             && let Some(frontier_bytes) = &update.frontier
         {
-            pattern_db::queries::update_block_frontier(self.db.pool(), &block.id, frontier_bytes)
-                .await?;
+            pattern_db::queries::update_block_frontier(&*self.db.get()?, &block.id, frontier_bytes)?;
         }
 
         // Evict from cache - next access will load the redone state from DB.
@@ -1210,7 +1208,7 @@ impl MemoryStore for MemoryCache {
     async fn undo_depth(&self, agent_id: &str, label: &str) -> MemoryResult<usize> {
         // Get block ID from DB
         let block =
-            pattern_db::queries::get_block_by_label(self.db.pool(), agent_id, label).await?;
+            pattern_db::queries::get_block_by_label(&*self.db.get()?, agent_id, label)?;
 
         let block = block.ok_or_else(|| MemoryError::NotFound {
             agent_id: agent_id.to_string(),
@@ -1218,7 +1216,7 @@ impl MemoryStore for MemoryCache {
         })?;
 
         // Count active updates
-        let count = pattern_db::queries::count_undo_steps(self.db.pool(), &block.id).await?;
+        let count = pattern_db::queries::count_undo_steps(&*self.db.get()?, &block.id)?;
 
         Ok(count as usize)
     }
@@ -1226,7 +1224,7 @@ impl MemoryStore for MemoryCache {
     async fn redo_depth(&self, agent_id: &str, label: &str) -> MemoryResult<usize> {
         // Get block ID from DB
         let block =
-            pattern_db::queries::get_block_by_label(self.db.pool(), agent_id, label).await?;
+            pattern_db::queries::get_block_by_label(&*self.db.get()?, agent_id, label)?;
 
         let block = block.ok_or_else(|| MemoryError::NotFound {
             agent_id: agent_id.to_string(),
@@ -1234,7 +1232,7 @@ impl MemoryStore for MemoryCache {
         })?;
 
         // Count inactive updates after active branch
-        let count = pattern_db::queries::count_redo_steps(self.db.pool(), &block.id).await?;
+        let count = pattern_db::queries::count_redo_steps(&*self.db.get()?, &block.id)?;
 
         Ok(count as usize)
     }
@@ -1247,8 +1245,7 @@ mod tests {
 
     async fn test_dbs() -> (tempfile::TempDir, Arc<ConstellationDb>) {
         let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("constellation.db");
-        let dbs = Arc::new(ConstellationDb::open(db_path).await.unwrap());
+        let dbs = Arc::new(ConstellationDb::open_in_memory().unwrap());
         (dir, dbs)
     }
 
@@ -1262,15 +1259,14 @@ mod tests {
             model_provider: "anthropic".to_string(),
             model_name: "claude".to_string(),
             system_prompt: "test".to_string(),
-            config: Default::default(),
-            enabled_tools: Default::default(),
+            config: pattern_db::Json(serde_json::json!({})),
+            enabled_tools: pattern_db::Json(vec![]),
             tool_rules: None,
             status: pattern_db::models::AgentStatus::Active,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
-        pattern_db::queries::create_agent(dbs.pool(), &agent)
-            .await
+        pattern_db::queries::create_agent(&dbs.get().unwrap(), &agent)
             .expect("Failed to create test agent");
         agent_id.to_string()
     }
@@ -1309,8 +1305,7 @@ mod tests {
             updated_at: chrono::Utc::now(),
         };
 
-        pattern_db::queries::create_block(dbs.pool(), &block)
-            .await
+        pattern_db::queries::create_block(&dbs.get().unwrap(), &block)
             .unwrap();
 
         // Create cache and load
@@ -1355,8 +1350,7 @@ mod tests {
             updated_at: chrono::Utc::now(),
         };
 
-        pattern_db::queries::create_block(dbs.pool(), &block)
-            .await
+        pattern_db::queries::create_block(&dbs.get().unwrap(), &block)
             .unwrap();
 
         let cache = MemoryCache::new(dbs.clone());
@@ -1372,8 +1366,7 @@ mod tests {
         cache.persist("agent_1", "scratch").await.unwrap();
 
         // Verify update was stored
-        let (_, updates) = pattern_db::queries::get_checkpoint_and_updates(dbs.pool(), "mem_2")
-            .await
+        let (_, updates) = pattern_db::queries::get_checkpoint_and_updates(&dbs.get().unwrap(), "mem_2")
             .unwrap();
 
         assert!(!updates.is_empty());

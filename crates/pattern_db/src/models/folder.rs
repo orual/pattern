@@ -5,7 +5,6 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
 
 /// A folder containing files accessible to agents.
 ///
@@ -13,7 +12,7 @@ use sqlx::FromRow;
 /// - Local filesystem paths
 /// - Virtual (content stored in DB)
 /// - Remote (URLs, cloud storage)
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Folder {
     /// Unique identifier
     pub id: String,
@@ -38,8 +37,7 @@ pub struct Folder {
 }
 
 /// Folder path types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
-#[sqlx(type_name = "TEXT", rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FolderPathType {
     /// Local filesystem path
@@ -61,7 +59,7 @@ impl std::fmt::Display for FolderPathType {
 }
 
 /// A file within a folder.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FolderFile {
     /// Unique identifier
     pub id: String,
@@ -92,7 +90,7 @@ pub struct FolderFile {
 ///
 /// Files are split into passages for embedding. Passages are the unit
 /// of retrieval - when an agent searches, they get relevant passages.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FilePassage {
     /// Unique identifier
     pub id: String,
@@ -119,7 +117,7 @@ pub struct FilePassage {
 /// Attachment linking a folder to an agent.
 ///
 /// Determines what access level an agent has to a folder's files.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FolderAttachment {
     /// Folder being attached
     pub folder_id: String,
@@ -135,8 +133,7 @@ pub struct FolderAttachment {
 }
 
 /// Folder access levels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
-#[sqlx(type_name = "TEXT", rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
 pub enum FolderAccess {

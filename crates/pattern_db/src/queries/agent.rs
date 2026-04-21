@@ -1,142 +1,141 @@
 //! Agent-related database queries.
 
-use sqlx::SqlitePool;
-use sqlx::types::Json;
+use rusqlite::OptionalExtension;
 
 use crate::error::DbResult;
-use crate::models::{Agent, AgentGroup, AgentStatus, GroupMember, GroupMemberRole, PatternType};
+use crate::models::{Agent, AgentGroup, AgentStatus, GroupMember, GroupMemberRole};
+use crate::Json;
+
+// ============================================================================
+// from_row implementations
+// ============================================================================
+
+impl Agent {
+    pub(crate) fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get("id")?,
+            name: row.get("name")?,
+            description: row.get("description")?,
+            model_provider: row.get("model_provider")?,
+            model_name: row.get("model_name")?,
+            system_prompt: row.get("system_prompt")?,
+            config: row.get("config")?,
+            enabled_tools: row.get("enabled_tools")?,
+            tool_rules: row.get("tool_rules")?,
+            status: row.get("status")?,
+            created_at: row.get("created_at")?,
+            updated_at: row.get("updated_at")?,
+        })
+    }
+}
+
+impl AgentGroup {
+    pub(crate) fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get("id")?,
+            name: row.get("name")?,
+            description: row.get("description")?,
+            pattern_type: row.get("pattern_type")?,
+            pattern_config: row.get("pattern_config")?,
+            created_at: row.get("created_at")?,
+            updated_at: row.get("updated_at")?,
+        })
+    }
+}
+
+impl GroupMember {
+    pub(crate) fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        Ok(Self {
+            group_id: row.get("group_id")?,
+            agent_id: row.get("agent_id")?,
+            role: row.get("role")?,
+            capabilities: row.get("capabilities")?,
+            joined_at: row.get("joined_at")?,
+        })
+    }
+}
+
+// ============================================================================
+// Agent queries
+// ============================================================================
 
 /// Get an agent by ID.
-pub async fn get_agent(pool: &SqlitePool, id: &str) -> DbResult<Option<Agent>> {
-    let agent = sqlx::query_as!(
-        Agent,
-        r#"
-        SELECT
-            id as "id!",
-            name as "name!",
-            description,
-            model_provider as "model_provider!",
-            model_name as "model_name!",
-            system_prompt as "system_prompt!",
-            config as "config!: _",
-            enabled_tools as "enabled_tools!: _",
-            tool_rules as "tool_rules: _",
-            status as "status!: AgentStatus",
-            created_at as "created_at!: _",
-            updated_at as "updated_at!: _"
-        FROM agents WHERE id = ?
-        "#,
-        id
-    )
-    .fetch_optional(pool)
-    .await?;
-    Ok(agent)
+pub fn get_agent(conn: &rusqlite::Connection, id: &str) -> DbResult<Option<Agent>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, description, model_provider, model_name, system_prompt,
+                config, enabled_tools, tool_rules, status, created_at, updated_at
+         FROM agents WHERE id = ?1",
+    )?;
+    let result = stmt.query_row(rusqlite::params![id], Agent::from_row).optional()?;
+    Ok(result)
 }
 
 /// Get an agent by name.
-pub async fn get_agent_by_name(pool: &SqlitePool, name: &str) -> DbResult<Option<Agent>> {
-    let agent = sqlx::query_as!(
-        Agent,
-        r#"
-        SELECT
-            id as "id!",
-            name as "name!",
-            description,
-            model_provider as "model_provider!",
-            model_name as "model_name!",
-            system_prompt as "system_prompt!",
-            config as "config!: _",
-            enabled_tools as "enabled_tools!: _",
-            tool_rules as "tool_rules: _",
-            status as "status!: AgentStatus",
-            created_at as "created_at!: _",
-            updated_at as "updated_at!: _"
-        FROM agents WHERE name = ?
-        "#,
-        name
-    )
-    .fetch_optional(pool)
-    .await?;
-    Ok(agent)
+pub fn get_agent_by_name(conn: &rusqlite::Connection, name: &str) -> DbResult<Option<Agent>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, description, model_provider, model_name, system_prompt,
+                config, enabled_tools, tool_rules, status, created_at, updated_at
+         FROM agents WHERE name = ?1",
+    )?;
+    let result = stmt.query_row(rusqlite::params![name], Agent::from_row).optional()?;
+    Ok(result)
 }
 
 /// List all agents.
-pub async fn list_agents(pool: &SqlitePool) -> DbResult<Vec<Agent>> {
-    let agents = sqlx::query_as!(
-        Agent,
-        r#"
-        SELECT
-            id as "id!",
-            name as "name!",
-            description,
-            model_provider as "model_provider!",
-            model_name as "model_name!",
-            system_prompt as "system_prompt!",
-            config as "config!: _",
-            enabled_tools as "enabled_tools!: _",
-            tool_rules as "tool_rules: _",
-            status as "status!: AgentStatus",
-            created_at as "created_at!: _",
-            updated_at as "updated_at!: _"
-        FROM agents ORDER BY name
-        "#
-    )
-    .fetch_all(pool)
-    .await?;
+pub fn list_agents(conn: &rusqlite::Connection) -> DbResult<Vec<Agent>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, description, model_provider, model_name, system_prompt,
+                config, enabled_tools, tool_rules, status, created_at, updated_at
+         FROM agents ORDER BY name",
+    )?;
+    let rows = stmt.query_map([], Agent::from_row)?;
+    let mut agents = Vec::new();
+    for row in rows {
+        agents.push(row?);
+    }
     Ok(agents)
 }
 
 /// List agents with a specific status.
-pub async fn list_agents_by_status(pool: &SqlitePool, status: AgentStatus) -> DbResult<Vec<Agent>> {
-    let agents = sqlx::query_as!(
-        Agent,
-        r#"
-        SELECT
-            id as "id!",
-            name as "name!",
-            description,
-            model_provider as "model_provider!",
-            model_name as "model_name!",
-            system_prompt as "system_prompt!",
-            config as "config!: _",
-            enabled_tools as "enabled_tools!: _",
-            tool_rules as "tool_rules: _",
-            status as "status!: AgentStatus",
-            created_at as "created_at!: _",
-            updated_at as "updated_at!: _"
-        FROM agents WHERE status = ? ORDER BY name
-        "#,
-        status
-    )
-    .fetch_all(pool)
-    .await?;
+pub fn list_agents_by_status(
+    conn: &rusqlite::Connection,
+    status: AgentStatus,
+) -> DbResult<Vec<Agent>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, description, model_provider, model_name, system_prompt,
+                config, enabled_tools, tool_rules, status, created_at, updated_at
+         FROM agents WHERE status = ?1 ORDER BY name",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![status], Agent::from_row)?;
+    let mut agents = Vec::new();
+    for row in rows {
+        agents.push(row?);
+    }
     Ok(agents)
 }
 
 /// Create a new agent.
-pub async fn create_agent(pool: &SqlitePool, agent: &Agent) -> DbResult<()> {
-    sqlx::query!(
-        r#"
-        INSERT INTO agents (id, name, description, model_provider, model_name,
-                           system_prompt, config, enabled_tools, tool_rules,
-                           status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        "#,
-        agent.id,
-        agent.name,
-        agent.description,
-        agent.model_provider,
-        agent.model_name,
-        agent.system_prompt,
-        agent.config,
-        agent.enabled_tools,
-        agent.tool_rules,
-        agent.status,
-        agent.created_at,
-        agent.updated_at,
-    )
-    .execute(pool)
-    .await?;
+pub fn create_agent(conn: &rusqlite::Connection, agent: &Agent) -> DbResult<()> {
+    conn.execute(
+        "INSERT INTO agents (id, name, description, model_provider, model_name,
+                            system_prompt, config, enabled_tools, tool_rules,
+                            status, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        rusqlite::params![
+            agent.id,
+            agent.name,
+            agent.description,
+            agent.model_provider,
+            agent.model_name,
+            agent.system_prompt,
+            agent.config,
+            agent.enabled_tools,
+            agent.tool_rules,
+            agent.status,
+            agent.created_at,
+            agent.updated_at,
+        ],
+    )?;
     Ok(())
 }
 
@@ -144,195 +143,151 @@ pub async fn create_agent(pool: &SqlitePool, agent: &Agent) -> DbResult<()> {
 ///
 /// If an agent with the same ID exists, it will be updated in place.
 /// Used by import to handle re-imports idempotently.
-pub async fn upsert_agent(pool: &SqlitePool, agent: &Agent) -> DbResult<()> {
-    sqlx::query!(
-        r#"
-        INSERT INTO agents (id, name, description, model_provider, model_name,
-                           system_prompt, config, enabled_tools, tool_rules,
-                           status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-            name = excluded.name,
-            description = excluded.description,
-            model_provider = excluded.model_provider,
-            model_name = excluded.model_name,
-            system_prompt = excluded.system_prompt,
-            config = excluded.config,
-            enabled_tools = excluded.enabled_tools,
-            tool_rules = excluded.tool_rules,
-            status = excluded.status,
-            updated_at = excluded.updated_at
-        "#,
-        agent.id,
-        agent.name,
-        agent.description,
-        agent.model_provider,
-        agent.model_name,
-        agent.system_prompt,
-        agent.config,
-        agent.enabled_tools,
-        agent.tool_rules,
-        agent.status,
-        agent.created_at,
-        agent.updated_at,
-    )
-    .execute(pool)
-    .await?;
+pub fn upsert_agent(conn: &rusqlite::Connection, agent: &Agent) -> DbResult<()> {
+    conn.execute(
+        "INSERT INTO agents (id, name, description, model_provider, model_name,
+                            system_prompt, config, enabled_tools, tool_rules,
+                            status, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+         ON CONFLICT(id) DO UPDATE SET
+             name = excluded.name,
+             description = excluded.description,
+             model_provider = excluded.model_provider,
+             model_name = excluded.model_name,
+             system_prompt = excluded.system_prompt,
+             config = excluded.config,
+             enabled_tools = excluded.enabled_tools,
+             tool_rules = excluded.tool_rules,
+             status = excluded.status,
+             updated_at = excluded.updated_at",
+        rusqlite::params![
+            agent.id,
+            agent.name,
+            agent.description,
+            agent.model_provider,
+            agent.model_name,
+            agent.system_prompt,
+            agent.config,
+            agent.enabled_tools,
+            agent.tool_rules,
+            agent.status,
+            agent.created_at,
+            agent.updated_at,
+        ],
+    )?;
     Ok(())
 }
 
 /// Update an agent's status.
-pub async fn update_agent_status(pool: &SqlitePool, id: &str, status: AgentStatus) -> DbResult<()> {
-    sqlx::query!(
-        "UPDATE agents SET status = ?, updated_at = datetime('now') WHERE id = ?",
-        status,
-        id
-    )
-    .execute(pool)
-    .await?;
+pub fn update_agent_status(
+    conn: &rusqlite::Connection,
+    id: &str,
+    status: AgentStatus,
+) -> DbResult<()> {
+    conn.execute(
+        "UPDATE agents SET status = ?1, updated_at = datetime('now') WHERE id = ?2",
+        rusqlite::params![status, id],
+    )?;
     Ok(())
 }
 
 /// Update an agent's tool rules.
-pub async fn update_agent_tool_rules(
-    pool: &SqlitePool,
+pub fn update_agent_tool_rules(
+    conn: &rusqlite::Connection,
     id: &str,
     tool_rules: Option<serde_json::Value>,
 ) -> DbResult<()> {
     let rules_json = tool_rules.map(|v| serde_json::to_string(&v).unwrap_or_default());
-    sqlx::query!(
-        "UPDATE agents SET tool_rules = ?, updated_at = datetime('now') WHERE id = ?",
-        rules_json,
-        id
-    )
-    .execute(pool)
-    .await?;
+    conn.execute(
+        "UPDATE agents SET tool_rules = ?1, updated_at = datetime('now') WHERE id = ?2",
+        rusqlite::params![rules_json, id],
+    )?;
     Ok(())
 }
 
 /// Delete an agent.
-pub async fn delete_agent(pool: &SqlitePool, id: &str) -> DbResult<()> {
-    sqlx::query!("DELETE FROM agents WHERE id = ?", id)
-        .execute(pool)
-        .await?;
+pub fn delete_agent(conn: &rusqlite::Connection, id: &str) -> DbResult<()> {
+    conn.execute("DELETE FROM agents WHERE id = ?1", rusqlite::params![id])?;
     Ok(())
 }
 
 /// Update an agent's core fields.
-pub async fn update_agent(pool: &SqlitePool, agent: &Agent) -> DbResult<()> {
-    sqlx::query!(
-        r#"
-        UPDATE agents SET
-            name = ?,
-            description = ?,
-            model_provider = ?,
-            model_name = ?,
-            system_prompt = ?,
-            config = ?,
-            enabled_tools = ?,
-            tool_rules = ?,
-            status = ?,
-            updated_at = datetime('now')
-        WHERE id = ?
-        "#,
-        agent.name,
-        agent.description,
-        agent.model_provider,
-        agent.model_name,
-        agent.system_prompt,
-        agent.config,
-        agent.enabled_tools,
-        agent.tool_rules,
-        agent.status,
-        agent.id
-    )
-    .execute(pool)
-    .await?;
+pub fn update_agent(conn: &rusqlite::Connection, agent: &Agent) -> DbResult<()> {
+    conn.execute(
+        "UPDATE agents SET
+             name = ?1, description = ?2, model_provider = ?3, model_name = ?4,
+             system_prompt = ?5, config = ?6, enabled_tools = ?7, tool_rules = ?8,
+             status = ?9, updated_at = datetime('now')
+         WHERE id = ?10",
+        rusqlite::params![
+            agent.name,
+            agent.description,
+            agent.model_provider,
+            agent.model_name,
+            agent.system_prompt,
+            agent.config,
+            agent.enabled_tools,
+            agent.tool_rules,
+            agent.status,
+            agent.id,
+        ],
+    )?;
     Ok(())
 }
 
+// ============================================================================
+// Group queries
+// ============================================================================
+
 /// Get an agent group by ID.
-pub async fn get_group(pool: &SqlitePool, id: &str) -> DbResult<Option<AgentGroup>> {
-    let group = sqlx::query_as!(
-        AgentGroup,
-        r#"
-        SELECT
-            id as "id!",
-            name as "name!",
-            description,
-            pattern_type as "pattern_type!: PatternType",
-            pattern_config as "pattern_config!: _",
-            created_at as "created_at!: _",
-            updated_at as "updated_at!: _"
-        FROM agent_groups WHERE id = ?
-        "#,
-        id
-    )
-    .fetch_optional(pool)
-    .await?;
-    Ok(group)
+pub fn get_group(conn: &rusqlite::Connection, id: &str) -> DbResult<Option<AgentGroup>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, description, pattern_type, pattern_config, created_at, updated_at
+         FROM agent_groups WHERE id = ?1",
+    )?;
+    let result = stmt.query_row(rusqlite::params![id], AgentGroup::from_row).optional()?;
+    Ok(result)
 }
 
 /// Get an agent group by name.
-pub async fn get_group_by_name(pool: &SqlitePool, name: &str) -> DbResult<Option<AgentGroup>> {
-    let group = sqlx::query_as!(
-        AgentGroup,
-        r#"
-        SELECT
-            id as "id!",
-            name as "name!",
-            description,
-            pattern_type as "pattern_type!: PatternType",
-            pattern_config as "pattern_config!: _",
-            created_at as "created_at!: _",
-            updated_at as "updated_at!: _"
-        FROM agent_groups WHERE name = ?
-        "#,
-        name
-    )
-    .fetch_optional(pool)
-    .await?;
-    Ok(group)
+pub fn get_group_by_name(conn: &rusqlite::Connection, name: &str) -> DbResult<Option<AgentGroup>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, description, pattern_type, pattern_config, created_at, updated_at
+         FROM agent_groups WHERE name = ?1",
+    )?;
+    let result = stmt.query_row(rusqlite::params![name], AgentGroup::from_row).optional()?;
+    Ok(result)
 }
 
 /// List all agent groups.
-pub async fn list_groups(pool: &SqlitePool) -> DbResult<Vec<AgentGroup>> {
-    let groups = sqlx::query_as!(
-        AgentGroup,
-        r#"
-        SELECT
-            id as "id!",
-            name as "name!",
-            description,
-            pattern_type as "pattern_type!: PatternType",
-            pattern_config as "pattern_config!: _",
-            created_at as "created_at!: _",
-            updated_at as "updated_at!: _"
-        FROM agent_groups ORDER BY name
-        "#
-    )
-    .fetch_all(pool)
-    .await?;
+pub fn list_groups(conn: &rusqlite::Connection) -> DbResult<Vec<AgentGroup>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, description, pattern_type, pattern_config, created_at, updated_at
+         FROM agent_groups ORDER BY name",
+    )?;
+    let rows = stmt.query_map([], AgentGroup::from_row)?;
+    let mut groups = Vec::new();
+    for row in rows {
+        groups.push(row?);
+    }
     Ok(groups)
 }
 
 /// Create a new agent group.
-pub async fn create_group(pool: &SqlitePool, group: &AgentGroup) -> DbResult<()> {
-    sqlx::query!(
-        r#"
-        INSERT INTO agent_groups (id, name, description, pattern_type, pattern_config, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        "#,
-        group.id,
-        group.name,
-        group.description,
-        group.pattern_type,
-        group.pattern_config,
-        group.created_at,
-        group.updated_at,
-    )
-    .execute(pool)
-    .await?;
+pub fn create_group(conn: &rusqlite::Connection, group: &AgentGroup) -> DbResult<()> {
+    conn.execute(
+        "INSERT INTO agent_groups (id, name, description, pattern_type, pattern_config, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            group.id,
+            group.name,
+            group.description,
+            group.pattern_type,
+            group.pattern_config,
+            group.created_at,
+            group.updated_at,
+        ],
+    )?;
     Ok(())
 }
 
@@ -340,66 +295,59 @@ pub async fn create_group(pool: &SqlitePool, group: &AgentGroup) -> DbResult<()>
 ///
 /// If a group with the same ID exists, it will be updated in place.
 /// Used by import to handle re-imports idempotently.
-pub async fn upsert_group(pool: &SqlitePool, group: &AgentGroup) -> DbResult<()> {
-    sqlx::query!(
-        r#"
-        INSERT INTO agent_groups (id, name, description, pattern_type, pattern_config, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-            name = excluded.name,
-            description = excluded.description,
-            pattern_type = excluded.pattern_type,
-            pattern_config = excluded.pattern_config,
-            updated_at = excluded.updated_at
-        "#,
-        group.id,
-        group.name,
-        group.description,
-        group.pattern_type,
-        group.pattern_config,
-        group.created_at,
-        group.updated_at,
-    )
-    .execute(pool)
-    .await?;
+pub fn upsert_group(conn: &rusqlite::Connection, group: &AgentGroup) -> DbResult<()> {
+    conn.execute(
+        "INSERT INTO agent_groups (id, name, description, pattern_type, pattern_config, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(id) DO UPDATE SET
+             name = excluded.name,
+             description = excluded.description,
+             pattern_type = excluded.pattern_type,
+             pattern_config = excluded.pattern_config,
+             updated_at = excluded.updated_at",
+        rusqlite::params![
+            group.id,
+            group.name,
+            group.description,
+            group.pattern_type,
+            group.pattern_config,
+            group.created_at,
+            group.updated_at,
+        ],
+    )?;
     Ok(())
 }
 
 /// Get members of a group.
-pub async fn get_group_members(pool: &SqlitePool, group_id: &str) -> DbResult<Vec<GroupMember>> {
-    let members = sqlx::query_as!(
-        GroupMember,
-        r#"
-        SELECT
-            group_id as "group_id!",
-            agent_id as "agent_id!",
-            role as "role: _",
-            capabilities as "capabilities!: _",
-            joined_at as "joined_at!: _"
-        FROM group_members WHERE group_id = ?
-        "#,
-        group_id
-    )
-    .fetch_all(pool)
-    .await?;
+pub fn get_group_members(
+    conn: &rusqlite::Connection,
+    group_id: &str,
+) -> DbResult<Vec<GroupMember>> {
+    let mut stmt = conn.prepare(
+        "SELECT group_id, agent_id, role, capabilities, joined_at
+         FROM group_members WHERE group_id = ?1",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![group_id], GroupMember::from_row)?;
+    let mut members = Vec::new();
+    for row in rows {
+        members.push(row?);
+    }
     Ok(members)
 }
 
 /// Add an agent to a group.
-pub async fn add_group_member(pool: &SqlitePool, member: &GroupMember) -> DbResult<()> {
-    sqlx::query!(
-        r#"
-        INSERT INTO group_members (group_id, agent_id, role, capabilities, joined_at)
-        VALUES (?, ?, ?, ?, ?)
-        "#,
-        member.group_id,
-        member.agent_id,
-        member.role,
-        member.capabilities,
-        member.joined_at,
-    )
-    .execute(pool)
-    .await?;
+pub fn add_group_member(conn: &rusqlite::Connection, member: &GroupMember) -> DbResult<()> {
+    conn.execute(
+        "INSERT INTO group_members (group_id, agent_id, role, capabilities, joined_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![
+            member.group_id,
+            member.agent_id,
+            member.role,
+            member.capabilities,
+            member.joined_at,
+        ],
+    )?;
     Ok(())
 }
 
@@ -407,157 +355,127 @@ pub async fn add_group_member(pool: &SqlitePool, member: &GroupMember) -> DbResu
 ///
 /// If the membership already exists, it will be updated in place.
 /// Used by import to handle re-imports idempotently.
-pub async fn upsert_group_member(pool: &SqlitePool, member: &GroupMember) -> DbResult<()> {
-    sqlx::query!(
-        r#"
-        INSERT INTO group_members (group_id, agent_id, role, capabilities, joined_at)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(group_id, agent_id) DO UPDATE SET
-            role = excluded.role,
-            capabilities = excluded.capabilities
-        "#,
-        member.group_id,
-        member.agent_id,
-        member.role,
-        member.capabilities,
-        member.joined_at,
-    )
-    .execute(pool)
-    .await?;
+pub fn upsert_group_member(conn: &rusqlite::Connection, member: &GroupMember) -> DbResult<()> {
+    conn.execute(
+        "INSERT INTO group_members (group_id, agent_id, role, capabilities, joined_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(group_id, agent_id) DO UPDATE SET
+             role = excluded.role,
+             capabilities = excluded.capabilities",
+        rusqlite::params![
+            member.group_id,
+            member.agent_id,
+            member.role,
+            member.capabilities,
+            member.joined_at,
+        ],
+    )?;
     Ok(())
 }
 
 /// Remove an agent from a group.
-pub async fn remove_group_member(
-    pool: &SqlitePool,
+pub fn remove_group_member(
+    conn: &rusqlite::Connection,
     group_id: &str,
     agent_id: &str,
 ) -> DbResult<()> {
-    sqlx::query!(
-        "DELETE FROM group_members WHERE group_id = ? AND agent_id = ?",
-        group_id,
-        agent_id
-    )
-    .execute(pool)
-    .await?;
+    conn.execute(
+        "DELETE FROM group_members WHERE group_id = ?1 AND agent_id = ?2",
+        rusqlite::params![group_id, agent_id],
+    )?;
     Ok(())
 }
 
 /// Update a group member's role.
-pub async fn update_group_member_role(
-    pool: &SqlitePool,
+pub fn update_group_member_role(
+    conn: &rusqlite::Connection,
     group_id: &str,
     agent_id: &str,
     role: Option<&Json<GroupMemberRole>>,
 ) -> DbResult<()> {
-    sqlx::query!(
-        "UPDATE group_members SET role = ? WHERE group_id = ? AND agent_id = ?",
-        role,
-        group_id,
-        agent_id
-    )
-    .execute(pool)
-    .await?;
+    conn.execute(
+        "UPDATE group_members SET role = ?1 WHERE group_id = ?2 AND agent_id = ?3",
+        rusqlite::params![role, group_id, agent_id],
+    )?;
     Ok(())
 }
 
 /// Update a group member's capabilities.
-pub async fn update_group_member_capabilities(
-    pool: &SqlitePool,
+pub fn update_group_member_capabilities(
+    conn: &rusqlite::Connection,
     group_id: &str,
     agent_id: &str,
     capabilities: &Json<Vec<String>>,
 ) -> DbResult<()> {
-    sqlx::query!(
-        "UPDATE group_members SET capabilities = ? WHERE group_id = ? AND agent_id = ?",
-        capabilities,
-        group_id,
-        agent_id
-    )
-    .execute(pool)
-    .await?;
+    conn.execute(
+        "UPDATE group_members SET capabilities = ?1 WHERE group_id = ?2 AND agent_id = ?3",
+        rusqlite::params![capabilities, group_id, agent_id],
+    )?;
     Ok(())
 }
 
 /// Update a group member's role and capabilities.
-pub async fn update_group_member(
-    pool: &SqlitePool,
+pub fn update_group_member(
+    conn: &rusqlite::Connection,
     group_id: &str,
     agent_id: &str,
     role: Option<&Json<GroupMemberRole>>,
     capabilities: &Json<Vec<String>>,
 ) -> DbResult<()> {
-    sqlx::query!(
-        "UPDATE group_members SET role = ?, capabilities = ? WHERE group_id = ? AND agent_id = ?",
-        role,
-        capabilities,
-        group_id,
-        agent_id
-    )
-    .execute(pool)
-    .await?;
+    conn.execute(
+        "UPDATE group_members SET role = ?1, capabilities = ?2 WHERE group_id = ?3 AND agent_id = ?4",
+        rusqlite::params![role, capabilities, group_id, agent_id],
+    )?;
     Ok(())
 }
 
 /// Get all groups an agent belongs to.
-pub async fn get_agent_groups(pool: &SqlitePool, agent_id: &str) -> DbResult<Vec<AgentGroup>> {
-    let groups = sqlx::query_as!(
-        AgentGroup,
-        r#"
-        SELECT
-            g.id as "id!",
-            g.name as "name!",
-            g.description,
-            g.pattern_type as "pattern_type!: PatternType",
-            g.pattern_config as "pattern_config!: _",
-            g.created_at as "created_at!: _",
-            g.updated_at as "updated_at!: _"
-        FROM agent_groups g
-        INNER JOIN group_members m ON g.id = m.group_id
-        WHERE m.agent_id = ?
-        ORDER BY g.name
-        "#,
-        agent_id
-    )
-    .fetch_all(pool)
-    .await?;
+pub fn get_agent_groups(conn: &rusqlite::Connection, agent_id: &str) -> DbResult<Vec<AgentGroup>> {
+    let mut stmt = conn.prepare(
+        "SELECT g.id, g.name, g.description, g.pattern_type, g.pattern_config,
+                g.created_at, g.updated_at
+         FROM agent_groups g
+         INNER JOIN group_members m ON g.id = m.group_id
+         WHERE m.agent_id = ?1
+         ORDER BY g.name",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![agent_id], AgentGroup::from_row)?;
+    let mut groups = Vec::new();
+    for row in rows {
+        groups.push(row?);
+    }
     Ok(groups)
 }
 
 /// Update an agent group.
-pub async fn update_group(pool: &SqlitePool, group: &AgentGroup) -> DbResult<()> {
-    sqlx::query!(
-        r#"
-        UPDATE agent_groups SET
-            name = ?,
-            description = ?,
-            pattern_type = ?,
-            pattern_config = ?,
-            updated_at = datetime('now')
-        WHERE id = ?
-        "#,
-        group.name,
-        group.description,
-        group.pattern_type,
-        group.pattern_config,
-        group.id
-    )
-    .execute(pool)
-    .await?;
+pub fn update_group(conn: &rusqlite::Connection, group: &AgentGroup) -> DbResult<()> {
+    conn.execute(
+        "UPDATE agent_groups SET
+             name = ?1, description = ?2, pattern_type = ?3,
+             pattern_config = ?4, updated_at = datetime('now')
+         WHERE id = ?5",
+        rusqlite::params![
+            group.name,
+            group.description,
+            group.pattern_type,
+            group.pattern_config,
+            group.id,
+        ],
+    )?;
     Ok(())
 }
 
 /// Delete an agent group and its members.
-pub async fn delete_group(pool: &SqlitePool, id: &str) -> DbResult<()> {
-    // Delete members first (foreign key constraint)
-    sqlx::query!("DELETE FROM group_members WHERE group_id = ?", id)
-        .execute(pool)
-        .await?;
-
-    // Delete the group
-    sqlx::query!("DELETE FROM agent_groups WHERE id = ?", id)
-        .execute(pool)
-        .await?;
+pub fn delete_group(conn: &rusqlite::Connection, id: &str) -> DbResult<()> {
+    // Delete members first (foreign key constraint).
+    conn.execute(
+        "DELETE FROM group_members WHERE group_id = ?1",
+        rusqlite::params![id],
+    )?;
+    conn.execute(
+        "DELETE FROM agent_groups WHERE id = ?1",
+        rusqlite::params![id],
+    )?;
     Ok(())
 }
 
@@ -565,33 +483,24 @@ pub async fn delete_group(pool: &SqlitePool, id: &str) -> DbResult<()> {
 ///
 /// Returns true if the agent has the capability with specialist role in any group.
 /// This is used for permission checks on cross-agent operations like constellation-wide search.
-pub async fn agent_has_capability(
-    pool: &SqlitePool,
+pub fn agent_has_capability(
+    conn: &rusqlite::Connection,
     agent_id: &str,
     capability: &str,
 ) -> DbResult<bool> {
-    // Query checks:
-    // 1. Agent matches
-    // 2. Role is a specialist (JSON type field = 'specialist')
-    // 3. Capabilities JSON array contains the capability string
-    let result = sqlx::query_scalar!(
-        r#"
-        SELECT EXISTS(
-            SELECT 1 FROM group_members
-            WHERE agent_id = ?
-              AND json_extract(role, '$.type') = 'specialist'
-              AND EXISTS (
-                  SELECT 1 FROM json_each(capabilities)
-                  WHERE json_each.value = ?
-              )
-        ) as "exists!: bool"
-        "#,
-        agent_id,
-        capability
-    )
-    .fetch_one(pool)
-    .await?;
-
+    let result: bool = conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM group_members
+             WHERE agent_id = ?1
+               AND json_extract(role, '$.type') = 'specialist'
+               AND EXISTS (
+                   SELECT 1 FROM json_each(capabilities)
+                   WHERE json_each.value = ?2
+               )
+         )",
+        rusqlite::params![agent_id, capability],
+        |r| r.get(0),
+    )?;
     Ok(result)
 }
 
@@ -599,40 +508,35 @@ pub async fn agent_has_capability(
 ///
 /// Returns true if both agents are members of at least one common group.
 /// This is used for permission checks on cross-agent search operations.
-pub async fn agents_share_group(
-    pool: &SqlitePool,
+pub fn agents_share_group(
+    conn: &rusqlite::Connection,
     agent_id_1: &str,
     agent_id_2: &str,
 ) -> DbResult<bool> {
-    let result = sqlx::query_scalar!(
-        r#"
-        SELECT EXISTS(
-            SELECT 1 FROM group_members m1
-            INNER JOIN group_members m2 ON m1.group_id = m2.group_id
-            WHERE m1.agent_id = ? AND m2.agent_id = ?
-        ) as "exists!: bool"
-        "#,
-        agent_id_1,
-        agent_id_2
-    )
-    .fetch_one(pool)
-    .await?;
-
+    let result: bool = conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM group_members m1
+             INNER JOIN group_members m2 ON m1.group_id = m2.group_id
+             WHERE m1.agent_id = ?1 AND m2.agent_id = ?2
+         )",
+        rusqlite::params![agent_id_1, agent_id_2],
+        |r| r.get(0),
+    )?;
     Ok(result)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{AgentStatus, PatternType};
     use crate::ConstellationDb;
-    use crate::models::{Agent, AgentGroup, AgentStatus, PatternType};
     use chrono::Utc;
 
-    async fn setup_test_db() -> ConstellationDb {
-        ConstellationDb::open_in_memory().await.unwrap()
+    fn setup_test_db() -> ConstellationDb {
+        ConstellationDb::open_in_memory().unwrap()
     }
 
-    async fn create_test_agent(db: &ConstellationDb, id: &str, name: &str) {
+    fn make_test_agent(conn: &rusqlite::Connection, id: &str, name: &str) {
         let agent = Agent {
             id: id.to_string(),
             name: name.to_string(),
@@ -647,10 +551,10 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
-        create_agent(db.pool(), &agent).await.unwrap();
+        create_agent(conn, &agent).unwrap();
     }
 
-    async fn create_test_group(db: &ConstellationDb, id: &str, name: &str) {
+    fn make_test_group(conn: &rusqlite::Connection, id: &str, name: &str) {
         let group = AgentGroup {
             id: id.to_string(),
             name: name.to_string(),
@@ -660,22 +564,17 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
-        create_group(db.pool(), &group).await.unwrap();
+        create_group(conn, &group).unwrap();
     }
 
-    // ============================================================================
-    // Tests for agent_has_capability
-    // ============================================================================
+    #[test]
+    fn test_agent_has_capability_specialist_with_matching_capability() {
+        let db = setup_test_db();
+        let conn = db.get().unwrap();
 
-    #[tokio::test]
-    async fn test_agent_has_capability_specialist_with_matching_capability() {
-        let db = setup_test_db().await;
+        make_test_agent(&conn, "agent1", "Agent 1");
+        make_test_group(&conn, "group1", "Group 1");
 
-        // Create agent and group.
-        create_test_agent(&db, "agent1", "Agent 1").await;
-        create_test_group(&db, "group1", "Group 1").await;
-
-        // Add agent as specialist with "memory" capability.
         let member = GroupMember {
             group_id: "group1".to_string(),
             agent_id: "agent1".to_string(),
@@ -685,36 +584,20 @@ mod tests {
             capabilities: Json(vec!["memory".to_string(), "search".to_string()]),
             joined_at: Utc::now(),
         };
-        add_group_member(db.pool(), &member).await.unwrap();
+        add_group_member(&conn, &member).unwrap();
 
-        // Should have the "memory" capability.
-        let has_memory = agent_has_capability(db.pool(), "agent1", "memory")
-            .await
-            .unwrap();
-        assert!(
-            has_memory,
-            "Specialist with 'memory' capability should return true"
-        );
-
-        // Should also have the "search" capability.
-        let has_search = agent_has_capability(db.pool(), "agent1", "search")
-            .await
-            .unwrap();
-        assert!(
-            has_search,
-            "Specialist with 'search' capability should return true"
-        );
+        assert!(agent_has_capability(&conn, "agent1", "memory").unwrap());
+        assert!(agent_has_capability(&conn, "agent1", "search").unwrap());
     }
 
-    #[tokio::test]
-    async fn test_agent_has_capability_specialist_without_matching_capability() {
-        let db = setup_test_db().await;
+    #[test]
+    fn test_agent_has_capability_specialist_without_matching_capability() {
+        let db = setup_test_db();
+        let conn = db.get().unwrap();
 
-        // Create agent and group.
-        create_test_agent(&db, "agent1", "Agent 1").await;
-        create_test_group(&db, "group1", "Group 1").await;
+        make_test_agent(&conn, "agent1", "Agent 1");
+        make_test_group(&conn, "group1", "Group 1");
 
-        // Add agent as specialist with "search" capability only.
         let member = GroupMember {
             group_id: "group1".to_string(),
             agent_id: "agent1".to_string(),
@@ -724,27 +607,19 @@ mod tests {
             capabilities: Json(vec!["search".to_string()]),
             joined_at: Utc::now(),
         };
-        add_group_member(db.pool(), &member).await.unwrap();
+        add_group_member(&conn, &member).unwrap();
 
-        // Should NOT have the "memory" capability.
-        let has_memory = agent_has_capability(db.pool(), "agent1", "memory")
-            .await
-            .unwrap();
-        assert!(
-            !has_memory,
-            "Specialist without 'memory' capability should return false"
-        );
+        assert!(!agent_has_capability(&conn, "agent1", "memory").unwrap());
     }
 
-    #[tokio::test]
-    async fn test_agent_has_capability_non_specialist_role() {
-        let db = setup_test_db().await;
+    #[test]
+    fn test_agent_has_capability_non_specialist_role() {
+        let db = setup_test_db();
+        let conn = db.get().unwrap();
 
-        // Create agent and group.
-        create_test_agent(&db, "agent1", "Agent 1").await;
-        create_test_group(&db, "group1", "Group 1").await;
+        make_test_agent(&conn, "agent1", "Agent 1");
+        make_test_group(&conn, "group1", "Group 1");
 
-        // Add agent as regular member with capabilities.
         let member = GroupMember {
             group_id: "group1".to_string(),
             agent_id: "agent1".to_string(),
@@ -752,261 +627,61 @@ mod tests {
             capabilities: Json(vec!["memory".to_string()]),
             joined_at: Utc::now(),
         };
-        add_group_member(db.pool(), &member).await.unwrap();
+        add_group_member(&conn, &member).unwrap();
 
-        // Regular role should NOT grant capability access even with matching capability.
-        let has_memory = agent_has_capability(db.pool(), "agent1", "memory")
-            .await
-            .unwrap();
-        assert!(
-            !has_memory,
-            "Regular role should not grant capability access"
-        );
+        assert!(!agent_has_capability(&conn, "agent1", "memory").unwrap());
     }
 
-    #[tokio::test]
-    async fn test_agent_has_capability_agent_not_in_any_group() {
-        let db = setup_test_db().await;
+    #[test]
+    fn test_agents_share_group_in_same_group() {
+        let db = setup_test_db();
+        let conn = db.get().unwrap();
 
-        // Create agent but don't add to any group.
-        create_test_agent(&db, "agent1", "Agent 1").await;
+        make_test_agent(&conn, "agent1", "Agent 1");
+        make_test_agent(&conn, "agent2", "Agent 2");
+        make_test_group(&conn, "group1", "Group 1");
 
-        // Agent not in any group should return false.
-        let has_memory = agent_has_capability(db.pool(), "agent1", "memory")
-            .await
-            .unwrap();
-        assert!(!has_memory, "Agent not in any group should return false");
+        for agent_id in ["agent1", "agent2"] {
+            let member = GroupMember {
+                group_id: "group1".to_string(),
+                agent_id: agent_id.to_string(),
+                role: Some(Json(GroupMemberRole::Regular)),
+                capabilities: Json(vec![]),
+                joined_at: Utc::now(),
+            };
+            add_group_member(&conn, &member).unwrap();
+        }
+
+        assert!(agents_share_group(&conn, "agent1", "agent2").unwrap());
+        assert!(agents_share_group(&conn, "agent2", "agent1").unwrap());
     }
 
-    #[tokio::test]
-    async fn test_agent_has_capability_observer_role() {
-        let db = setup_test_db().await;
+    #[test]
+    fn test_agents_share_group_in_different_groups() {
+        let db = setup_test_db();
+        let conn = db.get().unwrap();
 
-        // Create agent and group.
-        create_test_agent(&db, "agent1", "Agent 1").await;
-        create_test_group(&db, "group1", "Group 1").await;
+        make_test_agent(&conn, "agent1", "Agent 1");
+        make_test_agent(&conn, "agent2", "Agent 2");
+        make_test_group(&conn, "group1", "Group 1");
+        make_test_group(&conn, "group2", "Group 2");
 
-        // Add agent as observer with capabilities.
-        let member = GroupMember {
-            group_id: "group1".to_string(),
-            agent_id: "agent1".to_string(),
-            role: Some(Json(GroupMemberRole::Observer)),
-            capabilities: Json(vec!["memory".to_string()]),
-            joined_at: Utc::now(),
-        };
-        add_group_member(db.pool(), &member).await.unwrap();
-
-        // Observer role should NOT grant capability access.
-        let has_memory = agent_has_capability(db.pool(), "agent1", "memory")
-            .await
-            .unwrap();
-        assert!(
-            !has_memory,
-            "Observer role should not grant capability access"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_agent_has_capability_supervisor_role() {
-        let db = setup_test_db().await;
-
-        // Create agent and group.
-        create_test_agent(&db, "agent1", "Agent 1").await;
-        create_test_group(&db, "group1", "Group 1").await;
-
-        // Add agent as supervisor with capabilities.
-        let member = GroupMember {
-            group_id: "group1".to_string(),
-            agent_id: "agent1".to_string(),
-            role: Some(Json(GroupMemberRole::Supervisor)),
-            capabilities: Json(vec!["memory".to_string()]),
-            joined_at: Utc::now(),
-        };
-        add_group_member(db.pool(), &member).await.unwrap();
-
-        // Supervisor role should NOT grant capability access.
-        let has_memory = agent_has_capability(db.pool(), "agent1", "memory")
-            .await
-            .unwrap();
-        assert!(
-            !has_memory,
-            "Supervisor role should not grant capability access"
-        );
-    }
-
-    // ============================================================================
-    // Tests for agents_share_group
-    // ============================================================================
-
-    #[tokio::test]
-    async fn test_agents_share_group_in_same_group() {
-        let db = setup_test_db().await;
-
-        // Create agents and group.
-        create_test_agent(&db, "agent1", "Agent 1").await;
-        create_test_agent(&db, "agent2", "Agent 2").await;
-        create_test_group(&db, "group1", "Group 1").await;
-
-        // Add both agents to the same group.
-        let member1 = GroupMember {
+        add_group_member(&conn, &GroupMember {
             group_id: "group1".to_string(),
             agent_id: "agent1".to_string(),
             role: Some(Json(GroupMemberRole::Regular)),
             capabilities: Json(vec![]),
             joined_at: Utc::now(),
-        };
-        add_group_member(db.pool(), &member1).await.unwrap();
+        }).unwrap();
 
-        let member2 = GroupMember {
-            group_id: "group1".to_string(),
-            agent_id: "agent2".to_string(),
-            role: Some(Json(GroupMemberRole::Regular)),
-            capabilities: Json(vec![]),
-            joined_at: Utc::now(),
-        };
-        add_group_member(db.pool(), &member2).await.unwrap();
-
-        // They should share a group.
-        let share = agents_share_group(db.pool(), "agent1", "agent2")
-            .await
-            .unwrap();
-        assert!(share, "Agents in same group should return true");
-
-        // Order shouldn't matter.
-        let share_reversed = agents_share_group(db.pool(), "agent2", "agent1")
-            .await
-            .unwrap();
-        assert!(share_reversed, "agents_share_group should be symmetric");
-    }
-
-    #[tokio::test]
-    async fn test_agents_share_group_in_different_groups() {
-        let db = setup_test_db().await;
-
-        // Create agents and separate groups.
-        create_test_agent(&db, "agent1", "Agent 1").await;
-        create_test_agent(&db, "agent2", "Agent 2").await;
-        create_test_group(&db, "group1", "Group 1").await;
-        create_test_group(&db, "group2", "Group 2").await;
-
-        // Add agents to different groups.
-        let member1 = GroupMember {
-            group_id: "group1".to_string(),
-            agent_id: "agent1".to_string(),
-            role: Some(Json(GroupMemberRole::Regular)),
-            capabilities: Json(vec![]),
-            joined_at: Utc::now(),
-        };
-        add_group_member(db.pool(), &member1).await.unwrap();
-
-        let member2 = GroupMember {
+        add_group_member(&conn, &GroupMember {
             group_id: "group2".to_string(),
             agent_id: "agent2".to_string(),
             role: Some(Json(GroupMemberRole::Regular)),
             capabilities: Json(vec![]),
             joined_at: Utc::now(),
-        };
-        add_group_member(db.pool(), &member2).await.unwrap();
+        }).unwrap();
 
-        // They should NOT share a group.
-        let share = agents_share_group(db.pool(), "agent1", "agent2")
-            .await
-            .unwrap();
-        assert!(!share, "Agents in different groups should return false");
-    }
-
-    #[tokio::test]
-    async fn test_agents_share_group_agent_not_in_any_group() {
-        let db = setup_test_db().await;
-
-        // Create agents and one group.
-        create_test_agent(&db, "agent1", "Agent 1").await;
-        create_test_agent(&db, "agent2", "Agent 2").await;
-        create_test_group(&db, "group1", "Group 1").await;
-
-        // Only add agent1 to the group.
-        let member1 = GroupMember {
-            group_id: "group1".to_string(),
-            agent_id: "agent1".to_string(),
-            role: Some(Json(GroupMemberRole::Regular)),
-            capabilities: Json(vec![]),
-            joined_at: Utc::now(),
-        };
-        add_group_member(db.pool(), &member1).await.unwrap();
-
-        // They should NOT share a group (agent2 not in any group).
-        let share = agents_share_group(db.pool(), "agent1", "agent2")
-            .await
-            .unwrap();
-        assert!(
-            !share,
-            "Should return false when one agent not in any group"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_agents_share_group_multiple_shared_groups() {
-        let db = setup_test_db().await;
-
-        // Create agents and multiple groups.
-        create_test_agent(&db, "agent1", "Agent 1").await;
-        create_test_agent(&db, "agent2", "Agent 2").await;
-        create_test_group(&db, "group1", "Group 1").await;
-        create_test_group(&db, "group2", "Group 2").await;
-
-        // Add both agents to both groups.
-        for group_id in ["group1", "group2"] {
-            let member1 = GroupMember {
-                group_id: group_id.to_string(),
-                agent_id: "agent1".to_string(),
-                role: Some(Json(GroupMemberRole::Regular)),
-                capabilities: Json(vec![]),
-                joined_at: Utc::now(),
-            };
-            add_group_member(db.pool(), &member1).await.unwrap();
-
-            let member2 = GroupMember {
-                group_id: group_id.to_string(),
-                agent_id: "agent2".to_string(),
-                role: Some(Json(GroupMemberRole::Regular)),
-                capabilities: Json(vec![]),
-                joined_at: Utc::now(),
-            };
-            add_group_member(db.pool(), &member2).await.unwrap();
-        }
-
-        // They should share a group (even multiple).
-        let share = agents_share_group(db.pool(), "agent1", "agent2")
-            .await
-            .unwrap();
-        assert!(share, "Agents in multiple shared groups should return true");
-    }
-
-    #[tokio::test]
-    async fn test_agents_share_group_same_agent() {
-        let db = setup_test_db().await;
-
-        // Create agent and group.
-        create_test_agent(&db, "agent1", "Agent 1").await;
-        create_test_group(&db, "group1", "Group 1").await;
-
-        // Add agent to group.
-        let member = GroupMember {
-            group_id: "group1".to_string(),
-            agent_id: "agent1".to_string(),
-            role: Some(Json(GroupMemberRole::Regular)),
-            capabilities: Json(vec![]),
-            joined_at: Utc::now(),
-        };
-        add_group_member(db.pool(), &member).await.unwrap();
-
-        // Same agent should share a group with itself.
-        let share = agents_share_group(db.pool(), "agent1", "agent1")
-            .await
-            .unwrap();
-        assert!(
-            share,
-            "Agent should share a group with itself if in any group"
-        );
+        assert!(!agents_share_group(&conn, "agent1", "agent2").unwrap());
     }
 }

@@ -6,7 +6,7 @@
 use chrono::{DateTime, Utc};
 use cid::Cid;
 use iroh_car::{CarHeader, CarWriter};
-use sqlx::SqlitePool;
+use pattern_db::ConstellationDb;
 use tokio::io::AsyncWrite;
 
 use pattern_db::queries;
@@ -66,13 +66,13 @@ impl BlockCollector {
 
 /// Agent exporter - exports agents to CAR archives.
 pub struct Exporter {
-    pool: SqlitePool,
+    db: ConstellationDb,
 }
 
 impl Exporter {
     /// Create a new exporter with the given database pool.
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    pub fn new(db: ConstellationDb) -> Self {
+        Self { db }
     }
 
     /// Export an agent to a CAR file.
@@ -88,8 +88,7 @@ impl Exporter {
         let start_time = Utc::now();
 
         // Load agent
-        let agent = queries::get_agent(&self.pool, agent_id)
-            .await?
+        let agent = queries::get_agent(&*self.db.get()?, agent_id)?
             .ok_or_else(|| CoreError::AgentNotFound {
                 identifier: agent_id.to_string(),
             })?;
@@ -126,14 +125,13 @@ impl Exporter {
         let start_time = Utc::now();
 
         // Load group
-        let group = queries::get_group(&self.pool, group_id)
-            .await?
+        let group = queries::get_group(&*self.db.get()?, group_id)?
             .ok_or_else(|| CoreError::GroupNotFound {
                 identifier: group_id.to_string(),
             })?;
 
         // Load members
-        let members = queries::get_group_members(&self.pool, group_id).await?;
+        let members = queries::get_group_members(&*self.db.get()?, group_id)?;
 
         // Check if thin export
         let is_thin = matches!(&options.target, ExportTarget::Group { thin: true, .. });
@@ -173,8 +171,7 @@ impl Exporter {
             let mut agent_exports = Vec::with_capacity(members.len());
 
             for member in &members {
-                let agent = queries::get_agent(&self.pool, &member.agent_id)
-                    .await?
+                let agent = queries::get_agent(&*self.db.get()?, &member.agent_id)?
                     .ok_or_else(|| CoreError::AgentNotFound {
                         identifier: member.agent_id.clone(),
                     })?;
@@ -252,8 +249,8 @@ impl Exporter {
         let start_time = Utc::now();
 
         // Load all agents and groups
-        let agents = queries::list_agents(&self.pool).await?;
-        let groups = queries::list_groups(&self.pool).await?;
+        let agents = queries::list_agents(&*self.db.get()?)?;
+        let groups = queries::list_groups(&*self.db.get()?)?;
 
         let mut collector = BlockCollector::new();
         let mut stats = ExportStats::default();
@@ -291,7 +288,7 @@ impl Exporter {
         let mut group_exports: Vec<GroupExportThin> = Vec::with_capacity(groups.len());
 
         for group in &groups {
-            let members = queries::get_group_members(&self.pool, &group.id).await?;
+            let members = queries::get_group_members(&*self.db.get()?, &group.id)?;
 
             // Collect agent CIDs for this group
             let agent_cids: Vec<Cid> = members
@@ -337,13 +334,13 @@ impl Exporter {
 
         // Export all memory blocks (for blocks not already exported with agents)
         // and collect all shared attachments
-        let all_blocks = queries::list_all_blocks(&self.pool).await?;
-        let all_attachments = queries::list_all_shared_block_attachments(&self.pool).await?;
+        let all_blocks = queries::list_all_blocks(&*self.db.get()?)?;
+        let all_attachments = queries::list_all_shared_block_attachments(&*self.db.get()?)?;
 
         // Track which blocks we've already exported via agents
         let mut exported_block_ids: HashSet<String> = HashSet::new();
         for agent in &agents {
-            let agent_blocks = queries::list_blocks(&self.pool, &agent.id).await?;
+            let agent_blocks = queries::list_blocks(&*self.db.get()?, &agent.id)?;
             for block in agent_blocks {
                 exported_block_ids.insert(block.id);
             }
@@ -461,7 +458,7 @@ impl Exporter {
         collector: &mut BlockCollector,
         stats: &mut ExportStats,
     ) -> Result<Vec<Cid>> {
-        let blocks = queries::list_blocks(&self.pool, agent_id).await?;
+        let blocks = queries::list_blocks(&*self.db.get()?, agent_id)?;
         let mut export_cids = Vec::with_capacity(blocks.len());
 
         for block in blocks {
@@ -557,7 +554,7 @@ impl Exporter {
         stats: &mut ExportStats,
     ) -> Result<Vec<Cid>> {
         // Load all messages (including archived) - use a very high limit
-        let messages = queries::get_messages_with_archived(&self.pool, agent_id, i64::MAX).await?;
+        let messages = queries::get_messages_with_archived(&*self.db.get()?, agent_id, i64::MAX)?;
 
         if messages.is_empty() {
             return Ok(Vec::new());
@@ -640,7 +637,7 @@ impl Exporter {
         stats: &mut ExportStats,
     ) -> Result<Vec<Cid>> {
         // Load all archival entries (use high limit and offset 0)
-        let entries = queries::list_archival_entries(&self.pool, agent_id, i64::MAX, 0).await?;
+        let entries = queries::list_archival_entries(&*self.db.get()?, agent_id, i64::MAX, 0)?;
 
         let mut cids = Vec::with_capacity(entries.len());
         for entry in entries {
@@ -661,7 +658,7 @@ impl Exporter {
         collector: &mut BlockCollector,
         stats: &mut ExportStats,
     ) -> Result<Vec<Cid>> {
-        let summaries = queries::get_archive_summaries(&self.pool, agent_id).await?;
+        let summaries = queries::get_archive_summaries(&*self.db.get()?, agent_id)?;
 
         let mut cids = Vec::with_capacity(summaries.len());
         for summary in summaries {
@@ -694,7 +691,7 @@ impl Exporter {
 
         for agent_id in member_agent_ids {
             // Get blocks shared WITH this agent (not owned by them)
-            let attachments = queries::list_agent_shared_blocks(&self.pool, agent_id).await?;
+            let attachments = queries::list_agent_shared_blocks(&*self.db.get()?, agent_id)?;
             for attachment in attachments {
                 shared_block_ids.insert(attachment.block_id.clone());
                 attachment_exports.push(SharedBlockAttachmentExport::from(&attachment));
@@ -702,12 +699,12 @@ impl Exporter {
         }
 
         // Also get blocks owned by the group itself
-        let group_blocks = queries::list_blocks(&self.pool, group_id).await?;
+        let group_blocks = queries::list_blocks(&*self.db.get()?, group_id)?;
 
         // Export the shared blocks (avoiding duplicates with agent-owned blocks)
         let mut shared_cids = Vec::new();
         for block_id in &shared_block_ids {
-            if let Some(block) = queries::get_block(&self.pool, block_id).await? {
+            if let Some(block) = queries::get_block(&*self.db.get()?, block_id)? {
                 // Check if this block is already exported as part of an agent's blocks
                 // by checking if the owner is in our member list
                 if !member_agent_ids.contains(&block.agent_id) {
@@ -951,7 +948,7 @@ mod tests {
     use pattern_db::ConstellationDb;
 
     async fn setup_test_db() -> ConstellationDb {
-        ConstellationDb::open_in_memory().await.unwrap()
+        ConstellationDb::open_in_memory().unwrap()
     }
 
     #[tokio::test]
@@ -980,14 +977,14 @@ mod tests {
     #[tokio::test]
     async fn test_exporter_new() {
         let db = setup_test_db().await;
-        let _exporter = Exporter::new(db.pool().clone());
+        let _exporter = Exporter::new(db.clone());
         // Basic construction test
     }
 
     #[tokio::test]
     async fn test_chunk_snapshot_small() {
         let db = setup_test_db().await;
-        let exporter = Exporter::new(db.pool().clone());
+        let exporter = Exporter::new(db.clone());
 
         // Small snapshot that doesn't need chunking
         let snapshot = vec![1, 2, 3, 4, 5];
@@ -1003,7 +1000,7 @@ mod tests {
     #[tokio::test]
     async fn test_export_nonexistent_agent() {
         let db = setup_test_db().await;
-        let exporter = Exporter::new(db.pool().clone());
+        let exporter = Exporter::new(db.clone());
 
         let mut output = Vec::new();
         let options = ExportOptions::default();

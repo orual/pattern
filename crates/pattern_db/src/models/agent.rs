@@ -1,9 +1,8 @@
 //! Agent-related models.
 
+use crate::Json;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
-use sqlx::types::Json;
 
 // ============================================================================
 // Model Routing Configuration
@@ -104,7 +103,7 @@ pub enum RoutingCondition {
 // ============================================================================
 
 /// An agent in the constellation.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Agent {
     /// Unique identifier
     pub id: String,
@@ -145,8 +144,7 @@ pub struct Agent {
 }
 
 /// Agent status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
-#[sqlx(type_name = "TEXT", rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
 pub enum AgentStatus {
@@ -160,7 +158,7 @@ pub enum AgentStatus {
 }
 
 /// An agent group for coordination.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentGroup {
     /// Unique identifier
     pub id: String,
@@ -185,8 +183,7 @@ pub struct AgentGroup {
 }
 
 /// Coordination pattern types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
-#[sqlx(type_name = "TEXT", rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PatternType {
     /// Round-robin message distribution
@@ -204,7 +201,7 @@ pub enum PatternType {
 }
 
 /// Group membership.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupMember {
     /// Group ID
     pub group_id: String,
@@ -250,7 +247,7 @@ pub const ENDPOINT_TYPE_BLUESKY: &str = "bluesky";
 ///
 /// This enables agents to post to Bluesky or interact with ATProto services
 /// using a specific identity. The DID references a session stored in auth.db.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentAtprotoEndpoint {
     /// Agent ID (references agents table)
     pub agent_id: String,

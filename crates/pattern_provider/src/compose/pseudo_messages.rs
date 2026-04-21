@@ -279,9 +279,7 @@ fn render_block_type(bt: pattern_core::types::memory_types::BlockType) -> &'stat
     use pattern_core::types::memory_types::BlockType;
     match bt {
         BlockType::Core => "core",
-        BlockType::Working => "working",
-        BlockType::Archival => "archival",
-        BlockType::Log => "log",
+        BlockType::Working | _ => "working",
     }
 }
 

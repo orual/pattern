@@ -5,13 +5,12 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
 
 /// A calendar event or reminder.
 ///
 /// Events can be one-time or recurring, and can trigger agent actions
 /// via the Timer data source.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
     /// Unique identifier
     pub id: String,
@@ -64,7 +63,7 @@ pub struct Event {
 ///
 /// When a recurring event fires, we may want to track individual occurrences
 /// (e.g., for marking attendance, snoozing, or noting outcomes).
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventOccurrence {
     /// Unique identifier
     pub id: String,
@@ -89,8 +88,7 @@ pub struct EventOccurrence {
 }
 
 /// Status of an event occurrence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
-#[sqlx(type_name = "TEXT", rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
 pub enum OccurrenceStatus {

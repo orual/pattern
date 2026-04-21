@@ -1,0 +1,14 @@
+---
+source: crates/pattern_provider/tests/compose_segment3_regression.rs
+expression: text
+---
+<system-reminder>
+[memory:current_state]
+
+<block:session_log type="working" permission="Read, Append, Write">
+Recent session activity.
+
+[2026-04-19T10:05:00Z]
+[2026-04-19T10:00:00Z]
+</block:session_log>
+</system-reminder>

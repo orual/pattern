@@ -1,15 +1,14 @@
 //! Memory-related models.
 
+use crate::Json;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
-use sqlx::types::Json;
 
 /// A memory block belonging to an agent.
 ///
 /// Memory blocks are stored as Loro CRDT documents, enabling versioning,
 /// time-travel, and potential future merging.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryBlock {
     /// Unique identifier
     pub id: String,
@@ -64,27 +63,23 @@ pub struct MemoryBlock {
 }
 
 /// Memory block types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
-#[sqlx(type_name = "TEXT", rename_all = "lowercase")]
+///
+/// Only `Core` and `Working` remain after the v3-memory-rework Phase 2.
+/// Former `Archival` rows live in the `archival_entries` table; former
+/// `Log` rows are `Working` with a `{"kind": "log"}` metadata marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 #[derive(Default)]
 pub enum MemoryBlockType {
-    /// Always in context, critical for agent identity
-    /// Examples: persona, human, system guidelines
+    /// Always in context, critical for agent identity.
+    /// Examples: persona, human, system guidelines.
     Core,
 
-    /// Working memory, can be swapped in/out based on relevance
-    /// Examples: scratchpad, current_task, session_notes
+    /// Working memory, can be swapped in/out based on relevance.
+    /// Examples: scratchpad, current_task, session_notes.
     #[default]
     Working,
-
-    /// Long-term storage, NOT in context by default
-    /// Retrieved via recall/search tools using semantic search
-    Archival,
-
-    /// System-maintained logs (read-only to agent)
-    /// Recent entries shown in context, older entries searchable
-    Log,
 }
 
 impl MemoryBlockType {
@@ -93,8 +88,6 @@ impl MemoryBlockType {
         match self {
             Self::Core => "core",
             Self::Working => "working",
-            Self::Archival => "archival",
-            Self::Log => "log",
         }
     }
 }
@@ -106,10 +99,13 @@ impl std::str::FromStr for MemoryBlockType {
         match s.to_lowercase().as_str() {
             "core" => Ok(Self::Core),
             "working" => Ok(Self::Working),
-            "archival" => Ok(Self::Archival),
-            "log" => Ok(Self::Log),
+            "archival" | "log" => Err(format!(
+                "block type '{}' was removed in v3-memory-rework; \
+                 rows must be migrated via 0010_collapse_block_types.sql",
+                s
+            )),
             _ => Err(format!(
-                "unknown memory block type '{}', expected: core, working, archival, log",
+                "unknown memory block type '{}', expected: core, working",
                 s
             )),
         }
@@ -127,9 +123,8 @@ impl std::fmt::Display for MemoryBlockType {
 /// Ordered from most restrictive to least restrictive.
 /// This determines what operations an agent can perform on a block.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, sqlx::Type,
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
 )]
-#[sqlx(type_name = "TEXT", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
 pub enum MemoryPermission {
@@ -278,7 +273,7 @@ impl MemoryGate {
 }
 
 /// Checkpoint of a memory block (for history/rollback).
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryBlockCheckpoint {
     /// Auto-incrementing ID
     pub id: i64,
@@ -303,7 +298,7 @@ pub struct MemoryBlockCheckpoint {
 ///
 /// Separate from blocks - these are individual searchable entries
 /// the agent can store/retrieve. Useful for fine-grained memories.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchivalEntry {
     /// Unique identifier
     pub id: String,
@@ -328,7 +323,7 @@ pub struct ArchivalEntry {
 }
 
 /// Shared block attachment (when blocks are shared between agents).
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SharedBlockAttachment {
     /// The shared block
     pub block_id: String,
@@ -347,7 +342,7 @@ pub struct SharedBlockAttachment {
 ///
 /// Updates are Loro deltas stored between checkpoints. On read, the checkpoint
 /// is loaded and active updates are applied in seq order to reconstruct current state.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryBlockUpdate {
     /// Auto-incrementing ID
     pub id: i64,

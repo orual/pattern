@@ -1,9 +1,8 @@
 //! Message-related models.
 
+use crate::Json;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
-use sqlx::types::Json;
 
 /// A message in an agent's conversation history.
 ///
@@ -12,7 +11,7 @@ use sqlx::types::Json;
 ///
 /// The content is stored as JSON to support all MessageContent variants
 /// from the domain layer without data loss.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     /// Unique identifier
     pub id: String,
@@ -64,8 +63,7 @@ pub struct Message {
 }
 
 /// Message roles.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
-#[sqlx(type_name = "TEXT", rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
 pub enum MessageRole {
@@ -92,8 +90,7 @@ impl std::fmt::Display for MessageRole {
 }
 
 /// Batch type for categorizing message processing cycles.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
-#[sqlx(type_name = "TEXT", rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BatchType {
     /// User-initiated interaction
@@ -114,7 +111,7 @@ pub enum BatchType {
 ///
 /// Summaries can be chained: when multiple summaries accumulate, they can be
 /// summarized again into a higher-level summary (summary of summaries).
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchiveSummary {
     /// Unique identifier
     pub id: String,
@@ -147,7 +144,7 @@ pub struct ArchiveSummary {
 }
 
 /// Lightweight message projection for listing/searching.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageSummary {
     /// Message ID
     pub id: String,
@@ -172,7 +169,7 @@ pub struct MessageSummary {
 ///
 /// Used by the MessageRouter to queue messages between agents
 /// when the target agent is not immediately available.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueuedMessage {
     /// Unique identifier
     pub id: String,

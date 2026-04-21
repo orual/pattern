@@ -50,29 +50,45 @@ pub enum DocumentError {
     Other(String),
 }
 
-/// Block types matching pattern_db
+/// Block types matching pattern_db.
+///
+/// Only `Core` and `Working` remain after the v3-memory-rework Phase 2.
+/// `Archival` rows migrated to the `archival_entries` table; `Log` rows
+/// reclassified as `Working` with a `{"kind": "log"}` metadata marker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum BlockType {
     Core,
     Working,
-    Archival,
-    Log,
+}
+
+/// Errors from parsing a [`BlockType`] string.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum BlockTypeParseError {
+    /// A variant that existed prior to v3-memory-rework Phase 2 but was
+    /// removed. Rows must be migrated via `0010_collapse_block_types.sql`.
+    #[error(
+        "block_type {0:?} was removed in v3-memory-rework; \
+         rows must be migrated via migration 0010_collapse_block_types.sql"
+    )]
+    RemovedVariant(String),
+
+    /// An entirely unknown block type string.
+    #[error("unknown block_type {0:?}")]
+    Unknown(String),
 }
 
 impl std::str::FromStr for BlockType {
-    type Err = String;
+    type Err = BlockTypeParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "core" => Ok(Self::Core),
             "working" => Ok(Self::Working),
-            "archival" => Ok(Self::Archival),
-            "log" => Ok(Self::Log),
-            _ => Err(format!(
-                "unknown block type '{}', expected: core, working, archival, log",
-                s
-            )),
+            "archival" | "log" => Err(BlockTypeParseError::RemovedVariant(s.to_owned())),
+            other => Err(BlockTypeParseError::Unknown(other.to_owned())),
         }
     }
 }
@@ -82,8 +98,6 @@ impl std::fmt::Display for BlockType {
         match self {
             Self::Core => write!(f, "core"),
             Self::Working => write!(f, "working"),
-            Self::Archival => write!(f, "archival"),
-            Self::Log => write!(f, "log"),
         }
     }
 }
@@ -93,8 +107,8 @@ impl From<pattern_db::models::MemoryBlockType> for BlockType {
         match t {
             pattern_db::models::MemoryBlockType::Core => BlockType::Core,
             pattern_db::models::MemoryBlockType::Working => BlockType::Working,
-            pattern_db::models::MemoryBlockType::Archival => BlockType::Archival,
-            pattern_db::models::MemoryBlockType::Log => BlockType::Log,
+            // Future-proofing: non-exhaustive requires a catch-all.
+            _ => BlockType::Working,
         }
     }
 }
@@ -104,8 +118,6 @@ impl From<BlockType> for pattern_db::models::MemoryBlockType {
         match t {
             BlockType::Core => pattern_db::models::MemoryBlockType::Core,
             BlockType::Working => pattern_db::models::MemoryBlockType::Working,
-            BlockType::Archival => pattern_db::models::MemoryBlockType::Archival,
-            BlockType::Log => pattern_db::models::MemoryBlockType::Log,
         }
     }
 }

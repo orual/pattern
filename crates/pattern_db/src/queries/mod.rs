@@ -1,15 +1,7 @@
 //! Database query functions.
 //!
-//! Organized by domain:
-//! - `agent`: Agent CRUD and queries
-//! - `atproto_endpoints`: Agent ATProto identity mapping
-//! - `memory`: Memory block operations
-//! - `message`: Message history operations
-//! - `coordination`: Cross-agent coordination queries
-//! - `source`: Data source configuration
-//! - `task`: ADHD task management
-//! - `event`: Calendar events and reminders
-//! - `folder`: File access management
+//! Organized by domain. All queries use rusqlite directly with
+//! inherent `fn from_row` on each row struct.
 
 mod agent;
 mod atproto_endpoints;
@@ -20,7 +12,7 @@ mod memory;
 mod message;
 mod queue;
 mod source;
-mod stats;
+pub mod stats;
 mod task;
 
 pub use agent::*;
@@ -32,5 +24,4 @@ pub use memory::*;
 pub use message::*;
 pub use queue::*;
 pub use source::*;
-pub use stats::*;
 pub use task::*;

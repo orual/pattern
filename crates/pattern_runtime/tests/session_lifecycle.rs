@@ -62,8 +62,7 @@ async fn create_agent_row(db: &pattern_db::ConstellationDb, agent_id: &str) {
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
-    pattern_db::queries::create_agent(db.pool(), &agent)
-        .await
+    pattern_db::queries::create_agent(&db.get().unwrap(), &agent)
         .expect("create test agent row");
 }
 

@@ -2,16 +2,15 @@
 //!
 //! Tracks v1 → v2 migration decisions and issues for debugging and rollback.
 
+use crate::Json;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
-use sqlx::types::Json;
 
 /// Record of a v1 to v2 migration operation.
 ///
 /// Each CAR file import creates an audit record tracking what was imported,
 /// any issues found, and how they were resolved.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MigrationAudit {
     /// Unique identifier
     pub id: String,

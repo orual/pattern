@@ -30,7 +30,6 @@ secrecy = { workspace = true }
 # Database
 pattern-db = { path = "../pattern_db" }
 loro = { version = "1.10", features = ["counter"] }
-sqlx = { version = "0.8", features = ["json"] }
 
 # AI/LLM
 genai = { workspace = true }

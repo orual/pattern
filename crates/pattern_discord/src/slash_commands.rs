@@ -1169,7 +1169,7 @@ pub async fn handle_list_command(
 
     // Try to query all agents from the database first
     if let Some(dbs) = dbs {
-        match pattern_db::queries::list_agents(dbs.constellation.pool()).await {
+        match pattern_db::queries::list_agents(&dbs.constellation.get().unwrap()).await {
             Ok(db_agents) => {
                 if db_agents.is_empty() {
                     embed = embed.description("No agents found in database");

@@ -1,0 +1,9 @@
+---
+source: crates/pattern_provider/tests/compose_segment3_regression.rs
+assertion_line: 42
+expression: text
+---
+<system-reminder>
+[memory:current_state]
+(no blocks loaded)
+</system-reminder>

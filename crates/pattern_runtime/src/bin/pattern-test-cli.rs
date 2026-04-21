@@ -874,12 +874,9 @@ async fn cmd_cache_test(
     std::fs::create_dir_all(&cache_test_data_dir)?;
     let cache_test_db = std::sync::Arc::new(
         pattern_db::ConstellationDb::open(
-            cache_test_data_dir
-                .join("constellation.db")
-                .to_string_lossy()
-                .as_ref(),
-        )
-        .await?,
+            cache_test_data_dir.join("memory.db"),
+            cache_test_data_dir.join("messages.db"),
+        )?,
     );
 
     eprintln!("[session] opening TidepoolSession...");
@@ -1201,9 +1198,18 @@ async fn cmd_spawn(
     let db_path = data_dir.join("constellation.db");
     eprintln!("[spawn] opening constellation DB at {}", db_path.display());
     let db = Arc::new(
-        pattern_db::ConstellationDb::open(db_path.to_string_lossy().as_ref())
-            .await
-            .map_err(|e| format!("opening constellation DB: {e}"))?,
+        {
+            let db_path_str = db_path.to_string_lossy().to_string();
+            let parent = std::path::Path::new(&db_path_str)
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .to_path_buf();
+            pattern_db::ConstellationDb::open(
+                parent.join("memory.db"),
+                parent.join("messages.db"),
+            )
+            .map_err(|e| format!("opening constellation DB: {e}"))?
+        },
     );
     let memory_cache = Arc::new(pattern_memory::MemoryCache::new(db.clone()));
     let memory_store: Arc<dyn pattern_core::traits::MemoryStore> = memory_cache.clone();

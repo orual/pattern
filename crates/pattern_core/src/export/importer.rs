@@ -9,8 +9,9 @@ use chrono::Utc;
 use cid::Cid;
 use iroh_car::CarReader;
 use serde_ipld_dagcbor::from_slice as decode_dag_cbor;
-use sqlx::SqlitePool;
-use sqlx::types::Json;
+use pattern_db::Json;
+// TODO(v3-memory-rework): port to ConstellationDb after Tasks 6-9 complete.
+use pattern_db::ConstellationDb;
 use tokio::io::AsyncRead;
 
 use pattern_db::models::{
@@ -65,13 +66,13 @@ impl ImportResult {
 
 /// CAR archive importer.
 pub struct Importer {
-    pool: SqlitePool,
+    db: ConstellationDb,
 }
 
 impl Importer {
     /// Create a new importer with the given database pool.
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    pub fn new(db: ConstellationDb) -> Self {
+        Self { db }
     }
 
     /// Import a CAR archive from the given reader.
@@ -265,7 +266,7 @@ impl Importer {
             updated_at: now,
         };
 
-        queries::upsert_agent(&self.pool, &agent).await?;
+        queries::upsert_agent(&*self.db.get()?, &agent)?;
         result.agent_ids.push(agent_id.clone());
 
         // Import memory blocks (skip if already imported this session)
@@ -360,7 +361,7 @@ impl Importer {
             updated_at: now,
         };
 
-        queries::upsert_block(&self.pool, &memory_block).await?;
+        queries::upsert_block(&*self.db.get()?, &memory_block)?;
         Ok(())
     }
 
@@ -477,7 +478,7 @@ impl Importer {
             created_at: export.created_at,
         };
 
-        queries::upsert_message(&self.pool, &message).await?;
+        queries::upsert_message(&*self.db.get()?, &message)?;
         Ok(())
     }
 
@@ -527,7 +528,7 @@ impl Importer {
             created_at: export.created_at,
         };
 
-        queries::upsert_archival_entry(&self.pool, &entry).await?;
+        queries::upsert_archival_entry(&*self.db.get()?, &entry)?;
         Ok(())
     }
 
@@ -578,7 +579,7 @@ impl Importer {
             created_at: export.created_at,
         };
 
-        queries::upsert_archive_summary(&self.pool, &summary).await?;
+        queries::upsert_archive_summary(&*self.db.get()?, &summary)?;
         Ok(())
     }
 
@@ -672,7 +673,7 @@ impl Importer {
             .unwrap_or_else(|| export.group.name.clone());
 
         let group = self.create_group_from_record(&export.group, &group_id, &group_name)?;
-        queries::upsert_group(&self.pool, &group).await?;
+        queries::upsert_group(&*self.db.get()?, &group)?;
         result.group_ids.push(group_id.clone());
 
         // Create group members with mapped agent IDs
@@ -729,7 +730,7 @@ impl Importer {
             .unwrap_or_else(|| export.group.name.clone());
 
         let group = self.create_group_from_record(&export.group, &group_id, &group_name)?;
-        queries::upsert_group(&self.pool, &group).await?;
+        queries::upsert_group(&*self.db.get()?, &group)?;
         result.group_ids.push(group_id);
 
         // Note: thin exports don't include agent data, so members can't be created
@@ -773,7 +774,7 @@ impl Importer {
             joined_at: export.joined_at,
         };
 
-        queries::upsert_group_member(&self.pool, &member).await?;
+        queries::upsert_group_member(&*self.db.get()?, &member)?;
         Ok(())
     }
 
@@ -909,7 +910,7 @@ impl Importer {
 
         // For constellation groups, don't apply rename
         let group = self.create_group_from_record(&export.group, &group_id, &export.group.name)?;
-        queries::upsert_group(&self.pool, &group).await?;
+        queries::upsert_group(&*self.db.get()?, &group)?;
         result.group_ids.push(group_id.clone());
 
         // Create group members with mapped agent IDs
@@ -973,12 +974,11 @@ impl Importer {
 
             // Create the shared block attachment
             queries::create_shared_block_attachment(
-                &self.pool,
+                &*self.db.get()?,
                 &block_id,
                 &agent_id,
                 attachment.permission,
-            )
-            .await?;
+            )?;
         }
         Ok(())
     }
@@ -995,13 +995,13 @@ mod tests {
     use pattern_db::ConstellationDb;
 
     async fn setup_test_db() -> ConstellationDb {
-        ConstellationDb::open_in_memory().await.unwrap()
+        ConstellationDb::open_in_memory().unwrap()
     }
 
     #[tokio::test]
     async fn test_importer_new() {
         let db = setup_test_db().await;
-        let _importer = Importer::new(db.pool().clone());
+        let _importer = Importer::new(db.clone());
         // Basic construction test
     }
 
@@ -1049,7 +1049,7 @@ mod tests {
     #[tokio::test]
     async fn test_reconstruct_empty_snapshot() {
         let db = setup_test_db().await;
-        let importer = Importer::new(db.pool().clone());
+        let importer = Importer::new(db.clone());
         let blocks = HashMap::new();
 
         let result = importer.reconstruct_snapshot(&[], &blocks).unwrap();

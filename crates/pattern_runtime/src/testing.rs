@@ -41,7 +41,6 @@ pub use tidepool_testing::r#gen::standard_datacon_table;
 pub async fn test_db() -> std::sync::Arc<pattern_db::ConstellationDb> {
     std::sync::Arc::new(
         pattern_db::ConstellationDb::open_in_memory()
-            .await
             .expect("test_db: failed to open in-memory ConstellationDb"),
     )
 }

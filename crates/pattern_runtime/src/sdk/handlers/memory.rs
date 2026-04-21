@@ -302,8 +302,21 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                 "vector search not yet available in phase 3".to_string(),
             )),
             MemoryReq::Archive(label) => {
+                // Archive copies the block's rendered content into an
+                // archival entry. The block itself remains in memory_blocks
+                // as a Working-tier block (the agent can delete it
+                // separately if desired).
+                let doc = handle
+                    .block_on(store.get_block(&agent_id, &label))
+                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Archive: {e}")))?
+                    .ok_or_else(|| {
+                        EffectError::Handler(format!(
+                            "Pattern.Memory.Archive: block {label:?} not found for agent {agent_id:?}"
+                        ))
+                    })?;
+                let content = doc.render();
                 handle
-                    .block_on(store.set_block_type(&agent_id, &label, BlockType::Archival))
+                    .block_on(store.insert_archival(&agent_id, &content, None))
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Archive: {e}")))?;
                 cx.respond(())
             }

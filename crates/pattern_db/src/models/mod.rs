@@ -1,6 +1,8 @@
 //! Database models.
 //!
-//! These structs map directly to database tables via sqlx.
+//! These structs map directly to database tables. Row structs gain
+//! inherent `fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self>`
+//! methods as queries are ported (Tasks 6-9).
 
 mod agent;
 mod coordination;

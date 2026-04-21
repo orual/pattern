@@ -13,10 +13,9 @@ use pattern_memory::{MemoryCache, SharedBlockManager};
 /// Create a temporary on-disk ConstellationDb for testing.
 async fn test_db() -> (tempfile::TempDir, Arc<pattern_db::ConstellationDb>) {
     let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("constellation.db");
+    let _db_path = dir.path().join("constellation.db");
     let db = Arc::new(
-        pattern_db::ConstellationDb::open(db_path)
-            .await
+        pattern_db::ConstellationDb::open_in_memory()
             .unwrap(),
     );
     (dir, db)
@@ -31,15 +30,14 @@ async fn seed_agent(db: &pattern_db::ConstellationDb, agent_id: &str) {
         model_provider: "test".to_string(),
         model_name: "test".to_string(),
         system_prompt: "test".to_string(),
-        config: Default::default(),
-        enabled_tools: Default::default(),
+        config: pattern_db::Json(serde_json::json!({})),
+        enabled_tools: pattern_db::Json(vec![]),
         tool_rules: None,
         status: pattern_db::models::AgentStatus::Active,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
-    pattern_db::queries::create_agent(db.pool(), &agent)
-        .await
+    pattern_db::queries::create_agent(&db.get().unwrap(), &agent)
         .expect("failed to seed agent");
 }
 

@@ -7,17 +7,16 @@
 //!
 //! Distinct from CoordinationTask which is for internal agent work assignment.
 
+use crate::Json;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
-use sqlx::types::Json;
 
 /// A user-facing task.
 ///
 /// Tasks can be assigned to agents or be constellation-level.
 /// They support hierarchical breakdown which is crucial for ADHD:
 /// large overwhelming tasks can be broken into smaller, actionable steps.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     /// Unique identifier
     pub id: String,
@@ -71,8 +70,7 @@ pub struct Task {
 /// User task status.
 ///
 /// More nuanced than coordination task status to support ADHD workflows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
-#[sqlx(type_name = "TEXT", rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
 pub enum UserTaskStatus {
@@ -118,9 +116,8 @@ impl std::fmt::Display for UserTaskStatus {
 ///
 /// Distinguishes between importance and urgency (Eisenhower matrix style).
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, sqlx::Type,
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
 )]
-#[sqlx(type_name = "TEXT", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
 pub enum UserTaskPriority {
@@ -154,7 +151,7 @@ impl std::fmt::Display for UserTaskPriority {
 }
 
 /// Lightweight task projection for lists.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskSummary {
     /// Task ID
     pub id: String,
