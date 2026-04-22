@@ -24,6 +24,10 @@ pub struct Toast {
     pub created_at: Instant,
     /// How long before this toast auto-expires.
     pub ttl: Duration,
+    /// Whether this toast is accumulating streaming chunk data.
+    /// Chunk events append to the toast with this flag set; a Final event
+    /// replaces it and clears the flag.
+    pub streaming: bool,
 }
 
 /// Default toast time-to-live.
@@ -49,16 +53,51 @@ impl Default for ToastState {
 }
 
 impl ToastState {
-    /// Add a toast. Keeps at most [`MAX_TOASTS`] visible.
+    /// Add a note/final toast (discrete message, not streaming). Keeps at
+    /// most [`MAX_TOASTS`] visible.
     pub fn push(&mut self, text: String) {
         self.toasts.push(Toast {
             text,
             created_at: Instant::now(),
             ttl: DEFAULT_TTL,
+            streaming: false,
         });
-        while self.toasts.len() > MAX_TOASTS {
-            self.toasts.remove(0);
+        self.enforce_limit();
+    }
+
+    /// Append streaming chunk data. If the last toast is a streaming toast,
+    /// append to it. Otherwise create a new streaming toast.
+    pub fn push_chunk(&mut self, text: &str) {
+        if let Some(last) = self.toasts.last_mut() {
+            if last.streaming {
+                last.text.push_str(text);
+                last.created_at = Instant::now(); // Reset TTL on new data.
+                return;
+            }
         }
+        // No active streaming toast — create one.
+        self.toasts.push(Toast {
+            text: text.to_owned(),
+            created_at: Instant::now(),
+            ttl: DEFAULT_TTL,
+            streaming: true,
+        });
+        self.enforce_limit();
+    }
+
+    /// Finalize a streaming toast. Replaces the current streaming toast
+    /// (if any) with the final text, or creates a new non-streaming toast.
+    pub fn push_final(&mut self, text: String) {
+        if let Some(last) = self.toasts.last_mut() {
+            if last.streaming {
+                last.text = text;
+                last.streaming = false;
+                last.created_at = Instant::now();
+                return;
+            }
+        }
+        // No streaming toast — just create a regular one.
+        self.push(text);
     }
 
     /// Add a toast with a specific creation time (for testing).
@@ -68,10 +107,9 @@ impl ToastState {
             text,
             created_at,
             ttl: DEFAULT_TTL,
+            streaming: false,
         });
-        while self.toasts.len() > MAX_TOASTS {
-            self.toasts.remove(0);
-        }
+        self.enforce_limit();
     }
 
     /// Remove expired toasts based on their TTL.
@@ -87,6 +125,13 @@ impl ToastState {
     /// Whether any toasts are currently visible.
     pub fn is_empty(&self) -> bool {
         self.toasts.is_empty()
+    }
+
+    /// Drop oldest toasts to stay within the limit.
+    fn enforce_limit(&mut self) {
+        while self.toasts.len() > MAX_TOASTS {
+            self.toasts.remove(0);
+        }
     }
 }
 
@@ -210,6 +255,7 @@ mod tests {
                 text: "hello".into(),
                 created_at: Instant::now(),
                 ttl: DEFAULT_TTL,
+                streaming: false,
             }],
         };
 
@@ -223,5 +269,42 @@ mod tests {
 
         let output = buffer_to_string(terminal.backend().buffer());
         insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn chunk_events_accumulate_in_streaming_toast() {
+        let mut state = ToastState::default();
+        state.push_chunk("hello ");
+        state.push_chunk("world");
+        assert_eq!(state.toasts.len(), 1, "chunks should accumulate");
+        assert_eq!(state.toasts[0].text, "hello world");
+        assert!(state.toasts[0].streaming, "toast should be streaming");
+    }
+
+    #[test]
+    fn final_replaces_streaming_toast() {
+        let mut state = ToastState::default();
+        state.push_chunk("partial");
+        state.push_final("complete result".into());
+        assert_eq!(
+            state.toasts.len(),
+            1,
+            "final should replace streaming toast"
+        );
+        assert_eq!(state.toasts[0].text, "complete result");
+        assert!(
+            !state.toasts[0].streaming,
+            "toast should no longer be streaming"
+        );
+    }
+
+    #[test]
+    fn note_and_chunk_are_separate_toasts() {
+        let mut state = ToastState::default();
+        state.push("note message".into());
+        state.push_chunk("chunk data");
+        assert_eq!(state.toasts.len(), 2, "note and chunk should be separate");
+        assert_eq!(state.toasts[0].text, "note message");
+        assert_eq!(state.toasts[1].text, "chunk data");
     }
 }
