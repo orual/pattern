@@ -539,6 +539,41 @@ break-detection output (Phase 5 Task 11).
 - No cross-provider routing demo. Same provider per session.
 - No constellation / multi-agent paths. Foundation is single-agent.
 
+## Open work: Router trait + daemon CliRouter
+
+**Status:** blocked on Router trait fix. Do not attempt CliRouter until this is resolved.
+
+**Problem:** The `Router` trait (`router.rs`) does not carry origin information
+(who sent the message, from which session/batch). `route(&self, target, &Message)`
+only has the target and the message body. A correct `CliRouter` for the daemon
+needs origin metadata to tag outbound `WireTurnEvent::MessageSent` events for
+the TUI.
+
+**Required changes (in order):**
+
+1. **Fix Router trait**: `route()` should receive origin context — at minimum the
+   sender's agent_id. Design decision needed on whether this is a parameter, a
+   field on `Message`, or a wrapper struct.
+
+2. **Add `WireTurnEvent::MessageSent`** variant to `protocol.rs`:
+   `MessageSent { recipient: String, body: String }`. This is a wire-only
+   concept — no internal `TurnEvent` variant needed.
+
+3. **Add `WireTurnEvent::Text` agent name prefix**: Text events should render
+   with `[agent-name]` prefix in the TUI (like `[you]` for user messages).
+   Thread agent name through `RenderBatch`.
+
+4. **Implement `CliRouter`**: holds a channel to the daemon's event bus. On
+   `route()`, constructs `TaggedTurnEvent` with `MessageSent` and sends it.
+   Registered as the default scheme in the daemon's `RouterRegistry`.
+
+5. **Wire RouterRegistry into daemon sessions**: `get_or_open_session` creates
+   a registry, registers the CliRouter, calls `ctx.with_router(registry)`.
+
+**Current state:** `RouterBridge` (sync-to-async channel bridge) is implemented
+and working. The Message handler uses it. But no router is registered in daemon
+sessions, so `Message.Send` returns "no router bridge configured."
+
 ## Known flakes — historical note
 
 Two tests previously flaked intermittently under
