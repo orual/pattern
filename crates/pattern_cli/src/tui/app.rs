@@ -58,16 +58,17 @@ enum Focus {
 
 /// Selection mode state for mouse drag-to-copy (AC4.8).
 ///
-/// When active, mouse events set start/end coordinates. On mouse-up the
-/// selected text is extracted from the last rendered buffer and copied to
-/// the clipboard.
+/// When active (toggled via Ctrl+S), shows visual indicator and enables
+/// explicit selection mode. Automatic drag-to-select always works.
 #[derive(Debug, Default)]
 struct SelectionState {
     /// Start position (column, row) of the selection.
     start: Option<(u16, u16)>,
-    /// End position (column, row) of the selection.
-    end: Option<(u16, u16)>,
-    /// Whether selection mode is currently active.
+    /// Current position during drag (column, row).
+    current: Option<(u16, u16)>,
+    /// Whether we're currently dragging (moved > threshold from start).
+    is_dragging: bool,
+    /// Whether explicit selection mode is active (toggled via Ctrl+S).
     active: bool,
 }
 
@@ -284,22 +285,34 @@ impl App {
 
     /// Handle a mouse event.
     ///
-    /// In selection mode: left-down sets start, drag updates end, up extracts
-    /// text and copies to clipboard. Outside selection mode: left-click toggles
-    /// collapsible sections.
+    /// In explicit selection mode (Ctrl+S): only drag-to-select works.
+    /// In normal mode: drag-to-select works, clicks toggle collapsible sections.
     fn handle_mouse(&mut self, mouse: MouseEvent) {
-        // Selection mode mouse handling.
-        if self.selection.active {
-            match mouse.kind {
-                MouseEventKind::Down(MouseButton::Left) => {
-                    self.selection.start = Some((mouse.column, mouse.row));
-                    self.selection.end = None;
+        const DRAG_THRESHOLD: u16 = 3; // Pixels before click becomes drag
+
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.selection.start = Some((mouse.column, mouse.row));
+                self.selection.current = Some((mouse.column, mouse.row));
+                self.selection.is_dragging = false;
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some(start) = self.selection.start {
+                    self.selection.current = Some((mouse.column, mouse.row));
+                    // Check if moved more than threshold to distinguish click from drag.
+                    let dx = (mouse.column as i16 - start.0 as i16).abs();
+                    let dy = (mouse.row as i16 - start.1 as i16).abs();
+                    if dx + dy > DRAG_THRESHOLD as i16 {
+                        self.selection.is_dragging = true;
+                    }
                 }
-                MouseEventKind::Drag(MouseButton::Left) => {
-                    self.selection.end = Some((mouse.column, mouse.row));
-                }
-                MouseEventKind::Up(MouseButton::Left) => {
-                    if let (Some(start), Some(end)) = (self.selection.start, self.selection.end) {
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                if let Some(start) = self.selection.start {
+                    let end = self.selection.current.unwrap_or(start);
+
+                    if self.selection.is_dragging {
+                        // This was a drag → copy selection to clipboard.
                         let text = self.extract_text_from_buffer(start, end);
                         if !text.is_empty() {
                             match super::clipboard::copy_to_clipboard(&text) {
@@ -314,48 +327,50 @@ impl App {
                                 }
                             }
                         }
+                    } else if !self.selection.active {
+                        // This was a click in normal mode → toggle collapsible section.
+                        // In explicit selection mode, clicks don't toggle sections.
+                        let click_row = mouse.row;
+                        if let Some(&(batch_idx, section_idx, _y)) = self
+                            .conversation
+                            .click_targets
+                            .iter()
+                            .find(|&&(_, _, y)| y == click_row)
+                        {
+                            if let Some(batch) = self.conversation.batches.get_mut(batch_idx)
+                                && let Some(section) = batch.sections.get_mut(section_idx)
+                            {
+                                section.collapsed = !section.collapsed;
+                                section.cached_height = None;
+                            }
+                        }
                     }
-                    self.exit_selection_mode();
                 }
-                _ => {}
+                // Clear drag state but keep explicit mode if active.
+                let was_active = self.selection.active;
+                self.selection.start = None;
+                self.selection.current = None;
+                self.selection.is_dragging = false;
+                self.selection.active = was_active;
             }
-            return;
-        }
-
-        // Normal mode: left-click toggles collapsible sections.
-        if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
-            let click_row = mouse.row;
-
-            // Find a click target whose y position matches the clicked row.
-            if let Some(&(batch_idx, section_idx, _y)) = self
-                .conversation
-                .click_targets
-                .iter()
-                .find(|&&(_, _, y)| y == click_row)
-            {
-                // Toggle the section's collapsed state.
-                if let Some(batch) = self.conversation.batches.get_mut(batch_idx)
-                    && let Some(section) = batch.sections.get_mut(section_idx)
-                {
-                    section.collapsed = !section.collapsed;
-                    section.cached_height = None;
-                }
-            }
+            _ => {}
         }
     }
 
-    /// Enter selection mode: enable visual indicator in status bar.
+    /// Enter explicit selection mode (toggled via Ctrl+S).
     fn enter_selection_mode(&mut self) {
         self.selection.active = true;
         self.selection.start = None;
-        self.selection.end = None;
+        self.selection.current = None;
+        self.selection.is_dragging = false;
     }
 
-    /// Exit selection mode: clear selection coordinates.
+    /// Exit explicit selection mode.
     fn exit_selection_mode(&mut self) {
         self.selection.active = false;
         self.selection.start = None;
-        self.selection.end = None;
+        self.selection.current = None;
+        self.selection.is_dragging = false;
     }
 
     /// Extract text from the last rendered buffer between two screen positions.
@@ -410,6 +425,43 @@ impl App {
         trimmed.to_string()
     }
 
+    /// Render visual highlighting for the current selection.
+    fn render_selection_highlight(&self, start: (u16, u16), end: (u16, u16), buf: &mut Buffer) {
+        let Some(last_buf) = &self.last_rendered_buffer else {
+            return;
+        };
+
+        let buf_area = last_buf.area;
+
+        // Normalize coordinates.
+        let (r0, c0, r1, c1) = if (start.1, start.0) <= (end.1, end.0) {
+            (start.1, start.0, end.1, end.0)
+        } else {
+            (end.1, end.0, start.1, start.0)
+        };
+
+        // Render highlighted rectangle over selected area.
+        for row in r0..=r1 {
+            if row < buf_area.y || row >= buf_area.y + buf_area.height {
+                continue;
+            }
+            let col_start = if row == r0 { c0 } else { buf_area.x };
+            let col_end = if row == r1 { c1 } else { buf_area.x + buf_area.width - 1 };
+
+            for col in col_start..=col_end {
+                if col < buf_area.x || col >= buf_area.x + buf_area.width {
+                    continue;
+                }
+                // Get the existing cell and invert its style for selection highlight.
+                let cell = &last_buf[(col, row)];
+                let style = cell.style();
+                // Use reverse video for selection highlight.
+                buf[(col, row)]
+                    .set_style(ratatui::style::Style::default().bg(style.fg.unwrap_or(Color::White)));
+            }
+        }
+    }
+
     /// Handle a key event based on current focus.
     fn handle_key(&mut self, key: KeyEvent) {
         // Global: Ctrl+C always quits.
@@ -418,7 +470,7 @@ impl App {
             return;
         }
 
-        // Global: Ctrl+S toggles selection mode.
+        // Global: Ctrl+S toggles explicit selection mode.
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s') {
             if self.selection.active {
                 self.exit_selection_mode();
@@ -838,6 +890,13 @@ impl App {
         if self.autocomplete.is_visible() {
             let widget = AutocompleteWidget::new(&self.autocomplete);
             widget.render_above(layout.input, frame.buffer_mut());
+        }
+
+        // Selection highlighting (rendered on top of everything).
+        if let Some(start) = self.selection.start
+            && let Some(end) = self.selection.current
+        {
+            self.render_selection_highlight(start, end, frame.buffer_mut());
         }
     }
 }
