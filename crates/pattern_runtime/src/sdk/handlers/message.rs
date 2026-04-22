@@ -2,9 +2,10 @@
 //!
 //! Send / Reply / Notify: construct a `Message`, push it into
 //! `SessionContext::pending_messages`, and dispatch via the
-//! `RouterRegistry`. The handler runs in sync context (inside
-//! `spawn_blocking`), so router dispatch uses
-//! `Handle::current().block_on(...)`.
+//! [`RouterBridge`](crate::router::RouterBridge). The handler runs
+//! on a plain OS eval worker thread (no tokio runtime context), so
+//! router dispatch uses the sync `RouterBridge::route_sync` method
+//! which sends requests to an async router task via a channel.
 //!
 //! Ask: stubbed as candidate-for-removal per Phase 5 Task 20.
 //! v3 agents don't call LLMs via effects; LLMs drive agent turns
@@ -94,18 +95,15 @@ impl EffectHandler<SessionContext> for MessageHandler {
             }
             MessageReq::Send(recipient, body) => {
                 let agent_id = cx.user().agent_id().to_string();
-                let handle = tokio::runtime::Handle::current();
-                dispatch_outbound(cx, &handle, &agent_id, &recipient, &body, "Send")
+                dispatch_outbound(cx, &agent_id, &recipient, &body, "Send")
             }
             MessageReq::Reply(msg_id, body) => {
                 let agent_id = cx.user().agent_id().to_string();
-                let handle = tokio::runtime::Handle::current();
-                dispatch_outbound(cx, &handle, &agent_id, &msg_id, &body, "Reply")
+                dispatch_outbound(cx, &agent_id, &msg_id, &body, "Reply")
             }
             MessageReq::Notify(channel_id, body) => {
                 let agent_id = cx.user().agent_id().to_string();
-                let handle = tokio::runtime::Handle::current();
-                dispatch_outbound(cx, &handle, &agent_id, &channel_id, &body, "Notify")
+                dispatch_outbound(cx, &agent_id, &channel_id, &body, "Notify")
             }
         };
 
@@ -120,10 +118,9 @@ impl EffectHandler<SessionContext> for MessageHandler {
 }
 
 /// Construct a `Message` from the body, push it into pending_messages,
-/// and dispatch via the router registry.
+/// and dispatch via the router bridge (sync, no tokio context required).
 fn dispatch_outbound(
     cx: &EffectContext<'_, SessionContext>,
-    handle: &tokio::runtime::Handle,
     agent_id: &str,
     recipient: &str,
     body: &str,
@@ -151,13 +148,16 @@ fn dispatch_outbound(
         .unwrap()
         .push(msg.clone());
 
-    // Dispatch via router.
-    let router = cx.user().router();
-    handle
-        .block_on(router.route(recipient, &msg))
-        .map_err(|e| {
-            EffectError::Handler(format!("Pattern.Message.{op_name}: routing failed: {e}"))
-        })?;
+    // Dispatch via the router bridge (sync channel to async router task).
+    let bridge = cx.user().router_bridge().ok_or_else(|| {
+        EffectError::Handler(format!(
+            "Pattern.Message.{op_name}: no router bridge configured \
+             (session must be opened with a router via with_router)"
+        ))
+    })?;
+    bridge.route_sync(recipient, &msg).map_err(|e| {
+        EffectError::Handler(format!("Pattern.Message.{op_name}: routing failed: {e}"))
+    })?;
 
     cx.respond(())
 }

@@ -138,12 +138,14 @@ impl EvalWorker {
             .name(format!("pattern-eval-worker-{session_id_for_worker}"))
             .stack_size(256 * 1024 * 1024)
             .spawn(move || {
-                // Plain OS thread — no nested tokio runtime. The
+                // Plain OS thread — no tokio runtime context. The
                 // MemoryStore trait is sync (v3-memory-rework Phase 3),
-                // so handlers call store methods directly without any
-                // async bridging. The `for req in rx` loop blocks on
-                // the std::sync::mpsc channel; when all senders are
-                // dropped the iterator ends and the thread exits.
+                // so handlers call store methods directly. Async dispatch
+                // (e.g. Message.Send routing) goes through RouterBridge's
+                // sync channel rather than Handle::current().block_on.
+                // The `for req in rx` loop blocks on the std::sync::mpsc
+                // channel; when all senders are dropped the iterator
+                // ends and the thread exits.
                 for req in rx {
                     let outcome =
                         run_eval(&req.source, &ctx, &include_paths, &session_id_for_worker);

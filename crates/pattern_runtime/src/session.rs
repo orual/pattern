@@ -30,7 +30,7 @@ use pattern_core::types::turn::{StepReply, TurnInput};
 use crate::agent_loop::EvalWorker;
 use crate::checkpoint::{CheckpointEvent, CheckpointLog};
 use crate::memory::{MemoryStoreAdapter, TurnHistory};
-use crate::router::RouterRegistry;
+use crate::router::{RouterBridge, RouterRegistry};
 use crate::sdk::SdkLocation;
 use crate::sdk::handlers::DisplayHandler;
 use crate::timeout::{Budget, CancelState};
@@ -81,6 +81,11 @@ pub struct SessionContext {
     /// Send/Reply/Notify through this. Set at session open; read-only
     /// thereafter.
     router: Arc<RouterRegistry>,
+    /// Sync-to-async bridge for routing messages from the eval worker
+    /// thread to the async router task. Lazily initialised by
+    /// [`SessionContext::with_router`]; handlers call
+    /// [`RouterBridge::route_sync`] instead of `Handle::current().block_on`.
+    router_bridge: Option<RouterBridge>,
     /// Pending messages accumulated during a turn. Handlers push
     /// messages here; the agent loop drains them into `TurnOutput`
     /// at turn close.
@@ -180,6 +185,7 @@ impl SessionContext {
             provider,
             db,
             router: Arc::new(RouterRegistry::new()),
+            router_bridge: None,
             pending_messages: Arc::new(std::sync::Mutex::new(Vec::new())),
             turn_sink: Arc::new(NoOpSink),
             checkpoint_log: Arc::new(std::sync::Mutex::new(CheckpointLog::new())),
@@ -341,6 +347,14 @@ impl SessionContext {
         &self.router
     }
 
+    /// Sync-to-async router bridge. Returns `None` if no router has
+    /// been wired via [`Self::with_router`]. Handlers should prefer
+    /// this over direct `router()` access — it is safe to call from
+    /// a plain OS thread without a tokio runtime context.
+    pub fn router_bridge(&self) -> Option<&RouterBridge> {
+        self.router_bridge.as_ref()
+    }
+
     /// Pending messages accumulated during the current turn.
     pub fn pending_messages(
         &self,
@@ -355,15 +369,18 @@ impl SessionContext {
         &self.turn_sink
     }
 
-    /// Replace the router registry. Used by session open (and tests) to
-    /// inject a pre-configured registry — typically registered with a
-    /// `CliRouter` or other scheme handlers before the session starts.
+    /// Replace the router registry and spawn the async router bridge.
+    /// Used by session open (and tests) to inject a pre-configured
+    /// registry — typically registered with a `CliRouter` or other
+    /// scheme handlers before the session starts.
     ///
-    /// Currently exercised via `MessageHandler::tests`; production wiring
-    /// in `session::open` lands in Task 20 part 5 (agent_loop
-    /// integration). The `#[allow(dead_code)]` is temporary.
+    /// Must be called from within a tokio runtime context (the bridge
+    /// spawns a tokio task). After this call, handlers can use
+    /// [`Self::router_bridge`] to dispatch messages from a plain OS
+    /// thread without needing `Handle::current()`.
     #[allow(dead_code)]
     pub(crate) fn with_router(mut self, router: Arc<RouterRegistry>) -> Self {
+        self.router_bridge = Some(RouterBridge::spawn(router.clone()));
         self.router = router;
         self
     }

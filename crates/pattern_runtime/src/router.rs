@@ -27,6 +27,75 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use pattern_core::types::message::Message;
 
+// ---------------------------------------------------------------------------
+// RouterBridge — sync ↔ async bridge for eval worker → router dispatch
+// ---------------------------------------------------------------------------
+
+/// Request sent from the eval worker thread to the async router task.
+struct RouterRequest {
+    recipient: String,
+    message: Message,
+    reply: std::sync::mpsc::SyncSender<Result<(), RouterError>>,
+}
+
+/// Bridge between sync eval worker and async router dispatch.
+///
+/// Holds the send half of a `tokio::sync::mpsc` channel. The eval
+/// worker thread sends requests through it; a tokio task reads them
+/// and dispatches via the [`RouterRegistry`].
+///
+/// The `tokio::sync::mpsc::UnboundedSender::send` method is safe to
+/// call from non-tokio threads (it does not require a runtime
+/// context). The reply path uses `std::sync::mpsc::sync_channel` so
+/// the eval worker can block on the result without needing tokio.
+#[derive(Clone, Debug)]
+pub struct RouterBridge {
+    tx: tokio::sync::mpsc::UnboundedSender<RouterRequest>,
+}
+
+impl RouterBridge {
+    /// Spawn the async router task and return the bridge.
+    ///
+    /// The task runs on the tokio runtime and processes router requests
+    /// until the bridge (and all clones) are dropped, which closes the
+    /// channel and terminates the task.
+    pub fn spawn(registry: Arc<RouterRegistry>) -> Self {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<RouterRequest>();
+
+        tokio::spawn(async move {
+            while let Some(req) = rx.recv().await {
+                let result = registry.route(&req.recipient, &req.message).await;
+                // Reply channel may be closed if the eval worker timed
+                // out or was cancelled — that is not an error.
+                let _ = req.reply.send(result);
+            }
+        });
+
+        Self { tx }
+    }
+
+    /// Route a message synchronously. Blocks the calling thread until
+    /// the async router task processes the request and sends back the
+    /// result.
+    ///
+    /// Safe to call from a plain OS thread (no tokio runtime context
+    /// required).
+    pub fn route_sync(&self, recipient: &str, message: &Message) -> Result<(), RouterError> {
+        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+        let request = RouterRequest {
+            recipient: recipient.to_string(),
+            message: message.clone(),
+            reply: reply_tx,
+        };
+        self.tx
+            .send(request)
+            .map_err(|_| RouterError::RouteFailed("router bridge channel closed".into()))?;
+        reply_rx
+            .recv()
+            .map_err(|_| RouterError::RouteFailed("router bridge reply channel closed".into()))?
+    }
+}
+
 /// Errors produced by the routing layer.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
