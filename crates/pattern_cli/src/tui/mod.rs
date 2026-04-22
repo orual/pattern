@@ -5,6 +5,7 @@
 
 pub mod app;
 pub mod autocomplete;
+pub mod clipboard;
 pub mod commands;
 pub mod conversation;
 pub mod input;
