@@ -639,21 +639,16 @@ impl App {
         let layout = compute_layout_with_panel(frame.area(), self.panel_visibility, self.panel_pct);
 
         // Record the viewport height so key handlers can use the real size.
-        self.last_viewport_height = layout.conversation.height;
+        self.last_viewport_height = layout.conversation.map(|r| r.height).unwrap_or(0);
 
-        // Conversation area (skip when panel is expanded — it takes the full width).
-        match layout.panel_visibility {
-            PanelVisibility::Hidden | PanelVisibility::Visible => {
-                ratatui::widgets::StatefulWidget::render(
-                    ConversationView,
-                    layout.conversation,
-                    frame.buffer_mut(),
-                    &mut self.conversation,
-                );
-            }
-            PanelVisibility::Expanded => {
-                // Panel takes full width — don't render conversation.
-            }
+        // Conversation area (only render when present — None in Expanded mode).
+        if let Some(conv_rect) = layout.conversation {
+            ratatui::widgets::StatefulWidget::render(
+                ConversationView,
+                conv_rect,
+                frame.buffer_mut(),
+                &mut self.conversation,
+            );
         }
 
         // Side panel (when visible or expanded).
@@ -666,7 +661,7 @@ impl App {
             );
         }
 
-        // Input area — render the real textarea (hidden when expanded).
+        // Input area — always full width, always rendered.
         if layout.input.width > 0 && layout.input.height > 0 {
             render_input_area(layout.input, frame.buffer_mut(), self.focus, &self.input);
         }

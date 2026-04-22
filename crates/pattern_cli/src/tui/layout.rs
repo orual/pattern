@@ -53,12 +53,17 @@ pub const DEFAULT_PANEL_PCT: u16 = 25;
 // ---------------------------------------------------------------------------
 
 /// The regions of the main TUI view, including an optional side panel.
+///
+/// Input and status bar are always full width regardless of panel state.
+/// In `Expanded` mode the conversation area is `None` because the panel
+/// occupies the entire upper region.
 pub struct TuiLayout {
     /// Conversation area — occupies all remaining vertical space.
-    pub conversation: Rect,
-    /// Text input area — fixed at 2 rows.
+    /// `None` when the panel is expanded (conversation is hidden).
+    pub conversation: Option<Rect>,
+    /// Text input area — fixed at 2 rows, always full width.
     pub input: Rect,
-    /// Status bar — single row at the bottom.
+    /// Status bar — single row at the bottom, always full width.
     pub status_bar: Rect,
     /// Side panel area. `None` when the panel is hidden.
     pub panel: Option<Rect>,
@@ -111,67 +116,54 @@ pub fn compute_layout_with_panel(
         panel_visibility
     };
 
-    match effective {
-        PanelVisibility::Hidden => {
-            let chunks = vertical_split(area);
-            TuiLayout {
-                conversation: chunks[0],
-                input: chunks[1],
-                status_bar: chunks[2],
-                panel: None,
-                panel_visibility: PanelVisibility::Hidden,
-            }
-        }
-        PanelVisibility::Visible => {
-            // Horizontal split: left (main) | right (panel).
-            let panel_width = (area.width as u32 * panel_pct as u32 / 100) as u16;
-            let main_width = area.width.saturating_sub(panel_width);
+    // Three vertical regions: upper (Min(1)), input (Length(2)), status bar (Length(1)).
+    // Input and status bar are always full width, regardless of panel state.
+    let main_chunks = vertical_split(area);
+    let upper = main_chunks[0];
+    let input = main_chunks[1];
+    let status_bar = main_chunks[2];
 
-            let main_area = Rect {
-                x: area.x,
-                y: area.y,
-                width: main_width,
-                height: area.height,
+    match effective {
+        PanelVisibility::Hidden => TuiLayout {
+            conversation: Some(upper),
+            input,
+            status_bar,
+            panel: None,
+            panel_visibility: PanelVisibility::Hidden,
+        },
+        PanelVisibility::Visible => {
+            // Horizontal split of the upper region: [conversation | panel].
+            let panel_width = (upper.width as u32 * panel_pct as u32 / 100) as u16;
+            let conv_width = upper.width.saturating_sub(panel_width);
+
+            let conv_area = Rect {
+                x: upper.x,
+                y: upper.y,
+                width: conv_width,
+                height: upper.height,
             };
             let panel_area = Rect {
-                x: area.x + main_width,
-                y: area.y,
+                x: upper.x + conv_width,
+                y: upper.y,
                 width: panel_width,
-                height: area.height,
+                height: upper.height,
             };
 
-            let chunks = vertical_split(main_area);
             TuiLayout {
-                conversation: chunks[0],
-                input: chunks[1],
-                status_bar: chunks[2],
+                conversation: Some(conv_area),
+                input,
+                status_bar,
                 panel: Some(panel_area),
                 panel_visibility: PanelVisibility::Visible,
             }
         }
         PanelVisibility::Expanded => {
-            // Panel takes the full area. Conversation/input get zero rects.
-            let zero = Rect::new(area.x, area.y, 0, 0);
-
-            // Status bar still occupies the bottom row.
-            let panel_area = Rect {
-                x: area.x,
-                y: area.y,
-                width: area.width,
-                height: area.height.saturating_sub(1),
-            };
-            let status_bar = Rect {
-                x: area.x,
-                y: area.y + area.height.saturating_sub(1),
-                width: area.width,
-                height: 1.min(area.height),
-            };
-
+            // Panel takes the full upper area. Conversation is hidden.
             TuiLayout {
-                conversation: zero,
-                input: zero,
+                conversation: None,
+                input,
                 status_bar,
-                panel: Some(panel_area),
+                panel: Some(upper),
                 panel_visibility: PanelVisibility::Expanded,
             }
         }
@@ -220,15 +212,18 @@ mod tests {
         let terminal_height = 24u16;
         let layout = compute_layout(area(80, terminal_height));
 
-        // conversation + input (2) + status_bar (1) == terminal height
-        let total = layout.conversation.height + layout.input.height + layout.status_bar.height;
+        let conv = layout
+            .conversation
+            .expect("conversation should be Some in Hidden mode");
+        // conversation + input (2) + status_bar (1) == terminal height.
+        let total = conv.height + layout.input.height + layout.status_bar.height;
         assert_eq!(
             total, terminal_height,
             "all rows must be accounted for (no gaps)"
         );
         // Conversation takes everything except the two fixed regions.
         assert_eq!(
-            layout.conversation.height,
+            conv.height,
             terminal_height - 2 - 1,
             "conversation should fill remaining rows"
         );
@@ -240,18 +235,18 @@ mod tests {
         // ratatui clamps rects to zero-height rather than panicking.
         let layout = compute_layout(area(40, 3));
 
+        let conv = layout
+            .conversation
+            .expect("conversation should be Some in Hidden mode");
         // All rects must have valid (non-wrapping) coordinates.
-        assert!(
-            layout.conversation.y <= layout.input.y,
-            "conversation must be above input"
-        );
+        assert!(conv.y <= layout.input.y, "conversation must be above input");
         assert!(
             layout.input.y <= layout.status_bar.y,
             "input must be above status bar"
         );
 
         // The combined heights must not exceed the terminal height.
-        let total = layout.conversation.height + layout.input.height + layout.status_bar.height;
+        let total = conv.height + layout.input.height + layout.status_bar.height;
         assert!(
             total <= 3,
             "total allocated rows ({total}) must not exceed terminal height (3)"
@@ -275,10 +270,10 @@ mod tests {
             PanelVisibility::Hidden,
             "effective visibility must be Hidden"
         );
-        assert_eq!(
-            layout.conversation.width, 120,
-            "conversation must occupy full width"
-        );
+        let conv = layout
+            .conversation
+            .expect("conversation should be Some when hidden");
+        assert_eq!(conv.width, 120, "conversation must occupy full width");
     }
 
     #[test]
@@ -288,15 +283,24 @@ mod tests {
         assert_eq!(layout.panel_visibility, PanelVisibility::Visible);
 
         let panel = layout.panel.expect("panel rect must be Some when visible");
+        let conv = layout
+            .conversation
+            .expect("conversation should be Some when visible");
         assert!(panel.width > 0, "panel must have non-zero width");
-        assert!(
-            layout.conversation.width > 0,
-            "conversation must have non-zero width"
-        );
+        assert!(conv.width > 0, "conversation must have non-zero width");
         assert_eq!(
-            layout.conversation.width + panel.width,
+            conv.width + panel.width,
             120,
             "conversation + panel must fill terminal width"
+        );
+        // Input and status bar are always full width.
+        assert_eq!(
+            layout.input.width, 120,
+            "input must be full width when visible"
+        );
+        assert_eq!(
+            layout.status_bar.width, 120,
+            "status bar must be full width when visible"
         );
     }
 
@@ -311,13 +315,18 @@ mod tests {
             panel.width, 120,
             "expanded panel must occupy full terminal width"
         );
+        assert!(
+            layout.conversation.is_none(),
+            "conversation must be None in expanded mode"
+        );
+        // Input and status bar remain full width even in expanded mode.
         assert_eq!(
-            layout.conversation.width, 0,
-            "conversation must be zero-width in expanded mode"
+            layout.input.width, 120,
+            "input must be full width in expanded mode"
         );
         assert_eq!(
-            layout.input.width, 0,
-            "input must be zero-width in expanded mode"
+            layout.input.height, 2,
+            "input must still be 2 rows in expanded mode"
         );
     }
 
@@ -336,6 +345,10 @@ mod tests {
             layout.panel.is_none(),
             "panel rect must be None when auto-hidden"
         );
+        assert!(
+            layout.conversation.is_some(),
+            "conversation should be Some when auto-hidden"
+        );
     }
 
     #[test]
@@ -350,12 +363,12 @@ mod tests {
         // AC4.9: conversation rect starts at x=0 and spans the full width.
         let layout =
             compute_layout_with_panel(area(120, 24), PanelVisibility::Hidden, DEFAULT_PANEL_PCT);
+        let conv = layout
+            .conversation
+            .expect("conversation should be Some when hidden");
+        assert_eq!(conv.x, 0, "conversation x must be 0 (no left chrome)");
         assert_eq!(
-            layout.conversation.x, 0,
-            "conversation x must be 0 (no left chrome)"
-        );
-        assert_eq!(
-            layout.conversation.width, 120,
+            conv.width, 120,
             "conversation must span full terminal width (no right chrome)"
         );
     }
@@ -364,10 +377,14 @@ mod tests {
     fn panel_pct_affects_width() {
         let layout = compute_layout_with_panel(area(200, 24), PanelVisibility::Visible, 40);
         let panel = layout.panel.expect("panel must be present");
-        // 40% of 200 = 80.
+        let conv = layout
+            .conversation
+            .expect("conversation should be Some when visible");
+        // 40% of 200 = 80, but the split is on the upper area width which is
+        // the full terminal width (input/status are always full width).
         assert_eq!(panel.width, 80, "panel should be 40% of terminal width");
         assert_eq!(
-            layout.conversation.width, 120,
+            conv.width, 120,
             "conversation should be 60% of terminal width"
         );
     }
@@ -406,9 +423,10 @@ mod tests {
             "status bar must span full width in expanded mode"
         );
         let panel = layout.panel.unwrap();
+        // Panel gets upper area: terminal height minus input (2) minus status bar (1) = 21.
         assert_eq!(
-            panel.height, 23,
-            "expanded panel height should be terminal height minus status bar"
+            panel.height, 21,
+            "expanded panel height should be terminal height minus input and status bar"
         );
     }
 }
