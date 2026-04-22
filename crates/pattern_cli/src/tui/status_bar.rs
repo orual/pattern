@@ -27,6 +27,8 @@ pub struct StatusBarState {
     pub context_tokens: Option<u64>,
     /// Whether the TUI is connected to the daemon.
     pub connected: bool,
+    /// Whether selection mode is currently active (AC4.8).
+    pub selection_active: bool,
 }
 
 impl Default for StatusBarState {
@@ -36,6 +38,7 @@ impl Default for StatusBarState {
             agent_count: 0,
             context_tokens: None,
             connected: false,
+            selection_active: false,
         }
     }
 }
@@ -180,6 +183,21 @@ impl Widget for StatusBar<'_> {
             ));
         }
 
+        // Selection mode indicator.
+        if self.state.selection_active {
+            spans.push(Span::styled(
+                " │ ",
+                Style::default().fg(Color::DarkGray).bg(bar_bg),
+            ));
+            spans.push(Span::styled(
+                "[SELECT]",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .bg(bar_bg)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+
         let line = Line::from(spans);
         buf.set_line(area.x, area.y, &line, area.width);
     }
@@ -237,6 +255,7 @@ mod tests {
             agent_count: 3,
             context_tokens: Some(45000),
             connected: true,
+            selection_active: false,
         };
         let output = render_status_bar(&state, PanelVisibility::Hidden, 60);
         insta::assert_snapshot!(output);
@@ -249,6 +268,7 @@ mod tests {
             agent_count: 0,
             context_tokens: None,
             connected: false,
+            selection_active: false,
         };
         let output = render_status_bar(&state, PanelVisibility::Hidden, 60);
         insta::assert_snapshot!(output);
@@ -261,6 +281,7 @@ mod tests {
             agent_count: 2,
             context_tokens: Some(8500),
             connected: true,
+            selection_active: false,
         };
         let output = render_status_bar(&state, PanelVisibility::Visible, 70);
         insta::assert_snapshot!(output);

@@ -108,9 +108,13 @@ pub fn compute_layout_with_panel(
     // Clamp panel percentage.
     let panel_pct = panel_pct.clamp(MIN_PANEL_PCT, MAX_PANEL_PCT);
 
-    // Auto-hide: narrow terminals cannot fit the panel.
-    let effective = if area.width < MIN_PANEL_WIDTH && panel_visibility == PanelVisibility::Visible
-    {
+    // Auto-hide: narrow terminals cannot fit the panel. Both Visible and Expanded
+    // modes auto-hide to Hidden so the user can see the conversation.
+    let effective = if area.width < MIN_PANEL_WIDTH
+        && matches!(
+            panel_visibility,
+            PanelVisibility::Visible | PanelVisibility::Expanded
+        ) {
         PanelVisibility::Hidden
     } else {
         panel_visibility
@@ -348,6 +352,27 @@ mod tests {
         assert!(
             layout.conversation.is_some(),
             "conversation should be Some when auto-hidden"
+        );
+    }
+
+    #[test]
+    fn expanded_auto_hides_on_narrow_terminal() {
+        // Terminal width 80 is below MIN_PANEL_WIDTH (100). Even in Expanded
+        // mode, the panel should auto-hide so the user can see conversation.
+        let layout =
+            compute_layout_with_panel(area(80, 24), PanelVisibility::Expanded, DEFAULT_PANEL_PCT);
+        assert_eq!(
+            layout.panel_visibility,
+            PanelVisibility::Hidden,
+            "expanded panel must auto-hide on narrow terminal"
+        );
+        assert!(
+            layout.panel.is_none(),
+            "panel rect must be None when auto-hidden"
+        );
+        assert!(
+            layout.conversation.is_some(),
+            "conversation should be Some when auto-hidden from Expanded"
         );
     }
 

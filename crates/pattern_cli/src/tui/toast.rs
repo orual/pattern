@@ -17,6 +17,7 @@ use ratatui::widgets::{Clear, Widget};
 // ---------------------------------------------------------------------------
 
 /// A single toast notification.
+#[derive(Debug)]
 pub struct Toast {
     /// The text to display.
     pub text: String,
@@ -41,15 +42,10 @@ const MAX_TOASTS: usize = 3;
 // ---------------------------------------------------------------------------
 
 /// Manages active toast notifications.
+#[derive(Debug, Default)]
 pub struct ToastState {
     /// Active toasts, oldest first.
     pub toasts: Vec<Toast>,
-}
-
-impl Default for ToastState {
-    fn default() -> Self {
-        Self { toasts: Vec::new() }
-    }
 }
 
 impl ToastState {
@@ -68,12 +64,12 @@ impl ToastState {
     /// Append streaming chunk data. If the last toast is a streaming toast,
     /// append to it. Otherwise create a new streaming toast.
     pub fn push_chunk(&mut self, text: &str) {
-        if let Some(last) = self.toasts.last_mut() {
-            if last.streaming {
-                last.text.push_str(text);
-                last.created_at = Instant::now(); // Reset TTL on new data.
-                return;
-            }
+        if let Some(last) = self.toasts.last_mut()
+            && last.streaming
+        {
+            last.text.push_str(text);
+            last.created_at = Instant::now(); // Reset TTL on new data.
+            return;
         }
         // No active streaming toast — create one.
         self.toasts.push(Toast {
@@ -88,13 +84,13 @@ impl ToastState {
     /// Finalize a streaming toast. Replaces the current streaming toast
     /// (if any) with the final text, or creates a new non-streaming toast.
     pub fn push_final(&mut self, text: String) {
-        if let Some(last) = self.toasts.last_mut() {
-            if last.streaming {
-                last.text = text;
-                last.streaming = false;
-                last.created_at = Instant::now();
-                return;
-            }
+        if let Some(last) = self.toasts.last_mut()
+            && last.streaming
+        {
+            last.text = text;
+            last.streaming = false;
+            last.created_at = Instant::now();
+            return;
         }
         // No streaming toast — just create a regular one.
         self.push(text);

@@ -39,19 +39,6 @@ use super::toast::{ToastState, render_toasts};
 /// The receiver type for daemon subscription events.
 pub type DaemonEventReceiver = irpc::channel::mpsc::Receiver<TaggedTurnEvent>;
 
-/// Toggle mouse capture on/off.
-///
-/// When enabled, crossterm receives mouse events (clicks, drags) so the TUI
-/// can handle them (e.g. panel interactions, selection mode). When disabled,
-/// native terminal text selection works normally.
-pub(crate) fn set_mouse_capture(enabled: bool) {
-    if enabled {
-        crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture).ok();
-    } else {
-        crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture).ok();
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Focus
 // ---------------------------------------------------------------------------
@@ -63,6 +50,25 @@ enum Focus {
     Conversation,
     /// Keystrokes go to the input area.
     Input,
+}
+
+// ---------------------------------------------------------------------------
+// Selection mode
+// ---------------------------------------------------------------------------
+
+/// Selection mode state for mouse drag-to-copy (AC4.8).
+///
+/// When active, mouse events set start/end coordinates. On mouse-up the
+/// selected text is extracted from the last rendered buffer and copied to
+/// the clipboard.
+#[derive(Debug, Default)]
+struct SelectionState {
+    /// Start position (column, row) of the selection.
+    start: Option<(u16, u16)>,
+    /// End position (column, row) of the selection.
+    end: Option<(u16, u16)>,
+    /// Whether selection mode is currently active.
+    active: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -108,6 +114,11 @@ pub struct App {
     panel_visibility: PanelVisibility,
     /// Panel width as a percentage of terminal width (15..=50).
     panel_pct: u16,
+    /// Selection mode state for mouse drag-to-copy.
+    selection: SelectionState,
+    /// Buffer snapshot from the last rendered frame. Used by selection mode
+    /// to extract text at the coordinates the user dragged over.
+    last_rendered_buffer: Option<Buffer>,
 }
 
 impl App {
@@ -143,6 +154,8 @@ impl App {
             toast_state: ToastState::default(),
             panel_visibility: PanelVisibility::Hidden,
             panel_pct: DEFAULT_PANEL_PCT,
+            selection: SelectionState::default(),
+            last_rendered_buffer: None,
         }
     }
 
@@ -180,7 +193,8 @@ impl App {
         tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
 
         // Initial draw.
-        terminal.draw(|f| self.render_frame(f)).into_diagnostic()?;
+        let completed = terminal.draw(|f| self.render_frame(f)).into_diagnostic()?;
+        self.last_rendered_buffer = Some(completed.buffer.clone());
 
         loop {
             tokio::select! {
@@ -244,7 +258,8 @@ impl App {
                 break;
             }
 
-            terminal.draw(|f| self.render_frame(f)).into_diagnostic()?;
+            let completed = terminal.draw(|f| self.render_frame(f)).into_diagnostic()?;
+            self.last_rendered_buffer = Some(completed.buffer.clone());
         }
 
         Ok(())
@@ -267,8 +282,47 @@ impl App {
         }
     }
 
-    /// Handle a mouse event: left-click toggles collapsible sections.
+    /// Handle a mouse event.
+    ///
+    /// In selection mode: left-down sets start, drag updates end, up extracts
+    /// text and copies to clipboard. Outside selection mode: left-click toggles
+    /// collapsible sections.
     fn handle_mouse(&mut self, mouse: MouseEvent) {
+        // Selection mode mouse handling.
+        if self.selection.active {
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    self.selection.start = Some((mouse.column, mouse.row));
+                    self.selection.end = None;
+                }
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    self.selection.end = Some((mouse.column, mouse.row));
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    if let (Some(start), Some(end)) = (self.selection.start, self.selection.end) {
+                        let text = self.extract_text_from_buffer(start, end);
+                        if !text.is_empty() {
+                            match super::clipboard::copy_to_clipboard(&text) {
+                                Ok(()) => {
+                                    self.push_system_message(format!(
+                                        "copied {} chars to clipboard.",
+                                        text.len()
+                                    ));
+                                }
+                                Err(e) => {
+                                    self.push_system_message(format!("clipboard error: {e}"));
+                                }
+                            }
+                        }
+                    }
+                    self.exit_selection_mode();
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // Normal mode: left-click toggles collapsible sections.
         if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
             let click_row = mouse.row;
 
@@ -290,6 +344,72 @@ impl App {
         }
     }
 
+    /// Enter selection mode: enable visual indicator in status bar.
+    fn enter_selection_mode(&mut self) {
+        self.selection.active = true;
+        self.selection.start = None;
+        self.selection.end = None;
+    }
+
+    /// Exit selection mode: clear selection coordinates.
+    fn exit_selection_mode(&mut self) {
+        self.selection.active = false;
+        self.selection.start = None;
+        self.selection.end = None;
+    }
+
+    /// Extract text from the last rendered buffer between two screen positions.
+    ///
+    /// Reads characters from `last_rendered_buffer` line by line from start to
+    /// end. Multi-line selections include a newline at the end of each full row.
+    fn extract_text_from_buffer(&self, start: (u16, u16), end: (u16, u16)) -> String {
+        let Some(buf) = &self.last_rendered_buffer else {
+            return String::new();
+        };
+
+        let buf_area = buf.area;
+
+        // Normalize so (r0, c0) is before (r1, c1) in reading order.
+        let (r0, c0, r1, c1) = if (start.1, start.0) <= (end.1, end.0) {
+            (start.1, start.0, end.1, end.0)
+        } else {
+            (end.1, end.0, start.1, start.0)
+        };
+
+        let mut result = String::new();
+        for row in r0..=r1 {
+            if row < buf_area.y || row >= buf_area.y + buf_area.height {
+                continue;
+            }
+            let col_start = if row == r0 { c0 } else { buf_area.x };
+            let col_end = if row == r1 {
+                c1
+            } else {
+                buf_area.x + buf_area.width - 1
+            };
+            for col in col_start..=col_end {
+                if col < buf_area.x || col >= buf_area.x + buf_area.width {
+                    continue;
+                }
+                let cell = &buf[(col, row)];
+                let sym = cell.symbol();
+                result.push_str(sym);
+            }
+            // Add newline between rows in multi-line selections.
+            if row < r1 {
+                // Trim trailing whitespace from each row for cleaner copy.
+                let trimmed = result.trim_end_matches(' ');
+                let trim_len = trimmed.len();
+                result.truncate(trim_len);
+                result.push('\n');
+            }
+        }
+
+        // Trim trailing whitespace from the final row.
+        let trimmed = result.trim_end();
+        trimmed.to_string()
+    }
+
     /// Handle a key event based on current focus.
     fn handle_key(&mut self, key: KeyEvent) {
         // Global: Ctrl+C always quits.
@@ -298,12 +418,28 @@ impl App {
             return;
         }
 
+        // Global: Ctrl+S toggles selection mode.
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s') {
+            if self.selection.active {
+                self.exit_selection_mode();
+            } else {
+                self.enter_selection_mode();
+            }
+            return;
+        }
+
+        // In selection mode, Escape exits; any other non-mouse key also exits.
+        if self.selection.active {
+            self.exit_selection_mode();
+            // Escape is consumed entirely; other keys fall through.
+            if key.code == KeyCode::Esc {
+                return;
+            }
+        }
+
         // Global: Ctrl+P cycles panel visibility.
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p') {
             self.panel_visibility = self.panel_visibility.cycle();
-            // Enable mouse capture when the panel is visible (for click interactions),
-            // disable it when hidden so native terminal selection works.
-            set_mouse_capture(self.panel_visibility != PanelVisibility::Hidden);
             return;
         }
 
@@ -337,7 +473,6 @@ impl App {
                             // Make the panel visible if it is hidden.
                             if self.panel_visibility == PanelVisibility::Hidden {
                                 self.panel_visibility = PanelVisibility::Visible;
-                                set_mouse_capture(true);
                             }
                         }
                     }
@@ -474,7 +609,6 @@ impl App {
             }
             "panel" => {
                 self.panel_visibility = self.panel_visibility.cycle();
-                set_mouse_capture(self.panel_visibility != PanelVisibility::Hidden);
             }
             _ => {}
         }
@@ -690,6 +824,7 @@ impl App {
             agent_count: if self.connected { 1 } else { 0 },
             context_tokens: None,
             connected: self.connected,
+            selection_active: self.selection.active,
         };
         StatusBar::new(&sb_state, self.panel_visibility)
             .render(layout.status_bar, frame.buffer_mut());
