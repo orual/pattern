@@ -11,6 +11,7 @@ pub mod input;
 pub mod layout;
 pub mod markdown;
 pub mod model;
+pub mod panel;
 pub mod scroll;
 
 #[cfg(test)]

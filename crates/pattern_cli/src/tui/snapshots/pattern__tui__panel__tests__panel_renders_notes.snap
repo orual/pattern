@@ -1,0 +1,8 @@
+---
+source: crates/pattern_cli/src/tui/panel.rs
+assertion_line: 316
+expression: output
+---
+processing query
+agent started
+ panel ───────────────────────
