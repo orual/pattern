@@ -13,6 +13,7 @@ pub mod markdown;
 pub mod model;
 pub mod panel;
 pub mod scroll;
+pub mod toast;
 
 #[cfg(test)]
 pub mod test_utils;
