@@ -27,9 +27,10 @@ use super::autocomplete::{AutocompleteState, AutocompleteWidget, CommandSource, 
 use super::commands::lookup_command;
 use super::conversation::{ConversationState, ConversationView};
 use super::input::{InputAction, InputHandler};
-use super::layout::compute_layout;
+use super::layout::{PanelVisibility, compute_layout};
 use super::model::RenderBatch;
 use super::scroll::{apply_action, map_key_to_action};
+use super::status_bar::{StatusBar, StatusBarState};
 
 /// The receiver type for daemon subscription events.
 pub type DaemonEventReceiver = irpc::channel::mpsc::Receiver<TaggedTurnEvent>;
@@ -581,12 +582,14 @@ impl App {
         render_input_area(layout.input, frame.buffer_mut(), self.focus, &self.input);
 
         // Status bar.
-        render_status_bar(
-            layout.status_bar,
-            frame.buffer_mut(),
-            self.connected,
-            &self.current_agent,
-        );
+        let sb_state = StatusBarState {
+            persona_name: self.current_agent.to_string(),
+            agent_count: if self.connected { 1 } else { 0 },
+            context_tokens: None,
+            connected: self.connected,
+        };
+        StatusBar::new(&sb_state, PanelVisibility::Hidden)
+            .render(layout.status_bar, frame.buffer_mut());
 
         // Autocomplete popup (rendered on top of conversation).
         if self.autocomplete.is_visible() {
@@ -641,31 +644,7 @@ fn render_input_area(area: Rect, buf: &mut Buffer, focus: Focus, input: &InputHa
     }
 }
 
-/// Render the status bar — subdued text on subtle background.
-/// Uses ANSI `Black` bg which is typically slightly distinct from the terminal's
-/// default background in most themes, giving a gentle visual separation.
-fn render_status_bar(area: Rect, buf: &mut Buffer, connected: bool, current_agent: &str) {
-    let bar_bg = Color::Black;
-    // Fill entire bar width with background.
-    for x in area.x..area.x + area.width {
-        buf[(x, area.y)].set_style(Style::default().bg(bar_bg));
-    }
-
-    let (status_text, fg) = if connected {
-        (format!(" pattern [{current_agent}]"), Color::DarkGray)
-    } else {
-        (
-            format!(" pattern (offline) [{current_agent}]"),
-            Color::DarkGray,
-        )
-    };
-
-    let line = Line::from(vec![Span::styled(
-        status_text,
-        Style::default().fg(fg).bg(bar_bg),
-    )]);
-    buf.set_line(area.x, area.y, &line, area.width);
-}
+// Status bar rendering has been extracted to `super::status_bar::StatusBar`.
 
 // ---------------------------------------------------------------------------
 // Tests

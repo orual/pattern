@@ -13,6 +13,7 @@ pub mod markdown;
 pub mod model;
 pub mod panel;
 pub mod scroll;
+pub mod status_bar;
 pub mod toast;
 
 #[cfg(test)]
