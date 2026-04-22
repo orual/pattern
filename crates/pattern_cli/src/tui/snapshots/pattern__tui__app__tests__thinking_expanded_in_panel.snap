@@ -1,0 +1,21 @@
+---
+source: crates/pattern_cli/src/tui/app.rs
+assertion_line: 1148
+expression: output
+---
+[you] Analyze this                                                                   thinking ──────────────────────────
+▸ thinking: Let me consider the options carefully... Option A is good. O...         Let me consider the options
+I recommend option B.                                                               carefully...
+                                                                                    Option A is good.
+                                                                                    Option B is better.
+
+
+
+
+
+
+
+
+❯
+
+ @supervisor │ 1 agent │ ● connected │ panel: visible

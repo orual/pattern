@@ -27,10 +27,14 @@ use super::autocomplete::{AutocompleteState, AutocompleteWidget, CommandSource, 
 use super::commands::lookup_command;
 use super::conversation::{ConversationState, ConversationView};
 use super::input::{InputAction, InputHandler};
-use super::layout::{PanelVisibility, compute_layout};
-use super::model::RenderBatch;
+use super::layout::{
+    DEFAULT_PANEL_PCT, MAX_PANEL_PCT, MIN_PANEL_PCT, PanelVisibility, compute_layout_with_panel,
+};
+use super::model::{RenderBatch, SectionKind};
+use super::panel::{PanelContent, PanelState, SidePanel};
 use super::scroll::{apply_action, map_key_to_action};
 use super::status_bar::{StatusBar, StatusBarState};
+use super::toast::{ToastState, render_toasts};
 
 /// The receiver type for daemon subscription events.
 pub type DaemonEventReceiver = irpc::channel::mpsc::Receiver<TaggedTurnEvent>;
@@ -83,6 +87,14 @@ pub struct App {
     /// Available agents discovered during InitSession. Used by /front to
     /// validate the requested agent name before switching.
     available_agents: Vec<SmolStr>,
+    /// Mutable state for the side panel (notes, display content, thinking).
+    panel_state: PanelState,
+    /// Active toast notifications (visible when panel is hidden).
+    toast_state: ToastState,
+    /// Current panel visibility state (Hidden/Visible/Expanded).
+    panel_visibility: PanelVisibility,
+    /// Panel width as a percentage of terminal width (15..=50).
+    panel_pct: u16,
 }
 
 impl App {
@@ -114,6 +126,10 @@ impl App {
             last_viewport_height: 24,
             result_tx,
             available_agents: Vec::new(),
+            panel_state: PanelState::default(),
+            toast_state: ToastState::default(),
+            panel_visibility: PanelVisibility::Hidden,
+            panel_pct: DEFAULT_PANEL_PCT,
         }
     }
 
@@ -199,8 +215,9 @@ impl App {
                 }
                 // Branch 3: periodic UI refresh tick.
                 _ = tick.tick() => {
-                    // Just redraw — handles streaming cursor blink,
-                    // toast expiry, status bar updates.
+                    // Expire old toasts, then redraw. Also handles
+                    // streaming cursor blink and status bar updates.
+                    self.toast_state.tick();
                 }
                 // Branch 4: results from spawned async tasks (command results,
                 // send errors). Pushes the formatted message into the conversation
@@ -268,11 +285,44 @@ impl App {
             return;
         }
 
+        // Global: Ctrl+P cycles panel visibility.
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p') {
+            self.panel_visibility = self.panel_visibility.cycle();
+            return;
+        }
+
+        // Global: Ctrl+] increases panel width by 5%, clamped to MAX_PANEL_PCT.
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char(']') {
+            self.panel_pct = (self.panel_pct + 5).min(MAX_PANEL_PCT);
+            return;
+        }
+
+        // Global: Ctrl+[ decreases panel width by 5%, clamped to MIN_PANEL_PCT.
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('[') {
+            self.panel_pct = self.panel_pct.saturating_sub(5).max(MIN_PANEL_PCT);
+            return;
+        }
+
         match self.focus {
             Focus::Conversation => {
                 match key.code {
                     KeyCode::Char('q') => {
                         self.should_quit = true;
+                    }
+                    KeyCode::Char('p') => {
+                        // If a thinking section is focused, expand it into the panel.
+                        if let Some((batch_idx, section_idx)) = self.conversation.focused_section
+                            && let Some(batch) = self.conversation.batches.get(batch_idx)
+                            && let Some(section) = batch.sections.get(section_idx)
+                            && let SectionKind::Thinking(content) = &section.kind
+                        {
+                            self.panel_state.expanded_thinking = Some(content.clone());
+                            self.panel_state.content = PanelContent::Thinking;
+                            // Make the panel visible if it is hidden.
+                            if self.panel_visibility == PanelVisibility::Hidden {
+                                self.panel_visibility = PanelVisibility::Visible;
+                            }
+                        }
                     }
                     KeyCode::Esc => {
                         // Switch back to input focus.
@@ -406,8 +456,7 @@ impl App {
                 self.should_quit = true;
             }
             "panel" => {
-                // Phase 4 implements the panel. Placeholder acknowledgment.
-                self.push_system_message("panel toggle not yet implemented.".into());
+                self.panel_visibility = self.panel_visibility.cycle();
             }
             _ => {}
         }
@@ -540,7 +589,29 @@ impl App {
     }
 
     /// Handle a tagged turn event from the daemon.
+    ///
+    /// `Display` events are routed to the panel (when visible) or toast
+    /// popups (when hidden) instead of the conversation. All other events
+    /// are pushed into the conversation batch as before.
     fn handle_daemon_event(&mut self, tagged: TaggedTurnEvent) {
+        // Route Display events to panel/toast instead of the conversation batch.
+        if let WireTurnEvent::Display { kind, ref text } = tagged.event {
+            if self.panel_visibility == PanelVisibility::Hidden {
+                match kind {
+                    DisplayKind::Chunk => self.toast_state.push_chunk(text),
+                    DisplayKind::Final => self.toast_state.push_final(text.clone()),
+                    DisplayKind::Note => self.toast_state.push(text.clone()),
+                }
+            } else {
+                match kind {
+                    DisplayKind::Chunk => self.panel_state.push_chunk(text),
+                    DisplayKind::Final => self.panel_state.set_final(text.clone()),
+                    DisplayKind::Note => self.panel_state.push_note(text.clone()),
+                }
+            }
+            return;
+        }
+
         // Find existing batch by batch_id, or create a new one.
         let batch = match self
             .conversation
@@ -565,21 +636,40 @@ impl App {
     /// Extracted so that both `run()` (which owns the terminal) and tests
     /// (which use `terminal.draw()` directly) can share the rendering logic.
     fn render_frame(&mut self, frame: &mut ratatui::Frame<'_>) {
-        let layout = compute_layout(frame.area());
+        let layout = compute_layout_with_panel(frame.area(), self.panel_visibility, self.panel_pct);
 
         // Record the viewport height so key handlers can use the real size.
         self.last_viewport_height = layout.conversation.height;
 
-        // Conversation area.
-        ratatui::widgets::StatefulWidget::render(
-            ConversationView,
-            layout.conversation,
-            frame.buffer_mut(),
-            &mut self.conversation,
-        );
+        // Conversation area (skip when panel is expanded — it takes the full width).
+        match layout.panel_visibility {
+            PanelVisibility::Hidden | PanelVisibility::Visible => {
+                ratatui::widgets::StatefulWidget::render(
+                    ConversationView,
+                    layout.conversation,
+                    frame.buffer_mut(),
+                    &mut self.conversation,
+                );
+            }
+            PanelVisibility::Expanded => {
+                // Panel takes full width — don't render conversation.
+            }
+        }
 
-        // Input area — render the real textarea.
-        render_input_area(layout.input, frame.buffer_mut(), self.focus, &self.input);
+        // Side panel (when visible or expanded).
+        if let Some(panel_rect) = layout.panel {
+            ratatui::widgets::StatefulWidget::render(
+                SidePanel,
+                panel_rect,
+                frame.buffer_mut(),
+                &mut self.panel_state,
+            );
+        }
+
+        // Input area — render the real textarea (hidden when expanded).
+        if layout.input.width > 0 && layout.input.height > 0 {
+            render_input_area(layout.input, frame.buffer_mut(), self.focus, &self.input);
+        }
 
         // Status bar.
         let sb_state = StatusBarState {
@@ -588,8 +678,13 @@ impl App {
             context_tokens: None,
             connected: self.connected,
         };
-        StatusBar::new(&sb_state, PanelVisibility::Hidden)
+        StatusBar::new(&sb_state, self.panel_visibility)
             .render(layout.status_bar, frame.buffer_mut());
+
+        // Toast overlays (on top of everything, when there are active toasts).
+        if !self.toast_state.is_empty() {
+            render_toasts(frame.area(), frame.buffer_mut(), &self.toast_state);
+        }
 
         // Autocomplete popup (rendered on top of conversation).
         if self.autocomplete.is_visible() {
@@ -664,6 +759,15 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| app.render_frame(f)).unwrap();
         buffer_to_string(terminal.backend().buffer())
+    }
+
+    /// Build a [`TaggedTurnEvent`] with a default agent_id for test convenience.
+    fn tagged(batch_id: &str, event: WireTurnEvent) -> TaggedTurnEvent {
+        TaggedTurnEvent {
+            batch_id: batch_id.into(),
+            agent_id: SmolStr::new_static("test-agent"),
+            event,
+        }
     }
 
     #[test]
@@ -776,5 +880,318 @@ mod tests {
             args: vec![],
         });
         assert!(app.should_quit);
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 4: panel, toast, and display routing tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn panel_command_cycles_visibility() {
+        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        assert_eq!(app.panel_visibility, PanelVisibility::Hidden);
+
+        app.dispatch_command("panel", &[]);
+        assert_eq!(app.panel_visibility, PanelVisibility::Visible);
+
+        app.dispatch_command("panel", &[]);
+        assert_eq!(app.panel_visibility, PanelVisibility::Expanded);
+
+        app.dispatch_command("panel", &[]);
+        assert_eq!(app.panel_visibility, PanelVisibility::Hidden);
+    }
+
+    #[test]
+    fn ctrl_p_cycles_panel() {
+        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        assert_eq!(app.panel_visibility, PanelVisibility::Hidden);
+
+        let ctrl_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL);
+        app.handle_key(ctrl_p);
+        assert_eq!(app.panel_visibility, PanelVisibility::Visible);
+
+        app.handle_key(ctrl_p);
+        assert_eq!(app.panel_visibility, PanelVisibility::Expanded);
+
+        app.handle_key(ctrl_p);
+        assert_eq!(app.panel_visibility, PanelVisibility::Hidden);
+    }
+
+    #[test]
+    fn ctrl_bracket_adjusts_panel_pct() {
+        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        assert_eq!(app.panel_pct, DEFAULT_PANEL_PCT); // 25
+
+        let ctrl_right = KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL);
+        app.handle_key(ctrl_right);
+        assert_eq!(app.panel_pct, 30);
+
+        let ctrl_left = KeyEvent::new(KeyCode::Char('['), KeyModifiers::CONTROL);
+        app.handle_key(ctrl_left);
+        assert_eq!(app.panel_pct, 25);
+
+        // Clamp to max.
+        for _ in 0..20 {
+            app.handle_key(ctrl_right);
+        }
+        assert_eq!(app.panel_pct, MAX_PANEL_PCT);
+
+        // Clamp to min.
+        for _ in 0..20 {
+            app.handle_key(ctrl_left);
+        }
+        assert_eq!(app.panel_pct, MIN_PANEL_PCT);
+    }
+
+    #[test]
+    fn daemon_display_routes_to_toast_when_panel_hidden() {
+        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        app.panel_visibility = PanelVisibility::Hidden;
+
+        // Simulate a daemon Display::Note event.
+        app.handle_daemon_event(tagged(
+            "batch-1",
+            WireTurnEvent::Display {
+                kind: DisplayKind::Note,
+                text: "agent processing...".into(),
+            },
+        ));
+
+        // Should go to toast, not conversation.
+        assert!(
+            app.conversation.batches.is_empty(),
+            "Display event should not create a conversation batch"
+        );
+        assert_eq!(app.toast_state.toasts.len(), 1);
+        assert_eq!(app.toast_state.toasts[0].text, "agent processing...");
+    }
+
+    #[test]
+    fn daemon_display_routes_to_panel_when_visible() {
+        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        app.panel_visibility = PanelVisibility::Visible;
+
+        // Note event.
+        app.handle_daemon_event(tagged(
+            "batch-1",
+            WireTurnEvent::Display {
+                kind: DisplayKind::Note,
+                text: "a note".into(),
+            },
+        ));
+
+        // Chunk event.
+        app.handle_daemon_event(tagged(
+            "batch-1",
+            WireTurnEvent::Display {
+                kind: DisplayKind::Chunk,
+                text: "partial ".into(),
+            },
+        ));
+
+        // Final event.
+        app.handle_daemon_event(tagged(
+            "batch-1",
+            WireTurnEvent::Display {
+                kind: DisplayKind::Final,
+                text: "complete result".into(),
+            },
+        ));
+
+        // Nothing in conversation or toasts.
+        assert!(
+            app.conversation.batches.is_empty(),
+            "Display events should not create conversation batches"
+        );
+        assert!(
+            app.toast_state.is_empty(),
+            "Display events should not create toasts when panel is visible"
+        );
+
+        // Everything in panel state.
+        assert_eq!(app.panel_state.notes.len(), 1);
+        assert_eq!(app.panel_state.notes[0], "a note");
+        assert_eq!(app.panel_state.display_content, "complete result");
+    }
+
+    #[test]
+    fn daemon_non_display_events_still_go_to_conversation() {
+        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        app.panel_visibility = PanelVisibility::Visible;
+
+        // Text event should go to conversation, not panel.
+        app.handle_daemon_event(tagged(
+            "batch-1",
+            WireTurnEvent::Text("hello from agent".into()),
+        ));
+
+        assert_eq!(app.conversation.batches.len(), 1);
+        assert_eq!(app.conversation.batches[0].sections.len(), 1);
+    }
+
+    #[test]
+    fn push_system_message_still_goes_to_conversation() {
+        // This is the critical test: push_system_message creates Display
+        // events directly in a batch. They must NOT be rerouted.
+        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        app.panel_visibility = PanelVisibility::Visible;
+
+        app.push_system_message("a system note".into());
+
+        // Must be in conversation, not panel or toast.
+        assert_eq!(app.conversation.batches.len(), 1);
+        assert!(app.toast_state.is_empty());
+        assert!(app.panel_state.notes.is_empty());
+    }
+
+    #[test]
+    fn thinking_expand_to_panel() {
+        let mut app = App::new(SmolStr::new_static("pattern-default"));
+
+        // Add a batch with thinking content.
+        let mut batch = RenderBatch::new("batch-1".into(), Some("question".into()));
+        batch.push_event(&WireTurnEvent::Thinking("deep reasoning here".into()));
+        batch.push_event(&WireTurnEvent::Text("answer".into()));
+        batch.push_event(&WireTurnEvent::Stop(StopReason::EndTurn));
+        app.conversation.batches.push(batch);
+
+        // Focus on the thinking section (batch 0, section 0).
+        app.conversation.focused_section = Some((0, 0));
+        app.focus = Focus::Conversation;
+
+        // Press 'p' to expand thinking into panel.
+        let p_key = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
+        app.handle_key(p_key);
+
+        assert_eq!(
+            app.panel_state.expanded_thinking.as_deref(),
+            Some("deep reasoning here"),
+        );
+        assert_eq!(app.panel_state.content, PanelContent::Thinking);
+        // Panel should be auto-shown.
+        assert_eq!(app.panel_visibility, PanelVisibility::Visible);
+    }
+
+    // -------------------------------------------------------------------
+    // Integration snapshot tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn full_app_with_panel_visible() {
+        let mut app = App::new(SmolStr::new_static("supervisor"));
+        app.connected = true;
+        app.panel_visibility = PanelVisibility::Visible;
+        app.panel_pct = 30;
+
+        // Add a conversation batch.
+        let mut batch = RenderBatch::new("batch-1".into(), Some("Hello agent".into()));
+        batch.push_event(&WireTurnEvent::Text("The answer is **42**.".into()));
+        batch.push_event(&WireTurnEvent::Stop(StopReason::EndTurn));
+        app.conversation.batches.push(batch);
+
+        // Add some panel content.
+        app.panel_state.push_note("agent started".into());
+        app.panel_state.push_chunk("processing query...");
+
+        // Use a wide terminal so the panel is visible (>= MIN_PANEL_WIDTH=100).
+        let output = render_app(&mut app, 120, 16);
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn full_app_with_panel_hidden() {
+        let mut app = App::new(SmolStr::new_static("supervisor"));
+        app.connected = true;
+        app.panel_visibility = PanelVisibility::Hidden;
+
+        // Add a conversation batch.
+        let mut batch = RenderBatch::new("batch-1".into(), Some("Hello agent".into()));
+        batch.push_event(&WireTurnEvent::Text("The answer is **42**.".into()));
+        batch.push_event(&WireTurnEvent::Stop(StopReason::EndTurn));
+        app.conversation.batches.push(batch);
+
+        // Verify zero chrome: conversation fills full width.
+        let output = render_app(&mut app, 80, 12);
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn thinking_expanded_in_panel() {
+        let mut app = App::new(SmolStr::new_static("supervisor"));
+        app.connected = true;
+        app.panel_visibility = PanelVisibility::Visible;
+        app.panel_pct = 30;
+
+        // Add conversation with thinking.
+        let mut batch = RenderBatch::new("batch-1".into(), Some("Analyze this".into()));
+        batch.push_event(&WireTurnEvent::Thinking(
+            "Let me consider the options carefully...\nOption A is good.\nOption B is better."
+                .into(),
+        ));
+        batch.push_event(&WireTurnEvent::Text("I recommend option B.".into()));
+        batch.push_event(&WireTurnEvent::Stop(StopReason::EndTurn));
+        app.conversation.batches.push(batch);
+
+        // Set thinking content in panel.
+        app.panel_state.expanded_thinking = Some(
+            "Let me consider the options carefully...\nOption A is good.\nOption B is better."
+                .into(),
+        );
+        app.panel_state.content = PanelContent::Thinking;
+
+        let output = render_app(&mut app, 120, 16);
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn display_note_as_toast_when_hidden() {
+        let mut app = App::new(SmolStr::new_static("supervisor"));
+        app.connected = true;
+        app.panel_visibility = PanelVisibility::Hidden;
+
+        // Add some conversation content so the display isn't empty.
+        let mut batch = RenderBatch::new("batch-1".into(), Some("Hello".into()));
+        batch.push_event(&WireTurnEvent::Text("World".into()));
+        batch.push_event(&WireTurnEvent::Stop(StopReason::EndTurn));
+        app.conversation.batches.push(batch);
+
+        // Simulate a Display::Note arriving from daemon.
+        app.handle_daemon_event(tagged(
+            "batch-2",
+            WireTurnEvent::Display {
+                kind: DisplayKind::Note,
+                text: "agent processing query...".into(),
+            },
+        ));
+
+        // The toast should be visible in the render.
+        let output = render_app(&mut app, 80, 12);
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn display_note_in_panel_when_visible() {
+        let mut app = App::new(SmolStr::new_static("supervisor"));
+        app.connected = true;
+        app.panel_visibility = PanelVisibility::Visible;
+        app.panel_pct = 30;
+
+        // Add conversation content.
+        let mut batch = RenderBatch::new("batch-1".into(), Some("Hello".into()));
+        batch.push_event(&WireTurnEvent::Text("World".into()));
+        batch.push_event(&WireTurnEvent::Stop(StopReason::EndTurn));
+        app.conversation.batches.push(batch);
+
+        // Simulate Display::Note arriving from daemon — should go to panel.
+        app.handle_daemon_event(tagged(
+            "batch-2",
+            WireTurnEvent::Display {
+                kind: DisplayKind::Note,
+                text: "agent processing query...".into(),
+            },
+        ));
+
+        let output = render_app(&mut app, 120, 16);
+        insta::assert_snapshot!(output);
     }
 }

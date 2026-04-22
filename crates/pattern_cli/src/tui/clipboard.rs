@@ -20,9 +20,7 @@ use base64::Engine;
 /// may not be supported. Failures in arboard are silently ignored since OSC 52
 /// is the primary mechanism.
 pub fn copy_to_clipboard(text: &str) -> Result<(), String> {
-    // OSC 52 — always attempt. Most modern terminals support it.
-    let b64 = base64::engine::general_purpose::STANDARD.encode(text);
-    let osc = format!("\x1b]52;c;{b64}\x07");
+    let osc = osc52_sequence(text);
     std::io::Write::write_all(&mut std::io::stdout(), osc.as_bytes())
         .map_err(|e| format!("OSC 52 write failed: {e}"))?;
 

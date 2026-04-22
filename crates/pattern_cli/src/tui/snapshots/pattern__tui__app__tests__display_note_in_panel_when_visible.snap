@@ -1,0 +1,21 @@
+---
+source: crates/pattern_cli/src/tui/app.rs
+assertion_line: 1200
+expression: output
+---
+[you] Hello                                                                         agent processing query...
+World                                                                                panel ─────────────────────────────
+
+
+
+
+
+
+
+
+
+
+
+❯
+
+ @supervisor │ 1 agent │ ● connected │ panel: visible
