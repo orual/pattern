@@ -39,6 +39,19 @@ use super::toast::{ToastState, render_toasts};
 /// The receiver type for daemon subscription events.
 pub type DaemonEventReceiver = irpc::channel::mpsc::Receiver<TaggedTurnEvent>;
 
+/// Toggle mouse capture on/off.
+///
+/// When enabled, crossterm receives mouse events (clicks, drags) so the TUI
+/// can handle them (e.g. panel interactions, selection mode). When disabled,
+/// native terminal text selection works normally.
+pub(crate) fn set_mouse_capture(enabled: bool) {
+    if enabled {
+        crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture).ok();
+    } else {
+        crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture).ok();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Focus
 // ---------------------------------------------------------------------------
@@ -288,6 +301,9 @@ impl App {
         // Global: Ctrl+P cycles panel visibility.
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p') {
             self.panel_visibility = self.panel_visibility.cycle();
+            // Enable mouse capture when the panel is visible (for click interactions),
+            // disable it when hidden so native terminal selection works.
+            set_mouse_capture(self.panel_visibility != PanelVisibility::Hidden);
             return;
         }
 
@@ -321,6 +337,7 @@ impl App {
                             // Make the panel visible if it is hidden.
                             if self.panel_visibility == PanelVisibility::Hidden {
                                 self.panel_visibility = PanelVisibility::Visible;
+                                set_mouse_capture(true);
                             }
                         }
                     }
@@ -457,6 +474,7 @@ impl App {
             }
             "panel" => {
                 self.panel_visibility = self.panel_visibility.cycle();
+                set_mouse_capture(self.panel_visibility != PanelVisibility::Hidden);
             }
             _ => {}
         }

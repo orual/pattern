@@ -327,8 +327,10 @@ async fn run_tui() -> MietteResult<()> {
         original_hook(panic_info);
     }));
 
-    // Enable mouse capture so clicks can toggle collapsible sections.
-    crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture).ok();
+    // Start with mouse capture disabled so native terminal text selection works.
+    // Mouse capture is enabled dynamically when the panel is visible or selection
+    // mode is active (see app::set_mouse_capture).
+    crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture).ok();
 
     let mut terminal = ratatui::init();
     let mut app = tui::app::App::new(smol_str::SmolStr::from(session.resolved_agent.as_str()));
