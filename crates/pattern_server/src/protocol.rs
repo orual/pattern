@@ -160,6 +160,36 @@ pub struct ListAgentsRequest;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetStatusRequest;
 
+/// Request payload for [`PatternProtocol::GetHistory`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetHistoryRequest {
+    /// Agent to fetch history for.
+    pub agent_id: AgentId,
+}
+
+/// A single historical message batch with reconstructed events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoricalBatch {
+    /// Batch ID (snowflake).
+    pub batch_id: BatchId,
+    /// User's message that initiated this batch, if any.
+    pub user_message: Option<String>,
+    /// Agent response events as they were emitted during processing.
+    pub events: Vec<WireTurnEvent>,
+    /// Estimated token count for this batch (user + agent content).
+    pub tokens: u64,
+}
+
+/// Response to [`GetHistory`](PatternProtocol::GetHistory).
+///
+/// Contains recent conversation history for an agent, reconstructed from
+/// stored messages into the same wire format as live events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryResponse {
+    /// Historical batches in reverse chronological order (newest first).
+    pub batches: Vec<HistoricalBatch>,
+}
+
 /// Request payload for [`PatternProtocol::InitSession`].
 ///
 /// The TUI sends this after connecting to tell the daemon which project it is
@@ -248,6 +278,13 @@ pub enum PatternProtocol {
     /// Get a health snapshot of the daemon runtime.
     #[rpc(tx = oneshot::Sender<RuntimeStatus>)]
     GetStatus(GetStatusRequest),
+
+    /// Fetch conversation history for an agent.
+    ///
+    /// Returns recent message batches reconstructed from stored messages,
+    /// with events in the same wire format as live subscription output.
+    #[rpc(tx = oneshot::Sender<HistoryResponse>)]
+    GetHistory(GetHistoryRequest),
 
     /// Execute a slash command and return the result.
     #[rpc(tx = oneshot::Sender<CommandResult>)]

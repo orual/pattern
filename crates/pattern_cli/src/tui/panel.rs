@@ -23,6 +23,7 @@ pub enum PanelContent {
     /// Expanded thinking block content (AC4.5).
     Thinking,
     /// Placeholder for future memory/context view.
+    #[allow(dead_code)]
     Context,
 }
 

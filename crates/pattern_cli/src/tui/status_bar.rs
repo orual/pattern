@@ -4,6 +4,8 @@
 //! Renders a single-line bar at the bottom of the TUI with styled segments:
 //! `@persona | N agents | Xk ctx | ● connected`
 
+use std::time::{Duration, Instant};
+
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -11,6 +13,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
 use super::layout::PanelVisibility;
+
+/// How long status bar notifications persist.
+const NOTIFICATION_TTL: Duration = Duration::from_secs(3);
 
 // ---------------------------------------------------------------------------
 // Status bar state
@@ -29,6 +34,10 @@ pub struct StatusBarState {
     pub connected: bool,
     /// Whether selection mode is currently active (AC4.8).
     pub selection_active: bool,
+    /// Temporary notification message (auto-dismisses after TTL).
+    pub notification: Option<String>,
+    /// When the notification was created (for TTL expiry).
+    pub notification_created_at: Option<Instant>,
 }
 
 impl Default for StatusBarState {
@@ -39,6 +48,26 @@ impl Default for StatusBarState {
             context_tokens: None,
             connected: false,
             selection_active: false,
+            notification: None,
+            notification_created_at: None,
+        }
+    }
+}
+
+impl StatusBarState {
+    /// Set a temporary notification message that auto-dismisses after TTL.
+    pub fn set_notification(&mut self, message: String) {
+        self.notification = Some(message);
+        self.notification_created_at = Some(Instant::now());
+    }
+
+    /// Remove expired notifications based on TTL.
+    pub fn tick_notification(&mut self) {
+        if let Some(created_at) = self.notification_created_at {
+            if created_at.elapsed() >= NOTIFICATION_TTL {
+                self.notification = None;
+                self.notification_created_at = None;
+            }
         }
     }
 }
@@ -198,6 +227,21 @@ impl Widget for StatusBar<'_> {
             ));
         }
 
+        // Notification message (appended to status bar content).
+        if let Some(ref notif) = self.state.notification {
+            spans.push(Span::styled(
+                " │ ",
+                Style::default().fg(Color::DarkGray).bg(bar_bg),
+            ));
+            spans.push(Span::styled(
+                format!("{notif}"),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .bg(bar_bg)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+
         let line = Line::from(spans);
         buf.set_line(area.x, area.y, &line, area.width);
     }
@@ -256,6 +300,8 @@ mod tests {
             context_tokens: Some(45000),
             connected: true,
             selection_active: false,
+            notification: None,
+            notification_created_at: None,
         };
         let output = render_status_bar(&state, PanelVisibility::Hidden, 60);
         insta::assert_snapshot!(output);
@@ -269,6 +315,8 @@ mod tests {
             context_tokens: None,
             connected: false,
             selection_active: false,
+            notification: None,
+            notification_created_at: None,
         };
         let output = render_status_bar(&state, PanelVisibility::Hidden, 60);
         insta::assert_snapshot!(output);
@@ -282,6 +330,8 @@ mod tests {
             context_tokens: Some(8500),
             connected: true,
             selection_active: false,
+            notification: None,
+            notification_created_at: None,
         };
         let output = render_status_bar(&state, PanelVisibility::Visible, 70);
         insta::assert_snapshot!(output);

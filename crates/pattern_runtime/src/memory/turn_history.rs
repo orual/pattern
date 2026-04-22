@@ -586,13 +586,32 @@ fn estimate_turn_tokens(output: &TurnOutput) -> u64 {
         return (usage.prompt_tokens.unwrap_or(0) as u64)
             .saturating_add(usage.completion_tokens.unwrap_or(0) as u64);
     }
-    // Heuristic fallback: ~4 chars per token + flat overhead.
-    let text_chars: u64 = output
+    // Heuristic fallback: count characters from all content parts.
+    // This is more accurate than byte size for UTF-8 text.
+    let char_count: u64 = output
         .messages
         .iter()
-        .map(|m| m.chat_message.size() as u64)
+        .map(|m| {
+            m.chat_message.content.parts().iter().map(|part| {
+                match part {
+                    genai::chat::ContentPart::Text(s) => s.chars().count() as u64,
+                    genai::chat::ContentPart::Binary(b) => match &b.source {
+                        genai::chat::BinarySource::Url(s) => s.len() as u64,
+                        genai::chat::BinarySource::Base64(s) => s.len() as u64,
+                    },
+                    genai::chat::ContentPart::ToolCall(tc) => {
+                        tc.fn_name.len() as u64 + tc.fn_arguments.to_string().len() as u64
+                    }
+                    genai::chat::ContentPart::ToolResponse(tr) => tr.content.to_string().len() as u64,
+                    genai::chat::ContentPart::ThinkingBlock(tb) => {
+                        tb.text.as_ref().map(|t| t.chars().count() as u64).unwrap_or(0)
+                    }
+                    genai::chat::ContentPart::Custom(_) => 0,
+                }
+            }).sum::<u64>()
+        })
         .sum();
-    text_chars / 4 + 32
+    char_count / 4 + 32
 }
 
 #[cfg(test)]

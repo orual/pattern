@@ -141,9 +141,8 @@ sha2 = "0.10"
 # behaviour if/when active TurnHistory turns gain persistence (not
 # today, but future-proofing — see RenderedBlock.content_hash).
 blake3 = "1"
-arboard = "3"
+arboard = { version = "3", features = ["wayland-data-control"] }
 base64 = "0.22"
-tui-popup = "0.7"
 url = "2"
 serde_urlencoded = "0.7"
 

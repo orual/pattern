@@ -37,7 +37,7 @@ impl PanelVisibility {
 
 /// Minimum terminal width (columns) required to show the panel. Below this
 /// threshold the panel is auto-hidden regardless of the requested state.
-const MIN_PANEL_WIDTH: u16 = 100;
+pub const MIN_PANEL_WIDTH: u16 = 100;
 
 /// Minimum panel percentage (of terminal width).
 pub const MIN_PANEL_PCT: u16 = 15;
@@ -68,29 +68,15 @@ pub struct TuiLayout {
     /// Side panel area. `None` when the panel is hidden.
     pub panel: Option<Rect>,
     /// The effective panel visibility after auto-hide logic.
+    ///
+    /// Callers can read this to detect when the panel was force-hidden by the
+    /// narrow-terminal auto-hide rule (e.g., to suppress resize keybindings).
     pub panel_visibility: PanelVisibility,
 }
 
 // ---------------------------------------------------------------------------
 // Layout computation
 // ---------------------------------------------------------------------------
-
-/// Compute the [`TuiLayout`] for the given terminal area.
-///
-/// This is the simple overload that assumes no panel (Hidden state).
-/// Existing callers continue to work without changes.
-///
-/// The layout uses three vertical chunks:
-/// - Conversation: `Constraint::Min(1)` — grows to fill available space.
-/// - Input: `Constraint::Length(2)` — prompt line + 1 line of text.
-/// - Status bar: `Constraint::Length(1)` — single-line indicator.
-///
-/// On very small terminals (height < 5) ratatui will clamp rectangles to zero
-/// rather than producing nonsensical coordinates, so callers should always check
-/// `area.height > 0` before rendering into each region.
-pub fn compute_layout(area: Rect) -> TuiLayout {
-    compute_layout_with_panel(area, PanelVisibility::Hidden, DEFAULT_PANEL_PCT)
-}
 
 /// Compute the [`TuiLayout`] for the given terminal area with panel awareness.
 ///
@@ -202,19 +188,19 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Original tests (compute_layout — Hidden panel)
+    // Hidden panel layout tests
     // -----------------------------------------------------------------------
 
     #[test]
     fn layout_allocates_input_area() {
-        let layout = compute_layout(area(80, 24));
+        let layout = compute_layout_with_panel(area(80, 24), PanelVisibility::Hidden, DEFAULT_PANEL_PCT);
         assert_eq!(layout.input.height, 2, "input area must be exactly 2 rows");
     }
 
     #[test]
     fn layout_gives_remaining_to_conversation() {
         let terminal_height = 24u16;
-        let layout = compute_layout(area(80, terminal_height));
+        let layout = compute_layout_with_panel(area(80, terminal_height), PanelVisibility::Hidden, DEFAULT_PANEL_PCT);
 
         let conv = layout
             .conversation
@@ -237,7 +223,7 @@ mod tests {
     fn layout_handles_small_terminal() {
         // A terminal smaller than the fixed regions (4 rows total = 3 input + 1 status).
         // ratatui clamps rects to zero-height rather than panicking.
-        let layout = compute_layout(area(40, 3));
+        let layout = compute_layout_with_panel(area(40, 3), PanelVisibility::Hidden, DEFAULT_PANEL_PCT);
 
         let conv = layout
             .conversation

@@ -45,6 +45,7 @@ use tracing::{info, warn};
 
 use crate::bridge::{EventRx, EventTx, MultiplexSink, TurnSinkBridge, new_event_channel};
 use crate::protocol::*;
+use pattern_db::queries::get_messages;
 
 /// Configuration for real session mode. When provided to
 /// [`DaemonServer::spawn_with_config`], the server opens
@@ -134,6 +135,10 @@ pub struct DaemonServer {
     /// Minted once at spawn time so all messages from this session carry the
     /// same `Author::Partner` identity, rather than minting a fresh ID per message.
     partner_id: SmolStr,
+    /// Number of available personas discovered during the last InitSession.
+    /// Updated each time InitSession is called, used by GetStatus to report
+    /// agent count to the TUI.
+    available_agents: usize,
 }
 
 /// Handle returned by [`DaemonServer::spawn`].
@@ -180,6 +185,7 @@ impl DaemonServer {
             sessions: Arc::new(DashMap::new()),
             session_locks: Arc::new(DashMap::new()),
             partner_id: new_id(),
+            available_agents: 0,
         };
         tokio::spawn(server.run());
         DaemonHandle {
@@ -383,11 +389,79 @@ impl DaemonServer {
             PatternMessage::GetStatus(req) => {
                 let WithChannels { tx, .. } = req;
                 let status = RuntimeStatus {
-                    agent_count: self.sessions.len(),
+                    agent_count: self.available_agents,
                     active_batch_count: 0,
                     uptime_secs: self.started_at.elapsed().as_secs(),
                 };
                 let _ = tx.send(status).await;
+            }
+            PatternMessage::GetHistory(req) => {
+                use crate::protocol::{HistoricalBatch, HistoryResponse};
+                let WithChannels { tx, inner, .. } = req;
+
+                let batches = if let Some(mount) = &self.current_mount {
+                    if let Ok(conn) = mount.db.dedicated_connection() {
+                        // Fetch messages in DESC order, reverse to get chronological (ASC) order.
+                        let mut messages = get_messages(&conn, &inner.agent_id, i64::MAX)
+                            .unwrap_or_default();
+                        messages.reverse();
+
+                        // Group by batch_id and reconstruct events.
+                        let mut batch_map: std::collections::HashMap<String, Vec<_>> = std::collections::HashMap::new();
+                        for msg in messages {
+                            if let Some(batch_id) = &msg.batch_id {
+                                batch_map.entry(batch_id.clone()).or_default().push(msg);
+                            }
+                        }
+
+                        // Convert each batch to HistoricalBatch with WireTurnEvents.
+                        let mut batches: Vec<HistoricalBatch> = batch_map
+                            .into_iter()
+                            .map(|(batch_id, mut msgs)| {
+                                use pattern_db::models::MessageRole;
+                                msgs.sort_by_key(|m| m.sequence_in_batch.unwrap_or(0));
+
+                                // Extract user message from the first User role message.
+                                // Deserialize the full ChatMessage to get complete text content.
+                                let user_message = msgs.iter()
+                                    .filter(|m| m.role == MessageRole::User)
+                                    .filter_map(|m| serde_json::from_value::<ChatMessage>(m.content_json.0.clone()).ok())
+                                    .map(|cm| {
+                                        cm.content.parts().iter()
+                                            .filter_map(|p| p.as_text())
+                                            .collect::<Vec<_>>()
+                                            .join(" ")
+                                    })
+                                    .next();
+
+                                let events: Vec<WireTurnEvent> = msgs
+                                    .into_iter()
+                                    .flat_map(|msg| message_to_wire_events(msg))
+                                    .collect();
+
+                                let tokens = estimate_batch_tokens(&user_message, &events);
+
+                                HistoricalBatch {
+                                    batch_id: batch_id.into(),
+                                    user_message,
+                                    events,
+                                    tokens,
+                                }
+                            })
+                            .collect();
+
+                        // Sort batches by batch_id (which are snowflakes, so chronological = ascending)
+                        batches.sort_by(|a, b| a.batch_id.cmp(&b.batch_id));
+                        batches
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    vec![]
+                };
+
+                let response = HistoryResponse { batches };
+                let _ = tx.send(response).await;
             }
             PatternMessage::CancelBatch(req) => {
                 let WithChannels { tx, .. } = req;
@@ -463,6 +537,9 @@ impl DaemonServer {
 
                 let available: Vec<AgentId> =
                     personas.keys().map(|k| SmolStr::from(k.as_str())).collect();
+
+                // Update available agents count for GetStatus.
+                self.available_agents = available.len();
 
                 info!(
                     agent_id = %agent_id,
@@ -662,6 +739,126 @@ fn build_turn_input(msg: &AgentMessage, partner_id: &SmolStr, session_agent_id: 
         ),
         messages: vec![message],
     }
+}
+
+/// Convert a stored DB message to WireTurnEvents.
+///
+/// This function deserializes the `content_json` from the DB message and
+/// converts it to the appropriate wire events. A single DB message can
+/// produce multiple events (e.g., an assistant message with multiple
+/// content parts: text, tool calls, thinking).
+///
+/// User messages return an empty vec - the user_message field of
+/// HistoricalBatch handles those separately.
+fn message_to_wire_events(db_msg: pattern_db::models::Message) -> Vec<crate::protocol::WireTurnEvent> {
+    use crate::protocol::WireTurnEvent;
+    use pattern_db::models::MessageRole;
+
+    let mut events = Vec::new();
+
+    // Deserialize the ChatMessage from content_json.
+    let Ok(chat_msg) = serde_json::from_value::<ChatMessage>(db_msg.content_json.0) else {
+        return events;
+    };
+
+    // User messages are handled via the user_message field, not events.
+    if db_msg.role == MessageRole::User {
+        return events;
+    }
+
+    // For System messages, emit text content.
+    if db_msg.role == MessageRole::System {
+        let text: String = chat_msg.content.parts().iter()
+            .filter_map(|p| p.as_text())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !text.is_empty() {
+            events.push(WireTurnEvent::Text(text));
+        }
+        return events;
+    }
+
+    // For Assistant messages, emit events for ALL content parts.
+    if db_msg.role == MessageRole::Assistant {
+        for part in chat_msg.content.parts() {
+            if let Some(text) = part.as_text() {
+                events.push(WireTurnEvent::Text(text.to_string()));
+            } else if let Some(tc) = part.as_tool_call() {
+                events.push(WireTurnEvent::ToolCall {
+                    call_id: tc.call_id.clone(),
+                    function_name: tc.fn_name.clone(),
+                    arguments_json: tc.fn_arguments.to_string(),
+                });
+            }
+            // Note: ThinkingBlock and other parts could be added here as needed
+        }
+        return events;
+    }
+
+    // For Tool messages, emit tool result events.
+    if db_msg.role == MessageRole::Tool {
+        for part in chat_msg.content.parts() {
+            if let Some(tr) = part.as_tool_response() {
+                // Determine success based on content structure.
+                let (success, content_json) = if tr.content.is_string() {
+                    (true, tr.content.to_string())
+                } else {
+                    // Check if this is an error response (has "error" key).
+                    if let Some(obj) = tr.content.as_object() {
+                        if obj.contains_key("error") {
+                            (false, tr.content.to_string())
+                        } else {
+                            (true, tr.content.to_string())
+                        }
+                    } else {
+                        (true, tr.content.to_string())
+                    }
+                };
+                events.push(WireTurnEvent::ToolResult {
+                    call_id: tr.call_id.clone(),
+                    success,
+                    content_json,
+                });
+            }
+        }
+    }
+
+    events
+}
+
+/// Estimate token count for a historical batch.
+///
+/// Uses the same heuristic as the runtime: ~4 chars per token + flat overhead.
+/// For tool calls/results, counts the full JSON string length including structure.
+fn estimate_batch_tokens(user_message: &Option<String>, events: &[WireTurnEvent]) -> u64 {
+    let mut total_chars = 0;
+
+    // User message characters.
+    if let Some(msg) = user_message {
+        total_chars += msg.len();
+    }
+
+    // Event characters.
+    for ev in events {
+        match ev {
+            WireTurnEvent::Text(s) => total_chars += s.len(),
+            WireTurnEvent::Thinking(s) => total_chars += s.len(),
+            // ToolCall: count function name + full JSON arguments
+            WireTurnEvent::ToolCall { function_name, arguments_json, .. } => {
+                total_chars += function_name.len();
+                total_chars += arguments_json.len();
+            }
+            // ToolResult: count the full JSON content string
+            WireTurnEvent::ToolResult { content_json, .. } => {
+                total_chars += content_json.len();
+            }
+            WireTurnEvent::Display { text, .. } => total_chars += text.len(),
+            WireTurnEvent::Stop(_) => {}
+        }
+    }
+
+    // Heuristic: ~4 chars per token + 32 token overhead per batch.
+    (total_chars / 4) as u64 + 32
 }
 
 #[cfg(test)]

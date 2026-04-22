@@ -1,6 +1,5 @@
 ---
 source: crates/pattern_cli/src/tui/app.rs
-assertion_line: 675
 expression: output
 ---
 
@@ -14,4 +13,4 @@ expression: output
 
 ❯
 
- @pattern-default │ 0 agents │ ● disconnected
+ @pattern-default │ 0 agents │ 0 ctx │ ● disconnected

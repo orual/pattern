@@ -139,7 +139,7 @@ async fn main() -> MietteResult<()> {
     let log_file = std::fs::File::create(&log_path).ok();
     if let Some(file) = log_file {
         let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "pattern=warn".into());
+            .unwrap_or_else(|_| "pattern=info".into());
         tracing_subscriber::fmt()
             .with_env_filter(filter)
             .with_writer(std::sync::Mutex::new(file))
@@ -305,6 +305,7 @@ async fn run_tui() -> MietteResult<()> {
                             resolved_agent: agent_id.clone(),
                             error: None,
                             available_agents: vec![],
+                            history: vec![],
                         },
                     }
                 }
@@ -314,6 +315,7 @@ async fn run_tui() -> MietteResult<()> {
                     resolved_agent: agent_id.clone(),
                     error: None,
                     available_agents: vec![],
+                    history: vec![],
                 },
             }
         }
@@ -340,6 +342,11 @@ async fn run_tui() -> MietteResult<()> {
         app.set_available_agents(session.available_agents);
     }
 
+    // Load conversation history from the daemon.
+    if !session.history.is_empty() {
+        app.load_history(session.history);
+    }
+
     // Surface any session initialization error as the first system message.
     if let Some(err) = session.error {
         app.push_system_message(format!("warning: {err}"));
@@ -363,9 +370,10 @@ struct SessionResult {
     resolved_agent: String,
     error: Option<String>,
     available_agents: Vec<smol_str::SmolStr>,
+    history: Vec<pattern_server::protocol::HistoricalBatch>,
 }
 
-/// Send `InitSession`, then subscribe to the resolved agent's output.
+/// Send `InitSession`, fetch history, then subscribe to the resolved agent's output.
 ///
 /// On RPC failure or when the daemon reports a mount error, `error` is set —
 /// callers should surface it as a system message in the TUI.
@@ -385,6 +393,14 @@ async fn init_session_and_subscribe(
                 tracing::warn!("InitSession reported error: {err}");
             }
             let resolved = info.agent_id.clone();
+
+            // Fetch all non-archived conversation history.
+            let history = client
+                .get_history(resolved.clone())
+                .await
+                .map(|resp| resp.batches)
+                .unwrap_or_default();
+
             let rx = client.subscribe_output(resolved.clone()).await.ok();
             SessionResult {
                 client: Some(client.clone()),
@@ -392,6 +408,7 @@ async fn init_session_and_subscribe(
                 resolved_agent: resolved.to_string(),
                 error: info.error,
                 available_agents: info.available_agents,
+                history,
             }
         }
         Err(e) => {
@@ -403,6 +420,7 @@ async fn init_session_and_subscribe(
                 resolved_agent: default_agent.to_string(),
                 error: Some(format!("session init failed: {e}")),
                 available_agents: vec![],
+                history: vec![],
             }
         }
     }

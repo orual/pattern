@@ -4,6 +4,7 @@
 //! events ([`TaggedTurnEvent`]), and a periodic UI refresh tick using
 //! [`tokio::select!`]. The terminal is rendered each iteration via ratatui.
 
+use std::sync::Mutex;
 use std::time::Duration;
 
 use crossterm::event::{
@@ -28,11 +29,12 @@ use super::commands::lookup_command;
 use super::conversation::{ConversationState, ConversationView};
 use super::input::{InputAction, InputHandler};
 use super::layout::{
-    DEFAULT_PANEL_PCT, MAX_PANEL_PCT, MIN_PANEL_PCT, PanelVisibility, compute_layout_with_panel,
+    DEFAULT_PANEL_PCT, MAX_PANEL_PCT, MIN_PANEL_PCT, MIN_PANEL_WIDTH, PanelVisibility,
+    compute_layout_with_panel,
 };
 use super::model::{RenderBatch, SectionKind};
 use super::panel::{PanelContent, PanelState, SidePanel};
-use super::scroll::{apply_action, map_key_to_action};
+use super::scroll::{ConversationAction, apply_action, map_key_to_action};
 use super::status_bar::{StatusBar, StatusBarState};
 use super::toast::{ToastState, render_toasts};
 
@@ -96,6 +98,10 @@ pub struct App {
     current_agent: SmolStr,
     /// Whether we are connected to the daemon.
     connected: bool,
+    /// Number of active agents (from daemon status polls).
+    agent_count: usize,
+    /// Total context tokens from loaded history.
+    context_tokens: u64,
     /// Height of the conversation viewport from the last rendered frame.
     /// Used by key handlers so scroll calculations use the real terminal size.
     /// Defaults to 24 until the first frame is drawn.
@@ -120,6 +126,16 @@ pub struct App {
     /// Buffer snapshot from the last rendered frame. Used by selection mode
     /// to extract text at the coordinates the user dragged over.
     last_rendered_buffer: Option<Buffer>,
+    /// System clipboard handle (arboard). Kept alive for the TUI session
+    /// to avoid "clipboard dropped" errors on platforms where clipboard
+    /// connections need to persist.
+    clipboard: Option<Mutex<arboard::Clipboard>>,
+    /// Status bar state.
+    status_bar: StatusBarState,
+    /// Terminal width from the last rendered frame. Used by keybindings that
+    /// need to know whether the terminal is wide enough for a split-panel view.
+    /// Defaults to 0 until the first frame is drawn.
+    terminal_width: u16,
 }
 
 impl App {
@@ -148,6 +164,8 @@ impl App {
             client: None,
             current_agent: agent_id,
             connected: false,
+            agent_count: 0,
+            context_tokens: 0,
             last_viewport_height: 24,
             result_tx,
             available_agents: Vec::new(),
@@ -157,6 +175,11 @@ impl App {
             panel_pct: DEFAULT_PANEL_PCT,
             selection: SelectionState::default(),
             last_rendered_buffer: None,
+            // Initialize clipboard if available. May fail on some platforms
+            // (e.g., headless systems), so we store None in that case.
+            clipboard: arboard::Clipboard::new().ok().map(Mutex::new),
+            status_bar: StatusBarState::default(),
+            terminal_width: 0,
         }
     }
 
@@ -165,6 +188,7 @@ impl App {
     /// Called by the TUI startup after a successful `InitSession` so that
     /// `/front` can validate agent names against this list.
     pub fn set_available_agents(&mut self, agents: Vec<SmolStr>) {
+        self.agent_count = agents.len();
         self.available_agents = agents;
     }
 
@@ -192,6 +216,9 @@ impl App {
         let mut reader = EventStream::new();
         let mut tick = time::interval(Duration::from_millis(100));
         tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+        // Status polls are expensive (RPC round-trip); only poll every 5 seconds.
+        // We count 100ms ticks and fire on every 50th (5000ms / 100ms = 50).
+        let mut tick_count: u32 = 0;
 
         // Initial draw.
         let completed = terminal.draw(|f| self.render_frame(f)).into_diagnostic()?;
@@ -241,17 +268,29 @@ impl App {
                         }
                     }
                 }
-                // Branch 3: periodic UI refresh tick.
+                // Branch 3: periodic UI refresh tick (every 100ms).
                 _ = tick.tick() => {
-                    // Expire old toasts, then redraw. Also handles
-                    // streaming cursor blink and status bar updates.
+                    // Expire old toasts and status bar notifications.
                     self.toast_state.tick();
+                    self.tick_notification();
+                    // Poll daemon status every 5 seconds (every 50th tick).
+                    tick_count = tick_count.wrapping_add(1);
+                    if tick_count % 50 == 1 {
+                        self.poll_daemon_status();
+                    }
                 }
                 // Branch 4: results from spawned async tasks (command results,
                 // send errors). Pushes the formatted message into the conversation
                 // so results are visible to the user rather than only logged.
                 Some(msg) = result_rx.recv() => {
-                    self.push_system_message(msg);
+                    // Handle special status update messages.
+                    if let Some(status_str) = msg.strip_prefix("STATUS:") {
+                        if let Ok(count) = status_str.parse::<usize>() {
+                            self.agent_count = count;
+                        }
+                    } else {
+                        self.push_system_message(msg);
+                    }
                 }
             }
 
@@ -297,12 +336,14 @@ impl App {
                 self.selection.is_dragging = false;
             }
             MouseEventKind::Drag(MouseButton::Left) => {
+                tracing::debug!("Drag event at ({}, {})", mouse.column, mouse.row);
                 if let Some(start) = self.selection.start {
                     self.selection.current = Some((mouse.column, mouse.row));
                     // Check if moved more than threshold to distinguish click from drag.
                     let dx = (mouse.column as i16 - start.0 as i16).abs();
                     let dy = (mouse.row as i16 - start.1 as i16).abs();
                     if dx + dy > DRAG_THRESHOLD as i16 {
+                        tracing::debug!("Drag threshold exceeded, is_dragging=true");
                         self.selection.is_dragging = true;
                     }
                 }
@@ -315,15 +356,30 @@ impl App {
                         // This was a drag → copy selection to clipboard.
                         let text = self.extract_text_from_buffer(start, end);
                         if !text.is_empty() {
-                            match super::clipboard::copy_to_clipboard(&text) {
+                            let result = if let Some(clipboard) = &self.clipboard {
+                                match clipboard.lock() {
+                                    Ok(mut guard) => {
+                                        // Temporarily release lock by cloning the text
+                                        // and doing the operation within a闭包.
+                                        let text_clone = text.clone();
+                                        guard.set_text(text_clone).map_err(|e| {
+                                            format!("failed to set clipboard text: {e}")
+                                        })
+                                    }
+                                    Err(e) => Err(format!("clipboard lock failed: {e}")),
+                                }
+                            } else {
+                                Err("clipboard not available".to_string())
+                            };
+
+                            match result {
                                 Ok(()) => {
-                                    self.push_system_message(format!(
-                                        "copied {} chars to clipboard.",
-                                        text.len()
-                                    ));
+                                    self.status_bar
+                                        .set_notification(format!("copied {} chars", text.len()));
                                 }
                                 Err(e) => {
-                                    self.push_system_message(format!("clipboard error: {e}"));
+                                    self.status_bar
+                                        .set_notification(format!("clipboard error: {e}"));
                                 }
                             }
                         }
@@ -353,6 +409,36 @@ impl App {
                 self.selection.is_dragging = false;
                 self.selection.active = was_active;
             }
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                match self.focus {
+                    Focus::Input => {
+                        // Switch to conversation focus and apply scroll.
+                        self.focus = Focus::Conversation;
+                        let scroll_action = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
+                            ConversationAction::ScrollUp(3)
+                        } else {
+                            ConversationAction::ScrollDown(3)
+                        };
+                        apply_action(
+                            scroll_action,
+                            &mut self.conversation,
+                            self.last_viewport_height,
+                        );
+                    }
+                    Focus::Conversation => {
+                        let scroll_action = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
+                            ConversationAction::ScrollUp(3)
+                        } else {
+                            ConversationAction::ScrollDown(3)
+                        };
+                        apply_action(
+                            scroll_action,
+                            &mut self.conversation,
+                            self.last_viewport_height,
+                        );
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -371,6 +457,33 @@ impl App {
         self.selection.start = None;
         self.selection.current = None;
         self.selection.is_dragging = false;
+    }
+
+    /// Expire old status bar notifications.
+    fn tick_notification(&mut self) {
+        self.status_bar.tick_notification();
+    }
+
+    /// Poll the daemon for status updates (agent count, etc.).
+    /// Called periodically from the UI tick handler.
+    fn poll_daemon_status(&mut self) {
+        let Some(client) = &self.client else {
+            return;
+        };
+
+        // Spawn a task to poll status; we'll get the result via the result channel.
+        let client_clone = client.clone();
+        let result_tx = self.result_tx.clone();
+        tokio::spawn(async move {
+            match client_clone.get_status().await {
+                Ok(status) => {
+                    let _ = result_tx.send(format!("STATUS:{}", status.agent_count));
+                }
+                Err(e) => {
+                    tracing::debug!("Failed to poll daemon status: {:?}", e);
+                }
+            }
+        });
     }
 
     /// Extract text from the last rendered buffer between two screen positions.
@@ -427,11 +540,7 @@ impl App {
 
     /// Render visual highlighting for the current selection.
     fn render_selection_highlight(&self, start: (u16, u16), end: (u16, u16), buf: &mut Buffer) {
-        let Some(last_buf) = &self.last_rendered_buffer else {
-            return;
-        };
-
-        let buf_area = last_buf.area;
+        let buf_area = buf.area;
 
         // Normalize coordinates.
         let (r0, c0, r1, c1) = if (start.1, start.0) <= (end.1, end.0) {
@@ -440,26 +549,39 @@ impl App {
             (end.1, end.0, start.1, start.0)
         };
 
+        tracing::debug!(
+            "Rendering highlight: buf_area={:?}, selection=({},{} to {},{})",
+            buf_area,
+            r0,
+            c0,
+            r1,
+            c1
+        );
+        let mut cells_highlighted = 0;
+
         // Render highlighted rectangle over selected area.
         for row in r0..=r1 {
             if row < buf_area.y || row >= buf_area.y + buf_area.height {
+                tracing::debug!("Row {} outside buffer area", row);
                 continue;
             }
             let col_start = if row == r0 { c0 } else { buf_area.x };
-            let col_end = if row == r1 { c1 } else { buf_area.x + buf_area.width - 1 };
+            let col_end = if row == r1 {
+                c1
+            } else {
+                buf_area.x + buf_area.width - 1
+            };
 
             for col in col_start..=col_end {
                 if col < buf_area.x || col >= buf_area.x + buf_area.width {
                     continue;
                 }
-                // Get the existing cell and invert its style for selection highlight.
-                let cell = &last_buf[(col, row)];
-                let style = cell.style();
-                // Use reverse video for selection highlight.
-                buf[(col, row)]
-                    .set_style(ratatui::style::Style::default().bg(style.fg.unwrap_or(Color::White)));
+                // Use DarkGray background for selection highlight (consistent, visible).
+                buf[(col, row)].set_style(ratatui::style::Style::default().bg(Color::DarkGray));
+                cells_highlighted += 1;
             }
         }
+        tracing::debug!("Highlighted {} cells", cells_highlighted);
     }
 
     /// Handle a key event based on current focus.
@@ -490,19 +612,29 @@ impl App {
         }
 
         // Global: Ctrl+P cycles panel visibility.
+        // On narrow terminals (too small for split view), skip Visible and only
+        // toggle between Hidden and Expanded, since Expanded still works at any
+        // width while Visible would be immediately auto-hidden anyway.
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p') {
-            self.panel_visibility = self.panel_visibility.cycle();
+            self.panel_visibility = if self.terminal_width < MIN_PANEL_WIDTH {
+                match self.panel_visibility {
+                    PanelVisibility::Hidden => PanelVisibility::Expanded,
+                    PanelVisibility::Visible | PanelVisibility::Expanded => PanelVisibility::Hidden,
+                }
+            } else {
+                self.panel_visibility.cycle()
+            };
             return;
         }
 
-        // Global: Ctrl+] increases panel width by 5%, clamped to MAX_PANEL_PCT.
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char(']') {
+        // Global: Alt+] increases panel width by 5%, clamped to MAX_PANEL_PCT.
+        if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Char(']') {
             self.panel_pct = (self.panel_pct + 5).min(MAX_PANEL_PCT);
             return;
         }
 
-        // Global: Ctrl+[ decreases panel width by 5%, clamped to MIN_PANEL_PCT.
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('[') {
+        // Global: Alt+[ decreases panel width by 5%, clamped to MIN_PANEL_PCT.
+        if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Char('[') {
             self.panel_pct = self.panel_pct.saturating_sub(5).max(MIN_PANEL_PCT);
             return;
         }
@@ -778,6 +910,26 @@ impl App {
         self.conversation.batches.push(batch);
     }
 
+    /// Load historical batches into the conversation.
+    ///
+    /// Called during TUI startup to populate the conversation with recent
+    /// message history from the daemon.
+    pub(crate) fn load_history(&mut self, history: Vec<pattern_server::protocol::HistoricalBatch>) {
+        let mut total_tokens = 0;
+        for batch in history {
+            total_tokens += batch.tokens;
+            let mut render_batch = RenderBatch::new(batch.batch_id.clone(), batch.user_message);
+            for event in &batch.events {
+                render_batch.push_event(event);
+            }
+            render_batch.streaming = false;
+            self.conversation.batches.push(render_batch);
+        }
+        self.context_tokens = total_tokens;
+        // Enable auto-scroll so history loads at the bottom.
+        self.conversation.auto_scroll = true;
+    }
+
     /// Update autocomplete based on current input text.
     fn update_autocomplete(&mut self) {
         let text = self.input.current_text();
@@ -842,8 +994,16 @@ impl App {
     fn render_frame(&mut self, frame: &mut ratatui::Frame<'_>) {
         let layout = compute_layout_with_panel(frame.area(), self.panel_visibility, self.panel_pct);
 
-        // Record the viewport height so key handlers can use the real size.
+        // Record terminal dimensions so key handlers can use the real size.
         self.last_viewport_height = layout.conversation.map(|r| r.height).unwrap_or(0);
+        self.terminal_width = frame.area().width;
+
+        // If auto-hide kicked in (terminal became too narrow for split view),
+        // update stored state so the next Ctrl+P cycle starts from the correct
+        // position rather than a phantom Visible state.
+        if layout.panel_visibility != self.panel_visibility {
+            self.panel_visibility = layout.panel_visibility;
+        }
 
         // Conversation area (only render when present — None in Expanded mode).
         if let Some(conv_rect) = layout.conversation {
@@ -871,14 +1031,12 @@ impl App {
         }
 
         // Status bar.
-        let sb_state = StatusBarState {
-            persona_name: self.current_agent.to_string(),
-            agent_count: if self.connected { 1 } else { 0 },
-            context_tokens: None,
-            connected: self.connected,
-            selection_active: self.selection.active,
-        };
-        StatusBar::new(&sb_state, self.panel_visibility)
+        self.status_bar.persona_name = self.current_agent.to_string();
+        self.status_bar.agent_count = self.agent_count;
+        self.status_bar.context_tokens = Some(self.context_tokens);
+        self.status_bar.connected = self.connected;
+        self.status_bar.selection_active = self.selection.active;
+        StatusBar::new(&self.status_bar, self.panel_visibility)
             .render(layout.status_bar, frame.buffer_mut());
 
         // Toast overlays (on top of everything, when there are active toasts).
@@ -897,6 +1055,8 @@ impl App {
             && let Some(end) = self.selection.current
         {
             self.render_selection_highlight(start, end, frame.buffer_mut());
+        } else {
+            if self.selection.start.is_some() {}
         }
     }
 }
@@ -1109,8 +1269,10 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_p_cycles_panel() {
+    fn ctrl_p_cycles_panel_wide_terminal() {
         let mut app = App::new(SmolStr::new_static("pattern-default"));
+        // Simulate a wide terminal so all three states are reachable.
+        app.terminal_width = MIN_PANEL_WIDTH;
         assert_eq!(app.panel_visibility, PanelVisibility::Hidden);
 
         let ctrl_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL);
@@ -1125,27 +1287,44 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_bracket_adjusts_panel_pct() {
+    fn ctrl_p_skips_visible_on_narrow_terminal() {
+        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        // terminal_width defaults to 0, which is < MIN_PANEL_WIDTH.
+        assert_eq!(app.terminal_width, 0);
+        assert_eq!(app.panel_visibility, PanelVisibility::Hidden);
+
+        let ctrl_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL);
+        // On narrow terminals: Hidden -> Expanded (skip Visible).
+        app.handle_key(ctrl_p);
+        assert_eq!(app.panel_visibility, PanelVisibility::Expanded);
+
+        // Expanded -> Hidden.
+        app.handle_key(ctrl_p);
+        assert_eq!(app.panel_visibility, PanelVisibility::Hidden);
+    }
+
+    #[test]
+    fn alt_bracket_adjusts_panel_pct() {
         let mut app = App::new(SmolStr::new_static("pattern-default"));
         assert_eq!(app.panel_pct, DEFAULT_PANEL_PCT); // 25
 
-        let ctrl_right = KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL);
-        app.handle_key(ctrl_right);
+        let alt_right = KeyEvent::new(KeyCode::Char(']'), KeyModifiers::ALT);
+        app.handle_key(alt_right);
         assert_eq!(app.panel_pct, 30);
 
-        let ctrl_left = KeyEvent::new(KeyCode::Char('['), KeyModifiers::CONTROL);
-        app.handle_key(ctrl_left);
+        let alt_left = KeyEvent::new(KeyCode::Char('['), KeyModifiers::ALT);
+        app.handle_key(alt_left);
         assert_eq!(app.panel_pct, 25);
 
         // Clamp to max.
         for _ in 0..20 {
-            app.handle_key(ctrl_right);
+            app.handle_key(alt_right);
         }
         assert_eq!(app.panel_pct, MAX_PANEL_PCT);
 
         // Clamp to min.
         for _ in 0..20 {
-            app.handle_key(ctrl_left);
+            app.handle_key(alt_left);
         }
         assert_eq!(app.panel_pct, MIN_PANEL_PCT);
     }

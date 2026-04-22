@@ -114,6 +114,7 @@ impl ToastState {
     }
 
     /// Dismiss all visible toasts.
+    #[allow(dead_code)]
     pub fn dismiss(&mut self) {
         self.toasts.clear();
     }
