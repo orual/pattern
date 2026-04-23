@@ -4,7 +4,14 @@ Agent runtime for Pattern v3. Houses Tidepool (Haskell-in-Rust) embedding, the
 agent turn loop, `freer-simple` effect handlers, and turn-level checkpoint
 machinery. Depends only on `pattern_core` trait definitions.
 
-Last verified: 2026-04-20 (post v3-memory-rework Phase 8)
+Last verified: 2026-04-23 (post v3-TUI Phase 6)
+
+v3-TUI integration note: the runtime is consumed by `pattern_server`'s actor
+via `TidepoolSession`, `MultiplexSink`, and per-batch `TurnSinkBridge`. The
+session open path runs in spawned tasks (not the actor loop) and wire-safe
+events are emitted as `WireTurnEvent` for IRPC transport. No runtime public
+API changes landed during v3-TUI — what changed was who holds sessions and
+how events are routed out.
 
 See the v3 foundation design at
 `docs/design-plans/2026-04-16-v3-foundation.md` for the substrate choice,

@@ -2,12 +2,12 @@
 
 Pattern is a multi-agent ADHD support system providing external executive function through specialized cognitive agents. Each user ("partner") gets their own constellation of agents.
 
-**Current State**: Core framework operational on `rewrite-v3` branch. V3 foundation + v3-memory-rework (8-phase plan) complete. `pattern_memory` crate extracted, rusqlite migration done, 1066/1066 tests passing.
+**Current State**: Core framework operational on `batching` branch. V3 foundation + v3-memory-rework (8 phases) + v3-TUI (6 phases) all complete. `pattern_memory` crate extracted with the InRepo/Standalone/Sidecar storage modes. `pattern_server` daemon running over IRPC/QUIC with the `pattern_cli` ratatui TUI and zellij integration. 646/646 tests passing in `pattern-cli + pattern-server + pattern-memory`.
 
-Last verified: 2026-04-20
+Last verified: 2026-04-23
 
 
-> **For AI Agents**: This is the source of truth for the Pattern codebase. Each crate has its own `CLAUDE.md` with specific implementation guidelines.
+> **For AI Agents**: This is the source of truth for the Pattern codebase. Each crate has its own `CLAUDE.md` with specific implementation guidelines. `AGENTS.md` at root and in each crate is a symlink to the corresponding `CLAUDE.md` for cross-tool compatibility (Codex, Cursor, etc.).
 
 ## For Humans
 
@@ -33,24 +33,37 @@ Agents may be running in production. Any CLI invocation will disrupt active agen
 
 ## Workspace Structure
 
+### Active workspace members
+
+These crates are part of the current `[workspace]` and build under
+`cargo check` / `cargo nextest run`:
+
 ```
 pattern/
 ├── crates/
-│   ├── pattern_api/      # Shared API types and contracts
-│   ├── pattern_cli/      # CLI with TUI builders, mount + backup commands
+│   ├── pattern_cli/      # ratatui TUI + IRPC client, mount/backup/daemon subcommands, zellij integration
 │   ├── pattern_core/     # Agent framework, memory traits, tools, coordination
 │   ├── pattern_db/       # SQLite (rusqlite) with FTS5 and vector search
-│   ├── pattern_discord/  # Discord bot integration
-│   ├── pattern_macros/   # Derive macros (effect handler codegen)
-│   ├── pattern_mcp/      # MCP client and server
-│   ├── pattern_memory/   # Memory subsystem: cache, CRDT sync, VCS, backup
-│   ├── pattern_nd/       # ADHD-specific tools and personalities
+│   ├── pattern_memory/   # Memory subsystem: cache, CRDT sync, VCS, backup, mount modes
 │   ├── pattern_provider/ # LLM provider integration, auth, request shaping
 │   ├── pattern_runtime/  # Agent runtime (Tidepool, turn loop, SDK)
-│   └── pattern_server/   # Backend API server
-├── docs/                 # Architecture docs and guides
+│   └── pattern_server/   # Pattern daemon server (IRPC/QUIC)
+├── docs/                 # Architecture docs, implementation plans, design plans
 └── justfile              # Build automation
 ```
+
+### Retired / out-of-workspace crates
+
+These directories still exist on disk but are not in `[workspace].members` and
+do not currently build. They are kept for reference or future re-integration;
+do not assume they compile or reflect current architecture:
+
+- `pattern_discord/` — Discord bot integration (pre-v3 shape)
+- `pattern_mcp/` — MCP client/server (pre-v3 shape)
+- `pattern_nd/` — ADHD-specific tools and personalities (pre-v3 shape)
+
+`pattern_api` was removed entirely on 2026-04-23 — it was scaffolding for a
+design that no longer exists.
 
 Each crate has its own `CLAUDE.md` with specific implementation guidelines.
 

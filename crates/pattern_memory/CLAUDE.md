@@ -236,7 +236,7 @@ is wired).
 
 ## Status
 
-Last verified: 2026-04-20
+Last verified: 2026-04-23
 
 Created 2026-04-19 during v3-memory-rework Phase 1; populated incrementally
 in Phases 1-8. All 8 phases complete.

@@ -3,7 +3,7 @@
 ⚠️ **CRITICAL WARNING**: DO NOT run `pattern` CLI or test agents during development!
 Production agents are running. CLI commands will disrupt active agents.
 
-Last verified: 2026-04-20
+Last verified: 2026-04-23
 
 Core agent framework, memory trait definitions, tools, and coordination system for Pattern's multi-agent ADHD support. The `MemoryStore` trait is defined here; the canonical implementation (`MemoryCache`) lives in `pattern_memory`.
 
@@ -15,6 +15,11 @@ Core agent framework, memory trait definitions, tools, and coordination system f
 - v3-memory-rework complete: `MemoryStore` desynced (28->19 methods),
   `MemoryCache` + `SharedBlockManager` extracted to `pattern_memory`,
   `IsolatePolicy` + consolidation types added to `types/memory_types`.
+- v3-TUI complete (2026-04-23): `TurnEvent` and related turn-sink types
+  gained `Serialize`/`Deserialize` so the daemon can fan events out over
+  IRPC via `WireTurnEvent`. The unified `MemoryError` variant set here is
+  the canonical error type — duplicates were folded in during v3-TUI
+  stabilisation.
 
 ## Tool System Architecture
 
