@@ -37,7 +37,7 @@ crossbeam-channel = "0.5"
 tokio-util = { version = "0.7", features = ["rt"] }
 jiff = { workspace = true }
 rusqlite = { version = "0.39", features = ["bundled-full"] }
-metrics = "0.24"
+metrics = { workspace = true }
 
 # File system watcher
 notify = "8"

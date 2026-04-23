@@ -45,6 +45,9 @@ tracing-subscriber = { version = "0.3", features = [
     "local-time",
 ] }
 
+# Observability (counter/gauge/histogram facade; recorder wired at binary level).
+metrics = "0.24"
+
 # AI/LLM
 # Using fork with pattern-v3-foundation patches: per-block cache_control on
 # system prompts (`SystemBlock` / `ChatRequest::system_blocks`) and
