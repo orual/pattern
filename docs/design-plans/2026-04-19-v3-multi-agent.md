@@ -111,7 +111,7 @@ This is the fourth design plan in the Pattern v3 rewrite sequence. Builds on:
 - `docs/design-plans/2026-04-19-v3-task-skill-blocks.md` (Plan 2 — TaskList + Skill block subtypes, `ctx.tasks.*` and `ctx.skills.*` SDK surfaces)
 - `docs/plans/2026-04-16-rewrite-v3-design-draft.md` §4 (subagent primitives brainstorm)
 
-Plan 4 follows: `v3-extensibility` — CC-compatible plugin system, MCP inverted surface, iroh-rpc transport, trust enforcement
+Plan 4 follows: `v3-extensibility` — CC-compatible plugin system, MCP inverted surface, further irpc transport integration, trust enforcement
 
 ## Acceptance Criteria
 

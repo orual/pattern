@@ -45,7 +45,7 @@
 - **Haskell SDK module convention:** design says "Haskell SDK module `Pattern.Tasks` in `pattern_runtime`'s SDK resource directory" — the actual path is `crates/pattern_runtime/haskell/Pattern/`. Uses cabal, qualified-import convention for modules whose symbols would collide with Prelude (Tasks is `Tasks.create`, `Tasks.list`, etc.).
 - **GADT bridge attribute:** design doesn't spell out the `#[core(module = "Pattern.Tasks", name = "…")]` attribute usage — it's a `FromCore` derive convention from the existing codebase. Tasks request enum must mirror the Haskell GADT constructor names exactly.
 - **MemoryStore is sync post-refactor:** the sibling memory-rework plan sync-ifies `MemoryStore` (Phase 2 of sibling plan). Phase 3 of THIS plan runs after the refactor has landed, so handlers call `store.get_block(...)` etc. directly as sync methods. No `handle.block_on(store.method())`, no wrapping MemoryStore calls in `spawn_blocking`. Task 1 re-verifies the sync signature at execution time.
-- **Task-index queries go through pattern_db directly, not MemoryStore:** MemoryStore doesn't expose `list_tasks_filtered` / `query_task_graph_bfs`. Handlers acquire a `pattern_db` connection via the existing adapter surface (see how `handlers/search.rs` does FTS5 queries — handlers reuse that path). Task 1 re-verifies the connection acquisition pattern.
+- **Task-index queries go through `pattern_db` directly, not MemoryStore:** MemoryStore doesn't expose `list_tasks_filtered` / `query_task_graph_bfs`. Pre-flight audit (2026-04-23) corrected an earlier misconception in this plan that claimed "handlers/search.rs uses an existing adapter surface for FTS5 queries and handlers reuse that path" — that is false. `handlers/search.rs` routes through `self.store.search(...)` (a MemoryStore trait method); it does NOT touch `pattern_db` directly, and there is no existing handler-level connection-acquisition pattern. **The actual path:** `SessionContext::db()` at `crates/pattern_runtime/src/session.rs:311` returns `&Arc<pattern_db::ConstellationDb>`. Handlers acquire a pooled `rusqlite::Connection` via `cx.user().db().get()?` inside `EffectHandler::handle`. `ConstellationDb::get()` lives at `crates/pattern_db/src/connection.rs:146` and returns `DbResult<r2d2::PooledConnection<SqliteConnectionManager>>` — `Deref<Target = rusqlite::Connection>`, usable with the Phase 2 `pattern_db::queries::task` sync surface directly.
 - **`TaskNotFound` error variant:** MemoryError doesn't currently have a TaskNotFound variant. Task 2 adds one.
 - **Scope resolution:** handlers call `resolve_scope(&scope, caller, &store)` from `handlers/scope.rs` before any cross-agent/cross-block query, then intersect the result with the queried block's scope. For `list_tasks(block=None)`, enumerate all TaskList blocks across the resolved agent set.
 - **`TaskPatch.active_form` uses `Option<Option<String>>`** to allow explicit clearing — the design plan says `Option<String>` which can only set-or-leave-untouched. The double-option matches the treatment of `owner` in the same struct; the design's single-option for `active_form` was likely an oversight. Documented here; type itself lives in Phase 2 Task 1b.
@@ -68,11 +68,31 @@ rg -n 'pub fn list_tasks_filtered|pub fn query_task_graph_bfs' crates/pattern_db
 ```
 Expected: both present (Phase 2 Tasks 6 + 7 landed). If missing, STOP.
 
-**Step 2:** Read `crates/pattern_runtime/src/sdk/handlers/search.rs` and `handlers/memory.rs` end-to-end AFTER sibling sync refactor has landed. Record:
-- How `SessionContext` exposes `memory_store()` and the underlying db connection pool — save to `target/plan-phase3-context-surface.txt`.
-- The current (post-sync) dispatch shape: whether handlers are sync functions returning `Result<Value, EffectError>` directly, or whether the outer adapter still spawns a blocking thread at the SDK boundary (adapter-level concern only; handler bodies are sync and call MemoryStore methods directly).
-- The `DescribeEffect` trait impl shape used by `handlers/memory.rs`.
-- **VERIFY:** Run `rg -n 'async fn' crates/pattern_core/src/traits/memory_store.rs` — expect zero matches (confirms sync refactor landed). If async methods remain, STOP.
+**Step 2:** Read the following files in order and save a condensed reference to `target/plan-phase3-context-surface.txt`:
+
+1. **`crates/pattern_runtime/src/session.rs`** (lines ~41-100 for the struct, line 311 for `fn db()`, line ~165-180 for the relevant constructor):
+   - Confirm `SessionContext::db()` returns `&Arc<pattern_db::ConstellationDb>`.
+   - Confirm `SessionContext::memory_store()` / `SessionContext::adapter()` surface for MemoryStore access.
+   - Note the `cancel_state()` accessor (see cancellation pattern in `handlers/search.rs:77`).
+2. **`crates/pattern_db/src/connection.rs`** (line 146):
+   - Confirm `ConstellationDb::get(&self) -> DbResult<PooledConnection<SqliteConnectionManager>>`.
+   - The returned `PooledConnection` derefs to `rusqlite::Connection` and can be passed to `pattern_db::queries::task::*` functions directly.
+3. **`crates/pattern_runtime/src/sdk/describe.rs`** (line 65 for `trait DescribeEffect`, lines 12-62 for `EffectDecl` shape):
+   - Record the `EffectDecl { type_name, description, constructors, type_defs, helpers }` field set — TasksHandler mirrors this.
+4. **`crates/pattern_runtime/src/sdk/handlers/search.rs`** end-to-end (~200 lines):
+   - Record the handler struct (holds `Arc<dyn MemoryStore>`), `DescribeEffect` impl at `:45`, `EffectHandler<SessionContext>` impl with `type Request = SearchReq; fn handle(...)`.
+   - Record the cancellation-check pattern: `let state = cx.user().cancel_state(); if state.cancellation.load(Ordering::SeqCst) { return Err(EffectError::Handler(...)); }`.
+   - Record the `HandlerGuard` / `CANCELLED_SENTINEL` usage around long-running work.
+5. **`crates/pattern_runtime/src/sdk/handlers/memory.rs`** end-to-end:
+   - Record the `record_exchange` / post-mutation hook pattern — TasksHandler uses the same for mutation methods (`create_task`, `update_task`, `transition_status`, `link`, `unlink`, `add_comment`).
+6. **`crates/pattern_runtime/src/sdk/requests/memory.rs`** (lines 1-40):
+   - Record the `#[derive(Debug, FromCore)] enum MemoryReq` shape and `#[core(module = "Pattern.Memory", name = "…")]` attribute usage. TasksReq uses `module = "Pattern.Tasks"`.
+7. **`crates/pattern_runtime/src/sdk/bundle.rs`**:
+   - Find `SdkBundle` (HList via `frunk::HCons`). Record the current tag ordering — TasksHandler needs a new tag (likely after the last existing handler; Task 10 extends this).
+
+**VERIFY:** Run `rg -n 'async fn' crates/pattern_core/src/traits/memory_store.rs` — expect zero matches (confirms sync refactor landed). If async methods remain, STOP.
+
+**VERIFY:** Run `rg -n 'pub fn db\b' crates/pattern_runtime/src/session.rs` — expect a match at or near line 311. If missing, STOP — handler db-access pattern has been refactored away and this task needs a fresh audit.
 
 **Step 3:** Read `crates/pattern_runtime/haskell/Pattern/Memory.hs` end-to-end. Record the GADT declaration style and the qualified-import convention.
 

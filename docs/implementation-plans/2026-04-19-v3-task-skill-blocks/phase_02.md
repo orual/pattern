@@ -4,7 +4,7 @@
 
 **Architecture:** LoroDoc is canonical for task items and their outgoing `blocks` edges. The sync_worker reacts to loro commit events on TaskList blocks by diffing the item set and the per-item `blocks` list against the `tasks` / `task_edges` rows in a single `rusqlite::Transaction`. Reverse direction (who blocks me) is answered by indexed queries on `target_block + target_item`. Scope enforcement piggybacks on whatever mechanism the sibling plan wires for the existing block types.
 
-**Tech Stack:** Rust (pattern_memory, pattern_db), rusqlite 0.39 (post-sibling-migration), SQLite FTS5, `metrics` 0.23 (new workspace dep after sibling memory-rework Phase 4 lands it), `cargo nextest`.
+**Tech Stack:** Rust (pattern_memory, pattern_db), rusqlite 0.39 (post-sibling-migration), SQLite FTS5, `metrics` 0.24 (workspace dep — sibling memory-rework Phase 4 added it crate-level in `pattern_memory`; promoted to workspace on 2026-04-23 pre-flight, see design deviation below), `cargo nextest`.
 
 **Scope:** Phase 2 of 5.
 
@@ -41,7 +41,7 @@
 - **Migration numbering:** the design references `migrations/memory/0012_task_block_index.sql` assuming the sibling memory-rework plan splits migrations into subtrees. The current repo (pre-sibling-landing) is FLAT (`crates/pattern_db/migrations/` with 0001–0013 taken; 0012 is already used by `queued_message_full_content.sql`). The correct number at execution time is **whatever the next free slot in the sibling plan's final migration layout is**. Task 1 below re-confirms the layout at execution time and picks the right filename; the plan uses `0014_task_block_index.sql` as the fallback for a flat layout, or `memory/0013_task_block_index.sql` if the sibling lands a `memory/` subtree.
 - **rusqlite vs sqlx:** the sibling memory-rework plan migrates pattern_db from sqlx 0.8 to rusqlite 0.39. Phase 2 depends on that migration having landed. Task 1 re-verifies. If not landed, Phase 2 STOPS.
 - **Subscriber module path:** sibling plan does not yet publish the exact file path for the per-doc sync_worker. Task 1 re-verifies at execution time via re-reading the latest sibling implementation plan files. Fallback assumption if still unclear: `crates/pattern_memory/src/subscriber/mod.rs` with per-schema dispatch functions in `subscriber/task.rs`, `subscriber/skill.rs` etc.
-- **`metrics` crate:** not currently a workspace dep. Sibling memory-rework Phase 4 adds it. Task 1 re-verifies. If missing, Phase 2 STOPS (do not add it opportunistically here — coordinate with sibling plan to avoid version-pin drift).
+- **`metrics` crate:** pre-flight audit (2026-04-23) found sibling memory-rework Phase 4 landed `metrics = "0.24"` crate-level in `pattern_memory/Cargo.toml` only (not workspace as originally planned). Pre-flight fix promoted it to `[workspace.dependencies]` in root `Cargo.toml` at version `0.24` so downstream crates (this phase's `pattern_db` work + future `pattern_server` observability) can take it via `{ workspace = true }`. Task 1 verification below reflects the post-promotion state. No version-pin drift expected — 0.24 is a minor bump from the originally-speced 0.23 and API is compatible.
 - **FTS5 `tasks_fts` virtual table:** there is currently no FTS5 table for tasks. Phase 2 creates one in the same migration so AC5.3's keyword filter in Phase 3 has an index to hit.
 
 ---
@@ -77,10 +77,14 @@ If missing: STOP — sibling memory-rework Phase 4 has not landed yet.
 
 **Step 3: Confirm metrics crate available**
 
-Run: `rg '^metrics' Cargo.toml`
-Expected: `metrics = "0.23"` (or compatible) pinned in `[workspace.dependencies]`.
+Run: `rg '^metrics' Cargo.toml crates/pattern_memory/Cargo.toml`
+Expected:
+- Root `Cargo.toml`: `metrics = "0.24"` under `[workspace.dependencies]` (promoted 2026-04-23 pre-flight).
+- `crates/pattern_memory/Cargo.toml`: `metrics = { workspace = true }`.
 
-If missing: STOP — do NOT add it here; coordinate with sibling plan.
+If missing from workspace: STOP — the pre-flight promotion step in the v3-task-skill-blocks patch didn't land. Re-run the promotion before proceeding.
+
+For this phase, use `metrics = { workspace = true }` in any crate Cargo.toml that needs to emit counters/gauges (currently only `pattern_memory`; this phase does NOT add metrics to `pattern_db`).
 
 **Step 4: Confirm migration layout**
 

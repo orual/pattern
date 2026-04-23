@@ -4,7 +4,7 @@
 
 **Architecture:** Skill blocks pair a YAML frontmatter metadata region with a markdown body. Canonical files live at `<mount>/skills/<name>.md` (or inside block-owned project scope). The LoroDoc root carries `schema: "skill"`, a `metadata` LoroMap (author-defined), `extras` LoroMap (unknown frontmatter keys, preserved for round-trip), and a `body` LoroText. Runtime usage stats (`last_used`, `last_used_by`, `use_count`) live in a dedicated sqlite table (`skill_usage_stats`) — NOT in the LoroDoc — because they are per-local-install observability that doesn't belong in replicated content. This keeps the canonical `.md` file content-hash-stable across load events without needing any special "skip this subtree" emitter carve-out. Frontmatter parses via `saphyr` 0.0.6 using a hand-written visitor, matching the project's existing "hand-written AST↔LoroValue converter" convention from the sibling KDL work.
 
-**Tech Stack:** Rust (pattern_core, pattern_memory, pattern_db), `saphyr = "0.0.6"` (new workspace dep), `loro`, `serde_json` (for opaque `hooks`), `rusqlite`, `metrics` 0.23 (already available per sibling), `thiserror`.
+**Tech Stack:** Rust (pattern_core, pattern_memory, pattern_db), `saphyr = "0.0.6"` (new workspace dep), `loro`, `serde_json` (for opaque `hooks`), `rusqlite`, `metrics` 0.24 (workspace dep — promoted 2026-04-23; see Phase 2 design deviation), `thiserror`.
 
 **Scope:** Phase 4 of 5.
 

@@ -297,41 +297,104 @@ jj commit -m "[pattern-core] add BlockSchema::TaskList variant + #[non_exhaustiv
 <!-- END_TASK_7 -->
 
 <!-- START_TASK_8 -->
-### Task 8: Update every `BlockSchema` match site for `TaskList`
+### Task 8: Wire `BlockSchema::TaskList` into `pattern_core::memory::document` dispatch sites
 
-**Verifies:** v3-task-skill-blocks.AC1.1 (indirectly — the new variant is wired into all schema-dispatching call sites).
+**Verifies:** v3-task-skill-blocks.AC1.1 (indirectly — the new variant is wired into all pattern_core dispatch sites).
+
+**Scope-correction note (2026-04-23):** The original plan targeted schema helper methods and `pattern_cli/src/commands/debug.rs`. Task 3 at execution found: (a) the schema helper methods all use `_ =>` catch-alls and require no TaskList arm under `#[non_exhaustive]`; (b) `pattern_cli/src/commands/debug.rs` does not exist — no pattern_cli source file references `BlockSchema`. The *real* set of 6 exhaustive match sites is recorded in `target/plan-phase1-blockschema-sites.txt`. This task now covers the 4 `pattern_core/src/memory/document.rs` sites. The remaining 2 sites (`pattern_memory/src/subscriber/worker.rs` and `pattern_memory/src/cache.rs`) depend on `TopShape::TaskList` and are handled as part of Task 9 in the same implementor dispatch (see Task 9 Files list).
 
 **Files:**
-- Modify: every site recorded in Task 3's scratch file (`target/plan-phase1-blockschema-sites.txt`).
-- Expected concrete sites (re-verify at execution; sibling-plan relocation may shift paths):
-  - `crates/pattern_core/src/types/memory_types/schema.rs` helper methods `is_field_read_only`, `read_only_fields`, `is_section_read_only`, `get_section_schema`.
-  - `crates/pattern_cli/src/commands/debug.rs` debug printer.
+- Modify: `crates/pattern_core/src/memory/document.rs` — 4 exhaustive match sites.
 
 **Implementation:**
 
-For each helper method on `BlockSchema`:
-- `is_field_read_only(&self, _field: &str) -> bool`: `TaskList { .. } => false` — all fields are agent-editable; the schema doesn't pre-lock any.
-- `read_only_fields(&self) -> &'static [&'static str]`: `TaskList { .. } => &[]`.
-- `is_section_read_only(&self, _section: &str) -> bool`: `TaskList { .. } => false`.
-- `get_section_schema(&self, _section: &str) -> Option<BlockSchema>`: `TaskList { .. } => None` — sections don't nest inside TaskList; use `items` indexing at the loro/KDL layer instead.
+All four arms target `BlockSchema::TaskList { default_owner, default_status, display_limit }` (using `{ .. }` where fields aren't read).
 
-For the pattern_cli debug printer: add a match arm that prints `"TaskList(default_status={...}, display_limit={...})"` (mirror the formatting style of the neighbouring arms).
+1. **`export_for_editing` inner schema-name match (~line 759):** trivial string label.
+```rust
+BlockSchema::TaskList { .. } => "TaskList",
+```
 
-If `#[non_exhaustive]` is present on `BlockSchema`, `match` sites outside the defining crate MUST have a `_ =>` catch-all. Leave those catch-alls in place — don't add a specific `TaskList` arm unless the call site needs per-variant behaviour. In this phase, only the sites listed above need explicit handling.
+2. **`import_from_json` (~line 791):** TaskList expects `{"items": [...]}` JSON shape. Each array element is a TaskItem JSON object matching the serde shape from Task 5 (`id`, `subject`, `description`, `active_form`, `status`, `owner`, `blocks`, `metadata`, `comments`, `created_at`, `updated_at`). Implementation mirrors the existing `BlockSchema::List { .. }` arm, with `LoroMovableList` instead of `LoroList` and TaskItem shape validation per element.
+
+Sketch (implementor may adapt to match the conventions of the surrounding code):
+```rust
+BlockSchema::TaskList { .. } => {
+    let items = if let Some(arr) = value.as_array() {
+        arr.clone()
+    } else if let Some(items) = value.get("items").and_then(|v| v.as_array()) {
+        items.clone()
+    } else {
+        return Err(DocumentError::Other(
+            "TaskList schema expects array or object with 'items' field".to_string(),
+        ));
+    };
+    // Clear the existing movable list, then re-insert each item as a LoroMap.
+    // Mirror the existing List arm's pattern but target the "items" movable
+    // list (not "items" list). Look for the equivalent helper/constructor the
+    // existing arms use to convert a serde_json::Value into LoroValue. If no
+    // public helper exists in pattern_core, add one — but NOT `json_to_loro`
+    // from pattern_memory (that crosses crate boundaries the wrong way).
+    // ...
+}
+```
+
+**Scope guardrail:** if this arm needs a generic `json_to_loro` helper that doesn't already exist in `pattern_core`, either (a) extract one from pattern_memory and re-home it in pattern_core, or (b) do the JSON→LoroValue walk inline within this match arm using serde_json match patterns. Do NOT stub. Do NOT add a TaskList `import_from_json` that just returns `Err(...)` — the external-edit path routes KDL→JSON→`import_from_json` for all schemas, so TaskList needs real import.
+
+3. **`subscribe_content` (~line 943):** subscribe to the movable list named "items".
+```rust
+BlockSchema::TaskList { .. } => self.doc.get_movable_list("items").id(),
+```
+
+4. **`render_schema` (~line 1007):** rich per-item rendering for LLM context. Respect the TaskList's `display_limit` field — slice the items list to at most `display_limit` elements before rendering, and emit a truncation indicator when sliced. For each item, include: `id`, `subject`, `status`, `owner` (if present), `active_form` (if present), `blocks` (if non-empty, as `(block)"handle"` or `(block)"handle#item_id"` strings), and a brief `description` excerpt (first line or first ~80 chars).
+
+Sketch:
+```rust
+BlockSchema::TaskList { display_limit, default_status, default_owner } => {
+    let items_list = self.doc.get_movable_list("items");
+    let total = items_list.len();
+    let shown = display_limit.map(|lim| lim.min(total)).unwrap_or(total);
+    let mut out = String::new();
+    out.push_str(&format!("TaskList ({total} items"));
+    if shown < total { out.push_str(&format!(", showing {shown}")); }
+    if let Some(s) = default_status { out.push_str(&format!("; default_status={s:?}")); }
+    if let Some(o) = default_owner { out.push_str(&format!("; default_owner=@{o}")); }
+    out.push_str(")\n");
+    // Iterate the first `shown` items, extract fields from each LoroMap,
+    // and format one line per item (multi-line if description has content).
+    // Example per-item format:
+    //   - id=01H2Z7 subject="write spec" status=in-progress owner=@r active_form="writing spec"
+    //     blocks: (block)"alpha#01H2Z5", (block)"beta"
+    //     description: Draft the initial architecture...
+    // ...
+    if shown < total {
+        out.push_str(&format!("\n... {} more items not shown (display_limit={})\n",
+            total - shown, display_limit.unwrap()));
+    }
+    out
+}
+```
+
+Implementor's call on exact line format; match the tone/density of other `render_schema` arms. **Rich enough to be useful, bounded enough to not eat context.**
 
 **Testing:**
 
-No new tests; `cargo check --workspace` proves the variant is handled. Add a compile-fail insta test only if one already exists for BlockSchema in the workspace (Task 3 verifies).
+Inline unit tests in `document.rs` (or in the test module that exercises the other `render_schema` arms):
+- `export_for_editing` with a TaskList schema yields the "TaskList" schema name header.
+- `import_from_json` accepts `{"items": [TaskItem, ...]}` and populates the movable list.
+- `import_from_json` rejects malformed JSON (non-array `items`, wrong schema shape) with `DocumentError`.
+- `subscribe_content` returns a container id whose type-tag is MovableList (not List, not Map).
+- `render_schema` respects `display_limit` and emits the truncation indicator when items exceed it.
+- `render_schema` for an empty TaskList emits `"TaskList (0 items)"` with no item lines.
 
 **Verification:**
-- Run: `cargo check --workspace`
-- Expected: compiles without warnings.
-- Run: `cargo nextest run -p pattern-core -p pattern-cli --lib`
-- Expected: all existing tests still pass.
+- Run: `cargo check --workspace` — compiles without warnings.
+- Run: `cargo nextest run -p pattern-core --lib memory::document`
+- Expected: all new TaskList-dispatch tests pass; existing tests unchanged.
 
 **Commit:**
 ```
-jj commit -m "[pattern-core] [pattern-cli] handle BlockSchema::TaskList at match sites"
+jj commit -m "[pattern-core] wire BlockSchema::TaskList into document.rs dispatch"
 ```
 <!-- END_TASK_8 -->
 <!-- END_SUBCOMPONENT_C -->
@@ -340,14 +403,20 @@ jj commit -m "[pattern-core] [pattern-cli] handle BlockSchema::TaskList at match
 ### Subcomponent D: KDL converter extension for TaskList
 
 <!-- START_TASK_9 -->
-### Task 9: Extend `loro_value_to_kdl` / reverse with `task-list` dispatch
+### Task 9: Extend KDL converter with `task-list` dispatch + wire `pattern_memory` consumers
 
-**Verifies:** v3-task-skill-blocks.AC1.4 (BlockRef parse, both forms), v3-task-skill-blocks.AC1.6 (empty TaskList + self-edge canonical form).
+**Verifies:** v3-task-skill-blocks.AC1.4 (BlockRef parse, both forms), v3-task-skill-blocks.AC1.6 (empty TaskList + self-edge canonical form). Also completes the AC1.1 wiring started in Task 8 (the 2 `pattern_memory` exhaustive match sites).
+
+**Scope note (2026-04-23):** Extends the original plan to include the 2 `pattern_memory` exhaustive match sites (`worker.rs:45` and `cache.rs:791` inner closure plus `cache.rs:1280` catch-all turned into explicit arm) that depend on the new `TopShape::TaskList` variant. Landing the variant and its consumers in one atomic commit avoids the stub pattern (the guidance explicitly forbids stubs — any intermediate "TaskList handled with a todo!()" commit would violate it).
 
 **Files:**
 - Modify: `crates/pattern_memory/src/fs/kdl.rs` — extend `TopShape` enum with a `TaskList` variant; extend `loro_value_to_kdl` + `kdl_to_loro_value` match arms to delegate to the new module; extend `KdlConversionError` enum with `BlockRef { span, source }` and `MissingBlockAnnotation { span }` variants.
 - Create: `crates/pattern_memory/src/fs/kdl_task_list.rs` — new sibling module exposing `pub(super) fn task_list_to_kdl(value: &LoroValue) -> Result<KdlDocument, KdlConversionError>` and `pub(super) fn kdl_to_task_list(doc: &KdlDocument) -> Result<LoroValue, KdlConversionError>`. Task-list-specific encoding/decoding lives here (item nodes, typed `(block)` annotations, metadata/comments).
 - Modify: `crates/pattern_memory/src/fs/mod.rs` — add `mod kdl_task_list;` (or wherever `mod kdl;` is declared).
+- Modify: `crates/pattern_memory/src/subscriber/worker.rs` (~line 45) — add `BlockSchema::TaskList { .. } => { ... }` arm in `render_canonical_from_disk_doc`. The body extracts the `items` movable list from `disk_doc.get_deep_value()`, wraps it in a `LoroValue::Map` with `{"schema": "task-list", "items": List(...), ...}` discriminator shape, calls `loro_value_to_kdl(&value, TopShape::TaskList)`, and returns `("kdl", bytes)`.
+- Modify: `crates/pattern_memory/src/cache.rs`:
+  - (~line 791) Inner `apply_external_edit` closure — add `BlockSchema::TaskList { .. } => { ... }` arm that decodes UTF-8, calls `parse_kdl`, then `kdl_to_loro_value(&doc, TopShape::TaskList)`, converts to JSON via `loro_value_to_json`, and applies via `apply_json_to_loro_doc(&disk_doc, &json, &schema)`.
+  - (~line 1280) `apply_json_to_loro_doc` currently catch-alls to `_ => Err(...)`. Add an explicit `BlockSchema::TaskList { .. } => { ... }` arm that reads the JSON `items` array and populates `disk_doc.get_movable_list("items")` — mirrors Task 8's `import_from_json` TaskList arm, targeting the disk_doc directly instead of the memory_doc. Factor out a shared helper if the duplication becomes significant (inside `pattern_memory` since cache.rs lives there; pattern_core's `import_from_json` can stay self-contained).
 
 **Architecture decision (locked 2026-04-23):** The task-list dispatch becomes a first-class `TopShape::TaskList` variant on the schema-directed hint enum, consistent with how `Map`/`List` work today. The body delegates to `kdl_task_list.rs` to keep `kdl.rs` focused on generic Map/List/Composite handling — the task-list body is too large to inline cleanly. Future KDL-shaped schemas follow this same pattern: new `TopShape::X` variant + new `kdl_x.rs` module. This preserves the "caller consults BlockSchema, tells us the shape" convention (see `kdl.rs:11-13` module docs).
 
@@ -384,14 +453,26 @@ Unit tests in `crates/pattern_memory/src/fs/kdl_task_list.rs` (inline `#[cfg(tes
 - Item with `metadata { priority "high"; estimated_hours=2.5 }` round-trips (reuses the existing Map converter — exercises the nested recursion).
 - Item with `comments { entry author="@r" timestamp="..." { text "..." } }` round-trips.
 
+Integration-style tests in `crates/pattern_memory/src/subscriber/worker.rs` + `cache.rs` tests modules:
+- `worker.rs`: `render_canonical_from_disk_doc` with a TaskList schema emits KDL bytes that parse back via `kdl_to_loro_value(.., TopShape::TaskList)` into the original disk_doc state.
+- `cache.rs`: `apply_external_edit` with a KDL blob representing an edited TaskList applies to disk_doc and memory_doc correctly; CRDT merge works; no panics; no spurious emits.
+- `cache.rs`: `apply_json_to_loro_doc` with a JSON `{"items": [...]}` blob populates the movable list; empty items array produces an empty movable list.
+
 **Verification:**
 - Run: `cargo nextest run -p pattern-memory --lib fs::kdl_task_list`
 - Expected: converter tests pass.
+- Run: `cargo nextest run -p pattern-memory --lib subscriber::worker` and `--lib cache`
+- Expected: new TaskList-dispatch tests pass; existing tests unchanged.
+- Run: `cargo check --workspace`
+- Expected: all crates compile with `#[non_exhaustive]` on `BlockSchema` fully wired.
 
-**Commit:**
+**Commit (two atomic commits recommended, in order):**
 ```
-jj commit -m "[pattern-memory] extend KDL converter for TaskList blocks"
+jj commit -m "[pattern-memory] add KDL task-list converter (TopShape::TaskList + kdl_task_list module)"
+jj commit -m "[pattern-memory] wire BlockSchema::TaskList into subscriber worker + cache dispatch"
 ```
+
+**Implementor dispatch note (2026-04-23):** Tasks 8 and 9 land as a single unit — dispatch both to the same implementor so the two commits can be authored together and the full non_exhaustive match coverage lands without stub intermediates. Two atomic commits are preferred over one combined commit for bisect-ability.
 <!-- END_TASK_9 -->
 
 <!-- START_TASK_10 -->
