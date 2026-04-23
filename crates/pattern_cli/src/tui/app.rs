@@ -356,16 +356,12 @@ impl App {
                         // This was a drag → copy selection to clipboard.
                         let text = self.extract_text_from_buffer(start, end);
                         if !text.is_empty() {
+                            let char_count = text.len();
                             let result = if let Some(clipboard) = &self.clipboard {
                                 match clipboard.lock() {
-                                    Ok(mut guard) => {
-                                        // Temporarily release lock by cloning the text
-                                        // and doing the operation within a闭包.
-                                        let text_clone = text.clone();
-                                        guard.set_text(text_clone).map_err(|e| {
-                                            format!("failed to set clipboard text: {e}")
-                                        })
-                                    }
+                                    Ok(mut guard) => guard
+                                        .set_text(text)
+                                        .map_err(|e| format!("failed to set clipboard text: {e}")),
                                     Err(e) => Err(format!("clipboard lock failed: {e}")),
                                 }
                             } else {
@@ -375,7 +371,7 @@ impl App {
                             match result {
                                 Ok(()) => {
                                     self.status_bar
-                                        .set_notification(format!("copied {} chars", text.len()));
+                                        .set_notification(format!("copied {char_count} chars"));
                                 }
                                 Err(e) => {
                                     self.status_bar
@@ -392,13 +388,11 @@ impl App {
                             .click_targets
                             .iter()
                             .find(|&&(_, _, y)| y == click_row)
+                            && let Some(batch) = self.conversation.batches.get_mut(batch_idx)
+                            && let Some(section) = batch.sections.get_mut(section_idx)
                         {
-                            if let Some(batch) = self.conversation.batches.get_mut(batch_idx)
-                                && let Some(section) = batch.sections.get_mut(section_idx)
-                            {
-                                section.collapsed = !section.collapsed;
-                                section.cached_height = None;
-                            }
+                            section.collapsed = !section.collapsed;
+                            section.cached_height = None;
                         }
                     }
                 }
@@ -410,34 +404,21 @@ impl App {
                 self.selection.active = was_active;
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                match self.focus {
-                    Focus::Input => {
-                        // Switch to conversation focus and apply scroll.
-                        self.focus = Focus::Conversation;
-                        let scroll_action = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
-                            ConversationAction::ScrollUp(3)
-                        } else {
-                            ConversationAction::ScrollDown(3)
-                        };
-                        apply_action(
-                            scroll_action,
-                            &mut self.conversation,
-                            self.last_viewport_height,
-                        );
-                    }
-                    Focus::Conversation => {
-                        let scroll_action = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
-                            ConversationAction::ScrollUp(3)
-                        } else {
-                            ConversationAction::ScrollDown(3)
-                        };
-                        apply_action(
-                            scroll_action,
-                            &mut self.conversation,
-                            self.last_viewport_height,
-                        );
-                    }
+                // Scrolling always targets the conversation; switch focus first
+                // if the input box is currently focused.
+                if self.focus == Focus::Input {
+                    self.focus = Focus::Conversation;
                 }
+                let scroll_action = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
+                    ConversationAction::ScrollUp(3)
+                } else {
+                    ConversationAction::ScrollDown(3)
+                };
+                apply_action(
+                    scroll_action,
+                    &mut self.conversation,
+                    self.last_viewport_height,
+                );
             }
             _ => {}
         }
@@ -549,7 +530,7 @@ impl App {
             (end.1, end.0, start.1, start.0)
         };
 
-        tracing::debug!(
+        tracing::trace!(
             "Rendering highlight: buf_area={:?}, selection=({},{} to {},{})",
             buf_area,
             r0,
@@ -562,7 +543,7 @@ impl App {
         // Render highlighted rectangle over selected area.
         for row in r0..=r1 {
             if row < buf_area.y || row >= buf_area.y + buf_area.height {
-                tracing::debug!("Row {} outside buffer area", row);
+                tracing::trace!("Row {} outside buffer area", row);
                 continue;
             }
             let col_start = if row == r0 { c0 } else { buf_area.x };
@@ -581,7 +562,7 @@ impl App {
                 cells_highlighted += 1;
             }
         }
-        tracing::debug!("Highlighted {} cells", cells_highlighted);
+        tracing::trace!("Highlighted {} cells", cells_highlighted);
     }
 
     /// Handle a key event based on current focus.
@@ -978,7 +959,10 @@ impl App {
             Some(b) => b,
             None => {
                 // New batch — create with no user message (the TUI set
-                // the user message when it sent, above).
+                // the user message when it sent, above). Clear any stale
+                // streaming display content from the previous batch so a
+                // dropped connection mid-stream does not persist.
+                self.panel_state.clear_display();
                 let new_batch = RenderBatch::new(tagged.batch_id.clone(), None);
                 self.conversation.batches.push(new_batch);
                 self.conversation.batches.last_mut().unwrap()
@@ -1055,8 +1039,6 @@ impl App {
             && let Some(end) = self.selection.current
         {
             self.render_selection_highlight(start, end, frame.buffer_mut());
-        } else {
-            if self.selection.start.is_some() {}
         }
     }
 }

@@ -63,11 +63,11 @@ impl StatusBarState {
 
     /// Remove expired notifications based on TTL.
     pub fn tick_notification(&mut self) {
-        if let Some(created_at) = self.notification_created_at {
-            if created_at.elapsed() >= NOTIFICATION_TTL {
-                self.notification = None;
-                self.notification_created_at = None;
-            }
+        if let Some(created_at) = self.notification_created_at
+            && created_at.elapsed() >= NOTIFICATION_TTL
+        {
+            self.notification = None;
+            self.notification_created_at = None;
         }
     }
 }
@@ -234,7 +234,7 @@ impl Widget for StatusBar<'_> {
                 Style::default().fg(Color::DarkGray).bg(bar_bg),
             ));
             spans.push(Span::styled(
-                format!("{notif}"),
+                notif.clone(),
                 Style::default()
                     .fg(Color::Cyan)
                     .bg(bar_bg)

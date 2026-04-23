@@ -186,7 +186,7 @@ pub struct HistoricalBatch {
 /// stored messages into the same wire format as live events.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryResponse {
-    /// Historical batches in reverse chronological order (newest first).
+    /// Historical batches in chronological order (oldest first).
     pub batches: Vec<HistoricalBatch>,
 }
 

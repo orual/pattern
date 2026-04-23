@@ -143,6 +143,7 @@ sha2 = "0.10"
 blake3 = "1"
 arboard = { version = "3", features = ["wayland-data-control"] }
 base64 = "0.22"
+unicode-width = "0.2"
 url = "2"
 serde_urlencoded = "0.7"
 

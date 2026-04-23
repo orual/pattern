@@ -11,6 +11,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Widget};
+use unicode_width::UnicodeWidthStr;
 
 // ---------------------------------------------------------------------------
 // Toast
@@ -154,20 +155,28 @@ pub fn render_toasts(area: Rect, buf: &mut Buffer, state: &ToastState) {
             break;
         }
 
-        // Truncate text to fit.
-        let display_text = if toast.text.len() > max_toast_width as usize {
-            let mut truncated: String = toast
-                .text
-                .chars()
-                .take(max_toast_width as usize - 1)
-                .collect();
+        // Truncate text to fit, measuring display columns (handles CJK/emoji).
+        let max_w = max_toast_width as usize;
+        let display_text = if toast.text.width() > max_w {
+            let budget = max_w.saturating_sub(1);
+            let mut cols = 0usize;
+            let mut end = 0usize;
+            for ch in toast.text.chars() {
+                let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                if cols + w > budget {
+                    break;
+                }
+                cols += w;
+                end += ch.len_utf8();
+            }
+            let mut truncated = toast.text[..end].to_owned();
             truncated.push('…');
             truncated
         } else {
             toast.text.clone()
         };
 
-        let toast_width = (display_text.len() as u16 + 2).min(area.width);
+        let toast_width = (display_text.width() as u16 + 2).min(area.width);
         let x = area.x + area.width.saturating_sub(toast_width);
 
         // Clear the toast area.

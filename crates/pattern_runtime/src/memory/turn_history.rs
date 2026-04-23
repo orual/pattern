@@ -592,8 +592,11 @@ fn estimate_turn_tokens(output: &TurnOutput) -> u64 {
         .messages
         .iter()
         .map(|m| {
-            m.chat_message.content.parts().iter().map(|part| {
-                match part {
+            m.chat_message
+                .content
+                .parts()
+                .iter()
+                .map(|part| match part {
                     genai::chat::ContentPart::Text(s) => s.chars().count() as u64,
                     genai::chat::ContentPart::Binary(b) => match &b.source {
                         genai::chat::BinarySource::Url(s) => s.len() as u64,
@@ -602,13 +605,17 @@ fn estimate_turn_tokens(output: &TurnOutput) -> u64 {
                     genai::chat::ContentPart::ToolCall(tc) => {
                         tc.fn_name.len() as u64 + tc.fn_arguments.to_string().len() as u64
                     }
-                    genai::chat::ContentPart::ToolResponse(tr) => tr.content.to_string().len() as u64,
-                    genai::chat::ContentPart::ThinkingBlock(tb) => {
-                        tb.text.as_ref().map(|t| t.chars().count() as u64).unwrap_or(0)
+                    genai::chat::ContentPart::ToolResponse(tr) => {
+                        tr.content.to_string().len() as u64
                     }
+                    genai::chat::ContentPart::ThinkingBlock(tb) => tb
+                        .text
+                        .as_ref()
+                        .map(|t| t.chars().count() as u64)
+                        .unwrap_or(0),
                     genai::chat::ContentPart::Custom(_) => 0,
-                }
-            }).sum::<u64>()
+                })
+                .sum::<u64>()
         })
         .sum();
     char_count / 4 + 32

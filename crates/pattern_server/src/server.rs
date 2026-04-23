@@ -402,12 +402,13 @@ impl DaemonServer {
                 let batches = if let Some(mount) = &self.current_mount {
                     if let Ok(conn) = mount.db.dedicated_connection() {
                         // Fetch messages in DESC order, reverse to get chronological (ASC) order.
-                        let mut messages = get_messages(&conn, &inner.agent_id, i64::MAX)
-                            .unwrap_or_default();
+                        let mut messages =
+                            get_messages(&conn, &inner.agent_id, i64::MAX).unwrap_or_default();
                         messages.reverse();
 
                         // Group by batch_id and reconstruct events.
-                        let mut batch_map: std::collections::HashMap<String, Vec<_>> = std::collections::HashMap::new();
+                        let mut batch_map: std::collections::HashMap<String, Vec<_>> =
+                            std::collections::HashMap::new();
                         for msg in messages {
                             if let Some(batch_id) = &msg.batch_id {
                                 batch_map.entry(batch_id.clone()).or_default().push(msg);
@@ -423,21 +424,27 @@ impl DaemonServer {
 
                                 // Extract user message from the first User role message.
                                 // Deserialize the full ChatMessage to get complete text content.
-                                let user_message = msgs.iter()
+                                let user_message = msgs
+                                    .iter()
                                     .filter(|m| m.role == MessageRole::User)
-                                    .filter_map(|m| serde_json::from_value::<ChatMessage>(m.content_json.0.clone()).ok())
+                                    .filter_map(|m| {
+                                        serde_json::from_value::<ChatMessage>(
+                                            m.content_json.0.clone(),
+                                        )
+                                        .ok()
+                                    })
                                     .map(|cm| {
-                                        cm.content.parts().iter()
+                                        cm.content
+                                            .parts()
+                                            .iter()
                                             .filter_map(|p| p.as_text())
                                             .collect::<Vec<_>>()
                                             .join(" ")
                                     })
                                     .next();
 
-                                let events: Vec<WireTurnEvent> = msgs
-                                    .into_iter()
-                                    .flat_map(|msg| message_to_wire_events(msg))
-                                    .collect();
+                                let events: Vec<WireTurnEvent> =
+                                    msgs.into_iter().flat_map(message_to_wire_events).collect();
 
                                 let tokens = estimate_batch_tokens(&user_message, &events);
 
@@ -750,7 +757,9 @@ fn build_turn_input(msg: &AgentMessage, partner_id: &SmolStr, session_agent_id: 
 ///
 /// User messages return an empty vec - the user_message field of
 /// HistoricalBatch handles those separately.
-fn message_to_wire_events(db_msg: pattern_db::models::Message) -> Vec<crate::protocol::WireTurnEvent> {
+fn message_to_wire_events(
+    db_msg: pattern_db::models::Message,
+) -> Vec<crate::protocol::WireTurnEvent> {
     use crate::protocol::WireTurnEvent;
     use pattern_db::models::MessageRole;
 
@@ -768,7 +777,10 @@ fn message_to_wire_events(db_msg: pattern_db::models::Message) -> Vec<crate::pro
 
     // For System messages, emit text content.
     if db_msg.role == MessageRole::System {
-        let text: String = chat_msg.content.parts().iter()
+        let text: String = chat_msg
+            .content
+            .parts()
+            .iter()
             .filter_map(|p| p.as_text())
             .collect::<Vec<_>>()
             .join(" ");
@@ -844,7 +856,11 @@ fn estimate_batch_tokens(user_message: &Option<String>, events: &[WireTurnEvent]
             WireTurnEvent::Text(s) => total_chars += s.len(),
             WireTurnEvent::Thinking(s) => total_chars += s.len(),
             // ToolCall: count function name + full JSON arguments
-            WireTurnEvent::ToolCall { function_name, arguments_json, .. } => {
+            WireTurnEvent::ToolCall {
+                function_name,
+                arguments_json,
+                ..
+            } => {
                 total_chars += function_name.len();
                 total_chars += arguments_json.len();
             }

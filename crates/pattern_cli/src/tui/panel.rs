@@ -9,6 +9,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, StatefulWidget, Widget, Wrap};
+use unicode_width::UnicodeWidthStr;
 
 // ---------------------------------------------------------------------------
 // Panel content mode
@@ -75,6 +76,13 @@ impl PanelState {
     /// Replace display content with a final message.
     pub fn set_final(&mut self, text: String) {
         self.display_content = text;
+    }
+
+    /// Clear accumulated display content. Call when a new batch starts so
+    /// stale chunk data from a previous batch does not persist if no Final
+    /// event arrives (e.g., connection dropped mid-stream).
+    pub fn clear_display(&mut self) {
+        self.display_content.clear();
     }
 }
 
@@ -231,12 +239,29 @@ fn render_context_placeholder(area: Rect, buf: &mut Buffer) {
     paragraph.render(inner, buf);
 }
 
-/// Truncate a string to fit within a given column width.
+/// Truncate a string to fit within a given display column width.
+///
+/// Uses Unicode display width rather than byte or codepoint count so that
+/// double-width characters (CJK, emoji) are measured correctly.
 fn truncate_to_width(s: &str, max_width: usize) -> String {
-    if s.len() <= max_width {
+    if s.width() <= max_width {
         s.to_owned()
     } else {
-        let mut truncated: String = s.chars().take(max_width.saturating_sub(1)).collect();
+        // Walk codepoints accumulating display width until we exceed the budget.
+        let ellipsis_width = '…'.len_utf8(); // 3 bytes, 1 display column
+        let budget = max_width.saturating_sub(1); // reserve one column for '…'
+        let mut cols = 0usize;
+        let mut end = 0usize;
+        for ch in s.chars() {
+            let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if cols + w > budget {
+                break;
+            }
+            cols += w;
+            end += ch.len_utf8();
+        }
+        let _ = ellipsis_width; // used implicitly via '…' push
+        let mut truncated = s[..end].to_owned();
         truncated.push('…');
         truncated
     }

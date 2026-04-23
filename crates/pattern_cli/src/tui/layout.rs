@@ -94,13 +94,11 @@ pub fn compute_layout_with_panel(
     // Clamp panel percentage.
     let panel_pct = panel_pct.clamp(MIN_PANEL_PCT, MAX_PANEL_PCT);
 
-    // Auto-hide: narrow terminals cannot fit the panel. Both Visible and Expanded
-    // modes auto-hide to Hidden so the user can see the conversation.
-    let effective = if area.width < MIN_PANEL_WIDTH
-        && matches!(
-            panel_visibility,
-            PanelVisibility::Visible | PanelVisibility::Expanded
-        ) {
+    // Auto-hide: narrow terminals cannot fit a split-column view. Only Visible
+    // is auto-hidden — Expanded takes the full upper area so it works at any
+    // terminal width and should never be silently hidden.
+    let effective = if area.width < MIN_PANEL_WIDTH && panel_visibility == PanelVisibility::Visible
+    {
         PanelVisibility::Hidden
     } else {
         panel_visibility
@@ -193,14 +191,19 @@ mod tests {
 
     #[test]
     fn layout_allocates_input_area() {
-        let layout = compute_layout_with_panel(area(80, 24), PanelVisibility::Hidden, DEFAULT_PANEL_PCT);
+        let layout =
+            compute_layout_with_panel(area(80, 24), PanelVisibility::Hidden, DEFAULT_PANEL_PCT);
         assert_eq!(layout.input.height, 2, "input area must be exactly 2 rows");
     }
 
     #[test]
     fn layout_gives_remaining_to_conversation() {
         let terminal_height = 24u16;
-        let layout = compute_layout_with_panel(area(80, terminal_height), PanelVisibility::Hidden, DEFAULT_PANEL_PCT);
+        let layout = compute_layout_with_panel(
+            area(80, terminal_height),
+            PanelVisibility::Hidden,
+            DEFAULT_PANEL_PCT,
+        );
 
         let conv = layout
             .conversation
@@ -223,7 +226,8 @@ mod tests {
     fn layout_handles_small_terminal() {
         // A terminal smaller than the fixed regions (4 rows total = 3 input + 1 status).
         // ratatui clamps rects to zero-height rather than panicking.
-        let layout = compute_layout_with_panel(area(40, 3), PanelVisibility::Hidden, DEFAULT_PANEL_PCT);
+        let layout =
+            compute_layout_with_panel(area(40, 3), PanelVisibility::Hidden, DEFAULT_PANEL_PCT);
 
         let conv = layout
             .conversation
@@ -342,23 +346,23 @@ mod tests {
     }
 
     #[test]
-    fn expanded_auto_hides_on_narrow_terminal() {
-        // Terminal width 80 is below MIN_PANEL_WIDTH (100). Even in Expanded
-        // mode, the panel should auto-hide so the user can see conversation.
+    fn expanded_stays_expanded_on_narrow_terminal() {
+        // Expanded takes the full upper area (no split), so it is valid at any
+        // terminal width. Only Visible is auto-hidden on narrow terminals.
         let layout =
             compute_layout_with_panel(area(80, 24), PanelVisibility::Expanded, DEFAULT_PANEL_PCT);
         assert_eq!(
             layout.panel_visibility,
-            PanelVisibility::Hidden,
-            "expanded panel must auto-hide on narrow terminal"
+            PanelVisibility::Expanded,
+            "expanded panel must remain Expanded on narrow terminal"
         );
         assert!(
-            layout.panel.is_none(),
-            "panel rect must be None when auto-hidden"
+            layout.panel.is_some(),
+            "panel rect must be Some in Expanded mode"
         );
         assert!(
-            layout.conversation.is_some(),
-            "conversation should be Some when auto-hidden from Expanded"
+            layout.conversation.is_none(),
+            "conversation must be None in Expanded mode (panel occupies full upper area)"
         );
     }
 
