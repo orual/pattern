@@ -345,8 +345,11 @@ jj commit -m "[pattern-core] [pattern-cli] handle BlockSchema::TaskList at match
 **Verifies:** v3-task-skill-blocks.AC1.4 (BlockRef parse, both forms), v3-task-skill-blocks.AC1.6 (empty TaskList + self-edge canonical form).
 
 **Files:**
-- Modify: `crates/pattern_memory/src/fs/kdl.rs` — extend the forward and reverse converters.
-- Optional split: if the converter file exceeds a reasonable size, create `crates/pattern_memory/src/fs/kdl_task_list.rs` as a sibling module and expose a free function pair (`task_list_to_kdl`, `kdl_to_task_list`) called from the main dispatch. Implementor's call based on what sibling Phase 4 produced.
+- Modify: `crates/pattern_memory/src/fs/kdl.rs` — extend `TopShape` enum with a `TaskList` variant; extend `loro_value_to_kdl` + `kdl_to_loro_value` match arms to delegate to the new module; extend `KdlConversionError` enum with `BlockRef { span, source }` and `MissingBlockAnnotation { span }` variants.
+- Create: `crates/pattern_memory/src/fs/kdl_task_list.rs` — new sibling module exposing `pub(super) fn task_list_to_kdl(value: &LoroValue) -> Result<KdlDocument, KdlConversionError>` and `pub(super) fn kdl_to_task_list(doc: &KdlDocument) -> Result<LoroValue, KdlConversionError>`. Task-list-specific encoding/decoding lives here (item nodes, typed `(block)` annotations, metadata/comments).
+- Modify: `crates/pattern_memory/src/fs/mod.rs` — add `mod kdl_task_list;` (or wherever `mod kdl;` is declared).
+
+**Architecture decision (locked 2026-04-23):** The task-list dispatch becomes a first-class `TopShape::TaskList` variant on the schema-directed hint enum, consistent with how `Map`/`List` work today. The body delegates to `kdl_task_list.rs` to keep `kdl.rs` focused on generic Map/List/Composite handling — the task-list body is too large to inline cleanly. Future KDL-shaped schemas follow this same pattern: new `TopShape::X` variant + new `kdl_x.rs` module. This preserves the "caller consults BlockSchema, tells us the shape" convention (see `kdl.rs:11-13` module docs).
 
 **Implementation:**
 
@@ -367,14 +370,14 @@ Forward (`LoroValue → KdlDocument`):
     - `comments { entry author="..." timestamp="..." { text "..." } ... }` child node per comment. Timestamps use ISO-8601 jiff string form.
 
 Reverse (`KdlDocument → LoroValue`):
-- When the document's single top-level node is named `task-list`, dispatch into the new converter.
+- Caller passes `TopShape::TaskList`; `kdl_to_loro_value` dispatches to `kdl_task_list::kdl_to_task_list(doc)`.
 - Read entries and produce the `schema: "task-list"` discriminator map with `items` list populated from child `item` nodes.
-- For typed `(block)"..."` entries inside `blocks` nodes: call `BlockRef::from_str` on the string value. On error, propagate as `KdlConversionError::BlockRef { span, source }` (extend the existing `KdlConversionError` enum with a new `#[non_exhaustive]`-gated variant carrying the kdl `miette::SourceSpan` and the underlying `BlockRefParseError`). Preserve the KDL span so error messages include file:line.
+- For typed `(block)"..."` entries inside `blocks` nodes: call `BlockRef::from_str` on the string value. On error, propagate as `KdlConversionError::BlockRef { span, source }`. `KdlConversionError` is already `#[non_exhaustive]`; add the new variants carrying the kdl `miette::SourceSpan` and the underlying `BlockRefParseError`. Preserve the KDL span so error messages include file:line.
 - On a non-typed entry inside `blocks` (plain string without the `(block)` annotation), return `KdlConversionError::MissingBlockAnnotation { span }`.
 
 **Testing:**
 
-Unit tests in `crates/pattern_memory/src/fs/kdl.rs` (or companion `kdl_task_list.rs`):
+Unit tests in `crates/pattern_memory/src/fs/kdl_task_list.rs` (inline `#[cfg(test)] mod tests`):
 - Empty TaskList (`schema: "task-list"` with empty `items`) round-trips.
 - Single-item TaskList with `blocks=[self]` (self-referential edge) round-trips; the canonical KDL includes a `blocks (block)"<self_handle>#<own_id>"` entry.
 - TaskList with five items where two have outgoing edges to a third round-trips.
@@ -382,7 +385,7 @@ Unit tests in `crates/pattern_memory/src/fs/kdl.rs` (or companion `kdl_task_list
 - Item with `comments { entry author="@r" timestamp="..." { text "..." } }` round-trips.
 
 **Verification:**
-- Run: `cargo nextest run -p pattern-memory --lib fs::kdl`
+- Run: `cargo nextest run -p pattern-memory --lib fs::kdl_task_list`
 - Expected: converter tests pass.
 
 **Commit:**
@@ -439,7 +442,7 @@ jj commit -m "[pattern-memory] proptest TaskList ↔ KDL round-trip + reorder pr
 **Verifies:** v3-task-skill-blocks.AC1.5.
 
 **Files:**
-- Modify: `crates/pattern_memory/src/fs/kdl.rs` (or the companion `kdl_task_list.rs` from Task 9) tests module.
+- Modify: `crates/pattern_memory/src/fs/kdl_task_list.rs` tests module (the Task 9 module houses these — keeps task-list error-path tests colocated with the dispatch).
 
 **Implementation:**
 
@@ -451,7 +454,7 @@ Add unit tests (not proptest — these are deterministic failure assertions):
 
 **Testing:**
 
-- Run: `cargo nextest run -p pattern-memory --lib fs::kdl`
+- Run: `cargo nextest run -p pattern-memory --lib fs::kdl_task_list`
 - Expected: all four error-path tests pass.
 
 **Commit:**
