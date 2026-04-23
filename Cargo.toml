@@ -197,6 +197,12 @@ which = "8.0"
 # Fuzzy matching
 nucleo = "0.5"
 
+# Template rendering (zellij layout generation)
+askama = "0.15"
+
+# KDL parsing (zellij layout validation in tests)
+kdl = { version = "6", features = ["v1-fallback"] }
+
 
 [workspace.lints.clippy]
 mod_module_files = "warn"

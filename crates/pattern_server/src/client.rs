@@ -151,6 +151,19 @@ impl DaemonClient {
         Ok(agents)
     }
 
+    /// List all slash commands registered with the daemon.
+    ///
+    /// Returns commands provided by daemon-side plugins or runtime extensions.
+    /// Built-in TUI commands are already known client-side and are not included.
+    ///
+    /// Currently returns an empty vec — the plugin system that would register
+    /// commands server-side is not yet implemented. The RPC and the client's
+    /// autocomplete integration exist as scaffolding for that work.
+    pub async fn list_commands(&self) -> Result<Vec<DaemonCommandInfo>> {
+        let commands = self.inner.rpc(ListCommandsRequest).await?;
+        Ok(commands)
+    }
+
     /// Get a health snapshot of the daemon runtime.
     pub async fn get_status(&self) -> Result<RuntimeStatus> {
         let status = self.inner.rpc(GetStatusRequest).await?;
@@ -196,6 +209,26 @@ impl DaemonClient {
     pub async fn get_history(&self, agent_id: SmolStr) -> Result<HistoryResponse> {
         let response = self.inner.rpc(GetHistoryRequest { agent_id }).await?;
         Ok(response)
+    }
+
+    /// Return the number of currently connected clients.
+    ///
+    /// Used by `--stop-daemon-on-exit` (AC6.7): after the TUI exits, check
+    /// whether any other clients remain connected. If the count is 0, the
+    /// caller should send a shutdown request so the daemon does not outlive
+    /// the last development session.
+    pub async fn client_count(&self) -> Result<usize> {
+        let count = self.inner.rpc(GetClientCountRequest).await?;
+        Ok(count)
+    }
+
+    /// Request the daemon to shut down.
+    ///
+    /// The daemon responds before exiting, so this call resolves cleanly.
+    /// After the response, the daemon terminates via `std::process::exit(0)`.
+    pub async fn shutdown(&self) -> Result<()> {
+        self.inner.rpc(ShutdownRequest).await?;
+        Ok(())
     }
 }
 

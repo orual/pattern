@@ -4,7 +4,7 @@
 //! - Valid configs for each mode (A, B, C) with insta snapshots.
 //! - Invalid mode string → parse error.
 //! - Missing required field → parse error.
-//! - Mode B/C with `jj enabled=false` → validation error.
+//! - Standalone/Sidecar with `jj enabled=false` → validation error.
 //!
 //! KDL format notes: node and property names use kebab-case (idiomatic KDL).
 //! The knus derive macros convert Rust snake_case field names to kebab-case,
@@ -28,7 +28,12 @@ fn write_config(tmp: &TempDir, content: &str) -> std::path::PathBuf {
 }
 
 // ---------------------------------------------------------------------------
-// Valid fixture strings (kebab-case node/property names)
+// Legacy-alias fixtures (kebab-case node/property names)
+//
+// These fixtures deliberately use the single-letter mode values (`"A"` /
+// `"B"` / `"C"`) to exercise the backward-compatibility path in
+// `ModeKind::raw_decode`. Fresh mounts created by `init()` use the canonical
+// kebab-case names — see the `parse_valid_*_canonical_name` tests below.
 // ---------------------------------------------------------------------------
 
 const VALID_MODE_A: &str = r#"
@@ -79,11 +84,11 @@ project name="colocated-project" created-at="2026-04-20T09:00:00Z"
 // ---------------------------------------------------------------------------
 
 #[test]
-fn parse_valid_mode_a() {
+fn parse_valid_in_repo() {
     let tmp = TempDir::new().unwrap();
     let path = write_config(&tmp, VALID_MODE_A);
     let config = load_mount_config(&path).expect("mode A should parse");
-    assert_eq!(config.mount.mode, ModeKind::A);
+    assert_eq!(config.mount.mode, ModeKind::InRepo);
     assert_eq!(config.mount.memory_db, "memory.db");
     assert_eq!(config.personas.entries.len(), 1);
     assert_eq!(config.personas.entries[0].slot, "default");
@@ -91,29 +96,84 @@ fn parse_valid_mode_a() {
     assert_eq!(config.isolate_from_persona.policy, "none");
     assert!(!config.jj.enabled);
     assert_eq!(config.project.name, "pattern-dev");
-    insta::assert_yaml_snapshot!("valid_mode_a_config", config);
+    insta::assert_yaml_snapshot!("valid_in_repo_config", config);
 }
 
 #[test]
-fn parse_valid_mode_b() {
+fn parse_valid_standalone() {
     let tmp = TempDir::new().unwrap();
     let path = write_config(&tmp, VALID_MODE_B);
     let config = load_mount_config(&path).expect("mode B should parse");
-    assert_eq!(config.mount.mode, ModeKind::B);
+    assert_eq!(config.mount.mode, ModeKind::Standalone);
     assert_eq!(config.personas.entries.len(), 2);
     assert!(config.jj.enabled);
     assert_eq!(config.jj.max_new_file_size, "50MiB");
-    insta::assert_yaml_snapshot!("valid_mode_b_config", config);
+    insta::assert_yaml_snapshot!("valid_standalone_config", config);
 }
 
 #[test]
-fn parse_valid_mode_c() {
+fn parse_valid_sidecar() {
     let tmp = TempDir::new().unwrap();
     let path = write_config(&tmp, VALID_MODE_C);
     let config = load_mount_config(&path).expect("mode C should parse");
-    assert_eq!(config.mount.mode, ModeKind::C);
+    assert_eq!(config.mount.mode, ModeKind::Sidecar);
     assert!(config.jj.enabled);
-    insta::assert_yaml_snapshot!("valid_mode_c_config", config);
+    insta::assert_yaml_snapshot!("valid_sidecar_config", config);
+}
+
+// ---------------------------------------------------------------------------
+// Canonical-name parse tests
+//
+// `init()` scaffolds `.pattern.kdl` using the canonical kebab-case mode names
+// (`"in-repo"`, `"standalone"`, `"sidecar"`). These tests cover that production
+// path directly — without them, only the legacy single-letter aliases have
+// coverage. See also: `VALID_MODE_A/B/C` fixtures above that exercise the
+// backward-compat aliases for pre-rename `.pattern.kdl` files on disk.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parse_valid_in_repo_canonical_name() {
+    let tmp = TempDir::new().unwrap();
+    let path = write_config(
+        &tmp,
+        r#"
+mount mode="in-repo" memory-db="memory.db"
+jj enabled=false
+project name="canonical-a" created-at="2026-04-23T00:00:00Z"
+"#,
+    );
+    let config = load_mount_config(&path).expect("canonical in-repo must parse");
+    assert_eq!(config.mount.mode, ModeKind::InRepo);
+}
+
+#[test]
+fn parse_valid_standalone_canonical_name() {
+    let tmp = TempDir::new().unwrap();
+    let path = write_config(
+        &tmp,
+        r#"
+mount mode="standalone" memory-db="memory.db"
+jj enabled=true
+project name="canonical-b" created-at="2026-04-23T00:00:00Z"
+"#,
+    );
+    let config = load_mount_config(&path).expect("canonical standalone must parse");
+    assert_eq!(config.mount.mode, ModeKind::Standalone);
+}
+
+#[test]
+fn parse_valid_sidecar_canonical_name() {
+    let tmp = TempDir::new().unwrap();
+    let path = write_config(
+        &tmp,
+        r#"
+mount mode="sidecar" memory-db="memory.db"
+jj enabled=true
+project name="canonical-c" created-at="2026-04-23T00:00:00Z"
+"#,
+    );
+    let config = load_mount_config(&path).expect("canonical sidecar must parse");
+    assert_eq!(config.mount.mode, ModeKind::Sidecar);
 }
 
 // ---------------------------------------------------------------------------
@@ -191,7 +251,7 @@ mount mode="A" memory-db="memory.db"
 }
 
 #[test]
-fn mode_b_jj_disabled_produces_validation_error() {
+fn standalone_jj_disabled_produces_validation_error() {
     let tmp = TempDir::new().unwrap();
     let path = write_config(
         &tmp,
@@ -201,12 +261,13 @@ jj enabled=false
 project name="broken" created-at="2026-01-01T00:00:00Z"
 "#,
     );
-    let err = load_mount_config(&path).expect_err("mode B with jj disabled should fail validation");
+    let err =
+        load_mount_config(&path).expect_err("standalone with jj disabled should fail validation");
     match &err {
         ConfigError::Validation { reason, .. } => {
             assert!(
-                reason.contains("mode B"),
-                "validation message should mention mode B: {reason}"
+                reason.contains("standalone"),
+                "validation message should mention standalone: {reason}"
             );
         }
         other => panic!("expected ConfigError::Validation, got {other:?}"),
@@ -214,7 +275,7 @@ project name="broken" created-at="2026-01-01T00:00:00Z"
 }
 
 #[test]
-fn mode_c_jj_disabled_produces_validation_error() {
+fn sidecar_jj_disabled_produces_validation_error() {
     let tmp = TempDir::new().unwrap();
     let path = write_config(
         &tmp,

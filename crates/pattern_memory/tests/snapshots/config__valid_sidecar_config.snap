@@ -3,7 +3,7 @@ source: crates/pattern_memory/tests/config.rs
 expression: config
 ---
 mount:
-  mode: C
+  mode: Sidecar
   memory_db: memory.db
 personas:
   entries:

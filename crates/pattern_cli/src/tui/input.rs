@@ -8,6 +8,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pattern_core::types::provider::ContentPart;
+use ratatui::style::Style;
 use ratatui_textarea::TextArea;
 
 use super::commands::parse_slash_command;
@@ -44,11 +45,22 @@ pub struct InputHandler {
     stashed_input: Option<String>,
 }
 
+impl Default for InputHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InputHandler {
     /// Create a new input handler with an empty textarea and default settings.
     pub fn new() -> Self {
+        let mut textarea = TextArea::new(vec!["".to_string()]);
+        // The textarea widget underlines the entire cursor line by default,
+        // which looks noisy against the chat history. Reset it so only the
+        // cursor glyph itself signals focus.
+        textarea.set_cursor_line_style(Style::default());
         Self {
-            textarea: TextArea::new(vec!["".to_string()]),
+            textarea,
             history: Vec::new(),
             history_index: None,
             max_history: 50,

@@ -281,6 +281,58 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d92bec98840b8f03a5ff5413de5293bfcd8bf96467cf5452609f939ec6f5de16"
 
 [[package]]
+name = "askama"
+version = "0.15.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b8246bcbf8eb97abef10c2d92166449680d41d55c0fc6978a91dec2e3619608"
+dependencies = [
+ "askama_macros",
+ "itoa",
+ "percent-encoding",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "askama_derive"
+version = "0.15.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f9670bc84a28bb3da91821ef74226949ab63f1265aff7c751634f1dd0e6f97c"
+dependencies = [
+ "askama_parser",
+ "basic-toml",
+ "memchr",
+ "proc-macro2",
+ "quote",
+ "rustc-hash",
+ "serde",
+ "serde_derive",
+ "syn 2.0.113",
+]
+
+[[package]]
+name = "askama_macros"
+version = "0.15.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0756b45480437dded0565dfc568af62ccce146fb6cfe902e808ba86e445f44f"
+dependencies = [
+ "askama_derive",
+]
+
+[[package]]
+name = "askama_parser"
+version = "0.15.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d0af3691ba3af77949c0b5a3925444b85cb58a0184cc7fec16c68ba2e7be868"
+dependencies = [
+ "rustc-hash",
+ "serde",
+ "serde_derive",
+ "unicode-ident",
+ "winnow 1.0.2",
+]
+
+[[package]]
 name = "asn1-rs"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -480,6 +532,15 @@ name = "base64ct"
 version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d809780667f4410e7c41b07f52439b94d2bdf8528eeedc287fa38d3b7f95d82"
+
+[[package]]
+name = "basic-toml"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba62675e8242a4c4e806d12f11d136e626e6c8361d6b829310732241652a178a"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "bincode"
@@ -4294,7 +4355,7 @@ dependencies = [
  "jacquard-identity",
  "jacquard-oauth",
  "jose-jwk",
- "miette",
+ "miette 7.6.0",
  "regex",
  "regex-lite",
  "reqwest 0.12.28",
@@ -4321,7 +4382,7 @@ dependencies = [
  "jacquard-common",
  "jacquard-derive",
  "jacquard-lexicon",
- "miette",
+ "miette 7.6.0",
  "rustversion",
  "serde",
  "serde_bytes",
@@ -4349,7 +4410,7 @@ dependencies = [
  "ipld-core",
  "k256",
  "langtag",
- "miette",
+ "miette 7.6.0",
  "multibase",
  "multihash",
  "n0-future 0.1.3",
@@ -4403,7 +4464,7 @@ dependencies = [
  "jacquard-api",
  "jacquard-common",
  "jacquard-lexicon",
- "miette",
+ "miette 7.6.0",
  "mini-moka-wasm",
  "n0-future 0.1.3",
  "percent-encoding",
@@ -4430,7 +4491,7 @@ dependencies = [
  "heck 0.5.0",
  "inventory",
  "jacquard-common",
- "miette",
+ "miette 7.6.0",
  "multihash",
  "prettyplease",
  "proc-macro2",
@@ -4462,7 +4523,7 @@ dependencies = [
  "jacquard-identity",
  "jose-jwa",
  "jose-jwk",
- "miette",
+ "miette 7.6.0",
  "p256",
  "rand 0.8.5",
  "rouille",
@@ -4641,11 +4702,23 @@ dependencies = [
 
 [[package]]
 name = "kdl"
+version = "4.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e03e2e96c5926fe761088d66c8c2aee3a4352a2573f4eaca50043ad130af9117"
+dependencies = [
+ "miette 5.10.0",
+ "nom 7.1.3",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "kdl"
 version = "6.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "81a29e7b50079ff44549f68c0becb1c73d7f6de2a4ea952da77966daf3d4761e"
 dependencies = [
- "miette",
+ "kdl 4.7.1",
+ "miette 7.6.0",
  "num",
  "winnow 0.6.24",
 ]
@@ -4684,7 +4757,7 @@ dependencies = [
  "base64 0.22.1",
  "chumsky",
  "knus-derive",
- "miette",
+ "miette 7.6.0",
  "thiserror 2.0.18",
  "unicode-width 0.2.0",
 ]
@@ -5238,6 +5311,18 @@ dependencies = [
 
 [[package]]
 name = "miette"
+version = "5.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59bb584eaeeab6bd0226ccf3509a69d7936d148cf3d036ad350abe35e8c6856e"
+dependencies = [
+ "miette-derive 5.10.0",
+ "once_cell",
+ "thiserror 1.0.69",
+ "unicode-width 0.1.14",
+]
+
+[[package]]
+name = "miette"
 version = "7.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f98efec8807c63c752b5bd61f862c165c115b0a35685bdcfd9238c7aeb592b7"
@@ -5245,7 +5330,7 @@ dependencies = [
  "backtrace",
  "backtrace-ext",
  "cfg-if",
- "miette-derive",
+ "miette-derive 7.6.0",
  "owo-colors",
  "supports-color",
  "supports-hyperlinks",
@@ -5254,6 +5339,17 @@ dependencies = [
  "terminal_size",
  "textwrap",
  "unicode-width 0.1.14",
+]
+
+[[package]]
+name = "miette-derive"
+version = "5.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "49e7bc1560b95a3c4a25d03de42fe76ca718ab92d1a22a55b9b4cf67b3ae635c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.113",
 ]
 
 [[package]]
@@ -6164,7 +6260,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.45.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6279,6 +6375,7 @@ name = "pattern-cli"
 version = "0.4.0"
 dependencies = [
  "arboard",
+ "askama",
  "async-trait",
  "base64 0.22.1",
  "clap",
@@ -6292,7 +6389,8 @@ dependencies = [
  "insta",
  "irpc",
  "jiff",
- "miette",
+ "kdl 6.5.0",
+ "miette 7.6.0",
  "nix",
  "nucleo",
  "owo-colors",
@@ -6349,7 +6447,7 @@ dependencies = [
  "jacquard",
  "jiff",
  "loro",
- "miette",
+ "miette 7.6.0",
  "minijinja",
  "mockall",
  "multihash",
@@ -6408,7 +6506,7 @@ dependencies = [
  "insta",
  "jiff",
  "loro",
- "miette",
+ "miette 7.6.0",
  "r2d2",
  "r2d2_sqlite",
  "rusqlite",
@@ -6438,11 +6536,11 @@ dependencies = [
  "gix-discover",
  "insta",
  "jiff",
- "kdl",
+ "kdl 6.5.0",
  "knus",
  "loro",
  "metrics",
- "miette",
+ "miette 7.6.0",
  "notify 8.2.0",
  "notify-debouncer-full",
  "pattern-core",
@@ -6474,7 +6572,7 @@ dependencies = [
  "insta",
  "jiff",
  "keyring",
- "miette",
+ "miette 7.6.0",
  "parking_lot",
  "pattern-core",
  "rand 0.8.5",
@@ -6510,9 +6608,9 @@ dependencies = [
  "futures",
  "genai",
  "jiff",
- "kdl",
+ "kdl 6.5.0",
  "knus",
- "miette",
+ "miette 7.6.0",
  "pattern-core",
  "pattern-db",
  "pattern-memory",
@@ -6550,7 +6648,7 @@ dependencies = [
  "dirs 5.0.1",
  "irpc",
  "jiff",
- "miette",
+ "miette 7.6.0",
  "n0-future 0.3.2",
  "nix",
  "noq",
@@ -6559,6 +6657,7 @@ dependencies = [
  "pattern-memory",
  "pattern-provider",
  "pattern-runtime",
+ "postcard",
  "serde",
  "serde_json",
  "smol_str",
@@ -11217,6 +11316,15 @@ name = "winnow"
 version = "0.7.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5a5364e9d77fcdeeaa6062ced926ee3381faa2ee02d3eb83a5c27a8825540829"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
+name = "winnow"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ee1708bef14716a11bae175f579062d4554d95be2c6829f518df847b7b3fdd0"
 dependencies = [
  "memchr",
 ]

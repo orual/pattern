@@ -77,15 +77,15 @@ fn jj_available() -> bool {
 // Tests
 // ---------------------------------------------------------------------------
 
-/// `pattern mount init --mode a --path <tempdir>` should exit 0 and create
+/// `pattern mount init --mode in-repo --path <tempdir>` should exit 0 and create
 /// the expected directory layout.
 #[test]
-fn mount_init_mode_a_exits_zero() {
+fn mount_init_in_repo_exits_zero() {
     let bin = skip_if_no_binary!();
     let tmp = TempDir::new().expect("tempdir");
 
     let output = Command::new(&bin)
-        .args(["mount", "init", "--mode", "a", "--path"])
+        .args(["mount", "init", "--mode", "in-repo", "--path"])
         .arg(tmp.path())
         .output()
         .expect("failed to spawn pattern");
@@ -97,7 +97,7 @@ fn mount_init_mode_a_exits_zero() {
 
     assert!(
         output.status.success(),
-        "pattern mount init --mode a should exit 0, got {:?}",
+        "pattern mount init --mode in-repo should exit 0, got {:?}",
         output.status.code()
     );
 
@@ -105,23 +105,23 @@ fn mount_init_mode_a_exits_zero() {
     let mount_path = tmp.path().join(".pattern").join("shared");
     assert!(
         mount_path.is_dir(),
-        ".pattern/shared/ should exist after Mode A init"
+        ".pattern/shared/ should exist after InRepo mode init"
     );
     assert!(
         mount_path.join(".pattern.kdl").is_file(),
-        ".pattern/shared/.pattern.kdl should exist after Mode A init"
+        ".pattern/shared/.pattern.kdl should exist after InRepo mode init"
     );
     assert!(
         mount_path.join("blocks").join("core").is_dir(),
-        ".pattern/shared/blocks/core/ should exist after Mode A init"
+        ".pattern/shared/blocks/core/ should exist after InRepo mode init"
     );
 }
 
-/// `pattern mount init --mode b --project-id <id>` should exit 0 if jj is
+/// `pattern mount init --mode standalone --project-id <id>` should exit 0 if jj is
 /// available, or exit non-zero with a useful error message if jj is absent.
 /// The test is skipped entirely on the positive path if jj is not available.
 #[test]
-fn mount_init_mode_b_requires_jj() {
+fn mount_init_standalone_requires_jj() {
     let bin = skip_if_no_binary!();
 
     if !jj_available() {
@@ -135,7 +135,14 @@ fn mount_init_mode_b_requires_jj() {
                 .subsec_nanos()
         );
         let output = Command::new(&bin)
-            .args(["mount", "init", "--mode", "b", "--project-id", &project_id])
+            .args([
+                "mount",
+                "init",
+                "--mode",
+                "standalone",
+                "--project-id",
+                &project_id,
+            ])
             .env(
                 "PATTERN_HOME",
                 TempDir::new().expect("tempdir").path().to_str().unwrap(),
@@ -167,7 +174,14 @@ fn mount_init_mode_b_requires_jj() {
     );
 
     let output = Command::new(&bin)
-        .args(["mount", "init", "--mode", "b", "--project-id", &project_id])
+        .args([
+            "mount",
+            "init",
+            "--mode",
+            "standalone",
+            "--project-id",
+            &project_id,
+        ])
         .env("PATTERN_HOME", home_dir.path())
         .output()
         .expect("failed to spawn pattern");
@@ -179,7 +193,7 @@ fn mount_init_mode_b_requires_jj() {
 
     assert!(
         output.status.success(),
-        "pattern mount init --mode b should exit 0 when jj is available, got {:?}: {stderr}",
+        "pattern mount init --mode standalone should exit 0 when jj is available, got {:?}: {stderr}",
         output.status.code()
     );
 
@@ -195,7 +209,7 @@ fn mount_init_mode_b_requires_jj() {
     );
     assert!(
         mount_path.join(".pattern.kdl").is_file(),
-        ".pattern.kdl should exist after Mode B init"
+        ".pattern.kdl should exist after Standalone mode init"
     );
 }
 
@@ -234,18 +248,18 @@ fn mount_attach_no_mount_exits_nonzero() {
     );
 }
 
-/// `pattern mount attach <path>` on a valid Mode A mount should exit 0.
+/// `pattern mount attach <path>` on a valid InRepo mode mount should exit 0.
 ///
-/// This test creates a Mode A mount via `mount init` first, then attaches.
+/// This test creates a InRepo mode mount via `mount init` first, then attaches.
 /// It verifies the round-trip works end-to-end through the CLI.
 #[test]
-fn mount_attach_mode_a_exits_zero() {
+fn mount_attach_in_repo_exits_zero() {
     let bin = skip_if_no_binary!();
     let tmp = TempDir::new().expect("tempdir");
 
-    // First, initialize a Mode A mount.
+    // First, initialize a InRepo mode mount.
     let init_output = Command::new(&bin)
-        .args(["mount", "init", "--mode", "a", "--path"])
+        .args(["mount", "init", "--mode", "in-repo", "--path"])
         .arg(tmp.path())
         .output()
         .expect("failed to spawn pattern for init");
@@ -269,7 +283,7 @@ fn mount_attach_mode_a_exits_zero() {
 
     assert!(
         attach_output.status.success(),
-        "pattern mount attach on a valid Mode A mount should exit 0, got {:?}: {stderr}",
+        "pattern mount attach on a valid InRepo mode mount should exit 0, got {:?}: {stderr}",
         attach_output.status.code()
     );
     assert!(

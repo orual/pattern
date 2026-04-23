@@ -45,6 +45,11 @@ impl DaemonState {
         Self::state_dir().join("cert.der")
     }
 
+    /// Path to the daemon's stdout/stderr log file.
+    pub fn log_path() -> PathBuf {
+        Self::state_dir().join("daemon.log")
+    }
+
     /// Write state and certificate to disk, creating the directory if needed.
     pub fn save(&self, cert_der: &[u8]) -> std::io::Result<()> {
         let dir = Self::state_dir();

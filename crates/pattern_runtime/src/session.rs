@@ -459,6 +459,12 @@ impl TidepoolSession {
         self.checkpoint_log.clone()
     }
 
+    /// The session's shared cancel state. Callers can call
+    /// [`CancelState::request_cancel`] to soft-cancel a running step.
+    pub fn cancel_state(&self) -> Arc<CancelState> {
+        self.ctx.cancel_state()
+    }
+
     /// Open a minimal session: initialise context, checkpoint log, and handler
     /// display handle but do NOT spawn an eval worker. Used internally by
     /// [`Self::open_with_agent_loop`] and by `TidepoolRuntime::open_session`

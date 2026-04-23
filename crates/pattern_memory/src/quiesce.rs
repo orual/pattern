@@ -3,8 +3,8 @@
 //! [`quiesce`] prepares the memory subsystem for a VCS commit by ensuring all
 //! in-flight writes have landed on disk. It is mode-agnostic:
 //!
-//! - **Mode A** — the host-VCS caller invokes `quiesce` before its own commit.
-//! - **Modes B / C** — `JjAdapter::commit` invokes `quiesce` as its first step.
+//! - **InRepo mode** — the host-VCS caller invokes `quiesce` before its own commit.
+//! - **Standalone / Sidecar modes** — `JjAdapter::commit` invokes `quiesce` as its first step.
 //!
 //! # Order of operations
 //!
@@ -85,7 +85,7 @@ pub enum QuiesceError {
 /// quiesce loop would leave partially-fsynced files in a worse state than
 /// proceeding.
 ///
-/// # Mode A example
+/// # InRepo mode example
 ///
 /// ```no_run
 /// use std::path::PathBuf;

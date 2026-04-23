@@ -1,6 +1,6 @@
-//! Mode B storage initialization.
+//! Standalone mode storage initialization.
 //!
-//! Mode B creates a separate Pattern-owned jj repository at
+//! Standalone mode creates a separate Pattern-owned jj repository at
 //! `<paths.base()>/projects/<id>/shared/`. Pattern runs `jj commit` for
 //! history. `messages.db` lives at
 //! `<paths.base()>/projects/<id>/messages/messages.db`.
@@ -29,7 +29,7 @@ use super::error::ModeError;
 use crate::jj::JjAdapter;
 use crate::paths::PatternPaths;
 
-/// Initialize a Mode B mount for the given project ID.
+/// Initialize a Standalone mode mount for the given project ID.
 ///
 /// Creates the mount directory tree at `<paths.base()>/projects/<id>/shared/`,
 /// writes a `.pattern.kdl` config, ensures the messages directory exists,
@@ -47,7 +47,7 @@ pub fn init(
     jj_adapter: &JjAdapter,
     paths: &PatternPaths,
 ) -> Result<StorageMode, ModeError> {
-    let mount_path = paths.mode_b_mount_path(project_id);
+    let mount_path = paths.standalone_mount_path(project_id);
 
     // Create the directory structure.
     for subdir in ["blocks/core", "blocks/working", "personas", "lib"] {
@@ -58,7 +58,7 @@ pub fn init(
     }
 
     // Ensure the messages directory exists.
-    let msgs_path = paths.mode_b_messages_path(project_id);
+    let msgs_path = paths.standalone_messages_path(project_id);
     if let Some(parent) = msgs_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| ModeError::Io {
             path: parent.to_owned(),
@@ -68,9 +68,9 @@ pub fn init(
 
     let now = Utc::now().to_rfc3339();
 
-    // Scaffold .pattern.kdl with Mode B defaults.
+    // Scaffold .pattern.kdl with Standalone mode defaults.
     let kdl = format!(
-        r#"mount mode="B" memory-db="memory.db"
+        r#"mount mode="standalone" memory-db="memory.db"
 
 personas {{
     default "@pattern-default"
@@ -97,7 +97,7 @@ project name="{project_id}" created-at="{now}"
         jj_adapter.init_repo(&mount_path)?;
     }
 
-    Ok(StorageMode::B {
+    Ok(StorageMode::Standalone {
         mount_path,
         project_id: project_id.to_owned(),
     })
@@ -109,13 +109,13 @@ mod tests {
 
     use super::*;
 
-    /// Mode B init requires a real `jj` binary on PATH. These tests are
+    /// Standalone mode init requires a real `jj` binary on PATH. These tests are
     /// skipped if `jj` is not available (CI may not have it).
     fn skip_if_no_jj() -> Option<JjAdapter> {
         match JjAdapter::detect() {
             Ok(Some(adapter)) => Some(adapter),
             _ => {
-                eprintln!("skipping Mode B test: jj not available");
+                eprintln!("skipping Standalone mode test: jj not available");
                 None
             }
         }
@@ -132,7 +132,7 @@ mod tests {
 
         // Use a short stable project ID — the tempdir provides isolation.
         let project_id = format!("test-mode-b-{}", uuid::Uuid::new_v4().simple());
-        let mount_path = paths.mode_b_mount_path(&project_id);
+        let mount_path = paths.standalone_mount_path(&project_id);
 
         let mode = init(&project_id, &adapter, &paths).unwrap();
 
@@ -145,17 +145,17 @@ mod tests {
         assert!(mount_path.join(".jj").is_dir());
 
         match &mode {
-            StorageMode::B {
+            StorageMode::Standalone {
                 mount_path: mp,
                 project_id: pid,
             } => {
                 assert_eq!(mp, &mount_path);
                 assert_eq!(pid, &project_id);
             }
-            _ => panic!("expected StorageMode::B"),
+            _ => panic!("expected StorageMode::Standalone"),
         }
 
-        // home drops here, deleting the tempdir and all Mode B state.
+        // home drops here, deleting the tempdir and all Standalone mode state.
     }
 
     #[test]
@@ -168,16 +168,16 @@ mod tests {
         let paths = PatternPaths::with_base(home.path());
 
         let project_id = format!("test-mode-b-kdl-{}", uuid::Uuid::new_v4().simple());
-        let mount_path = paths.mode_b_mount_path(&project_id);
+        let mount_path = paths.standalone_mount_path(&project_id);
 
         init(&project_id, &adapter, &paths).unwrap();
 
         let kdl_path = mount_path.join(".pattern.kdl");
         let config = crate::config::load_mount_config(&kdl_path).unwrap();
-        assert_eq!(config.mount.mode, crate::config::ModeKind::B);
+        assert_eq!(config.mount.mode, crate::config::ModeKind::Standalone);
         assert!(config.jj.enabled);
         assert_eq!(config.project.name, project_id);
 
-        // home drops here, deleting the tempdir and all Mode B state.
+        // home drops here, deleting the tempdir and all Standalone mode state.
     }
 }

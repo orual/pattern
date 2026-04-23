@@ -48,8 +48,8 @@ pub fn attach_with_paths(start: &Path, paths: &PatternPaths) -> Result<MountedSt
 
     // Resolve DB paths per mode.
     let (memory_db_path, messages_db_path, mode) = match config.mount.mode {
-        ModeKind::A => {
-            // For Mode A, project_root is the ancestor containing `.pattern/`.
+        ModeKind::InRepo => {
+            // For InRepo mode, project_root is the ancestor containing `.pattern/`.
             // mount_path = <project>/.pattern/shared
             // project_root = <project>
             let project_root = mount_path
@@ -60,7 +60,7 @@ pub fn attach_with_paths(start: &Path, paths: &PatternPaths) -> Result<MountedSt
                 })?
                 .to_owned();
             let memory_db = mount_path.join(&config.mount.memory_db);
-            let messages_db = PatternPaths::mode_a_messages_path(&project_root);
+            let messages_db = PatternPaths::in_repo_messages_path(&project_root);
             // Create the transient directory so ConstellationDb can open the DB there.
             let transient_dir = project_root.join(".pattern").join("transient");
             std::fs::create_dir_all(&transient_dir).map_err(|e| MountError::Io {
@@ -70,26 +70,26 @@ pub fn attach_with_paths(start: &Path, paths: &PatternPaths) -> Result<MountedSt
             (
                 memory_db,
                 messages_db,
-                StorageMode::A {
+                StorageMode::InRepo {
                     mount_path: mount_path.clone(),
                     project_root,
                 },
             )
         }
-        ModeKind::B => {
+        ModeKind::Standalone => {
             let memory_db = mount_path.join(&config.mount.memory_db);
-            let messages_db = paths.mode_b_messages_path(&config.project.name);
+            let messages_db = paths.standalone_messages_path(&config.project.name);
             (
                 memory_db,
                 messages_db,
-                StorageMode::B {
+                StorageMode::Standalone {
                     mount_path: mount_path.clone(),
                     project_id: config.project.name.clone(),
                 },
             )
         }
-        ModeKind::C => {
-            // Mode C: sidecar jj inside host git. Layout is the same as Mode A:
+        ModeKind::Sidecar => {
+            // Sidecar mode: sidecar jj inside host git. Layout is the same as InRepo mode:
             // mount_path = <project>/.pattern/shared
             // project_root = <project>
             let project_root = mount_path
@@ -100,7 +100,7 @@ pub fn attach_with_paths(start: &Path, paths: &PatternPaths) -> Result<MountedSt
                 })?
                 .to_owned();
             let memory_db = mount_path.join(&config.mount.memory_db);
-            let messages_db = PatternPaths::mode_a_messages_path(&project_root);
+            let messages_db = PatternPaths::in_repo_messages_path(&project_root);
             // Create the transient directory so ConstellationDb can open the DB there.
             let transient_dir = project_root.join(".pattern").join("transient");
             std::fs::create_dir_all(&transient_dir).map_err(|e| MountError::Io {
@@ -110,7 +110,7 @@ pub fn attach_with_paths(start: &Path, paths: &PatternPaths) -> Result<MountedSt
             (
                 memory_db,
                 messages_db,
-                StorageMode::C {
+                StorageMode::Sidecar {
                     mount_path: mount_path.clone(),
                 },
             )

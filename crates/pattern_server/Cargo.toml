@@ -37,6 +37,12 @@ jiff = { workspace = true }
 nix = { version = "0.29", features = ["signal", "process"] }
 
 [dev-dependencies]
+# postcard is the wire format used by irpc (v1.1.3 transitively). Kept as a
+# direct dev-dep so protocol roundtrip tests exercise the real wire encoding
+# rather than only serde_json — postcard rejects a handful of shapes that
+# serde_json accepts (e.g. `serde_json::Value`, untagged enums without a
+# discriminant), and those restrictions are load-bearing for irpc correctness.
+postcard = { version = "1", features = ["alloc"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
 

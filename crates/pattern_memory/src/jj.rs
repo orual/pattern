@@ -17,7 +17,7 @@
 //!         println!("jj {}", adapter.version());
 //!     }
 //!     Ok(None) => {
-//!         // jj is not on PATH; Mode A continues without it
+//!         // jj is not on PATH; InRepo mode continues without it
 //!     }
 //!     Err(e) => {
 //!         // jj is present but the version is not supported, or another probe error

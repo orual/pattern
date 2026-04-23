@@ -1,6 +1,6 @@
 //! Helper for appending entries to a `.gitignore` file idempotently.
 //!
-//! Used by Mode A init to ensure `.pattern/transient/` (and similar entries)
+//! Used by InRepo mode init to ensure `.pattern/transient/` (and similar entries)
 //! are excluded from host VCS tracking.
 
 use std::io::Write;

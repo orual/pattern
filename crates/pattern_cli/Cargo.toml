@@ -56,8 +56,10 @@ serde_json = { workspace = true }
 arboard = { workspace = true }
 base64 = { workspace = true }
 unicode-width = { workspace = true }
+askama = { workspace = true }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }
 tempfile = { workspace = true }
 insta = { workspace = true }
+kdl = { workspace = true }

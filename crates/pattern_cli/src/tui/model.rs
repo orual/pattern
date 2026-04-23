@@ -18,6 +18,14 @@ use smol_str::SmolStr;
 
 use super::markdown;
 
+/// Indent (in columns) applied to the body of expanded ToolCall/ToolResult
+/// sections — arguments and tool output sit under their header line, shifted
+/// right so the hierarchy is visible at a glance. Used by both the renderer
+/// (to offset the paragraph's draw rect) and `compute_heights` (to compute
+/// wrap height at the narrower content width). Must stay in sync across
+/// both call sites.
+pub const TOOL_BODY_INDENT: u16 = 2;
+
 // ---------------------------------------------------------------------------
 // Section types
 // ---------------------------------------------------------------------------
@@ -154,6 +162,10 @@ pub struct RenderBatch {
     pub batch_id: SmolStr,
     /// The user's message that initiated this exchange, if any.
     pub user_message: Option<String>,
+    /// The agent that authored this batch's response, if known. When set, a
+    /// `[name]` label is rendered inline with the first line of the
+    /// agent's sections. System/notification batches leave this `None`.
+    pub agent_name: Option<SmolStr>,
     /// Ordered sections of agent response content.
     pub sections: Vec<Section>,
     /// Whether the agent is still streaming content for this batch.
@@ -166,9 +178,18 @@ impl RenderBatch {
         Self {
             batch_id,
             user_message,
+            agent_name: None,
             sections: Vec::new(),
             streaming: true,
         }
+    }
+
+    /// Attach an agent name to this batch. The renderer shows a `[name]`
+    /// label inline with the first section's first line, mirroring the
+    /// `[you]` prefix on the user message.
+    pub fn with_agent(mut self, name: SmolStr) -> Self {
+        self.agent_name = Some(name);
+        self
     }
 
     /// Append a wire turn event to this batch, extending or creating sections
@@ -256,15 +277,19 @@ impl RenderBatch {
                     function_name: _,
                     ..
                 } => {
-                    // Header line + arguments.
+                    // Header line + indented arguments. The inner width
+                    // must match the renderer's narrowed draw rect or the
+                    // cached height will under-count wrapped lines.
                     let header_height = 1u16;
-                    let args_height = plain_text_height(arguments, width);
+                    let inner_width = width.saturating_sub(TOOL_BODY_INDENT);
+                    let args_height = plain_text_height(arguments, inner_width);
                     header_height.saturating_add(args_height)
                 }
                 SectionKind::ToolResult { content, .. } => {
-                    // Header line + content.
+                    // Header line + indented content (see ToolCall note).
                     let header_height = 1u16;
-                    let content_height = plain_text_height(content, width);
+                    let inner_width = width.saturating_sub(TOOL_BODY_INDENT);
+                    let content_height = plain_text_height(content, inner_width);
                     header_height.saturating_add(content_height)
                 }
                 SectionKind::Display { text, .. } => plain_text_height(text, width),
@@ -273,11 +298,24 @@ impl RenderBatch {
         }
     }
 
-    /// Total height of this batch in terminal lines, including user message line.
+    /// Total height of this batch in terminal lines: user message line (if
+    /// any) + intra-batch gap (blank separator between user and agent, when
+    /// both sides have content) + sum of section heights. The `[agent]`
+    /// label is rendered inline with the first section's first line and
+    /// does not occupy its own row.
     pub fn total_height(&self) -> u16 {
         let user_msg_height: u16 = if self.user_message.is_some() { 1 } else { 0 };
+        let intra_gap: u16 = if self.user_message.is_some()
+            && (self.agent_name.is_some() || !self.sections.is_empty())
+        {
+            1
+        } else {
+            0
+        };
         let sections_height: u16 = self.sections.iter().map(|s| s.height()).sum();
-        user_msg_height.saturating_add(sections_height)
+        user_msg_height
+            .saturating_add(intra_gap)
+            .saturating_add(sections_height)
     }
 }
 

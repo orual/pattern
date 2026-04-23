@@ -4,11 +4,11 @@
 //! encapsulated in [`PatternPaths`]:
 //!
 //! - `base()` — `~/.pattern/`
-//! - `mode_a_messages_path()` — `<project>/.pattern/transient/messages.db`
-//! - `mode_b_mount_path()` — `~/.pattern/projects/<id>/shared/`
-//! - `mode_b_messages_path()` — `~/.pattern/projects/<id>/messages/messages.db`
+//! - `in_repo_messages_path()` — `<project>/.pattern/transient/messages.db`
+//! - `standalone_mount_path()` — `~/.pattern/projects/<id>/shared/`
+//! - `standalone_messages_path()` — `~/.pattern/projects/<id>/messages/messages.db`
 //!
-//! For Mode A and Mode C, messages.db lives inside the project repo at
+//! For InRepo and Sidecar modes, messages.db lives inside the project repo at
 //! `<project>/.pattern/transient/` (gitignored so it is never committed, but
 //! project-adjacent for discoverability). The `.pattern/transient/` entry in
 //! the project's `.gitignore` keeps it out of VCS history.
@@ -100,7 +100,7 @@ impl PatternPaths {
         &self.base
     }
 
-    /// Path where Mode A (and Mode C) stores `messages.db` for a project.
+    /// Path where InRepo mode (and Sidecar mode) stores `messages.db` for a project.
     ///
     /// Returns `<project_root>/.pattern/transient/messages.db`.
     ///
@@ -109,28 +109,28 @@ impl PatternPaths {
     /// caller is responsible for creating the directory before opening the DB.
     ///
     /// This method does not use `&self` (no `~/.pattern/` path is involved for
-    /// Mode A/C); it is kept as an associated method for symmetry with
-    /// `mode_b_messages_path`.
-    pub fn mode_a_messages_path(project_root: &Path) -> PathBuf {
+    /// InRepo/Sidecar); it is kept as an associated method for symmetry with
+    /// `standalone_messages_path`.
+    pub fn in_repo_messages_path(project_root: &Path) -> PathBuf {
         project_root
             .join(".pattern")
             .join("transient")
             .join("messages.db")
     }
 
-    /// Path where Mode B stores its mount directory for a given project ID.
+    /// Path where Standalone mode stores its mount directory for a given project ID.
     ///
     /// Returns `<base>/projects/<id>/shared/`. This is the root of the
-    /// Pattern-owned jj repository for Mode B mounts.
-    pub fn mode_b_mount_path(&self, project_id: &str) -> PathBuf {
+    /// Pattern-owned jj repository for Standalone mode mounts.
+    pub fn standalone_mount_path(&self, project_id: &str) -> PathBuf {
         self.base.join("projects").join(project_id).join("shared")
     }
 
-    /// Path where Mode B stores `messages.db` for a given project ID.
+    /// Path where Standalone mode stores `messages.db` for a given project ID.
     ///
     /// Returns `<base>/projects/<id>/messages/messages.db`. Stored outside
     /// the jj worktree so that history commits don't include conversation data.
-    pub fn mode_b_messages_path(&self, project_id: &str) -> PathBuf {
+    pub fn standalone_messages_path(&self, project_id: &str) -> PathBuf {
         self.base
             .join("projects")
             .join(project_id)
@@ -140,14 +140,14 @@ impl PatternPaths {
 
     /// Directory where `messages.db` snapshots are stored for a given project ID.
     ///
-    /// Returns `<base>/backups/<id>/messages/`. Used by Mode B, which has no
+    /// Returns `<base>/backups/<id>/messages/`. Used by Standalone mode, which has no
     /// host repo to put backup files in. Created on first snapshot if it does
     /// not yet exist.
     pub fn backup_dir(&self, project_id: &str) -> PathBuf {
         self.base.join("backups").join(project_id).join("messages")
     }
 
-    /// Directory where Mode A/C stores `messages.db` snapshots for a project.
+    /// Directory where InRepo/Sidecar stores `messages.db` snapshots for a project.
     ///
     /// Returns `<project_root>/.pattern/transient/backups/<project_name>/messages/`.
     /// Kept inside `.pattern/transient/` so it is gitignored by the same rule
@@ -270,9 +270,9 @@ mod tests {
     }
 
     #[test]
-    fn mode_a_messages_path_structure() {
+    fn in_repo_messages_path_structure() {
         let project = TempDir::new().unwrap();
-        let path = PatternPaths::mode_a_messages_path(project.path());
+        let path = PatternPaths::in_repo_messages_path(project.path());
         // Should be: <project>/.pattern/transient/messages.db
         assert_eq!(
             path.file_name().and_then(|n| n.to_str()),
@@ -321,10 +321,10 @@ mod tests {
     }
 
     #[test]
-    fn mode_b_mount_path_structure() {
+    fn standalone_mount_path_structure() {
         let base = TempDir::new().unwrap();
         let paths = PatternPaths::with_base(base.path());
-        let path = paths.mode_b_mount_path("my-project");
+        let path = paths.standalone_mount_path("my-project");
         // Should be: <base>/projects/my-project/shared
         assert_eq!(path.file_name().and_then(|n| n.to_str()), Some("shared"));
         let id_component = path.parent().unwrap();
@@ -336,10 +336,10 @@ mod tests {
     }
 
     #[test]
-    fn mode_b_messages_path_structure() {
+    fn standalone_messages_path_structure() {
         let base = TempDir::new().unwrap();
         let paths = PatternPaths::with_base(base.path());
-        let path = paths.mode_b_messages_path("my-project");
+        let path = paths.standalone_messages_path("my-project");
         // Should be: <base>/projects/my-project/messages/messages.db
         assert_eq!(
             path.file_name().and_then(|n| n.to_str()),

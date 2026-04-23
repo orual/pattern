@@ -21,11 +21,15 @@ use smol_str::SmolStr;
 use tokio::time;
 
 use pattern_core::traits::turn_sink::DisplayKind;
+use pattern_core::types::ids::new_snowflake_id;
 use pattern_server::client::DaemonClient;
 use pattern_server::protocol::{TaggedTurnEvent, WireTurnEvent};
 
-use super::autocomplete::{AutocompleteState, AutocompleteWidget, CommandSource, CompletionSource};
-use super::commands::lookup_command;
+use super::autocomplete::{AutocompleteState, AutocompleteWidget};
+use super::commands::{
+    CMD_AGENTS, CMD_CANCEL, CMD_CLEAR, CMD_FLOAT, CMD_FRONT, CMD_PANE, CMD_PANEL, CMD_QUIT,
+    CMD_SHUTDOWN, CMD_STATUS, CommandRegistry,
+};
 use super::conversation::{ConversationState, ConversationView};
 use super::input::{InputAction, InputHandler};
 use super::layout::{
@@ -37,6 +41,7 @@ use super::panel::{PanelContent, PanelState, SidePanel};
 use super::scroll::{ConversationAction, apply_action, map_key_to_action};
 use super::status_bar::{StatusBar, StatusBarState};
 use super::toast::{ToastState, render_toasts};
+use super::zellij::detect::ZellijState;
 
 /// The receiver type for daemon subscription events.
 pub type DaemonEventReceiver = irpc::channel::mpsc::Receiver<TaggedTurnEvent>;
@@ -86,8 +91,8 @@ pub struct App {
     input: InputHandler,
     /// Autocomplete popup state.
     autocomplete: AutocompleteState,
-    /// Command completion source.
-    command_source: CommandSource,
+    /// Command registry: built-in commands plus any daemon-provided extensions.
+    command_registry: CommandRegistry,
     /// Whether the event loop should exit.
     should_quit: bool,
     /// Which panel has keyboard focus.
@@ -136,6 +141,9 @@ pub struct App {
     /// need to know whether the terminal is wide enough for a split-panel view.
     /// Defaults to 0 until the first frame is drawn.
     terminal_width: u16,
+    /// Zellij environment state detected at startup. Drives `/pane` and
+    /// `/float` availability and the auto-session launch decision.
+    zellij_state: ZellijState,
 }
 
 impl App {
@@ -158,7 +166,7 @@ impl App {
             },
             input: InputHandler::new(),
             autocomplete: AutocompleteState::new(),
-            command_source: CommandSource,
+            command_registry: CommandRegistry::new(),
             should_quit: false,
             focus: Focus::Input,
             client: None,
@@ -180,6 +188,7 @@ impl App {
             clipboard: arboard::Clipboard::new().ok().map(Mutex::new),
             status_bar: StatusBarState::default(),
             terminal_width: 0,
+            zellij_state: ZellijState::NotAvailable,
         }
     }
 
@@ -190,6 +199,23 @@ impl App {
     pub fn set_available_agents(&mut self, agents: Vec<SmolStr>) {
         self.agent_count = agents.len();
         self.available_agents = agents;
+    }
+
+    /// Register plugin commands fetched from the daemon on session init.
+    ///
+    /// Each item is a `(name, description)` pair. Commands with names that
+    /// already exist in the built-in registry are silently ignored — built-ins
+    /// always take precedence.
+    pub fn set_daemon_commands(&mut self, commands: Vec<(String, String)>) {
+        self.command_registry.register_daemon_commands(commands);
+    }
+
+    /// Update the zellij environment state.
+    ///
+    /// Called from `run_chat()` after detecting the zellij state at startup.
+    /// Drives `/pane` and `/float` availability.
+    pub fn set_zellij_state(&mut self, state: ZellijState) {
+        self.zellij_state = state;
     }
 
     /// Run the async event loop until the user quits.
@@ -706,9 +732,12 @@ impl App {
                 // Extract display text from parts.
                 let user_text = text_from_parts(&parts);
 
-                // Add user message to conversation.
-                let batch_id: SmolStr = format!("user-{}", self.conversation.batches.len()).into();
-                let batch = RenderBatch::new(batch_id.clone(), Some(user_text));
+                // Add user message to conversation. Snowflake IDs are
+                // lex-sortable and safe for distributed minting — the daemon
+                // uses this exact ID to tag all TurnEvents for this exchange.
+                let batch_id = new_snowflake_id();
+                let batch = RenderBatch::new(batch_id.clone(), Some(user_text))
+                    .with_agent(self.current_agent.clone());
                 self.conversation.batches.push(batch);
 
                 // Send to daemon if connected.
@@ -742,14 +771,10 @@ impl App {
 
     /// Dispatch a slash command by name.
     fn dispatch_command(&mut self, name: &str, args: &[String]) {
-        match lookup_command(name) {
-            Some(cmd) => {
-                use super::commands::CommandTarget;
-                match cmd.target {
-                    CommandTarget::Local => self.dispatch_local_command(name, args),
-                    CommandTarget::Runtime => self.dispatch_runtime_command(name, args),
-                }
-            }
+        use super::commands::CommandTarget;
+        match self.command_registry.lookup(name).map(|e| e.target) {
+            Some(CommandTarget::Local) => self.dispatch_local_command(name, args),
+            Some(CommandTarget::Runtime) => self.dispatch_runtime_command(name, args),
             None => {
                 // Check for plugin-namespaced command (contains ':').
                 if name.contains(':') {
@@ -764,17 +789,42 @@ impl App {
     }
 
     /// Handle a local command (no daemon interaction).
-    fn dispatch_local_command(&mut self, name: &str, _args: &[String]) {
+    fn dispatch_local_command(&mut self, name: &str, args: &[String]) {
         match name {
-            "clear" => {
+            CMD_CLEAR => {
                 self.conversation.batches.clear();
             }
-            "quit" => {
+            CMD_QUIT => {
                 self.should_quit = true;
             }
-            "panel" => {
+            CMD_PANEL => {
                 self.panel_visibility = self.panel_visibility.cycle();
             }
+            CMD_PANE | CMD_FLOAT => match &self.zellij_state {
+                ZellijState::InSession { .. } => {
+                    let agent = args.first().map(|a| a.trim_start_matches('@').to_string());
+                    match agent {
+                        Some(agent) => {
+                            let result = if name == CMD_PANE {
+                                super::zellij::pane::spawn_tiled(&agent)
+                            } else {
+                                super::zellij::pane::spawn_floating(&agent)
+                            };
+                            if let Err(e) = result {
+                                self.push_system_message(e);
+                            }
+                        }
+                        None => {
+                            self.push_system_message(format!("usage: /{name} @agent-name"));
+                        }
+                    }
+                }
+                _ => {
+                    self.push_system_message(format!(
+                        "/{name} requires a zellij session (not running inside zellij)"
+                    ));
+                }
+            },
             _ => {}
         }
     }
@@ -782,7 +832,11 @@ impl App {
     /// Handle a runtime command (requires daemon).
     fn dispatch_runtime_command(&mut self, name: &str, args: &[String]) {
         match name {
-            "front" => {
+            CMD_FRONT => {
+                // TODO(multi-agent): /front is currently client-side only — the daemon has
+                // no persistent fronting state, so restarting the TUI resets to the default
+                // agent. When the multi-agent feature lands, add a `SetFront` RPC and
+                // persist the fronting choice server-side so reconnecting picks it up.
                 if let Some(agent_name) = args.first() {
                     let agent_name = agent_name.trim_start_matches('@');
                     // Validate against the available agents list when populated.
@@ -811,33 +865,61 @@ impl App {
                     self.push_system_message(format!("current agent: {}", self.current_agent));
                 }
             }
-            "agents" | "status" | "context" => {
+            CMD_AGENTS => {
                 if let Some(client) = &self.client {
                     let client = client.clone();
-                    let cmd_name = name.to_string();
-                    let args = args.to_vec();
                     let result_tx = self.result_tx.clone();
                     tokio::spawn(async move {
-                        match client.run_command(cmd_name.clone(), args).await {
-                            Ok(result) => {
-                                let _ = result_tx.send(result.output);
+                        match client.list_agents().await {
+                            Ok(agents) => {
+                                let msg = if agents.is_empty() {
+                                    "agents: (none active)".to_string()
+                                } else {
+                                    let lines: Vec<String> = agents
+                                        .iter()
+                                        .map(|a| format!("  {} ({})", a.agent_id, a.persona_name))
+                                        .collect();
+                                    format!("agents:\n{}", lines.join("\n"))
+                                };
+                                let _ = result_tx.send(msg);
                             }
                             Err(e) => {
-                                let _ = result_tx.send(format!("/{cmd_name} failed: {e}"));
+                                let _ = result_tx.send(format!("/agents failed: {e}"));
                             }
                         }
                     });
-                    self.push_system_message(format!("/{name} sent to daemon..."));
                 } else {
                     self.push_system_message("not connected to daemon.".into());
                 }
             }
-            "shutdown" => {
+            CMD_STATUS => {
                 if let Some(client) = &self.client {
                     let client = client.clone();
                     let result_tx = self.result_tx.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = client.run_command("shutdown".into(), Vec::new()).await {
+                        match client.get_status().await {
+                            Ok(status) => {
+                                let msg = format!(
+                                    "status: {} agent(s) active, uptime {}s",
+                                    status.agent_count, status.uptime_secs
+                                );
+                                let _ = result_tx.send(msg);
+                            }
+                            Err(e) => {
+                                let _ = result_tx.send(format!("/status failed: {e}"));
+                            }
+                        }
+                    });
+                } else {
+                    self.push_system_message("not connected to daemon.".into());
+                }
+            }
+            CMD_SHUTDOWN => {
+                if let Some(client) = &self.client {
+                    let client = client.clone();
+                    let result_tx = self.result_tx.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = client.shutdown().await {
                             let _ = result_tx.send(format!("shutdown failed: {e}"));
                         }
                     });
@@ -845,6 +927,34 @@ impl App {
                     self.should_quit = true;
                 } else {
                     self.push_system_message("not connected to daemon.".into());
+                }
+            }
+            CMD_CANCEL => {
+                // Find the most recent streaming batch and cancel it.
+                let batch_id = self
+                    .conversation
+                    .batches
+                    .iter()
+                    .rev()
+                    .find(|b| b.streaming)
+                    .map(|b| b.batch_id.clone());
+
+                if let Some(batch_id) = batch_id {
+                    if let Some(client) = &self.client {
+                        let client = client.clone();
+                        let result_tx = self.result_tx.clone();
+                        let bid = batch_id.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = client.cancel_batch(bid.clone()).await {
+                                let _ = result_tx.send(format!("cancel failed: {e}"));
+                            }
+                        });
+                        self.push_system_message(format!("cancelling batch {batch_id}…"));
+                    } else {
+                        self.push_system_message("not connected to daemon.".into());
+                    }
+                } else {
+                    self.push_system_message("no active response to cancel.".into());
                 }
             }
             _ => {
@@ -876,11 +986,60 @@ impl App {
         }
     }
 
+    /// Return the number of conversation batches (system messages included).
+    ///
+    /// Used by integration tests to assert on conversation state without
+    /// requiring access to private fields. The `dead_code` allow is needed
+    /// because the binary target does not call these methods directly.
+    #[allow(dead_code)]
+    pub fn conversation_batch_count(&self) -> usize {
+        self.conversation.batches.len()
+    }
+
+    /// Return the text content of the last section in the last conversation batch.
+    ///
+    /// Searches backwards through sections for the first `Display` or `Text`
+    /// section and returns its text. Returns `None` when the conversation is
+    /// empty or contains only non-text sections.
+    ///
+    /// Used by integration tests to verify user-facing error messages without
+    /// inspecting internal model types directly.
+    #[allow(dead_code)]
+    pub fn last_conversation_message(&self) -> Option<&str> {
+        let batch = self.conversation.batches.last()?;
+        use super::model::SectionKind;
+        for section in batch.sections.iter().rev() {
+            match &section.kind {
+                SectionKind::Display { text, .. } => return Some(text.as_str()),
+                SectionKind::Text(text) => return Some(text.as_str()),
+                _ => continue,
+            }
+        }
+        None
+    }
+
+    /// Dispatch a slash command from a raw string.
+    ///
+    /// Parses `"/name arg1 arg2"` and routes through the normal command
+    /// dispatch path. Used by integration tests to exercise slash command
+    /// behaviour without requiring a running event loop.
+    #[allow(dead_code)]
+    pub fn dispatch_slash_command(&mut self, raw: &str) {
+        let stripped = raw.strip_prefix('/').unwrap_or(raw);
+        let mut parts = stripped.splitn(2, ' ');
+        let name = parts.next().unwrap_or(stripped);
+        let args: Vec<String> = parts
+            .next()
+            .map(|rest| rest.split_whitespace().map(str::to_string).collect())
+            .unwrap_or_default();
+        self.dispatch_command(name, &args);
+    }
+
     /// Push a system message (note) into the conversation.
     ///
-    /// `pub(crate)` so `run_tui()` in `main.rs` can surface session init
-    /// errors as the first message before the event loop starts.
-    pub(crate) fn push_system_message(&mut self, text: String) {
+    /// Called by `run_chat()` to surface session init errors and other
+    /// notifications as the first message before the event loop starts.
+    pub fn push_system_message(&mut self, text: String) {
         let batch_id: SmolStr = format!("sys-{}", self.conversation.batches.len()).into();
         let mut batch = RenderBatch::new(batch_id, None);
         batch.push_event(&WireTurnEvent::Display {
@@ -895,11 +1054,12 @@ impl App {
     ///
     /// Called during TUI startup to populate the conversation with recent
     /// message history from the daemon.
-    pub(crate) fn load_history(&mut self, history: Vec<pattern_server::protocol::HistoricalBatch>) {
+    pub fn load_history(&mut self, history: Vec<pattern_server::protocol::HistoricalBatch>) {
         let mut total_tokens = 0;
         for batch in history {
             total_tokens += batch.tokens;
-            let mut render_batch = RenderBatch::new(batch.batch_id.clone(), batch.user_message);
+            let mut render_batch = RenderBatch::new(batch.batch_id.clone(), batch.user_message)
+                .with_agent(self.current_agent.clone());
             for event in &batch.events {
                 render_batch.push_event(event);
             }
@@ -918,8 +1078,8 @@ impl App {
             && !without_slash.contains(' ')
         {
             // Completing a command name. Empty pattern shows all commands.
-            let candidates = self.command_source.candidates();
-            self.autocomplete.update(without_slash, &candidates);
+            let candidates = self.command_registry.candidates();
+            self.autocomplete.update(without_slash, candidates);
             return;
         }
         self.autocomplete.hide();
@@ -963,7 +1123,8 @@ impl App {
                 // streaming display content from the previous batch so a
                 // dropped connection mid-stream does not persist.
                 self.panel_state.clear_display();
-                let new_batch = RenderBatch::new(tagged.batch_id.clone(), None);
+                let new_batch = RenderBatch::new(tagged.batch_id.clone(), None)
+                    .with_agent(tagged.agent_id.clone());
                 self.conversation.batches.push(new_batch);
                 self.conversation.batches.last_mut().unwrap()
             }
@@ -1561,5 +1722,322 @@ mod tests {
 
         let output = render_app(&mut app, 120, 16);
         insta::assert_snapshot!(output);
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 5: batch routing and cancel tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn events_route_to_correct_batch() {
+        let mut app = App::new(SmolStr::new_static("pattern-default"));
+
+        // Pre-create two streaming batches.
+        app.conversation
+            .batches
+            .push(RenderBatch::new("batch-A".into(), Some("first".into())));
+        app.conversation
+            .batches
+            .push(RenderBatch::new("batch-B".into(), Some("second".into())));
+
+        // Route a text event to batch-A.
+        app.handle_daemon_event(tagged("batch-A", WireTurnEvent::Text("alpha".into())));
+        // Route a text event to batch-B.
+        app.handle_daemon_event(tagged("batch-B", WireTurnEvent::Text("beta".into())));
+
+        let batch_a = app
+            .conversation
+            .batches
+            .iter()
+            .find(|b| b.batch_id == "batch-A")
+            .expect("batch-A must exist");
+        let batch_b = app
+            .conversation
+            .batches
+            .iter()
+            .find(|b| b.batch_id == "batch-B")
+            .expect("batch-B must exist");
+
+        assert_eq!(
+            batch_a.sections.len(),
+            1,
+            "batch-A should have exactly one section"
+        );
+        assert_eq!(
+            batch_b.sections.len(),
+            1,
+            "batch-B should have exactly one section"
+        );
+
+        // Verify content landed in the right place.
+        match &batch_a.sections[0].kind {
+            SectionKind::Text(text) => {
+                assert!(
+                    text.contains("alpha"),
+                    "batch-A should contain 'alpha', got: {text}"
+                );
+            }
+            other => panic!("batch-A: expected Text, got {other:?}"),
+        }
+        match &batch_b.sections[0].kind {
+            SectionKind::Text(text) => {
+                assert!(
+                    text.contains("beta"),
+                    "batch-B should contain 'beta', got: {text}"
+                );
+            }
+            other => panic!("batch-B: expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_cross_contamination_between_batches() {
+        let mut app = App::new(SmolStr::new_static("pattern-default"));
+
+        // Interleave events for two different batches.
+        app.handle_daemon_event(tagged("batch-X", WireTurnEvent::Text("x1".into())));
+        app.handle_daemon_event(tagged("batch-Y", WireTurnEvent::Text("y1".into())));
+        app.handle_daemon_event(tagged("batch-X", WireTurnEvent::Text("x2".into())));
+        app.handle_daemon_event(tagged("batch-Y", WireTurnEvent::Text("y2".into())));
+
+        assert_eq!(app.conversation.batches.len(), 2);
+
+        let batch_x = app
+            .conversation
+            .batches
+            .iter()
+            .find(|b| b.batch_id == "batch-X")
+            .expect("batch-X must exist");
+        let batch_y = app
+            .conversation
+            .batches
+            .iter()
+            .find(|b| b.batch_id == "batch-Y")
+            .expect("batch-Y must exist");
+
+        // Both batches should only have one section (text events accumulate).
+        assert_eq!(batch_x.sections.len(), 1);
+        assert_eq!(batch_y.sections.len(), 1);
+
+        match &batch_x.sections[0].kind {
+            SectionKind::Text(text) => {
+                assert!(
+                    text.contains("x1") && text.contains("x2"),
+                    "batch-X should contain both x events, got: {text}"
+                );
+                assert!(
+                    !text.contains("y1") && !text.contains("y2"),
+                    "batch-X must not contain Y events, got: {text}"
+                );
+            }
+            other => panic!("batch-X: expected Text, got {other:?}"),
+        }
+        match &batch_y.sections[0].kind {
+            SectionKind::Text(text) => {
+                assert!(
+                    text.contains("y1") && text.contains("y2"),
+                    "batch-Y should contain both y events, got: {text}"
+                );
+                assert!(
+                    !text.contains("x1") && !text.contains("x2"),
+                    "batch-Y must not contain X events, got: {text}"
+                );
+            }
+            other => panic!("batch-Y: expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_batch_id_creates_new_batch() {
+        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        assert!(app.conversation.batches.is_empty());
+
+        // Event arrives for a batch-id the TUI has never seen.
+        app.handle_daemon_event(tagged("daemon-side-only", WireTurnEvent::Text("hi".into())));
+
+        assert_eq!(app.conversation.batches.len(), 1);
+        assert_eq!(app.conversation.batches[0].batch_id, "daemon-side-only");
+    }
+
+    // -------------------------------------------------------------------
+    // Command dispatch tests: /agents, /status, /shutdown
+    // -------------------------------------------------------------------
+
+    /// `/agents` without a daemon connection surfaces "not connected" immediately.
+    #[test]
+    fn agents_command_without_client_shows_not_connected() {
+        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        // No client set — dispatch_runtime_command should push a system message.
+        app.dispatch_runtime_command("agents", &[]);
+        assert_eq!(app.conversation.batches.len(), 1);
+        let msg = app.last_conversation_message().unwrap_or("");
+        assert!(
+            msg.contains("not connected"),
+            "expected 'not connected' message, got: {msg}"
+        );
+    }
+
+    /// `/status` without a daemon connection surfaces "not connected" immediately.
+    #[test]
+    fn status_command_without_client_shows_not_connected() {
+        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        app.dispatch_runtime_command("status", &[]);
+        assert_eq!(app.conversation.batches.len(), 1);
+        let msg = app.last_conversation_message().unwrap_or("");
+        assert!(
+            msg.contains("not connected"),
+            "expected 'not connected' message, got: {msg}"
+        );
+    }
+
+    /// `/agents` with a real echo-mode daemon calls `list_agents()` and renders
+    /// the result as a system message in the conversation. Verifies the Phase 3
+    /// spec: "Command dispatch test verifying /agents calls client.list_agents()
+    /// and renders result as system message."
+    #[tokio::test]
+    async fn agents_command_calls_list_agents_and_renders_result() {
+        use pattern_server::server::DaemonServer;
+
+        let handle = DaemonServer::spawn();
+        let raw_client = handle.client;
+        let client = pattern_server::client::DaemonClient::from_local(raw_client);
+
+        // Replace the placeholder channel with a real one owned in this scope.
+        let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        app.client = Some(client);
+        app.result_tx = result_tx;
+
+        // Dispatch /agents — spawns a task that will send to result_tx.
+        app.dispatch_runtime_command("agents", &[]);
+
+        // Wait for the spawned task to complete and send its result.
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), result_rx.recv())
+            .await
+            .expect("timed out waiting for /agents result")
+            .expect("channel closed unexpectedly");
+
+        // In echo mode the daemon returns an empty agent list.
+        assert!(
+            msg.contains("agents:") || msg.contains("(none active)"),
+            "/agents result should contain agent list, got: {msg}"
+        );
+    }
+
+    /// `/status` with a real echo-mode daemon calls `get_status()` and renders
+    /// uptime + agent count as a system message.
+    #[tokio::test]
+    async fn status_command_calls_get_status_and_renders_result() {
+        use pattern_server::server::DaemonServer;
+
+        let handle = DaemonServer::spawn();
+        let raw_client = handle.client;
+        let client = pattern_server::client::DaemonClient::from_local(raw_client);
+
+        let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        app.client = Some(client);
+        app.result_tx = result_tx;
+
+        app.dispatch_runtime_command("status", &[]);
+
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), result_rx.recv())
+            .await
+            .expect("timed out waiting for /status result")
+            .expect("channel closed unexpectedly");
+
+        assert!(
+            msg.contains("status:") && msg.contains("uptime"),
+            "/status result should contain status info, got: {msg}"
+        );
+    }
+
+    /// `/shutdown` with a real echo-mode daemon calls `shutdown()` (not
+    /// `run_command("shutdown", ...)`), sets `should_quit`, and the daemon's
+    /// Shutdown handler responds cleanly.
+    #[tokio::test]
+    async fn shutdown_command_calls_shutdown_rpc_and_sets_quit() {
+        use pattern_server::server::DaemonServer;
+
+        let handle = DaemonServer::spawn();
+        let raw_client = handle.client;
+        let client = pattern_server::client::DaemonClient::from_local(raw_client);
+
+        let (result_tx, _result_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        app.client = Some(client);
+        app.result_tx = result_tx;
+
+        assert!(!app.should_quit);
+        app.dispatch_runtime_command("shutdown", &[]);
+        // should_quit is set synchronously before the async task completes.
+        assert!(
+            app.should_quit,
+            "/shutdown should set should_quit immediately"
+        );
+    }
+
+    #[test]
+    fn cancel_command_with_no_streaming_batch() {
+        let mut app = App::new(SmolStr::new_static("pattern-default"));
+
+        // Add a non-streaming batch (already finished).
+        let mut batch = RenderBatch::new("batch-1".into(), Some("hello".into()));
+        batch.push_event(&WireTurnEvent::Stop(StopReason::EndTurn));
+        batch.streaming = false;
+        app.conversation.batches.push(batch);
+
+        let batch_count_before = app.conversation.batches.len();
+        app.dispatch_runtime_command("cancel", &[]);
+
+        // Should add one system message explaining there's nothing to cancel.
+        assert_eq!(app.conversation.batches.len(), batch_count_before + 1);
+        let sys_batch = app.conversation.batches.last().unwrap();
+        match &sys_batch.sections[0].kind {
+            super::super::model::SectionKind::Display { text, .. } => {
+                assert!(
+                    text.contains("no active response to cancel"),
+                    "expected no-op message, got: {text}"
+                );
+            }
+            other => panic!("expected Display section, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cancel_command_targets_most_recent_streaming_batch() {
+        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        // No client, so the cancel path hits the "not connected" branch.
+        // We just verify it finds the correct streaming batch.
+
+        // Finished batch.
+        let mut done = RenderBatch::new("done".into(), Some("old".into()));
+        done.streaming = false;
+        app.conversation.batches.push(done);
+
+        // Active streaming batch.
+        let mut active = RenderBatch::new("active".into(), Some("new".into()));
+        active.streaming = true;
+        app.conversation.batches.push(active);
+
+        let batch_count_before = app.conversation.batches.len();
+        app.dispatch_runtime_command("cancel", &[]);
+
+        // The cancel path without a client should push "not connected" message,
+        // which means it DID find the streaming batch (entered the Some branch).
+        assert_eq!(app.conversation.batches.len(), batch_count_before + 1);
+        let sys_batch = app.conversation.batches.last().unwrap();
+        match &sys_batch.sections[0].kind {
+            super::super::model::SectionKind::Display { text, .. } => {
+                assert!(
+                    text.contains("not connected"),
+                    "expected 'not connected' message (found streaming batch but no client), got: {text}"
+                );
+            }
+            other => panic!("expected Display section, got {other:?}"),
+        }
     }
 }

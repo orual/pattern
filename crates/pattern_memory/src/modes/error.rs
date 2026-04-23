@@ -2,8 +2,8 @@
 
 use std::path::PathBuf;
 
-/// Errors produced during storage mode initialization (`mode_a::init`,
-/// `mode_b::init`).
+/// Errors produced during storage mode initialization (`in_repo::init`,
+/// `standalone::init`, `sidecar::init`).
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum ModeError {

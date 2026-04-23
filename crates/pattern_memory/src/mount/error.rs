@@ -27,7 +27,7 @@ pub enum MountError {
         path: PathBuf,
     },
 
-    /// Mode C is not yet available for production use.
+    /// Sidecar mode is not yet available for production use.
     #[error("mode {mode} is unavailable: {reason}")]
     #[diagnostic(code(pattern_memory::mount::mode_unavailable))]
     ModeUnavailable {

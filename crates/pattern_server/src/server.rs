@@ -23,7 +23,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use irpc::{Client, WithChannels};
@@ -46,6 +46,24 @@ use tracing::{info, warn};
 use crate::bridge::{EventRx, EventTx, MultiplexSink, TurnSinkBridge, new_event_channel};
 use crate::protocol::*;
 use pattern_db::queries::get_messages;
+
+/// RAII guard that removes a `batch_id → agent_id` entry from `batch_to_agent`
+/// when dropped.
+///
+/// Held by every spawned session task so that the entry is removed on normal
+/// completion, early return, or panic — without relying on `fan_out` to observe
+/// a `Stop` event. The `fan_out` cleanup on `Stop` is left as a defensive
+/// double-remove; `DashMap::remove` is a no-op when the key is absent.
+struct BatchGuard {
+    map: Arc<DashMap<BatchId, AgentId>>,
+    batch_id: BatchId,
+}
+
+impl Drop for BatchGuard {
+    fn drop(&mut self) {
+        self.map.remove(&self.batch_id);
+    }
+}
 
 /// Configuration for real session mode. When provided to
 /// [`DaemonServer::spawn_with_config`], the server opens
@@ -139,6 +157,10 @@ pub struct DaemonServer {
     /// Updated each time InitSession is called, used by GetStatus to report
     /// agent count to the TUI.
     available_agents: usize,
+    /// Maps in-flight batch IDs to their agent ID so that `CancelBatch` can
+    /// locate the correct session. Entries are inserted on `SendMessage` and
+    /// removed when a `Stop` event arrives for the batch.
+    batch_to_agent: Arc<DashMap<BatchId, AgentId>>,
 }
 
 /// Handle returned by [`DaemonServer::spawn`].
@@ -149,6 +171,12 @@ pub struct DaemonServer {
 pub struct DaemonHandle {
     /// The irpc client for making requests to the daemon actor.
     pub client: Client<PatternProtocol>,
+    /// Test-only reference to the server's `batch_to_agent` map, so tests can
+    /// verify that entries are retired on batch completion without needing a
+    /// public accessor on the production server. Kept behind `cfg(test)` so
+    /// it cannot leak into normal use.
+    #[cfg(test)]
+    pub(crate) batch_to_agent: Arc<DashMap<BatchId, AgentId>>,
 }
 
 impl DaemonServer {
@@ -172,6 +200,7 @@ impl DaemonServer {
     fn spawn_inner(echo: bool, session_config: Option<Arc<SessionConfig>>) -> DaemonHandle {
         let (msg_tx, msg_rx) = tokio::sync::mpsc::channel(64);
         let (event_tx, event_rx) = new_event_channel();
+        let batch_to_agent = Arc::new(DashMap::new());
         let server = Self {
             recv: msg_rx,
             event_rx,
@@ -186,10 +215,13 @@ impl DaemonServer {
             session_locks: Arc::new(DashMap::new()),
             partner_id: new_id(),
             available_agents: 0,
+            batch_to_agent: batch_to_agent.clone(),
         };
         tokio::spawn(server.run());
         DaemonHandle {
             client: Client::local(msg_tx),
+            #[cfg(test)]
+            batch_to_agent,
         }
     }
 
@@ -223,6 +255,15 @@ impl DaemonServer {
             event = ?event.event,
             "fan_out: dispatching event"
         );
+
+        // Retire the `batch_id -> agent_id` mapping once the batch completes
+        // so `batch_to_agent` does not grow unboundedly over long-running
+        // sessions. CancelBatch removes entries on cancel; this handles the
+        // normal-completion path.
+        if matches!(event.event, WireTurnEvent::Stop(_)) {
+            self.batch_to_agent.remove(&event.batch_id);
+        }
+
         let Some(senders) = self.subscribers.get_mut(&event.agent_id) else {
             return;
         };
@@ -263,6 +304,10 @@ impl DaemonServer {
                 let batch_id = inner.batch_id.clone();
                 let agent_id = inner.agent_id.clone();
 
+                // Track batch → agent so CancelBatch can find the right session.
+                self.batch_to_agent
+                    .insert(batch_id.clone(), agent_id.clone());
+
                 // Acknowledge receipt — the client unblocks immediately.
                 let _ = tx.send(()).await;
 
@@ -291,8 +336,19 @@ impl DaemonServer {
                     let event_tx = self.event_tx.clone();
                     let partner_id = self.partner_id.clone();
                     let mount = mount.clone();
+                    let batch_to_agent = self.batch_to_agent.clone();
 
                     tokio::spawn(async move {
+                        // Hold a guard for the lifetime of this task. If the task
+                        // exits early (error return) or panics, the guard's Drop
+                        // removes the batch → agent entry so the map doesn't leak.
+                        // The fan_out cleanup on Stop is left as a defensive
+                        // double-remove; DashMap::remove is a no-op when absent.
+                        let _batch_guard = BatchGuard {
+                            map: batch_to_agent,
+                            batch_id: batch_id.clone(),
+                        };
+
                         // 1. Get or open session (may block during compilation).
                         let agent_session = match get_or_open_session(
                             &agent_id,
@@ -386,6 +442,14 @@ impl DaemonServer {
                     .collect();
                 let _ = tx.send(agents).await;
             }
+            PatternMessage::ListCommands(req) => {
+                let WithChannels { tx, .. } = req;
+                // The daemon's command registry starts empty. Plugin commands
+                // will be registered here when the plugin system lands.
+                // Built-in TUI commands are handled client-side and are not
+                // included in this response.
+                let _ = tx.send(vec![]).await;
+            }
             PatternMessage::GetStatus(req) => {
                 let WithChannels { tx, .. } = req;
                 let status = RuntimeStatus {
@@ -399,11 +463,25 @@ impl DaemonServer {
                 use crate::protocol::{HistoricalBatch, HistoryResponse};
                 let WithChannels { tx, inner, .. } = req;
 
-                let batches = if let Some(mount) = &self.current_mount {
-                    if let Ok(conn) = mount.db.dedicated_connection() {
+                // Move the blocking DB read + deserialization off the actor loop
+                // into a spawn_blocking task so other messages are not delayed
+                // while we wait for SQLite I/O.
+                let db = self.current_mount.as_ref().map(|m| m.db.clone());
+                let agent_id = inner.agent_id.clone();
+
+                tokio::spawn(async move {
+                    let batches = tokio::task::spawn_blocking(move || -> Vec<HistoricalBatch> {
+                        let Some(db) = db else {
+                            return vec![];
+                        };
+                        let conn = match db.dedicated_connection() {
+                            Ok(c) => c,
+                            Err(_) => return vec![],
+                        };
+
                         // Fetch messages in DESC order, reverse to get chronological (ASC) order.
                         let mut messages =
-                            get_messages(&conn, &inner.agent_id, i64::MAX).unwrap_or_default();
+                            get_messages(&conn, &agent_id, i64::MAX).unwrap_or_default();
                         messages.reverse();
 
                         // Group by batch_id and reconstruct events.
@@ -457,33 +535,88 @@ impl DaemonServer {
                             })
                             .collect();
 
-                        // Sort batches by batch_id (which are snowflakes, so chronological = ascending)
+                        // Sort batches by batch_id (snowflakes sort chronologically).
                         batches.sort_by(|a, b| a.batch_id.cmp(&b.batch_id));
                         batches
-                    } else {
-                        vec![]
-                    }
-                } else {
-                    vec![]
-                };
+                    })
+                    .await
+                    .unwrap_or_default();
 
-                let response = HistoryResponse { batches };
-                let _ = tx.send(response).await;
+                    let response = HistoryResponse { batches };
+                    let _ = tx.send(response).await;
+                });
             }
             PatternMessage::CancelBatch(req) => {
-                let WithChannels { tx, .. } = req;
-                // TODO(phase-2): wire cancellation — call session.cancel_batch(inner.batch_id)
-                // using TidepoolSession's CancelState so the TUI's Esc key can stop a running
-                // step. For phase 1, we acknowledge immediately and take no other action.
+                let WithChannels { tx, inner, .. } = req;
+                let batch_id = inner;
+                // Look up which agent owns this batch, then signal its CancelState.
+                if let Some(agent_id) = self.batch_to_agent.get(&batch_id) {
+                    if let Some(session) = self.sessions.get::<SmolStr>(&agent_id) {
+                        session.session.cancel_state().request_cancel();
+                        tracing::info!(
+                            batch_id = %batch_id,
+                            agent_id = %*agent_id,
+                            "cancel requested for in-flight batch"
+                        );
+                    }
+                } else {
+                    tracing::debug!(batch_id = %batch_id, "cancel_batch: no active batch found");
+                }
+                // Remove the mapping — the batch is no longer in flight.
+                self.batch_to_agent.remove(&batch_id);
                 let _ = tx.send(()).await;
             }
             PatternMessage::RunCommand(req) => {
+                // RunCommand is the transport for plugin-namespaced slash commands
+                // (e.g. `/plugin-name:do-thing`). Built-in commands route through
+                // dedicated RPCs (ListAgents, GetStatus, Shutdown, ...) rather than
+                // here. The plugin system itself is future work; for now every
+                // command returns a "not implemented" error.
                 let WithChannels { tx, inner, .. } = req;
                 let result = CommandResult {
                     success: false,
-                    output: format!("command not yet implemented: {}", inner.command),
+                    output: format!("plugin command not yet implemented: {}", inner.command),
                 };
                 let _ = tx.send(result).await;
+            }
+            PatternMessage::Shutdown(req) => {
+                let WithChannels { tx, .. } = req;
+                // Respond before exiting so the client's await resolves cleanly.
+                // A brief sleep gives the response time to flush over the wire
+                // before the process exits.
+                let _ = tx.send(crate::protocol::ShutdownResponse).await;
+                tokio::spawn(async {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    std::process::exit(0);
+                });
+            }
+            PatternMessage::GetClientCount(req) => {
+                let WithChannels { tx, .. } = req;
+                // Dead senders are only lazily pruned during fan_out. Since
+                // fan_out only runs when events arrive, the count can be stale
+                // after a subscriber disconnects but before the next event.
+                // Probe each sender's closed() future to prune proactively so
+                // that --stop-daemon-on-exit (AC6.7) sees the true count.
+                for senders in self.subscribers.values_mut() {
+                    let mut alive = Vec::with_capacity(senders.len());
+                    for tx in senders.drain(..) {
+                        // closed() resolves when the receiver is dropped (including
+                        // remote disconnects via QUIC). A zero-duration timeout
+                        // lets us probe without blocking the actor loop.
+                        let is_closed = tokio::time::timeout(Duration::from_millis(0), tx.closed())
+                            .await
+                            .is_ok();
+                        if !is_closed {
+                            alive.push(tx);
+                        }
+                    }
+                    *senders = alive;
+                }
+                // Remove agent entries that have no live subscribers remaining.
+                self.subscribers.retain(|_, senders| !senders.is_empty());
+
+                let count: usize = self.subscribers.values().map(|s| s.len()).sum();
+                let _ = tx.send(count).await;
             }
             PatternMessage::InitSession(req) => {
                 let WithChannels { tx, inner, .. } = req;
@@ -961,5 +1094,130 @@ mod tests {
         assert_eq!(info.persona_name, "echo");
         assert!(info.available_agents.is_empty());
         assert!(info.error.is_none());
+    }
+
+    /// Verifies that `GetClientCount` prunes senders whose receiver has been
+    /// dropped, rather than returning a stale count.
+    ///
+    /// Without the proactive closed() probe in the handler, dropping the
+    /// receiver does not remove the sender from `self.subscribers` until
+    /// the next `fan_out`. This means `client_count()` would return 1 even
+    /// after the last subscriber exits, and `--stop-daemon-on-exit` would
+    /// never trigger.
+    #[tokio::test]
+    async fn get_client_count_prunes_dropped_subscribers() {
+        let handle = DaemonServer::spawn();
+        let client = DaemonClient::from_local(handle.client);
+
+        // Subscribe to a specific agent to register a sender in subscribers.
+        let rx = client
+            .subscribe_output("prune-test-agent".into())
+            .await
+            .unwrap();
+
+        // The server must see one live subscriber.
+        let count = client.client_count().await.unwrap();
+        assert_eq!(count, 1, "expected 1 subscriber after subscribing");
+
+        // Drop the receiver — this causes the sender's closed() to resolve.
+        drop(rx);
+
+        // Give the drop a moment to propagate through the channel machinery.
+        tokio::task::yield_now().await;
+
+        // GetClientCount must probe and prune the dead sender, returning 0.
+        let count = client.client_count().await.unwrap();
+        assert_eq!(
+            count, 0,
+            "expected 0 subscribers after receiver was dropped"
+        );
+    }
+
+    /// `batch_to_agent` must drop an entry once its batch finishes (Stop event),
+    /// not only on `CancelBatch`. Otherwise the map grows without bound over
+    /// the life of the daemon.
+    #[tokio::test]
+    async fn batch_to_agent_drops_entry_on_stop_event() {
+        let handle = DaemonServer::spawn();
+        let batch_map = handle.batch_to_agent.clone();
+        let client = DaemonClient::from_local(handle.client);
+
+        let mut events = client
+            .subscribe_output("retire-test-agent".into())
+            .await
+            .unwrap();
+
+        // Send several batches and drain each to completion; after every
+        // Stop the corresponding entry must be gone.
+        for _ in 0..3 {
+            let batch_id: SmolStr = new_snowflake_id();
+            client
+                .send_message(
+                    batch_id.clone(),
+                    "retire-test-agent".into(),
+                    vec![ContentPart::Text("ping".into())],
+                )
+                .await
+                .unwrap();
+
+            // Drain until we see the batch's Stop event.
+            loop {
+                let ev = events.recv().await.unwrap().unwrap();
+                if ev.batch_id == batch_id && matches!(ev.event, WireTurnEvent::Stop(_)) {
+                    break;
+                }
+            }
+        }
+
+        // Yield to let fan_out finalise any trailing removals before we peek.
+        tokio::task::yield_now().await;
+
+        assert!(
+            batch_map.is_empty(),
+            "batch_to_agent must be empty after all batches complete; has {} entries",
+            batch_map.len()
+        );
+    }
+
+    /// `BatchGuard` removes the entry when a spawned task exits early, even
+    /// without emitting a `Stop` event. This tests the guard directly rather
+    /// than through the full send path: spawn a minimal task that inserts an
+    /// entry, holds a guard, then returns early. The entry must be gone.
+    #[tokio::test]
+    async fn batch_to_agent_removes_entry_when_task_exits_early() {
+        use dashmap::DashMap;
+        use std::sync::Arc;
+
+        let batch_to_agent: Arc<DashMap<BatchId, AgentId>> = Arc::new(DashMap::new());
+        let batch_id: BatchId = "early-exit-batch".into();
+        let agent_id: AgentId = "test-agent".into();
+
+        // Simulate the actor inserting the entry before spawning the task.
+        batch_to_agent.insert(batch_id.clone(), agent_id.clone());
+        assert!(
+            batch_to_agent.contains_key(&batch_id),
+            "entry should be present after insert"
+        );
+
+        // Spawn a task that holds the guard and returns early (without emitting Stop).
+        let map_clone = batch_to_agent.clone();
+        let bid_clone = batch_id.clone();
+        tokio::spawn(async move {
+            let _guard = BatchGuard {
+                map: map_clone,
+                batch_id: bid_clone,
+            };
+            // Exit without emitting Stop — guard's Drop should clean up.
+        })
+        .await
+        .unwrap();
+
+        // Yield to ensure Drop has run and the entry is removed.
+        tokio::task::yield_now().await;
+
+        assert!(
+            !batch_to_agent.contains_key(&batch_id),
+            "BatchGuard must remove the entry on task exit; entry still present"
+        );
     }
 }

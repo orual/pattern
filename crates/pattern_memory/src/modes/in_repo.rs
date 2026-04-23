@@ -1,6 +1,6 @@
-//! Mode A storage initialization.
+//! InRepo mode storage initialization.
 //!
-//! Mode A puts block files inside the project repo at
+//! InRepo mode puts block files inside the project repo at
 //! `<project>/.pattern/shared/` and delegates history to the host VCS (git
 //! or jj). `messages.db` lives inside the project at
 //! `<project>/.pattern/transient/messages.db`, gitignored so it is never
@@ -32,7 +32,7 @@ use super::StorageMode;
 use super::error::ModeError;
 use super::gitignore;
 
-/// Initialize a Mode A mount at the given project root.
+/// Initialize a InRepo mode mount at the given project root.
 ///
 /// Creates the `.pattern/shared/` directory tree, writes a `.pattern.kdl`
 /// config, and ensures `.pattern/transient/` is in the project's `.gitignore`.
@@ -61,9 +61,9 @@ pub fn init(project_root: &Path) -> Result<StorageMode, ModeError> {
         .unwrap_or("pattern-project");
     let now = Utc::now().to_rfc3339();
 
-    // Scaffold .pattern.kdl with Mode A defaults.
+    // Scaffold .pattern.kdl with InRepo mode defaults.
     let kdl = format!(
-        r#"mount mode="A" memory-db="memory.db"
+        r#"mount mode="in-repo" memory-db="memory.db"
 
 personas {{
     default "@pattern-default"
@@ -90,7 +90,7 @@ project name="{project_name}" created-at="{now}"
     gitignore::append_if_missing(project_root, ".pattern/shared/memory.db-wal")?;
     gitignore::append_if_missing(project_root, ".pattern/shared/memory.db-shm")?;
 
-    Ok(StorageMode::A {
+    Ok(StorageMode::InRepo {
         mount_path,
         project_root: project_root.to_owned(),
     })
@@ -115,14 +115,14 @@ mod tests {
         assert!(mount_path.join(".pattern.kdl").is_file());
 
         match &mode {
-            StorageMode::A {
+            StorageMode::InRepo {
                 mount_path: mp,
                 project_root: pr,
             } => {
                 assert_eq!(mp, &mount_path);
                 assert_eq!(pr, tmp.path());
             }
-            _ => panic!("expected StorageMode::A"),
+            _ => panic!("expected StorageMode::InRepo"),
         }
     }
 
@@ -135,7 +135,7 @@ mod tests {
         let content = std::fs::read_to_string(&kdl_path).unwrap();
 
         // Verify key properties are present.
-        assert!(content.contains(r#"mode="A""#));
+        assert!(content.contains(r#"mode="in-repo""#));
         assert!(content.contains(r#"memory-db="memory.db""#));
         assert!(content.contains("jj enabled=false"));
         assert!(content.contains("project name="));
@@ -182,7 +182,7 @@ mod tests {
 
         let kdl_path = tmp.path().join(".pattern/shared/.pattern.kdl");
         let config = crate::config::load_mount_config(&kdl_path).unwrap();
-        assert_eq!(config.mount.mode, crate::config::ModeKind::A);
+        assert_eq!(config.mount.mode, crate::config::ModeKind::InRepo);
         assert_eq!(config.mount.memory_db, "memory.db");
         assert!(!config.jj.enabled);
     }

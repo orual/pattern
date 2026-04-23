@@ -2,8 +2,8 @@
 //!
 //! [`JjError`] covers all failure modes: missing binary, unsupported version,
 //! subprocess failures, output parse failures, and not-found conditions for
-//! workspaces and bookmarks. Mode A tolerates `Ok(None)` from
-//! [`super::adapter::JjAdapter::detect`]; Modes B/C surface these errors loudly
+//! workspaces and bookmarks. InRepo mode tolerates `Ok(None)` from
+//! [`super::adapter::JjAdapter::detect`]; Standalone/Sidecar modes surface these errors loudly
 //! at attach time.
 
 use miette::Diagnostic;
@@ -13,7 +13,7 @@ use thiserror::Error;
 #[non_exhaustive]
 #[derive(Debug, Error, Diagnostic)]
 pub enum JjError {
-    /// The `jj` binary was not found on PATH. Not an error in Mode A (it just
+    /// The `jj` binary was not found on PATH. Not an error in InRepo mode (it just
     /// returns `Ok(None)` from detect); surfaced as an error only when
     /// explicitly required.
     #[error("jj binary not found on PATH")]

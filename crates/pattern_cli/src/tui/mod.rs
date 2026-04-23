@@ -15,6 +15,7 @@ pub mod panel;
 pub mod scroll;
 pub mod status_bar;
 pub mod toast;
+pub mod zellij;
 
 #[cfg(test)]
 pub mod test_utils;

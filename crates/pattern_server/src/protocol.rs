@@ -156,9 +156,42 @@ pub struct RuntimeStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListAgentsRequest;
 
+/// Request payload for [`PatternProtocol::ListCommands`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListCommandsRequest;
+
+/// Metadata about a daemon-registered slash command.
+///
+/// Returned by [`PatternProtocol::ListCommands`]. The TUI merges these with
+/// its local built-in command registry to provide autocomplete for commands
+/// registered by plugins or future extensions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonCommandInfo {
+    /// Command name (without leading `/`).
+    pub name: String,
+    /// Human-readable description for autocomplete display.
+    pub description: String,
+}
+
 /// Request payload for [`PatternProtocol::GetStatus`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetStatusRequest;
+
+/// Request payload for [`PatternProtocol::GetClientCount`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetClientCountRequest;
+
+/// Request payload for [`PatternProtocol::Shutdown`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShutdownRequest;
+
+/// Response to [`PatternProtocol::Shutdown`].
+///
+/// The daemon responds before exiting so the client's `.await` can resolve
+/// cleanly. After sending, the daemon calls `std::process::exit(0)` after a
+/// brief delay to let the response flush over the wire.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShutdownResponse;
 
 /// Request payload for [`PatternProtocol::GetHistory`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -275,6 +308,13 @@ pub enum PatternProtocol {
     #[rpc(tx = oneshot::Sender<Vec<AgentInfo>>)]
     ListAgents(ListAgentsRequest),
 
+    /// List all slash commands registered with the daemon.
+    ///
+    /// The TUI calls this on session init to augment its local built-in command
+    /// registry with any commands provided by plugins or runtime extensions.
+    #[rpc(tx = oneshot::Sender<Vec<DaemonCommandInfo>>)]
+    ListCommands(ListCommandsRequest),
+
     /// Get a health snapshot of the daemon runtime.
     #[rpc(tx = oneshot::Sender<RuntimeStatus>)]
     GetStatus(GetStatusRequest),
@@ -297,12 +337,55 @@ pub enum PatternProtocol {
     /// [`SessionInfo`] with the resolved agent identity and available agents.
     #[rpc(tx = oneshot::Sender<SessionInfo>)]
     InitSession(InitSessionRequest),
+
+    /// Return the number of currently connected clients.
+    ///
+    /// Used by `--stop-daemon-on-exit` (AC6.7): after the TUI exits, the
+    /// client calls this and shuts down the daemon if the count is zero,
+    /// ensuring no stale daemon state persists between development runs.
+    #[rpc(tx = oneshot::Sender<usize>)]
+    GetClientCount(GetClientCountRequest),
+
+    /// Request the daemon to shut down cleanly.
+    ///
+    /// The daemon responds with [`ShutdownResponse`] before exiting so the
+    /// client's `.await` resolves. A brief `tokio::time::sleep` delay follows
+    /// the response to allow the reply to flush, then `std::process::exit(0)`
+    /// terminates the process.
+    #[rpc(tx = oneshot::Sender<ShutdownResponse>)]
+    Shutdown(ShutdownRequest),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use pattern_core::types::turn::StopReason;
+
+    #[test]
+    fn shutdown_request_roundtrip() {
+        // Unit struct carries no payload; the roundtrip exercises that the
+        // `Serialize` + `Deserialize` derives exist and round-trip via both
+        // backends. postcard is the wire format used by irpc at runtime, so
+        // verifying it separately from serde_json catches cases where a type
+        // encodes fine as JSON but can't be represented in postcard's subset
+        // (e.g. `serde_json::Value`, untagged enums without a discriminant).
+        let req = ShutdownRequest;
+        let json = serde_json::to_string(&req).unwrap();
+        let _decoded: ShutdownRequest = serde_json::from_str(&json).unwrap();
+
+        let bytes = postcard::to_allocvec(&req).unwrap();
+        let _decoded: ShutdownRequest = postcard::from_bytes(&bytes).unwrap();
+    }
+
+    #[test]
+    fn shutdown_response_roundtrip() {
+        let resp = ShutdownResponse;
+        let json = serde_json::to_string(&resp).unwrap();
+        let _decoded: ShutdownResponse = serde_json::from_str(&json).unwrap();
+
+        let bytes = postcard::to_allocvec(&resp).unwrap();
+        let _decoded: ShutdownResponse = postcard::from_bytes(&bytes).unwrap();
+    }
 
     #[test]
     fn agent_message_roundtrip() {

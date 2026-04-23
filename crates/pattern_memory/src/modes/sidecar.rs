@@ -1,6 +1,6 @@
-//! Mode C storage initialization.
+//! Sidecar mode storage initialization.
 //!
-//! Mode C creates a "sidecar" jj repository inside `.pattern/shared/` within
+//! Sidecar mode creates a "sidecar" jj repository inside `.pattern/shared/` within
 //! a host git project. The pattern-jj repo is self-contained: its `.jj/`
 //! directory lives at `.pattern/shared/.jj/` and only tracks files within
 //! `.pattern/shared/`. Host git tracks the pattern files but NOT `.jj/`
@@ -42,14 +42,14 @@ use super::error::ModeError;
 use super::gitignore;
 use crate::jj::JjAdapter;
 
-/// Initialize a Mode C mount at the given project root.
+/// Initialize a Sidecar mode mount at the given project root.
 ///
 /// Creates the `.pattern/shared/` directory tree, writes a `.pattern.kdl`
-/// config with `mode="C"` and `jj enabled=true`, initializes a jj git
+/// config with `mode="sidecar"` and `jj enabled=true`, initializes a jj git
 /// repository inside `.pattern/shared/`, and appends `.pattern/shared/.jj/`
 /// to the project root's `.gitignore`.
 ///
-/// `messages.db` placement follows Mode A's convention: it lives inside the
+/// `messages.db` placement follows InRepo mode's convention: it lives inside the
 /// project repo at `<project>/.pattern/transient/messages.db`, gitignored so
 /// that ephemeral conversation data is never committed.
 ///
@@ -75,9 +75,9 @@ pub fn init(project_root: &Path, jj_adapter: &JjAdapter) -> Result<StorageMode, 
         .unwrap_or("pattern-project");
     let now = Utc::now().to_rfc3339();
 
-    // Scaffold .pattern.kdl with Mode C defaults.
+    // Scaffold .pattern.kdl with Sidecar mode defaults.
     let kdl = format!(
-        r#"mount mode="C" memory-db="memory.db"
+        r#"mount mode="sidecar" memory-db="memory.db"
 
 personas {{
     default "@pattern-default"
@@ -123,7 +123,7 @@ project name="{project_name}" created-at="{now}"
     gitignore::append_if_missing(&mount_path, "memory.db-wal")?;
     gitignore::append_if_missing(&mount_path, "memory.db-shm")?;
 
-    Ok(StorageMode::C { mount_path })
+    Ok(StorageMode::Sidecar { mount_path })
 }
 
 #[cfg(test)]
@@ -133,13 +133,13 @@ mod tests {
     use super::*;
     use crate::jj::JjAdapter;
 
-    /// Mode C init requires a real `jj` binary on PATH. These tests are
+    /// Sidecar mode init requires a real `jj` binary on PATH. These tests are
     /// skipped if `jj` is not available.
     fn skip_if_no_jj() -> Option<JjAdapter> {
         match JjAdapter::detect() {
             Ok(Some(adapter)) => Some(adapter),
             _ => {
-                eprintln!("skipping Mode C test: jj not available");
+                eprintln!("skipping Sidecar mode test: jj not available");
                 None
             }
         }
@@ -164,10 +164,10 @@ mod tests {
         assert!(mount_path.join(".jj").is_dir());
 
         match &mode {
-            StorageMode::C { mount_path: mp } => {
+            StorageMode::Sidecar { mount_path: mp } => {
                 assert_eq!(mp, &mount_path);
             }
-            _ => panic!("expected StorageMode::C"),
+            _ => panic!("expected StorageMode::Sidecar"),
         }
     }
 
@@ -182,7 +182,7 @@ mod tests {
 
         let kdl_path = tmp.path().join(".pattern/shared/.pattern.kdl");
         let config = crate::config::load_mount_config(&kdl_path).unwrap();
-        assert_eq!(config.mount.mode, crate::config::ModeKind::C);
+        assert_eq!(config.mount.mode, crate::config::ModeKind::Sidecar);
         assert!(config.jj.enabled);
         assert_eq!(config.mount.memory_db, "memory.db");
     }

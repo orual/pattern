@@ -2,7 +2,7 @@
 //!
 //! Covers v3-memory-rework.AC8.3 and AC8.4:
 //! - AC8.3: `quiesce()` drains all sync_workers, calls wal_checkpoint, and fsyncs emitted files.
-//! - AC8.4: In Mode A (no jj adapter), `quiesce()` still runs and produces a canonical
+//! - AC8.4: In InRepo mode (no jj adapter), `quiesce()` still runs and produces a canonical
 //!   `memory.db` for the host VCS to commit.
 
 use std::sync::Arc;
@@ -37,13 +37,13 @@ fn seed_agent(db: &pattern_db::ConstellationDb, agent_id: &str) {
     pattern_db::queries::create_agent(&db.get().unwrap(), &agent).unwrap();
 }
 
-/// AC8.4: Mode A — quiesce without any subscribers or emitted files.
+/// AC8.4: InRepo mode — quiesce without any subscribers or emitted files.
 ///
 /// The fundamental invariant: `quiesce` must succeed even when there are no
-/// subscribers and no emitted file paths. This is the common Mode A case where
+/// subscribers and no emitted file paths. This is the common InRepo mode case where
 /// the memory cache is used without a mount path.
 #[test]
-fn quiesce_mode_a_no_subscribers_no_files() {
+fn quiesce_in_repo_no_subscribers_no_files() {
     let db = test_db();
     let cache = MemoryCache::new(db);
 

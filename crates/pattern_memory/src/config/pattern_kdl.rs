@@ -116,18 +116,20 @@ pub struct MountSection {
 
 /// Storage mode identifier parsed from the `mode` property of the `mount` node.
 ///
-/// The KDL value must be the uppercase letter `"A"`, `"B"`, or `"C"`.
-/// `DecodeScalar` is implemented manually rather than derived so that the
-/// canonical form stays uppercase (the `DecodeScalar` derive would lower-case
-/// the variants via kebab-case conversion).
+/// The canonical KDL values are `"in-repo"`, `"standalone"`, and `"sidecar"`.
+/// The legacy uppercase letters `"A"`, `"B"`, and `"C"` are still accepted for
+/// backward compatibility with older `.pattern.kdl` files — they map onto the
+/// new names without warning. `DecodeScalar` is implemented manually rather
+/// than derived so the canonical form stays stable against kebab-case
+/// conversion and we can recognise the legacy aliases explicitly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ModeKind {
-    /// Mode A: in-repo storage; host VCS owns history.
-    A,
-    /// Mode B: separate Pattern-owned jj repository.
-    B,
-    /// Mode C: sidecar jj alongside host git (experimental).
-    C,
+    /// In-repo storage; host VCS owns history. (Legacy alias: `"A"`.)
+    InRepo,
+    /// Separate Pattern-owned jj repository. (Legacy alias: `"B"`.)
+    Standalone,
+    /// Sidecar jj alongside host git. (Legacy alias: `"C"`.)
+    Sidecar,
 }
 
 impl<S: knus::traits::ErrorSpan> knus::DecodeScalar<S> for ModeKind {
@@ -152,22 +154,29 @@ impl<S: knus::traits::ErrorSpan> knus::DecodeScalar<S> for ModeKind {
     ) -> Result<ModeKind, knus::errors::DecodeError<S>> {
         match &**val {
             knus::ast::Literal::String(s) => match s.as_ref() {
-                "A" => Ok(ModeKind::A),
-                "B" => Ok(ModeKind::B),
-                "C" => Ok(ModeKind::C),
+                // Canonical names.
+                "in-repo" => Ok(ModeKind::InRepo),
+                "standalone" => Ok(ModeKind::Standalone),
+                "sidecar" => Ok(ModeKind::Sidecar),
+                // Legacy single-letter aliases from pre-rename `.pattern.kdl`
+                // files. Kept indefinitely — cheap to support, protects users
+                // from a lossy upgrade.
+                "A" => Ok(ModeKind::InRepo),
+                "B" => Ok(ModeKind::Standalone),
+                "C" => Ok(ModeKind::Sidecar),
                 _ => {
                     // Emit the scalar-kind error to get a good diagnostic, then
                     // return a fallback. knus requires raw_decode to return a
                     // valid value even on error because knus collects errors
                     // separately and surfaces them all at the end rather than
-                    // short-circuiting. We fall back to Mode B (not A) because
-                    // Mode B keeps all data inside ~/.pattern/ and never
-                    // pollutes a project directory.
+                    // short-circuiting. We fall back to Standalone (not InRepo)
+                    // because Standalone keeps all data inside ~/.pattern/ and
+                    // never pollutes a project directory.
                     ctx.emit_error(knus::errors::DecodeError::scalar_kind(
                         knus::decode::Kind::String,
                         val,
                     ));
-                    Ok(ModeKind::B)
+                    Ok(ModeKind::Standalone)
                 }
             },
             _ => {
@@ -175,10 +184,10 @@ impl<S: knus::traits::ErrorSpan> knus::DecodeScalar<S> for ModeKind {
                     knus::decode::Kind::String,
                     val,
                 ));
-                // Same fallback rationale as above: Mode B is safer than A on
-                // error because it stays within ~/.pattern/ and cannot
-                // accidentally pollute a project directory.
-                Ok(ModeKind::B)
+                // Same fallback rationale as above: Standalone is safer than
+                // InRepo on error because it stays within ~/.pattern/ and
+                // cannot accidentally pollute a project directory.
+                Ok(ModeKind::Standalone)
             }
         }
     }
@@ -291,7 +300,7 @@ impl Default for JjSection {
 /// KDL: `project name="my-project" created-at="2026-04-19T12:00:00Z"`
 #[derive(Debug, Clone, Decode, Serialize)]
 pub struct ProjectSection {
-    /// Human-readable project name used for path construction in Mode B.
+    /// Human-readable project name used for path construction in Standalone mode.
     ///
     /// KDL property: `name`
     #[knus(property)]
@@ -475,8 +484,8 @@ pub fn load_mount_config(path: &Path) -> Result<MountConfig, ConfigError> {
 /// Enforce cross-field constraints that KDL syntax alone cannot express.
 ///
 /// Rules validated here:
-/// - Mode B requires `jj enabled=true` (Pattern owns VCS history).
-/// - Mode C requires `jj enabled=true` (sidecar jj must be active).
+/// - Standalone mode requires `jj enabled=true` (Pattern owns VCS history).
+/// - Sidecar mode requires `jj enabled=true` (sidecar jj must be active).
 /// - `isolate-from-persona policy` must be one of `"none"`, `"core-only"`,
 ///   or `"full"`.
 /// - `backup.snapshot-interval`, when present, must be a recognised duration
@@ -484,20 +493,20 @@ pub fn load_mount_config(path: &Path) -> Result<MountConfig, ConfigError> {
 ///   surfaces bad config immediately rather than silently falling back to a
 ///   1-hour default at attach time.
 ///
-/// Path-level constraints (e.g. Mode A requiring a hashable project root)
+/// Path-level constraints (e.g. InRepo mode requiring a hashable project root)
 /// are deferred to attach time, since parse time does not know the project
 /// root path.
 fn validate_config(config: &MountConfig, path: &Path) -> Result<(), ConfigError> {
     match config.mount.mode {
-        ModeKind::B | ModeKind::C if !config.jj.enabled => {
+        ModeKind::Standalone | ModeKind::Sidecar if !config.jj.enabled => {
             return Err(ConfigError::Validation {
                 path: path.to_owned(),
                 reason: format!(
-                    "mode {} requires `jj enabled=true` but `jj.enabled` is false",
+                    "mode `{}` requires `jj enabled=true` but `jj.enabled` is false",
                     match config.mount.mode {
-                        ModeKind::B => "B",
-                        ModeKind::C => "C",
-                        ModeKind::A => unreachable!(),
+                        ModeKind::Standalone => "standalone",
+                        ModeKind::Sidecar => "sidecar",
+                        ModeKind::InRepo => unreachable!(),
                     }
                 ),
             });

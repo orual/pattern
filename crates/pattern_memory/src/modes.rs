@@ -8,16 +8,16 @@
 //! # Submodules
 //!
 //! - [`error`] — [`ModeError`](error::ModeError) type.
-//! - [`mode_a`] — Mode A initialization (in-repo, host VCS owns history).
-//! - [`mode_b`] — Mode B initialization (separate Pattern-owned jj repo).
-//! - [`mode_c`] — Mode C initialization (sidecar jj inside host git project).
+//! - [`in_repo`] — InRepo initialization (host VCS owns history).
+//! - [`standalone`] — Standalone initialization (Pattern-owned jj repo).
+//! - [`sidecar`] — Sidecar initialization (jj alongside host git).
 //! - [`gitignore`] — Idempotent `.gitignore` append helper.
 
 pub mod error;
 pub mod gitignore;
-pub mod mode_a;
-pub mod mode_b;
-pub mod mode_c;
+pub mod in_repo;
+pub mod sidecar;
+pub mod standalone;
 
 use std::path::{Path, PathBuf};
 
@@ -28,29 +28,29 @@ use std::path::{Path, PathBuf};
 ///
 /// # Variants
 ///
-/// - **Mode A** — in-repo storage; the user's existing host VCS (git or jj)
+/// - **InRepo** — in-repo storage; the user's existing host VCS (git or jj)
 ///   owns history. Pattern writes files into a subdirectory of the host repo
 ///   and never invokes `jj` itself.
 ///
-/// - **Mode B** — separate directory (e.g. `~/.pattern/projects/<id>/`) with
+/// - **Standalone** — separate directory (e.g. `~/.pattern/projects/<id>/`) with
 ///   a dedicated Pattern-owned jj repo. Pattern runs `jj commit` for history.
 ///   Requires a working `jj` installation (checked by [`JjAdapter::detect`]).
 ///
-/// - **Mode C** — sidecar; Pattern's `.jj/` lives alongside the host `.git/`
-///   in the same working-copy directory. Gated on Phase 6 validation spike.
-///   Not yet enabled for production use.
+/// - **Sidecar** — Pattern's `.jj/` lives alongside the host `.git/` in the
+///   same working-copy directory. Validated by Phase 6 spike; uses
+///   `--no-colocate` so the jj-internal git repo stays at `.jj/repo/`.
 ///
 /// [`JjAdapter::detect`]: crate::jj::JjAdapter::detect
 ///
 /// # Phase status
 ///
-/// Phase 5 (this file) introduces the enum shape. Phase 6 adds the
-/// per-mode attach/detach logic and reads the active mode from `.pattern.kdl`.
+/// Phase 5 introduced the enum shape. Phase 6 added the per-mode
+/// attach/detach logic and reads the active mode from `.pattern.kdl`.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum StorageMode {
     /// In-repo storage; host VCS owns history. Pattern does not run `jj`.
-    A {
+    InRepo {
         /// Root of the mount — where Pattern writes canonical memory files
         /// (`<project>/.pattern/shared/`).
         mount_path: PathBuf,
@@ -59,14 +59,14 @@ pub enum StorageMode {
         project_root: PathBuf,
     },
     /// Separate Pattern-owned jj repository. Pattern runs `jj commit`.
-    B {
+    Standalone {
         /// Root of the mount — the dedicated pattern directory.
         mount_path: PathBuf,
         /// Stable identifier for this project's jj repository.
         project_id: String,
     },
-    /// Sidecar — pattern jj lives alongside host git. Phase 6 validation spike.
-    C {
+    /// Sidecar — pattern jj lives alongside host git.
+    Sidecar {
         /// Root of the mount — shares the host working-copy directory.
         mount_path: PathBuf,
     },
@@ -76,21 +76,24 @@ impl StorageMode {
     /// The root directory where Pattern writes canonical memory files.
     pub fn mount_path(&self) -> &Path {
         match self {
-            StorageMode::A { mount_path, .. } => mount_path,
-            StorageMode::B { mount_path, .. } => mount_path,
-            StorageMode::C { mount_path } => mount_path,
+            StorageMode::InRepo { mount_path, .. } => mount_path,
+            StorageMode::Standalone { mount_path, .. } => mount_path,
+            StorageMode::Sidecar { mount_path } => mount_path,
         }
     }
 
     /// Whether this mode requires a `jj` adapter at attach time.
     ///
-    /// Mode A works without `jj` (host VCS owns commits). Modes B and C
-    /// require a supported `jj` installation — [`JjAdapter::detect`] must
-    /// return `Ok(Some(_))` or attachment will fail with a typed error.
+    /// `InRepo` works without `jj` (host VCS owns commits). `Standalone` and
+    /// `Sidecar` require a supported `jj` installation — [`JjAdapter::detect`]
+    /// must return `Ok(Some(_))` or attachment will fail with a typed error.
     ///
     /// [`JjAdapter::detect`]: crate::jj::JjAdapter::detect
     pub fn requires_jj(&self) -> bool {
-        matches!(self, StorageMode::B { .. } | StorageMode::C { .. })
+        matches!(
+            self,
+            StorageMode::Standalone { .. } | StorageMode::Sidecar { .. }
+        )
     }
 }
 
@@ -99,8 +102,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mode_a_does_not_require_jj() {
-        let mode = StorageMode::A {
+    fn in_repo_does_not_require_jj() {
+        let mode = StorageMode::InRepo {
             mount_path: PathBuf::from("/tmp/test"),
             project_root: PathBuf::from("/tmp"),
         };
@@ -108,8 +111,8 @@ mod tests {
     }
 
     #[test]
-    fn mode_b_requires_jj() {
-        let mode = StorageMode::B {
+    fn standalone_requires_jj() {
+        let mode = StorageMode::Standalone {
             mount_path: PathBuf::from("/tmp/test"),
             project_id: "proj-123".into(),
         };
@@ -117,8 +120,8 @@ mod tests {
     }
 
     #[test]
-    fn mode_c_requires_jj() {
-        let mode = StorageMode::C {
+    fn sidecar_requires_jj() {
+        let mode = StorageMode::Sidecar {
             mount_path: PathBuf::from("/tmp/test"),
         };
         assert!(mode.requires_jj());
@@ -127,21 +130,21 @@ mod tests {
     #[test]
     fn mount_path_round_trips() {
         let path = PathBuf::from("/some/mount");
-        let mode_a = StorageMode::A {
+        let in_repo = StorageMode::InRepo {
             mount_path: path.clone(),
             project_root: PathBuf::from("/some"),
         };
-        assert_eq!(mode_a.mount_path(), path.as_path());
+        assert_eq!(in_repo.mount_path(), path.as_path());
 
-        let mode_b = StorageMode::B {
+        let standalone = StorageMode::Standalone {
             mount_path: path.clone(),
             project_id: "p".into(),
         };
-        assert_eq!(mode_b.mount_path(), path.as_path());
+        assert_eq!(standalone.mount_path(), path.as_path());
 
-        let mode_c = StorageMode::C {
+        let sidecar = StorageMode::Sidecar {
             mount_path: path.clone(),
         };
-        assert_eq!(mode_c.mount_path(), path.as_path());
+        assert_eq!(sidecar.mount_path(), path.as_path());
     }
 }

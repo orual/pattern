@@ -212,6 +212,12 @@ impl CancelState {
     pub fn is_cancelled(&self) -> bool {
         self.cancellation.load(Ordering::SeqCst)
     }
+
+    /// Request a soft cancel. The running step will observe this at the next
+    /// effect handler boundary and return a cancelled sentinel.
+    pub fn request_cancel(&self) {
+        self.cancellation.store(true, Ordering::SeqCst);
+    }
 }
 
 /// Spawn the watchdog task. Returns a handle that the session drops

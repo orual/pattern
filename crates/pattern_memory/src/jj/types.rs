@@ -35,7 +35,7 @@ pub struct JjWorkspaceTarget {
 /// A workspace entry from `jj workspace list -T 'json(self) ++ "\n"'`.
 ///
 /// Each workspace has a name and a target commit. Pattern uses this to
-/// enumerate workspaces when managing multi-workspace Mode B/C layouts.
+/// enumerate workspaces when managing multi-workspace Standalone/Sidecar layouts.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct JjWorkspace {
     /// The workspace name (e.g. `"default"`).

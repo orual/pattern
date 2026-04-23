@@ -3,7 +3,7 @@ source: crates/pattern_memory/tests/config.rs
 expression: config
 ---
 mount:
-  mode: A
+  mode: InRepo
   memory_db: memory.db
 personas:
   entries:

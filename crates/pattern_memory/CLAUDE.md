@@ -25,9 +25,10 @@ concurrent-workspace-add hazard documented in jj-vcs/jj#9314. Version range
 is `MIN_SUPPORTED_VERSION` (0.38.0) to `MAX_TESTED_VERSION` (0.40.0);
 `detect()` refuses older versions loudly.
 
-**Why CLI, not jj-lib:** on-disk format drift risk in Modes A+C is worse than
-template fragility. See `docs/implementation-plans/2026-04-19-v3-memory-rework/phase_05.md`
-for the full decision record.
+**Why CLI, not jj-lib:** on-disk format drift risk in InRepo and Sidecar modes
+is worse than template fragility. See
+`docs/implementation-plans/2026-04-19-v3-memory-rework/phase_05.md` for the full
+decision record.
 
 **Template shape (jj 0.40.0):** all commands use `json(self) ++ "\n"` which
 outputs the full self object as NDJSON. Serde deserialization is forgiving
@@ -44,13 +45,13 @@ outputs the full self object as NDJSON. Serde deserialization is forgiving
 - Forgiving serde parse (unknown fields tolerated; missing fields flagged).
 - `--color=never` universally applied via `JjAdapter::cmd()`.
 - `init_repo()` uses `--no-colocate` so the backing git repo stays inside
-  `.jj/repo/` (no top-level `.git/` created). Required for Mode C to avoid
+  `.jj/repo/` (no top-level `.git/` created). Required for Sidecar mode to avoid
   host git treating the mount as a nested repository.
 
 **`JjAdapter::detect()` return values:**
 
 - `Ok(Some(_))` — supported jj found.
-- `Ok(None)` — jj not on PATH; Mode A continues without it.
+- `Ok(None)` — jj not on PATH; InRepo mode continues without it.
 - `Err(UnsupportedVersion)` — jj found but too old.
 
 **Entry point:** `pattern_memory::jj::JjAdapter`
@@ -88,24 +89,26 @@ workers genuinely need to be killed.
 **Entry point:** `pattern_memory::quiesce::quiesce(&cache, &paths)`
 
 **When to call:**
-- Mode A: caller invokes `quiesce` before the host VCS commit.
-- Modes B/C: `JjAdapter::commit` invokes `quiesce` as its first step.
+- InRepo mode: caller invokes `quiesce` before the host VCS commit.
+- Standalone / Sidecar modes: `JjAdapter::commit` invokes `quiesce` as its first step.
 
 ## storage modes (`src/modes.rs`, `src/modes/`)
 
 `StorageMode` enum describing how Pattern manages VCS history for a mount.
 
-- `StorageMode::A { mount_path, project_root }` — in-repo; host VCS owns history. No jj.
-- `StorageMode::B { mount_path, project_id }` — separate Pattern-owned jj repo.
-- `StorageMode::C { mount_path }` — sidecar jj alongside host git. Validated by Phase 6 spike (2026-04-20, 38 ops, PASS).
+- `StorageMode::InRepo { mount_path, project_root }` — in-repo; host VCS owns history. No jj.
+- `StorageMode::Standalone { mount_path, project_id }` — separate Pattern-owned jj repo.
+- `StorageMode::Sidecar { mount_path }` — sidecar jj alongside host git. Validated by Phase 6 spike (2026-04-20, 38 ops, PASS).
 
-Key method: `requires_jj()` — returns `true` for B and C; `false` for A.
+Key method: `requires_jj()` — returns `true` for `Standalone` and `Sidecar`; `false` for `InRepo`.
+
+`.pattern.kdl` config accepts both the canonical names (`"in-repo"`, `"standalone"`, `"sidecar"`) and the legacy single-letter aliases (`"A"`, `"B"`, `"C"`) for backward compatibility.
 
 Submodules:
 
-- `modes::mode_a` — Mode A init (`init(project_root)` creates `.pattern/shared/` layout + `.pattern.kdl` + `.gitignore` entry).
-- `modes::mode_b` — Mode B init (`init(project_id, &jj_adapter)` creates `~/.pattern/projects/<id>/shared/` + jj repo).
-- `modes::mode_c` — Mode C init (`init(project_root, &jj_adapter)` creates `.pattern/shared/` layout + jj repo + `.gitignore` entries). Sidecar jj inside host git project; validated by Phase 6 spike.
+- `modes::in_repo` — InRepo mode init (`init(project_root)` creates `.pattern/shared/` layout + `.pattern.kdl` + `.gitignore` entry).
+- `modes::standalone` — Standalone mode init (`init(project_id, &jj_adapter)` creates `~/.pattern/projects/<id>/shared/` + jj repo).
+- `modes::sidecar` — Sidecar mode init (`init(project_root, &jj_adapter)` creates `.pattern/shared/` layout + jj repo + `.gitignore` entries). Sidecar jj inside host git project; validated by Phase 6 spike.
 - `modes::gitignore` — idempotent `.gitignore` append helper.
 - `modes::error` — `ModeError` type.
 
@@ -244,22 +247,25 @@ completed 2026-04-20.
 Phase 5 subcomponent B (`StorageMode` enum, `quiesce()`, CI canary):
 completed 2026-04-20.
 
-Phase 6 subcomponent B (Mode A+B init, MountedStore attach/detach, CLI
-subcommands): completed 2026-04-20.
+Phase 6 subcomponent B (InRepo + Standalone init, MountedStore attach/detach,
+CLI subcommands): completed 2026-04-20.
 
-Phase 6 task 7 (Mode C init, attach, CLI `--mode c`, validation spike):
+Phase 6 task 7 (Sidecar init, attach, CLI `--mode sidecar`, validation spike):
 completed 2026-04-20. See `docs/notes/2026-04-20-mode-c-spike.md` for
 spike results. Spike expanded 2026-04-20 to 38 ops including attach/detach
 cycles, MemoryStore writes, and external .md edits.
 
+Storage modes renamed 2026-04-23: `Mode A/B/C` → `InRepo/Standalone/Sidecar`.
+The `ModeKind` KDL parser keeps the legacy single-letter strings as aliases.
+
 Phase 6 code review fixes (2026-04-20):
 - `attach()` now spawns `ReembedQueue` when tokio runtime is available.
 - `MountedStore.reembed_queue` field stores the queue handle.
-- Mode B tests use `PatternPaths::with_base(tempdir)` (no unsafe env var, no real `~/.pattern/` writes).
+- Standalone mode tests use `PatternPaths::with_base(tempdir)` (no unsafe env var, no real `~/.pattern/` writes).
 - `PatternPaths` struct replaced free path functions; `default_paths()` for production, `with_base()` for tests.
 - `attach_with_paths()` accepts injectable `PatternPaths` for test isolation.
 - `persist()` uses version-vector comparison instead of dirty flag — prevents silent data loss.
-- `ModeKind` parse error falls back to Mode B (safer than A — stays in ~/.pattern/).
+- `ModeKind` parse error falls back to `Standalone` (safer than `InRepo` — stays in `~/.pattern/` and cannot accidentally pollute a project directory).
 - `IsolateSection.policy` validated as one of "none"/"core-only"/"full".
 - CLI integration tests in `crates/pattern_cli/tests/cli_mount.rs`.
 

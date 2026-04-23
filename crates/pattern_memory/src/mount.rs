@@ -169,14 +169,14 @@ mod tests {
     use super::*;
 
     /// Create a minimal mount structure in a tempdir for testing.
-    fn setup_mode_a_mount(tmp: &Path) {
-        crate::modes::mode_a::init(tmp).expect("Mode A init should succeed");
+    fn setup_in_repo_mount(tmp: &Path) {
+        crate::modes::in_repo::init(tmp).expect("InRepo mode init should succeed");
     }
 
     #[test]
     fn find_mount_at_project_root() {
         let tmp = TempDir::new().unwrap();
-        setup_mode_a_mount(tmp.path());
+        setup_in_repo_mount(tmp.path());
 
         let found = find_mount(tmp.path()).unwrap();
         assert_eq!(found, tmp.path().join(".pattern").join("shared"));
@@ -185,7 +185,7 @@ mod tests {
     #[test]
     fn find_mount_from_subdirectory() {
         let tmp = TempDir::new().unwrap();
-        setup_mode_a_mount(tmp.path());
+        setup_in_repo_mount(tmp.path());
 
         let deep = tmp.path().join("src").join("lib").join("deep");
         std::fs::create_dir_all(&deep).unwrap();
@@ -205,12 +205,12 @@ mod tests {
     }
 
     #[test]
-    fn attach_mode_a_round_trip() {
+    fn attach_in_repo_round_trip() {
         let tmp = TempDir::new().unwrap();
-        setup_mode_a_mount(tmp.path());
+        setup_in_repo_mount(tmp.path());
 
         let store = attach(tmp.path()).unwrap();
-        assert!(matches!(store.mode, StorageMode::A { .. }));
+        assert!(matches!(store.mode, StorageMode::InRepo { .. }));
         assert_eq!(store.mount_path, tmp.path().join(".pattern").join("shared"));
 
         // Verify the DB is healthy.
@@ -233,7 +233,7 @@ mod tests {
     #[test]
     fn attach_detach_reattach() {
         let tmp = TempDir::new().unwrap();
-        setup_mode_a_mount(tmp.path());
+        setup_in_repo_mount(tmp.path());
 
         // First attach.
         let store = attach(tmp.path()).unwrap();

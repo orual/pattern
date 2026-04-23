@@ -12,7 +12,7 @@ use ratatui::widgets::{StatefulWidget, Widget};
 use ratatui_widgets::paragraph::{Paragraph, Wrap};
 
 use super::markdown;
-use super::model::{RenderBatch, Section, SectionKind};
+use super::model::{RenderBatch, Section, SectionKind, TOOL_BODY_INDENT};
 
 // ---------------------------------------------------------------------------
 // State
@@ -60,11 +60,14 @@ impl StatefulWidget for ConversationView {
             batch.compute_heights(area.width);
         }
 
-        // Step 2: calculate total content height.
+        // Step 2: calculate total content height. Each batch after the first
+        // is preceded by a one-line separator for visual breathing room
+        // between exchanges.
         let total_height: usize = state
             .batches
             .iter()
-            .map(|b| b.total_height() as usize)
+            .enumerate()
+            .map(|(i, b)| b.total_height() as usize + if i == 0 { 0 } else { 1 })
             .sum();
 
         // Step 3: auto-scroll to bottom if enabled.
@@ -79,16 +82,33 @@ impl StatefulWidget for ConversationView {
         let viewport_bottom = area.y + area.height;
 
         for (batch_idx, batch) in state.batches.iter().enumerate() {
+            let separator_height = if batch_idx == 0 { 0 } else { 1 };
             let batch_height = batch.total_height() as usize;
+            let block_height = separator_height + batch_height;
 
-            // Skip batches entirely above the viewport.
-            if accumulated + batch_height <= state.scroll_offset {
-                accumulated += batch_height;
+            // Skip blocks entirely above the viewport.
+            if accumulated + block_height <= state.scroll_offset {
+                accumulated += block_height;
                 continue;
             }
 
-            // How many lines of this batch are above the viewport?
-            let skip_lines = state.scroll_offset.saturating_sub(accumulated);
+            // How many lines of this (separator + batch) block are above the
+            // viewport?
+            let mut skip_lines = state.scroll_offset.saturating_sub(accumulated);
+
+            // Render the inter-batch separator as a blank line (if applicable
+            // and visible).
+            if separator_height > 0 {
+                if skip_lines > 0 {
+                    skip_lines -= 1;
+                } else if current_y < viewport_bottom {
+                    current_y += 1;
+                }
+            }
+
+            if current_y >= viewport_bottom {
+                break;
+            }
 
             // Step 5: render this batch, collecting click targets for collapsed sections.
             current_y = render_batch(
@@ -102,7 +122,7 @@ impl StatefulWidget for ConversationView {
                 &mut state.click_targets,
             );
 
-            accumulated += batch_height;
+            accumulated += block_height;
 
             // Stop when below viewport.
             if current_y >= viewport_bottom {
@@ -161,6 +181,28 @@ fn render_batch(
         }
     }
 
+    // Intra-batch gap: a blank line between the user message and the agent's
+    // response, for visual breathing room within a batch.
+    if batch.user_message.is_some() && (batch.agent_name.is_some() || !batch.sections.is_empty()) {
+        if skip_lines > 0 {
+            skip_lines -= 1;
+        } else if current_y < viewport_bottom {
+            current_y += 1;
+        }
+    }
+
+    // The agent label is prepended inline to the first visible section. We
+    // build the span once and pass it via `section_prefix`; after the first
+    // section consumes it, subsequent sections render without a prefix.
+    let mut section_prefix: Option<Span<'static>> = batch.agent_name.as_ref().map(|name| {
+        Span::styled(
+            format!("[{name}] "),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+    });
+
     // Render each section.
     for (section_idx, section) in batch.sections.iter().enumerate() {
         if current_y >= viewport_bottom {
@@ -186,6 +228,13 @@ fn render_batch(
             click_targets.push((batch_idx, section_idx, current_y));
         }
 
+        // Consume the agent prefix on the first section we actually render.
+        let prefix = if lines_to_skip_in_section == 0 {
+            section_prefix.take()
+        } else {
+            None
+        };
+
         current_y = render_section(
             section,
             area,
@@ -193,13 +242,29 @@ fn render_batch(
             current_y,
             viewport_bottom,
             lines_to_skip_in_section,
+            prefix,
         );
     }
 
     current_y
 }
 
+/// Prepend a styled prefix span to the first line of a ratatui [`Text`] in
+/// place. Used by [`render_section`] to inject the `[agent]` label inline
+/// with the first line of the first section in a batch.
+fn prepend_span_to_text(text: &mut ratatui::text::Text<'static>, span: Span<'static>) {
+    if let Some(first_line) = text.lines.first_mut() {
+        first_line.spans.insert(0, span);
+    } else {
+        text.lines.push(Line::from(vec![span]));
+    }
+}
+
 /// Render a single section into the buffer.
+///
+/// When `prefix` is `Some`, the given span is prepended to the first visible
+/// line of this section — used to inline the `[agent]` label on the first
+/// section of a batch (mirroring how `[you]` is inline with the user line).
 fn render_section(
     section: &Section,
     area: Rect,
@@ -207,13 +272,27 @@ fn render_section(
     current_y: u16,
     viewport_bottom: u16,
     skip_lines: usize,
+    prefix: Option<Span<'static>>,
 ) -> u16 {
-    if section.collapsed {
-        // Collapsed: render the one-line summary.
+    // ToolCall and ToolResult render their own styled headers (matching the
+    // expanded arrow `▾` to the collapsed `▸`) so users can see at a glance
+    // that an expanded block is a tool section rather than free text. They
+    // fall through the generic-collapsed short-circuit below.
+    let use_tool_header = matches!(
+        section.kind,
+        SectionKind::ToolCall { .. } | SectionKind::ToolResult { .. }
+    );
+
+    if section.collapsed && !use_tool_header {
+        // Collapsed (non-tool): render the one-line summary.
         if skip_lines == 0 && current_y < viewport_bottom {
             let summary = section.summary();
-            let style = Style::default().fg(Color::DarkGray);
-            let line = Line::from(vec![Span::styled(summary, style)]);
+            let summary_span = Span::styled(summary, Style::default().fg(Color::DarkGray));
+            let spans = match prefix {
+                Some(p) => vec![p, summary_span],
+                None => vec![summary_span],
+            };
+            let line = Line::from(spans);
             buf.set_line(area.x, current_y, &line, area.width);
             return current_y + 1;
         }
@@ -223,7 +302,10 @@ fn render_section(
     // Expanded rendering based on section kind.
     match &section.kind {
         SectionKind::Text(content) => {
-            let text = markdown::render_markdown(content);
+            let mut text = markdown::render_markdown(content);
+            if let Some(p) = prefix {
+                prepend_span_to_text(&mut text, p);
+            }
             let paragraph = Paragraph::new(text).wrap(Wrap { trim: true });
             render_paragraph_lines(
                 &paragraph,
@@ -236,7 +318,10 @@ fn render_section(
         }
         SectionKind::Thinking(content) => {
             let style = Style::default().fg(Color::DarkGray);
-            let text = ratatui::text::Text::styled(content.clone(), style);
+            let mut text = ratatui::text::Text::styled(content.clone(), style);
+            if let Some(p) = prefix {
+                prepend_span_to_text(&mut text, p);
+            }
             let paragraph = Paragraph::new(text).wrap(Wrap { trim: true });
             render_paragraph_lines(
                 &paragraph,
@@ -255,31 +340,38 @@ fn render_section(
             let mut y = current_y;
             let mut remaining_skip = skip_lines;
 
-            // Header line.
+            // Header line — same format for collapsed (▸) and expanded (▾),
+            // rendered in a muted DarkGray so it reads as metadata rather
+            // than content.
             if remaining_skip > 0 {
                 remaining_skip -= 1;
             } else if y < viewport_bottom {
-                let header = Line::from(vec![
-                    Span::styled(
-                        "tool: ",
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(function_name.as_str()),
-                ]);
+                let arrow = if section.collapsed { "▸" } else { "▾" };
+                let header_style = Style::default().fg(Color::DarkGray);
+                let mut spans = Vec::with_capacity(2);
+                if let Some(p) = prefix.clone() {
+                    spans.push(p);
+                }
+                spans.push(Span::styled(
+                    format!(" {arrow} tool: {function_name}"),
+                    header_style,
+                ));
+                let header = Line::from(spans);
                 buf.set_line(area.x, y, &header, area.width);
                 y += 1;
             }
 
-            // Arguments.
-            if y < viewport_bottom {
+            // Body (expanded only): arguments indented under the header via a
+            // narrower, rightward-shifted draw rect so wrapped lines stay
+            // aligned.
+            if !section.collapsed && y < viewport_bottom {
                 let style = Style::default().fg(Color::DarkGray);
                 let text = ratatui::text::Text::styled(arguments.clone(), style);
                 let paragraph = Paragraph::new(text).wrap(Wrap { trim: true });
+                let inner = indented_area(area);
                 y = render_paragraph_lines(
                     &paragraph,
-                    area,
+                    inner,
                     buf,
                     y,
                     viewport_bottom,
@@ -289,38 +381,44 @@ fn render_section(
             y
         }
         SectionKind::ToolResult {
-            success, content, ..
+            call_id,
+            success,
+            content,
         } => {
             let mut y = current_y;
             let mut remaining_skip = skip_lines;
 
-            // Header line.
+            // Header line — same format for collapsed (▸) and expanded (▾).
+            // The surrounding text is muted DarkGray; the status token (ok /
+            // error) keeps its status colour so the outcome stands out at a
+            // glance.
             if remaining_skip > 0 {
                 remaining_skip -= 1;
             } else if y < viewport_bottom {
+                let arrow = if section.collapsed { "▸" } else { "▾" };
                 let status_color = if *success { Color::Green } else { Color::Red };
-                let status_text = if *success {
-                    "result: ok"
-                } else {
-                    "result: error"
-                };
-                let header = Line::from(vec![Span::styled(
-                    status_text,
-                    Style::default()
-                        .fg(status_color)
-                        .add_modifier(Modifier::BOLD),
-                )]);
+                let status = if *success { "ok" } else { "error" };
+                let muted = Style::default().fg(Color::DarkGray);
+                let mut spans = Vec::with_capacity(5);
+                if let Some(p) = prefix.clone() {
+                    spans.push(p);
+                }
+                spans.push(Span::styled(format!(" {arrow} result ("), muted));
+                spans.push(Span::styled(status, Style::default().fg(status_color)));
+                spans.push(Span::styled(format!("): {call_id}"), muted));
+                let header = Line::from(spans);
                 buf.set_line(area.x, y, &header, area.width);
                 y += 1;
             }
 
-            // Content.
-            if y < viewport_bottom {
+            // Body (expanded only): content indented under the header.
+            if !section.collapsed && y < viewport_bottom {
                 let text = ratatui::text::Text::from(content.clone());
                 let paragraph = Paragraph::new(text).wrap(Wrap { trim: true });
+                let inner = indented_area(area);
                 y = render_paragraph_lines(
                     &paragraph,
-                    area,
+                    inner,
                     buf,
                     y,
                     viewport_bottom,
@@ -336,7 +434,10 @@ fn render_section(
                 }
                 _ => Style::default().fg(Color::Cyan),
             };
-            let t = ratatui::text::Text::styled(text.clone(), style);
+            let mut t = ratatui::text::Text::styled(text.clone(), style);
+            if let Some(p) = prefix {
+                prepend_span_to_text(&mut t, p);
+            }
             let paragraph = Paragraph::new(t).wrap(Wrap { trim: true });
             render_paragraph_lines(
                 &paragraph,
@@ -352,6 +453,19 @@ fn render_section(
 
 /// Render a paragraph's lines into the buffer, skipping `skip_lines`
 /// from the top. Returns the next Y position.
+/// Return a sub-Rect shifted right by [`TOOL_BODY_INDENT`] columns, with
+/// `width` reduced by the same amount. Used for expanded tool call/result
+/// bodies so their content sits under the header and wraps at the visual
+/// right edge. Height is left alone — callers clip using their own y-bound.
+fn indented_area(area: Rect) -> Rect {
+    Rect {
+        x: area.x.saturating_add(TOOL_BODY_INDENT),
+        y: area.y,
+        width: area.width.saturating_sub(TOOL_BODY_INDENT),
+        height: area.height,
+    }
+}
+
 fn render_paragraph_lines(
     paragraph: &Paragraph<'_>,
     area: Rect,
@@ -481,6 +595,72 @@ mod tests {
         insta::assert_snapshot!(output);
     }
 
+    /// A batch with `agent_name` renders `[name] ` inline with the first
+    /// line of the agent's first section, after the user message.
+    #[test]
+    fn agent_header_renders_after_user_line() {
+        let batch = make_text_batch().with_agent("supervisor".into());
+        let mut state = ConversationState {
+            batches: vec![batch],
+            auto_scroll: false,
+            scroll_offset: 0,
+            focused_section: None,
+            click_targets: Vec::new(),
+        };
+        let output = render_to_string(&mut state, 50, 10);
+        assert!(
+            output.contains("[supervisor]"),
+            "expected agent header in output, got:\n{output}"
+        );
+        // Ensure the agent header falls on a line after the user message.
+        let lines: Vec<&str> = output.lines().collect();
+        let user_idx = lines
+            .iter()
+            .position(|l| l.contains("[you]"))
+            .expect("user line present");
+        let agent_idx = lines
+            .iter()
+            .position(|l| l.contains("[supervisor]"))
+            .expect("agent header present");
+        assert!(
+            agent_idx > user_idx,
+            "agent header must come after user line, user={user_idx} agent={agent_idx}"
+        );
+    }
+
+    /// Two batches render with a blank separator line between them.
+    #[test]
+    fn blank_line_separates_consecutive_batches() {
+        let batch_a = RenderBatch::new("batch-a".into(), Some("first question".into()))
+            .with_agent("a".into());
+        let batch_b = RenderBatch::new("batch-b".into(), Some("second question".into()))
+            .with_agent("b".into());
+        let mut state = ConversationState {
+            batches: vec![batch_a, batch_b],
+            auto_scroll: false,
+            scroll_offset: 0,
+            focused_section: None,
+            click_targets: Vec::new(),
+        };
+        let output = render_to_string(&mut state, 50, 10);
+        let lines: Vec<&str> = output.lines().collect();
+        // Find the two user lines — the gap between them must contain a blank
+        // line (only whitespace).
+        let first_user = lines
+            .iter()
+            .position(|l| l.contains("first question"))
+            .expect("first user line");
+        let second_user = lines
+            .iter()
+            .position(|l| l.contains("second question"))
+            .expect("second user line");
+        let gap_range = first_user + 1..second_user;
+        assert!(
+            gap_range.clone().any(|i| lines[i].trim().is_empty()),
+            "expected a blank separator line between batches, got:\n{output}"
+        );
+    }
+
     #[test]
     fn thinking_collapsed_shows_summary() {
         let mut state = ConversationState {
@@ -530,7 +710,10 @@ mod tests {
         let mut state = ConversationState {
             batches: vec![batch1, batch2],
             auto_scroll: false,
-            // Offset past the first batch (user_message + text = 2 lines).
+            // Skip the first batch's user_message + intra-gap (2 lines), so
+            // the text line of batch 1 and then batch 2 are visible. Note
+            // that the text line here is single-line, so total_height of
+            // batch 1 is 3 (user + gap + text).
             scroll_offset: 2,
             focused_section: None,
             click_targets: Vec::new(),
@@ -594,13 +777,13 @@ mod tests {
         // Expand the thinking section so it contributes full height.
         batch.sections[0].collapsed = false;
 
-        // Total content: 1 user_msg + 5 thinking lines = 6 lines.
-        // scroll_offset=2 skips the user message line and "line one",
-        // so the viewport should start at "line two".
+        // Total content: 1 user_msg + 1 intra-batch gap + 5 thinking lines
+        // = 7 lines. scroll_offset=3 skips the user message line, the blank
+        // gap, and "line one", so the viewport should start at "line two".
         let mut state = ConversationState {
             batches: vec![batch],
             auto_scroll: false,
-            scroll_offset: 2,
+            scroll_offset: 3,
             focused_section: None,
             click_targets: Vec::new(),
         };

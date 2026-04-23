@@ -30,7 +30,7 @@ pub enum ConfigError {
     },
 
     /// The config parsed successfully but fails a cross-field constraint that
-    /// KDL syntax alone cannot enforce (e.g. Mode B requires `jj.enabled=true`).
+    /// KDL syntax alone cannot enforce (e.g. Standalone mode requires `jj.enabled=true`).
     #[error("invalid mount config in {path}: {reason}")]
     #[diagnostic(code(pattern_memory::config::validation))]
     Validation {

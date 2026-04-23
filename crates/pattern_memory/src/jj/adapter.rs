@@ -10,7 +10,7 @@
 //! # Detection
 //!
 //! [`JjAdapter::detect`] probes for `jj` on PATH and validates the version.
-//! It returns `Ok(None)` when jj is absent (Mode A is fine without it) and
+//! It returns `Ok(None)` when jj is absent (InRepo mode is fine without it) and
 //! `Err(JjError::UnsupportedVersion)` when jj is present but too old.
 
 use std::path::Path;
@@ -47,14 +47,14 @@ impl JjAdapter {
     ///
     /// Returns:
     /// - `Ok(Some(_))` — a supported jj was found (AC8.1).
-    /// - `Ok(None)` — jj is not on PATH; Mode A continues normally (AC8.5).
+    /// - `Ok(None)` — jj is not on PATH; InRepo mode continues normally (AC8.5).
     /// - `Err(JjError::UnsupportedVersion)` — jj found but below the minimum
     ///   supported version (AC8.6).
     /// - `Err(_)` — other probe failures (I/O errors, subprocess failures).
     pub fn detect() -> JjResult<Option<Self>> {
         let binary = match which::which("jj") {
             Ok(path) => path,
-            // Missing binary is not an error — Mode A works without jj.
+            // Missing binary is not an error — InRepo mode works without jj.
             Err(_) => return Ok(None),
         };
 
@@ -198,9 +198,9 @@ impl JjAdapter {
     ///
     /// Invokes `jj git init --no-colocate` at `path`. The `--no-colocate`
     /// flag keeps the backing git repository inside `.jj/repo/` rather than
-    /// creating a top-level `.git/` directory. This is important for Mode C
+    /// creating a top-level `.git/` directory. This is important for Sidecar mode
     /// where a top-level `.git/` would cause the host git to treat the mount
-    /// directory as a nested repository, and harmless for Mode B (which has
+    /// directory as a nested repository, and harmless for Standalone mode (which has
     /// no host VCS to conflict with).
     pub fn init_repo(&self, path: &Path) -> JjResult<()> {
         let _guard = self.mutation_lock.lock().map_err(|_| poisoned())?;

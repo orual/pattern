@@ -1,0 +1,5 @@
+---
+source: crates/pattern_cli/src/tui/status_bar.rs
+expression: output
+---
+ @supervisor │ 3 agents │ 45k ctx │ ● connected

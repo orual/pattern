@@ -1,6 +1,6 @@
-//! Mode C validation spike — interleaved jj and git operations.
+//! Sidecar mode validation spike — interleaved jj and git operations.
 //!
-//! This test creates a real git repository with a Mode C pattern mount
+//! This test creates a real git repository with a Sidecar mode pattern mount
 //! (sidecar jj inside `.pattern/shared/`), then exercises ~38 interleaved
 //! operations to verify that the two VCS tools coexist correctly.
 //!
@@ -18,7 +18,7 @@
 //!
 //! To run:
 //! ```sh
-//! cargo nextest run -p pattern-memory --test mode_c_spike --nocapture
+//! cargo nextest run -p pattern-memory --test sidecar_spike --nocapture
 //! ```
 
 use std::path::Path;
@@ -29,7 +29,7 @@ use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::BlockCreate;
 use pattern_core::types::memory_types::{BlockSchema, BlockType};
 use pattern_memory::jj::JjAdapter;
-use pattern_memory::modes::mode_c;
+use pattern_memory::modes::sidecar;
 use pattern_memory::mount::attach;
 use tempfile::TempDir;
 
@@ -97,13 +97,13 @@ fn git_init_project() -> TempDir {
 // Spike test
 // ---------------------------------------------------------------------------
 
-/// Mode C validation spike: ~38 interleaved jj + git + attach/detach + MemoryStore operations.
+/// Sidecar mode validation spike: ~38 interleaved jj + git + attach/detach + MemoryStore operations.
 ///
 /// Verifies that a sidecar jj repo inside `.pattern/shared/` coexists with
 /// the host git repo without corruption or state interference. Also exercises
 /// attach/detach cycles, MemoryStore-level writes, and external .md edits.
 #[test]
-fn mode_c_validation_spike() {
+fn sidecar_validation_spike() {
     let adapter = skip_if_no_jj!();
     if !git_available() {
         eprintln!("SKIP: git not available on PATH");
@@ -115,10 +115,10 @@ fn mode_c_validation_spike() {
     let mount_path = root.join(".pattern").join("shared");
 
     // -----------------------------------------------------------------------
-    // Setup: initialize Mode C
+    // Setup: initialize Sidecar mode
     // -----------------------------------------------------------------------
 
-    let _mode = mode_c::init(root, &adapter).expect("mode_c::init failed");
+    let _mode = sidecar::init(root, &adapter).expect("sidecar::init failed");
     assert!(
         mount_path.join(".jj").is_dir(),
         ".jj/ should exist after init"
@@ -632,7 +632,7 @@ fn mode_c_validation_spike() {
     );
 
     // Report success.
-    eprintln!("--- Mode C validation spike: PASS ---");
+    eprintln!("--- Sidecar mode validation spike: PASS ---");
     eprintln!("  total ops: 38");
     eprintln!("  jj commits: {}", final_jj_log.len());
     eprintln!("  git commits: {}", final_git_log.lines().count());

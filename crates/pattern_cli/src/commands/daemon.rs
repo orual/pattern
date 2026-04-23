@@ -75,17 +75,9 @@ pub enum DaemonSub {
         #[arg(long, default_value_t = 0)]
         port: u16,
 
-        /// Path to the project root (defaults to the current directory).
-        #[arg(long)]
-        path: Option<PathBuf>,
-
         /// Run in echo mode (no LLM, echoes messages back). Used for testing.
         #[arg(long)]
         echo: bool,
-
-        /// Path to a persona KDL file. Required unless running in echo mode.
-        #[arg(long)]
-        persona: Option<PathBuf>,
     },
     /// Stop the running daemon.
     Stop,
@@ -95,12 +87,7 @@ pub enum DaemonSub {
 
 pub fn cmd_daemon(cmd: DaemonCmd) -> MietteResult<()> {
     match cmd.sub {
-        DaemonSub::Start {
-            port,
-            path,
-            echo,
-            persona,
-        } => cmd_start(port, path, echo, persona),
+        DaemonSub::Start { port, echo } => cmd_start(port, echo),
         DaemonSub::Stop => cmd_stop(),
         DaemonSub::Status => cmd_status(),
     }
@@ -110,12 +97,7 @@ pub fn cmd_daemon(cmd: DaemonCmd) -> MietteResult<()> {
 // start
 // ---------------------------------------------------------------------------
 
-fn cmd_start(
-    port: u16,
-    path: Option<PathBuf>,
-    echo: bool,
-    persona: Option<PathBuf>,
-) -> MietteResult<()> {
+fn cmd_start(port: u16, echo: bool) -> MietteResult<()> {
     // Check for an already-running daemon.
     if let Ok(state) = DaemonState::load() {
         if state.is_process_alive() {
@@ -133,6 +115,8 @@ fn cmd_start(
     let server_bin = locate_server_binary()?;
 
     // Build the argument list for the server binary.
+    // Projects are mounted on demand via InitSession; personas are discovered
+    // lazily. No --path or --persona flags are passed.
     let mut cmd = std::process::Command::new(&server_bin);
     cmd.arg("start");
     if port != 0 {
@@ -140,12 +124,6 @@ fn cmd_start(
     }
     if echo {
         cmd.arg("--echo");
-    }
-    if let Some(persona_path) = &persona {
-        cmd.arg("--persona").arg(persona_path);
-    }
-    if let Some(project_path) = &path {
-        cmd.arg("--path").arg(project_path);
     }
 
     // Detach fully: no stdin, stdout/stderr to log file so daemon output
@@ -332,6 +310,14 @@ fn resolve_default_persona(
 
 /// Ensure the daemon is running and return its listen address.
 ///
+/// The daemon is always spawned as a detached background process that writes
+/// its logs to `~/.pattern/daemon/daemon.log`. When running in an
+/// auto-launched zellij session, the layout includes a `pattern-daemon` tab
+/// that `tail -F`s that log file, so daemon output is still visible without
+/// coupling the daemon's lifecycle to zellij's. This means exiting zellij
+/// (or reattaching to a stale session) does not kill the daemon or leave
+/// orphaned daemon tabs behind.
+///
 /// The daemon starts project-agnostic. The TUI sends an `InitSession` RPC
 /// after connecting to tell the daemon which project it is working in.
 ///
@@ -353,10 +339,13 @@ pub fn ensure_daemon_running() -> MietteResult<SocketAddr> {
     }
 
     let server_bin = locate_server_binary()?;
-    let mut cmd = std::process::Command::new(&server_bin);
+    spawn_daemon_background(&server_bin)
+}
+
+/// Spawn the daemon as a detached background process.
+fn spawn_daemon_background(server_bin: &Path) -> MietteResult<SocketAddr> {
+    let mut cmd = std::process::Command::new(server_bin);
     cmd.arg("start");
-    // The daemon starts bare — no --path or --persona needed.
-    // Projects are mounted on demand via InitSession from the TUI.
 
     // Redirect all IO to log file — daemon must not write to the TUI terminal.
     let log_path = DaemonState::state_dir().join("daemon.log");
@@ -450,9 +439,7 @@ mod tests {
             w.sub,
             DaemonSub::Start {
                 port: 0,
-                path: None,
                 echo: false,
-                persona: None,
             }
         ));
     }
@@ -472,9 +459,7 @@ mod tests {
             w.sub,
             DaemonSub::Start {
                 port: 9001,
-                path: None,
                 echo: false,
-                persona: None,
             }
         ));
     }
@@ -612,9 +597,9 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let paths = PatternPaths::with_base(home.path());
 
-        // Set up a Mode A mount structure.
+        // Set up a InRepo mode mount structure.
         let project = tempfile::tempdir().unwrap();
-        pattern_memory::modes::mode_a::init(project.path()).unwrap();
+        pattern_memory::modes::in_repo::init(project.path()).unwrap();
 
         // Create a persona in the mount.
         let mount_path = project.path().join(".pattern/shared");

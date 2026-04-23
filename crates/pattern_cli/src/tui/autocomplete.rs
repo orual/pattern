@@ -12,8 +12,6 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, List, ListItem, Widget};
 
-use super::commands::builtin_commands;
-
 // ---------------------------------------------------------------------------
 // Completion item
 // ---------------------------------------------------------------------------
@@ -27,35 +25,6 @@ pub struct CompletionItem {
     pub description: String,
     /// Fuzzy match score from nucleo (higher = better match).
     pub score: u32,
-}
-
-// ---------------------------------------------------------------------------
-// CompletionSource trait
-// ---------------------------------------------------------------------------
-
-/// Trait for pluggable completion sources.
-///
-/// Implementations provide raw candidate lists; nucleo handles the filtering
-/// and scoring.
-pub trait CompletionSource {
-    /// Return all candidates as `(value, description)` pairs.
-    fn candidates(&self) -> Vec<(String, String)>;
-}
-
-// ---------------------------------------------------------------------------
-// CommandSource
-// ---------------------------------------------------------------------------
-
-/// Completion source that returns all built-in slash commands.
-pub struct CommandSource;
-
-impl CompletionSource for CommandSource {
-    fn candidates(&self) -> Vec<(String, String)> {
-        builtin_commands()
-            .iter()
-            .map(|cmd| (cmd.name.to_string(), cmd.description.to_string()))
-            .collect()
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -113,6 +82,12 @@ pub struct AutocompleteState {
     selected: usize,
     /// The current pattern being matched against.
     pattern: String,
+}
+
+impl Default for AutocompleteState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AutocompleteState {
@@ -274,7 +249,7 @@ impl<'a> AutocompleteWidget<'a> {
             })
             .collect();
 
-        let list = List::new(list_items).style(Style::default().bg(Color::DarkGray));
+        let list = List::new(list_items).style(Style::default().bg(Color::Black));
         Widget::render(list, popup_area, buf);
     }
 }
@@ -299,7 +274,7 @@ mod tests {
             ("agents".into(), "List active agents".into()),
             ("status".into(), "Show runtime status".into()),
             ("shutdown".into(), "Stop the daemon".into()),
-            ("context".into(), "Show context/memory info".into()),
+            ("cancel".into(), "Cancel the current batch".into()),
             ("panel".into(), "Toggle side panel".into()),
         ]
     }

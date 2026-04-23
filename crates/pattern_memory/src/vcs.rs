@@ -7,7 +7,7 @@
 //! # Preference rule
 //!
 //! When both `.jj/` and `.git/` exist at the same level (a colocated jj
-//! workspace), [`HostVcs::Jj`] is returned. Pattern's Mode C relies on this
+//! workspace), [`HostVcs::Jj`] is returned. Pattern's Sidecar mode relies on this
 //! colocated layout; always preferring jj avoids accidentally treating a
 //! colocated repo as a plain git repo.
 

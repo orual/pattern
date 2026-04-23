@@ -4,7 +4,7 @@
 //! provider calls. Runs in CI.
 //!
 //! Flow:
-//!   1. Create Mode A project in a tempdir git repo.
+//!   1. Create InRepo mode project in a tempdir git repo.
 //!   2. Attach the mount.
 //!   3. Write Core text block + Map block + Log block.
 //!   4. Verify canonical files emitted (.md, .kdl, .jsonl) with expected content.
@@ -166,10 +166,10 @@ async fn smoke_e2e() {
     let project_root = tmp.path().to_owned();
     let paths = PatternPaths::with_base(tmp.path());
 
-    // --- Step 1: git init + Mode A project ---
+    // --- Step 1: git init + InRepo mode project ---
     git_init(&project_root);
-    pattern_memory::modes::mode_a::init(&project_root).expect("Mode A init");
-    git_commit(&project_root, "baseline: init Mode A project");
+    pattern_memory::modes::in_repo::init(&project_root).expect("InRepo mode init");
+    git_commit(&project_root, "baseline: init InRepo mode project");
 
     // --- Step 2: attach ---
     let mount = attach_with_paths(&project_root, &paths).expect("attach");
