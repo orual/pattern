@@ -994,24 +994,84 @@ impl MemoryCache {
                 // Update the FTS5 preview column so external edits are
                 // visible to search. The worker does this on every subscriber
                 // cycle; we mirror that here for the external-edit path.
+                //
+                // For TaskList blocks, also run `reconcile_task_list` inside the
+                // same transaction so that the `tasks` and `task_edges` sqlite
+                // indexes reflect the external edit immediately — without waiting
+                // for the subscriber worker to receive a CommitEvent (which does
+                // not fire for imported CRDT updates via `subscribe_local_update`).
                 let preview = doc.render();
                 match self.db.get() {
-                    Ok(conn) => {
+                    Ok(mut conn) => {
                         let preview_str = if preview.is_empty() {
                             None
                         } else {
                             Some(preview.as_str())
                         };
-                        if let Err(e) =
-                            pattern_db::queries::update_block_preview(&conn, block_id, preview_str)
-                        {
-                            metrics::counter!("memory.external_edit.fts_update_failed")
-                                .increment(1);
-                            tracing::error!(
-                                block_id = %block_id,
-                                error = %e,
-                                "FTS5 update failed after external edit merge"
-                            );
+
+                        if matches!(
+                            schema,
+                            pattern_core::types::memory_types::BlockSchema::TaskList { .. }
+                        ) {
+                            // TaskList: FTS + task reconcile in a single transaction
+                            // (mirrors render_cycle atomicity in the subscriber worker).
+                            match conn.transaction() {
+                                Ok(tx) => {
+                                    if let Err(e) = pattern_db::queries::update_block_preview(
+                                        &tx,
+                                        block_id,
+                                        preview_str,
+                                    ) {
+                                        metrics::counter!("memory.external_edit.fts_update_failed")
+                                            .increment(1);
+                                        tracing::error!(
+                                            block_id = %block_id, error = %e,
+                                            "FTS5 update failed in TaskList external-edit transaction; rolling back"
+                                        );
+                                        // tx drops without commit → implicit rollback.
+                                    } else if let Err(e) =
+                                        crate::subscriber::task::reconcile_task_list(
+                                            &tx, block_id, &disk_doc,
+                                        )
+                                    {
+                                        metrics::counter!("memory.external_edit.reconcile_failed")
+                                            .increment(1);
+                                        tracing::error!(
+                                            block_id = %block_id, error = %e,
+                                            "TaskList reconcile failed during external edit; transaction rolled back"
+                                        );
+                                        // tx drops without commit → both FTS and reconcile roll back.
+                                    } else if let Err(e) = tx.commit() {
+                                        metrics::counter!("memory.external_edit.reconcile_failed")
+                                            .increment(1);
+                                        tracing::error!(
+                                            block_id = %block_id, error = %e,
+                                            "TaskList external-edit transaction commit failed"
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        block_id = %block_id, error = %e,
+                                        "failed to open transaction for TaskList external-edit reconcile"
+                                    );
+                                }
+                            }
+                        } else {
+                            // Non-TaskList: standalone FTS update.
+                            if let Err(e) = pattern_db::queries::update_block_preview(
+                                &conn,
+                                block_id,
+                                preview_str,
+                            ) {
+                                metrics::counter!("memory.external_edit.fts_update_failed")
+                                    .increment(1);
+                                tracing::error!(
+                                    block_id = %block_id,
+                                    error = %e,
+                                    "FTS5 update failed after external edit merge"
+                                );
+                            }
                         }
                     }
                     Err(e) => {
