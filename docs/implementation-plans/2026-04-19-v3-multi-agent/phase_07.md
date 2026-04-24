@@ -4,7 +4,7 @@
 
 **Architecture:** delegation patterns are pure Haskell — they live in the same `crates/pattern_runtime/haskell/Pattern/` tree as the existing 14 SDK modules and get picked up by the standard include-path logic at session open. No Rust changes unless the patterns surface new capability requirements or helper gaps. The smoke test at `crates/pattern_runtime/tests/multi_agent_smoke.rs` instantiates a two-persona constellation (supervisor + specialist), routes a human message through fronting, triggers a task delegation, verifies the specialist completes the task, verifies capability enforcement refuses an unauthorised effect, and exercises a fork-and-merge cycle. All provider calls go through a scripted mock. Phase 7 is mostly integration verification — most actual Rust code landed in Phases 1-6.
 
-**Tech Stack:** Haskell (same SDK style as existing `Pattern.*` modules; no new language features), a mock `ProviderClient` (either reuse an existing mock or add one at `crates/pattern_runtime/tests/support/mock_provider.rs` — first task is to find out which).
+**Tech Stack:** Haskell (same SDK style as existing `Pattern.*` modules; no new language features), the existing `pattern_runtime::testing::MockProviderClient` at `crates/pattern_runtime/src/testing.rs:110` — scripted via `MockProviderClient::with_turns(...)`. No new provider mock.
 
 **Scope:** 7 of 7. Closes AC10.
 
@@ -94,10 +94,13 @@ roundRobin
     -> [task]                    -- ^ tasks (preserves order in result)
     -> (task -> Spawn.EphemeralConfig -> Spawn.EphemeralConfig)
        -- ^ merge task payload into the per-task ephemeral config
-    -> Eff effs [Spawn.SpawnResult]
+    -> Eff effs [Either Spawn.SpawnError Spawn.SpawnResult]
 roundRobin workers tasks attach = do
     let assignments = zip tasks (cycle workers)
-    mapM (\(t, w) -> Spawn.ephemeral (attach t w) >>= Spawn.awaitResult) assignments
+    -- Spawn all workers in parallel, then batch-await (single sync-bridge
+    -- round-trip via AwaitAll on the Rust side).
+    ids <- traverse (\(t, w) -> Spawn.ephemeral (attach t w)) assignments
+    Spawn.awaitAll ids
 ```
 
 (Signatures illustrative — Haskell imports actually in-tree may differ slightly; match existing style at `Pattern/Spawn.hs`.)
@@ -141,9 +144,12 @@ pipeline
 pipeline initialInput stages attach =
     foldM step initialInput stages
   where
+    -- Pipeline stages are sequential by design (stage N+1 depends on stage N's
+    -- output), so spawn + awaitSpawn in sequence is correct here.
     step acc (cfg, decode) = do
       let cfg' = attach acc cfg
-      result <- Spawn.ephemeral cfg' >>= Spawn.awaitResult
+      sid <- Spawn.ephemeral cfg'
+      result <- Spawn.awaitSpawn sid
       pure (decode result)
 ```
 
@@ -177,9 +183,11 @@ fanOut
     => [Spawn.EphemeralConfig]   -- ^ workers
     -> task                       -- ^ shared task
     -> (task -> Spawn.EphemeralConfig -> Spawn.EphemeralConfig)
-    -> Eff effs [Spawn.SpawnResult]
-fanOut workers task attach =
-    mapM (\w -> Spawn.ephemeral (attach task w) >>= Spawn.awaitResult) workers
+    -> Eff effs [Either Spawn.SpawnError Spawn.SpawnResult]
+fanOut workers task attach = do
+    -- Genuine parallel fan-out: spawn every worker, then awaitAll as a batch.
+    ids <- traverse (\w -> Spawn.ephemeral (attach task w)) workers
+    Spawn.awaitAll ids
 ```
 
 **Testing:**

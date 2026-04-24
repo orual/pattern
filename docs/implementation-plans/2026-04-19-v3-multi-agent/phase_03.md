@@ -474,7 +474,7 @@ Capability check on the **spawner** (not the fork): the fork itself is short-liv
 Lookup in the handler:
 
 ```rust
-SpawnReq::ForkOp(ForkOp { id, op }) => {
+SpawnReq::ForkOp { id, op } => {
     let registry = cx.user().fork_registry();
     match op {
         ForkOpKind::AwaitResult => {

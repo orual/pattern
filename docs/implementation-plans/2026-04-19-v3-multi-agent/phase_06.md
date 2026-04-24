@@ -14,7 +14,7 @@
 
 ## Codebase verification findings
 
-- ✓ `agents` table at `crates/pattern_db/migrations/memory/0001_initial.sql:9-31` has: `id, name, description, model_provider, model_name, system_prompt, config, enabled_tools, tool_rules, status, created_at, updated_at`. Missing: `config_path`, `project_attachments`. Migration `0012` adds these.
+- ✓ `agents` table at `crates/pattern_db/migrations/memory/0001_initial.sql:9-31` has: `id, name, description, model_provider, model_name, system_prompt, config, enabled_tools, tool_rules, status, created_at, updated_at`. Missing: `config_path`, `project_attachments`. Migration `0013` adds these.
 - ✓ Legacy `agent_groups` + `group_members` still in `0001_initial.sql:40-61`. `group_members.capabilities` added by migration `0008`. Active queries in `crates/pattern_db/src/queries/coordination.rs` + `queries/agent.rs`. Phase 6 migrates away and drops.
 - ✓ Legacy `coordination_tasks` at `0001_initial.sql:242-251` — **design plan note was stale; table is still present**. Phase 6 drops as part of `0015_drop_legacy_coordination.sql`.
 - ✓ `rewrite-staging/runtime_subsystems/coordination/types.rs` contains `CoordinationPattern` enum + `AgentGroup`/`GroupMember`/`DelegationRules`/`VotingRules`/`PipelineStage`/`SleeptimeTrigger`. Not in the active workspace; delete the directory (or the coordination subtree) as part of this phase.
@@ -121,7 +121,7 @@ CREATE INDEX idx_persona_group_members_persona ON persona_group_members(persona_
 **Verification:**
 `cargo nextest run -p pattern-db migrations`
 
-**Commit:** `[pattern-db] migration 0012 + 0013: extend agents, add persona relationships + groups`
+**Commit:** `[pattern-db] migration 0013 + 0014: extend agents, add persona relationships + groups`
 <!-- END_TASK_1 -->
 
 <!-- START_TASK_2 -->
@@ -167,69 +167,51 @@ Expected: final grep produces zero results (outside of migration files that keep
 <!-- START_SUBCOMPONENT_B (tasks 3-5) -->
 
 <!-- START_TASK_3 -->
-### Task 3: `ConstellationRegistry` type in `pattern_core`
+### Task 3: Extend `ConstellationRegistry` with Phase 6 methods + add group types
 
 **Verifies:** foundation for AC9.*.
 
+**Scope:** `ConstellationRegistry` trait, `PersonaRecord`, `PersonaStatus`, `RegistryScope`, `RegistryError`, `RelationshipEdge`, `EdgeDirection`, `GroupId` **already land in Phase 5 Task 1** (hoisted there so Phase 5 tests can exercise `FrontingResolver::resolve` against a registry). Phase 6 Task 3 modifies the existing file to:
+- Extend the trait with the group- and relationship-CRUD methods.
+- Add `PersonaGroup` and `RelationshipSpec` structs.
+- Extend `RegistryError` with Phase 6-specific variants (e.g., `GroupNotFound`, `DuplicateGroup`).
+
 **Files:**
-- Create: `crates/pattern_core/src/constellation.rs`
-- Modify: `crates/pattern_core/src/lib.rs` — re-export.
+- Modify: `crates/pattern_core/src/constellation.rs` — extend trait + add group types.
+- Modify: `crates/pattern_core/src/lib.rs` — re-export new group types.
 
 **Implementation:**
 
-```rust
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct PersonaRecord {
-    pub id: PersonaId,
-    pub name: String,
-    pub status: PersonaStatus,
-    pub config_path: Option<PathBuf>,
-    pub project_attachments: Vec<PathBuf>,
-    pub relationships: Vec<RelationshipEdge>,
-    pub group_memberships: Vec<GroupId>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub enum PersonaStatus { Active, Draft, Inactive }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RelationshipEdge {
-    pub other: PersonaId,
-    pub kind: RelationshipKind,
-    pub direction: EdgeDirection, // Outgoing | Incoming
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub enum EdgeDirection { Outgoing, Incoming }
-```
-
-`ConstellationRegistry` trait (pattern_core holds the trait; concrete DB-backed impl lives in pattern_db):
+Extensions to the trait defined in Phase 5 Task 1:
 
 ```rust
+// Added by Phase 6 Task 3 (extensions only — the base trait + types exist from Phase 5).
 #[async_trait]
 pub trait ConstellationRegistry: Send + Sync {
-    async fn list(&self, scope: RegistryScope) -> Result<Vec<PersonaRecord>, RegistryError>;
+    // ...list, get (Phase 5)...
     async fn find(&self, project: Option<&Path>, kind: Option<RelationshipKind>) -> Result<Vec<PersonaRecord>, RegistryError>;
-    async fn get(&self, id: &PersonaId) -> Result<Option<PersonaRecord>, RegistryError>;
     async fn register(&self, record: PersonaRecord) -> Result<(), RegistryError>;
     async fn set_status(&self, id: &PersonaId, status: PersonaStatus) -> Result<(), RegistryError>;
     async fn add_relationship(&self, edge: RelationshipSpec) -> Result<(), RegistryError>;
     async fn groups(&self, scope: RegistryScope) -> Result<Vec<PersonaGroup>, RegistryError>;
     async fn create_group(&self, name: String, project_id: Option<String>) -> Result<PersonaGroup, RegistryError>;
 }
+
+// Added: PersonaGroup, RelationshipSpec structs (new in Phase 6).
+// GroupId (SmolStr alias) lands in Phase 5 alongside PersonaRecord.
 ```
 
-Pattern_core holds the trait only; pattern_db has the rusqlite-backed impl.
+Pattern_core holds the trait; pattern_db has the rusqlite-backed impl (Task 4). Phase 5's `InMemoryConstellationRegistry` test helper implements only the Phase 5-defined methods; Phase 6 extends it to cover the new methods, staying behind the same `#[cfg(any(test, feature = "test-support"))]` gate.
 
 **Testing:**
-- Unit: `PersonaRecord` serde round-trip.
-- Unit: `RelationshipEdge` direction preserved in serde.
+- Unit: `PersonaGroup` + `RelationshipSpec` serde round-trip.
+- Unit: `RegistryError::GroupNotFound` / `DuplicateGroup` produce the expected miette diagnostics.
+- (Phase 5 Task 1 tests already cover `PersonaRecord` / `RelationshipEdge` serde — do not duplicate here.)
 
 **Verification:**
-`cargo nextest run -p pattern-core constellation`
+`cargo nextest run -p pattern-core constellation::groups`
 
-**Commit:** `[pattern-core] add ConstellationRegistry trait and PersonaRecord types`
+**Commit:** `[pattern-core] extend ConstellationRegistry with groups + relationship methods`
 <!-- END_TASK_3 -->
 
 <!-- START_TASK_4 -->

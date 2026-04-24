@@ -2,7 +2,7 @@
 
 **Goal:** introduce a `FrontingSet` runtime primitive that tracks which persona(s) are "fronting" (the active interface to a human), persist it to `pattern_db` so it survives restart, dispatch incoming messages through a `RoutingTable` that can direct them to specialists by pattern, support direct `@persona-name` addressing that bypasses routing, and ensure the broker's Partner-bypass helper (Phase 4 Task 1) sees the right `MessageOrigin` at every effect-dispatch site so Partner-originated turns short-circuit the permission/policy gate while agent-originated turns still pass through it.
 
-**Architecture:** `FrontingSet` is constellation-scoped (not session-scoped) and lives on the daemon actor — one set per runtime instance, persisted in a new `fronting_set` + `routing_rules` table pair in pattern_db's memory database. Load at `DaemonServer::spawn_with_config`; save on mutation. The routing dispatcher sits in front of the `AgentRegistry` added in Phase 4 Task 4 — it resolves an incoming message to a `PersonaId` by: (1) stripping `@persona-name` prefix and sending direct if present, (2) evaluating routing rules in priority order, (3) falling back to the designated fallback persona. Co-fronting (multiple active personas) is a first-class case — unmatched messages fan out to every active persona if no fallback is specified. Human-as-caller uses the fronting persona's `SessionContext` wholesale; the broker's `request()` method checks `sender.is_human()` and returns a `PermissionGrant::synthesized_human()` without broadcast.
+**Architecture:** `FrontingSet` is constellation-scoped (not session-scoped) and lives on the daemon actor — one set per runtime instance, persisted in a new `fronting_set` + `routing_rules` table pair in pattern_db's memory database. Load at `DaemonServer::spawn_with_config`; save on mutation. The routing dispatcher sits in front of the `AgentRegistry` added in Phase 4 Task 4 — it resolves an incoming message to a `PersonaId` by: (1) stripping `@persona-name` prefix and sending direct if present, (2) evaluating routing rules in priority order, (3) falling back to the designated fallback persona. Co-fronting (multiple active personas) is a first-class case — unmatched messages fan out to every active persona if no fallback is specified. Partner-as-caller uses the fronting persona's `SessionContext` wholesale; the broker's `request(req, origin, timeout)` method checks `origin.bypasses_permission_gate()` and returns `PermissionGrant::synthesized_partner(...)` without broadcast when the test passes.
 
 **Tech Stack:** `rusqlite_migration` 2.5 (already the DB-migration machinery; migration `0012_fronting.sql`), `knus` for any KDL fragment of fronting config (optional, see below), `postcard` for IRPC protocol (already the wire format — new `WireTurnEvent::FrontingChanged` variant), existing `DaemonServer` actor in `pattern_server`.
 
@@ -18,11 +18,11 @@
 - ✓ `UserId` alias (`SmolStr`) at `crates/pattern_core/src/types/ids.rs:35`. Used via existing `Author::Partner(Partner { user_id })` variant in `MessageOrigin`.
 - ✓ **No separate `Caller` enum.** Phase 4 Task 1 plumbs `&MessageOrigin` through `Router::route`; Phase 5 ensures handlers read the turn's `MessageOrigin` and call `origin.bypasses_permission_gate()` before escalating to the broker. `MessageOrigin` already exists in the codebase with the right four-way `Author` discriminant.
 - ✓ `DaemonServer` actor in `pattern_server/src/server.rs` spawns via `DaemonServer::spawn_with_config(SessionConfig { sdk, provider })` (called from `pattern_server/src/main.rs:67-137`). Sessions cached per-agent in `DaemonServer.sessions`; project mounts in `.project_mounts`. Add `fronting_set: RwLock<FrontingSet>` as a daemon-level field.
-- ✓ `MessageOrigin { Author, Sphere }` in message.rs — existing discriminant. Phase 5 re-uses it for both attribution (compose/snapshot, unchanged) AND permission-gating dispatch. Single source of truth; no parallel `Caller` type.
+- ✓ `MessageOrigin { Author, Sphere }` at `crates/pattern_core/src/types/origin.rs:202` — existing discriminant. Phase 5 re-uses it for both attribution (compose/snapshot, unchanged) AND permission-gating dispatch. Single source of truth; no parallel `Caller` type.
 - ✗ No `@persona-name` parsing. Introduce in Phase 5 in the message dispatch layer — a small `fn parse_direct_address(s: &str) -> Option<PersonaId>` that strips a leading `@` and treats the rest as the persona id. Supports both `@alice` (plain) and `@alice: hello there` (prefix form).
 - ✗ `Message` carries no `to: Option<PersonaId>` field. Recipient is dispatch-time. Phase 5 keeps it that way; routing resolves recipient from rules, not from the Message struct.
 - ✓ `WireTurnEvent` at `pattern_server/src/protocol.rs`; variants `Text`, `Thinking`, `ToolCall`, `ToolResult`, `Display`, `Stop`. Phase 4 adds `MessageSent`. Phase 5 adds `FrontingChanged { active: Vec<PersonaId>, fallback: Option<PersonaId>, rules: Vec<RoutingRuleWire> }`. `TaggedTurnEvent` wraps this for multi-agent fan-out already.
-- ⚠ PermissionBroker is rebuilt per-runtime in Phase 1. Phase 5 adds the human short-circuit as a separate concern — `PermissionBroker::request(req, caller, timeout)` gains the `caller` parameter and returns `Some(PermissionGrant::synthesized_human())` immediately when `caller.is_human()`. Documented here; edit the broker alongside.
+- ⚠ PermissionBroker is rebuilt per-runtime in Phase 1. Phase 1 Task 6 also introduces the `origin: &MessageOrigin` parameter + Partner short-circuit. Phase 5 just ensures every handler call site passes the turn's current origin correctly (reading from the `current_turn_origin` accessor added in Phase 1 Task 7).
 - ⚠ Draft-persona queue from Phase 4 Task 4 is a transient in-memory stash. Phase 5 does not promote drafts — that's Phase 6. Phase 5 ensures draft personas can NEVER appear as an active front (the setter rejects any `PersonaId` whose registry status is `Draft`).
 
 ### Design decisions locked in
@@ -69,8 +69,9 @@ This avoids forcing the user to manage fronting explicitly before sending the fi
 **Verifies:** foundation.
 
 **Files:**
-- Create: `crates/pattern_core/src/fronting.rs`
-- Modify: `crates/pattern_core/src/lib.rs` — re-export.
+- Create: `crates/pattern_core/src/fronting.rs` — `FrontingSet`, `RoutingTable`, `RoutingRule`, `MessagePattern`, `ResolveOutcome`, `FrontingResolver`.
+- Create: `crates/pattern_core/src/constellation.rs` — `ConstellationRegistry` trait + supporting types (`PersonaRecord`, `PersonaStatus`, `RegistryScope`, `RegistryError`, `RelationshipEdge`, `EdgeDirection`, `GroupId`). These are hoisted here from Phase 6 so Phase 5 tests can exercise default-persona resolution.
+- Modify: `crates/pattern_core/src/lib.rs` — re-export both modules.
 
 **Implementation:**
 
@@ -109,7 +110,7 @@ pub enum MessagePattern {
 
 `RoutingTable` compiles `Regex` variants into `regex::Regex` at construction and caches them alongside the rule list, so evaluation is hot-path cheap. Invalid regex strings fail at load with a clear `FrontingLoadError::InvalidRegex { rule_id, source, inner }`.
 
-`FrontingSet::resolve(&self, msg_body: &str) -> ResolveOutcome` returns:
+`FrontingResolver::resolve(&self, msg_body: &str) -> ResolveOutcome` returns:
 
 ```rust
 pub enum ResolveOutcome {
@@ -126,9 +127,63 @@ Owned throughout — PersonaId is a SmolStr (cheap to clone for ≤22-byte ids, 
 
 Evaluate: strip `@persona-id` prefix first → Direct. Else iterate rules by descending priority; first match → Rule. Else fallback if Some. Else if `active.len() >= 1` → FanOut. Else consult the `ConstellationRegistry` for the first `Active` persona sorted by id → `DefaultPersona`. Else → `SystemDefault`. Messages never fail-close on fronting state.
 
-Because `resolve()` needs the registry for the default-persona lookup, the method takes an `&impl ConstellationRegistry` argument (or the registry is folded into a `FrontingResolver` struct that owns both). The pure-data `FrontingSet` stays serializable; the resolver is the operational layer.
+Because resolution needs the registry for the default-persona lookup, introduce a `FrontingResolver { set: FrontingSet, registry: Arc<dyn ConstellationRegistry> }` struct that owns both. `FrontingSet` stays as pure serializable data; `FrontingResolver::resolve(&self, msg_body: &str) -> ResolveOutcome` is the operational entry point.
 
-**Phase 5 tests before Phase 6 lands the real registry.** Phase 5 ships an `InMemoryConstellationRegistry` test helper at `crates/pattern_runtime/src/testing.rs` (or a new `testing/registry.rs` submodule) implementing `ConstellationRegistry` over a `DashMap<PersonaId, PersonaRecord>`. Tests seed the in-memory registry with fixture personas + statuses and exercise `DefaultPersona` / `SystemDefault` outcomes deterministically. Phase 6 Task 4's pattern_db-backed impl slots in via the same trait; no Phase 5 test changes at handoff.
+**Registry trait lives in Phase 5.** The `ConstellationRegistry` trait + supporting types (`PersonaRecord`, `PersonaStatus`, `RegistryScope`, `RegistryError`, `RelationshipEdge`, `EdgeDirection`) land in `pattern_core` as part of this task (see code block below) so Phase 5's default-persona tests can exercise them. Phase 6 Task 3 is a no-op for these definitions (already defined); Phase 6 Task 4 provides the `pattern_db`-backed impl, and Phase 6 may extend the trait with `groups` / `create_group` / `PersonaGroup` when it lands the group schema.
+
+```rust
+// pattern_core/src/constellation.rs (part of Phase 5 Task 1)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct PersonaRecord {
+    pub id: PersonaId,
+    pub name: String,
+    pub status: PersonaStatus,
+    pub config_path: Option<PathBuf>,
+    pub project_attachments: Vec<PathBuf>,
+    pub relationships: Vec<RelationshipEdge>,
+    pub group_memberships: Vec<GroupId>, // empty until Phase 6 lands groups
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PersonaStatus { Active, Draft, Inactive }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelationshipEdge {
+    pub other: PersonaId,
+    pub kind: RelationshipKind,
+    pub direction: EdgeDirection,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum EdgeDirection { Outgoing, Incoming }
+
+// GroupId lands here (not Phase 6) so PersonaRecord compiles in Phase 5.
+// Phase 6 adds the PersonaGroup struct and related CRUD; the id type is stable.
+pub type GroupId = SmolStr;
+
+pub enum RegistryScope { All, Project(PathBuf) }
+
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum RegistryError {
+    #[error("persona not found: {0}")]
+    PersonaNotFound(PersonaId),
+    #[error("registry backend unavailable")]
+    BackendUnavailable,
+    // additional variants added by Phase 6 as the real backend lands
+}
+
+#[async_trait]
+pub trait ConstellationRegistry: Send + Sync {
+    async fn list(&self, scope: RegistryScope) -> Result<Vec<PersonaRecord>, RegistryError>;
+    async fn get(&self, id: &PersonaId) -> Result<Option<PersonaRecord>, RegistryError>;
+    // Minimal Phase 5 surface; Phase 6 extends with find, register, set_status,
+    // add_relationship, groups, create_group.
+}
+```
+
+**Phase 5 tests:** an `InMemoryConstellationRegistry` helper in `pattern_runtime::testing` implements the minimal trait over a `DashMap<PersonaId, PersonaRecord>`. Tests seed personas and exercise `DefaultPersona` / `SystemDefault` outcomes deterministically.
 
 **Testing:**
 - Unit: direct-addressing wins over matching rules.
@@ -137,11 +192,14 @@ Because `resolve()` needs the registry for the default-persona lookup, the metho
 - Unit: empty fronting + registry with three Active personas → DefaultPersona returns the lowest-id one.
 - Unit: empty fronting + registry with zero Active → SystemDefault.
 - proptest: serde round-trip on arbitrarily-generated `FrontingSet`s.
+- Unit: `PersonaRecord` serde round-trip — new types from the `constellation.rs` hoist get coverage here rather than deferring to Phase 6.
+- Unit: `RelationshipEdge` direction preserved in serde.
+- Unit: `InMemoryConstellationRegistry::list(All)` returns every seeded persona; `list(Project(p))` filters; `get(id)` returns Some/None correctly. Exercises the hoisted trait directly.
 
 **Verification:**
 `cargo nextest run -p pattern-core fronting`
 
-**Commit:** `[pattern-core] add FrontingSet, RoutingTable, MessagePattern types`
+**Commit:** `[pattern-core] add FrontingSet + RoutingTable + MessagePattern types; add ConstellationRegistry trait (Phase 6 extends)`
 <!-- END_TASK_1 -->
 
 <!-- START_TASK_2 -->
@@ -270,11 +328,11 @@ pub async fn dispatch_to_mailboxes(
     }
     match resolver.resolve(&body.text()) {
         ResolveOutcome::Direct(id) => registry.deliver(id, sender, body).await,
-        ResolveOutcome::Rule { target, .. } => registry.deliver(target.clone(), sender, body).await,
-        ResolveOutcome::Fallback(target) => registry.deliver(target.clone(), sender, body).await,
+        ResolveOutcome::Rule { target, .. } => registry.deliver(target, sender, body).await,
+        ResolveOutcome::Fallback(target) => registry.deliver(target, sender, body).await,
         ResolveOutcome::FanOut(ids) => {
             for id in ids {
-                registry.deliver(id.clone(), sender, body).await?;
+                registry.deliver(id, sender, body).await?;
             }
             Ok(())
         }
@@ -394,7 +452,7 @@ Daemon side (pattern_server): `DaemonServer` exposes `GetFronting`, `SetFronting
 
 **Testing:**
 - Integration: agent with `FrontingControl` can call `Fronting.set [alice, bob] (Just alice)`; DB row updated.
-- Integration: agent without `FrontingControl` gets `EffectError::CapabilityDenied`.
+- Integration: agent without `FrontingControl` gets `EffectError::Handler` whose message starts with `CAPABILITY_DENIED_PREFIX`.
 - RPC: TUI client issues `SetFronting`; receives `FrontingChanged` back; subsequent message routing follows the new rules (AC8.8 — verify the in-flight case).
 
 **Verification:**

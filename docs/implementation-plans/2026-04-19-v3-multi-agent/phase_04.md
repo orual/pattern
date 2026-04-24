@@ -2,7 +2,7 @@
 
 **Goal:** let agents talk to each other (`ctx.message.send`) by giving every active session a tokio mailbox that wakes it with a `TurnInput` when a message arrives. Pin assigned tasks into the recipient's working-memory snapshot selection. Introduce `WakeCondition` (Rust primitives: `TaskTimeout`, `TaskDependencyResolved`, `BlockChanged`, `Interval`) and a `WakeReason` discriminant on `TurnInput` so the agent knows why it was woken. Define the Haskell surface for custom wake conditions (registration is capability-gated; full Haskell-condition evaluation is deferred — this phase ships the registration path and the Rust primitives).
 
-**Architecture:** each active session gets a **mailbox task** — a tokio task owning an `mpsc::UnboundedReceiver<MailboxInput>`. The task watches the session's busy flag; when a message arrives and the session is idle, it calls into the existing `drive_step` with the message synthesized as a `TurnInput`. When busy, it queues. `MessageRouter` is extended with an agent-addressed scheme that resolves `PersonaId` → mailbox sender through an `AgentRegistry` (in-memory in Phase 4; DB-backed in Phase 6). The router's existing `blocked on Router trait fix` note (per `pattern_runtime/CLAUDE.md`) gets resolved here: `Router::route` gains a `sender: &MessageOrigin` parameter (reusing the existing four-way `Author` discriminant: `Partner(UserId) | Human | Agent(AgentId) | System`), and `WireTurnEvent::MessageSent` is added so the TUI can render sent messages with attribution. Wake conditions register on the mailbox task; timers, block subscribers, and task-index polls all funnel into the same mpsc as message deliveries, with a `WakeReason` tag so the agent can branch on origin.
+**Architecture:** each active session gets a **mailbox task** — a tokio task owning an `mpsc::UnboundedReceiver<MailboxInput>`. The task watches the session's busy flag; when a message arrives and the session is idle, it calls into the existing `drive_step` with the message synthesized as a `TurnInput`. When busy, it queues. `MessageRouter` is extended with an agent-addressed scheme that resolves `PersonaId` → mailbox sender through an `AgentRegistry` (in-memory in Phase 4; DB-backed in Phase 6). The router's existing `blocked on Router trait fix` note (per `pattern_runtime/CLAUDE.md`) gets resolved here: `Router::route` gains a `sender: &MessageOrigin` parameter (reusing the existing four-way `Author` discriminant: `Partner(UserId) | Human | Agent(AgentId) | System`), and `WireTurnEvent::MessageSent` is added so the TUI can render sent messages with attribution. Wake conditions register on the mailbox task; tokio timers (TaskTimeout, Interval) and loro block subscribers (BlockChanged, TaskDependencyResolved — the latter rides the same subscriber fan-out, re-reading the task status on parent-block change) all funnel into the same mpsc as message deliveries, with a `WakeReason` tag so the agent can branch on origin.
 
 **Tech Stack:** `tokio::sync::mpsc::UnboundedSender/Receiver` (precedent in `router.rs:63`), `tokio::sync::Notify` (new — for "busy-flag released" wake-ups), `std::sync::atomic::AtomicBool` for busy state, existing `pattern_memory::subscriber::CommitEvent` channel (extended with a `BlockChanged` notifier hook), `jiff::Span` for timeouts + intervals. No new external deps.
 
@@ -68,17 +68,17 @@
 
 **Files:**
 - Modify: `crates/pattern_runtime/src/router.rs` — `Router::route` signature gains `sender: &MessageOrigin`.
-- Modify: `crates/pattern_core/src/types/message.rs` — add `impl MessageOrigin { pub fn bypasses_permission_gate(&self) -> bool }` that returns `matches!(self.author, Author::Partner(_))`. Only `Partner` gets the bypass; general `Human` is subject to gating per project policy (TUI user is always Partner).
+- Modify: `crates/pattern_core/src/types/origin.rs` — add `impl MessageOrigin { pub fn bypasses_permission_gate(&self) -> bool }` that returns `matches!(self.author, Author::Partner(_))`. Only `Partner` gets the bypass; general `Human` is subject to gating per project policy (TUI user is always Partner).
 - Modify: `crates/pattern_server/src/protocol.rs` — add `WireTurnEvent::MessageSent { recipient, body, from: Author }` variant.
 - Modify: `crates/pattern_runtime/src/sdk/handlers/message.rs` — pass the turn's `MessageOrigin` into `route()`; handler reads it from `cx.user()` or per-turn source (Phase 5 Task 5 threads it end-to-end).
 - Implement: `crates/pattern_runtime/src/router/cli.rs` — `CliRouter` was stubbed per CLAUDE.md; finish the implementation now (consumes a channel to the daemon's event bus, emits `WireTurnEvent::MessageSent` on route).
 
 **Implementation:**
 
-No new enum. Reuse `MessageOrigin { author: Author, sphere: Sphere }` already at `crates/pattern_core/src/types/message.rs`. `Author` already discriminates `Partner(Partner{user_id}) | Human(...) | Agent(AgentAuthor{agent_id}) | System` — exactly the four-way split the broker needs.
+No new enum. Reuse `MessageOrigin { author: Author, sphere: Sphere }` already at `crates/pattern_core/src/types/origin.rs`. `Author` already discriminates `Partner(Partner{user_id}) | Human(...) | Agent(AgentAuthor{agent_id}) | System` — exactly the four-way split the broker needs.
 
 ```rust
-// pattern_core/src/types/message.rs (extension)
+// pattern_core/src/types/origin.rs (extension)
 impl MessageOrigin {
     /// Partner (the constellation's owner; TUI user) bypasses permission gating.
     /// Generic `Human` does NOT bypass — any non-Partner human still needs approval.
@@ -130,7 +130,7 @@ pub enum MailboxInput {
 
 pub struct Mailbox {
     tx: mpsc::UnboundedSender<MailboxInput>,
-    rx: Mutex<mpsc::UnboundedReceiver<MailboxInput>>, // mutex because task pops; sender clonable
+    rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<MailboxInput>>, // tokio Mutex — task holds the guard across .await
     persona_id: PersonaId,
 }
 
@@ -501,7 +501,7 @@ subscriber.subscribe_to_block(&block.label, Box::new(move |bref| {
 **Verifies:** AC7.3, AC7.5.
 
 **Files:**
-- Modify: `crates/pattern_runtime/src/wake/mod.rs` — `TaskDependencyResolved` polling loop backed by `TaskQuery` trait from Task 5.
+- Modify: `crates/pattern_runtime/src/wake/mod.rs` — `TaskDependencyResolved` wake registered via the loro subscriber fan-out from Task 8; no new trait.
 - Modify: `crates/pattern_runtime/src/sdk/requests/` — new `WakeReq::Register(WakeCondition)` / `WakeReq::Unregister(String)`.
 - Create: `crates/pattern_runtime/src/sdk/handlers/wake.rs` — handler; capability-gated via `CapabilityFlag::WakeConditionRegistration`.
 - Modify: `crates/pattern_runtime/src/sdk/bundle.rs` — add `WakeHandler` to `SdkBundle` HList at the **end**, AFTER `Diagnostics` (the existing convention places Diagnostics last as session-level introspection; `Wake` joins as position 15). Extend `CANONICAL_EFFECT_ROW` with `"Wake"` in the same slot. Do NOT insert Wake mid-list — agent programs encode effect positions in their `Eff '[...]` row shapes and any earlier insertion breaks compiled programs.
@@ -522,17 +522,17 @@ If Plan 2 hasn't exposed `parent_block(task_ref)` yet, the resolution is a plain
 
 Custom Haskell conditions: the handler accepts and stores the program but logs `"custom wake condition registered; evaluator deferred"` on register. No evaluator runs yet. This is consistent with the design's stated deferral.
 
-Capability gate: handler reads `cx.user().capabilities().has_flag(WakeConditionRegistration)`; if not, returns `EffectError::CapabilityDenied`.
+Capability gate: handler reads `cx.user().capabilities().has_flag(WakeConditionRegistration)`; if not, returns `EffectError::Handler(format!("{CAPABILITY_DENIED_PREFIX}WakeConditionRegistration"))` (reusing the well-known-prefix pattern from Phase 1 Task 15; `CAPABILITY_DENIED_PREFIX = "CapabilityDenied: "`).
 
 **Testing:**
-- AC7.3: register `TaskDependencyResolved(T)`; update T's status to Completed in another session; assert wake fires within poll interval + 250ms grace.
-- AC7.5: register without `WakeConditionRegistration` capability → `EffectError::CapabilityDenied`.
+- AC7.3: register `TaskDependencyResolved(T)`; update T's status to Completed in another session; assert wake fires within the loro subscriber latency window (~250ms).
+- AC7.5: register without `WakeConditionRegistration` capability → `EffectError::Handler` whose message starts with `CAPABILITY_DENIED_PREFIX`.
 - Integration: Haskell agent program calls `Wake.register (Interval 60s)` — succeeds.
 
 **Verification:**
 `cargo nextest run -p pattern-runtime wake`
 
-**Commit:** `[pattern-runtime] expose Pattern.Wake effect with capability gate; TaskDependencyResolved polling`
+**Commit:** `[pattern-runtime] expose Pattern.Wake effect with capability gate; TaskDependencyResolved via subscriber`
 <!-- END_TASK_9 -->
 
 <!-- END_SUBCOMPONENT_C -->

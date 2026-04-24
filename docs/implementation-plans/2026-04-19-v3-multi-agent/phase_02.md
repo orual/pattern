@@ -32,11 +32,11 @@
 - ✓ `BlockRef` exists at `crates/pattern_core/src/types/block_ref.rs` with fields `label: String`, `block_id: String`, `agent_id: String`, plus constructors `new`, `with_owner`, `owned_by`. `ForkConfig.task_ref` can reference it directly — no placeholder needed.
 - ✗ No `tokio::sync::Semaphore` usage anywhere. Phase 2 introduces the first use.
 - ⚠ `LoroDoc` access is through `MemoryStoreAdapter::inner().get_block(...) -> StructuredDocument` which wraps `Arc<LoroDoc>`. For sibling spawn with its own memory root, we construct a fresh `MemoryCache` with a new `LoroDoc::new()`; for ephemeral, the child shares the parent's adapter (memory reads but no isolated scope, unless explicitly restricted); for fork (Phase 3), we `LoroDoc::fork()` and build a new adapter over the forked doc.
-- ✓ `HasCancelState` trait exists and is used by every handler; Phase 1 introduces `HasPermissionAuthority` alongside. Phase 2 extends the same user-trait pattern with `HasSpawnRegistry` so handlers can reach the child registry cheanly.
+- ✓ `HasCancelState` trait exists and is used by every handler; Phase 1 introduces `HasPermissionBridge` alongside. Phase 2 extends the same user-trait pattern with `HasSpawnRegistry` so handlers can reach the child registry cheanly.
 
 ### Design decisions locked in
 
-- **Spawn grammar.** `SpawnReq::Start(String)` is retired. Phase 2 ships four discrete constructors at the Haskell layer (`Ephemeral`, `Fork`, `Sibling`, `Stop`) with structured config payloads and structured returns (`SpawnId`, `ForkHandle`, `PersonaId`). Both the Rust enum and the Haskell `Pattern.Spawn` module move atomically.
+- **Spawn grammar.** `SpawnReq::Start(String)` is retired. Phase 2 ships six discrete constructors at the Haskell layer (`Ephemeral`, `AwaitSpawn`, `AwaitAll`, `Fork`, `Sibling`, `Stop`). `Ephemeral` returns `SpawnId` immediately (non-blocking — the child session runs in the background); `AwaitSpawn(SpawnId)` blocks until the ephemeral completes and returns its `SpawnResult`; `AwaitAll([SpawnId])` blocks until every id in the list completes, returning `Vec<Result<SpawnResult, SpawnError>>` in id-order (Rust-side ``futures::future::join_all`` — single sync-bridge round-trip, partial-failure-preserving so ensemble patterns can inspect per-id outcomes). `Fork` returns a structured `ForkHandle` that Phase 3 Task 8 gives resolution helpers. `Sibling` returns `PersonaId`. `Stop` returns unit. Both the Rust enum and the Haskell `Pattern.Spawn` module move atomically.
 - **Parent→child cancel propagation.** Ephemeral and Fork share the parent's `Arc<CancelState>` (sub-lives tie to parent turn by design). Sibling gets a fresh `CancelState` (independent lifetime). Revisit only if Phase 4 mailbox work surfaces timing flakes.
 - **Child-handle storage.** Dedicated `SpawnRegistry` type with its own `Drop` behaviour (abort all children), rather than inlining `Vec<ChildSessionHandle>` on `SessionContext`. Keeps the cancellation contract local to one type.
 
@@ -177,6 +177,19 @@ Replace existing `SpawnReq` with:
 pub enum SpawnReq {
     #[core(module = "Pattern.Spawn", name = "Ephemeral")]
     Ephemeral(EphemeralConfig),
+    /// Block until the given ephemeral completes; return its result. Separate
+    /// from Ephemeral so delegation patterns can spawn many workers in parallel
+    /// and await them.
+    #[core(module = "Pattern.Spawn", name = "AwaitSpawn")]
+    AwaitSpawn(SpawnId),
+    /// Block until every id in the list completes; return per-id results in
+    /// id-order (`Vec<Result<SpawnResult, SpawnError>>`). Handler uses
+    /// `futures::future::join_all` (not `try_join_all`) — a single sync-bridge
+    /// round-trip awaits N parallel children AND preserves per-id failures so
+    /// ensemble / voting patterns (Pattern.Delegation.FanOut) can inspect
+    /// partial outcomes.
+    #[core(module = "Pattern.Spawn", name = "AwaitAll")]
+    AwaitAll(Vec<SpawnId>),
     #[core(module = "Pattern.Spawn", name = "Fork")]
     Fork(ForkConfig),
     #[core(module = "Pattern.Spawn", name = "Sibling")]
@@ -190,10 +203,10 @@ The `FromCore` derive must decode each `*Config` struct directly. Pattern-match 
 
 Update `effect_decl()` to advertise the new constructors + `ephemeral`/`fork`/`sibling`/`stop` helpers. Keep the description succinct (the code-tool description is user-facing for agents).
 
-Match in `handle()` to each variant — all four variants currently return `EffectError::Handler("phase 2 task 3+ not yet wired")`. Actual dispatch lands in subsequent tasks.
+Match in `handle()` to each variant — all six variants currently return `EffectError::Handler("phase 2 task 3+ not yet wired")`. Actual dispatch lands in subsequent tasks.
 
 **Testing:**
-- Unit: `effect_decl().constructors` contains `"Ephemeral"`, `"Fork"`, `"Sibling"`, `"Stop"`. No residue of the old `"Start"` constructor.
+- Unit: `effect_decl().constructors` contains `"Ephemeral"`, `"AwaitSpawn"`, `"AwaitAll"`, `"Fork"`, `"Sibling"`, `"Stop"`. No residue of the old `"Start"` constructor.
 - Unit: `canonical_effect_decls()` still parses under `parse_constructor` (the existing test at `bundle.rs:115`).
 - **SdkBundle ordering note:** `Spawn` already occupies its canonical slot in the bundle HList (position 13, just before `Diagnostics`). Phase 2 Task 2 redesigns the Haskell-side grammar but does NOT re-position `Spawn` in the HList — the effect-tag numbering agent programs encode in their `Eff '[...]` rows MUST stay stable. Plan 2 (task-skill-blocks) is expected to have added `Tasks` to `CANONICAL_EFFECT_ROW` by Phase 2 execution time; if it did, confirm the ordering and slot alignment between `Pattern.Spawn` and `Pattern.Tasks` at kickoff. Do NOT reshuffle existing slots.
 - Snapshot (insta): Haskell preamble contains the updated `Pattern.Spawn` imports/helpers list. Update or add a snapshot so the diff is obvious.
@@ -213,7 +226,7 @@ Match in `handle()` to each variant — all four variants currently return `Effe
 - Create: `crates/pattern_runtime/src/spawn/registry.rs`
 - Create: `crates/pattern_runtime/src/spawn/mod.rs` (new module).
 - Modify: `crates/pattern_runtime/src/session.rs` — add `spawn_registry: Arc<SpawnRegistry>` field on `SessionContext`; a parent's registry is the child's parent pointer.
-- Create `HasSpawnRegistry` trait alongside `HasCancelState` / `HasPermissionAuthority` and implement on `SessionContext`.
+- Create `HasSpawnRegistry` trait alongside `HasCancelState` / `HasPermissionBridge` and implement on `SessionContext`.
 
 **Implementation:**
 
@@ -228,7 +241,13 @@ pub struct ChildSessionHandle {
     pub child_id: SmolStr,
     pub kind: SpawnKind,                 // Ephemeral | Fork | Sibling
     pub cancel_state: Arc<CancelState>,  // shared for ephemeral/fork; independent for sibling
-    pub join: tokio::task::JoinHandle<Result<StepReply, SpawnError>>,
+    // The background task running the child session. Wrapped as Shared so
+    // multiple awaiters (AwaitSpawn + follow-up AwaitAll including the same
+    // id) can all observe the same result without panicking (tokio's
+    // JoinHandle is single-consume; Shared gives Clone + multi-await).
+    pub result: futures::future::Shared<
+        futures::future::BoxFuture<'static, Result<SpawnResult, SpawnError>>
+    >,
     // Semaphore permit held for the duration of ephemeral life; Some for Ephemeral only
     pub _permit: Option<OwnedSemaphorePermit>,
 }
@@ -238,7 +257,7 @@ Methods:
 - `SpawnRegistry::new(parent_id, limit: usize)` — constructs with `Semaphore::new(limit)`.
 - `try_acquire_ephemeral_slot(&self) -> Option<OwnedSemaphorePermit>` — fails fast if full.
 - `register(&self, handle: ChildSessionHandle)` — push under mutex.
-- `cancel_all(&self)` — sets every child's `cancel_state` atomic; drops permits (releasing semaphore slots); drops `JoinHandle`s so the runtime joins them best-effort. Idempotent.
+- `cancel_all(&self)` — sets every child's `cancel_state.cancellation` atomic (signals `run_ephemeral` to short-circuit at its next poll point); drops permits (releasing semaphore slots); drops the `Shared<BoxFuture>` result caches. The underlying tokio task completes on its own once `run_ephemeral` observes the cancel signal; the `Shared` drop just forgets the cached outcome. Idempotent.
 - `Drop` for `SpawnRegistry` calls `cancel_all()` — enforces AC3.6.
 
 Ephemeral and Fork children share the parent's `Arc<CancelState>`; Sibling children get their own `CancelState` and are NOT added to the parent's registry (they outlive the parent).
@@ -260,7 +279,7 @@ Ephemeral and Fork children share the parent's `Arc<CancelState>`; Sibling child
 <!-- START_SUBCOMPONENT_B (tasks 4-5) -->
 
 <!-- START_TASK_4 -->
-### Task 4: Ephemeral dispatch — build child session, spawn eval worker, await result
+### Task 4: Ephemeral dispatch — non-blocking spawn returning `SpawnId`, plus `AwaitSpawn`
 
 **Verifies:** AC3.1, AC3.2, AC3.3, AC3.4.
 
@@ -290,30 +309,69 @@ SpawnReq::Ephemeral(cfg) => {
 
     let child_ctx = parent.fork_for_ephemeral(cfg, child_caps)?;
     let child_id = child_ctx.session_id().clone();
-    let join = tokio::spawn(run_ephemeral(child_ctx.clone(), cfg.clone()));
+    // Spawn the child session asynchronously; do NOT block the handler.
+    let join_handle = tokio::spawn(run_ephemeral(child_ctx.clone(), cfg.clone()));
+
+    // Adapt the JoinHandle's Result<Result<StepReply, SpawnError>, JoinError>
+    // into the Spawn-effect-level Result<SpawnResult, SpawnError>, then wrap as
+    // Shared<BoxFuture> so multiple awaiters (AwaitSpawn / AwaitAll / repeated
+    // AwaitSpawn on the same id) can poll idempotently.
+    let result = async move {
+        match join_handle.await {
+            Ok(Ok(step_reply)) => Ok(SpawnResult::from_step_reply(step_reply)),
+            Ok(Err(spawn_err)) => Err(spawn_err),
+            Err(join_err) => Err(SpawnError::JoinPanicked(join_err.to_string())),
+        }
+    }
+    .boxed()
+    .shared();
 
     registry.register(ChildSessionHandle {
         child_id: child_id.clone(),
         kind: SpawnKind::Ephemeral,
         cancel_state: child_ctx.cancel_state().clone(),
-        join,
+        result,
         _permit: Some(permit),
     });
 
-    // Await result (ephemerals block parent by default; re-visit when Phase 4 mailbox lands)
-    match registry.wait_for(child_id.clone()).await {
+    // Return the SpawnId immediately. Caller uses AwaitSpawn(id) to block
+    // for the result (or lets the registry drop handle the child if it
+    // doesn't care about the output — fire-and-forget is supported).
+    Ok(Value::spawn_id(child_id))
+}
+
+SpawnReq::AwaitSpawn(id) => {
+    let registry = cx.user().spawn_registry();
+    match registry.wait_for(id).await {
         Ok(reply) => Ok(Value::from_spawn_result(&reply)),
         Err(e) => Err(EffectError::Handler(e.to_string())),
     }
 }
+
+SpawnReq::AwaitAll(ids) => {
+    let registry = cx.user().spawn_registry();
+    // Genuinely parallel await — join_all polls every future concurrently.
+    // Use join_all (not try_join_all) so ensemble / voting patterns like
+    // Pattern.Delegation.FanOut get per-id results even when some children
+    // fail. Caller sees Vec<Result<SpawnResult, SpawnError>> and decides
+    // how to handle partial failure.
+    let futures = ids.into_iter().map(|id| registry.wait_for(id));
+    let replies: Vec<Result<SpawnResult, SpawnError>> =
+        futures::future::join_all(futures).await;
+    Ok(Value::spawn_result_list(&replies))
+}
 ```
 
-`run_ephemeral` constructs the EvalWorker (via existing `EvalWorker::spawn_with_includes`), compiles `cfg.program` against the filtered preamble (Phase 1's `preamble::build_for(&caps)`), executes, returns `StepReply` or error. Timeout is wrapped via `tokio::time::timeout(cfg.timeout.unwrap_or(runtime_default), …)`. On timeout, the child's `cancel_state` is tripped (for AC3.4), the EvalWorker thread is asked to stop via its channel, and the handler returns `SpawnError::Timeout`.
+Add `SpawnRegistry::wait_for(id: SpawnId) -> Result<SpawnResult, SpawnError>`: looks up the `ChildSessionHandle` by id, clones its `Shared<Future>`, awaits it. The `Shared` wrapper means every call on the same id observes the same result (idempotent); multi-await is safe (unlike raw `JoinHandle`, which panics on second await). The wrapping future inside `Shared` is built at `register` time: it awaits the real `JoinHandle`, maps `Result<StepReply, SpawnError>` → `Result<SpawnResult, SpawnError>` (the type adapter from the session-level result to the spawn-effect-level payload), and caches the outcome. The handle stays in the registry until parent resolution drops everything — this way `Stop(id)` and subsequent `AwaitSpawn(id)` calls remain valid across the child's lifetime.
+
+`run_ephemeral` constructs the EvalWorker (via existing `EvalWorker::spawn_with_includes`), compiles `cfg.program` against the filtered preamble (Phase 1's `preamble::build_for(&caps)`), executes, returns `StepReply` or error. Timeout is wrapped via `tokio::time::timeout(cfg.timeout.unwrap_or(runtime_default), …)`. On timeout, the child's `cancel_state` is tripped (for AC3.4), the EvalWorker thread is asked to stop via its channel, and the cached result becomes `Err(SpawnError::Timeout)` — observable via the next `AwaitSpawn`.
+
+**Why non-blocking:** delegation patterns like FanOut must spawn every worker in parallel and await them as a batch. A blocking `Ephemeral` serializes the parallelism. Phase 7's `Pattern.Delegation.FanOut` uses `traverse Spawn.ephemeral workers >>= Spawn.awaitAll` — one sync-bridge round-trip for N parallel awaits. `awaitSpawn` (single-id) exists for patterns like Pipeline where stages are sequential by design; FanOut and RoundRobin use `awaitAll`.
 
 Costume: `child_ctx` overrides the system-prompt slot with `cfg.costume` when set. The persona's identity in logs stays as the parent's. This is consistent with the design: "attributed to parent in logs."
 
 **Testing:**
-- Integration (mock provider at `crates/pattern_runtime/tests/support/mock_provider.rs` — if it doesn't exist, create a minimal one that echoes a scripted response for "spawn ephemeral" probes): 
+- Integration (use `pattern_runtime::testing::MockProviderClient` — already exists at `crates/pattern_runtime/src/testing.rs:110`; script a response for "spawn ephemeral" probes via `MockProviderClient::with_turns(...)`): 
   - AC3.1: parent spawns an ephemeral whose program is `pure (T.pack "ok")`; parent receives `"ok"`.
   - AC3.2: parent has CapabilitySet `[Memory, Spawn]`; ephemeral config asks for `[Memory, Spawn, Shell]` → handler returns `SpawnError::CapabilityEscalation`.
   - AC3.3: ephemeral with costume "be terse"; assert the child's compiled prompt contains "be terse" and the log line attributes to the parent's persona id.
@@ -394,7 +452,7 @@ The sibling's `SessionContext` gets a fresh `CancelState`, fresh `pending_messag
 **Testing:**
 - Integration: parent spawns a sibling pointing at a persona fixture KDL in `crates/pattern_runtime/tests/fixtures/sibling_persona.kdl`. Assert a new session with `persona_id == fixture.name` exists and runs a trivial program.
 - AC5.4: the fixture restricts capabilities to `[Memory]`; parent has `[Memory, Shell]`; sibling program calling `Shell.execute` fails at compile — the sibling's caps come from its own config, NOT the parent's.
-- AC5.6: unknown persona id → `SpawnError::PersonaNotFound`. Use a registry stub that returns `None` for unknown ids.
+- AC5.6: unknown persona id → `SpawnError::PersonaNotFound(RegistryError::PersonaNotFound(id))`. `SpawnError` wraps `RegistryError` as a dedicated variant so the design's `RegistryError::PersonaNotFound` propagation (AC5.6 in the design) is preserved while the spawn call site gets a domain-local error type. Use a registry stub that returns `Err(RegistryError::PersonaNotFound(id))` for unknown ids.
 
 **Verification:**
 `cargo nextest run -p pattern-runtime sibling_spawn`
@@ -475,18 +533,18 @@ For `ForkIsolation::Persistent`: return `EffectError::Handler("persistent fork i
 <!-- END_TASK_8 -->
 
 <!-- START_TASK_9 -->
-### Task 9: Expose `ctx.spawn.{ephemeral,fork,sibling,stop}` on the Haskell SDK
+### Task 9: Expose `ctx.spawn.{ephemeral,awaitSpawn,awaitAll,fork,sibling,stop}` on the Haskell SDK
 
 **Verifies:** AC3.1, AC4.7, AC5.1 at the agent-facing surface.
 
 **Files:**
-- Modify: `crates/pattern_runtime/haskell/Pattern/Spawn.hs` — helpers for all four variants with proper Haskell types.
+- Modify: `crates/pattern_runtime/haskell/Pattern/Spawn.hs` — helpers for all six variants with proper Haskell types.
 - Modify: `crates/pattern_runtime/src/sdk/handlers/spawn.rs` — ensure `DescribeEffect::effect_decl` helpers list matches the updated `Pattern/Spawn.hs`.
 - Update: `crates/pattern_runtime/src/sdk/preamble.rs` snapshot (if one exists) to reflect new helper signatures.
 
 **Implementation:**
 
-Haskell-side helpers + minimal type declarations. The return types (`SpawnId`, `ForkHandle`, `PersonaId`, `SpawnResult`, `MergeReport`) land here as opaque placeholders that Phase 3 Task 8 fleshes out with resolution helpers. Naming them in Phase 2 prevents forward-reference compile failures.
+Haskell-side helpers + minimal type declarations. `SpawnId` is the handle returned by `ephemeral`; callers pass it to `awaitSpawn` (block-for-result) or `stop` (cancel). `SpawnResult` is the structured return from `awaitSpawn` (carries a JSON payload in Phase 2; Phase 3 Task 8 may extend with field accessors). `ForkHandle` + `MergeReport` land here as opaque placeholders that Phase 3 Task 8 fleshes out with resolution helpers.
 
 ```haskell
 -- Type placeholders. Phase 3 Task 8 extends ForkHandle with awaitResult /
@@ -504,8 +562,20 @@ newtype SpawnResult = SpawnResult { spawnResultJson :: Value }
 newtype MergeReport = MergeReport { mergeReportJson :: Value }
   deriving (Eq, Show)
 
+-- Non-blocking: returns a SpawnId immediately; child session runs in the
+-- background. Use awaitSpawn to block on the result. Separation lets
+-- delegation patterns spawn in parallel then await as a batch.
 ephemeral :: Member Spawn effs => EphemeralConfig -> Eff effs SpawnId
 ephemeral cfg = Freer.send (Ephemeral cfg)
+
+awaitSpawn :: Member Spawn effs => SpawnId -> Eff effs SpawnResult
+awaitSpawn sid = Freer.send (AwaitSpawn sid)
+
+-- Await many ephemerals in a single round-trip; results come back in id order.
+-- Uses futures::future::join_all on the Rust side — all children poll concurrently,
+-- and partial failure is preserved (each slot is Either SpawnError SpawnResult).
+awaitAll :: Member Spawn effs => [SpawnId] -> Eff effs [Either SpawnError SpawnResult]
+awaitAll ids = Freer.send (AwaitAll ids)
 
 fork :: Member Spawn effs => ForkConfig -> Eff effs ForkHandle
 fork cfg = Freer.send (Fork cfg)
@@ -523,12 +593,13 @@ Snapshot tests from Phase 1 Task 3 pick up the new helpers automatically; review
 
 **Testing:**
 - Multi-module compilation test: an agent program imports `Pattern.Spawn` and calls `ephemeral (EphemeralConfig { program = "pure ()", ...})`. Compile via the existing `tests/multi_module_sdk.rs` pattern.
-- Integration: same program runs end-to-end, returns a `SpawnId`.
+- Integration: `ephemeral cfg >>= awaitSpawn` runs end-to-end and returns a `SpawnResult` with the ephemeral's output in the JSON payload.
+- Integration: parallel pattern — `traverse ephemeral [cfg1, cfg2, cfg3]` then `awaitAll ids` returns 3 results; workers genuinely ran in parallel (assert via wall-clock vs. sequential baseline); single sync-bridge round-trip for the await batch.
 
 **Verification:**
 `cargo nextest run -p pattern-runtime spawn_sdk_surface` + `cargo test --doc -p pattern-runtime`
 
-**Commit:** `[pattern-runtime] surface ctx.spawn.{ephemeral,fork,sibling,stop} in Pattern.Spawn`
+**Commit:** `[pattern-runtime] surface ctx.spawn.{ephemeral,awaitSpawn,awaitAll,fork,sibling,stop} in Pattern.Spawn`
 <!-- END_TASK_9 -->
 
 <!-- END_SUBCOMPONENT_D -->
@@ -538,7 +609,7 @@ Snapshot tests from Phase 1 Task 3 pick up the new helpers automatically; review
 ## Phase done-when checklist
 
 - [ ] Spawn-config types (Ephemeral/Fork/Sibling/PersonaConfig + RelationshipKind) live in `pattern_core`. `PersonaId` alias added. `CapabilityFlag` + the `flags` field on `CapabilitySet` already land in Phase 1 Task 1.
-- [ ] `SpawnReq` grammar replaced with four-variant enum; Haskell `Pattern.Spawn` module updated.
+- [ ] `SpawnReq` grammar replaced with six-variant enum (Ephemeral, AwaitSpawn, AwaitAll, Fork, Sibling, Stop); Haskell `Pattern.Spawn` module updated.
 - [ ] `SpawnRegistry` with per-parent semaphore + cancel-on-drop exists and is threaded through `SessionContext`.
 - [ ] Ephemeral dispatch produces a live child session with capability inheritance, costume, and timeout; full AC3 coverage.
 - [ ] Sub-spawn chain cancels cleanly when parent resolves (AC3.6, AC3.7).
