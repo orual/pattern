@@ -18,6 +18,22 @@ use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use loro::LoroValue;
 
 /// Errors specific to the KDL ↔ LoroValue conversion.
+///
+/// ## Miette diagnostic metadata
+///
+/// Not all variants carry `#[diagnostic]` metadata — only those where a KDL
+/// source span is available at the point the error is constructed:
+///
+/// - `TaskEdgeRef` and `MissingBlockAnnotation` carry `#[label]` spans because
+///   the kdl crate provides byte-offset spans for individual entries, and these
+///   errors are constructed directly from KDL parse output.
+/// - `ShapeMismatch`, `DuplicateKey`, and `AmbiguousNode` are detected at a
+///   structural level where the span would be the entire document or node, not
+///   a precise location. Adding spans to these variants would require threading
+///   KDL source positions through many more call sites without meaningfully
+///   improving diagnostics. They remain plain `#[error]` for now.
+/// - `UnsupportedVariant`, `UnsupportedBinary`, and `ParseError` arise before
+///   or outside KDL parse output and have no associated source position.
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 #[non_exhaustive]
 pub enum KdlConversionError {
@@ -48,6 +64,9 @@ pub enum KdlConversionError {
     AmbiguousNode,
 
     /// A `TaskEdgeRef` inside a `blocks` node failed to parse.
+    ///
+    /// Carries a KDL source span (`#[label]`) because the error is constructed
+    /// directly from a `KdlEntry` which provides byte-offset information.
     #[error("invalid TaskEdgeRef: {source}")]
     #[diagnostic(code(pattern_memory::kdl::task_edge_ref))]
     TaskEdgeRef {
@@ -58,6 +77,9 @@ pub enum KdlConversionError {
     },
 
     /// A `blocks` child entry is missing the `(block)` type annotation.
+    ///
+    /// Carries a KDL source span (`#[label]`) because the error is constructed
+    /// directly from a `KdlEntry` which provides byte-offset information.
     #[error("missing (block) type annotation")]
     #[diagnostic(code(pattern_memory::kdl::missing_block_annotation))]
     MissingBlockAnnotation {

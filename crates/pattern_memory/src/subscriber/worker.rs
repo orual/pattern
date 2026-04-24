@@ -122,6 +122,11 @@ pub(crate) fn render_canonical_from_disk_doc(
                 .map_err(|e| format!("KDL serialization failed: {e}"))?;
             Ok(("kdl", kdl_doc.to_string().into_bytes()))
         }
+        // NOTE: `_ =>` covers future non_exhaustive additions (e.g. Skill, Phase 4).
+        // All currently-defined BlockSchema variants must have explicit arms above
+        // this catch-all. If a new variant is added to BlockSchema without a
+        // corresponding arm here, this branch will silently return an error at
+        // runtime rather than failing at compile time. Keep this list current.
         _ => Err(format!(
             "unsupported schema for canonical rendering: {schema:?}"
         )),
@@ -1634,5 +1639,133 @@ mod tests {
         cancel.cancel();
         drop(tx);
         handle.join().expect("worker should not panic");
+    }
+
+    /// Test that `render_canonical_from_disk_doc` with a TaskList schema emits
+    /// KDL bytes that parse back via `kdl_to_loro_value(.., TopShape::TaskList)`
+    /// into the original disk_doc state (AC Task 9 worker round-trip).
+    ///
+    /// This exercises the full subscriber path for TaskList:
+    /// StructuredDocument::import_from_json → update bytes → CommitEvent →
+    /// disk_doc import → TaskList KDL render → file emit → KDL parse →
+    /// kdl_to_loro_value → LoroValue equality with original.
+    #[test]
+    fn worker_emits_kdl_for_task_list_schema() {
+        use pattern_core::types::memory_types::TaskStatus;
+
+        let db = Arc::new(ConstellationDb::open_in_memory().unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        setup_db_block(&db, "tl_block", "agent_tl");
+
+        let schema = BlockSchema::TaskList {
+            default_status: Some(TaskStatus::Pending),
+            default_owner: None,
+            display_limit: None,
+        };
+
+        let doc = StructuredDocument::new(schema.clone());
+
+        // Insert two items via the StructuredDocument API.
+        let items_json = serde_json::json!({
+            "items": [
+                {
+                    "id": "item-a",
+                    "subject": "First task",
+                    "description": "",
+                    "status": "pending",
+                    "blocks": [],
+                    "metadata": {},
+                    "comments": [],
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "updated_at": "2026-01-01T00:00:00Z"
+                },
+                {
+                    "id": "item-b",
+                    "subject": "Second task",
+                    "description": "Has a description",
+                    "status": "in-progress",
+                    "blocks": [],
+                    "metadata": {},
+                    "comments": [],
+                    "created_at": "2026-01-02T00:00:00Z",
+                    "updated_at": "2026-01-02T00:00:00Z"
+                }
+            ]
+        });
+
+        let vv_before = doc.inner().oplog_vv();
+        doc.import_from_json(&items_json).unwrap();
+        doc.commit();
+        let update_bytes = doc
+            .inner()
+            .export(loro::ExportMode::updates(&vv_before))
+            .unwrap();
+
+        let mount_dir = run_worker_and_get_file("tl_block", schema, doc, update_bytes, db, &dir);
+
+        // The worker should emit a .kdl file for TaskList schema.
+        let file_path = mount_dir.join("tl_block.kdl");
+        assert!(
+            file_path.exists(),
+            "KDL file should be written for TaskList schema"
+        );
+
+        let content = std::fs::read_to_string(&file_path).unwrap();
+
+        // Basic content checks.
+        assert!(
+            content.contains("task-list"),
+            "KDL file should contain task-list root node: {content}"
+        );
+        assert!(
+            content.contains("First task"),
+            "KDL file should contain first item subject: {content}"
+        );
+        assert!(
+            content.contains("Second task"),
+            "KDL file should contain second item subject: {content}"
+        );
+        assert!(
+            content.contains("Has a description"),
+            "KDL file should contain non-empty description: {content}"
+        );
+
+        // Round-trip: parse the emitted KDL back through kdl_to_loro_value
+        // and verify the item ids are preserved (the key AC1.7 guarantee).
+        let parsed_kdl =
+            crate::fs::kdl::parse_kdl(&content).expect("emitted KDL must be valid KDL");
+        let round_tripped =
+            crate::fs::kdl::kdl_to_loro_value(&parsed_kdl, crate::fs::kdl::TopShape::TaskList)
+                .expect("emitted KDL must parse back to LoroValue via TaskList shape");
+
+        let loro::LoroValue::Map(root) = &round_tripped else {
+            panic!("round-tripped value must be a LoroValue::Map");
+        };
+        let loro::LoroValue::List(items) = root.get("items").expect("items key must exist") else {
+            panic!("items must be a LoroValue::List");
+        };
+        assert_eq!(items.len(), 2, "round-tripped items list must have 2 items");
+
+        // Verify item ids survived the round-trip.
+        let ids: Vec<&str> = items
+            .iter()
+            .filter_map(|item| {
+                let loro::LoroValue::Map(m) = item else {
+                    return None;
+                };
+                m.get("id").and_then(|v| match v {
+                    loro::LoroValue::String(s) => Some(s.as_str()),
+                    _ => None,
+                })
+            })
+            .collect();
+        assert!(
+            ids.contains(&"item-a"),
+            "item-a id must survive round-trip: {ids:?}"
+        );
+        assert!(
+            ids.contains(&"item-b"),
+            "item-b id must survive round-trip: {ids:?}"
+        );
     }
 }

@@ -140,6 +140,18 @@ pub(super) fn kdl_to_task_list(doc: &KdlDocument) -> Result<LoroValue, KdlConver
 // Forward helpers
 // ---------------------------------------------------------------------------
 
+/// Null-normalization convention for optional fields:
+///
+/// `metadata`, `active_form`, and `owner` may arrive as `LoroValue::Null`
+/// (e.g., when constructed from JSON via `json_to_loro` and the JSON value
+/// is `null`). The forward path pattern-matches on `LoroValue::String` so
+/// `Null` variants are simply skipped — nothing is emitted. The reverse path
+/// (`kdl_node_to_task_item`) inserts `LoroValue::Map({})` for missing
+/// metadata and omits `owner`/`active_form` entirely (they remain absent from
+/// the output map). This means `Null` and absent are treated identically: a
+/// `Null` normalises to absent on the first round-trip. Subsequent round-trips
+/// are stable (idempotent after the first pass). This is intentional: agents
+/// should use the explicit types (`String`, `Map`) rather than `Null`.
 fn task_item_to_kdl_node(value: &LoroValue) -> Result<KdlNode, KdlConversionError> {
     let map = match value {
         LoroValue::Map(m) => m,
@@ -167,7 +179,13 @@ fn task_item_to_kdl_node(value: &LoroValue) -> Result<KdlNode, KdlConversionErro
         children.nodes_mut().push(n);
     }
 
-    // description.
+    // description — convention: empty string equals absent. We omit the node
+    // when the value is empty, and the reverse path (`kdl_node_to_task_item`)
+    // defaults to `LoroValue::String("")` when no description node is found.
+    // This means an empty description survives round-trips as "" → omit → ""
+    // without loss. `TaskItem::active_form` is `Option<String>` and uses a
+    // separate absent/present distinction; description is always `String` and
+    // uses the empty-equals-absent convention documented here.
     if let Some(LoroValue::String(s)) = map.get("description")
         && !s.is_empty()
     {
@@ -227,8 +245,8 @@ fn task_item_to_kdl_node(value: &LoroValue) -> Result<KdlNode, KdlConversionErro
         for c in comments.iter() {
             if let LoroValue::Map(cm) = c {
                 let mut entry_node = KdlNode::new("entry");
-                push_str_prop_from(&mut entry_node, "author", cm);
-                push_str_prop_from(&mut entry_node, "timestamp", cm);
+                push_str_prop(&mut entry_node, "author", cm);
+                push_str_prop(&mut entry_node, "timestamp", cm);
                 // text child.
                 if let Some(LoroValue::String(t)) = cm.get("text") {
                     let mut text_node = KdlNode::new("text");
@@ -275,10 +293,6 @@ fn push_str_prop(node: &mut KdlNode, key: &str, map: &loro::LoroMapValue) {
         entry.set_name(Some(key));
         node.push(entry);
     }
-}
-
-fn push_str_prop_from(node: &mut KdlNode, key: &str, map: &loro::LoroMapValue) {
-    push_str_prop(node, key, map);
 }
 
 fn push_str_child(children: &mut KdlDocument, key: &str, map: &loro::LoroMapValue) {
@@ -581,11 +595,17 @@ mod tests {
 
     // Error path tests (Task 11 scope but colocated here per plan).
 
-    /// Check that a `miette::Report` wrapping the error renders with
-    /// source-span gutter characters (`│`) when the KDL source is attached.
+    /// Check that a `miette::Report` wrapping the error renders with source-span
+    /// gutter characters when the KDL source is attached. Also verifies that the
+    /// expected label text appears in the rendered output.
+    ///
     /// This confirms that `KdlConversionError` implements `miette::Diagnostic`
-    /// and that the `#[label]` span is wired correctly.
-    fn assert_miette_renders_source_span(err: KdlConversionError, kdl_str: &str) {
+    /// and that the `#[label]` span and text are wired correctly.
+    fn assert_miette_renders_source_span(
+        err: KdlConversionError,
+        kdl_str: &str,
+        expected_label: &str,
+    ) {
         use miette::{GraphicalReportHandler, GraphicalTheme, NamedSource};
         let report = miette::Report::new(err)
             .with_source_code(NamedSource::new("test.kdl", kdl_str.to_owned()));
@@ -606,6 +626,18 @@ mod tests {
         assert!(
             rendered.contains(",-["),
             "expected miette source-location marker ',-[' in rendered report, got:\n{rendered}"
+        );
+        // The label text from #[label("...")] must appear in the rendered output.
+        assert!(
+            rendered.contains(expected_label),
+            "expected label text {:?} in rendered report, got:\n{rendered}",
+            expected_label,
+        );
+        // A line-number gutter marker (`| ` or `│`) must also appear,
+        // confirming a real source location is being rendered.
+        assert!(
+            rendered.contains("| ") || rendered.contains("│"),
+            "expected line-number gutter marker in rendered report, got:\n{rendered}"
         );
     }
 
@@ -628,7 +660,7 @@ mod tests {
         // Rebuild the error to assert miette rendering (unwrap_err() consumed it).
         let doc2 = super::super::kdl::parse_kdl(kdl_str).unwrap();
         let err2 = kdl_to_task_list(&doc2).unwrap_err();
-        assert_miette_renders_source_span(err2, kdl_str);
+        assert_miette_renders_source_span(err2, kdl_str, "invalid block reference here");
     }
 
     #[test]
@@ -649,7 +681,7 @@ mod tests {
         );
         let doc2 = super::super::kdl::parse_kdl(kdl_str).unwrap();
         let err2 = kdl_to_task_list(&doc2).unwrap_err();
-        assert_miette_renders_source_span(err2, kdl_str);
+        assert_miette_renders_source_span(err2, kdl_str, "expected (block) type annotation here");
     }
 
     #[test]
@@ -678,7 +710,7 @@ mod tests {
         }
         let doc2 = super::super::kdl::parse_kdl(kdl_str).unwrap();
         let err2 = kdl_to_task_list(&doc2).unwrap_err();
-        assert_miette_renders_source_span(err2, kdl_str);
+        assert_miette_renders_source_span(err2, kdl_str, "invalid block reference here");
     }
 
     #[test]
@@ -707,6 +739,6 @@ mod tests {
         }
         let doc2 = super::super::kdl::parse_kdl(kdl_str).unwrap();
         let err2 = kdl_to_task_list(&doc2).unwrap_err();
-        assert_miette_renders_source_span(err2, kdl_str);
+        assert_miette_renders_source_span(err2, kdl_str, "invalid block reference here");
     }
 }

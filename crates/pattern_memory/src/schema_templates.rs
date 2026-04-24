@@ -59,8 +59,18 @@ pub mod templates {
         }
     }
 
-    /// Task list schema.
-    /// For ADHD task management.
+    /// Task list schema (legacy, pre-v3-task-skill-blocks).
+    ///
+    /// Returns a `BlockSchema::List` with a Map item schema. This was the
+    /// original approach before the dedicated `BlockSchema::TaskList` variant
+    /// was added in v3-task-skill-blocks Phase 1.
+    ///
+    /// **Prefer `BlockSchema::TaskList { .. }` for new code.** `BlockSchema::TaskList`
+    /// uses a `LoroMovableList` for proper item reordering semantics, carries
+    /// richer item metadata (status, owner, blocks, comments), and round-trips
+    /// through a dedicated KDL serializer. This function is retained for
+    /// backward-compatibility with existing persona TOML files and tests that
+    /// reference the old shape, but new task lists should use `TaskList`.
     pub fn task_list() -> BlockSchema {
         BlockSchema::List {
             item_schema: Some(Box::new(BlockSchema::Map {

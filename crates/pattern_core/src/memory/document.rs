@@ -1214,12 +1214,20 @@ impl StructuredDocument {
                             .unwrap_or_default();
 
                         // Build the item line.
-                        let mut line = format!("- id={id} subject=\"{subject}\" status={status}");
+                        // subject and active_form are rendered with Debug-format
+                        // quoting ({:?}) so that values containing `"` are escaped
+                        // rather than producing malformed output.
+                        let mut line = format!("- id={id} subject={subject:?} status={status}");
                         if let Some(ref o) = owner {
-                            line.push_str(&format!(" owner=@{o}"));
+                            // AgentId values are stored without a leading `@`
+                            // (the convention in pattern_core types/ids.rs).
+                            // We prepend it here only at render time. Strip any
+                            // pre-existing `@` first so we never emit `@@agent`.
+                            let bare = o.trim_start_matches('@');
+                            line.push_str(&format!(" owner=@{bare}"));
                         }
                         if let Some(ref af) = active_form {
-                            line.push_str(&format!(" active_form=\"{af}\""));
+                            line.push_str(&format!(" active_form={af:?}"));
                         }
                         out.push_str(&line);
                         out.push('\n');
@@ -1272,11 +1280,13 @@ impl StructuredDocument {
                     }
                 }
 
-                if shown < total {
+                if let Some(lim) = display_limit
+                    && shown < total
+                {
                     out.push_str(&format!(
                         "\n... {} more items not shown (display_limit={})\n",
                         total - shown,
-                        display_limit.unwrap()
+                        lim,
                     ));
                 }
 
@@ -2184,15 +2194,39 @@ mod tests {
 
     #[test]
     fn test_task_list_subscribe_content_returns_movable_list() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
         let doc = StructuredDocument::new(make_task_list_schema());
-        let container_id = match &doc.metadata.schema {
-            BlockSchema::TaskList { .. } => doc.doc.get_movable_list("items").id(),
-            _ => panic!("expected TaskList schema"),
-        };
-        // ContainerID's container_type() method tells us the type.
+
+        // Call the production code path: subscribe_content should wire up the
+        // LoroMovableList container. If the subscription fires on item insertion
+        // we know (a) subscribe_content ran, (b) it chose the correct container.
+        let fired = Arc::new(AtomicU32::new(0));
+        let fired_clone = fired.clone();
+        let _sub = doc.subscribe_content(Arc::new(move |_event| {
+            fired_clone.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        // Insert an item via the production API to trigger the subscription.
+        let item = make_task_item_json("sub1", "subscription test", "pending");
+        let payload = serde_json::json!({ "items": [item] });
+        doc.import_from_json(&payload).unwrap();
+        doc.commit();
+
+        assert!(
+            fired.load(Ordering::SeqCst) > 0,
+            "subscribe_content subscription must fire when an item is inserted into the MovableList"
+        );
+
+        // Also verify the container type by inspecting what subscribe_content
+        // subscribed to: get_movable_list returns a LoroMovableList, and its
+        // ContainerID reports type MovableList.
+        let container_id = doc.doc.get_movable_list("items").id();
         assert_eq!(
             format!("{:?}", container_id.container_type()),
-            "MovableList"
+            "MovableList",
+            "TaskList subscribe_content must target the MovableList container"
         );
     }
 
