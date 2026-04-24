@@ -1,0 +1,7 @@
+---
+source: crates/pattern_db/tests/queries_task.rs
+assertion_line: 464
+expression: results
+---
+- - i-01
+  - -1.0833
