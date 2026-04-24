@@ -3,9 +3,15 @@
 //! User-facing task management with ADHD-aware features:
 //! - Hierarchical breakdown (big tasks → small steps)
 //! - Flexible scheduling (due dates, scheduled times)
-//! - Priority levels with urgency distinction
 //!
 //! Distinct from task-block index rows (see queries::task) used for agent work assignment.
+//!
+//! ## Schema alignment note (migration 0011)
+//!
+//! Migration 0011 renamed `title` → `subject` (aligning with `TaskItem.subject`
+//! in the CRDT layer) and dropped the `priority` column (priority is now carried
+//! as freeform metadata JSON in the TaskList block layer, not as a fixed SQL
+//! column). The `Task` struct here reflects the post-migration shape.
 
 use crate::Json;
 use chrono::{DateTime, Utc};
@@ -18,52 +24,51 @@ use serde::{Deserialize, Serialize};
 /// large overwhelming tasks can be broken into smaller, actionable steps.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
-    /// Unique identifier
+    /// Unique identifier.
     pub id: String,
 
-    /// Agent responsible for this task (None = constellation-level)
+    /// Agent responsible for this task (None = constellation-level).
     pub agent_id: Option<String>,
 
-    /// Task title (short, actionable)
-    pub title: String,
+    /// Brief imperative description of what needs to be done.
+    ///
+    /// Renamed from `title` in migration 0011 to align with `TaskItem.subject`.
+    pub subject: String,
 
-    /// Detailed description (optional)
+    /// Detailed description (optional).
     pub description: Option<String>,
 
-    /// Current status
+    /// Current status.
     pub status: UserTaskStatus,
 
-    /// Priority level
-    pub priority: UserTaskPriority,
-
-    /// When the task is due (hard deadline)
+    /// When the task is due (hard deadline).
     pub due_at: Option<DateTime<Utc>>,
 
-    /// When the task is scheduled to be worked on
+    /// When the task is scheduled to be worked on.
     pub scheduled_at: Option<DateTime<Utc>>,
 
-    /// When the task was completed
+    /// When the task was completed.
     pub completed_at: Option<DateTime<Utc>>,
 
-    /// Parent task for hierarchy (None = top-level)
+    /// Parent task for hierarchy (None = top-level).
     pub parent_task_id: Option<String>,
 
-    /// Optional tags/labels as JSON array
+    /// Optional tags/labels as JSON array.
     pub tags: Option<Json<Vec<String>>>,
 
-    /// Estimated duration in minutes (for time-boxing)
+    /// Estimated duration in minutes (for time-boxing).
     pub estimated_minutes: Option<i64>,
 
-    /// Actual duration in minutes (filled on completion)
+    /// Actual duration in minutes (filled on completion).
     pub actual_minutes: Option<i64>,
 
-    /// Optional notes/context
+    /// Optional notes/context.
     pub notes: Option<String>,
 
-    /// Creation timestamp
+    /// Creation timestamp.
     pub created_at: DateTime<Utc>,
 
-    /// Last update timestamp
+    /// Last update timestamp.
     pub updated_at: DateTime<Utc>,
 }
 
@@ -151,24 +156,21 @@ impl std::fmt::Display for UserTaskPriority {
 /// Lightweight task projection for lists.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskSummary {
-    /// Task ID
+    /// Task ID.
     pub id: String,
 
-    /// Task title
-    pub title: String,
+    /// Brief imperative description (renamed from `title` in migration 0011).
+    pub subject: String,
 
-    /// Current status
+    /// Current status.
     pub status: UserTaskStatus,
 
-    /// Priority level
-    pub priority: UserTaskPriority,
-
-    /// Due date if set
+    /// Due date if set.
     pub due_at: Option<DateTime<Utc>>,
 
-    /// Parent task ID for hierarchy display
+    /// Parent task ID for hierarchy display.
     pub parent_task_id: Option<String>,
 
-    /// Number of subtasks (computed)
+    /// Number of subtasks (computed).
     pub subtask_count: Option<i64>,
 }

@@ -461,5 +461,4 @@ mod tests {
         round_trip(UserTaskPriority::Critical, "critical");
         round_trip(UserTaskPriority::Low, "low");
     }
-
 }

@@ -32,9 +32,9 @@
 - **Promotion is daemon-level RPC, not an agent effect.** Only humans can promote drafts; this is a trust boundary. Exposing it as `ctx.constellation.promote` via the Haskell surface is an anti-pattern (an agent could promote another agent). Daemon-side only.
 - **Legacy-schema removal is atomic.** Migration `0014` drops `agent_groups`, `group_members`, `coordination_tasks` in one pass. Any call sites in `queries/coordination.rs` / `queries/agent.rs` are deleted in the same commit.
 
-### Open question
+### Resolved
 
-**Q6.1.** There may be live data in the legacy tables (the user may have coordination data from the pre-v3 era). **Resolve at kickoff:** check if the user's active `memory.db` holds rows in these tables; if yes, either (a) include a data-migration step in `0014` that ports existing rows into the new schema where equivalent (group definitions → `persona_groups`), or (b) confirm with orual that the data is disposable (likely, given v3 is a rewrite). Plan assumes **(b)** — data disposable — but execution pauses for a confirmation if the tables have rows.
+- **Legacy coordination data is disposable.** v3 is breaking the data format intentionally; `0014` does a clean `DROP TABLE` with no row-porting step. Confirmed by orual.
 
 ---
 
@@ -146,7 +146,7 @@ DROP TABLE IF EXISTS group_members;
 DROP TABLE IF EXISTS agent_groups;
 ```
 
-Before running this, **resolve Q6.1** — if there's existing data, either port it in this migration or confirm with orual that the data is disposable.
+Legacy rows are dropped outright — v3 is intentionally breaking the data format.
 
 Code cleanup: grep for `CoordinationPattern`, `agent_groups`, `group_members`, `coordination_tasks`, `DelegationRules`, `VotingRules`, `PipelineStage`, `SleeptimeTrigger`. Delete every reference. Remove imports. Run `cargo check --workspace` — every call site must be updated or the code deleted.
 
@@ -424,7 +424,7 @@ CLI commands: parse args, call the new daemon RPCs (`ListPersonas`, `PromoteDraf
 
 ## Notes for executor
 
-- **Resolve Q6.1 at kickoff.** Check if the active memory.db has legacy-coordination data before running `0014`.
+- Legacy coordination data is disposable — no data migration step in `0014`.
 - Staging-era types live outside the workspace; deletion is safe — confirm with a `cargo check --workspace` before committing the deletion.
 - `drain_draft_queue` is Phase 4's API. Use it verbatim; do not add a second drain.
 - CLI / TUI work is intentionally lean — Phase 7's smoke test verifies more, and pattern_cli polish is its own backlog.

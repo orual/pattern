@@ -17,7 +17,7 @@
 - ✓ Existing SDK Haskell modules at `crates/pattern_runtime/haskell/Pattern/`: `Aeson`, `Diagnostics`, `Display`, `File`, `Log`, `Mcp`, `Memory`, `Message`, `Prelude`, `Recall`, `Rpc`, `Search`, `Shell`, `Sources`, `Spawn`, `Table`, `Text`, `Time`. Delegation modules go alongside: `Pattern.Delegation.RoundRobin`, `Pattern.Delegation.Pipeline`, `Pattern.Delegation.FanOut`.
 - ✗ The design plan's path `crates/pattern_runtime/src/tidepool/sdk/lib/` does not exist — it's `crates/pattern_runtime/haskell/Pattern/` in-tree. Plan uses the real path.
 - ✓ Integration test dir `crates/pattern_runtime/tests/` already has 17 integration suites (`hello_world.rs`, `multi_module_sdk.rs`, `session_lifecycle.rs`, etc.). `multi_agent_smoke.rs` follows the same shape.
-- ⚠ Mock `ProviderClient` status unclear. Grep for `MockProvider` / `fn mock_provider` at execution start. If none exists, Phase 7 Task 1 adds a minimal one.
+- ✓ `MockProviderClient` lives at `crates/pattern_runtime/src/testing.rs:110` with `with_turns`, `text_turn`, `tool_use_turn`, `with_token_count` helpers (and a `rotate_count` inspection hook). Re-exported via `pattern_runtime::testing`. Phase 7 reuses it — no new provider mock.
 
 ### Design decisions locked in
 
@@ -26,11 +26,7 @@
 - **Pipeline** — chain stages where stage N's output feeds stage N+1's input. Used for multi-step processing where each step is a distinct specialist.
 - **FanOut** — same task submitted in parallel to all workers; caller aggregates results. Used for voting / ensemble patterns.
 - **Smoke test is the single comprehensive end-to-end test.** We do NOT add one integration test per AC — the smoke test exercises the full surface in one go, and failure modes get diagnosed from the test's structured output per AC10.5.
-- **Mock provider contract.** Scripted reply set: input prompt matches a known fixture → return a known Haskell `SpawnReply` / message, else error. Deterministic.
-
-### Open questions
-
-**Q7.1.** Mock provider — does it exist in the test-support layer? Check at kickoff; if not, Task 1 adds one. Don't invent a second mock if one already serves.
+- **Mock provider contract.** `MockProviderClient::with_turns(...)` at `pattern_runtime::testing` takes a `Vec<Vec<ProviderEvent>>` (one vec per scripted turn). Use the `text_turn` / `tool_use_turn` helpers for the common shapes; add inline event lists when the scripted flow needs custom content. Deterministic; no network.
 
 ---
 
@@ -50,54 +46,26 @@
 <!-- START_SUBCOMPONENT_A (tasks 1-4) -->
 
 <!-- START_TASK_1 -->
-### Task 1: Mock provider (or verify existing)
+### Task 1: Author scripted turns for the multi-agent smoke
 
-**Verifies:** AC10.2.
+**Verifies:** AC10.2 (ensures the smoke test runs against a deterministic provider).
 
 **Files:**
-- Check: `crates/pattern_runtime/tests/support/` (if exists). Grep for `Mock` / `Scripted` / `FakeProvider` across `crates/pattern_runtime/tests/` and `crates/pattern_provider/src/testing.rs` (if any).
-- Create (if absent): `crates/pattern_runtime/tests/support/mock_provider.rs` with a `ScriptedProvider` type implementing `ProviderClient`.
+- Create: `crates/pattern_runtime/tests/fixtures/multi_agent/scripted_turns.rs` — a module that builds the `Vec<Vec<ProviderEvent>>` script for the smoke test using `MockProviderClient::{text_turn, tool_use_turn}` helpers from `pattern_runtime::testing`.
 
 **Implementation:**
 
-If nothing exists:
+The `MockProviderClient` already exists and is the correct vehicle — don't introduce a second mock. The work here is pure fixture authoring: write the scripted turn sequence the smoke needs (supervisor routes → specialist completes task → supervisor summarizes). Keep the fixtures in a named module so other multi-agent tests can reuse them if they grow.
 
-```rust
-pub struct ScriptedProvider {
-    script: Mutex<VecDeque<ScriptedReply>>,
-}
-
-pub enum ScriptedReply {
-    Text(String),
-    ToolCall { name: String, input: serde_json::Value },
-    Stop(StopReason),
-}
-
-impl ScriptedProvider {
-    pub fn new(script: Vec<ScriptedReply>) -> Self { ... }
-}
-
-#[async_trait]
-impl ProviderClient for ScriptedProvider {
-    async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
-        let mut script = self.script.lock().unwrap();
-        let reply = script.pop_front().ok_or(ProviderError::ScriptExhausted)?;
-        Ok(reply.into_response())
-    }
-    // rotate_session_uuid default no-op is fine for tests.
-}
-```
-
-Even if an existing mock exists, document what it covers in the smoke test's comment header — future readers shouldn't re-discover the setup.
+Review the existing `MockProviderClient` tests at `crates/pattern_runtime/src/testing.rs` bottom to see the builder idioms; match that style.
 
 **Testing:**
-- Unit: `ScriptedProvider` exhaustion returns `ProviderError::ScriptExhausted`.
-- Unit: scripted replies are delivered in order.
+- None beyond what the smoke test itself (Task 5) exercises.
 
 **Verification:**
-`cargo nextest run -p pattern-runtime mock_provider`
+Compilation alone is sufficient; the smoke test in Task 5 exercises the fixtures.
 
-**Commit:** `[pattern-runtime] add (or confirm) ScriptedProvider for multi-agent tests`
+**Commit:** `[pattern-runtime] add scripted turn fixtures for multi-agent smoke`
 <!-- END_TASK_1 -->
 
 <!-- START_TASK_2 -->
@@ -241,7 +209,7 @@ fanOut workers task attach =
 
 Test flow:
 
-1. **Setup.** Build a `ScriptedProvider` with a pre-known response sequence for both personas. Use a temp data dir with Standalone mount mode + jj enabled.
+1. **Setup.** Build a `MockProviderClient::with_turns(...)` using the scripted fixtures from Task 1. Use a temp data dir with Standalone mount mode + jj enabled.
 2. **Persona loading.** Load `supervisor.kdl` (has `FrontingControl` + `SpawnNewIdentities` capability flags; `Constellation`, `Spawn`, `Message`, `Memory`) and `specialist.kdl` (has only `Memory` + `Message`). Register both via the registry; set FrontingSet to `{ active: [supervisor], fallback: supervisor }`.
 3. **Human message.** Simulate an `InitSession` + `SendMessage` RPC with the human message `"please delegate: compute 2+2"`. The supervisor's scripted response dispatches a `MessageReq::Delegate { task: TaskRef, target: specialist, body: "2+2" }`.
 4. **Delegation lands in specialist's mailbox.** Specialist steps, reads the task from its pinned working-memory snapshot, scripted response emits a result `"4"`.
@@ -308,7 +276,7 @@ Manual: read the diff of updated CLAUDE.md files and confirm accuracy.
 
 ## Phase done-when checklist
 
-- [ ] ScriptedProvider (new or existing) covers deterministic multi-agent tests.
+- [ ] `MockProviderClient` scripted-turn fixtures cover the smoke test deterministically.
 - [ ] Three delegation Haskell modules (RoundRobin, Pipeline, FanOut) importable and tested in the smoke.
 - [ ] `multi_agent_smoke.rs` exercises the full surface and passes under `cargo nextest run` without external dependencies.
 - [ ] No residual `todo!()` / `unimplemented!()` / stale CLAUDE.md notes left over from phases 1-6.
@@ -318,7 +286,7 @@ Manual: read the diff of updated CLAUDE.md files and confirm accuracy.
 
 ## Notes for executor
 
-- **Resolve Q7.1 at kickoff.** Look for an existing mock provider before writing a new one. Duplicating testing infra is churn.
+- Use `pattern_runtime::testing::MockProviderClient` — it exists and is the canonical vehicle. Do not invent a second mock.
 - The smoke test intentionally overlaps with per-phase tests. Per-phase tests isolate regressions; the smoke test proves composition. Both are load-bearing.
 - If the smoke test takes >60s, something is mis-wired — pause and diagnose before adding timeouts. The scripted provider should complete each turn in milliseconds.
 - Commit style per project.

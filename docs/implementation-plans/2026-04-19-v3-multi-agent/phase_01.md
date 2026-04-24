@@ -29,15 +29,10 @@
 - ✓ Persona KDL schema lives at `crates/pattern_runtime/src/persona_loader.rs`. Adding `capabilities {}` / `policy {}` blocks extends the existing `PersonaSnapshot` `Decode` derive.
 - + Unrelated bonus: `PersonaSnapshot.enabled_tools` was already removed (see `pattern_core/CLAUDE.md`) with a note that "permission/capability control will return via effect-level prelude filtering + per-effect permission structures in a future phase" — **this phase**. That cleanup is still applicable; no residual `enabled_tools` plumbing should be re-introduced.
 
-### Open design question to confirm with user before starting
+### Design decisions (resolved against the codebase)
 
-**Q1.** The broker today lives at `crates/pattern_core/src/permission.rs` and the trait-only rule says `pattern_core` holds data + traits, not execution. Current broker has real async machinery (tokio channels). Options:
-- **A.** Move the broker to `pattern_runtime` entirely and leave a thin trait (`PermissionAuthority` or similar) in core so handlers can depend on the trait.
-- **B.** Keep the broker in core (it is an async "data-bus" with limited behaviour) and treat it as an exception on grounds of being a coordination primitive, not execution logic.
-
-Plan assumes **(A)** — broker moves to `pattern_runtime`, core keeps a trait. Executor should confirm with user before Task 5; if (B) is preferred, Task 5 shrinks to "refactor-in-place + make constructor pub + jiff swap".
-
-**(Resolved — see Task 15.)** AC2.7 is verified end-to-end in Phase 1. The File handler's `Write` arm evaluates the policy pipeline and short-circuits on `Deny` / `RequireApproval` before any real write logic runs. The actual write mechanics (path sandboxing, fs operations) stay out of Phase 1 and remain the sandbox-io plan's responsibility — but the gate is live.
+- **Broker stays in `pattern_core`.** `permission.rs` already imports `tokio::sync::{RwLock, broadcast, oneshot}` and `provider_client.rs` defines async trait methods — `pattern_core` is a trait-+-coordination-primitives crate in practice, not strictly-trait-only. The broker is a data-bus (coordination), not execution logic. Task 5 collapses to refactor-in-place: make `PermissionBroker::new()` pub, remove any singleton, swap chrono→jiff. No trait relocation, no crate move.
+- **AC2.7 is verified end-to-end in Task 15.** The File handler's `Write` arm evaluates the policy pipeline and short-circuits on `Deny` / `RequireApproval` before any real write logic runs. Actual write mechanics (path sandboxing, fs operations) remain the sandbox-io plan's responsibility, but the gate is live.
 
 ---
 
@@ -253,56 +248,41 @@ Expected: compile-failure case matches expected error; compile-success case runs
 <!-- START_SUBCOMPONENT_C (tasks 5-7) -->
 
 <!-- START_TASK_5 -->
-### Task 5: Introduce `PermissionAuthority` trait in `pattern_core`, move broker to `pattern_runtime`
+### Task 5: Make `PermissionBroker` per-runtime (in place)
 
 **Verifies:** none directly — sets up AC2.4 / AC2.5 / AC2.6 / AC2.8 / AC2.9.
 
-**DESIGN QUESTION (Q1):** confirm with user before starting. Assumes (A) — broker moves to runtime. If user prefers (B), this task collapses into Task 6.
-
 **Files:**
-- Create: `crates/pattern_core/src/permission/authority.rs` — trait definition.
-- Modify: `crates/pattern_core/src/permission.rs` — keep ONLY pure data types (`PermissionScope`, `PermissionRequest`, `PermissionGrant`, `PermissionDecisionKind`). Delete `PermissionBroker` struct + impls (they move).
-- Modify: `crates/pattern_core/src/lib.rs` — adjust re-exports.
-- Move: `PermissionBroker` struct and its async machinery to `crates/pattern_runtime/src/permission/mod.rs` (new subdirectory).
-- Modify any call sites of `PermissionBroker` found by grep (`rg -F "PermissionBroker" crates/`) to go through the trait + per-runtime instance.
+- Modify: `crates/pattern_core/src/permission.rs` — make `fn new()` pub; keep struct + impls in place.
+- Delete: any global singleton (grep for `Lazy.*PermissionBroker`, `OnceCell.*PermissionBroker`, `static.*PermissionBroker` across the workspace).
+- Modify: call sites of the singleton — each now accepts the broker as a dependency.
 
 **Implementation:**
-Trait (in `pattern_core`):
+The broker's struct shape stays exactly as it is today — `pattern_core::permission.rs` already imports `tokio::sync::{RwLock, broadcast, oneshot}` and hosts async methods, so keeping a coordination primitive here is consistent with established precedent. The refactor is mechanical:
 
-```rust
-#[async_trait]
-pub trait PermissionAuthority: Send + Sync {
-    async fn request(&self, req: PermissionRequest, timeout: std::time::Duration)
-        -> Option<PermissionGrant>;
-    fn subscribe(&self) -> tokio::sync::broadcast::Receiver<PermissionRequest>;
-    fn respond(&self, id: &str, decision: PermissionDecisionKind);
-}
-```
-
-(Using `tokio::sync::broadcast` in a trait exposes a tokio type in core — acceptable precedent: we already expose tokio types in core traits. If orual prefers a narrower trait surface, surface this in review.)
-
-Implement the trait on the relocated `PermissionBroker` in `pattern_runtime`. Keep the existing struct shape — that's what makes this refactor mechanical.
-
-Per-runtime instantiation lives wherever the runtime is currently constructing one. A `rg` sweep should find one or two call sites. Change private `fn new()` to `pub fn new() -> Self`.
+1. `rg -F "PermissionBroker::" crates/` — identify every call site.
+2. Grep for the singleton constructor (`Lazy` / `OnceCell` / `static`).
+3. Delete the singleton. Make `PermissionBroker::new()` pub.
+4. Thread `Arc<PermissionBroker>` through runtime construction (Task 7 wires it onto `SessionContext`).
 
 **Testing:**
-- Unit: existing permission tests migrate to `pattern_runtime::permission::tests` unchanged.
+- Unit: existing permission tests still pass unchanged.
+- Unit: two broker instances created independently have separate pending queues (belt-and-suspenders with Task 6's AC2.9 coverage).
 
 **Verification:**
-`cargo nextest run -p pattern-core permission && cargo nextest run -p pattern-runtime permission`
-Expected: all pre-existing tests still pass after the move.
+`cargo nextest run -p pattern-core permission`
+Expected: all pre-existing tests still pass; no references to a global `PermissionBroker` remain.
 
-**Commit:** `[pattern-core] [pattern-runtime] extract PermissionAuthority trait, move broker to runtime`
+**Commit:** `[pattern-core] make PermissionBroker per-runtime; remove global singleton`
 <!-- END_TASK_5 -->
 
 <!-- START_TASK_6 -->
-### Task 6: `PermissionBroker` v2 — jiff durations, per-runtime construction, approve-for-scope plumbing
+### Task 6: `PermissionBroker` v2 — jiff durations, approve-for-scope plumbing
 
 **Verifies:** AC2.4, AC2.5, AC2.6, AC2.8, AC2.9.
 
 **Files:**
-- Modify: `crates/pattern_runtime/src/permission/mod.rs` (post-move from Task 5).
-- Modify: `crates/pattern_core/src/permission.rs` — change `PermissionGrant.expires_at` from `chrono::DateTime<chrono::Utc>` to `jiff::Timestamp`; add `PermissionDecisionKind::ApproveForDuration(jiff::Span)` (replacing `std::time::Duration`).
+- Modify: `crates/pattern_core/src/permission.rs` — change `PermissionGrant.expires_at` from `chrono::DateTime<chrono::Utc>` to `jiff::Timestamp`; add `PermissionDecisionKind::ApproveForDuration(jiff::Span)` (replacing `std::time::Duration`); add the approve-for-scope cache.
 - Modify: any callers that build `PermissionDecisionKind::ApproveForDuration` or read `PermissionGrant.expires_at`.
 
 **Implementation:**
@@ -327,35 +307,32 @@ Expected: all new behaviour covered; no panics / leaks on timeout.
 <!-- END_TASK_6 -->
 
 <!-- START_TASK_7 -->
-### Task 7: Remove global `PermissionBroker` singleton, thread per-runtime instance through handler contexts
+### Task 7: Thread per-runtime broker through handler contexts
 
 **Verifies:** AC2.9.
 
 **Files:**
-- Modify: wherever the singleton lives (grep surfaces it). Typically a `once_cell::sync::Lazy<PermissionBroker>` or similar — delete it.
-- Modify: `crates/pattern_runtime/src/session.rs` or the runtime construction path — construct the broker alongside the runtime, store as `Arc<PermissionBroker>`, expose through `SessionContext` (accessor `ctx.permission_authority() -> Arc<dyn PermissionAuthority>`).
-- Modify: any handler (`shell.rs`, future `file.rs`, etc.) that accesses the old global — switch to `cx.user().permission_authority()` via `HasCancelState` + new trait `HasPermissionAuthority` (or fold into existing user trait, whichever is lighter).
+- Modify: `crates/pattern_runtime/src/session.rs` — construct the broker alongside the runtime, store as `Arc<PermissionBroker>`, expose through `SessionContext` (accessor `ctx.permission_broker() -> &Arc<PermissionBroker>`).
+- Modify: any handler (`shell.rs`, future `file.rs`, etc.) that will consult the broker — switch to `cx.user().permission_broker()` via a new `HasPermissionBroker` trait (alongside the existing `HasCancelState`).
 
 **Implementation:**
-Define `HasPermissionAuthority` in `pattern_runtime::permission`:
+Define `HasPermissionBroker` in `pattern_runtime::session` (or wherever `HasCancelState` lives):
 
 ```rust
-pub trait HasPermissionAuthority {
-    fn permission_authority(&self) -> &Arc<dyn PermissionAuthority>;
+pub trait HasPermissionBroker {
+    fn permission_broker(&self) -> &Arc<pattern_core::permission::PermissionBroker>;
 }
 ```
 
-`SessionContext` implements it. Handlers that need the broker take an additional bound `U: HasCancelState + HasPermissionAuthority` (example in `shell.rs`).
-
-Do not leave a backwards-compat shim (the guidance is explicit). Delete the global; callers fail to compile until updated. Fix every call site in the same task.
+`SessionContext` implements it. Handlers that need the broker take an additional bound `U: HasCancelState + HasPermissionBroker` (example in `shell.rs` at Task 10).
 
 **Testing:**
-- Integration: spin up two `SessionContext`s backed by independent `PermissionBroker` instances; confirm approving a scope on one does not leak (AC2.9, belt-and-suspenders with Task 6).
+- Integration: spin up two `SessionContext`s with independent `PermissionBroker` instances; confirm approving a scope on one does not leak (AC2.9, belt-and-suspenders with Task 6).
 
 **Verification:**
-`cargo nextest run` full suite. Expected: no references to `PermissionBroker::global()` or equivalents remain.
+`cargo nextest run` full suite. Expected: every handler that consults the broker reaches it through the per-session `SessionContext`.
 
-**Commit:** `[pattern-runtime] remove PermissionBroker singleton, scope to per-runtime instance`
+**Commit:** `[pattern-runtime] thread per-runtime PermissionBroker through SessionContext`
 <!-- END_TASK_7 -->
 
 <!-- END_SUBCOMPONENT_C -->
@@ -730,7 +707,7 @@ The blocking `futures::executor::block_on` call mirrors the Shell handler (which
 - [ ] `CapabilitySet`, `EffectCategory`, `CapabilityError` types live in `pattern_core`.
 - [ ] `filtered_effect_decls` + `preamble::build_for` produce capability-scoped preambles.
 - [ ] Session open accepts an optional `CapabilitySet`; integration test shows compile-time rejection of excluded effects.
-- [ ] `PermissionAuthority` trait in core; `PermissionBroker` moved to runtime; global singleton deleted.
+- [ ] `PermissionBroker` refactored in place: `new()` pub, global singleton deleted, per-runtime instances threaded through `SessionContext`.
 - [ ] `PermissionBroker` v2 on jiff, per-runtime, with approve-for-scope + approve-for-duration caches, no leaks on timeout.
 - [ ] `PolicyRule` / `PolicySet` types; Rust defaults seeded; KDL blocks parsed; merge order respected.
 - [ ] Shell handler routes through `PolicySet` + broker on `RequireApproval`.
@@ -743,6 +720,6 @@ The blocking `futures::executor::block_on` call mirrors the Shell handler (which
 
 - Do not reintroduce `PersonaSnapshot.enabled_tools`. The capabilities block replaces it cleanly.
 - Plan 2 (task-skill-blocks) is mid-landing in parallel. If the `Tasks` effect lands in `CANONICAL_EFFECT_ROW` during Phase 1 execution, the `EffectCategory::Tasks` slot is already there; no schema churn. If it does NOT land, Phase 1 still works — the variant is reserved.
-- Confirm Q1 (broker location) with the user before Task 5. (Q2 resolved — Task 15 lands AC2.7 end-to-end.)
+- All design questions resolved in this plan: broker stays in `pattern_core` (in-place refactor, Tasks 5-7), AC2.7 lands end-to-end via Task 15's File handler gate.
 - Commit style per project: `[pattern-core] …` / `[pattern-runtime] …` / `[pattern-core] [pattern-runtime] …` for cross-crate moves.
 - Always `cargo nextest run`; `cargo test --doc` for doctests; `cargo fmt`; `cargo clippy --all-features --all-targets`; `just pre-commit-all` before merging.

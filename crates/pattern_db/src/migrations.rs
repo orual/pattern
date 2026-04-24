@@ -35,6 +35,9 @@ static MEMORY_MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!(
             "../migrations/memory/0010_collapse_block_types.sql"
         )),
+        M::up(include_str!(
+            "../migrations/memory/0011_task_block_index.sql"
+        )),
     ])
 });
 
