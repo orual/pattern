@@ -19,6 +19,7 @@ pub mod search;
 pub mod shell;
 pub mod sources;
 pub mod spawn;
+pub mod tasks;
 pub mod time;
 
 pub use diagnostics::DiagnosticsReq;
@@ -34,6 +35,7 @@ pub use search::SearchReq;
 pub use shell::ShellReq;
 pub use sources::SourcesReq;
 pub use spawn::SpawnReq;
+pub use tasks::TasksReq;
 pub use time::TimeReq;
 
 #[cfg(test)]

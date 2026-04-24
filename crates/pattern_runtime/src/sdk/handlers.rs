@@ -19,6 +19,7 @@ pub mod search;
 pub mod shell;
 pub mod sources;
 pub mod spawn;
+pub mod tasks;
 pub mod time;
 
 pub use diagnostics::DiagnosticsHandler;
@@ -34,4 +35,5 @@ pub use search::SearchHandler;
 pub use shell::ShellHandler;
 pub use sources::SourcesHandler;
 pub use spawn::SpawnHandler;
+pub use tasks::TasksHandler;
 pub use time::TimeHandler;
