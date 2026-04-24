@@ -102,6 +102,8 @@ serenity = { version = "0.12", default-features = false, features = [
 
 rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk.git" } # MCP
 
+saphyr = "0.0.6"
+
 # Testing
 mockall = "0.13"
 pretty_assertions = "1.4"

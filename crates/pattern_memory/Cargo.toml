@@ -31,6 +31,7 @@ serde_json = { workspace = true }
 
 # Serialization formats
 kdl = "6"
+saphyr = { workspace = true }
 blake3 = { workspace = true }
 
 # Sync subscriber worker
