@@ -31,6 +31,7 @@ pub mod reembed;
 pub mod schema_templates;
 pub mod scope;
 pub mod sharing;
+pub mod skill;
 pub mod subscriber;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
