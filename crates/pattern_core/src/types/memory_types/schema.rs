@@ -5,6 +5,10 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::types::ids::AgentId;
+
+use super::TaskStatus;
+
 /// A section within a Composite schema, containing its own schema and metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CompositeSection {
@@ -33,7 +37,14 @@ pub struct TextViewport {
     pub display_lines: usize,
 }
 
-/// Block schema defines the structure of a memory block's Loro document
+/// Block schema defines the structure of a memory block's Loro document.
+///
+/// `#[non_exhaustive]` is applied so that adding new schema variants in
+/// future phases (e.g. `Skill` in Phase 4) is a non-breaking change.
+/// External match sites must include a `_ =>` catch-all arm; internal
+/// match sites in `pattern_core` and `pattern_memory` carry explicit arms
+/// for every variant.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum BlockSchema {
     /// Free-form text with optional viewport for large content
@@ -65,6 +76,30 @@ pub enum BlockSchema {
 
     /// Custom composite with multiple named sections
     Composite { sections: Vec<CompositeSection> },
+
+    /// Ordered, movable list of task items stored in a `LoroMovableList`.
+    ///
+    /// Items carry per-item `TaskItem` records (status, owner, dependency
+    /// edges, comments, metadata). The list-level fields here hold policy
+    /// defaults applied when an item omits its own value.
+    ///
+    /// `display_limit` caps how many items are rendered into the LLM context
+    /// window; excess items are summarised with a truncation indicator.
+    /// `None` means no cap (all items shown).
+    TaskList {
+        /// Agent to assign new items to when no explicit owner is set.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default_owner: Option<AgentId>,
+
+        /// Status to apply to new items when none is specified at creation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default_status: Option<TaskStatus>,
+
+        /// Maximum number of items to render in the LLM context window.
+        /// `None` means render all items.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_limit: Option<usize>,
+    },
 }
 
 impl Default for BlockSchema {
@@ -202,4 +237,68 @@ pub struct LogEntrySchema {
 
     /// Additional custom fields
     pub fields: Vec<FieldDef>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// AC1.1: `BlockSchema::TaskList` can be constructed and round-trips through
+    /// `serde_json` without loss.
+    ///
+    /// This test is written *before* the `TaskList` variant is added to
+    /// `BlockSchema`. It must fail (compile error / `no variant named TaskList`)
+    /// until Task 7 implements the variant — TDD red phase.
+    #[test]
+    fn block_schema_task_list_serde_round_trip() {
+        use crate::types::ids::AgentId;
+        use crate::types::memory_types::TaskStatus;
+
+        let schema = BlockSchema::TaskList {
+            default_owner: None,
+            default_status: Some(TaskStatus::Pending),
+            display_limit: Some(20),
+        };
+
+        let json = serde_json::to_string(&schema).expect("serialise BlockSchema::TaskList");
+        let recovered: BlockSchema =
+            serde_json::from_str(&json).expect("deserialise BlockSchema::TaskList");
+
+        assert_eq!(schema, recovered);
+
+        // Spot-check: default_owner absent, default_status present, display_limit present.
+        let v: serde_json::Value = serde_json::from_str(&json).expect("parse as Value");
+        // Externally-tagged enum: the outer key is "TaskList".
+        assert!(
+            v.get("TaskList").is_some(),
+            "outer key must be 'TaskList', got: {v}"
+        );
+        let inner = &v["TaskList"];
+        assert!(
+            inner["default_owner"].is_null(),
+            "default_owner must be null when None"
+        );
+        assert_eq!(
+            inner["default_status"].as_str(),
+            Some("pending"),
+            "default_status must serialize as kebab-case"
+        );
+        assert_eq!(
+            inner["display_limit"].as_u64(),
+            Some(20),
+            "display_limit must serialize as integer"
+        );
+
+        // Ensure AgentId variant round-trips correctly too.
+        let schema_with_owner = BlockSchema::TaskList {
+            default_owner: Some(AgentId::from("agent-orual")),
+            default_status: None,
+            display_limit: None,
+        };
+        let json2 = serde_json::to_string(&schema_with_owner)
+            .expect("serialise TaskList with owner");
+        let recovered2: BlockSchema =
+            serde_json::from_str(&json2).expect("deserialise TaskList with owner");
+        assert_eq!(schema_with_owner, recovered2);
+    }
 }
