@@ -84,6 +84,7 @@ tempfile = { workspace = true }
 proptest = "1"
 insta = { version = "1", features = ["yaml"] }
 futures = { workspace = true }
+metrics-util = { version = "0.20.1", features = ["debugging"] }
 
 [lints]
 workspace = true
