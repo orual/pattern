@@ -34,7 +34,7 @@ type BlockHandle = Text
 -- >   "handle": BlockHandle,
 -- >   "name": Text,
 -- >   "description": Text?,          -- from skill frontmatter
--- >   "trust_tier": Text,            -- kebab-case: "built-in" | "trusted" | "community" | "untrusted"
+-- >   "trust_tier": Text,            -- kebab-case: "first-party" | "project-local" | "plugin-installed" | "ad-hoc"
 -- >   "keywords": [Text],
 -- >   "last_used": Text?             -- ISO 8601 timestamp or null
 -- > }
@@ -45,7 +45,6 @@ type SkillInfo = Text
 -- > {
 -- >   "name": Text,
 -- >   "description": Text?,
--- >   "version": Text?,
 -- >   "trust_tier": Text,
 -- >   "keywords": [Text],
 -- >   "hooks": Value                  -- arbitrary hook config from frontmatter
@@ -78,10 +77,14 @@ data Skills a where
   -- Returns a JSON-encoded @Maybe SkillMetadata@ ('Nothing' if the
   -- handle refers to a non-Skill block).
   GetMetadata   :: BlockHandle -> Skills Text
-  -- | Inject the skill body into segment 2 of the current turn's
-  -- composed model request. Records a usage-stat row in sqlite.
-  -- Returns unit; emits a @[skill:loaded] … [skill:loaded:end]@ marker.
-  Load          :: BlockHandle -> Skills ()
+  -- | Load a skill block: returns the rendered
+  -- @[skill:loaded] … [skill:loaded:end]@ text (markers + frontmatter line
+  -- + full body) as the tool result, and records a usage-stat row in
+  -- sqlite. The returned string becomes the tool_result content; because
+  -- tool_result messages are part of conversation history, the skill body
+  -- naturally persists across subsequent turns without a separate
+  -- pseudo-message pipe.
+  Load          :: BlockHandle -> Skills Text
   -- | Full-text search over skill name, description, keywords, and body.
   -- Returns a JSON-encoded @[SkillInfo]@ ordered by BM25 relevance.
   Search        :: Text        -> Skills Text
@@ -105,14 +108,17 @@ listSkills = send List
 getSkillMetadata :: Member Skills effs => BlockHandle -> Eff effs Text
 getSkillMetadata h = send (GetMetadata h)
 
--- | Inject the skill body into the current turn's composed context.
+-- | Load a skill block.
 --
--- Emits a @[skill:loaded] name=\"…\" trust_tier=\"…\"@ marker followed by
--- the skill body and a @[skill:loaded:end]@ marker in segment 2.
+-- Returns the rendered @[skill:loaded] name=\"…\" trust_tier=\"…\"@ +
+-- frontmatter line + full body + @[skill:loaded:end]@ as 'Text', delivered
+-- as the tool_result content. Persists across subsequent turns naturally
+-- via conversation history.
+--
 -- Also records a usage-stat row (increments @use_count@) in sqlite.
--- Loading the same skill twice in one turn produces two markers (no
+-- Loading the same skill twice produces two tool_result messages (no
 -- dedup in v1, by design).
-loadSkill :: Member Skills effs => BlockHandle -> Eff effs ()
+loadSkill :: Member Skills effs => BlockHandle -> Eff effs Text
 loadSkill h = send (Load h)
 
 -- | Search skill blocks by FTS5 query.

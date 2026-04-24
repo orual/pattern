@@ -122,7 +122,6 @@ async fn populate_history(
         let output = TurnOutput {
             messages: vec![assistant_msg],
             block_writes: vec![],
-            pseudo_messages: vec![],
             tool_calls: vec![],
             stop_reason: StopReason::EndTurn,
             usage: None,
@@ -214,7 +213,6 @@ async fn populate_history_with_empty_kept_turn(
         let output = TurnOutput {
             messages: vec![],
             block_writes: vec![],
-            pseudo_messages: vec![],
             tool_calls: vec![],
             stop_reason: StopReason::EndTurn,
             usage: None,
@@ -241,7 +239,6 @@ async fn populate_history_with_empty_kept_turn(
     let output_empty = TurnOutput {
         messages: vec![], // empty — the edge case
         block_writes: vec![],
-        pseudo_messages: vec![],
         tool_calls: vec![],
         stop_reason: StopReason::EndTurn,
         usage: None,

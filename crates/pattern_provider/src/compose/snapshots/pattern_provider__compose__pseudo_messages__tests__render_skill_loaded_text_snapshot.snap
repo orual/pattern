@@ -1,8 +1,8 @@
 ---
 source: crates/pattern_provider/src/compose/pseudo_messages.rs
+assertion_line: 728
 expression: text
 ---
-<system-reminder>
 [skill:loaded] name="fix-authentication" trust_tier="project-local"
 
 ## Overview
@@ -10,4 +10,3 @@ expression: text
 Handles OAuth2 token refresh for expired sessions.
 
 [skill:loaded:end]
-</system-reminder>

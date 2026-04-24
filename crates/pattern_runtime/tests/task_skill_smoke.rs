@@ -27,7 +27,6 @@ use pattern_db::ConstellationDb;
 use pattern_memory::MemoryCache;
 use pattern_memory::fs::markdown_skill::{SkillFile, write_skill_to_loro_doc};
 use pattern_memory::scope::{MemoryScope, ScopeBinding};
-use pattern_runtime::memory::MemoryStoreAdapter;
 use pattern_runtime::sdk::handlers::skills::{
     handle_get_metadata, handle_list, handle_load, handle_search,
 };
@@ -543,35 +542,32 @@ fn smoke_skills_surface() {
     let hash_before = blake3::hash(body_before.as_bytes());
 
     // --- load ---
-    // The adapter wraps the cache as `Arc<dyn MemoryStore>` for handle_load.
-    let adapter = MemoryStoreAdapter::new(cache.clone(), AGENT);
-
-    handle_load(&*cache, &adapter, &mut usage_conn, AGENT, "oauth2-helper")
+    // handle_load returns the rendered [skill:loaded] text directly as the
+    // tool_result body (AC9.1). Persistence across turns is structurally
+    // guaranteed because tool_result messages flow through active_messages().
+    let rendered = handle_load(&*cache, &mut usage_conn, AGENT, "oauth2-helper")
         .expect("smoke_skills_surface[step:load]: load must succeed (AC9.1)");
 
-    // The adapter buffer should contain exactly one pseudo-message.
-    let drained = adapter.drain_pending_pseudo_messages();
-    assert_eq!(
-        drained.len(),
-        1,
-        "smoke_skills_surface[step:load]: exactly one pseudo-message must be queued (AC9.1)"
-    );
-    let msg_text = format!("{:?}", drained[0]);
     assert!(
-        msg_text.contains("[skill:loaded]"),
-        "smoke_skills_surface[step:load]: pseudo-message must contain [skill:loaded] marker"
+        rendered.contains("[skill:loaded]"),
+        "smoke_skills_surface[step:load]: rendered text must contain [skill:loaded] marker"
     );
     assert!(
-        msg_text.contains("[skill:loaded:end]"),
-        "smoke_skills_surface[step:load]: pseudo-message must contain [skill:loaded:end] marker"
+        rendered.contains("[skill:loaded:end]"),
+        "smoke_skills_surface[step:load]: rendered text must contain [skill:loaded:end] marker"
     );
     assert!(
-        msg_text.contains("oauth2-helper"),
-        "smoke_skills_surface[step:load]: pseudo-message must contain skill name"
+        rendered.contains("oauth2-helper"),
+        "smoke_skills_surface[step:load]: rendered text must contain skill name"
     );
     assert!(
-        msg_text.contains("OAuth2 Helper"),
-        "smoke_skills_surface[step:load]: pseudo-message must contain body heading"
+        rendered.contains("OAuth2 Helper"),
+        "smoke_skills_surface[step:load]: rendered text must contain body heading"
+    );
+    assert!(
+        !rendered.contains("<system-reminder>"),
+        "smoke_skills_surface[step:load]: rendered text must NOT be wrapped in \
+         <system-reminder> (tool_result has its own role-based framing)"
     );
 
     // --- canonical body hash after load — must be unchanged (AC9.3 / AC9.6) ---
