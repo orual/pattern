@@ -81,8 +81,29 @@ impl EffectHandler<SessionContext> for TasksHandler {
         _cx: &EffectContext<'_, SessionContext>,
     ) -> Result<Value, EffectError> {
         match req {
-            TasksReq::_Placeholder => Err(EffectError::Handler(
-                "Pattern.Tasks is scaffolding; variants added in Task 5".into(),
+            TasksReq::Create(_, _) => Err(EffectError::Handler(
+                "Pattern.Tasks::Create — Task 7 implements".into(),
+            )),
+            TasksReq::Update(_, _) => Err(EffectError::Handler(
+                "Pattern.Tasks::Update — Task 7 implements".into(),
+            )),
+            TasksReq::Transition(_, _) => Err(EffectError::Handler(
+                "Pattern.Tasks::Transition — Task 7 implements".into(),
+            )),
+            TasksReq::AddComment(_, _) => Err(EffectError::Handler(
+                "Pattern.Tasks::AddComment — Task 7 implements".into(),
+            )),
+            TasksReq::Link(_, _) => Err(EffectError::Handler(
+                "Pattern.Tasks::Link — Task 8 implements".into(),
+            )),
+            TasksReq::Unlink(_, _) => Err(EffectError::Handler(
+                "Pattern.Tasks::Unlink — Task 8 implements".into(),
+            )),
+            TasksReq::List(_, _) => Err(EffectError::Handler(
+                "Pattern.Tasks::List — Task 9 implements".into(),
+            )),
+            TasksReq::QueryGraph(_, _) => Err(EffectError::Handler(
+                "Pattern.Tasks::QueryGraph — Task 9 implements".into(),
             )),
         }
     }
