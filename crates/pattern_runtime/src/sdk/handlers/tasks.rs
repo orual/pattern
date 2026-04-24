@@ -107,12 +107,14 @@ impl EffectHandler<SessionContext> for TasksHandler {
                 handle_add_comment(&*store, &agent_id, &edge_ref, &text)?;
                 cx.respond(())
             }
-            TasksReq::Link(_, _) => Err(EffectError::Handler(
-                "Pattern.Tasks::Link — Task 8 implements".into(),
-            )),
-            TasksReq::Unlink(_, _) => Err(EffectError::Handler(
-                "Pattern.Tasks::Unlink — Task 8 implements".into(),
-            )),
+            TasksReq::Link(source_ref, target_ref) => {
+                handle_link(&*store, &agent_id, &source_ref, &target_ref)?;
+                cx.respond(())
+            }
+            TasksReq::Unlink(source_ref, target_ref) => {
+                handle_unlink(&*store, &agent_id, &source_ref, &target_ref)?;
+                cx.respond(())
+            }
             TasksReq::List(_, _) => Err(EffectError::Handler(
                 "Pattern.Tasks::List — Task 9 implements".into(),
             )),
@@ -188,6 +190,23 @@ fn parse_item_ref(ref_str: &str) -> Result<(String, String), TaskHandlerError> {
             ref_str: ref_str.to_string(),
         })?;
     Ok((parsed.block.to_string(), item.to_string()))
+}
+
+/// Parse a `TaskEdgeRef` string without requiring the item component. Used
+/// for link/unlink targets, which may address either a specific item or an
+/// entire block.
+fn parse_edge_ref_any(ref_str: &str) -> Result<(String, Option<String>), TaskHandlerError> {
+    let parsed: TaskEdgeRef =
+        ref_str
+            .parse::<TaskEdgeRef>()
+            .map_err(|e| TaskHandlerError::BadEdgeRef {
+                ref_str: ref_str.to_string(),
+                source: e,
+            })?;
+    Ok((
+        parsed.block.to_string(),
+        parsed.task_item.map(|s| s.to_string()),
+    ))
 }
 
 /// Fetch a block's StructuredDocument and verify its schema is TaskList.
@@ -521,6 +540,149 @@ pub(crate) fn handle_add_comment(
     Ok(())
 }
 
+/// Add a directed dependency edge from `source_ref` (which must address a
+/// specific item) to `target_ref` (block-level or item-level). The edge lives
+/// on the source item's `blocks` list; the target's LoroDoc is never touched.
+///
+/// If an identical edge already exists, this is a no-op (dedup keeps the
+/// canonical .kdl file tidy and prevents duplicate rows on reconcile).
+pub(crate) fn handle_link(
+    store: &dyn MemoryStore,
+    agent_id: &str,
+    source_ref: &str,
+    target_ref: &str,
+) -> Result<(), TaskHandlerError> {
+    let (src_block, src_item) = parse_item_ref(source_ref)?;
+    let (tgt_block, tgt_item) = parse_edge_ref_any(target_ref)?;
+
+    let sdoc = fetch_task_list(store, agent_id, &src_block)?;
+    let doc = sdoc.inner();
+    let index = find_item_index(doc, &src_item).ok_or_else(|| {
+        TaskHandlerError::Memory(MemoryError::TaskNotFound {
+            block: src_block.as_str().into(),
+            item: src_item.as_str().into(),
+        })
+    })?;
+
+    let mut item = read_item_as_json(doc, index)
+        .ok_or_else(|| TaskHandlerError::Loro(format!("item at index {index} not a map")))?;
+
+    // Grab or create the `blocks` array.
+    let blocks_arr = match item.entry("blocks") {
+        serde_json::map::Entry::Occupied(mut e) => {
+            if !e.get().is_array() {
+                e.insert(JsonValue::Array(vec![]));
+            }
+            e.into_mut().as_array_mut().expect("just inserted array")
+        }
+        serde_json::map::Entry::Vacant(e) => e
+            .insert(JsonValue::Array(vec![]))
+            .as_array_mut()
+            .expect("just inserted array"),
+    };
+
+    // Dedup: skip if an identical edge already exists.
+    if edge_matches_any(blocks_arr, &tgt_block, tgt_item.as_deref()) {
+        return Ok(());
+    }
+    blocks_arr.push(build_edge_value(&tgt_block, tgt_item.as_deref()));
+
+    item.insert(
+        "updated_at".into(),
+        JsonValue::String(jiff::Timestamp::now().to_string()),
+    );
+
+    replace_item_at(doc, index, item)?;
+    doc.commit();
+
+    store.mark_dirty(agent_id, &src_block);
+    store
+        .persist_block(agent_id, &src_block)
+        .map_err(|e| TaskHandlerError::Store(e.to_string()))?;
+
+    Ok(())
+}
+
+/// Remove a directed edge from the source item's `blocks` list. If no matching
+/// edge exists, this is a silent no-op (no LoroDoc mutation, no dirty mark).
+pub(crate) fn handle_unlink(
+    store: &dyn MemoryStore,
+    agent_id: &str,
+    source_ref: &str,
+    target_ref: &str,
+) -> Result<(), TaskHandlerError> {
+    let (src_block, src_item) = parse_item_ref(source_ref)?;
+    let (tgt_block, tgt_item) = parse_edge_ref_any(target_ref)?;
+
+    let sdoc = fetch_task_list(store, agent_id, &src_block)?;
+    let doc = sdoc.inner();
+    let index = find_item_index(doc, &src_item).ok_or_else(|| {
+        TaskHandlerError::Memory(MemoryError::TaskNotFound {
+            block: src_block.as_str().into(),
+            item: src_item.as_str().into(),
+        })
+    })?;
+
+    let mut item = read_item_as_json(doc, index)
+        .ok_or_else(|| TaskHandlerError::Loro(format!("item at index {index} not a map")))?;
+
+    let removed_any = match item.get_mut("blocks") {
+        Some(JsonValue::Array(arr)) => {
+            let before = arr.len();
+            arr.retain(|e| !edge_matches(e, &tgt_block, tgt_item.as_deref()));
+            before != arr.len()
+        }
+        _ => false,
+    };
+
+    if !removed_any {
+        return Ok(());
+    }
+
+    item.insert(
+        "updated_at".into(),
+        JsonValue::String(jiff::Timestamp::now().to_string()),
+    );
+
+    replace_item_at(doc, index, item)?;
+    doc.commit();
+
+    store.mark_dirty(agent_id, &src_block);
+    store
+        .persist_block(agent_id, &src_block)
+        .map_err(|e| TaskHandlerError::Store(e.to_string()))?;
+
+    Ok(())
+}
+
+/// Whether an edge JSON value matches `(target_block, target_item)`. Edges are
+/// shaped as `{ "block": String, "task_item": String | Null }`.
+fn edge_matches(edge: &JsonValue, block: &str, item: Option<&str>) -> bool {
+    let e_block = edge.get("block").and_then(|v| v.as_str());
+    if e_block != Some(block) {
+        return false;
+    }
+    let e_item = edge.get("task_item").and_then(|v| v.as_str());
+    e_item == item
+}
+
+/// Whether any edge in `edges` matches `(target_block, target_item)`.
+fn edge_matches_any(edges: &[JsonValue], block: &str, item: Option<&str>) -> bool {
+    edges.iter().any(|e| edge_matches(e, block, item))
+}
+
+/// Construct a new edge JSON value pointing at `(target_block, target_item)`.
+fn build_edge_value(block: &str, item: Option<&str>) -> JsonValue {
+    let mut edge = serde_json::Map::new();
+    edge.insert("block".into(), JsonValue::String(block.to_string()));
+    edge.insert(
+        "task_item".into(),
+        item.map(|s| JsonValue::String(s.to_string()))
+            .unwrap_or(JsonValue::Null),
+    );
+    JsonValue::Object(edge)
+}
+
 /// Apply a `TaskPatch` to a mutable JSON map representing a task item.
 ///
 /// Double-option fields (`owner`, `active_form`):
@@ -832,4 +994,174 @@ mod tests {
         let item = read_item_as_json(sdoc.inner(), 0).unwrap();
         assert!(item.get("owner").is_none(), "owner must be cleared");
     }
+
+    // region: link / unlink tests
+
+    /// Helper: read the blocks edge list on the item at `index` in `block`.
+    fn edges_at(store: &dyn MemoryStore, agent: &str, block: &str, index: usize) -> Vec<JsonValue> {
+        let sdoc = store.get_block(agent, block).unwrap().unwrap();
+        let item = read_item_as_json(sdoc.inner(), index).unwrap();
+        item.get("blocks")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn link_appends_edge_to_source_item_blocks() {
+        let store = Arc::new(InMemoryMemoryStore::new());
+        seed_task_list(&*store, "agent-a", "tasks");
+        let a = handle_create(&*store, "agent-a", "tasks", &sample_spec("A")).unwrap();
+        let b = handle_create(&*store, "agent-a", "tasks", &sample_spec("B")).unwrap();
+
+        let a_ref = format!("tasks#{a}");
+        let b_ref = format!("tasks#{b}");
+        handle_link(&*store, "agent-a", &a_ref, &b_ref).unwrap();
+
+        // A's blocks list has exactly one edge pointing at B.
+        let edges = edges_at(&*store, "agent-a", "tasks", 0);
+        assert_eq!(edges.len(), 1, "exactly one edge");
+        assert_eq!(
+            edges[0].get("block").and_then(|v| v.as_str()),
+            Some("tasks")
+        );
+        assert_eq!(
+            edges[0].get("task_item").and_then(|v| v.as_str()),
+            Some(b.as_str())
+        );
+    }
+
+    #[test]
+    fn link_twice_is_idempotent_dedup() {
+        let store = Arc::new(InMemoryMemoryStore::new());
+        seed_task_list(&*store, "agent-a", "tasks");
+        let a = handle_create(&*store, "agent-a", "tasks", &sample_spec("A")).unwrap();
+        let b = handle_create(&*store, "agent-a", "tasks", &sample_spec("B")).unwrap();
+
+        let a_ref = format!("tasks#{a}");
+        let b_ref = format!("tasks#{b}");
+        handle_link(&*store, "agent-a", &a_ref, &b_ref).unwrap();
+        handle_link(&*store, "agent-a", &a_ref, &b_ref).unwrap();
+
+        let edges = edges_at(&*store, "agent-a", "tasks", 0);
+        assert_eq!(edges.len(), 1, "dedup keeps a single entry");
+    }
+
+    #[test]
+    fn self_edge_allowed() {
+        let store = Arc::new(InMemoryMemoryStore::new());
+        seed_task_list(&*store, "agent-a", "tasks");
+        let a = handle_create(&*store, "agent-a", "tasks", &sample_spec("A")).unwrap();
+
+        let a_ref = format!("tasks#{a}");
+        handle_link(&*store, "agent-a", &a_ref, &a_ref).expect("self-edge allowed");
+
+        let edges = edges_at(&*store, "agent-a", "tasks", 0);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(
+            edges[0].get("task_item").and_then(|v| v.as_str()),
+            Some(a.as_str()),
+            "self-edge addresses itself"
+        );
+    }
+
+    #[test]
+    fn link_cross_block_does_not_touch_target_block_doc() {
+        // Two distinct TaskList blocks. link(A@L1, B@L2) must only mutate L1.
+        let store = Arc::new(InMemoryMemoryStore::new());
+        seed_task_list(&*store, "agent-a", "l1");
+        seed_task_list(&*store, "agent-a", "l2");
+        let a = handle_create(&*store, "agent-a", "l1", &sample_spec("A")).unwrap();
+        let b = handle_create(&*store, "agent-a", "l2", &sample_spec("B")).unwrap();
+
+        // Snapshot L2's frontier before the link.
+        let l2_before = {
+            let sdoc = store.get_block("agent-a", "l2").unwrap().unwrap();
+            sdoc.inner().state_frontiers()
+        };
+
+        let a_ref = format!("l1#{a}");
+        let b_ref = format!("l2#{b}");
+        handle_link(&*store, "agent-a", &a_ref, &b_ref).unwrap();
+
+        // L2's frontier unchanged — we never touched its LoroDoc.
+        let l2_after = {
+            let sdoc = store.get_block("agent-a", "l2").unwrap().unwrap();
+            sdoc.inner().state_frontiers()
+        };
+        assert_eq!(
+            l2_before, l2_after,
+            "target block's LoroDoc must not advance"
+        );
+
+        // And the edge IS in L1.
+        let l1_edges = edges_at(&*store, "agent-a", "l1", 0);
+        assert_eq!(l1_edges.len(), 1);
+        assert_eq!(
+            l1_edges[0].get("block").and_then(|v| v.as_str()),
+            Some("l2")
+        );
+        assert_eq!(
+            l1_edges[0].get("task_item").and_then(|v| v.as_str()),
+            Some(b.as_str())
+        );
+    }
+
+    #[test]
+    fn unlink_removes_edge_from_blocks_list() {
+        let store = Arc::new(InMemoryMemoryStore::new());
+        seed_task_list(&*store, "agent-a", "tasks");
+        let a = handle_create(&*store, "agent-a", "tasks", &sample_spec("A")).unwrap();
+        let b = handle_create(&*store, "agent-a", "tasks", &sample_spec("B")).unwrap();
+
+        let a_ref = format!("tasks#{a}");
+        let b_ref = format!("tasks#{b}");
+        handle_link(&*store, "agent-a", &a_ref, &b_ref).unwrap();
+        assert_eq!(edges_at(&*store, "agent-a", "tasks", 0).len(), 1);
+
+        handle_unlink(&*store, "agent-a", &a_ref, &b_ref).unwrap();
+        assert_eq!(
+            edges_at(&*store, "agent-a", "tasks", 0).len(),
+            0,
+            "edge removed after unlink"
+        );
+    }
+
+    #[test]
+    fn unlink_nonexistent_edge_is_noop() {
+        let store = Arc::new(InMemoryMemoryStore::new());
+        seed_task_list(&*store, "agent-a", "tasks");
+        let a = handle_create(&*store, "agent-a", "tasks", &sample_spec("A")).unwrap();
+        let b = handle_create(&*store, "agent-a", "tasks", &sample_spec("B")).unwrap();
+
+        let a_ref = format!("tasks#{a}");
+        let b_ref = format!("tasks#{b}");
+        // No prior link — unlink must succeed silently.
+        handle_unlink(&*store, "agent-a", &a_ref, &b_ref).expect("no-op unlink must not error");
+
+        assert_eq!(edges_at(&*store, "agent-a", "tasks", 0).len(), 0);
+    }
+
+    #[test]
+    fn link_missing_source_item_returns_task_not_found() {
+        let store = Arc::new(InMemoryMemoryStore::new());
+        seed_task_list(&*store, "agent-a", "tasks");
+        // Bogus source item id.
+        let err = handle_link(
+            &*store,
+            "agent-a",
+            "tasks#01HQZZZBOGUS01",
+            "tasks#any-target",
+        )
+        .expect_err("must fail");
+        assert!(
+            matches!(
+                err,
+                TaskHandlerError::Memory(MemoryError::TaskNotFound { .. })
+            ),
+            "expected TaskNotFound, got {err:?}"
+        );
+    }
+
+    // endregion: link / unlink tests
 }
