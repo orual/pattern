@@ -9,6 +9,7 @@ mod core_types;
 mod metadata;
 mod schema;
 mod search;
+mod skill;
 mod task;
 pub mod task_query;
 
@@ -17,6 +18,7 @@ pub use core_types::*;
 pub use metadata::*;
 pub use schema::*;
 pub use search::*;
+pub use skill::*;
 pub use task::*;
 pub use task_query::*;
 
