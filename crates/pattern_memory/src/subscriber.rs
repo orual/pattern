@@ -27,6 +27,7 @@
 
 pub mod event;
 pub mod supervisor;
+pub mod task;
 pub mod worker;
 
 pub use event::{CommitEvent, Heartbeat, ReembedRequest};

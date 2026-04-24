@@ -347,6 +347,62 @@ pub(crate) fn run_subscriber(config: WorkerConfig) {
             }
         }
 
+        // Reconcile block-index tables for schema-specific blocks.
+        // TaskList blocks maintain `tasks` + `task_edges` rows derived from
+        // the LoroDoc state. The reconcile runs inside a transaction so
+        // partial failures roll back atomically.
+        if matches!(schema, BlockSchema::TaskList { .. }) {
+            match db.get() {
+                Ok(mut conn) => {
+                    match conn.transaction() {
+                        Ok(tx) => {
+                            if let Err(e) = crate::subscriber::task::reconcile_task_list(
+                                &tx,
+                                &block_id,
+                                &disk_doc,
+                            ) {
+                                metrics::counter!(
+                                    "memory.sync_worker.reconcile_error",
+                                    "schema" => "task-list"
+                                )
+                                .increment(1);
+                                tracing::error!(
+                                    block_id = %block_id, error = %e,
+                                    "TaskList reconcile failed; transaction rolled back"
+                                );
+                                // tx drops here without commit → implicit rollback.
+                            } else if let Err(e) = tx.commit() {
+                                metrics::counter!(
+                                    "memory.sync_worker.reconcile_error",
+                                    "schema" => "task-list"
+                                )
+                                .increment(1);
+                                tracing::error!(
+                                    block_id = %block_id, error = %e,
+                                    "TaskList reconcile commit failed"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            metrics::counter!(
+                                "memory.sync_worker.reconcile_error",
+                                "schema" => "task-list"
+                            )
+                            .increment(1);
+                            tracing::error!(
+                                block_id = %block_id, error = %e,
+                                "failed to open transaction for TaskList reconcile"
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    metrics::counter!("memory.subscriber.pool_exhausted").increment(1);
+                    tracing::error!(error = %e, "DB pool get failed for TaskList reconcile");
+                }
+            }
+        }
+
         // Queue a re-embed request unconditionally on hash change.
         // This is acceptable overhead: the re-embed consumer silently drops
         // requests when no embedding provider is configured, and the clone
