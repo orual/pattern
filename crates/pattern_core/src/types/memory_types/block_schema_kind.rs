@@ -19,8 +19,7 @@ use super::BlockSchema;
 /// not the full schema value.
 ///
 /// Serialises as kebab-case strings matching the `BlockSchema` serde
-/// representation. `Skill` will be added in Phase 4 — this enum is
-/// `#[non_exhaustive]` so that addition is a non-breaking change.
+/// representation.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -37,6 +36,8 @@ pub enum BlockSchemaKind {
     Composite,
     /// Corresponds to [`BlockSchema::TaskList`].
     TaskList,
+    /// Corresponds to [`BlockSchema::Skill`].
+    Skill,
 }
 
 impl From<&BlockSchema> for BlockSchemaKind {
@@ -54,6 +55,7 @@ impl From<&BlockSchema> for BlockSchemaKind {
             BlockSchema::Log { .. } => Self::Log,
             BlockSchema::Composite { .. } => Self::Composite,
             BlockSchema::TaskList { .. } => Self::TaskList,
+            BlockSchema::Skill { .. } => Self::Skill,
         }
     }
 }
@@ -182,5 +184,24 @@ mod tests {
             display_limit: None,
         };
         assert_eq!(BlockSchemaKind::from(&schema), BlockSchemaKind::TaskList);
+    }
+
+    #[test]
+    fn block_schema_kind_skill_round_trips_as_kebab() {
+        let kind = BlockSchemaKind::Skill;
+        let json = serde_json::to_string(&kind).unwrap();
+        assert_eq!(json, r#""skill""#);
+        assert_eq!(
+            serde_json::from_str::<BlockSchemaKind>(&json).unwrap(),
+            kind
+        );
+    }
+
+    #[test]
+    fn from_block_schema_skill_yields_skill_kind() {
+        let schema = BlockSchema::Skill {
+            expected_keys: vec!["checklist".to_string()],
+        };
+        assert_eq!(BlockSchemaKind::from(&schema), BlockSchemaKind::Skill);
     }
 }

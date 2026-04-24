@@ -100,6 +100,19 @@ pub enum BlockSchema {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         display_limit: Option<usize>,
     },
+
+    /// A Skill block — YAML-frontmatter metadata + markdown body canonical
+    /// file. See [`crate::types::memory_types::SkillMetadata`] for the
+    /// typed frontmatter fields. `expected_keys` lists author-hint metadata
+    /// keys this block template expects; treated as soft documentation, not
+    /// enforced by the runtime.
+    Skill {
+        /// Author-declared hints about which metadata keys this block
+        /// template expects. Soft documentation — not enforced by
+        /// the runtime.
+        #[serde(default)]
+        expected_keys: Vec<String>,
+    },
 }
 
 impl Default for BlockSchema {
@@ -242,6 +255,45 @@ pub struct LogEntrySchema {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `BlockSchema::Skill` with non-empty `expected_keys` round-trips through
+    /// `serde_json` without loss.
+    #[test]
+    fn block_schema_skill_serde_round_trip_with_keys() {
+        let schema = BlockSchema::Skill {
+            expected_keys: vec!["checklist".to_string(), "workflow".to_string()],
+        };
+        let json = serde_json::to_string(&schema).expect("serialise BlockSchema::Skill");
+        let recovered: BlockSchema =
+            serde_json::from_str(&json).expect("deserialise BlockSchema::Skill");
+        assert_eq!(schema, recovered);
+
+        // Spot-check: outer key is "Skill", expected_keys present.
+        let v: serde_json::Value = serde_json::from_str(&json).expect("parse as Value");
+        assert!(
+            v.get("Skill").is_some(),
+            "outer key must be 'Skill', got: {v}"
+        );
+        let inner = &v["Skill"];
+        let keys = inner["expected_keys"]
+            .as_array()
+            .expect("expected_keys must be array");
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0].as_str(), Some("checklist"));
+        assert_eq!(keys[1].as_str(), Some("workflow"));
+    }
+
+    /// `BlockSchema::Skill` with empty `expected_keys` round-trips correctly.
+    #[test]
+    fn block_schema_skill_serde_round_trip_empty_keys() {
+        let schema = BlockSchema::Skill {
+            expected_keys: vec![],
+        };
+        let json = serde_json::to_string(&schema).expect("serialise BlockSchema::Skill empty");
+        let recovered: BlockSchema =
+            serde_json::from_str(&json).expect("deserialise BlockSchema::Skill empty");
+        assert_eq!(schema, recovered);
+    }
 
     /// AC1.1: `BlockSchema::TaskList` can be constructed and round-trips through
     /// `serde_json` without loss.

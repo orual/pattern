@@ -874,9 +874,21 @@ impl MemoryCache {
                         .map_err(|e| format!("disk_doc JSON import failed: {e}"))?;
                     disk_doc.commit();
                 }
-                // NOTE: `_ =>` covers future non_exhaustive additions (e.g. Skill,
-                // Phase 4). All currently-defined BlockSchema variants must have
-                // explicit arms above this catch-all.
+                pattern_core::types::memory_types::BlockSchema::Skill { .. } => {
+                    // Skill blocks parse via YAML-frontmatter + markdown body.
+                    // The `markdown_skill` converter is implemented in Task 7
+                    // (Phase 4, Subcomponent C). Until then, external edits to
+                    // Skill block files cannot be imported — return a typed error
+                    // so the caller can log and skip without silent data loss.
+                    return Err(format!(
+                        "{}",
+                        crate::fs::FsError::ConverterNotYetAvailable(
+                            pattern_core::types::memory_types::BlockSchemaKind::Skill
+                        )
+                    ));
+                }
+                // NOTE: `_ =>` covers future non_exhaustive additions beyond
+                // currently-known variants. Keep this list current.
                 _ => {
                     return Err(format!("unsupported schema: {schema:?}"));
                 }
@@ -1463,9 +1475,19 @@ fn apply_json_to_loro_doc(
             }
             Ok(())
         }
-        // NOTE: `_ =>` covers future non_exhaustive additions (e.g. Skill, Phase 4).
-        // All currently-defined BlockSchema variants must have explicit arms above
-        // this catch-all.
+        // Skill blocks are not imported via JSON — they use the YAML-frontmatter +
+        // markdown-body pipeline in `markdown_skill` (Task 7, Phase 4). Reaching
+        // this arm would mean the inbound watcher dispatched a Skill block edit to
+        // the JSON import path, which is a logic error in the caller. Return a
+        // typed error rather than silently doing nothing wrong.
+        (_, pattern_core::types::memory_types::BlockSchema::Skill { .. }) => Err(format!(
+            "{}",
+            crate::fs::FsError::ConverterNotYetAvailable(
+                pattern_core::types::memory_types::BlockSchemaKind::Skill
+            )
+        )),
+        // NOTE: `_ =>` covers future non_exhaustive additions beyond
+        // currently-known variants. Keep this list current.
         _ => Err(format!(
             "unexpected JSON shape for schema {:?}: expected object for Map/Composite/TaskList, array for List/Log",
             schema

@@ -122,11 +122,25 @@ pub(crate) fn render_canonical_from_disk_doc(
                 .map_err(|e| format!("KDL serialization failed: {e}"))?;
             Ok(("kdl", kdl_doc.to_string().into_bytes()))
         }
-        // NOTE: `_ =>` covers future non_exhaustive additions (e.g. Skill, Phase 4).
-        // All currently-defined BlockSchema variants must have explicit arms above
-        // this catch-all. If a new variant is added to BlockSchema without a
-        // corresponding arm here, this branch will silently return an error at
-        // runtime rather than failing at compile time. Keep this list current.
+        BlockSchema::Skill { .. } => {
+            // Skill blocks serialize to YAML-frontmatter + markdown body. The
+            // `markdown_skill` converter is implemented in Task 7 (Phase 4,
+            // Subcomponent C). Until then, this arm returns a typed domain error
+            // so callers can log and skip the emission cycle cleanly rather than
+            // hitting an undefined catch-all.
+            Err(format!(
+                "{}",
+                crate::fs::FsError::ConverterNotYetAvailable(
+                    pattern_core::types::memory_types::BlockSchemaKind::Skill
+                )
+            ))
+        }
+        // NOTE: `_ =>` covers future non_exhaustive additions beyond the variants
+        // currently known. All currently-defined BlockSchema variants must have
+        // explicit arms above this catch-all. If a new variant is added to
+        // BlockSchema without a corresponding arm here, this branch will silently
+        // return an error at runtime rather than failing at compile time. Keep
+        // this list current.
         _ => Err(format!(
             "unsupported schema for canonical rendering: {schema:?}"
         )),

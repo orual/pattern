@@ -5,6 +5,8 @@
 
 use std::path::PathBuf;
 
+use pattern_core::types::memory_types::BlockSchemaKind;
+
 use crate::fs::kdl::KdlConversionError;
 
 /// Errors arising from filesystem serialization and deserialization of memory
@@ -39,4 +41,13 @@ pub enum FsError {
         #[source]
         source: std::string::FromUtf8Error,
     },
+
+    /// A converter for this block schema kind has not been implemented yet.
+    ///
+    /// This is a typed placeholder for schema variants whose filesystem
+    /// serializer/deserializer is planned but not yet landed. Task 7 of
+    /// Phase 4 replaces the `Skill` arm that returns this error with the
+    /// real `markdown_skill::emit` / `markdown_skill::parse` calls.
+    #[error("no filesystem converter available yet for schema kind {0:?}")]
+    ConverterNotYetAvailable(BlockSchemaKind),
 }

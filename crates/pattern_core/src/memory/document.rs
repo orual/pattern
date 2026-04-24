@@ -765,6 +765,7 @@ impl StructuredDocument {
                                 BlockSchema::Log { .. } => "Log",
                                 BlockSchema::Composite { .. } => "Composite",
                                 BlockSchema::TaskList { .. } => "TaskList",
+                                BlockSchema::Skill { .. } => "Skill",
                             };
                             format!(
                                 "# Schema: {}\n# Edit the values below, then save.\n\n{}",
@@ -946,6 +947,25 @@ impl StructuredDocument {
                     }
                 }
             }
+            BlockSchema::Skill { .. } => {
+                // Skill: treat the body as text content, mirroring the Text arm.
+                // The YAML frontmatter lives in the "metadata" LoroMap and is
+                // managed by the `markdown_skill` converter (Task 7, Phase 4);
+                // `import_from_json` only handles the body here.
+                let text = if let Some(s) = value.as_str() {
+                    s.to_string()
+                } else if let Some(body) = value.get("body").and_then(|v| v.as_str()) {
+                    body.to_string()
+                } else {
+                    return Err(DocumentError::Other(
+                        "Skill schema expects string body or object with 'body' field".to_string(),
+                    ));
+                };
+                let body_text = self.doc.get_text("body");
+                body_text
+                    .update(&text, Default::default())
+                    .map_err(|e| DocumentError::Other(e.to_string()))?;
+            }
         }
         Ok(())
     }
@@ -1002,6 +1022,9 @@ impl StructuredDocument {
             BlockSchema::Log { .. } => self.doc.get_list("entries").id(),
             BlockSchema::Composite { .. } => self.doc.get_map("root").id(),
             BlockSchema::TaskList { .. } => self.doc.get_movable_list("items").id(),
+            // Skill blocks store the markdown body in a LoroText container named
+            // "body", mirroring the Text variant's "content" container convention.
+            BlockSchema::Skill { .. } => self.doc.get_text("body").id(),
         };
         self.doc.subscribe(&container_id, callback)
     }
@@ -1323,6 +1346,24 @@ impl StructuredDocument {
                 }
 
                 out
+            }
+
+            BlockSchema::Skill { expected_keys } => {
+                // Render the body text. The YAML frontmatter metadata lives in
+                // the "metadata" LoroMap and is presented separately by the
+                // skill-aware render path in Task 9 (Phase 4). For now, render
+                // the body text and a note about expected metadata keys so the
+                // block is at least legible in LLM context.
+                let body = self.doc.get_text("body").to_string();
+                if expected_keys.is_empty() {
+                    body
+                } else {
+                    format!(
+                        "Skill(expected_keys=[{}])\n{}",
+                        expected_keys.join(", "),
+                        body
+                    )
+                }
             }
         }
     }
