@@ -11,126 +11,13 @@
 //! - v3-task-skill-blocks.AC3.6: idempotent — running twice with no change
 //!   produces the same final row set.
 
-use loro::{LoroDoc, LoroValue};
-use metrics_util::debugging::{DebugValue, DebuggingRecorder};
-use pattern_db::migrations::run_memory_migrations;
-use pattern_memory::subscriber::task::{reconcile_task_list, ReconcileError};
-use rusqlite::Connection;
+use pattern_memory::subscriber::task::reconcile_task_list;
 
-// ---------------------------------------------------------------------------
-// helpers
-// ---------------------------------------------------------------------------
-
-/// Open an in-memory DB with all memory migrations applied.
-fn fresh_db() -> Connection {
-    let mut conn = Connection::open_in_memory().unwrap();
-    run_memory_migrations(&mut conn).unwrap();
-    conn
-}
-
-/// Build a single task item as a LoroValue::Map.
-fn make_item(
-    id: &str,
-    subject: &str,
-    status: &str,
-    edges: &[(&str, Option<&str>)],
-) -> LoroValue {
-    let mut map: Vec<(String, LoroValue)> = vec![
-        ("id".into(), LoroValue::String(id.into())),
-        ("subject".into(), LoroValue::String(subject.into())),
-        ("status".into(), LoroValue::String(status.into())),
-    ];
-
-    let edge_list: Vec<LoroValue> = edges
-        .iter()
-        .map(|(block, item)| {
-            let mut edge: Vec<(String, LoroValue)> = vec![
-                ("block".into(), LoroValue::String((*block).into())),
-            ];
-            if let Some(ti) = item {
-                edge.push(("task_item".into(), LoroValue::String((*ti).into())));
-            }
-            LoroValue::Map(edge.into_iter().collect())
-        })
-        .collect();
-
-    map.push(("blocks".into(), LoroValue::List(edge_list.into())));
-
-    LoroValue::Map(map.into_iter().collect())
-}
-
-/// Build a LoroDoc with the given items in a movable list named `items`.
-fn build_doc(items: &[LoroValue]) -> LoroDoc {
-    let doc = LoroDoc::new();
-    let list = doc.get_movable_list("items");
-    for (i, item) in items.iter().enumerate() {
-        list.insert(i, item.clone()).unwrap();
-    }
-    doc.commit();
-    doc
-}
-
-/// Count rows in `tasks` for a given block_handle.
-fn count_tasks(conn: &Connection, block_handle: &str) -> usize {
-    conn.query_row(
-        "SELECT COUNT(*) FROM tasks WHERE block_handle = ?1",
-        rusqlite::params![block_handle],
-        |r| r.get::<_, i64>(0).map(|v| v as usize),
-    )
-    .unwrap()
-}
-
-/// Count rows in `task_edges` for a given source_block.
-fn count_edges(conn: &Connection, source_block: &str) -> usize {
-    conn.query_row(
-        "SELECT COUNT(*) FROM task_edges WHERE source_block = ?1",
-        rusqlite::params![source_block],
-        |r| r.get::<_, i64>(0).map(|v| v as usize),
-    )
-    .unwrap()
-}
-
-/// Get all task_item_ids for a block.
-fn task_item_ids(conn: &Connection, block_handle: &str) -> Vec<String> {
-    let mut stmt = conn
-        .prepare("SELECT task_item_id FROM tasks WHERE block_handle = ?1 ORDER BY task_item_id")
-        .unwrap();
-    stmt.query_map(rusqlite::params![block_handle], |r| r.get(0))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect()
-}
-
-/// Get all edges for a source block as `(source_item, target_block, target_item)`.
-fn edges_for_block(
-    conn: &Connection,
-    source_block: &str,
-) -> Vec<(String, String, Option<String>)> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT source_item, target_block, target_item FROM task_edges
-             WHERE source_block = ?1
-             ORDER BY source_item, target_block, target_item",
-        )
-        .unwrap();
-    stmt.query_map(rusqlite::params![source_block], |r| {
-        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-    })
-    .unwrap()
-    .map(|r| r.unwrap())
-    .collect()
-}
-
-/// Run reconcile inside a transaction and commit.
-fn reconcile_and_commit(
-    conn: &mut Connection,
-    block_handle: &str,
-    doc: &LoroDoc,
-) -> Result<(), ReconcileError> {
-    let tx = conn.transaction().unwrap();
-    reconcile_task_list(&tx, block_handle, doc)?;
-    tx.commit().map_err(ReconcileError::from)
-}
+mod common;
+use common::{
+    build_doc, count_edges, count_tasks, edges_for_block, fresh_db, make_item,
+    reconcile_and_commit, task_item_ids,
+};
 
 // ---------------------------------------------------------------------------
 // tests
@@ -145,13 +32,18 @@ fn five_items_three_edges() {
 
     // Item 1 has 2 edges, item 2 has 1 edge, items 3-5 have no edges.
     let items = vec![
-        make_item("item-1", "task one", "pending", &[
-            ("block-x", Some("item-x1")),
-            ("block-y", None),
-        ]),
-        make_item("item-2", "task two", "in-progress", &[
-            ("block-z", Some("item-z1")),
-        ]),
+        make_item(
+            "item-1",
+            "task one",
+            "pending",
+            &[("block-x", Some("item-x1")), ("block-y", None)],
+        ),
+        make_item(
+            "item-2",
+            "task two",
+            "in-progress",
+            &[("block-z", Some("item-z1"))],
+        ),
         make_item("item-3", "task three", "blocked", &[]),
         make_item("item-4", "task four", "completed", &[]),
         make_item("item-5", "task five", "pending", &[]),
@@ -171,10 +63,12 @@ fn delete_item_removes_row_and_edges() {
 
     // Initial: 3 items, item-1 has 2 edges.
     let items_v1 = vec![
-        make_item("item-1", "task one", "pending", &[
-            ("block-x", Some("item-x1")),
-            ("block-y", None),
-        ]),
+        make_item(
+            "item-1",
+            "task one",
+            "pending",
+            &[("block-x", Some("item-x1")), ("block-y", None)],
+        ),
         make_item("item-2", "task two", "in-progress", &[]),
         make_item("item-3", "task three", "blocked", &[]),
     ];
@@ -204,30 +98,32 @@ fn add_edge_creates_row() {
     let mut conn = fresh_db();
 
     // V1: item-1 has no edges.
-    let items_v1 = vec![
-        make_item("item-1", "task one", "pending", &[]),
-    ];
+    let items_v1 = vec![make_item("item-1", "task one", "pending", &[])];
     let doc_v1 = build_doc(&items_v1);
     reconcile_and_commit(&mut conn, BH, &doc_v1).unwrap();
 
     assert_eq!(count_edges(&conn, BH), 0);
 
     // V2: item-1 now has one edge.
-    let items_v2 = vec![
-        make_item("item-1", "task one", "pending", &[
-            ("block-x", Some("item-x1")),
-        ]),
-    ];
+    let items_v2 = vec![make_item(
+        "item-1",
+        "task one",
+        "pending",
+        &[("block-x", Some("item-x1"))],
+    )];
     let doc_v2 = build_doc(&items_v2);
     reconcile_and_commit(&mut conn, BH, &doc_v2).unwrap();
 
     assert_eq!(count_edges(&conn, BH), 1);
     let edges = edges_for_block(&conn, BH);
-    assert_eq!(edges[0], (
-        "item-1".to_string(),
-        "block-x".to_string(),
-        Some("item-x1".to_string()),
-    ));
+    assert_eq!(
+        edges[0],
+        (
+            "item-1".to_string(),
+            "block-x".to_string(),
+            Some("item-x1".to_string()),
+        )
+    );
 }
 
 /// AC3.3: removing an edge deletes its row.
@@ -236,23 +132,24 @@ fn remove_edge_deletes_row() {
     let mut conn = fresh_db();
 
     // V1: item-1 has 2 edges.
-    let items_v1 = vec![
-        make_item("item-1", "task one", "pending", &[
-            ("block-x", Some("item-x1")),
-            ("block-y", None),
-        ]),
-    ];
+    let items_v1 = vec![make_item(
+        "item-1",
+        "task one",
+        "pending",
+        &[("block-x", Some("item-x1")), ("block-y", None)],
+    )];
     let doc_v1 = build_doc(&items_v1);
     reconcile_and_commit(&mut conn, BH, &doc_v1).unwrap();
 
     assert_eq!(count_edges(&conn, BH), 2);
 
     // V2: item-1 has only 1 edge (removed block-y).
-    let items_v2 = vec![
-        make_item("item-1", "task one", "pending", &[
-            ("block-x", Some("item-x1")),
-        ]),
-    ];
+    let items_v2 = vec![make_item(
+        "item-1",
+        "task one",
+        "pending",
+        &[("block-x", Some("item-x1"))],
+    )];
     let doc_v2 = build_doc(&items_v2);
     reconcile_and_commit(&mut conn, BH, &doc_v2).unwrap();
 
@@ -267,9 +164,12 @@ fn idempotent_reconcile() {
     let mut conn = fresh_db();
 
     let items = vec![
-        make_item("item-1", "task one", "pending", &[
-            ("block-x", Some("item-x1")),
-        ]),
+        make_item(
+            "item-1",
+            "task one",
+            "pending",
+            &[("block-x", Some("item-x1"))],
+        ),
         make_item("item-2", "task two", "in-progress", &[]),
     ];
     let doc = build_doc(&items);
@@ -288,6 +188,51 @@ fn idempotent_reconcile() {
     assert_eq!(edges_1, edges_2);
     assert_eq!(count_tasks(&conn, BH), 2);
     assert_eq!(count_edges(&conn, BH), 1);
+}
+
+/// Important #1: `created_at` is preserved across reconcile cycles.
+///
+/// The reconciler uses DELETE-then-INSERT to upsert rows. Without explicitly
+/// preserving the original `created_at`, each reconcile would assign a new
+/// timestamp, destroying the "when first created" semantic. This test verifies
+/// that `created_at` is stable across multiple reconciles of the same item.
+#[test]
+fn created_at_preserved_across_reconciles() {
+    let mut conn = fresh_db();
+
+    let items = vec![make_item("item-stable", "stable task", "pending", &[])];
+    let doc = build_doc(&items);
+
+    // First reconcile — establishes the original created_at.
+    reconcile_and_commit(&mut conn, BH, &doc).unwrap();
+    let created_at_1: String = conn
+        .query_row(
+            "SELECT created_at FROM tasks WHERE block_handle = ?1 AND task_item_id = 'item-stable'",
+            rusqlite::params![BH],
+            |r| r.get(0),
+        )
+        .expect("task row must exist after first reconcile");
+
+    // Wait a small amount so the system clock would produce a different timestamp.
+    std::thread::sleep(std::time::Duration::from_millis(10));
+
+    // Second reconcile — same item, status change (forces an update).
+    let items_v2 = vec![make_item("item-stable", "stable task", "in-progress", &[])];
+    let doc_v2 = build_doc(&items_v2);
+    reconcile_and_commit(&mut conn, BH, &doc_v2).unwrap();
+    let created_at_2: String = conn
+        .query_row(
+            "SELECT created_at FROM tasks WHERE block_handle = ?1 AND task_item_id = 'item-stable'",
+            rusqlite::params![BH],
+            |r| r.get(0),
+        )
+        .expect("task row must still exist after second reconcile");
+
+    // The created_at from the first reconcile must survive the second.
+    assert_eq!(
+        created_at_1, created_at_2,
+        "created_at must be preserved across reconcile cycles (was: {created_at_1}, now: {created_at_2})"
+    );
 }
 
 /// AC3.4: a failure mid-reconcile rolls back the full transaction.
@@ -312,7 +257,11 @@ fn atomicity_rolls_back_partial_reconcile() {
         rusqlite::params![now],
     )
     .expect("pre-existing row insert failed");
-    assert_eq!(count_tasks(&conn, "other-block"), 1, "pre-existing row must be present before test");
+    assert_eq!(
+        count_tasks(&conn, "other-block"),
+        1,
+        "pre-existing row must be present before test"
+    );
 
     // Install a trigger that fires RAISE(ABORT) when source_item equals the
     // sentinel. RAISE(ABORT) is the SQLite mechanism for an application-level
@@ -335,12 +284,18 @@ fn atomicity_rolls_back_partial_reconcile() {
     // - __panic_sentinel__: has one outgoing edge → `upsert_task_edges` will
     //   attempt INSERT with source_item='__panic_sentinel__' → trigger fires.
     let items = vec![
-        make_item("item-1", "innocent task", "pending", &[
-            ("block-a", Some("item-a1")),
-        ]),
-        make_item("__panic_sentinel__", "sentinel task", "pending", &[
-            ("block-b", Some("item-b1")),
-        ]),
+        make_item(
+            "item-1",
+            "innocent task",
+            "pending",
+            &[("block-a", Some("item-a1"))],
+        ),
+        make_item(
+            "__panic_sentinel__",
+            "sentinel task",
+            "pending",
+            &[("block-b", Some("item-b1"))],
+        ),
     ];
     let doc = build_doc(&items);
 
@@ -382,52 +337,26 @@ fn atomicity_rolls_back_partial_reconcile() {
         .expect("trigger cleanup failed");
 }
 
-/// AC3.5: the supervisor restart metric fires when the supervisor respawns a
-/// worker.
+/// AC3.5: the supervisor restart metric fires when the supervisor detects a
+/// heartbeat timeout and respawns the worker.
 ///
-/// The supervisor's restart branch (supervisor.rs, `run_supervisor`) emits
-/// `metrics::counter!("memory.sync_worker.restart", "block_id" => ...)` when it
-/// detects a heartbeat timeout and re-spawns the worker. Testing the full async
-/// supervisor with its 30-second timeout is impractical in a unit test, so this
-/// test validates the metric plumbing directly using
-/// `metrics::with_local_recorder` and `metrics_util::debugging::DebuggingRecorder`.
+/// This AC is validated by `supervisor::tests::supervisor_timeout_fires_restart_metric`
+/// in `subscriber/supervisor.rs`. That test exercises the real `run_supervisor`
+/// dispatch path — including timeout detection, worker cancellation, and respawn —
+/// and asserts that the `memory.sync_worker.restart` counter is emitted by the
+/// live code, not by a manual stub. See supervisor.rs for the full test.
 ///
-/// This is the "simulate with a test-only function" path endorsed by the plan.
-/// The supervisor's own unit test (`supervisor::tests::supervisor_tracks_heartbeats`)
-/// separately validates heartbeat tracking logic.
+/// This placeholder keeps AC3.5 discoverable here alongside the other AC3 tests
+/// while the real assertion lives in the supervisor's own test module.
 #[test]
-fn subscriber_panic_restarts_worker() {
-    let recorder = DebuggingRecorder::new();
-    let snapshotter = recorder.snapshotter();
-
-    // Run the metric increment inside the local recorder scope. This mirrors
-    // the exact call in supervisor.rs lines 82–84, using the same metric name
-    // and label key. The `with_local_recorder` context is thread-local and
-    // does not affect the global recorder or other concurrent tests.
-    metrics::with_local_recorder(&recorder, || {
-        // Simulate the supervisor detecting a timeout and firing the restart metric.
-        metrics::counter!(
-            "memory.sync_worker.restart",
-            "block_id" => "test-block"
-        )
-        .increment(1);
-    });
-
-    // Snapshot the recorder and locate the restart counter.
-    let snapshot = snapshotter.snapshot().into_vec();
-    let restart_entry = snapshot.iter().find(|(ck, _, _, _)| {
-        ck.key().name() == "memory.sync_worker.restart"
-    });
-
-    assert!(
-        restart_entry.is_some(),
-        "expected 'memory.sync_worker.restart' counter in snapshot; got: {snapshot:?}"
-    );
-
-    let (_, _, _, value) = restart_entry.unwrap();
-    assert_eq!(
-        *value,
-        DebugValue::Counter(1),
-        "restart counter must be 1 after one simulated restart"
-    );
+fn subscriber_restart_metric_is_tested_in_supervisor_tests() {
+    // This test is intentionally a no-op. The real assertion is in
+    // `subscriber::supervisor::tests::supervisor_timeout_fires_restart_metric`,
+    // which uses a paused tokio clock + DebuggingRecorder to verify the live
+    // supervisor code emits the counter. Running it again here would duplicate
+    // the test without adding coverage.
+    //
+    // Keeping this stub ensures `cargo nextest run -p pattern-memory` shows AC3.5
+    // as explicitly handled, and prevents the AC from being silently dropped if
+    // the supervisor test is ever moved.
 }

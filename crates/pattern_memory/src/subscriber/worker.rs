@@ -280,154 +280,34 @@ pub(crate) fn run_subscriber(config: WorkerConfig) {
             continue;
         }
 
-        // Render canonical content from disk_doc.
-        let (ext, canonical_bytes) = match render_canonical_from_disk_doc(&disk_doc, &schema) {
-            Ok(pair) => pair,
-            Err(e) => {
-                metrics::counter!("memory.subscriber.render_failed").increment(1);
-                tracing::error!(
-                    block_id = %block_id, error = %e,
-                    "canonical render failed; skipping emission cycle"
-                );
-                continue;
-            }
-        };
-        let new_hash: [u8; 32] = blake3::hash(&canonical_bytes).into();
-
-        // Hash-based echo suppression: skip if the content hasn't changed.
-        if Some(new_hash) == last_emitted_hash {
-            let _ = heartbeat_tx.try_send(Heartbeat {
-                block_id: block_id.clone(),
-                at: Instant::now(),
-            });
-            continue;
-        }
-
-        // Emit canonical file.
-        let file_path = mount_path.join(format!("{}.{}", block_id, ext));
-        if let Err(e) = crate::fs::atomic_write(&file_path, &canonical_bytes) {
-            metrics::counter!("memory.subscriber.fs_write_failed").increment(1);
-            tracing::error!(path = ?file_path, error = %e, "atomic_write failed");
-            continue;
-        }
-
-        // Record the mtime of the file we just wrote for self-echo suppression.
-        if let Ok(metadata) = std::fs::metadata(&file_path)
-            && let Ok(mtime) = metadata.modified()
-            && let Ok(mut guard) = last_written_mtime.lock()
-        {
-            *guard = Some(mtime);
-        }
-
-        // The FTS5 preview column stores the human-readable render regardless
-        // of the on-disk format. Use doc.render() which produces the LLM-context
-        // representation (not the raw canonical bytes for KDL/JSONL).
-        let preview = doc.render();
-
-        // Update FTS5 row via the content_preview column (triggers handle FTS).
-        match db.get() {
-            Ok(conn) => {
-                let preview_str = if preview.is_empty() {
-                    None
-                } else {
-                    Some(preview.as_str())
-                };
-                if let Err(e) =
-                    pattern_db::queries::update_block_preview(&conn, &block_id, preview_str)
-                {
-                    metrics::counter!("memory.subscriber.fts_update_failed").increment(1);
-                    tracing::error!(
-                        block_id = %block_id, error = %e, "FTS5 update failed"
-                    );
-                }
-            }
-            Err(e) => {
-                metrics::counter!("memory.subscriber.pool_exhausted").increment(1);
-                tracing::error!(error = %e, "DB pool get failed");
-            }
-        }
-
-        // Reconcile block-index tables for schema-specific blocks.
-        // TaskList blocks maintain `tasks` + `task_edges` rows derived from
-        // the LoroDoc state. The reconcile runs inside a transaction so
-        // partial failures roll back atomically.
-        if matches!(schema, BlockSchema::TaskList { .. }) {
-            match db.get() {
-                Ok(mut conn) => {
-                    match conn.transaction() {
-                        Ok(tx) => {
-                            if let Err(e) = crate::subscriber::task::reconcile_task_list(
-                                &tx,
-                                &block_id,
-                                &disk_doc,
-                            ) {
-                                metrics::counter!(
-                                    "memory.sync_worker.reconcile_error",
-                                    "schema" => "task-list"
-                                )
-                                .increment(1);
-                                tracing::error!(
-                                    block_id = %block_id, error = %e,
-                                    "TaskList reconcile failed; transaction rolled back"
-                                );
-                                // tx drops here without commit → implicit rollback.
-                            } else if let Err(e) = tx.commit() {
-                                metrics::counter!(
-                                    "memory.sync_worker.reconcile_error",
-                                    "schema" => "task-list"
-                                )
-                                .increment(1);
-                                tracing::error!(
-                                    block_id = %block_id, error = %e,
-                                    "TaskList reconcile commit failed"
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            metrics::counter!(
-                                "memory.sync_worker.reconcile_error",
-                                "schema" => "task-list"
-                            )
-                            .increment(1);
-                            tracing::error!(
-                                block_id = %block_id, error = %e,
-                                "failed to open transaction for TaskList reconcile"
-                            );
-                        }
-                    }
-                }
-                Err(e) => {
-                    metrics::counter!("memory.subscriber.pool_exhausted").increment(1);
-                    tracing::error!(error = %e, "DB pool get failed for TaskList reconcile");
-                }
-            }
-        }
-
-        // Queue a re-embed request unconditionally on hash change.
-        // This is acceptable overhead: the re-embed consumer silently drops
-        // requests when no embedding provider is configured, and the clone
-        // cost of canonical_bytes is negligible for typical block sizes.
-        let _ = reembed_tx.send(ReembedRequest {
-            block_id: block_id.clone(),
-            canonical_bytes: canonical_bytes.clone(),
-            content_hash: new_hash,
-        });
-
-        last_emitted_hash = Some(new_hash);
-
-        let _ = heartbeat_tx.try_send(Heartbeat {
-            block_id: block_id.clone(),
-            at: Instant::now(),
-        });
+        // Render canonical bytes, write to disk, update FTS, reconcile
+        // schema-specific tables (TaskList → tasks/task_edges), re-embed,
+        // heartbeat. Centralised in render_cycle so every event path —
+        // normal loop, quiesce pause-flush, and post-resume — runs the same
+        // code; no path can silently skip the TaskList reconcile.
+        render_cycle(
+            &block_id,
+            &schema,
+            &disk_doc,
+            &doc,
+            &mount_path,
+            &last_written_mtime,
+            &db,
+            &reembed_tx,
+            &heartbeat_tx,
+            &mut last_emitted_hash,
+        );
     }
 }
 
 /// Execute one full render cycle from disk_doc to disk: render canonical bytes,
-/// check hash, atomic_write, update mtime, FTS, re-embed, heartbeat.
+/// check hash, atomic_write, update mtime, FTS, TaskList reconcile, re-embed,
+/// heartbeat.
 ///
-/// Returns the new content hash (or the previous one if content was unchanged).
-/// Extracted from the main loop so `handle_pause` can reuse it without
-/// duplicating ~40 lines.
+/// Centralised here so every event path — normal loop, quiesce pause-flush,
+/// and post-resume — runs the same code and cannot silently skip the TaskList
+/// reconcile. Calling `render_cycle` is the single place that advances
+/// persistent state after a content change.
 #[allow(clippy::too_many_arguments)]
 fn render_cycle(
     block_id: &str,
@@ -476,23 +356,97 @@ fn render_cycle(
         *guard = Some(mtime);
     }
 
+    // Update persistent index tables. The strategy depends on schema:
+    //
+    // - TaskList blocks: FTS preview update AND task/edge reconcile run
+    //   inside a single transaction on one connection — both succeed or
+    //   both roll back atomically. Without this, a crash between the two
+    //   operations would leave the FTS index out of sync with task rows.
+    //
+    // - All other schemas: FTS preview update runs standalone (no transaction
+    //   needed for a single-statement write).
     let preview = doc.render();
-    match db.get() {
-        Ok(conn) => {
-            let preview_str = if preview.is_empty() {
-                None
-            } else {
-                Some(preview.as_str())
-            };
-            if let Err(e) = pattern_db::queries::update_block_preview(&conn, block_id, preview_str)
-            {
-                metrics::counter!("memory.subscriber.fts_update_failed").increment(1);
-                tracing::error!(block_id = %block_id, error = %e, "FTS5 update failed");
+    let preview_str = if preview.is_empty() {
+        None
+    } else {
+        Some(preview.as_str())
+    };
+
+    if matches!(schema, BlockSchema::TaskList { .. }) {
+        // Single connection, single transaction: FTS + task reconcile are atomic.
+        match db.get() {
+            Ok(mut conn) => {
+                match conn.transaction() {
+                    Ok(tx) => {
+                        // FTS update inside the transaction.
+                        if let Err(e) =
+                            pattern_db::queries::update_block_preview(&tx, block_id, preview_str)
+                        {
+                            metrics::counter!("memory.subscriber.fts_update_failed").increment(1);
+                            tracing::error!(
+                                block_id = %block_id, error = %e,
+                                "FTS5 update failed inside TaskList transaction; rolling back"
+                            );
+                            // tx drops without commit → implicit rollback.
+                        } else if let Err(e) =
+                            crate::subscriber::task::reconcile_task_list(&tx, block_id, disk_doc)
+                        {
+                            metrics::counter!(
+                                "memory.sync_worker.reconcile_error",
+                                "schema" => "task-list"
+                            )
+                            .increment(1);
+                            tracing::error!(
+                                block_id = %block_id, error = %e,
+                                "TaskList reconcile failed; transaction rolled back"
+                            );
+                            // tx drops here without commit → both FTS and reconcile roll back.
+                        } else if let Err(e) = tx.commit() {
+                            metrics::counter!(
+                                "memory.sync_worker.reconcile_error",
+                                "schema" => "task-list"
+                            )
+                            .increment(1);
+                            tracing::error!(
+                                block_id = %block_id, error = %e,
+                                "TaskList transaction commit failed"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        metrics::counter!(
+                            "memory.sync_worker.reconcile_error",
+                            "schema" => "task-list"
+                        )
+                        .increment(1);
+                        tracing::error!(
+                            block_id = %block_id, error = %e,
+                            "failed to open transaction for TaskList reconcile"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                metrics::counter!("memory.subscriber.pool_exhausted").increment(1);
+                tracing::error!(error = %e, "DB pool get failed for TaskList reconcile");
             }
         }
-        Err(e) => {
-            metrics::counter!("memory.subscriber.pool_exhausted").increment(1);
-            tracing::error!(error = %e, "DB pool get failed");
+    } else {
+        // Non-TaskList schemas: standalone FTS update (single statement, no
+        // transaction needed).
+        match db.get() {
+            Ok(conn) => {
+                if let Err(e) =
+                    pattern_db::queries::update_block_preview(&conn, block_id, preview_str)
+                {
+                    metrics::counter!("memory.subscriber.fts_update_failed").increment(1);
+                    tracing::error!(block_id = %block_id, error = %e, "FTS5 update failed");
+                }
+            }
+            Err(e) => {
+                metrics::counter!("memory.subscriber.pool_exhausted").increment(1);
+                tracing::error!(error = %e, "DB pool get failed");
+            }
         }
     }
 
@@ -1823,5 +1777,339 @@ mod tests {
             ids.contains(&"item-b"),
             "item-b id must survive round-trip: {ids:?}"
         );
+    }
+
+    /// AC3: CommitEvent → worker dispatch arm → reconcile_task_list pipeline.
+    ///
+    /// This test verifies that the `BlockSchema::TaskList` dispatch in
+    /// `render_cycle` (which is called from the main event loop and from
+    /// `handle_pause`) actually fires when a `CommitEvent` arrives. If the
+    /// dispatch arm were removed or broken, the previous tests — which call
+    /// `reconcile_task_list` directly — would still pass. Only this test would
+    /// fail, proving the wiring is live.
+    ///
+    /// Strategy:
+    /// 1. Build a TaskList LoroDoc with 3 items (2 with edges).
+    /// 2. Send a `CommitEvent` via the worker channel.
+    /// 3. Wait for the worker to process it (debounce + render).
+    /// 4. Assert that the `tasks` and `task_edges` SQL tables reflect the doc.
+    #[test]
+    fn commit_event_drives_task_list_reconcile_in_worker() {
+        use pattern_core::types::memory_types::TaskStatus;
+
+        let db = Arc::new(ConstellationDb::open_in_memory().unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        setup_db_block(&db, "tl_reconcile_block", "agent_tl_r");
+
+        let schema = BlockSchema::TaskList {
+            default_status: Some(TaskStatus::Pending),
+            default_owner: None,
+            display_limit: None,
+        };
+
+        let doc = StructuredDocument::new(schema.clone());
+
+        // Build a TaskList doc with 3 items: item-x (no edges), item-y (1 edge),
+        // item-z (1 edge). Total: 3 task rows, 2 edge rows expected.
+        let items_json = serde_json::json!({
+            "items": [
+                {
+                    "id": "item-x",
+                    "subject": "Item X",
+                    "description": "",
+                    "status": "pending",
+                    "blocks": [],
+                    "metadata": {},
+                    "comments": [],
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "updated_at": "2026-01-01T00:00:00Z"
+                },
+                {
+                    "id": "item-y",
+                    "subject": "Item Y",
+                    "description": "",
+                    "status": "in-progress",
+                    "blocks": [
+                        { "block": "other-block", "task_item": "other-item" }
+                    ],
+                    "metadata": {},
+                    "comments": [],
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "updated_at": "2026-01-01T00:00:00Z"
+                },
+                {
+                    "id": "item-z",
+                    "subject": "Item Z",
+                    "description": "",
+                    "status": "blocked",
+                    "blocks": [
+                        { "block": "another-block" }
+                    ],
+                    "metadata": {},
+                    "comments": [],
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "updated_at": "2026-01-01T00:00:00Z"
+                }
+            ]
+        });
+
+        let vv_before = doc.inner().oplog_vv();
+        doc.import_from_json(&items_json).unwrap();
+        doc.commit();
+        let update_bytes = doc
+            .inner()
+            .export(loro::ExportMode::updates(&vv_before))
+            .unwrap();
+
+        // Run the full worker pipeline via CommitEvent.
+        run_worker_and_get_file(
+            "tl_reconcile_block",
+            schema,
+            doc,
+            update_bytes,
+            db.clone(),
+            &dir,
+        );
+
+        // Assert that the SQL tables were reconciled by the worker's dispatch arm.
+        let conn = db.get().unwrap();
+
+        let task_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tasks WHERE block_handle = 'tl_reconcile_block'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("tasks count query must succeed");
+        assert_eq!(
+            task_count, 3,
+            "worker must reconcile 3 task rows via CommitEvent dispatch; got {task_count}"
+        );
+
+        let edge_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_edges WHERE source_block = 'tl_reconcile_block'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("task_edges count query must succeed");
+        assert_eq!(
+            edge_count, 2,
+            "worker must reconcile 2 edge rows via CommitEvent dispatch; got {edge_count}"
+        );
+
+        // Verify item ids are present.
+        let mut item_ids: Vec<String> = conn
+            .prepare(
+                "SELECT task_item_id FROM tasks WHERE block_handle = 'tl_reconcile_block' \
+                 ORDER BY task_item_id",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        item_ids.sort();
+        assert_eq!(
+            item_ids,
+            vec!["item-x", "item-y", "item-z"],
+            "all three items must appear in tasks table after CommitEvent"
+        );
+    }
+
+    /// Critical #4: pause/resume cycle with TaskList block pending runs reconcile.
+    ///
+    /// Verifies that `render_cycle` — which is now called from `handle_pause` on
+    /// both the pause-flush and post-resume paths — also drives TaskList
+    /// reconciliation. Before the fix, a write during quiesce would leave
+    /// `tasks`/`task_edges` stale until the next CommitEvent.
+    ///
+    /// Sequence:
+    /// 1. Write an initial TaskList (2 items) to the worker; confirm 2 SQL rows.
+    /// 2. Pause the worker.
+    /// 3. Write a new version (3 items) to memory_doc while paused.
+    /// 4. Resume the worker.
+    /// 5. Verify `tasks` reflects the 3-item state — proving `render_cycle`
+    ///    (called on resume) ran the reconcile.
+    #[test]
+    fn pause_resume_runs_tasklist_reconcile() {
+        use pattern_core::types::memory_types::TaskStatus;
+
+        let db = Arc::new(ConstellationDb::open_in_memory().unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        setup_db_block(&db, "pr_tl_block", "agent_pr_tl");
+
+        let schema = BlockSchema::TaskList {
+            default_status: Some(TaskStatus::Pending),
+            default_owner: None,
+            display_limit: None,
+        };
+
+        let doc = StructuredDocument::new(schema.clone());
+        let doc_clone = doc.clone();
+        let disk_doc = Arc::new(doc.inner().fork());
+
+        let (tx, rx) = crossbeam_channel::bounded(64);
+        let cancel = CancellationToken::new();
+        let (reembed_tx, _reembed_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (hb_tx, _hb_rx) = crossbeam_channel::bounded(64);
+        let last_written_mtime = Arc::new(Mutex::new(None));
+        let paused = Arc::new(AtomicBool::new(false));
+        let pause_complete = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let resume_signal_arc = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let mount = Arc::new(dir.path().to_path_buf());
+
+        // Step 1: write 2 items.
+        let v1_json = serde_json::json!({
+            "items": [
+                {
+                    "id": "item-alpha", "subject": "Alpha", "description": "",
+                    "status": "pending", "blocks": [], "metadata": {}, "comments": [],
+                    "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+                },
+                {
+                    "id": "item-beta", "subject": "Beta", "description": "",
+                    "status": "in-progress", "blocks": [], "metadata": {}, "comments": [],
+                    "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+                }
+            ]
+        });
+        let vv0 = doc.inner().oplog_vv();
+        doc.import_from_json(&v1_json).unwrap();
+        doc.commit();
+        let update_v1 = doc.inner().export(loro::ExportMode::updates(&vv0)).unwrap();
+
+        let cancel_clone = cancel.clone();
+        let db_clone = Arc::clone(&db);
+        let mount_clone = Arc::clone(&mount);
+        let paused_worker = Arc::clone(&paused);
+        let pc_worker = Arc::clone(&pause_complete);
+        let rs_worker = Arc::clone(&resume_signal_arc);
+
+        let handle = std::thread::spawn(move || {
+            run_subscriber(WorkerConfig {
+                block_id: "pr_tl_block".to_string(),
+                schema,
+                rx,
+                cancel: cancel_clone,
+                db: db_clone,
+                reembed_tx,
+                heartbeat_tx: hb_tx,
+                mount_path: mount_clone,
+                disk_doc,
+                doc: doc_clone,
+                last_written_mtime,
+                paused: paused_worker,
+                pause_complete: pc_worker,
+                resume_signal: rs_worker,
+            });
+        });
+
+        tx.send(CommitEvent {
+            block_id: "pr_tl_block".to_string(),
+            update_bytes: update_v1,
+        })
+        .unwrap();
+
+        // Wait for the worker to process the initial write.
+        std::thread::sleep(Duration::from_millis(300));
+
+        // Confirm the initial 2-item reconcile.
+        {
+            let conn = db.get().unwrap();
+            let cnt: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM tasks WHERE block_handle = 'pr_tl_block'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                cnt, 2,
+                "initial reconcile must produce 2 task rows; got {cnt}"
+            );
+        }
+
+        // Step 2: pause the worker.
+        paused.store(true, Ordering::Release);
+        {
+            let (lock, cvar) = pause_complete.as_ref();
+            let mut complete = lock.lock().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !*complete {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                assert!(!remaining.is_zero(), "worker did not pause in time");
+                let (guard, _) = cvar.wait_timeout(complete, remaining).unwrap();
+                complete = guard;
+            }
+        }
+
+        // Step 3: add a third item to memory_doc while paused.
+        // The callback is suppressed during pause, so no CommitEvent is sent.
+        let v2_json = serde_json::json!({
+            "items": [
+                {
+                    "id": "item-alpha", "subject": "Alpha", "description": "",
+                    "status": "pending", "blocks": [], "metadata": {}, "comments": [],
+                    "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+                },
+                {
+                    "id": "item-beta", "subject": "Beta", "description": "",
+                    "status": "in-progress", "blocks": [], "metadata": {}, "comments": [],
+                    "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+                },
+                {
+                    "id": "item-gamma", "subject": "Gamma", "description": "",
+                    "status": "blocked", "blocks": [], "metadata": {}, "comments": [],
+                    "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+                }
+            ]
+        });
+        doc.import_from_json(&v2_json).unwrap();
+        doc.commit();
+
+        // Step 4: resume the worker.
+        {
+            let (lock, cvar) = resume_signal_arc.as_ref();
+            let mut resumed = lock.lock().unwrap();
+            *resumed = true;
+            cvar.notify_one();
+        }
+
+        // Wait for the resume render_cycle to complete.
+        std::thread::sleep(Duration::from_millis(300));
+
+        // Step 5: verify the SQL tables reflect the 3-item state.
+        let conn = db.get().unwrap();
+        let cnt: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tasks WHERE block_handle = 'pr_tl_block'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            cnt, 3,
+            "TaskList reconcile must run during pause/resume render_cycle; \
+             expected 3 rows, got {cnt}"
+        );
+
+        // Verify item-gamma (the new item added during pause) is present.
+        let gamma_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM tasks \
+                 WHERE block_handle = 'pr_tl_block' AND task_item_id = 'item-gamma'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            gamma_exists,
+            "item-gamma written during pause must be reconciled on resume"
+        );
+
+        cancel.cancel();
+        drop(tx);
+        handle.join().expect("worker should not panic");
     }
 }

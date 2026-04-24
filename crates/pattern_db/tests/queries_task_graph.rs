@@ -13,7 +13,7 @@
 use std::time::Instant;
 
 use pattern_db::ConstellationDb;
-use pattern_db::queries::{GraphDirection, upsert_task_edges, query_task_graph_bfs};
+use pattern_db::queries::{GraphDirection, query_task_graph_bfs, upsert_task_edges};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -52,10 +52,7 @@ fn insert_edge(
     };
 
     let mut edges = existing;
-    edges.push((
-        target_block.to_string(),
-        target_item.map(|s| s.to_string()),
-    ));
+    edges.push((target_block.to_string(), target_item.map(|s| s.to_string())));
     upsert_task_edges(&tx, "blk-main", source_item, &edges).unwrap();
     tx.commit().unwrap();
 }
@@ -87,9 +84,21 @@ fn depth_zero_returns_root_only() {
     // Build a 3-node chain so there are edges to traverse — but we cap at depth 0.
     build_chain(&mut conn, 3);
 
-    let result = query_task_graph_bfs(&conn, "blk-main", Some("n-0"), GraphDirection::Forward, 0, 1000).unwrap();
+    let result = query_task_graph_bfs(
+        &conn,
+        "blk-main",
+        Some("n-0"),
+        GraphDirection::Forward,
+        0,
+        1000,
+    )
+    .unwrap();
 
-    assert_eq!(result.nodes.len(), 1, "depth=0 must return only the root node");
+    assert_eq!(
+        result.nodes.len(),
+        1,
+        "depth=0 must return only the root node"
+    );
     assert_eq!(
         result.nodes[0],
         ("blk-main".to_string(), Some("n-0".to_string()))
@@ -99,7 +108,10 @@ fn depth_zero_returns_root_only() {
         "depth=0 must return zero edges; got {:?}",
         result.edges
     );
-    assert!(!result.truncated, "depth=0 on a small graph must not truncate");
+    assert!(
+        !result.truncated,
+        "depth=0 on a small graph must not truncate"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -115,9 +127,15 @@ fn five_node_chain_forward_unlimited_depth() {
     build_chain(&mut conn, 5);
 
     // u32::MAX as "unlimited" — the chain is only 5 nodes so we'll exhaust it.
-    let result =
-        query_task_graph_bfs(&conn, "blk-main", Some("n-0"), GraphDirection::Forward, u32::MAX, 1000)
-            .unwrap();
+    let result = query_task_graph_bfs(
+        &conn,
+        "blk-main",
+        Some("n-0"),
+        GraphDirection::Forward,
+        u32::MAX,
+        1000,
+    )
+    .unwrap();
 
     assert_eq!(
         result.nodes.len(),
@@ -152,9 +170,15 @@ fn five_node_chain_forward_depth_two() {
 
     build_chain(&mut conn, 5);
 
-    let result =
-        query_task_graph_bfs(&conn, "blk-main", Some("n-0"), GraphDirection::Forward, 2, 1000)
-            .unwrap();
+    let result = query_task_graph_bfs(
+        &conn,
+        "blk-main",
+        Some("n-0"),
+        GraphDirection::Forward,
+        2,
+        1000,
+    )
+    .unwrap();
 
     // depth=2: root (depth 0) + n-1 (depth 1) + n-2 (depth 2). n-3 would be depth 3 — excluded.
     assert_eq!(
@@ -171,8 +195,7 @@ fn five_node_chain_forward_depth_two() {
     );
     assert!(!result.truncated);
 
-    let node_items: Vec<Option<&str>> =
-        result.nodes.iter().map(|(_, i)| i.as_deref()).collect();
+    let node_items: Vec<Option<&str>> = result.nodes.iter().map(|(_, i)| i.as_deref()).collect();
     assert!(node_items.contains(&Some("n-0")));
     assert!(node_items.contains(&Some("n-1")));
     assert!(node_items.contains(&Some("n-2")));
@@ -193,9 +216,15 @@ fn cycle_terminates_with_visited_set() {
     insert_edge(&mut conn, "n-1", "blk-main", Some("n-2")); // B → C
     insert_edge(&mut conn, "n-2", "blk-main", Some("n-0")); // C → A  (back-edge)
 
-    let result =
-        query_task_graph_bfs(&conn, "blk-main", Some("n-0"), GraphDirection::Forward, 10, 1000)
-            .unwrap();
+    let result = query_task_graph_bfs(
+        &conn,
+        "blk-main",
+        Some("n-0"),
+        GraphDirection::Forward,
+        10,
+        1000,
+    )
+    .unwrap();
 
     // The visited-set prevents re-enqueuing n-0 when the cycle closes.
     assert_eq!(
@@ -234,20 +263,23 @@ fn large_graph_truncates_at_max_nodes_within_one_second() {
             )
             .unwrap();
         for i in 0..9999usize {
-            stmt.execute(rusqlite::params![
-                format!("n-{i}"),
-                format!("n-{}", i + 1),
-            ])
-            .unwrap();
+            stmt.execute(rusqlite::params![format!("n-{i}"), format!("n-{}", i + 1),])
+                .unwrap();
         }
         drop(stmt);
         tx.commit().unwrap();
     }
 
     let start = Instant::now();
-    let result =
-        query_task_graph_bfs(&conn, "blk-main", Some("n-0"), GraphDirection::Forward, u32::MAX, 1000)
-            .unwrap();
+    let result = query_task_graph_bfs(
+        &conn,
+        "blk-main",
+        Some("n-0"),
+        GraphDirection::Forward,
+        u32::MAX,
+        1000,
+    )
+    .unwrap();
     let elapsed = start.elapsed();
 
     assert!(
@@ -301,9 +333,15 @@ fn reverse_direction_block_level_target_returns_sources() {
 
     // Reverse walk starting from the block-level root of "blk-target".
     // root_item = None to match the NULL target_item in the edges above.
-    let result =
-        query_task_graph_bfs(&conn, "blk-target", None, GraphDirection::Reverse, u32::MAX, 1000)
-            .unwrap();
+    let result = query_task_graph_bfs(
+        &conn,
+        "blk-target",
+        None,
+        GraphDirection::Reverse,
+        u32::MAX,
+        1000,
+    )
+    .unwrap();
 
     // Root + 2 sources = 3 nodes.
     assert_eq!(
@@ -313,8 +351,7 @@ fn reverse_direction_block_level_target_returns_sources() {
         result.nodes
     );
 
-    let node_items: Vec<Option<&str>> =
-        result.nodes.iter().map(|(_, i)| i.as_deref()).collect();
+    let node_items: Vec<Option<&str>> = result.nodes.iter().map(|(_, i)| i.as_deref()).collect();
     assert!(
         node_items.contains(&Some("src-1")),
         "src-1 must appear in reverse traversal"
@@ -330,5 +367,177 @@ fn reverse_direction_block_level_target_returns_sources() {
         2,
         "reverse BFS must yield 2 edges; got {:?}",
         result.edges
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 7: Direction::Both — simple bidirectional graph
+// ---------------------------------------------------------------------------
+
+/// `GraphDirection::Both` follows edges in both directions from the root.
+///
+/// Deduplication: each *node* is visited at most once, but the *edge* between
+/// two already-visited nodes is still recorded. This means edge count can
+/// exceed node count minus 1 when cycles or bidirectional edges are present.
+///
+/// Test graph: A→B (forward) and A←C (reverse), root = A, depth = 1.
+/// Both: discovers B (forward) and C (reverse) from A.
+/// Expected: 3 nodes, 2 edges.
+#[test]
+fn both_direction_discovers_forward_and_reverse_neighbours() {
+    let db = fresh_db();
+    let mut conn = db.get().unwrap();
+
+    // Set up: B is a forward neighbour of A (A→B).
+    //         C has a forward edge to A (C→A), so A←C in reverse direction.
+    {
+        let tx = conn.transaction().unwrap();
+        upsert_task_edges(
+            &tx,
+            "blk-main",
+            "n-a",
+            &[("blk-main".to_string(), Some("n-b".to_string()))],
+        )
+        .unwrap();
+        upsert_task_edges(
+            &tx,
+            "blk-main",
+            "n-c",
+            &[("blk-main".to_string(), Some("n-a".to_string()))],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+
+    // Both direction from n-a at depth=1.
+    let result = query_task_graph_bfs(
+        &conn,
+        "blk-main",
+        Some("n-a"),
+        GraphDirection::Both,
+        1,
+        1000,
+    )
+    .unwrap();
+
+    // Root n-a + forward n-b + reverse n-c = 3 nodes.
+    assert_eq!(
+        result.nodes.len(),
+        3,
+        "Both at depth=1 must discover root + forward + reverse neighbour; got {:?}",
+        result.nodes
+    );
+
+    let node_items: Vec<Option<&str>> = result.nodes.iter().map(|(_, i)| i.as_deref()).collect();
+    assert!(
+        node_items.contains(&Some("n-a")),
+        "root n-a must be present"
+    );
+    assert!(
+        node_items.contains(&Some("n-b")),
+        "forward neighbour n-b must be present"
+    );
+    assert!(
+        node_items.contains(&Some("n-c")),
+        "reverse neighbour n-c must be present"
+    );
+
+    // 2 edges: A→B (forward) and C→A recorded as (C, A) in the reverse direction.
+    assert_eq!(
+        result.edges.len(),
+        2,
+        "Both at depth=1 must record 2 edges; got {:?}",
+        result.edges
+    );
+    assert!(!result.truncated);
+}
+
+/// `GraphDirection::Both` produces different results from Forward or Reverse alone.
+///
+/// Graph: A→B, C→A. Root = A, depth = 1.
+/// - Forward only: discovers B (1 additional node, 1 edge).
+/// - Reverse only: discovers C (1 additional node, 1 edge).
+/// - Both: discovers B and C (2 additional nodes, 2 edges).
+#[test]
+fn both_direction_differs_from_forward_and_reverse_alone() {
+    let db = fresh_db();
+    let mut conn = db.get().unwrap();
+
+    {
+        let tx = conn.transaction().unwrap();
+        upsert_task_edges(
+            &tx,
+            "blk-main",
+            "n-a",
+            &[("blk-main".to_string(), Some("n-b".to_string()))],
+        )
+        .unwrap();
+        upsert_task_edges(
+            &tx,
+            "blk-main",
+            "n-c",
+            &[("blk-main".to_string(), Some("n-a".to_string()))],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+
+    // Forward from n-a: only n-b reachable.
+    let fwd = query_task_graph_bfs(
+        &conn,
+        "blk-main",
+        Some("n-a"),
+        GraphDirection::Forward,
+        1,
+        1000,
+    )
+    .unwrap();
+    assert_eq!(
+        fwd.nodes.len(),
+        2,
+        "Forward must reach 2 nodes (root + n-b)"
+    );
+
+    // Reverse from n-a: only n-c reachable.
+    let rev = query_task_graph_bfs(
+        &conn,
+        "blk-main",
+        Some("n-a"),
+        GraphDirection::Reverse,
+        1,
+        1000,
+    )
+    .unwrap();
+    assert_eq!(
+        rev.nodes.len(),
+        2,
+        "Reverse must reach 2 nodes (root + n-c)"
+    );
+
+    // Both from n-a: reaches n-b and n-c.
+    let both = query_task_graph_bfs(
+        &conn,
+        "blk-main",
+        Some("n-a"),
+        GraphDirection::Both,
+        1,
+        1000,
+    )
+    .unwrap();
+    assert_eq!(
+        both.nodes.len(),
+        3,
+        "Both must reach 3 nodes (root + n-b + n-c); got {:?}",
+        both.nodes
+    );
+
+    // Confirm the union superset relationship.
+    assert!(
+        both.nodes.len() > fwd.nodes.len(),
+        "Both must discover strictly more nodes than Forward alone"
+    );
+    assert!(
+        both.nodes.len() > rev.nodes.len(),
+        "Both must discover strictly more nodes than Reverse alone"
     );
 }

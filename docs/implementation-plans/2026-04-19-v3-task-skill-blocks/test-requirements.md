@@ -23,8 +23,8 @@
 
 | AC | Test | Type | File | Notes |
 |----|------|------|------|-------|
-| AC2.1 | Migration applies to fresh DB | integration | `crates/pattern_db/tests/migration_task_block_index.rs` | Run all migrations through 0014; assert `tasks`, `task_edges`, `tasks_fts` tables exist |
-| AC2.2 | Pre-existing task rows preserved with new column defaults | integration | `crates/pattern_db/tests/migration_task_block_index.rs` | Insert pre-migration row, apply 0014, assert row survives with `block_handle=NULL`, `comments_json='[]'` |
+| AC2.1 | Migration applies to fresh DB | integration | `crates/pattern_db/tests/migration_task_block_index.rs` | Run all migrations through memory/0011; assert `tasks`, `task_edges`, `tasks_fts` tables exist |
+| AC2.2 | Pre-existing task rows preserved with new column defaults | integration | `crates/pattern_db/tests/migration_task_block_index.rs` | Insert pre-migration row, apply memory/0011, assert row survives with `block_handle=NULL`, `comments_json='[]'` |
 | AC2.3 | `coordination_tasks` table dropped; no active callers | integration + compile | `crates/pattern_db/tests/migration_task_block_index.rs` + `cargo check -p pattern-db` | Post-migration table absent; grep confirms no active-path references |
 | AC2.4 | `task_edges` schema correct | integration | `crates/pattern_db/tests/migration_task_block_index.rs` | Verify columns via `PRAGMA table_info`; unique expression index functional |
 | AC2.5 | Duplicate edge rejected by unique constraint | integration | `crates/pattern_db/tests/migration_task_block_index.rs` | Two identical inserts -> second returns UNIQUE violation |

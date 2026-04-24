@@ -1,17 +1,18 @@
-//! ADHD task models.
+//! User-facing ADHD task model.
 //!
-//! User-facing task management with ADHD-aware features:
-//! - Hierarchical breakdown (big tasks → small steps)
-//! - Flexible scheduling (due dates, scheduled times)
-//!
-//! Distinct from task-block index rows (see queries::task) used for agent work assignment.
+//! `Task` and `UserTaskStatus` are retained for migration compatibility and
+//! for potential re-use by `pattern_nd` when that crate is re-integrated.
+//! `UserTaskPriority` and the CRUD query functions (`create_user_task`,
+//! `get_user_task`, etc.) were removed on 2026-04-23 — they had no active
+//! callers in the current workspace. See `queries/task.rs` module doc for
+//! the full removal rationale.
 //!
 //! ## Schema alignment note (migration 0011)
 //!
 //! Migration 0011 renamed `title` → `subject` (aligning with `TaskItem.subject`
-//! in the CRDT layer) and dropped the `priority` column (priority is now carried
-//! as freeform metadata JSON in the TaskList block layer, not as a fixed SQL
-//! column). The `Task` struct here reflects the post-migration shape.
+//! in the CRDT layer) and dropped the `priority` column (priority is now
+//! carried as freeform metadata JSON in the TaskList block layer).
+//! `Task` here reflects the post-migration shape.
 
 use crate::Json;
 use chrono::{DateTime, Utc};
@@ -115,62 +116,4 @@ impl std::fmt::Display for UserTaskStatus {
             Self::Deferred => write!(f, "deferred"),
         }
     }
-}
-
-/// User task priority.
-///
-/// Distinguishes between importance and urgency (Eisenhower matrix style).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[derive(Default)]
-pub enum UserTaskPriority {
-    /// Can wait, nice to have
-    Low,
-
-    /// Normal priority, should get done
-    #[default]
-    Medium,
-
-    /// Important, prioritize this
-    High,
-
-    /// Time-sensitive AND important - do this now
-    Urgent,
-
-    /// Critical blocker - everything else waits
-    Critical,
-}
-
-impl std::fmt::Display for UserTaskPriority {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Low => write!(f, "low"),
-            Self::Medium => write!(f, "medium"),
-            Self::High => write!(f, "high"),
-            Self::Urgent => write!(f, "urgent"),
-            Self::Critical => write!(f, "critical"),
-        }
-    }
-}
-
-/// Lightweight task projection for lists.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaskSummary {
-    /// Task ID.
-    pub id: String,
-
-    /// Brief imperative description (renamed from `title` in migration 0011).
-    pub subject: String,
-
-    /// Current status.
-    pub status: UserTaskStatus,
-
-    /// Due date if set.
-    pub due_at: Option<DateTime<Utc>>,
-
-    /// Parent task ID for hierarchy display.
-    pub parent_task_id: Option<String>,
-
-    /// Number of subtasks (computed).
-    pub subtask_count: Option<i64>,
 }

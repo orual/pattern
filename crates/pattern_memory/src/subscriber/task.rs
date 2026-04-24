@@ -10,10 +10,10 @@ use std::collections::HashSet;
 use loro::LoroValue;
 use rusqlite::Transaction;
 
+use pattern_db::queries::task_row::{TaskRow, TaskStatus};
 use pattern_db::queries::{
     delete_task_edges_for_item, delete_task_row, upsert_task_edges, upsert_task_row,
 };
-use pattern_db::queries::task_row::{TaskRow, TaskStatus};
 
 // region: error
 
@@ -93,16 +93,14 @@ fn require_str(
 }
 
 /// Parse a TaskStatus from a LoroValue map's `status` field.
-fn extract_status(
-    map: &loro::LoroMapValue,
-    index: usize,
-) -> Result<TaskStatus, ReconcileError> {
+fn extract_status(map: &loro::LoroMapValue, index: usize) -> Result<TaskStatus, ReconcileError> {
     let s = require_str(map, "status", index)?;
-    s.parse::<TaskStatus>().map_err(|_| ReconcileError::WrongFieldType {
-        index,
-        field: "status",
-        detail: format!("unknown status '{s}'"),
-    })
+    s.parse::<TaskStatus>()
+        .map_err(|_| ReconcileError::WrongFieldType {
+            index,
+            field: "status",
+            detail: format!("unknown status '{s}'"),
+        })
 }
 
 /// Extract the `blocks` field (a list of maps with `block` + `task_item` keys)
@@ -140,7 +138,13 @@ fn extract_edges(
                 let task_item = match edge_map.get("task_item") {
                     Some(LoroValue::String(s)) => Some(s.to_string()),
                     Some(LoroValue::Null) | None => None,
-                    _ => None,
+                    Some(other) => {
+                        return Err(ReconcileError::WrongFieldType {
+                            index,
+                            field: "blocks[].task_item",
+                            detail: format!("task_item must be string or null, got {other:?}"),
+                        });
+                    }
                 };
                 edges.push((block, task_item));
             }
@@ -176,9 +180,7 @@ fn loro_value_to_json(val: &LoroValue) -> serde_json::Value {
         LoroValue::I64(i) => serde_json::json!(*i),
         LoroValue::Double(f) => serde_json::json!(*f),
         LoroValue::String(s) => serde_json::Value::String(s.to_string()),
-        LoroValue::List(l) => {
-            serde_json::Value::Array(l.iter().map(loro_value_to_json).collect())
-        }
+        LoroValue::List(l) => serde_json::Value::Array(l.iter().map(loro_value_to_json).collect()),
         LoroValue::Map(m) => {
             let obj: serde_json::Map<String, serde_json::Value> = m
                 .iter()
@@ -191,10 +193,7 @@ fn loro_value_to_json(val: &LoroValue) -> serde_json::Value {
 }
 
 /// Extract a single task item from a LoroValue::Map.
-fn extract_task_item(
-    value: &LoroValue,
-    index: usize,
-) -> Result<ExtractedItem, ReconcileError> {
+fn extract_task_item(value: &LoroValue, index: usize) -> Result<ExtractedItem, ReconcileError> {
     let map = match value {
         LoroValue::Map(m) => m,
         other => {
@@ -265,17 +264,27 @@ pub fn reconcile_task_list(
         extracted.push(extract_task_item(val, i)?);
     }
 
-    // Step 2: fetch existing task_item_ids from SQL.
+    // Step 2: fetch existing task_item_ids and their created_at timestamps.
+    // We preserve created_at across reconciles so that "when first created"
+    // semantics are not destroyed by the DELETE-then-INSERT in upsert_task_row.
     let mut existing_ids: HashSet<String> = HashSet::new();
+    let mut existing_created_at: std::collections::HashMap<String, chrono::DateTime<chrono::Utc>> =
+        std::collections::HashMap::new();
     {
         let mut stmt = tx.prepare(
-            "SELECT task_item_id FROM tasks WHERE block_handle = ?1 AND task_item_id IS NOT NULL",
+            "SELECT task_item_id, created_at FROM tasks \
+             WHERE block_handle = ?1 AND task_item_id IS NOT NULL",
         )?;
         let rows = stmt.query_map(rusqlite::params![block_handle], |row| {
-            row.get::<_, String>(0)
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, chrono::DateTime<chrono::Utc>>(1)?,
+            ))
         })?;
         for row in rows {
-            existing_ids.insert(row?);
+            let (item_id, created_at) = row?;
+            existing_ids.insert(item_id.clone());
+            existing_created_at.insert(item_id, created_at);
         }
     }
 
@@ -291,8 +300,12 @@ pub fn reconcile_task_list(
     }
 
     // Step 5: upsert all items from loro + their edges.
+    // Use the existing SQL created_at if the row already exists; fall back to
+    // now() only for genuinely new items. This preserves the "when first
+    // created" semantic across reconcile cycles.
     let now = chrono::Utc::now();
     for item in &extracted {
+        let created_at = existing_created_at.get(&item.id).copied().unwrap_or(now);
         let row = TaskRow {
             rowid: 0, // ignored by upsert (delete-then-insert).
             id: item.id.clone(),
@@ -308,7 +321,7 @@ pub fn reconcile_task_list(
             task_item_id: Some(item.id.clone()),
             owner_agent_id: item.owner.clone(),
             comments_json: item.comments_json.clone(),
-            created_at: now,
+            created_at,
             updated_at: now,
         };
         upsert_task_row(tx, &row)?;

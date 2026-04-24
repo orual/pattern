@@ -28,4 +28,4 @@ pub use migration::{
     EntityImport, IssueSeverity, MigrationAudit, MigrationIssue, MigrationLog, MigrationStats,
 };
 pub use source::{AgentDataSource, DataSource, SourceType};
-pub use task::{Task, TaskSummary, UserTaskPriority, UserTaskStatus};
+pub use task::{Task, UserTaskStatus};

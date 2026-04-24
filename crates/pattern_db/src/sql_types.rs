@@ -312,24 +312,6 @@ impl std::str::FromStr for crate::models::UserTaskStatus {
 
 impl_text_sql_via_as_str!(crate::models::UserTaskStatus);
 
-// UserTaskPriority: Display produces db format (lowercase).
-impl std::str::FromStr for crate::models::UserTaskPriority {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "low" => Ok(Self::Low),
-            "medium" => Ok(Self::Medium),
-            "high" => Ok(Self::High),
-            "urgent" => Ok(Self::Urgent),
-            "critical" => Ok(Self::Critical),
-            _ => Err(format!("unknown user task priority '{s}'")),
-        }
-    }
-}
-
-impl_text_sql_via_display!(crate::models::UserTaskPriority);
-
 #[cfg(test)]
 mod tests {
     use rusqlite::Connection;
@@ -452,12 +434,10 @@ mod tests {
     }
 
     #[test]
-    fn user_task_types_round_trip() {
+    fn user_task_status_round_trip() {
         round_trip(UserTaskStatus::Backlog, "backlog");
         round_trip(UserTaskStatus::InProgress, "in_progress");
         round_trip(UserTaskStatus::Blocked, "blocked");
         round_trip(UserTaskStatus::Deferred, "deferred");
-        round_trip(UserTaskPriority::Critical, "critical");
-        round_trip(UserTaskPriority::Low, "low");
     }
 }

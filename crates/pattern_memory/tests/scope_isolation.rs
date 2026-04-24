@@ -280,6 +280,120 @@ fn search_archival_none_policy_merges_persona_and_project() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// AC3 scope enforcement via MemoryScope for TaskList blocks
+// ---------------------------------------------------------------------------
+
+/// Scope enforcement for TaskList blocks: a TaskList block created under the
+/// project agent is visible through a project-scope `MemoryScope` binding but
+/// invisible through a persona-scope `Full`-isolation binding.
+///
+/// This is the `MemoryScope`-layer complement to the SQL-layer isolation test
+/// in `subscriber_task_list_concurrent.rs::scope_enforcement_project_only`.
+/// Both tests are needed: the SQL test verifies that `reconcile_task_list`
+/// stores rows under the correct `block_handle`; this test verifies that the
+/// `MemoryScope` routing layer enforces the same boundary at the block level.
+///
+/// Mirrors the requirement from v3-task-skill-blocks.AC10.3:
+/// "Scope enforcement: project-scope blocks invisible to persona session."
+#[test]
+fn tasklist_block_invisible_to_persona_under_full_isolation() {
+    // ---- Part 1: Full isolation hides persona blocks ----
+    // A project session with Full isolation sees the project's TaskList block
+    // but cannot see the persona's block, and cannot write to the persona agent.
+    {
+        let store = ScopeTestStore::new();
+        // Seed a block under the project agent (simulates a TaskList block owned
+        // by the project). ScopeTestStore::seed uses text schema, but MemoryScope
+        // routing is schema-agnostic — it routes purely by agent_id.
+        store.seed(
+            "project-agent",
+            "sprint-tasks",
+            "- [ ] write tests\n- [ ] deploy",
+        );
+        // Seed a separate block under the persona agent.
+        store.seed("persona-agent", "personal-notes", "my personal notes");
+
+        let scope = MemoryScope::new(
+            store,
+            ScopeBinding::with_project("persona-agent", "project-agent", IsolatePolicy::Full),
+        );
+
+        // Project's block IS visible through the Full-isolation scope.
+        let project_block = scope
+            .get_rendered_content("any", "sprint-tasks")
+            .expect("get_rendered_content must not error");
+        assert!(
+            project_block.is_some(),
+            "project-agent's TaskList block must be visible through Full-isolation MemoryScope"
+        );
+        assert_eq!(
+            project_block.as_deref(),
+            Some("- [ ] write tests\n- [ ] deploy"),
+            "content must match what was seeded under project-agent"
+        );
+
+        // Persona's block is INVISIBLE through Full isolation.
+        let persona_block = scope
+            .get_rendered_content("any", "personal-notes")
+            .expect("must not error");
+        assert!(
+            persona_block.is_none(),
+            "persona block must be invisible through Full-isolation MemoryScope"
+        );
+
+        // Writes targeting the persona agent are DENIED.
+        let write_result = scope.create_block(
+            "persona-agent",
+            BlockCreate::new(
+                "new-persona-block",
+                MemoryBlockType::Working,
+                BlockSchema::text(),
+            ),
+        );
+        assert!(
+            matches!(
+                write_result.unwrap_err(),
+                MemoryError::IsolationDenied { .. }
+            ),
+            "Full isolation must deny writes targeting the persona agent"
+        );
+    }
+
+    // ---- Part 2: Persona passthrough cannot see project blocks ----
+    // A persona-only session (passthrough, no project) cannot see the project's
+    // TaskList block because passthrough delegates by agent_id — the project
+    // agent's block does not exist under the persona agent's namespace.
+    {
+        let store = ScopeTestStore::new();
+        store.seed("project-agent", "sprint-tasks", "project task content");
+        store.seed("persona-agent", "personal-notes", "persona content");
+
+        // Passthrough scope: the persona agent sees only its own blocks.
+        let scope = MemoryScope::new(store, ScopeBinding::passthrough("persona-agent"));
+
+        // Persona can see its own block.
+        let persona_notes = scope
+            .get_rendered_content("persona-agent", "personal-notes")
+            .expect("must not error");
+        assert!(
+            persona_notes.is_some(),
+            "persona-agent's block must be visible through passthrough scope"
+        );
+
+        // Persona scope cannot see project's TaskList block — the scope
+        // delegates directly to the store with the caller's agent_id, and
+        // "persona-agent" does not own "sprint-tasks".
+        let project_block_via_persona = scope
+            .get_rendered_content("persona-agent", "sprint-tasks")
+            .expect("must not error");
+        assert!(
+            project_block_via_persona.is_none(),
+            "project-agent's TaskList block must not be visible through persona passthrough scope"
+        );
+    }
+}
+
 /// search_archival under IsolatePolicy::Full returns only project entries,
 /// not persona entries.
 #[test]

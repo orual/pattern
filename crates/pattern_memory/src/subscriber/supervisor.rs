@@ -121,7 +121,13 @@ pub(crate) async fn run_supervisor(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicBool;
+
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
     use super::*;
+    use crate::subscriber::event::CommitEvent;
 
     #[tokio::test]
     async fn supervisor_tracks_heartbeats() {
@@ -157,5 +163,133 @@ mod tests {
 
         // The heartbeat should have been recorded.
         assert!(state.last_heartbeats.contains_key("block_1"));
+    }
+
+    /// Test that the supervisor fires the `memory.sync_worker.restart` metric
+    /// when it detects a heartbeat timeout.
+    ///
+    /// Strategy: inject a stale heartbeat directly into `state.last_heartbeats`
+    /// with a timestamp already past `HEARTBEAT_TIMEOUT`. Then build a
+    /// single-threaded tokio runtime and run the entire async body via
+    /// `Runtime::block_on` inside a `metrics::with_local_recorder` sync closure.
+    /// Because `block_on` executes the future on the current thread (the same
+    /// thread where the recorder is installed as a thread-local), all metric
+    /// emissions from the supervisor task — which runs on that same thread —
+    /// are captured by the recorder. `tokio::time::pause()` is called manually
+    /// at the start of the body so the clock can be fast-forwarded past
+    /// `TICK_INTERVAL` without real sleeps.
+    #[test]
+    fn supervisor_timeout_fires_restart_metric() {
+        use tokio_util::sync::CancellationToken as WorkerCancel;
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        // Build a current-thread runtime so `block_on` keeps all async execution
+        // on this thread, matching the thread-local recorder installed below.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+
+        metrics::with_local_recorder(&recorder, || {
+            rt.block_on(async {
+                tokio::time::pause();
+
+                let (_hb_tx, hb_rx) = crossbeam_channel::bounded::<Heartbeat>(64);
+                let subscribers: Arc<DashMap<String, SubscriberHandle>> = Arc::new(DashMap::new());
+                let cancel = CancellationToken::new();
+                let state = Arc::new(SupervisorState::new());
+
+                // Inject a stale heartbeat — already past HEARTBEAT_TIMEOUT relative
+                // to the paused tokio clock. Using std::time::Instant (which tokio
+                // also intercepts when the clock is paused) ensures the supervisor's
+                // `Instant::now().duration_since(...)` comparison fires immediately.
+                let stale_at = Instant::now()
+                    .checked_sub(HEARTBEAT_TIMEOUT + Duration::from_secs(1))
+                    .expect("system clock must support past-Instant subtraction");
+                state
+                    .last_heartbeats
+                    .insert("stale-block".to_string(), stale_at);
+
+                // Add a dummy SubscriberHandle so the supervisor can cancel and join it.
+                let worker_cancel = WorkerCancel::new();
+                let worker_cancel_clone = worker_cancel.clone();
+                let dummy_handle = SubscriberHandle {
+                    cancel: worker_cancel_clone,
+                    thread: std::thread::spawn(move || {
+                        while !worker_cancel.is_cancelled() {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                    }),
+                    event_tx: {
+                        let (tx, _) = crossbeam_channel::bounded::<CommitEvent>(1);
+                        tx
+                    },
+                    _subscription: {
+                        let doc = loro::LoroDoc::new();
+                        doc.subscribe_local_update(Box::new(|_| true))
+                    },
+                    disk_doc: Arc::new(loro::LoroDoc::new()),
+                    last_written_mtime: Arc::new(Mutex::new(None)),
+                    paused: Arc::new(AtomicBool::new(false)),
+                    pause_complete: Arc::new((Mutex::new(false), std::sync::Condvar::new())),
+                    resume_signal: Arc::new((Mutex::new(false), std::sync::Condvar::new())),
+                };
+                subscribers.insert("stale-block".to_string(), dummy_handle);
+
+                let respawn_called = Arc::new(AtomicBool::new(false));
+                let respawn_called_clone = respawn_called.clone();
+                let respawn_fn: Arc<dyn Fn(&str) + Send + Sync> =
+                    Arc::new(move |block_id: &str| {
+                        assert_eq!(block_id, "stale-block");
+                        respawn_called_clone.store(true, std::sync::atomic::Ordering::Release);
+                    });
+
+                let state_clone = state.clone();
+                let cancel_clone = cancel.clone();
+                let subs_clone = subscribers.clone();
+
+                let handle = tokio::spawn(async move {
+                    run_supervisor(hb_rx, subs_clone, cancel_clone, state_clone, respawn_fn).await;
+                });
+
+                // Advance the tokio clock past TICK_INTERVAL so the supervisor tick fires.
+                tokio::time::advance(TICK_INTERVAL + Duration::from_millis(100)).await;
+                // Yield control so the spawned supervisor task can actually run.
+                tokio::task::yield_now().await;
+                // Give a tiny real sleep for the blocking join inside the supervisor to finish.
+                tokio::time::sleep(Duration::from_millis(50)).await;
+
+                cancel.cancel();
+                handle.await.unwrap();
+
+                assert!(
+                    respawn_called.load(std::sync::atomic::Ordering::Acquire),
+                    "supervisor must call respawn_fn for the timed-out block"
+                );
+                assert!(
+                    !state.last_heartbeats.contains_key("stale-block"),
+                    "supervisor must remove the timed-out entry from last_heartbeats"
+                );
+            });
+        });
+
+        let snapshot = snapshotter.snapshot().into_vec();
+        let restart_entry = snapshot
+            .iter()
+            .find(|(ck, _, _, _)| ck.key().name() == "memory.sync_worker.restart");
+
+        assert!(
+            restart_entry.is_some(),
+            "supervisor must emit 'memory.sync_worker.restart' counter on timeout; \
+             got snapshot: {snapshot:?}"
+        );
+        let (_, _, _, value) = restart_entry.unwrap();
+        assert_eq!(
+            *value,
+            DebugValue::Counter(1),
+            "restart counter must be 1 after one timeout detection"
+        );
     }
 }
