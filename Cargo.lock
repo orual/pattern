@@ -6665,6 +6665,7 @@ dependencies = [
  "pattern-provider",
  "pattern-runtime",
  "regex",
+ "rusqlite",
  "rustyline-async",
  "secrecy",
  "serde",

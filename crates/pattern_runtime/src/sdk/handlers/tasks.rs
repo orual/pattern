@@ -17,7 +17,8 @@ use pattern_core::memory::StructuredDocument;
 use pattern_core::traits::MemoryStore;
 use pattern_core::types::ids::{TaskItemId, new_snowflake_id};
 use pattern_core::types::memory_types::{
-    BlockSchema, MemoryError, TaskEdgeRef, TaskStatus, task_query::TaskPatch, task_query::TaskSpec,
+    BlockFilter, BlockSchema, MemoryError, TaskEdgeRef, TaskStatus,
+    task_query::{GraphQuery, GraphSlice, TaskFilter, TaskPatch, TaskSpec, TaskView},
 };
 
 use crate::sdk::describe::{DescribeEffect, EffectDecl};
@@ -115,12 +116,33 @@ impl EffectHandler<SessionContext> for TasksHandler {
                 handle_unlink(&*store, &agent_id, &source_ref, &target_ref)?;
                 cx.respond(())
             }
-            TasksReq::List(_, _) => Err(EffectError::Handler(
-                "Pattern.Tasks::List — Task 9 implements".into(),
-            )),
-            TasksReq::QueryGraph(_, _) => Err(EffectError::Handler(
-                "Pattern.Tasks::QueryGraph — Task 9 implements".into(),
-            )),
+            TasksReq::List(block_opt, filter_json) => {
+                let conn = cx.user().db().get().map_err(|e| {
+                    EffectError::Handler(format!("Pattern.Tasks::List: db connection: {e}"))
+                })?;
+                let views = handle_list_tasks(
+                    &*store,
+                    &conn,
+                    &agent_id,
+                    block_opt.as_deref(),
+                    &filter_json,
+                )?;
+                // Haskell return type is [TaskView] where TaskView = Text:
+                // serialize each TaskView as JSON, pass as a list of strings.
+                let view_strs: Vec<String> = views
+                    .iter()
+                    .map(|v| serde_json::to_string(v).unwrap_or_default())
+                    .collect();
+                cx.respond(view_strs)
+            }
+            TasksReq::QueryGraph(root_ref, query_json) => {
+                let conn = cx.user().db().get().map_err(|e| {
+                    EffectError::Handler(format!("Pattern.Tasks::QueryGraph: db connection: {e}"))
+                })?;
+                let slice = handle_query_graph(&*store, &conn, &agent_id, &root_ref, &query_json)?;
+                // Return type is GraphSlice = Text (JSON-encoded).
+                cx.respond(serde_json::to_string(&slice).unwrap_or_default())
+            }
         }
     }
 }
@@ -683,6 +705,203 @@ fn build_edge_value(block: &str, item: Option<&str>) -> JsonValue {
     JsonValue::Object(edge)
 }
 
+/// List tasks visible to `agent_id`, optionally scoped to a single block.
+///
+/// When `block` is `Some`, the handler verifies the block exists and is a
+/// TaskList schema (returning `NotATaskList` otherwise) and restricts the
+/// query to that handle. When `block` is `None`, the handler enumerates all
+/// TaskList-schema blocks visible via `MemoryStore::list_blocks` for the
+/// caller — the underlying `MemoryScope` handles `IsolatePolicy` routing.
+///
+/// The caller's `filter.blocks` (if set) is intersected with the visible set;
+/// an empty intersection short-circuits to `Ok(vec![])` without touching SQL.
+///
+/// `blocker_count` / `blocks_count` are batched via two aggregate queries on
+/// `task_edges` rather than N+1 lookups.
+pub(crate) fn handle_list_tasks(
+    store: &dyn MemoryStore,
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+    block: Option<&str>,
+    filter_json: &str,
+) -> Result<Vec<TaskView>, TaskHandlerError> {
+    let mut filter: TaskFilter =
+        serde_json::from_str(filter_json).map_err(|source| TaskHandlerError::Json {
+            what: "TaskFilter",
+            source,
+        })?;
+
+    let visible_blocks: Vec<smol_str::SmolStr> = match block {
+        Some(h) => {
+            // Existence + schema enforcement.
+            fetch_task_list(store, agent_id, h)?;
+            vec![smol_str::SmolStr::new(h)]
+        }
+        None => {
+            let metas = store
+                .list_blocks(BlockFilter::by_agent(agent_id))
+                .map_err(|e| TaskHandlerError::Store(e.to_string()))?;
+            metas
+                .into_iter()
+                .filter(|m| matches!(m.schema, BlockSchema::TaskList { .. }))
+                .map(|m| smol_str::SmolStr::new(&m.label))
+                .collect()
+        }
+    };
+
+    // Intersect with any caller-supplied block constraint.
+    filter.blocks = Some(match filter.blocks.take() {
+        Some(user_blocks) => {
+            let visible_set: std::collections::HashSet<_> =
+                visible_blocks.iter().cloned().collect();
+            user_blocks
+                .into_iter()
+                .filter(|b| visible_set.contains(b))
+                .collect()
+        }
+        None => visible_blocks,
+    });
+
+    if filter.blocks.as_ref().is_some_and(|v| v.is_empty()) {
+        return Ok(Vec::new());
+    }
+
+    let rows = pattern_db::queries::list_tasks_filtered(conn, &filter)
+        .map_err(|e| TaskHandlerError::Store(e.to_string()))?;
+
+    project_rows_to_views(conn, rows)
+}
+
+/// Perform a BFS graph traversal from `root_ref`, honouring `GraphQuery`'s
+/// direction, depth, and max-nodes caps. Scope-checks the root's block via
+/// [`fetch_task_list`] so agents can't snoop into blocks they don't own.
+pub(crate) fn handle_query_graph(
+    store: &dyn MemoryStore,
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+    root_ref: &str,
+    query_json: &str,
+) -> Result<GraphSlice, TaskHandlerError> {
+    let root: TaskEdgeRef =
+        root_ref
+            .parse::<TaskEdgeRef>()
+            .map_err(|source| TaskHandlerError::BadEdgeRef {
+                ref_str: root_ref.to_string(),
+                source,
+            })?;
+    let query: GraphQuery =
+        serde_json::from_str(query_json).map_err(|source| TaskHandlerError::Json {
+            what: "GraphQuery",
+            source,
+        })?;
+
+    // Scope-check: the root block must be accessible to the caller.
+    fetch_task_list(store, agent_id, root.block.as_str())?;
+
+    pattern_db::queries::query_task_graph_bfs(conn, &root, &query)
+        .map_err(|e| TaskHandlerError::Store(e.to_string()))
+}
+
+/// Project `TaskRow`s into `TaskView`s with batched blocker/blocks count
+/// aggregates. Rows missing either `block_handle` or `task_item_id` are
+/// filtered out (legacy pre-v3 rows not tied to a TaskList block).
+fn project_rows_to_views(
+    conn: &rusqlite::Connection,
+    rows: Vec<pattern_db::queries::task_row::TaskRow>,
+) -> Result<Vec<TaskView>, TaskHandlerError> {
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let keys: Vec<(String, String)> = rows
+        .iter()
+        .filter_map(|r| r.block_handle.clone().zip(r.task_item_id.clone()))
+        .collect();
+
+    let in_degrees = aggregate_edge_counts(conn, &keys, /*as_target=*/ true)?;
+    let out_degrees = aggregate_edge_counts(conn, &keys, /*as_target=*/ false)?;
+
+    let views = rows
+        .into_iter()
+        .filter_map(|r| {
+            let block = r.block_handle?;
+            let item = r.task_item_id?;
+            let key = (block.clone(), item.clone());
+            let blocker_count = in_degrees.get(&key).copied().unwrap_or(0);
+            let blocks_count = out_degrees.get(&key).copied().unwrap_or(0);
+            Some(TaskView {
+                block_ref: TaskEdgeRef {
+                    block: block.into(),
+                    task_item: Some(item.into()),
+                },
+                subject: r.subject,
+                status: r.status,
+                owner: r.owner_agent_id.map(smol_str::SmolStr::new),
+                blocker_count,
+                blocks_count,
+            })
+        })
+        .collect();
+
+    Ok(views)
+}
+
+/// Run a single aggregate query to count edges keyed on `(block, item)`.
+/// `as_target == true` counts incoming edges (blocker_count); `false` counts
+/// outgoing edges (blocks_count). NULL `target_item` values are never in our
+/// key set (callers only pass item-level keys), so no sentinel handling is
+/// required.
+fn aggregate_edge_counts(
+    conn: &rusqlite::Connection,
+    keys: &[(String, String)],
+    as_target: bool,
+) -> Result<std::collections::HashMap<(String, String), usize>, TaskHandlerError> {
+    if keys.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let (block_col, item_col) = if as_target {
+        ("target_block", "target_item")
+    } else {
+        ("source_block", "source_item")
+    };
+
+    // Tuple-IN clause: `WHERE (block, item) IN ((?, ?), (?, ?), ...)`.
+    let placeholders = vec!["(?, ?)"; keys.len()].join(", ");
+    let sql = format!(
+        "SELECT {block_col}, {item_col}, COUNT(*) \
+         FROM task_edges \
+         WHERE ({block_col}, {item_col}) IN ({placeholders}) \
+         GROUP BY {block_col}, {item_col}"
+    );
+
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| TaskHandlerError::Store(e.to_string()))?;
+
+    // Flatten keys into a param sequence.
+    let mut flat: Vec<String> = Vec::with_capacity(keys.len() * 2);
+    for (b, i) in keys {
+        flat.push(b.clone());
+        flat.push(i.clone());
+    }
+
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(flat.iter()), |row| {
+            let block: String = row.get(0)?;
+            let item: String = row.get(1)?;
+            let count: i64 = row.get(2)?;
+            Ok(((block, item), count as usize))
+        })
+        .map_err(|e| TaskHandlerError::Store(e.to_string()))?;
+
+    let mut result = std::collections::HashMap::new();
+    for r in rows {
+        let (key, count) = r.map_err(|e| TaskHandlerError::Store(e.to_string()))?;
+        result.insert(key, count);
+    }
+    Ok(result)
+}
+
 /// Apply a `TaskPatch` to a mutable JSON map representing a task item.
 ///
 /// Double-option fields (`owner`, `active_form`):
@@ -1164,4 +1383,447 @@ mod tests {
     }
 
     // endregion: link / unlink tests
+
+    // region: list / query-graph tests
+
+    use pattern_core::types::memory_types::task_query::{Direction, GraphQuery};
+    use pattern_db::ConstellationDb;
+
+    fn open_db() -> ConstellationDb {
+        ConstellationDb::open_in_memory().expect("in-memory db")
+    }
+
+    /// Seed a task row directly into the `tasks` table (bypassing the subscriber).
+    fn seed_task_row(
+        db: &ConstellationDb,
+        block: &str,
+        item_id: &str,
+        subject: &str,
+        status: TaskStatus,
+        owner: Option<&str>,
+    ) {
+        let now = chrono::Utc::now();
+        let row = pattern_db::queries::task_row::TaskRow {
+            rowid: 0,
+            id: format!("tk-{item_id}"),
+            agent_id: None,
+            subject: subject.to_string(),
+            description: None,
+            status,
+            due_at: None,
+            scheduled_at: None,
+            completed_at: None,
+            parent_task_id: None,
+            block_handle: Some(block.to_string()),
+            task_item_id: Some(item_id.to_string()),
+            owner_agent_id: owner.map(|s| s.to_string()),
+            comments_json: "[]".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        let mut conn = db.get().expect("pool conn");
+        let tx = conn.transaction().unwrap();
+        pattern_db::queries::upsert_task_row(&tx, &row).unwrap();
+        tx.commit().unwrap();
+    }
+
+    /// Seed a single edge from (src_block, src_item) to (tgt_block, tgt_item).
+    fn seed_edge(
+        db: &ConstellationDb,
+        src_block: &str,
+        src_item: &str,
+        tgt_block: &str,
+        tgt_item: Option<&str>,
+    ) {
+        let mut conn = db.get().unwrap();
+        let tx = conn.transaction().unwrap();
+        // upsert_task_edges replaces ALL edges for this source; pre-read + merge
+        // so we don't clobber previously-seeded edges from the same source.
+        let existing: Vec<(String, Option<String>)> = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT target_block, target_item FROM task_edges \
+                     WHERE source_block = ?1 AND source_item = ?2",
+                )
+                .unwrap();
+            stmt.query_map(rusqlite::params![src_block, src_item], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+        };
+        let mut merged = existing;
+        merged.push((tgt_block.to_string(), tgt_item.map(|s| s.to_string())));
+        pattern_db::queries::upsert_task_edges(&tx, src_block, src_item, &merged).unwrap();
+        tx.commit().unwrap();
+    }
+
+    #[test]
+    fn list_tasks_scoped_to_single_block_only_returns_that_block() {
+        let store = Arc::new(InMemoryMemoryStore::new());
+        let db = open_db();
+        seed_task_list(&*store, "agent-a", "l1");
+        seed_task_list(&*store, "agent-a", "l2");
+        seed_task_row(&db, "l1", "i1", "task 1", TaskStatus::Pending, None);
+        seed_task_row(&db, "l1", "i2", "task 2", TaskStatus::InProgress, None);
+        seed_task_row(&db, "l2", "i3", "task 3", TaskStatus::Pending, None);
+
+        let conn = db.get().unwrap();
+        let views =
+            handle_list_tasks(&*store, &conn, "agent-a", Some("l1"), "{}").expect("list ok");
+        assert_eq!(views.len(), 2, "only l1's tasks");
+        for v in &views {
+            assert_eq!(v.block_ref.block.as_str(), "l1");
+        }
+    }
+
+    #[test]
+    fn list_tasks_no_block_enumerates_all_visible() {
+        let store = Arc::new(InMemoryMemoryStore::new());
+        let db = open_db();
+        seed_task_list(&*store, "agent-a", "l1");
+        seed_task_list(&*store, "agent-a", "l2");
+        seed_task_row(&db, "l1", "i1", "one", TaskStatus::Pending, None);
+        seed_task_row(&db, "l2", "i2", "two", TaskStatus::Pending, None);
+        // And a task row for a block the agent does NOT own — must be invisible.
+        seed_task_row(
+            &db,
+            "other-block",
+            "i3",
+            "hidden",
+            TaskStatus::Pending,
+            None,
+        );
+
+        let conn = db.get().unwrap();
+        let views = handle_list_tasks(&*store, &conn, "agent-a", None, "{}").unwrap();
+        assert_eq!(views.len(), 2, "agent sees only their own blocks' tasks");
+        let blocks: std::collections::HashSet<&str> =
+            views.iter().map(|v| v.block_ref.block.as_str()).collect();
+        assert!(blocks.contains("l1") && blocks.contains("l2"));
+        assert!(!blocks.contains("other-block"));
+    }
+
+    #[test]
+    fn list_tasks_status_filter_matches_subset() {
+        let store = Arc::new(InMemoryMemoryStore::new());
+        let db = open_db();
+        seed_task_list(&*store, "agent-a", "tasks");
+        seed_task_row(&db, "tasks", "a", "a", TaskStatus::Pending, None);
+        seed_task_row(&db, "tasks", "b", "b", TaskStatus::InProgress, None);
+        seed_task_row(&db, "tasks", "c", "c", TaskStatus::Blocked, None);
+        seed_task_row(&db, "tasks", "d", "d", TaskStatus::Completed, None);
+        seed_task_row(&db, "tasks", "e", "e", TaskStatus::Cancelled, None);
+
+        let filter = TaskFilter {
+            status: Some(vec![TaskStatus::InProgress, TaskStatus::Blocked]),
+            ..Default::default()
+        };
+        let filter_json = serde_json::to_string(&filter).unwrap();
+
+        let conn = db.get().unwrap();
+        let views = handle_list_tasks(&*store, &conn, "agent-a", None, &filter_json).unwrap();
+        assert_eq!(views.len(), 2);
+        for v in &views {
+            assert!(matches!(
+                v.status,
+                TaskStatus::InProgress | TaskStatus::Blocked
+            ));
+        }
+    }
+
+    #[test]
+    fn list_tasks_keyword_filter_matches_fts5() {
+        let store = Arc::new(InMemoryMemoryStore::new());
+        let db = open_db();
+        seed_task_list(&*store, "agent-a", "tasks");
+        seed_task_row(
+            &db,
+            "tasks",
+            "a",
+            "fix authentication bug",
+            TaskStatus::Pending,
+            None,
+        );
+        seed_task_row(&db, "tasks", "b", "write docs", TaskStatus::Pending, None);
+        seed_task_row(
+            &db,
+            "tasks",
+            "c",
+            "refactor auth flow",
+            TaskStatus::Pending,
+            None,
+        );
+
+        let filter = TaskFilter {
+            keyword: Some("auth*".to_string()),
+            ..Default::default()
+        };
+        let filter_json = serde_json::to_string(&filter).unwrap();
+
+        let conn = db.get().unwrap();
+        let views = handle_list_tasks(&*store, &conn, "agent-a", None, &filter_json).unwrap();
+        let subjects: std::collections::HashSet<&str> =
+            views.iter().map(|v| v.subject.as_str()).collect();
+        assert_eq!(views.len(), 2, "two matches for 'auth*'");
+        assert!(subjects.contains("fix authentication bug"));
+        assert!(subjects.contains("refactor auth flow"));
+    }
+
+    #[test]
+    fn list_tasks_has_blockers_filter() {
+        let store = Arc::new(InMemoryMemoryStore::new());
+        let db = open_db();
+        seed_task_list(&*store, "agent-a", "tasks");
+        seed_task_row(&db, "tasks", "a", "a", TaskStatus::Pending, None);
+        seed_task_row(&db, "tasks", "b", "b", TaskStatus::Pending, None);
+        seed_task_row(&db, "tasks", "c", "c", TaskStatus::Pending, None);
+        // b is blocked by a (edge from a → b, so b has an incoming edge).
+        seed_edge(&db, "tasks", "a", "tasks", Some("b"));
+
+        let filter = TaskFilter {
+            has_blockers: Some(true),
+            ..Default::default()
+        };
+        let filter_json = serde_json::to_string(&filter).unwrap();
+
+        let conn = db.get().unwrap();
+        let views = handle_list_tasks(&*store, &conn, "agent-a", None, &filter_json).unwrap();
+        assert_eq!(views.len(), 1);
+        assert_eq!(
+            views[0].block_ref.task_item.as_ref().map(|s| s.as_str()),
+            Some("b")
+        );
+    }
+
+    #[test]
+    fn list_tasks_projects_blocker_and_blocks_counts() {
+        let store = Arc::new(InMemoryMemoryStore::new());
+        let db = open_db();
+        seed_task_list(&*store, "agent-a", "tasks");
+        seed_task_row(&db, "tasks", "a", "a", TaskStatus::Pending, None);
+        seed_task_row(&db, "tasks", "b", "b", TaskStatus::Pending, None);
+        seed_task_row(&db, "tasks", "c", "c", TaskStatus::Pending, None);
+        // a → b and a → c: a has 2 outgoing (blocks_count=2)
+        seed_edge(&db, "tasks", "a", "tasks", Some("b"));
+        seed_edge(&db, "tasks", "a", "tasks", Some("c"));
+        // c gets incoming from a (blocker_count=1 for c).
+
+        let conn = db.get().unwrap();
+        let views = handle_list_tasks(&*store, &conn, "agent-a", Some("tasks"), "{}").unwrap();
+        let by_item: std::collections::HashMap<&str, &TaskView> = views
+            .iter()
+            .filter_map(|v| v.block_ref.task_item.as_deref().map(|s| (s, v)))
+            .collect();
+        assert_eq!(by_item["a"].blocks_count, 2);
+        assert_eq!(by_item["a"].blocker_count, 0);
+        assert_eq!(by_item["b"].blocker_count, 1);
+        assert_eq!(by_item["c"].blocker_count, 1);
+    }
+
+    #[test]
+    fn list_tasks_on_non_tasklist_returns_not_a_task_list() {
+        let store = Arc::new(InMemoryMemoryStore::new());
+        let db = open_db();
+        // Seed a Text block instead.
+        let create = BlockCreate::new("notes".to_string(), MemoryBlockType::Working, text_schema())
+            .with_description("notes".to_string())
+            .with_char_limit(4096);
+        store.create_block("agent-a", create).unwrap();
+
+        let conn = db.get().unwrap();
+        let err = handle_list_tasks(&*store, &conn, "agent-a", Some("notes"), "{}")
+            .expect_err("must fail on non-TaskList block");
+        assert!(matches!(
+            err,
+            TaskHandlerError::Memory(MemoryError::NotATaskList { .. })
+        ));
+    }
+
+    #[test]
+    fn query_graph_forward_chain_of_5() {
+        let store = Arc::new(InMemoryMemoryStore::new());
+        let db = open_db();
+        seed_task_list(&*store, "agent-a", "tasks");
+        for id in ["a", "b", "c", "d", "e"] {
+            seed_task_row(&db, "tasks", id, id, TaskStatus::Pending, None);
+        }
+        // a → b → c → d → e
+        seed_edge(&db, "tasks", "a", "tasks", Some("b"));
+        seed_edge(&db, "tasks", "b", "tasks", Some("c"));
+        seed_edge(&db, "tasks", "c", "tasks", Some("d"));
+        seed_edge(&db, "tasks", "d", "tasks", Some("e"));
+
+        let root = TaskEdgeRef {
+            block: "tasks".into(),
+            task_item: Some("a".into()),
+        };
+        let query = GraphQuery {
+            direction: Direction::Forward,
+            depth: None,
+            max_nodes: None,
+        };
+        let conn = db.get().unwrap();
+        let slice = handle_query_graph(
+            &*store,
+            &conn,
+            "agent-a",
+            &root.to_string(),
+            &serde_json::to_string(&query).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(slice.nodes.len(), 5, "5 nodes in chain");
+        assert_eq!(slice.edges.len(), 4, "4 edges in chain");
+        assert!(!slice.truncated);
+    }
+
+    #[test]
+    fn query_graph_depth_zero_returns_root_only() {
+        let store = Arc::new(InMemoryMemoryStore::new());
+        let db = open_db();
+        seed_task_list(&*store, "agent-a", "tasks");
+        seed_task_row(&db, "tasks", "a", "a", TaskStatus::Pending, None);
+        seed_task_row(&db, "tasks", "b", "b", TaskStatus::Pending, None);
+        seed_edge(&db, "tasks", "a", "tasks", Some("b"));
+
+        let root = TaskEdgeRef {
+            block: "tasks".into(),
+            task_item: Some("a".into()),
+        };
+        let query = GraphQuery {
+            direction: Direction::Forward,
+            depth: Some(0),
+            max_nodes: None,
+        };
+        let conn = db.get().unwrap();
+        let slice = handle_query_graph(
+            &*store,
+            &conn,
+            "agent-a",
+            &root.to_string(),
+            &serde_json::to_string(&query).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(slice.nodes.len(), 1, "only root node");
+        assert_eq!(slice.edges.len(), 0, "no edges at depth 0");
+    }
+
+    #[test]
+    fn query_graph_reverse_direction_walks_incoming_edges() {
+        let store = Arc::new(InMemoryMemoryStore::new());
+        let db = open_db();
+        seed_task_list(&*store, "agent-a", "tasks");
+        seed_task_row(&db, "tasks", "a", "a", TaskStatus::Pending, None);
+        seed_task_row(&db, "tasks", "b", "b", TaskStatus::Pending, None);
+        // a → b, querying B with Reverse should find A.
+        seed_edge(&db, "tasks", "a", "tasks", Some("b"));
+
+        let root = TaskEdgeRef {
+            block: "tasks".into(),
+            task_item: Some("b".into()),
+        };
+        let query = GraphQuery {
+            direction: Direction::Reverse,
+            depth: None,
+            max_nodes: None,
+        };
+        let conn = db.get().unwrap();
+        let slice = handle_query_graph(
+            &*store,
+            &conn,
+            "agent-a",
+            &root.to_string(),
+            &serde_json::to_string(&query).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(slice.nodes.len(), 2, "B + A (reverse reachable)");
+        assert_eq!(slice.edges.len(), 1);
+    }
+
+    #[test]
+    fn query_graph_cycle_terminates_within_depth() {
+        let store = Arc::new(InMemoryMemoryStore::new());
+        let db = open_db();
+        seed_task_list(&*store, "agent-a", "tasks");
+        for id in ["a", "b", "c"] {
+            seed_task_row(&db, "tasks", id, id, TaskStatus::Pending, None);
+        }
+        // Cycle: a → b → c → a
+        seed_edge(&db, "tasks", "a", "tasks", Some("b"));
+        seed_edge(&db, "tasks", "b", "tasks", Some("c"));
+        seed_edge(&db, "tasks", "c", "tasks", Some("a"));
+
+        let root = TaskEdgeRef {
+            block: "tasks".into(),
+            task_item: Some("a".into()),
+        };
+        let query = GraphQuery {
+            direction: Direction::Forward,
+            depth: None,
+            max_nodes: None,
+        };
+        let conn = db.get().unwrap();
+        let slice = handle_query_graph(
+            &*store,
+            &conn,
+            "agent-a",
+            &root.to_string(),
+            &serde_json::to_string(&query).unwrap(),
+        )
+        .unwrap();
+
+        // BFS with visited-set termination: exactly 3 nodes + 3 edges.
+        assert_eq!(slice.nodes.len(), 3);
+        assert_eq!(slice.edges.len(), 3);
+        assert!(!slice.truncated, "bounded by graph size, not caps");
+    }
+
+    #[test]
+    fn query_graph_max_nodes_truncates_large_graph() {
+        // Star topology: one root with 100 direct children. Depth 1 reaches all
+        // children; max_nodes=50 caps the traversal before it finishes.
+        // Using a star (not a chain) avoids interaction with the default
+        // depth=16 cap — we want to verify the max_nodes truncation path.
+        let store = Arc::new(InMemoryMemoryStore::new());
+        let db = open_db();
+        seed_task_list(&*store, "agent-a", "tasks");
+        seed_task_row(&db, "tasks", "root", "root", TaskStatus::Pending, None);
+        for i in 0..100 {
+            let id = format!("c{i:03}");
+            seed_task_row(&db, "tasks", &id, &id, TaskStatus::Pending, None);
+            seed_edge(&db, "tasks", "root", "tasks", Some(&id));
+        }
+
+        let root = TaskEdgeRef {
+            block: "tasks".into(),
+            task_item: Some("root".into()),
+        };
+        let query = GraphQuery {
+            direction: Direction::Forward,
+            depth: Some(2),
+            max_nodes: Some(50),
+        };
+        let conn = db.get().unwrap();
+        let slice = handle_query_graph(
+            &*store,
+            &conn,
+            "agent-a",
+            &root.to_string(),
+            &serde_json::to_string(&query).unwrap(),
+        )
+        .unwrap();
+
+        assert!(
+            slice.nodes.len() <= 50,
+            "capped at 50, got {}",
+            slice.nodes.len()
+        );
+        assert!(slice.truncated, "max_nodes cap must flag truncation");
+    }
+
+    // endregion: list / query-graph tests
 }
