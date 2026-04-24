@@ -169,6 +169,46 @@ pub enum MemoryError {
     #[diagnostic(code(pattern_core::memory::document))]
     Document(#[from] DocumentError),
 
+    /// A task item does not exist in the specified block.
+    ///
+    /// Returned when attempting to update, transition, or link a task by
+    /// reference when the item id does not exist in the target block.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::MemoryError;
+    /// use pattern_core::types::ids::TaskItemId;
+    /// use pattern_core::types::block::BlockHandle;
+    ///
+    /// let err = MemoryError::TaskNotFound {
+    ///     block: BlockHandle::new("sprint-1"),
+    ///     item: TaskItemId::from("item-042"),
+    /// };
+    /// let msg = err.to_string();
+    /// assert!(msg.contains("sprint-1"));
+    /// assert!(msg.contains("item-042"));
+    /// ```
+    #[error("task not found: block {block}, item {item}")]
+    #[diagnostic(code(pattern_core::memory::task_not_found))]
+    TaskNotFound {
+        /// The block where the task item was expected.
+        block: BlockHandle,
+        /// The task item id that was not found.
+        item: crate::types::ids::TaskItemId,
+    },
+
+    /// The block does not have a TaskList schema.
+    ///
+    /// Raised when attempting a task-list operation (create_task, update_task,
+    /// link, etc.) on a block whose schema is not `BlockSchema::TaskList`.
+    #[error("block is not a task list: {block}")]
+    #[diagnostic(code(pattern_core::memory::not_a_task_list))]
+    NotATaskList {
+        /// The block that is not a TaskList.
+        block: BlockHandle,
+    },
+
     /// Catch-all for memory operation failures that don't fit other variants.
     #[error("memory operation failed: {0}")]
     #[diagnostic(code(pattern_core::memory::other))]
@@ -179,3 +219,40 @@ pub enum MemoryError {
 ///
 /// Used throughout `MemoryStore` trait signatures and implementations.
 pub type MemoryResult<T> = Result<T, MemoryError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn task_not_found_display_includes_block_and_item() {
+        let err = MemoryError::TaskNotFound {
+            block: BlockHandle::new("sprint-1"),
+            item: crate::types::ids::TaskItemId::from("item-042"),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("sprint-1"),
+            "error message should contain block: {}",
+            msg
+        );
+        assert!(
+            msg.contains("item-042"),
+            "error message should contain item: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn not_a_task_list_display_includes_block() {
+        let err = MemoryError::NotATaskList {
+            block: BlockHandle::new("persona"),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("persona"),
+            "error message should contain block: {}",
+            msg
+        );
+    }
+}
