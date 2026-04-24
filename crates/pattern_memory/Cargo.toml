@@ -45,7 +45,7 @@ notify-debouncer-full = "0.5"
 
 # Errors + logging
 thiserror = { workspace = true }
-miette = { workspace = true }
+miette = { workspace = true, features = ["fancy"] }
 tracing = { workspace = true }
 
 # Utilities inherited from the original pattern_core::memory surface

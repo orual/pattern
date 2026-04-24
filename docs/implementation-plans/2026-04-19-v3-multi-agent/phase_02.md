@@ -1,0 +1,549 @@
+# v3-multi-agent Phase 2: Spawn primitives
+
+**Goal:** replace the stub `SpawnHandler` with a real dispatcher that spawns three kinds of child sessions — ephemeral workers, forks (phase 3 fleshes out isolation modes), and sibling personas — threaded through an extended `SpawnReq` grammar with structured `EphemeralConfig / ForkConfig / SiblingConfig`. Parent sessions track child handles for lifetime management; a tokio semaphore enforces concurrency limits per parent; capability inheritance restricts children to a subset of the parent's caps.
+
+**Architecture:** the `SpawnHandler` parses the Haskell-side request into one of three typed config variants. For ephemeral, it clones the parent's `SessionContext` (share the `Arc`s; rebuild per-session fields fresh), builds a new EvalWorker thread, runs the child's program to completion, and returns a result. For sibling, it loads a persona via the existing `persona_loader` and opens a fully independent session with its own `CapabilitySet` (from the sibling's persona config). For fork, Phase 2 delivers only the scaffolding + the lightweight path; Phase 3 adds persistent (jj workspace) isolation and merge/promote flows. Parent-child lifetime is enforced via a shared `Arc<ChildSessionRegistry>` on the parent's context; when the parent session's `CancelState` fires, children inherit that signal.
+
+**Tech Stack:** Rust, `tokio::sync::Semaphore` (introduced in this phase — no existing precedent), existing `EvalWorker` (`std::thread::spawn` with 256 MiB stack), existing `CancelState` shared via `Arc`, existing `persona_loader` for sibling persona loading, `frunk` HList patterns from `sdk/bundle.rs`, proptest/insta for config serde.
+
+**Scope:** 2 of 7. Delivers all ephemeral behaviour (AC3 in full) and sibling scaffolding (AC5 — identity authorization, config plumbing; the draft-state + registry interaction lands in Phase 6). Fork structural scaffolding is wired so Phase 3 can swap in isolation modes.
+
+**Codebase verified:** 2026-04-23. Plan 2 may land a `Tasks` effect in parallel; that does not touch Spawn.
+
+---
+
+## Codebase verification findings
+
+- ✓ `SpawnHandler` stub at `crates/pattern_runtime/src/sdk/handlers/spawn.rs` currently wraps `HandlerGuard` then returns `EffectError::Handler("not implemented in v3 foundation")`.
+- ✓ Existing `SpawnReq` at `crates/pattern_runtime/src/sdk/requests/spawn.rs`:
+  ```rust
+  pub enum SpawnReq {
+      #[core(module = "Pattern.Spawn", name = "Start")] Start(String),
+      #[core(module = "Pattern.Spawn", name = "Stop")]  Stop(String),
+  }
+  ```
+  The `Start(String)` variant is load-bearing in the Haskell preamble. **Changing the constructor surface is a breaking change on the Haskell side** — the `Pattern.Spawn` module in `crates/pattern_runtime/haskell/Pattern/Spawn.hs` ships with the crate, so we update both sides atomically.
+- ✓ `SessionContext` structure at `crates/pattern_runtime/src/session.rs:40-121`. Per-session mutable fields: `cancel_state: Arc<CancelState>`, `pending_messages: Arc<Mutex<Vec<_>>>`, `checkpoint_log: Arc<Mutex<CheckpointLog>>`, `current_turn: Arc<AtomicU64>`, `adapter: Arc<MemoryStoreAdapter>`. Shared-read: `provider`, `db`, `router` (all `Arc`).
+- ⚠ `include_paths` is currently a local variable in `TidepoolSession::open_with_agent_loop`, not on `SessionContext`. Child spawn needs it, so Phase 2 adds `include_paths: Arc<Vec<PathBuf>>` to the context.
+- ✓ `EvalWorker::spawn_with_includes(ctx, include_paths, session_id)` at `crates/pattern_runtime/src/agent_loop/eval_worker.rs:137-165`. New worker = new 256 MiB OS thread — **cheap in CPU/memory terms for small fan-out, expensive at scale**. Semaphore limit keeps this sane.
+- ✓ `CancelState` at `crates/pattern_runtime/src/timeout.rs:191-198`. Shared-via-`Arc` is the existing pattern.
+- ✓ Persona loader at `crates/pattern_runtime/src/persona_loader.rs` is self-contained; `load_persona(&Path) -> Result<PersonaSnapshot, PersonaLoadError>` reusable.
+- ✗ No `PersonaId` type alias. Only `AgentId: SmolStr` in `crates/pattern_core/src/types/ids.rs`. **Decision:** add `pub type PersonaId = SmolStr;` as a readability alias (documented as "same underlying type as AgentId; used in multi-agent code").
+- ✗ No `tokio::sync::Semaphore` usage anywhere. Phase 2 introduces the first use.
+- ⚠ `LoroDoc` access is through `MemoryStoreAdapter::inner().get_block(...) -> StructuredDocument` which wraps `Arc<LoroDoc>`. For sibling spawn with its own memory root, we construct a fresh `MemoryCache` with a new `LoroDoc::new()`; for ephemeral, the child shares the parent's adapter (memory reads but no isolated scope, unless explicitly restricted); for fork (Phase 3), we `LoroDoc::fork()` and build a new adapter over the forked doc.
+- ✓ `HasCancelState` trait exists and is used by every handler; Phase 1 introduces `HasPermissionAuthority` alongside. Phase 2 extends the same user-trait pattern with `HasSpawnRegistry` so handlers can reach the child registry cheanly.
+
+### Design questions to resolve at execution
+
+**Q2.1.** The existing `SpawnReq::Start(String)` is tightly coupled to a single string argument. Phase 2 needs three config shapes. Options:
+- **A.** Replace `SpawnReq` with three discrete request constructors at the Haskell layer:
+  ```
+  SpawnEphemeral :: EphemeralConfig -> Spawn SpawnId
+  SpawnFork      :: ForkConfig      -> Spawn ForkHandle
+  SpawnSibling   :: SiblingConfig   -> Spawn PersonaId
+  SpawnStop      :: SpawnId         -> Spawn ()
+  ```
+  Clean but requires moving the Haskell `Pattern.Spawn` module forward.
+- **B.** Keep a single `Start` constructor with a typed union payload (JSON text of a tagged enum). Less clean but minimally invasive.
+
+Plan assumes **(A)** — discrete constructors, with a structured `SpawnId` / `PersonaId` / `ForkHandle` response.
+
+**Q2.2.** Parent→child cancel propagation: share the parent's `Arc<CancelState>` outright (simplest; child observes parent-cancel atomic immediately) vs. wrap in a child-local CancelState that subscribes via a tokio watch channel (clean separation; lets a parent cancel a child without also ending its own turn).
+
+Plan assumes **share the Arc** for ephemerals (sub-lives tie to parent turn by design) and fork and **fresh state** for siblings (they live independently). Revisit if the shared-Arc model causes timing-assertion flakes during Phase 4 mailbox work.
+
+**Q2.3.** `Arc<ChildSessionRegistry>` or inline `Vec<ChildSessionHandle>` on SessionContext? Plan assumes a dedicated type `SpawnRegistry` with its own Drop-behaviour (abort all children) because it keeps the cancellation contract local to one type.
+
+---
+
+## Acceptance Criteria Coverage
+
+### v3-multi-agent.AC3: Ephemeral spawn
+
+- **v3-multi-agent.AC3.1 Success:** `ctx.spawn.ephemeral(config)` creates a new TidepoolSession with a separate EvalWorker thread; the ephemeral executes its program and returns a result to the parent
+- **v3-multi-agent.AC3.2 Success:** Ephemeral's CapabilitySet is a subset of parent's; prelude filtering reflects the restricted set
+- **v3-multi-agent.AC3.3 Success:** Ephemeral with costume has its system prompt override set to the costume's content; persona identity remains the parent's in logs
+- **v3-multi-agent.AC3.4 Success:** Ephemeral timeout fires; session is cancelled; parent receives a timeout error, not a hang
+- **v3-multi-agent.AC3.5 Success:** Concurrent ephemeral count respects the configured semaphore limit; attempt to exceed returns a clear error
+- **v3-multi-agent.AC3.6 Failure:** Parent session resolves (completes or errors); all child ephemeral sessions are cancelled; no orphaned EvalWorker threads remain
+- **v3-multi-agent.AC3.7 Edge:** Ephemeral spawning its own ephemeral (nested); grandchild dies when child dies, child dies when parent resolves — full lifetime chain
+
+### v3-multi-agent.AC5 (partial — identity-auth portion)
+
+- **v3-multi-agent.AC5.1 Success:** `ctx.spawn.sibling(SiblingConfig { persona: Existing(id), .. })` opens a session for the existing persona; no authorization required
+- **v3-multi-agent.AC5.2 Success:** `ctx.spawn.sibling(SiblingConfig { persona: New(config), .. })` with `SpawnNewIdentities` capability creates the persona and opens its session
+- **v3-multi-agent.AC5.3 Success:** `ctx.spawn.sibling(SiblingConfig { persona: New(config), .. })` without `SpawnNewIdentities` capability creates persona config as Draft; no session opened; returns the draft PersonaId
+- **v3-multi-agent.AC5.4 Success:** Sibling session's CapabilitySet comes from its own persona config, not from the spawner's CapabilitySet
+- **v3-multi-agent.AC5.6 Failure:** Sibling spawn referencing a nonexistent PersonaId returns `RegistryError::PersonaNotFound`
+
+AC5.5 (auto-registration in agent registry) and AC5.7 (draft PersonaId visibility in constellation) are verified in Phase 6 when the registry schema lands. Phase 2 ships the code paths but the registry queries they call are stubs returning in-memory results; the draft state produced here is consumed by Phase 6's registration.
+
+### v3-multi-agent.AC4.7, AC4.8 (partial — fork promote scaffold)
+
+- **v3-multi-agent.AC4.7 Success:** `fork.promote(persona_config)` creates a new persona config, registers as Draft in the registry, inherits the fork's memory state — **scaffolding only in Phase 2; fork-to-sibling memory transfer verified in Phase 3.**
+- **v3-multi-agent.AC4.8 Failure:** `fork.promote()` without `SpawnNewIdentities` capability returns `CapabilityError::Denied` — **gate wiring verified in Phase 2; end-to-end verification in Phase 3.**
+
+---
+
+<!-- START_SUBCOMPONENT_A (tasks 1-3) -->
+
+<!-- START_TASK_1 -->
+### Task 1: Define spawn-config types in `pattern_core`
+
+**Verifies:** foundation for AC3.2, AC3.3, AC5.*.
+
+**Files:**
+- Create: `crates/pattern_core/src/spawn.rs`
+- Modify: `crates/pattern_core/src/lib.rs` (re-export)
+- Modify: `crates/pattern_core/src/types/ids.rs` — add `pub type PersonaId = SmolStr;` with a doc comment noting it's an alias for `AgentId`.
+
+**Implementation:**
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct EphemeralConfig {
+    pub program: String,             // Haskell source to compile + run
+    pub costume: Option<String>,     // system-prompt override; parent identity retained
+    pub capabilities: Option<CapabilitySet>, // None = inherit parent's full set
+    pub timeout: Option<jiff::Span>, // None = inherit parent/runtime default
+    pub metadata: serde_json::Value, // caller-supplied tags for logs
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ForkConfig {
+    pub program: String,
+    pub isolation: ForkIsolation,           // Lightweight | Persistent
+    pub capabilities: Option<CapabilitySet>,
+    pub timeout_hint: Option<jiff::Span>,
+    pub task_ref: Option<BlockRef>,         // used for jj bookmark naming in Phase 3
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ForkIsolation {
+    Lightweight,  // LoroDoc::fork(); no disk writes
+    Persistent,   // jj workspace; Phase 3 wiring
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SiblingConfig {
+    pub persona: SiblingPersona,
+    pub relationship: RelationshipKind, // SupervisorOf | SpecialistFor | PeerWith | ObserverOf
+    pub shared_blocks: Vec<String>,     // block labels the sibling can read from spawner
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SiblingPersona {
+    Existing(PersonaId),
+    New(PersonaConfig),               // simplified copy of PersonaSnapshot
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct PersonaConfig {
+    pub name: String,
+    pub system_prompt: String,
+    pub capabilities: CapabilitySet,
+    // Further fields deferred to Phase 6 registry work
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RelationshipKind {
+    SupervisorOf,
+    SpecialistFor,
+    PeerWith,
+    ObserverOf,
+}
+```
+
+`BlockRef` is the Plan-2 type (verify landed before running Task 1; if not, block on it). If Plan 2 hasn't shipped `BlockRef` by the time Task 1 runs, define a minimal placeholder here and switch to the Plan 2 type via `cargo nextest` breakage as soon as Plan 2 merges — do NOT dual-maintain.
+
+**Testing:**
+- Unit: serde round-trip for each config struct (plain `serde_json`).
+- Unit: `RelationshipKind` display/FromStr round-trip (if we emit it in logs or KDL).
+- Ensure `#[non_exhaustive]` everywhere so future fields don't force a major bump on downstream crates.
+
+**Verification:**
+`cargo nextest run -p pattern-core spawn`
+
+**Commit:** `[pattern-core] add spawn-config types (Ephemeral, Fork, Sibling) + PersonaId alias`
+<!-- END_TASK_1 -->
+
+<!-- START_TASK_2 -->
+### Task 2: Extend `SpawnReq` grammar for three spawn modes
+
+**Verifies:** foundation for AC3.1 / AC5.1-3 / AC4.7 dispatch.
+
+**Files:**
+- Modify: `crates/pattern_runtime/src/sdk/requests/spawn.rs`
+- Modify: `crates/pattern_runtime/src/sdk/handlers/spawn.rs` — update `DescribeEffect::effect_decl` advertised constructors/helpers.
+- Modify: `crates/pattern_runtime/haskell/Pattern/Spawn.hs` — update GADT constructors + helpers.
+- Modify: `crates/pattern_runtime/src/sdk/code_tool.rs` or wherever the code-tool description is built from `canonical_effect_decls()` — ensure the regenerated description picks up the new helpers (should be automatic via `DescribeEffect`).
+
+**Implementation:**
+
+Replace existing `SpawnReq` with:
+
+```rust
+#[derive(Debug, FromCore)]
+pub enum SpawnReq {
+    #[core(module = "Pattern.Spawn", name = "Ephemeral")]
+    Ephemeral(EphemeralConfig),
+    #[core(module = "Pattern.Spawn", name = "Fork")]
+    Fork(ForkConfig),
+    #[core(module = "Pattern.Spawn", name = "Sibling")]
+    Sibling(SiblingConfig),
+    #[core(module = "Pattern.Spawn", name = "Stop")]
+    Stop(SpawnId),
+}
+```
+
+The `FromCore` derive needs to support decoding the `*Config` types. Confirm with a quick look at how other complex variants round-trip (e.g., `MessageReq` or similar). If it doesn't support arbitrary serde, either implement `ToCore`/`FromCore` manually or fall back to a `String` wire-format containing a JSON-encoded payload. The **preference** is first-class typed support; **fallback** is JSON-over-string with a `Config::parse_json(&str)` helper on each config struct.
+
+Update `effect_decl()` to advertise the new constructors + `ephemeral`/`fork`/`sibling`/`stop` helpers. Keep the description succinct (the code-tool description is user-facing for agents).
+
+Match in `handle()` to each variant — all four variants currently return `EffectError::Handler("phase 2 task 3+ not yet wired")`. Actual dispatch lands in subsequent tasks.
+
+**Testing:**
+- Unit: `effect_decl().constructors` contains `"Ephemeral"`, `"Fork"`, `"Sibling"`, `"Stop"`. No residue of the old `"Start"` constructor.
+- Unit: `canonical_effect_decls()` still parses under `parse_constructor` (the existing test at `bundle.rs:115`).
+- Snapshot (insta): Haskell preamble contains the updated `Pattern.Spawn` imports/helpers list. Update or add a snapshot so the diff is obvious.
+
+**Verification:**
+`cargo nextest run -p pattern-runtime spawn`. `cargo test --doc`.
+
+**Commit:** `[pattern-runtime] redesign Pattern.Spawn as Ephemeral|Fork|Sibling|Stop`
+<!-- END_TASK_2 -->
+
+<!-- START_TASK_3 -->
+### Task 3: `SpawnRegistry` — child handle tracking with lifetime enforcement
+
+**Verifies:** AC3.6, AC3.7.
+
+**Files:**
+- Create: `crates/pattern_runtime/src/spawn/registry.rs`
+- Create: `crates/pattern_runtime/src/spawn/mod.rs` (new module).
+- Modify: `crates/pattern_runtime/src/session.rs` — add `spawn_registry: Arc<SpawnRegistry>` field on `SessionContext`; a parent's registry is the child's parent pointer.
+- Create `HasSpawnRegistry` trait alongside `HasCancelState` / `HasPermissionAuthority` and implement on `SessionContext`.
+
+**Implementation:**
+
+```rust
+pub struct SpawnRegistry {
+    parent_id: SmolStr,
+    children: Mutex<Vec<ChildSessionHandle>>,
+    concurrent_ephemeral_limit: Arc<Semaphore>,
+}
+
+pub struct ChildSessionHandle {
+    pub child_id: SmolStr,
+    pub kind: SpawnKind,                 // Ephemeral | Fork | Sibling
+    pub cancel_state: Arc<CancelState>,  // shared for ephemeral/fork; independent for sibling
+    pub join: tokio::task::JoinHandle<Result<StepReply, SpawnError>>,
+    // Semaphore permit held for the duration of ephemeral life; Some for Ephemeral only
+    pub _permit: Option<OwnedSemaphorePermit>,
+}
+```
+
+Methods:
+- `SpawnRegistry::new(parent_id, limit: usize)` — constructs with `Semaphore::new(limit)`.
+- `try_acquire_ephemeral_slot(&self) -> Option<OwnedSemaphorePermit>` — fails fast if full.
+- `register(&self, handle: ChildSessionHandle)` — push under mutex.
+- `cancel_all(&self)` — sets every child's `cancel_state` atomic; drops permits (releasing semaphore slots); drops `JoinHandle`s so the runtime joins them best-effort. Idempotent.
+- `Drop` for `SpawnRegistry` calls `cancel_all()` — enforces AC3.6.
+
+Ephemeral and Fork children share the parent's `Arc<CancelState>`; Sibling children get their own `CancelState` and are NOT added to the parent's registry (they outlive the parent).
+
+**Testing:**
+- Unit: create a `SpawnRegistry` with limit=2; acquire three permits; third returns None with `TryAcquireError::NoPermits` — convert to `SpawnError::ConcurrencyLimitExceeded` with a helpful message (AC3.5).
+- Unit: call `cancel_all()` — children's `CancelState::cancellation` flips to true.
+- Unit: drop registry — ditto (AC3.6).
+- Unit: nested registry (child's registry has its own limit) — grandchild cancellation propagates when parent cancels (AC3.7). Use scripted handles (no real EvalWorker) to keep the test fast + deterministic.
+
+**Verification:**
+`cargo nextest run -p pattern-runtime spawn::registry`
+
+**Commit:** `[pattern-runtime] introduce SpawnRegistry with semaphore + cancel-on-drop`
+<!-- END_TASK_3 -->
+
+<!-- END_SUBCOMPONENT_A -->
+
+<!-- START_SUBCOMPONENT_B (tasks 4-5) -->
+
+<!-- START_TASK_4 -->
+### Task 4: Ephemeral dispatch — build child session, spawn eval worker, await result
+
+**Verifies:** AC3.1, AC3.2, AC3.3, AC3.4.
+
+**Files:**
+- Modify: `crates/pattern_runtime/src/sdk/handlers/spawn.rs` — real `Ephemeral(cfg)` handling.
+- Modify: `crates/pattern_runtime/src/session.rs` — `SessionContext::fork_for_ephemeral(&self, cfg: &EphemeralConfig) -> Arc<SessionContext>` method that clones Arc-shared fields and rebuilds per-session state fresh (new `CancelState`? No — **share** parent's `Arc<CancelState>` so parent cancel propagates; rebuild `pending_messages`, `checkpoint_log`, `current_turn`, and `spawn_registry` sub-registry).
+- Modify: `crates/pattern_runtime/src/session.rs` — persist `include_paths: Arc<Vec<PathBuf>>` on `SessionContext` (currently a local in `open_with_agent_loop`). Populate at session open from the existing construction path.
+
+**Implementation:**
+
+```rust
+// In spawn.rs handler
+SpawnReq::Ephemeral(cfg) => {
+    let parent = cx.user();
+    let registry = parent.spawn_registry();
+    let permit = registry.try_acquire_ephemeral_slot()
+        .ok_or_else(|| EffectError::Handler(
+            "concurrent ephemeral limit reached for parent session".into()))?;
+
+    // Restrict child capabilities (must be subset of parent).
+    let parent_caps = parent.capabilities();
+    let child_caps = match &cfg.capabilities {
+        Some(set) => set.clone().restrict_to(&parent_caps)
+            .map_err(|e| EffectError::Handler(format!("capability escalation: {e}")))?,
+        None => parent_caps.clone(),
+    };
+
+    let child_ctx = parent.fork_for_ephemeral(cfg, child_caps)?;
+    let child_id = child_ctx.session_id().clone();
+    let join = tokio::spawn(run_ephemeral(child_ctx.clone(), cfg.clone()));
+
+    registry.register(ChildSessionHandle {
+        child_id: child_id.clone(),
+        kind: SpawnKind::Ephemeral,
+        cancel_state: child_ctx.cancel_state().clone(),
+        join,
+        _permit: Some(permit),
+    });
+
+    // Await result (ephemerals block parent by default; re-visit when Phase 4 mailbox lands)
+    match registry.wait_for(child_id.clone()).await {
+        Ok(reply) => Ok(Value::from_spawn_result(&reply)),
+        Err(e) => Err(EffectError::Handler(e.to_string())),
+    }
+}
+```
+
+`run_ephemeral` constructs the EvalWorker (via existing `EvalWorker::spawn_with_includes`), compiles `cfg.program` against the filtered preamble (Phase 1's `preamble::build_for(&caps)`), executes, returns `StepReply` or error. Timeout is wrapped via `tokio::time::timeout(cfg.timeout.unwrap_or(runtime_default), …)`. On timeout, the child's `cancel_state` is tripped (for AC3.4), the EvalWorker thread is asked to stop via its channel, and the handler returns `SpawnError::Timeout`.
+
+Costume: `child_ctx` overrides the system-prompt slot with `cfg.costume` when set. The persona's identity in logs stays as the parent's. This is consistent with the design: "attributed to parent in logs."
+
+**Testing:**
+- Integration (mock provider at `crates/pattern_runtime/tests/support/mock_provider.rs` — if it doesn't exist, create a minimal one that echoes a scripted response for "spawn ephemeral" probes): 
+  - AC3.1: parent spawns an ephemeral whose program is `pure (T.pack "ok")`; parent receives `"ok"`.
+  - AC3.2: parent has CapabilitySet `[Memory, Spawn]`; ephemeral config asks for `[Memory, Spawn, Shell]` → handler returns `SpawnError::CapabilityEscalation`.
+  - AC3.3: ephemeral with costume "be terse"; assert the child's compiled prompt contains "be terse" and the log line attributes to the parent's persona id.
+  - AC3.4: ephemeral with `timeout = jiff::Span::new().seconds(1)` and program that loops forever (`_ <- loopForever`); parent gets `SpawnError::Timeout` within ~1.5s; no EvalWorker thread leaks (best-effort: spawn-then-collect test asserts at end).
+  - AC3.5: sequential 3 ephemerals on a registry with limit=2; third fails with `ConcurrencyLimitExceeded`.
+
+- Integration: use deterministic programs — no live model.
+
+**Verification:**
+`cargo nextest run -p pattern-runtime ephemeral_spawn`
+
+**Commit:** `[pattern-runtime] implement ephemeral spawn dispatch with timeout + semaphore`
+<!-- END_TASK_4 -->
+
+<!-- START_TASK_5 -->
+### Task 5: Sub-spawn lifetime chain
+
+**Verifies:** AC3.6, AC3.7.
+
+**Files:**
+- Modify: `crates/pattern_runtime/src/spawn/registry.rs` — ensure child `SpawnRegistry` instances point back to parent for cascade.
+- Modify: `crates/pattern_runtime/src/sdk/handlers/spawn.rs` — when the child handler spawns its own ephemeral, the grandchild registers with the child's registry, whose `cancel_on_parent_signal` is tied to the parent's CancelState.
+
+**Implementation:**
+Each child's `SpawnRegistry` carries a weak reference to the grandparent's cancel watcher (or inherits the parent's `Arc<CancelState>`). When the parent's `CancelState::cancellation` flips, a tokio task subscribed to it calls `child_registry.cancel_all()`. The subscription is fire-and-forget — nothing else needs to hold the watcher alive.
+
+Concretely: when `fork_for_ephemeral` builds a child context, it spawns:
+
+```rust
+tokio::spawn({
+    let parent_cancel = parent.cancel_state().clone();
+    let child_registry = child_ctx.spawn_registry().clone();
+    async move {
+        parent_cancel.wait_for_cancel().await; // add this helper if not present
+        child_registry.cancel_all();
+    }
+});
+```
+
+`wait_for_cancel` is a convenience over the existing atomic; it polls or hooks into whatever notification mechanism already exists (`tokio::sync::Notify` is the likely fit; verify at implementation time).
+
+**Testing:**
+- Integration: 3-level chain. Parent spawns ephemeral-child, ephemeral-child spawns grandchild. Parent's cancel → both child and grandchild observe `cancel_state.cancellation=true` within 100ms.
+- Integration: parent completes normally (no cancel) → child and grandchild complete normally.
+
+**Verification:**
+`cargo nextest run -p pattern-runtime ephemeral_chain`
+
+**Commit:** `[pattern-runtime] propagate parent cancel through child spawn registries`
+<!-- END_TASK_5 -->
+
+<!-- END_SUBCOMPONENT_B -->
+
+<!-- START_SUBCOMPONENT_C (tasks 6-7) -->
+
+<!-- START_TASK_6 -->
+### Task 6: Sibling dispatch — existing-persona adoption
+
+**Verifies:** AC5.1, AC5.4, AC5.6.
+
+**Files:**
+- Modify: `crates/pattern_runtime/src/sdk/handlers/spawn.rs` — `Sibling(cfg)` arm handling `SiblingPersona::Existing(id)`.
+- Create: `crates/pattern_runtime/src/spawn/sibling.rs` — helper to open a session for an existing persona.
+- Modify: `crates/pattern_runtime/src/session.rs` — `open_sibling_session(persona: PersonaSnapshot, relationship: RelationshipKind) -> Result<TidepoolSession, SpawnError>`.
+
+**Implementation:**
+Adopt-existing flow:
+
+1. Resolve `persona_id` via persona loader (find the persona config path — Phase 6 will have the registry lookup; Phase 2 accepts a direct path or uses a lookup stub that errors `PersonaNotFound` if not found).
+2. Call `load_persona(path)` → `PersonaSnapshot`.
+3. Open a fully independent `TidepoolSession` with the sibling's own `CapabilitySet` (from `PersonaSnapshot.capabilities` — field added by Phase 1 Task 13).
+4. DO NOT add the sibling to the parent's `SpawnRegistry` — siblings live independently of parent lifetime.
+5. Return the sibling's `PersonaId` to the Haskell caller.
+
+The sibling's `SessionContext` gets a fresh `CancelState`, fresh `pending_messages`, fresh `checkpoint_log`, fresh `SpawnRegistry`, a fresh `adapter` over a fresh `MemoryCache` (sibling has own memory root per design).
+
+**Testing:**
+- Integration: parent spawns a sibling pointing at a persona fixture KDL in `crates/pattern_runtime/tests/fixtures/sibling_persona.kdl`. Assert a new session with `persona_id == fixture.name` exists and runs a trivial program.
+- AC5.4: the fixture restricts capabilities to `[Memory]`; parent has `[Memory, Shell]`; sibling program calling `Shell.execute` fails at compile — the sibling's caps come from its own config, NOT the parent's.
+- AC5.6: unknown persona id → `SpawnError::PersonaNotFound`. Use a registry stub that returns `None` for unknown ids.
+
+**Verification:**
+`cargo nextest run -p pattern-runtime sibling_spawn`
+
+**Commit:** `[pattern-runtime] implement sibling spawn for existing personas`
+<!-- END_TASK_6 -->
+
+<!-- START_TASK_7 -->
+### Task 7: Sibling dispatch — new-identity draft flow
+
+**Verifies:** AC5.2, AC5.3.
+
+**Files:**
+- Modify: `crates/pattern_runtime/src/spawn/sibling.rs` — `SiblingPersona::New(cfg)` arm.
+- Create: `crates/pattern_runtime/src/spawn/draft.rs` — writes a persona KDL to disk (at a well-known drafts location, e.g. `<mount>/drafts/<persona_id>.kdl`) and records a `DraftPersona { id, config_path, created_at }` via a small interface that Phase 6 replaces with the real registry.
+- Modify: `crates/pattern_core/src/capability.rs` — add `EffectCategory::SpawnNewIdentities` as a capability flag? No — SpawnNewIdentities is a sub-right of Spawn, not a first-class effect. Instead:
+- Modify: `crates/pattern_core/src/capability.rs` — introduce `CapabilityFlag` enum orthogonal to `EffectCategory`; `CapabilitySet` gains a `flags: BTreeSet<CapabilityFlag>` field. Initial flags: `SpawnNewIdentities`, `WakeConditionRegistration` (future use). Plumb through the parser in Phase 1 Task 13.
+
+**Implementation:**
+When `cfg.persona == New(persona_config)`:
+
+- If `parent.capabilities().has_flag(CapabilityFlag::SpawnNewIdentities)`: create the persona config on disk, register in the runtime-visible draft table (stub in Phase 2, real in Phase 6), **open the session** just like the existing-persona path. Return the new `PersonaId`. (AC5.2.)
+- If NOT: still create the KDL on disk, register as draft, but **do not open a session**. Return the draft `PersonaId`. A later human-driven promote (Phase 6) opens it. (AC5.3.)
+
+The draft file writing goes through the file handler — which is still a stub. Work around by writing directly from the sibling spawn code path (`std::fs::write`) to a dedicated drafts directory; the file-handler-gating applies only to agent-driven file writes, not runtime-internal ones. Document this in the code.
+
+**Testing:**
+- AC5.2: parent has `SpawnNewIdentities`; spawn sibling with `New(cfg)`. Draft file written, registry entry created, session opened, new `PersonaId` returned, session steps at least once successfully.
+- AC5.3: same but parent lacks the flag. Draft file written, registry entry with `status = Draft`, no session opened, returned `PersonaId` appears in the runtime-local drafts list but `session_manager.get(&id).is_none()`.
+- Unit: scope restrictions — `CapabilitySet` flag serde round-trip.
+
+**Verification:**
+`cargo nextest run -p pattern-runtime sibling_new_identity`
+
+**Commit:** `[pattern-runtime] implement sibling new-identity draft flow with capability flag gate`
+<!-- END_TASK_7 -->
+
+<!-- END_SUBCOMPONENT_C -->
+
+<!-- START_SUBCOMPONENT_D (tasks 8-9) -->
+
+<!-- START_TASK_8 -->
+### Task 8: Fork dispatch — lightweight path (scaffolding; full semantics in Phase 3)
+
+**Verifies:** AC4.7 scaffold, AC4.8 gate wiring.
+
+**Files:**
+- Modify: `crates/pattern_runtime/src/sdk/handlers/spawn.rs` — `Fork(cfg)` arm.
+- Create: `crates/pattern_runtime/src/spawn/fork.rs` — type `ForkHandle` with `await_result()`, `merge_back()` (stub), `discard()` (stub), `promote(cfg)` (stub).
+
+**Implementation:**
+For `ForkIsolation::Lightweight`:
+- Accept the fork config.
+- Call `LoroDoc::fork()` on the parent's memory doc (accessor added in Task 4 helper).
+- Build a child `SessionContext` with the forked doc wrapped in a new `MemoryCache` → new `MemoryStoreAdapter`.
+- Spawn the child program like an ephemeral.
+- Return a `ForkHandle` with stored child-session info.
+
+For `ForkIsolation::Persistent`: return `EffectError::Handler("persistent fork isolation lands in Phase 3")`. Do not attempt jj workspace creation here.
+
+`ForkHandle.promote(persona_config)`: verify `SpawnNewIdentities` flag on the forker's CapabilitySet; if absent, return `CapabilityError::Denied`. Actual persona-config construction + registry entry is identical to Task 7. The fork's memory state is handed off to the new persona — in Phase 2 we structurally wire this (accept a `promote` call, verify the gate) but the actual memory-state transfer is a Phase 3 problem (jj merge + loro import).
+
+**Testing:**
+- Integration: lightweight fork with a trivial program; `fork.await_result()` returns.
+- Capability test: fork without `SpawnNewIdentities`; `fork.promote(new_cfg)` returns `CapabilityError::Denied`.
+- Gate test: persistent fork returns the "Phase 3" handler error — verifies the Phase 3 path is intentionally blocked.
+
+**Verification:**
+`cargo nextest run -p pattern-runtime fork_spawn`
+
+**Commit:** `[pattern-runtime] scaffold fork spawn dispatch (lightweight only; Phase 3 persistent)`
+<!-- END_TASK_8 -->
+
+<!-- START_TASK_9 -->
+### Task 9: Expose `ctx.spawn.{ephemeral,fork,sibling,stop}` on the Haskell SDK
+
+**Verifies:** AC3.1, AC4.7, AC5.1 at the agent-facing surface.
+
+**Files:**
+- Modify: `crates/pattern_runtime/haskell/Pattern/Spawn.hs` — helpers for all four variants with proper Haskell types.
+- Modify: `crates/pattern_runtime/src/sdk/handlers/spawn.rs` — ensure `DescribeEffect::effect_decl` helpers list matches the updated `Pattern/Spawn.hs`.
+- Update: `crates/pattern_runtime/src/sdk/preamble.rs` snapshot (if one exists) to reflect new helper signatures.
+
+**Implementation:**
+
+Haskell-side helpers:
+
+```haskell
+ephemeral :: Member Spawn effs => EphemeralConfig -> Eff effs SpawnId
+ephemeral cfg = Freer.send (Ephemeral cfg)
+
+fork :: Member Spawn effs => ForkConfig -> Eff effs ForkHandle
+fork cfg = Freer.send (Fork cfg)
+
+sibling :: Member Spawn effs => SiblingConfig -> Eff effs PersonaId
+sibling cfg = Freer.send (Sibling cfg)
+
+stop :: Member Spawn effs => SpawnId -> Eff effs ()
+stop sid = Freer.send (Stop sid)
+```
+
+Corresponding `EphemeralConfig`, `ForkConfig`, `SiblingConfig` Haskell types; start with minimal field sets and extend as Phase 3/6 need. Use record syntax with safe defaults. Document the Haskell types' serde layout to match the Rust config structs (JSON bridging via existing `Pattern.Aeson` helpers).
+
+Snapshot tests from Phase 1 Task 3 pick up the new helpers automatically; review the insta diff and approve.
+
+**Testing:**
+- Multi-module compilation test: an agent program imports `Pattern.Spawn` and calls `ephemeral (EphemeralConfig { program = "pure ()", ...})`. Compile via the existing `tests/multi_module_sdk.rs` pattern.
+- Integration: same program runs end-to-end, returns a `SpawnId`.
+
+**Verification:**
+`cargo nextest run -p pattern-runtime spawn_sdk_surface` + `cargo test --doc -p pattern-runtime`
+
+**Commit:** `[pattern-runtime] surface ctx.spawn.{ephemeral,fork,sibling,stop} in Pattern.Spawn`
+<!-- END_TASK_9 -->
+
+<!-- END_SUBCOMPONENT_D -->
+
+---
+
+## Phase done-when checklist
+
+- [ ] Spawn-config types (Ephemeral/Fork/Sibling/PersonaConfig + RelationshipKind + CapabilityFlag) live in `pattern_core`. `PersonaId` alias added.
+- [ ] `SpawnReq` grammar replaced with four-variant enum; Haskell `Pattern.Spawn` module updated.
+- [ ] `SpawnRegistry` with per-parent semaphore + cancel-on-drop exists and is threaded through `SessionContext`.
+- [ ] Ephemeral dispatch produces a live child session with capability inheritance, costume, and timeout; full AC3 coverage.
+- [ ] Sub-spawn chain cancels cleanly when parent resolves (AC3.6, AC3.7).
+- [ ] Sibling dispatch supports existing personas (AC5.1, AC5.4, AC5.6) and new-identity drafts (AC5.2, AC5.3).
+- [ ] Fork dispatch compiles and runs for `Lightweight` isolation; `Persistent` returns a clear "Phase 3" handler error; `promote` gate wiring is in place.
+- [ ] All existing tests still pass. New tests cover ACs listed above using deterministic (mock-provider, no-live-model) harnesses.
+- [ ] No orphan EvalWorker threads under test — confirm with a thread-count snapshot at end of each integration test.
+
+---
+
+## Notes for executor
+
+- Confirm Q2.1 (SpawnReq grammar A vs B) and Q2.2 (cancel propagation model) with user before writing Task 2.
+- `FromCore` derive must support the config structs. If it doesn't, the fallback is JSON-over-string — costs a few lines of encoding/decoding in each direction but is cheap to rip out later.
+- `BlockRef` type landed by Plan 2. If it hasn't merged when Task 1 executes, surface as a blocker — do NOT invent a placeholder that will silently diverge.
+- Memory ACL integration with sibling spawn (sibling reading shared blocks) is out of Phase 2 scope; Phase 6 / existing shared-block pattern handles it.
+- Commit style per project conventions. Include `[pattern-core]` for all pattern_core changes; `[pattern-runtime]` for runtime work; `[pattern-runtime] [haskell]` for combined Rust+Haskell commits.

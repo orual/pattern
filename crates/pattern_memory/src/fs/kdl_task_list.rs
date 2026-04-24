@@ -581,6 +581,34 @@ mod tests {
 
     // Error path tests (Task 11 scope but colocated here per plan).
 
+    /// Check that a `miette::Report` wrapping the error renders with
+    /// source-span gutter characters (`│`) when the KDL source is attached.
+    /// This confirms that `KdlConversionError` implements `miette::Diagnostic`
+    /// and that the `#[label]` span is wired correctly.
+    fn assert_miette_renders_source_span(err: KdlConversionError, kdl_str: &str) {
+        use miette::{GraphicalReportHandler, GraphicalTheme, NamedSource};
+        let report = miette::Report::new(err)
+            .with_source_code(NamedSource::new("test.kdl", kdl_str.to_owned()));
+        // Use GraphicalReportHandler directly rather than `{:?}` so we get the
+        // rich formatted output without requiring a global miette::set_hook call.
+        // GraphicalTheme::none() strips ANSI colour codes so the assertion is
+        // purely structural (gutter characters, not colour escapes).
+        let handler = GraphicalReportHandler::new_themed(GraphicalTheme::none());
+        let mut rendered = String::new();
+        handler
+            .render_report(&mut rendered, report.as_ref())
+            .expect("miette render_report failed");
+        // GraphicalReportHandler emits `,-[file:line:col]` source-location
+        // markers and line-number gutter lines (e.g., `4 |`) only when a
+        // `SourceCode` is attached and a `#[label]` span is present.
+        // Asserting on `,-[` is conservative: the plain error message alone
+        // would never produce this codespan framing sequence.
+        assert!(
+            rendered.contains(",-["),
+            "expected miette source-location marker ',-[' in rendered report, got:\n{rendered}"
+        );
+    }
+
     #[test]
     fn empty_block_ref_returns_task_edge_ref_error() {
         let kdl_str = r#"task-list {
@@ -597,6 +625,10 @@ mod tests {
             matches!(err, KdlConversionError::TaskEdgeRef { .. }),
             "expected TaskEdgeRef error, got: {err:?}"
         );
+        // Rebuild the error to assert miette rendering (unwrap_err() consumed it).
+        let doc2 = super::super::kdl::parse_kdl(kdl_str).unwrap();
+        let err2 = kdl_to_task_list(&doc2).unwrap_err();
+        assert_miette_renders_source_span(err2, kdl_str);
     }
 
     #[test]
@@ -615,6 +647,9 @@ mod tests {
             matches!(err, KdlConversionError::MissingBlockAnnotation { .. }),
             "expected MissingBlockAnnotation error, got: {err:?}"
         );
+        let doc2 = super::super::kdl::parse_kdl(kdl_str).unwrap();
+        let err2 = kdl_to_task_list(&doc2).unwrap_err();
+        assert_miette_renders_source_span(err2, kdl_str);
     }
 
     #[test]
@@ -641,6 +676,9 @@ mod tests {
             }
             other => panic!("expected TaskEdgeRef error, got: {other:?}"),
         }
+        let doc2 = super::super::kdl::parse_kdl(kdl_str).unwrap();
+        let err2 = kdl_to_task_list(&doc2).unwrap_err();
+        assert_miette_renders_source_span(err2, kdl_str);
     }
 
     #[test]
@@ -667,5 +705,8 @@ mod tests {
             }
             other => panic!("expected TaskEdgeRef error, got: {other:?}"),
         }
+        let doc2 = super::super::kdl::parse_kdl(kdl_str).unwrap();
+        let err2 = kdl_to_task_list(&doc2).unwrap_err();
+        assert_miette_renders_source_span(err2, kdl_str);
     }
 }

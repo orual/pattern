@@ -862,6 +862,9 @@ impl MemoryCache {
                         .map_err(|e| format!("disk_doc JSON import failed: {e}"))?;
                     disk_doc.commit();
                 }
+                // NOTE: `_ =>` covers future non_exhaustive additions (e.g. Skill,
+                // Phase 4). All currently-defined BlockSchema variants must have
+                // explicit arms above this catch-all.
                 _ => {
                     return Err(format!("unsupported schema: {schema:?}"));
                 }
@@ -1277,6 +1280,39 @@ pub(crate) fn spawn_subscriber_for_block(
 
 /// Apply a JSON value to a raw LoroDoc (without StructuredDocument wrapper).
 ///
+/// Convert a `serde_json::Value` to a `loro::LoroValue`.
+///
+/// Used when importing JSON task items into a `LoroMovableList` so that
+/// the render path (`task_item_to_kdl_node`) receives `LoroValue::Map`
+/// rather than opaque serialized JSON strings.
+fn json_to_loro_value(value: &serde_json::Value) -> loro::LoroValue {
+    match value {
+        serde_json::Value::Null => loro::LoroValue::Null,
+        serde_json::Value::Bool(b) => loro::LoroValue::Bool(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                loro::LoroValue::I64(i)
+            } else if let Some(f) = n.as_f64() {
+                loro::LoroValue::Double(f)
+            } else {
+                loro::LoroValue::Null
+            }
+        }
+        serde_json::Value::String(s) => loro::LoroValue::String(s.clone().into()),
+        serde_json::Value::Array(arr) => {
+            let items: Vec<loro::LoroValue> = arr.iter().map(json_to_loro_value).collect();
+            loro::LoroValue::List(items.into())
+        }
+        serde_json::Value::Object(obj) => {
+            let map: std::collections::HashMap<String, loro::LoroValue> = obj
+                .iter()
+                .map(|(k, v)| (k.clone(), json_to_loro_value(v)))
+                .collect();
+            loro::LoroValue::Map(map.into())
+        }
+    }
+}
+
 /// This is used by `apply_external_edit` to apply parsed file content to
 /// the disk_doc. For text blocks, use `LoroText::update` directly instead
 /// of this function. For structured blocks (Map/List/Log/Composite), this
@@ -1358,11 +1394,14 @@ fn apply_json_to_loro_doc(
         (serde_json::Value::Object(map), BlockSchema::TaskList { .. }) => {
             // TaskList: items are in a movable list. Extract the "items" array
             // from the JSON (which comes from the KDL round-trip discriminator map).
+            // The items key must be present and must be an array; silent
+            // substitution of a missing key would silently discard all items.
             let items = map
                 .get("items")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
+                .ok_or_else(|| "TaskList JSON is missing required 'items' key".to_string())?;
+            let items = items
+                .as_array()
+                .ok_or_else(|| format!("TaskList JSON 'items' must be an array, got: {}", items))?;
             let loro_list = doc.get_movable_list("items");
             let len = loro_list.len();
             if len > 0 {
@@ -1370,15 +1409,22 @@ fn apply_json_to_loro_doc(
                     .delete(0, len)
                     .map_err(|e| format!("LoroMovableList delete failed: {e}"))?;
             }
-            for entry in &items {
-                let json_str = serde_json::to_string(entry)
-                    .map_err(|e| format!("JSON serialize failed: {e}"))?;
+            // Push each item as a LoroValue::Map so that the render path
+            // (`task_item_to_kdl_node`) sees Map entries rather than
+            // opaque JSON strings. This mirrors the pattern used by
+            // `StructuredDocument::import_from_json` which also converts
+            // via json_to_loro before inserting into the movable list.
+            for entry in items {
+                let loro_value = json_to_loro_value(entry);
                 loro_list
-                    .push(json_str)
+                    .push(loro_value)
                     .map_err(|e| format!("LoroMovableList push failed: {e}"))?;
             }
             Ok(())
         }
+        // NOTE: `_ =>` covers future non_exhaustive additions (e.g. Skill, Phase 4).
+        // All currently-defined BlockSchema variants must have explicit arms above
+        // this catch-all.
         _ => Err(format!(
             "unexpected JSON shape for schema {:?}: expected object for Map/Composite/TaskList, array for List/Log",
             schema
@@ -3103,5 +3149,274 @@ mod tests {
             .thread
             .join()
             .expect("respawned worker thread should not panic");
+    }
+
+    // -------------------------------------------------------------------------
+    // TaskList dispatch tests (AC Task 9 — cache.rs)
+    // -------------------------------------------------------------------------
+
+    /// `apply_json_to_loro_doc` with a TaskList JSON blob populates the
+    /// LoroMovableList. Verifies both that items are inserted and that the
+    /// movable list contains LoroValue::Map entries (not serialized JSON strings).
+    #[test]
+    fn apply_json_to_loro_doc_task_list_populates_movable_list() {
+        use loro::LoroDoc;
+        use pattern_core::types::memory_types::BlockSchema;
+
+        let schema = BlockSchema::TaskList {
+            default_status: None,
+            default_owner: None,
+            display_limit: None,
+        };
+
+        let doc = LoroDoc::new();
+        let json = serde_json::json!({
+            "items": [
+                {
+                    "id": "t1",
+                    "subject": "Task one",
+                    "description": "",
+                    "status": "pending",
+                    "blocks": [],
+                    "metadata": {},
+                    "comments": [],
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "updated_at": "2026-01-01T00:00:00Z"
+                },
+                {
+                    "id": "t2",
+                    "subject": "Task two",
+                    "description": "",
+                    "status": "in-progress",
+                    "blocks": [],
+                    "metadata": {},
+                    "comments": [],
+                    "created_at": "2026-01-02T00:00:00Z",
+                    "updated_at": "2026-01-02T00:00:00Z"
+                }
+            ]
+        });
+
+        apply_json_to_loro_doc(&doc, &json, &schema)
+            .expect("apply_json_to_loro_doc with TaskList JSON must succeed");
+        doc.commit();
+
+        let list = doc.get_movable_list("items");
+        assert_eq!(list.len(), 2, "movable list must contain 2 items");
+
+        // Items must be LoroValue::Map (not opaque String).
+        let deep = list.get_deep_value();
+        let loro::LoroValue::List(items) = &deep else {
+            panic!("deep value must be a LoroValue::List, got: {deep:?}");
+        };
+        for (i, item) in items.iter().enumerate() {
+            assert!(
+                matches!(item, loro::LoroValue::Map(_)),
+                "item {i} must be LoroValue::Map for the render path, got: {item:?}"
+            );
+        }
+    }
+
+    /// `apply_json_to_loro_doc` with an empty items array produces an empty
+    /// movable list (no panics, no residual items).
+    #[test]
+    fn apply_json_to_loro_doc_task_list_empty_items() {
+        use loro::LoroDoc;
+        use pattern_core::types::memory_types::BlockSchema;
+
+        let schema = BlockSchema::TaskList {
+            default_status: None,
+            default_owner: None,
+            display_limit: None,
+        };
+
+        let doc = LoroDoc::new();
+        let json = serde_json::json!({ "items": [] });
+
+        apply_json_to_loro_doc(&doc, &json, &schema)
+            .expect("apply_json_to_loro_doc with empty TaskList items must succeed");
+        doc.commit();
+
+        let list = doc.get_movable_list("items");
+        assert_eq!(
+            list.len(),
+            0,
+            "movable list must be empty for empty items array"
+        );
+    }
+
+    /// `apply_json_to_loro_doc` rejects a TaskList JSON blob that is missing
+    /// the required `items` key (Important #2: no silent data loss).
+    #[test]
+    fn apply_json_to_loro_doc_task_list_rejects_missing_items_key() {
+        use loro::LoroDoc;
+        use pattern_core::types::memory_types::BlockSchema;
+
+        let schema = BlockSchema::TaskList {
+            default_status: None,
+            default_owner: None,
+            display_limit: None,
+        };
+
+        let doc = LoroDoc::new();
+        let bad_json = serde_json::json!({ "xyz": "junk" });
+
+        let result = apply_json_to_loro_doc(&doc, &bad_json, &schema);
+        assert!(
+            result.is_err(),
+            "missing 'items' key must produce an error, not silent data loss"
+        );
+        assert!(
+            result.unwrap_err().contains("missing required 'items' key"),
+            "error message must mention the missing key"
+        );
+    }
+
+    /// `apply_json_to_loro_doc` rejects a TaskList JSON blob where `items` is
+    /// not an array.
+    #[test]
+    fn apply_json_to_loro_doc_task_list_rejects_non_array_items() {
+        use loro::LoroDoc;
+        use pattern_core::types::memory_types::BlockSchema;
+
+        let schema = BlockSchema::TaskList {
+            default_status: None,
+            default_owner: None,
+            display_limit: None,
+        };
+
+        let doc = LoroDoc::new();
+        let bad_json = serde_json::json!({ "items": "not an array" });
+
+        let result = apply_json_to_loro_doc(&doc, &bad_json, &schema);
+        assert!(
+            result.is_err(),
+            "'items' must be an array — string value must be rejected"
+        );
+    }
+
+    /// `apply_external_edit` with a TaskList KDL blob applies to disk_doc and
+    /// the changes are merged into memory_doc via CRDT update export/import.
+    /// Verifies no panics and that the movable list in disk_doc reflects the
+    /// edited items.
+    #[test]
+    fn apply_external_edit_task_list_merges_kdl_into_crdt() {
+        use pattern_core::memory::StructuredDocument;
+        use pattern_core::types::memory_types::BlockSchema;
+
+        let (_dir, db) = test_dbs();
+        let block_id = "tl_ext_block";
+        let agent_id = "agent_tl_ext";
+        create_test_agent(&db, agent_id);
+
+        let schema = BlockSchema::TaskList {
+            default_status: None,
+            default_owner: None,
+            display_limit: None,
+        };
+
+        // Create block in DB.
+        {
+            let conn = db.get().unwrap();
+            let block = pattern_db::models::MemoryBlock {
+                id: block_id.to_string(),
+                agent_id: agent_id.to_string(),
+                label: block_id.to_string(),
+                description: "TaskList external edit test".to_string(),
+                block_type: pattern_db::models::MemoryBlockType::Working,
+                char_limit: 5000,
+                permission: pattern_db::models::MemoryPermission::ReadWrite,
+                pinned: false,
+                loro_snapshot: vec![],
+                content_preview: None,
+                metadata: None,
+                embedding_model: None,
+                is_active: true,
+                frontier: None,
+                last_seq: 0,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            };
+            pattern_db::queries::create_block(&conn, &block).unwrap();
+        }
+
+        // Create the cache, load the doc, and spawn a subscriber.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mount_path = Arc::new(temp_dir.path().to_path_buf());
+        let (reembed_tx, _reembed_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (hb_tx, _hb_rx) = crossbeam_channel::bounded(64);
+        let subscribers: Arc<DashMap<String, SubscriberHandle>> = Arc::new(DashMap::new());
+
+        let doc = StructuredDocument::new(schema.clone());
+
+        spawn_subscriber_for_block(
+            block_id,
+            schema.clone(),
+            &doc,
+            reembed_tx,
+            hb_tx,
+            Arc::clone(&mount_path),
+            Arc::clone(&db),
+            Arc::clone(&subscribers),
+        );
+
+        // The MemoryCache needs a populated `blocks` map for `apply_external_edit`
+        // to find the block. Build a minimal cache directly with the doc + subscriber.
+        let cache = MemoryCache::new(Arc::clone(&db));
+        // Insert the doc into the cache manually (bypassing DB load).
+        {
+            cache.blocks.insert(
+                block_id.to_string(),
+                CachedBlock {
+                    doc: doc.clone(),
+                    last_seq: 0,
+                    last_persisted_frontier: None,
+                    dirty: false,
+                    last_accessed: chrono::Utc::now(),
+                },
+            );
+        }
+        // Move the subscriber handle into the cache's subscriber map.
+        {
+            let (_, handle) = subscribers.remove(block_id).unwrap();
+            cache.subscribers.insert(block_id.to_string(), handle);
+        }
+
+        // Build a minimal TaskList KDL blob representing an external edit.
+        let kdl_content = r#"task-list {
+    item id="ext-1" status="pending" {
+        subject "Externally added task"
+    }
+}"#;
+
+        // Apply the external edit — this is the production path exercised by
+        // the file watcher when it detects a human edit.
+        cache.apply_external_edit(block_id, kdl_content.as_bytes());
+
+        // Give the subscriber a moment to process (apply_external_edit imports
+        // disk_doc updates into memory_doc synchronously, then queues a re-render).
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Verify the disk_doc (accessed via the subscriber) reflects the edit.
+        let sub = cache.subscribers.get(block_id).unwrap();
+        let disk_doc = Arc::clone(&sub.disk_doc);
+        drop(sub);
+
+        let deep = disk_doc.get_movable_list("items").get_deep_value();
+        let loro::LoroValue::List(items) = &deep else {
+            panic!("disk_doc items must be LoroValue::List after external edit, got: {deep:?}");
+        };
+        assert_eq!(
+            items.len(),
+            1,
+            "disk_doc must have 1 item after external edit"
+        );
+
+        // Clean up.
+        let (_, handle) = cache.subscribers.remove(block_id).unwrap();
+        handle.cancel.cancel();
+        drop(handle._subscription);
+        drop(handle.event_tx);
+        handle.thread.join().expect("worker should not panic");
     }
 }

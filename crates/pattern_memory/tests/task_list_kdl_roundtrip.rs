@@ -144,10 +144,8 @@ fn safe_string(max_len: usize) -> impl Strategy<Value = String> {
 
 /// Strategy for non-empty KDL-safe strings.
 fn non_empty_safe_string(max_len: usize) -> impl Strategy<Value = String> {
-    prop::string::string_regex(&format!(
-        r"[\x20-\x7E -ÿ]{{1,{max_len}}}"
-    ))
-    .expect("valid regex for non_empty_safe_string")
+    prop::string::string_regex(&format!(r"[\x20-\x7E -ÿ]{{1,{max_len}}}"))
+        .expect("valid regex for non_empty_safe_string")
 }
 
 /// A small pool of synthetic handles drawn from to keep the test corpus
@@ -193,7 +191,10 @@ fn metadata_strategy() -> impl Strategy<Value = LoroValue> {
 
     // A flat map of 0..=4 keys with scalar leaf values.
     let flat_map = prop::collection::vec(
-        ("[a-z][a-z0-9_]{0,12}".prop_filter("non-empty key", |k| !k.is_empty()), leaf),
+        (
+            "[a-z][a-z0-9_]{0,12}".prop_filter("non-empty key", |k| !k.is_empty()),
+            leaf,
+        ),
         0..=4,
     )
     .prop_map(|pairs| {
@@ -210,10 +211,7 @@ fn metadata_strategy() -> impl Strategy<Value = LoroValue> {
     let nested = prop::collection::vec(
         (
             "[a-z][a-z0-9_]{0,12}".prop_filter("non-empty key", |k| !k.is_empty()),
-            prop_oneof![
-                scalar,
-                flat_map,
-            ],
+            prop_oneof![scalar, flat_map,],
         ),
         0..=4,
     )
@@ -259,17 +257,17 @@ fn task_comment_strategy() -> impl Strategy<Value = LoroValue> {
 /// a custom `Arbitrary` impl.
 fn task_item_strategy() -> impl Strategy<Value = LoroValue> {
     (
-        non_empty_safe_string(120),     // subject
-        safe_string(500),               // description
+        non_empty_safe_string(120), // subject
+        safe_string(500),           // description
         prop_oneof![
             Just(None::<String>),
             non_empty_safe_string(80).prop_map(Some),
-        ],                              // active_form
-        task_status_str(),              // status
-        optional_agent_id(),            // owner
-        metadata_strategy(),            // metadata
-        prop::collection::vec(task_comment_strategy(), 0..=3),   // comments
-        prop::collection::vec(task_edge_ref_strategy(), 0..=5),  // blocks
+        ], // active_form
+        task_status_str(),          // status
+        optional_agent_id(),        // owner
+        metadata_strategy(),        // metadata
+        prop::collection::vec(task_comment_strategy(), 0..=3), // comments
+        prop::collection::vec(task_edge_ref_strategy(), 0..=5), // blocks
     )
         .prop_map(
             |(subject, description, active_form, status, owner, metadata, comments, blocks)| {
@@ -286,14 +284,8 @@ fn task_item_strategy() -> impl Strategy<Value = LoroValue> {
                     m.insert("owner".into(), LoroValue::String(owner_str.into()));
                 }
                 m.insert("metadata".into(), metadata);
-                m.insert(
-                    "comments".into(),
-                    LoroValue::List(comments.into()),
-                );
-                m.insert(
-                    "blocks".into(),
-                    LoroValue::List(blocks.into()),
-                );
+                m.insert("comments".into(), LoroValue::List(comments.into()));
+                m.insert("blocks".into(), LoroValue::List(blocks.into()));
                 m.insert("created_at".into(), LoroValue::String(CREATED_AT.into()));
                 m.insert("updated_at".into(), LoroValue::String(UPDATED_AT.into()));
                 LoroValue::Map(m.into())
@@ -308,10 +300,10 @@ fn task_item_strategy() -> impl Strategy<Value = LoroValue> {
 /// (empty TaskList round-trip).
 fn task_list_strategy() -> impl Strategy<Value = LoroValue> {
     (
-        optional_agent_id(),                       // default_owner
-        prop_oneof![Just(None), task_status_str().prop_map(Some)], // default_status
+        optional_agent_id(),                                        // default_owner
+        prop_oneof![Just(None), task_status_str().prop_map(Some)],  // default_status
         prop_oneof![Just(None::<i64>), (1i64..=50).prop_map(Some)], // display_limit
-        prop::collection::vec(task_item_strategy(), 0..=8),          // items
+        prop::collection::vec(task_item_strategy(), 0..=8),         // items
     )
         .prop_map(|(default_owner, default_status, display_limit, items)| {
             let mut m: HashMap<String, LoroValue> = HashMap::new();
@@ -521,7 +513,11 @@ fn self_referential_edge_round_trips() {
 
     // Confirm the self-edge survived intact in the round-tripped output.
     let rt_ids = extract_item_ids(&rt);
-    assert_eq!(rt_ids, vec![own_id.to_string()], "item id must survive round-trip");
+    assert_eq!(
+        rt_ids,
+        vec![own_id.to_string()],
+        "item id must survive round-trip"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -18,7 +18,7 @@ use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use loro::LoroValue;
 
 /// Errors specific to the KDL ↔ LoroValue conversion.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
 #[non_exhaustive]
 pub enum KdlConversionError {
     /// A LoroValue variant that has no KDL representation was encountered.
@@ -48,15 +48,23 @@ pub enum KdlConversionError {
     AmbiguousNode,
 
     /// A `TaskEdgeRef` inside a `blocks` node failed to parse.
-    #[error("invalid TaskEdgeRef at {span:?}: {source}")]
+    #[error("invalid TaskEdgeRef: {source}")]
+    #[diagnostic(code(pattern_memory::kdl::task_edge_ref))]
     TaskEdgeRef {
+        /// The byte-offset span of the offending entry in the KDL source.
+        #[label("invalid block reference here")]
         span: miette::SourceSpan,
         source: pattern_core::types::memory_types::TaskEdgeRefParseError,
     },
 
     /// A `blocks` child entry is missing the `(block)` type annotation.
-    #[error("missing (block) type annotation at {span:?}")]
-    MissingBlockAnnotation { span: miette::SourceSpan },
+    #[error("missing (block) type annotation")]
+    #[diagnostic(code(pattern_memory::kdl::missing_block_annotation))]
+    MissingBlockAnnotation {
+        /// The byte-offset span of the offending entry in the KDL source.
+        #[label("expected (block) type annotation here")]
+        span: miette::SourceSpan,
+    },
 }
 
 /// Top-level shape hint for the KDL converter.
