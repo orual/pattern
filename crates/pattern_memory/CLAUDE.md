@@ -234,9 +234,29 @@ is wired).
 
 **Entry point:** `pattern_memory::reembed::ReembedQueue`
 
+## fs (`src/fs/`, `src/fs/markdown_skill/`)
+
+Canonical file format converters. Each block schema has a converter that
+translates between the on-disk file format and LoroDoc state.
+
+- `fs::kdl` — KDL serializer/deserializer for Map, Composite, List, TaskList schemas.
+- `fs::markdown` — Passthrough markdown for Text schema.
+- `fs::jsonl` — Newline-delimited JSON for Log schema.
+- `fs::markdown_skill` — YAML-frontmatter + markdown body for Skill schema.
+  - `parse(bytes) -> Result<SkillFile, SkillParseError>` — saphyr-based parser.
+  - `emit(metadata, extras, body) -> Result<String, SkillEmitError>` — deterministic emitter (stable field order for content-hash stability).
+  - `loro_bridge::{write_skill_to_loro_doc, project_metadata_from_loro, project_extras_from_loro}` — LoroDoc ↔ SkillFile bridge used by the subscriber worker (outbound render) and the cache external-edit path (inbound parse).
+
+**LoroDoc layout for Skill blocks:**
+- `"metadata"` LoroMap — typed fields as JSON-string-encoded scalars: `name`, `trust_tier`, `description`, `keywords_json` (JSON array), `hooks_json` (JSON value). JSON strings chosen for CRDT merge simplicity (whole-field LWW, which is appropriate for read-mostly skill definitions).
+- `"extras"` LoroMap — unknown frontmatter keys, each stored as a JSON-encoded string.
+- `"body"` LoroText — raw markdown body.
+
+**Entry point:** `pattern_memory::fs::markdown_skill`
+
 ## Status
 
-Last verified: 2026-04-23
+Last verified: 2026-04-24
 
 Created 2026-04-19 during v3-memory-rework Phase 1; populated incrementally
 in Phases 1-8. All 8 phases complete.
@@ -274,3 +294,9 @@ completed 2026-04-20. AC11.1–11.7 implemented and passing (23 tests: 13 unit
 + 10 integration). Root bug fixed: pre-restore safety copies used second-
 precision timestamps causing name collision when rollback restore happened
 in the same second; switched to nanosecond decimal suffix.
+
+v3-task-skill-blocks Phase 4 Task 9 (2026-04-24): Skill schema document I/O
+wired. `BlockSchema::Skill` outbound render (worker.rs) and inbound external-edit
+(cache.rs) now fully functional. `skill_usage_stats` migration registered.
+`markdown_skill::loro_bridge` module added for LoroDoc ↔ SkillFile bridging.
+530/530 tests passing.

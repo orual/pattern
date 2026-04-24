@@ -123,17 +123,40 @@ pub(crate) fn render_canonical_from_disk_doc(
             Ok(("kdl", kdl_doc.to_string().into_bytes()))
         }
         BlockSchema::Skill { .. } => {
-            // Skill blocks serialize to YAML-frontmatter + markdown body. The
-            // `markdown_skill` converter is implemented in Task 7 (Phase 4,
-            // Subcomponent C). Until then, this arm returns a typed domain error
-            // so callers can log and skip the emission cycle cleanly rather than
-            // hitting an undefined catch-all.
-            Err(format!(
-                "{}",
-                crate::fs::FsError::ConverterNotYetAvailable(
-                    pattern_core::types::memory_types::BlockSchemaKind::Skill
-                )
-            ))
+            // Skill blocks serialize to YAML-frontmatter + markdown body.
+            // The disk_doc stores three root-level containers (populated by
+            // the inbound path via `write_skill_to_loro_doc`):
+            //   "metadata" — LoroMap with JSON-string-encoded typed fields.
+            //   "extras"   — LoroMap with JSON-string-encoded unknown keys.
+            //   "body"     — LoroText with the raw markdown body.
+            // `get_deep_value()` materializes all live containers into
+            // LoroValue snapshots; the loro_bridge helpers project them back.
+            let deep_value = disk_doc.get_deep_value();
+            let root_map = match &deep_value {
+                loro::LoroValue::Map(m) => m,
+                _ => {
+                    return Err("Skill disk_doc get_deep_value() returned non-map root".to_string());
+                }
+            };
+
+            // Project metadata fields from the "metadata" sub-map.
+            let metadata = crate::fs::markdown_skill::project_metadata_from_loro(root_map)
+                .map_err(|e| format!("Skill metadata projection failed: {e}"))?;
+
+            // Project extras (unknown frontmatter keys) from the "extras" sub-map.
+            let extras = crate::fs::markdown_skill::project_extras_from_loro(root_map)
+                .map_err(|e| format!("Skill extras projection failed: {e}"))?;
+
+            // Body text from the LoroText container, defaulting to empty.
+            let body = match root_map.get("body") {
+                Some(loro::LoroValue::String(s)) => s.as_ref().to_string(),
+                _ => String::new(),
+            };
+
+            let rendered = crate::fs::markdown_skill::emit(&metadata, &extras, &body)
+                .map_err(|e| format!("Skill emit failed: {e}"))?;
+
+            Ok(("md", rendered.into_bytes()))
         }
         // NOTE: `_ =>` covers future non_exhaustive additions beyond the variants
         // currently known. All currently-defined BlockSchema variants must have

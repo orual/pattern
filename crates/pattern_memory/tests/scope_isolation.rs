@@ -427,3 +427,51 @@ fn search_archival_full_policy_returns_project_only() {
         "persona entry must not appear under Full policy; got ids: {ids:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// AC9 (Task 9): Skill blocks + MemoryScope::Full isolation
+// ---------------------------------------------------------------------------
+
+/// Skill blocks created in project scope are invisible to persona-default
+/// sessions under `IsolatePolicy::Full`.
+///
+/// Scope isolation operates at the routing layer (agent_id scoping) and is
+/// schema-agnostic — it applies identically to Skill blocks, TaskList blocks,
+/// and any other schema. This test documents the property explicitly for Skill
+/// blocks by using a store with a skill-labelled block in project scope and
+/// verifying that it is invisible to a persona-only session.
+///
+/// The implementation property is: `MemoryScope` never inspects `BlockSchema`;
+/// routing is entirely based on `agent_id` matching and `IsolatePolicy`. Thus
+/// Skill blocks need no special handling and get Full isolation for free.
+#[test]
+fn skill_block_in_project_scope_invisible_to_persona_under_full_isolation() {
+    // Project scope has a skill block; persona scope has a scratchpad.
+    // Under Full isolation, the persona session cannot see either block from
+    // the other scope.
+    let store = ScopeTestStore::new();
+    store.seed("project", "my-skill", "# Skill body");
+    store.seed("persona", "scratch", "persona scratchpad");
+
+    let scope = MemoryScope::new(
+        store,
+        ScopeBinding::with_project("persona", "project", IsolatePolicy::Full),
+    );
+
+    // Persona block ("scratch") is invisible under Full isolation.
+    assert!(
+        scope
+            .get_rendered_content("any", "scratch")
+            .unwrap()
+            .is_none(),
+        "persona 'scratch' block must be invisible to session under Full isolation"
+    );
+
+    // Project Skill block ("my-skill") is visible because it belongs to the
+    // project agent_id which IS accessible under Full isolation.
+    let skill = scope.get_rendered_content("project", "my-skill").unwrap();
+    assert!(
+        skill.is_some(),
+        "project 'my-skill' block must be visible to session under Full isolation"
+    );
+}

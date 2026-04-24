@@ -875,17 +875,14 @@ impl MemoryCache {
                     disk_doc.commit();
                 }
                 pattern_core::types::memory_types::BlockSchema::Skill { .. } => {
-                    // Skill blocks parse via YAML-frontmatter + markdown body.
-                    // The `markdown_skill` converter is implemented in Task 7
-                    // (Phase 4, Subcomponent C). Until then, external edits to
-                    // Skill block files cannot be imported — return a typed error
-                    // so the caller can log and skip without silent data loss.
-                    return Err(format!(
-                        "{}",
-                        crate::fs::FsError::ConverterNotYetAvailable(
-                            pattern_core::types::memory_types::BlockSchemaKind::Skill
-                        )
-                    ));
+                    // Skill blocks: parse YAML-frontmatter + markdown body, then
+                    // mirror the typed SkillMetadata, extras, and body into the
+                    // disk_doc using the loro_bridge helpers.
+                    let skill_file = crate::fs::markdown_skill::parse(content)
+                        .map_err(|e| format!("Skill parse failed: {e}"))?;
+                    crate::fs::markdown_skill::write_skill_to_loro_doc(&skill_file, &disk_doc)
+                        .map_err(|e| format!("Skill write_skill_to_loro_doc failed: {e}"))?;
+                    disk_doc.commit();
                 }
                 // NOTE: `_ =>` covers future non_exhaustive additions beyond
                 // currently-known variants. Keep this list current.
@@ -1475,17 +1472,18 @@ fn apply_json_to_loro_doc(
             }
             Ok(())
         }
-        // Skill blocks are not imported via JSON — they use the YAML-frontmatter +
-        // markdown-body pipeline in `markdown_skill` (Task 7, Phase 4). Reaching
-        // this arm would mean the inbound watcher dispatched a Skill block edit to
-        // the JSON import path, which is a logic error in the caller. Return a
-        // typed error rather than silently doing nothing wrong.
-        (_, pattern_core::types::memory_types::BlockSchema::Skill { .. }) => Err(format!(
-            "{}",
-            crate::fs::FsError::ConverterNotYetAvailable(
-                pattern_core::types::memory_types::BlockSchemaKind::Skill
-            )
-        )),
+        // Skill blocks are NOT imported via the JSON path — the external-edit
+        // inbound path calls `write_skill_to_loro_doc` directly after parsing
+        // via `markdown_skill::parse`. This arm is structurally unreachable
+        // through normal code paths. If it is ever reached, that indicates a
+        // logic error in the caller (e.g., a new code site that constructs a
+        // JSON payload and calls this function for a Skill schema without going
+        // through the YAML-frontmatter pipeline). Return a clear error.
+        (_, pattern_core::types::memory_types::BlockSchema::Skill { .. }) => Err(
+            "apply_json_to_loro_doc must not be called for Skill blocks: use \
+             write_skill_to_loro_doc (markdown_skill::loro_bridge) instead"
+                .to_string(),
+        ),
         // NOTE: `_ =>` covers future non_exhaustive additions beyond
         // currently-known variants. Keep this list current.
         _ => Err(format!(

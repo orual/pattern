@@ -38,6 +38,9 @@ static MEMORY_MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!(
             "../migrations/memory/0011_task_block_index.sql"
         )),
+        M::up(include_str!(
+            "../migrations/memory/0012_skill_usage_stats.sql"
+        )),
     ])
 });
 
@@ -82,6 +85,70 @@ mod tests {
         assert!(tables.contains(&"agents".to_string()));
         assert!(tables.contains(&"memory_blocks".to_string()));
         assert!(tables.contains(&"archival_entries".to_string()));
+    }
+
+    #[test]
+    fn skill_usage_stats_migration_applies_clean() {
+        // Verify migration 0012 creates the skill_usage_stats table with the
+        // expected schema. Tests that the WITHOUT ROWID table is created and
+        // that basic upsert semantics work on a fresh database.
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_memory_migrations(&mut conn).unwrap();
+
+        // Table must exist.
+        let tables: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            tables.contains(&"skill_usage_stats".to_string()),
+            "skill_usage_stats table must exist after migrations; got {tables:?}"
+        );
+
+        // Smoke-test: insert and read back.
+        conn.execute(
+            "INSERT INTO skill_usage_stats (block_handle, last_used, last_used_by, use_count)
+             VALUES ('test-skill', '2026-04-24T12:00:00Z', 'agent-a', 1)",
+            [],
+        )
+        .unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT use_count FROM skill_usage_stats WHERE block_handle = 'test-skill'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // Verify ON CONFLICT upsert increments the counter.
+        conn.execute(
+            "INSERT INTO skill_usage_stats (block_handle, last_used, last_used_by, use_count)
+             VALUES ('test-skill', '2026-04-24T13:00:00Z', 'agent-b', 1)
+             ON CONFLICT(block_handle) DO UPDATE
+             SET last_used    = excluded.last_used,
+                 last_used_by = excluded.last_used_by,
+                 use_count    = skill_usage_stats.use_count + 1",
+            [],
+        )
+        .unwrap();
+
+        let (count2, last_by): (i64, String) = conn
+            .query_row(
+                "SELECT use_count, last_used_by FROM skill_usage_stats WHERE block_handle = 'test-skill'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(count2, 2, "use_count should be 2 after upsert");
+        assert_eq!(
+            last_by, "agent-b",
+            "last_used_by should be the latest agent"
+        );
     }
 
     #[test]
