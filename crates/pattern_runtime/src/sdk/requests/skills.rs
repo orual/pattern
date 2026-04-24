@@ -8,5 +8,18 @@ use tidepool_bridge_derive::FromCore;
 /// Rust mirror of the Haskell `Skills` GADT.
 #[derive(Debug, FromCore)]
 pub enum SkillsReq {
-    // variants added per-method in later tasks
+    #[core(module = "Pattern.Skills", name = "List")]
+    List,
+
+    #[core(module = "Pattern.Skills", name = "GetMetadata")]
+    GetMetadata(String /* BlockHandle */),
+
+    #[core(module = "Pattern.Skills", name = "Load")]
+    Load(String /* BlockHandle */),
+
+    #[core(module = "Pattern.Skills", name = "Search")]
+    Search(String /* query text */),
+
+    #[core(module = "Pattern.Skills", name = "GetUsageStats")]
+    GetUsageStats(String /* BlockHandle */),
 }

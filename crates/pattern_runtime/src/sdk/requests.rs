@@ -104,7 +104,10 @@ mod parity {
                 "AddComment",
             ],
         ),
-        ("SkillsReq", &[]),
+        (
+            "SkillsReq",
+            &["List", "GetMetadata", "Load", "Search", "GetUsageStats"],
+        ),
     ];
 
     /// Sanity check: the table isn't empty and each entry lists at least
@@ -304,11 +307,16 @@ mod parity {
     }
 
     #[test]
-    #[allow(unused_imports)]
     fn skills_req_variants() {
         use super::SkillsReq;
-        // SkillsReq is empty during Task 3 scaffolding; variants added in Task 4.
-        assert_eq!(count("SkillsReq"), 0);
+        // Exhaustively construct every variant so a rename or added variant
+        // forces a compile error or count mismatch.
+        let _ = SkillsReq::List;
+        let _ = SkillsReq::GetMetadata(String::new());
+        let _ = SkillsReq::Load(String::new());
+        let _ = SkillsReq::Search(String::new());
+        let _ = SkillsReq::GetUsageStats(String::new());
+        assert_eq!(count("SkillsReq"), 5);
     }
 
     /// Look up the expected variant count from the table.

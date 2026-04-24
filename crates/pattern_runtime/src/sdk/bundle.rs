@@ -1,8 +1,8 @@
-//! Bundle the full 15-handler SDK into a single `DispatchEffect`.
+//! Bundle the full 16-handler SDK into a single `DispatchEffect`.
 //!
 //! Handler position in the HList is the JIT effect tag: agent programs must
 //! declare `Eff '[...]` rows whose head prefix aligns with this order. The
-//! canonical order is: `Memory, Search, Recall, Tasks` (storage-adjacent),
+//! canonical order is: `Memory, Search, Recall, Tasks, Skills` (storage-adjacent),
 //! then `Message, Display, Time, Log` (Prelude-5 minus Memory), then rarer
 //! effects (`Shell, File, Sources, Mcp, Rpc, Spawn, Diagnostics`).
 //!
@@ -25,16 +25,16 @@
 use crate::sdk::describe::CollectEffectDecls;
 use crate::sdk::handlers::{
     DiagnosticsHandler, DisplayHandler, FileHandler, LogHandler, McpHandler, MemoryHandler,
-    MessageHandler, RecallHandler, RpcHandler, SearchHandler, ShellHandler, SourcesHandler,
-    SpawnHandler, TasksHandler, TimeHandler,
+    MessageHandler, RecallHandler, RpcHandler, SearchHandler, ShellHandler, SkillsHandler,
+    SourcesHandler, SpawnHandler, TasksHandler, TimeHandler,
 };
 
-/// The full 15-handler SDK bundle, typed as a `frunk::HList`.
+/// The full 16-handler SDK bundle, typed as a `frunk::HList`.
 ///
-/// Order: `Memory, Search, Recall, Tasks, Message, Display, Time, Log,
-/// Shell, File, Sources, Mcp, Rpc, Spawn, Diagnostics`. Search, Recall,
-/// and Tasks are placed immediately after Memory (storage-adjacent) so
-/// cross-agent search, archival, and task-graph operations cluster
+/// Order: `Memory, Search, Recall, Tasks, Skills, Message, Display, Time, Log,
+/// Shell, File, Sources, Mcp, Rpc, Spawn, Diagnostics`. Search, Recall, Tasks,
+/// and Skills are placed immediately after Memory (storage-adjacent) so
+/// cross-agent search, archival, task-graph, and skill operations cluster
 /// together. Diagnostics is last (rarely used; session-level
 /// introspection only).
 pub type SdkBundle = frunk::HList![
@@ -42,6 +42,7 @@ pub type SdkBundle = frunk::HList![
     SearchHandler,
     RecallHandler,
     TasksHandler,
+    SkillsHandler,
     MessageHandler,
     DisplayHandler,
     TimeHandler,
@@ -69,6 +70,7 @@ pub const CANONICAL_EFFECT_ROW: &[&str] = &[
     "Search",
     "Recall",
     "Tasks",
+    "Skills",
     "Message",
     "Display",
     "Time",
@@ -87,12 +89,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_decls_has_15_entries() {
+    fn canonical_decls_has_16_entries() {
         let decls = canonical_effect_decls();
         assert_eq!(
             decls.len(),
-            15,
-            "expected 15 handler decls, got {}",
+            16,
+            "expected 16 handler decls, got {}",
             decls.len()
         );
     }
@@ -170,6 +172,38 @@ mod tests {
             assert!(
                 names.contains(expected),
                 "missing Pattern.Tasks method {expected:?}, got {names:?}"
+            );
+        }
+    }
+
+    /// Verify the Pattern.Skills effect registers all five expected methods
+    /// and appears immediately after Tasks (tag 4).
+    #[test]
+    fn skills_effect_registers_with_five_methods_at_tag_4() {
+        let decls = canonical_effect_decls();
+        let (tag, skills) = decls
+            .iter()
+            .enumerate()
+            .find(|(_, d)| d.type_name == "Skills")
+            .expect("Skills must appear in canonical decls");
+        assert_eq!(
+            tag, 4,
+            "Skills must be at tag 4 (storage-adjacent after Tasks)"
+        );
+        assert_eq!(
+            skills.constructors.len(),
+            5,
+            "Pattern.Skills must enumerate all 5 methods"
+        );
+        let names: std::collections::HashSet<&str> = skills
+            .constructors
+            .iter()
+            .filter_map(|c| c.split_whitespace().next())
+            .collect();
+        for expected in ["List", "GetMetadata", "Load", "Search", "GetUsageStats"] {
+            assert!(
+                names.contains(expected),
+                "missing Pattern.Skills method {expected:?}, got {names:?}"
             );
         }
     }

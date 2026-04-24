@@ -1,7 +1,7 @@
 //! Haskell preamble assembler for `code` tool eval source wrapping.
 //!
 //! Produces the static Haskell boilerplate shared by every `code` tool
-//! eval: language pragmas, module header, standard imports, the 15 SDK
+//! eval: language pragmas, module header, standard imports, the 16 SDK
 //! effect module imports (hybrid qualified/unqualified scheme), the
 //! `type M` effect-row alias, and pagination support.
 //!
@@ -27,7 +27,7 @@ use crate::sdk::describe::EffectDecl;
 /// inlined (the effect modules are imported directly; tidepool's
 /// multi-module compilation works since the DataConTable/CoreExpr bug
 /// was fixed in our fork). The `type M` alias is hardcoded to match the
-/// canonical 15-effect row.
+/// canonical 16-effect row.
 pub fn build(decls: &[EffectDecl]) -> String {
     let mut out = String::with_capacity(8192);
 
@@ -101,6 +101,7 @@ pub fn build(decls: &[EffectDecl]) -> String {
     out.push_str("import qualified Pattern.Search as Search\n");
     out.push_str("import qualified Pattern.Recall as Recall\n");
     out.push_str("import qualified Pattern.Tasks as Tasks\n");
+    out.push_str("import qualified Pattern.Skills as Skills\n");
     out.push_str("import qualified Pattern.Diagnostics as Diagnostics\n");
 
     out.push_str("default (Int, Text)\n");
@@ -139,11 +140,11 @@ pub fn build(decls: &[EffectDecl]) -> String {
     // snippets is `result :: Eff M Value`, which expands to
     // `Eff '[Memory.Memory, ...] Value`. Wrapping `Eff` into the
     // synonym here would produce `Eff (Eff '[...]) Value` — a kind
-    // error. Canonical order: Memory, Search, Recall, Tasks, Message,
-    // Display, Time, Log, Shell, File, Sources, Mcp, Rpc, Spawn,
-    // Diagnostics. Must match `SdkBundle` HList in `bundle.rs`.
+    // error. Canonical order: Memory, Search, Recall, Tasks, Skills,
+    // Message, Display, Time, Log, Shell, File, Sources, Mcp, Rpc,
+    // Spawn, Diagnostics. Must match `SdkBundle` HList in `bundle.rs`.
     out.push_str(concat!(
-        "type M = '[Memory.Memory, Search.Search, Recall.Recall, Tasks.Tasks, ",
+        "type M = '[Memory.Memory, Search.Search, Recall.Recall, Tasks.Tasks, Skills.Skills, ",
         "Message, Display, Time, Log.Log, Shell.Shell, ",
         "File.File, Sources.Sources, Mcp.Mcp, Rpc.Rpc, Spawn, ",
         "Diagnostics.Diagnostics]\n\n",
@@ -245,10 +246,11 @@ fn emit_pagination_support(out: &mut String) {
 
 /// Build the effect stack type string using qualified names where required.
 ///
-/// Returns the canonical 15-effect row string matching the `type M` alias
+/// Returns the canonical 16-effect row string matching the `type M` alias
 /// in the preamble: `'[Memory.Memory, Search.Search, Recall.Recall,
-/// Tasks.Tasks, Message, Display, Time, Log.Log, Shell.Shell, File.File,
-/// Sources.Sources, Mcp.Mcp, Rpc.Rpc, Spawn, Diagnostics.Diagnostics]`.
+/// Tasks.Tasks, Skills.Skills, Message, Display, Time, Log.Log,
+/// Shell.Shell, File.File, Sources.Sources, Mcp.Mcp, Rpc.Rpc, Spawn,
+/// Diagnostics.Diagnostics]`.
 ///
 /// Returns `'[]` when `decls` is empty (legacy / test use).
 pub fn build_effect_stack_type(decls: &[EffectDecl]) -> String {
@@ -259,7 +261,7 @@ pub fn build_effect_stack_type(decls: &[EffectDecl]) -> String {
     // `build()`. These are parallel-maintained; if the canonical effect row
     // in `bundle.rs` ever changes, both must be updated together.
     concat!(
-        "'[Memory.Memory, Search.Search, Recall.Recall, Tasks.Tasks, ",
+        "'[Memory.Memory, Search.Search, Recall.Recall, Tasks.Tasks, Skills.Skills, ",
         "Message, Display, Time, Log.Log, Shell.Shell, ",
         "File.File, Sources.Sources, Mcp.Mcp, Rpc.Rpc, Spawn, ",
         "Diagnostics.Diagnostics]"
@@ -326,6 +328,7 @@ mod tests {
             "import qualified Pattern.Search as Search",
             "import qualified Pattern.Recall as Recall",
             "import qualified Pattern.Tasks as Tasks",
+            "import qualified Pattern.Skills as Skills",
             "import qualified Pattern.Diagnostics as Diagnostics",
         ];
         for line in expected {
@@ -452,9 +455,10 @@ mod tests {
         let decls = canonical_effect_decls();
         let stack = build_effect_stack_type(&decls);
         assert!(
-            stack
-                .starts_with("'[Memory.Memory, Search.Search, Recall.Recall, Tasks.Tasks, Message"),
-            "expected qualified form; got: {stack}"
+            stack.starts_with(
+                "'[Memory.Memory, Search.Search, Recall.Recall, Tasks.Tasks, Skills.Skills, Message"
+            ),
+            "expected qualified form with Skills after Tasks; got: {stack}"
         );
         assert!(
             stack.ends_with("Diagnostics.Diagnostics]"),

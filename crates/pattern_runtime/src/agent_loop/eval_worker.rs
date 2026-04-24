@@ -60,8 +60,8 @@ use crate::sdk::bundle::SdkBundle;
 use crate::sdk::code_tool::{CodeToolInput, template_source};
 use crate::sdk::handlers::{
     DisplayHandler, FileHandler, LogHandler, McpHandler, MemoryHandler, MessageHandler,
-    RecallHandler, RpcHandler, SearchHandler, ShellHandler, SourcesHandler, SpawnHandler,
-    TasksHandler, TimeHandler,
+    RecallHandler, RpcHandler, SearchHandler, ShellHandler, SkillsHandler, SourcesHandler,
+    SpawnHandler, TasksHandler, TimeHandler,
 };
 use crate::session::SessionContext;
 
@@ -255,6 +255,7 @@ fn run_eval(
         SearchHandler::new(store.clone()),
         RecallHandler::new(store),
         TasksHandler,
+        SkillsHandler,
         MessageHandler,
         display,
         TimeHandler,
