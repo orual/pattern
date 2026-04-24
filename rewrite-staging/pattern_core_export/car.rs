@@ -1,3 +1,12 @@
+// ALREADY MOVED TO: pattern_memory/src/export/car.rs
+// ORIGIN: crates/pattern_core/src/export/car.rs
+// PHASE: v3-task-skill-blocks circular-dep fix (commit b29738a1, 2026-04-23)
+// RESHAPE: none — this is an obsolete duplicate kept for reference;
+//          the live copy in pattern_memory has already absorbed the changes
+//          required to break the pattern_core → pattern_db cycle.
+//          Delete once the migration-manifest confirms no further
+//          reference is needed.
+
 //! CAR file utilities.
 
 use cid::Cid;

@@ -156,3 +156,9 @@ Generated 2026-04-16. Authoritative until this phase completes; archived after.
 | `utils/mod.rs` | audit | `pattern_core/src/utils/` for reusable helpers; rest → `rewrite-staging/runtime_subsystems/utils/` | 2 | Task 9 audits contents |
 | `utils/debug.rs` | audit | `pattern_core/src/utils/debug.rs` for reusable helpers; rest → `rewrite-staging/runtime_subsystems/utils/` | 2 | Task 9 audits contents |
 | `utils/error_logging.rs` | audit | `pattern_core/src/utils/error_logging.rs` for reusable helpers; rest → `rewrite-staging/runtime_subsystems/utils/` | 2 | Task 9 audits contents |
+
+## Post-hoc additions (after 2026-04-16 cutoff)
+
+| Origin path | Disposition | Destination | Phase | Notes |
+|---|---|---|---|---|
+| `export.rs` (+ `export/`) | stage | `rewrite-staging/pattern_core_export/` | done post-hoc (v3-task-skill-blocks circular-dep fix, 2026-04-23) | Module relocated to `pattern_memory/src/export/` as part of breaking the `pattern_core → pattern_db` dep cycle (commit `b29738a1`). Staged copies are obsolete duplicates kept for reference; live copies in pattern_memory already absorbed the changes. Delete once confirmed no archaeology value remains. |
