@@ -6657,6 +6657,7 @@ dependencies = [
  "jiff",
  "kdl 6.5.0",
  "knus",
+ "loro",
  "miette 7.6.0",
  "pattern-core",
  "pattern-db",

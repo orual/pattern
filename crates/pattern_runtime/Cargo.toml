@@ -58,6 +58,7 @@ serde_json       = { workspace = true }
 knus             = "3.3"
 kdl              = "6"
 jiff             = { workspace = true }
+loro             = { version = "1.10", features = ["counter"] }
 smol_str         = { workspace = true }
 regex            = { workspace = true }
 # Stable content hashing for snapshot delta detection.
