@@ -879,14 +879,44 @@ impl StructuredDocument {
                     ));
                 };
 
-                // Clear the existing movable list and re-insert each item.
+                // Clear the existing movable list and re-insert each item as
+                // a nested LoroMap CONTAINER (not a value-map snapshot). This
+                // preserves field-level CRDT merge semantics on subsequent
+                // in-place mutations. `comments` and `blocks` nested lists
+                // are likewise stored as LoroList containers for correct
+                // multi-writer append semantics.
                 let list = self.doc.get_movable_list("items");
                 for i in (0..list.len()).rev() {
                     let _ = list.delete(i, 1);
                 }
                 for item in items {
-                    let loro_value = json_to_loro(&item);
-                    let _ = list.push(loro_value);
+                    let Some(obj) = item.as_object() else {
+                        return Err(DocumentError::Other(format!(
+                            "TaskList item must be a JSON object, got: {item}"
+                        )));
+                    };
+                    let item_map = list
+                        .push_container(loro::LoroMap::new())
+                        .map_err(|e| DocumentError::Other(e.to_string()))?;
+                    for (key, value) in obj {
+                        match (key.as_str(), value) {
+                            ("comments" | "blocks", JsonValue::Array(arr)) => {
+                                let nested = item_map
+                                    .insert_container(key, loro::LoroList::new())
+                                    .map_err(|e| DocumentError::Other(e.to_string()))?;
+                                for elem in arr {
+                                    nested
+                                        .push(json_to_loro(elem))
+                                        .map_err(|e| DocumentError::Other(e.to_string()))?;
+                                }
+                            }
+                            _ => {
+                                item_map
+                                    .insert(key, json_to_loro(value))
+                                    .map_err(|e| DocumentError::Other(e.to_string()))?;
+                            }
+                        }
+                    }
                 }
             }
             BlockSchema::Composite { sections } => {

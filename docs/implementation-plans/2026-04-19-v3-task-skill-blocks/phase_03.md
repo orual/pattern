@@ -403,7 +403,7 @@ jj commit -m "[pattern-runtime] implement link/unlink handlers (source-only edge
 
 - `handle_list_tasks(block: Option<BlockHandle>, filter: TaskFilter)`:
   - Resolve scope: call `handlers::scope::resolve_scope(&scope, &agent_id, &store)` (sync post-refactor). Record the list of resolved agent ids.
-  - If `block == Some(h)`, scope-check that the block belongs to one of the resolved agents. If not, return `EffectError::PermissionDenied` (existing variant). Then `pattern_db::queries::task::list_tasks_filtered(&conn, &filter.scoped_to_block(h))`.
+  - If `block == Some(h)`, scope-check that the block belongs to one of the resolved agents. If not, return `EffectError::Handler(...)` with a clear permission-denied message. **Note:** the original plan referenced `EffectError::PermissionDenied` as an "existing variant" — no such variant exists in `tidepool-effect`; fall back to `Handler`. Then `pattern_db::queries::task::list_tasks_filtered(&conn, &filter.scoped_to_block(h))`.
   - If `block == None`, enumerate via `pattern_db::queries::task::list_tasks_filtered(&conn, &filter.scoped_to_agents(resolved_agents))`. `TaskFilter` gets helper methods `scoped_to_block` / `scoped_to_agents` that embed the scope constraint into the SQL WHERE clause.
   - Project `TaskRow → TaskView` (derive `blocker_count` from `task_edges WHERE target_block+target_item = row.block+row.item`, `blocks_count` from `WHERE source_block+source_item = row.block+row.item`). Batch these counts via two aggregate queries rather than N+1.
 - `handle_query_graph(root: TaskEdgeRef, query: GraphQuery)`:

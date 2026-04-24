@@ -175,6 +175,11 @@ pub fn list_tasks_filtered(
     }
 
     let mut sql = String::with_capacity(512);
+    // `params` is boxed because rusqlite wants heterogeneous `&dyn ToSql`,
+    // and the parameter sources (SmolStr-backed handles, `&'static str` status
+    // values, and owned String keyword) have different lifetimes. SmolStr
+    // doesn't impl `ToSql` so we copy to String for those paths — the alloc
+    // per-filter-block is marginal and avoids a borrow-checker gauntlet.
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     let mut param_idx = 1u32;
     let mut conditions: Vec<String> = Vec::new();
@@ -211,12 +216,13 @@ pub fn list_tasks_filtered(
             })
             .collect();
         for b in blocks {
-            params.push(Box::new(b.to_string()));
+            params.push(Box::new(b.as_str().to_owned()));
         }
         conditions.push(format!("t.block_handle IN ({})", placeholders.join(", ")));
     }
 
     // Status filter — serialize each TaskStatus to its kebab-case string.
+    // `TaskStatus::as_str()` returns `&'static str`; pass it directly in a Box.
     if let Some(ref statuses) = filter.status
         && !statuses.is_empty()
     {
@@ -224,7 +230,7 @@ pub fn list_tasks_filtered(
             .iter()
             .map(|s| {
                 let p = format!("?{param_idx}");
-                params.push(Box::new(s.as_str().to_string()));
+                params.push(Box::new(s.as_str()));
                 param_idx += 1;
                 p
             })
@@ -232,10 +238,10 @@ pub fn list_tasks_filtered(
         conditions.push(format!("t.status IN ({})", placeholders.join(", ")));
     }
 
-    // Owner filter — AgentId is SmolStr; pass as str.
+    // Owner filter — AgentId is SmolStr; copy to owned String for Box.
     if let Some(ref owner) = filter.owner {
         conditions.push(format!("t.owner_agent_id = ?{param_idx}"));
-        params.push(Box::new(owner.as_str().to_string()));
+        params.push(Box::new(owner.as_str().to_owned()));
         param_idx += 1;
     }
 
@@ -344,7 +350,16 @@ pub fn query_task_graph_bfs(
             continue;
         }
 
-        let mut neighbours: Vec<(Node, Node)> = Vec::new();
+        // Each entry is `(edge_source, edge_target, discovered)`:
+        // - `edge_source`/`edge_target`: always in original source→target
+        //   orientation (invariant independent of traversal direction).
+        // - `discovered`: the newly-reachable node — always the side opposite
+        //   `current`, used to advance the BFS frontier.
+        //
+        // This disentangles the semantic edge from the graph-walk step so
+        // `GraphSlice.edges` keeps a stable orientation under Forward,
+        // Reverse, and Both traversals.
+        let mut neighbours: Vec<(Node, Node, Node)> = Vec::new();
 
         // Forward neighbours.
         if matches!(direction, Direction::Forward | Direction::Both) {
@@ -357,12 +372,15 @@ pub fn query_task_graph_bfs(
                 })?;
                 for row in rows {
                     let neighbour = row?;
-                    neighbours.push((current.clone(), neighbour));
+                    neighbours.push((current.clone(), neighbour.clone(), neighbour));
                 }
             }
         }
 
-        // Reverse neighbours.
+        // Reverse neighbours. The SQL returns `(source_block, source_item)`
+        // for edges whose target is `current`, so the semantic edge is
+        // `(neighbour, current)` — NOT `(current, neighbour)` — and the
+        // discovered node is `neighbour`.
         if matches!(direction, Direction::Reverse | Direction::Both) {
             let rows =
                 reverse_stmt.query_map(rusqlite::params![&current.0, &current.1], |row| {
@@ -372,16 +390,15 @@ pub fn query_task_graph_bfs(
                 })?;
             for row in rows {
                 let neighbour = row?;
-                neighbours.push((current.clone(), neighbour));
+                neighbours.push((neighbour.clone(), current.clone(), neighbour));
             }
         }
 
-        for (from, to) in neighbours {
-            let target = to.clone();
-            if !visited.contains(&target) {
-                visited.insert(target.clone());
-                edges.push((from, to));
-                nodes.push(target.clone());
+        for (edge_src, edge_tgt, discovered) in neighbours {
+            if !visited.contains(&discovered) {
+                visited.insert(discovered.clone());
+                edges.push((edge_src, edge_tgt));
+                nodes.push(discovered.clone());
                 if nodes.len() as u32 >= max_nodes {
                     truncated = true;
                     return Ok(GraphSlice {
@@ -393,10 +410,12 @@ pub fn query_task_graph_bfs(
                         truncated,
                     });
                 }
-                frontier.push_back((target, depth + 1));
+                frontier.push_back((discovered, depth + 1));
             } else {
-                // Still record the edge even if the node was already visited.
-                edges.push((from, to));
+                // Still record the edge even if the discovered node was
+                // already visited (so cycles and re-convergent paths get all
+                // their edges materialized).
+                edges.push((edge_src, edge_tgt));
             }
         }
     }

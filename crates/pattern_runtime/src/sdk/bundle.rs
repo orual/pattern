@@ -1,10 +1,10 @@
-//! Bundle the full 13-handler SDK into a single `DispatchEffect`.
+//! Bundle the full 15-handler SDK into a single `DispatchEffect`.
 //!
 //! Handler position in the HList is the JIT effect tag: agent programs must
 //! declare `Eff '[...]` rows whose head prefix aligns with this order. The
-//! canonical order is: `Memory, Search, Recall` (storage-adjacent), then
-//! `Message, Display, Time, Log` (Prelude-5 minus Memory), then rarer
-//! effects (`Shell, File, Sources, Mcp, Rpc, Spawn`).
+//! canonical order is: `Memory, Search, Recall, Tasks` (storage-adjacent),
+//! then `Message, Display, Time, Log` (Prelude-5 minus Memory), then rarer
+//! effects (`Shell, File, Sources, Mcp, Rpc, Spawn, Diagnostics`).
 //!
 //! **Why Prelude-5-first (historical note):** originally this ordering was
 //! required to avoid DataCon name collisions: tidepool-bridge looked up
@@ -26,20 +26,22 @@ use crate::sdk::describe::CollectEffectDecls;
 use crate::sdk::handlers::{
     DiagnosticsHandler, DisplayHandler, FileHandler, LogHandler, McpHandler, MemoryHandler,
     MessageHandler, RecallHandler, RpcHandler, SearchHandler, ShellHandler, SourcesHandler,
-    SpawnHandler, TimeHandler,
+    SpawnHandler, TasksHandler, TimeHandler,
 };
 
-/// The full 14-handler SDK bundle, typed as a `frunk::HList`.
+/// The full 15-handler SDK bundle, typed as a `frunk::HList`.
 ///
-/// Order: `Memory, Search, Recall, Message, Display, Time, Log, Shell,
-/// File, Sources, Mcp, Rpc, Spawn, Diagnostics`. Search and Recall are
-/// placed immediately after Memory (storage-adjacent) so cross-agent
-/// search and archival operations cluster together. Diagnostics is last
-/// (rarely used; session-level introspection only).
+/// Order: `Memory, Search, Recall, Tasks, Message, Display, Time, Log,
+/// Shell, File, Sources, Mcp, Rpc, Spawn, Diagnostics`. Search, Recall,
+/// and Tasks are placed immediately after Memory (storage-adjacent) so
+/// cross-agent search, archival, and task-graph operations cluster
+/// together. Diagnostics is last (rarely used; session-level
+/// introspection only).
 pub type SdkBundle = frunk::HList![
     MemoryHandler,
     SearchHandler,
     RecallHandler,
+    TasksHandler,
     MessageHandler,
     DisplayHandler,
     TimeHandler,
@@ -66,6 +68,7 @@ pub const CANONICAL_EFFECT_ROW: &[&str] = &[
     "Memory",
     "Search",
     "Recall",
+    "Tasks",
     "Message",
     "Display",
     "Time",
@@ -84,12 +87,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_decls_has_14_entries() {
+    fn canonical_decls_has_15_entries() {
         let decls = canonical_effect_decls();
         assert_eq!(
             decls.len(),
-            14,
-            "expected 14 handler decls, got {}",
+            15,
+            "expected 15 handler decls, got {}",
             decls.len()
         );
     }
@@ -126,6 +129,48 @@ mod tests {
                     parsed.unwrap_err()
                 );
             }
+        }
+    }
+
+    /// Verify the Pattern.Tasks effect registers all eight expected methods
+    /// (Create, Update, Transition, Link, Unlink, List, QueryGraph, AddComment)
+    /// and appears in the storage-adjacent position (tag 3, after Recall).
+    #[test]
+    fn tasks_effect_registers_with_eight_methods_at_tag_3() {
+        let decls = canonical_effect_decls();
+        let (tag, tasks) = decls
+            .iter()
+            .enumerate()
+            .find(|(_, d)| d.type_name == "Tasks")
+            .expect("Tasks must appear in canonical decls");
+        assert_eq!(
+            tag, 3,
+            "Tasks must be at tag 3 (storage-adjacent after Recall)"
+        );
+        assert_eq!(
+            tasks.constructors.len(),
+            8,
+            "Pattern.Tasks must enumerate all 8 methods"
+        );
+        let names: std::collections::HashSet<&str> = tasks
+            .constructors
+            .iter()
+            .filter_map(|c| c.split_whitespace().next())
+            .collect();
+        for expected in [
+            "Create",
+            "Update",
+            "Transition",
+            "Link",
+            "Unlink",
+            "List",
+            "QueryGraph",
+            "AddComment",
+        ] {
+            assert!(
+                names.contains(expected),
+                "missing Pattern.Tasks method {expected:?}, got {names:?}"
+            );
         }
     }
 }

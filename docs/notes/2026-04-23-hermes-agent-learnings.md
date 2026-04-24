@@ -35,12 +35,6 @@ Pattern's four compaction strategies currently produce bare summaries. Adding a 
 
 Pattern should track last N compaction deltas per session and short-circuit if savings collapse.
 
-### Agent self-model block kind
-
-Honcho's integration in hermes treats the AI as a first-class peer with its own fact set distinct from the user's (`plugins/memory/honcho/__init__.py:454-490`). Pattern's `BlockKind::{Core, Working, Archival, Recall}` are all implicitly user-centric — there is no dedicated home for facts the agent maintains about its own behaviour patterns, constraints, preferred approaches, or discovered boundaries.
-
-A new variant — `BlockKind::SelfModel` or `persona_self` — would give compaction a place to land "things the agent learned about operating as this persona" rather than overloading Working or Recall. Complements the existing kinds without overlap. Worth thinking about before anything else touches the `BlockKind` enum.
-
 ## Medium-value ideas
 
 ### Trivial-prompt filter + empty-streak backoff

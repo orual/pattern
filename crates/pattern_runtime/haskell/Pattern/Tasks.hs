@@ -38,34 +38,87 @@ type TaskItemId = Text
 -- as 'TaskEdgeRef' values.
 type TaskEdgeRef = Text
 
--- | JSON-encoded task specification (fields: subject, description,
--- status, owner, priority, due_date, active_form, tags).  Build with
--- @Pattern.Aeson@ or pass a pre-encoded 'Text' literal.
+-- | JSON-encoded task specification. Build with @Pattern.Aeson@ or pass
+-- a pre-encoded 'Text' literal. Schema:
+--
+-- > {
+-- >   "subject": Text,              -- required
+-- >   "description": Text,          -- required (use "" for none)
+-- >   "status": TaskStatus?,        -- optional; defaults to "pending"
+-- >   "owner": AgentId?,            -- optional
+-- >   "active_form": Text?,         -- optional; "what is currently happening"
+-- >   "metadata": Value             -- required; use null for none
+-- > }
 type TaskSpec = Text
 
--- | JSON-encoded task patch.  Only provided fields are updated;
--- omitted fields are left untouched.
+-- | JSON-encoded task patch. Only provided fields are updated; omitted
+-- fields are left untouched. Schema:
+--
+-- > {
+-- >   "subject": Text?,             -- optional set-or-leave
+-- >   "description": Text?,         -- optional set-or-leave
+-- >   "status": TaskStatus?,        -- optional set-or-leave
+-- >   "metadata": Value?,           -- optional set-or-leave
+-- >   "owner": AgentId|null??,      -- absent=leave, null=clear, value=set (double-option)
+-- >   "active_form": Text|null??    -- absent=leave, null=clear, value=set (double-option)
+-- > }
 type TaskPatch = Text
 
--- | JSON-encoded task status value (e.g. @\"\\\"InProgress\\\"\"@).
+-- | JSON-encoded task status — a bare JSON string in kebab-case. One of:
+-- @\"pending\"@, @\"in-progress\"@, @\"blocked\"@, @\"completed\"@,
+-- @\"cancelled\"@. Serialized with surrounding quotes, e.g.
+-- @\"\\\"in-progress\\\"\"@.
 type TaskStatus = Text
 
--- | JSON-encoded task filter (fields: status, owner, has_blockers,
--- keyword).  Use @\"{}\"@ for an unfiltered list.
+-- | JSON-encoded task filter. Use @\"{}\"@ for an unfiltered list.
+-- Schema:
+--
+-- > {
+-- >   "status": [TaskStatus]?,     -- optional; any of these statuses
+-- >   "owner": AgentId?,           -- optional; owned by this agent
+-- >   "has_blockers": Bool?,       -- optional; has/has-not incoming edges
+-- >   "keyword": Text?,            -- optional; FTS5 MATCH expression
+-- >   "blocks": [BlockHandle]?     -- optional; restrict to these blocks
+-- > }
 type TaskFilter = Text
 
 -- | JSON-encoded 'TaskView' record returned as an element of the 'List'
--- result.  Each 'TaskView' is opaque 'Text'; agents decode individually
--- via @Pattern.Aeson@.
+-- result. Each 'TaskView' is opaque 'Text'; agents decode individually
+-- via @Pattern.Aeson@ (lens accessors — no @FromJSON@ yet). Schema:
+--
+-- > {
+-- >   "block_ref": TaskEdgeRef,
+-- >   "subject": Text,
+-- >   "status": TaskStatus,
+-- >   "owner": AgentId?,
+-- >   "blocker_count": Int,        -- tasks that block this one (in-degree)
+-- >   "blocks_count": Int          -- tasks this one blocks (out-degree)
+-- > }
+--
+-- A follow-up task ("typed SDK records via vendored JSON parser") will
+-- replace these opaque Texts with real Haskell records + FromJSON.
 type TaskView = Text
 
--- | JSON-encoded graph-query parameters (fields: direction, depth,
--- max_nodes).  'direction' is one of @\"Forward\"@, @\"Reverse\"@,
--- @\"Both\"@.
+-- | JSON-encoded graph-query parameters. Schema:
+--
+-- > {
+-- >   "direction": Direction,       -- "forward", "reverse", or "both"
+-- >   "depth": Int?,                -- optional; default 16
+-- >   "max_nodes": Int?             -- optional; default 1000
+-- > }
 type GraphQuery = Text
 
--- | JSON-encoded graph slice returned by 'QueryGraph' (fields: nodes,
--- edges, truncated).
+-- | JSON-encoded graph slice returned by 'QueryGraph'. Schema:
+--
+-- > {
+-- >   "nodes": [TaskEdgeRef],       -- all discovered nodes
+-- >   "edges": [[TaskEdgeRef, TaskEdgeRef]],  -- (source, target) pairs
+-- >   "truncated": Bool             -- true if depth/max_nodes cap was hit
+-- > }
+--
+-- Edges are always in source→target orientation regardless of traversal
+-- direction (Reverse traversal returns edges pointing at the root, not
+-- outward from it).
 type GraphSlice = Text
 
 -- | Task effect algebra.

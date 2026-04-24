@@ -1418,16 +1418,48 @@ fn apply_json_to_loro_doc(
                     .delete(0, len)
                     .map_err(|e| format!("LoroMovableList delete failed: {e}"))?;
             }
-            // Push each item as a LoroValue::Map so that the render path
-            // (`task_item_to_kdl_node`) sees Map entries rather than
-            // opaque JSON strings. This mirrors the pattern used by
-            // `StructuredDocument::import_from_json` which also converts
-            // via json_to_loro before inserting into the movable list.
+            // Push each item as a nested LoroMap CONTAINER (not a value-map
+            // snapshot). This preserves field-level CRDT merge semantics for
+            // concurrent mutations — an agent updating `status` and another
+            // adding a comment on the same item merge correctly instead of
+            // LWW-stomping each other (review finding I3).
+            //
+            // The render path (`task_item_to_kdl_node`) and subscriber
+            // reconcile (`reconcile_task_list`) both consume `get_deep_value()`
+            // which materializes containers back into `LoroValue::Map` values,
+            // so downstream shape is unchanged.
             for entry in items {
-                let loro_value = json_to_loro_value(entry);
-                loro_list
-                    .push(loro_value)
-                    .map_err(|e| format!("LoroMovableList push failed: {e}"))?;
+                let entry_obj = entry
+                    .as_object()
+                    .ok_or_else(|| format!("TaskList item must be a JSON object, got: {entry}"))?;
+                let item_map = loro_list
+                    .push_container(loro::LoroMap::new())
+                    .map_err(|e| format!("LoroMovableList push_container failed: {e}"))?;
+                for (key, value) in entry_obj {
+                    match (key.as_str(), value) {
+                        // `comments` and `blocks` are nested lists. Keep them
+                        // as LoroList containers so future in-place mutations
+                        // (add_comment, link/unlink) produce CRDT ops rather
+                        // than wholesale replacements.
+                        ("comments" | "blocks", serde_json::Value::Array(arr)) => {
+                            let nested = item_map
+                                .insert_container(key, loro::LoroList::new())
+                                .map_err(|e| {
+                                    format!("LoroMap insert_container({key}) failed: {e}")
+                                })?;
+                            for elem in arr {
+                                nested
+                                    .push(json_to_loro_value(elem))
+                                    .map_err(|e| format!("LoroList push in {key} failed: {e}"))?;
+                            }
+                        }
+                        _ => {
+                            item_map
+                                .insert(key, json_to_loro_value(value))
+                                .map_err(|e| format!("LoroMap insert({key}) failed: {e}"))?;
+                        }
+                    }
+                }
             }
             Ok(())
         }

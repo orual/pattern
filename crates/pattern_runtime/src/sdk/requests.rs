@@ -89,6 +89,19 @@ mod parity {
         ("RpcReq", &["Call", "Recv"]),
         ("SpawnReq", &["Start", "Stop"]),
         ("DiagnosticsReq", &["GetDiagnostics"]),
+        (
+            "TasksReq",
+            &[
+                "Create",
+                "Update",
+                "Transition",
+                "Link",
+                "Unlink",
+                "List",
+                "QueryGraph",
+                "AddComment",
+            ],
+        ),
     ];
 
     /// Sanity check: the table isn't empty and each entry lists at least
@@ -97,8 +110,8 @@ mod parity {
     fn parity_table_is_populated() {
         assert_eq!(
             EXPECTED.len(),
-            14,
-            "expected 14 SDK namespaces; update this test when adding/removing one"
+            15,
+            "expected 15 SDK namespaces; update this test when adding/removing one"
         );
         for (enum_name, variants) in EXPECTED {
             assert!(
@@ -268,6 +281,23 @@ mod parity {
         use super::DiagnosticsReq;
         let _ = DiagnosticsReq::GetDiagnostics;
         assert_eq!(count("DiagnosticsReq"), 1);
+    }
+
+    #[test]
+    fn tasks_req_variants() {
+        use super::TasksReq;
+        // Exhaustively construct every variant so a rename or added variant
+        // forces a compile error or count mismatch. Payload strings are
+        // unused — this only exercises the type shape.
+        let _ = TasksReq::Create(String::new(), String::new());
+        let _ = TasksReq::Update(String::new(), String::new());
+        let _ = TasksReq::Transition(String::new(), String::new());
+        let _ = TasksReq::Link(String::new(), String::new());
+        let _ = TasksReq::Unlink(String::new(), String::new());
+        let _ = TasksReq::List(None, String::new());
+        let _ = TasksReq::QueryGraph(String::new(), String::new());
+        let _ = TasksReq::AddComment(String::new(), String::new());
+        assert_eq!(count("TasksReq"), 8);
     }
 
     /// Look up the expected variant count from the table.

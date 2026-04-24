@@ -1,7 +1,7 @@
 //! Haskell preamble assembler for `code` tool eval source wrapping.
 //!
 //! Produces the static Haskell boilerplate shared by every `code` tool
-//! eval: language pragmas, module header, standard imports, the 13 SDK
+//! eval: language pragmas, module header, standard imports, the 15 SDK
 //! effect module imports (hybrid qualified/unqualified scheme), the
 //! `type M` effect-row alias, and pagination support.
 //!
@@ -27,7 +27,7 @@ use crate::sdk::describe::EffectDecl;
 /// inlined (the effect modules are imported directly; tidepool's
 /// multi-module compilation works since the DataConTable/CoreExpr bug
 /// was fixed in our fork). The `type M` alias is hardcoded to match the
-/// canonical 13-effect row.
+/// canonical 15-effect row.
 pub fn build(decls: &[EffectDecl]) -> String {
     let mut out = String::with_capacity(8192);
 
@@ -43,7 +43,7 @@ pub fn build(decls: &[EffectDecl]) -> String {
 
     // Standard imports. Pattern.Prelude is the curated prelude substitute
     // (Text-returning show, list/Map helpers, Aeson construction). It does
-    // NOT re-export the 13 effect modules. The `hiding (error)` suppresses
+    // NOT re-export the 15 effect modules. The `hiding (error)` suppresses
     // Prelude.error so agents use the Text-accepting shadow defined below.
     out.push_str("import Pattern.Prelude hiding (error)\n");
     out.push_str("import qualified Data.Text as T\n");
@@ -70,11 +70,12 @@ pub fn build(decls: &[EffectDecl]) -> String {
     // disambiguation at call sites). The four "terse" modules (Message,
     // Time, Display, Spawn) have helper names that don't collide with
     // Prelude or other effects — agents can write bare `send`, `now`,
-    // `chunk`, `start`. The other nine have generic verbs (`get`,
-    // `read`, `error`, etc.) that WOULD collide unqualified, so they
-    // ARE ONLY imported qualified (not both). This also gives the LLM
-    // a single consistent style (`Memory.put`, `Display.chunk`,
-    // `Log.info`) when it pattern-matches off other SDK conventions.
+    // `chunk`, `start`. The other ten have generic verbs (`get`,
+    // `read`, `error`, `create`, `list`, etc.) that WOULD collide
+    // unqualified, so they ARE ONLY imported qualified (not both). This
+    // also gives the LLM a single consistent style (`Memory.put`,
+    // `Display.chunk`, `Log.info`, `Tasks.create`) when it
+    // pattern-matches off other SDK conventions.
     out.push_str(
         "-- Terse-import SDK effects (also qualified for explicit-attribution call sites)\n",
     );
@@ -99,6 +100,8 @@ pub fn build(decls: &[EffectDecl]) -> String {
     out.push_str("import qualified Pattern.Mcp as Mcp\n");
     out.push_str("import qualified Pattern.Search as Search\n");
     out.push_str("import qualified Pattern.Recall as Recall\n");
+    out.push_str("import qualified Pattern.Tasks as Tasks\n");
+    out.push_str("import qualified Pattern.Diagnostics as Diagnostics\n");
 
     out.push_str("default (Int, Text)\n");
     // Text-accepting error shim. Hides Pattern.Log.error (qualified as
@@ -136,12 +139,14 @@ pub fn build(decls: &[EffectDecl]) -> String {
     // snippets is `result :: Eff M Value`, which expands to
     // `Eff '[Memory.Memory, ...] Value`. Wrapping `Eff` into the
     // synonym here would produce `Eff (Eff '[...]) Value` — a kind
-    // error. Canonical order: Memory, Search, Recall, Message,
-    // Display, Time, Log, Shell, File, Sources, Mcp, Rpc, Spawn.
+    // error. Canonical order: Memory, Search, Recall, Tasks, Message,
+    // Display, Time, Log, Shell, File, Sources, Mcp, Rpc, Spawn,
+    // Diagnostics. Must match `SdkBundle` HList in `bundle.rs`.
     out.push_str(concat!(
-        "type M = '[Memory.Memory, Search.Search, Recall.Recall, ",
+        "type M = '[Memory.Memory, Search.Search, Recall.Recall, Tasks.Tasks, ",
         "Message, Display, Time, Log.Log, Shell.Shell, ",
-        "File.File, Sources.Sources, Mcp.Mcp, Rpc.Rpc, Spawn]\n\n",
+        "File.File, Sources.Sources, Mcp.Mcp, Rpc.Rpc, Spawn, ",
+        "Diagnostics.Diagnostics]\n\n",
     ));
 
     // Pagination support — pure Haskell functions (no effect types),
@@ -240,10 +245,10 @@ fn emit_pagination_support(out: &mut String) {
 
 /// Build the effect stack type string using qualified names where required.
 ///
-/// Returns the canonical 13-effect row string matching the `type M` alias
+/// Returns the canonical 15-effect row string matching the `type M` alias
 /// in the preamble: `'[Memory.Memory, Search.Search, Recall.Recall,
-/// Message, Display, Time, Log.Log, Shell.Shell, File.File,
-/// Sources.Sources, Mcp.Mcp, Rpc.Rpc, Spawn]`.
+/// Tasks.Tasks, Message, Display, Time, Log.Log, Shell.Shell, File.File,
+/// Sources.Sources, Mcp.Mcp, Rpc.Rpc, Spawn, Diagnostics.Diagnostics]`.
 ///
 /// Returns `'[]` when `decls` is empty (legacy / test use).
 pub fn build_effect_stack_type(decls: &[EffectDecl]) -> String {
@@ -254,9 +259,10 @@ pub fn build_effect_stack_type(decls: &[EffectDecl]) -> String {
     // `build()`. These are parallel-maintained; if the canonical effect row
     // in `bundle.rs` ever changes, both must be updated together.
     concat!(
-        "'[Memory.Memory, Search.Search, Recall.Recall, ",
+        "'[Memory.Memory, Search.Search, Recall.Recall, Tasks.Tasks, ",
         "Message, Display, Time, Log.Log, Shell.Shell, ",
-        "File.File, Sources.Sources, Mcp.Mcp, Rpc.Rpc, Spawn]"
+        "File.File, Sources.Sources, Mcp.Mcp, Rpc.Rpc, Spawn, ",
+        "Diagnostics.Diagnostics]"
     )
     .to_string()
 }
@@ -319,6 +325,8 @@ mod tests {
             "import qualified Pattern.Mcp as Mcp",
             "import qualified Pattern.Search as Search",
             "import qualified Pattern.Recall as Recall",
+            "import qualified Pattern.Tasks as Tasks",
+            "import qualified Pattern.Diagnostics as Diagnostics",
         ];
         for line in expected {
             assert!(preamble.contains(line), "missing: {line}");
@@ -334,7 +342,8 @@ mod tests {
         // to `Eff '[...] Value`. Wrapping `Eff` into the synonym would
         // produce a kind error (Eff expects a list, not another Eff).
         assert!(
-            preamble.contains("type M = '[Memory.Memory, Search.Search, Recall.Recall"),
+            preamble
+                .contains("type M = '[Memory.Memory, Search.Search, Recall.Recall, Tasks.Tasks"),
             "missing or incorrect type M list alias"
         );
         assert!(
@@ -346,8 +355,10 @@ mod tests {
             "missing Message/Display/Time/Log.Log in type M"
         );
         assert!(
-            preamble.contains("File.File, Sources.Sources, Mcp.Mcp, Rpc.Rpc, Spawn]"),
-            "missing File/Sources/Mcp/Rpc/Spawn in type M"
+            preamble.contains(
+                "File.File, Sources.Sources, Mcp.Mcp, Rpc.Rpc, Spawn, Diagnostics.Diagnostics]"
+            ),
+            "missing File/Sources/Mcp/Rpc/Spawn/Diagnostics in type M"
         );
     }
 
@@ -441,12 +452,13 @@ mod tests {
         let decls = canonical_effect_decls();
         let stack = build_effect_stack_type(&decls);
         assert!(
-            stack.starts_with("'[Memory.Memory, Search.Search, Recall.Recall, Message"),
+            stack
+                .starts_with("'[Memory.Memory, Search.Search, Recall.Recall, Tasks.Tasks, Message"),
             "expected qualified form; got: {stack}"
         );
         assert!(
-            stack.ends_with("Spawn]"),
-            "expected Spawn] at end; got: {stack}"
+            stack.ends_with("Diagnostics.Diagnostics]"),
+            "expected Diagnostics.Diagnostics] at end; got: {stack}"
         );
     }
 
