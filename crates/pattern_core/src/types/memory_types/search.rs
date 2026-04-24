@@ -31,16 +31,6 @@ pub enum SearchContentType {
     Messages,
 }
 
-impl SearchContentType {
-    /// Convert to pattern_db SearchContentType.
-    pub fn to_db_content_type(self) -> pattern_db::search::SearchContentType {
-        match self {
-            Self::Blocks => pattern_db::search::SearchContentType::MemoryBlock,
-            Self::Archival => pattern_db::search::SearchContentType::ArchivalEntry,
-            Self::Messages => pattern_db::search::SearchContentType::Message,
-        }
-    }
-}
 
 /// Search options for memory operations
 #[derive(Debug, Clone)]
@@ -143,23 +133,6 @@ pub struct MemorySearchResult {
     pub score: f64,
 }
 
-impl MemorySearchResult {
-    /// Convert from pattern_db SearchResult.
-    pub fn from_db_result(result: pattern_db::search::SearchResult) -> Self {
-        let content_type = match result.content_type {
-            pattern_db::search::SearchContentType::Message => SearchContentType::Messages,
-            pattern_db::search::SearchContentType::MemoryBlock => SearchContentType::Blocks,
-            pattern_db::search::SearchContentType::ArchivalEntry => SearchContentType::Archival,
-        };
-
-        Self {
-            id: result.id,
-            content_type,
-            content: result.content,
-            score: result.score,
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {

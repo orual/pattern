@@ -195,6 +195,7 @@ Match in `handle()` to each variant — all four variants currently return `Effe
 **Testing:**
 - Unit: `effect_decl().constructors` contains `"Ephemeral"`, `"Fork"`, `"Sibling"`, `"Stop"`. No residue of the old `"Start"` constructor.
 - Unit: `canonical_effect_decls()` still parses under `parse_constructor` (the existing test at `bundle.rs:115`).
+- **SdkBundle ordering note:** `Spawn` already occupies its canonical slot in the bundle HList (position 13, just before `Diagnostics`). Phase 2 Task 2 redesigns the Haskell-side grammar but does NOT re-position `Spawn` in the HList — the effect-tag numbering agent programs encode in their `Eff '[...]` rows MUST stay stable. Plan 2 (task-skill-blocks) is expected to have added `Tasks` to `CANONICAL_EFFECT_ROW` by Phase 2 execution time; if it did, confirm the ordering and slot alignment between `Pattern.Spawn` and `Pattern.Tasks` at kickoff. Do NOT reshuffle existing slots.
 - Snapshot (insta): Haskell preamble contains the updated `Pattern.Spawn` imports/helpers list. Update or add a snapshot so the diff is obvious.
 
 **Verification:**
@@ -357,6 +358,7 @@ tokio::spawn({
 **Testing:**
 - Integration: 3-level chain. Parent spawns ephemeral-child, ephemeral-child spawns grandchild. Parent's cancel → both child and grandchild observe `cancel_state.cancellation=true` within 100ms.
 - Integration: parent completes normally (no cancel) → child and grandchild complete normally.
+- **EvalWorker orphan check (AC3.6):** `EvalWorker` spawns an OS thread via `std::thread::spawn` with a 256 MiB stack — leaks are expensive. Add an atomic counter `static LIVE_EVAL_WORKERS: AtomicUsize` at `agent_loop/eval_worker.rs`, incremented in `spawn`/`spawn_with_includes` and decremented on worker-thread exit (drop-guard at the worker's thread-local). At test start: record `initial = LIVE_EVAL_WORKERS.load()`. At test end (after parent resolves): assert `LIVE_EVAL_WORKERS.load() == initial` within a 500ms grace window. This is a deterministic leak test, not best-effort.
 
 **Verification:**
 `cargo nextest run -p pattern-runtime ephemeral_chain`
@@ -408,8 +410,7 @@ The sibling's `SessionContext` gets a fresh `CancelState`, fresh `pending_messag
 **Files:**
 - Modify: `crates/pattern_runtime/src/spawn/sibling.rs` — `SiblingPersona::New(cfg)` arm.
 - Create: `crates/pattern_runtime/src/spawn/draft.rs` — writes a persona KDL to disk (at a well-known drafts location, e.g. `<mount>/drafts/<persona_id>.kdl`) and records a `DraftPersona { id, config_path, created_at }` via a small interface that Phase 6 replaces with the real registry.
-- Modify: `crates/pattern_core/src/capability.rs` — add `EffectCategory::SpawnNewIdentities` as a capability flag? No — SpawnNewIdentities is a sub-right of Spawn, not a first-class effect. Instead:
-- Modify: `crates/pattern_core/src/capability.rs` — introduce `CapabilityFlag` enum orthogonal to `EffectCategory`; `CapabilitySet` gains a `flags: BTreeSet<CapabilityFlag>` field. Initial flags: `SpawnNewIdentities`, `WakeConditionRegistration` (future use). Plumb through the parser in Phase 1 Task 13.
+- No structural changes to `CapabilitySet` or `CapabilityFlag` — both types land in Phase 1 Task 1 with `SpawnNewIdentities` reserved. Phase 2 Task 7 only *reads* the flag at runtime via `parent.capabilities().has_flag(CapabilityFlag::SpawnNewIdentities)`.
 
 **Implementation:**
 When `cfg.persona == New(persona_config)`:
@@ -417,7 +418,14 @@ When `cfg.persona == New(persona_config)`:
 - If `parent.capabilities().has_flag(CapabilityFlag::SpawnNewIdentities)`: create the persona config on disk, register in the runtime-visible draft table (stub in Phase 2, real in Phase 6), **open the session** just like the existing-persona path. Return the new `PersonaId`. (AC5.2.)
 - If NOT: still create the KDL on disk, register as draft, but **do not open a session**. Return the draft `PersonaId`. A later human-driven promote (Phase 6) opens it. (AC5.3.)
 
-The draft file writing goes through the file handler — which is still a stub. Work around by writing directly from the sibling spawn code path (`std::fs::write`) to a dedicated drafts directory; the file-handler-gating applies only to agent-driven file writes, not runtime-internal ones. Document this in the code.
+The draft file is written by the runtime itself (not through the File effect), using `std::fs::write` into a runtime-owned drafts directory. This is the correct trust boundary: the File handler's shape-based gate (Phase 1 Task 15) exists to prevent **agent programs** from mutating pattern-config KDL; runtime-internal writes are authorised by the runtime's own code paths (the `spawn.sibling` handler ran, not the Haskell agent directly writing to disk), so the gate does not apply.
+
+For audit-trail parity, the draft write goes through a small `RuntimeConfigWriter` helper that:
+1. Resolves the drafts directory relative to the mount.
+2. Logs the write at `info` with the persona id and a `source = "runtime.spawn.sibling"` tag.
+3. Calls `std::fs::write`.
+
+This gives the same observability the Phase 1 shape gate provides for agent writes, without conflating runtime-authorised writes with agent-driven ones. Tests: assert the log line appears; assert the file lands at the expected path; assert no `PermissionRequest` is broadcast through the broker (it's a runtime-internal operation).
 
 **Testing:**
 - AC5.2: parent has `SpawnNewIdentities`; spawn sibling with `New(cfg)`. Draft file written, registry entry created, session opened, new `PersonaId` returned, session steps at least once successfully.
@@ -478,9 +486,24 @@ For `ForkIsolation::Persistent`: return `EffectError::Handler("persistent fork i
 
 **Implementation:**
 
-Haskell-side helpers:
+Haskell-side helpers + minimal type declarations. The return types (`SpawnId`, `ForkHandle`, `PersonaId`, `SpawnResult`, `MergeReport`) land here as opaque placeholders that Phase 3 Task 8 fleshes out with resolution helpers. Naming them in Phase 2 prevents forward-reference compile failures.
 
 ```haskell
+-- Type placeholders. Phase 3 Task 8 extends ForkHandle with awaitResult /
+-- mergeBack / discard / promote helpers; Phase 2 just needs the wire shape.
+newtype SpawnId   = SpawnId   { spawnIdText :: Text } deriving (Eq, Show)
+newtype PersonaId = PersonaId { personaIdText :: Text } deriving (Eq, Show)
+data ForkHandle   = ForkHandle { forkId :: SpawnId } deriving (Eq, Show)
+
+-- Result of an ephemeral's await or a fork's awaitResult (Phase 3 extends).
+-- Phase 2 surfaces it as opaque JSON; Phase 3 Task 8 adds field accessors.
+newtype SpawnResult = SpawnResult { spawnResultJson :: Value }
+  deriving (Eq, Show)
+
+-- Placeholder; Phase 3 Task 2 fills in the concrete record shape.
+newtype MergeReport = MergeReport { mergeReportJson :: Value }
+  deriving (Eq, Show)
+
 ephemeral :: Member Spawn effs => EphemeralConfig -> Eff effs SpawnId
 ephemeral cfg = Freer.send (Ephemeral cfg)
 
@@ -494,7 +517,7 @@ stop :: Member Spawn effs => SpawnId -> Eff effs ()
 stop sid = Freer.send (Stop sid)
 ```
 
-Corresponding `EphemeralConfig`, `ForkConfig`, `SiblingConfig` Haskell types; start with minimal field sets and extend as Phase 3/6 need. Use record syntax with safe defaults. Document the Haskell types' serde layout to match the Rust config structs (JSON bridging via existing `Pattern.Aeson` helpers).
+Corresponding `EphemeralConfig`, `ForkConfig`, `SiblingConfig` Haskell record types with fields mirroring the Rust config structs. Use record syntax with safe defaults. JSON wire format bridges via existing `Pattern.Aeson` helpers; Rust-side `FromCore` is implemented by hand (no JSON-over-string fallback).
 
 Snapshot tests from Phase 1 Task 3 pick up the new helpers automatically; review the insta diff and approve.
 
@@ -514,7 +537,7 @@ Snapshot tests from Phase 1 Task 3 pick up the new helpers automatically; review
 
 ## Phase done-when checklist
 
-- [ ] Spawn-config types (Ephemeral/Fork/Sibling/PersonaConfig + RelationshipKind + CapabilityFlag) live in `pattern_core`. `PersonaId` alias added.
+- [ ] Spawn-config types (Ephemeral/Fork/Sibling/PersonaConfig + RelationshipKind) live in `pattern_core`. `PersonaId` alias added. `CapabilityFlag` + the `flags` field on `CapabilitySet` already land in Phase 1 Task 1.
 - [ ] `SpawnReq` grammar replaced with four-variant enum; Haskell `Pattern.Spawn` module updated.
 - [ ] `SpawnRegistry` with per-parent semaphore + cancel-on-drop exists and is threaded through `SessionContext`.
 - [ ] Ephemeral dispatch produces a live child session with capability inheritance, costume, and timeout; full AC3 coverage.

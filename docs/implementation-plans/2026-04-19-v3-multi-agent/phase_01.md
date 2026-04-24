@@ -106,14 +106,35 @@ pub enum EffectCategory {
 }
 ```
 
-Define `CapabilitySet` as a wrapper around `BTreeSet<EffectCategory>` (sorted, deterministic for hashing / serde):
+Define `CapabilityFlag` — an orthogonal set of boolean rights that a CapabilitySet grants beyond effect-category access:
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum CapabilityFlag {
+    /// Permits spawning a persona with a fresh identity (consumed in Phase 2
+    /// Task 7 and Phase 3 Task 7). Default off.
+    SpawnNewIdentities,
+    /// Permits registering custom Haskell wake conditions (consumed in
+    /// Phase 4 Task 9). Default off.
+    WakeConditionRegistration,
+    /// Permits setting the FrontingSet or routing rules (consumed in
+    /// Phase 5 Task 6). Default off.
+    FrontingControl,
+}
+```
+
+Define `CapabilitySet` as a struct carrying both effect categories and flags:
 
 ```rust
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CapabilitySet(BTreeSet<EffectCategory>);
+pub struct CapabilitySet {
+    pub categories: BTreeSet<EffectCategory>,
+    pub flags: BTreeSet<CapabilityFlag>,
+}
 ```
 
-Provide constructors: `CapabilitySet::empty()`, `CapabilitySet::all()` (every variant of `EffectCategory`), `CapabilitySet::from_iter(…)`. Methods: `contains(cat) -> bool`, `iter()`, `is_subset_of(other)`, and `restrict_to(other: &CapabilitySet) -> Result<Self, CapabilityError>` — used for ephemeral/fork inheritance (cannot escalate; returning `CapabilityError::Escalation` if `self` introduces caps absent from `other`).
+Provide constructors: `CapabilitySet::empty()`, `CapabilitySet::all()` (every `EffectCategory` variant + every `CapabilityFlag` variant — "godmode"), `CapabilitySet::from_iter(…)` (categories only; flags default empty). Methods: `contains(cat) -> bool`, `has_flag(flag: CapabilityFlag) -> bool`, `iter_categories()`, `iter_flags()`, `is_subset_of(other)`, `restrict_to(other: &CapabilitySet) -> Result<Self, CapabilityError>` — the restriction check enforces BOTH `self.categories ⊆ other.categories` AND `self.flags ⊆ other.flags`.
 
 Define `CapabilityError` with `thiserror`:
 
@@ -121,29 +142,38 @@ Define `CapabilityError` with `thiserror`:
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum CapabilityError {
-    #[error("capability escalation: cannot add {added:?} to a set restricted to {parent:?}")]
-    Escalation { added: Vec<EffectCategory>, parent: Vec<EffectCategory> },
+    #[error("capability escalation: cannot add categories {added_categories:?} or flags {added_flags:?} to a set restricted to categories {parent_categories:?} flags {parent_flags:?}")]
+    Escalation {
+        added_categories: Vec<EffectCategory>,
+        added_flags: Vec<CapabilityFlag>,
+        parent_categories: Vec<EffectCategory>,
+        parent_flags: Vec<CapabilityFlag>,
+    },
     #[error("capability denied: effect {category:?} not present in set")]
     Denied { category: EffectCategory },
+    #[error("capability flag denied: {flag:?} not present in set")]
+    FlagDenied { flag: CapabilityFlag },
 }
 ```
 
 Notes:
 - Error messages lowercase, sentence fragments per project conventions.
-- No runtime behaviour beyond data + predicates. `pattern_core` trait-only rule preserved.
+- No runtime behaviour beyond data + predicates. `pattern_core` trait-only spirit preserved.
 - `#[non_exhaustive]` everywhere per project convention.
+- `CapabilityFlag` variants are reserved for forward-use; Phase 1 doesn't wire any flag-gated behaviour itself, but the schema is set so Phase 2 / 4 / 5 can add gates without touching Phase 1 data types.
 
 **Testing:**
-- Unit: `CapabilitySet::all().len() == <variant_count>`; keep this assertion resilient — use `strum::EnumIter` or a manual match enumerating every variant (adding a new variant forces the test to update).
-- Unit: `restrict_to` returns `Err(Escalation{..})` when expanding beyond parent; returns `Ok` otherwise.
-- Unit: `CapabilitySet::default() == empty()`.
-- proptest (`serde_json`): round-trip `CapabilitySet` — parse-serialize-parse.
+- Unit: `CapabilitySet::all()` contains every EffectCategory variant and every CapabilityFlag variant. Use a manual match that covers every variant of each enum (adding a new variant forces the test to update).
+- Unit: `restrict_to` returns `Err(Escalation{..})` when expanding categories beyond parent OR expanding flags beyond parent; returns `Ok` otherwise.
+- Unit: `CapabilitySet::default() == empty()` — no categories, no flags.
+- Unit: `has_flag(SpawnNewIdentities)` returns false on a default set; returns true after `set.flags.insert(SpawnNewIdentities)`.
+- proptest (`serde_json`): round-trip `CapabilitySet` including flags — parse-serialize-parse.
 
 **Verification:**
 `cargo nextest run -p pattern-core capability`
 Expected: all new tests pass; full suite still green.
 
-**Commit:** `[pattern-core] add CapabilitySet and EffectCategory types`
+**Commit:** `[pattern-core] add CapabilitySet, EffectCategory, CapabilityFlag types`
 <!-- END_TASK_1 -->
 
 <!-- START_TASK_2 -->
@@ -277,16 +307,20 @@ Expected: all pre-existing tests still pass; no references to a global `Permissi
 <!-- END_TASK_5 -->
 
 <!-- START_TASK_6 -->
-### Task 6: `PermissionBroker` v2 — jiff durations, approve-for-scope plumbing
+### Task 6: `PermissionBroker` v2 — jiff durations, origin-aware request, approve-for-scope plumbing
 
 **Verifies:** AC2.4, AC2.5, AC2.6, AC2.8, AC2.9.
 
 **Files:**
-- Modify: `crates/pattern_core/src/permission.rs` — change `PermissionGrant.expires_at` from `chrono::DateTime<chrono::Utc>` to `jiff::Timestamp`; add `PermissionDecisionKind::ApproveForDuration(jiff::Span)` (replacing `std::time::Duration`); add the approve-for-scope cache.
-- Modify: any callers that build `PermissionDecisionKind::ApproveForDuration` or read `PermissionGrant.expires_at`.
+- Modify: `crates/pattern_core/src/permission.rs` — change `PermissionGrant.expires_at` from `chrono::DateTime<chrono::Utc>` to `jiff::Timestamp`; add `PermissionDecisionKind::ApproveForDuration(jiff::Span)` (replacing `std::time::Duration`); add the approve-for-scope cache; extend `request()` to take `origin: &MessageOrigin` and short-circuit on `origin.bypasses_permission_gate()` (Partner only, per Phase 4 Task 1's helper).
+- Modify: any callers that build `PermissionDecisionKind::ApproveForDuration` or read `PermissionGrant.expires_at` or call `request()`.
 
 **Implementation:**
 Swap chrono for jiff using the crate-level `jiff::Timestamp` / `jiff::Span`. Reason about expiry with `now + span`. Keep the `request()` method's external `timeout: std::time::Duration` — this is a host-side timeout and doesn't need jiff; the *grant* duration is the one that flows into the agent-visible data.
+
+Extend `request` signature with `origin: &MessageOrigin`. The broker short-circuits at the top: `if origin.bypasses_permission_gate() { return Some(PermissionGrant::synthesized_partner(req.scope.clone())); }`. All existing call sites from Phase 1 Tasks 5 / 10 / 15 pass `&origin` sourced from the current turn (see Task 7 for the accessor). The bypass helper lands in Phase 4 Task 1; until Phase 4 Task 1 commits, stub `bypasses_permission_gate()` as `fn bypasses_permission_gate(&self) -> bool { false }` and wire it to the real match in Phase 4. **No call site has to change between Phase 1 and Phase 4** — the helper is always callable.
+
+Add `PermissionGrant::synthesized_partner(scope: PermissionScope) -> PermissionGrant` constructor that produces a grant with a fresh id, no `expires_at`, and a marker in metadata (`{"source": "partner_bypass"}`) for audit.
 
 Add an `approve_for_scope` behaviour: when a grant returns `ApproveForScope`, the broker records the `PermissionScope` in an in-memory "session scope cache" (keyed by `(agent_id, scope)`). Subsequent requests matching the cached scope return without re-broadcasting. Cache is per-broker-instance (per-runtime), so two runtimes have independent caches (AC2.9).
 
@@ -298,6 +332,8 @@ Timeout path (AC2.8): `request()` already `tokio::time::timeout`s on the oneshot
 - Unit: request flow end-to-end with synthetic `subscribe()` recipient that calls `respond()` — cover ApproveOnce, ApproveForScope (two calls, second short-circuits), ApproveForDuration (advance `jiff::Timestamp` via injected clock), timeout case.
 - Inject a `fn now_fn: Arc<dyn Fn() -> jiff::Timestamp + Send + Sync>` so duration tests don't sleep. Default production constructor uses `jiff::Timestamp::now`.
 - Unit: two broker instances with independent scope caches — approving a scope on instance A does not carry to instance B (AC2.9).
+- Unit: Partner-bypass — construct an origin with `Author::Partner(...)`, call `request(..., &origin, ...)`, assert returns `Some(PermissionGrant)` with `source: partner_bypass` marker WITHOUT broadcast (no subscriber sees a request).
+- Unit: non-Partner origins (`Author::Human(_)`, `Author::Agent(_)`, `Author::System`) do NOT short-circuit — broadcast fires normally.
 
 **Verification:**
 `cargo nextest run -p pattern-runtime permission`
@@ -307,30 +343,85 @@ Expected: all new behaviour covered; no panics / leaks on timeout.
 <!-- END_TASK_6 -->
 
 <!-- START_TASK_7 -->
-### Task 7: Thread per-runtime broker through handler contexts
+### Task 7: Thread per-runtime broker + `PermissionBridge` + current-turn origin through handler contexts
 
-**Verifies:** AC2.9.
+**Verifies:** AC2.9, and the plumbing that Task 10 (Shell) and Task 15 (File) rely on.
 
 **Files:**
-- Modify: `crates/pattern_runtime/src/session.rs` — construct the broker alongside the runtime, store as `Arc<PermissionBroker>`, expose through `SessionContext` (accessor `ctx.permission_broker() -> &Arc<PermissionBroker>`).
-- Modify: any handler (`shell.rs`, future `file.rs`, etc.) that will consult the broker — switch to `cx.user().permission_broker()` via a new `HasPermissionBroker` trait (alongside the existing `HasCancelState`).
+- Modify: `crates/pattern_runtime/src/session.rs` — construct the broker alongside the runtime, store as `Arc<PermissionBroker>`, expose through `SessionContext`. Add a per-turn `current_turn_origin: Arc<std::sync::RwLock<Option<MessageOrigin>>>` field — written by `drive_step` on turn entry/exit, read by handlers.
+- Create: `crates/pattern_runtime/src/permission/bridge.rs` — `PermissionBridge` type following the `RouterBridge` (`crates/pattern_runtime/src/router.rs`) pattern: a sync-to-async bridge so handlers on the sync `EvalWorker` thread can request broker grants without `futures::executor::block_on`. One bridge per broker instance.
+- Modify: `crates/pattern_runtime/src/agent_loop.rs` — `drive_step` writes `ctx.current_turn_origin` from `TurnInput::origin` at entry, clears at exit (both arms — panic-safe via the Task 2 defer guard).
+- Modify: any handler that will consult the broker — expose via a new `HasPermissionBridge` trait alongside `HasCancelState`.
 
 **Implementation:**
-Define `HasPermissionBroker` in `pattern_runtime::session` (or wherever `HasCancelState` lives):
 
 ```rust
-pub trait HasPermissionBroker {
-    fn permission_broker(&self) -> &Arc<pattern_core::permission::PermissionBroker>;
+// session.rs
+pub trait HasPermissionBridge {
+    fn permission_bridge(&self) -> &Arc<PermissionBridge>;
+    fn current_turn_origin(&self) -> Option<MessageOrigin>;
+}
+
+impl HasPermissionBridge for SessionContext {
+    fn permission_bridge(&self) -> &Arc<PermissionBridge> { &self.permission_bridge }
+    fn current_turn_origin(&self) -> Option<MessageOrigin> {
+        self.current_turn_origin.read().ok()?.clone()
+    }
+}
+
+// permission/bridge.rs
+pub struct PermissionBridge {
+    request_tx: std::sync::mpsc::Sender<PermissionBridgeRequest>,
+}
+
+struct PermissionBridgeRequest {
+    req: PermissionRequest,
+    origin: MessageOrigin,
+    timeout: Duration,
+    reply_tx: std::sync::mpsc::Sender<Option<PermissionGrant>>,
+}
+
+impl PermissionBridge {
+    pub fn spawn(broker: Arc<PermissionBroker>) -> Arc<Self> {
+        let (tx, rx) = std::sync::mpsc::channel::<PermissionBridgeRequest>();
+        // Pump: one tokio task per bridge drains the sync channel and
+        // invokes broker.request() on the tokio runtime, replying via
+        // the request's reply_tx.
+        let broker = broker.clone();
+        tokio::spawn(async move {
+            // Receive from a sync channel in an async context: use
+            // tokio::task::spawn_blocking for the recv, similar to RouterBridge.
+            // (See router.rs for the exact pattern.)
+        });
+        Arc::new(Self { request_tx: tx })
+    }
+
+    pub fn request_sync(
+        &self,
+        req: PermissionRequest,
+        origin: &MessageOrigin,
+        timeout: Duration,
+    ) -> Option<PermissionGrant> {
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        let _ = self.request_tx.send(PermissionBridgeRequest {
+            req, origin: origin.clone(), timeout, reply_tx,
+        });
+        reply_rx.recv_timeout(timeout).ok().flatten()
+    }
 }
 ```
 
-`SessionContext` implements it. Handlers that need the broker take an additional bound `U: HasCancelState + HasPermissionBroker` (example in `shell.rs` at Task 10).
+`SessionContext` holds `permission_bridge: Arc<PermissionBridge>` constructed at session open. Handlers that need the broker take `U: HasCancelState + HasPermissionBridge` and call `cx.user().permission_bridge().request_sync(...)`.
+
+Do not leave a backwards-compat shim (guidance is explicit). Delete the global; callers fail to compile until updated. Fix every call site in the same task.
 
 **Testing:**
-- Integration: spin up two `SessionContext`s with independent `PermissionBroker` instances; confirm approving a scope on one does not leak (AC2.9, belt-and-suspenders with Task 6).
+- Integration: spin up two `SessionContext`s with independent `PermissionBroker` instances; confirm approving a scope on one does not leak (AC2.9).
+- Integration: Shell/File handler running on the sync EvalWorker thread issues `request_sync`; bridge correctly round-trips to the broker and back without deadlock. Use a scripted subscriber that responds in <10ms.
+- Integration: panic in drive_step still clears `current_turn_origin` (uses the Task 2 defer guard).
 
 **Verification:**
-`cargo nextest run` full suite. Expected: every handler that consults the broker reaches it through the per-session `SessionContext`.
+`cargo nextest run` full suite. Expected: every handler that consults the broker reaches it through the per-session `SessionContext` via `PermissionBridge`; no `futures::executor::block_on` in any handler.
 
 **Commit:** `[pattern-runtime] thread per-runtime PermissionBroker through SessionContext`
 <!-- END_TASK_7 -->
@@ -391,7 +482,7 @@ pub struct PolicySet {
 
 `PolicySet` offers `evaluate(effect: EffectCategory, context: &PolicyContext) -> PolicyAction`, iterating rules in precedence order (`RuntimeOverride > KdlConfig > RustDefault`) and returning the first matching rule's action. `PolicyContext` carries the runtime details the matcher needs (a shell command string, a file path, a memory scope).
 
-Pin down the `PolicyMatcher::ShellCommand` semantics: accept a shell-style glob pattern (`*`, `?`, no brace-expansion) using the `globset` crate if not already a dep — **ASK user before adding.** If `globset` is off the table, fall back to prefix matching (`"rm -rf".starts_with(&pat)`) and document the limitation. Either way, make the semantics obvious in the doc comment.
+`PolicyMatcher::ShellCommand` semantics: accept a shell-style glob pattern (`*`, `?`, no brace-expansion). `regex` is already a workspace dep (verified `Cargo.toml: regex = "1"`) — translate the glob into a regex at rule-load time and match against the command string. Keep the glob vocabulary small (`*` → `.*`, `?` → `.`, `[...]` passes through), document it in the doc comment, and test both matching and non-matching cases for every supported metacharacter.
 
 **Testing:**
 - Unit: precedence ordering — a RuntimeOverride Deny beats a KdlConfig Allow beats a RustDefault RequireApproval.
@@ -434,42 +525,66 @@ Keep the list short and documented. Each rule has a one-line `// why:` comment i
 <!-- START_TASK_10 -->
 ### Task 10: Policy evaluation in the Shell handler dispatch path
 
-**Verifies:** AC2.1 (end-to-end), AC2.2, AC2.3 (after Task 13 lands KDL overrides).
+**Verifies:** AC2.1 gate path (Deny end-to-end), AC2.2 gate-skip path (Allow end-to-end); real command-execution verification deferred to whenever the real Shell handler lands.
+
+**Important scope note:** `crates/pattern_runtime/src/sdk/handlers/shell.rs` is currently a stub that returns `EffectError::Handler("not implemented in v3 foundation (phase: post-foundation shell-tool plan)")`. Task 10 wraps the existing stub with the policy gate — it does NOT implement real command execution. Tests assert on the distinct error prefixes from Task 15 (`PERMISSION_DENIED_PREFIX` on Deny; handler's existing "not implemented" string on Allow). When the real Shell handler eventually lands in its own plan, approve-path tests can assert command output.
 
 **Files:**
-- Modify: `crates/pattern_runtime/src/sdk/handlers/shell.rs` — thread `PolicySet` into the handler via `SessionContext`, evaluate before command execution, escalate to `PermissionAuthority` on `RequireApproval`, reject on `Deny`.
+- Modify: `crates/pattern_runtime/src/sdk/handlers/shell.rs` — thread `PolicySet` into the handler via `SessionContext`, evaluate before command execution, escalate to `PermissionBridge::request_sync` on `RequireApproval`, reject on `Deny`. Preserve the existing "not implemented" stub error for the Allow / approved-after-gate path.
 - Modify: `crates/pattern_runtime/src/session.rs` — `SessionContext` gains `policies: Arc<PolicySet>` constructed at open from `rust_defaults() ++ kdl_rules ++ runtime_rules`.
 
 **Implementation:**
-Shell handler pseudocode:
 
 ```rust
-let policies = cx.user().policies();
-let ctx = PolicyContext::Shell { command: &req.command };
-match policies.evaluate(EffectCategory::Shell, &ctx) {
-    PolicyAction::Allow => run_shell(req),
-    PolicyAction::Deny { reason } => Err(EffectError::PermissionDenied(reason)),
-    PolicyAction::RequireApproval { reason } => {
-        let grant = cx.user().permission_authority()
-            .request(build_request(req, reason), request_timeout).await;
-        if grant.is_some() { run_shell(req) } else { Err(EffectError::PermissionDenied(None)) }
+fn handle(&mut self, req: ShellReq, cx: &EffectContext<'_, U>) -> Result<Value, EffectError> {
+    let _guard = HandlerGuard::enter(&cx.user().cancel_state().gate);
+    let policy_ctx = PolicyContext::Shell { command: &req.command };
+    match cx.user().policies().evaluate(EffectCategory::Shell, &policy_ctx) {
+        PolicyAction::Deny { reason } => Err(EffectError::Handler(format!(
+            "{PERMISSION_DENIED_PREFIX}{}",
+            reason.unwrap_or_else(|| "shell denied by policy".into()),
+        ))),
+        PolicyAction::RequireApproval { reason } => {
+            let origin = cx.user().current_turn_origin().ok_or_else(|| EffectError::Handler(
+                "shell: no current turn origin available".into()))?;
+            let grant = cx.user().permission_bridge().request_sync(
+                build_shell_request(&req.command, reason),
+                &origin,
+                request_timeout,
+            );
+            if grant.is_some() {
+                // Gate cleared. Fall through to the existing stub (real execution
+                // arrives in a later plan).
+                Err(EffectError::Handler(
+                    "Pattern.Shell.Execute is not implemented in v3 foundation \
+                     (phase: post-foundation shell-tool plan). Gate cleared.".into(),
+                ))
+            } else {
+                Err(EffectError::Handler(format!(
+                    "{PERMISSION_DENIED_PREFIX}shell denied by broker",
+                )))
+            }
+        }
+        PolicyAction::Allow => Err(EffectError::Handler(
+            "Pattern.Shell.Execute is not implemented in v3 foundation \
+             (phase: post-foundation shell-tool plan).".into(),
+        )),
     }
 }
 ```
 
-(Names are illustrative — use the existing error types. If `EffectError::PermissionDenied` does not exist, add it.)
-
-For Task 10 specifically, DO NOT yet wire KDL-loaded rules — that's Task 13/14. Construct `PolicySet` from `rust_defaults()` only. This keeps the Shell path testable in isolation now.
+For Task 10 specifically, DO NOT yet wire KDL-loaded rules — that's Task 13/14. Construct `PolicySet` from `rust_defaults()` only.
 
 **Testing:**
-- Integration (scripted, no live shell): open a session, submit an agent program that calls `Shell.execute "rm -rf /tmp/testdir"`. A test harness subscribes to the broker and responds with `Deny` — the agent sees an error matching `PermissionDenied` (AC2.1).
-- Integration: same setup, respond with `ApproveOnce` — the agent proceeds (Shell handler runs the command; tests use a neutered command like `echo ok` combined with a test-side pattern to exercise the gate).
-- Integration: `Shell.execute "ls"` (not matched by defaults) runs without broker interaction.
+- AC2.1 Deny path: agent program calls `Shell.execute "rm -rf /tmp/testdir"`. Test harness subscribes to the broker and responds `Deny`. Assert agent sees `EffectError::Handler` whose message starts with `PERMISSION_DENIED_PREFIX`.
+- AC2.1 Approve path (stub error): same program, broker responds `ApproveOnce`. Assert agent sees `EffectError::Handler` whose message contains `"Pattern.Shell.Execute is not implemented"` AND `"Gate cleared"`. This proves: (a) the gate fired, (b) approval was recognized, (c) execution stub is reached. Real execution verification is NOT in Phase 1 scope.
+- AC2.2 gate-skip: `Shell.execute "ls"` (not matched by defaults). Assert NO broker request observed; agent sees the plain stub "not implemented" error (no "Gate cleared" marker — since the gate short-circuited on `Allow` without the explicit approval ceremony). This proves the gate isn't over-firing.
+- Partner bypass (cross-check with Task 6's broker test): origin is `Author::Partner(...)`; the broker's short-circuit returns `Some` synthetically; agent sees the "Gate cleared" stub error WITHOUT the broker observing a request.
 
 **Verification:**
 `cargo nextest run -p pattern-runtime shell_policy`
 
-**Commit:** `[pattern-runtime] gate Shell handler through PolicySet`
+**Commit:** `[pattern-runtime] gate Shell handler stub through PolicySet + PermissionBridge`
 <!-- END_TASK_10 -->
 
 <!-- END_SUBCOMPONENT_D -->
@@ -569,9 +684,14 @@ Persona KDL fragment (illustrative):
 
 ```kdl
 capabilities {
-    - "memory"
-    - "message"
-    - "tasks"
+    effects {
+        - "memory"
+        - "message"
+        - "tasks"
+    }
+    flags {
+        - "spawn-new-identities"
+    }
 }
 
 policy {
@@ -585,14 +705,16 @@ policy {
 }
 ```
 
-`CapabilitiesSection` uses `knus::Decode` to parse a list of lowercase strings into a `CapabilitySet`. Unknown effect names error out clearly (knus already supports `#[knus(argument, str)]`-style conversions via `FromStr` on `EffectCategory`).
+`CapabilitiesSection` uses `knus::Decode` to parse both child blocks — `effects` (list of lowercase effect-category strings) and `flags` (list of kebab-case flag names). Unknown names error out clearly (knus already supports `#[knus(argument, str)]`-style conversions via `FromStr` on `EffectCategory` / `CapabilityFlag`). Both child blocks are optional; an empty `capabilities {}` decodes to `CapabilitySet::empty()` (pure-computation persona).
 
 `PolicySection` parses into `Vec<PolicyRule>` with `Precedence::KdlConfig`.
 
 **Testing:**
-- Unit: parse a hand-written KDL persona fixture (new file at `crates/pattern_runtime/tests/fixtures/capability_persona.kdl`) and assert capabilities + policy rules decode to the expected in-memory shape.
+- Unit: parse a hand-written KDL persona fixture (new file at `crates/pattern_runtime/tests/fixtures/capability_persona.kdl`) and assert capabilities + flags + policy rules decode to the expected in-memory shape.
 - Unit: a persona without `capabilities {}` falls back to `CapabilitySet::all()` — back-compat; document this clearly in the doc comment.
-- Unit: invalid effect name (`capabilities { - "nonsense" }`) returns a knus/miette error with the bad span.
+- Unit: a persona with `capabilities { effects { ... } }` but no `flags` block decodes with empty flags (no SpawnNewIdentities etc.).
+- Unit: a persona with `capabilities { flags { - "spawn-new-identities" } }` decodes with `CapabilityFlag::SpawnNewIdentities` set.
+- Unit: invalid effect name (`effects { - "nonsense" }`) or invalid flag name returns a knus/miette error with the bad span.
 
 **Verification:**
 `cargo nextest run -p pattern-runtime persona_loader`
@@ -644,34 +766,50 @@ policy {
 Split the File handler's blanket stub so that `FileReq::Write(path, content)` evaluates the policy pipeline before any write logic:
 
 ```rust
+// Well-known prefix — tests and handlers pattern-match on it.
+const PERMISSION_DENIED_PREFIX: &str = "PermissionDenied: ";
+const GATE_APPROVED_PREFIX: &str = "GateApproved: ";
+
 fn handle(&mut self, req: FileReq, cx: &EffectContext<'_, U>) -> Result<Value, EffectError> {
     let _guard = HandlerGuard::enter(&cx.user().cancel_state().gate);
     match req {
         FileReq::Write(path, content) => {
-            let ctx = PolicyContext::FileWrite { path: &path, content: content.as_bytes() };
-            match cx.user().policies().evaluate(EffectCategory::File, &ctx) {
+            let policy_ctx = PolicyContext::FileWrite { path: &path, content: content.as_bytes() };
+            match cx.user().policies().evaluate(EffectCategory::File, &policy_ctx) {
                 PolicyAction::Deny { reason } => {
-                    Err(EffectError::PermissionDenied(reason.unwrap_or_default()))
+                    Err(EffectError::Handler(format!(
+                        "{PERMISSION_DENIED_PREFIX}{}",
+                        reason.unwrap_or_else(|| "file write denied by policy".into()),
+                    )))
                 }
                 PolicyAction::RequireApproval { reason } => {
-                    // Same escalation shape as Shell handler (Task 10): build
-                    // PermissionRequest, call broker.request, map None → denied.
-                    let granted = futures::executor::block_on(async {
-                        cx.user().permission_authority()
-                            .request(build_file_request(&path, reason), cx.user().caller(), request_timeout)
-                            .await
-                    });
-                    if granted.is_some() {
-                        Err(EffectError::Handler(
-                            "File.Write gate approved; actual write mechanics land in sandbox-io plan".into(),
-                        ))
+                    // Escalate via the same sync bridge the Shell handler uses
+                    // (RouterBridge-style sync-to-async channel from router.rs).
+                    // Do NOT introduce futures::executor::block_on — that can
+                    // deadlock if the broker re-enters tokio.
+                    let origin = cx.user().current_turn_origin()
+                        .ok_or_else(|| EffectError::Handler(
+                            "file write: no current turn origin available".into()))?;
+                    let grant = cx.user().permission_bridge().request_sync(
+                        build_file_request(&path, reason),
+                        &origin,
+                        request_timeout,
+                    );
+                    if grant.is_some() {
+                        Err(EffectError::Handler(format!(
+                            "{GATE_APPROVED_PREFIX}File.Write gate approved; actual \
+                             write mechanics land in sandbox-io plan",
+                        )))
                     } else {
-                        Err(EffectError::PermissionDenied("file write denied by broker".into()))
+                        Err(EffectError::Handler(format!(
+                            "{PERMISSION_DENIED_PREFIX}file write denied by broker",
+                        )))
                     }
                 }
-                PolicyAction::Allow => Err(EffectError::Handler(
-                    "File.Write gate approved; actual write mechanics land in sandbox-io plan".into(),
-                )),
+                PolicyAction::Allow => Err(EffectError::Handler(format!(
+                    "{GATE_APPROVED_PREFIX}File.Write gate approved; actual \
+                     write mechanics land in sandbox-io plan",
+                ))),
             }
         }
         FileReq::Read(_) | FileReq::ListDir(_) => Err(EffectError::Handler(
@@ -683,14 +821,14 @@ fn handle(&mut self, req: FileReq, cx: &EffectContext<'_, U>) -> Result<Value, E
 }
 ```
 
-The "Allow" and "RequireApproval-approved" arms return a distinct error from the "Deny" / "RequireApproval-denied" arm so tests can assert which path fired. `PermissionDenied` is a new `EffectError` variant if it doesn't already exist — add it in the same commit.
+**Why `EffectError::Handler(prefix)` and not a new variant:** `EffectError` lives in the external `tidepool-effect` crate (our fork at `github:orual/tidepool`). Adding a `PermissionDenied` variant there would require an upstream patch + `flake.lock` bump, out of scope for this phase. The `Handler(prefix)` pattern matches the existing convention used by other Phase 1 stubs, and tests can match on the `PERMISSION_DENIED_PREFIX` / `GATE_APPROVED_PREFIX` constants. When this pattern accumulates enough users to warrant the upstream patch, promote to a dedicated variant.
 
-The blocking `futures::executor::block_on` call mirrors the Shell handler (which runs on the sync EvalWorker thread and cannot `.await`). If the Shell handler uses a different bridge (`RouterBridge`-style sync channel), reuse that instead — align with the established precedent, don't invent a second bridge.
+**Why not `futures::executor::block_on`:** it spins up a mini-executor that can deadlock if the broker re-enters the ambient tokio runtime. Reuse `RouterBridge`'s sync-to-async channel pattern (`crates/pattern_runtime/src/router.rs`) via a new `PermissionBridge` on the same shape — one sync channel per broker, one tokio task drains it. Task 7 establishes the bridge; Task 10 (Shell) and Task 15 (File) consume it.
 
 **Testing (integration, matches AC2.7):**
-- AC2.7 core: agent program with `File` capability calls `File.write "/tmp/.pattern.kdl" "mount mode=\"A\"\n"`. The broker's test subscriber observes a `PermissionRequest` with scope matching the write; test responds `Deny`; the agent sees `PermissionDenied`. Assert the error message mentions "pattern config kdl".
+- AC2.7 core: agent program with `File` capability calls `File.write "/tmp/.pattern.kdl" "mount mode=\"A\"\n"`. The broker's test subscriber observes a `PermissionRequest` with scope matching the write; test responds `Deny`; the agent sees an `EffectError::Handler` whose message starts with `PERMISSION_DENIED_PREFIX`. Assert the message mentions "pattern config kdl".
 - AC2.7 locked-default: the persona's KDL config contains `policy { rule "allow-all-writes" effect="file" action="allow" { matcher "file-path" pattern="**/*" } }` — a loosening rule. Submit the same write to `/tmp/.pattern.kdl`. Assert the broker STILL receives the request (locked default wins over KDL `Allow`).
-- Non-config file: `File.write "/tmp/notes.txt" "hello"`. Assert NO broker request observed; the agent sees the "Allow; actual write mechanics land in sandbox-io plan" error. This proves the gate isn't over-firing — the distinct error variant is the signal.
+- Non-config file: `File.write "/tmp/notes.txt" "hello"`. Assert NO broker request observed; the agent sees an `EffectError::Handler` whose message starts with `GATE_APPROVED_PREFIX`. This proves the gate isn't over-firing — the distinct prefix is the signal.
 
 **Verification:**
 `cargo nextest run -p pattern-runtime file_write_gate -- --nocapture`

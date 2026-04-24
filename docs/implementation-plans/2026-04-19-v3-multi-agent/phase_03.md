@@ -33,7 +33,7 @@
 
 ### Design decisions locked in
 
-- **Lightweight merge mechanics.** `parent_doc.import(&fork_doc.export_snapshot())` is the merge operation. Loro CRDT guarantees semantic convergence — concurrent edits to the same block resolve deterministically by the CRDT (both changes preserved when non-overlapping; last-writer semantics per loro's internal resolution when overlapping). Document this in the Phase 3 code and add property tests to codify the behaviour we observe.
+- **Lightweight merge mechanics.** `parent_doc.import(&fork_doc.export_snapshot())` is the merge operation. Loro is a vector-clock CRDT — concurrent edits resolve deterministically by operation order within each site's logical timeline, preserving all ops across both sides. Property tests codify the exact observed behaviour (see Task 2) rather than asserting a specific resolution rule that may shift between loro versions.
 - **Persistent merge mechanics.** `JjAdapter::merge(repo_root, fork_revset, parent_revset)` handles the jj side; after jj merges the working copies, we still need to reconcile LoroDoc state. Approach: the fork's workspace maintains its own LoroDoc files on disk (via the existing mount mode); merge reads the fork's on-disk doc snapshots and `import()`s them into the parent's in-memory LoroDocs. jj handles commit-graph convergence; loro handles block-level convergence; the two merges compose.
 - **Bookmark name format.** `<agent-id>/<task-label>` when a `BlockRef.label` is available, else `<agent-id>/<short-uuid>`. Task label is sanitized (lowercase, alphanumeric + hyphens).
 - **Discard semantics.** Lightweight: drop the forked `LoroDoc` and `SessionContext`; no persisted state. Persistent: `workspace_forget(repo_root, name)` + `bookmark_delete(repo_root, name)` atomically (fallible; if `workspace_forget` fails, we still attempt `bookmark_delete` and surface both errors).
@@ -74,33 +74,66 @@ This phase implements and tests:
 
 **Implementation:**
 
+**Verified shape of the types we touch** (check at `crates/pattern_memory/src/types_internal.rs:18` + `crates/pattern_memory/src/cache.rs:44`):
+- `CachedBlock` fields: `doc: StructuredDocument`, `last_seq: i64`, `last_persisted_frontier: Option<VersionVector>`, `dirty: bool`, `last_accessed: DateTime<Utc>`. Metadata (id, agent_id, label) is embedded in `doc` and accessed via `doc.id()`, `doc.agent_id()`, `doc.label()`.
+- `MemoryCache.blocks`: `Arc<DashMap<String, CachedBlock>>` keyed by **`block_id`** (not label). `cache.get(agent_id: &AgentId, label: &str)` walks the map and filters by both.
+
+Pseudocode accordingly:
+
 ```rust
-// document.rs
+// pattern_core/src/memory/document.rs
 impl StructuredDocument {
-    pub fn fork(&self, new_metadata: BlockMetadata) -> Self {
-        let forked_doc = self.doc.fork();
-        StructuredDocument::from_parts(forked_doc, new_metadata)
+    /// Fork the underlying LoroDoc + rebuild a StructuredDocument around the
+    /// forked doc. Preserves embedded metadata (label, id, schema) — ownership
+    /// rewrite happens at the cache level via a separate method.
+    pub fn fork(&self) -> Self {
+        let forked_doc = self.inner().fork();
+        // Reuse the existing from_snapshot_with_metadata-style constructor; see
+        // the existing Arc<LoroDoc> wrapping pattern at document.rs:378 for
+        // the accessor surface.
+        StructuredDocument::from_forked_doc(forked_doc, self.metadata_snapshot())
     }
 }
 
-// cache.rs
+// pattern_memory/src/cache.rs
 impl MemoryCache {
+    /// Fork every block whose embedded `agent_id` matches `parent_agent`,
+    /// producing a new MemoryCache over the forked LoroDocs. Shares the
+    /// underlying DB handle (cheap Arc clone).
     pub fn fork_for_child(
         &self,
         parent_agent: &AgentId,
         child_agent: &AgentId,
     ) -> Result<MemoryCache, MemoryError> {
-        let child = MemoryCache::new(self.db.clone()); // shares DB Arc
+        let child = MemoryCache::new(self.db.clone());
         for entry in self.blocks.iter() {
-            let (label, cached) = (entry.key().clone(), entry.value());
-            if cached.owner_agent() != parent_agent { continue; }
-            let forked = cached.document.fork(cached.metadata.with_owner(child_agent.clone()));
-            child.insert_forked(label, forked);
+            let (block_id, cached) = (entry.key().clone(), entry.value());
+            if cached.doc.agent_id() != parent_agent.as_str() { continue; }
+            // Fork the document and rewrite ownership. Requires a helper on
+            // StructuredDocument to re-tag the agent_id on the forked doc;
+            // add it alongside `fork()` (`fn retag_owner(&mut self, new_owner: &AgentId)`).
+            let mut forked_doc = cached.doc.fork();
+            forked_doc.retag_owner(child_agent);
+            child.insert_cached_block(block_id, CachedBlock {
+                doc: forked_doc,
+                last_seq: cached.last_seq,
+                last_persisted_frontier: cached.last_persisted_frontier.clone(),
+                dirty: false, // fork starts clean — parent's pending writes do not transfer
+                last_accessed: chrono::Utc::now(),
+            });
         }
         Ok(child)
     }
 }
 ```
+
+Add helper methods needed for the above (they're all trivial plumbing over existing fields):
+- `StructuredDocument::from_forked_doc(doc: LoroDoc, metadata_snapshot: BlockMetadata) -> Self`
+- `StructuredDocument::metadata_snapshot(&self) -> BlockMetadata`
+- `StructuredDocument::retag_owner(&mut self, new_owner: &AgentId)`
+- `MemoryCache::insert_cached_block(&self, block_id: String, block: CachedBlock)` — pub(crate), used only by `fork_for_child`.
+
+**Pre-task sanity check:** before writing code, open `types_internal.rs` and `cache.rs` and confirm field names match. If the struct has evolved since 2026-04-23, adjust the names in the pseudocode. Do NOT write against an assumed shape.
 
 (Names illustrative — match the existing style of `MemoryCache` fields. Restrict visibility with `pub(crate)` as appropriate.)
 
@@ -161,7 +194,7 @@ impl ForkHandle {
 }
 ```
 
-Concurrent edit behaviour: when both parent and child wrote to `notes` between fork and merge, `parent.import(child_snapshot)` applies the child's ops on top of the parent's. Loro's CRDT semantics preserve both operations; the resulting doc reflects a deterministic merge. Test covers this explicitly.
+Concurrent edit behaviour: when both parent and child wrote to `notes` between fork and merge, `parent.import(child_snapshot)` applies the child's ops on top of the parent's. Loro's vector-clock CRDT semantics preserve all operations across both timelines and produce a deterministic merge result independent of import order. Tests snapshot the observed output so regressions against future loro upgrades are visible.
 
 **Testing:**
 - Integration: "concurrent edits diamond":
@@ -429,8 +462,12 @@ Capability check on the **spawner** (not the fork): the fork itself is short-liv
 
 **Files:**
 - Modify: `crates/pattern_runtime/haskell/Pattern/Spawn.hs` — from Phase 2 Task 9, `fork :: ForkConfig -> Eff effs ForkHandle`. Phase 3 fleshes out the `ForkHandle` Haskell type to carry an opaque id plus helpers: `awaitResult`, `mergeBack`, `discard`, `promote`.
-- Modify: `crates/pattern_runtime/src/sdk/requests/spawn.rs` — add `SpawnReq` variants for `ForkAwaitResult(SpawnId)`, `ForkMergeBack(SpawnId)`, `ForkDiscard(SpawnId)`, `ForkPromote(SpawnId, PersonaConfig)` — or, preferably, a single `ForkOp { id: SpawnId, op: ForkOpKind }` with `ForkOpKind::{AwaitResult, MergeBack, Discard, Promote(PersonaConfig)}`.
-- Modify: `crates/pattern_runtime/src/sdk/handlers/spawn.rs` — dispatch each variant to the `ForkRegistry` the runtime owns (a `DashMap<SpawnId, ForkHandle>`). Operations consume the handle (remove from map) on `Discard`/`Promote`/`AwaitResult`; `MergeBack` preserves the handle so the caller can still `Discard` later.
+- Modify: `crates/pattern_runtime/src/sdk/requests/spawn.rs` — add `SpawnReq::ForkOp { id: SpawnId, op: ForkOpKind }` with `ForkOpKind::{AwaitResult, MergeBack, Discard, Promote(PersonaConfig)}`.
+- Create: `crates/pattern_runtime/src/spawn/fork_registry.rs` — `ForkRegistry` struct wrapping `DashMap<SpawnId, ForkHandle>` with CRUD methods (`insert`, `get`, `remove`). This is a distinct type from Phase 2 Task 3's `SpawnRegistry` (which is for ephemeral/fork child-session lifetime). Forks live in `ForkRegistry` so they survive past the spawner's turn and remain addressable by id for subsequent `ForkOp`s.
+- Modify: `crates/pattern_runtime/src/session.rs` — add `fork_registry: Arc<ForkRegistry>` field to `SessionContext`, initialised empty at session open. Expose via `HasForkRegistry` trait.
+- Modify: `crates/pattern_runtime/src/sdk/handlers/spawn.rs` — dispatch each variant to the `ForkRegistry`. Operations consume the handle (remove from map) on `Discard`/`Promote`/`AwaitResult`; `MergeBack` preserves the handle so the caller can still `Discard` later.
+
+**ForkRegistry ownership note.** The registry lives on each spawner's `SessionContext`, not on the daemon. Forks are scoped to the session that created them; when that session closes, the registry drops and all outstanding `ForkHandle`s are discarded (same Drop semantics as Phase 2's `SpawnRegistry`, but on a different collection). Phase 2 Task 8 constructed `ForkHandle` but stashed it locally in the handler — Phase 3 Task 8 moves it into the registry so subsequent `ForkOp` calls can reach it by id.
 
 **Implementation:**
 

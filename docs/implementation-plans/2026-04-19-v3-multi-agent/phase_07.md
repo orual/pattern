@@ -51,7 +51,7 @@
 **Verifies:** AC10.2 (ensures the smoke test runs against a deterministic provider).
 
 **Files:**
-- Create: `crates/pattern_runtime/tests/fixtures/multi_agent/scripted_turns.rs` — a module that builds the `Vec<Vec<ProviderEvent>>` script for the smoke test using `MockProviderClient::{text_turn, tool_use_turn}` helpers from `pattern_runtime::testing`.
+- Create: `crates/pattern_runtime/tests/support/multi_agent_scripts.rs` — a module that builds the `Vec<Vec<ProviderEvent>>` script for the smoke test using `MockProviderClient::{text_turn, tool_use_turn}` helpers from `pattern_runtime::testing`. The `tests/support/` location keeps runnable test code separate from inert data fixtures (KDL / HS under `tests/fixtures/`); consume via `#[path = "support/multi_agent_scripts.rs"] mod scripts;` at the top of `multi_agent_smoke.rs`.
 
 **Implementation:**
 
@@ -209,11 +209,11 @@ fanOut workers task attach =
 
 Test flow:
 
-1. **Setup.** Build a `MockProviderClient::with_turns(...)` using the scripted fixtures from Task 1. Use a temp data dir with Standalone mount mode + jj enabled.
+1. **Setup.** Build a `MockProviderClient::with_turns(...)` using the scripted fixtures from Task 1. Use a temp data dir with **InRepo mount mode, jj disabled** — the smoke only exercises lightweight forks (step 6 spawns `ForkIsolation::Lightweight`), which do not require jj. This keeps the test runnable on any CI image. Persistent-fork coverage stays in Phase 3's dedicated `fork_persistent.rs` integration test, which is jj-gated there.
 2. **Persona loading.** Load `supervisor.kdl` (has `FrontingControl` + `SpawnNewIdentities` capability flags; `Constellation`, `Spawn`, `Message`, `Memory`) and `specialist.kdl` (has only `Memory` + `Message`). Register both via the registry; set FrontingSet to `{ active: [supervisor], fallback: supervisor }`.
 3. **Human message.** Simulate an `InitSession` + `SendMessage` RPC with the human message `"please delegate: compute 2+2"`. The supervisor's scripted response dispatches a `MessageReq::Delegate { task: TaskRef, target: specialist, body: "2+2" }`.
 4. **Delegation lands in specialist's mailbox.** Specialist steps, reads the task from its pinned working-memory snapshot, scripted response emits a result `"4"`.
-5. **Capability enforcement.** Assert that during the specialist's turn, it CANNOT call `Shell.execute` (capability excluded from its set — compile or dispatch error, whichever fires first per Phase 1 AC1.2).
+5. **Capability enforcement.** The specialist's program tries to call `Shell.execute`; assert **compile-time failure** from `tidepool-extract` — the specialist's `CapabilitySet` excludes `Shell`, so Phase 1 Task 3's filtered prelude omits the `Shell` GADT constructors and the program fails to compile with a clear "unknown constructor" / "not in scope" error. This is AC1.2 end-to-end. Do NOT accept a runtime dispatch error here — the whole point of Phase 1's prelude filtering is that the program can't even be expressed.
 6. **Fork-and-merge.** Supervisor spawns a lightweight fork; fork writes `"fork-note"` to its own `notes` block; `fork.merge_back()`; assert parent's `notes` block contains the merge outcome per loro semantics.
 7. **Result propagation.** Specialist's `"4"` message routes back to the supervisor (via `Message.send(supervisor_id, ...)`); supervisor observes it in its next turn.
 8. **Concurrency check (AC10.6).** The test uses a unique temp dir per run — no shared-state collisions with concurrent `pattern-runtime` tests under `cargo nextest run`.

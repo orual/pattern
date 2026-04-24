@@ -17,7 +17,7 @@ oauth = ["pattern-core/oauth"]
 
 [dependencies]
 # Workspace dependencies
-pattern-core = { path = "../pattern_core", features = ["export"] }
+pattern-core = { path = "../pattern_core" }
 pattern-db = { path = "../pattern_db"}
 pattern-memory = { path = "../pattern_memory" }
 pattern-server = { path = "../pattern_server" }

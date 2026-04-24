@@ -1,10 +1,10 @@
 # v3-multi-agent Phase 5: Fronting and routing
 
-**Goal:** introduce a `FrontingSet` runtime primitive that tracks which persona(s) are "fronting" (the active interface to a human), persist it to `pattern_db` so it survives restart, dispatch incoming messages through a `RoutingTable` that can direct them to specialists by pattern, support direct `@persona-name` addressing that bypasses routing, and thread the `Caller` discriminant from Phase 4 Task 1 through effect handlers so human-originated turns short-circuit the permission/policy gate while agent-originated turns still pass through it.
+**Goal:** introduce a `FrontingSet` runtime primitive that tracks which persona(s) are "fronting" (the active interface to a human), persist it to `pattern_db` so it survives restart, dispatch incoming messages through a `RoutingTable` that can direct them to specialists by pattern, support direct `@persona-name` addressing that bypasses routing, and ensure the broker's Partner-bypass helper (Phase 4 Task 1) sees the right `MessageOrigin` at every effect-dispatch site so Partner-originated turns short-circuit the permission/policy gate while agent-originated turns still pass through it.
 
 **Architecture:** `FrontingSet` is constellation-scoped (not session-scoped) and lives on the daemon actor — one set per runtime instance, persisted in a new `fronting_set` + `routing_rules` table pair in pattern_db's memory database. Load at `DaemonServer::spawn_with_config`; save on mutation. The routing dispatcher sits in front of the `AgentRegistry` added in Phase 4 Task 4 — it resolves an incoming message to a `PersonaId` by: (1) stripping `@persona-name` prefix and sending direct if present, (2) evaluating routing rules in priority order, (3) falling back to the designated fallback persona. Co-fronting (multiple active personas) is a first-class case — unmatched messages fan out to every active persona if no fallback is specified. Human-as-caller uses the fronting persona's `SessionContext` wholesale; the broker's `request()` method checks `sender.is_human()` and returns a `PermissionGrant::synthesized_human()` without broadcast.
 
-**Tech Stack:** `rusqlite_migration` 2.5 (already the DB-migration machinery; migration `0011_fronting.sql`), `knus` for any KDL fragment of fronting config (optional, see below), `postcard` for IRPC protocol (already the wire format — new `WireTurnEvent::FrontingChanged` variant), existing `DaemonServer` actor in `pattern_server`.
+**Tech Stack:** `rusqlite_migration` 2.5 (already the DB-migration machinery; migration `0012_fronting.sql`), `knus` for any KDL fragment of fronting config (optional, see below), `postcard` for IRPC protocol (already the wire format — new `WireTurnEvent::FrontingChanged` variant), existing `DaemonServer` actor in `pattern_server`.
 
 **Scope:** 5 of 7. Closes AC8 completely. AC8.1 (DB persistence) requires the new migration; AC8.8 (in-flight routing update) is the most subtle piece.
 
@@ -14,11 +14,11 @@
 
 ## Codebase verification findings
 
-- ✓ Migration dir `crates/pattern_db/migrations/memory/` with 10 existing migrations. Pattern: `<NNNN>_<name>.sql` embedded via `include_str!` in `crates/pattern_db/src/migrations.rs`. Applied via `rusqlite_migration::Migrations::new_iter`. Phase 5 adds `0011_fronting.sql` with two tables (`fronting_set` for the active persona list, `routing_rules` for dispatch rules). Existing `agents` table (9 fields, incl. `status`) is the style to follow.
-- ✓ `UserId` alias (`SmolStr`) at `crates/pattern_core/src/types/ids.rs:35`. Ready to use in `Caller::Human(UserId)`.
-- ✓ `Caller` enum lands in Phase 4 Task 1. Phase 5 consumes it; no new caller wiring here.
+- ✓ Migration dir `crates/pattern_db/migrations/memory/` with 10 existing migrations. Pattern: `<NNNN>_<name>.sql` embedded via `include_str!` in `crates/pattern_db/src/migrations.rs`. Applied via `rusqlite_migration::Migrations::new_iter`. Phase 5 adds `0012_fronting.sql` with two tables (`fronting_set` for the active persona list, `routing_rules` for dispatch rules). Existing `agents` table (9 fields, incl. `status`) is the style to follow.
+- ✓ `UserId` alias (`SmolStr`) at `crates/pattern_core/src/types/ids.rs:35`. Used via existing `Author::Partner(Partner { user_id })` variant in `MessageOrigin`.
+- ✓ **No separate `Caller` enum.** Phase 4 Task 1 plumbs `&MessageOrigin` through `Router::route`; Phase 5 ensures handlers read the turn's `MessageOrigin` and call `origin.bypasses_permission_gate()` before escalating to the broker. `MessageOrigin` already exists in the codebase with the right four-way `Author` discriminant.
 - ✓ `DaemonServer` actor in `pattern_server/src/server.rs` spawns via `DaemonServer::spawn_with_config(SessionConfig { sdk, provider })` (called from `pattern_server/src/main.rs:67-137`). Sessions cached per-agent in `DaemonServer.sessions`; project mounts in `.project_mounts`. Add `fronting_set: RwLock<FrontingSet>` as a daemon-level field.
-- ✓ `MessageOrigin { Author, Sphere }` in message.rs — existing discriminant. Phase 5 does NOT replace MessageOrigin (that's a compose/snapshot concern); it layers `Caller` on top for dispatch/permission gating.
+- ✓ `MessageOrigin { Author, Sphere }` in message.rs — existing discriminant. Phase 5 re-uses it for both attribution (compose/snapshot, unchanged) AND permission-gating dispatch. Single source of truth; no parallel `Caller` type.
 - ✗ No `@persona-name` parsing. Introduce in Phase 5 in the message dispatch layer — a small `fn parse_direct_address(s: &str) -> Option<PersonaId>` that strips a leading `@` and treats the rest as the persona id. Supports both `@alice` (plain) and `@alice: hello there` (prefix form).
 - ✗ `Message` carries no `to: Option<PersonaId>` field. Recipient is dispatch-time. Phase 5 keeps it that way; routing resolves recipient from rules, not from the Message struct.
 - ✓ `WireTurnEvent` at `pattern_server/src/protocol.rs`; variants `Text`, `Thinking`, `ToolCall`, `ToolResult`, `Display`, `Stop`. Phase 4 adds `MessageSent`. Phase 5 adds `FrontingChanged { active: Vec<PersonaId>, fallback: Option<PersonaId>, rules: Vec<RoutingRuleWire> }`. `TaggedTurnEvent` wraps this for multi-agent fan-out already.
@@ -50,7 +50,7 @@ This avoids forcing the user to manage fronting explicitly before sending the fi
 - **v3-multi-agent.AC8.3 Success:** Incoming message matching no routing rule is delivered to the fallback persona
 - **v3-multi-agent.AC8.4 Success:** Direct addressing (`@persona-name` or explicit PersonaId) bypasses routing; delivered to named persona regardless of routing rules
 - **v3-multi-agent.AC8.5 Success:** Co-fronting with two active personas: both receive copies of unrouted messages (or routing rules discriminate between them)
-- **v3-multi-agent.AC8.6 Success:** `ctx.caller` is `Caller::Human(user_id)` for human-initiated turns and `Caller::Agent(persona_id)` for agent-initiated turns
+- **v3-multi-agent.AC8.6 Success:** the turn's `MessageOrigin.author` is `Author::Partner(Partner{user_id})` for TUI/Partner-initiated turns, `Author::Human(...)` for non-Partner humans, `Author::Agent(AgentAuthor{agent_id})` for agent-initiated turns, `Author::System` for runtime-initiated (wake conditions, housekeeping). Handlers read the origin off the turn's `EffectContext` and call `.bypasses_permission_gate()` for the Partner short-circuit.
 - **v3-multi-agent.AC8.7 Success:** Human-as-caller uses fronting persona's SessionContext; all memory handles and project mount are the persona's
 - **v3-multi-agent.AC8.8 Edge:** FrontingSet update while messages are in-flight: messages already queued use old routing; new messages use updated routing (no reprocessing)
 
@@ -112,19 +112,23 @@ pub enum MessagePattern {
 `FrontingSet::resolve(&self, msg_body: &str) -> ResolveOutcome` returns:
 
 ```rust
-pub enum ResolveOutcome<'a> {
-    Direct(PersonaId),                 // @persona prefix parsed
-    Rule { rule_id: &'a str, target: &'a PersonaId },
-    Fallback(&'a PersonaId),
-    FanOut(&'a [PersonaId]),           // no fallback, co-fronted
-    DefaultPersona(PersonaId),         // fronting empty; first Active persona from registry
-    SystemDefault,                     // no Active personas exist at all
+pub enum ResolveOutcome {
+    Direct(PersonaId),                   // @persona prefix parsed
+    Rule { rule_id: String, target: PersonaId },
+    Fallback(PersonaId),
+    FanOut(Vec<PersonaId>),              // no fallback, co-fronted
+    DefaultPersona(PersonaId),           // fronting empty; first Active persona from registry
+    SystemDefault,                       // no Active personas exist at all
 }
 ```
+
+Owned throughout — PersonaId is a SmolStr (cheap to clone for ≤22-byte ids, Arc-shared beyond). Consistent ownership keeps call sites simple; no `.cloned()` dances per variant.
 
 Evaluate: strip `@persona-id` prefix first → Direct. Else iterate rules by descending priority; first match → Rule. Else fallback if Some. Else if `active.len() >= 1` → FanOut. Else consult the `ConstellationRegistry` for the first `Active` persona sorted by id → `DefaultPersona`. Else → `SystemDefault`. Messages never fail-close on fronting state.
 
 Because `resolve()` needs the registry for the default-persona lookup, the method takes an `&impl ConstellationRegistry` argument (or the registry is folded into a `FrontingResolver` struct that owns both). The pure-data `FrontingSet` stays serializable; the resolver is the operational layer.
+
+**Phase 5 tests before Phase 6 lands the real registry.** Phase 5 ships an `InMemoryConstellationRegistry` test helper at `crates/pattern_runtime/src/testing.rs` (or a new `testing/registry.rs` submodule) implementing `ConstellationRegistry` over a `DashMap<PersonaId, PersonaRecord>`. Tests seed the in-memory registry with fixture personas + statuses and exercise `DefaultPersona` / `SystemDefault` outcomes deterministically. Phase 6 Task 4's pattern_db-backed impl slots in via the same trait; no Phase 5 test changes at handoff.
 
 **Testing:**
 - Unit: direct-addressing wins over matching rules.
@@ -146,7 +150,7 @@ Because `resolve()` needs the registry for the default-persona lookup, the metho
 **Verifies:** AC8.1.
 
 **Files:**
-- Create: `crates/pattern_db/migrations/memory/0011_fronting.sql`
+- Create: `crates/pattern_db/migrations/memory/0012_fronting.sql`
 - Modify: `crates/pattern_db/src/migrations.rs` — register the new migration.
 - Create: `crates/pattern_db/src/queries/fronting.rs` — CRUD queries.
 - Modify: `crates/pattern_db/src/lib.rs` (or module re-export point) — expose the new query surface.
@@ -154,7 +158,7 @@ Because `resolve()` needs the registry for the default-persona lookup, the metho
 **Implementation:**
 
 ```sql
--- 0011_fronting.sql
+-- 0012_fronting.sql
 CREATE TABLE fronting_set (
     id TEXT PRIMARY KEY,               -- singleton row, id = "default"
     active_personas TEXT NOT NULL,     -- JSON array of PersonaId
@@ -241,19 +245,22 @@ Save-on-change: wrap `fronting` updates in a helper that takes the write lock, m
 **Verifies:** AC8.2, AC8.3, AC8.4, AC8.5.
 
 **Files:**
-- Modify: `crates/pattern_runtime/src/router.rs` — `RouterRegistry::route` consults the FrontingSet for agent-scheme messages before falling through to the scheme-based dispatcher.
-- Modify: `crates/pattern_runtime/src/router/agent.rs` (Phase 4 Task 4) — use `FrontingSet::resolve()` to pick the target(s) when no explicit persona id is present in the payload.
-- Create: `crates/pattern_runtime/src/fronting_dispatch.rs` — the dispatcher logic (`dispatch_to_mailboxes`).
+- Modify: `crates/pattern_runtime/src/router/agent.rs` (from Phase 4 Task 4) — `AgentRouter::route` becomes the sole entry point for all agent-scheme deliveries (from both the Message handler and human `SendMessage` RPC). When the `target` string contains an explicit `agent:<persona-id>`, route direct as Phase 4 Task 4 already does. When it's empty or contains routing sentinels like `fronting:` / `auto:`, delegate to `dispatch_to_mailboxes`.
+- Create: `crates/pattern_runtime/src/fronting_dispatch.rs` — the routing-resolution function `dispatch_to_mailboxes(registry, resolver, sender, body) -> Result<(), RouterError>`. This is a pure router function called BY `AgentRouter::route`; it does not own message dispatch, just target selection. `AgentRouter::route` is the single entry point.
 
 **Implementation:**
 
-Message-dispatch pseudocode:
+Two-layer responsibility:
+- `AgentRouter::route` — called from any message-dispatch site (Phase 4's Message handler, Phase 5's human SendMessage path, Phase 5 Task 7's supervisor routing). Handles explicit-target (direct addressing) + draft queueing (Phase 4 Task 4's `queue_for_draft` branch). Delegates to `dispatch_to_mailboxes` when the target is unspecified.
+- `dispatch_to_mailboxes` — evaluates the FrontingSet resolver, returns a list of `PersonaId`s, then calls back into the registry's delivery primitive for each. Does NOT know about the Message handler or the RPC surface.
+
+Message-dispatch pseudocode (inside `dispatch_to_mailboxes`, called from `AgentRouter::route`):
 
 ```rust
 pub async fn dispatch_to_mailboxes(
     registry: &AgentRegistry,
     fronting: &FrontingSet,
-    sender: &Caller,
+    sender: &MessageOrigin,
     body: &Message,
     explicit_target: Option<&str>,
 ) -> Result<(), RouterError> {
@@ -295,44 +302,62 @@ pub async fn dispatch_to_mailboxes(
 <!-- END_TASK_4 -->
 
 <!-- START_TASK_5 -->
-### Task 5: Human-as-caller pathway + permission short-circuit
+### Task 5: Thread `MessageOrigin` into handler escalation; broker Partner short-circuit
 
 **Verifies:** AC8.6, AC8.7.
 
 **Files:**
-- Modify: `crates/pattern_runtime/src/sdk/handlers/` — each handler that escalates to the broker reads `cx.user().caller()`.
-- Modify: `crates/pattern_runtime/src/permission/mod.rs` (Phase 1 Task 5's relocated broker) — `request(req, caller, timeout)` signature; human short-circuit.
-- Modify: `crates/pattern_runtime/src/session.rs` — `SessionContext` gains `caller: Caller` (set per-turn; defaults to `Caller::System` for runtime-initiated work like wake conditions).
-- Modify: `crates/pattern_runtime/src/agent_loop.rs` — at turn entry, set `ctx.caller` from the TurnInput's sender (human vs agent).
+- Modify: `crates/pattern_runtime/src/sdk/handlers/` — each handler that escalates to the broker reads the current turn's `MessageOrigin` via `EffectContext` (see Implementation).
+- Modify: `crates/pattern_core/src/permission.rs` (the per-runtime broker from Phase 1 Tasks 5-7) — `request(req, origin: &MessageOrigin, timeout)` signature; Partner short-circuit reads `origin.bypasses_permission_gate()` (helper added by Phase 4 Task 1).
+- Modify: `crates/pattern_runtime/src/session.rs` — add a per-turn accessor that makes the turn's `MessageOrigin` reachable from the effect-dispatch path (implementation below).
+- Modify: `crates/pattern_runtime/src/agent_loop.rs` — `drive_step` captures the inbound turn's `MessageOrigin` and makes it available to handlers for the duration of the turn.
 
 **Implementation:**
 
-Caller set per-turn: `drive_step` accepts a `Caller` parameter (or reads it from `TurnInput::origin` when available); sets `ctx.caller` before dispatching the agent loop; resets after turn.
-
-Broker short-circuit:
+`TurnInput` already carries `origin: MessageOrigin`. No new field anywhere. The only runtime plumbing is: at the start of each `drive_step` invocation, store the current turn's origin somewhere handlers can read it. The busy-flag wrapper from Phase 4 Task 2 already serializes turns, so this is single-writer-single-reader — no race.
 
 ```rust
+// session.rs — add one field alongside the existing per-turn state:
+//   current_turn_origin: Arc<std::sync::RwLock<Option<MessageOrigin>>>
+//
+// drive_step sets it on entry (inside the busy-flag wrapper), clears on exit.
+// Handlers read via ctx.user().current_turn_origin().
+//
+// The RwLock is write-rare (per-turn) / read-hot (every broker escalation), and
+// because the busy flag already prevents concurrent turns on the same session,
+// the write is uncontested.
+
+// broker (permission.rs) short-circuit:
 impl PermissionBroker {
-    pub async fn request(&self, req: PermissionRequest, caller: &Caller, timeout: Duration) -> Option<PermissionGrant> {
-        if caller.is_human() {
-            return Some(PermissionGrant::synthesized_human(req.scope.clone()));
+    pub async fn request(
+        &self,
+        req: PermissionRequest,
+        origin: &MessageOrigin,
+        timeout: Duration,
+    ) -> Option<PermissionGrant> {
+        if origin.bypasses_permission_gate() {
+            return Some(PermissionGrant::synthesized_partner(req.scope.clone()));
         }
         // existing policy + broadcast flow
     }
 }
 ```
 
+`synthesized_partner` (name change from earlier drafts) makes the grant's provenance explicit — Partner bypass, not a signed approval.
+
+Handler escalation sites (Shell Task 10, File Task 15): `let origin = cx.user().current_turn_origin().ok_or(EffectError::Handler("no turn origin available"))?; broker.request(req, &origin, timeout).await`.
+
 Human's SessionContext: when a human connects to a fronting persona, the daemon reuses that persona's SessionContext (workspace / project mount / memory handles) — no new context is built. This is the architectural claim in AC8.7; verify by checking that the daemon's `get_or_open_session(fronting_persona)` returns the cached session rather than constructing a new one for the human's turn.
 
 **Testing:**
-- AC8.6: assert `ctx.caller` is `Human(_)` when the turn originated from `SendMessage` RPC (human-initiated) and `Agent(_)` when it originated from `MessageReq::Send` (agent-initiated).
-- AC8.7: human sends a message to the fronting persona; the turn's context references the persona's project mount + memory handles, not a fresh one.
-- AC2.* regression: shell command that would normally gate still gates for `Caller::Agent`; does NOT gate for `Caller::Human`.
+- AC8.6: assert the handler-visible `MessageOrigin.author` is `Author::Partner(_)` when the turn originated from `SendMessage` RPC (TUI user is Partner); `Author::Agent(_)` when it originated from `MessageReq::Send` from another agent.
+- AC8.7: human (Partner) sends a message to the fronting persona; the turn's context references the persona's project mount + memory handles, not a fresh one.
+- AC2.* regression: shell command that would normally gate still gates for `Author::Agent`; does NOT gate for `Author::Partner`; DOES gate for `Author::Human(_)` (generic human is not Partner).
 
 **Verification:**
-`cargo nextest run -p pattern-runtime human_caller`
+`cargo nextest run -p pattern-runtime origin_short_circuit`
 
-**Commit:** `[pattern-runtime] thread Caller through handlers; add human short-circuit in broker`
+**Commit:** `[pattern-runtime] thread turn MessageOrigin through handlers; add Partner short-circuit in broker`
 <!-- END_TASK_5 -->
 
 <!-- END_SUBCOMPONENT_B -->
@@ -415,10 +440,10 @@ Scenario:
 ## Phase done-when checklist
 
 - [ ] `FrontingSet` + `RoutingTable` + `RoutingRule` + `MessagePattern` types land in `pattern_core`.
-- [ ] Migration `0011_fronting.sql` ships with CRUD queries in pattern_db.
+- [ ] Migration `0012_fronting.sql` ships with CRUD queries in pattern_db.
 - [ ] Daemon loads FrontingSet on spawn, saves on change, rolls back on save failure.
 - [ ] Routing dispatcher handles rule-match, fallback, fan-out, direct addressing, empty-fronting default-persona lookup, system-default ack.
-- [ ] `Caller` threaded through handlers; broker short-circuits on `Caller::Human`.
+- [ ] `MessageOrigin` reachable from handlers via `EffectContext`; broker short-circuits on `origin.bypasses_permission_gate()` (Partner-only).
 - [ ] `ctx.fronting.{set,route,clear,current}` exposed; capability-gated; wire event emitted.
 - [ ] Supervisor end-to-end test passes.
 - [ ] All existing tests still green.

@@ -15,6 +15,9 @@
 //! Nothing in `pattern_core` depends on this crate.
 
 pub mod backup;
+pub mod db_bridge;
+#[cfg(feature = "export")]
+pub mod export;
 pub mod cache;
 pub mod config;
 pub mod fs;

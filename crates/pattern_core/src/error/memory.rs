@@ -86,9 +86,9 @@ pub enum MemoryError {
         /// The label of the block the operation was attempted on.
         block_label: String,
         /// The permission level required for the operation.
-        required: pattern_db::models::MemoryPermission,
+        required: crate::types::memory_types::MemoryPermission,
         /// The permission level the block actually has.
-        actual: pattern_db::models::MemoryPermission,
+        actual: crate::types::memory_types::MemoryPermission,
     },
 
     /// Operation would cross a persona isolation boundary.
@@ -157,7 +157,7 @@ pub enum MemoryError {
     /// An error from the underlying database layer.
     #[error("database error: {0}")]
     #[diagnostic(code(pattern_core::memory::database))]
-    Database(#[from] pattern_db::DbError),
+    Database(String),
 
     /// An error from the Loro CRDT layer.
     #[error("loro error: {0}")]

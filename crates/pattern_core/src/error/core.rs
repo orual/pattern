@@ -443,8 +443,7 @@ pub enum CoreError {
     )]
     DagCborEncodingError {
         data_type: String,
-        #[source]
-        cause: serde_ipld_dagcbor::error::EncodeError<std::collections::TryReserveError>,
+        cause: String,
     },
 
     /// DAG-CBOR decoding failed.
@@ -479,8 +478,7 @@ pub enum CoreError {
     )]
     CarError {
         operation: String,
-        #[source]
-        cause: iroh_car::Error,
+        cause: String,
     },
 
     /// An export operation failed.
@@ -534,13 +532,14 @@ pub enum CoreError {
     ///
     /// # Example
     ///
-    /// Cannot construct pattern_db::DbError in doctest directly.
+    /// Wraps a database error as a string — the typed `pattern_db::DbError`
+    /// is mapped at the `pattern_memory` boundary.
     #[error("SQLite database error: {0}")]
     #[diagnostic(
         code(pattern_core::sqlite_error),
         help("check database connection and query")
     )]
-    SqliteError(#[from] pattern_db::DbError),
+    SqliteError(String),
 
     // ── Misc validation ───────────────────────────────────────────────────────
     /// A value was in an invalid or unrecognised format.

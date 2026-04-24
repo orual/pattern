@@ -4,7 +4,7 @@
 
 **Architecture:** the registry is a pair of migrations on pattern_db's memory database — one extends `agents` with the missing columns, one introduces `persona_relationships` and `persona_groups` (plus a membership join). A `ConstellationRegistry` type in `pattern_core` owns the in-memory projection (cached from DB) and exposes CRUD + query methods; the daemon holds one per runtime. Sibling spawn (Phase 2) and fronting updates (Phase 5) wire into it via clear insertion points. Promotion of a draft persona is a daemon-level RPC: open the session, flip `status` from `Draft` to `Active`, register the mailbox with the agent registry (Phase 4), replay Phase 4's draft-queue into the mailbox, emit `WireTurnEvent::FrontingChanged` if applicable.
 
-**Tech Stack:** `rusqlite_migration` (new migrations `0012_agents_extend.sql`, `0013_persona_relationships.sql`, `0014_drop_legacy_coordination.sql`), existing `Json<T>` wrapper at `crates/pattern_db/src/json_wrapper.rs` for enum columns, `smol_str::SmolStr` for ids, `jiff::Timestamp` for timestamps.
+**Tech Stack:** `rusqlite_migration` (new migrations `0013_agents_extend.sql`, `0014_persona_relationships.sql`, `0015_drop_legacy_coordination.sql`), existing `Json<T>` wrapper at `crates/pattern_db/src/json_wrapper.rs` for enum columns, `smol_str::SmolStr` for ids, `jiff::Timestamp` for timestamps.
 
 **Scope:** 6 of 7. Closes AC5 (the registry-facing parts — AC5.5, AC5.7 — left open by Phase 2), AC9 fully. Also performs the schema cleanup of the legacy coordination tables. The retirement of the staging-era types is straightforward code deletion.
 
@@ -16,7 +16,7 @@
 
 - ✓ `agents` table at `crates/pattern_db/migrations/memory/0001_initial.sql:9-31` has: `id, name, description, model_provider, model_name, system_prompt, config, enabled_tools, tool_rules, status, created_at, updated_at`. Missing: `config_path`, `project_attachments`. Migration `0012` adds these.
 - ✓ Legacy `agent_groups` + `group_members` still in `0001_initial.sql:40-61`. `group_members.capabilities` added by migration `0008`. Active queries in `crates/pattern_db/src/queries/coordination.rs` + `queries/agent.rs`. Phase 6 migrates away and drops.
-- ✓ Legacy `coordination_tasks` at `0001_initial.sql:242-251` — **design plan note was stale; table is still present**. Phase 6 drops as part of `0014_drop_legacy_coordination.sql`.
+- ✓ Legacy `coordination_tasks` at `0001_initial.sql:242-251` — **design plan note was stale; table is still present**. Phase 6 drops as part of `0015_drop_legacy_coordination.sql`.
 - ✓ `rewrite-staging/runtime_subsystems/coordination/types.rs` contains `CoordinationPattern` enum + `AgentGroup`/`GroupMember`/`DelegationRules`/`VotingRules`/`PipelineStage`/`SleeptimeTrigger`. Not in the active workspace; delete the directory (or the coordination subtree) as part of this phase.
 - ✓ `SessionConfig` / `DaemonServer` couple project attachments loosely via `project_mounts: Arc<DashMap<PathBuf, Arc<ProjectMount>>>`. Phase 6 formalizes "persona X is attached to projects [A, B]" on the persona row and persists it.
 - ✗ No pre-existing "persona registry" / "agent registry" type. Greenfield work.
@@ -30,11 +30,11 @@
 - **Groups are organisational only.** Not a coordination mechanism. `persona_groups` table holds `id`, `name`, `project_id` (optional scoping). `persona_group_members` is a simple join. Nothing in Phase 6 uses groups for dispatch; they're for human-facing organization (roster views, bulk operations).
 - **Project attachments as JSON array.** `agents.project_attachments` is `JSON NOT NULL DEFAULT '[]'` — a list of project paths the persona participates in. Queries filter by array-contains via `json_each` (SQLite supports this).
 - **Promotion is daemon-level RPC, not an agent effect.** Only humans can promote drafts; this is a trust boundary. Exposing it as `ctx.constellation.promote` via the Haskell surface is an anti-pattern (an agent could promote another agent). Daemon-side only.
-- **Legacy-schema removal is atomic.** Migration `0014` drops `agent_groups`, `group_members`, `coordination_tasks` in one pass. Any call sites in `queries/coordination.rs` / `queries/agent.rs` are deleted in the same commit.
+- **Legacy-schema removal is atomic.** Migration `0015` drops `agent_groups`, `group_members`, `coordination_tasks` in one pass. Any call sites in `queries/coordination.rs` / `queries/agent.rs` are deleted in the same commit.
 
 ### Resolved
 
-- **Legacy coordination data is disposable.** v3 is breaking the data format intentionally; `0014` does a clean `DROP TABLE` with no row-porting step. Confirmed by orual.
+- **Legacy coordination data is disposable.** v3 is breaking the data format intentionally; `0015` does a clean `DROP TABLE` with no row-porting step. Confirmed by orual.
 
 ---
 
@@ -64,24 +64,23 @@
 **Verifies:** foundation for AC9.1-6, AC5.5, AC5.7.
 
 **Files:**
-- Create: `crates/pattern_db/migrations/memory/0012_agents_extend.sql`
-- Create: `crates/pattern_db/migrations/memory/0013_persona_relationships.sql`
+- Create: `crates/pattern_db/migrations/memory/0013_agents_extend.sql`
+- Create: `crates/pattern_db/migrations/memory/0014_persona_relationships.sql`
 - Modify: `crates/pattern_db/src/migrations.rs` — register both.
 
 **Implementation:**
 
 ```sql
--- 0012_agents_extend.sql
+-- 0013_agents_extend.sql
 ALTER TABLE agents ADD COLUMN config_path TEXT;
 ALTER TABLE agents ADD COLUMN project_attachments TEXT NOT NULL DEFAULT '[]';
 -- status column already exists; widen accepted values: 'active', 'draft', 'inactive'.
 -- Enforcement via app-level enum; SQLite doesn't enforce enum constraints.
-
-CREATE INDEX idx_agents_status ON agents(status);
+-- idx_agents_status already exists from 0001_initial.sql:34 — do NOT re-create.
 ```
 
 ```sql
--- 0013_persona_relationships.sql
+-- 0014_persona_relationships.sql
 CREATE TABLE persona_relationships (
     id TEXT PRIMARY KEY,
     from_persona TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
@@ -131,7 +130,7 @@ CREATE INDEX idx_persona_group_members_persona ON persona_group_members(persona_
 **Verifies:** none directly (cleanup); prevents regressions.
 
 **Files:**
-- Create: `crates/pattern_db/migrations/memory/0014_drop_legacy_coordination.sql`
+- Create: `crates/pattern_db/migrations/memory/0015_drop_legacy_coordination.sql`
 - Delete or gut: `crates/pattern_db/src/queries/coordination.rs`
 - Delete or gut: the `agent_groups` / `group_members` / `coordination_tasks` queries inside `crates/pattern_db/src/queries/agent.rs`
 - Delete: `rewrite-staging/runtime_subsystems/coordination/` (entire subtree)
@@ -140,7 +139,7 @@ CREATE INDEX idx_persona_group_members_persona ON persona_group_members(persona_
 **Implementation:**
 
 ```sql
--- 0014_drop_legacy_coordination.sql
+-- 0015_drop_legacy_coordination.sql
 DROP TABLE IF EXISTS coordination_tasks;
 DROP TABLE IF EXISTS group_members;
 DROP TABLE IF EXISTS agent_groups;
@@ -252,8 +251,15 @@ Key queries:
   ```sql
   SELECT a.id, a.name, a.status, a.config_path, a.project_attachments
   FROM agents a
-  WHERE (:project IS NULL OR json_extract_member(a.project_attachments, :project))
+  WHERE :project IS NULL
+     OR EXISTS (
+          SELECT 1 FROM json_each(a.project_attachments) j
+          WHERE j.value = :project
+        )
   ```
+  Uses SQLite's `json_each` (built-in JSON1 extension, enabled in the rusqlite
+  `bundled` feature already used by pattern_db) to iterate the JSON array and
+  match values. No custom functions required.
   Then load relationships and group memberships in batched follow-ups (avoid N+1 via `IN (...)` on the collected ids).
 
 - `find(project, kind)`:
@@ -350,27 +356,41 @@ pub async fn handle_promote(daemon: &DaemonServer, persona_id: PersonaId) -> Res
     // 2. Load the persona config from record.config_path.
     let persona = persona_loader::load_persona(record.config_path.as_ref().ok_or(PromoteError::MissingConfig)?)?;
 
-    // 3. Open the session via the normal path.
-    let session = daemon.open_session(persona).await?;
+    // 3. If the draft carries seed memory state from a fork-promote (Phase 3
+    //    Task 7), use it as the initial MemoryCache. Otherwise the session
+    //    opens with a fresh cache.
+    let seed_cache = daemon.draft_registry.take_seed_cache(&persona_id);
 
-    // 4. Register with agent registry (Phase 4) for mailbox routing.
+    // 4. Open the session via the normal path, passing seed_cache if present.
+    let session = daemon.open_session_with_seed(persona, seed_cache).await?;
+
+    // 5. Register with agent registry (Phase 4) for mailbox routing.
     daemon.agent_registry.register(persona_id.clone(), session.mailbox_tx(), AgentStatus::Active);
 
-    // 5. Drain the Phase 4 draft-message queue into the new mailbox.
+    // 6. Drain the Phase 4 draft-message queue into the new mailbox.
     let queued = daemon.agent_registry.drain_draft_queue(&persona_id);
-    for (msg, sender) in queued {
-        session.mailbox_tx().send(MailboxInput::Message { msg, from: sender })
+    for (msg, origin) in queued {
+        session.mailbox_tx().send(MailboxInput::Message { msg, from: origin })
             .map_err(|_| PromoteError::MailboxClosed)?;
     }
 
-    // 6. Update DB status.
+    // 7. Update DB status.
     daemon.registry.set_status(&persona_id, PersonaStatus::Active).await?;
 
     Ok(())
 }
 ```
 
-Phase 4's draft queue exposes `drain_draft_queue(&PersonaId) -> Vec<(Message, Caller)>` (it's already hooked into the queueing side per Phase 4 Task 4). If the accessor name differs, align here — do not add a second drain API.
+**`take_seed_cache` + `open_session_with_seed`** — Phase 3 Task 7's `DraftPersona.seed_cache: Option<MemoryCache>` feeds the promotion path here. Add to the daemon:
+- `DraftRegistry::take_seed_cache(&PersonaId) -> Option<MemoryCache>` — consumes the seed (take semantics, not clone — we can't re-use it after this call).
+- `DaemonServer::open_session_with_seed(persona: PersonaSnapshot, seed: Option<MemoryCache>) -> Result<TidepoolSession, _>` — when `seed` is `Some`, build the session's `SessionContext` around the supplied cache rather than constructing a fresh one. Both fork-promote flows (lightweight → in-memory seed; persistent → seed carries the forked LoroDocs) land here with the same shape.
+
+Test coverage:
+- Fork-promote (lightweight): spawn fork, fork writes block `notes`, `fork.promote(cfg)` creates draft, `PromoteDraft` RPC opens session, agent reads `notes` in first turn and sees the fork's write.
+- Fork-promote (persistent): same but over Standalone mount with jj — assert the jj workspace's bookmark is inherited and the persona's first turn sees the forked state.
+- No-seed draft (non-fork path): sibling spawn without `SpawnNewIdentities` flag creates a draft with `seed_cache = None`; promotion opens a fresh session with empty memory.
+
+Phase 4's draft queue exposes `drain_draft_queue(&PersonaId) -> Vec<(Message, MessageOrigin)>` (it's already hooked into the queueing side per Phase 4 Task 4). If the accessor name differs, align here — do not add a second drain API.
 
 **Testing:**
 - AC5.5: sibling spawn with `relationship = SupervisorOf` → registry has both the sibling and the edge; `ctx.constellation.list()` shows the new persona (AC9.4).
@@ -411,7 +431,7 @@ CLI commands: parse args, call the new daemon RPCs (`ListPersonas`, `PromoteDraf
 
 ## Phase done-when checklist
 
-- [ ] Migrations `0012`, `0013`, `0014` land cleanly; old tables dropped; staging types deleted.
+- [ ] Migrations `0013`, `0014`, `0015` land cleanly; old tables dropped; staging types deleted.
 - [ ] `ConstellationRegistry` trait in core; rusqlite impl in pattern_db.
 - [ ] `ctx.constellation.{list,find,groups}` SDK surface (read-only) works via Haskell agent code.
 - [ ] Sibling spawn auto-registers with relationship edges.
@@ -424,7 +444,7 @@ CLI commands: parse args, call the new daemon RPCs (`ListPersonas`, `PromoteDraf
 
 ## Notes for executor
 
-- Legacy coordination data is disposable — no data migration step in `0014`.
+- Legacy coordination data is disposable — no data migration step in `0015`.
 - Staging-era types live outside the workspace; deletion is safe — confirm with a `cargo check --workspace` before committing the deletion.
 - `drain_draft_queue` is Phase 4's API. Use it verbatim; do not add a second drain.
 - CLI / TUI work is intentionally lean — Phase 7's smoke test verifies more, and pattern_cli polish is its own backlog.

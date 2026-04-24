@@ -100,7 +100,7 @@ impl StructuredDocument {
     #[deprecated(note = "Use new_with_metadata instead")]
     pub fn new_with_permission(
         schema: BlockSchema,
-        permission: pattern_db::models::MemoryPermission,
+        permission: crate::types::memory_types::MemoryPermission,
     ) -> Self {
         let mut metadata = BlockMetadata::standalone(schema);
         metadata.permission = permission;
@@ -112,7 +112,7 @@ impl StructuredDocument {
     pub fn from_snapshot_with_permission(
         snapshot: &[u8],
         schema: BlockSchema,
-        permission: pattern_db::models::MemoryPermission,
+        permission: crate::types::memory_types::MemoryPermission,
     ) -> Result<Self, DocumentError> {
         let mut metadata = BlockMetadata::standalone(schema);
         metadata.permission = permission;
@@ -151,12 +151,12 @@ impl StructuredDocument {
     }
 
     /// Get the effective permission for this document.
-    pub fn permission(&self) -> pattern_db::models::MemoryPermission {
+    pub fn permission(&self) -> crate::types::memory_types::MemoryPermission {
         self.metadata.permission
     }
 
     /// Set the effective permission for this document (DB is source of truth).
-    pub fn set_permission(&mut self, permission: pattern_db::models::MemoryPermission) {
+    pub fn set_permission(&mut self, permission: crate::types::memory_types::MemoryPermission) {
         self.metadata.permission = permission;
     }
 
@@ -224,29 +224,29 @@ impl StructuredDocument {
     /// Returns Ok(()) if allowed, or PermissionDenied error if not.
     fn check_permission(
         &self,
-        op: pattern_db::models::MemoryOp,
+        op: crate::types::memory_types::MemoryOp,
         is_system: bool,
     ) -> Result<(), DocumentError> {
         if is_system {
             return Ok(());
         }
 
-        let gate = pattern_db::models::MemoryGate::check(op, self.metadata.permission);
+        let gate = crate::types::memory_types::MemoryGate::check(op, self.metadata.permission);
         if gate.is_allowed() {
             Ok(())
         } else {
             // Determine required permission based on operation
             let required = match op {
-                pattern_db::models::MemoryOp::Read => {
-                    pattern_db::models::MemoryPermission::ReadOnly
+                crate::types::memory_types::MemoryOp::Read => {
+                    crate::types::memory_types::MemoryPermission::ReadOnly
                 }
-                pattern_db::models::MemoryOp::Append => {
-                    pattern_db::models::MemoryPermission::Append
+                crate::types::memory_types::MemoryOp::Append => {
+                    crate::types::memory_types::MemoryPermission::Append
                 }
-                pattern_db::models::MemoryOp::Overwrite => {
-                    pattern_db::models::MemoryPermission::ReadWrite
+                crate::types::memory_types::MemoryOp::Overwrite => {
+                    crate::types::memory_types::MemoryPermission::ReadWrite
                 }
-                pattern_db::models::MemoryOp::Delete => pattern_db::models::MemoryPermission::Admin,
+                crate::types::memory_types::MemoryOp::Delete => crate::types::memory_types::MemoryPermission::Admin,
             };
             Err(DocumentError::PermissionDenied {
                 operation: format!("{:?}", op),
@@ -267,7 +267,7 @@ impl StructuredDocument {
     /// Set text content (replaces all).
     /// If is_system is false, checks that the document has Overwrite permission.
     pub fn set_text(&self, content: &str, is_system: bool) -> Result<(), DocumentError> {
-        self.check_permission(pattern_db::models::MemoryOp::Overwrite, is_system)?;
+        self.check_permission(crate::types::memory_types::MemoryOp::Overwrite, is_system)?;
 
         let text = self.doc.get_text("content");
         let current_len = text.len_unicode();
@@ -286,7 +286,7 @@ impl StructuredDocument {
     /// Append text to existing content.
     /// If is_system is false, checks that the document has Append permission.
     pub fn append_text(&self, content: &str, is_system: bool) -> Result<(), DocumentError> {
-        self.check_permission(pattern_db::models::MemoryOp::Append, is_system)?;
+        self.check_permission(crate::types::memory_types::MemoryOp::Append, is_system)?;
 
         let text = self.doc.get_text("content");
         let pos = text.len_unicode();
@@ -335,7 +335,7 @@ impl StructuredDocument {
         replace: &str,
         is_system: bool,
     ) -> Result<bool, DocumentError> {
-        self.check_permission(pattern_db::models::MemoryOp::Overwrite, is_system)?;
+        self.check_permission(crate::types::memory_types::MemoryOp::Overwrite, is_system)?;
 
         let text = self.doc.get_text("content");
         let current = text.to_string();
@@ -610,7 +610,7 @@ impl StructuredDocument {
     /// Push an item to the end of the list.
     /// If is_system is false, checks that the document has Append permission.
     pub fn push_item(&self, item: JsonValue, is_system: bool) -> Result<(), DocumentError> {
-        self.check_permission(pattern_db::models::MemoryOp::Append, is_system)?;
+        self.check_permission(crate::types::memory_types::MemoryOp::Append, is_system)?;
 
         let list = self.doc.get_list("items");
         let loro_value = json_to_loro(&item);
@@ -627,7 +627,7 @@ impl StructuredDocument {
         item: JsonValue,
         is_system: bool,
     ) -> Result<(), DocumentError> {
-        self.check_permission(pattern_db::models::MemoryOp::Append, is_system)?;
+        self.check_permission(crate::types::memory_types::MemoryOp::Append, is_system)?;
 
         let list = self.doc.get_list("items");
         if index > list.len() {
@@ -646,7 +646,7 @@ impl StructuredDocument {
     /// Delete an item at a specific index.
     /// If is_system is false, checks that the document has Delete permission (Admin).
     pub fn delete_item(&self, index: usize, is_system: bool) -> Result<(), DocumentError> {
-        self.check_permission(pattern_db::models::MemoryOp::Delete, is_system)?;
+        self.check_permission(crate::types::memory_types::MemoryOp::Delete, is_system)?;
 
         let list = self.doc.get_list("items");
         if index >= list.len() {
@@ -699,7 +699,7 @@ impl StructuredDocument {
     /// Append a log entry.
     /// If is_system is false, checks that the document has Append permission.
     pub fn append_log_entry(&self, entry: JsonValue, is_system: bool) -> Result<(), DocumentError> {
-        self.check_permission(pattern_db::models::MemoryOp::Append, is_system)?;
+        self.check_permission(crate::types::memory_types::MemoryOp::Append, is_system)?;
 
         let list = self.doc.get_list("entries");
         let loro_value = json_to_loro(&entry);

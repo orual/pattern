@@ -2,7 +2,7 @@
 
 **Goal:** let agents talk to each other (`ctx.message.send`) by giving every active session a tokio mailbox that wakes it with a `TurnInput` when a message arrives. Pin assigned tasks into the recipient's working-memory snapshot selection. Introduce `WakeCondition` (Rust primitives: `TaskTimeout`, `TaskDependencyResolved`, `BlockChanged`, `Interval`) and a `WakeReason` discriminant on `TurnInput` so the agent knows why it was woken. Define the Haskell surface for custom wake conditions (registration is capability-gated; full Haskell-condition evaluation is deferred — this phase ships the registration path and the Rust primitives).
 
-**Architecture:** each active session gets a **mailbox task** — a tokio task owning an `mpsc::UnboundedReceiver<MailboxInput>`. The task watches the session's busy flag; when a message arrives and the session is idle, it calls into the existing `drive_step` with the message synthesized as a `TurnInput`. When busy, it queues. `MessageRouter` is extended with an agent-addressed scheme that resolves `PersonaId` → mailbox sender through an `AgentRegistry` (in-memory in Phase 4; DB-backed in Phase 6). The router's existing `blocked on Router trait fix` note (per `pattern_runtime/CLAUDE.md`) gets resolved here: `Router::route` gains a `sender: &Caller` parameter, and `WireTurnEvent::MessageSent` is added so the TUI can render sent messages with attribution. Wake conditions register on the mailbox task; timers, block subscribers, and task-index polls all funnel into the same mpsc as message deliveries, with a `WakeReason` tag so the agent can branch on origin.
+**Architecture:** each active session gets a **mailbox task** — a tokio task owning an `mpsc::UnboundedReceiver<MailboxInput>`. The task watches the session's busy flag; when a message arrives and the session is idle, it calls into the existing `drive_step` with the message synthesized as a `TurnInput`. When busy, it queues. `MessageRouter` is extended with an agent-addressed scheme that resolves `PersonaId` → mailbox sender through an `AgentRegistry` (in-memory in Phase 4; DB-backed in Phase 6). The router's existing `blocked on Router trait fix` note (per `pattern_runtime/CLAUDE.md`) gets resolved here: `Router::route` gains a `sender: &MessageOrigin` parameter (reusing the existing four-way `Author` discriminant: `Partner(UserId) | Human | Agent(AgentId) | System`), and `WireTurnEvent::MessageSent` is added so the TUI can render sent messages with attribution. Wake conditions register on the mailbox task; timers, block subscribers, and task-index polls all funnel into the same mpsc as message deliveries, with a `WakeReason` tag so the agent can branch on origin.
 
 **Tech Stack:** `tokio::sync::mpsc::UnboundedSender/Receiver` (precedent in `router.rs:63`), `tokio::sync::Notify` (new — for "busy-flag released" wake-ups), `std::sync::atomic::AtomicBool` for busy state, existing `pattern_memory::subscriber::CommitEvent` channel (extended with a `BlockChanged` notifier hook), `jiff::Span` for timeouts + intervals. No new external deps.
 
@@ -62,48 +62,50 @@
 <!-- START_SUBCOMPONENT_A (tasks 1-3) -->
 
 <!-- START_TASK_1 -->
-### Task 1: Fix `Router` trait to carry sender identity; add `Caller` enum
+### Task 1: Fix `Router` trait to carry sender identity; add bypass helper on `MessageOrigin`
 
 **Verifies:** prerequisite for AC6.1; resolves pre-existing stub.
 
 **Files:**
-- Modify: `crates/pattern_runtime/src/router.rs` — `Router::route` signature gains `sender: &Caller`.
-- Modify: `crates/pattern_core/src/types/caller.rs` (new file) — `Caller` enum.
-- Modify: `crates/pattern_core/src/lib.rs` — re-export `Caller`.
-- Modify: `crates/pattern_server/src/protocol.rs` — add `WireTurnEvent::MessageSent { recipient, body, from }` variant.
-- Modify: `crates/pattern_runtime/src/sdk/handlers/message.rs` — pass the session's `Caller` into `route()`.
+- Modify: `crates/pattern_runtime/src/router.rs` — `Router::route` signature gains `sender: &MessageOrigin`.
+- Modify: `crates/pattern_core/src/types/message.rs` — add `impl MessageOrigin { pub fn bypasses_permission_gate(&self) -> bool }` that returns `matches!(self.author, Author::Partner(_))`. Only `Partner` gets the bypass; general `Human` is subject to gating per project policy (TUI user is always Partner).
+- Modify: `crates/pattern_server/src/protocol.rs` — add `WireTurnEvent::MessageSent { recipient, body, from: Author }` variant.
+- Modify: `crates/pattern_runtime/src/sdk/handlers/message.rs` — pass the turn's `MessageOrigin` into `route()`; handler reads it from `cx.user()` or per-turn source (Phase 5 Task 5 threads it end-to-end).
 - Implement: `crates/pattern_runtime/src/router/cli.rs` — `CliRouter` was stubbed per CLAUDE.md; finish the implementation now (consumes a channel to the daemon's event bus, emits `WireTurnEvent::MessageSent` on route).
 
 **Implementation:**
 
+No new enum. Reuse `MessageOrigin { author: Author, sphere: Sphere }` already at `crates/pattern_core/src/types/message.rs`. `Author` already discriminates `Partner(Partner{user_id}) | Human(...) | Agent(AgentAuthor{agent_id}) | System` — exactly the four-way split the broker needs.
+
 ```rust
-// pattern_core/src/types/caller.rs
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Caller {
-    Human(UserId),
-    Agent(PersonaId),
-    System, // runtime-initiated (wake conditions, housekeeping)
+// pattern_core/src/types/message.rs (extension)
+impl MessageOrigin {
+    /// Partner (the constellation's owner; TUI user) bypasses permission gating.
+    /// Generic `Human` does NOT bypass — any non-Partner human still needs approval.
+    pub fn bypasses_permission_gate(&self) -> bool {
+        matches!(self.author, Author::Partner(_))
+    }
 }
 
 // pattern_runtime/src/router.rs
 #[async_trait]
 pub trait Router: Send + Sync {
     fn scheme(&self) -> &str;
-    async fn route(&self, sender: &Caller, target: &str, body: &Message) -> Result<(), RouterError>;
+    async fn route(&self, sender: &MessageOrigin, target: &str, body: &Message) -> Result<(), RouterError>;
 }
 ```
 
-Thread `sender` through `RouterBridge::route_sync`, `RouterRegistry::route`, and all existing implementations.
+Thread `sender: &MessageOrigin` through `RouterBridge::route_sync`, `RouterRegistry::route`, and all existing implementations.
 
 **Testing:**
-- Unit: `Caller` serde round-trip.
+- Unit: `MessageOrigin::bypasses_permission_gate` returns true for `Author::Partner(_)`, false for every other variant.
 - Integration: existing router tests still pass with sender threaded through.
 - Integration: `CliRouter::route` emits a `WireTurnEvent::MessageSent` on a registered test channel.
 
 **Verification:**
 `cargo nextest run -p pattern-runtime router && cargo nextest run -p pattern-server protocol`
 
-**Commit:** `[pattern-core] [pattern-runtime] [pattern-server] add Caller, fix Router trait with sender, implement CliRouter`
+**Commit:** `[pattern-core] [pattern-runtime] [pattern-server] fix Router trait with sender origin; add Partner bypass helper; implement CliRouter`
 <!-- END_TASK_1 -->
 
 <!-- START_TASK_2 -->
@@ -121,7 +123,7 @@ Thread `sender` through `RouterBridge::route_sync`, `RouterRegistry::route`, and
 ```rust
 // mailbox.rs
 pub enum MailboxInput {
-    Message { msg: Message, from: Caller },
+    Message { msg: Message, from: MessageOrigin },
     TaskAssigned { task: BlockRef, from: PersonaId, msg: Message },
     Wake { reason: WakeReason },
 }
@@ -252,15 +254,41 @@ pub struct AgentEntry {
     pub status: AgentStatus, // Active | Draft | Inactive
 }
 
+/// Per-persona queue for messages sent to a Draft persona (no session open).
+/// Phase 6's PromoteDraft RPC drains this when it flips the persona to Active.
+type DraftQueue = Mutex<VecDeque<(Message, MessageOrigin)>>;
+
 pub struct AgentRegistry {
     entries: DashMap<PersonaId, AgentEntry>,
+    /// Queues for Draft personas. Entry keyed by PersonaId; exists only while
+    /// the persona is in Draft status. Removed on promotion (drain) or on
+    /// `unregister(persona_id)` if the Draft is abandoned.
+    draft_queues: DashMap<PersonaId, DraftQueue>,
 }
 
 impl AgentRegistry {
+    /// Register an active persona's mailbox sender.
     pub fn register(&self, id: PersonaId, tx: mpsc::UnboundedSender<MailboxInput>, status: AgentStatus);
+    /// Unregister. If the persona was Draft, also drops any queued messages.
     pub fn unregister(&self, id: &PersonaId);
+    /// Mailbox sender for the persona, if Active.
     pub fn sender(&self, id: &PersonaId) -> Option<mpsc::UnboundedSender<MailboxInput>>;
+    /// Current status of the persona, if registered.
     pub fn status(&self, id: &PersonaId) -> Option<AgentStatus>;
+
+    /// Append a message to a Draft persona's queue. Returns Err if the persona
+    /// is not Draft (callers route to the mailbox instead).
+    pub fn queue_for_draft(
+        &self,
+        id: &PersonaId,
+        msg: Message,
+        origin: MessageOrigin,
+    ) -> Result<(), RouterError>;
+
+    /// Drain all queued messages for a persona. Used by Phase 6's PromoteDraft RPC
+    /// after flipping the persona to Active and opening its session. Returns
+    /// messages in FIFO order (oldest first). Idempotent: second call returns empty.
+    pub fn drain_draft_queue(&self, id: &PersonaId) -> Vec<(Message, MessageOrigin)>;
 }
 
 pub struct AgentRouter {
@@ -270,7 +298,7 @@ pub struct AgentRouter {
 #[async_trait]
 impl Router for AgentRouter {
     fn scheme(&self) -> &str { "agent" }
-    async fn route(&self, sender: &Caller, target: &str, body: &Message) -> Result<(), RouterError> {
+    async fn route(&self, sender: &MessageOrigin, target: &str, body: &Message) -> Result<(), RouterError> {
         let id = PersonaId::from(target.strip_prefix("agent:").unwrap_or(target));
         match self.registry.status(&id) {
             None => Err(RouterError::PersonaNotFound(id)),
@@ -296,7 +324,7 @@ Session open registers `(persona_id, mailbox_tx)` with the registry. Session clo
 
 **Testing:**
 - AC6.1: two sessions in the same runtime; session A sends to session B's persona; B's mailbox receives.
-- AC6.4: send to nonexistent persona → `RouterError::PersonaNotFound`.
+- AC6.4: send to nonexistent persona → `RouterError::PersonaNotFound`. The error must propagate cleanly through the full call chain: `AgentRouter::route` returns `RouterError::PersonaNotFound(id)` → `RouterRegistry::route` passes it through unchanged → `MessageReq::Send` handler converts it to `EffectError::Handler(format!("{ROUTER_ERROR_PREFIX}PersonaNotFound: {id}"))` using a well-known prefix constant (consistent with Phase 1 Task 15's `PERMISSION_DENIED_PREFIX` pattern; external `tidepool-effect::EffectError` stays unchanged). Tests match on the prefix + persona id fragment.
 - AC6.5: session A, persona B registered as Draft; A sends to B; response is Ok but B's mailbox (empty, since no session) remains empty. Assert queued message present in registry's draft queue.
 - AC6.6: 10 concurrent messages from 3 senders to same target; target receives all 10 in a well-defined order (FIFO per-sender; interleaving across senders is non-deterministic but no loss).
 
@@ -329,7 +357,7 @@ The mailbox task's `build_turn_input` already handles `TaskAssigned` by appendin
 **Verification:**
 `cargo nextest run -p pattern-runtime message::delegate`
 
-**Commit:** `[pattern-runtime] wire task-pinning delegation into mailbox + introduce TaskQuery trait`
+**Commit:** `[pattern-runtime] wire task-pinning delegation into mailbox`
 <!-- END_TASK_5 -->
 
 <!-- END_SUBCOMPONENT_B -->
@@ -362,9 +390,16 @@ pub enum WakeReason {
 
 `TurnInput::from_wake(wake: WakeReason, session_agent: &AgentId) -> TurnInput` constructs a no-message TurnInput tagged with the reason. Agent program can branch on `input.wake` in its Haskell code — a helper in `Pattern.Turn` exposes `wakeReason :: TurnInput -> Maybe WakeReason`.
 
+**Threading `wake` from `drive_step` to the agent program:**
+1. `build_turn_input` (Task 3, `mailbox.rs`) populates `wake` from the `MailboxInput::Wake { reason }` variant; message deliveries leave it `None`.
+2. `drive_step` accepts `TurnInput` with the `wake` field already populated; no signature change beyond Phase 4 Task 2's busy-flag wrapper.
+3. `compose_request_for_turn` in `agent_loop.rs` serialises the Haskell-visible `TurnInput` — include `wake` so the agent's Haskell `wakeReason` helper sees it. Add a one-line entry in the existing Haskell-bridge encoder / decoder to round-trip the field.
+4. Confirm round-trip with an integration test that registers an `Interval(200ms)` wake, observes the Haskell program receive `WakeReason::Interval`, and branches on it.
+
 **Testing:**
 - Unit: serde round-trip for each variant.
 - Unit: `TurnInput::from_wake(Interval{ period: Span::hours(1) }, &a)` produces `wake == Some(Interval { period: 1h })`.
+- Integration: end-to-end wake pipeline — the Haskell `wakeReason` helper observes the right variant for each Rust wake primitive (see Task 7-9 tests). If the composed-request encoding drops the `wake` field, this test fails.
 
 **Verification:**
 `cargo nextest run -p pattern-core wake`
@@ -469,13 +504,21 @@ subscriber.subscribe_to_block(&block.label, Box::new(move |bref| {
 - Modify: `crates/pattern_runtime/src/wake/mod.rs` — `TaskDependencyResolved` polling loop backed by `TaskQuery` trait from Task 5.
 - Modify: `crates/pattern_runtime/src/sdk/requests/` — new `WakeReq::Register(WakeCondition)` / `WakeReq::Unregister(String)`.
 - Create: `crates/pattern_runtime/src/sdk/handlers/wake.rs` — handler; capability-gated via `CapabilityFlag::WakeConditionRegistration`.
-- Modify: `crates/pattern_runtime/src/sdk/bundle.rs` — add `WakeHandler` to `SdkBundle` HList; extend `CANONICAL_EFFECT_ROW` with `"Wake"`.
+- Modify: `crates/pattern_runtime/src/sdk/bundle.rs` — add `WakeHandler` to `SdkBundle` HList at the **end**, AFTER `Diagnostics` (the existing convention places Diagnostics last as session-level introspection; `Wake` joins as position 15). Extend `CANONICAL_EFFECT_ROW` with `"Wake"` in the same slot. Do NOT insert Wake mid-list — agent programs encode effect positions in their `Eff '[...]` row shapes and any earlier insertion breaks compiled programs.
 - Modify: `crates/pattern_core/src/capability.rs` — flip `EffectCategory::Wake` from "reserved" to in use.
 - Create: `crates/pattern_runtime/haskell/Pattern/Wake.hs` — Haskell helpers.
 
 **Implementation:**
 
-TaskDependencyResolved uses a poll loop (every N seconds, configurable, default 5s) against Plan 2's `ctx.tasks.get(task_ref)` query. When the returned `TaskStatus` transitions to `Completed`, fire the wake and deregister. Polling is crude but deterministic; a DB-side trigger / loro subscriber hook on the `TaskList` block could replace it later — not in this phase.
+`TaskDependencyResolved(task_ref)` uses the existing loro subscriber machinery from Phase 4 Task 8 — **no polling**. Tasks live inside `TaskList` blocks; when the block changes, we re-check the task's status. Registration:
+
+1. Resolve the `TaskList` block that contains `task_ref` via `ctx.tasks.parent_block(task_ref) -> BlockRef` (Plan 2 API; confirm exact name at execution time and align).
+2. Call `subscriber.subscribe_to_block(&parent.label, callback)` on the resolved TaskList block (same hook used by `BlockChanged`).
+3. In the callback, call `ctx.tasks.get(task_ref)`; if the returned `TaskStatus` is `Completed`, send `MailboxInput::Wake { reason: WakeReason::TaskDependencyResolved { task: task_ref } }` and call `subscriber.unsubscribe(handle)` to deregister.
+
+Wake fires within the same latency window as `BlockChanged` (typically <250ms from the write, bounded by loro subscriber delivery). Tests assert within that window using the same harness Phase 4 Task 8 uses.
+
+If Plan 2 hasn't exposed `parent_block(task_ref)` yet, the resolution is a plain query: scan the agent's accessible `TaskList` blocks for one containing `task_ref`. This is cheap at registration time (once per `ctx.wake.register`), not per-evaluation.
 
 Custom Haskell conditions: the handler accepts and stores the program but logs `"custom wake condition registered; evaluator deferred"` on register. No evaluator runs yet. This is consistent with the design's stated deferral.
 

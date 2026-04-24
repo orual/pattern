@@ -44,8 +44,8 @@ pub enum DocumentError {
     )]
     PermissionDenied {
         operation: String,
-        required: pattern_db::models::MemoryPermission,
-        actual: pattern_db::models::MemoryPermission,
+        required: MemoryPermission,
+        actual: MemoryPermission,
     },
 
     #[error("{0}")]
@@ -100,26 +100,6 @@ impl std::fmt::Display for BlockType {
         match self {
             Self::Core => write!(f, "core"),
             Self::Working => write!(f, "working"),
-        }
-    }
-}
-
-impl From<pattern_db::models::MemoryBlockType> for BlockType {
-    fn from(t: pattern_db::models::MemoryBlockType) -> Self {
-        match t {
-            pattern_db::models::MemoryBlockType::Core => BlockType::Core,
-            pattern_db::models::MemoryBlockType::Working => BlockType::Working,
-            // Future-proofing: non-exhaustive requires a catch-all.
-            _ => BlockType::Working,
-        }
-    }
-}
-
-impl From<BlockType> for pattern_db::models::MemoryBlockType {
-    fn from(t: BlockType) -> Self {
-        match t {
-            BlockType::Core => pattern_db::models::MemoryBlockType::Core,
-            BlockType::Working => pattern_db::models::MemoryBlockType::Working,
         }
     }
 }
@@ -375,29 +355,90 @@ impl std::str::FromStr for MemoryPermission {
     }
 }
 
-impl From<MemoryPermission> for pattern_db::models::MemoryPermission {
-    fn from(p: MemoryPermission) -> Self {
-        match p {
-            MemoryPermission::ReadOnly => pattern_db::models::MemoryPermission::ReadOnly,
-            MemoryPermission::Partner => pattern_db::models::MemoryPermission::Partner,
-            MemoryPermission::Human => pattern_db::models::MemoryPermission::Human,
-            MemoryPermission::Append => pattern_db::models::MemoryPermission::Append,
-            MemoryPermission::ReadWrite => pattern_db::models::MemoryPermission::ReadWrite,
-            MemoryPermission::Admin => pattern_db::models::MemoryPermission::Admin,
-        }
-    }
+/// Memory operation types for permission gating.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryOp {
+    /// Read data from a block.
+    Read,
+    /// Append to existing content.
+    Append,
+    /// Replace content entirely.
+    Overwrite,
+    /// Delete a block.
+    Delete,
 }
 
-impl From<pattern_db::models::MemoryPermission> for MemoryPermission {
-    fn from(p: pattern_db::models::MemoryPermission) -> Self {
-        match p {
-            pattern_db::models::MemoryPermission::ReadOnly => MemoryPermission::ReadOnly,
-            pattern_db::models::MemoryPermission::Partner => MemoryPermission::Partner,
-            pattern_db::models::MemoryPermission::Human => MemoryPermission::Human,
-            pattern_db::models::MemoryPermission::Append => MemoryPermission::Append,
-            pattern_db::models::MemoryPermission::ReadWrite => MemoryPermission::ReadWrite,
-            pattern_db::models::MemoryPermission::Admin => MemoryPermission::Admin,
+/// Result of permission check for a memory operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemoryGate {
+    /// Operation can proceed without additional consent.
+    Allow,
+    /// Operation may proceed with human/partner consent.
+    RequireConsent { reason: String },
+    /// Operation is not allowed under current policy.
+    Deny { reason: String },
+}
+
+impl MemoryGate {
+    /// Check whether an operation is allowed under a permission level.
+    ///
+    /// Policy:
+    /// - Read: always allowed.
+    /// - Append: allowed for Append/ReadWrite/Admin; Human/Partner require consent; ReadOnly denied.
+    /// - Overwrite: allowed for ReadWrite/Admin; Human/Partner require consent; ReadOnly/Append denied.
+    /// - Delete: allowed for Admin only; others denied.
+    pub fn check(op: MemoryOp, perm: MemoryPermission) -> Self {
+        match op {
+            MemoryOp::Read => Self::Allow,
+            MemoryOp::Append => match perm {
+                MemoryPermission::Append
+                | MemoryPermission::ReadWrite
+                | MemoryPermission::Admin => Self::Allow,
+                MemoryPermission::Human => Self::RequireConsent {
+                    reason: "Requires human approval to append".into(),
+                },
+                MemoryPermission::Partner => Self::RequireConsent {
+                    reason: "Requires partner approval to append".into(),
+                },
+                MemoryPermission::ReadOnly => Self::Deny {
+                    reason: "Block is read-only; appending is not allowed".into(),
+                },
+            },
+            MemoryOp::Overwrite => match perm {
+                MemoryPermission::ReadWrite | MemoryPermission::Admin => Self::Allow,
+                MemoryPermission::Human => Self::RequireConsent {
+                    reason: "Requires human approval to overwrite".into(),
+                },
+                MemoryPermission::Partner => Self::RequireConsent {
+                    reason: "Requires partner approval to overwrite".into(),
+                },
+                MemoryPermission::Append | MemoryPermission::ReadOnly => Self::Deny {
+                    reason: "Insufficient permission (append-only or read-only) for overwrite"
+                        .into(),
+                },
+            },
+            MemoryOp::Delete => match perm {
+                MemoryPermission::Admin => Self::Allow,
+                _ => Self::Deny {
+                    reason: "Deleting memory requires admin permission".into(),
+                },
+            },
         }
+    }
+
+    /// Check if the gate allows the operation.
+    pub fn is_allowed(&self) -> bool {
+        matches!(self, Self::Allow)
+    }
+
+    /// Check if the gate requires consent.
+    pub fn requires_consent(&self) -> bool {
+        matches!(self, Self::RequireConsent { .. })
+    }
+
+    /// Check if the gate denies the operation.
+    pub fn is_denied(&self) -> bool {
+        matches!(self, Self::Deny { .. })
     }
 }
 
