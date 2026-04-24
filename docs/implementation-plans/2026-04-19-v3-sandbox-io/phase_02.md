@@ -2,7 +2,7 @@
 
 **Goal:** Replace the `FileHandler` stub with a real implementation dispatching into a per-session `FileManager` coordinator. FileManager uses Phase 1's pooled `DirWatcher<PathFanoutRouter>` primitive — one `PathFanoutRouter` shared session-wide and one `DirWatcher` per unique parent directory, lazily created and GC'd. Open files get a `LoroSyncedFile`; watch-only paths get a direct router subscription (no LoroDoc). External edits surface as attachments on the agent's next turn through the same composer step that delivers memory-block snapshots.
 
-**Architecture:** `FileHandler` implements `EffectHandler<SessionContext>` (tightened from the stub's `HasCancelState` bound — matches `SkillsHandler` at `crates/pattern_runtime/src/sdk/handlers/skills.rs:76`). It dispatches `FileReq` variants to `cx.user().file_manager()`. FileManager is `Arc<FileManager>` held on `SessionContext` (new field). Internal state: one shared `PathFanoutRouter`, a `DashMap<PathBuf /* canonical parent dir */, Arc<DirWatcher>>` for lazily-created per-directory watchers, a `DashMap<PathBuf, Arc<LoroSyncedFile>>` of open files, a `DashMap<PathBuf, PathFanoutSubscription>` for watch-only paths, a pending-edits queue drained by `compose_request_for_turn`, and a compiled `FilePolicy` (ordered rules, last-match-wins, default-deny). Config-KDL shape detection gates writes to pattern-reserved configs through `PermissionBroker`.
+**Architecture:** `FileHandler` implements `EffectHandler<SessionContext>` (tightened from the stub's `HasCancelState` bound — matches `SkillsHandler` at `crates/pattern_runtime/src/sdk/handlers/skills.rs:76`). It dispatches `FileReq` variants to `cx.user().file_manager()`. FileManager is `Arc<FileManager>` held on `SessionContext` (new field). Internal state: one shared `PathFanoutRouter`, a `DashMap<PathBuf /* canonical parent dir */, Arc<DirWatcher>>` for lazily-created per-directory watchers, a `DashMap<PathBuf, Arc<LoroSyncedFile>>` of open files, a `DashMap<PathBuf, PathFanoutSubscription>` for watch-only paths, and a compiled `FilePolicy` (ordered rules, last-match-wins, default-deny). Config-KDL shape detection gates writes to pattern-reserved configs through `PermissionBroker`. **External-edit notifications use the canonical pseudo-message pipeline** (`MemoryStoreAdapter::record_pseudo_message` → `TurnOutput::pseudo_messages` → `Segment2Pass::recent_pseudo_messages`), the same mechanism `Pattern.Skills.Load` uses; FileManager's listener threads call `pattern_provider::compose::pseudo_messages::render_file_edit_event(...)` and push the resulting `ChatMessage` via the adapter. **No new `MessageAttachment` variant is introduced** — the existing pipeline already carries handler-originated reminders into segment 2.
 
 **Tech Stack:** Rust, `loro`, `notify` (via Phase 1 primitive), `tidepool_effect`, `knus` (already a dep — persona loader), `globset` (**new workspace dep**), `kdl` (already a transitive dep via knus), `dashmap`, `thiserror`, `tempfile` (tests).
 
@@ -15,7 +15,7 @@
 - SdkBundle HList: `crates/pattern_runtime/src/sdk/bundle.rs:40-57`; FileHandler at tag 10, no position change.
 - `SessionContext`: `crates/pattern_runtime/src/session.rs:40-121` + accessors. Adding `file_manager()` accessor.
 - `PersonaSnapshot` at `crates/pattern_core/src/types/snapshot.rs`. Adding `open_files: Vec<PathBuf>`.
-- System-reminder mechanism: `MessageAttachment::BatchOpeningSnapshot` at `crates/pattern_core/src/types/message.rs`, spliced onto first user message by `compose_request_for_turn` in `crates/pattern_runtime/src/agent_loop.rs`. Template for `FileEdits` attachment.
+- System-reminder mechanism: handler-originated reminders use `MemoryStoreAdapter::record_pseudo_message(ChatMessage)` (in-flight on `batching` branch — see working-copy diffs to `pattern_runtime/src/memory/adapter.rs`, `pattern_core/src/types/turn.rs`, `pattern_runtime/src/agent_loop.rs`, `pattern_provider/src/compose/passes/segment_2.rs`). Pipeline: handler/listener pushes to adapter buffer → `agent_loop` step 5 drains into `TurnOutput::pseudo_messages` → `TurnHistory::most_recent_pseudo_messages()` → `Segment2Pass::new(..., recent_pseudo_messages, ...)` replays into segment 2. `Pattern.Skills.Load` is the in-flight template (`crates/pattern_runtime/src/sdk/handlers/skills.rs:428-478`); the renderer lives at `pattern_provider::compose::pseudo_messages::render_skill_loaded_event`. **Phase 2 mirrors this pattern** for file edits — adds `render_file_edit_event` to the same module, calls it from FileManager listener threads.
 - KDL parsing: `crates/pattern_runtime/src/persona_loader.rs` (knus); config entry point `pattern_memory::config::pattern_kdl::PatternConfig`.
 - `globset`: not yet workspace dep. Add in Task 1.
 - `PermissionBroker` at `crates/pattern_core/src/permission.rs:54-100` — Plan 3 changes it to per-instance.
@@ -330,9 +330,11 @@ pub file_policy: FilePolicySection,
 
 FileManager uses Phase 1's pooled-watcher primitive: one `PathFanoutRouter` shared session-wide + one `DirWatcher<PathFanoutRouter>` per unique parent directory, lazily created on first file access in that dir and GC'd on last close. This avoids N inotify watches when an agent opens N files in the same directory.
 
+External edits are surfaced to the agent through the canonical pseudo-message pipe: each open/watched file's listener thread takes an `Arc<MemoryStoreAdapter>` (cloned at construction time) and calls `adapter.record_pseudo_message(render_file_edit_event(...))` — no FileManager-internal pending-edits queue, no separate composer splice point.
+
 ```rust
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 use dashmap::DashMap;
@@ -344,22 +346,13 @@ use pattern_memory::loro_sync::{
     DirWatcher, DirWatcherConfig, LoroSyncedFile, PathFanoutRouter,
     PathFanoutSubscription,
 };
+use crate::memory::MemoryStoreAdapter;
 use crate::file_manager::error::FileError;
 use crate::file_manager::policy::FilePolicy;
 use crate::file_manager::types::FileInfo;
 
-#[derive(Clone, Debug)]
-pub enum ExternalEditKind { Open, Watch }
-
-#[derive(Clone, Debug)]
-pub struct ExternalEditEvent {
-    pub path: PathBuf,
-    pub kind: ExternalEditKind,
-    pub at: jiff::Timestamp,
-    /// For Open files: unified-diff-style description of what changed.
-    /// For Watch files: None (no loro state to diff against).
-    pub diff: Option<String>,
-}
+#[derive(Clone, Copy, Debug)]
+pub enum FileEditKind { Open, Watch }
 
 pub struct FileManager {
     policy: FilePolicy,
@@ -367,11 +360,14 @@ pub struct FileManager {
     dir_watchers: DashMap<PathBuf, Arc<DirWatcher>>,
     open_files: DashMap<PathBuf, Arc<LoroSyncedFile>>,
     watch_only_paths: DashMap<PathBuf, PathFanoutSubscription>,
-    pending_external_edits: Arc<Mutex<Vec<ExternalEditEvent>>>,
     /// One listener per open/watched file, bridging SyncedDoc change events
-    /// or router subscriptions into `pending_external_edits`. Not filesystem
-    /// watchers themselves — those are the pooled DirWatchers above.
+    /// or router subscriptions into the per-session adapter's pseudo-message
+    /// buffer. Not filesystem watchers themselves — those are the pooled
+    /// DirWatchers above.
     edit_listeners: DashMap<PathBuf, JoinHandle<()>>,
+    /// Per-session adapter — cloned for each listener thread so reminders
+    /// can be pushed via `record_pseudo_message`. Cheap clone (Arc).
+    adapter: Arc<MemoryStoreAdapter>,
     capability_set: Arc<CapabilitySet>,
     permission_broker: Arc<PermissionBroker>,
     cancel: CancellationToken,
@@ -380,6 +376,7 @@ pub struct FileManager {
 impl FileManager {
     pub fn new(
         policy: FilePolicy,
+        adapter: Arc<MemoryStoreAdapter>,
         capability_set: Arc<CapabilitySet>,
         permission_broker: Arc<PermissionBroker>,
     ) -> Self {
@@ -389,8 +386,8 @@ impl FileManager {
             dir_watchers: DashMap::new(),
             open_files: DashMap::new(),
             watch_only_paths: DashMap::new(),
-            pending_external_edits: Arc::new(Mutex::new(Vec::new())),
             edit_listeners: DashMap::new(),
+            adapter,
             capability_set,
             permission_broker,
             cancel: CancellationToken::new(),
@@ -494,11 +491,11 @@ impl FileManager {
         let sf = LoroSyncedFile::open_with_router(&canonical, &self.router)?;
         let content = sf.read()?.into_bytes();
 
-        // Bridge SyncedDoc external-change events → pending_external_edits.
+        // Bridge SyncedDoc external-change events → adapter pseudo-messages.
         // NOT a filesystem watcher — listens on an already-running crossbeam
         // channel from the pooled DirWatcher / SyncedDoc ingest thread.
         let rx = sf.subscribe_external_changes();
-        let pending = Arc::clone(&self.pending_external_edits);
+        let adapter = Arc::clone(&self.adapter);
         let cancel = self.cancel.clone();
         let path_owned = canonical.clone();
         let listener = std::thread::Builder::new()
@@ -507,13 +504,17 @@ impl FileManager {
                 while let Ok(evt) = rx.recv() {
                     if cancel.is_cancelled() { break; }
                     if evt.applied {
-                        let mut guard = pending.lock().unwrap();
-                        guard.push(ExternalEditEvent {
-                            path: path_owned.clone(),
-                            kind: ExternalEditKind::Open,
-                            at: jiff::Timestamp::now(),
-                            diff: None, // filled by Task 8
-                        });
+                        // Build the canonical pseudo-message and push via the
+                        // adapter — same pipeline as Pattern.Skills.Load.
+                        // diff is None for now; Task 8 fills the diff payload.
+                        let msg = pattern_provider::compose::pseudo_messages::
+                            render_file_edit_event(
+                                &path_owned,
+                                FileEditKind::Open,
+                                jiff::Timestamp::now(),
+                                None, // diff filled in Task 8
+                            );
+                        adapter.record_pseudo_message(msg);
                     }
                 }
             })
@@ -556,7 +557,7 @@ impl FileManager {
         let (tx, rx) = crossbeam_channel::bounded(64);
         let subscription = self.router.subscribe(canonical.clone(), tx);
 
-        let pending = Arc::clone(&self.pending_external_edits);
+        let adapter = Arc::clone(&self.adapter);
         let cancel = self.cancel.clone();
         let path_owned = canonical.clone();
         let listener = std::thread::Builder::new()
@@ -564,13 +565,14 @@ impl FileManager {
             .spawn(move || {
                 while let Ok(_evt) = rx.recv() {
                     if cancel.is_cancelled() { break; }
-                    let mut guard = pending.lock().unwrap();
-                    guard.push(ExternalEditEvent {
-                        path: path_owned.clone(),
-                        kind: ExternalEditKind::Watch,
-                        at: jiff::Timestamp::now(),
-                        diff: None,
-                    });
+                    let msg = pattern_provider::compose::pseudo_messages::
+                        render_file_edit_event(
+                            &path_owned,
+                            FileEditKind::Watch,
+                            jiff::Timestamp::now(),
+                            None, // watch-only never has diff
+                        );
+                    adapter.record_pseudo_message(msg);
                 }
             })
             .map_err(|e| FileError::Io { path: path.to_owned(), source: e })?;
@@ -621,13 +623,6 @@ impl FileManager {
             });
         }
         Ok(entries)
-    }
-
-    /// Consumed by agent_loop's compose_request_for_turn to produce
-    /// MessageAttachment::FileEdits (Task 8).
-    pub fn drain_pending_edits(&self) -> Vec<ExternalEditEvent> {
-        let mut guard = self.pending_external_edits.lock().unwrap();
-        std::mem::take(&mut *guard)
     }
 
     /// Snapshot open file paths for session serialization (AC2.11).
@@ -744,11 +739,12 @@ pub(crate) fn await_approval(
 
 **Implementation:**
 
-In `SessionContext::from_persona`, after the mount config is parsed:
+In `SessionContext::from_persona`, after the adapter is constructed and the mount config is parsed:
 ```rust
 let policy = FilePolicy::from_rules(mount_config.file_policy.rules.clone())?;
 let file_manager = Arc::new(FileManager::new(
     policy,
+    Arc::clone(&adapter),                     // existing per-session adapter
     persona.capability_set.clone(),          // Plan 3
     runtime.permission_broker().clone(),     // Plan 3
 ));
@@ -859,69 +855,59 @@ impl EffectHandler<SessionContext> for FileHandler {
 <!-- END_TASK_7 -->
 
 <!-- START_TASK_8 -->
-### Task 8: System-reminder pipeline for external-edit notifications
+### Task 8: `render_file_edit_event` + diff payload
 
 **Files:**
-- Modify: `crates/pattern_core/src/types/message.rs` — add `MessageAttachment::FileEdits(Vec<FileEditNotice>)` variant.
-- Modify: `crates/pattern_runtime/src/agent_loop.rs` — in `compose_request_for_turn` (investigator pointed at the block-change detection block near line 500-600), after the existing `BatchOpeningSnapshot` splicing, call `ctx.session_context().file_manager().drain_pending_edits()` and splice a `FileEdits` attachment onto the same first-user-message.
-- Modify: `pattern_provider::compose::passes::Segment2Pass` — add a render arm for `MessageAttachment::FileEdits` that emits a `<system-reminder>` block.
-- Modify: `crates/pattern_runtime/src/file_manager/manager.rs` — complete `ExternalEditEvent.diff` for open files. For opaque text, snapshot memory_doc content before + after merge and compute a unified-diff-style block. External-dep decision: see open questions below — default is before/after text block (zero new deps); the `similar` crate for real unified diff requires orual approval.
+- Modify: `crates/pattern_provider/src/compose/pseudo_messages.rs` — add `render_file_edit_event(path, kind, at, diff) -> ChatMessage` alongside the existing `render_skill_loaded_event`. Same module, same shape.
+- Modify: `crates/pattern_memory/src/loro_sync/synced_doc.rs` (Phase 1 contract — verify Phase 1 ships it; if not, surface as scope feedback) — capture memory_doc content before + after each external-merge cycle and include both in `ExternalChangeEvent::diff_data` (a structured `before: String, after: String` pair, or a single rendered diff string).
+- Modify: `crates/pattern_runtime/src/file_manager/manager.rs` — listener threads pass the captured diff payload through to `render_file_edit_event` instead of `None`.
 
-**`FileEditNotice` shape:**
-
-```rust
-// pattern_core/src/types/message.rs
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FileEditNotice {
-    pub path: PathBuf,
-    pub kind: ExternalEditKind,  // reuses ExternalEditKind from pattern_runtime — or re-define here
-    pub at: jiff::Timestamp,
-    pub diff: Option<String>,
-}
-```
-
-**Splicing (agent_loop.rs):**
+**`render_file_edit_event` shape:**
 
 ```rust
-let file_edits = ctx.session_context().file_manager().drain_pending_edits();
-if !file_edits.is_empty() {
-    let notices: Vec<FileEditNotice> = file_edits.into_iter().map(|evt| FileEditNotice {
-        path: evt.path,
-        kind: evt.kind,
-        at: evt.at,
-        diff: evt.diff,
-    }).collect();
-    if let Some(first_msg) = partial.messages.iter_mut().find(|m| matches!(m.role, ChatRole::User)) {
-        first_msg.attachments.push(MessageAttachment::FileEdits(notices));
+// pattern_provider/src/compose/pseudo_messages.rs
+pub fn render_file_edit_event(
+    path: &Path,
+    kind: FileEditKind,        // re-exported from pattern_runtime, or re-defined here
+    at: jiff::Timestamp,
+    diff: Option<String>,
+) -> ChatMessage {
+    let kind_label = match kind {
+        FileEditKind::Open  => "you had open",
+        FileEditKind::Watch => "you were watching",
+    };
+    let mut body = format!(
+        "<system-reminder>\n\
+         External edit detected while you were thinking:\n\
+         - {at} {} ({kind_label}) changed",
+        path.display(),
+    );
+    if let Some(diff) = diff {
+        body.push_str(":\n```\n");
+        body.push_str(&diff);
+        body.push_str("\n```");
     }
+    body.push_str("\n</system-reminder>");
+    ChatMessage::user(body)
 }
 ```
 
-**Segment-2 render:**
+(Exact `ChatMessage` constructor matches whatever `render_skill_loaded_event` uses — verify at execution time.)
 
-For each `FileEditNotice`, emit a `<system-reminder>` block:
-```
-<system-reminder>
-External edits detected while you were thinking:
-- /project/src/lib.rs (you had open) changed:
-  [before/after text, or unified diff if `similar` was approved]
-- /project/Cargo.toml (you were watching) changed
-</system-reminder>
-```
+**Diff computation (default: before/after text blocks, zero new deps):**
 
-**Diff computation for open files (default: before/after text blocks, no new dep):**
+Phase 1's `SyncedDoc` ingest thread already captures memory_doc state before applying external edits (it has to, in order to compute the `oplog_vv` for export). Extending it to also expose the rendered before/after content is a small addition. For opaque text (file case), `before = doc.get_text("content").to_string()` pre-merge, `after = doc.get_text("content").to_string()` post-merge; the diff payload is `format!("--- before\n{before}\n+++ after\n{after}")` (literal, no diff library required).
 
-Inside `SyncedDoc`, capture the memory_doc content before applying an external edit. After merge, capture the new content. The difference is provided to the subscriber via `ExternalChangeEvent` (Phase 1 already has this channel). For this plan's default, store both `before: String` and `after: String` in `ExternalChangeEvent` (or a new `ExternalChangeEvent::Detailed` variant); render at Segment-2 time as code-fenced before/after blocks.
+If orual approves the `similar` crate (open question Q1), swap the renderer to emit a unified diff via `similar::TextDiff::from_lines`. Data model unchanged.
 
-If orual approves the `similar` crate (see open question Q1), swap the renderer to emit a unified diff. The data model in `ExternalEditEvent` stays the same either way — only the render changes.
-
-**Verifies:** AC2.7.
+**Verifies:** AC2.7 (text content delivered as system reminder in next turn).
 
 **Verification:**
 - `cargo check --workspace`.
-- Integration test in Task 10 exercises the full path end-to-end.
+- Unit test on `render_file_edit_event` — given known inputs, snapshot the rendered ChatMessage body via `insta`.
+- Integration test in Task 10 (`external_edit_on_open_file_becomes_attachment`) renamed to `external_edit_on_open_file_becomes_pseudo_message` — asserts on `TurnOutput::pseudo_messages` (or `TurnHistory::most_recent_pseudo_messages`) contains a message whose body contains the file path and the diff payload.
 
-**Commit:** `[pattern-runtime] [pattern-core] file-edit system-reminder pipeline`
+**Commit:** `[pattern-provider] [pattern-runtime] render_file_edit_event + before/after diff payload`
 <!-- END_TASK_8 -->
 
 <!-- END_SUBCOMPONENT_C -->
@@ -981,14 +967,14 @@ for path in &persona_snapshot.open_files {
 
 | AC | Test name | Mechanism |
 |----|-----------|-----------|
-| 2.1 | `read_does_not_open_loro` | `fm.read(path)`; external `std::fs::write`; wait 750ms; assert `drain_pending_edits` empty. |
-| 2.2 | `open_returns_content_and_subscribes` | `fm.open` content matches disk; external edit → `drain_pending_edits` non-empty with `kind=Open`. |
+| 2.1 | `read_does_not_open_loro` | `fm.read(path)`; external `std::fs::write`; wait 750ms; assert `adapter.drain_pending_pseudo_messages()` empty. |
+| 2.2 | `open_returns_content_and_subscribes` | `fm.open` content matches disk; external edit → `adapter.drain_pending_pseudo_messages()` non-empty with body containing path + `you had open`. |
 | 2.3 | `write_on_open_file_goes_through_loro` | Open + `fm.write("new")` with a concurrent external edit — both preserved per Phase 1 AC1.3. Write on un-opened file: direct `atomic_write`, no loro. |
-| 2.4 | `close_drops_watcher` | Open, close, external edit; wait; `drain_pending_edits` empty. |
+| 2.4 | `close_drops_watcher` | Open, close, external edit; wait; `adapter.drain_pending_pseudo_messages()` empty. |
 | 2.5 | `list_with_glob` | Tempdir with `a.rs`, `b.py`, `c.rs`; `fm.list(dir, "*.rs")` returns 2 entries. |
-| 2.6 | `watch_does_not_create_loro` | `fm.watch`; external edit; event appears with `kind=Watch`; `fm.open_files` does not contain path; `fm.watch_only_paths` does. |
+| 2.6 | `watch_does_not_create_loro` | `fm.watch`; external edit; reminder body contains `you were watching`; `fm.open_files` does not contain path; `fm.watch_only_paths` does. |
 | 2.6b | `watcher_pooling_shares_dir_watchers` | Open three files in the same directory; `fm.dir_watchers` has exactly one entry (pooled). Close two; still one. Close last; entry GC'd. |
-| 2.7 | `external_edit_on_open_file_becomes_attachment` | Full integration: open session + test persona with file-policy; agent `Pattern.File.Open(path)`; external `std::fs::write`; next turn's compose output contains `MessageAttachment::FileEdits` with the right path. |
+| 2.7 | `external_edit_on_open_file_becomes_pseudo_message` | Full integration: open session + test persona with file-policy; agent `Pattern.File.Open(path)`; external `std::fs::write`; advance one turn; assert the next turn's `Segment2Pass` receives a `recent_pseudo_messages` entry whose body contains the file path and the diff payload. |
 | 2.8 | `write_outside_rules_denied` | Policy `allow /project/**` only; `fm.write("/etc/passwd", ...)` → `FileError::PermissionDenied { reason: "no matching rule (default deny)" }`. |
 | 2.9 | `config_write_triggers_broker` | Content that parses as pattern config KDL. Scripted broker auto-approves → write succeeds; scripted broker denies → `FileError::ConfigApprovalDenied`. |
 | 2.10 | `ordered_rules_last_match_wins` | Three scenarios in one test. (a) `allow /project/**`, then `deny /project/.env` → `.env` denied by rule 1, `lib.rs` allowed by rule 0. (b) `deny /project/**`, then `allow /project/notes/*.md` → `notes/foo.md` allowed despite broader deny. (c) Nested re-allow — `allow /project/**`, `deny /project/secrets/**`, `allow /project/secrets/public.txt` → `public.txt` allowed, `secrets/private.txt` denied. All verify denial reason names the losing rule. |
@@ -1014,7 +1000,7 @@ for path in &persona_snapshot.open_files {
 
 **Q1: `similar` crate for unified-diff rendering.** Would make file-edit system reminders much more readable (real unified diffs instead of before/after text blocks). Adds a dep for cosmetic polish. Default: ask before adding — per project guidance.
 
-**Q2: `MessageAttachment::FileEdits` as a new variant vs. piggy-backing on `BatchOpeningSnapshot`.** New variant has clearer semantics but more plumbing (Segment-2 render arm + agent_loop splice). Defaulted to new variant; flag if reviewer prefers piggy-backing.
+**Q2 [resolved 2026-04-24]:** Originally proposed adding a `MessageAttachment::FileEdits` variant. Updated to use the canonical pseudo-message pipeline (`adapter.record_pseudo_message`) — no new attachment variant, mirrors `Pattern.Skills.Load`. See updated Task 4 + Task 8.
 
 **Q3: Canonicalization fallback on missing files.** `canonicalize_best` falls back to raw path when the file doesn't exist (write-new case). Means allow/deny patterns should be canonical absolute paths — KDL authors writing relative patterns would be surprised. Document in the KDL config schema; flag if a stricter stance is preferred.
 

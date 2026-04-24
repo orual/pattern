@@ -295,8 +295,10 @@ pub async fn orchestrate(
         })
     };
 
-    // 5. Drain pending block writes from the memory adapter.
+    // 5. Drain pending block writes + handler-originated pseudo-messages
+    //    from the memory adapter.
     let block_writes = ctx.adapter().drain_pending();
+    let pseudo_messages = ctx.adapter().drain_pending_pseudo_messages();
 
     // 6. Build cache metrics from the captured usage.
     //
@@ -364,6 +366,7 @@ pub async fn orchestrate(
     Ok(TurnOutput {
         messages,
         block_writes,
+        pseudo_messages,
         tool_calls,
         stop_reason,
         usage,
@@ -1264,7 +1267,7 @@ async fn compose_request_for_turn(
     // 3. Snapshot TurnHistory state. Holding the mutex across the
     //    persona-load await above would be a deadlock risk — we
     //    acquire briefly here only.
-    let (summary_head_messages, prior_messages, recent_block_writes) = {
+    let (summary_head_messages, prior_messages, recent_block_writes, recent_pseudo_messages) = {
         let hist = turn_history
             .lock()
             .map_err(|_| RuntimeError::ProviderError {
@@ -1285,8 +1288,14 @@ async fn compose_request_for_turn(
             .collect();
 
         let recent_block_writes = hist.most_recent_block_writes().to_vec();
+        let recent_pseudo_messages = hist.most_recent_pseudo_messages().to_vec();
 
-        (summary_head_messages, prior_messages, recent_block_writes)
+        (
+            summary_head_messages,
+            prior_messages,
+            recent_block_writes,
+            recent_pseudo_messages,
+        )
     };
 
     // 4. Record whether segment 1 has content before `system_blocks`
@@ -1310,6 +1319,7 @@ async fn compose_request_for_turn(
             summary_head_messages,
             prior_messages,
             &recent_block_writes,
+            &recent_pseudo_messages,
             cache_profile.clone(),
         )),
     ];

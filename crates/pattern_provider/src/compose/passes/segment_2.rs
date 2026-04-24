@@ -93,9 +93,14 @@ impl Segment2Pass {
         summary_head_messages: Vec<ChatMessage>,
         prior_messages: Vec<(SmolStr, ChatMessage)>,
         recent_block_writes: &[BlockWrite],
+        recent_pseudo_messages: &[ChatMessage],
         profile: CacheProfile,
     ) -> Self {
-        let pseudo_messages = render_change_events(recent_block_writes);
+        let mut pseudo_messages = render_change_events(recent_block_writes);
+        // Handler-originated pseudo-messages (e.g. [skill:loaded] markers)
+        // are appended after block-write-rendered ones. Order within the
+        // group is preserved from the adapter buffer.
+        pseudo_messages.extend(recent_pseudo_messages.iter().cloned());
         Self {
             summary_head_messages,
             prior_messages,
@@ -227,7 +232,7 @@ mod tests {
             (SmolStr::new("msg-2"), ChatMessage::assistant("hi")),
         ];
 
-        let pass = Segment2Pass::new(vec![], prior, &writes, test_profile());
+        let pass = Segment2Pass::new(vec![], prior, &writes, &[], test_profile());
         let mut partial = PartialRequest::new("claude-opus-4-7");
         pass.apply(&mut partial).unwrap();
 
@@ -249,7 +254,7 @@ mod tests {
         let summary = synthesize_summary_message(0, "pos_a", "pos_b", "summary text");
         let prior = vec![(SmolStr::new("msg-1"), ChatMessage::user("recent message"))];
 
-        let pass = Segment2Pass::new(vec![summary], prior, &[], test_profile());
+        let pass = Segment2Pass::new(vec![summary], prior, &[], &[], test_profile());
         let mut partial = PartialRequest::new("claude-opus-4-7");
         pass.apply(&mut partial).unwrap();
 
@@ -276,7 +281,7 @@ mod tests {
             (SmolStr::new("msg-3"), ChatMessage::user("msg3")),
         ];
 
-        let pass = Segment2Pass::new(vec![], prior, &[], test_profile());
+        let pass = Segment2Pass::new(vec![], prior, &[], &[], test_profile());
         let mut partial = PartialRequest::new("claude-opus-4-7");
         pass.apply(&mut partial).unwrap();
 
@@ -295,7 +300,7 @@ mod tests {
 
     #[test]
     fn empty_segment_2_no_marker() {
-        let pass = Segment2Pass::new(vec![], vec![], &[], test_profile());
+        let pass = Segment2Pass::new(vec![], vec![], &[], &[], test_profile());
         let mut partial = PartialRequest::new("claude-opus-4-7");
         pass.apply(&mut partial).unwrap();
 
@@ -316,7 +321,7 @@ mod tests {
         ];
         let writes = vec![make_block_write("tasks", BlockWriteKind::Updated)];
 
-        let pass = Segment2Pass::new(vec![summary], prior, &writes, test_profile());
+        let pass = Segment2Pass::new(vec![summary], prior, &writes, &[], test_profile());
         let mut partial = PartialRequest::new("claude-opus-4-7");
         pass.apply(&mut partial).unwrap();
 
@@ -342,7 +347,7 @@ mod tests {
     #[test]
     fn cache_control_uses_segment_2_control() {
         let prior = vec![(SmolStr::new("msg-1"), ChatMessage::user("msg"))];
-        let pass = Segment2Pass::new(vec![], prior, &[], test_profile());
+        let pass = Segment2Pass::new(vec![], prior, &[], &[], test_profile());
         let mut partial = PartialRequest::new("claude-opus-4-7");
         pass.apply(&mut partial).unwrap();
 

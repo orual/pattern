@@ -225,6 +225,16 @@ impl TurnHistory {
             .unwrap_or(&[])
     }
 
+    /// Handler-originated pseudo-messages from the immediately-prior turn
+    /// (e.g. `[skill:loaded]` markers from `Pattern.Skills.Load`). Empty
+    /// if this is the first turn.
+    pub fn most_recent_pseudo_messages(&self) -> &[genai::chat::ChatMessage] {
+        self.active
+            .back()
+            .map(|tr| tr.output.pseudo_messages.as_slice())
+            .unwrap_or(&[])
+    }
+
     /// Cached archive-summary head. Composer prepends to Segment 2.
     pub fn summary_head(&self) -> &[ArchiveSummary] {
         &self.summary_head
@@ -567,6 +577,7 @@ fn flush_turn_record(
         output: TurnOutput {
             messages: output_msgs,
             block_writes: Vec::new(),
+            pseudo_messages: Vec::new(),
             tool_calls,
             stop_reason,
             usage: None,
@@ -647,6 +658,7 @@ mod tests {
                 })
                 .collect(),
             block_writes,
+            pseudo_messages: vec![],
             tool_calls: vec![],
             stop_reason: StopReason::EndTurn,
             usage: None,
@@ -743,6 +755,7 @@ mod tests {
             TurnOutput {
                 messages: vec![assistant_msg],
                 block_writes: vec![],
+                pseudo_messages: vec![],
                 tool_calls: vec![],
                 stop_reason: StopReason::EndTurn,
                 usage: None,

@@ -37,6 +37,11 @@ pub struct MemoryStoreAdapter {
     inner: Arc<dyn MemoryStore>,
     agent_id: String,
     pending: Arc<Mutex<Vec<BlockWrite>>>,
+    /// Handler-originated pseudo-messages (e.g. `[skill:loaded]` markers
+    /// pushed by `Pattern.Skills.Load`). Drained at turn close into
+    /// [`pattern_core::types::turn::TurnOutput::pseudo_messages`] so the
+    /// composer can replay them into segment 2 on the next wire turn.
+    pending_pseudo_messages: Arc<Mutex<Vec<genai::chat::ChatMessage>>>,
 }
 
 impl MemoryStoreAdapter {
@@ -47,6 +52,7 @@ impl MemoryStoreAdapter {
             inner,
             agent_id: agent_id.into(),
             pending: Arc::new(Mutex::new(Vec::new())),
+            pending_pseudo_messages: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -58,6 +64,22 @@ impl MemoryStoreAdapter {
     /// Drain pending writes. Session calls at turn close.
     pub fn drain_pending(&self) -> Vec<BlockWrite> {
         std::mem::take(&mut *self.pending.lock().unwrap())
+    }
+
+    /// Handlers call this to emit a pseudo-message into the current turn's
+    /// segment-2 replay. The canonical use is `Pattern.Skills.Load` which
+    /// pushes a `[skill:loaded] … [skill:loaded:end]` marker so the model
+    /// sees the loaded skill body on the next wire turn.
+    ///
+    /// Unlike [`record_write`], this does NOT mutate memory — it is a
+    /// wire-format side-effect only.
+    pub fn record_pseudo_message(&self, msg: genai::chat::ChatMessage) {
+        self.pending_pseudo_messages.lock().unwrap().push(msg);
+    }
+
+    /// Drain pending pseudo-messages. Session calls at turn close.
+    pub fn drain_pending_pseudo_messages(&self) -> Vec<genai::chat::ChatMessage> {
+        std::mem::take(&mut *self.pending_pseudo_messages.lock().unwrap())
     }
 
     /// Agent id this adapter attributes mutations to.
@@ -78,6 +100,14 @@ impl std::fmt::Debug for MemoryStoreAdapter {
             .field(
                 "pending_count",
                 &self.pending.lock().map(|v| v.len()).unwrap_or(0),
+            )
+            .field(
+                "pending_pseudo_messages_count",
+                &self
+                    .pending_pseudo_messages
+                    .lock()
+                    .map(|v| v.len())
+                    .unwrap_or(0),
             )
             .finish_non_exhaustive()
     }

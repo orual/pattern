@@ -117,6 +117,7 @@ mod tests {
                 vec![],
                 prior_msgs,
                 &writes,
+                &[],
                 profile.clone(),
             )),
             Box::new(Segment3Pass::new(blocks, profile)),
@@ -167,7 +168,7 @@ mod tests {
         let blocks = vec![make_doc("persona", "content")];
 
         let seg1 = Segment1Pass::new(system_blocks, vec![], profile.clone());
-        let seg2 = Segment2Pass::new(vec![], prior_msgs, &[], profile.clone());
+        let seg2 = Segment2Pass::new(vec![], prior_msgs, &[], &[], profile.clone());
         let seg3 = Segment3Pass::new(blocks, profile);
 
         let mut partial = PartialRequest::new("claude-opus-4-7");
@@ -214,6 +215,7 @@ mod tests {
                 vec![],
                 vec![(SmolStr::new("msg-1"), ChatMessage::user("hello"))],
                 &[],
+                &[],
                 profile.clone(),
             )),
             Box::new(Segment3Pass::new(blocks, profile)),
@@ -250,7 +252,13 @@ mod tests {
                 vec![],
                 profile.clone(),
             )),
-            Box::new(Segment2Pass::new(vec![], prior, &writes, profile.clone())),
+            Box::new(Segment2Pass::new(
+                vec![],
+                prior,
+                &writes,
+                &[],
+                profile.clone(),
+            )),
             Box::new(Segment3Pass::new(vec![], profile)),
         ];
 

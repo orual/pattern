@@ -144,7 +144,7 @@ fn segment_1_contains_no_memory_block_content_or_labels() {
             profile.clone(),
         )),
         // Segment 2: no prior messages, no block writes — clean slate.
-        Box::new(Segment2Pass::new(vec![], vec![], &[], profile.clone())),
+        Box::new(Segment2Pass::new(vec![], vec![], &[], &[], profile.clone())),
         Box::new(Segment3Pass::new(blocks, profile)),
     ];
 

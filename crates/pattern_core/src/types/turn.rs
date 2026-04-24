@@ -176,6 +176,7 @@ impl TurnInput {
 /// let output = TurnOutput {
 ///     messages: vec![],
 ///     block_writes: vec![],
+///     pseudo_messages: vec![],
 ///     tool_calls: vec![],
 ///     stop_reason: StopReason::EndTurn,
 ///     usage: None,
@@ -195,6 +196,22 @@ pub struct TurnOutput {
     pub messages: Vec<Message>,
     /// Memory block writes that occurred during this turn, in order.
     pub block_writes: Vec<BlockWrite>,
+    /// Handler-originated pseudo-messages (e.g. `[skill:loaded]` markers)
+    /// emitted during this turn, in order.
+    ///
+    /// Unlike [`Self::block_writes`] (which are rendered inline by the
+    /// composer via `render_change_events`), these are fully-rendered
+    /// [`genai::chat::ChatMessage`] payloads pushed by handlers that need
+    /// to inject wire-only context without touching memory. Drained from
+    /// [`crate::types::turn::TurnInput::continuation`]-adjacent buffers
+    /// at turn close and replayed into segment 2 on the next wire turn.
+    ///
+    /// Future work: `block_writes` themselves may be migrated to this
+    /// generic pipe (rendered eagerly at write-time into a ChatMessage
+    /// pushed here) once all call-sites are audited. Keeping them on the
+    /// structured `BlockWrite` vec for now preserves audit/replay access.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pseudo_messages: Vec<genai::chat::ChatMessage>,
     /// Tool calls the LLM requested during this wire turn. Non-empty only
     /// when `stop_reason == ToolUse`. Documents what the model requested;
     /// the corresponding results are inlined into `messages` as the
@@ -529,6 +546,7 @@ mod cache_metrics_tests {
 /// let turn = TurnOutput {
 ///     messages: vec![],
 ///     block_writes: vec![],
+///     pseudo_messages: vec![],
 ///     tool_calls: vec![],
 ///     stop_reason: StopReason::EndTurn,
 ///     usage: None,
@@ -619,6 +637,7 @@ mod step_reply_tests {
         TurnOutput {
             messages: vec![],
             block_writes: vec![],
+            pseudo_messages: vec![],
             tool_calls: vec![],
             stop_reason: stop,
             usage: None,

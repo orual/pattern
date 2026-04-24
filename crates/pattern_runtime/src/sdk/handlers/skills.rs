@@ -106,15 +106,13 @@ impl EffectHandler<SessionContext> for SkillsHandler {
                         .unwrap_or_else(|| "null".to_string()),
                 )
             }
-            SkillsReq::Load(_) => {
-                // Task 7: load handler — segment-2 injection + sqlite stat write.
-                // Not yet implemented; surface a clear diagnostic until Task 7 lands.
-                Err(EffectError::Handler(
-                    "Pattern.Skills.Load is not yet implemented \
-                     (Phase 5 Task 7). Agent code should not call Load \
-                     before the handler implementation lands."
-                        .to_string(),
-                ))
+            SkillsReq::Load(handle) => {
+                let mut conn = cx.user().db().get().map_err(|e| {
+                    EffectError::Handler(format!("Pattern.Skills::Load: db connection: {e}"))
+                })?;
+                let adapter = cx.user().adapter().clone();
+                handle_load(&*store, &adapter, &mut conn, &agent_id, &handle)?;
+                cx.respond(())
             }
             SkillsReq::Search(query) => {
                 let conn = cx.user().db().get().map_err(|e| {
@@ -417,6 +415,66 @@ pub(crate) fn handle_search(
     }
 
     Ok(infos)
+}
+
+/// Load a Skill block: render the body into a `[skill:loaded]` pseudo-message
+/// (queued for the next wire turn's segment 2), and record a usage stat row
+/// in sqlite. Does NOT mutate the LoroDoc and does NOT touch the canonical
+/// `.md` file (AC9.3 / AC9.6 — content-hash stable across loads).
+///
+/// Returns `BlockNotFound` if the handle has no block (AC8.5), or
+/// `Skill(SkillError::NotASkill)` if the block exists but is not a Skill
+/// (AC8.6). Other errors propagate as Sqlite/Store/MalformedLoro.
+pub(crate) fn handle_load(
+    store: &dyn MemoryStore,
+    adapter: &crate::memory::MemoryStoreAdapter,
+    conn: &mut rusqlite::Connection,
+    agent_id: &str,
+    handle: &str,
+) -> Result<(), SkillHandlerError> {
+    // 1. Fetch block.
+    let sdoc = store
+        .get_block(agent_id, handle)
+        .map_err(|e| SkillHandlerError::Store(e.to_string()))?
+        .ok_or_else(|| SkillHandlerError::BlockNotFound {
+            agent: agent_id.to_string(),
+            block: handle.to_string(),
+        })?;
+
+    // 2. Schema check.
+    if !matches!(sdoc.schema(), BlockSchema::Skill { .. }) {
+        return Err(SkillHandlerError::Skill(SkillError::NotASkill(
+            BlockHandle::new(handle),
+        )));
+    }
+
+    // 3. Project metadata + 4. read body.
+    let metadata = project_skill_metadata(sdoc.inner(), handle)?;
+    let body = sdoc.inner().get_text("body").to_string();
+
+    // 5. Build pseudo-message + 6. push to adapter buffer.
+    let pseudo = pattern_provider::compose::pseudo_messages::render_skill_loaded_event(
+        &metadata.name,
+        metadata.trust_tier,
+        &body,
+    );
+    adapter.record_pseudo_message(pseudo);
+
+    // 7. Sqlite stat write inside a transaction. record_usage uses an UPSERT
+    //    that increments use_count atomically; wrapping in a transaction is
+    //    belt-and-braces but matches the convention from sibling handlers.
+    let agent_smol: pattern_core::types::ids::AgentId = agent_id.into();
+    let bh = BlockHandle::new(handle);
+    let now = jiff::Timestamp::now();
+    let tx = conn
+        .transaction()
+        .map_err(|e| SkillHandlerError::Sqlite(e.to_string()))?;
+    pattern_db::queries::skill_usage::record_usage(&tx, &bh, &agent_smol, now)
+        .map_err(|e| SkillHandlerError::Sqlite(e.to_string()))?;
+    tx.commit()
+        .map_err(|e| SkillHandlerError::Sqlite(e.to_string()))?;
+
+    Ok(())
 }
 
 // endregion: handlers
@@ -733,6 +791,304 @@ mod tests {
             stats.last_used.as_ref().map(|t| t.to_string()),
             Some(t3.to_string()),
             "last_used must be t3"
+        );
+    }
+
+    // ---- load handler tests -------------------------------------------------
+
+    use crate::memory::MemoryStoreAdapter;
+
+    fn make_adapter(
+        store: Arc<crate::testing::in_memory_store::InMemoryMemoryStore>,
+        agent_id: &str,
+    ) -> MemoryStoreAdapter {
+        MemoryStoreAdapter::new(store, agent_id)
+    }
+
+    #[test]
+    fn load_missing_block_returns_block_not_found() {
+        // AC8.5: handle that doesn't exist returns BlockNotFound.
+        let store = Arc::new(crate::testing::in_memory_store::InMemoryMemoryStore::new());
+        let mut conn = open_test_db();
+        let agent = "agent-test";
+        let adapter = make_adapter(store.clone(), agent);
+
+        let err = handle_load(&*store, &adapter, &mut conn, agent, "no-such-skill")
+            .expect_err("must error for missing block");
+        assert!(
+            matches!(err, SkillHandlerError::BlockNotFound { .. }),
+            "expected BlockNotFound, got {err:?}"
+        );
+        assert!(
+            adapter.drain_pending_pseudo_messages().is_empty(),
+            "no pseudo-message must be queued for missing block"
+        );
+    }
+
+    #[test]
+    fn load_text_block_returns_not_a_skill() {
+        // AC8.6: handle on a Text block returns SkillError::NotASkill.
+        let store = Arc::new(crate::testing::in_memory_store::InMemoryMemoryStore::new());
+        let mut conn = open_test_db();
+        let agent = "agent-test";
+        let adapter = make_adapter(store.clone(), agent);
+
+        store
+            .create_block(
+                agent,
+                BlockCreate::new("notes", MemoryBlockType::Working, text_schema()),
+            )
+            .expect("create text block");
+
+        let err = handle_load(&*store, &adapter, &mut conn, agent, "notes")
+            .expect_err("must error for non-skill block");
+        match err {
+            SkillHandlerError::Skill(SkillError::NotASkill(h)) => {
+                assert_eq!(h.as_str(), "notes");
+            }
+            other => panic!("expected NotASkill, got {other:?}"),
+        }
+        assert!(
+            adapter.drain_pending_pseudo_messages().is_empty(),
+            "no pseudo-message must be queued for non-skill block"
+        );
+    }
+
+    #[test]
+    fn load_injects_pseudo_message_into_adapter_buffer() {
+        // AC9.1 (unit-level): a successful load queues exactly one pseudo-message
+        // on the adapter buffer. The buffer is drained at turn close into
+        // TurnOutput.pseudo_messages, then replayed into segment 2 on the next
+        // wire turn (covered structurally by skills_load_mode_a.rs and the
+        // smoke test in Task 9).
+        let store = Arc::new(crate::testing::in_memory_store::InMemoryMemoryStore::new());
+        let mut conn = open_test_db();
+        let agent = "agent-test";
+        let adapter = make_adapter(store.clone(), agent);
+
+        seed_skill(
+            &store,
+            agent,
+            "fix-auth",
+            make_skill_metadata("fix-auth"),
+            "## Overview\n\nHandles OAuth2.\n",
+        );
+
+        handle_load(&*store, &adapter, &mut conn, agent, "fix-auth").expect("load must succeed");
+
+        let drained = adapter.drain_pending_pseudo_messages();
+        assert_eq!(drained.len(), 1, "exactly one pseudo-message expected");
+        let rendered = format!("{:?}", drained[0]);
+        assert!(
+            rendered.contains("[skill:loaded]"),
+            "pseudo-message must contain [skill:loaded] marker; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("[skill:loaded:end]"),
+            "pseudo-message must contain [skill:loaded:end] marker; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("fix-auth"),
+            "pseudo-message must contain skill name; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("Handles OAuth2"),
+            "pseudo-message must contain body content; got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn load_updates_use_count_to_five() {
+        // AC9.3: 5 loads → use_count == 5.
+        let store = Arc::new(crate::testing::in_memory_store::InMemoryMemoryStore::new());
+        let mut conn = open_test_db();
+        let agent = "agent-test";
+        let adapter = make_adapter(store.clone(), agent);
+
+        seed_skill(
+            &store,
+            agent,
+            "skill-x",
+            make_skill_metadata("skill-x"),
+            "Body.",
+        );
+
+        for _ in 0..5 {
+            handle_load(&*store, &adapter, &mut conn, agent, "skill-x").expect("load must succeed");
+        }
+
+        let bh = BlockHandle::new("skill-x");
+        let stats = pattern_db::queries::skill_usage::get_usage_stats(&conn, &bh)
+            .expect("get_usage_stats must succeed");
+        assert_eq!(stats.use_count, 5, "use_count must be 5 after 5 loads");
+        assert!(
+            stats.last_used.is_some(),
+            "last_used must be populated after first load"
+        );
+    }
+
+    #[test]
+    fn load_does_not_modify_lorodoc_body() {
+        // AC9.3: 100 loads must not alter the canonical block content. We hash
+        // the body LoroText before and after the loop and assert equal. The
+        // canonical-file-on-disk invariant is covered by skills_load_mode_a.rs.
+        let store = Arc::new(crate::testing::in_memory_store::InMemoryMemoryStore::new());
+        let mut conn = open_test_db();
+        let agent = "agent-test";
+        let adapter = make_adapter(store.clone(), agent);
+
+        seed_skill(
+            &store,
+            agent,
+            "skill-stable",
+            make_skill_metadata("skill-stable"),
+            "stable body content\n",
+        );
+
+        let body_before = {
+            let sdoc = store
+                .get_block(agent, "skill-stable")
+                .unwrap()
+                .expect("block exists");
+            sdoc.inner().get_text("body").to_string()
+        };
+        let hash_before = blake3::hash(body_before.as_bytes());
+
+        for _ in 0..100 {
+            handle_load(&*store, &adapter, &mut conn, agent, "skill-stable")
+                .expect("load must succeed");
+        }
+
+        let body_after = {
+            let sdoc = store
+                .get_block(agent, "skill-stable")
+                .unwrap()
+                .expect("block exists");
+            sdoc.inner().get_text("body").to_string()
+        };
+        let hash_after = blake3::hash(body_after.as_bytes());
+
+        assert_eq!(
+            hash_before, hash_after,
+            "LoroDoc body must be byte-identical after 100 loads"
+        );
+        assert_eq!(body_before, body_after, "body strings must match");
+    }
+
+    #[test]
+    fn load_two_skills_preserves_buffer_order() {
+        // AC9.4: load A then B; pseudo-messages drain in A-then-B order.
+        let store = Arc::new(crate::testing::in_memory_store::InMemoryMemoryStore::new());
+        let mut conn = open_test_db();
+        let agent = "agent-test";
+        let adapter = make_adapter(store.clone(), agent);
+
+        seed_skill(
+            &store,
+            agent,
+            "skill-alpha",
+            make_skill_metadata("skill-alpha"),
+            "Alpha body.",
+        );
+        seed_skill(
+            &store,
+            agent,
+            "skill-beta",
+            make_skill_metadata("skill-beta"),
+            "Beta body.",
+        );
+
+        handle_load(&*store, &adapter, &mut conn, agent, "skill-alpha").unwrap();
+        handle_load(&*store, &adapter, &mut conn, agent, "skill-beta").unwrap();
+
+        let drained = adapter.drain_pending_pseudo_messages();
+        assert_eq!(drained.len(), 2, "two pseudo-messages expected");
+        let first = format!("{:?}", drained[0]);
+        let second = format!("{:?}", drained[1]);
+        assert!(first.contains("skill-alpha"), "first must be alpha");
+        assert!(second.contains("skill-beta"), "second must be beta");
+    }
+
+    #[test]
+    fn load_same_skill_twice_emits_two_markers() {
+        // AC9.5: loading the same skill twice produces two markers (no dedup).
+        let store = Arc::new(crate::testing::in_memory_store::InMemoryMemoryStore::new());
+        let mut conn = open_test_db();
+        let agent = "agent-test";
+        let adapter = make_adapter(store.clone(), agent);
+
+        seed_skill(
+            &store,
+            agent,
+            "skill-twice",
+            make_skill_metadata("skill-twice"),
+            "Body.",
+        );
+
+        handle_load(&*store, &adapter, &mut conn, agent, "skill-twice").unwrap();
+        handle_load(&*store, &adapter, &mut conn, agent, "skill-twice").unwrap();
+
+        let drained = adapter.drain_pending_pseudo_messages();
+        assert_eq!(drained.len(), 2, "two markers expected (no dedup)");
+    }
+
+    #[test]
+    fn load_drained_pseudo_messages_flow_into_turn_output() {
+        // AC9.2 structural: TurnHistory::most_recent_pseudo_messages returns the
+        // adapter-drained vec when stored on TurnOutput. Full multi-turn replay
+        // through Segment2Pass is covered by Task 9's smoke test.
+        use crate::memory::TurnHistory;
+        use jiff::Timestamp;
+        use pattern_core::types::ids::new_snowflake_id;
+        use pattern_core::types::turn::{StopReason, TurnInput, TurnOutput};
+
+        let store = Arc::new(crate::testing::in_memory_store::InMemoryMemoryStore::new());
+        let mut conn = open_test_db();
+        let agent = "agent-test";
+        let adapter = make_adapter(store.clone(), agent);
+
+        seed_skill(
+            &store,
+            agent,
+            "skill-flow",
+            make_skill_metadata("skill-flow"),
+            "Flow body.",
+        );
+        handle_load(&*store, &adapter, &mut conn, agent, "skill-flow").expect("load must succeed");
+
+        let drained_pseudo = adapter.drain_pending_pseudo_messages();
+        assert_eq!(drained_pseudo.len(), 1, "one pseudo-message expected");
+
+        // Build a minimal TurnOutput carrying the drained pseudo-messages and
+        // verify TurnHistory::most_recent_pseudo_messages reads them back.
+        let turn_id = new_snowflake_id();
+        let batch_id = new_snowflake_id();
+        let input =
+            TurnInput::continuation(batch_id, pattern_core::types::ids::AgentId::from(agent));
+        let output = TurnOutput {
+            messages: vec![],
+            block_writes: vec![],
+            pseudo_messages: drained_pseudo.clone(),
+            tool_calls: vec![],
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+            cache_metrics: Default::default(),
+            completed_at: Timestamp::now(),
+        };
+
+        let mut hist = TurnHistory::empty();
+        hist.record(turn_id, input, output);
+
+        let from_hist = hist.most_recent_pseudo_messages();
+        assert_eq!(
+            from_hist.len(),
+            1,
+            "TurnHistory must surface the drained pseudo-messages"
+        );
+        let rendered = format!("{:?}", from_hist[0]);
+        assert!(
+            rendered.contains("skill-flow"),
+            "round-tripped pseudo-message must contain skill name; got: {rendered}"
         );
     }
 }
