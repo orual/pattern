@@ -4,10 +4,13 @@
 //! - [`SkillMetadata`] — author-defined content from frontmatter.
 //! - [`SkillTrustTier`] — provenance classification governing hook permissions.
 //! - [`SkillUsageStats`] — per-local-install runtime statistics (not serialized).
+//! - [`SkillInfo`] — summary of a skill for listings and search results.
+//! - [`SkillError`] — errors specific to skill operations.
 
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
+use crate::types::block::BlockHandle;
 use crate::types::ids::AgentId;
 
 // region: SkillMetadata
@@ -130,6 +133,50 @@ pub struct SkillUsageStats {
 }
 
 // endregion: SkillUsageStats
+
+// region: SkillInfo
+
+/// Summary information about a skill for listings and search results.
+///
+/// Combines metadata fields with runtime usage statistics from the sqlite
+/// table. Used in responses from `Pattern.Skills.list` and `Pattern.Skills.search`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SkillInfo {
+    /// The stable handle (label) by which agents refer to this skill block.
+    pub handle: BlockHandle,
+    /// Skill name from metadata (required field).
+    pub name: String,
+    /// Short human description, if provided.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Provenance tier of this skill.
+    pub trust_tier: SkillTrustTier,
+    /// Keywords for full-text search, if any.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
+    /// Most recent load timestamp, if any. Populated from sqlite at list/search time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_used: Option<Timestamp>,
+}
+
+// endregion: SkillInfo
+
+// region: SkillError
+
+/// Errors specific to skill operations.
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error)]
+pub enum SkillError {
+    /// The block at the given handle is not a Skill block.
+    #[error("block `{0}` is not a Skill block")]
+    NotASkill(BlockHandle),
+
+    /// The skill's LoroDoc metadata could not be read or parsed.
+    #[error("skill metadata for `{0}` could not be read from LoroDoc")]
+    MalformedMetadata(BlockHandle),
+}
+
+// endregion: SkillError
 
 // region: tests
 
@@ -269,6 +316,55 @@ mod tests {
         // Re-serialize and ensure byte stability (idempotency).
         let json_str_2 = serde_json::to_string(&deserialized).unwrap();
         assert_eq!(json_str, json_str_2);
+    }
+
+    #[test]
+    fn skill_info_round_trips() {
+        use smol_str::SmolStr;
+
+        let handle = SmolStr::new("my-skill");
+        let now = Timestamp::now();
+
+        let skill_info = SkillInfo {
+            handle: handle.clone(),
+            name: "my-skill".to_string(),
+            description: Some("A useful skill".to_string()),
+            trust_tier: SkillTrustTier::ProjectLocal,
+            keywords: vec!["useful".to_string(), "practical".to_string()],
+            last_used: Some(now),
+        };
+
+        // Serialize to JSON.
+        let json_str = serde_json::to_string(&skill_info).unwrap();
+
+        // Deserialize back.
+        let deserialized: SkillInfo = serde_json::from_str(&json_str).unwrap();
+
+        // Verify all fields match.
+        assert_eq!(deserialized.handle, skill_info.handle);
+        assert_eq!(deserialized.name, skill_info.name);
+        assert_eq!(deserialized.description, skill_info.description);
+        assert_eq!(deserialized.trust_tier, skill_info.trust_tier);
+        assert_eq!(deserialized.keywords, skill_info.keywords);
+        assert_eq!(deserialized.last_used, skill_info.last_used);
+        assert_eq!(deserialized, skill_info);
+    }
+
+    #[test]
+    fn skill_error_not_a_skill_display_includes_handle() {
+        use smol_str::SmolStr;
+
+        let handle = SmolStr::new("my-text-block");
+        let error = SkillError::NotASkill(handle.clone());
+
+        // Display message should contain the handle.
+        let display_msg = format!("{}", error);
+        assert!(
+            display_msg.contains("my-text-block"),
+            "error message '{}' should contain handle",
+            display_msg
+        );
+        assert!(display_msg.contains("not a Skill block"));
     }
 }
 
