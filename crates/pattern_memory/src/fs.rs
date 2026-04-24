@@ -11,6 +11,7 @@
 pub mod error;
 pub mod jsonl;
 pub mod kdl;
+mod kdl_task_list;
 pub mod markdown;
 pub mod watcher;
 

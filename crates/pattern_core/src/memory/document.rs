@@ -1225,37 +1225,33 @@ impl StructuredDocument {
                         out.push('\n');
 
                         // Blocks.
-                        if let Some(LoroValue::List(blocks)) = map.get("blocks") {
-                            if !blocks.is_empty() {
-                                let block_strs: Vec<String> = blocks
-                                    .iter()
-                                    .filter_map(|b| match b {
-                                        LoroValue::Map(m) => {
-                                            let handle = m.get("block").and_then(|v| match v {
-                                                LoroValue::String(s) => Some(s.to_string()),
-                                                _ => None,
-                                            })?;
-                                            let item_id =
-                                                m.get("task_item").and_then(|v| match v {
-                                                    LoroValue::String(s) => Some(s.to_string()),
-                                                    _ => None,
-                                                });
-                                            Some(match item_id {
-                                                Some(id) => {
-                                                    format!("(block)\"{handle}#{id}\"")
-                                                }
-                                                None => format!("(block)\"{handle}\""),
-                                            })
-                                        }
-                                        _ => None,
-                                    })
-                                    .collect();
-                                if !block_strs.is_empty() {
-                                    out.push_str(&format!(
-                                        "    blocks: {}\n",
-                                        block_strs.join(", ")
-                                    ));
-                                }
+                        if let Some(LoroValue::List(blocks)) = map.get("blocks")
+                            && !blocks.is_empty()
+                        {
+                            let block_strs: Vec<String> = blocks
+                                .iter()
+                                .filter_map(|b| match b {
+                                    LoroValue::Map(m) => {
+                                        let handle = m.get("block").and_then(|v| match v {
+                                            LoroValue::String(s) => Some(s.to_string()),
+                                            _ => None,
+                                        })?;
+                                        let item_id = m.get("task_item").and_then(|v| match v {
+                                            LoroValue::String(s) => Some(s.to_string()),
+                                            _ => None,
+                                        });
+                                        Some(match item_id {
+                                            Some(id) => {
+                                                format!("(block)\"{handle}#{id}\"")
+                                            }
+                                            None => format!("(block)\"{handle}\""),
+                                        })
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            if !block_strs.is_empty() {
+                                out.push_str(&format!("    blocks: {}\n", block_strs.join(", ")));
                             }
                         }
 

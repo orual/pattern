@@ -114,6 +114,17 @@ pub(crate) fn render_canonical_from_disk_doc(
             }
             Ok(("jsonl", output.into_bytes()))
         }
+        BlockSchema::TaskList { .. } => {
+            // TaskList blocks use a LoroMovableList named "items".
+            // Build a discriminator map and delegate to the TaskList KDL converter.
+            let deep_value = disk_doc.get_deep_value();
+            let kdl_doc = crate::fs::kdl::loro_value_to_kdl(&deep_value, TopShape::TaskList)
+                .map_err(|e| format!("KDL serialization failed: {e}"))?;
+            Ok(("kdl", kdl_doc.to_string().into_bytes()))
+        }
+        _ => Err(format!(
+            "unsupported schema for canonical rendering: {schema:?}"
+        )),
     }
 }
 

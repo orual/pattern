@@ -845,6 +845,26 @@ impl MemoryCache {
                         .map_err(|e| format!("disk_doc JSON import failed: {e}"))?;
                     disk_doc.commit();
                 }
+                pattern_core::types::memory_types::BlockSchema::TaskList { .. } => {
+                    // TaskList blocks: parse KDL with TaskList shape, import via JSON.
+                    let text = String::from_utf8(content.to_vec())
+                        .map_err(|e| format!("UTF-8 decode failed: {e}"))?;
+                    let kdl_doc = crate::fs::kdl::parse_kdl(&text)
+                        .map_err(|e| format!("KDL parse failed: {e}"))?;
+                    let loro_value = crate::fs::kdl::kdl_to_loro_value(
+                        &kdl_doc,
+                        crate::fs::kdl::TopShape::TaskList,
+                    )
+                    .map_err(|e| format!("KDL→LoroValue failed: {e}"))?;
+                    let json = crate::fs::kdl::loro_value_to_json(&loro_value)
+                        .ok_or_else(|| "LoroValue→JSON conversion failed".to_string())?;
+                    apply_json_to_loro_doc(&disk_doc, &json, &schema)
+                        .map_err(|e| format!("disk_doc JSON import failed: {e}"))?;
+                    disk_doc.commit();
+                }
+                _ => {
+                    return Err(format!("unsupported schema: {schema:?}"));
+                }
             }
             Ok(())
         })();
@@ -1335,8 +1355,32 @@ fn apply_json_to_loro_doc(
             }
             Ok(())
         }
+        (serde_json::Value::Object(map), BlockSchema::TaskList { .. }) => {
+            // TaskList: items are in a movable list. Extract the "items" array
+            // from the JSON (which comes from the KDL round-trip discriminator map).
+            let items = map
+                .get("items")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let loro_list = doc.get_movable_list("items");
+            let len = loro_list.len();
+            if len > 0 {
+                loro_list
+                    .delete(0, len)
+                    .map_err(|e| format!("LoroMovableList delete failed: {e}"))?;
+            }
+            for entry in &items {
+                let json_str = serde_json::to_string(entry)
+                    .map_err(|e| format!("JSON serialize failed: {e}"))?;
+                loro_list
+                    .push(json_str)
+                    .map_err(|e| format!("LoroMovableList push failed: {e}"))?;
+            }
+            Ok(())
+        }
         _ => Err(format!(
-            "unexpected JSON shape for schema {:?}: expected object for Map/Composite, array for List/Log",
+            "unexpected JSON shape for schema {:?}: expected object for Map/Composite/TaskList, array for List/Log",
             schema
         )),
     }

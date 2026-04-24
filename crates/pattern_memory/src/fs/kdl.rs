@@ -46,6 +46,17 @@ pub enum KdlConversionError {
     /// ambiguous for LoroValue mapping.
     #[error("ambiguous KDL node: has both arguments and children")]
     AmbiguousNode,
+
+    /// A `TaskEdgeRef` inside a `blocks` node failed to parse.
+    #[error("invalid TaskEdgeRef at {span:?}: {source}")]
+    TaskEdgeRef {
+        span: miette::SourceSpan,
+        source: pattern_core::types::memory_types::TaskEdgeRefParseError,
+    },
+
+    /// A `blocks` child entry is missing the `(block)` type annotation.
+    #[error("missing (block) type annotation at {span:?}")]
+    MissingBlockAnnotation { span: miette::SourceSpan },
 }
 
 /// Top-level shape hint for the KDL converter.
@@ -56,6 +67,7 @@ pub enum KdlConversionError {
 pub enum TopShape {
     Map,
     List,
+    TaskList,
 }
 
 /// Serialize a `LoroValue` to a `KdlDocument`.
@@ -83,6 +95,9 @@ pub fn loro_value_to_kdl(
             for v in l.iter() {
                 doc.nodes_mut().push(loro_value_to_kdl_node("-", v)?);
             }
+        }
+        (TopShape::TaskList, _) => {
+            return super::kdl_task_list::task_list_to_kdl(value);
         }
         (shape, other) => {
             return Err(KdlConversionError::ShapeMismatch {
@@ -140,6 +155,7 @@ pub fn kdl_to_loro_value(
             }
             Ok(LoroValue::List(out.into()))
         }
+        TopShape::TaskList => super::kdl_task_list::kdl_to_task_list(doc),
     }
 }
 
@@ -184,7 +200,10 @@ pub fn loro_value_to_json(value: &LoroValue) -> Option<serde_json::Value> {
 // ---------------------------------------------------------------------------
 
 /// Convert a single `LoroValue` into a `KdlNode` with the given name.
-fn loro_value_to_kdl_node(name: &str, value: &LoroValue) -> Result<KdlNode, KdlConversionError> {
+pub(super) fn loro_value_to_kdl_node(
+    name: &str,
+    value: &LoroValue,
+) -> Result<KdlNode, KdlConversionError> {
     let mut node = KdlNode::new(name);
     match value {
         LoroValue::Null => {
