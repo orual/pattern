@@ -295,8 +295,8 @@ mod tests {
             default_status: None,
             display_limit: None,
         };
-        let json2 = serde_json::to_string(&schema_with_owner)
-            .expect("serialise TaskList with owner");
+        let json2 =
+            serde_json::to_string(&schema_with_owner).expect("serialise TaskList with owner");
         let recovered2: BlockSchema =
             serde_json::from_str(&json2).expect("deserialise TaskList with owner");
         assert_eq!(schema_with_owner, recovered2);

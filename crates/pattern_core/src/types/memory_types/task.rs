@@ -217,10 +217,7 @@ mod tests {
         let status = TaskStatus::Pending;
         let json = serde_json::to_string(&status).unwrap();
         assert_eq!(json, r#""pending""#);
-        assert_eq!(
-            serde_json::from_str::<TaskStatus>(&json).unwrap(),
-            status
-        );
+        assert_eq!(serde_json::from_str::<TaskStatus>(&json).unwrap(), status);
     }
 
     #[test]
@@ -228,10 +225,7 @@ mod tests {
         let status = TaskStatus::InProgress;
         let json = serde_json::to_string(&status).unwrap();
         assert_eq!(json, r#""in-progress""#);
-        assert_eq!(
-            serde_json::from_str::<TaskStatus>(&json).unwrap(),
-            status
-        );
+        assert_eq!(serde_json::from_str::<TaskStatus>(&json).unwrap(), status);
     }
 
     #[test]
@@ -239,10 +233,7 @@ mod tests {
         let status = TaskStatus::Blocked;
         let json = serde_json::to_string(&status).unwrap();
         assert_eq!(json, r#""blocked""#);
-        assert_eq!(
-            serde_json::from_str::<TaskStatus>(&json).unwrap(),
-            status
-        );
+        assert_eq!(serde_json::from_str::<TaskStatus>(&json).unwrap(), status);
     }
 
     #[test]
@@ -250,10 +241,7 @@ mod tests {
         let status = TaskStatus::Completed;
         let json = serde_json::to_string(&status).unwrap();
         assert_eq!(json, r#""completed""#);
-        assert_eq!(
-            serde_json::from_str::<TaskStatus>(&json).unwrap(),
-            status
-        );
+        assert_eq!(serde_json::from_str::<TaskStatus>(&json).unwrap(), status);
     }
 
     #[test]
@@ -261,10 +249,7 @@ mod tests {
         let status = TaskStatus::Cancelled;
         let json = serde_json::to_string(&status).unwrap();
         assert_eq!(json, r#""cancelled""#);
-        assert_eq!(
-            serde_json::from_str::<TaskStatus>(&json).unwrap(),
-            status
-        );
+        assert_eq!(serde_json::from_str::<TaskStatus>(&json).unwrap(), status);
     }
 
     // --- TaskEdgeRef::from_str parsing ---
@@ -365,8 +350,7 @@ mod tests {
         };
 
         let json = serde_json::to_string(&item).expect("serialise TaskItem");
-        let recovered: TaskItem =
-            serde_json::from_str(&json).expect("deserialise TaskItem");
+        let recovered: TaskItem = serde_json::from_str(&json).expect("deserialise TaskItem");
         assert_eq!(item, recovered);
 
         // Spot-check key fields survive the wire.
@@ -395,13 +379,11 @@ mod tests {
         };
 
         let json = serde_json::to_string(&item).expect("serialise TaskItem");
-        let recovered: TaskItem =
-            serde_json::from_str(&json).expect("deserialise TaskItem");
+        let recovered: TaskItem = serde_json::from_str(&json).expect("deserialise TaskItem");
         assert_eq!(item, recovered);
 
         // Confirm the decoded JSON agrees: empty vecs decode as arrays, not null.
-        let v: serde_json::Value =
-            serde_json::from_str(&json).expect("parse as Value");
+        let v: serde_json::Value = serde_json::from_str(&json).expect("parse as Value");
         assert!(v["blocks"].is_array(), "blocks field must be a JSON array");
         assert!(
             v["comments"].is_array(),
@@ -465,8 +447,7 @@ mod tests {
         };
 
         let json = serde_json::to_string(&comment).expect("serialise TaskComment");
-        let recovered: TaskComment =
-            serde_json::from_str(&json).expect("deserialise TaskComment");
+        let recovered: TaskComment = serde_json::from_str(&json).expect("deserialise TaskComment");
         assert_eq!(comment, recovered);
 
         // Confirm the text survived character-for-character.

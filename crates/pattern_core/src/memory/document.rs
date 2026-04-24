@@ -762,6 +762,7 @@ impl StructuredDocument {
                                 BlockSchema::List { .. } => "List",
                                 BlockSchema::Log { .. } => "Log",
                                 BlockSchema::Composite { .. } => "Composite",
+                                BlockSchema::TaskList { .. } => "TaskList",
                             };
                             format!(
                                 "# Schema: {}\n# Edit the values below, then save.\n\n{}",
@@ -864,6 +865,28 @@ impl StructuredDocument {
                     self.append_log_entry(entry, true)?;
                 }
             }
+            BlockSchema::TaskList { .. } => {
+                // TaskList: expect array or object with "items" field.
+                let items = if let Some(arr) = value.as_array() {
+                    arr.clone()
+                } else if let Some(items) = value.get("items").and_then(|v| v.as_array()) {
+                    items.clone()
+                } else {
+                    return Err(DocumentError::Other(
+                        "TaskList schema expects array or object with 'items' field".to_string(),
+                    ));
+                };
+
+                // Clear the existing movable list and re-insert each item.
+                let list = self.doc.get_movable_list("items");
+                for i in (0..list.len()).rev() {
+                    let _ = list.delete(i, 1);
+                }
+                for item in items {
+                    let loro_value = json_to_loro(&item);
+                    let _ = list.push(loro_value);
+                }
+            }
             BlockSchema::Composite { sections } => {
                 // Composite: expect object with section keys
                 let obj = value.as_object().ok_or_else(|| {
@@ -946,6 +969,7 @@ impl StructuredDocument {
             BlockSchema::List { .. } => self.doc.get_list("items").id(),
             BlockSchema::Log { .. } => self.doc.get_list("entries").id(),
             BlockSchema::Composite { .. } => self.doc.get_map("root").id(),
+            BlockSchema::TaskList { .. } => self.doc.get_movable_list("items").id(),
         };
         self.doc.subscribe(&container_id, callback)
     }
@@ -1120,6 +1144,148 @@ impl StructuredDocument {
             }
 
             BlockSchema::Composite { sections } => self.render_composite(sections),
+
+            BlockSchema::TaskList {
+                display_limit,
+                default_status,
+                default_owner,
+            } => {
+                let items_list = self.doc.get_movable_list("items");
+                let total = items_list.len();
+                let shown = display_limit.map(|lim| lim.min(total)).unwrap_or(total);
+                let mut out = String::new();
+                out.push_str(&format!("TaskList ({total} items"));
+                if shown < total {
+                    out.push_str(&format!(", showing {shown}"));
+                }
+                if let Some(s) = default_status {
+                    out.push_str(&format!("; default_status={s:?}"));
+                }
+                if let Some(o) = default_owner {
+                    out.push_str(&format!("; default_owner=@{o}"));
+                }
+                out.push_str(")\n");
+
+                // Use get_deep_value() to get fully-resolved LoroValues
+                // (LoroMovableList::get returns ValueOrContainer, not LoroValue).
+                let deep = items_list.get_deep_value();
+                let all_items = match &deep {
+                    LoroValue::List(l) => l.as_ref(),
+                    _ => &[] as &[LoroValue],
+                };
+
+                for value in all_items.iter().take(shown) {
+                    if let LoroValue::Map(map) = value {
+                        let id = map
+                            .get("id")
+                            .and_then(|v| match v {
+                                LoroValue::String(s) => Some(s.as_ref()),
+                                _ => None,
+                            })
+                            .unwrap_or("?");
+                        let subject = map
+                            .get("subject")
+                            .and_then(|v| match v {
+                                LoroValue::String(s) => Some(s.as_ref()),
+                                _ => None,
+                            })
+                            .unwrap_or("");
+                        let status = map
+                            .get("status")
+                            .and_then(|v| match v {
+                                LoroValue::String(s) => Some(s.to_string()),
+                                _ => None,
+                            })
+                            .unwrap_or_default();
+                        let owner = map.get("owner").and_then(|v| match v {
+                            LoroValue::String(s) => Some(s.to_string()),
+                            _ => None,
+                        });
+                        let active_form = map.get("active_form").and_then(|v| match v {
+                            LoroValue::String(s) => Some(s.to_string()),
+                            _ => None,
+                        });
+                        let description = map
+                            .get("description")
+                            .and_then(|v| match v {
+                                LoroValue::String(s) => Some(s.to_string()),
+                                _ => None,
+                            })
+                            .unwrap_or_default();
+
+                        // Build the item line.
+                        let mut line = format!("- id={id} subject=\"{subject}\" status={status}");
+                        if let Some(ref o) = owner {
+                            line.push_str(&format!(" owner=@{o}"));
+                        }
+                        if let Some(ref af) = active_form {
+                            line.push_str(&format!(" active_form=\"{af}\""));
+                        }
+                        out.push_str(&line);
+                        out.push('\n');
+
+                        // Blocks.
+                        if let Some(LoroValue::List(blocks)) = map.get("blocks") {
+                            if !blocks.is_empty() {
+                                let block_strs: Vec<String> = blocks
+                                    .iter()
+                                    .filter_map(|b| match b {
+                                        LoroValue::Map(m) => {
+                                            let handle = m.get("block").and_then(|v| match v {
+                                                LoroValue::String(s) => Some(s.to_string()),
+                                                _ => None,
+                                            })?;
+                                            let item_id =
+                                                m.get("task_item").and_then(|v| match v {
+                                                    LoroValue::String(s) => Some(s.to_string()),
+                                                    _ => None,
+                                                });
+                                            Some(match item_id {
+                                                Some(id) => {
+                                                    format!("(block)\"{handle}#{id}\"")
+                                                }
+                                                None => format!("(block)\"{handle}\""),
+                                            })
+                                        }
+                                        _ => None,
+                                    })
+                                    .collect();
+                                if !block_strs.is_empty() {
+                                    out.push_str(&format!(
+                                        "    blocks: {}\n",
+                                        block_strs.join(", ")
+                                    ));
+                                }
+                            }
+                        }
+
+                        // Description excerpt (first line or ~80 chars).
+                        if !description.is_empty() {
+                            let excerpt = description
+                                .lines()
+                                .next()
+                                .unwrap_or(&description)
+                                .chars()
+                                .take(80)
+                                .collect::<String>();
+                            out.push_str(&format!("    description: {excerpt}\n"));
+                        }
+                    } else {
+                        // Non-map item — render as debug.
+                        out.push_str(&format!("- {value:?}\n"));
+                    }
+                }
+
+                if shown < total {
+                    out.push_str(&format!(
+                        "\n... {} more items not shown (display_limit={})\n",
+                        total - shown,
+                        display_limit.unwrap()
+                    ));
+                }
+
+                out
+            }
         }
     }
 }
@@ -1952,5 +2118,184 @@ mod tests {
 
         // Subscription should have fired
         assert!(changed.load(Ordering::SeqCst));
+    }
+
+    // ========== TaskList schema dispatch tests (Task 8) ==========
+
+    fn make_task_list_schema() -> BlockSchema {
+        BlockSchema::TaskList {
+            default_owner: None,
+            default_status: Some(crate::types::memory_types::TaskStatus::Pending),
+            display_limit: Some(3),
+        }
+    }
+
+    fn make_task_item_json(id: &str, subject: &str, status: &str) -> JsonValue {
+        serde_json::json!({
+            "id": id,
+            "subject": subject,
+            "description": "",
+            "status": status,
+            "blocks": [],
+            "metadata": {},
+            "comments": [],
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
+        })
+    }
+
+    #[test]
+    fn test_task_list_export_for_editing_schema_name() {
+        let doc = StructuredDocument::new(make_task_list_schema());
+        let exported = doc.export_for_editing();
+        assert!(
+            exported.contains("# Schema: TaskList"),
+            "Expected TaskList schema header, got: {exported}"
+        );
+    }
+
+    #[test]
+    fn test_task_list_import_from_json_populates_movable_list() {
+        let doc = StructuredDocument::new(make_task_list_schema());
+        let items = serde_json::json!({
+            "items": [
+                make_task_item_json("a1", "write spec", "pending"),
+                make_task_item_json("a2", "review spec", "in-progress"),
+            ]
+        });
+        doc.import_from_json(&items).unwrap();
+
+        let list = doc.doc.get_movable_list("items");
+        assert_eq!(list.len(), 2);
+    }
+
+    #[test]
+    fn test_task_list_import_from_json_accepts_bare_array() {
+        let doc = StructuredDocument::new(make_task_list_schema());
+        let items = serde_json::json!([make_task_item_json("b1", "task one", "pending"),]);
+        doc.import_from_json(&items).unwrap();
+
+        let list = doc.doc.get_movable_list("items");
+        assert_eq!(list.len(), 1);
+    }
+
+    #[test]
+    fn test_task_list_import_from_json_rejects_malformed() {
+        let doc = StructuredDocument::new(make_task_list_schema());
+        let bad = serde_json::json!({ "wrong": "shape" });
+        assert!(doc.import_from_json(&bad).is_err());
+    }
+
+    #[test]
+    fn test_task_list_subscribe_content_returns_movable_list() {
+        let doc = StructuredDocument::new(make_task_list_schema());
+        let container_id = match &doc.metadata.schema {
+            BlockSchema::TaskList { .. } => doc.doc.get_movable_list("items").id(),
+            _ => panic!("expected TaskList schema"),
+        };
+        // ContainerID's container_type() method tells us the type.
+        assert_eq!(
+            format!("{:?}", container_id.container_type()),
+            "MovableList"
+        );
+    }
+
+    #[test]
+    fn test_task_list_render_schema_empty() {
+        let doc = StructuredDocument::new(BlockSchema::TaskList {
+            default_owner: None,
+            default_status: None,
+            display_limit: None,
+        });
+        let rendered = doc.render();
+        assert!(
+            rendered.starts_with("TaskList (0 items)"),
+            "Expected empty task list header, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn test_task_list_render_schema_respects_display_limit() {
+        let schema = BlockSchema::TaskList {
+            default_owner: None,
+            default_status: None,
+            display_limit: Some(2),
+        };
+        let doc = StructuredDocument::new(schema);
+        // Insert 4 items.
+        let items = serde_json::json!({
+            "items": [
+                make_task_item_json("c1", "one", "pending"),
+                make_task_item_json("c2", "two", "pending"),
+                make_task_item_json("c3", "three", "pending"),
+                make_task_item_json("c4", "four", "pending"),
+            ]
+        });
+        doc.import_from_json(&items).unwrap();
+        doc.commit();
+
+        let rendered = doc.render();
+        assert!(
+            rendered.contains("TaskList (4 items, showing 2)"),
+            "Expected truncated header, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("... 2 more items not shown"),
+            "Expected truncation indicator, got: {rendered}"
+        );
+        // Should show only 2 item lines.
+        let item_lines: Vec<&str> = rendered
+            .lines()
+            .filter(|l| l.starts_with("- id="))
+            .collect();
+        assert_eq!(item_lines.len(), 2);
+    }
+
+    #[test]
+    fn test_task_list_render_schema_shows_blocks_and_description() {
+        let doc = StructuredDocument::new(BlockSchema::TaskList {
+            default_owner: Some("agent-r".into()),
+            default_status: Some(crate::types::memory_types::TaskStatus::InProgress),
+            display_limit: None,
+        });
+        let items = serde_json::json!({
+            "items": [{
+                "id": "x1",
+                "subject": "do thing",
+                "description": "First line of desc\nSecond line",
+                "status": "in-progress",
+                "owner": "agent-r",
+                "active_form": "doing the thing",
+                "blocks": [
+                    { "block": "alpha", "task_item": null },
+                    { "block": "beta", "task_item": "y2" }
+                ],
+                "metadata": {},
+                "comments": [],
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z"
+            }]
+        });
+        doc.import_from_json(&items).unwrap();
+        doc.commit();
+
+        let rendered = doc.render();
+        assert!(rendered.contains("owner=@agent-r"), "missing owner");
+        assert!(
+            rendered.contains("active_form=\"doing the thing\""),
+            "missing active_form"
+        );
+        assert!(
+            rendered.contains("(block)\"alpha\""),
+            "missing block-only edge"
+        );
+        assert!(
+            rendered.contains("(block)\"beta#y2\""),
+            "missing block#item edge"
+        );
+        assert!(
+            rendered.contains("description: First line of desc"),
+            "missing description excerpt"
+        );
     }
 }
