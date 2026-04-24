@@ -29,30 +29,16 @@
 - ✓ `CancelState` at `crates/pattern_runtime/src/timeout.rs:191-198`. Shared-via-`Arc` is the existing pattern.
 - ✓ Persona loader at `crates/pattern_runtime/src/persona_loader.rs` is self-contained; `load_persona(&Path) -> Result<PersonaSnapshot, PersonaLoadError>` reusable.
 - ✗ No `PersonaId` type alias. Only `AgentId: SmolStr` in `crates/pattern_core/src/types/ids.rs`. **Decision:** add `pub type PersonaId = SmolStr;` as a readability alias (documented as "same underlying type as AgentId; used in multi-agent code").
+- ✓ `BlockRef` exists at `crates/pattern_core/src/types/block_ref.rs` with fields `label: String`, `block_id: String`, `agent_id: String`, plus constructors `new`, `with_owner`, `owned_by`. `ForkConfig.task_ref` can reference it directly — no placeholder needed.
 - ✗ No `tokio::sync::Semaphore` usage anywhere. Phase 2 introduces the first use.
 - ⚠ `LoroDoc` access is through `MemoryStoreAdapter::inner().get_block(...) -> StructuredDocument` which wraps `Arc<LoroDoc>`. For sibling spawn with its own memory root, we construct a fresh `MemoryCache` with a new `LoroDoc::new()`; for ephemeral, the child shares the parent's adapter (memory reads but no isolated scope, unless explicitly restricted); for fork (Phase 3), we `LoroDoc::fork()` and build a new adapter over the forked doc.
 - ✓ `HasCancelState` trait exists and is used by every handler; Phase 1 introduces `HasPermissionAuthority` alongside. Phase 2 extends the same user-trait pattern with `HasSpawnRegistry` so handlers can reach the child registry cheanly.
 
-### Design questions to resolve at execution
+### Design decisions locked in
 
-**Q2.1.** The existing `SpawnReq::Start(String)` is tightly coupled to a single string argument. Phase 2 needs three config shapes. Options:
-- **A.** Replace `SpawnReq` with three discrete request constructors at the Haskell layer:
-  ```
-  SpawnEphemeral :: EphemeralConfig -> Spawn SpawnId
-  SpawnFork      :: ForkConfig      -> Spawn ForkHandle
-  SpawnSibling   :: SiblingConfig   -> Spawn PersonaId
-  SpawnStop      :: SpawnId         -> Spawn ()
-  ```
-  Clean but requires moving the Haskell `Pattern.Spawn` module forward.
-- **B.** Keep a single `Start` constructor with a typed union payload (JSON text of a tagged enum). Less clean but minimally invasive.
-
-Plan assumes **(A)** — discrete constructors, with a structured `SpawnId` / `PersonaId` / `ForkHandle` response.
-
-**Q2.2.** Parent→child cancel propagation: share the parent's `Arc<CancelState>` outright (simplest; child observes parent-cancel atomic immediately) vs. wrap in a child-local CancelState that subscribes via a tokio watch channel (clean separation; lets a parent cancel a child without also ending its own turn).
-
-Plan assumes **share the Arc** for ephemerals (sub-lives tie to parent turn by design) and fork and **fresh state** for siblings (they live independently). Revisit if the shared-Arc model causes timing-assertion flakes during Phase 4 mailbox work.
-
-**Q2.3.** `Arc<ChildSessionRegistry>` or inline `Vec<ChildSessionHandle>` on SessionContext? Plan assumes a dedicated type `SpawnRegistry` with its own Drop-behaviour (abort all children) because it keeps the cancellation contract local to one type.
+- **Spawn grammar.** `SpawnReq::Start(String)` is retired. Phase 2 ships four discrete constructors at the Haskell layer (`Ephemeral`, `Fork`, `Sibling`, `Stop`) with structured config payloads and structured returns (`SpawnId`, `ForkHandle`, `PersonaId`). Both the Rust enum and the Haskell `Pattern.Spawn` module move atomically.
+- **Parent→child cancel propagation.** Ephemeral and Fork share the parent's `Arc<CancelState>` (sub-lives tie to parent turn by design). Sibling gets a fresh `CancelState` (independent lifetime). Revisit only if Phase 4 mailbox work surfaces timing flakes.
+- **Child-handle storage.** Dedicated `SpawnRegistry` type with its own `Drop` behaviour (abort all children), rather than inlining `Vec<ChildSessionHandle>` on `SessionContext`. Keeps the cancellation contract local to one type.
 
 ---
 
@@ -158,7 +144,7 @@ pub enum RelationshipKind {
 }
 ```
 
-`BlockRef` is the Plan-2 type (verify landed before running Task 1; if not, block on it). If Plan 2 hasn't shipped `BlockRef` by the time Task 1 runs, define a minimal placeholder here and switch to the Plan 2 type via `cargo nextest` breakage as soon as Plan 2 merges — do NOT dual-maintain.
+`BlockRef` already lives at `crates/pattern_core/src/types/block_ref.rs`; import it directly.
 
 **Testing:**
 - Unit: serde round-trip for each config struct (plain `serde_json`).
@@ -200,7 +186,7 @@ pub enum SpawnReq {
 }
 ```
 
-The `FromCore` derive needs to support decoding the `*Config` types. Confirm with a quick look at how other complex variants round-trip (e.g., `MessageReq` or similar). If it doesn't support arbitrary serde, either implement `ToCore`/`FromCore` manually or fall back to a `String` wire-format containing a JSON-encoded payload. The **preference** is first-class typed support; **fallback** is JSON-over-string with a `Config::parse_json(&str)` helper on each config struct.
+The `FromCore` derive must decode each `*Config` struct directly. Pattern-match the shape used by other structured requests (check `MessageReq` or similar). If the derive can't carry a nested struct payload, implement `FromCore` by hand — do NOT fall back to JSON-over-string.
 
 Update `effect_decl()` to advertise the new constructors + `ephemeral`/`fork`/`sibling`/`stop` helpers. Keep the description succinct (the code-tool description is user-facing for agents).
 
@@ -542,8 +528,7 @@ Snapshot tests from Phase 1 Task 3 pick up the new helpers automatically; review
 
 ## Notes for executor
 
-- Confirm Q2.1 (SpawnReq grammar A vs B) and Q2.2 (cancel propagation model) with user before writing Task 2.
-- `FromCore` derive must support the config structs. If it doesn't, the fallback is JSON-over-string — costs a few lines of encoding/decoding in each direction but is cheap to rip out later.
-- `BlockRef` type landed by Plan 2. If it hasn't merged when Task 1 executes, surface as a blocker — do NOT invent a placeholder that will silently diverge.
+- `FromCore` derive must decode each config struct directly; implement the trait by hand if the derive doesn't cover nested payloads. No JSON-over-string.
+- `BlockRef` lives at `crates/pattern_core/src/types/block_ref.rs` — import directly.
 - Memory ACL integration with sibling spawn (sibling reading shared blocks) is out of Phase 2 scope; Phase 6 / existing shared-block pattern handles it.
 - Commit style per project conventions. Include `[pattern-core]` for all pattern_core changes; `[pattern-runtime]` for runtime work; `[pattern-runtime] [haskell]` for combined Rust+Haskell commits.

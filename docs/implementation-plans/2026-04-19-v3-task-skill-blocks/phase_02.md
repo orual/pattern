@@ -16,7 +16,7 @@
 
 ### v3-task-skill-blocks.AC2: Task block index tables + migration
 
-- **v3-task-skill-blocks.AC2.1 Success:** Migration `0014_task_block_index.sql` (flat layout) or `memory/XX_task_block_index.sql` (sibling-subtree layout) applies cleanly to a fresh DB — Task 1 picks the exact filename at execution time
+- **v3-task-skill-blocks.AC2.1 Success:** Migration `memory/0011_task_block_index.sql` (confirmed path via Task 1 pre-flight; sibling memory-rework landed a `memory/` subtree at 0001–0010) applies cleanly to a fresh DB
 - **v3-task-skill-blocks.AC2.2 Success:** Migration round-trip test: fixture DB with pre-migration `tasks` rows migrates; pre-existing columns preserved; new columns added with defaults
 - **v3-task-skill-blocks.AC2.3 Success:** `coordination_tasks` table dropped; no remaining references in active code paths
 - **v3-task-skill-blocks.AC2.4 Success:** `task_edges` table created with `source_block`, `source_item NOT NULL`, `target_block`, `target_item NULL`; unique expression index over `COALESCE(target_item, '<block>')` serves as the effective primary key
@@ -38,9 +38,9 @@
 
 ## Design deviations recorded during planning
 
-- **Migration numbering:** the design references `migrations/memory/0012_task_block_index.sql` assuming the sibling memory-rework plan splits migrations into subtrees. The current repo (pre-sibling-landing) is FLAT (`crates/pattern_db/migrations/` with 0001–0013 taken; 0012 is already used by `queued_message_full_content.sql`). The correct number at execution time is **whatever the next free slot in the sibling plan's final migration layout is**. Task 1 below re-confirms the layout at execution time and picks the right filename; the plan uses `0014_task_block_index.sql` as the fallback for a flat layout, or `memory/0013_task_block_index.sql` if the sibling lands a `memory/` subtree.
+- **Migration numbering (locked 2026-04-23 via Task 1 execution):** the design referenced `migrations/memory/0012_task_block_index.sql`. Actual state: sibling memory-rework landed a `memory/` subtree at 0001–0010 and a `messages/` subtree at 0001, while the flat `migrations/0001–0013` files are INACTIVE legacy (not referenced in `include_str!` in `migrations.rs`). The correct path is **`crates/pattern_db/migrations/memory/0011_task_block_index.sql`**. Task 3 must also add the `include_str!` line to `MEMORY_MIGRATIONS` in `crates/pattern_db/src/migrations.rs`.
 - **rusqlite vs sqlx:** the sibling memory-rework plan migrates pattern_db from sqlx 0.8 to rusqlite 0.39. Phase 2 depends on that migration having landed. Task 1 re-verifies. If not landed, Phase 2 STOPS.
-- **Subscriber module path:** sibling plan does not yet publish the exact file path for the per-doc sync_worker. Task 1 re-verifies at execution time via re-reading the latest sibling implementation plan files. Fallback assumption if still unclear: `crates/pattern_memory/src/subscriber/mod.rs` with per-schema dispatch functions in `subscriber/task.rs`, `subscriber/skill.rs` etc.
+- **Subscriber module path (locked 2026-04-23 via Task 1 execution):** the subscriber uses the modern `subscriber.rs` + `subscriber/` convention (not `mod.rs`). Root file: `crates/pattern_memory/src/subscriber.rs`. Submodules: `subscriber/event.rs`, `subscriber/supervisor.rs`, `subscriber/worker.rs` (68 KB — the OS-thread sync worker). No per-schema dispatch files exist yet. Task 8 creates `subscriber/task.rs` and registers the dispatch in `subscriber.rs` (NOT `subscriber/mod.rs`).
 - **`metrics` crate:** pre-flight audit (2026-04-23) found sibling memory-rework Phase 4 landed `metrics = "0.24"` crate-level in `pattern_memory/Cargo.toml` only (not workspace as originally planned). Pre-flight fix promoted it to `[workspace.dependencies]` in root `Cargo.toml` at version `0.24` so downstream crates (this phase's `pattern_db` work + future `pattern_server` observability) can take it via `{ workspace = true }`. Task 1 verification below reflects the post-promotion state. No version-pin drift expected — 0.24 is a minor bump from the originally-speced 0.23 and API is compatible.
 - **FTS5 `tasks_fts` virtual table:** there is currently no FTS5 table for tasks. Phase 2 creates one in the same migration so AC5.3's keyword filter in Phase 3 has an index to hit.
 
@@ -71,7 +71,7 @@ Expected: rusqlite present; sqlx gone (or scoped to legacy modules only). If sql
 **Step 2: Confirm subscriber module layout**
 
 Run: `fd -e rs subscriber crates/pattern_memory/src`
-Expected: a subscriber submodule tree exists (likely `src/subscriber/mod.rs` + per-schema files). Record the exact paths into the scratch file `target/plan-phase2-subscriber-paths.txt`.
+Expected: `src/subscriber.rs` (module root, modern `.rs`-file-alongside-dir convention — NOT `mod.rs`) plus `src/subscriber/{event,supervisor,worker}.rs`. Record the exact paths into the scratch file `target/plan-phase2-subscriber-paths.txt`.
 
 If missing: STOP — sibling memory-rework Phase 4 has not landed yet.
 
@@ -90,7 +90,7 @@ For this phase, use `metrics = { workspace = true }` in any crate Cargo.toml tha
 
 Run: `ls crates/pattern_db/migrations/`
 Record the highest-numbered existing migration file and whether there is a `memory/` subtree. Choose the new filename accordingly:
-- Flat + highest is 0013 → `0014_task_block_index.sql`.
+- Flat + highest is 0013 → `memory/0011_task_block_index.sql`.
 - Sibling split into `memory/` subtree → use the sibling's next free `memory/XX_task_block_index.sql`.
 
 Record the chosen path in `target/plan-phase2-migration-path.txt` — used by Task 3.
@@ -233,12 +233,12 @@ jj commit -m "[pattern-db] remove coordination_tasks query surface (REPLACED BY:
 ### Subcomponent B: Migration + schema
 
 <!-- START_TASK_3 -->
-### Task 3: Write migration `0014_task_block_index.sql` (or sibling subtree equivalent)
+### Task 3: Write migration `memory/0011_task_block_index.sql` (or sibling subtree equivalent)
 
 **Verifies:** v3-task-skill-blocks.AC2.1, AC2.3, AC2.4, AC2.6.
 
 **Files:**
-- Create: `crates/pattern_db/migrations/0014_task_block_index.sql` (or the subtree path recorded in Task 1).
+- Create: `crates/pattern_db/migrations/memory/0011_task_block_index.sql` (or the subtree path recorded in Task 1).
 
 **Implementation:**
 
@@ -326,7 +326,7 @@ Covered by Task 4's migration round-trip test. This task produces the SQL file o
 **Commit:**
 
 ```
-jj commit -m "[pattern-db] add migration 0014 task_block_index (tasks + task_edges + tasks_fts)"
+jj commit -m "[pattern-db] add memory/0011 task_block_index migration (tasks + task_edges + tasks_fts)"
 ```
 <!-- END_TASK_3 -->
 
@@ -341,13 +341,13 @@ jj commit -m "[pattern-db] add migration 0014 task_block_index (tasks + task_edg
 **Implementation:**
 
 Test setup helpers:
-- `fresh_db()` — opens an in-memory rusqlite connection and runs ALL migrations through 0014 (or equivalent).
+- `fresh_db()` — opens an in-memory rusqlite connection and runs ALL migrations through memory/0011 (or equivalent).
 - `pre_migration_db()` — opens a connection and runs migrations only through the previous number (0013 in a flat layout).
 
 Tests:
 - `migration_applies_to_empty_db`: call `fresh_db()`, assert `SELECT name FROM sqlite_master WHERE name IN ('tasks','task_edges','tasks_fts')` returns three rows.
-- `migration_preserves_pre_existing_task_rows`: open `pre_migration_db()`, insert a row into `tasks` with the pre-migration shape (id, agent_id, title, description, status, priority=5, …), apply migration 0014, assert the row is still there with `priority` column gone, new columns `block_handle=NULL`, `task_item_id=NULL`, `owner_agent_id=NULL`, `comments_json='[]'`.
-- `migration_drops_coordination_tasks`: insert a row into `coordination_tasks` at the pre-migration stage; apply 0014; assert `coordination_tasks` table no longer exists via `PRAGMA table_list`.
+- `migration_preserves_pre_existing_task_rows`: open `pre_migration_db()`, insert a row into `tasks` with the pre-migration shape (id, agent_id, title, description, status, priority=5, …), apply memory/0011, assert the row is still there with `priority` column gone, new columns `block_handle=NULL`, `task_item_id=NULL`, `owner_agent_id=NULL`, `comments_json='[]'`.
+- `migration_drops_coordination_tasks`: insert a row into `coordination_tasks` at the pre-migration stage; apply memory/0011; assert `coordination_tasks` table no longer exists via `PRAGMA table_list`.
 - `task_edges_unique_constraint_rejects_duplicates`: insert an edge row twice with identical `(source_block, source_item, target_block, target_item=NULL)` → second insert errors with a UNIQUE constraint violation. Repeat with `target_item="id-xyz"`.
 - `task_edges_block_vs_item_distinct`: insert one edge with `target_item=NULL` and one with `target_item="anything-not-<block>"` to the same source — both succeed (AC2.7).
 - `priority_drop_does_not_break_existing_queries`: after migration, `cargo check -p pattern-db` verifies this compile-time. Add a smoke test that runs every query function exported by `pattern_db::queries::task` (once Task 5 lands) against the freshly migrated schema.
@@ -360,7 +360,7 @@ Tests:
 **Commit:**
 
 ```
-jj commit -m "[pattern-db] migration 0014 round-trip and constraint tests"
+jj commit -m "[pattern-db] memory/0011 round-trip and constraint tests"
 ```
 <!-- END_TASK_4 -->
 <!-- END_SUBCOMPONENT_B -->
@@ -504,7 +504,7 @@ jj commit -m "[pattern-db] query_task_graph_bfs with depth + max_nodes caps"
 
 **Files:**
 - Create (or modify, per Task 1 findings): `crates/pattern_memory/src/subscriber/task.rs` — new per-schema handler module.
-- Modify: `crates/pattern_memory/src/subscriber/mod.rs` — register the new dispatch arm matching `BlockSchema::TaskList { .. }`.
+- Modify: `crates/pattern_memory/src/subscriber.rs` — register the new dispatch arm matching `BlockSchema::TaskList { .. }`.
 
 **Implementation:**
 
@@ -555,7 +555,7 @@ jj commit -m "[pattern-memory] subscriber: reconcile tasks + task_edges for Task
 
 **Files:**
 - Modify: `crates/pattern_memory/src/subscriber/task.rs` — wrap reconcile in the existing worker's `rusqlite::Transaction` scope (the sibling plan's subscriber loop already opens a tx per commit event; this task confirms our code uses it correctly).
-- Modify: `crates/pattern_memory/src/subscriber/mod.rs` — confirm panic→restart path exists from sibling Phase 4. If it exists, this task only adds a metrics counter increment. If it doesn't, coordinate with sibling plan before proceeding.
+- Modify: `crates/pattern_memory/src/subscriber.rs` — confirm panic→restart path exists from sibling Phase 4. If it exists, this task only adds a metrics counter increment. If it doesn't, coordinate with sibling plan before proceeding.
 
 **Implementation:**
 

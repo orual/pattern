@@ -129,6 +129,17 @@ pub fn resolve_scope(
                 Ok(agents)
             }
         }
+
+        // `Schema(kind)` is an orthogonal filter dimension — it restricts by
+        // block schema type, not by agent identity. The scope resolver's job
+        // is to produce an agent-ID set; schema filtering is applied by the
+        // query layer on top of that result. Fall back to `CurrentAgent`
+        // semantics so the caller's own data is searched and the query layer
+        // applies the schema predicate.
+        //
+        // The `_ =>` arm also covers any future non-exhaustive variants that
+        // may be added to `SearchScope` in later phases.
+        _ => Ok(vec![caller.to_string()]),
     }
 }
 
