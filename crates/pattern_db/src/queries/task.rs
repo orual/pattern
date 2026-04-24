@@ -500,19 +500,19 @@ pub fn list_tasks_filtered(
     }
 
     // Status filter.
-    if let Some(ref statuses) = filter.status {
-        if !statuses.is_empty() {
-            let placeholders: Vec<String> = statuses
-                .iter()
-                .map(|s| {
-                    let p = format!("?{param_idx}");
-                    params.push(Box::new(s.clone()));
-                    param_idx += 1;
-                    p
-                })
-                .collect();
-            conditions.push(format!("t.status IN ({})", placeholders.join(", ")));
-        }
+    if let Some(ref statuses) = filter.status
+        && !statuses.is_empty()
+    {
+        let placeholders: Vec<String> = statuses
+            .iter()
+            .map(|s| {
+                let p = format!("?{param_idx}");
+                params.push(Box::new(s.clone()));
+                param_idx += 1;
+                p
+            })
+            .collect();
+        conditions.push(format!("t.status IN ({})", placeholders.join(", ")));
     }
 
     // Owner filter.
