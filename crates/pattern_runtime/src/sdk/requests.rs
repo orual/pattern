@@ -17,6 +17,7 @@ pub mod recall;
 pub mod rpc;
 pub mod search;
 pub mod shell;
+pub mod skills;
 pub mod sources;
 pub mod spawn;
 pub mod tasks;
@@ -33,6 +34,7 @@ pub use recall::RecallReq;
 pub use rpc::RpcReq;
 pub use search::SearchReq;
 pub use shell::ShellReq;
+pub use skills::SkillsReq;
 pub use sources::SourcesReq;
 pub use spawn::SpawnReq;
 pub use tasks::TasksReq;
@@ -102,6 +104,7 @@ mod parity {
                 "AddComment",
             ],
         ),
+        ("SkillsReq", &[]),
     ];
 
     /// Sanity check: the table isn't empty and each entry lists at least
@@ -110,8 +113,8 @@ mod parity {
     fn parity_table_is_populated() {
         assert_eq!(
             EXPECTED.len(),
-            15,
-            "expected 15 SDK namespaces; update this test when adding/removing one"
+            16,
+            "expected 16 SDK namespaces; update this test when adding/removing one"
         );
         for (enum_name, variants) in EXPECTED {
             assert!(
@@ -298,6 +301,14 @@ mod parity {
         let _ = TasksReq::QueryGraph(String::new(), String::new());
         let _ = TasksReq::AddComment(String::new(), String::new());
         assert_eq!(count("TasksReq"), 8);
+    }
+
+    #[test]
+    #[allow(unused_imports)]
+    fn skills_req_variants() {
+        use super::SkillsReq;
+        // SkillsReq is empty during Task 3 scaffolding; variants added in Task 4.
+        assert_eq!(count("SkillsReq"), 0);
     }
 
     /// Look up the expected variant count from the table.
