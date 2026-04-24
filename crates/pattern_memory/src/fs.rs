@@ -13,6 +13,7 @@ pub mod jsonl;
 pub mod kdl;
 mod kdl_task_list;
 pub mod markdown;
+pub mod markdown_skill;
 pub mod watcher;
 
 pub use error::FsError;
