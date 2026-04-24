@@ -276,6 +276,11 @@ impl std::str::FromStr for crate::models::SourceType {
 
 impl_text_sql_via_display!(crate::models::SourceType);
 
+// --- TaskList block-index types ---
+// TaskStatus (queries::task_row): stored as kebab-case TEXT. Uses as_str() + FromStr.
+// This is distinct from UserTaskStatus (snake_case, user-facing ADHD task model).
+impl_text_sql_via_as_str!(crate::queries::task_row::TaskStatus);
+
 // --- Task (ADHD) types ---
 // UserTaskStatus: Display produces "in progress" (human-readable) but db wants "in_progress".
 // Need dedicated as_str().

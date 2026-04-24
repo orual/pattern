@@ -13,6 +13,7 @@ mod queue;
 mod source;
 pub mod stats;
 mod task;
+pub mod task_row;
 
 pub use agent::*;
 pub use atproto_endpoints::*;
@@ -23,3 +24,4 @@ pub use message::*;
 pub use queue::*;
 pub use source::*;
 pub use task::*;
+pub use task_row::{TaskEdgeRow, TaskRow};
