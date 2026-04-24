@@ -4,6 +4,10 @@
 //! These functions are used by the TaskList subscriber reconciler in
 //! `pattern_memory` and by Phase 3 SDK handlers in `pattern_runtime`.
 //!
+//! Query types (`TaskFilter`, `Direction`, `GraphQuery`, `GraphSlice`,
+//! `TaskEdgeRef`) come from `pattern_core::types::memory_types::task_query`
+//! and `pattern_core::types::memory_types::task`.
+//!
 //! ## Removed legacy user-task surface (2026-04-23)
 //!
 //! `create_user_task`, `get_user_task`, `list_tasks`, `get_subtasks`,
@@ -13,72 +17,19 @@
 //! `UserTaskStatus`) which has no active callers in the current workspace.
 //! If `pattern_nd` is re-integrated, these should be re-introduced there
 //! rather than in this crate's general query layer.
-//!
-//! ## Circular-dependency note
-//!
-//! Types like `TaskFilter`, `Direction`, `GraphSlice` live in `pattern_core`
-//! (which depends on `pattern_db`). To avoid the circular dependency,
-//! the functions here accept plain primitives or local mirror structs
-//! (`FilterArgs`, `GraphDirection`, `GraphSliceRows`). The conversion
-//! between `pattern_core` types and these primitives is done by callers
-//! in `pattern_memory` or `pattern_runtime`.
 
 use std::collections::{HashSet, VecDeque};
+
+use pattern_core::types::memory_types::{
+    TaskEdgeRef,
+    task_query::{Direction, GraphQuery, GraphSlice, TaskFilter},
+};
 
 use crate::queries::task_row::TaskRow;
 
 // ============================================================================
 // Block-index query layer (post-migration 0011)
 // ============================================================================
-
-// region: local types
-
-/// Filter arguments for [`list_tasks_filtered`].
-///
-/// All fields are `Option`; `None` means "no constraint on this axis".
-/// Callers in `pattern_memory`/`pattern_runtime` convert from
-/// `pattern_core::types::memory_types::task_query::TaskFilter` into this
-/// plain-data struct.
-#[derive(Debug, Clone, Default)]
-pub struct FilterArgs {
-    /// Only return tasks whose status matches one of these kebab-case strings.
-    pub status: Option<Vec<String>>,
-    /// Only return tasks assigned to this owner agent.
-    pub owner: Option<String>,
-    /// If `Some(true)`, only tasks that have at least one incoming edge
-    /// (i.e. something blocks them). If `Some(false)`, only tasks with
-    /// zero incoming edges. `None` skips the check.
-    pub has_blockers: Option<bool>,
-    /// FTS5 keyword query. When set, results are ordered by BM25 relevance.
-    pub keyword: Option<String>,
-}
-
-/// BFS traversal direction for [`query_task_graph_bfs`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GraphDirection {
-    /// Follow edges from source to target.
-    Forward,
-    /// Follow edges from target to source (reverse lookup).
-    Reverse,
-    /// Follow edges in both directions.
-    Both,
-}
-
-/// A node in the graph result, expressed as `(block, Option<item>)`.
-pub type GraphNode = (String, Option<String>);
-
-/// Result of a BFS graph traversal via [`query_task_graph_bfs`].
-#[derive(Debug, Clone)]
-pub struct GraphSliceRows {
-    /// Discovered nodes in BFS visitation order.
-    pub nodes: Vec<GraphNode>,
-    /// Directed edges `(from, to)` discovered during traversal.
-    pub edges: Vec<(GraphNode, GraphNode)>,
-    /// `true` if the traversal hit `max_nodes` before exhausting the frontier.
-    pub truncated: bool,
-}
-
-// endregion: local types
 
 // region: upsert / delete
 
@@ -209,10 +160,20 @@ pub fn delete_task_edges_targeting(
 ///
 /// The `has_blockers` filter checks whether the task appears as a target in
 /// `task_edges` (i.e. something blocks it).
+///
+/// When `filter.blocks` is `Some(vec![])` (empty vec), this returns no results
+/// immediately — callers should pass `None` when no block scoping is desired.
 pub fn list_tasks_filtered(
     conn: &rusqlite::Connection,
-    filter: &FilterArgs,
+    filter: &TaskFilter,
 ) -> rusqlite::Result<Vec<TaskRow>> {
+    // Short-circuit: Some(empty vec) means "no results", not "all results".
+    if let Some(ref blocks) = filter.blocks
+        && blocks.is_empty()
+    {
+        return Ok(Vec::new());
+    }
+
     let mut sql = String::with_capacity(512);
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     let mut param_idx = 1u32;
@@ -238,7 +199,24 @@ pub fn list_tasks_filtered(
         );
     }
 
-    // Status filter.
+    // Block handle filter.
+    if let Some(ref blocks) = filter.blocks {
+        // Empty vec is short-circuited above; here blocks is non-empty.
+        let placeholders: Vec<String> = blocks
+            .iter()
+            .map(|_| {
+                let p = format!("?{param_idx}");
+                param_idx += 1;
+                p
+            })
+            .collect();
+        for b in blocks {
+            params.push(Box::new(b.to_string()));
+        }
+        conditions.push(format!("t.block_handle IN ({})", placeholders.join(", ")));
+    }
+
+    // Status filter — serialize each TaskStatus to its kebab-case string.
     if let Some(ref statuses) = filter.status
         && !statuses.is_empty()
     {
@@ -246,7 +224,7 @@ pub fn list_tasks_filtered(
             .iter()
             .map(|s| {
                 let p = format!("?{param_idx}");
-                params.push(Box::new(s.clone()));
+                params.push(Box::new(s.as_str().to_string()));
                 param_idx += 1;
                 p
             })
@@ -254,10 +232,10 @@ pub fn list_tasks_filtered(
         conditions.push(format!("t.status IN ({})", placeholders.join(", ")));
     }
 
-    // Owner filter.
+    // Owner filter — AgentId is SmolStr; pass as str.
     if let Some(ref owner) = filter.owner {
         conditions.push(format!("t.owner_agent_id = ?{param_idx}"));
-        params.push(Box::new(owner.clone()));
+        params.push(Box::new(owner.as_str().to_string()));
         param_idx += 1;
     }
 
@@ -311,24 +289,45 @@ pub fn list_tasks_filtered(
 
 /// BFS traversal over the `task_edges` graph.
 ///
-/// Starts from `root` and walks edges according to `direction`, up to
-/// `max_depth` hops and `max_nodes` total nodes. Returns the discovered
-/// nodes, edges, and whether the traversal was truncated.
+/// Starts from `root` and walks edges according to `query.direction`, up to
+/// `query.depth` hops and `query.max_nodes` total nodes. Default caps of
+/// `depth=16` and `max_nodes=1000` are applied when the fields are `None`.
+///
+/// Returns the discovered nodes and edges as [`TaskEdgeRef`] values, and
+/// whether the traversal was truncated.
 pub fn query_task_graph_bfs(
     conn: &rusqlite::Connection,
-    root_block: &str,
-    root_item: Option<&str>,
-    direction: GraphDirection,
-    max_depth: u32,
-    max_nodes: u32,
-) -> rusqlite::Result<GraphSliceRows> {
-    let root: GraphNode = (root_block.to_string(), root_item.map(|s| s.to_string()));
-    let mut visited: HashSet<GraphNode> = HashSet::new();
-    visited.insert(root.clone());
-    let mut frontier: VecDeque<(GraphNode, u32)> = VecDeque::new();
-    frontier.push_back((root.clone(), 0));
-    let mut nodes: Vec<GraphNode> = vec![root];
-    let mut edges: Vec<(GraphNode, GraphNode)> = Vec::new();
+    root: &TaskEdgeRef,
+    query: &GraphQuery,
+) -> rusqlite::Result<GraphSlice> {
+    let max_depth = query.depth.unwrap_or(16);
+    let max_nodes = query.max_nodes.unwrap_or(1000);
+    let direction = query.direction;
+
+    // Internal BFS uses (block, Option<item>) tuples for hashing.
+    type Node = (String, Option<String>);
+
+    fn ref_to_node(r: &TaskEdgeRef) -> Node {
+        (
+            r.block.to_string(),
+            r.task_item.as_ref().map(|s| s.to_string()),
+        )
+    }
+    fn node_to_ref(n: &Node) -> TaskEdgeRef {
+        use smol_str::SmolStr;
+        TaskEdgeRef {
+            block: SmolStr::new(&n.0),
+            task_item: n.1.as_deref().map(SmolStr::new),
+        }
+    }
+
+    let root_node: Node = ref_to_node(root);
+    let mut visited: HashSet<Node> = HashSet::new();
+    visited.insert(root_node.clone());
+    let mut frontier: VecDeque<(Node, u32)> = VecDeque::new();
+    frontier.push_back((root_node.clone(), 0));
+    let mut nodes: Vec<Node> = vec![root_node];
+    let mut edges: Vec<(Node, Node)> = Vec::new();
     let mut truncated = false;
 
     // Prepare statements for forward/reverse lookups.
@@ -345,10 +344,10 @@ pub fn query_task_graph_bfs(
             continue;
         }
 
-        let mut neighbours: Vec<(GraphNode, GraphNode)> = Vec::new();
+        let mut neighbours: Vec<(Node, Node)> = Vec::new();
 
         // Forward neighbours.
-        if matches!(direction, GraphDirection::Forward | GraphDirection::Both) {
+        if matches!(direction, Direction::Forward | Direction::Both) {
             // Forward lookup requires a non-null source_item.
             if let Some(ref item) = current.1 {
                 let rows = forward_stmt.query_map(rusqlite::params![&current.0, item], |row| {
@@ -364,7 +363,7 @@ pub fn query_task_graph_bfs(
         }
 
         // Reverse neighbours.
-        if matches!(direction, GraphDirection::Reverse | GraphDirection::Both) {
+        if matches!(direction, Direction::Reverse | Direction::Both) {
             let rows =
                 reverse_stmt.query_map(rusqlite::params![&current.0, &current.1], |row| {
                     let sb: String = row.get(0)?;
@@ -385,23 +384,29 @@ pub fn query_task_graph_bfs(
                 nodes.push(target.clone());
                 if nodes.len() as u32 >= max_nodes {
                     truncated = true;
-                    return Ok(GraphSliceRows {
-                        nodes,
-                        edges,
+                    return Ok(GraphSlice {
+                        nodes: nodes.iter().map(node_to_ref).collect(),
+                        edges: edges
+                            .iter()
+                            .map(|(f, t)| (node_to_ref(f), node_to_ref(t)))
+                            .collect(),
                         truncated,
                     });
                 }
                 frontier.push_back((target, depth + 1));
             } else {
-                // Still record the edge even if node already visited.
+                // Still record the edge even if the node was already visited.
                 edges.push((from, to));
             }
         }
     }
 
-    Ok(GraphSliceRows {
-        nodes,
-        edges,
+    Ok(GraphSlice {
+        nodes: nodes.iter().map(node_to_ref).collect(),
+        edges: edges
+            .iter()
+            .map(|(f, t)| (node_to_ref(f), node_to_ref(t)))
+            .collect(),
         truncated,
     })
 }

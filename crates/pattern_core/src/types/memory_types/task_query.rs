@@ -27,6 +27,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::types::{
+    block::BlockHandle,
     ids::AgentId,
     memory_types::{TaskStatus, task::TaskEdgeRef},
 };
@@ -179,6 +180,16 @@ pub struct TaskFilter {
     /// FTS5 keyword query string.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keyword: Option<String>,
+    /// Restrict to items belonging to one of these block handles.
+    ///
+    /// - `None` → no block constraint (all blocks included).
+    /// - `Some(vec![h])` → only items from block `h`.
+    /// - `Some(many)` → items from any block in the set.
+    ///
+    /// `Some(vec![])` (empty vec) is treated as "no results" — not "all results."
+    /// Callers should pass `None` when no block scoping is desired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocks: Option<Vec<BlockHandle>>,
 }
 
 // endregion: TaskFilter
@@ -484,6 +495,7 @@ mod tests {
         assert!(filter.owner.is_none());
         assert!(filter.has_blockers.is_none());
         assert!(filter.keyword.is_none());
+        assert!(filter.blocks.is_none());
     }
 
     #[test]
@@ -493,6 +505,7 @@ mod tests {
             owner: Some(SmolStr::new("agent-z")),
             has_blockers: Some(true),
             keyword: Some("auth".to_owned()),
+            blocks: None,
         };
 
         let json = serde_json::to_string(&filter).unwrap();
@@ -504,6 +517,56 @@ mod tests {
     fn task_filter_empty_json_deserializes_to_all_none() {
         let filter: TaskFilter = serde_json::from_str("{}").unwrap();
         assert_eq!(filter, TaskFilter::default());
+    }
+
+    #[test]
+    fn task_filter_blocks_field_round_trips() {
+        // Some(vec![h]) — single block constraint.
+        let filter = TaskFilter {
+            status: None,
+            owner: None,
+            has_blockers: None,
+            keyword: None,
+            blocks: Some(vec![SmolStr::new("sprint-block"), SmolStr::new("backlog")]),
+        };
+
+        let json = serde_json::to_string(&filter).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        // `blocks` must be present and be an array with 2 elements.
+        assert!(v.get("blocks").is_some(), "blocks must be present in JSON");
+        assert_eq!(
+            v["blocks"].as_array().map(|a| a.len()),
+            Some(2),
+            "blocks array must contain 2 elements"
+        );
+
+        let recovered: TaskFilter = serde_json::from_str(&json).unwrap();
+        assert_eq!(filter, recovered);
+    }
+
+    #[test]
+    fn task_filter_blocks_none_absent_in_json() {
+        let filter = TaskFilter::default();
+        let json = serde_json::to_string(&filter).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            v.get("blocks").is_none(),
+            "blocks=None must be absent in JSON: {json}"
+        );
+    }
+
+    #[test]
+    fn task_filter_blocks_empty_vec_round_trips() {
+        // Some(vec![]) — explicit "no results" sentinel.
+        let filter = TaskFilter {
+            blocks: Some(vec![]),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&filter).unwrap();
+        let recovered: TaskFilter = serde_json::from_str(&json).unwrap();
+        assert_eq!(filter, recovered);
+        assert_eq!(recovered.blocks, Some(vec![]));
     }
 
     // endregion: TaskFilter tests

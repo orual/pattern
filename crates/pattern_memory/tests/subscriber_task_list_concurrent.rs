@@ -8,7 +8,8 @@
 //!   visible to a project-scope query but invisible to a persona-only query.
 
 use loro::{ExportMode, LoroDoc};
-use pattern_db::queries::{FilterArgs, list_tasks_filtered};
+use pattern_core::types::memory_types::task_query::TaskFilter;
+use pattern_db::queries::list_tasks_filtered;
 
 mod common;
 use common::{
@@ -313,7 +314,7 @@ fn scope_enforcement_project_only() {
     // no status/owner/keyword filter is applied. We verify that the total
     // row count is 4 (3 project + 1 persona), confirming that the two sets
     // of tasks are stored under separate handles and not interleaved.
-    let all_rows = list_tasks_filtered(&conn, &FilterArgs::default())
+    let all_rows = list_tasks_filtered(&conn, &TaskFilter::default())
         .expect("list_tasks_filtered must succeed");
     assert_eq!(
         all_rows.len(),

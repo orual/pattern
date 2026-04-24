@@ -3,13 +3,14 @@
 //! Covers:
 //! - `upsert_task_row` / `delete_task_row` CRUD.
 //! - `upsert_task_edges` / `delete_task_edges_for_item` / `delete_task_edges_targeting`.
-//! - `list_tasks_filtered` with status, owner, has_blockers, and FTS5 keyword filters.
+//! - `list_tasks_filtered` with status, owner, has_blockers, keyword, and blocks filters.
 //! - FTS5 BM25 relevance ordering stability (insta snapshots).
 
+use pattern_core::types::memory_types::task_query::TaskFilter;
 use pattern_db::ConstellationDb;
 use pattern_db::queries::task_row::TaskStatus;
 use pattern_db::queries::{
-    FilterArgs, TaskRow, delete_task_edges_for_item, delete_task_edges_targeting, delete_task_row,
+    TaskRow, delete_task_edges_for_item, delete_task_edges_targeting, delete_task_row,
     list_tasks_filtered, upsert_task_edges, upsert_task_row,
 };
 
@@ -91,7 +92,7 @@ fn upsert_one_row_then_list() {
         tx.commit().unwrap();
     }
 
-    let results = list_tasks_filtered(&conn, &FilterArgs::default()).unwrap();
+    let results = list_tasks_filtered(&conn, &TaskFilter::default()).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].subject, "write tests");
 }
@@ -127,7 +128,7 @@ fn upsert_twice_same_key_produces_one_row() {
         tx.commit().unwrap();
     }
 
-    let results = list_tasks_filtered(&conn, &FilterArgs::default()).unwrap();
+    let results = list_tasks_filtered(&conn, &TaskFilter::default()).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].subject, "updated");
     assert_eq!(results[0].status, TaskStatus::InProgress);
@@ -160,7 +161,7 @@ fn delete_row_makes_list_empty() {
         tx.commit().unwrap();
     }
 
-    let results = list_tasks_filtered(&conn, &FilterArgs::default()).unwrap();
+    let results = list_tasks_filtered(&conn, &TaskFilter::default()).unwrap();
     assert!(results.is_empty());
 }
 
@@ -370,8 +371,8 @@ fn filter_by_status() {
     let mut conn = db.get().unwrap();
     insert_filter_fixture(&mut conn);
 
-    let filter = FilterArgs {
-        status: Some(vec!["pending".to_string()]),
+    let filter = TaskFilter {
+        status: Some(vec![TaskStatus::Pending]),
         ..Default::default()
     };
     let results = list_tasks_filtered(&conn, &filter).unwrap();
@@ -385,8 +386,8 @@ fn filter_by_owner() {
     let mut conn = db.get().unwrap();
     insert_filter_fixture(&mut conn);
 
-    let filter = FilterArgs {
-        owner: Some("agent-2".to_string()),
+    let filter = TaskFilter {
+        owner: Some(smol_str::SmolStr::new("agent-2")),
         ..Default::default()
     };
     let results = list_tasks_filtered(&conn, &filter).unwrap();
@@ -400,7 +401,7 @@ fn filter_by_has_blockers_true() {
     let mut conn = db.get().unwrap();
     insert_filter_fixture(&mut conn);
 
-    let filter = FilterArgs {
+    let filter = TaskFilter {
         has_blockers: Some(true),
         ..Default::default()
     };
@@ -420,7 +421,7 @@ fn filter_by_has_blockers_false() {
     let mut conn = db.get().unwrap();
     insert_filter_fixture(&mut conn);
 
-    let filter = FilterArgs {
+    let filter = TaskFilter {
         has_blockers: Some(false),
         ..Default::default()
     };
@@ -435,7 +436,7 @@ fn filter_by_keyword_fts5() {
     let mut conn = db.get().unwrap();
     insert_filter_fixture(&mut conn);
 
-    let filter = FilterArgs {
+    let filter = TaskFilter {
         keyword: Some("auth".to_string()),
         ..Default::default()
     };
@@ -455,15 +456,166 @@ fn filter_combined_status_and_owner() {
     let mut conn = db.get().unwrap();
     insert_filter_fixture(&mut conn);
 
-    let filter = FilterArgs {
-        status: Some(vec!["in-progress".to_string()]),
-        owner: Some("agent-2".to_string()),
+    let filter = TaskFilter {
+        status: Some(vec![TaskStatus::InProgress]),
+        owner: Some(smol_str::SmolStr::new("agent-2")),
         ..Default::default()
     };
     let results = list_tasks_filtered(&conn, &filter).unwrap();
     // Only t-03 is in-progress AND owned by agent-2.
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].task_item_id.as_deref(), Some("i-03"));
+}
+
+// ---------------------------------------------------------------------------
+// blocks filter tests
+// ---------------------------------------------------------------------------
+
+/// Insert tasks across two block handles for blocks-filter testing.
+fn insert_two_block_fixture(conn: &mut rusqlite::Connection) {
+    insert_test_agent(conn);
+
+    let tasks = vec![
+        (
+            "t-b1-01",
+            "blk-alpha",
+            "i-01",
+            "alpha task one",
+            TaskStatus::Pending,
+        ),
+        (
+            "t-b1-02",
+            "blk-alpha",
+            "i-02",
+            "alpha task two",
+            TaskStatus::InProgress,
+        ),
+        (
+            "t-b2-01",
+            "blk-beta",
+            "i-01",
+            "beta task one",
+            TaskStatus::Pending,
+        ),
+        (
+            "t-b2-02",
+            "blk-beta",
+            "i-02",
+            "beta task two",
+            TaskStatus::Completed,
+        ),
+        (
+            "t-b2-03",
+            "blk-beta",
+            "i-03",
+            "beta task three",
+            TaskStatus::Blocked,
+        ),
+    ];
+
+    let tx = conn.transaction().unwrap();
+    for (id, blk, item, subject, status) in &tasks {
+        let row = make_task_row(id, blk, item, subject, *status, None, None);
+        upsert_task_row(&tx, &row).unwrap();
+    }
+    tx.commit().unwrap();
+}
+
+#[test]
+fn filter_blocks_single_handle_returns_only_that_block() {
+    let db = fresh_db();
+    let mut conn = db.get().unwrap();
+    insert_two_block_fixture(&mut conn);
+
+    let filter = TaskFilter {
+        blocks: Some(vec![smol_str::SmolStr::new("blk-alpha")]),
+        ..Default::default()
+    };
+    let results = list_tasks_filtered(&conn, &filter).unwrap();
+
+    assert_eq!(
+        results.len(),
+        2,
+        "blk-alpha has 2 tasks; got: {:?}",
+        results
+            .iter()
+            .map(|r| r.task_item_id.as_deref())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        results
+            .iter()
+            .all(|r| r.block_handle.as_deref() == Some("blk-alpha")),
+        "all results must be from blk-alpha"
+    );
+}
+
+#[test]
+fn filter_blocks_multiple_handles_returns_union() {
+    let db = fresh_db();
+    let mut conn = db.get().unwrap();
+    insert_two_block_fixture(&mut conn);
+
+    let filter = TaskFilter {
+        blocks: Some(vec![
+            smol_str::SmolStr::new("blk-alpha"),
+            smol_str::SmolStr::new("blk-beta"),
+        ]),
+        ..Default::default()
+    };
+    let results = list_tasks_filtered(&conn, &filter).unwrap();
+
+    // 2 from blk-alpha + 3 from blk-beta = 5 total.
+    assert_eq!(results.len(), 5, "union of both blocks must return 5 tasks");
+}
+
+#[test]
+fn filter_blocks_none_returns_all() {
+    let db = fresh_db();
+    let mut conn = db.get().unwrap();
+    insert_two_block_fixture(&mut conn);
+
+    let results = list_tasks_filtered(&conn, &TaskFilter::default()).unwrap();
+    assert_eq!(
+        results.len(),
+        5,
+        "no block constraint must return all 5 tasks"
+    );
+}
+
+#[test]
+fn filter_blocks_empty_vec_returns_no_results() {
+    let db = fresh_db();
+    let mut conn = db.get().unwrap();
+    insert_two_block_fixture(&mut conn);
+
+    let filter = TaskFilter {
+        blocks: Some(vec![]),
+        ..Default::default()
+    };
+    let results = list_tasks_filtered(&conn, &filter).unwrap();
+    assert!(
+        results.is_empty(),
+        "Some(empty vec) must return no results — it is 'no block constraint' vs 'all results'"
+    );
+}
+
+#[test]
+fn filter_blocks_combined_with_status() {
+    let db = fresh_db();
+    let mut conn = db.get().unwrap();
+    insert_two_block_fixture(&mut conn);
+
+    // Only pending tasks in blk-beta — only beta task one.
+    let filter = TaskFilter {
+        blocks: Some(vec![smol_str::SmolStr::new("blk-beta")]),
+        status: Some(vec![TaskStatus::Pending]),
+        ..Default::default()
+    };
+    let results = list_tasks_filtered(&conn, &filter).unwrap();
+
+    assert_eq!(results.len(), 1, "blk-beta has 1 pending task");
+    assert_eq!(results[0].subject, "beta task one");
 }
 
 // ---------------------------------------------------------------------------

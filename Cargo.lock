@@ -6549,6 +6549,7 @@ dependencies = [
  "rusqlite_migration",
  "serde",
  "serde_json",
+ "smol_str",
  "sqlite-vec",
  "tempfile",
  "thiserror 1.0.69",
