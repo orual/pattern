@@ -5,7 +5,7 @@
 //! - Flexible scheduling (due dates, scheduled times)
 //! - Priority levels with urgency distinction
 //!
-//! Distinct from CoordinationTask which is for internal agent work assignment.
+//! Distinct from task-block index rows (see queries::task) used for agent work assignment.
 
 use crate::Json;
 use chrono::{DateTime, Utc};

@@ -50,14 +50,12 @@ pub use search::{
 
 // Re-export key model types for convenience.
 pub use models::{
-    ActivityEvent, ActivityEventType, Agent, AgentAtprotoEndpoint, AgentDataSource, AgentGroup,
-    AgentStatus, AgentSummary, ArchivalEntry, ArchiveSummary, ConstellationSummary,
-    CoordinationState, CoordinationTask, DataSource, ENDPOINT_TYPE_BLUESKY, EntityImport, Event,
-    EventImportance, EventOccurrence, FilePassage, Folder, FolderAccess, FolderAttachment,
-    FolderFile, FolderPathType, GroupMember, GroupMemberRole, HandoffNote, IssueSeverity,
-    MemoryBlock, MemoryBlockCheckpoint, MemoryBlockType, MemoryGate, MemoryOp, MemoryPermission,
-    Message, MessageRole, MessageSummary, MigrationAudit, MigrationIssue, MigrationLog,
-    MigrationStats, ModelRoutingConfig, ModelRoutingRule, NotableEvent, OccurrenceStatus,
-    PatternType, RoutingCondition, SharedBlockAttachment, SourceType, Task, TaskPriority,
-    TaskStatus, TaskSummary, UserTaskPriority, UserTaskStatus,
+    Agent, AgentAtprotoEndpoint, AgentDataSource, AgentGroup, AgentStatus, ArchivalEntry,
+    ArchiveSummary, DataSource, ENDPOINT_TYPE_BLUESKY, EntityImport, Event, EventOccurrence,
+    FilePassage, Folder, FolderAccess, FolderAttachment, FolderFile, FolderPathType, GroupMember,
+    GroupMemberRole, IssueSeverity, MemoryBlock, MemoryBlockCheckpoint, MemoryBlockType,
+    MemoryGate, MemoryOp, MemoryPermission, Message, MessageRole, MessageSummary, MigrationAudit,
+    MigrationIssue, MigrationLog, MigrationStats, ModelRoutingConfig, ModelRoutingRule,
+    OccurrenceStatus, PatternType, RoutingCondition, SharedBlockAttachment, SourceType, Task,
+    TaskSummary, UserTaskPriority, UserTaskStatus,
 };

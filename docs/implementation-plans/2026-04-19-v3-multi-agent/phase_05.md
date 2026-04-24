@@ -29,15 +29,15 @@
 
 - **FrontingSet ownership.** `DaemonServer` owns one; it is not per-session. Load in `DaemonServer::spawn_with_config`; save on `ctx.fronting.set/route/clear`.
 - **Co-fronting semantics.** Multiple personas in `FrontingSet.active`. Unrouted messages default to the `fallback` persona; if no fallback, fan out to all active personas (every member receives a copy). The design says fan-out OR discrimination by rules — we support both via the `fallback` field's presence.
-- **Routing-rule matcher types.** Strings + a small set of patterns: `Prefix(String)`, `Regex(String)`, `Contains(String)`, `TopicTag(String)`. Regex compiled once per rule (use the `regex` crate — check Cargo.toml; if not present, ask orual before adding; a prefix/contains-only initial shape is acceptable if regex adds a new dep).
+- **Routing-rule matcher types.** `Prefix(String)`, `Contains(String)`, `TopicTag(String)`, `Regex(String)`. `regex` is already a workspace dep (`Cargo.toml: regex = "1"`; used by `pattern_core`, `pattern_runtime`, `pattern_discord`) — compile once per rule at load, hold `regex::Regex` inside `RoutingTable` alongside the source string for persistence.
 - **In-flight routing updates (AC8.8).** Messages already in a mailbox queue use the routing they were resolved under. New messages use the new routing. Concretely: `RouterRegistry::route` is the only point where routing is evaluated; once a `MailboxInput` lands in an mpsc channel it's committed to its target. No re-routing.
 - **Human short-circuit scope.** Applies to `Shell`, `File`, and any handler that today escalates to the broker. It does NOT bypass `MemoryPermission`/`memory_acl::check()` — memory ACL governs what blocks a persona can touch regardless of caller; the human still acts through the fronting persona, and the persona's identity is what the ACL sees.
 
-### Open questions
+### Empty FrontingSet — default-persona fallback
 
-**Q5.1.** Regex in routing rules requires the `regex` crate. Check workspace deps; if absent, **ask orual** before adding. A `prefix/contains/topic-tag` initial set is sufficient for the supervisor pattern and defers regex to a follow-up.
+If the user clears the FrontingSet entirely (no `active` personas, no `fallback`), dispatch falls back to a best-available default: the first `Active` persona in the registry (sorted by id for determinism). If the registry has no `Active` personas either, route to `SystemDefault` — a synthetic persona that logs the message and ack-nowledges — so human messages are never silently dropped. The CLI/TUI exposes this via a clear "no fronting configured — using default" status line.
 
-**Q5.2.** If the user clears the FrontingSet entirely (no active personas), what happens to incoming messages? Options: reject, queue in a runtime-level overflow inbox, fall back to a system default. Plan assumes **reject** with a clear `RouterError::NoActiveFronting` — a FrontingSet must have at least one active persona to accept messages. CLI/TUI surface this to the user.
+This avoids forcing the user to manage fronting explicitly before sending the first message; power users can configure routing whenever they want, but baseline behaviour just works.
 
 ---
 
@@ -53,6 +53,11 @@
 - **v3-multi-agent.AC8.6 Success:** `ctx.caller` is `Caller::Human(user_id)` for human-initiated turns and `Caller::Agent(persona_id)` for agent-initiated turns
 - **v3-multi-agent.AC8.7 Success:** Human-as-caller uses fronting persona's SessionContext; all memory handles and project mount are the persona's
 - **v3-multi-agent.AC8.8 Edge:** FrontingSet update while messages are in-flight: messages already queued use old routing; new messages use updated routing (no reprocessing)
+
+### Empty-fronting fallback (additional coverage beyond listed ACs)
+
+- Empty `active` + empty `fallback` + registry has Active personas → delivers to the lowest-id Active persona (`DefaultPersona` outcome).
+- Empty `active` + empty `fallback` + registry has zero Active personas → `SystemDefault` outcome; message is acked and logged; human sees a "no fronting configured" status line.
 
 ---
 
@@ -98,29 +103,35 @@ pub enum MessagePattern {
     Prefix(String),
     Contains(String),
     TopicTag(String),
-    // Regex(String) — gated on Q5.1 + regex dep
+    Regex(String), // source stored; compiled form cached in RoutingTable at load
 }
 ```
+
+`RoutingTable` compiles `Regex` variants into `regex::Regex` at construction and caches them alongside the rule list, so evaluation is hot-path cheap. Invalid regex strings fail at load with a clear `FrontingLoadError::InvalidRegex { rule_id, source, inner }`.
 
 `FrontingSet::resolve(&self, msg_body: &str) -> ResolveOutcome` returns:
 
 ```rust
 pub enum ResolveOutcome<'a> {
-    Direct(PersonaId),           // @persona prefix parsed
+    Direct(PersonaId),                 // @persona prefix parsed
     Rule { rule_id: &'a str, target: &'a PersonaId },
     Fallback(&'a PersonaId),
-    FanOut(&'a [PersonaId]),     // no fallback, co-fronted
-    NoActiveFronting,
+    FanOut(&'a [PersonaId]),           // no fallback, co-fronted
+    DefaultPersona(PersonaId),         // fronting empty; first Active persona from registry
+    SystemDefault,                     // no Active personas exist at all
 }
 ```
 
-Evaluate: strip `@persona-id` prefix first → Direct. Else iterate rules by descending priority; first match → Rule. Else fallback if Some. Else if `active.len() >= 1` → FanOut. Else NoActiveFronting.
+Evaluate: strip `@persona-id` prefix first → Direct. Else iterate rules by descending priority; first match → Rule. Else fallback if Some. Else if `active.len() >= 1` → FanOut. Else consult the `ConstellationRegistry` for the first `Active` persona sorted by id → `DefaultPersona`. Else → `SystemDefault`. Messages never fail-close on fronting state.
+
+Because `resolve()` needs the registry for the default-persona lookup, the method takes an `&impl ConstellationRegistry` argument (or the registry is folded into a `FrontingResolver` struct that owns both). The pure-data `FrontingSet` stays serializable; the resolver is the operational layer.
 
 **Testing:**
 - Unit: direct-addressing wins over matching rules.
 - Unit: highest-priority matching rule wins.
 - Unit: co-fronting fan-out when no fallback.
-- Unit: NoActiveFronting when `active` is empty.
+- Unit: empty fronting + registry with three Active personas → DefaultPersona returns the lowest-id one.
+- Unit: empty fronting + registry with zero Active → SystemDefault.
 - proptest: serde round-trip on arbitrarily-generated `FrontingSet`s.
 
 **Verification:**
@@ -250,7 +261,7 @@ pub async fn dispatch_to_mailboxes(
         // agent:<persona-id> from a message send call
         return registry.deliver(t.into(), sender, body).await;
     }
-    match fronting.resolve(&body.text()) {
+    match resolver.resolve(&body.text()) {
         ResolveOutcome::Direct(id) => registry.deliver(id, sender, body).await,
         ResolveOutcome::Rule { target, .. } => registry.deliver(target.clone(), sender, body).await,
         ResolveOutcome::Fallback(target) => registry.deliver(target.clone(), sender, body).await,
@@ -260,7 +271,8 @@ pub async fn dispatch_to_mailboxes(
             }
             Ok(())
         }
-        ResolveOutcome::NoActiveFronting => Err(RouterError::NoActiveFronting),
+        ResolveOutcome::DefaultPersona(id) => registry.deliver(id, sender, body).await,
+        ResolveOutcome::SystemDefault => registry.deliver_system_default(sender, body).await,
     }
 }
 ```
@@ -273,6 +285,8 @@ pub async fn dispatch_to_mailboxes(
 - AC8.4: `"@alice please do X"` delivered to alice regardless of rules.
 - AC8.5: two active personas, no fallback, message with no rule match → both mailboxes receive a copy.
 - AC8.8: submit a message, immediately update routing, submit a second message — first goes to old target, second to new target.
+- Empty-fronting default: clear the FrontingSet entirely; send a message; assert it lands in the lowest-id Active persona's mailbox with a status event surfaced to the human.
+- System default: additionally mark all personas as Inactive; send a message; assert the `SystemDefault` path acks without crashing and emits a `FrontingMissing` diagnostic.
 
 **Verification:**
 `cargo nextest run -p pattern-runtime fronting_dispatch`
@@ -403,7 +417,7 @@ Scenario:
 - [ ] `FrontingSet` + `RoutingTable` + `RoutingRule` + `MessagePattern` types land in `pattern_core`.
 - [ ] Migration `0011_fronting.sql` ships with CRUD queries in pattern_db.
 - [ ] Daemon loads FrontingSet on spawn, saves on change, rolls back on save failure.
-- [ ] Routing dispatcher handles rule-match, fallback, fan-out, direct addressing, NoActiveFronting.
+- [ ] Routing dispatcher handles rule-match, fallback, fan-out, direct addressing, empty-fronting default-persona lookup, system-default ack.
 - [ ] `Caller` threaded through handlers; broker short-circuits on `Caller::Human`.
 - [ ] `ctx.fronting.{set,route,clear,current}` exposed; capability-gated; wire event emitted.
 - [ ] Supervisor end-to-end test passes.
@@ -413,8 +427,7 @@ Scenario:
 
 ## Notes for executor
 
-- **Resolve Q5.1 (regex dep) at kickoff.** If orual says no to `regex`, drop `MessagePattern::Regex` from Task 1 — prefix + contains + topic-tag cover the supervisor pattern.
-- **Q5.2 (empty FrontingSet).** Plan assumes reject-with-error. If orual wants different behaviour, adjust before Task 4.
+- **Empty-fronting default.** The resolver is responsible for falling through to the registry's best-available Active persona; only when there are zero Active personas does it hand off to the system default. Message delivery never fails-closed on fronting state.
 - **Registry.status lookup for Draft personas.** Phase 4 introduced the agent registry with status; Phase 5 reads it when validating `Fronting::set`. Don't duplicate status tracking.
 - **AC8.8 in-flight.** The test must be genuine — queue a message, mutate fronting, then release the busy flag. Don't skip the concurrency shape.
 - Commit style per project.

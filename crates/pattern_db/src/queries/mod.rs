@@ -5,7 +5,6 @@
 
 mod agent;
 mod atproto_endpoints;
-mod coordination;
 mod event;
 mod folder;
 mod memory;
@@ -17,7 +16,6 @@ mod task;
 
 pub use agent::*;
 pub use atproto_endpoints::*;
-pub use coordination::*;
 pub use event::*;
 pub use folder::*;
 pub use memory::*;

@@ -37,7 +37,7 @@
 
 Plan assumes **(A)** — broker moves to `pattern_runtime`, core keeps a trait. Executor should confirm with user before Task 5; if (B) is preferred, Task 5 shrinks to "refactor-in-place + make constructor pub + jiff swap".
 
-**Q2.** The design's AC2.7 ("config-KDL writes are gated regardless of config settings") requires a live `File.Write` handler to exercise end-to-end. The File handler is a stub tracked by the sandbox-io plan. Phase 1 delivers the **pure detection predicate + its policy hook**; end-to-end AC2.7 verification is covered by a follow-up when File.Write lands. The plan ships a unit test suite exhaustively covering the predicate so no detection regressions slip through. Flagged so the executor does not attempt to implement `File.Write` in Phase 1.
+**(Resolved — see Task 15.)** AC2.7 is verified end-to-end in Phase 1. The File handler's `Write` arm evaluates the policy pipeline and short-circuits on `Deny` / `RequireApproval` before any real write logic runs. The actual write mechanics (path sandboxing, fs operations) stay out of Phase 1 and remain the sandbox-io plan's responsibility — but the gate is live.
 
 ---
 
@@ -62,7 +62,7 @@ This phase implements and tests:
 - **v3-multi-agent.AC2.4 Success:** PermissionBroker approve-once allows the specific invocation; subsequent identical invocation is gated again
 - **v3-multi-agent.AC2.5 Success:** PermissionBroker approve-for-scope allows all invocations matching the scope pattern until session ends
 - **v3-multi-agent.AC2.6 Success:** PermissionBroker approve-for-duration allows invocations for the specified jiff duration; invocation after expiry is gated again
-- **v3-multi-agent.AC2.7 Failure:** Agent attempts to write a file that parses as pattern config KDL; write is gated regardless of KDL config settings (Rust default, cannot be loosened) — **verified via detection-predicate unit tests in Phase 1; end-to-end verification deferred to the phase that lands `File.Write`.**
+- **v3-multi-agent.AC2.7 Failure:** Agent attempts to write a file that parses as pattern config KDL; write is gated regardless of KDL config settings (Rust default, cannot be loosened) — verified end-to-end in Phase 1 via Task 15's gate-evaluating `File.Write` dispatch.
 - **v3-multi-agent.AC2.8 Failure:** PermissionBroker request times out (no human response); effect returns denial, not hang
 - **v3-multi-agent.AC2.9 Edge:** PermissionBroker is per-runtime instance; two runtime instances have independent broker state and pending request queues
 
@@ -650,6 +650,79 @@ policy {
 
 <!-- END_SUBCOMPONENT_F -->
 
+<!-- START_SUBCOMPONENT_G (tasks 15) -->
+
+<!-- START_TASK_15 -->
+### Task 15: `File.Write` policy gate — end-to-end AC2.7
+
+**Verifies:** AC2.7 (end-to-end — agent program calls `File.write`, gate fires, write is denied).
+
+**Files:**
+- Modify: `crates/pattern_runtime/src/sdk/handlers/file.rs`
+- Extend: `crates/pattern_core/src/capability/policy.rs` — `PolicyContext` gains `FileWrite { path: &Path, content: &[u8] }` variant if not already added in Task 8.
+- Extend: the shell-handler test harness from Task 10 so the same pattern serves file-write tests.
+
+**Implementation:**
+
+Split the File handler's blanket stub so that `FileReq::Write(path, content)` evaluates the policy pipeline before any write logic:
+
+```rust
+fn handle(&mut self, req: FileReq, cx: &EffectContext<'_, U>) -> Result<Value, EffectError> {
+    let _guard = HandlerGuard::enter(&cx.user().cancel_state().gate);
+    match req {
+        FileReq::Write(path, content) => {
+            let ctx = PolicyContext::FileWrite { path: &path, content: content.as_bytes() };
+            match cx.user().policies().evaluate(EffectCategory::File, &ctx) {
+                PolicyAction::Deny { reason } => {
+                    Err(EffectError::PermissionDenied(reason.unwrap_or_default()))
+                }
+                PolicyAction::RequireApproval { reason } => {
+                    // Same escalation shape as Shell handler (Task 10): build
+                    // PermissionRequest, call broker.request, map None → denied.
+                    let granted = futures::executor::block_on(async {
+                        cx.user().permission_authority()
+                            .request(build_file_request(&path, reason), cx.user().caller(), request_timeout)
+                            .await
+                    });
+                    if granted.is_some() {
+                        Err(EffectError::Handler(
+                            "File.Write gate approved; actual write mechanics land in sandbox-io plan".into(),
+                        ))
+                    } else {
+                        Err(EffectError::PermissionDenied("file write denied by broker".into()))
+                    }
+                }
+                PolicyAction::Allow => Err(EffectError::Handler(
+                    "File.Write gate approved; actual write mechanics land in sandbox-io plan".into(),
+                )),
+            }
+        }
+        FileReq::Read(_) | FileReq::ListDir(_) => Err(EffectError::Handler(
+            "Pattern.File.Read / ListDir are not implemented in v3-multi-agent Phase 1 \
+             (sandbox-io plan). Agent code should not call these in Phase 1-scope programs."
+                .into(),
+        )),
+    }
+}
+```
+
+The "Allow" and "RequireApproval-approved" arms return a distinct error from the "Deny" / "RequireApproval-denied" arm so tests can assert which path fired. `PermissionDenied` is a new `EffectError` variant if it doesn't already exist — add it in the same commit.
+
+The blocking `futures::executor::block_on` call mirrors the Shell handler (which runs on the sync EvalWorker thread and cannot `.await`). If the Shell handler uses a different bridge (`RouterBridge`-style sync channel), reuse that instead — align with the established precedent, don't invent a second bridge.
+
+**Testing (integration, matches AC2.7):**
+- AC2.7 core: agent program with `File` capability calls `File.write "/tmp/.pattern.kdl" "mount mode=\"A\"\n"`. The broker's test subscriber observes a `PermissionRequest` with scope matching the write; test responds `Deny`; the agent sees `PermissionDenied`. Assert the error message mentions "pattern config kdl".
+- AC2.7 locked-default: the persona's KDL config contains `policy { rule "allow-all-writes" effect="file" action="allow" { matcher "file-path" pattern="**/*" } }` — a loosening rule. Submit the same write to `/tmp/.pattern.kdl`. Assert the broker STILL receives the request (locked default wins over KDL `Allow`).
+- Non-config file: `File.write "/tmp/notes.txt" "hello"`. Assert NO broker request observed; the agent sees the "Allow; actual write mechanics land in sandbox-io plan" error. This proves the gate isn't over-firing — the distinct error variant is the signal.
+
+**Verification:**
+`cargo nextest run -p pattern-runtime file_write_gate -- --nocapture`
+
+**Commit:** `[pattern-runtime] wire File.Write policy gate with shape-guard enforcement`
+<!-- END_TASK_15 -->
+
+<!-- END_SUBCOMPONENT_G -->
+
 ---
 
 ## Phase done-when checklist
@@ -661,7 +734,7 @@ policy {
 - [ ] `PermissionBroker` v2 on jiff, per-runtime, with approve-for-scope + approve-for-duration caches, no leaks on timeout.
 - [ ] `PolicyRule` / `PolicySet` types; Rust defaults seeded; KDL blocks parsed; merge order respected.
 - [ ] Shell handler routes through `PolicySet` + broker on `RequireApproval`.
-- [ ] Config-KDL shape guard locked as a default that KDL cannot loosen; unit-tested exhaustively. End-to-end File-write gating documented as blocked by the sandbox-io plan.
+- [ ] Config-KDL shape guard locked as a default that KDL cannot loosen; unit-tested exhaustively AND verified end-to-end via the Task 15 `File.Write` gate (agent program → handler → policy evaluation → broker → denied).
 - [ ] All existing tests still pass. New tests cover AC1.1–1.6 and AC2.1–2.9 (2.7 at predicate level only, flagged in the AC coverage section above).
 
 ---
@@ -670,6 +743,6 @@ policy {
 
 - Do not reintroduce `PersonaSnapshot.enabled_tools`. The capabilities block replaces it cleanly.
 - Plan 2 (task-skill-blocks) is mid-landing in parallel. If the `Tasks` effect lands in `CANONICAL_EFFECT_ROW` during Phase 1 execution, the `EffectCategory::Tasks` slot is already there; no schema churn. If it does NOT land, Phase 1 still works — the variant is reserved.
-- Confirm Q1 (broker location) and Q2 (scope of AC2.7) with the user before Task 5 / Task 11.
+- Confirm Q1 (broker location) with the user before Task 5. (Q2 resolved — Task 15 lands AC2.7 end-to-end.)
 - Commit style per project: `[pattern-core] …` / `[pattern-runtime] …` / `[pattern-core] [pattern-runtime] …` for cross-crate moves.
 - Always `cargo nextest run`; `cargo test --doc` for doctests; `cargo fmt`; `cargo clippy --all-features --all-targets`; `just pre-commit-all` before merging.

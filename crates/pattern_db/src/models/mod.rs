@@ -5,7 +5,6 @@
 //! methods as queries are ported (Tasks 6-9).
 
 mod agent;
-mod coordination;
 mod event;
 mod folder;
 mod memory;
@@ -17,10 +16,6 @@ mod task;
 pub use agent::{
     Agent, AgentAtprotoEndpoint, AgentGroup, AgentStatus, ENDPOINT_TYPE_BLUESKY, GroupMember,
     GroupMemberRole, ModelRoutingConfig, ModelRoutingRule, PatternType, RoutingCondition,
-};
-pub use coordination::{
-    ActivityEvent, ActivityEventType, AgentSummary, ConstellationSummary, CoordinationState,
-    CoordinationTask, EventImportance, HandoffNote, NotableEvent, TaskPriority, TaskStatus,
 };
 pub use event::{Event, EventOccurrence, OccurrenceStatus};
 pub use folder::{FilePassage, Folder, FolderAccess, FolderAttachment, FolderFile, FolderPathType};
