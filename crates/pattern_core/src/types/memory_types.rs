@@ -8,10 +8,12 @@ mod core_types;
 mod metadata;
 mod schema;
 mod search;
+mod task;
 mod task_item_id;
 
 pub use core_types::*;
 pub use metadata::*;
 pub use schema::*;
 pub use search::*;
+pub use task::*;
 pub use task_item_id::{TaskItemId, TaskItemIdError};
