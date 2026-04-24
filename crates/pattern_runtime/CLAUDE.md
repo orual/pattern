@@ -4,7 +4,7 @@ Agent runtime for Pattern v3. Houses Tidepool (Haskell-in-Rust) embedding, the
 agent turn loop, `freer-simple` effect handlers, and turn-level checkpoint
 machinery. Depends only on `pattern_core` trait definitions.
 
-Last verified: 2026-04-23 (post v3-TUI Phase 6)
+Last verified: 2026-04-24 (post v3-task-skill-blocks Phase 5 Task 9)
 
 v3-TUI integration note: the runtime is consumed by `pattern_server`'s actor
 via `TidepoolSession`, `MultiplexSink`, and per-batch `TurnSinkBridge`. The
@@ -400,6 +400,46 @@ wired previously-stubbed methods:
 - `insert_archival` / `search_archival` / `delete_archival` — stored
   in `Vec<ArchivalRecord>` with naive `contains()` search.
 - `update_block_schema` — mutates `metadata.schema`.
+
+### SDK handler visibility (`sdk/handlers/`)
+
+The tasks and skills handler functions are `pub` (not `pub(crate)`) so
+they can be called from integration tests in `tests/`. This is
+intentional: direct handler calls let integration tests exercise the full
+Rust SDK surface without going through the Haskell eval path (which requires
+`preflight::check()` and `tidepool-extract` on PATH).
+
+**Changed to `pub`:**
+- `sdk/handlers/tasks.rs` — `handle_create`, `handle_update`,
+  `handle_transition`, `handle_add_comment`, `handle_link`, `handle_unlink`,
+  `handle_list_tasks`, `handle_query_graph`, and `TaskHandlerError`.
+- `sdk/handlers/skills.rs` — `handle_list`, `handle_get_metadata`,
+  `handle_get_usage_stats`, `handle_search`, `handle_load`, and
+  `SkillHandlerError`.
+
+### End-to-end smoke test (`tests/task_skill_smoke.rs`)
+
+Four `#[test]` functions exercising the Tasks + Skills SDK surface
+end-to-end (v3-task-skill-blocks AC10.1, AC10.3, AC10.5, AC10.8):
+
+1. **`smoke_tasks_surface`** — `InMemoryMemoryStore` + `reconcile_task_list`
+   + `handle_create`/`update`/`transition`/`link`/`list_tasks`/`query_graph`.
+2. **`smoke_skills_surface`** — `Arc<MemoryCache>` (FTS5 backend) +
+   `handle_list`/`get_metadata`/`search`/`load`; verifies pseudo-message
+   injection and blake3 content-hash stability across loads.
+3. **`smoke_cross_schema_fts`** — `Arc<MemoryCache>` + Text/TaskList/Skill
+   blocks all with a shared keyword; `MemoryStore::search` returns hits from
+   all three schemas.
+4. **`smoke_scope_enforcement`** — `MemoryScope::Full` isolation; persona
+   blocks are hidden (even from the persona), project blocks visible to all
+   callers; persona write is `IsolationDenied`.
+
+Each test uses its own fresh in-memory sqlite + store — no shared state,
+safe under `--test-threads=N` (AC10.5).
+
+Note: `InMemoryMemoryStore::search()` has no FTS5 backend and always
+returns empty. Tests needing real FTS5 search must use `Arc<MemoryCache>`
+backed by `ConstellationDb::open_in_memory()`.
 
 ### Search, recall, and shared-block access
 

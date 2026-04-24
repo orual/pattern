@@ -144,7 +144,7 @@ impl EffectHandler<SessionContext> for SkillsHandler {
 /// dispatch boundary so unit tests can match on `SkillHandlerError` precisely.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub(crate) enum SkillHandlerError {
+pub enum SkillHandlerError {
     /// Block doesn't exist for this agent.
     #[error("no block {block:?} for agent {agent:?}")]
     BlockNotFound { agent: String, block: String },
@@ -208,7 +208,7 @@ fn project_skill_metadata(
 /// Enumerates blocks via `store.list_blocks`, filters to `BlockSchema::Skill`,
 /// projects each block's LoroDoc into `SkillMetadata`, batch-fetches usage
 /// stats from sqlite, and assembles `SkillInfo` records.
-pub(crate) fn handle_list(
+pub fn handle_list(
     store: &dyn MemoryStore,
     conn: &rusqlite::Connection,
     agent_id: &str,
@@ -269,7 +269,7 @@ pub(crate) fn handle_list(
 /// Returns `None` if the block's schema is not Skill (per AC8.3 — this is
 /// not an error, just a typed `Option<SkillMetadata>`). Returns an error
 /// if the block doesn't exist.
-pub(crate) fn handle_get_metadata(
+pub fn handle_get_metadata(
     store: &dyn MemoryStore,
     agent_id: &str,
     handle: &str,
@@ -296,7 +296,7 @@ pub(crate) fn handle_get_metadata(
 /// Returns `SkillUsageStats::default()` when no row exists (the skill has
 /// never been loaded on this install). Returns an error if the block does
 /// not exist or is not a Skill block.
-pub(crate) fn handle_get_usage_stats(
+pub fn handle_get_usage_stats(
     store: &dyn MemoryStore,
     conn: &rusqlite::Connection,
     agent_id: &str,
@@ -335,7 +335,7 @@ pub(crate) fn handle_get_usage_stats(
 /// `memory_blocks.id` UUID (not the label). To correlate to block labels, we
 /// enumerate all Skill blocks for this agent and intersect. This is O(n) in the
 /// number of skill blocks and O(1) DB queries — acceptable for the expected scale.
-pub(crate) fn handle_search(
+pub fn handle_search(
     store: &dyn MemoryStore,
     conn: &rusqlite::Connection,
     agent_id: &str,
@@ -425,7 +425,7 @@ pub(crate) fn handle_search(
 /// Returns `BlockNotFound` if the handle has no block (AC8.5), or
 /// `Skill(SkillError::NotASkill)` if the block exists but is not a Skill
 /// (AC8.6). Other errors propagate as Sqlite/Store/MalformedLoro.
-pub(crate) fn handle_load(
+pub fn handle_load(
     store: &dyn MemoryStore,
     adapter: &crate::memory::MemoryStoreAdapter,
     conn: &mut rusqlite::Connection,

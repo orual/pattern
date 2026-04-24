@@ -1,8 +1,8 @@
 # Phase 5: Runtime-provided ports + integration
 
-**Goal:** Ship `HttpPort` as the first concrete `Port` impl (registered at runtime startup); unify the three system-reminder pipelines (FileEdits from Phase 2, ShellOutput from Phase 3, PortEvents from Phase 4) so they share splice/render machinery instead of three near-identical code paths; write the end-to-end smoke test that exercises shell + file + port surfaces deterministically; finalize cleanup so only Spawn (Plan 3) and Mcp (Plan 4) handler stubs remain.
+**Goal:** Ship `HttpPort` as the first concrete `Port` impl (registered at runtime startup); write the end-to-end smoke test that exercises shell + file + port surfaces deterministically; finalize cleanup so only Spawn (Plan 3) and Mcp (Plan 4) handler stubs remain.
 
-**Architecture:** `HttpPort` lives in `crates/pattern_runtime/src/ports/http.rs` and uses `reqwest` (already a workspace dep, used by `pattern_core` and `pattern_mcp`). Methods: `configure` (set base URL / default headers / timeout), `get`, `post`, `put`, `delete`, `head`. No `subscribe` — `HttpPort::capabilities()` returns `subscribable: false`. The `library()` returns a Haskell `Pattern.Http` module with typed wrappers around the JSON payload format. System reminder unification: all three turn-composition splice points (Phase 2 task 8, Phase 3 task 7, Phase 4 task 5) currently write `MessageAttachment::FileEdits` / `ShellOutput` / `PortEvents` separately. This phase introduces a single `MessageAttachment::SystemReminders(Vec<SystemReminder>)` variant where `SystemReminder` is an enum over the three sources — the splice happens once, render is one `Segment2Pass` arm, drain calls happen in sequence inside one helper. Smoke test at `crates/pattern_runtime/tests/sandbox_io_smoke.rs` runs the full `TidepoolSession` lifecycle exercising all three subsystems; uses a mock provider (no live model dependency).
+**Architecture:** `HttpPort` lives in `crates/pattern_runtime/src/ports/http.rs` and uses `reqwest` (already a workspace dep, used by `pattern_core` and `pattern_mcp`). Methods: `configure` (set base URL / default headers / timeout), `get`, `post`, `put`, `delete`, `head`. No `subscribe` — `HttpPort::capabilities()` returns `subscribable: false`. The `library()` returns a Haskell `Pattern.Http` module with typed wrappers around the JSON payload format. **System reminder unification: not needed.** Phases 2/3/4 each use the canonical `adapter.record_pseudo_message` pipeline (the `Skills.Load` template) — there is no fragmentation to consolidate. Phase 5 dropped the originally-planned unification task. Smoke test at `crates/pattern_runtime/tests/sandbox_io_smoke.rs` runs the full `TidepoolSession` lifecycle exercising all three subsystems; uses a mock provider (no live model dependency).
 
 **Tech Stack:** Rust async, `reqwest = "0.12"` (workspace), `wiremock` (test-only — already used by pattern_provider for HTTP-mocked tests, verify at execution time).
 
@@ -21,7 +21,7 @@
 
 ### v3-sandbox-io.AC5: Integration and cleanup
 - **v3-sandbox-io.AC5.1 Success:** `HttpPort` registered as runtime-provided port; `Port.Call("http", "get", {url})` performs HTTP request and returns response
-- **v3-sandbox-io.AC5.2 Success:** System reminders from file watches, shell spawn output, and port subscriptions all appear in segment 2 of the agent's next turn
+- **v3-sandbox-io.AC5.2 Success:** System reminders from file watches, shell spawn output, and port subscriptions all appear in segment 2 of the agent's next turn — satisfied by Phases 2-4 each using the canonical `adapter.record_pseudo_message` → `TurnOutput::pseudo_messages` → `Segment2Pass::recent_pseudo_messages` pipeline. Phase 5's smoke test (Task 4) provides the cross-phase verification.
 - **v3-sandbox-io.AC5.3 Success:** Smoke test at `crates/pattern_runtime/tests/sandbox_io_smoke.rs` passes deterministically: exercises shell execute, file open+write+external-edit+merge, port call+subscribe
 - **v3-sandbox-io.AC5.4 Success:** Sources handler stub and Rpc handler stub deleted; only Spawn (Plan 3) and Mcp (Plan 4) stubs remain
 - **v3-sandbox-io.AC5.5 Success:** `canonical_effect_decls()` updated for Shell, File, Port effects; removed Sources and Rpc declarations
@@ -33,8 +33,10 @@
 ## Subcomponent layout
 
 - **A (tasks 1-2): `HttpPort` impl + runtime registration.**
-- **B (tasks 3-4): System reminder unification — single `SystemReminders` variant + one splice helper + Segment-2 render arm.**
-- **C (tasks 5-6): End-to-end smoke test + final cleanup verification.**
+- **B (task 3): Cleanup — `canonical_effect_decls`, preamble, stub audit, CLAUDE.md refresh.**
+- **C (tasks 4-5): End-to-end smoke test + final regression sweep.**
+
+(Original layout had a separate "system reminder unification" subcomponent. Dropped — Phases 2/3/4 already use the canonical pseudo-message pipeline introduced via `adapter.record_pseudo_message`. No code-path consolidation needed.)
 
 ---
 
@@ -303,122 +305,10 @@ encode = TL.toStrict . TLE.decodeUtf8 . A.encode
 
 ---
 
-<!-- START_SUBCOMPONENT_B (tasks 3-4) -->
+<!-- START_SUBCOMPONENT_B (task 3) -->
 
 <!-- START_TASK_3 -->
-### Task 3: Unify the three system-reminder pipelines
-
-**Files:**
-- Modify: `crates/pattern_core/src/types/message.rs` — replace the three independent variants (`FileEdits`, `ShellOutput`, `PortEvents` from Phases 2/3/4) with a single `SystemReminders(Vec<SystemReminder>)` variant where `SystemReminder` is the enum.
-- Modify: `crates/pattern_runtime/src/agent_loop.rs` — `compose_request_for_turn` calls one helper `drain_and_splice_system_reminders(ctx, partial)` instead of three separate splice blocks.
-- Modify: `pattern_provider::compose::passes::Segment2Pass` — one render arm for `SystemReminders` instead of three.
-- Modify: `crates/pattern_runtime/src/file_manager/manager.rs`, `crates/pattern_runtime/src/process_manager/manager.rs`, `crates/pattern_runtime/src/session.rs` — the three `drain_*` accessors stay (they're now consumed inside the unified helper, not splice-side).
-
-**Implementation:**
-
-```rust
-// pattern_core/src/types/message.rs
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum SystemReminder {
-    FileEdit {
-        path: PathBuf,
-        kind: FileEditKind,   // Open | Watch
-        at: jiff::Timestamp,
-        diff: Option<String>,
-    },
-    ShellOutput {
-        task_id: String,
-        kind: ShellOutputKind,  // Output(String) | Exit { code, duration_ms }
-        at: jiff::Timestamp,
-    },
-    PortEvent {
-        port_id: String,
-        payload: serde_json::Value,
-        at: jiff::Timestamp,
-    },
-}
-
-// MessageAttachment gains:
-SystemReminders(Vec<SystemReminder>),
-// And loses the three Phase-introduced variants (FileEdits, ShellOutput, PortEvents).
-```
-
-Helper in `agent_loop.rs`:
-
-```rust
-fn drain_and_splice_system_reminders(
-    ctx: &SessionContext,
-    partial: &mut PartialRequest,
-) {
-    let mut reminders: Vec<SystemReminder> = Vec::new();
-
-    for evt in ctx.file_manager().drain_pending_edits() {
-        reminders.push(SystemReminder::FileEdit {
-            path: evt.path,
-            kind: evt.kind.into(),
-            at: evt.at,
-            diff: evt.diff,
-        });
-    }
-    for evt in ctx.drain_pending_shell_output() {
-        reminders.push(SystemReminder::ShellOutput {
-            task_id: evt.task_id.to_string(),
-            kind: evt.kind.into(),
-            at: evt.at,
-        });
-    }
-    for evt in ctx.drain_pending_port_events() {
-        reminders.push(SystemReminder::PortEvent {
-            port_id: evt.port_id.to_string(),
-            payload: evt.payload,
-            at: evt.at,
-        });
-    }
-
-    if !reminders.is_empty() {
-        // Sort by timestamp so the agent sees events in temporal order
-        // even when they came from different subsystems.
-        reminders.sort_by_key(|r| match r {
-            SystemReminder::FileEdit { at, .. } => *at,
-            SystemReminder::ShellOutput { at, .. } => *at,
-            SystemReminder::PortEvent { at, .. } => *at,
-        });
-        if let Some(first) = partial.messages.iter_mut().find(|m| matches!(m.role, ChatRole::User)) {
-            first.attachments.push(MessageAttachment::SystemReminders(reminders));
-        }
-    }
-}
-```
-
-Segment-2 render emits one `<system-reminder>` block per attachment, with sub-bullets per source:
-
-```
-<system-reminder>
-External events since your last turn:
-- 17:42:00.123 file /project/src/lib.rs (you had open) changed:
-  [diff or before/after]
-- 17:42:01.456 shell task abc12345:
-  $ output line one
-  [exited 0 in 1234ms]
-- 17:42:02.789 port http event:
-  { "status": 200, ... }
-</system-reminder>
-```
-
-**Verifies:** AC5.2.
-
-**Verification:**
-- `cargo check --workspace`.
-- Unit test for `drain_and_splice_system_reminders`:
-    - `mixes_three_sources_in_temporal_order` — push events with interleaved timestamps from file/shell/port; assert the rendered order matches timestamp order, not source order.
-    - `no_attachment_when_all_sources_empty` — drain returns empty; no attachment spliced.
-- Update Phase 2 Task 8, Phase 3 Task 7, Phase 4 Task 5 tests where they assert on the per-source `MessageAttachment::FileEdits/ShellOutput/PortEvents` variants — those variants no longer exist; assertions move to `MessageAttachment::SystemReminders` matching on the inner enum.
-
-**Commit:** `[pattern-runtime] [pattern-core] unify file/shell/port system reminders`
-<!-- END_TASK_3 -->
-
-<!-- START_TASK_4 -->
-### Task 4: Cleanup — `canonical_effect_decls`, preamble, stub audit
+### Task 3: Cleanup — `canonical_effect_decls`, preamble, stub audit
 
 **Files:**
 - Modify: `crates/pattern_runtime/src/sdk/bundle.rs:88-107` — `canonical_effect_decls()` test asserts the final count: 15 (16 original — Sources — Rpc + Port = 15). Verify the SdkBundle HList declaration matches.
@@ -439,16 +329,16 @@ External events since your last turn:
 - `grep -rn "is not implemented" crates/pattern_runtime/src/sdk/handlers/ | grep -v 'mcp\|spawn'` returns no matches.
 
 **Commit:** `[pattern-runtime] cleanup — canonical_effect_decls=15, preamble + CLAUDE.md current`
-<!-- END_TASK_4 -->
+<!-- END_TASK_3 -->
 
 <!-- END_SUBCOMPONENT_B -->
 
 ---
 
-<!-- START_SUBCOMPONENT_C (tasks 5-6) -->
+<!-- START_SUBCOMPONENT_C (tasks 4-5) -->
 
-<!-- START_TASK_5 -->
-### Task 5: End-to-end smoke test
+<!-- START_TASK_4 -->
+### Task 4: End-to-end smoke test
 
 **Files:**
 - Create: `crates/pattern_runtime/tests/sandbox_io_smoke.rs`.
@@ -462,7 +352,7 @@ External events since your last turn:
 3. **Step 1 — shell execute** — agent code calls `Shell.execute "echo hello"`; assert `ExecuteResult` with output `"hello\n"` + exit 0.
 4. **Step 2 — file open + write** — agent opens a file in the tempdir, writes content, asserts read back matches.
 5. **Step 3 — external edit** — test harness writes to the same file via `std::fs::write` from outside the agent. Wait for the SyncedDoc merge (condition-based, 5s deadline).
-6. **Step 4 — next turn shows file edit reminder** — agent's next turn input contains `MessageAttachment::SystemReminders` with a `SystemReminder::FileEdit` for the path.
+6. **Step 4 — next turn shows file edit reminder** — agent's next turn `Segment2Pass::recent_pseudo_messages` (or equivalently `most_recent_pseudo_messages`) contains a message whose body references the file path.
 7. **Step 5 — shell spawn + output reminder** — agent calls `Shell.spawn "for i in 1 2 3; do echo line$i; sleep 0.05; done"`. Wait one turn boundary; assert `SystemReminder::ShellOutput` chunks contain "line1", "line2", "line3", and an `Exit` chunk.
 8. **Step 6 — port call** — agent calls `Port.call "mock" "ping" "{}"`. MockPort returns scripted response. Assert response shape.
 9. **Step 7 — port subscribe + event reminder** — agent calls `Port.subscribe "mock" "{}"`. Test harness pushes an event into MockPort. Wait one turn; assert `SystemReminder::PortEvent` with the right port_id.
@@ -488,10 +378,10 @@ External events since your last turn:
 - Run with `--test-threads=4` alongside other integration tests.
 
 **Commit:** `[pattern-runtime] end-to-end sandbox_io smoke test`
-<!-- END_TASK_5 -->
+<!-- END_TASK_4 -->
 
-<!-- START_TASK_6 -->
-### Task 6: Workspace-wide regression sweep + final stub audit
+<!-- START_TASK_5 -->
+### Task 5: Workspace-wide regression sweep + final stub audit
 
 **Files:** no code changes; verification gate.
 
@@ -515,7 +405,7 @@ Plus:
 **Verifies:** AC5.4, AC5.5, AC5.7.
 
 **Commit:** Only if incidental fixes needed — `[pattern-runtime] [pattern-core] [pattern-memory] sandbox-io cleanup pass`.
-<!-- END_TASK_6 -->
+<!-- END_TASK_5 -->
 
 <!-- END_SUBCOMPONENT_C -->
 
@@ -525,7 +415,7 @@ Plus:
 
 **Q1: `wiremock` for HttpPort tests.** Investigator did not confirm presence in workspace. If absent, **ask orual** before adding. Alternative: skip the over-the-wire test and rely on `wiremock`-equivalent unit tests for the `do_request` payload shape (deserialize the constructed `reqwest::Request` rather than sending it). Defaulted to ask first.
 
-**Q2: System-reminder unification scope.** Phase 5 Task 3 retroactively replaces three `MessageAttachment` variants with one. This means Phase 2/3/4 ship temporary three-variant code that gets unified here. Alternative: do the unified design from Phase 2 onward (introduce `SystemReminders` in Phase 2, all three phases write to it). Defaulted to retroactive unify because (a) Phase 2/3/4 can each be reviewed and merged independently, (b) the unification is cheap to do once all three sources exist. Flag if reviewer prefers the up-front design.
+**Q2 [resolved 2026-04-24]:** Originally proposed introducing then unifying three `MessageAttachment` variants. Updated: Phases 2/3/4 use the canonical `adapter.record_pseudo_message` pipeline (the `Skills.Load` template established by previous work), and there's nothing to unify. Phase 5's unification task removed.
 
 **Q3: HttpPort response body as `String` vs `Vec<u8>`.** Plan returns `body` as `String`. Binary responses (images, PDFs) get garbled or lossy-decoded. Defaults are sensible for typical agent use (text APIs); a `body_b64` alternative variant could be added later. Flag if reviewer wants the binary-safe variant in scope.
 

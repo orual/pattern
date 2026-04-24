@@ -29,7 +29,7 @@
 - Runtime-global wiring template: `crates/pattern_runtime/src/runtime.rs:32` (`TidepoolRuntime` struct).
 - Per-session access: `cx.user()` returns `&SessionContext`; for runtime-global state, accessor on `SessionContext` (`process_manager()`) returns the runtime's `Arc<ProcessManager>`.
 - Existing deps: `pty-process = { version = "0.5", features = ["async"] }` and `strip-ansi-escapes = "0.2"` listed in `crates/pattern_core/Cargo.toml:98-99` but unused in source — Phase 3 moves them to `crates/pattern_runtime/Cargo.toml` and removes from pattern_core.
-- System reminder integration: same canonical pseudo-message pipeline as `Pattern.Skills.Load` and Phase 2 — `adapter.record_pseudo_message(render_shell_output_event(...))`. See `crates/pattern_runtime/src/sdk/handlers/skills.rs:455-461` for the in-flight template; `pattern_provider::compose::pseudo_messages` is the renderer module.
+- System reminder integration: same canonical pseudo-message pipeline as `Pattern.Skills.Load` and Phase 2 — `adapter.record_pseudo_message(render_shell_output_event(...))`. See `crates/pattern_runtime/src/sdk/handlers/skills.rs` (search for `record_pseudo_message`) for the canonical template established by previous work; `pattern_provider::compose::pseudo_messages` is the renderer module.
 
 ---
 
@@ -283,7 +283,7 @@ ProcessManager wraps a `ShellBackend` and adds:
 - The `running_processes` registry (delegated to the backend's internal map for spawn/kill/status).
 - The session lifetime — currently one shared `LocalPtyBackend` per ProcessManager instance, but designed so future variants (per-agent shells, isolated bubblewrap shells, container shells) can swap the backend without touching the manager.
 - Optional capability gating (Plan 3 `CapabilitySet` accessor; for Phase 3 this is a stub that always allows when the cap is in the set).
-- Process-output broadcast → `pending_shell_output` listener bridge (Task 7 wires this).
+- Per-spawn listener bridge that drains the broadcast receiver and pushes pseudo-messages via `adapter.record_pseudo_message` (Task 7 wires this).
 
 ```rust
 use std::sync::Arc;
@@ -300,7 +300,7 @@ use crate::process_manager::error::ShellError;
 pub struct ProcessManager {
     backend: Arc<dyn ShellBackend>,
     /// Per-spawned-process broadcast subscribers. Phase 3 owns the
-    /// listener bridge that pushes chunks into pending_shell_output;
+    /// listener bridge that pushes chunks via `adapter.record_pseudo_message`;
     /// see Task 7. Keyed by TaskId.
     spawn_subscribers: DashMap<TaskId, broadcast::Receiver<OutputChunk>>,
     cancel: CancellationToken,
@@ -338,7 +338,7 @@ impl ProcessManager {
         let (task_id, rx) = self.backend.spawn_streaming(command).await?;
         // Stash the receiver here so the listener bridge (Task 7) can pick
         // it up. Caller of ProcessManager doesn't see the receiver directly —
-        // output flows through pending_shell_output via the bridge.
+        // output flows through adapter.record_pseudo_message via the listener.
         self.spawn_subscribers.insert(task_id.clone(), rx);
         Ok(task_id)
     }

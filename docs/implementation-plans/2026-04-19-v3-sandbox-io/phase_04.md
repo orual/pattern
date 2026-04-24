@@ -738,8 +738,8 @@ pub struct MockPort {
 | 4.1 | Covered by Task 1's doctest. | — |
 | 4.2 | `port_list_returns_registered_metadatas` | Register 3 MockPorts; `Port.List` returns 3 entries. |
 | 4.3 | `port_call_dispatches_to_registered_port` | MockPort with call_response = `{"ok": true}`; `Port.Call("mock", "ping", "{}")` returns the response. |
-| 4.4 | `port_subscribe_delivers_events_via_attachment` | Subscribe; push 3 events via MockPort's tx; advance one turn; assert `MessageAttachment::PortEvents` contains 3 entries. |
-| 4.5 | `port_unsubscribe_stops_event_delivery` | Subscribe + push 1 event + drain. Unsubscribe + push another event + wait + drain — second event NOT present. |
+| 4.4 | `port_subscribe_delivers_events_via_pseudo_messages` | Subscribe; push 3 events via MockPort's tx; await scheduler; assert `adapter.drain_pending_pseudo_messages()` (or `most_recent_pseudo_messages` after a turn boundary) contains 3 messages whose bodies reference the port id. |
+| 4.5 | `port_unsubscribe_stops_event_delivery` | Subscribe + push 1 event + drain. Unsubscribe + push another event + tick + drain — second event NOT present (AbortHandle stopped the task). |
 | 4.6 | `port_library_appended_to_preamble_when_capable` | MockPort with `library_src = Some("module Mock where mockFn = ...")`; build preamble with capability granted; assert preamble contains `mockFn`. |
 | 4.7 | `port_call_capability_denied_blocks_dispatch` | Capability set without the port; `Port.Call("mock", ...)` returns `PortError::CapabilityDenied`. |
 | 4.8 | `port_call_unknown_port_returns_not_found` | `Port.Call("does-not-exist", ...)` → `PortError::NotFound`. |

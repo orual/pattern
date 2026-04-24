@@ -190,7 +190,7 @@ impl EffectHandler<SessionContext> for TasksHandler {
 /// on `TaskHandlerError::TaskNotFound { .. }` precisely.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub(crate) enum TaskHandlerError {
+pub enum TaskHandlerError {
     /// Block doesn't exist for this agent.
     #[error("no block {block:?} for agent {agent:?}")]
     BlockNotFound { agent: String, block: String },
@@ -482,7 +482,7 @@ fn record_task_write(
 // region: handlers
 
 /// Create a new task item in the given block. Returns the minted item id.
-pub(crate) fn handle_create(
+pub fn handle_create(
     store: &dyn MemoryStore,
     agent_id: &str,
     block: &str,
@@ -557,7 +557,7 @@ pub(crate) fn handle_create(
 /// Apply a partial patch to an existing task item. Each field is set
 /// in-place on the item's `LoroMap` container so concurrent edits to
 /// different fields merge correctly.
-pub(crate) fn handle_update(
+pub fn handle_update(
     store: &dyn MemoryStore,
     agent_id: &str,
     edge_ref: &str,
@@ -599,7 +599,7 @@ pub(crate) fn handle_update(
 
 /// Transition a task's status, with optional `completed_at` stamping when
 /// moving to `Completed`.
-pub(crate) fn handle_transition(
+pub fn handle_transition(
     store: &dyn MemoryStore,
     agent_id: &str,
     edge_ref: &str,
@@ -658,7 +658,7 @@ pub(crate) fn handle_transition(
 
 /// Append a comment to a task. The comment's `author` is the calling agent and
 /// `timestamp` is captured at handler time.
-pub(crate) fn handle_add_comment(
+pub fn handle_add_comment(
     store: &dyn MemoryStore,
     agent_id: &str,
     edge_ref: &str,
@@ -711,7 +711,7 @@ pub(crate) fn handle_add_comment(
 ///
 /// If an identical edge already exists, this is a no-op (dedup keeps the
 /// canonical .kdl file tidy and prevents duplicate rows on reconcile).
-pub(crate) fn handle_link(
+pub fn handle_link(
     store: &dyn MemoryStore,
     agent_id: &str,
     source_ref: &str,
@@ -767,7 +767,7 @@ pub(crate) fn handle_link(
 
 /// Remove a directed edge from the source item's `blocks` list. If no matching
 /// edge exists, this is a silent no-op (no LoroDoc mutation, no dirty mark).
-pub(crate) fn handle_unlink(
+pub fn handle_unlink(
     store: &dyn MemoryStore,
     agent_id: &str,
     source_ref: &str,
@@ -880,7 +880,7 @@ fn build_edge_map(block: &str, item: Option<&str>) -> serde_json::Map<String, Js
 ///
 /// `blocker_count` / `blocks_count` are batched via two aggregate queries on
 /// `task_edges` rather than N+1 lookups.
-pub(crate) fn handle_list_tasks(
+pub fn handle_list_tasks(
     store: &dyn MemoryStore,
     conn: &rusqlite::Connection,
     agent_id: &str,
@@ -951,7 +951,7 @@ pub(crate) fn handle_list_tasks(
 /// This prevents an information leak where an edge from a visible block A
 /// to a hidden block B would expose B's task identities via BFS results
 /// (review finding C4).
-pub(crate) fn handle_query_graph(
+pub fn handle_query_graph(
     store: &dyn MemoryStore,
     conn: &rusqlite::Connection,
     agent_id: &str,
