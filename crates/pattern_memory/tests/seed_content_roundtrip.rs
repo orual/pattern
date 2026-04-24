@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::BlockCreate;
-use pattern_core::types::memory_types::{BlockSchema, BlockType};
+use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
 use pattern_memory::MemoryCache;
 use serde_json::json;
 
@@ -49,7 +49,7 @@ fn seed_content_survives_persist_and_get() {
     seed_agent(&db, agent);
 
     // Step 1: create_block (like seed_persona_memory_blocks does).
-    let create = BlockCreate::new("persona", BlockType::Core, BlockSchema::text());
+    let create = BlockCreate::new("persona", MemoryBlockType::Core, BlockSchema::text());
     let doc = cache.create_block(agent, create).unwrap();
 
     // Step 2: import content (like seed_persona_memory_blocks does).
@@ -86,7 +86,7 @@ fn cache_sees_imported_content_before_persist() {
     let agent = "cache-see-agent";
     seed_agent(&db, agent);
 
-    let create = BlockCreate::new("scratchpad", BlockType::Working, BlockSchema::text());
+    let create = BlockCreate::new("scratchpad", MemoryBlockType::Working, BlockSchema::text());
     let doc = cache.create_block(agent, create).unwrap();
 
     doc.import_from_json(&json!("scratch content")).unwrap();
@@ -223,7 +223,7 @@ fn seed_content_survives_db_roundtrip() {
     let agent = "db-roundtrip-agent";
     seed_agent(&db, agent);
 
-    let create = BlockCreate::new("persona", BlockType::Core, BlockSchema::text());
+    let create = BlockCreate::new("persona", MemoryBlockType::Core, BlockSchema::text());
     let doc = cache.create_block(agent, create).unwrap();
     doc.import_from_json(&json!("persona description text"))
         .unwrap();
@@ -256,7 +256,7 @@ fn persist_after_import_writes_to_db() {
     let agent = "persist-writes-agent";
     seed_agent(&db, agent);
 
-    let create = BlockCreate::new("notes", BlockType::Working, BlockSchema::text());
+    let create = BlockCreate::new("notes", MemoryBlockType::Working, BlockSchema::text());
     let doc = cache.create_block(agent, create).unwrap();
     let block_id = doc.id().to_string();
 
@@ -292,7 +292,7 @@ fn persist_empty_block_is_harmless() {
     let agent = "persist-empty-agent";
     seed_agent(&db, agent);
 
-    let create = BlockCreate::new("empty", BlockType::Working, BlockSchema::text());
+    let create = BlockCreate::new("empty", MemoryBlockType::Working, BlockSchema::text());
     let _doc = cache.create_block(agent, create).unwrap();
 
     // Persist without any content changes. Should not error.

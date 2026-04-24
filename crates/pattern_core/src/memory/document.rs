@@ -6,8 +6,8 @@ use loro::{
 use serde_json::Value as JsonValue;
 
 use crate::types::memory_types::{
-    BlockMetadata, BlockSchema, BlockType, CompositeSection, DocumentError, FieldType,
-    LogEntrySchema,
+    BlockMetadata, BlockSchema, CompositeSection, DocumentError, FieldType, LogEntrySchema,
+    MemoryBlockType,
 };
 
 /// Wrapper around LoroDoc for schema-aware operations.
@@ -194,7 +194,7 @@ impl StructuredDocument {
     }
 
     /// Get the block type.
-    pub fn block_type(&self) -> BlockType {
+    pub fn block_type(&self) -> MemoryBlockType {
         self.metadata.block_type
     }
 

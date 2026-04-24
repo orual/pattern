@@ -38,7 +38,8 @@
 pub mod base_instructions;
 pub mod error;
 pub mod memory;
-pub mod memory_acl;
+// `memory_acl` module removed: MemoryOp, MemoryGate, and check() are
+// canonical in types::memory_types::core_types (as methods on MemoryGate).
 pub mod permission;
 pub mod traits;
 pub mod types;

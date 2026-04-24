@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::BlockCreate;
-use pattern_core::types::memory_types::{BlockSchema, BlockType};
+use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
 use pattern_memory::MemoryCache;
 use pattern_memory::quiesce::{QuiesceError, quiesce};
 
@@ -74,7 +74,7 @@ fn quiesce_with_blocks_no_subscribers() {
     for i in 0..3 {
         let create = BlockCreate::new(
             format!("block-{i}"),
-            BlockType::Working,
+            MemoryBlockType::Working,
             BlockSchema::text(),
         );
         cache.create_block(agent, create).unwrap();
@@ -213,7 +213,7 @@ fn quiesce_drains_subscribers_before_checkpoint() {
 async fn quiesce_with_live_subscriber_full_path() {
     use pattern_core::traits::MemoryStore;
     use pattern_core::types::block::BlockCreate;
-    use pattern_core::types::memory_types::{BlockSchema, BlockType};
+    use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
     use std::time::Duration;
 
     // Directories: one for the on-disk DB, one for subscriber file emission.
@@ -246,7 +246,11 @@ async fn quiesce_with_live_subscriber_full_path() {
     // clone of the cached LoroDoc, so mutations on `doc` fire `subscribe_local_update`
     // on the same underlying document. Mark dirty and persist to spawn the subscriber
     // (which registers the `subscribe_local_update` callback).
-    let create = BlockCreate::new("live-sub-block", BlockType::Working, BlockSchema::text());
+    let create = BlockCreate::new(
+        "live-sub-block",
+        MemoryBlockType::Working,
+        BlockSchema::text(),
+    );
     let doc = cache.create_block(agent, create).unwrap();
     let block_id = doc.id().to_string();
 

@@ -49,7 +49,7 @@ use pattern_core::error::RuntimeError;
 use pattern_core::memory::StructuredDocument;
 use pattern_core::traits::TurnEvent;
 use pattern_core::types::ids::{AgentId, MessageId, new_id};
-use pattern_core::types::memory_types::BlockType;
+use pattern_core::types::memory_types::MemoryBlockType;
 use pattern_core::types::message::{
     Message, MessageAttachment, MidBatchDeltaBehavior, RenderedBlock, ResponseMeta, SnapshotKind,
 };
@@ -408,8 +408,8 @@ fn render_block_for_snapshot(block: &StructuredDocument, visible: bool) -> Rende
     let label = smol_str::SmolStr::new(block.label());
     let bt = block.block_type();
     let block_type_str = match bt {
-        BlockType::Core => "core",
-        BlockType::Working | _ => "working",
+        MemoryBlockType::Core => "core",
+        MemoryBlockType::Working | _ => "working",
     };
     let permission = block.permission().to_string();
     let content = block.render();
@@ -683,10 +683,10 @@ fn block_visibility_from_hashes(
     shown_hashes: &std::collections::HashMap<String, u64>,
     current_hash: u64,
 ) -> bool {
-    use pattern_core::types::memory_types::BlockType;
+    use pattern_core::types::memory_types::MemoryBlockType;
     match block.block_type() {
-        BlockType::Core => true,
-        BlockType::Working | _ => {
+        MemoryBlockType::Core => true,
+        MemoryBlockType::Working | _ => {
             let label = block.label();
             let is_pinned = block.is_pinned();
             let is_refd = block_refs.iter().any(|r| r.label.as_str() == label);
@@ -2909,7 +2909,7 @@ mod tests {
     fn test_block(label: &str, rendered: &str, hash: u64) -> RenderedBlock {
         RenderedBlock {
             label: smol_str::SmolStr::new(label),
-            block_type: BlockType::Working,
+            block_type: MemoryBlockType::Working,
             rendered: Some(std::sync::Arc::from(rendered)),
             content_hash: hash,
         }
@@ -3068,16 +3068,22 @@ mod tests {
     /// composes correctly and the default is observable end-to-end.
     #[test]
     fn snapshot_policy_default_has_include_self_edits_and_standard_selection() {
-        use pattern_core::types::memory_types::BlockType;
+        use pattern_core::types::memory_types::MemoryBlockType;
         use pattern_core::types::message::{MidBatchDeltaBehavior, SnapshotPolicy};
         let policy = SnapshotPolicy::default();
         assert_eq!(policy.mid_batch, MidBatchDeltaBehavior::IncludeSelfEdits);
         assert!(
-            policy.selection.include_types.contains(&BlockType::Core),
+            policy
+                .selection
+                .include_types
+                .contains(&MemoryBlockType::Core),
             "default selection must include Core blocks"
         );
         assert!(
-            policy.selection.include_types.contains(&BlockType::Working),
+            policy
+                .selection
+                .include_types
+                .contains(&MemoryBlockType::Working),
             "default selection must include Working blocks"
         );
         assert!(
@@ -3237,12 +3243,12 @@ mod tests {
         async fn dispatch(&self, _tool_call: ToolCall, _preamble: &str) -> ToolOutcome {
             use jiff::Timestamp;
             use pattern_core::types::block::{BlockWrite, BlockWriteKind};
-            use pattern_core::types::memory_types::BlockType;
+            use pattern_core::types::memory_types::MemoryBlockType;
 
             self.ctx.adapter().record_write(BlockWrite {
                 handle: smol_str::SmolStr::new(&self.block_label),
                 memory_id: smol_str::SmolStr::new("mem-test"),
-                block_type: BlockType::Working,
+                block_type: MemoryBlockType::Working,
                 rendered_content: "updated content".to_string(),
                 kind: BlockWriteKind::Replaced,
                 previous_content_hash: Some(0xabcd),
@@ -3265,7 +3271,7 @@ mod tests {
         block_label: &str,
     ) -> (Arc<SessionContext>, Arc<VecSink>, Arc<MockProviderClient>) {
         use pattern_core::types::block::BlockCreate;
-        use pattern_core::types::memory_types::{BlockSchema, BlockType};
+        use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
         use pattern_core::types::message::SnapshotPolicy;
         use pattern_core::types::snapshot::ContextPolicy;
 
@@ -3274,7 +3280,7 @@ mod tests {
         store_concrete
             .create_block(
                 "agent-a",
-                BlockCreate::new(block_label, BlockType::Working, BlockSchema::text()),
+                BlockCreate::new(block_label, MemoryBlockType::Working, BlockSchema::text()),
             )
             .expect("pre-create block");
 

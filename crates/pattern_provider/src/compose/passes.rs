@@ -39,7 +39,7 @@ mod tests {
 
     use pattern_core::memory::StructuredDocument;
     use pattern_core::types::block::{BlockWrite, BlockWriteKind};
-    use pattern_core::types::memory_types::{BlockMetadata, BlockSchema, BlockType};
+    use pattern_core::types::memory_types::{BlockMetadata, BlockSchema, MemoryBlockType};
     use pattern_core::types::origin::{Author, SystemReason};
 
     use crate::compose::PartialRequest;
@@ -56,7 +56,7 @@ mod tests {
     fn make_doc(label: &str, content: &str) -> StructuredDocument {
         let mut metadata = BlockMetadata::standalone(BlockSchema::text());
         metadata.label = label.to_string();
-        metadata.block_type = BlockType::Working;
+        metadata.block_type = MemoryBlockType::Working;
         let doc = StructuredDocument::new_with_metadata(metadata, None);
         doc.set_text(content, true).unwrap();
         doc
@@ -66,7 +66,7 @@ mod tests {
         BlockWrite {
             handle: SmolStr::new(handle),
             memory_id: SmolStr::new("mem_test"),
-            block_type: BlockType::Working,
+            block_type: MemoryBlockType::Working,
             rendered_content: "updated content".to_string(),
             kind: BlockWriteKind::Updated,
             previous_content_hash: None,

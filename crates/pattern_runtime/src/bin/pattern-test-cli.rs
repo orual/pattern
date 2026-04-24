@@ -636,7 +636,7 @@ async fn seed_anchor_blocks(
     agent_id: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use pattern_core::types::block::BlockCreate;
-    use pattern_core::types::memory_types::{BlockSchema, BlockType};
+    use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
 
     // (label, block_type, content, pinned)
     //
@@ -647,19 +647,19 @@ async fn seed_anchor_blocks(
     let seeds = [
         (
             pattern_core::PERSONA_LABEL,
-            BlockType::Core,
+            MemoryBlockType::Core,
             load_fixture("anchor-persona-block.md", ANCHOR_PERSONA_FALLBACK),
             false,
         ),
         (
             "current_human",
-            BlockType::Working,
+            MemoryBlockType::Working,
             load_fixture("pattern-current-human-block.md", CURRENT_HUMAN_FALLBACK),
             true,
         ),
         (
             "partner",
-            BlockType::Core,
+            MemoryBlockType::Core,
             load_fixture("pattern-partner-block.md", PARTNER_FALLBACK),
             false,
         ),

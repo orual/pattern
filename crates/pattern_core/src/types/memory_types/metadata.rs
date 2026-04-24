@@ -6,7 +6,7 @@
 use chrono::{DateTime, Utc};
 use serde_json::Value as JsonValue;
 
-use super::{BlockSchema, BlockType};
+use super::{BlockSchema, MemoryBlockType};
 
 /// Block metadata (without loading the full document).
 #[derive(Debug, Clone)]
@@ -15,7 +15,7 @@ pub struct BlockMetadata {
     pub agent_id: String,
     pub label: String,
     pub description: String,
-    pub block_type: BlockType,
+    pub block_type: MemoryBlockType,
     pub schema: BlockSchema,
     pub char_limit: usize,
     pub permission: super::MemoryPermission,
@@ -33,7 +33,7 @@ impl BlockMetadata {
             agent_id: String::new(),
             label: String::new(),
             description: String::new(),
-            block_type: BlockType::Working,
+            block_type: MemoryBlockType::Working,
             schema,
             char_limit: 0,
             permission: super::MemoryPermission::ReadWrite,
@@ -63,6 +63,6 @@ pub struct SharedBlockInfo {
     pub owner_agent_name: Option<String>,
     pub label: String,
     pub description: String,
-    pub block_type: BlockType,
+    pub block_type: MemoryBlockType,
     pub permission: super::MemoryPermission,
 }

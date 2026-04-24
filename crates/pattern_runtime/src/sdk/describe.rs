@@ -23,7 +23,7 @@ pub struct EffectDecl {
     /// `data T a where`).
     pub constructors: &'static [&'static str],
     /// Extra Haskell type/function definitions emitted before the GADT.
-    /// Use for supporting types (e.g. `data BlockType = ...`) and
+    /// Use for supporting types (e.g. `data MemoryBlockType = ...`) and
     /// type aliases.
     pub type_defs: &'static [&'static str],
     /// Thin curried helper definitions emitted after the `type M` alias.
@@ -112,7 +112,7 @@ mod tests {
     #[test]
     fn parse_constructor_multi_args() {
         let pc = parse_constructor(
-            "Create :: BlockHandle -> Text -> BlockType -> SchemaKind -> Maybe Int -> Content -> Memory ()",
+            "Create :: BlockHandle -> Text -> MemoryBlockType -> SchemaKind -> Maybe Int -> Content -> Memory ()",
         ).unwrap();
         assert_eq!(pc.name, "Create");
         assert_eq!(pc.arity, 6);

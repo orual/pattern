@@ -152,7 +152,7 @@ mod tests {
     use smol_str::SmolStr;
 
     use pattern_core::types::block::{BlockWrite, BlockWriteKind};
-    use pattern_core::types::memory_types::BlockType;
+    use pattern_core::types::memory_types::MemoryBlockType;
     use pattern_core::types::origin::{Author, SystemReason};
 
     use crate::compose::breakpoints::BreakpointLocation;
@@ -170,7 +170,7 @@ mod tests {
         BlockWrite {
             handle: SmolStr::new(handle),
             memory_id: SmolStr::new("mem_test"),
-            block_type: BlockType::Working,
+            block_type: MemoryBlockType::Working,
             rendered_content: "new content".to_string(),
             kind,
             previous_content_hash: None,

@@ -207,7 +207,7 @@ mod tests {
     use super::*;
     use crate::testing::InMemoryMemoryStore;
     use pattern_core::types::block::BlockWriteKind;
-    use pattern_core::types::memory_types::{BlockSchema, BlockType};
+    use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
     use pattern_core::types::origin::{AgentAuthor, Author};
     use smol_str::SmolStr;
 
@@ -215,7 +215,7 @@ mod tests {
         BlockWrite {
             handle: SmolStr::new(handle),
             memory_id: SmolStr::new("mem_test_01"),
-            block_type: BlockType::Working,
+            block_type: MemoryBlockType::Working,
             rendered_content: format!("content for {handle}"),
             kind,
             previous_content_hash: None,
@@ -252,7 +252,7 @@ mod tests {
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
         let adapter = MemoryStoreAdapter::new(store, "agent-a");
 
-        let create = BlockCreate::new("notes", BlockType::Working, BlockSchema::text());
+        let create = BlockCreate::new("notes", MemoryBlockType::Working, BlockSchema::text());
         let doc = adapter.create_block("agent-a", create).unwrap();
         assert_eq!(doc.metadata().label, "notes");
 

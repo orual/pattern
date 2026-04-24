@@ -5,10 +5,7 @@
 //! access. Memory operations don't need the auth DB; consumers that require
 //! both wire them separately.
 
-use crate::db_bridge::{
-    DbResultExt, core_block_type_to_db, core_perm_to_db, core_search_type_to_db,
-    db_block_type_to_core, db_perm_to_core, db_search_result_to_core,
-};
+use crate::db_bridge::{DbResultExt, core_search_type_to_db, db_search_result_to_core};
 use crate::subscriber::SubscriberHandle;
 use crate::subscriber::event::{Heartbeat, ReembedRequest};
 use crate::subscriber::supervisor::{SupervisorState, run_supervisor};
@@ -281,7 +278,7 @@ impl MemoryCache {
             label
         );
         let (block_id, permission) = match access_result {
-            Some((id, perm)) => (id, db_perm_to_core(perm)),
+            Some((id, perm)) => (id, perm),
             None => {
                 return Err(MemoryError::NotFound {
                     agent_id: agent_id.to_string(),
@@ -1458,10 +1455,10 @@ fn db_block_to_metadata(block: &pattern_db::models::MemoryBlock) -> BlockMetadat
         agent_id: block.agent_id.clone(),
         label: block.label.clone(),
         description: block.description.clone(),
-        block_type: db_block_type_to_core(block.block_type),
+        block_type: block.block_type,
         schema,
         char_limit: block.char_limit as usize,
-        permission: db_perm_to_core(block.permission),
+        permission: block.permission,
         pinned: block.pinned,
         created_at: block.created_at,
         updated_at: block.updated_at,
@@ -1543,9 +1540,9 @@ impl MemoryStore for MemoryCache {
             agent_id: agent_id.to_string(),
             label,
             description,
-            block_type: core_block_type_to_db(block_type),
+            block_type: block_type,
             char_limit: effective_char_limit as i64,
-            permission: core_perm_to_db(permission),
+            permission: permission,
             pinned: false,
             loro_snapshot,
             content_preview: None,
@@ -1607,12 +1604,7 @@ impl MemoryStore for MemoryCache {
         let base = if let Some(ref agent) = filter.agent_id {
             if let Some(bt) = filter.block_type {
                 // Optimized path: agent + type.
-                pattern_db::queries::list_blocks_by_type(
-                    &*self.db.get().mem()?,
-                    agent,
-                    core_block_type_to_db(bt),
-                )
-                .mem()?
+                pattern_db::queries::list_blocks_by_type(&*self.db.get().mem()?, agent, bt).mem()?
             } else {
                 pattern_db::queries::list_blocks(&*self.db.get().mem()?, agent).mem()?
             }
@@ -1768,8 +1760,8 @@ impl MemoryStore for MemoryCache {
                 owner_agent_name: owner_name,
                 label: block.label,
                 description: block.description,
-                block_type: db_block_type_to_core(block.block_type),
-                permission: db_perm_to_core(permission),
+                block_type: block.block_type,
+                permission: permission,
             })
             .collect())
     }
@@ -1790,7 +1782,7 @@ impl MemoryStore for MemoryCache {
         .mem()?;
 
         let (block_id, shared_permission) = match access_result {
-            Some((id, perm)) => (id, db_perm_to_core(perm)),
+            Some((id, perm)) => (id, perm),
             None => return Ok(None), // No access.
         };
 
@@ -1867,12 +1859,7 @@ impl MemoryStore for MemoryCache {
 
         // Apply block_type update.
         if let Some(bt) = patch.block_type {
-            pattern_db::queries::update_block_type(
-                &*self.db.get().mem()?,
-                &block.id,
-                core_block_type_to_db(bt),
-            )
-            .mem()?;
+            pattern_db::queries::update_block_type(&*self.db.get().mem()?, &block.id, bt).mem()?;
             if let Some(mut cached) = self.blocks.get_mut(&block.id) {
                 cached.doc.metadata_mut().block_type = bt;
                 cached.last_accessed = Utc::now();
@@ -2052,10 +2039,8 @@ impl MemoryStore for MemoryCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pattern_core::types::memory_types::BlockType;
-    use pattern_db::models::{
-        MemoryBlock, MemoryBlockType, MemoryPermission as DbMemoryPermission,
-    };
+    use pattern_core::types::memory_types::MemoryBlockType;
+    use pattern_db::models::MemoryBlock;
 
     fn test_dbs() -> (tempfile::TempDir, Arc<ConstellationDb>) {
         let dir = tempfile::tempdir().unwrap();
@@ -2103,7 +2088,7 @@ mod tests {
             description: "Agent personality".to_string(),
             block_type: MemoryBlockType::Core,
             char_limit: 5000,
-            permission: DbMemoryPermission::ReadWrite,
+            permission: MemoryPermission::ReadWrite,
             pinned: true,
             loro_snapshot: vec![],
             content_preview: None,
@@ -2147,7 +2132,7 @@ mod tests {
             description: "Working memory".to_string(),
             block_type: MemoryBlockType::Working,
             char_limit: 5000,
-            permission: DbMemoryPermission::ReadWrite,
+            permission: MemoryPermission::ReadWrite,
             pinned: false,
             loro_snapshot: vec![],
             content_preview: None,
@@ -2194,7 +2179,7 @@ mod tests {
             description: "Block for no-dirty persist test".to_string(),
             block_type: MemoryBlockType::Working,
             char_limit: 5000,
-            permission: DbMemoryPermission::ReadWrite,
+            permission: MemoryPermission::ReadWrite,
             pinned: false,
             loro_snapshot: vec![],
             content_preview: None,
@@ -2241,7 +2226,7 @@ mod tests {
             description: "Block for no-op persist test".to_string(),
             block_type: MemoryBlockType::Working,
             char_limit: 5000,
-            permission: DbMemoryPermission::ReadWrite,
+            permission: MemoryPermission::ReadWrite,
             pinned: false,
             loro_snapshot: vec![],
             content_preview: None,
@@ -2294,7 +2279,7 @@ mod tests {
         let created_doc = cache
             .create_block(
                 "agent_1",
-                BlockCreate::new("test_block", BlockType::Working, BlockSchema::text())
+                BlockCreate::new("test_block", MemoryBlockType::Working, BlockSchema::text())
                     .with_description("Test block description")
                     .with_char_limit(1000),
             )
@@ -2324,7 +2309,7 @@ mod tests {
         cache
             .create_block(
                 "agent_1",
-                BlockCreate::new("block1", BlockType::Core, BlockSchema::text())
+                BlockCreate::new("block1", MemoryBlockType::Core, BlockSchema::text())
                     .with_description("First block")
                     .with_char_limit(1000),
             )
@@ -2333,7 +2318,7 @@ mod tests {
         cache
             .create_block(
                 "agent_1",
-                BlockCreate::new("block2", BlockType::Working, BlockSchema::text())
+                BlockCreate::new("block2", MemoryBlockType::Working, BlockSchema::text())
                     .with_description("Second block")
                     .with_char_limit(2000),
             )
@@ -2342,7 +2327,7 @@ mod tests {
         cache
             .create_block(
                 "agent_1",
-                BlockCreate::new("block3", BlockType::Core, BlockSchema::text())
+                BlockCreate::new("block3", MemoryBlockType::Core, BlockSchema::text())
                     .with_description("Third block")
                     .with_char_limit(1500),
             )
@@ -2354,12 +2339,12 @@ mod tests {
 
         // List blocks by type.
         let core_blocks = cache
-            .list_blocks(BlockFilter::by_type("agent_1", BlockType::Core))
+            .list_blocks(BlockFilter::by_type("agent_1", MemoryBlockType::Core))
             .unwrap();
         assert_eq!(core_blocks.len(), 2);
 
         let working_blocks = cache
-            .list_blocks(BlockFilter::by_type("agent_1", BlockType::Working))
+            .list_blocks(BlockFilter::by_type("agent_1", MemoryBlockType::Working))
             .unwrap();
         assert_eq!(working_blocks.len(), 1);
         assert_eq!(working_blocks[0].label, "block2");
@@ -2374,7 +2359,7 @@ mod tests {
         cache
             .create_block(
                 "agent_1",
-                BlockCreate::new("to_delete", BlockType::Working, BlockSchema::text())
+                BlockCreate::new("to_delete", MemoryBlockType::Working, BlockSchema::text())
                     .with_description("Will be deleted")
                     .with_char_limit(1000),
             )
@@ -2405,9 +2390,13 @@ mod tests {
         cache
             .create_block(
                 "agent_1",
-                BlockCreate::new("content_test", BlockType::Working, BlockSchema::text())
-                    .with_description("Test content rendering")
-                    .with_char_limit(1000),
+                BlockCreate::new(
+                    "content_test",
+                    MemoryBlockType::Working,
+                    BlockSchema::text(),
+                )
+                .with_description("Test content rendering")
+                .with_char_limit(1000),
             )
             .unwrap();
 
@@ -2476,7 +2465,7 @@ mod tests {
         cache
             .create_block(
                 "agent_1",
-                BlockCreate::new("metadata_test", BlockType::Core, BlockSchema::text())
+                BlockCreate::new("metadata_test", MemoryBlockType::Core, BlockSchema::text())
                     .with_description("Test metadata retrieval")
                     .with_char_limit(5000),
             )
@@ -2491,7 +2480,7 @@ mod tests {
         let metadata = metadata.unwrap();
         assert_eq!(metadata.label, "metadata_test");
         assert_eq!(metadata.description, "Test metadata retrieval");
-        assert_eq!(metadata.block_type, BlockType::Core);
+        assert_eq!(metadata.block_type, MemoryBlockType::Core);
         assert_eq!(metadata.char_limit, 5000);
         assert!(!metadata.pinned);
     }
@@ -2509,7 +2498,7 @@ mod tests {
         cache
             .create_block(
                 "agent_1",
-                BlockCreate::new("persona", BlockType::Core, BlockSchema::text())
+                BlockCreate::new("persona", MemoryBlockType::Core, BlockSchema::text())
                     .with_description("Agent personality")
                     .with_char_limit(1000),
             )
@@ -2528,7 +2517,7 @@ mod tests {
         cache
             .create_block(
                 "agent_1",
-                BlockCreate::new("notes", BlockType::Working, BlockSchema::text())
+                BlockCreate::new("notes", MemoryBlockType::Working, BlockSchema::text())
                     .with_description("Working notes")
                     .with_char_limit(1000),
             )
@@ -2687,7 +2676,7 @@ mod tests {
         cache
             .create_block(
                 "agent_1",
-                BlockCreate::new("persona", BlockType::Core, BlockSchema::text())
+                BlockCreate::new("persona", MemoryBlockType::Core, BlockSchema::text())
                     .with_description("Agent personality")
                     .with_char_limit(1000),
             )
@@ -2809,7 +2798,7 @@ mod tests {
         cache
             .create_block(
                 "agent_1",
-                BlockCreate::new("test_block", BlockType::Working, BlockSchema::text())
+                BlockCreate::new("test_block", MemoryBlockType::Working, BlockSchema::text())
                     .with_description("Test")
                     .with_char_limit(1000),
             )
@@ -2940,9 +2929,13 @@ mod tests {
         let doc = cache
             .create_block(
                 "agent_1",
-                BlockCreate::new("test_replace", BlockType::Working, BlockSchema::text())
-                    .with_description("Test block for replacement")
-                    .with_char_limit(1000),
+                BlockCreate::new(
+                    "test_replace",
+                    MemoryBlockType::Working,
+                    BlockSchema::text(),
+                )
+                .with_description("Test block for replacement")
+                .with_char_limit(1000),
             )
             .unwrap();
 
@@ -2984,9 +2977,13 @@ mod tests {
         let doc = cache
             .create_block(
                 "agent_1",
-                BlockCreate::new("test_replace", BlockType::Working, BlockSchema::text())
-                    .with_description("Test block for replacement")
-                    .with_char_limit(1000),
+                BlockCreate::new(
+                    "test_replace",
+                    MemoryBlockType::Working,
+                    BlockSchema::text(),
+                )
+                .with_description("Test block for replacement")
+                .with_char_limit(1000),
             )
             .unwrap();
 
@@ -3016,9 +3013,13 @@ mod tests {
         let doc = cache
             .create_block(
                 "agent_1",
-                BlockCreate::new("unicode_test", BlockType::Working, BlockSchema::text())
-                    .with_description("Test block for Unicode replacement")
-                    .with_char_limit(1000),
+                BlockCreate::new(
+                    "unicode_test",
+                    MemoryBlockType::Working,
+                    BlockSchema::text(),
+                )
+                .with_description("Test block for Unicode replacement")
+                .with_char_limit(1000),
             )
             .unwrap();
 
@@ -3125,7 +3126,7 @@ mod tests {
                 description: "Respawn test block".to_string(),
                 block_type: pattern_db::models::MemoryBlockType::Working,
                 char_limit: 5000,
-                permission: DbMemoryPermission::ReadWrite,
+                permission: MemoryPermission::ReadWrite,
                 pinned: false,
                 loro_snapshot: vec![],
                 content_preview: None,
@@ -3383,7 +3384,7 @@ mod tests {
                 description: "TaskList external edit test".to_string(),
                 block_type: pattern_db::models::MemoryBlockType::Working,
                 char_limit: 5000,
-                permission: DbMemoryPermission::ReadWrite,
+                permission: MemoryPermission::ReadWrite,
                 pinned: false,
                 loro_snapshot: vec![],
                 content_preview: None,

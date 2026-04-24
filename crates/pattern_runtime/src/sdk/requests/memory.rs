@@ -13,7 +13,7 @@
 
 use tidepool_bridge_derive::FromCore;
 
-/// Block classification. Mirrors Haskell `Pattern.Memory.BlockType`.
+/// Block classification. Mirrors Haskell `Pattern.Memory.MemoryBlockType`.
 /// The `Block` prefix is deliberate — see module docs.
 ///
 /// `BlockArchival` and `BlockLog` are kept in the Haskell SDK for
@@ -35,15 +35,15 @@ pub enum BlockTypeReq {
     Log,
 }
 
-impl From<BlockTypeReq> for pattern_core::types::memory_types::BlockType {
+impl From<BlockTypeReq> for pattern_core::types::memory_types::MemoryBlockType {
     fn from(req: BlockTypeReq) -> Self {
-        use pattern_core::types::memory_types::BlockType;
+        use pattern_core::types::memory_types::MemoryBlockType;
         match req {
-            BlockTypeReq::Core => BlockType::Core,
+            BlockTypeReq::Core => MemoryBlockType::Core,
             // Archival and Log map to Working; archival storage uses the
             // archival_entries table, log blocks use Working + log-schema.
             BlockTypeReq::Working | BlockTypeReq::Archival | BlockTypeReq::Log => {
-                BlockType::Working
+                MemoryBlockType::Working
             }
         }
     }

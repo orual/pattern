@@ -270,7 +270,7 @@ mod tests {
 
         let create = BlockCreate::new(
             "notes",
-            pattern_core::types::memory_types::BlockType::Working,
+            pattern_core::types::memory_types::MemoryBlockType::Working,
             BlockSchema::text(),
         );
 

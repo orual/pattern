@@ -41,7 +41,7 @@
 
 use genai::chat::ChatMessage;
 use pattern_core::memory::StructuredDocument;
-use pattern_core::types::memory_types::BlockType;
+use pattern_core::types::memory_types::MemoryBlockType;
 
 use crate::shaper::wrap_system_reminder;
 
@@ -109,11 +109,11 @@ fn render_block(block: &StructuredDocument) -> String {
     format!("{open_tag}\n{inner}\n{close_tag}")
 }
 
-/// Human-readable label for a [`BlockType`].
-fn render_block_type(bt: BlockType) -> &'static str {
+/// Human-readable label for a [`MemoryBlockType`].
+fn render_block_type(bt: MemoryBlockType) -> &'static str {
     match bt {
-        BlockType::Core => "core",
-        BlockType::Working => "working",
+        MemoryBlockType::Core => "core",
+        MemoryBlockType::Working => "working",
         _ => "working",
     }
 }
@@ -124,7 +124,7 @@ fn render_block_type(bt: BlockType) -> &'static str {
 mod tests {
     use genai::chat::ChatRole;
     use pattern_core::memory::StructuredDocument;
-    use pattern_core::types::memory_types::{BlockMetadata, BlockSchema, BlockType};
+    use pattern_core::types::memory_types::{BlockMetadata, BlockSchema, MemoryBlockType};
 
     use super::*;
 
@@ -147,7 +147,7 @@ mod tests {
         let mut metadata = BlockMetadata::standalone(BlockSchema::text());
         metadata.label = label.to_string();
         metadata.description = description.to_string();
-        metadata.block_type = BlockType::Working;
+        metadata.block_type = MemoryBlockType::Working;
         let doc = StructuredDocument::new_with_metadata(metadata, None);
         doc.set_text(content, true).unwrap();
         doc
@@ -157,7 +157,7 @@ mod tests {
         label: &str,
         description: &str,
         content: &str,
-        block_type: BlockType,
+        block_type: MemoryBlockType,
     ) -> StructuredDocument {
         let mut metadata = BlockMetadata::standalone(BlockSchema::text());
         metadata.label = label.to_string();
@@ -259,7 +259,7 @@ mod tests {
             "myblock",
             "",
             "content",
-            BlockType::Core,
+            MemoryBlockType::Core,
         )];
         let msg = render_current_state(&blocks);
         let text = msg_text(&msg);

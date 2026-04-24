@@ -446,7 +446,7 @@ impl<S: MemoryStore> MemoryStore for MemoryScope<S> {
 mod tests {
     use super::*;
     use crate::testing::ScopeTestStore;
-    use pattern_core::types::memory_types::{BlockSchema, BlockType};
+    use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
 
     // ---- AC12.1: IsolatePolicy::None merges both scopes ----
 
@@ -562,7 +562,7 @@ mod tests {
 
         let result = scope.create_block(
             "persona-1",
-            BlockCreate::new("new-block", BlockType::Working, BlockSchema::text()),
+            BlockCreate::new("new-block", MemoryBlockType::Working, BlockSchema::text()),
         );
         assert!(matches!(
             result.unwrap_err(),
@@ -584,7 +584,7 @@ mod tests {
         // Write to project-1 (not persona-1) succeeds under None.
         let result = scope.create_block(
             "project-1",
-            BlockCreate::new("task-list", BlockType::Working, BlockSchema::text()),
+            BlockCreate::new("task-list", MemoryBlockType::Working, BlockSchema::text()),
         );
         assert!(result.is_ok());
     }
@@ -601,7 +601,7 @@ mod tests {
         // Under None, writes to persona are also allowed (bidirectional).
         let result = scope.create_block(
             "persona-1",
-            BlockCreate::new("personal-notes", BlockType::Core, BlockSchema::text()),
+            BlockCreate::new("personal-notes", MemoryBlockType::Core, BlockSchema::text()),
         );
         assert!(result.is_ok());
     }

@@ -1,71 +1,21 @@
 //! Bridging conversions between `pattern_core` domain types and
 //! `pattern_db` storage types.
 //!
-//! These functions live here because `pattern_core` must not depend on
-//! `pattern_db`, and `pattern_db` must not depend on `pattern_core`.
-//! `pattern_memory` depends on both, making it the natural home for the
-//! bridge.
+//! After the dependency inversion (`pattern_db` now depends on `pattern_core`),
+//! most domain enums (MemoryPermission, MemoryBlockType, TaskStatus) are shared
+//! directly — no conversion needed.
 //!
-//! Orphan rules prevent `From` impls between two foreign types, so these
-//! are free functions.
+//! This module retains:
+//! - `SearchContentType` bridging (core and db use different variant names).
+//! - `SearchResult` → `MemorySearchResult` projection (different struct shapes).
+//! - `DbError` → `MemoryError` mapping helpers.
 
 use pattern_core::error::MemoryError;
-use pattern_core::types::memory_types::{
-    BlockType, MemoryPermission, MemorySearchResult, SearchContentType,
-};
+use pattern_core::types::memory_types::{MemorySearchResult, SearchContentType};
 use pattern_db::DbError;
-use pattern_db::models::{MemoryBlockType, MemoryPermission as DbMemoryPermission};
 use pattern_db::search::{
     SearchContentType as DbSearchContentType, SearchResult as DbSearchResult,
 };
-
-// ── MemoryPermission ↔ DbMemoryPermission ───────────────────────────────────
-
-/// Convert core `MemoryPermission` to db `MemoryPermission`.
-pub fn core_perm_to_db(p: MemoryPermission) -> DbMemoryPermission {
-    match p {
-        MemoryPermission::ReadOnly => DbMemoryPermission::ReadOnly,
-        MemoryPermission::Partner => DbMemoryPermission::Partner,
-        MemoryPermission::Human => DbMemoryPermission::Human,
-        MemoryPermission::Append => DbMemoryPermission::Append,
-        MemoryPermission::ReadWrite => DbMemoryPermission::ReadWrite,
-        MemoryPermission::Admin => DbMemoryPermission::Admin,
-    }
-}
-
-/// Convert db `MemoryPermission` to core `MemoryPermission`.
-pub fn db_perm_to_core(p: DbMemoryPermission) -> MemoryPermission {
-    match p {
-        DbMemoryPermission::ReadOnly => MemoryPermission::ReadOnly,
-        DbMemoryPermission::Partner => MemoryPermission::Partner,
-        DbMemoryPermission::Human => MemoryPermission::Human,
-        DbMemoryPermission::Append => MemoryPermission::Append,
-        DbMemoryPermission::ReadWrite => MemoryPermission::ReadWrite,
-        DbMemoryPermission::Admin => MemoryPermission::Admin,
-    }
-}
-
-// ── BlockType ↔ MemoryBlockType ─────────────────────────────────────────────
-
-/// Convert db `MemoryBlockType` to core `BlockType`.
-pub fn db_block_type_to_core(t: MemoryBlockType) -> BlockType {
-    match t {
-        MemoryBlockType::Core => BlockType::Core,
-        MemoryBlockType::Working => BlockType::Working,
-        // Future-proofing: non-exhaustive requires a catch-all.
-        _ => BlockType::Working,
-    }
-}
-
-/// Convert core `BlockType` to db `MemoryBlockType`.
-pub fn core_block_type_to_db(t: BlockType) -> MemoryBlockType {
-    match t {
-        BlockType::Core => MemoryBlockType::Core,
-        BlockType::Working => MemoryBlockType::Working,
-        // Future-proofing: non-exhaustive requires a catch-all.
-        _ => MemoryBlockType::Working,
-    }
-}
 
 // ── SearchContentType ↔ DbSearchContentType ─────────────────────────────────
 

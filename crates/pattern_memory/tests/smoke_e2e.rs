@@ -26,7 +26,7 @@ use std::time::Duration;
 use jiff::Timestamp;
 use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::BlockCreate;
-use pattern_core::types::memory_types::{BlockSchema, BlockType};
+use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
 use pattern_db::{ConstellationDb, Json, models};
 use pattern_memory::backup::restore::restore_snapshot;
 use pattern_memory::backup::snapshot::create_snapshot;
@@ -192,7 +192,7 @@ async fn smoke_e2e() {
         .cache
         .create_block(
             agent_id,
-            BlockCreate::new("notes", BlockType::Core, BlockSchema::text()),
+            BlockCreate::new("notes", MemoryBlockType::Core, BlockSchema::text()),
         )
         .expect("create notes block");
     let notes_block_id = text_doc.id().to_string();
@@ -205,7 +205,7 @@ async fn smoke_e2e() {
             agent_id,
             BlockCreate::new(
                 "config",
-                BlockType::Working,
+                MemoryBlockType::Working,
                 BlockSchema::Map { fields: vec![] },
             ),
         )
@@ -219,7 +219,7 @@ async fn smoke_e2e() {
             agent_id,
             BlockCreate::new(
                 "events",
-                BlockType::Working,
+                MemoryBlockType::Working,
                 BlockSchema::Log {
                     display_limit: 100,
                     entry_schema: pattern_core::types::memory_types::LogEntrySchema {

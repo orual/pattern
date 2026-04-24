@@ -49,7 +49,7 @@
 
 use genai::chat::{SystemBlock, Tool};
 use pattern_core::memory::StructuredDocument;
-use pattern_core::types::memory_types::{BlockMetadata, BlockSchema, BlockType};
+use pattern_core::types::memory_types::{BlockMetadata, BlockSchema, MemoryBlockType};
 use pattern_provider::compose::{
     BreakpointLocation, CacheProfile, ComposerPass, PartialRequest,
     passes::{Segment1Pass, Segment2Pass, Segment3Pass},
@@ -71,7 +71,7 @@ const SENTINEL_CONTENT_B: &str = "AUDIT_SENTINEL_BLOCK_CONTENT_BETA_3D8A1F: iden
 fn make_doc(label: &str, content: &str) -> StructuredDocument {
     let mut metadata = BlockMetadata::standalone(BlockSchema::text());
     metadata.label = label.to_string();
-    metadata.block_type = BlockType::Working;
+    metadata.block_type = MemoryBlockType::Working;
     let doc = StructuredDocument::new_with_metadata(metadata, None);
     doc.set_text(content, true)
         .expect("set_text on a fresh StructuredDocument must succeed");

@@ -65,7 +65,7 @@ const PREVIEW_MAX_CHARS: usize = 240;
 /// use jiff::Timestamp;
 /// use smol_str::SmolStr;
 ///
-/// use pattern_core::types::memory_types::BlockType;
+/// use pattern_core::types::memory_types::MemoryBlockType;
 /// use pattern_core::types::block::{BlockHandle, BlockWrite, BlockWriteKind};
 /// use pattern_core::types::origin::{Author, SystemReason};
 /// use pattern_provider::compose::pseudo_messages::render_change_event;
@@ -73,7 +73,7 @@ const PREVIEW_MAX_CHARS: usize = 240;
 /// let event = BlockWrite {
 ///     handle: SmolStr::new("task_list"),
 ///     memory_id: SmolStr::new("mem_01"),
-///     block_type: BlockType::Working,
+///     block_type: MemoryBlockType::Working,
 ///     rendered_content: "- [ ] do the thing".to_string(),
 ///     kind: BlockWriteKind::Created,
 ///     previous_content_hash: None,
@@ -102,7 +102,7 @@ pub fn render_change_event(event: &BlockWrite) -> ChatMessage {
 /// use jiff::Timestamp;
 /// use smol_str::SmolStr;
 ///
-/// use pattern_core::types::memory_types::BlockType;
+/// use pattern_core::types::memory_types::MemoryBlockType;
 /// use pattern_core::types::block::{BlockHandle, BlockWrite, BlockWriteKind};
 /// use pattern_core::types::origin::{Author, SystemReason};
 /// use pattern_provider::compose::pseudo_messages::render_change_events;
@@ -274,12 +274,12 @@ fn render_diff(previous: &str, current: &str) -> String {
     out
 }
 
-/// Human-readable label for a [`pattern_core::types::memory_types::BlockType`].
-fn render_block_type(bt: pattern_core::types::memory_types::BlockType) -> &'static str {
-    use pattern_core::types::memory_types::BlockType;
+/// Human-readable label for a [`pattern_core::types::memory_types::MemoryBlockType`].
+fn render_block_type(bt: pattern_core::types::memory_types::MemoryBlockType) -> &'static str {
+    use pattern_core::types::memory_types::MemoryBlockType;
     match bt {
-        BlockType::Core => "core",
-        BlockType::Working | _ => "working",
+        MemoryBlockType::Core => "core",
+        MemoryBlockType::Working | _ => "working",
     }
 }
 
@@ -293,7 +293,7 @@ mod tests {
 
     use pattern_core::types::block::{BlockWrite, BlockWriteKind};
     use pattern_core::types::ids::new_id;
-    use pattern_core::types::memory_types::BlockType;
+    use pattern_core::types::memory_types::MemoryBlockType;
     use pattern_core::types::origin::{AgentAuthor, Author, Human, Partner, SystemReason};
 
     use super::*;
@@ -320,7 +320,7 @@ mod tests {
         BlockWrite {
             handle: SmolStr::new(handle),
             memory_id: SmolStr::new("mem_test_01"),
-            block_type: BlockType::Working,
+            block_type: MemoryBlockType::Working,
             rendered_content: rendered_content.to_string(),
             kind,
             previous_content_hash: previous_hash,

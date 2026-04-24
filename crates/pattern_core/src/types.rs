@@ -16,6 +16,7 @@ pub mod origin;
 pub mod provider;
 pub mod search;
 pub mod snapshot;
+mod sql_types;
 pub mod turn;
 
 pub use batch::{BatchType, MessageBatch};

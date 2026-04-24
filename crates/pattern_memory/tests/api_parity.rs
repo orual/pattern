@@ -7,7 +7,7 @@ use std::sync::Arc;
 use pattern_core::memory::StructuredDocument;
 use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::BlockCreate;
-use pattern_core::types::memory_types::{BlockFilter, BlockSchema, BlockType};
+use pattern_core::types::memory_types::{BlockFilter, BlockSchema, MemoryBlockType};
 use pattern_memory::{MemoryCache, SharedBlockManager};
 
 /// Create a temporary on-disk ConstellationDb for testing.
@@ -45,10 +45,10 @@ fn memory_cache_create_get_list_round_trip() {
     seed_agent(&db, agent);
 
     // create_block — returns a StructuredDocument.
-    let create = BlockCreate::new("notes", BlockType::Working, BlockSchema::text());
+    let create = BlockCreate::new("notes", MemoryBlockType::Working, BlockSchema::text());
     let doc: StructuredDocument = cache.create_block(agent, create).unwrap();
     assert_eq!(doc.label(), "notes");
-    assert_eq!(doc.block_type(), BlockType::Working);
+    assert_eq!(doc.block_type(), MemoryBlockType::Working);
 
     // get_block — round-trips.
     let fetched = cache.get_block(agent, "notes").unwrap();

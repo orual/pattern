@@ -2,7 +2,7 @@
 //!
 //! Enables explicit sharing of blocks between agents with controlled access levels.
 
-use crate::db_bridge::{DbResultExt, core_perm_to_db, db_perm_to_core};
+use crate::db_bridge::DbResultExt;
 use pattern_core::types::memory_types::{MemoryError, MemoryPermission, MemoryResult};
 use pattern_db::ConstellationDb;
 use pattern_db::queries;
@@ -49,7 +49,7 @@ impl SharedBlockManager {
             &*self.db.get().mem()?,
             block_id,
             agent_id,
-            core_perm_to_db(permission),
+            permission,
         )
         .mem()?;
 
@@ -129,7 +129,7 @@ impl SharedBlockManager {
 
         Ok(attachments
             .into_iter()
-            .map(|att| (att.agent_id, db_perm_to_core(att.permission)))
+            .map(|att| (att.agent_id, att.permission))
             .collect())
     }
 
@@ -143,7 +143,7 @@ impl SharedBlockManager {
 
         Ok(attachments
             .into_iter()
-            .map(|att| (att.block_id, db_perm_to_core(att.permission)))
+            .map(|att| (att.block_id, att.permission))
             .collect())
     }
 
@@ -168,7 +168,7 @@ impl SharedBlockManager {
 
             // 2. Check if constellation owner -> dictated by the permission on the block.
             if block.agent_id == CONSTELLATION_OWNER {
-                return Ok(Some(db_perm_to_core(block.permission)));
+                return Ok(Some(block.permission));
             }
         } else {
             // Block doesn't exist.
@@ -180,7 +180,7 @@ impl SharedBlockManager {
             queries::get_shared_block_attachment(&*self.db.get().mem()?, block_id, agent_id)
                 .mem()?;
 
-        Ok(attachment.map(|att| db_perm_to_core(att.permission)))
+        Ok(attachment.map(|att| att.permission))
     }
 
     /// Check if the given permission allows write operations.
@@ -201,7 +201,7 @@ impl SharedBlockManager {
 mod tests {
     use super::*;
     use chrono::Utc;
-    use pattern_db::models::MemoryPermission as DbMemoryPermission;
+    use pattern_core::types::memory_types::MemoryPermission;
     use pattern_db::models::{MemoryBlock, MemoryBlockType};
 
     async fn setup_test_dbs() -> Arc<ConstellationDb> {
@@ -236,7 +236,7 @@ mod tests {
             description: "Test block".to_string(),
             block_type: MemoryBlockType::Working,
             char_limit: 1000,
-            permission: DbMemoryPermission::ReadWrite,
+            permission: MemoryPermission::ReadWrite,
             pinned: false,
             loro_snapshot: vec![],
             content_preview: None,

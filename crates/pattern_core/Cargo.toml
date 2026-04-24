@@ -51,6 +51,9 @@ hf-hub = { version = "0.4", default-features = false, features = [
 ], optional = true }
 tokenizers = { version = "0.21", optional = true }
 
+# Optional: SQLite type conversions (enabled by pattern-db)
+rusqlite = { version = "0.39", optional = true }
+
 # Schema generation
 schemars = { workspace = true }
 compact_str = { version = "0.9.0", features = ["serde", "markup", "smallvec"] }
@@ -127,6 +130,9 @@ embed-candle = [
 ]
 embed-cloud = ["reqwest-middleware", "http"]
 embed-ollama = ["reqwest-middleware", "http"]
+
+# Enable rusqlite FromSql/ToSql impls for domain enums
+sqlite = ["rusqlite"]
 
 
 [lints]

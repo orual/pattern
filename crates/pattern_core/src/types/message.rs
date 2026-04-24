@@ -19,7 +19,7 @@ use smol_str::SmolStr;
 
 use crate::types::block_ref::BlockRef;
 use crate::types::ids::{AgentId, BatchId, MessageId};
-use crate::types::memory_types::BlockType;
+use crate::types::memory_types::MemoryBlockType;
 use genai::ModelIden;
 use genai::chat::Usage;
 
@@ -127,7 +127,7 @@ pub struct RenderedBlock {
     /// inline storage of short labels.
     pub label: SmolStr,
     /// Block type at snapshot time.
-    pub block_type: BlockType,
+    pub block_type: MemoryBlockType,
     /// Rendered content when this block is meant to be surfaced on the
     /// wire. `None` means "tracked but silent" -- hash is present for
     /// delta detection but wire rendering skips this block.
@@ -146,7 +146,7 @@ pub struct RenderedBlock {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotSelection {
     /// Block types to include. Default: `[Core, Working]`.
-    pub include_types: Vec<BlockType>,
+    pub include_types: Vec<MemoryBlockType>,
     /// Explicit block-label allowlist. If empty, include all blocks
     /// matching `include_types`. If non-empty, restrict to these
     /// labels regardless of type.
@@ -159,7 +159,7 @@ pub struct SnapshotSelection {
 impl Default for SnapshotSelection {
     fn default() -> Self {
         Self {
-            include_types: vec![BlockType::Core, BlockType::Working],
+            include_types: vec![MemoryBlockType::Core, MemoryBlockType::Working],
             include_labels: Vec::new(),
             exclude_labels: Vec::new(),
         }
@@ -203,7 +203,7 @@ pub enum MidBatchDeltaBehavior {
 impl SnapshotSelection {
     /// Test whether a block with the given label and type passes the
     /// selection filter.
-    pub fn accepts(&self, label: &str, block_type: BlockType) -> bool {
+    pub fn accepts(&self, label: &str, block_type: MemoryBlockType) -> bool {
         // Check exclude list first.
         if self.exclude_labels.iter().any(|l| l.as_str() == label) {
             return false;

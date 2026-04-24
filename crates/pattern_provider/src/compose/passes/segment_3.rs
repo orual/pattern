@@ -66,7 +66,7 @@ impl ComposerPass for Segment3Pass {
 mod tests {
     use genai::chat::{CacheControl, ChatMessage};
     use pattern_core::memory::StructuredDocument;
-    use pattern_core::types::memory_types::{BlockMetadata, BlockSchema, BlockType};
+    use pattern_core::types::memory_types::{BlockMetadata, BlockSchema, MemoryBlockType};
 
     use crate::compose::breakpoints::BreakpointLocation;
     use crate::compose::profile::CacheProfile;
@@ -84,7 +84,7 @@ mod tests {
     fn make_doc(label: &str, content: &str) -> StructuredDocument {
         let mut metadata = BlockMetadata::standalone(BlockSchema::text());
         metadata.label = label.to_string();
-        metadata.block_type = BlockType::Working;
+        metadata.block_type = MemoryBlockType::Working;
         let doc = StructuredDocument::new_with_metadata(metadata, None);
         doc.set_text(content, true).unwrap();
         doc

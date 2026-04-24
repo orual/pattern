@@ -66,13 +66,9 @@ macro_rules! impl_text_sql_via_display {
 }
 
 // --- Memory types ---
-// MemoryBlockType: as_str() returns "core"/"working".
-// FromStr matches those; rejects removed "archival"/"log" with a clear error.
-impl_text_sql_via_as_str!(crate::models::MemoryBlockType);
-
-// MemoryPermission: as_str() returns "read_only"/"partner"/etc.
-// FromStr matches those. Display is human-readable (different), so use as_str.
-impl_text_sql_via_as_str!(crate::models::MemoryPermission);
+// MemoryBlockType, MemoryPermission, TaskStatus: FromSql/ToSql impls live in
+// pattern_core::types::sql_types (behind the `sqlite` feature). They are
+// available here because pattern_db enables that feature.
 
 // --- Message types ---
 // MessageRole: Display produces "user"/"assistant"/"system"/"tool" which matches db.
@@ -277,9 +273,7 @@ impl std::str::FromStr for crate::models::SourceType {
 impl_text_sql_via_display!(crate::models::SourceType);
 
 // --- TaskList block-index types ---
-// TaskStatus (queries::task_row): stored as kebab-case TEXT. Uses as_str() + FromStr.
-// This is distinct from UserTaskStatus (snake_case, user-facing ADHD task model).
-impl_text_sql_via_as_str!(crate::queries::task_row::TaskStatus);
+// TaskStatus: FromSql/ToSql impl lives in pattern_core::types::sql_types.
 
 // --- Task (ADHD) types ---
 // UserTaskStatus: Display produces "in progress" (human-readable) but db wants "in_progress".

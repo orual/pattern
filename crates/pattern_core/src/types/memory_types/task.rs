@@ -44,6 +44,52 @@ pub enum TaskStatus {
     Cancelled,
 }
 
+impl TaskStatus {
+    /// Returns the canonical kebab-case string stored in SQLite.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::InProgress => "in-progress",
+            Self::Blocked => "blocked",
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+impl std::fmt::Display for TaskStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for TaskStatus {
+    type Err = UnknownTaskStatusError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "pending" => Ok(Self::Pending),
+            "in-progress" => Ok(Self::InProgress),
+            "blocked" => Ok(Self::Blocked),
+            "completed" => Ok(Self::Completed),
+            "cancelled" => Ok(Self::Cancelled),
+            other => Err(UnknownTaskStatusError(other.to_owned())),
+        }
+    }
+}
+
+/// Error returned when an unknown task status string is encountered.
+#[derive(Debug)]
+pub struct UnknownTaskStatusError(pub String);
+
+impl std::fmt::Display for UnknownTaskStatusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown task status '{}'", self.0)
+    }
+}
+
+impl std::error::Error for UnknownTaskStatusError {}
+
 // endregion: TaskStatus
 
 // region: TaskComment

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::BlockCreate;
-use pattern_core::types::memory_types::{BlockFilter, BlockSchema, BlockType, MemoryError};
+use pattern_core::types::memory_types::{BlockFilter, BlockSchema, MemoryBlockType, MemoryError};
 use pattern_db::{ConstellationDb, Json, models};
 use pattern_memory::MemoryCache;
 
@@ -110,7 +110,7 @@ async fn concurrent_memory_cache_stress() {
                 let doc = retry_on_locked(|| {
                     cache_clone.create_block(
                         &agent_id,
-                        BlockCreate::new(&label, BlockType::Working, BlockSchema::text()),
+                        BlockCreate::new(&label, MemoryBlockType::Working, BlockSchema::text()),
                     )
                 })
                 .unwrap_or_else(|e| panic!("create block {label} failed after retries: {e}"));
@@ -202,7 +202,7 @@ async fn concurrent_multi_cache_stress() {
                 let doc = retry_on_locked(|| {
                     cache.create_block(
                         &agent_id,
-                        BlockCreate::new(&label, BlockType::Working, BlockSchema::text()),
+                        BlockCreate::new(&label, MemoryBlockType::Working, BlockSchema::text()),
                     )
                 })
                 .unwrap_or_else(|e| panic!("create_block {label} failed: {e}"));

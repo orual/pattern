@@ -18,7 +18,7 @@ use std::sync::atomic::Ordering;
 use pattern_core::memory::StructuredDocument;
 use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::{BlockWrite, BlockWriteKind};
-use pattern_core::types::memory_types::{BlockSchema, BlockType};
+use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
 use pattern_core::types::origin::{AgentAuthor, Author};
 use smol_str::SmolStr;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
@@ -68,7 +68,7 @@ impl DescribeEffect for MemoryHandler {
             constructors: &[
                 "Get            :: BlockHandle -> Memory Content",
                 "Put            :: BlockHandle -> Content -> Maybe Text -> Memory ()",
-                "Create         :: BlockHandle -> Text -> BlockType -> SchemaKind -> Maybe Int -> Content -> Memory ()",
+                "Create         :: BlockHandle -> Text -> MemoryBlockType -> SchemaKind -> Maybe Int -> Content -> Memory ()",
                 "Append         :: BlockHandle -> Content -> Memory ()",
                 "Replace        :: BlockHandle -> Text -> Text -> Memory ()",
                 "Search         :: Query -> Memory [BlockHandle]",
@@ -82,14 +82,14 @@ impl DescribeEffect for MemoryHandler {
                 "type Content = Text",
                 "type Query = Text",
                 "type Owner = Text",
-                "data BlockType = BlockCore | BlockWorking | BlockArchival | BlockLog",
+                "data MemoryBlockType = BlockCore | BlockWorking | BlockArchival | BlockLog",
                 "data SchemaKind = SchemaText | SchemaMap | SchemaList | SchemaLog",
             ],
             helpers: &[
                 "get :: Member Memory effs => BlockHandle -> Eff effs Content\nget h = send (Get h)",
                 "put :: Member Memory effs => BlockHandle -> Content -> Eff effs ()\nput h c = send (Put h c Nothing)",
                 "putWithDesc :: Member Memory effs => BlockHandle -> Content -> Text -> Eff effs ()\nputWithDesc h c d = send (Put h c (Just d))",
-                "create :: Member Memory effs => BlockHandle -> Text -> BlockType -> SchemaKind -> Maybe Int -> Content -> Eff effs ()\ncreate h d bt sk cl ic = send (Create h d bt sk cl ic)",
+                "create :: Member Memory effs => BlockHandle -> Text -> MemoryBlockType -> SchemaKind -> Maybe Int -> Content -> Eff effs ()\ncreate h d bt sk cl ic = send (Create h d bt sk cl ic)",
                 "append :: Member Memory effs => BlockHandle -> Content -> Eff effs ()\nappend h c = send (Append h c)",
                 "replace :: Member Memory effs => BlockHandle -> Text -> Text -> Eff effs ()\nreplace h old new = send (Replace h old new)",
                 "search :: Member Memory effs => Query -> Eff effs [BlockHandle]\nsearch q = send (Search q)",
@@ -200,7 +200,7 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                 cx.respond(())
             }
             MemoryReq::Create(label, description, block_type, schema_kind, char_limit, initial) => {
-                let bt: BlockType = block_type.into();
+                let bt: MemoryBlockType = block_type.into();
                 let schema: BlockSchema = schema_kind.into();
                 let limit = char_limit
                     .map(|n| n.max(0) as usize)
@@ -451,7 +451,7 @@ fn upsert_block_content(
             let desc = description.unwrap_or(DEFAULT_AUTO_CREATE_DESCRIPTION);
             let create = pattern_core::types::block::BlockCreate::new(
                 label.to_owned(),
-                BlockType::Working,
+                MemoryBlockType::Working,
                 BlockSchema::text(),
             )
             .with_description(desc)
@@ -508,7 +508,7 @@ struct PreWriteState {
     rendered_content: Option<String>,
     content_hash: Option<u64>,
     memory_id: Option<SmolStr>,
-    block_type: Option<BlockType>,
+    block_type: Option<MemoryBlockType>,
 }
 
 /// Capture pre-write state for a block. If the block doesn't exist,
@@ -581,7 +581,7 @@ fn record_block_write(params: RecordBlockWriteParams<'_>, store: &dyn MemoryStor
             // fails we still record the write with placeholder values.
             match store.get_block(agent_id, label) {
                 Ok(Some(doc)) => (SmolStr::new(doc.id()), doc.block_type()),
-                _ => (SmolStr::new("unknown"), BlockType::Working),
+                _ => (SmolStr::new("unknown"), MemoryBlockType::Working),
             }
         }
     };

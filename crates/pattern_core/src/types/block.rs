@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
 use crate::types::ids::MemoryId;
-use crate::types::memory_types::{BlockSchema, BlockType, MemoryPermission};
+use crate::types::memory_types::{BlockSchema, MemoryBlockType, MemoryPermission};
 use crate::types::origin::Author;
 
 /// A lightweight, stable identifier for a memory block as seen by agents.
@@ -62,14 +62,14 @@ pub type BlockHandle = SmolStr;
 /// # Examples
 ///
 /// ```
-/// use pattern_core::types::memory_types::{BlockSchema, BlockType, MemoryPermission};
+/// use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType, MemoryPermission};
 /// use pattern_core::types::block::BlockCreate;
 ///
 /// // Minimal construction using defaults (ReadWrite permission).
-/// let create = BlockCreate::new("persona", BlockType::Core, BlockSchema::text());
+/// let create = BlockCreate::new("persona", MemoryBlockType::Core, BlockSchema::text());
 ///
 /// // With optional overrides.
-/// let create = BlockCreate::new("task_list", BlockType::Working, BlockSchema::text())
+/// let create = BlockCreate::new("task_list", MemoryBlockType::Working, BlockSchema::text())
 ///     .with_description("Tasks for this session")
 ///     .with_char_limit(2000)
 ///     .with_permission(MemoryPermission::ReadOnly);
@@ -82,7 +82,7 @@ pub struct BlockCreate {
     /// Human-readable description of what this block holds.
     pub description: String,
     /// Whether the block is Core, Working, or Archival.
-    pub block_type: BlockType,
+    pub block_type: MemoryBlockType,
     /// Schema governing the block's content structure.
     pub schema: BlockSchema,
     /// Maximum number of characters the block may hold.
@@ -97,7 +97,7 @@ impl BlockCreate {
     /// - `description`: empty string
     /// - `char_limit`: [`crate::types::memory_types::DEFAULT_MEMORY_CHAR_LIMIT`]
     /// - `permission`: `ReadWrite`
-    pub fn new(label: impl Into<String>, block_type: BlockType, schema: BlockSchema) -> Self {
+    pub fn new(label: impl Into<String>, block_type: MemoryBlockType, schema: BlockSchema) -> Self {
         Self {
             label: label.into(),
             description: String::new(),
@@ -175,7 +175,7 @@ pub enum BlockWriteKind {
 /// use jiff::Timestamp;
 /// use smol_str::SmolStr;
 ///
-/// use pattern_core::types::memory_types::BlockType;
+/// use pattern_core::types::memory_types::MemoryBlockType;
 /// use pattern_core::types::block::{BlockHandle, BlockWrite, BlockWriteKind};
 /// use pattern_core::types::origin::{Author, SystemReason};
 ///
@@ -183,7 +183,7 @@ pub enum BlockWriteKind {
 /// let write = BlockWrite {
 ///     handle,
 ///     memory_id: SmolStr::new("mem_01HXYZ"),
-///     block_type: BlockType::Working,
+///     block_type: MemoryBlockType::Working,
 ///     rendered_content: "- [ ] Review PR\n- [x] Write tests".to_string(),
 ///     kind: BlockWriteKind::Appended,
 ///     previous_content_hash: Some(0xdead_beef_dead_beef),
@@ -200,7 +200,7 @@ pub struct BlockWrite {
     /// DB row identifier for the block (for re-fetch of full state).
     pub memory_id: MemoryId,
     /// Whether the block is Core, Working, or Archival.
-    pub block_type: BlockType,
+    pub block_type: MemoryBlockType,
     /// Rendered text content after the write, ready for pseudo-message
     /// display. Derived from the underlying [`crate::memory::StructuredDocument`]
     /// at write time so display does not need to re-query memory.

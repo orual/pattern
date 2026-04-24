@@ -57,18 +57,29 @@ pub enum DocumentError {
 /// Only `Core` and `Working` remain after the v3-memory-rework Phase 2.
 /// `Archival` rows migrated to the `archival_entries` table; `Log` rows
 /// reclassified as `Working` with a `{"kind": "log"}` metadata marker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
-pub enum BlockType {
+pub enum MemoryBlockType {
     Core,
+    #[default]
     Working,
 }
 
-/// Errors from parsing a [`BlockType`] string.
+impl MemoryBlockType {
+    /// Returns the lowercase string representation matching the database format.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Core => "core",
+            Self::Working => "working",
+        }
+    }
+}
+
+/// Errors from parsing a [`MemoryBlockType`] string.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum BlockTypeParseError {
+pub enum MemoryBlockTypeParseError {
     /// A variant that existed prior to v3-memory-rework Phase 2 but was
     /// removed. Rows must be migrated via `0010_collapse_block_types.sql`.
     #[error(
@@ -82,20 +93,20 @@ pub enum BlockTypeParseError {
     Unknown(String),
 }
 
-impl std::str::FromStr for BlockType {
-    type Err = BlockTypeParseError;
+impl std::str::FromStr for MemoryBlockType {
+    type Err = MemoryBlockTypeParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "core" => Ok(Self::Core),
             "working" => Ok(Self::Working),
-            "archival" | "log" => Err(BlockTypeParseError::RemovedVariant(s.to_owned())),
-            other => Err(BlockTypeParseError::Unknown(other.to_owned())),
+            "archival" | "log" => Err(MemoryBlockTypeParseError::RemovedVariant(s.to_owned())),
+            other => Err(MemoryBlockTypeParseError::Unknown(other.to_owned())),
         }
     }
 }
 
-impl std::fmt::Display for BlockType {
+impl std::fmt::Display for MemoryBlockType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Core => write!(f, "core"),
@@ -156,8 +167,8 @@ pub use crate::error::memory::{MemoryError, MemoryResult};
 /// assert!(f.block_type.is_none());
 ///
 /// // Only Core blocks for an agent.
-/// let f = BlockFilter::by_type("agent-1", pattern_core::types::memory_types::BlockType::Core);
-/// assert_eq!(f.block_type, Some(pattern_core::types::memory_types::BlockType::Core));
+/// let f = BlockFilter::by_type("agent-1", pattern_core::types::memory_types::MemoryBlockType::Core);
+/// assert_eq!(f.block_type, Some(pattern_core::types::memory_types::MemoryBlockType::Core));
 ///
 /// // Constellation-wide label prefix scan.
 /// let f = BlockFilter::by_prefix("ds:");
@@ -172,7 +183,7 @@ pub struct BlockFilter {
     /// constellation-wide listings).
     pub agent_id: Option<String>,
     /// If set, only blocks with this type are returned.
-    pub block_type: Option<BlockType>,
+    pub block_type: Option<MemoryBlockType>,
     /// If set, only blocks whose label starts with this prefix
     /// are returned.
     pub label_prefix: Option<String>,
@@ -188,7 +199,7 @@ impl BlockFilter {
     }
 
     /// Filter to a single agent's blocks of a specific type.
-    pub fn by_type(agent_id: impl Into<String>, block_type: BlockType) -> Self {
+    pub fn by_type(agent_id: impl Into<String>, block_type: MemoryBlockType) -> Self {
         Self {
             agent_id: Some(agent_id.into()),
             block_type: Some(block_type),
@@ -220,11 +231,11 @@ impl BlockFilter {
 /// Uses builder-style chaining for ergonomic construction:
 ///
 /// ```
-/// use pattern_core::types::memory_types::{BlockMetadataPatch, BlockType};
+/// use pattern_core::types::memory_types::{BlockMetadataPatch, MemoryBlockType};
 ///
 /// let patch = BlockMetadataPatch::default()
 ///     .pinned(true)
-///     .block_type(BlockType::Working);
+///     .block_type(MemoryBlockType::Working);
 ///
 /// assert_eq!(patch.pinned, Some(true));
 /// assert!(!patch.is_empty());
@@ -235,7 +246,7 @@ pub struct BlockMetadataPatch {
     /// If set, update the block's pinned flag.
     pub pinned: Option<bool>,
     /// If set, change the block's type.
-    pub block_type: Option<BlockType>,
+    pub block_type: Option<MemoryBlockType>,
     /// If set, update the block's schema.
     pub schema: Option<BlockSchema>,
     /// If set, update the block's human-readable description.
@@ -250,7 +261,7 @@ impl BlockMetadataPatch {
     }
 
     /// Set the block type.
-    pub fn block_type(mut self, bt: BlockType) -> Self {
+    pub fn block_type(mut self, bt: MemoryBlockType) -> Self {
         self.block_type = Some(bt);
         self
     }
@@ -321,6 +332,20 @@ pub enum MemoryPermission {
     ReadWrite,
     /// Total control, can delete
     Admin,
+}
+
+impl MemoryPermission {
+    /// Returns the snake_case string representation matching the database format.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read_only",
+            Self::Partner => "partner",
+            Self::Human => "human",
+            Self::Append => "append",
+            Self::ReadWrite => "read_write",
+            Self::Admin => "admin",
+        }
+    }
 }
 
 impl Display for MemoryPermission {
@@ -490,9 +515,9 @@ mod tests {
 
     #[test]
     fn block_filter_by_type() {
-        let f = BlockFilter::by_type("agent-1", BlockType::Core);
+        let f = BlockFilter::by_type("agent-1", MemoryBlockType::Core);
         assert_eq!(f.agent_id.as_deref(), Some("agent-1"));
-        assert_eq!(f.block_type, Some(BlockType::Core));
+        assert_eq!(f.block_type, Some(MemoryBlockType::Core));
         assert!(f.label_prefix.is_none());
     }
 
@@ -516,10 +541,10 @@ mod tests {
     fn patch_builder_chaining() {
         let p = BlockMetadataPatch::default()
             .pinned(true)
-            .block_type(BlockType::Working)
+            .block_type(MemoryBlockType::Working)
             .description("test description");
         assert_eq!(p.pinned, Some(true));
-        assert_eq!(p.block_type, Some(BlockType::Working));
+        assert_eq!(p.block_type, Some(MemoryBlockType::Working));
         assert_eq!(p.description.as_deref(), Some("test description"));
         assert!(p.schema.is_none());
         assert!(!p.is_empty());

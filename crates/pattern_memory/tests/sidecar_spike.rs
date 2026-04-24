@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::BlockCreate;
-use pattern_core::types::memory_types::{BlockSchema, BlockType};
+use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
 use pattern_memory::jj::JjAdapter;
 use pattern_memory::modes::sidecar;
 use pattern_memory::mount::attach;
@@ -355,7 +355,7 @@ fn sidecar_validation_spike() {
         let doc1 = cache
             .create_block(
                 "agent-spike",
-                BlockCreate::new("persona", BlockType::Core, BlockSchema::text()),
+                BlockCreate::new("persona", MemoryBlockType::Core, BlockSchema::text()),
             )
             .expect("create_block persona");
         doc1.set_text("Pattern agent persona.", true)
@@ -368,7 +368,7 @@ fn sidecar_validation_spike() {
         let doc2 = cache
             .create_block(
                 "agent-spike",
-                BlockCreate::new("task_list", BlockType::Working, BlockSchema::text()),
+                BlockCreate::new("task_list", MemoryBlockType::Working, BlockSchema::text()),
             )
             .expect("create_block task_list");
         doc2.set_text("- Task one\n- Task two\n", true)
@@ -381,7 +381,7 @@ fn sidecar_validation_spike() {
         let doc3 = cache
             .create_block(
                 "agent-spike",
-                BlockCreate::new("notes", BlockType::Core, BlockSchema::text()),
+                BlockCreate::new("notes", MemoryBlockType::Core, BlockSchema::text()),
             )
             .expect("create_block notes");
         doc3.set_text("Core notes block.", true)
@@ -426,7 +426,7 @@ fn sidecar_validation_spike() {
         let doc4 = cache
             .create_block(
                 "agent-spike",
-                BlockCreate::new("context", BlockType::Core, BlockSchema::text()),
+                BlockCreate::new("context", MemoryBlockType::Core, BlockSchema::text()),
             )
             .expect("create_block context");
         doc4.set_text("Additional context block.", true)
@@ -439,7 +439,7 @@ fn sidecar_validation_spike() {
         let doc5 = cache
             .create_block(
                 "agent-spike",
-                BlockCreate::new("scratch", BlockType::Working, BlockSchema::text()),
+                BlockCreate::new("scratch", MemoryBlockType::Working, BlockSchema::text()),
             )
             .expect("create_block scratch");
         doc5.set_text("Scratch working memory.", true)

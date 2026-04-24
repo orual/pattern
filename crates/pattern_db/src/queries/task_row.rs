@@ -5,13 +5,11 @@
 //! [`crate::models::Task`] (the user-facing ADHD task model) and
 //! [`crate::models::UserTaskStatus`] (the snake_case user-task status).
 //!
-//! ## Dependency isolation
+//! ## Dependency direction
 //!
-//! `pattern_db` cannot depend on `pattern_core` (circular: `pattern_core`
-//! already depends on `pattern_db`). [`TaskStatus`] defined here mirrors
-//! `pattern_core::types::memory_types::TaskStatus` with identical variants
-//! and the same kebab-case SQLite encoding. The conversion between the two
-//! types is the responsibility of `pattern_memory`, which can see both.
+//! `pattern_db` depends on `pattern_core`. [`TaskStatus`] is imported from
+//! `pattern_core::types::memory_types::TaskStatus` — there is a single
+//! canonical definition.
 //!
 //! ## Column order for SELECT statements
 //!
@@ -31,70 +29,8 @@
 
 use chrono::{DateTime, Utc};
 
-// region: TaskStatus
-
-/// Lifecycle state of a task item stored in the `tasks` block-index table.
-///
-/// Stored in SQLite as a kebab-case TEXT column (e.g. `"pending"`,
-/// `"in-progress"`). This mirrors `pattern_core::types::memory_types::TaskStatus`
-/// variant-for-variant; the conversion is done in `pattern_memory` which can
-/// see both crates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum TaskStatus {
-    /// Task has not been started.
-    Pending,
-    /// Task is actively being worked on.
-    InProgress,
-    /// Task cannot proceed until an external dependency is resolved.
-    Blocked,
-    /// Task finished successfully.
-    Completed,
-    /// Task will not be done.
-    Cancelled,
-}
-
-impl TaskStatus {
-    /// Returns the canonical kebab-case string stored in SQLite.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::InProgress => "in-progress",
-            Self::Blocked => "blocked",
-            Self::Completed => "completed",
-            Self::Cancelled => "cancelled",
-        }
-    }
-}
-
-impl std::str::FromStr for TaskStatus {
-    type Err = UnknownTaskStatusError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "pending" => Ok(Self::Pending),
-            "in-progress" => Ok(Self::InProgress),
-            "blocked" => Ok(Self::Blocked),
-            "completed" => Ok(Self::Completed),
-            "cancelled" => Ok(Self::Cancelled),
-            other => Err(UnknownTaskStatusError(other.to_owned())),
-        }
-    }
-}
-
-/// Error returned when an unknown task status string is read from SQLite.
-#[derive(Debug)]
-pub struct UnknownTaskStatusError(pub String);
-
-impl std::fmt::Display for UnknownTaskStatusError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "unknown task status '{}'", self.0)
-    }
-}
-
-impl std::error::Error for UnknownTaskStatusError {}
-
-// endregion: TaskStatus
+// TaskStatus is now canonical in pattern_core; re-exported here for convenience.
+pub use pattern_core::types::memory_types::{TaskStatus, UnknownTaskStatusError};
 
 // region: TaskRow
 
@@ -186,8 +122,8 @@ impl TaskRow {
 /// `target_block + target_item` indexes rather than storing duplicate rows.
 ///
 /// All fields are plain `String` rather than domain newtypes because
-/// `pattern_db` cannot depend on `pattern_core` (circular dependency).
-/// Callers in `pattern_memory` convert to/from
+/// `BlockHandle` etc. are SmolStr aliases that would add unnecessary
+/// coupling. Callers in `pattern_memory` convert to/from
 /// `pattern_core::types::block::BlockHandle` etc.
 #[derive(Debug, Clone)]
 pub struct TaskEdgeRow {

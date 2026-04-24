@@ -5,7 +5,9 @@
 //! description presence/absence, and the empty-blocks edge case.
 
 use pattern_core::memory::StructuredDocument;
-use pattern_core::types::memory_types::{BlockMetadata, BlockSchema, BlockType, LogEntrySchema};
+use pattern_core::types::memory_types::{
+    BlockMetadata, BlockSchema, LogEntrySchema, MemoryBlockType,
+};
 use pattern_provider::compose::current_state::render_current_state;
 
 // ---- helpers ---------------------------------------------------------------
@@ -26,7 +28,7 @@ fn make_doc(
     label: &str,
     description: &str,
     content: &str,
-    block_type: BlockType,
+    block_type: MemoryBlockType,
     schema: BlockSchema,
 ) -> StructuredDocument {
     let mut metadata = BlockMetadata::standalone(schema);
@@ -78,14 +80,14 @@ fn snapshot_core_and_working_blocks() {
             "persona",
             "The agent's identity and role.",
             "I am Aria, a Pattern executive-function agent.",
-            BlockType::Core,
+            MemoryBlockType::Core,
             BlockSchema::text(),
         ),
         make_doc(
             "scratchpad",
             "Working notes for the current session.",
             "- reviewed PR #42\n- waiting on CI",
-            BlockType::Working,
+            MemoryBlockType::Working,
             BlockSchema::text(),
         ),
     ];
@@ -109,7 +111,7 @@ fn snapshot_log_schema_on_working_tier() {
         "session_log",
         "Recent session activity.",
         "2026-04-19T10:00:00Z: started session\n2026-04-19T10:05:00Z: reviewed memory",
-        BlockType::Working,
+        MemoryBlockType::Working,
         log_schema,
     )];
     let msg = render_current_state(&blocks);
@@ -132,7 +134,7 @@ fn snapshot_log_schema_on_core_tier() {
         "system_log",
         "",
         "2026-04-19T10:00:00Z: system boot",
-        BlockType::Core,
+        MemoryBlockType::Core,
         log_schema,
     )];
     let msg = render_current_state(&blocks);
@@ -148,14 +150,14 @@ fn snapshot_mixed_blocks_with_and_without_description() {
             "human",
             "Information about the partner.",
             "Name: Alex\nPreferences: concise responses",
-            BlockType::Core,
+            MemoryBlockType::Core,
             BlockSchema::text(),
         ),
         make_doc(
             "task_queue",
             "",
             "1. Fix bug #123\n2. Write tests",
-            BlockType::Working,
+            MemoryBlockType::Working,
             BlockSchema::text(),
         ),
     ];

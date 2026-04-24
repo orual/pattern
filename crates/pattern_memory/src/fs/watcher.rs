@@ -340,7 +340,7 @@ mod tests {
     fn watcher_detects_external_edit_md() {
         use pattern_core::traits::MemoryStore;
         use pattern_core::types::block::BlockCreate;
-        use pattern_core::types::memory_types::{BlockSchema, BlockType};
+        use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
         use pattern_db::ConstellationDb;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -378,7 +378,7 @@ mod tests {
         let doc = cache
             .create_block(
                 "agent_1",
-                BlockCreate::new("test", BlockType::Working, BlockSchema::text())
+                BlockCreate::new("test", MemoryBlockType::Working, BlockSchema::text())
                     .with_description("Test block")
                     .with_char_limit(1000),
             )

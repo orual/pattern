@@ -13,9 +13,9 @@ pub mod memory {
     use crate::traits::MemoryStore;
     use crate::types::block::BlockCreate;
     use crate::types::memory_types::{
-        ArchivalEntry, BlockFilter, BlockMetadata, BlockMetadataPatch, BlockSchema, BlockType,
-        MemoryResult, MemorySearchResult, MemorySearchScope, SearchOptions, SharedBlockInfo,
-        UndoRedoDepth, UndoRedoOp,
+        ArchivalEntry, BlockFilter, BlockMetadata, BlockMetadataPatch, BlockSchema,
+        MemoryBlockType, MemoryResult, MemorySearchResult, MemorySearchScope, SearchOptions,
+        SharedBlockInfo, UndoRedoDepth, UndoRedoOp,
     };
 
     /// Configurable mock MemoryStore for testing different block configurations.
@@ -73,12 +73,12 @@ pub mod memory {
         fn list_blocks(&self, filter: BlockFilter) -> MemoryResult<Vec<BlockMetadata>> {
             // Return mock blocks based on type filter if present.
             match filter.block_type {
-                Some(BlockType::Core) => Ok(vec![BlockMetadata {
+                Some(MemoryBlockType::Core) => Ok(vec![BlockMetadata {
                     id: "core-1".to_string(),
                     agent_id: "test-agent".to_string(),
                     label: "core_memory".to_string(),
                     description: "Core agent memory".to_string(),
-                    block_type: BlockType::Core,
+                    block_type: MemoryBlockType::Core,
                     schema: BlockSchema::text(),
                     char_limit: 1000,
                     permission: crate::types::memory_types::MemoryPermission::ReadWrite,
@@ -86,14 +86,14 @@ pub mod memory {
                     created_at: Utc::now(),
                     updated_at: Utc::now(),
                 }]),
-                Some(BlockType::Working) => {
+                Some(MemoryBlockType::Working) => {
                     if self.working_blocks_pinned {
                         Ok(vec![BlockMetadata {
                             id: "working-1".to_string(),
                             agent_id: "test-agent".to_string(),
                             label: "working_memory".to_string(),
                             description: "Working context".to_string(),
-                            block_type: BlockType::Working,
+                            block_type: MemoryBlockType::Working,
                             schema: BlockSchema::text(),
                             char_limit: 2000,
                             permission: crate::types::memory_types::MemoryPermission::ReadWrite,
@@ -108,7 +108,7 @@ pub mod memory {
                                 agent_id: "test-agent".to_string(),
                                 label: "ephemeral_context".to_string(),
                                 description: "Ephemeral context block".to_string(),
-                                block_type: BlockType::Working,
+                                block_type: MemoryBlockType::Working,
                                 schema: BlockSchema::text(),
                                 char_limit: 2000,
                                 permission: crate::types::memory_types::MemoryPermission::ReadWrite,
@@ -121,7 +121,7 @@ pub mod memory {
                                 agent_id: "test-agent".to_string(),
                                 label: "user_profile".to_string(),
                                 description: "User profile block".to_string(),
-                                block_type: BlockType::Working,
+                                block_type: MemoryBlockType::Working,
                                 schema: BlockSchema::text(),
                                 char_limit: 2000,
                                 permission: crate::types::memory_types::MemoryPermission::ReadWrite,
@@ -134,7 +134,7 @@ pub mod memory {
                                 agent_id: "test-agent".to_string(),
                                 label: "pinned_config".to_string(),
                                 description: "Pinned configuration".to_string(),
-                                block_type: BlockType::Working,
+                                block_type: MemoryBlockType::Working,
                                 schema: BlockSchema::text(),
                                 char_limit: 2000,
                                 permission: crate::types::memory_types::MemoryPermission::ReadWrite,

@@ -6,7 +6,7 @@
 use pattern_core::MemoryStore;
 use pattern_core::types::block::BlockCreate;
 use pattern_core::types::memory_types::{
-    BlockFilter, BlockMetadataPatch, BlockSchema, BlockType, IsolatePolicy, MemoryError,
+    BlockFilter, BlockMetadataPatch, BlockSchema, IsolatePolicy, MemoryBlockType, MemoryError,
 };
 use pattern_memory::scope::{MemoryScope, ScopeBinding};
 use pattern_memory::testing::ScopeTestStore;
@@ -175,7 +175,7 @@ fn ac12_6_none_default_write_goes_to_project() {
     let doc = scope
         .create_block(
             "project",
-            BlockCreate::new("task-list", BlockType::Working, BlockSchema::text()),
+            BlockCreate::new("task-list", MemoryBlockType::Working, BlockSchema::text()),
         )
         .expect("write to project should succeed");
 
@@ -209,7 +209,7 @@ fn passthrough_no_project_is_transparent() {
     scope
         .create_block(
             "agent-1",
-            BlockCreate::new("new", BlockType::Core, BlockSchema::text()),
+            BlockCreate::new("new", MemoryBlockType::Core, BlockSchema::text()),
         )
         .expect("passthrough write should succeed");
 }

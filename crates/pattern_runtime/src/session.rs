@@ -826,7 +826,7 @@ fn seed_persona_memory_blocks(
     >,
 ) -> Result<(), RuntimeError> {
     use pattern_core::types::block::BlockCreate;
-    use pattern_core::types::memory_types::{BlockSchema, BlockType, MemoryType};
+    use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType, MemoryType};
 
     for (label, spec) in memory_blocks {
         // shared_id is a planned feature for constellation-level cross-agent
@@ -856,10 +856,10 @@ fn seed_persona_memory_blocks(
         }
 
         let block_type = match spec.memory_type {
-            MemoryType::Core => BlockType::Core,
+            MemoryType::Core => MemoryBlockType::Core,
             // Archival persona specs create Working-tier blocks; true
             // archival storage lives in archival_entries (separate table).
-            MemoryType::Working | MemoryType::Archival => BlockType::Working,
+            MemoryType::Working | MemoryType::Archival => MemoryBlockType::Working,
         };
         let schema = spec.schema.clone().unwrap_or_else(BlockSchema::text);
 
