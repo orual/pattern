@@ -10,14 +10,14 @@
 | AC | Test | Type | File | Notes |
 |----|------|------|------|-------|
 | AC1.1 | `BlockSchema::TaskList` serde round-trip | unit | `crates/pattern_core/src/types/memory_types/schema.rs` tests | Construct variant with all fields, JSON round-trip, assert equality |
-| AC1.2 | Task types exist with documented fields + kebab-case serde | unit | `crates/pattern_core/src/types/memory_types/task.rs` tests | Status enum all-variant round-trip; `BlockRef::from_str` both forms; `TaskItem` JSON round-trip with populated fields |
+| AC1.2 | Task types exist with documented fields + kebab-case serde | unit | `crates/pattern_core/src/types/memory_types/task.rs` tests | Status enum all-variant round-trip; `TaskEdgeRef::from_str` both forms; `TaskItem` JSON round-trip with populated fields |
 | AC1.3 | Proptest TaskList KDL round-trip | property | `crates/pattern_memory/tests/task_list_kdl_roundtrip.rs` | Arbitrary TaskList (0..8 items, edges, comments) -> KDL -> LoroValue; canonical JSON comparison |
-| AC1.4 | BlockRef parses both KDL annotation forms | unit | `crates/pattern_memory/src/fs/kdl.rs` tests (or `kdl_task_list.rs`) | `(block)"handle"` and `(block)"handle#item_id"` both parse to correct `BlockRef` |
-| AC1.5 | Malformed BlockRef produces `KdlConversionError` with span | unit | `crates/pattern_memory/src/fs/kdl.rs` tests | Empty `(block)""`, missing annotation, `"#no-handle"`, `"handle#"` each return typed error with miette `SourceSpan` |
+| AC1.4 | TaskEdgeRef parses both KDL annotation forms | unit | `crates/pattern_memory/src/fs/kdl.rs` tests (or `kdl_task_list.rs`) | `(block)"handle"` and `(block)"handle#item_id"` both parse to correct `TaskEdgeRef` |
+| AC1.5 | Malformed TaskEdgeRef produces `KdlConversionError` with span | unit | `crates/pattern_memory/src/fs/kdl.rs` tests | Empty `(block)""`, missing annotation, `"#no-handle"`, `"handle#"` each return typed error with miette `SourceSpan` |
 | AC1.6 | Empty TaskList + self-edge round-trip | unit + property | `crates/pattern_memory/src/fs/kdl.rs` tests + `crates/pattern_memory/tests/task_list_kdl_roundtrip.rs` | Zero-item list round-trips; self-referential `A.blocks=[A]` round-trips; proptest strategy allows self-edges |
 | AC1.7 | Item reorder preserves ids across round-trip | property | `crates/pattern_memory/tests/task_list_kdl_roundtrip.rs` | `LoroMovableList.mov()` permutations -> KDL -> parse; all original `TaskItemId` values present exactly once |
-| AC1.8 | `TaskItemId::parse("")` -> Empty; `new()` produces valid id | unit | `crates/pattern_core/src/types/memory_types/task_item_id.rs` tests | Empty rejection; `new()` non-empty; serde transparent; JSON deser rejects `""` |
-| AC1.9 | Concurrent `TaskItemId::new()` produces distinct ids | unit | `crates/pattern_core/src/types/memory_types/task_item_id.rs` tests | 32 threads each call `new()`, collect into `HashSet`, assert 32 distinct values |
+| AC1.8 | `new_snowflake_id()` produces non-empty base32 id | unit | `crates/pattern_core/src/types/ids.rs` tests | `TaskItemId = SmolStr` alias per house convention; empty-string rejection lives at `TaskEdgeRef::from_str` wire boundary (see AC1.5) |
+| AC1.9 | Concurrent `new_snowflake_id()` produces distinct ids | unit | `crates/pattern_core/src/types/ids.rs` tests | 32 threads each call `new_snowflake_id()`, collect into `HashSet<SmolStr>`, assert 32 distinct values |
 
 ### AC2: Task block index tables + migration
 
@@ -54,7 +54,7 @@
 | AC4.5 | `unlink(A, B)` removes edge row | integration | `crates/pattern_runtime/src/sdk/handlers/tasks.rs` tests | Link then unlink, assert edge row gone after reconcile |
 | AC4.5b | Cross-block link is atomic (only source doc modified) | integration | `crates/pattern_runtime/src/sdk/handlers/tasks.rs` tests | A in block L1, B in block L2; link; assert only L1's doc version changed |
 | AC4.6 | `add_comment` appends with author + timestamp | integration | `crates/pattern_runtime/src/sdk/handlers/tasks.rs` tests | Add 3 comments, list in order, verify agent id on each |
-| AC4.7 | `update_task` on nonexistent ref -> `TaskNotFound` | unit | `crates/pattern_runtime/src/sdk/handlers/tasks.rs` tests | Bogus `BlockRef` returns `MemoryError::TaskNotFound` |
+| AC4.7 | `update_task` on nonexistent ref -> `TaskNotFound` | unit | `crates/pattern_runtime/src/sdk/handlers/tasks.rs` tests | Bogus `TaskEdgeRef` returns `MemoryError::TaskNotFound` |
 | AC4.8 | `link(A, A)` self-edge allowed | integration | `crates/pattern_runtime/src/sdk/handlers/tasks.rs` tests | Self-link succeeds; edge row has source == target |
 
 ### AC5: `list_tasks` + `query_graph`

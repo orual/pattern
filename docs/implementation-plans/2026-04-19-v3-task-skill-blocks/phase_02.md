@@ -152,10 +152,10 @@ In `task_query.rs`, define (all `#[derive(Clone, Debug, Serialize, Deserialize)]
 - `TaskSpec { subject: String, description: String, active_form: Option<String>, status: Option<TaskStatus>, owner: Option<AgentId>, metadata: serde_json::Value }` — edges NOT set on creation.
 - `TaskPatch { subject: Option<String>, description: Option<String>, active_form: Option<Option<String>>, status: Option<TaskStatus>, owner: Option<Option<AgentId>>, metadata: Option<serde_json::Value> }` — `Option<Option<T>>` pattern allows explicitly clearing a field. (See Phase 3 design-deviations for rationale.)
 - `TaskFilter { status: Option<Vec<TaskStatus>>, owner: Option<AgentId>, has_blockers: Option<bool>, keyword: Option<String> }` with `#[derive(Default)]`.
-- `TaskView { block_ref: BlockRef, subject: String, status: TaskStatus, owner: Option<AgentId>, blocker_count: usize, blocks_count: usize }` — projection for UI/agent consumption.
+- `TaskView { block_ref: TaskEdgeRef, subject: String, status: TaskStatus, owner: Option<AgentId>, blocker_count: usize, blocks_count: usize }` — projection for UI/agent consumption.
 - `GraphQuery { direction: Direction, depth: Option<u32>, max_nodes: Option<u32> }` with sensible defaults (depth=16, max_nodes=1000 resolved at query time).
 - `Direction { Forward, Reverse, Both }` — `#[non_exhaustive]`; serde kebab-case.
-- `GraphSlice { nodes: Vec<BlockRef>, edges: Vec<(BlockRef, BlockRef)>, truncated: bool }`.
+- `GraphSlice { nodes: Vec<TaskEdgeRef>, edges: Vec<(TaskEdgeRef, TaskEdgeRef)>, truncated: bool }`.
 
 **`SearchScope` extension:**
 
@@ -417,11 +417,11 @@ Expose these sync functions (rusqlite is sync; callers wrap in `spawn_blocking`)
 
 - `pub fn upsert_task_row(tx: &Transaction, row: &TaskRow) -> rusqlite::Result<()>` — uses `INSERT OR REPLACE` (or `ON CONFLICT` if the unique key is `(block_handle, task_item_id)`; see Step 2).
 - `pub fn delete_task_row(tx: &Transaction, block: &BlockHandle, item: &TaskItemId) -> rusqlite::Result<usize>` — returns rows affected.
-- `pub fn upsert_task_edges(tx: &Transaction, source_block: &BlockHandle, source_item: &TaskItemId, edges: &[BlockRef]) -> rusqlite::Result<()>` — idempotent: DELETE existing edges for `(source_block, source_item)` then INSERT the new set. Phase 2's reconcile prefers this wholesale replacement to a diff-based approach because it's simpler and the source-side edge count is bounded.
+- `pub fn upsert_task_edges(tx: &Transaction, source_block: &BlockHandle, source_item: &TaskItemId, edges: &[TaskEdgeRef]) -> rusqlite::Result<()>` — idempotent: DELETE existing edges for `(source_block, source_item)` then INSERT the new set. Phase 2's reconcile prefers this wholesale replacement to a diff-based approach because it's simpler and the source-side edge count is bounded.
 - `pub fn delete_task_edges_for_item(tx: &Transaction, block: &BlockHandle, item: &TaskItemId) -> rusqlite::Result<usize>` — deletes all rows where source matches.
 - `pub fn delete_task_edges_targeting(tx: &Transaction, target_block: &BlockHandle, target_item: Option<&TaskItemId>) -> rusqlite::Result<usize>` — for cleanup when a target goes away.
 - `pub fn list_tasks_filtered(conn: &Connection, filter: &TaskFilter) -> rusqlite::Result<Vec<TaskRow>>` — translates `TaskFilter` (defined in Phase 2 Task 1b) into a parameterized SELECT with optional FTS5 join when `keyword` is set.
-- `pub fn query_task_graph_bfs(conn: &Connection, root: &BlockRef, direction: Direction, depth: u32, max_nodes: u32) -> rusqlite::Result<GraphSlice>` — BFS walker with visited-set. `Direction` + `GraphSlice` defined in Phase 2 Task 1b.
+- `pub fn query_task_graph_bfs(conn: &Connection, root: &TaskEdgeRef, direction: Direction, depth: u32, max_nodes: u32) -> rusqlite::Result<GraphSlice>` — BFS walker with visited-set. `Direction` + `GraphSlice` defined in Phase 2 Task 1b.
 
 **Step 2: Unique key on tasks**
 
@@ -462,7 +462,7 @@ jj commit -m "[pattern-db] rewrite queries/task for TaskList block index + FTS5 
 **Implementation:**
 
 Walker outline:
-1. Initialize `visited: HashSet<BlockRef>` with `root`, `frontier: VecDeque<(BlockRef, u32 /*depth*/)>` with `(root, 0)`, `nodes: Vec<BlockRef>` with `root`, `edges: Vec<(BlockRef, BlockRef)>`, `truncated = false`.
+1. Initialize `visited: HashSet<TaskEdgeRef>` with `root`, `frontier: VecDeque<(TaskEdgeRef, u32 /*depth*/)>` with `(root, 0)`, `nodes: Vec<TaskEdgeRef>` with `root`, `edges: Vec<(TaskEdgeRef, TaskEdgeRef)>`, `truncated = false`.
 2. Pop `(current, d)` from frontier. If `d >= max_depth`, skip neighbours. Otherwise, SELECT neighbours:
    - `Direction::Forward` — `SELECT target_block, target_item FROM task_edges WHERE source_block = ? AND source_item = ?` (only item-level sources have outgoing edges).
    - `Direction::Reverse` — `SELECT source_block, source_item FROM task_edges WHERE target_block = ? AND (target_item IS ? OR (target_item IS NULL AND ? IS NULL))` (parameter twice because NULL in SQLite doesn't equate).

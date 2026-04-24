@@ -23,7 +23,7 @@
 - **v3-task-skill-blocks.AC4.5 Success:** `unlink(A, B)` removes the entry from A.blocks in a single loro commit; `task_edges` row deleted by subscriber on next reconcile
 - **v3-task-skill-blocks.AC4.5b Edge:** `link(A, B)` where A and B are in different TaskList blocks is atomic — only A's block is modified, so there's no cross-document commit coordination required
 - **v3-task-skill-blocks.AC4.6 Success:** `add_comment(task, text)` appends `TaskComment { author: current_agent, timestamp: now, text }` to the task's comments list
-- **v3-task-skill-blocks.AC4.7 Failure:** `update_task` on a nonexistent `BlockRef` returns `MemoryError::TaskNotFound` with the offending ref in the error message
+- **v3-task-skill-blocks.AC4.7 Failure:** `update_task` on a nonexistent `TaskEdgeRef` returns `MemoryError::TaskNotFound` with the offending ref in the error message
 - **v3-task-skill-blocks.AC4.8 Edge:** `link(A, A)` (self-edge) is allowed — graph topology is unconstrained in v1
 
 ### v3-task-skill-blocks.AC5: `list_tasks` + `query_graph`
@@ -219,13 +219,13 @@ module Pattern.Tasks where
 
 data Tasks a where
   Create       :: BlockHandle -> Text -> Tasks TaskItemId      -- block, TaskSpec-as-json
-  Update       :: BlockRef    -> Text -> Tasks ()              -- ref, TaskPatch-as-json
-  Transition   :: BlockRef    -> Text -> Tasks ()              -- ref, TaskStatus-as-json
-  Link         :: BlockRef    -> BlockRef -> Tasks ()
-  Unlink       :: BlockRef    -> BlockRef -> Tasks ()
+  Update       :: TaskEdgeRef    -> Text -> Tasks ()              -- ref, TaskPatch-as-json
+  Transition   :: TaskEdgeRef    -> Text -> Tasks ()              -- ref, TaskStatus-as-json
+  Link         :: TaskEdgeRef    -> TaskEdgeRef -> Tasks ()
+  Unlink       :: TaskEdgeRef    -> TaskEdgeRef -> Tasks ()
   List         :: Maybe BlockHandle -> Text -> Tasks Text       -- block, TaskFilter-as-json, returns [TaskView]-as-json
-  QueryGraph   :: BlockRef    -> Text -> Tasks Text             -- root, GraphQuery-as-json, returns GraphSlice-as-json
-  AddComment   :: BlockRef    -> Text -> Tasks ()
+  QueryGraph   :: TaskEdgeRef    -> Text -> Tasks Text             -- root, GraphQuery-as-json, returns GraphSlice-as-json
+  AddComment   :: TaskEdgeRef    -> Text -> Tasks ()
 ```
 
 Provide convenience wrappers mirroring `Pattern.Memory`'s style (e.g., `createTask :: BlockHandle -> TaskSpec -> Eff r TaskItemId` that JSON-encodes on the Haskell side).
@@ -255,10 +255,10 @@ pub enum TasksReq {
     Create(String /* BlockHandle */, String /* TaskSpec JSON */),
 
     #[core(module = "Pattern.Tasks", name = "Update")]
-    Update(String /* BlockRef */, String /* TaskPatch JSON */),
+    Update(String /* TaskEdgeRef */, String /* TaskPatch JSON */),
 
     #[core(module = "Pattern.Tasks", name = "Transition")]
-    Transition(String /* BlockRef */, String /* TaskStatus JSON */),
+    Transition(String /* TaskEdgeRef */, String /* TaskStatus JSON */),
 
     #[core(module = "Pattern.Tasks", name = "Link")]
     Link(String, String),
@@ -270,7 +270,7 @@ pub enum TasksReq {
     List(Option<String>, String /* TaskFilter JSON */),
 
     #[core(module = "Pattern.Tasks", name = "QueryGraph")]
-    QueryGraph(String /* root BlockRef */, String /* GraphQuery JSON */),
+    QueryGraph(String /* root TaskEdgeRef */, String /* GraphQuery JSON */),
 
     #[core(module = "Pattern.Tasks", name = "AddComment")]
     AddComment(String, String),
@@ -335,7 +335,7 @@ jj commit -m "[pattern-runtime] TasksHandler dispatch skeleton"
 
 **Implementation sketch:**
 
-- `handle_create`: fetch the TaskList LoroDoc via `store.get_block(agent_id, block)`; assert schema is TaskList (else error with `NotATaskList`); generate `TaskItemId::new()`; insert a new LoroMap under the `items` LoroMovableList with all TaskSpec fields + derived `created_at` + `updated_at` timestamps (jiff `now()`); commit the LoroDoc; return the new id. Subscriber reconciles the `tasks` row on its own schedule.
+- `handle_create`: fetch the TaskList LoroDoc via `store.get_block(agent_id, block)`; assert schema is TaskList (else error with `NotATaskList`); mint a new `TaskItemId` via `new_snowflake_id()`; insert a new LoroMap under the `items` LoroMovableList with all TaskSpec fields + derived `created_at` + `updated_at` timestamps (jiff `now()`); commit the LoroDoc; return the new id. Subscriber reconciles the `tasks` row on its own schedule.
 - `handle_update`: locate the item by id; apply each `Some(field)` from the patch; set `updated_at`; commit. Return `TaskNotFound` if the item doesn't exist.
 - `handle_transition`: special case of update that only modifies `status`; if new status is `Completed`, also set `completed_at` in metadata (per AC4.3's "if block schema tracks it" — the design leaves this as schema-optional; use a `completed_at` key inside the item's loro map, not a separate DB column).
 - `handle_add_comment`: locate item; append `TaskComment { author: cx.user().agent_id(), timestamp: jiff::Timestamp::now(), text }` to the item's `comments` loro list; commit.
@@ -347,7 +347,7 @@ Tests in `crates/pattern_runtime/src/sdk/handlers/tasks.rs` (or a sibling `tests
 - `update_patches_specified_fields_only`: seed a task, patch `subject`, assert description unchanged, `updated_at` refreshed.
 - `transition_to_completed_sets_completed_at`: transition, then inspect block, assert metadata has `completed_at`.
 - `add_comment_appends`: add three comments, list returns them in order, each with the current agent id.
-- `update_on_missing_ref_returns_task_not_found`: call update with a bogus BlockRef, assert `MemoryError::TaskNotFound`.
+- `update_on_missing_ref_returns_task_not_found`: call update with a bogus TaskEdgeRef, assert `MemoryError::TaskNotFound`.
 
 **Verification:**
 - Run: `cargo nextest run -p pattern-runtime --lib handlers::tasks`
@@ -368,7 +368,7 @@ jj commit -m "[pattern-runtime] implement create/update/transition/add_comment h
 
 **Implementation:**
 
-- `handle_link(source: BlockRef, target: BlockRef)`:
+- `handle_link(source: TaskEdgeRef, target: TaskEdgeRef)`:
   - Fetch source block's LoroDoc; locate item by `source.task_item` (error if source is block-level — edges originate from items only).
   - Append `target` to the item's `blocks` list if not already present (dedup here is optional — Phase 2's upsert is wholesale replacement so duplicates in loro would still collapse in sqlite, but dedup in loro keeps the canonical `.kdl` file tidy).
   - Commit the source's LoroDoc only. Do NOT touch target's doc — this is the single-source-of-truth edge model.
@@ -406,7 +406,7 @@ jj commit -m "[pattern-runtime] implement link/unlink handlers (source-only edge
   - If `block == Some(h)`, scope-check that the block belongs to one of the resolved agents. If not, return `EffectError::PermissionDenied` (existing variant). Then `pattern_db::queries::task::list_tasks_filtered(&conn, &filter.scoped_to_block(h))`.
   - If `block == None`, enumerate via `pattern_db::queries::task::list_tasks_filtered(&conn, &filter.scoped_to_agents(resolved_agents))`. `TaskFilter` gets helper methods `scoped_to_block` / `scoped_to_agents` that embed the scope constraint into the SQL WHERE clause.
   - Project `TaskRow → TaskView` (derive `blocker_count` from `task_edges WHERE target_block+target_item = row.block+row.item`, `blocks_count` from `WHERE source_block+source_item = row.block+row.item`). Batch these counts via two aggregate queries rather than N+1.
-- `handle_query_graph(root: BlockRef, query: GraphQuery)`:
+- `handle_query_graph(root: TaskEdgeRef, query: GraphQuery)`:
   - Scope-check root via resolve_scope as above.
   - Call `pattern_db::queries::task::query_task_graph_bfs(&conn, &root, query.direction, query.depth.unwrap_or(16), query.max_nodes.unwrap_or(1000))`. Returns `GraphSlice`.
 

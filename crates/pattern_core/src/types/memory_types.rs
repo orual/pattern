@@ -9,11 +9,14 @@ mod metadata;
 mod schema;
 mod search;
 mod task;
-mod task_item_id;
 
 pub use core_types::*;
 pub use metadata::*;
 pub use schema::*;
 pub use search::*;
 pub use task::*;
-pub use task_item_id::{TaskItemId, TaskItemIdError};
+
+// `TaskItemId` is a SmolStr alias defined alongside the other id aliases
+// in `crate::types::ids`. Re-exported here for import convenience since
+// it appears on `TaskItem` and `TaskEdgeRef` in this module.
+pub use crate::types::ids::TaskItemId;

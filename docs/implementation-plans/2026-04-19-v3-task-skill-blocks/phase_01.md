@@ -2,7 +2,7 @@
 
 **Goal:** Land the `BlockSchema::TaskList` variant and supporting types, and extend the LoroValue↔KdlDocument converter so TaskList blocks round-trip losslessly through canonical `.kdl` files.
 
-**Architecture:** New `TaskList` variant on the existing `BlockSchema` enum holds task-list-level policy (default owner/status, display cap); per-item `TaskItem` records live in a `LoroMovableList` under each TaskList block's LoroDoc and carry status, owner, typed `BlockRef` edges, metadata, and inline comments. KDL serialization extends the Phase-4-sibling `loro_value_to_kdl` converter with a `task-list` dispatch that emits/parses `item { ... }` children and typed `(block)"..."` entries for `BlockRef`.
+**Architecture:** New `TaskList` variant on the existing `BlockSchema` enum holds task-list-level policy (default owner/status, display cap); per-item `TaskItem` records live in a `LoroMovableList` under each TaskList block's LoroDoc and carry status, owner, typed `TaskEdgeRef` edges, metadata, and inline comments. KDL serialization extends the Phase-4-sibling `loro_value_to_kdl` converter with a `task-list` dispatch that emits/parses `item { ... }` children and typed `(block)"..."` entries for `TaskEdgeRef`.
 
 **Tech Stack:** Rust (pattern_core, pattern_memory), `loro` (LoroMovableList + LoroMap), `kdl` v2, `smol_str`, `ferroid` (base32 Mastodon-style Snowflake IDs via workspace `new_snowflake_id()`), `jiff`, `proptest`, `cargo nextest`.
 
@@ -19,20 +19,24 @@ This phase implements and tests:
 ### v3-task-skill-blocks.AC1: TaskList schema + KDL round-trip
 
 - **v3-task-skill-blocks.AC1.1 Success:** `BlockSchema::TaskList { default_owner, default_status, display_limit }` exists and is exported from `pattern_core::types::memory_types`
-- **v3-task-skill-blocks.AC1.2 Success:** `TaskItem`, `TaskStatus`, `TaskComment`, `BlockRef`, `TaskItemId` types exist with documented fields
+- **v3-task-skill-blocks.AC1.2 Success:** `TaskItem`, `TaskStatus`, `TaskComment`, `TaskEdgeRef`, `TaskItemId` types exist with documented fields
 - **v3-task-skill-blocks.AC1.3 Success:** Property test (proptest) confirms round-trip equivalence: generate arbitrary TaskList with nested items + edges + comments → serialize to KDL → parse back → LoroValue matches original
-- **v3-task-skill-blocks.AC1.4 Success:** BlockRef parses both `(block)"<handle>"` and `(block)"<handle>#<item_id>"` forms
-- **v3-task-skill-blocks.AC1.5 Failure:** Malformed BlockRef annotation (e.g., `(block)""` or missing typed annotation) produces `KdlConversionError` with file:line reference
+- **v3-task-skill-blocks.AC1.4 Success:** TaskEdgeRef parses both `(block)"<handle>"` and `(block)"<handle>#<item_id>"` forms
+- **v3-task-skill-blocks.AC1.5 Failure:** Malformed TaskEdgeRef annotation (e.g., `(block)""` or missing typed annotation) produces `KdlConversionError` with file:line reference
 - **v3-task-skill-blocks.AC1.6 Edge:** Empty TaskList (zero items) round-trips cleanly; self-referential edge (`A.blocks = [A]`) round-trips cleanly
 - **v3-task-skill-blocks.AC1.7 Edge:** Item reordering via `LoroMovableList` preserves item ids across round-trip
-- **v3-task-skill-blocks.AC1.8 Success:** `TaskItemId::parse("")` returns `TaskItemIdError::Empty`; `TaskItemId::new()` produces a valid Snowflake string (base32-encoded Mastodon-style via `new_snowflake_id`)
-- **v3-task-skill-blocks.AC1.9 Success:** Two concurrent agents calling `TaskItemId::new()` produce distinct ids (Snowflake collision-resistant by construction)
+- **v3-task-skill-blocks.AC1.8 Success:** `new_snowflake_id()` produces a non-empty base32-encoded Mastodon-style Snowflake string usable directly as a `TaskItemId` (which is a `SmolStr` alias per house convention)
+- **v3-task-skill-blocks.AC1.9 Success:** 32 concurrent threads calling `new_snowflake_id()` produce 32 distinct ids (ferroid `AtomicSnowflakeGenerator` collision-resistant by construction)
 
 ---
 
 ## Design deviations recorded during planning
 
-- **Snowflake, not UUID v7:** the design plan text says "UUID v7 as base32 string" but the workspace's time-ordered ID infrastructure is ferroid-backed `SnowflakeMastodonId` (exported as `pattern_core::types::ids::new_snowflake_id() -> SmolStr`, base32-encoded, lexicographically sortable). This is the existing house convention for any ID that must order turns/batches/messages. `TaskItemId::new()` delegates to `new_snowflake_id()`. The design's "UUID v7" wording is treated as imprecise — no new UUID generator is introduced. AC1.9 (collision resistance across concurrent multi-agent creates) is satisfied by ferroid's `AtomicSnowflakeGenerator<_, MonotonicClock>` under the existing global `MESSAGE_POSITION_GENERATOR` (verified in `crates/pattern_core/src/utils.rs`).
+- **Snowflake, not UUID v7:** the design plan text says "UUID v7 as base32 string" but the workspace's time-ordered ID infrastructure is ferroid-backed `SnowflakeMastodonId` (exported as `pattern_core::types::ids::new_snowflake_id() -> SmolStr`, base32-encoded, lexicographically sortable). This is the existing house convention. Call sites mint a `TaskItemId` by calling `new_snowflake_id()` directly. The design's "UUID v7" wording is treated as imprecise — no new UUID generator is introduced. AC1.9 is satisfied by ferroid's `AtomicSnowflakeGenerator<_, MonotonicClock>` (verified in `crates/pattern_core/src/utils.rs`).
+
+- **`TaskItemId` is a `SmolStr` type alias, not a newtype** (locked 2026-04-23 during Task 4 execution). House convention: every ID alias in `pattern_core::types::ids` is a `pub type FooId = SmolStr;` with no validation or newtype ceremony — documented in `ids.rs:3-10` ("Type aliases preserve naming for signature clarity without newtype ceremony; there is no compile-time distinction between kinds. When a distinct type is genuinely useful (rare, e.g. validation-bearing atproto identifiers), wrap explicitly at the site that needs it."). `TaskItemId` has no validation-bearing behaviour that the site-level wire parsers don't already provide. Empty-string rejection happens at `TaskEdgeRef::from_str` (which catches the `"handle#"` and `"#id"` failure paths), not at the id alias itself. Removes ~220 lines of newtype ceremony that the original plan specified (manual Serialize/Deserialize impls, `TaskItemIdError`, `parse` / `new` / `as_str` / `FromStr` / `Display` impls, 13 tests) — all were re-implementing `SmolStr`'s native behaviour.
+
+- **`TaskEdgeRef` rename** (locked 2026-04-23 during Task 5 execution). The original plan named the task-graph edge type `BlockRef`, but `pattern_core::types::block_ref::BlockRef` already exists for a different purpose (context-loading references: `{ label, block_id, agent_id }`). That type is load-bearing across ~6 consumer files in `pattern_core` and `pattern_runtime`. Renaming the new task-graph type avoids the collision. `TaskEdgeRef` is explicit about its role (task dependency graph) and the KDL wire format (`(block)"handle"` typed annotation) is unchanged — only the Rust type name differs.
 - **Sibling-plan prerequisites (must land before Phase 1 executes):**
   - `v3-memory-rework` Phase 1 relocates `BlockSchema` to `pattern_core::types::memory_types::schema` and applies `#[non_exhaustive]`.
   - `v3-memory-rework` Phase 4 creates `crates/pattern_memory/src/fs/kdl.rs` exposing `loro_value_to_kdl(&LoroValue) -> Result<KdlDocument, KdlConversionError>` and its inverse, plus the `KdlConversionError` error type. This plan extends that module; it does NOT create it.
@@ -84,7 +88,7 @@ Run:
 rg -n 'impl FromStr for BlockHandle|impl From<.*> for BlockHandle|pub fn new.*BlockHandle' crates/pattern_core/src
 ```
 
-Expected: either a `FromStr` / `From<&str>` impl OR a `BlockHandle::new(s: impl Into<SmolStr>)` constructor exists. Record the signature — Task 5's `BlockRef::from_str` uses it.
+Expected: either a `FromStr` / `From<&str>` impl OR a `BlockHandle::new(s: impl Into<SmolStr>)` constructor exists. Record the signature — Task 5's `TaskEdgeRef::from_str` uses it.
 
 If neither form is available, the implementor must add `impl From<&str> for BlockHandle` in `crates/pattern_core/src/types/block.rs` as a sub-step before Task 5. Stays in scope for Phase 1.
 
@@ -139,46 +143,56 @@ Save the list to a scratch file: `target/plan-phase1-blockschema-sites.txt`. Thi
 <!-- START_SUBCOMPONENT_B (tasks 4-6) -->
 ### Subcomponent B: Core task types
 
-Functionality tasks. Introduces `TaskItemId`, `TaskStatus`, `TaskComment`, `BlockRef`, `TaskItem`.
+Functionality tasks. Introduces `TaskItemId`, `TaskStatus`, `TaskComment`, `TaskEdgeRef`, `TaskItem`.
 
 <!-- START_TASK_4 -->
-### Task 4: `TaskItemId` newtype with Snowflake generation
+### Task 4: `TaskItemId` type alias + Snowflake generator tests
 
 **Verifies:** v3-task-skill-blocks.AC1.8, v3-task-skill-blocks.AC1.9.
 
+**Scope-correction note (2026-04-23):** The original plan specified `TaskItemId` as a newtype wrapping `SmolStr` with a dedicated module, error enum, `new` / `parse` / `as_str` / `FromStr` / `Display` impls, manual serde, and 13 tests. That violated the house convention documented in `crates/pattern_core/src/types/ids.rs:3-10`: every identifier is a `pub type FooId = SmolStr;` alias unless validation is genuinely needed, and none of the newtype ceremony was load-bearing. Empty-string rejection at the id level is redundant — it's already enforced at the wire boundary that sees external data (`TaskEdgeRef::from_str` in Task 5). Task re-scoped to a one-line alias addition + two tests on `new_snowflake_id()`.
+
 **Files:**
-- Create: `crates/pattern_core/src/types/memory_types/task_item_id.rs`
-- Modify: `crates/pattern_core/src/types/memory_types/mod.rs` (add `mod task_item_id;` + `pub use task_item_id::{TaskItemId, TaskItemIdError};`)
-- Test: same file (unit tests at bottom — follow `pattern_core` convention for inline `#[cfg(test)] mod tests`).
+- Modify: `crates/pattern_core/src/types/ids.rs` — add `pub type TaskItemId = SmolStr;` next to the other id aliases, with a brief doc comment noting it's minted via `new_snowflake_id()`.
+- Modify: `crates/pattern_core/src/types/memory_types.rs` — re-export `pub use crate::types::ids::TaskItemId;` so downstream `use pattern_core::types::memory_types::TaskItemId;` continues to resolve.
 
 **Implementation:**
 
-- `TaskItemId(SmolStr)` newtype, `#[derive(Clone, Debug, PartialEq, Eq, Hash)]`. Implement `Display` (prints the wrapped string) and `FromStr` (delegates to `parse`).
-- `pub fn new() -> Self { Self(crate::types::ids::new_snowflake_id()) }` — delegates to the workspace's existing ferroid-backed generator. This yields a base32-encoded Mastodon-style Snowflake; lexicographically sortable; collision-resistant across concurrent multi-agent creates via `AtomicSnowflakeGenerator<_, MonotonicClock>`.
-- `pub fn parse(s: &str) -> Result<Self, TaskItemIdError>` rejects empty strings with `TaskItemIdError::Empty`; otherwise wraps. Do NOT validate Snowflake shape at parse — tolerates externally supplied ids (including short synthetic ids used in fixtures) as long as they're non-empty.
-- `pub fn as_str(&self) -> &str` returns the inner SmolStr's `&str`.
-- Serde: derive `Serialize` / `Deserialize` as transparent string (use `serde(transparent)` on the struct or a manual impl that reuses `parse`). Deserialize must reject empty strings via `TaskItemIdError::Empty` surfaced as `serde::de::Error`.
-- Error type: `#[non_exhaustive] pub enum TaskItemIdError` with at minimum an `Empty` variant. Use `thiserror::Error`.
+```rust
+// In crates/pattern_core/src/types/ids.rs, alongside the other aliases:
+
+/// A task item identifier — unique within its parent TaskList block.
+///
+/// Minted via [`new_snowflake_id`] for lexicographic time-ordering;
+/// any non-empty string is also acceptable (used in test fixtures and
+/// in agent-supplied references via wire formats like `TaskEdgeRef`).
+/// Empty-string validation lives at the wire boundaries that see
+/// external data (see `TaskEdgeRef::from_str`), not on this alias.
+pub type TaskItemId = SmolStr;
+```
+
+No `new()`, no `parse()`, no error enum, no manual serde. Callers mint ids by calling `new_snowflake_id()` directly.
 
 **Testing:**
 
-Tests in the same file verify:
-- `v3-task-skill-blocks.AC1.8`: `TaskItemId::parse("")` returns `Err(TaskItemIdError::Empty)`; `TaskItemId::new()` produces a non-empty string that round-trips through `parse`.
-- `v3-task-skill-blocks.AC1.9`: spawning 32 threads that each call `TaskItemId::new()` once and collect into a `HashSet` yields 32 distinct values. (Thread spawn + join is sufficient — the underlying ferroid `AtomicSnowflakeGenerator` already handles concurrent-access collision resistance via atomic counter bumps within the same millisecond.)
-- Serde transparent behaviour: `serde_json::to_string(&id)` produces a quoted string; deserialization rejects `""`.
+Add to the existing `#[cfg(test)] mod tests` block in `ids.rs`:
+- `new_snowflake_id_is_non_empty`: `assert!(!new_snowflake_id().is_empty())`. Verifies AC1.8.
+- `new_snowflake_id_is_collision_resistant_concurrently`: spawn 32 threads that each call `new_snowflake_id()`, collect results into `HashSet<SmolStr>`, assert length is 32. Verifies AC1.9.
+
+Downstream integration coverage: Task 5's `TaskEdgeRef::from_str` tests exercise empty-handle and empty-item-id rejection, covering the wire-level validation AC1.5 references.
 
 **Verification:**
-- Run: `cargo nextest run -p pattern-core --lib task_item_id`
-- Expected: all task_item_id tests pass.
+- Run: `cargo nextest run -p pattern-core --lib types::ids`
+- Expected: 2 new tests pass alongside the existing `new_id_*` tests.
 
 **Commit:**
 ```
-jj commit -m "[pattern-core] add TaskItemId newtype using snowflake generator"
+jj commit -m "[pattern-core] add TaskItemId alias + snowflake generator tests"
 ```
 <!-- END_TASK_4 -->
 
 <!-- START_TASK_5 -->
-### Task 5: `TaskStatus`, `TaskComment`, `BlockRef`, `TaskItem` types
+### Task 5: `TaskStatus`, `TaskComment`, `TaskEdgeRef`, `TaskItem` types
 
 **Verifies:** v3-task-skill-blocks.AC1.2.
 
@@ -192,9 +206,9 @@ jj commit -m "[pattern-core] add TaskItemId newtype using snowflake generator"
 
 2. `TaskComment { author: AgentId, timestamp: Timestamp, text: String }` — standard derives plus `Serialize`/`Deserialize`. `Timestamp` is `jiff::Timestamp`.
 
-3. `BlockRef { block: BlockHandle, task_item: Option<TaskItemId> }` with:
+3. `TaskEdgeRef { block: BlockHandle, task_item: Option<TaskItemId> }` with:
    - `Display` impl that emits `"<handle>"` when `task_item` is `None`, `"<handle>#<item_id>"` otherwise.
-   - `FromStr` impl that parses both forms; empty handle or empty item-id chunk returns `BlockRefParseError`. Use `#[non_exhaustive]` on the error enum; variants at minimum `EmptyHandle`, `EmptyItemId`.
+   - `FromStr` impl that parses both forms; empty handle or empty item-id chunk returns `TaskEdgeRefParseError`. Use `#[non_exhaustive]` on the error enum; variants at minimum `EmptyHandle`, `EmptyItemId`.
    - Serde: derive struct-form serde so JSON representation is `{"block": "...", "task_item": null or "..."}`. KDL encoding is handled separately in Task 9 — serde and KDL are distinct surfaces.
 
 4. `TaskItem` struct — fields exactly as the design specifies:
@@ -204,7 +218,7 @@ jj commit -m "[pattern-core] add TaskItemId newtype using snowflake generator"
    - `pub active_form: Option<String>`
    - `pub status: TaskStatus`
    - `pub owner: Option<AgentId>`
-   - `pub blocks: Vec<BlockRef>` — outgoing edges only (see design's "Single-source-of-truth edge model"); there is no `blocked_by` field.
+   - `pub blocks: Vec<TaskEdgeRef>` — outgoing edges only (see design's "Single-source-of-truth edge model"); there is no `blocked_by` field.
    - `pub metadata: serde_json::Value` (freeform JSON).
    - `pub comments: Vec<TaskComment>` (append-mostly; no dedup).
    - `pub created_at: Timestamp`
@@ -214,10 +228,10 @@ jj commit -m "[pattern-core] add TaskItemId newtype using snowflake generator"
 **Testing:**
 
 - Unit tests in `task.rs` confirm kebab-case status serialization round-trip for every variant.
-- `BlockRef::from_str("handle")` yields `BlockRef { block: ..., task_item: None }`.
-- `BlockRef::from_str("handle#id")` yields the item form.
-- `BlockRef::from_str("")`, `"#id"`, `"handle#"` each return `Err`.
-- `BlockRef::to_string().parse()` round-trips for both forms.
+- `TaskEdgeRef::from_str("handle")` yields `TaskEdgeRef { block: ..., task_item: None }`.
+- `TaskEdgeRef::from_str("handle#id")` yields the item form.
+- `TaskEdgeRef::from_str("")`, `"#id"`, `"handle#"` each return `Err`.
+- `TaskEdgeRef::to_string().parse()` round-trips for both forms.
 
 **Verification:**
 - Run: `cargo nextest run -p pattern-core --lib types::memory_types::task`
@@ -225,7 +239,7 @@ jj commit -m "[pattern-core] add TaskItemId newtype using snowflake generator"
 
 **Commit:**
 ```
-jj commit -m "[pattern-core] add TaskItem, TaskStatus, TaskComment, BlockRef types"
+jj commit -m "[pattern-core] add TaskItem, TaskStatus, TaskComment, TaskEdgeRef types"
 ```
 <!-- END_TASK_5 -->
 
@@ -240,9 +254,9 @@ jj commit -m "[pattern-core] add TaskItem, TaskStatus, TaskComment, BlockRef typ
 **Implementation:**
 
 Add tests that cover the cross-type contract:
-- `TaskItem` JSON round-trip via `serde_json` — construct an instance with all fields populated including a BlockRef vector containing both block-level and item-level refs, encode, decode, assert equality.
+- `TaskItem` JSON round-trip via `serde_json` — construct an instance with all fields populated including a TaskEdgeRef vector containing both block-level and item-level refs, encode, decode, assert equality.
 - `TaskItem` with empty `blocks` and empty `comments` vectors round-trips cleanly.
-- `TaskItem` with a self-edge (an item whose `blocks` contains a `BlockRef` pointing at its own `TaskItemId` inside its own block) round-trips cleanly. This anchors AC1.6.
+- `TaskItem` with a self-edge (an item whose `blocks` contains a `TaskEdgeRef` pointing at its own `TaskItemId` inside its own block) round-trips cleanly. This anchors AC1.6.
 - `TaskComment` with multiline text and UTF-8 (emoji, combining marks) round-trips.
 
 **Verification:**
@@ -405,12 +419,12 @@ jj commit -m "[pattern-core] wire BlockSchema::TaskList into document.rs dispatc
 <!-- START_TASK_9 -->
 ### Task 9: Extend KDL converter with `task-list` dispatch + wire `pattern_memory` consumers
 
-**Verifies:** v3-task-skill-blocks.AC1.4 (BlockRef parse, both forms), v3-task-skill-blocks.AC1.6 (empty TaskList + self-edge canonical form). Also completes the AC1.1 wiring started in Task 8 (the 2 `pattern_memory` exhaustive match sites).
+**Verifies:** v3-task-skill-blocks.AC1.4 (TaskEdgeRef parse, both forms), v3-task-skill-blocks.AC1.6 (empty TaskList + self-edge canonical form). Also completes the AC1.1 wiring started in Task 8 (the 2 `pattern_memory` exhaustive match sites).
 
 **Scope note (2026-04-23):** Extends the original plan to include the 2 `pattern_memory` exhaustive match sites (`worker.rs:45` and `cache.rs:791` inner closure plus `cache.rs:1280` catch-all turned into explicit arm) that depend on the new `TopShape::TaskList` variant. Landing the variant and its consumers in one atomic commit avoids the stub pattern (the guidance explicitly forbids stubs — any intermediate "TaskList handled with a todo!()" commit would violate it).
 
 **Files:**
-- Modify: `crates/pattern_memory/src/fs/kdl.rs` — extend `TopShape` enum with a `TaskList` variant; extend `loro_value_to_kdl` + `kdl_to_loro_value` match arms to delegate to the new module; extend `KdlConversionError` enum with `BlockRef { span, source }` and `MissingBlockAnnotation { span }` variants.
+- Modify: `crates/pattern_memory/src/fs/kdl.rs` — extend `TopShape` enum with a `TaskList` variant; extend `loro_value_to_kdl` + `kdl_to_loro_value` match arms to delegate to the new module; extend `KdlConversionError` enum with `TaskEdgeRef { span, source }` and `MissingBlockAnnotation { span }` variants.
 - Create: `crates/pattern_memory/src/fs/kdl_task_list.rs` — new sibling module exposing `pub(super) fn task_list_to_kdl(value: &LoroValue) -> Result<KdlDocument, KdlConversionError>` and `pub(super) fn kdl_to_task_list(doc: &KdlDocument) -> Result<LoroValue, KdlConversionError>`. Task-list-specific encoding/decoding lives here (item nodes, typed `(block)` annotations, metadata/comments).
 - Modify: `crates/pattern_memory/src/fs/mod.rs` — add `mod kdl_task_list;` (or wherever `mod kdl;` is declared).
 - Modify: `crates/pattern_memory/src/subscriber/worker.rs` (~line 45) — add `BlockSchema::TaskList { .. } => { ... }` arm in `render_canonical_from_disk_doc`. The body extracts the `items` movable list from `disk_doc.get_deep_value()`, wraps it in a `LoroValue::Map` with `{"schema": "task-list", "items": List(...), ...}` discriminator shape, calls `loro_value_to_kdl(&value, TopShape::TaskList)`, and returns `("kdl", bytes)`.
@@ -441,7 +455,7 @@ Forward (`LoroValue → KdlDocument`):
 Reverse (`KdlDocument → LoroValue`):
 - Caller passes `TopShape::TaskList`; `kdl_to_loro_value` dispatches to `kdl_task_list::kdl_to_task_list(doc)`.
 - Read entries and produce the `schema: "task-list"` discriminator map with `items` list populated from child `item` nodes.
-- For typed `(block)"..."` entries inside `blocks` nodes: call `BlockRef::from_str` on the string value. On error, propagate as `KdlConversionError::BlockRef { span, source }`. `KdlConversionError` is already `#[non_exhaustive]`; add the new variants carrying the kdl `miette::SourceSpan` and the underlying `BlockRefParseError`. Preserve the KDL span so error messages include file:line.
+- For typed `(block)"..."` entries inside `blocks` nodes: call `TaskEdgeRef::from_str` on the string value. On error, propagate as `KdlConversionError::TaskEdgeRef { span, source }`. `KdlConversionError` is already `#[non_exhaustive]`; add the new variants carrying the kdl `miette::SourceSpan` and the underlying `TaskEdgeRefParseError`. Preserve the KDL span so error messages include file:line.
 - On a non-typed entry inside `blocks` (plain string without the `(block)` annotation), return `KdlConversionError::MissingBlockAnnotation { span }`.
 
 **Testing:**
@@ -494,8 +508,8 @@ Define a bounded `Strategy` for `TaskItem`:
 - `owner`: optional `AgentId` (use the workspace's existing `AgentId` strategy if defined; otherwise a simple "@[a-z]{3,12}" regex strategy).
 - `metadata`: bounded `serde_json::Value` strategy — use `prop_recursive` with depth ≤ 2, branch factor ≤ 4, leaf = number/string/bool/null.
 - `comments`: `Vec<TaskComment>`, length 0..=3.
-- `blocks`: `Vec<BlockRef>`, length 0..=5, elements drawn from a small pool of synthetic `BlockHandle`s + optional item ids. **Allow self-referential edges** (do not forbid an item from referring to itself in its blocks list) — AC1.6 requires this.
-- `id`: from `TaskItemId::new()` at the strategy level (not generated from a shrinkable space — proptest shrinking on random time-ordered snowflakes is unhelpful, and we want the id comparison in round-trip to be stable).
+- `blocks`: `Vec<TaskEdgeRef>`, length 0..=5, elements drawn from a small pool of synthetic `BlockHandle`s + optional item ids. **Allow self-referential edges** (do not forbid an item from referring to itself in its blocks list) — AC1.6 requires this.
+- `id`: minted by `new_snowflake_id()` at the strategy level (not generated from a shrinkable space — proptest shrinking on random time-ordered snowflakes is unhelpful, and we want the id comparison in round-trip to be stable).
 - `created_at`, `updated_at`: fixed reference timestamps (skipping time-shrink complexity; the KDL converter treats them as opaque strings).
 
 Define a bounded `Strategy` for `TaskList`-shaped LoroValue:
@@ -518,7 +532,7 @@ jj commit -m "[pattern-memory] proptest TaskList ↔ KDL round-trip + reorder pr
 <!-- END_TASK_10 -->
 
 <!-- START_TASK_11 -->
-### Task 11: BlockRef error-path tests in KDL parsing
+### Task 11: TaskEdgeRef error-path tests in KDL parsing
 
 **Verifies:** v3-task-skill-blocks.AC1.5.
 
@@ -528,10 +542,10 @@ jj commit -m "[pattern-memory] proptest TaskList ↔ KDL round-trip + reorder pr
 **Implementation:**
 
 Add unit tests (not proptest — these are deterministic failure assertions):
-- Input KDL with `blocks (block)""` — parser returns `Err(KdlConversionError::BlockRef { span, .. })` and the `span` points at the offending entry. Assert the error's `Display` includes a file-like marker (line/column) using `miette::SourceSpan` → `miette::Report` formatting.
+- Input KDL with `blocks (block)""` — parser returns `Err(KdlConversionError::TaskEdgeRef { span, .. })` and the `span` points at the offending entry. Assert the error's `Display` includes a file-like marker (line/column) using `miette::SourceSpan` → `miette::Report` formatting.
 - Input KDL with `blocks "handle-without-annotation"` (plain string, missing the `(block)` typed annotation) — parser returns `Err(KdlConversionError::MissingBlockAnnotation { span })`.
-- Input KDL with `blocks (block)"#no-handle-before-hash"` — returns `Err(KdlConversionError::BlockRef { source: BlockRefParseError::EmptyHandle, .. })`.
-- Input KDL with `blocks (block)"handle#"` — returns `Err(... BlockRefParseError::EmptyItemId ...)`.
+- Input KDL with `blocks (block)"#no-handle-before-hash"` — returns `Err(KdlConversionError::TaskEdgeRef { source: TaskEdgeRefParseError::EmptyHandle, .. })`.
+- Input KDL with `blocks (block)"handle#"` — returns `Err(... TaskEdgeRefParseError::EmptyItemId ...)`.
 
 **Testing:**
 
@@ -540,7 +554,7 @@ Add unit tests (not proptest — these are deterministic failure assertions):
 
 **Commit:**
 ```
-jj commit -m "[pattern-memory] test BlockRef KDL error paths (empty, missing annotation)"
+jj commit -m "[pattern-memory] test TaskEdgeRef KDL error paths (empty, missing annotation)"
 ```
 <!-- END_TASK_11 -->
 <!-- END_SUBCOMPONENT_D -->

@@ -69,6 +69,15 @@ pub type RelationId = SmolStr;
 /// A task identifier.
 pub type TaskId = SmolStr;
 
+/// A task item identifier — unique within its parent TaskList block.
+///
+/// Minted via [`new_snowflake_id`] for lexicographic time-ordering; any
+/// non-empty string is also acceptable (used in test fixtures and in
+/// agent-supplied references via wire formats like `TaskEdgeRef`).
+/// Empty-string validation lives at the wire boundaries that see external
+/// data (see `TaskEdgeRef::from_str`), not on this alias.
+pub type TaskItemId = SmolStr;
+
 /// A tool-call identifier — ties a tool invocation to its response.
 pub type ToolCallId = SmolStr;
 
@@ -152,5 +161,30 @@ mod tests {
         let a = new_id();
         let b = new_id();
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn new_snowflake_id_is_non_empty() {
+        let id = new_snowflake_id();
+        assert!(!id.is_empty());
+    }
+
+    /// AC1.9 (v3-task-skill-blocks): 32 concurrent calls to `new_snowflake_id`
+    /// produce 32 distinct ids — proves collision resistance under concurrent
+    /// multi-agent creates via the ferroid `AtomicSnowflakeGenerator`.
+    #[test]
+    fn new_snowflake_id_is_collision_resistant_concurrently() {
+        use std::{collections::HashSet, thread};
+
+        let handles: Vec<_> = (0..32).map(|_| thread::spawn(new_snowflake_id)).collect();
+        let ids: HashSet<SmolStr> = handles
+            .into_iter()
+            .map(|h| h.join().expect("thread must not panic"))
+            .collect();
+        assert_eq!(
+            ids.len(),
+            32,
+            "32 concurrent new_snowflake_id() calls must produce 32 distinct ids"
+        );
     }
 }
