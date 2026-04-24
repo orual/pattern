@@ -15,8 +15,9 @@ use crate::sdk::requests::tasks::TasksReq;
 use crate::session::SessionContext;
 
 /// Handler position in the canonical [`crate::sdk::bundle::SdkBundle`]
-/// HList. Tasks handler will be tag 14 (after DiagnosticsHandler at tag 13).
-const TASKS_HANDLER_TAG: u32 = 14;
+/// HList. Final tag is assigned in Phase 3 Task 10 when TasksHandler is
+/// inserted into the HList (storage-adjacent, near Memory/Search/Recall).
+const TASKS_HANDLER_TAG: u32 = u32::MAX;
 
 /// Handler for `Pattern.Tasks`.
 ///
@@ -67,7 +68,16 @@ impl DescribeEffect for TasksHandler {
                 "type GraphQuery = Text",
                 "type GraphSlice = Text",
             ],
-            helpers: &[],
+            helpers: &[
+                "create :: Member Tasks effs => BlockHandle -> TaskSpec -> Eff effs TaskItemId\ncreate block spec = send (Create block spec)",
+                "update :: Member Tasks effs => TaskEdgeRef -> TaskPatch -> Eff effs ()\nupdate ref patch = send (Update ref patch)",
+                "transition :: Member Tasks effs => TaskEdgeRef -> TaskStatus -> Eff effs ()\ntransition ref status = send (Transition ref status)",
+                "link :: Member Tasks effs => TaskEdgeRef -> TaskEdgeRef -> Eff effs ()\nlink src tgt = send (Link src tgt)",
+                "unlink :: Member Tasks effs => TaskEdgeRef -> TaskEdgeRef -> Eff effs ()\nunlink src tgt = send (Unlink src tgt)",
+                "list :: Member Tasks effs => Maybe BlockHandle -> TaskFilter -> Eff effs [TaskView]\nlist block filt = send (List block filt)",
+                "queryGraph :: Member Tasks effs => TaskEdgeRef -> GraphQuery -> Eff effs GraphSlice\nqueryGraph root query = send (QueryGraph root query)",
+                "addComment :: Member Tasks effs => TaskEdgeRef -> Text -> Eff effs ()\naddComment ref txt = send (AddComment ref txt)",
+            ],
         }
     }
 }

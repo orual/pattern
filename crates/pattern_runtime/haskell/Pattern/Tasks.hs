@@ -54,8 +54,10 @@ type TaskStatus = Text
 -- keyword).  Use @\"{}\"@ for an unfiltered list.
 type TaskFilter = Text
 
--- | JSON-encoded list of 'TaskView' records returned by 'List'.
-type TaskViewList = Text
+-- | JSON-encoded 'TaskView' record returned as an element of the 'List'
+-- result.  Each 'TaskView' is opaque 'Text'; agents decode individually
+-- via @Pattern.Aeson@.
+type TaskView = Text
 
 -- | JSON-encoded graph-query parameters (fields: direction, depth,
 -- max_nodes).  'direction' is one of @\"Forward\"@, @\"Reverse\"@,
@@ -93,10 +95,10 @@ data Tasks a where
   Unlink     :: TaskEdgeRef  -> TaskEdgeRef -> Tasks ()
   -- ^ Remove a directed dependency edge.  No-op if the edge does not
   -- exist.
-  List       :: Maybe BlockHandle -> TaskFilter -> Tasks TaskViewList
+  List       :: Maybe BlockHandle -> TaskFilter -> Tasks [TaskView]
   -- ^ List tasks.  Pass 'Nothing' to enumerate tasks across all
-  -- scope-visible TaskList blocks.  Returns a JSON-encoded
-  -- @[TaskView]@.
+  -- scope-visible TaskList blocks.  Returns a list of JSON-encoded
+  -- 'TaskView' records.
   QueryGraph :: TaskEdgeRef  -> GraphQuery -> Tasks GraphSlice
   -- ^ BFS traversal of the task dependency graph from the given root.
   -- Returns a JSON-encoded 'GraphSlice'.
@@ -131,7 +133,7 @@ unlink src tgt = send (Unlink src tgt)
 -- | List tasks.  Pass 'Nothing' for @block@ to search all
 -- scope-visible TaskList blocks.  Pass @\"{}\"@ for @filter@ to return
 -- all tasks without filtering.
-list :: Member Tasks effs => Maybe BlockHandle -> TaskFilter -> Eff effs TaskViewList
+list :: Member Tasks effs => Maybe BlockHandle -> TaskFilter -> Eff effs [TaskView]
 list block filt = send (List block filt)
 
 -- | BFS traversal of the task dependency graph starting from @root@.
