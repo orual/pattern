@@ -1540,9 +1540,9 @@ impl MemoryStore for MemoryCache {
             agent_id: agent_id.to_string(),
             label,
             description,
-            block_type: block_type,
+            block_type,
             char_limit: effective_char_limit as i64,
-            permission: permission,
+            permission,
             pinned: false,
             loro_snapshot,
             content_preview: None,
@@ -1761,7 +1761,7 @@ impl MemoryStore for MemoryCache {
                 label: block.label,
                 description: block.description,
                 block_type: block.block_type,
-                permission: permission,
+                permission,
             })
             .collect())
     }

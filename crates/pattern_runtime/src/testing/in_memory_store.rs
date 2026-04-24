@@ -77,7 +77,7 @@ impl MemoryStore for InMemoryMemoryStore {
         metadata.block_type = create.block_type;
         metadata.char_limit = create.char_limit;
         // Honor the caller-supplied permission instead of leaving the default.
-        metadata.permission = create.permission.into();
+        metadata.permission = create.permission;
         let doc = StructuredDocument::new_with_metadata(metadata, Some(agent_id.to_string()));
         let mut guard = self.blocks.lock().unwrap();
         guard.insert(
