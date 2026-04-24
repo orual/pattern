@@ -720,9 +720,16 @@ impl DaemonServer {
             return Ok(entry.clone());
         }
 
-        // Slow path: mount the project.
-        let mounted = pattern_memory::mount::attach(&canonical)
-            .map_err(|e| format!("failed to attach mount at {}: {e}", canonical.display()))?;
+        // Slow path: mount the project. Pass the first-party skill directory
+        // so skills under pattern_runtime's resources/skills/ are classified
+        // as FirstParty regardless of what their frontmatter declares.
+        let mounted = pattern_memory::mount::attach(
+            &canonical,
+            Some(std::path::PathBuf::from(
+                pattern_runtime::sdk::FIRST_PARTY_SKILL_DIR,
+            )),
+        )
+        .map_err(|e| format!("failed to attach mount at {}: {e}", canonical.display()))?;
 
         let mount = Arc::new(ProjectMount {
             cache: mounted.cache.clone(),

@@ -1,0 +1,7 @@
+---
+source: crates/pattern_memory/tests/skill_fts5.rs
+expression: "ordered_names.join(\"\\n\")"
+---
+security-audit
+access-control
+credential-rotation

@@ -6503,6 +6503,7 @@ dependencies = [
  "jacquard",
  "jiff",
  "loro",
+ "metrics",
  "miette 7.6.0",
  "minijinja",
  "mockall",

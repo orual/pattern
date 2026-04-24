@@ -34,6 +34,7 @@ use loro::{LoroDoc, LoroMapValue, LoroValue};
 use pattern_core::types::memory_types::{SkillMetadata, SkillTrustTier};
 use serde_json::Value as JsonValue;
 
+use super::emit::SkillEmitError;
 use super::parse::SkillFile;
 
 // region: write_skill_to_loro_doc
@@ -52,7 +53,7 @@ use super::parse::SkillFile;
 /// The caller is responsible for calling `doc.commit()` after this function
 /// returns.
 pub fn write_skill_to_loro_doc(skill_file: &SkillFile, doc: &LoroDoc) -> Result<(), String> {
-    write_metadata_to_loro_map(doc, &skill_file.metadata)?;
+    write_metadata_to_loro_map(doc, &skill_file.metadata).map_err(|e| e.to_string())?;
     write_extras_to_loro_map(doc, &skill_file.extras)?;
 
     let body_text = doc.get_text("body");
@@ -165,49 +166,47 @@ pub fn project_extras_from_loro(root: &LoroMapValue) -> Result<LoroValue, String
 
 // region: internal write helpers
 
-fn write_metadata_to_loro_map(doc: &LoroDoc, meta: &SkillMetadata) -> Result<(), String> {
+fn write_metadata_to_loro_map(doc: &LoroDoc, meta: &SkillMetadata) -> Result<(), SkillEmitError> {
     let m = doc.get_map("metadata");
 
     m.insert("name", LoroValue::String(meta.name.clone().into()))
-        .map_err(|e| format!("metadata insert('name') failed: {e}"))?;
+        .map_err(|_| SkillEmitError::Fmt)?;
 
-    let tier_str = trust_tier_to_str(meta.trust_tier);
+    let tier_str = trust_tier_to_str(meta.trust_tier)?;
     m.insert("trust_tier", LoroValue::String(tier_str.into()))
-        .map_err(|e| format!("metadata insert('trust_tier') failed: {e}"))?;
+        .map_err(|_| SkillEmitError::Fmt)?;
 
     match &meta.description {
         Some(d) => {
             m.insert("description", LoroValue::String(d.clone().into()))
-                .map_err(|e| format!("metadata insert('description') failed: {e}"))?;
+                .map_err(|_| SkillEmitError::Fmt)?;
         }
         None => {
             // Explicitly set to Null so prior descriptions are cleared on
             // external-edit round-trips.
             m.insert("description", LoroValue::Null)
-                .map_err(|e| format!("metadata insert('description' null) failed: {e}"))?;
+                .map_err(|_| SkillEmitError::Fmt)?;
         }
     }
 
     if meta.keywords.is_empty() {
         // Clear any prior keywords by writing an empty JSON array.
         m.insert("keywords_json", LoroValue::String("[]".into()))
-            .map_err(|e| format!("metadata insert('keywords_json') failed: {e}"))?;
+            .map_err(|_| SkillEmitError::Fmt)?;
     } else {
-        let json_str = serde_json::to_string(&meta.keywords)
-            .map_err(|e| format!("keywords JSON serialize failed: {e}"))?;
+        let json_str = serde_json::to_string(&meta.keywords).map_err(|_| SkillEmitError::Fmt)?;
         m.insert("keywords_json", LoroValue::String(json_str.into()))
-            .map_err(|e| format!("metadata insert('keywords_json') failed: {e}"))?;
+            .map_err(|_| SkillEmitError::Fmt)?;
     }
 
     if meta.hooks.is_null() {
         // Clear any prior hooks.
         m.insert("hooks_json", LoroValue::Null)
-            .map_err(|e| format!("metadata insert('hooks_json' null) failed: {e}"))?;
+            .map_err(|_| SkillEmitError::Fmt)?;
     } else {
-        let json_str = serde_json::to_string(&meta.hooks)
-            .map_err(|e| format!("hooks JSON serialize failed: {e}"))?;
+        let json_str = serde_json::to_string(&meta.hooks).map_err(|_| SkillEmitError::Fmt)?;
         m.insert("hooks_json", LoroValue::String(json_str.into()))
-            .map_err(|e| format!("metadata insert('hooks_json') failed: {e}"))?;
+            .map_err(|_| SkillEmitError::Fmt)?;
     }
 
     Ok(())
@@ -220,6 +219,28 @@ fn write_extras_to_loro_map(doc: &LoroDoc, extras: &LoroValue) -> Result<(), Str
     };
 
     let m = doc.get_map("extras");
+
+    // Delete any keys that are no longer in the incoming extras. Without this
+    // step, keys removed from a .md file on disk would persist in the LoroDoc
+    // forever — resurrecting stale data on the next outbound render.
+    let existing_keys: Vec<String> = {
+        // get_deep_value materializes the current map contents; collect key
+        // names so we can delete anything absent from extras_map.
+        let deep = m.get_deep_value();
+        if let LoroValue::Map(current) = deep {
+            current
+                .keys()
+                .filter(|k| !extras_map.contains_key(k.as_str()))
+                .map(|k| k.to_string())
+                .collect()
+        } else {
+            Vec::new()
+        }
+    };
+    for key in existing_keys {
+        m.delete(&key)
+            .map_err(|e| format!("extras delete('{key}') failed: {e}"))?;
+    }
 
     // Insert each extras value as a JSON string so we can handle arbitrary
     // nesting without creating deep LoroDoc container hierarchies.
@@ -302,13 +323,15 @@ fn json_to_loro_value_bridge(v: &JsonValue) -> LoroValue {
 
 // region: trust tier helpers
 
-fn trust_tier_to_str(tier: SkillTrustTier) -> &'static str {
+fn trust_tier_to_str(tier: SkillTrustTier) -> Result<&'static str, SkillEmitError> {
     match tier {
-        SkillTrustTier::FirstParty => "first-party",
-        SkillTrustTier::ProjectLocal => "project-local",
-        SkillTrustTier::PluginInstalled => "plugin-installed",
-        SkillTrustTier::AdHoc => "ad-hoc",
-        _ => "ad-hoc",
+        SkillTrustTier::FirstParty => Ok("first-party"),
+        SkillTrustTier::ProjectLocal => Ok("project-local"),
+        SkillTrustTier::PluginInstalled => Ok("plugin-installed"),
+        SkillTrustTier::AdHoc => Ok("ad-hoc"),
+        // Fail loud if a new variant is added upstream without updating this
+        // match. Silently coercing to "ad-hoc" would hide the bug.
+        _ => Err(SkillEmitError::UnsupportedTrustTier),
     }
 }
 
@@ -492,6 +515,59 @@ mod tests {
         };
         assert!(matches!(custom.get("leaf"), Some(LoroValue::String(s)) if s.as_ref() == "hello"));
         assert!(matches!(custom.get("count"), Some(LoroValue::I64(7))));
+    }
+
+    /// C1: when extras is written twice and the second call is missing a key
+    /// that was present in the first, `project_extras_from_loro` must NOT
+    /// return the removed key. Without the key-deletion step in
+    /// `write_extras_to_loro_map`, the LoroDoc would resurrect stale entries.
+    #[test]
+    fn write_extras_twice_removes_deleted_keys() {
+        let doc = make_loro_doc();
+
+        // First write: two keys.
+        let mut extras_first: HashMap<String, LoroValue> = HashMap::new();
+        extras_first.insert("keep".to_string(), LoroValue::String("alive".into()));
+        extras_first.insert("drop".to_string(), LoroValue::String("dead".into()));
+        let sf_first = SkillFile {
+            metadata: minimal_skill_file().metadata,
+            extras: LoroValue::Map(extras_first.into()),
+            body: String::new(),
+        };
+        write_skill_to_loro_doc(&sf_first, &doc).unwrap();
+        doc.commit();
+
+        // Second write: only "keep" key. "drop" was removed from the file.
+        let mut extras_second: HashMap<String, LoroValue> = HashMap::new();
+        extras_second.insert("keep".to_string(), LoroValue::String("alive".into()));
+        let sf_second = SkillFile {
+            metadata: sf_first.metadata.clone(),
+            extras: LoroValue::Map(extras_second.into()),
+            body: String::new(),
+        };
+        write_skill_to_loro_doc(&sf_second, &doc).unwrap();
+        doc.commit();
+
+        let deep = doc.get_deep_value();
+        let root = match &deep {
+            LoroValue::Map(m) => m,
+            _ => panic!("expected root map"),
+        };
+        let projected = project_extras_from_loro(root).unwrap();
+        let LoroValue::Map(emap) = &projected else {
+            panic!("extras must be map");
+        };
+
+        // "keep" must still be present.
+        assert!(
+            matches!(emap.get("keep"), Some(LoroValue::String(s)) if s.as_ref() == "alive"),
+            "'keep' key must survive the second write; got: {emap:?}"
+        );
+        // "drop" must have been deleted by the second write.
+        assert!(
+            emap.get("drop").is_none(),
+            "'drop' key must be absent after second write (data resurrection check); got: {emap:?}"
+        );
     }
 }
 

@@ -19,7 +19,7 @@ pub fn cmd_backup_create(path: Option<PathBuf>) -> MietteResult<()> {
     let start = resolve_start(path)?;
     let paths =
         pattern_memory::paths::PatternPaths::default_paths().map_err(miette::Report::new)?;
-    let store = pattern_memory::mount::attach(&start).map_err(miette::Report::new)?;
+    let store = pattern_memory::mount::attach(&start, None).map_err(miette::Report::new)?;
 
     let messages_db = store.db.messages_path().to_owned();
     let project_id = store.config.project.name.clone();
@@ -51,7 +51,7 @@ pub fn cmd_backup_list(path: Option<PathBuf>) -> MietteResult<()> {
     let start = resolve_start(path)?;
     let paths =
         pattern_memory::paths::PatternPaths::default_paths().map_err(miette::Report::new)?;
-    let store = pattern_memory::mount::attach(&start).map_err(miette::Report::new)?;
+    let store = pattern_memory::mount::attach(&start, None).map_err(miette::Report::new)?;
     let project_id = store.config.project.name.clone();
     store.detach();
 
@@ -88,7 +88,7 @@ pub fn cmd_backup_restore(spec: String, path: Option<PathBuf>) -> MietteResult<(
     let start = resolve_start(path)?;
     let paths =
         pattern_memory::paths::PatternPaths::default_paths().map_err(miette::Report::new)?;
-    let store = pattern_memory::mount::attach(&start).map_err(miette::Report::new)?;
+    let store = pattern_memory::mount::attach(&start, None).map_err(miette::Report::new)?;
 
     let messages_db = store.db.messages_path().to_owned();
     let project_id = store.config.project.name.clone();
@@ -130,7 +130,7 @@ pub fn cmd_backup_info(spec: String, path: Option<PathBuf>) -> MietteResult<()> 
     let start = resolve_start(path)?;
     let paths =
         pattern_memory::paths::PatternPaths::default_paths().map_err(miette::Report::new)?;
-    let store = pattern_memory::mount::attach(&start).map_err(miette::Report::new)?;
+    let store = pattern_memory::mount::attach(&start, None).map_err(miette::Report::new)?;
     let project_id = store.config.project.name.clone();
     store.detach();
 

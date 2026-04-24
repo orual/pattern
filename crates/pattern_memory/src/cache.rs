@@ -6,6 +6,7 @@
 //! both wire them separately.
 
 use crate::db_bridge::{DbResultExt, core_search_type_to_db, db_search_result_to_core};
+use crate::skill::{SkillProvenance, assign_trust_tier, resolve_source_for_path};
 use crate::subscriber::SubscriberHandle;
 use crate::subscriber::event::{Heartbeat, ReembedRequest};
 use crate::subscriber::supervisor::{SupervisorState, run_supervisor};
@@ -73,6 +74,19 @@ pub struct MemoryCache {
     /// tests and embedded usage that don't need file emission).
     mount_path: Option<Arc<PathBuf>>,
 
+    /// Optional path to the first-party skill directory (e.g.
+    /// `pattern_runtime/resources/skills`). When set, skills loaded from
+    /// files under this directory are classified as `SkillSource::SdkResourceDir`
+    /// and receive `SkillTrustTier::FirstParty` regardless of their declared tier.
+    ///
+    /// This must be injected from outside `pattern_memory` because the
+    /// canonical first-party path lives in `pattern_runtime`, which depends on
+    /// `pattern_memory` (not the other way around). The correct injection
+    /// path is via the `first_party_skills_dir` parameter of
+    /// [`crate::mount::attach`] / [`crate::mount::attach_with_paths`], which
+    /// in turn call `with_first_party_skills_dir` internally.
+    first_party_skills_dir: Option<PathBuf>,
+
     /// Sender for re-embed requests from subscriber workers to the async
     /// re-embed queue. Must be set alongside `mount_path`.
     reembed_tx: Option<tokio::sync::mpsc::UnboundedSender<ReembedRequest>>,
@@ -111,6 +125,7 @@ impl MemoryCache {
             subscribers: Arc::new(DashMap::new()),
             default_char_limit: DEFAULT_MEMORY_CHAR_LIMIT,
             mount_path: None,
+            first_party_skills_dir: None,
             reembed_tx: None,
             heartbeat_tx: None,
             supervisor_cancel: CancellationToken::new(),
@@ -131,6 +146,7 @@ impl MemoryCache {
             subscribers: Arc::new(DashMap::new()),
             default_char_limit: DEFAULT_MEMORY_CHAR_LIMIT,
             mount_path: None,
+            first_party_skills_dir: None,
             reembed_tx: None,
             heartbeat_tx: None,
             supervisor_cancel: CancellationToken::new(),
@@ -250,6 +266,29 @@ impl MemoryCache {
             }
         }
 
+        self
+    }
+
+    /// Configure the first-party skill directory for trust-tier enforcement.
+    ///
+    /// When set, skills loaded from files under `dir` are classified as
+    /// [`SkillSource::SdkResourceDir`] and assigned `SkillTrustTier::FirstParty`
+    /// regardless of the `trust_tier` value in their YAML frontmatter.
+    ///
+    /// This is called internally by [`crate::mount::attach`] / [`crate::mount::attach_with_paths`],
+    /// which receive the first-party path from `pattern_runtime::sdk::FIRST_PARTY_SKILL_DIR`
+    /// via their `first_party_skills_dir` parameter. It cannot be baked into
+    /// `pattern_memory` itself because the first-party path is relative to
+    /// `pattern_runtime`'s `CARGO_MANIFEST_DIR`, which is only known at
+    /// `pattern_runtime`'s build time.
+    ///
+    /// Not `pub` — callers must go through the attach API, which is the
+    /// correct-by-construction path. Tests that need to exercise trust-tier
+    /// override pass a test-specific path via `attach_with_paths`.
+    ///
+    /// [`SkillSource::SdkResourceDir`]: crate::skill::SkillSource::SdkResourceDir
+    pub(crate) fn with_first_party_skills_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.first_party_skills_dir = Some(dir.into());
         self
     }
 
@@ -876,10 +915,44 @@ impl MemoryCache {
                 }
                 pattern_core::types::memory_types::BlockSchema::Skill { .. } => {
                     // Skill blocks: parse YAML-frontmatter + markdown body, then
-                    // mirror the typed SkillMetadata, extras, and body into the
-                    // disk_doc using the loro_bridge helpers.
-                    let skill_file = crate::fs::markdown_skill::parse(content)
+                    // enforce the trust tier based on provenance, and mirror the
+                    // typed SkillMetadata, extras, and body into the disk_doc.
+                    let mut skill_file = crate::fs::markdown_skill::parse(content)
                         .map_err(|e| format!("Skill parse failed: {e}"))?;
+
+                    // Enforce trust tier from provenance. The declared tier in
+                    // the YAML frontmatter is advisory only — authors cannot
+                    // self-promote a skill to FirstParty by writing it in the
+                    // file. `assign_trust_tier` enforces the policy and fires
+                    // the `skill.plugin_installed_tier_without_plugin_system`
+                    // metric when a PluginInstalled declaration is encountered.
+                    //
+                    // The file_path is reconstructed from mount_path + block_id
+                    // because `apply_external_edit` only receives raw bytes (no
+                    // path parameter). Skill blocks always use the .md extension.
+                    let file_path = self.mount_path.as_deref().map(|mp| {
+                        let mut p = mp.to_path_buf();
+                        p.push(format!("{block_id}.md"));
+                        p
+                    });
+                    let fp_ref = self.first_party_skills_dir.as_deref();
+                    // Collect mount paths into an owned Vec so we can take &[&Path] slices.
+                    let mount_paths: Vec<PathBuf> = self
+                        .mount_path
+                        .as_deref()
+                        .map(|mp| vec![mp.to_path_buf()])
+                        .unwrap_or_default();
+                    let mount_refs: Vec<&std::path::Path> =
+                        mount_paths.iter().map(|p| p.as_path()).collect();
+                    if let Some(ref fp) = file_path {
+                        let source = resolve_source_for_path(fp, fp_ref, &mount_refs);
+                        let provenance = SkillProvenance {
+                            source,
+                            declared_tier: Some(skill_file.metadata.trust_tier),
+                        };
+                        skill_file.metadata.trust_tier = assign_trust_tier(&provenance);
+                    }
+
                     crate::fs::markdown_skill::write_skill_to_loro_doc(&skill_file, &disk_doc)
                         .map_err(|e| format!("Skill write_skill_to_loro_doc failed: {e}"))?;
                     disk_doc.commit();
@@ -1575,6 +1648,64 @@ impl MemoryStore for MemoryCache {
             block_metadata.clone(),
             Some(agent_id.to_string()),
         );
+
+        // For Skill blocks, initialize the "metadata" and "extras" LoroMap
+        // containers with sensible defaults so the subscriber worker can
+        // render the block immediately without encountering a missing-metadata
+        // error. Without this step, `project_metadata_from_loro` would fail
+        // on the first render cycle and increment `fts_update_failed`.
+        //
+        // We use `label` as the skill name because:
+        //   - It's the canonical human-readable identifier for the block.
+        //   - It's always non-empty (required by BlockCreate validation).
+        //   - It survives without the user having to call write_skill_to_loro_doc.
+        if let pattern_core::types::memory_types::BlockSchema::Skill { .. } = &schema {
+            let loro_doc = doc.inner();
+            let metadata_map = loro_doc.get_map("metadata");
+            metadata_map
+                .insert(
+                    "name",
+                    loro::LoroValue::String(block_metadata.label.clone().into()),
+                )
+                .map_err(|e| {
+                    MemoryError::Other(format!(
+                        "Skill create_block: metadata insert('name') failed: {e}"
+                    ))
+                })?;
+            metadata_map
+                .insert("trust_tier", loro::LoroValue::String("ad-hoc".into()))
+                .map_err(|e| {
+                    MemoryError::Other(format!(
+                        "Skill create_block: metadata insert('trust_tier') failed: {e}"
+                    ))
+                })?;
+            // Initialize description, keywords_json, and hooks_json to their
+            // empty/null defaults so the projection helpers always find them.
+            metadata_map
+                .insert("description", loro::LoroValue::Null)
+                .map_err(|e| {
+                    MemoryError::Other(format!(
+                        "Skill create_block: metadata insert('description') failed: {e}"
+                    ))
+                })?;
+            metadata_map
+                .insert("keywords_json", loro::LoroValue::String("[]".into()))
+                .map_err(|e| {
+                    MemoryError::Other(format!(
+                        "Skill create_block: metadata insert('keywords_json') failed: {e}"
+                    ))
+                })?;
+            metadata_map
+                .insert("hooks_json", loro::LoroValue::Null)
+                .map_err(|e| {
+                    MemoryError::Other(format!(
+                        "Skill create_block: metadata insert('hooks_json') failed: {e}"
+                    ))
+                })?;
+            // Touch the "extras" map so it exists (empty) in the snapshot.
+            let _extras_map = loro_doc.get_map("extras");
+            loro_doc.commit();
+        }
 
         // Store schema in DB metadata JSON.
         let mut db_metadata = serde_json::Map::new();
@@ -3530,4 +3661,299 @@ mod tests {
         drop(handle.event_tx);
         handle.thread.join().expect("worker should not panic");
     }
+
+    // region: trust-tier override tests (C5-test)
+
+    /// Helper: create a DB block entry with a Skill schema and return the
+    /// created block's ID. `block_id` is used as both ID and label.
+    fn create_skill_block_in_db(db: &ConstellationDb, block_id: &str, agent_id: &str) {
+        use pattern_db::models::{MemoryBlock, MemoryBlockType};
+        let conn = db.get().unwrap();
+        let block = MemoryBlock {
+            id: block_id.to_string(),
+            agent_id: agent_id.to_string(),
+            label: block_id.to_string(),
+            description: "Skill trust-tier test block".to_string(),
+            block_type: MemoryBlockType::Working,
+            char_limit: 10_000,
+            permission: MemoryPermission::ReadWrite,
+            pinned: false,
+            loro_snapshot: vec![],
+            content_preview: None,
+            metadata: None,
+            embedding_model: None,
+            is_active: true,
+            frontier: None,
+            last_seq: 0,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        pattern_db::queries::create_block(&conn, &block).unwrap();
+    }
+
+    /// Helper: build a minimal MemoryCache with mount_path + first_party_skills_dir
+    /// wired, and populate it with a Skill StructuredDocument + subscriber.
+    ///
+    /// Both `mount_path_dir` and `fp_dir_path` are caller-supplied so that
+    /// tests can control whether `<mount_path>/<block_id>.md` is under `fp_dir`
+    /// (by passing the same tempdir for both) or not (separate tempdirs).
+    ///
+    /// Returns `(cache, doc)` — the caller must keep any TempDirs alive.
+    fn setup_skill_cache_with_fp_dir(
+        db: Arc<pattern_db::ConstellationDb>,
+        block_id: &str,
+        mount_path_dir: &std::path::Path,
+        fp_dir_path: &std::path::Path,
+    ) -> (MemoryCache, pattern_core::memory::StructuredDocument) {
+        use pattern_core::memory::StructuredDocument;
+        use pattern_core::types::memory_types::BlockSchema;
+
+        let mount_path = Arc::new(mount_path_dir.to_path_buf());
+        let (reembed_tx, _reembed_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (reembed_tx2, _reembed_rx2) = tokio::sync::mpsc::unbounded_channel();
+        let (hb_tx, _hb_rx) = crossbeam_channel::bounded::<crate::subscriber::event::Heartbeat>(64);
+        let (hb_tx2, hb_rx2) =
+            crossbeam_channel::bounded::<crate::subscriber::event::Heartbeat>(64);
+        let subscribers: Arc<DashMap<String, SubscriberHandle>> = Arc::new(DashMap::new());
+
+        let schema = BlockSchema::Skill {
+            expected_keys: vec![],
+        };
+        let doc = StructuredDocument::new(schema.clone());
+
+        spawn_subscriber_for_block(
+            block_id,
+            schema,
+            &doc,
+            reembed_tx,
+            hb_tx,
+            Arc::clone(&mount_path),
+            Arc::clone(&db),
+            Arc::clone(&subscribers),
+        );
+
+        // Build the cache with both mount_path (so apply_external_edit reconstructs
+        // `mount_path/<block_id>.md`) and first_party_skills_dir (so the trust-tier
+        // enforcement logic in apply_external_edit fires correctly).
+        let cache = MemoryCache::new(Arc::clone(&db))
+            .with_mount_path(mount_path_dir.to_path_buf(), reembed_tx2, hb_tx2, hb_rx2)
+            .with_first_party_skills_dir(fp_dir_path.to_path_buf());
+
+        cache.blocks.insert(
+            block_id.to_string(),
+            CachedBlock {
+                doc: doc.clone(),
+                last_seq: 0,
+                last_persisted_frontier: None,
+                dirty: false,
+                last_accessed: chrono::Utc::now(),
+            },
+        );
+        {
+            let (_, handle) = subscribers.remove(block_id).unwrap();
+            cache.subscribers.insert(block_id.to_string(), handle);
+        }
+
+        (cache, doc)
+    }
+
+    /// Read the `trust_tier` from the disk_doc stored in a subscriber handle,
+    /// using `project_metadata_from_loro`.
+    fn read_trust_tier_from_disk_doc(
+        cache: &MemoryCache,
+        block_id: &str,
+    ) -> pattern_core::types::memory_types::SkillTrustTier {
+        use crate::fs::markdown_skill::loro_bridge::project_metadata_from_loro;
+
+        let sub = cache.subscribers.get(block_id).unwrap();
+        let disk_doc = Arc::clone(&sub.disk_doc);
+        drop(sub);
+
+        let deep = disk_doc.get_deep_value();
+        let loro::LoroValue::Map(root) = &deep else {
+            panic!("disk_doc root must be a Map; got: {deep:?}");
+        };
+        project_metadata_from_loro(root)
+            .expect("project_metadata_from_loro must succeed after a valid apply_external_edit")
+            .trust_tier
+    }
+
+    /// `apply_external_edit` with a Skill block whose frontmatter declares
+    /// `trust_tier: first-party` BUT the file path is NOT under
+    /// `first_party_skills_dir` — the enforced tier must NOT be `FirstParty`.
+    /// Authors cannot self-promote a skill to FirstParty by writing it in the
+    /// YAML frontmatter.
+    ///
+    /// Note: this test documents the user-facing semantic (self-promotion is
+    /// blocked). It is INVARIANT to whether `first_party_skills_dir` is
+    /// threaded through `attach` — even with plumbing disabled, a file outside
+    /// any first-party/mount-skills directory falls through to `Runtime →
+    /// AdHoc`, satisfying the `!= FirstParty` assertion. The genuine plumbing
+    /// verification is `apply_external_edit_skill_preserves_first_party_for_paths_inside_fp_dir`
+    /// below (positive case: stored tier == FirstParty only when plumbing is
+    /// wired).
+    #[test]
+    fn apply_external_edit_skill_overrides_declared_first_party_tier_outside_fp_dir() {
+        let (_dir, db) = test_dbs();
+        let block_id = "skill_tier_override_block";
+        let agent_id = "agent_skill_tier_override";
+        create_test_agent(&db, agent_id);
+        create_skill_block_in_db(&db, block_id, agent_id);
+
+        // mount_tmp and fp_tmp are separate — block_id.md (in mount_tmp)
+        // is NOT under fp_tmp, so the tier must not be FirstParty.
+        let mount_tmp = tempfile::tempdir().unwrap();
+        let fp_tmp = tempfile::tempdir().unwrap();
+        let (cache, _doc) = setup_skill_cache_with_fp_dir(
+            Arc::clone(&db),
+            block_id,
+            mount_tmp.path(),
+            fp_tmp.path(),
+        );
+
+        // Skill frontmatter declares first-party, but the file is in mount_tmp,
+        // NOT under fp_tmp → enforced tier must NOT be FirstParty.
+        let md = "---\nname: my-skill\ntrust_tier: first-party\ndescription: test\n---\nbody\n";
+        cache.apply_external_edit(block_id, md.as_bytes());
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let tier = read_trust_tier_from_disk_doc(&cache, block_id);
+        assert_ne!(
+            tier,
+            pattern_core::types::memory_types::SkillTrustTier::FirstParty,
+            "a skill file outside fp_dir must not be granted FirstParty, \
+             even if the frontmatter declares it; got tier={tier:?}"
+        );
+
+        // Clean up subscriber.
+        let (_, handle) = cache.subscribers.remove(block_id).unwrap();
+        handle.cancel.cancel();
+        drop(handle._subscription);
+        drop(handle.event_tx);
+        handle.thread.join().expect("worker should not panic");
+    }
+
+    /// `apply_external_edit` with a Skill block whose file path IS under
+    /// `first_party_skills_dir` must receive `SkillTrustTier::FirstParty`
+    /// regardless of the declared tier in the frontmatter.
+    ///
+    /// The path is under fp_dir because mount_path == fp_dir, so the
+    /// reconstructed path `mount_path/<block_id>.md` starts_with fp_dir.
+    #[test]
+    fn apply_external_edit_skill_preserves_first_party_for_paths_inside_fp_dir() {
+        let (_dir, db) = test_dbs();
+        let block_id = "skill_fp_inside_block";
+        let agent_id = "agent_skill_fp_inside";
+        create_test_agent(&db, agent_id);
+        create_skill_block_in_db(&db, block_id, agent_id);
+
+        // Use the same tempdir for mount_path AND fp_dir so that
+        // `mount_path/<block_id>.md` starts_with fp_dir → SdkResourceDir source.
+        let combined_tmp = tempfile::tempdir().unwrap();
+        let (cache, _doc) = setup_skill_cache_with_fp_dir(
+            Arc::clone(&db),
+            block_id,
+            combined_tmp.path(),
+            combined_tmp.path(),
+        );
+
+        // Frontmatter declares ad-hoc, but path IS under fp_dir → FirstParty wins.
+        let md = "---\nname: sdk-skill\ntrust_tier: ad-hoc\ndescription: test\n---\nbody\n";
+        cache.apply_external_edit(block_id, md.as_bytes());
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let tier = read_trust_tier_from_disk_doc(&cache, block_id);
+        assert_eq!(
+            tier,
+            pattern_core::types::memory_types::SkillTrustTier::FirstParty,
+            "a skill file inside fp_dir must receive FirstParty, \
+             even if frontmatter declares ad-hoc; got tier={tier:?}"
+        );
+
+        // Clean up.
+        let (_, handle) = cache.subscribers.remove(block_id).unwrap();
+        handle.cancel.cancel();
+        drop(handle._subscription);
+        drop(handle.event_tx);
+        handle.thread.join().expect("worker should not panic");
+    }
+
+    /// `apply_external_edit` with a Skill file outside fp_dir that declares
+    /// `plugin-installed` — the stored tier must be `PluginInstalled` AND the
+    /// `skill.plugin_installed_tier_without_plugin_system` counter must fire.
+    ///
+    /// Note: `assign_trust_tier` short-circuits on `declared_tier ==
+    /// PluginInstalled` before consulting source classification, so this test
+    /// is invariant to whether `first_party_skills_dir` plumbing is wired. It
+    /// verifies a different property than the other two tests in this group —
+    /// specifically, that the plugin-installed declaration is preserved and
+    /// emits the expected observability signal, not that path-based source
+    /// classification works. Path-plumbing regression coverage is in
+    /// `apply_external_edit_skill_preserves_first_party_for_paths_inside_fp_dir`.
+    #[test]
+    fn apply_external_edit_skill_preserves_plugin_installed_declaration() {
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        let (_dir, db) = test_dbs();
+        let block_id = "skill_plugin_tier_block";
+        let agent_id = "agent_skill_plugin_tier";
+        create_test_agent(&db, agent_id);
+        create_skill_block_in_db(&db, block_id, agent_id);
+
+        // mount_tmp and fp_tmp are separate — file is outside fp_dir.
+        let mount_tmp = tempfile::tempdir().unwrap();
+        let fp_tmp = tempfile::tempdir().unwrap();
+        let (cache, _doc) = setup_skill_cache_with_fp_dir(
+            Arc::clone(&db),
+            block_id,
+            mount_tmp.path(),
+            fp_tmp.path(),
+        );
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        // File is outside fp_dir; declares plugin-installed → PluginInstalled preserved + metric.
+        let md =
+            "---\nname: plugin-skill\ntrust_tier: plugin-installed\ndescription: test\n---\nbody\n";
+
+        metrics::with_local_recorder(&recorder, || {
+            cache.apply_external_edit(block_id, md.as_bytes());
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let tier = read_trust_tier_from_disk_doc(&cache, block_id);
+        assert_eq!(
+            tier,
+            pattern_core::types::memory_types::SkillTrustTier::PluginInstalled,
+            "plugin-installed declaration must be preserved by assign_trust_tier; \
+             got tier={tier:?}"
+        );
+
+        // The observability counter must have fired inside with_local_recorder.
+        let snapshot = snapshotter.snapshot().into_vec();
+        let entry = snapshot.iter().find(|(ck, _, _, _)| {
+            ck.key().name() == "skill.plugin_installed_tier_without_plugin_system"
+        });
+        assert!(
+            entry.is_some(),
+            "expected 'skill.plugin_installed_tier_without_plugin_system' counter; \
+             snapshot: {snapshot:?}"
+        );
+        let (_, _, _, value) = entry.unwrap();
+        assert_eq!(
+            *value,
+            DebugValue::Counter(1),
+            "plugin-installed counter must be 1 after one skill edit"
+        );
+
+        // Clean up.
+        let (_, handle) = cache.subscribers.remove(block_id).unwrap();
+        handle.cancel.cancel();
+        drop(handle._subscription);
+        drop(handle.event_tx);
+        handle.thread.join().expect("worker should not panic");
+    }
+
+    // endregion: trust-tier override tests (C5-test)
 }

@@ -21,4 +21,4 @@ pub mod requests;
 pub use bundle::SdkBundle;
 pub use code_tool::CODE_TOOL;
 pub use describe::{CollectEffectDecls, DescribeEffect, EffectDecl};
-pub use location::SdkLocation;
+pub use location::{FIRST_PARTY_SKILL_DIR, SdkLocation};

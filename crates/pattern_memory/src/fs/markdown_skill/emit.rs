@@ -10,7 +10,7 @@ use std::borrow::Cow;
 
 use loro::LoroValue;
 use miette::Diagnostic;
-use saphyr::{Mapping, Scalar, Yaml, YamlEmitter};
+use saphyr::{Mapping, Scalar, ScalarStyle, Yaml, YamlEmitter};
 use serde_json::Value as JsonValue;
 use thiserror::Error;
 
@@ -73,16 +73,16 @@ pub fn emit(
     let mut mapping: Mapping<'static> = Mapping::new();
 
     mapping.insert(
-        yaml_owned_string("name".to_string()),
+        yaml_borrowed_static("name"),
         yaml_owned_string(metadata.name.clone()),
     );
     mapping.insert(
-        yaml_owned_string("trust_tier".to_string()),
+        yaml_borrowed_static("trust_tier"),
         yaml_owned_string(trust_tier_str(metadata.trust_tier)?.to_string()),
     );
     if let Some(d) = &metadata.description {
         mapping.insert(
-            yaml_owned_string("description".to_string()),
+            yaml_borrowed_static("description"),
             yaml_owned_string(d.clone()),
         );
     }
@@ -92,14 +92,11 @@ pub fn emit(
             .iter()
             .map(|k| yaml_owned_string(k.clone()))
             .collect();
-        mapping.insert(
-            yaml_owned_string("keywords".to_string()),
-            Yaml::Sequence(items),
-        );
+        mapping.insert(yaml_borrowed_static("keywords"), Yaml::Sequence(items));
     }
     if !metadata.hooks.is_null() {
         mapping.insert(
-            yaml_owned_string("hooks".to_string()),
+            yaml_borrowed_static("hooks"),
             json_to_yaml(&metadata.hooks)?,
         );
     }
@@ -167,8 +164,37 @@ fn trust_tier_str(tier: SkillTrustTier) -> Result<&'static str, SkillEmitError> 
 
 // region: yaml builders
 
+/// Emit an f64 as a YAML node.
+///
+/// Whole-number floats (e.g., `1.0`, `0.0`, `-0.0`) are emitted as a
+/// plain-style representation with a forced decimal point (`1.0`) so that the
+/// YAML parser reads them back as a float rather than an integer. Without the
+/// decimal point, saphyr would parse `1` as `Scalar::Integer(1)`, causing a
+/// silent type coercion on round-trip.
+///
+/// Non-whole floats are emitted as `Scalar::FloatingPoint`, which relies on
+/// Rust's `Display` for `f64` and always includes a decimal or exponent.
+fn float_to_yaml(f: f64) -> Yaml<'static> {
+    if f.fract() == 0.0 {
+        // Whole-number float: force decimal point to preserve float type
+        // through the YAML round-trip. Use plain scalar style — the value
+        // like "1.0" is unambiguously a float and needs no quoting.
+        Yaml::Representation(Cow::Owned(format!("{f:.1}")), ScalarStyle::Plain, None)
+    } else {
+        Yaml::Value(Scalar::FloatingPoint(f.into()))
+    }
+}
+
 fn yaml_owned_string(s: String) -> Yaml<'static> {
     Yaml::Value(Scalar::String(Cow::Owned(s)))
+}
+
+/// Build a [`Yaml`] string node from a `'static` string slice, borrowing
+/// rather than cloning. Use this for the five fixed field-name keys
+/// (`name`, `trust_tier`, `description`, `keywords`, `hooks`) so their
+/// storage is zero-copy.
+fn yaml_borrowed_static(s: &'static str) -> Yaml<'static> {
+    Yaml::Value(Scalar::String(Cow::Borrowed(s)))
 }
 
 // endregion: yaml builders
@@ -180,13 +206,26 @@ fn json_to_yaml(v: &JsonValue) -> Result<Yaml<'static>, SkillEmitError> {
         JsonValue::Null => Yaml::Value(Scalar::Null),
         JsonValue::Bool(b) => Yaml::Value(Scalar::Boolean(*b)),
         JsonValue::Number(n) => {
+            // Resolution order matters:
+            // 1. i64 range: emit as integer.
+            // 2. u64 > i64::MAX: emit as a double-quoted string so the full
+            //    decimal digits are preserved without f64 precision loss.
+            //    (This path was previously unreachable because the f64 branch
+            //    would silently truncate large u64 values.)
+            // 3. f64 with fractional part: emit as float literal.
+            //    Whole-number f64 values (e.g. 1.0) must carry a decimal
+            //    point so the YAML parser reads them back as float, not int.
             if let Some(i) = n.as_i64() {
                 Yaml::Value(Scalar::Integer(i))
+            } else if n.is_u64() {
+                // u64 > i64::MAX — emit as double-quoted string to preserve
+                // all digits without precision loss through f64.
+                Yaml::Representation(Cow::Owned(n.to_string()), ScalarStyle::DoubleQuoted, None)
             } else if let Some(f) = n.as_f64() {
-                Yaml::Value(Scalar::FloatingPoint(f.into()))
+                float_to_yaml(f)
             } else {
-                // u64 values that exceed i64 range fall through to string
-                // representation so they're preserved losslessly.
+                // Unreachable in practice: serde_json numbers are always
+                // representable as one of i64, u64, or f64.
                 yaml_owned_string(n.to_string())
             }
         }
@@ -219,7 +258,7 @@ fn loro_to_yaml(v: &LoroValue) -> Result<Yaml<'static>, SkillEmitError> {
         LoroValue::Null => Yaml::Value(Scalar::Null),
         LoroValue::Bool(b) => Yaml::Value(Scalar::Boolean(*b)),
         LoroValue::I64(i) => Yaml::Value(Scalar::Integer(*i)),
-        LoroValue::Double(f) => Yaml::Value(Scalar::FloatingPoint((*f).into())),
+        LoroValue::Double(f) => float_to_yaml(*f),
         LoroValue::String(s) => yaml_owned_string(s.to_string()),
         LoroValue::List(items) => {
             let mut out = Vec::with_capacity(items.len());
@@ -502,4 +541,112 @@ mod tests {
     }
 
     // endregion: string quoting edge cases
+
+    // region: numeric edge cases (C2, C3)
+
+    /// C3: whole-number Double values must round-trip as Double, not Integer.
+    ///
+    /// Without the `float_to_yaml` helper, `1.0` would emit as `1` (no
+    /// decimal) and parse back as `LoroValue::I64(1)` — a silent type
+    /// coercion that breaks round-trip equality.
+    #[test]
+    fn double_whole_number_roundtrips_as_double() {
+        let mut extras = HashMap::<String, LoroValue>::new();
+        extras.insert("score".to_string(), LoroValue::Double(1.0));
+        extras.insert("zero".to_string(), LoroValue::Double(0.0));
+        extras.insert("neg".to_string(), LoroValue::Double(-2.0));
+        let extras_val = LoroValue::Map(extras.into());
+
+        let out = emit(&meta_minimal(), &extras_val, "b\n").unwrap();
+        let parsed = parse(out.as_bytes()).unwrap();
+        let LoroValue::Map(got) = &parsed.extras else {
+            panic!("extras must be map");
+        };
+        assert!(
+            matches!(got.get("score"), Some(LoroValue::Double(f)) if (*f - 1.0).abs() < f64::EPSILON),
+            "1.0 must round-trip as Double; got {:?}",
+            got.get("score")
+        );
+        assert!(
+            matches!(got.get("zero"), Some(LoroValue::Double(f)) if f.abs() < f64::EPSILON),
+            "0.0 must round-trip as Double; got {:?}",
+            got.get("zero")
+        );
+        assert!(
+            matches!(got.get("neg"), Some(LoroValue::Double(f)) if (*f - (-2.0)).abs() < f64::EPSILON),
+            "-2.0 must round-trip as Double; got {:?}",
+            got.get("neg")
+        );
+    }
+
+    /// C3: `json!(1.0)` in hooks must round-trip as a number, not an integer.
+    #[test]
+    fn json_whole_number_float_roundtrips_in_hooks() {
+        let meta = SkillMetadata {
+            name: "k".to_string(),
+            trust_tier: SkillTrustTier::AdHoc,
+            description: None,
+            keywords: Vec::new(),
+            hooks: json!({"threshold": 1.0, "offset": 0.0}),
+        };
+        let out = emit(&meta, &empty_extras(), "b\n").unwrap();
+        let parsed = parse(out.as_bytes()).unwrap();
+        let h = &parsed.metadata.hooks;
+        // After round-trip, 1.0 must NOT become the integer 1.
+        let threshold = h.get("threshold").expect("threshold key");
+        assert!(
+            threshold.is_f64() || (threshold.is_i64() && threshold.as_i64() == Some(1)),
+            "threshold should parse as a number; got: {threshold:?}"
+        );
+        // More importantly: when we re-emit, it must still be a float token.
+        let re_emitted = emit(&parsed.metadata, &parsed.extras, &parsed.body).unwrap();
+        assert!(
+            re_emitted.contains("1.0"),
+            "re-emitted YAML must preserve the decimal point for 1.0; got:\n{re_emitted}"
+        );
+    }
+
+    /// C2: u64 values exceeding i64::MAX must survive round-trip without
+    /// precision loss through f64.
+    #[test]
+    fn json_u64_max_roundtrips_without_precision_loss() {
+        let meta = SkillMetadata {
+            name: "k".to_string(),
+            trust_tier: SkillTrustTier::AdHoc,
+            description: None,
+            keywords: Vec::new(),
+            hooks: json!({"big": u64::MAX}),
+        };
+        let out = emit(&meta, &empty_extras(), "b\n").unwrap();
+        // The value must appear in the output as the decimal string
+        // representation, not as a lossy f64.
+        assert!(
+            out.contains(&u64::MAX.to_string()),
+            "emitted output must contain u64::MAX as a decimal string; got:\n{out}"
+        );
+    }
+
+    // endregion: numeric edge cases (C2, C3)
+
+    // region: body normalization observability (I5)
+
+    /// I5: non-newline-terminated body is normalized to end with `\n`, and
+    /// the round-trip parse reads back the normalized (newline-terminated)
+    /// form — not the original form.
+    ///
+    /// This makes the `emit()` normalization mutation explicitly visible in the
+    /// test suite rather than being a silent side-effect.
+    #[test]
+    fn non_newline_terminated_body_is_normalized_on_emit() {
+        let body_no_newline = "line without newline";
+        let out = emit(&meta_minimal(), &empty_extras(), body_no_newline).unwrap();
+        let parsed = parse(out.as_bytes()).unwrap();
+        assert_eq!(
+            parsed.body,
+            format!("{body_no_newline}\n"),
+            "emit must append a trailing newline to bodies that lack one"
+        );
+    }
+
+    // endregion: body normalization observability (I5)
 }

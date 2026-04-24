@@ -300,3 +300,10 @@ wired. `BlockSchema::Skill` outbound render (worker.rs) and inbound external-edi
 (cache.rs) now fully functional. `skill_usage_stats` migration registered.
 `markdown_skill::loro_bridge` module added for LoroDoc ↔ SkillFile bridging.
 530/530 tests passing.
+
+v3-task-skill-blocks Phase 4 Task 10 (2026-04-24): FTS5 indexing for Skill
+blocks. `StructuredDocument::render()` for `BlockSchema::Skill` now emits
+name + description + keywords + body as the `content_preview` string so all
+fields are indexed in `memory_blocks_fts`. Integration test file
+`crates/pattern_memory/tests/skill_fts5.rs` covers search by name, description,
+keyword, body, and BM25 ordering (insta snapshot). 554/554 tests passing.

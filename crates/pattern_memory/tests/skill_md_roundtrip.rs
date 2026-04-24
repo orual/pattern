@@ -20,12 +20,15 @@ use serde_json::Value as JsonValue;
 /// forms (`null`, `42`, etc.); `need_quotes` in saphyr 0.0.6 does not
 /// cover strings with embedded newlines for round-trip purposes, so we
 /// exclude those here and unit-test multiline separately.
+///
+/// Unicode is included (α-ω range, 0391-03C9) to exercise multi-byte
+/// UTF-8 paths through the saphyr emitter and span-offset approximation
+/// in `parse()`.
 fn safe_text() -> impl Strategy<Value = String> {
-    // Includes `:`, `#`, `'`, `"`, `[`, `]`, `{`, `}` to exercise saphyr's
-    // quoting rules. Excludes newlines (parser strips bodies verbatim, not
-    // YAML values — multiline scalars are tested in unit tests) and the
-    // NUL byte.
-    "[A-Za-z0-9_ .,;!?:#'\"\\[\\]{}@*&<>=|%-]{1,30}"
+    // Includes ASCII punctuation to exercise saphyr quoting rules plus
+    // a subset of Greek Unicode to exercise multi-byte UTF-8 paths.
+    // Excludes newlines, NUL, and the three-dash sequence (frontmatter delimiter).
+    "[A-Za-z0-9_ .,;!?:#'\"\\[\\]{}@*&<>=|%\\-\u{03B1}-\u{03C9}]{1,30}"
         .prop_filter("trim-safe", |s| !s.starts_with(' ') && !s.ends_with(' '))
 }
 
@@ -49,11 +52,30 @@ fn keywords_strategy() -> impl Strategy<Value = Vec<String>> {
 // Bounded JsonValue strategy for hooks — avoids f64 (NaN/Inf issues),
 // non-ASCII-identifier map keys, and too-deep recursion.
 fn hooks_leaf() -> impl Strategy<Value = JsonValue> {
+    // Whole-number f64 (C3): `json!(1.0)` must survive the emit→parse
+    // round-trip with its decimal point preserved. The emitter uses
+    // `float_to_yaml`, which forces `1.0` (not `1`) so saphyr parses it back
+    // as a floating-point number, not an integer.
+    //
+    // Large f64 values (beyond i32 range) and fractional floats are excluded
+    // here because the proptest property asserts full `SkillMetadata`
+    // equality; fractional floats in hooks survive round-trip fine but the
+    // test setup complexity would grow. Large u64 values that exceed i64::MAX
+    // are tested in the dedicated `hooks_large_u64_no_precision_loss` proptest
+    // below, which relaxes the equality assertion to account for the known
+    // string coercion on the parse side.
     prop_oneof![
         Just(JsonValue::Null),
         any::<bool>().prop_map(JsonValue::Bool),
         any::<i64>().prop_map(|i| serde_json::json!(i)),
         safe_text().prop_map(JsonValue::String),
+        // Whole-number floats: must round-trip with decimal point preserved.
+        prop_oneof![
+            Just(serde_json::json!(0.0_f64)),
+            Just(serde_json::json!(1.0_f64)),
+            Just(serde_json::json!(-1.0_f64)),
+            Just(serde_json::json!(2.0_f64)),
+        ],
     ]
 }
 
@@ -102,11 +124,26 @@ fn skill_metadata_strategy() -> impl Strategy<Value = SkillMetadata> {
 // Extras strategy — bounded LoroValue tree. Scalars + one level of
 // list/map nesting is enough to cover interesting round-trip surface.
 fn loro_scalar() -> impl Strategy<Value = LoroValue> {
+    // Whole-number f64 values (C3): `1.0`, `0.0`, etc. must round-trip as
+    // `LoroValue::Double`, not be coerced to `LoroValue::I64` by the YAML
+    // parser. The emitter forces a decimal point (`1.0` not `1`) to preserve
+    // the float type. NaN and Inf are excluded — they cannot be emitted to
+    // canonical YAML (no standard representation) and are not valid Skill
+    // frontmatter values.
+    let whole_double = prop_oneof![
+        Just(LoroValue::Double(0.0)),
+        Just(LoroValue::Double(1.0)),
+        Just(LoroValue::Double(-1.0)),
+        Just(LoroValue::Double(2.0)),
+        Just(LoroValue::Double(100.0)),
+        Just(LoroValue::Double(-100.0)),
+    ];
     prop_oneof![
         Just(LoroValue::Null),
         any::<bool>().prop_map(LoroValue::Bool),
         any::<i64>().prop_map(LoroValue::I64),
         safe_text().prop_map(|s| LoroValue::String(s.into())),
+        whole_double,
     ]
 }
 
@@ -186,6 +223,50 @@ proptest! {
         let re_emitted = emit(&parsed.metadata, &parsed.extras, &parsed.body)
             .expect("re-emit must succeed");
         prop_assert_eq!(emitted, re_emitted, "emit should be idempotent post-parse");
+    }
+
+    /// C2: hooks values that contain u64 > i64::MAX survive emit without
+    /// precision loss — the decimal string representation must appear verbatim
+    /// in the emitted YAML.
+    ///
+    /// Round-trip type identity is NOT asserted here because the emitter
+    /// uses a double-quoted string for u64 > i64::MAX (to avoid f64 precision
+    /// loss), which the parse path reads back as `JsonValue::String`. This is a
+    /// known, documented limitation: precision is preserved but the JSON type
+    /// changes from Number to String on the inbound parse side.
+    ///
+    /// What this test verifies:
+    /// - `emit` does not return an error.
+    /// - `parse` of the emitted bytes does not return an error.
+    /// - The decimal string for the large u64 value appears in the output,
+    ///   not a lossy f64 approximation.
+    #[test]
+    fn hooks_large_u64_no_precision_loss(
+        // Generate u64 values strictly above i64::MAX to exercise the
+        // "emit as double-quoted string" branch added in C2.
+        big in (i64::MAX as u64 + 1)..=u64::MAX,
+        name in "[A-Za-z][A-Za-z0-9_-]{0,10}",
+    ) {
+        let meta = SkillMetadata {
+            name,
+            trust_tier: SkillTrustTier::AdHoc,
+            description: None,
+            keywords: Vec::new(),
+            hooks: serde_json::json!({"counter": big}),
+        };
+        let extras = LoroValue::Map(HashMap::<String, LoroValue>::new().into());
+
+        let emitted = emit(&meta, &extras, "body\n").expect("emit must succeed for large u64 hooks");
+        // The decimal string must appear verbatim — not as a rounded f64.
+        let big_str = big.to_string();
+        prop_assert!(
+            emitted.contains(&big_str),
+            "emitted YAML must contain the exact decimal for {big}: got:\n{emitted}"
+        );
+
+        // Parse must not fail.
+        let _parsed = parse(emitted.as_bytes())
+            .unwrap_or_else(|e| panic!("parse failed for large u64 emit output: {e:?}\noutput was:\n{emitted}"));
     }
 }
 

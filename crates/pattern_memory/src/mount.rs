@@ -209,7 +209,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         setup_in_repo_mount(tmp.path());
 
-        let store = attach(tmp.path()).unwrap();
+        let store = attach(tmp.path(), None).unwrap();
         assert!(matches!(store.mode, StorageMode::InRepo { .. }));
         assert_eq!(store.mount_path, tmp.path().join(".pattern").join("shared"));
 
@@ -223,7 +223,7 @@ mod tests {
     #[test]
     fn attach_not_found_error() {
         let tmp = TempDir::new().unwrap();
-        let err = attach(tmp.path()).unwrap_err();
+        let err = attach(tmp.path(), None).unwrap_err();
         assert!(
             matches!(err, MountError::NotFound { .. }),
             "expected NotFound, got: {err:?}"
@@ -236,12 +236,12 @@ mod tests {
         setup_in_repo_mount(tmp.path());
 
         // First attach.
-        let store = attach(tmp.path()).unwrap();
+        let store = attach(tmp.path(), None).unwrap();
         store.db.health_check().unwrap();
         store.detach();
 
         // Re-attach should succeed with identical state.
-        let store2 = attach(tmp.path()).unwrap();
+        let store2 = attach(tmp.path(), None).unwrap();
         store2.db.health_check().unwrap();
         store2.detach();
     }

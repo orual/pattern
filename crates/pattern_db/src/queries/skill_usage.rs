@@ -147,9 +147,17 @@ fn from_row_offset(row: &rusqlite::Row, offset: usize) -> rusqlite::Result<Skill
     let last_used_str: Option<String> = row.get(offset)?;
     let last_used_by_str: Option<String> = row.get(offset + 1)?;
     let use_count: u64 = {
-        // rusqlite maps INTEGER to i64; cast to u64 (count is always ≥ 0).
+        // rusqlite maps INTEGER to i64. The counter is always non-negative so
+        // we convert safely; negative values indicate DB corruption and are
+        // reported as a type conversion failure rather than silently wrapping.
         let raw: i64 = row.get(offset + 2)?;
-        raw as u64
+        u64::try_from(raw).map_err(|_| {
+            rusqlite::Error::FromSqlConversionFailure(
+                offset + 2,
+                rusqlite::types::Type::Integer,
+                format!("use_count {raw} is negative; expected non-negative integer").into(),
+            )
+        })?
     };
 
     let last_used = last_used_str

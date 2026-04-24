@@ -308,7 +308,7 @@ fn cmd_mount_init(mode: ModeArg, path: PathBuf, project_id: Option<String>) -> M
 }
 
 fn cmd_attach(path: &std::path::Path) -> MietteResult<()> {
-    let store = pattern_memory::mount::attach(path).map_err(miette::Report::new)?;
+    let store = pattern_memory::mount::attach(path, None).map_err(miette::Report::new)?;
     println!(
         "Attached: mode={:?} mount={}",
         store.mode,

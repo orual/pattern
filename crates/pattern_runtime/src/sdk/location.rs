@@ -1,10 +1,29 @@
 //! SDK location resolution. Phase 3 implements Directory mode only; Embedded
 //! and Auto are declared for API stability but return
 //! `RuntimeError::CompileInternal` with guidance to use Directory mode.
+//!
+//! This module also defines [`FIRST_PARTY_SKILL_DIR`], which is the canonical
+//! path to the first-party skill definitions shipped with `pattern_runtime`.
+//! It is used by [`pattern_memory::skill::resolve_source_for_path`] to
+//! classify loaded `.md` skill files by provenance and assign the correct
+//! [`SkillTrustTier`](pattern_core::types::memory_types::SkillTrustTier).
 
 use std::path::PathBuf;
 
 use pattern_core::error::RuntimeError;
+
+/// Absolute path to the first-party skill definitions bundled with
+/// `pattern_runtime`.
+///
+/// The value is baked at build time from `$CARGO_MANIFEST_DIR/resources/skills`
+/// using [`concat!`] + [`env!`]. Any `.md` file discovered under this directory
+/// is classified as [`SkillSource::SdkResourceDir`] and receives
+/// [`SkillTrustTier::FirstParty`], regardless of the `trust_tier` field written
+/// in the file's YAML frontmatter.
+///
+/// [`SkillSource::SdkResourceDir`]: pattern_memory::skill::SkillSource::SdkResourceDir
+/// [`SkillTrustTier::FirstParty`]: pattern_core::types::memory_types::SkillTrustTier::FirstParty
+pub const FIRST_PARTY_SKILL_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/resources/skills");
 
 /// Where Pattern finds its Haskell SDK modules at runtime.
 #[derive(Debug, Clone)]

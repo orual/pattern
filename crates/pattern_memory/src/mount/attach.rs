@@ -5,7 +5,7 @@
 //! subscriber support, starts a filesystem watcher, and returns a
 //! [`MountedStore`] handle.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use pattern_db::ConstellationDb;
@@ -26,15 +26,24 @@ use crate::reembed::ReembedQueue;
 /// This is the production entry point. For tests that need a custom base
 /// directory, use [`attach_with_paths`].
 ///
+/// `first_party_skills_dir` controls trust-tier enforcement for Skill blocks.
+/// Pass `Some(PathBuf::from(pattern_runtime::sdk::FIRST_PARTY_SKILL_DIR))` from
+/// agent-runtime callers so skills under that directory receive
+/// `SkillTrustTier::FirstParty` automatically. Pass `None` for admin/backup
+/// operations that do not process agent skill effects.
+///
 /// # Errors
 ///
 /// - [`MountError::NotFound`] if no mount is found.
 /// - [`MountError::Config`] if the `.pattern.kdl` is invalid.
 /// - [`MountError::Db`] if the databases cannot be opened.
 /// - [`MountError::Watcher`] if the filesystem watcher fails to start.
-pub fn attach(start: &Path) -> Result<MountedStore, MountError> {
+pub fn attach(
+    start: &Path,
+    first_party_skills_dir: Option<PathBuf>,
+) -> Result<MountedStore, MountError> {
     let paths = PatternPaths::default_paths()?;
-    attach_with_paths(start, &paths)
+    attach_with_paths(start, &paths, first_party_skills_dir)
 }
 
 /// Attach to the nearest mount at or above `start` with an explicit
@@ -42,7 +51,14 @@ pub fn attach(start: &Path) -> Result<MountedStore, MountError> {
 ///
 /// Use [`PatternPaths::with_base`] in tests to avoid writing to the real
 /// `~/.pattern/` directory.
-pub fn attach_with_paths(start: &Path, paths: &PatternPaths) -> Result<MountedStore, MountError> {
+///
+/// `first_party_skills_dir` controls trust-tier enforcement for Skill blocks.
+/// See [`attach`] for the full doc.
+pub fn attach_with_paths(
+    start: &Path,
+    paths: &PatternPaths,
+    first_party_skills_dir: Option<PathBuf>,
+) -> Result<MountedStore, MountError> {
     let mount_path = super::find_mount(start)?;
     let config = load_mount_config(&mount_path.join(".pattern.kdl"))?;
 
@@ -144,12 +160,20 @@ pub fn attach_with_paths(start: &Path, paths: &PatternPaths) -> Result<MountedSt
     };
 
     let (heartbeat_tx, heartbeat_rx) = crossbeam_channel::bounded(256);
-    let cache = Arc::new(MemoryCache::new(db.clone()).with_mount_path(
+    // Build the MemoryCache with mount path (enables subscriber file emission)
+    // and, when provided, the first-party skill directory for trust-tier
+    // enforcement. The first-party dir comes from pattern_runtime and cannot
+    // be baked into pattern_memory (circular dep: pattern_memory ← pattern_runtime).
+    let mut mc = MemoryCache::new(db.clone()).with_mount_path(
         mount_path.clone(),
         reembed_tx,
         heartbeat_tx,
         heartbeat_rx,
-    ));
+    );
+    if let Some(fp_dir) = first_party_skills_dir {
+        mc = mc.with_first_party_skills_dir(fp_dir);
+    }
+    let cache = Arc::new(mc);
 
     // Start the filesystem watcher for external edits.
     let watcher = MountWatcher::start(WatcherConfig {

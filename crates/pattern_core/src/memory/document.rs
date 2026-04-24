@@ -949,16 +949,53 @@ impl StructuredDocument {
             }
             BlockSchema::Skill { .. } => {
                 // Skill: treat the body as text content, mirroring the Text arm.
+                //
                 // The YAML frontmatter lives in the "metadata" LoroMap and is
-                // managed by the `markdown_skill` converter (Task 7, Phase 4);
-                // `import_from_json` only handles the body here.
+                // populated by `markdown_skill::write_skill_to_loro_doc` on the
+                // external-edit inbound path. `import_from_json` handles only
+                // the bare body string (for programmatic creation/seeding of a
+                // body without metadata); it intentionally does NOT replicate
+                // the loro_bridge logic.
+                //
+                // Accepted input shapes:
+                //   - `Value::String(body)` — the body string directly.
+                //   - `Value::Object` with exactly one `"body"` key — an
+                //     object that contains ONLY the body.
+                //
+                // Rejected: any object with keys beyond `"body"`. Callers that
+                // need to write metadata must use `write_skill_to_loro_doc`.
                 let text = if let Some(s) = value.as_str() {
                     s.to_string()
-                } else if let Some(body) = value.get("body").and_then(|v| v.as_str()) {
-                    body.to_string()
+                } else if let Some(obj) = value.as_object() {
+                    // Check for stray keys — any key other than "body" means
+                    // the caller is trying to write structured metadata through
+                    // the wrong API path.
+                    let extra_keys: Vec<&str> = obj
+                        .keys()
+                        .filter(|k| *k != "body")
+                        .map(|k| k.as_str())
+                        .collect();
+                    if !extra_keys.is_empty() {
+                        return Err(DocumentError::Other(format!(
+                            "Skill blocks with structured metadata must use \
+                             write_skill_to_loro_doc; import_from_json only accepts \
+                             bare body strings. Got keys: {{{}}}",
+                            extra_keys.join(", ")
+                        )));
+                    }
+                    obj.get("body")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            DocumentError::Other(
+                                "Skill schema object must contain a string 'body' field"
+                                    .to_string(),
+                            )
+                        })?
+                        .to_string()
                 } else {
                     return Err(DocumentError::Other(
-                        "Skill schema expects string body or object with 'body' field".to_string(),
+                        "Skill schema expects a string body or an object with a single 'body' field"
+                            .to_string(),
                     ));
                 };
                 let body_text = self.doc.get_text("body");
@@ -1348,22 +1385,104 @@ impl StructuredDocument {
                 out
             }
 
-            BlockSchema::Skill { expected_keys } => {
-                // Render the body text. The YAML frontmatter metadata lives in
-                // the "metadata" LoroMap and is presented separately by the
-                // skill-aware render path in Task 9 (Phase 4). For now, render
-                // the body text and a note about expected metadata keys so the
-                // block is at least legible in LLM context.
-                let body = self.doc.get_text("body").to_string();
-                if expected_keys.is_empty() {
-                    body
-                } else {
-                    format!(
-                        "Skill(expected_keys=[{}])\n{}",
-                        expected_keys.join(", "),
-                        body
-                    )
+            BlockSchema::Skill { .. } => {
+                // Render name + description + keywords + body into a single
+                // preview string so all fields are covered by the FTS5 index.
+                // The FTS5 `content_preview` column is updated from the return
+                // value of this function via `update_block_preview`.
+                //
+                // Metadata lives in a `"metadata"` LoroMap whose scalar fields
+                // are stored as plain LoroValue strings. We project them here
+                // with a minimal inline projection rather than importing
+                // `pattern_memory::fs::markdown_skill::project_metadata_from_loro`
+                // (which would create a circular dependency — pattern_core must
+                // never depend on pattern_memory). The inline logic is strictly
+                // read-only and tolerates missing or malformed fields by
+                // substituting empty strings.
+                let deep = self.doc.get_deep_value();
+                let mut out = String::new();
+
+                let metadata_map = match &deep {
+                    LoroValue::Map(root) => match root.get("metadata") {
+                        Some(LoroValue::Map(m)) => Some(m.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+
+                if let Some(meta) = &metadata_map {
+                    // Name field.
+                    if let Some(LoroValue::String(name)) = meta.get("name") {
+                        out.push_str(name);
+                        out.push('\n');
+                    }
+
+                    // Description field (optional — stored as String or Null).
+                    if let Some(LoroValue::String(desc)) = meta.get("description") {
+                        out.push_str(desc);
+                        out.push('\n');
+                    }
+
+                    // Keywords — stored as a JSON-encoded array string.
+                    // Missing `keywords_json` is valid (means no keywords);
+                    // only a present-but-malformed or wrong-type value fires
+                    // the metric.
+                    if let Some(LoroValue::String(kw_json)) = meta.get("keywords_json") {
+                        match serde_json::from_str::<serde_json::Value>(kw_json) {
+                            Ok(serde_json::Value::Array(kws)) => {
+                                let joined: Vec<&str> =
+                                    kws.iter().filter_map(|v| v.as_str()).collect();
+                                if !joined.is_empty() {
+                                    out.push_str(&joined.join(" "));
+                                    out.push('\n');
+                                }
+                            }
+                            Ok(_) | Err(_) => {
+                                // keywords_json contains unparseable JSON or a
+                                // non-array JSON value. Emit a warning so the
+                                // condition is observable in production.
+                                // Fires with `kind=malformed` label so the
+                                // metric time-series is symmetric with the
+                                // wrong-type branch below.
+                                metrics::counter!(
+                                    "memory.skill.render_keywords_json_failed",
+                                    "kind" => "malformed"
+                                )
+                                .increment(1);
+                                tracing::warn!(
+                                    block_id = %self.metadata().id,
+                                    "Skill block 'keywords_json' could not be parsed as a JSON array; keywords omitted from render"
+                                );
+                            }
+                        }
+                    } else if let Some(other) = meta.get("keywords_json") {
+                        // keywords_json is present but stored as a non-string
+                        // LoroValue — this indicates a schema corruption or a
+                        // bug in the writer path. Fire a metric with a
+                        // distinct label so it's distinguishable from the
+                        // JSON-parse-failure case above.
+                        metrics::counter!(
+                            "memory.skill.render_keywords_json_failed",
+                            "kind" => "wrong_type"
+                        )
+                        .increment(1);
+                        tracing::warn!(
+                            block_id = %self.metadata().id,
+                            loro_kind = ?std::mem::discriminant(other),
+                            "Skill block 'keywords_json' has unexpected non-string LoroValue; \
+                             keywords omitted from render"
+                        );
+                    }
                 }
+
+                // Body text.
+                let body = self.doc.get_text("body").to_string();
+                if !body.is_empty() {
+                    out.push('\n');
+                    out.push_str(&body);
+                }
+
+                out
             }
         }
     }
@@ -2401,4 +2520,51 @@ mod tests {
             "missing description excerpt"
         );
     }
+
+    // region: Skill import_from_json
+
+    /// Skill `import_from_json` accepts `{"body": "text content"}` and writes
+    /// the body text into the LoroDoc's `"body"` LoroText container.
+    #[test]
+    fn test_skill_import_from_json_accepts_body_object() {
+        let doc = StructuredDocument::new(BlockSchema::Skill {
+            expected_keys: vec![],
+        });
+        doc.import_from_json(&serde_json::json!({"body": "text content"}))
+            .expect("Skill import_from_json should accept {\"body\": \"...\"}");
+        doc.commit();
+        // The body text must match exactly what was written.
+        // Access via inner() since the "body" container is Skill-specific and
+        // not exposed through the StructuredDocument's text_content() helper
+        // (which reads from the generic "content" container used by Text schema).
+        assert_eq!(
+            doc.inner().get_text("body").to_string(),
+            "text content",
+            "body LoroText should contain the written string"
+        );
+    }
+
+    /// Skill `import_from_json` rejects objects with keys beyond `"body"` and
+    /// returns a `DocumentError::Other` that names the offending key(s) and
+    /// points callers toward `write_skill_to_loro_doc`.
+    #[test]
+    fn test_skill_import_from_json_rejects_extra_keys() {
+        let doc = StructuredDocument::new(BlockSchema::Skill {
+            expected_keys: vec![],
+        });
+        let err = doc
+            .import_from_json(&serde_json::json!({"body": "x", "name": "bogus"}))
+            .expect_err("Skill import_from_json must reject extra keys beyond 'body'");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("write_skill_to_loro_doc"),
+            "error message should point callers to write_skill_to_loro_doc; got: {msg}"
+        );
+        assert!(
+            msg.contains("name"),
+            "error message should name the offending key 'name'; got: {msg}"
+        );
+    }
+
+    // endregion: Skill import_from_json
 }

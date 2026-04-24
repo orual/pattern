@@ -344,7 +344,7 @@ fn sidecar_validation_spike() {
 
     // Op 26: first attach cycle — attach, create blocks, detach.
     {
-        let store = attach(root).expect("attach cycle 1 failed");
+        let store = attach(root, None).expect("attach cycle 1 failed");
         let cache = Arc::clone(&store.cache);
 
         // Op 27: create 3 blocks through MemoryStore.
@@ -409,7 +409,7 @@ fn sidecar_validation_spike() {
 
     // Op 28: second attach — re-attach and verify blocks survived detach.
     {
-        let store = attach(root).expect("attach cycle 2 failed");
+        let store = attach(root, None).expect("attach cycle 2 failed");
         let cache = Arc::clone(&store.cache);
 
         let doc = cache
@@ -471,7 +471,7 @@ fn sidecar_validation_spike() {
 
     // Op 31: third attach cycle — verify all 5 blocks still accessible.
     {
-        let store = attach(root).expect("attach cycle 3 failed");
+        let store = attach(root, None).expect("attach cycle 3 failed");
         let cache = Arc::clone(&store.cache);
 
         let meta_list = cache
@@ -565,7 +565,7 @@ fn sidecar_validation_spike() {
     // session; here we verify the DB attach/detach round-trip still works
     // cleanly after filesystem changes.
     {
-        let store = attach(root).expect("attach after external edits failed");
+        let store = attach(root, None).expect("attach after external edits failed");
 
         // The memory.db has the pre-external-edit block content (it was
         // persisted via MemoryStore before the external edit). The on-disk

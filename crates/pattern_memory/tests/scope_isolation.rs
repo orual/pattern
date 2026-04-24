@@ -475,3 +475,70 @@ fn skill_block_in_project_scope_invisible_to_persona_under_full_isolation() {
         "project 'my-skill' block must be visible to session under Full isolation"
     );
 }
+
+/// Sibling test that uses a real `BlockSchema::Skill` block populated via
+/// `seed_skill`, verifying that the LoroDoc metadata is wired correctly and
+/// that `get_rendered_content` returns the emitted markdown under Full
+/// isolation.
+///
+/// Demonstrates that `BlockSchema::Skill` obeys scope isolation exactly the
+/// same as other schemas — the property holds because `MemoryScope` routes
+/// on `agent_id` and `IsolatePolicy`, never on the block schema.
+#[test]
+fn skill_block_with_real_schema_is_invisible_to_persona_under_full_isolation() {
+    use pattern_core::types::memory_types::{SkillMetadata, SkillTrustTier};
+
+    let store = ScopeTestStore::new();
+
+    // Seed a genuine Skill block (BlockSchema::Skill) in the project scope.
+    let skill_meta = SkillMetadata {
+        name: "my-real-skill".to_string(),
+        trust_tier: SkillTrustTier::AdHoc,
+        description: Some("A test skill.".to_string()),
+        keywords: vec!["test".to_string()],
+        hooks: serde_json::Value::Null,
+    };
+    store.seed_skill(
+        "project",
+        "my-real-skill",
+        skill_meta,
+        "# Real Skill\nBody.\n",
+    );
+
+    // Seed a plain text block in the persona scope for contrast.
+    store.seed("persona", "scratch", "persona scratchpad");
+
+    let scope = MemoryScope::new(
+        store,
+        ScopeBinding::with_project("persona", "project", IsolatePolicy::Full),
+    );
+
+    // Persona block is invisible under Full isolation.
+    assert!(
+        scope
+            .get_rendered_content("any", "scratch")
+            .unwrap()
+            .is_none(),
+        "persona 'scratch' must be invisible under Full isolation"
+    );
+
+    // Project Skill block is visible under Full isolation because it belongs
+    // to the project agent_id which is accessible.
+    let rendered = scope
+        .get_rendered_content("project", "my-real-skill")
+        .unwrap();
+    assert!(
+        rendered.is_some(),
+        "project Skill block must be visible under Full isolation"
+    );
+    let content = rendered.unwrap();
+    // The rendered content is the emitted markdown — verify key fields are present.
+    assert!(
+        content.contains("my-real-skill"),
+        "rendered content should include the skill name; got: {content}"
+    );
+    assert!(
+        content.contains("ad-hoc"),
+        "rendered content should include the trust_tier; got: {content}"
+    );
+}

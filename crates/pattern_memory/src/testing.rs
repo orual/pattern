@@ -9,8 +9,8 @@ use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::BlockCreate;
 use pattern_core::types::memory_types::{
     ArchivalEntry, BlockFilter, BlockMetadata, BlockMetadataPatch, BlockSchema, MemoryResult,
-    MemorySearchResult, MemorySearchScope, SearchOptions, SharedBlockInfo, UndoRedoDepth,
-    UndoRedoOp,
+    MemorySearchResult, MemorySearchScope, SearchOptions, SharedBlockInfo, SkillMetadata,
+    UndoRedoDepth, UndoRedoOp,
 };
 use serde_json::Value as JsonValue;
 
@@ -54,6 +54,48 @@ impl ScopeTestStore {
             (agent_id.to_string(), label.to_string()),
             (doc, content.to_string()),
         );
+    }
+
+    /// Seed a Skill block directly into the store.
+    ///
+    /// Creates a block with `BlockSchema::Skill` and writes `metadata` +
+    /// `body` into the LoroDoc's `"metadata"` LoroMap and `"body"` LoroText
+    /// via [`crate::fs::markdown_skill::write_skill_to_loro_doc`]. The
+    /// `rendered_content` stored for `get_rendered_content` is the emitted
+    /// markdown string.
+    ///
+    /// Use this helper in scope-isolation tests that need to exercise Skill
+    /// blocks specifically (rather than the generic Text-schema blocks
+    /// produced by [`ScopeTestStore::seed`]).
+    pub fn seed_skill(&self, agent_id: &str, label: &str, metadata: SkillMetadata, body: &str) {
+        let schema = BlockSchema::Skill {
+            expected_keys: vec![],
+        };
+        let mut meta = BlockMetadata::standalone(schema);
+        meta.agent_id = agent_id.to_string();
+        meta.label = label.to_string();
+        let doc = StructuredDocument::new_with_metadata(meta, None);
+
+        // Wire the LoroDoc via the loro_bridge so project_metadata_from_loro
+        // returns valid data and the emit path does not fail.
+        let skill_file = crate::fs::markdown_skill::parse::SkillFile {
+            metadata: metadata.clone(),
+            extras: loro::LoroValue::Map(Default::default()),
+            body: body.to_string(),
+        };
+        crate::fs::markdown_skill::write_skill_to_loro_doc(&skill_file, doc.inner())
+            .expect("seed_skill: write_skill_to_loro_doc failed");
+        doc.inner().commit();
+
+        // Emit the canonical representation so get_rendered_content returns
+        // something meaningful.
+        let rendered = crate::fs::markdown_skill::emit(&metadata, &skill_file.extras, body)
+            .expect("seed_skill: emit failed");
+
+        self.blocks
+            .lock()
+            .unwrap()
+            .insert((agent_id.to_string(), label.to_string()), (doc, rendered));
     }
 
     /// Seed an archival entry directly, bypassing `insert_archival`.

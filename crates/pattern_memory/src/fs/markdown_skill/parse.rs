@@ -46,6 +46,9 @@ pub fn parse(bytes: &[u8]) -> Result<SkillFile, SkillParseError> {
     let text = std::str::from_utf8(bytes).map_err(|_| SkillParseError::NonUtf8Body)?;
     let (frontmatter_src, body_src) = split_frontmatter(text)?;
 
+    // Clone once so every error from this parse shares the same source text.
+    let source_text = frontmatter_src.to_string();
+
     let docs = Yaml::load_from_str(frontmatter_src).map_err(|e| {
         let marker = e.marker();
         // Marker index is in chars (YAML marker convention). Use the
@@ -54,23 +57,38 @@ pub fn parse(bytes: &[u8]) -> Result<SkillFile, SkillParseError> {
         // frontmatter. For non-ASCII, the reported span may be slightly off
         // but still useful for humans.
         let span = SourceSpan::from((marker.index(), 1));
-        SkillParseError::Yaml { span, source: e }
+        SkillParseError::Yaml {
+            source_text: source_text.clone(),
+            span,
+            source: e,
+        }
     })?;
 
     if docs.is_empty() {
         return Err(SkillParseError::MissingRequiredKey {
             key: "name",
+            source_text,
             span: None,
         });
     }
 
     let root = &docs[0];
-    let (metadata, extras) = visit_root(root)?;
+    let (metadata, extras) = visit_root(root, &source_text)?;
+
+    // Normalize CRLF → LF in the body so files edited on Windows (or
+    // received via HTTP with CRLF line endings) round-trip cleanly. The
+    // emit path always produces LF; a CRLF body would otherwise produce
+    // a file that parses back to a different body string than it emitted.
+    let body = if body_src.contains('\r') {
+        body_src.replace("\r\n", "\n")
+    } else {
+        body_src.to_string()
+    };
 
     Ok(SkillFile {
         metadata,
         extras,
-        body: body_src.to_string(),
+        body,
     })
 }
 
@@ -114,7 +132,10 @@ fn split_frontmatter(text: &str) -> Result<(&str, &str), SkillParseError> {
 
 // region: root visitor
 
-fn visit_root(yaml: &Yaml) -> Result<(SkillMetadata, LoroValue), SkillParseError> {
+fn visit_root(
+    yaml: &Yaml,
+    source_text: &str,
+) -> Result<(SkillMetadata, LoroValue), SkillParseError> {
     let mapping = match yaml {
         Yaml::Mapping(m) => m,
         other => {
@@ -122,6 +143,7 @@ fn visit_root(yaml: &Yaml) -> Result<(SkillMetadata, LoroValue), SkillParseError
                 key: "<root>".to_string(),
                 expected: "mapping",
                 actual: yaml_kind(other),
+                source_text: source_text.to_string(),
                 span: None,
             });
         }
@@ -142,24 +164,25 @@ fn visit_root(yaml: &Yaml) -> Result<(SkillMetadata, LoroValue), SkillParseError
                     key: "<mapping-key>".to_string(),
                     expected: "string",
                     actual: yaml_kind(other),
+                    source_text: source_text.to_string(),
                     span: None,
                 });
             }
         };
 
         match key_str.as_str() {
-            "name" => name = Some(extract_string(v, "name")?),
+            "name" => name = Some(extract_string(v, "name", source_text)?),
             "trust_tier" => {
-                let s = extract_string(v, "trust_tier")?;
-                trust_tier = Some(parse_trust_tier(&s)?);
+                let s = extract_string(v, "trust_tier", source_text)?;
+                trust_tier = Some(parse_trust_tier(&s, source_text)?);
             }
             "description" => {
                 description = match v {
                     Yaml::Value(Scalar::Null) => None,
-                    _ => Some(extract_string(v, "description")?),
+                    _ => Some(extract_string(v, "description", source_text)?),
                 };
             }
-            "keywords" => keywords = extract_string_sequence(v, "keywords")?,
+            "keywords" => keywords = extract_string_sequence(v, "keywords", source_text)?,
             "hooks" => hooks = yaml_to_json(v),
             _ => {
                 extras.insert(key_str, yaml_to_loro(v));
@@ -169,6 +192,7 @@ fn visit_root(yaml: &Yaml) -> Result<(SkillMetadata, LoroValue), SkillParseError
 
     let name = name.ok_or(SkillParseError::MissingRequiredKey {
         key: "name",
+        source_text: source_text.to_string(),
         span: None,
     })?;
     if name.is_empty() {
@@ -176,11 +200,13 @@ fn visit_root(yaml: &Yaml) -> Result<(SkillMetadata, LoroValue), SkillParseError
             key: "name".to_string(),
             expected: "non-empty string",
             actual: "empty string",
+            source_text: source_text.to_string(),
             span: None,
         });
     }
     let trust_tier = trust_tier.ok_or(SkillParseError::MissingRequiredKey {
         key: "trust_tier",
+        source_text: source_text.to_string(),
         span: None,
     })?;
 
@@ -198,7 +224,7 @@ fn visit_root(yaml: &Yaml) -> Result<(SkillMetadata, LoroValue), SkillParseError
 
 // region: scalar extractors
 
-fn extract_string(yaml: &Yaml, key: &str) -> Result<String, SkillParseError> {
+fn extract_string(yaml: &Yaml, key: &str, source_text: &str) -> Result<String, SkillParseError> {
     match yaml {
         Yaml::Value(Scalar::String(s)) => Ok(s.as_ref().to_string()),
         Yaml::Representation(s, _, _) => Ok(s.as_ref().to_string()),
@@ -206,24 +232,33 @@ fn extract_string(yaml: &Yaml, key: &str) -> Result<String, SkillParseError> {
             key: key.to_string(),
             expected: "string",
             actual: yaml_kind(other),
+            source_text: source_text.to_string(),
             span: None,
         }),
     }
 }
 
-fn extract_string_sequence(yaml: &Yaml, key: &str) -> Result<Vec<String>, SkillParseError> {
+fn extract_string_sequence(
+    yaml: &Yaml,
+    key: &str,
+    source_text: &str,
+) -> Result<Vec<String>, SkillParseError> {
     match yaml {
-        Yaml::Sequence(items) => items.iter().map(|v| extract_string(v, key)).collect(),
+        Yaml::Sequence(items) => items
+            .iter()
+            .map(|v| extract_string(v, key, source_text))
+            .collect(),
         other => Err(SkillParseError::TypeMismatch {
             key: key.to_string(),
             expected: "sequence",
             actual: yaml_kind(other),
+            source_text: source_text.to_string(),
             span: None,
         }),
     }
 }
 
-fn parse_trust_tier(s: &str) -> Result<SkillTrustTier, SkillParseError> {
+fn parse_trust_tier(s: &str, source_text: &str) -> Result<SkillTrustTier, SkillParseError> {
     match s {
         "first-party" => Ok(SkillTrustTier::FirstParty),
         "project-local" => Ok(SkillTrustTier::ProjectLocal),
@@ -231,6 +266,7 @@ fn parse_trust_tier(s: &str) -> Result<SkillTrustTier, SkillParseError> {
         "ad-hoc" => Ok(SkillTrustTier::AdHoc),
         other => Err(SkillParseError::InvalidTrustTier {
             value: other.to_string(),
+            source_text: source_text.to_string(),
             span: None,
         }),
     }
@@ -644,4 +680,49 @@ mod tests {
     }
 
     // endregion: hooks + extras edge cases
+
+    // region: CRLF normalization (M6)
+
+    /// M6: a body that contains CRLF line endings must be normalized to LF
+    /// before the SkillFile is returned.
+    ///
+    /// This matters because `emit()` always produces LF output. A CRLF body
+    /// would produce a file whose parse re-yields a different body string,
+    /// breaking content-hash stability and proptest round-trip equality.
+    #[test]
+    fn parse_normalizes_crlf_body_to_lf() {
+        let src = "---\r\nname: foo\r\ntrust_tier: ad-hoc\r\n---\r\nline one\r\nline two\r\n";
+        let sf = parse(src.as_bytes()).unwrap();
+        assert_eq!(
+            sf.body, "line one\nline two\n",
+            "body must have CRLF normalized to LF; got {:?}",
+            sf.body
+        );
+    }
+
+    /// M6: a CRLF round-trip: parse CRLF → emit (LF) → parse again → bodies match.
+    ///
+    /// Confirms that the content-hash suppression path (emit(parse(file)) == file)
+    /// holds even when the original file has CRLF line endings.
+    #[test]
+    fn crlf_body_parse_emit_parse_produces_lf() {
+        use super::super::emit::emit;
+        use std::collections::HashMap;
+
+        let src = "---\r\nname: test\r\ntrust_tier: ad-hoc\r\n---\r\nsome body\r\n";
+        let first = parse(src.as_bytes()).unwrap();
+        // After parse, body must be LF-normalized.
+        assert_eq!(first.body, "some body\n");
+
+        let extras_empty = loro::LoroValue::Map(HashMap::<String, loro::LoroValue>::new().into());
+        let emitted = emit(&first.metadata, &extras_empty, &first.body).unwrap();
+        let second = parse(emitted.as_bytes()).unwrap();
+        assert_eq!(
+            first.body, second.body,
+            "body must survive CRLF → LF normalization across two parse-emit cycles"
+        );
+        assert_eq!(first.metadata, second.metadata);
+    }
+
+    // endregion: CRLF normalization (M6)
 }
