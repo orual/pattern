@@ -206,7 +206,8 @@ fn project_skill_metadata(
 ///
 /// Enumerates blocks via `store.list_blocks`, filters to `BlockSchema::Skill`,
 /// projects each block's LoroDoc into `SkillMetadata`, batch-fetches usage
-/// stats from sqlite, and assembles `SkillInfo` records.
+/// stats from sqlite, and assembles `SkillInfo` records. The underlying
+/// `MemoryScope` handles `IsolatePolicy` routing upstream.
 pub fn handle_list(
     store: &dyn MemoryStore,
     conn: &rusqlite::Connection,
@@ -857,7 +858,8 @@ mod tests {
             "## Overview\n\nHandles OAuth2.\n",
         );
 
-        let rendered = handle_load(&*store, &mut conn, agent, "fix-auth").expect("load must succeed");
+        let rendered =
+            handle_load(&*store, &mut conn, agent, "fix-auth").expect("load must succeed");
 
         assert!(
             rendered.contains("[skill:loaded]"),
@@ -1117,12 +1119,7 @@ mod tests {
         // skill body persists across the intervening non-loading turn.
         let active_text: String = hist
             .active_messages()
-            .map(|m| {
-                m.chat_message
-                    .content
-                    .joined_texts()
-                    .unwrap_or_default()
-            })
+            .map(|m| m.chat_message.content.joined_texts().unwrap_or_default())
             .collect::<Vec<_>>()
             .join("\n");
 

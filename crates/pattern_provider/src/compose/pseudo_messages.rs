@@ -116,10 +116,10 @@ pub fn render_change_events(events: &[BlockWrite]) -> Vec<ChatMessage> {
     events.iter().map(render_change_event).collect()
 }
 
-/// Render a skill-loaded notification as a pseudo-message.
+/// Render the `[skill:loaded] … [skill:loaded:end]` text for a successful
+/// `Pattern.Skills.Load` call.
 ///
-/// The returned message has `role = User` and carries a
-/// `<system-reminder>`-wrapped body in the canonical form:
+/// Format:
 ///
 /// ```text
 /// [skill:loaded] name="<name>" trust_tier="<kebab>"
@@ -129,25 +129,8 @@ pub fn render_change_events(events: &[BlockWrite]) -> Vec<ChatMessage> {
 /// [skill:loaded:end]
 /// ```
 ///
-/// This is injected into segment 2 of the current turn's composed request
-/// when an agent calls `Pattern.Skills.Load`. The format mirrors the
-/// `[memory:written]` / `[memory:updated]` markers produced by
-/// [`render_change_event`] so agents see a consistent pseudo-message shape
-/// for side-effecting SDK calls.
-///
-/// `trust_tier` is rendered as its kebab-case serde form (e.g. `"project-local"`).
-///
-/// # Examples
-///
-/// ```
-/// use pattern_core::types::memory_types::SkillTrustTier;
-/// use pattern_provider::compose::pseudo_messages::render_skill_loaded_event;
-///
-/// let msg = render_skill_loaded_event("my-skill", SkillTrustTier::ProjectLocal, "## Overview\nDoes things.");
-/// assert_eq!(msg.role, genai::chat::ChatRole::User);
-/// ```
-/// Render the `[skill:loaded] … [skill:loaded:end]` text for a successful
-/// `Pattern.Skills.Load` call.
+/// `trust_tier` is rendered as its kebab-case serde form (e.g.
+/// `"project-local"`).
 ///
 /// Returns the raw text (markers + frontmatter line + full body) WITHOUT
 /// `<system-reminder>` wrapping — the load handler returns this string as
@@ -156,7 +139,20 @@ pub fn render_change_events(events: &[BlockWrite]) -> Vec<ChatMessage> {
 ///
 /// Because tool_result messages are part of `TurnHistory::active_messages`,
 /// the rendered content naturally persists in segment 2 across subsequent
-/// turns without needing a separate pseudo-message pipe.
+/// turns without needing a separate pseudo-message pipe. The
+/// `render_skill_loaded_text_snapshot` test in this module pins the exact
+/// rendered form across changes.
+///
+/// # Examples
+///
+/// ```
+/// use pattern_core::types::memory_types::SkillTrustTier;
+/// use pattern_provider::compose::pseudo_messages::render_skill_loaded_text;
+///
+/// let text = render_skill_loaded_text("my-skill", SkillTrustTier::ProjectLocal, "## Overview\nDoes things.");
+/// assert!(text.starts_with("[skill:loaded]"));
+/// assert!(text.ends_with("[skill:loaded:end]"));
+/// ```
 pub fn render_skill_loaded_text(name: &str, trust_tier: SkillTrustTier, body: &str) -> String {
     let tier_str = serde_json::to_string(&trust_tier).unwrap_or_else(|_| "\"unknown\"".to_string());
     let tier_kebab = tier_str.trim_matches('"');

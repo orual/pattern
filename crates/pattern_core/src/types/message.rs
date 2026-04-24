@@ -77,6 +77,12 @@ pub struct Message {
 /// but is not part of the stored `ChatMessage` structure. Exists so the
 /// conversational record stays uncontaminated by ephemeral context reminders,
 /// while the wire still receives them.
+///
+/// Attachments are **write-once**: once attached to a `Message`, they are
+/// never updated. The splice machinery in `agent_loop` renders attachment
+/// content deterministically into wire-content at compose-time. This is the
+/// cache-stability story — a message's wire bytes stay stable across turns
+/// because the attachments don't mutate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MessageAttachment {
     /// Memory snapshot attached to a batch-initiating user message
@@ -96,6 +102,37 @@ pub enum MessageAttachment {
         /// For Delta: labels of blocks edited since prior batch. Empty
         /// for Full.
         edited_blocks: Vec<SmolStr>,
+    },
+    /// A skill became autonomously available to the agent (e.g. a plugin
+    /// auto-installed it). Renders as a `<system-reminder>`-wrapped
+    /// `[skill:available]` marker showing the frontmatter so the agent
+    /// learns it exists and can decide to call `Skills.Load`. Carries
+    /// metadata only — NOT the body — to keep wire bytes small and the
+    /// attachment cache-stable.
+    SkillAvailable {
+        /// The skill's block handle, used for subsequent `Skills.Load` calls.
+        handle: SmolStr,
+        /// Author-declared name from the skill's YAML frontmatter.
+        name: String,
+        /// Effective trust tier (post-policy enforcement, kebab-case
+        /// when rendered).
+        trust_tier: crate::types::memory_types::SkillTrustTier,
+        /// Optional one-line description from frontmatter.
+        description: Option<String>,
+        /// Keywords from frontmatter.
+        keywords: Vec<String>,
+    },
+    /// Caller-rendered text. The splice path inlines `content` verbatim
+    /// onto the host message; the caller is responsible for any wrapping
+    /// (e.g. `<system-reminder>` markers) it wants.
+    ///
+    /// Use this for one-off notifications that don't fit a typed variant.
+    /// New recurring patterns should get their own typed variant for
+    /// refactoring resistance and structured analytics.
+    Custom {
+        /// Pre-rendered text. Spliced verbatim into the host message's
+        /// content. Caller handles all formatting.
+        content: String,
     },
 }
 

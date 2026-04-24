@@ -295,8 +295,13 @@ pub async fn orchestrate(
         })
     };
 
-    // 5. Drain pending block writes from the memory adapter.
+    // 5. Drain pending block writes + handler-originated attachments from
+    //    the memory adapter. Attachments get attached to a TurnOutput
+    //    message below (after assistant_message + tool_result_message are
+    //    finalized) so the splice machinery picks them up on the next
+    //    compose cycle.
     let block_writes = ctx.adapter().drain_pending();
+    let pending_attachments = ctx.adapter().drain_pending_attachments();
 
     // 6. Build cache metrics from the captured usage.
     //
@@ -350,7 +355,7 @@ pub async fn orchestrate(
     // then the tool_result message (if this was a tool-use turn). This
     // preserves the complete round-trip in TurnHistory so the composer's
     // Segment 2 pass replays [assistant(tool_use), tool_result] correctly.
-    let messages = {
+    let mut messages = {
         let mut v = Vec::with_capacity(2);
         if let Some(m) = assistant_message {
             v.push(m);
@@ -360,6 +365,26 @@ pub async fn orchestrate(
         }
         v
     };
+
+    // Attach handler-originated attachments to the LAST message of this
+    // turn (preferring tool_result_msg if present — it's the "completion"
+    // anchor for handler side-effects; otherwise assistant_msg). If the
+    // turn produced no messages but attachments are queued, we drop them
+    // with a warn — there's no host message to anchor onto, and turning
+    // them into a synthetic message would change the conversational
+    // record (which attachments are explicitly designed not to do).
+    if !pending_attachments.is_empty() {
+        if let Some(last_msg) = messages.last_mut() {
+            last_msg.attachments.extend(pending_attachments);
+        } else {
+            tracing::warn!(
+                count = pending_attachments.len(),
+                "attachments queued by handlers but no TurnOutput message to anchor onto; dropping"
+            );
+            metrics::counter!("memory.adapter.attachments_dropped_no_anchor")
+                .increment(pending_attachments.len() as u64);
+        }
+    }
 
     Ok(TurnOutput {
         messages,
@@ -490,55 +515,93 @@ fn build_snapshot_attachment(
     }
 }
 
-/// Render a [`MessageAttachment::BatchOpeningSnapshot`] into a
-/// `<system-reminder>`-wrapped text block for compose-time splicing.
-fn render_snapshot_attachment(attachment: &MessageAttachment) -> String {
-    let MessageAttachment::BatchOpeningSnapshot {
-        kind,
-        block_names,
-        blocks,
-        edited_blocks,
-    } = attachment;
+/// Render a single attachment's inner content (NO `<system-reminder>` wrap).
+///
+/// Multiple attachments on the same message are grouped into a single
+/// `<system-reminder>` block by [`render_attachments_for_message`]. Per-variant
+/// renderers return raw content; the splice path handles wrapping.
+fn render_attachment_content(attachment: &MessageAttachment) -> String {
+    match attachment {
+        MessageAttachment::BatchOpeningSnapshot {
+            kind,
+            block_names,
+            blocks,
+            edited_blocks,
+        } => {
+            let mut parts = Vec::new();
 
-    let mut parts = Vec::new();
+            parts.push("[memory:current_state]".to_string());
 
-    // Header.
-    parts.push("[memory:current_state]".to_string());
-
-    // Kind indicator.
-    match kind {
-        SnapshotKind::Full => {
-            parts.push("(full snapshot)".to_string());
-        }
-        SnapshotKind::Delta { since_batch } => {
-            parts.push(format!("(delta since batch {since_batch})"));
-            if !edited_blocks.is_empty() {
-                let names: Vec<&str> = edited_blocks.iter().map(|s| s.as_str()).collect();
-                parts.push(format!(
-                    "[memory:updated] blocks changed: {}",
-                    names.join(", ")
-                ));
+            match kind {
+                SnapshotKind::Full => {
+                    parts.push("(full snapshot)".to_string());
+                }
+                SnapshotKind::Delta { since_batch } => {
+                    parts.push(format!("(delta since batch {since_batch})"));
+                    if !edited_blocks.is_empty() {
+                        let names: Vec<&str> = edited_blocks.iter().map(|s| s.as_str()).collect();
+                        parts.push(format!(
+                            "[memory:updated] blocks changed: {}",
+                            names.join(", ")
+                        ));
+                    }
+                }
             }
+
+            if block_names.is_empty() {
+                parts.push("(no blocks loaded)".to_string());
+            } else {
+                let names: Vec<&str> = block_names.iter().map(|s| s.as_str()).collect();
+                parts.push(format!("Available blocks: {}", names.join(", ")));
+            }
+
+            for block in blocks {
+                if let Some(ref rendered) = block.rendered {
+                    parts.push(rendered.to_string());
+                }
+            }
+
+            parts.join("\n\n")
         }
-    }
-
-    // Block namespace.
-    if block_names.is_empty() {
-        parts.push("(no blocks loaded)".to_string());
-    } else {
-        let names: Vec<&str> = block_names.iter().map(|s| s.as_str()).collect();
-        parts.push(format!("Available blocks: {}", names.join(", ")));
-    }
-
-    // Block contents (only render visible blocks).
-    for block in blocks {
-        if let Some(ref rendered) = block.rendered {
-            parts.push(rendered.to_string());
+        MessageAttachment::SkillAvailable {
+            handle: _,
+            name,
+            trust_tier,
+            description,
+            keywords,
+        } => {
+            let tier_str =
+                serde_json::to_string(trust_tier).unwrap_or_else(|_| "\"unknown\"".to_string());
+            let tier_kebab = tier_str.trim_matches('"');
+            let mut header =
+                format!("[skill:available] name=\"{name}\" trust_tier=\"{tier_kebab}\"");
+            if let Some(desc) = description.as_deref().filter(|s| !s.is_empty()) {
+                header.push_str(&format!(" description=\"{desc}\""));
+            }
+            let mut parts = vec![header];
+            if !keywords.is_empty() {
+                parts.push(format!("keywords: [{}]", keywords.join(", ")));
+            }
+            parts.push("[skill:available:end]".to_string());
+            parts.join("\n")
         }
+        MessageAttachment::Custom { content } => content.clone(),
     }
+}
 
+/// Render all attachments on a message into a single grouped
+/// `<system-reminder>` block. Returns `None` if `attachments` is empty.
+///
+/// Each attachment's content is separated by a blank line. The single
+/// outer `<system-reminder>` wrap is what reaches the wire — never per-
+/// attachment wraps.
+fn render_attachments_for_message(attachments: &[MessageAttachment]) -> Option<String> {
+    if attachments.is_empty() {
+        return None;
+    }
+    let parts: Vec<String> = attachments.iter().map(render_attachment_content).collect();
     let body = parts.join("\n\n");
-    wrap_system_reminder(&body)
+    Some(wrap_system_reminder(&body))
 }
 
 /// Collect the most recent rendered content hash for each block label
@@ -557,7 +620,11 @@ fn collect_last_shown_hashes(history: &TurnHistory) -> std::collections::HashMap
             .chain(record.input.messages.iter().rev());
         for msg in all_msgs {
             for att in &msg.attachments {
-                let MessageAttachment::BatchOpeningSnapshot { blocks, .. } = att;
+                // Only BatchOpeningSnapshot carries block-hash data; skip
+                // non-snapshot variants (SkillAvailable, Custom, etc.).
+                let MessageAttachment::BatchOpeningSnapshot { blocks, .. } = att else {
+                    continue;
+                };
                 for bs in blocks {
                     if bs.rendered.is_some() && !map.contains_key(bs.label.as_str()) {
                         map.insert(bs.label.to_string(), bs.content_hash);
@@ -588,7 +655,11 @@ fn collect_last_tracked_hashes(history: &TurnHistory) -> std::collections::HashM
             .chain(record.input.messages.iter().rev());
         for msg in all_msgs {
             for att in &msg.attachments {
-                let MessageAttachment::BatchOpeningSnapshot { blocks, .. } = att;
+                // Only BatchOpeningSnapshot carries block-hash data; skip
+                // non-snapshot variants (SkillAvailable, Custom, etc.).
+                let MessageAttachment::BatchOpeningSnapshot { blocks, .. } = att else {
+                    continue;
+                };
                 for bs in blocks {
                     // Track EVERY block regardless of rendering — the hash
                     // is present for delta detection even when rendered=None.
@@ -1058,7 +1129,11 @@ pub async fn drive_step(
                         .unwrap_or_default();
                     for msg in &recorded_input.messages {
                         for att in &msg.attachments {
-                            let MessageAttachment::BatchOpeningSnapshot { blocks, .. } = att;
+                            // Only BatchOpeningSnapshot carries block hashes;
+                            // skip non-snapshot variants.
+                            let MessageAttachment::BatchOpeningSnapshot { blocks, .. } = att else {
+                                continue;
+                            };
                             for bs in blocks {
                                 // recorded_input is MORE recent than history,
                                 // so it overwrites.
@@ -1378,9 +1453,9 @@ async fn compose_request_for_turn(
     let mut last_spliced_idx: Option<usize> = None;
     for (i, msg) in input.messages.iter().enumerate() {
         let composed_idx = seg2_end + i;
-        for attachment in &msg.attachments {
-            let rendered = render_snapshot_attachment(attachment);
-            // Append as a new ContentPart::Text after existing content.
+        // All attachments on a message group into a single
+        // <system-reminder> block — never per-attachment wraps.
+        if let Some(rendered) = render_attachments_for_message(&msg.attachments) {
             splice_text_onto_message(&mut req.chat.messages[composed_idx], &rendered);
             last_spliced_idx = Some(composed_idx);
         }
@@ -1416,8 +1491,7 @@ async fn compose_request_for_turn(
                 // happen, but skip gracefully rather than panicking.
                 continue;
             };
-            for attachment in &msg.attachments {
-                let rendered = render_snapshot_attachment(attachment);
+            if let Some(rendered) = render_attachments_for_message(&msg.attachments) {
                 splice_text_onto_message(&mut req.chat.messages[composed_idx], &rendered);
                 last_spliced_idx = Some(composed_idx);
             }
@@ -2916,7 +2990,7 @@ mod tests {
     }
 
     #[test]
-    fn render_snapshot_attachment_full_contains_block_content() {
+    fn render_attachment_content_full_contains_block_content() {
         let blocks = vec![test_block(
             "notes",
             "<block:notes type=\"working\" permission=\"read_write\">\nhello\n</block:notes>",
@@ -2928,10 +3002,12 @@ mod tests {
             blocks,
             edited_blocks: vec![],
         };
-        let rendered = render_snapshot_attachment(&attachment);
+        // Per-variant content does NOT wrap in <system-reminder>; that
+        // happens once at message-level via render_attachments_for_message.
+        let rendered = render_attachment_content(&attachment);
         assert!(
-            rendered.contains("<system-reminder>"),
-            "must wrap in system-reminder"
+            !rendered.contains("<system-reminder>"),
+            "per-variant content must NOT wrap; got: {rendered}"
         );
         assert!(
             rendered.contains("[memory:current_state]"),
@@ -2942,10 +3018,21 @@ mod tests {
             rendered.contains("<block:notes"),
             "must contain block content"
         );
+
+        // The message-level renderer wraps once.
+        let wrapped = render_attachments_for_message(&[attachment]).unwrap();
+        assert!(
+            wrapped.contains("<system-reminder>"),
+            "message-level render must wrap; got: {wrapped}"
+        );
+        assert!(
+            wrapped.matches("<system-reminder>").count() == 1,
+            "exactly one wrap; got: {wrapped}"
+        );
     }
 
     #[test]
-    fn render_snapshot_attachment_delta_shows_edited_blocks() {
+    fn render_attachment_content_delta_shows_edited_blocks() {
         let blocks = vec![test_block(
             "tasks",
             "<block:tasks>changed content</block:tasks>",
@@ -2959,7 +3046,7 @@ mod tests {
             blocks,
             edited_blocks: vec!["tasks".into()],
         };
-        let rendered = render_snapshot_attachment(&attachment);
+        let rendered = render_attachment_content(&attachment);
         assert!(
             rendered.contains("(delta since batch batch-prev)"),
             "must indicate delta"
@@ -2975,6 +3062,191 @@ mod tests {
         );
     }
 
+    // ---- generic attachment splice round-trip ------------------------------
+
+    #[test]
+    fn render_attachment_content_skill_available_renders_marker_and_keywords() {
+        let att = MessageAttachment::SkillAvailable {
+            handle: smol_str::SmolStr::new("skill-1"),
+            name: "fix-auth".to_string(),
+            trust_tier: pattern_core::types::memory_types::SkillTrustTier::ProjectLocal,
+            description: Some("Handles OAuth2".to_string()),
+            keywords: vec!["auth".to_string(), "oauth".to_string()],
+        };
+        let body = render_attachment_content(&att);
+        // Per-variant content does NOT wrap.
+        assert!(
+            !body.contains("<system-reminder>"),
+            "per-variant must not wrap; got: {body}"
+        );
+        assert!(body.contains("[skill:available]"));
+        assert!(body.contains("[skill:available:end]"));
+        assert!(body.contains("name=\"fix-auth\""));
+        assert!(body.contains("trust_tier=\"project-local\""));
+        assert!(body.contains("description=\"Handles OAuth2\""));
+        assert!(body.contains("keywords: [auth, oauth]"));
+    }
+
+    #[test]
+    fn render_attachment_content_custom_inlines_caller_text() {
+        let att = MessageAttachment::Custom {
+            content: "[custom:event] foo=bar".to_string(),
+        };
+        let body = render_attachment_content(&att);
+        assert_eq!(body, "[custom:event] foo=bar");
+    }
+
+    #[test]
+    fn render_attachments_for_message_groups_into_single_system_reminder() {
+        let attachments = vec![
+            MessageAttachment::SkillAvailable {
+                handle: smol_str::SmolStr::new("skill-1"),
+                name: "alpha".to_string(),
+                trust_tier: pattern_core::types::memory_types::SkillTrustTier::FirstParty,
+                description: None,
+                keywords: vec![],
+            },
+            MessageAttachment::Custom {
+                content: "[custom:event] note=hello".to_string(),
+            },
+        ];
+        let rendered = render_attachments_for_message(&attachments)
+            .expect("non-empty attachments must render");
+
+        // Exactly ONE wrap regardless of how many attachments.
+        assert_eq!(
+            rendered.matches("<system-reminder>").count(),
+            1,
+            "exactly one wrap; got: {rendered}"
+        );
+        assert_eq!(
+            rendered.matches("</system-reminder>").count(),
+            1,
+            "exactly one closing tag; got: {rendered}"
+        );
+        // Both attachments' content present.
+        assert!(rendered.contains("[skill:available]"));
+        assert!(rendered.contains("name=\"alpha\""));
+        assert!(rendered.contains("[custom:event] note=hello"));
+    }
+
+    #[test]
+    fn render_attachments_for_message_empty_returns_none() {
+        assert!(render_attachments_for_message(&[]).is_none());
+    }
+
+    /// End-to-end persistence test: an attachment recorded on a message in
+    /// turn N persists across an intervening non-attaching turn N+1, and
+    /// the splice machinery would still render it on turn N+2 compose.
+    /// Future-work note: when a plugin auto-installer emits
+    /// `SkillAvailable`, this is the path that ensures the agent keeps
+    /// seeing the marker after subsequent turns.
+    #[test]
+    fn attachment_persists_across_intervening_turn_via_active_messages() {
+        use crate::memory::TurnHistory;
+        use genai::chat::ChatMessage;
+        use jiff::Timestamp;
+        use pattern_core::types::ids::{AgentId, MessageId, new_id, new_snowflake_id};
+        use pattern_core::types::message::Message;
+        use pattern_core::types::turn::{StopReason, TurnInput, TurnOutput};
+
+        let agent = "agent-test";
+
+        let make_msg = |chat: ChatMessage,
+                        batch: smol_str::SmolStr,
+                        attachments: Vec<MessageAttachment>|
+         -> Message {
+            Message {
+                chat_message: chat,
+                id: MessageId::from(new_id()),
+                position: new_snowflake_id(),
+                owner_id: AgentId::from(agent),
+                created_at: Timestamp::now(),
+                batch,
+                response_meta: None,
+                block_refs: vec![],
+                attachments,
+            }
+        };
+
+        let mut hist = TurnHistory::empty();
+
+        // Turn 1: a tool_result message carrying a SkillAvailable attachment.
+        let batch_a = new_snowflake_id();
+        let attachments = vec![MessageAttachment::SkillAvailable {
+            handle: smol_str::SmolStr::new("skill-x"),
+            name: "skill-x".to_string(),
+            trust_tier: pattern_core::types::memory_types::SkillTrustTier::FirstParty,
+            description: Some("Auto-installed by plugin".to_string()),
+            keywords: vec!["auto".to_string()],
+        }];
+        let tool_result = make_msg(
+            ChatMessage::new(genai::chat::ChatRole::Tool, "ok"),
+            batch_a.clone(),
+            attachments,
+        );
+        let tool_result_id = tool_result.id.clone();
+        hist.record(
+            new_snowflake_id(),
+            TurnInput::continuation(batch_a, AgentId::from(agent)),
+            TurnOutput {
+                messages: vec![tool_result],
+                block_writes: vec![],
+                tool_calls: vec![],
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+                cache_metrics: Default::default(),
+                completed_at: Timestamp::now(),
+            },
+        );
+
+        // Turn 2: a non-attaching turn (e.g. agent does unrelated work).
+        let batch_b = new_snowflake_id();
+        let unrelated = make_msg(ChatMessage::user("hi"), batch_b.clone(), vec![]);
+        hist.record(
+            new_snowflake_id(),
+            TurnInput::continuation(batch_b, AgentId::from(agent)),
+            TurnOutput {
+                messages: vec![unrelated],
+                block_writes: vec![],
+                tool_calls: vec![],
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+                cache_metrics: Default::default(),
+                completed_at: Timestamp::now(),
+            },
+        );
+
+        // The attachment must STILL be visible via active_messages — it's
+        // anchored to a specific Message.id which has not been compacted.
+        let surviving: Vec<&Message> = hist
+            .active_messages()
+            .filter(|m| m.id == tool_result_id)
+            .collect();
+        assert_eq!(
+            surviving.len(),
+            1,
+            "tool_result message must persist in history"
+        );
+        assert_eq!(
+            surviving[0].attachments.len(),
+            1,
+            "attachment must still be on the message after an intervening turn"
+        );
+
+        // Render-time splice still produces the marker.
+        let rendered = render_attachments_for_message(&surviving[0].attachments)
+            .expect("non-empty attachments");
+        assert!(
+            rendered.contains("[skill:available]"),
+            "attachment must still render after intervening turn; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("name=\"skill-x\""),
+            "attachment name must persist; got: {rendered}"
+        );
+    }
+
     #[test]
     fn build_snapshot_full_includes_all_blocks() {
         let blocks = vec![
@@ -2987,7 +3259,10 @@ mod tests {
             block_names,
             blocks,
             edited_blocks,
-        } = &att;
+        } = &att
+        else {
+            panic!("expected BatchOpeningSnapshot");
+        };
         assert_eq!(*kind, SnapshotKind::Full);
         assert_eq!(block_names.len(), 2);
         assert_eq!(blocks.len(), 2);
@@ -3020,7 +3295,10 @@ mod tests {
             blocks,
             edited_blocks,
             ..
-        } = &att;
+        } = &att
+        else {
+            panic!("expected BatchOpeningSnapshot");
+        };
 
         // block_names always has ALL current blocks.
         assert_eq!(block_names.len(), 3);

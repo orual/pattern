@@ -19,7 +19,21 @@
 -- Constructor names match the Rust 'SkillsReq' variants exactly so that
 -- the @#[core(module = \"Pattern.Skills\", name = \"...\")]@ derive
 -- attributes decode them without manual mapping.
-module Pattern.Skills where
+module Pattern.Skills
+  ( -- * Effect algebra
+    Skills (..)
+    -- * JSON-payload type aliases
+  , BlockHandle
+  , SkillInfo
+  , SkillMetadata
+  , SkillUsageStats
+    -- * Helpers
+  , listSkills
+  , getSkillMetadata
+  , loadSkill
+  , searchSkills
+  , getSkillUsageStats
+  ) where
 
 import Control.Monad.Freer (Eff, Member, send)
 import Data.Text (Text)

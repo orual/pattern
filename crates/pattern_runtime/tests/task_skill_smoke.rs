@@ -412,8 +412,8 @@ fn smoke_tasks_surface() {
 /// - list contains seeded skill with correct trust_tier (AC8.1).
 /// - get_metadata returns SkillMetadata with hooks JSON intact (AC8.2).
 /// - search returns the seeded skill (AC8.4).
-/// - load injects the expected pseudo-message content into the adapter
-///   buffer (AC9.1).
+/// - load returns the rendered `[skill:loaded] … [skill:loaded:end]` text
+///   directly as the tool_result body (AC9.1).
 /// - canonical `.md` blake3 hash is unchanged before/after load (AC9.3 /
 ///   AC9.6 — content-hash invariant).
 #[test]

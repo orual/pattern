@@ -24,6 +24,7 @@ use pattern_core::types::memory_types::{
     MemorySearchResult, MemorySearchScope, SearchOptions, SharedBlockInfo, UndoRedoDepth,
     UndoRedoOp,
 };
+use pattern_core::types::message::MessageAttachment;
 
 /// Wraps a concrete `MemoryStore` implementation and intercepts mutations
 /// to record `BlockWrite` entries for the current turn. Session drains
@@ -37,6 +38,12 @@ pub struct MemoryStoreAdapter {
     inner: Arc<dyn MemoryStore>,
     agent_id: String,
     pending: Arc<Mutex<Vec<BlockWrite>>>,
+    /// Pending [`MessageAttachment`]s queued by handlers (e.g. plugin
+    /// auto-install events emitting `SkillAvailable`). Drained at turn
+    /// close into the wire turn's tool_result_msg or assistant_msg
+    /// `attachments` vec, then persisted via the splice machinery.
+    /// Write-once: once attached, never updated (cache-stable).
+    pending_attachments: Arc<Mutex<Vec<MessageAttachment>>>,
 }
 
 impl MemoryStoreAdapter {
@@ -47,6 +54,7 @@ impl MemoryStoreAdapter {
             inner,
             agent_id: agent_id.into(),
             pending: Arc::new(Mutex::new(Vec::new())),
+            pending_attachments: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -58,6 +66,27 @@ impl MemoryStoreAdapter {
     /// Drain pending writes. Session calls at turn close.
     pub fn drain_pending(&self) -> Vec<BlockWrite> {
         std::mem::take(&mut *self.pending.lock().unwrap())
+    }
+
+    /// Handlers call this to queue a [`MessageAttachment`] for the current
+    /// wire turn. The session drains the buffer at turn close and attaches
+    /// each entry onto the appropriate message in
+    /// [`pattern_core::types::turn::TurnOutput::messages`] (preferring the
+    /// last message — typically a `tool_result` for handler-originated
+    /// events). The splice machinery in `compose_request_for_turn` then
+    /// renders attachments as a single grouped `<system-reminder>` block
+    /// onto the wire on subsequent compose cycles.
+    ///
+    /// Write-once contract: once attached to a Message, the attachment is
+    /// never updated. This keeps wire bytes stable across turns and the
+    /// cache warm.
+    pub fn record_attachment(&self, attachment: MessageAttachment) {
+        self.pending_attachments.lock().unwrap().push(attachment);
+    }
+
+    /// Drain pending attachments. Session calls at turn close.
+    pub fn drain_pending_attachments(&self) -> Vec<MessageAttachment> {
+        std::mem::take(&mut *self.pending_attachments.lock().unwrap())
     }
 
     /// Agent id this adapter attributes mutations to.
@@ -78,6 +107,14 @@ impl std::fmt::Debug for MemoryStoreAdapter {
             .field(
                 "pending_count",
                 &self.pending.lock().map(|v| v.len()).unwrap_or(0),
+            )
+            .field(
+                "pending_attachments_count",
+                &self
+                    .pending_attachments
+                    .lock()
+                    .map(|v| v.len())
+                    .unwrap_or(0),
             )
             .finish_non_exhaustive()
     }
@@ -284,5 +321,57 @@ mod tests {
         let adapter = MemoryStoreAdapter::new(store, "agent-a");
         let debug_str = format!("{adapter:?}");
         assert!(debug_str.contains("agent-a"));
+    }
+
+    #[test]
+    fn record_attachment_and_drain_roundtrip() {
+        let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
+        let adapter = MemoryStoreAdapter::new(store, "agent-a");
+
+        adapter.record_attachment(MessageAttachment::Custom {
+            content: "hello".to_string(),
+        });
+        adapter.record_attachment(MessageAttachment::SkillAvailable {
+            handle: SmolStr::new("skill-1"),
+            name: "demo".to_string(),
+            trust_tier: pattern_core::types::memory_types::SkillTrustTier::ProjectLocal,
+            description: None,
+            keywords: vec![],
+        });
+
+        let drained = adapter.drain_pending_attachments();
+        assert_eq!(drained.len(), 2);
+        assert!(matches!(drained[0], MessageAttachment::Custom { .. }));
+        assert!(matches!(
+            drained[1],
+            MessageAttachment::SkillAvailable { .. }
+        ));
+
+        // Subsequent drain returns empty.
+        assert!(adapter.drain_pending_attachments().is_empty());
+    }
+
+    #[test]
+    fn attachment_buffer_isolated_per_adapter() {
+        let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
+        let adapter_a = MemoryStoreAdapter::new(store.clone(), "agent-a");
+        let adapter_b = MemoryStoreAdapter::new(store, "agent-b");
+
+        adapter_a.record_attachment(MessageAttachment::Custom {
+            content: "from a".to_string(),
+        });
+        adapter_b.record_attachment(MessageAttachment::Custom {
+            content: "from b".to_string(),
+        });
+
+        let a = adapter_a.drain_pending_attachments();
+        let b = adapter_b.drain_pending_attachments();
+        assert_eq!(a.len(), 1);
+        assert_eq!(b.len(), 1);
+        if let MessageAttachment::Custom { content } = &a[0] {
+            assert_eq!(content, "from a");
+        } else {
+            panic!("expected Custom");
+        }
     }
 }
