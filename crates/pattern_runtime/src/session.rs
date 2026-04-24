@@ -1176,7 +1176,7 @@ mod tests {
             .expect("persona block should exist");
         assert_eq!(
             doc.permission(),
-            pattern_db::models::MemoryPermission::ReadOnly,
+            pattern_core::types::memory_types::MemoryPermission::ReadOnly,
             "persona block should be ReadOnly as declared in the spec"
         );
 
@@ -1187,7 +1187,7 @@ mod tests {
             .expect("scratchpad block should exist");
         assert_eq!(
             doc2.permission(),
-            pattern_db::models::MemoryPermission::ReadWrite,
+            pattern_core::types::memory_types::MemoryPermission::ReadWrite,
             "scratchpad block should be ReadWrite as declared in the spec"
         );
     }

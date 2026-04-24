@@ -31,7 +31,6 @@ pub enum SearchContentType {
     Messages,
 }
 
-
 /// Search options for memory operations
 #[derive(Debug, Clone)]
 pub struct SearchOptions {
@@ -132,7 +131,6 @@ pub struct MemorySearchResult {
     /// Relevance score (0-1, higher is better)
     pub score: f64,
 }
-
 
 #[cfg(test)]
 mod tests {

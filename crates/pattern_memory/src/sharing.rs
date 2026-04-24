@@ -1,63 +1,69 @@
-//! Shared memory block support
+//! Shared memory block support.
 //!
 //! Enables explicit sharing of blocks between agents with controlled access levels.
-//! Uses MemoryPermission from pattern_db for access control granularity.
 
-use pattern_core::types::memory_types::{MemoryError, MemoryResult};
+use crate::db_bridge::{DbResultExt, core_perm_to_db, db_perm_to_core};
+use pattern_core::types::memory_types::{MemoryError, MemoryPermission, MemoryResult};
 use pattern_db::ConstellationDb;
-use pattern_db::models::MemoryPermission;
 use pattern_db::queries;
 use std::sync::Arc;
 
 // Re-export the constant from pattern_core for backward compatibility.
 pub use pattern_core::types::memory_types::CONSTELLATION_OWNER;
 
-/// Manager for shared memory blocks
+/// Manager for shared memory blocks.
 #[derive(Debug)]
 pub struct SharedBlockManager {
     db: Arc<ConstellationDb>,
 }
 
 impl SharedBlockManager {
-    /// Create a new shared block manager
+    /// Create a new shared block manager.
     pub fn new(db: Arc<ConstellationDb>) -> Self {
         Self { db }
     }
 
-    /// Share a block with another agent
+    /// Share a block with another agent.
     ///
     /// Permission levels available:
-    /// - `ReadOnly`: Can only read the block
-    /// - `Partner`: Requires partner approval to write
-    /// - `Human`: Requires human approval to write
-    /// - `Append`: Can append but not overwrite
-    /// - `ReadWrite`: Full read/write access
-    /// - `Admin`: Full access including delete
+    /// - `ReadOnly`: Can only read the block.
+    /// - `Partner`: Requires partner approval to write.
+    /// - `Human`: Requires human approval to write.
+    /// - `Append`: Can append but not overwrite.
+    /// - `ReadWrite`: Full read/write access.
+    /// - `Admin`: Full access including delete.
     pub async fn share_block(
         &self,
         block_id: &str,
         agent_id: &str,
         permission: MemoryPermission,
     ) -> MemoryResult<()> {
-        // Check that the block exists
-        let block = queries::get_block(&*self.db.get()?, block_id)?;
+        // Check that the block exists.
+        let block = queries::get_block(&*self.db.get().mem()?, block_id).mem()?;
         if block.is_none() {
             return Err(MemoryError::Other(format!("Block not found: {}", block_id)));
         }
 
-        // Create shared attachment
-        queries::create_shared_block_attachment(&*self.db.get()?, block_id, agent_id, permission)?;
+        // Create shared attachment.
+        queries::create_shared_block_attachment(
+            &*self.db.get().mem()?,
+            block_id,
+            agent_id,
+            core_perm_to_db(permission),
+        )
+        .mem()?;
 
         Ok(())
     }
 
-    /// Remove sharing for a block
+    /// Remove sharing for a block.
     pub async fn unshare_block(&self, block_id: &str, agent_id: &str) -> MemoryResult<()> {
-        queries::delete_shared_block_attachment(&*self.db.get()?, block_id, agent_id)?;
+        queries::delete_shared_block_attachment(&*self.db.get().mem()?, block_id, agent_id)
+            .mem()?;
         Ok(())
     }
 
-    /// Share a block with another agent by name
+    /// Share a block with another agent by name.
     ///
     /// Looks up the target agent by name, then shares the block.
     /// Returns the target agent's ID on success.
@@ -68,22 +74,25 @@ impl SharedBlockManager {
         target_agent_name: &str,
         permission: MemoryPermission,
     ) -> MemoryResult<String> {
-        // Look up target agent by name
-        let target_agent = queries::get_agent_by_name(&*self.db.get()?, target_agent_name)?
+        // Look up target agent by name.
+        let target_agent = queries::get_agent_by_name(&*self.db.get().mem()?, target_agent_name)
+            .mem()?
             .ok_or_else(|| MemoryError::Other(format!("Agent not found: {}", target_agent_name)))?;
 
-        // Get the block by label to find its ID
-        let block = queries::get_block_by_label(&*self.db.get()?, owner_agent_id, block_label)?
-            .ok_or_else(|| MemoryError::Other(format!("Block not found: {}", block_label)))?;
+        // Get the block by label to find its ID.
+        let block =
+            queries::get_block_by_label(&*self.db.get().mem()?, owner_agent_id, block_label)
+                .mem()?
+                .ok_or_else(|| MemoryError::Other(format!("Block not found: {}", block_label)))?;
 
-        // Share the block
+        // Share the block.
         self.share_block(&block.id, &target_agent.id, permission)
             .await?;
 
         Ok(target_agent.id)
     }
 
-    /// Remove sharing from another agent by name
+    /// Remove sharing from another agent by name.
     ///
     /// Looks up the target agent by name, then removes sharing.
     /// Returns the target agent's ID on success.
@@ -93,82 +102,88 @@ impl SharedBlockManager {
         block_label: &str,
         target_agent_name: &str,
     ) -> MemoryResult<String> {
-        // Look up target agent by name
-        let target_agent = queries::get_agent_by_name(&*self.db.get()?, target_agent_name)?
+        // Look up target agent by name.
+        let target_agent = queries::get_agent_by_name(&*self.db.get().mem()?, target_agent_name)
+            .mem()?
             .ok_or_else(|| MemoryError::Other(format!("Agent not found: {}", target_agent_name)))?;
 
-        // Get the block by label to find its ID
-        let block = queries::get_block_by_label(&*self.db.get()?, owner_agent_id, block_label)?
-            .ok_or_else(|| MemoryError::Other(format!("Block not found: {}", block_label)))?;
+        // Get the block by label to find its ID.
+        let block =
+            queries::get_block_by_label(&*self.db.get().mem()?, owner_agent_id, block_label)
+                .mem()?
+                .ok_or_else(|| MemoryError::Other(format!("Block not found: {}", block_label)))?;
 
-        // Unshare the block
+        // Unshare the block.
         self.unshare_block(&block.id, &target_agent.id).await?;
 
         Ok(target_agent.id)
     }
 
-    /// Get all agents a block is shared with
+    /// Get all agents a block is shared with.
     pub async fn get_shared_agents(
         &self,
         block_id: &str,
     ) -> MemoryResult<Vec<(String, MemoryPermission)>> {
-        let attachments = queries::list_block_shared_agents(&*self.db.get()?, block_id)?;
+        let attachments =
+            queries::list_block_shared_agents(&*self.db.get().mem()?, block_id).mem()?;
 
         Ok(attachments
             .into_iter()
-            .map(|att| (att.agent_id, att.permission))
+            .map(|att| (att.agent_id, db_perm_to_core(att.permission)))
             .collect())
     }
 
-    /// Get all blocks shared with an agent
+    /// Get all blocks shared with an agent.
     pub async fn get_blocks_shared_with(
         &self,
         agent_id: &str,
     ) -> MemoryResult<Vec<(String, MemoryPermission)>> {
-        let attachments = queries::list_agent_shared_blocks(&*self.db.get()?, agent_id)?;
+        let attachments =
+            queries::list_agent_shared_blocks(&*self.db.get().mem()?, agent_id).mem()?;
 
         Ok(attachments
             .into_iter()
-            .map(|att| (att.block_id, att.permission))
+            .map(|att| (att.block_id, db_perm_to_core(att.permission)))
             .collect())
     }
 
-    /// Check if agent has access to block (owner or shared)
+    /// Check if agent has access to block (owner or shared).
     ///
     /// Returns:
-    /// - Some(Admin) if agent owns the block
-    /// - Some(ReadOnly) if block owner is CONSTELLATION_OWNER (readable by all)
-    /// - Some(permission) if block is explicitly shared with agent
-    /// - None if agent has no access
+    /// - Some(Admin) if agent owns the block.
+    /// - Some(ReadOnly) if block owner is CONSTELLATION_OWNER (readable by all).
+    /// - Some(permission) if block is explicitly shared with agent.
+    /// - None if agent has no access.
     pub async fn check_access(
         &self,
         block_id: &str,
         agent_id: &str,
     ) -> MemoryResult<Option<MemoryPermission>> {
-        // 1. Get block, check if agent is owner -> Admin access
-        let block = queries::get_block(&*self.db.get()?, block_id)?;
+        // 1. Get block, check if agent is owner -> Admin access.
+        let block = queries::get_block(&*self.db.get().mem()?, block_id).mem()?;
         if let Some(block) = block {
             if block.agent_id == agent_id {
                 return Ok(Some(MemoryPermission::Admin));
             }
 
-            // 2. Check if constellation owner -> dictated by the permission on the block
+            // 2. Check if constellation owner -> dictated by the permission on the block.
             if block.agent_id == CONSTELLATION_OWNER {
-                return Ok(Some(block.permission));
+                return Ok(Some(db_perm_to_core(block.permission)));
             }
         } else {
-            // Block doesn't exist
+            // Block doesn't exist.
             return Ok(None);
         }
 
-        // 3. Check shared attachments
+        // 3. Check shared attachments.
         let attachment =
-            queries::get_shared_block_attachment(&*self.db.get()?, block_id, agent_id)?;
+            queries::get_shared_block_attachment(&*self.db.get().mem()?, block_id, agent_id)
+                .mem()?;
 
-        Ok(attachment.map(|att| att.permission))
+        Ok(attachment.map(|att| db_perm_to_core(att.permission)))
     }
 
-    /// Check if the given permission allows write operations
+    /// Check if the given permission allows write operations.
     pub fn can_write(permission: MemoryPermission) -> bool {
         matches!(
             permission,
@@ -176,7 +191,7 @@ impl SharedBlockManager {
         )
     }
 
-    /// Check if the given permission allows delete operations
+    /// Check if the given permission allows delete operations.
     pub fn can_delete(permission: MemoryPermission) -> bool {
         matches!(permission, MemoryPermission::Admin)
     }
@@ -186,6 +201,7 @@ impl SharedBlockManager {
 mod tests {
     use super::*;
     use chrono::Utc;
+    use pattern_db::models::MemoryPermission as DbMemoryPermission;
     use pattern_db::models::{MemoryBlock, MemoryBlockType};
 
     async fn setup_test_dbs() -> Arc<ConstellationDb> {
@@ -220,7 +236,7 @@ mod tests {
             description: "Test block".to_string(),
             block_type: MemoryBlockType::Working,
             char_limit: 1000,
-            permission: MemoryPermission::ReadWrite,
+            permission: DbMemoryPermission::ReadWrite,
             pinned: false,
             loro_snapshot: vec![],
             content_preview: None,
@@ -241,20 +257,15 @@ mod tests {
         let dbs = setup_test_dbs().await;
         let manager = SharedBlockManager::new(dbs.clone());
 
-        // Create test agents
         create_test_agent(&dbs, "agent1", "Agent 1").await;
         create_test_agent(&dbs, "agent2", "Agent 2").await;
-
-        // Create a block owned by agent1
         create_test_block(&dbs, "block1", "agent1").await;
 
-        // Share it with agent2 with ReadOnly access
         manager
             .share_block("block1", "agent2", MemoryPermission::ReadOnly)
             .await
             .unwrap();
 
-        // Verify agent2 has ReadOnly access
         let access = manager.check_access("block1", "agent2").await.unwrap();
         assert_eq!(access, Some(MemoryPermission::ReadOnly));
         assert!(!SharedBlockManager::can_write(access.unwrap()));
@@ -265,20 +276,15 @@ mod tests {
         let dbs = setup_test_dbs().await;
         let manager = SharedBlockManager::new(dbs.clone());
 
-        // Create test agents
         create_test_agent(&dbs, "agent1", "Agent 1").await;
         create_test_agent(&dbs, "agent2", "Agent 2").await;
-
-        // Create a block owned by agent1
         create_test_block(&dbs, "block1", "agent1").await;
 
-        // Share it with agent2 with Append access
         manager
             .share_block("block1", "agent2", MemoryPermission::Append)
             .await
             .unwrap();
 
-        // Verify agent2 has Append access
         let access = manager.check_access("block1", "agent2").await.unwrap();
         assert_eq!(access, Some(MemoryPermission::Append));
         assert!(SharedBlockManager::can_write(access.unwrap()));
@@ -290,21 +296,16 @@ mod tests {
         let dbs = setup_test_dbs().await;
         let manager = SharedBlockManager::new(dbs.clone());
 
-        // Create test agents
         create_test_agent(&dbs, "agent1", "Agent 1").await;
         create_test_agent(&dbs, "agent2", "Agent 2").await;
-
-        // Create and share a block
         create_test_block(&dbs, "block1", "agent1").await;
         manager
             .share_block("block1", "agent2", MemoryPermission::ReadOnly)
             .await
             .unwrap();
 
-        // Unshare it
         manager.unshare_block("block1", "agent2").await.unwrap();
 
-        // Verify agent2 no longer has access
         let access = manager.check_access("block1", "agent2").await.unwrap();
         assert_eq!(access, None);
     }
@@ -314,13 +315,9 @@ mod tests {
         let dbs = setup_test_dbs().await;
         let manager = SharedBlockManager::new(dbs.clone());
 
-        // Create test agent
         create_test_agent(&dbs, "agent1", "Agent 1").await;
-
-        // Create a block
         create_test_block(&dbs, "block1", "agent1").await;
 
-        // Owner should have Admin access without explicit sharing
         let access = manager.check_access("block1", "agent1").await.unwrap();
         assert_eq!(access, Some(MemoryPermission::Admin));
         assert!(SharedBlockManager::can_write(access.unwrap()));
@@ -332,12 +329,9 @@ mod tests {
         let dbs = setup_test_dbs().await;
         let manager = SharedBlockManager::new(dbs.clone());
 
-        // Create test agents
         create_test_agent(&dbs, "agent1", "Agent 1").await;
         create_test_agent(&dbs, "agent2", "Agent 2").await;
         create_test_agent(&dbs, "agent3", "Agent 3").await;
-
-        // Create a block and share with multiple agents with different permissions
         create_test_block(&dbs, "block1", "agent1").await;
         manager
             .share_block("block1", "agent2", MemoryPermission::ReadOnly)
@@ -348,7 +342,6 @@ mod tests {
             .await
             .unwrap();
 
-        // List shared agents
         let mut shared = manager.get_shared_agents("block1").await.unwrap();
         shared.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -364,15 +357,10 @@ mod tests {
         let dbs = setup_test_dbs().await;
         let manager = SharedBlockManager::new(dbs.clone());
 
-        // Create constellation owner agent
         create_test_agent(&dbs, CONSTELLATION_OWNER, "Constellation").await;
-
-        // Create a block owned by constellation (default permission is ReadWrite)
         create_test_block(&dbs, "block1", CONSTELLATION_OWNER).await;
 
-        // Any agent should have access matching the block's permission
         let access = manager.check_access("block1", "any_agent").await.unwrap();
-        // The block is created with ReadWrite permission, so that's what non-owners get
         assert_eq!(access, Some(MemoryPermission::ReadWrite));
     }
 }

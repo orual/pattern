@@ -21,8 +21,8 @@ use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::BlockCreate;
 use pattern_core::types::memory_types::{
     ArchivalEntry, BlockFilter, BlockMetadata, BlockMetadataPatch, BlockSchema, MemoryError,
-    MemoryResult, MemorySearchResult, MemorySearchScope, SearchMode, SearchOptions,
-    SharedBlockInfo, UndoRedoDepth, UndoRedoOp,
+    MemoryPermission, MemoryResult, MemorySearchResult, MemorySearchScope, SearchMode,
+    SearchOptions, SharedBlockInfo, UndoRedoDepth, UndoRedoOp,
 };
 use pattern_db::ConstellationDb;
 use pattern_db::Json;
@@ -300,7 +300,8 @@ impl MemoryCache {
 
             // Check for new updates from DB since we last synced.
             let updates =
-                pattern_db::queries::get_updates_since(&*self.db.get().mem()?, &block_id, last_seq).mem()?;
+                pattern_db::queries::get_updates_since(&*self.db.get().mem()?, &block_id, last_seq)
+                    .mem()?;
 
             // Re-acquire mutable lock to apply updates and update permission from DB.
             {
@@ -346,7 +347,9 @@ impl MemoryCache {
         effective_permission: MemoryPermission,
     ) -> MemoryResult<Option<CachedBlock>> {
         // Get block from database.
-        let block = pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, agent_id, label).mem()?;
+        let block =
+            pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, agent_id, label)
+                .mem()?;
 
         let block = match block {
             Some(b) if b.is_active => b,
@@ -365,7 +368,8 @@ impl MemoryCache {
 
         // Get and apply any updates since the snapshot.
         let (_checkpoint, updates) =
-            pattern_db::queries::get_checkpoint_and_updates(&*self.db.get().mem()?, &block.id).mem()?;
+            pattern_db::queries::get_checkpoint_and_updates(&*self.db.get().mem()?, &block.id)
+                .mem()?;
 
         // Create StructuredDocument from snapshot with metadata.
         let doc = if block.loro_snapshot.is_empty() {
@@ -397,7 +401,9 @@ impl MemoryCache {
     /// Persist changes for a block (export delta, write to DB).
     pub fn persist(&self, agent_id: &str, label: &str) -> MemoryResult<()> {
         // Get block_id from DB first.
-        let block = pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, agent_id, label).mem()?;
+        let block =
+            pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, agent_id, label)
+                .mem()?;
         let block_id = match block {
             Some(b) => b.id,
             None => {
@@ -460,7 +466,8 @@ impl MemoryCache {
                 &blob,
                 Some(&frontier_bytes),
                 Some("agent"),
-            )?;
+            )
+            .mem()?;
 
             new_seq = Some(seq);
         }
@@ -473,7 +480,8 @@ impl MemoryCache {
         };
 
         // Only update the preview, don't touch loro_snapshot.
-        pattern_db::queries::update_block_preview(&*self.db.get().mem()?, &block_id, preview_str).mem()?;
+        pattern_db::queries::update_block_preview(&*self.db.get().mem()?, &block_id, preview_str)
+            .mem()?;
 
         // Now re-acquire the lock to update the cache entry.
         let mut entry = self
@@ -504,7 +512,9 @@ impl MemoryCache {
 
     /// Helper to get block_id from agent_id and label.
     fn get_block_id(&self, agent_id: &str, label: &str) -> MemoryResult<Option<String>> {
-        let block = pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, agent_id, label).mem()?;
+        let block =
+            pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, agent_id, label)
+                .mem()?;
         Ok(block.map(|b| b.id))
     }
 
@@ -1098,7 +1108,7 @@ impl MemoryCache {
                 agent_id: agent_id_filter.map(String::from),
             });
         } else if options.content_types.len() == 1 {
-            let db_content_type = options.content_types[0].to_db_content_type();
+            let db_content_type = core_search_type_to_db(options.content_types[0]);
             builder = builder.filter(pattern_db::search::ContentFilter {
                 content_type: Some(db_content_type),
                 agent_id: agent_id_filter.map(String::from),
@@ -1109,7 +1119,7 @@ impl MemoryCache {
             let mut all_results = Vec::new();
 
             for content_type in &options.content_types {
-                let db_content_type = content_type.to_db_content_type();
+                let db_content_type = core_search_type_to_db(*content_type);
                 let mut type_builder = pattern_db::search::search(&search_conn)
                     .text(query)
                     .mode(effective_mode)
@@ -1123,7 +1133,7 @@ impl MemoryCache {
                     type_builder = type_builder.embedding(embedding);
                 }
 
-                let results = type_builder.execute()?;
+                let results = type_builder.execute().mem()?;
                 all_results.extend(results);
             }
 
@@ -1137,17 +1147,14 @@ impl MemoryCache {
 
             return Ok(all_results
                 .into_iter()
-                .map(MemorySearchResult::from_db_result)
+                .map(db_search_result_to_core)
                 .collect());
         }
 
         // Execute search.
-        let results = builder.execute()?;
+        let results = builder.execute().mem()?;
 
-        Ok(results
-            .into_iter()
-            .map(MemorySearchResult::from_db_result)
-            .collect())
+        Ok(results.into_iter().map(db_search_result_to_core).collect())
     }
 }
 
@@ -1508,7 +1515,7 @@ impl MemoryStore for MemoryCache {
             block_type,
             schema: schema.clone(),
             char_limit: effective_char_limit,
-            permission: permission.into(),
+            permission,
             pinned: false,
             created_at: now,
             updated_at: now,
@@ -1536,9 +1543,9 @@ impl MemoryStore for MemoryCache {
             agent_id: agent_id.to_string(),
             label,
             description,
-            block_type: block_type.into(),
+            block_type: core_block_type_to_db(block_type),
             char_limit: effective_char_limit as i64,
-            permission: permission.into(),
+            permission: core_perm_to_db(permission),
             pinned: false,
             loro_snapshot,
             content_preview: None,
@@ -1587,7 +1594,9 @@ impl MemoryStore for MemoryCache {
         label: &str,
     ) -> MemoryResult<Option<BlockMetadata>> {
         // Query DB for block metadata without loading full document.
-        let block = pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, agent_id, label).mem()?;
+        let block =
+            pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, agent_id, label)
+                .mem()?;
 
         Ok(block.as_ref().map(db_block_to_metadata))
     }
@@ -1598,12 +1607,18 @@ impl MemoryStore for MemoryCache {
         let base = if let Some(ref agent) = filter.agent_id {
             if let Some(bt) = filter.block_type {
                 // Optimized path: agent + type.
-                pattern_db::queries::list_blocks_by_type(&*self.db.get().mem()?, agent, core_block_type_to_db(bt)).mem()?
+                pattern_db::queries::list_blocks_by_type(
+                    &*self.db.get().mem()?,
+                    agent,
+                    core_block_type_to_db(bt),
+                )
+                .mem()?
             } else {
                 pattern_db::queries::list_blocks(&*self.db.get().mem()?, agent).mem()?
             }
         } else if let Some(ref prefix) = filter.label_prefix {
-            pattern_db::queries::list_blocks_by_label_prefix(&*self.db.get().mem()?, prefix).mem()?
+            pattern_db::queries::list_blocks_by_label_prefix(&*self.db.get().mem()?, prefix)
+                .mem()?
         } else {
             // No agent, no prefix — all blocks.
             pattern_db::queries::list_blocks_by_label_prefix(&*self.db.get().mem()?, "").mem()?
@@ -1631,7 +1646,9 @@ impl MemoryStore for MemoryCache {
 
     fn delete_block(&self, agent_id: &str, label: &str) -> MemoryResult<()> {
         // Get block ID first.
-        let block = pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, agent_id, label).mem()?;
+        let block =
+            pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, agent_id, label)
+                .mem()?;
 
         if let Some(block) = block {
             // Drop from cache first (will persist if dirty and cancel subscriber).
@@ -1701,12 +1718,14 @@ impl MemoryStore for MemoryCache {
             .mode(pattern_db::search::SearchMode::FtsOnly)
             .limit(limit as i64)
             .filter(pattern_db::search::ContentFilter::archival(Some(agent_id)))
-            .execute()?;
+            .execute()
+            .mem()?;
 
         // Convert search results to ArchivalEntry.
         let mut entries = Vec::new();
         for result in results {
-            if let Some(entry) = pattern_db::queries::get_archival_entry(&search_conn, &result.id).mem().mem()?
+            if let Some(entry) =
+                pattern_db::queries::get_archival_entry(&search_conn, &result.id).mem()?
             {
                 entries.push(db_archival_to_archival(&entry));
             }
@@ -1738,7 +1757,8 @@ impl MemoryStore for MemoryCache {
     }
 
     fn list_shared_blocks(&self, agent_id: &str) -> MemoryResult<Vec<SharedBlockInfo>> {
-        let shared = pattern_db::queries::get_shared_blocks(&*self.db.get().mem()?, agent_id).mem()?;
+        let shared =
+            pattern_db::queries::get_shared_blocks(&*self.db.get().mem()?, agent_id).mem()?;
 
         Ok(shared
             .into_iter()
@@ -1749,7 +1769,7 @@ impl MemoryStore for MemoryCache {
                 label: block.label,
                 description: block.description,
                 block_type: db_block_type_to_core(block.block_type),
-                permission,
+                permission: db_perm_to_core(permission),
             })
             .collect())
     }
@@ -1766,10 +1786,11 @@ impl MemoryStore for MemoryCache {
             requester_agent_id,
             owner_agent_id,
             label,
-        )?;
+        )
+        .mem()?;
 
         let (block_id, shared_permission) = match access_result {
-            Some((id, perm)) => (id, perm),
+            Some((id, perm)) => (id, db_perm_to_core(perm)),
             None => return Ok(None), // No access.
         };
 
@@ -1782,7 +1803,8 @@ impl MemoryStore for MemoryCache {
 
             // Check for new updates from DB since we last synced.
             let updates =
-                pattern_db::queries::get_updates_since(&*self.db.get().mem()?, &block_id, last_seq).mem()?;
+                pattern_db::queries::get_updates_since(&*self.db.get().mem()?, &block_id, last_seq)
+                    .mem()?;
 
             // Re-acquire mutable lock to apply updates.
             let mut entry = self.blocks.get_mut(&block_id).unwrap();
@@ -1824,7 +1846,9 @@ impl MemoryStore for MemoryCache {
         }
 
         // Get block from DB.
-        let block = pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, agent_id, label).mem()?;
+        let block =
+            pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, agent_id, label)
+                .mem()?;
 
         let block = block.ok_or_else(|| MemoryError::NotFound {
             agent_id: agent_id.to_string(),
@@ -1833,7 +1857,8 @@ impl MemoryStore for MemoryCache {
 
         // Apply pinned update.
         if let Some(pinned) = patch.pinned {
-            pattern_db::queries::update_block_pinned(&*self.db.get().mem()?, &block.id, pinned).mem()?;
+            pattern_db::queries::update_block_pinned(&*self.db.get().mem()?, &block.id, pinned)
+                .mem()?;
             if let Some(mut cached) = self.blocks.get_mut(&block.id) {
                 cached.doc.metadata_mut().pinned = pinned;
                 cached.last_accessed = Utc::now();
@@ -1842,7 +1867,12 @@ impl MemoryStore for MemoryCache {
 
         // Apply block_type update.
         if let Some(bt) = patch.block_type {
-            pattern_db::queries::update_block_type(&*self.db.get().mem()?, &block.id, core_block_type_to_db(bt)).mem()?;
+            pattern_db::queries::update_block_type(
+                &*self.db.get().mem()?,
+                &block.id,
+                core_block_type_to_db(bt),
+            )
+            .mem()?;
             if let Some(mut cached) = self.blocks.get_mut(&block.id) {
                 cached.doc.metadata_mut().block_type = bt;
                 cached.last_accessed = Utc::now();
@@ -1883,7 +1913,8 @@ impl MemoryStore for MemoryCache {
                 &*self.db.get().mem()?,
                 &block.id,
                 &metadata_json,
-            )?;
+            )
+            .mem()?;
 
             if let Some(mut cached) = self.blocks.get_mut(&block.id) {
                 cached.doc.set_schema(schema.clone());
@@ -1901,7 +1932,8 @@ impl MemoryStore for MemoryCache {
                 Some(description.as_str()),
                 None,
                 None,
-            )?;
+            )
+            .mem()?;
 
             if let Some(mut cached) = self.blocks.get_mut(&block.id) {
                 cached.doc.metadata_mut().description = description.clone();
@@ -1914,7 +1946,9 @@ impl MemoryStore for MemoryCache {
 
     fn undo_redo(&self, agent_id: &str, label: &str, op: UndoRedoOp) -> MemoryResult<bool> {
         // Get block ID from DB.
-        let block = pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, agent_id, label).mem()?;
+        let block =
+            pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, agent_id, label)
+                .mem()?;
 
         let block = block.ok_or_else(|| MemoryError::NotFound {
             agent_id: agent_id.to_string(),
@@ -1923,8 +1957,11 @@ impl MemoryStore for MemoryCache {
 
         match op {
             UndoRedoOp::Undo => {
-                let deactivated_seq =
-                    pattern_db::queries::deactivate_latest_update(&*self.db.get().mem()?, &block.id).mem()?;
+                let deactivated_seq = pattern_db::queries::deactivate_latest_update(
+                    &*self.db.get().mem()?,
+                    &block.id,
+                )
+                .mem()?;
 
                 if deactivated_seq.is_none() {
                     return Ok(false); // Nothing to undo.
@@ -1932,7 +1969,8 @@ impl MemoryStore for MemoryCache {
 
                 // Update the block's frontier to the new latest active update's frontier.
                 let new_latest =
-                    pattern_db::queries::get_latest_update(&*self.db.get().mem()?, &block.id).mem()?;
+                    pattern_db::queries::get_latest_update(&*self.db.get().mem()?, &block.id)
+                        .mem()?;
 
                 if let Some(update) = new_latest {
                     if let Some(frontier_bytes) = &update.frontier {
@@ -1940,11 +1978,17 @@ impl MemoryStore for MemoryCache {
                             &*self.db.get().mem()?,
                             &block.id,
                             frontier_bytes,
-                        )?;
+                        )
+                        .mem()?;
                     }
                 } else {
                     // No active updates left - clear frontier to initial state.
-                    pattern_db::queries::update_block_frontier(&*self.db.get().mem()?, &block.id, &[]).mem()?;
+                    pattern_db::queries::update_block_frontier(
+                        &*self.db.get().mem()?,
+                        &block.id,
+                        &[],
+                    )
+                    .mem()?;
                 }
 
                 // Evict from cache - next access will load the undone state from DB.
@@ -1953,7 +1997,8 @@ impl MemoryStore for MemoryCache {
             }
             UndoRedoOp::Redo => {
                 let reactivated_seq =
-                    pattern_db::queries::reactivate_next_update(&*self.db.get().mem()?, &block.id).mem()?;
+                    pattern_db::queries::reactivate_next_update(&*self.db.get().mem()?, &block.id)
+                        .mem()?;
 
                 if reactivated_seq.is_none() {
                     return Ok(false); // Nothing to redo.
@@ -1961,7 +2006,8 @@ impl MemoryStore for MemoryCache {
 
                 // Update the block's frontier to the new latest active update's frontier.
                 let new_latest =
-                    pattern_db::queries::get_latest_update(&*self.db.get().mem()?, &block.id).mem()?;
+                    pattern_db::queries::get_latest_update(&*self.db.get().mem()?, &block.id)
+                        .mem()?;
 
                 if let Some(update) = new_latest
                     && let Some(frontier_bytes) = &update.frontier
@@ -1970,7 +2016,8 @@ impl MemoryStore for MemoryCache {
                         &*self.db.get().mem()?,
                         &block.id,
                         frontier_bytes,
-                    )?;
+                    )
+                    .mem()?;
                 }
 
                 // Evict from cache - next access will load the redone state from DB.
@@ -1984,15 +2031,19 @@ impl MemoryStore for MemoryCache {
     }
 
     fn history_depth(&self, agent_id: &str, label: &str) -> MemoryResult<UndoRedoDepth> {
-        let block = pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, agent_id, label).mem()?;
+        let block =
+            pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, agent_id, label)
+                .mem()?;
 
         let block = block.ok_or_else(|| MemoryError::NotFound {
             agent_id: agent_id.to_string(),
             label: label.to_string(),
         })?;
 
-        let undo = pattern_db::queries::count_undo_steps(&*self.db.get().mem()?, &block.id).mem()? as usize;
-        let redo = pattern_db::queries::count_redo_steps(&*self.db.get().mem()?, &block.id).mem()? as usize;
+        let undo = pattern_db::queries::count_undo_steps(&*self.db.get().mem()?, &block.id).mem()?
+            as usize;
+        let redo = pattern_db::queries::count_redo_steps(&*self.db.get().mem()?, &block.id).mem()?
+            as usize;
 
         Ok(UndoRedoDepth { undo, redo })
     }
@@ -2002,7 +2053,9 @@ impl MemoryStore for MemoryCache {
 mod tests {
     use super::*;
     use pattern_core::types::memory_types::BlockType;
-    use pattern_db::models::{MemoryBlock, MemoryBlockType, MemoryPermission};
+    use pattern_db::models::{
+        MemoryBlock, MemoryBlockType, MemoryPermission as DbMemoryPermission,
+    };
 
     fn test_dbs() -> (tempfile::TempDir, Arc<ConstellationDb>) {
         let dir = tempfile::tempdir().unwrap();
@@ -2050,7 +2103,7 @@ mod tests {
             description: "Agent personality".to_string(),
             block_type: MemoryBlockType::Core,
             char_limit: 5000,
-            permission: MemoryPermission::ReadWrite,
+            permission: DbMemoryPermission::ReadWrite,
             pinned: true,
             loro_snapshot: vec![],
             content_preview: None,
@@ -2094,7 +2147,7 @@ mod tests {
             description: "Working memory".to_string(),
             block_type: MemoryBlockType::Working,
             char_limit: 5000,
-            permission: MemoryPermission::ReadWrite,
+            permission: DbMemoryPermission::ReadWrite,
             pinned: false,
             loro_snapshot: vec![],
             content_preview: None,
@@ -2141,7 +2194,7 @@ mod tests {
             description: "Block for no-dirty persist test".to_string(),
             block_type: MemoryBlockType::Working,
             char_limit: 5000,
-            permission: MemoryPermission::ReadWrite,
+            permission: DbMemoryPermission::ReadWrite,
             pinned: false,
             loro_snapshot: vec![],
             content_preview: None,
@@ -2188,7 +2241,7 @@ mod tests {
             description: "Block for no-op persist test".to_string(),
             block_type: MemoryBlockType::Working,
             char_limit: 5000,
-            permission: MemoryPermission::ReadWrite,
+            permission: DbMemoryPermission::ReadWrite,
             pinned: false,
             loro_snapshot: vec![],
             content_preview: None,
@@ -3072,7 +3125,7 @@ mod tests {
                 description: "Respawn test block".to_string(),
                 block_type: pattern_db::models::MemoryBlockType::Working,
                 char_limit: 5000,
-                permission: MemoryPermission::ReadWrite,
+                permission: DbMemoryPermission::ReadWrite,
                 pinned: false,
                 loro_snapshot: vec![],
                 content_preview: None,
@@ -3330,7 +3383,7 @@ mod tests {
                 description: "TaskList external edit test".to_string(),
                 block_type: pattern_db::models::MemoryBlockType::Working,
                 char_limit: 5000,
-                permission: MemoryPermission::ReadWrite,
+                permission: DbMemoryPermission::ReadWrite,
                 pinned: false,
                 loro_snapshot: vec![],
                 content_preview: None,

@@ -93,7 +93,7 @@ fn structured_document_text_round_trip() {
 
 #[test]
 fn shared_block_manager_permission_helpers() {
-    use pattern_db::models::MemoryPermission;
+    use pattern_core::types::memory_types::MemoryPermission;
     // Static permission helpers (no DB needed).
     assert!(SharedBlockManager::can_write(MemoryPermission::ReadWrite));
     assert!(!SharedBlockManager::can_write(MemoryPermission::ReadOnly));

@@ -612,14 +612,11 @@ pub fn query_task_graph_bfs(
         if matches!(direction, GraphDirection::Forward | GraphDirection::Both) {
             // Forward lookup requires a non-null source_item.
             if let Some(ref item) = current.1 {
-                let rows = forward_stmt.query_map(
-                    rusqlite::params![&current.0, item],
-                    |row| {
-                        let tb: String = row.get(0)?;
-                        let ti: Option<String> = row.get(1)?;
-                        Ok((tb, ti))
-                    },
-                )?;
+                let rows = forward_stmt.query_map(rusqlite::params![&current.0, item], |row| {
+                    let tb: String = row.get(0)?;
+                    let ti: Option<String> = row.get(1)?;
+                    Ok((tb, ti))
+                })?;
                 for row in rows {
                     let neighbour = row?;
                     neighbours.push((current.clone(), neighbour));
@@ -629,14 +626,12 @@ pub fn query_task_graph_bfs(
 
         // Reverse neighbours.
         if matches!(direction, GraphDirection::Reverse | GraphDirection::Both) {
-            let rows = reverse_stmt.query_map(
-                rusqlite::params![&current.0, &current.1],
-                |row| {
+            let rows =
+                reverse_stmt.query_map(rusqlite::params![&current.0, &current.1], |row| {
                     let sb: String = row.get(0)?;
                     let si: String = row.get(1)?;
                     Ok((sb, Some(si)))
-                },
-            )?;
+                })?;
             for row in rows {
                 let neighbour = row?;
                 neighbours.push((current.clone(), neighbour));

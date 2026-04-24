@@ -13,9 +13,11 @@ use pattern_core::error::MemoryError;
 use pattern_core::types::memory_types::{
     BlockType, MemoryPermission, MemorySearchResult, SearchContentType,
 };
-use pattern_db::models::{MemoryBlockType, MemoryPermission as DbMemoryPermission};
-use pattern_db::search::{SearchContentType as DbSearchContentType, SearchResult as DbSearchResult};
 use pattern_db::DbError;
+use pattern_db::models::{MemoryBlockType, MemoryPermission as DbMemoryPermission};
+use pattern_db::search::{
+    SearchContentType as DbSearchContentType, SearchResult as DbSearchResult,
+};
 
 // ── MemoryPermission ↔ DbMemoryPermission ───────────────────────────────────
 
@@ -60,6 +62,8 @@ pub fn core_block_type_to_db(t: BlockType) -> MemoryBlockType {
     match t {
         BlockType::Core => MemoryBlockType::Core,
         BlockType::Working => MemoryBlockType::Working,
+        // Future-proofing: non-exhaustive requires a catch-all.
+        _ => MemoryBlockType::Working,
     }
 }
 
@@ -114,4 +118,3 @@ impl<T> DbResultExt<T> for Result<T, DbError> {
         self.map_err(db_err_to_memory)
     }
 }
-

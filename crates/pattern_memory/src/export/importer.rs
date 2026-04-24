@@ -19,6 +19,7 @@ use pattern_db::models::{
 };
 use pattern_db::queries;
 
+use super::DbToCoreExt;
 use super::{
     EXPORT_VERSION,
     types::{
@@ -183,7 +184,7 @@ impl Importer {
             .await
             .map_err(|e| CoreError::CarError {
                 operation: "opening CAR".to_string(),
-                cause: e,
+                cause: e.to_string(),
             })?;
 
         let root_cids = reader.header().roots().to_vec();
@@ -198,7 +199,7 @@ impl Importer {
                 Err(e) => {
                     return Err(CoreError::CarError {
                         operation: "reading block".to_string(),
-                        cause: e,
+                        cause: e.to_string(),
                     });
                 }
             }
@@ -276,7 +277,7 @@ impl Importer {
             updated_at: now,
         };
 
-        queries::upsert_agent(&*self.db.get()?, &agent)?;
+        queries::upsert_agent(&*self.db.get().db()?, &agent).db()?;
         result.agent_ids.push(agent_id.clone());
 
         // Import memory blocks (skip if already imported this session)
@@ -371,7 +372,7 @@ impl Importer {
             updated_at: now,
         };
 
-        queries::upsert_block(&*self.db.get()?, &memory_block)?;
+        queries::upsert_block(&*self.db.get().db()?, &memory_block).db()?;
         Ok(())
     }
 
@@ -489,7 +490,7 @@ impl Importer {
             created_at: chrono_to_jiff(export.created_at),
         };
 
-        queries::upsert_message(&*self.db.get()?, &message)?;
+        queries::upsert_message(&*self.db.get().db()?, &message).db()?;
         Ok(())
     }
 
@@ -539,7 +540,7 @@ impl Importer {
             created_at: export.created_at,
         };
 
-        queries::upsert_archival_entry(&*self.db.get()?, &entry)?;
+        queries::upsert_archival_entry(&*self.db.get().db()?, &entry).db()?;
         Ok(())
     }
 
@@ -591,7 +592,7 @@ impl Importer {
             created_at: chrono_to_jiff(export.created_at),
         };
 
-        queries::upsert_archive_summary(&*self.db.get()?, &summary)?;
+        queries::upsert_archive_summary(&*self.db.get().db()?, &summary).db()?;
         Ok(())
     }
 
@@ -685,7 +686,7 @@ impl Importer {
             .unwrap_or_else(|| export.group.name.clone());
 
         let group = self.create_group_from_record(&export.group, &group_id, &group_name)?;
-        queries::upsert_group(&*self.db.get()?, &group)?;
+        queries::upsert_group(&*self.db.get().db()?, &group).db()?;
         result.group_ids.push(group_id.clone());
 
         // Create group members with mapped agent IDs
@@ -742,7 +743,7 @@ impl Importer {
             .unwrap_or_else(|| export.group.name.clone());
 
         let group = self.create_group_from_record(&export.group, &group_id, &group_name)?;
-        queries::upsert_group(&*self.db.get()?, &group)?;
+        queries::upsert_group(&*self.db.get().db()?, &group).db()?;
         result.group_ids.push(group_id);
 
         // Note: thin exports don't include agent data, so members can't be created
@@ -786,7 +787,7 @@ impl Importer {
             joined_at: export.joined_at,
         };
 
-        queries::upsert_group_member(&*self.db.get()?, &member)?;
+        queries::upsert_group_member(&*self.db.get().db()?, &member).db()?;
         Ok(())
     }
 
@@ -922,7 +923,7 @@ impl Importer {
 
         // For constellation groups, don't apply rename
         let group = self.create_group_from_record(&export.group, &group_id, &export.group.name)?;
-        queries::upsert_group(&*self.db.get()?, &group)?;
+        queries::upsert_group(&*self.db.get().db()?, &group).db()?;
         result.group_ids.push(group_id.clone());
 
         // Create group members with mapped agent IDs
@@ -986,11 +987,12 @@ impl Importer {
 
             // Create the shared block attachment
             queries::create_shared_block_attachment(
-                &*self.db.get()?,
+                &*self.db.get().db()?,
                 &block_id,
                 &agent_id,
                 attachment.permission,
-            )?;
+            )
+            .db()?;
         }
         Ok(())
     }

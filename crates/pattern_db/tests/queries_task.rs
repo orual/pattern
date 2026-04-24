@@ -6,12 +6,12 @@
 //! - `list_tasks_filtered` with status, owner, has_blockers, and FTS5 keyword filters.
 //! - FTS5 BM25 relevance ordering stability (insta snapshots).
 
-use pattern_db::queries::{
-    delete_task_edges_for_item, delete_task_edges_targeting, delete_task_row, list_tasks_filtered,
-    upsert_task_edges, upsert_task_row, FilterArgs, TaskRow,
-};
-use pattern_db::queries::task_row::TaskStatus;
 use pattern_db::ConstellationDb;
+use pattern_db::queries::task_row::TaskStatus;
+use pattern_db::queries::{
+    FilterArgs, TaskRow, delete_task_edges_for_item, delete_task_edges_targeting, delete_task_row,
+    list_tasks_filtered, upsert_task_edges, upsert_task_row,
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -77,7 +77,13 @@ fn upsert_one_row_then_list() {
     insert_test_agent(&conn);
 
     let row = make_task_row(
-        "t-1", "blk-a", "item-1", "write tests", TaskStatus::Pending, None, None,
+        "t-1",
+        "blk-a",
+        "item-1",
+        "write tests",
+        TaskStatus::Pending,
+        None,
+        None,
     );
     {
         let tx = conn.transaction().unwrap();
@@ -97,10 +103,22 @@ fn upsert_twice_same_key_produces_one_row() {
     insert_test_agent(&conn);
 
     let row1 = make_task_row(
-        "t-1", "blk-a", "item-1", "original", TaskStatus::Pending, None, None,
+        "t-1",
+        "blk-a",
+        "item-1",
+        "original",
+        TaskStatus::Pending,
+        None,
+        None,
     );
     let row2 = make_task_row(
-        "t-2", "blk-a", "item-1", "updated", TaskStatus::InProgress, None, None,
+        "t-2",
+        "blk-a",
+        "item-1",
+        "updated",
+        TaskStatus::InProgress,
+        None,
+        None,
     );
     {
         let tx = conn.transaction().unwrap();
@@ -122,7 +140,13 @@ fn delete_row_makes_list_empty() {
     insert_test_agent(&conn);
 
     let row = make_task_row(
-        "t-1", "blk-a", "item-1", "doomed", TaskStatus::Pending, None, None,
+        "t-1",
+        "blk-a",
+        "item-1",
+        "doomed",
+        TaskStatus::Pending,
+        None,
+        None,
     );
     {
         let tx = conn.transaction().unwrap();
@@ -223,16 +247,96 @@ fn insert_filter_fixture(conn: &mut rusqlite::Connection) {
     .unwrap();
 
     let tasks = vec![
-        ("t-01", "blk-a", "i-01", "fix login timeout", TaskStatus::Pending, Some("agent-1"), Some("investigate the login timeout bug")),
-        ("t-02", "blk-a", "i-02", "update auth docs", TaskStatus::Pending, Some("agent-1"), Some("refresh auth documentation")),
-        ("t-03", "blk-a", "i-03", "review migration safety", TaskStatus::InProgress, Some("agent-2"), Some("check migration for data safety")),
-        ("t-04", "blk-a", "i-04", "refactor token rotation", TaskStatus::InProgress, Some("agent-1"), Some("improve token rotation logic")),
-        ("t-05", "blk-a", "i-05", "audit password hashing", TaskStatus::Completed, Some("agent-2"), Some("audit bcrypt password hashing")),
-        ("t-06", "blk-a", "i-06", "add rate limiting", TaskStatus::Pending, Some("agent-1"), None),
-        ("t-07", "blk-a", "i-07", "fix session expiry", TaskStatus::Blocked, Some("agent-2"), Some("session tokens expire too early")),
-        ("t-08", "blk-a", "i-08", "update error messages", TaskStatus::Pending, None, Some("improve user-facing error messages")),
-        ("t-09", "blk-a", "i-09", "add MFA support", TaskStatus::Cancelled, Some("agent-1"), None),
-        ("t-10", "blk-a", "i-10", "deploy auth service", TaskStatus::Pending, Some("agent-2"), Some("deploy the auth service to production")),
+        (
+            "t-01",
+            "blk-a",
+            "i-01",
+            "fix login timeout",
+            TaskStatus::Pending,
+            Some("agent-1"),
+            Some("investigate the login timeout bug"),
+        ),
+        (
+            "t-02",
+            "blk-a",
+            "i-02",
+            "update auth docs",
+            TaskStatus::Pending,
+            Some("agent-1"),
+            Some("refresh auth documentation"),
+        ),
+        (
+            "t-03",
+            "blk-a",
+            "i-03",
+            "review migration safety",
+            TaskStatus::InProgress,
+            Some("agent-2"),
+            Some("check migration for data safety"),
+        ),
+        (
+            "t-04",
+            "blk-a",
+            "i-04",
+            "refactor token rotation",
+            TaskStatus::InProgress,
+            Some("agent-1"),
+            Some("improve token rotation logic"),
+        ),
+        (
+            "t-05",
+            "blk-a",
+            "i-05",
+            "audit password hashing",
+            TaskStatus::Completed,
+            Some("agent-2"),
+            Some("audit bcrypt password hashing"),
+        ),
+        (
+            "t-06",
+            "blk-a",
+            "i-06",
+            "add rate limiting",
+            TaskStatus::Pending,
+            Some("agent-1"),
+            None,
+        ),
+        (
+            "t-07",
+            "blk-a",
+            "i-07",
+            "fix session expiry",
+            TaskStatus::Blocked,
+            Some("agent-2"),
+            Some("session tokens expire too early"),
+        ),
+        (
+            "t-08",
+            "blk-a",
+            "i-08",
+            "update error messages",
+            TaskStatus::Pending,
+            None,
+            Some("improve user-facing error messages"),
+        ),
+        (
+            "t-09",
+            "blk-a",
+            "i-09",
+            "add MFA support",
+            TaskStatus::Cancelled,
+            Some("agent-1"),
+            None,
+        ),
+        (
+            "t-10",
+            "blk-a",
+            "i-10",
+            "deploy auth service",
+            TaskStatus::Pending,
+            Some("agent-2"),
+            Some("deploy the auth service to production"),
+        ),
     ];
 
     let tx = conn.transaction().unwrap();
@@ -410,7 +514,15 @@ fn insert_fts5_fixture(conn: &mut rusqlite::Connection) {
 
     let tx = conn.transaction().unwrap();
     for (id, blk, item, subject, desc) in &tasks {
-        let row = make_task_row(id, blk, item, subject, TaskStatus::Pending, None, Some(desc));
+        let row = make_task_row(
+            id,
+            blk,
+            item,
+            subject,
+            TaskStatus::Pending,
+            None,
+            Some(desc),
+        );
         upsert_task_row(&tx, &row).unwrap();
     }
     tx.commit().unwrap();

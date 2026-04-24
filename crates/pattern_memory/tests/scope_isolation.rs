@@ -73,14 +73,14 @@ fn ac12_2_core_only_reads_persona_as_readonly() {
     let doc = scope.get_block("any", "scratchpad").unwrap().unwrap();
     assert_eq!(
         doc.metadata().permission,
-        pattern_db::models::MemoryPermission::ReadOnly,
+        pattern_core::types::memory_types::MemoryPermission::ReadOnly,
     );
 
     // Project block is writable (default permission).
     let project_doc = scope.get_block("any", "readme").unwrap().unwrap();
     assert_ne!(
         project_doc.metadata().permission,
-        pattern_db::models::MemoryPermission::ReadOnly,
+        pattern_core::types::memory_types::MemoryPermission::ReadOnly,
     );
 }
 

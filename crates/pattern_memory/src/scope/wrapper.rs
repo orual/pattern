@@ -130,7 +130,9 @@ impl<S: MemoryStore> MemoryScope<S> {
                 // Fall through to persona.
                 match self.inner.get_block(&self.binding.persona_id, label)? {
                     Some(mut doc) if mark_persona_readonly => {
-                        doc.set_permission(pattern_db::models::MemoryPermission::ReadOnly);
+                        doc.set_permission(
+                            pattern_core::types::memory_types::MemoryPermission::ReadOnly,
+                        );
                         Ok(Some(doc))
                     }
                     other => Ok(other),
@@ -500,7 +502,7 @@ mod tests {
         let doc = scope.get_block("any", "scratchpad").unwrap().unwrap();
         assert_eq!(
             doc.metadata().permission,
-            pattern_db::models::MemoryPermission::ReadOnly
+            pattern_core::types::memory_types::MemoryPermission::ReadOnly
         );
     }
 

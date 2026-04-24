@@ -13,6 +13,7 @@ use pattern_db::queries;
 
 use std::collections::{HashMap, HashSet};
 
+use super::DbToCoreExt;
 use super::{
     EXPORT_VERSION, MAX_BLOCK_BYTES, TARGET_CHUNK_BYTES,
     car::{chunk_bytes, encode_block, estimate_size},
@@ -88,11 +89,11 @@ impl Exporter {
         let start_time = Utc::now();
 
         // Load agent
-        let agent = queries::get_agent(&*self.db.get()?, agent_id)?.ok_or_else(|| {
-            CoreError::AgentNotFound {
+        let agent = queries::get_agent(&*self.db.get().db()?, agent_id)
+            .db()?
+            .ok_or_else(|| CoreError::AgentNotFound {
                 identifier: agent_id.to_string(),
-            }
-        })?;
+            })?;
 
         // Export agent data to blocks
         let (agent_export, blocks, stats) = self.export_agent_data(&agent, options).await?;
@@ -126,14 +127,14 @@ impl Exporter {
         let start_time = Utc::now();
 
         // Load group
-        let group = queries::get_group(&*self.db.get()?, group_id)?.ok_or_else(|| {
-            CoreError::GroupNotFound {
+        let group = queries::get_group(&*self.db.get().db()?, group_id)
+            .db()?
+            .ok_or_else(|| CoreError::GroupNotFound {
                 identifier: group_id.to_string(),
-            }
-        })?;
+            })?;
 
         // Load members
-        let members = queries::get_group_members(&*self.db.get()?, group_id)?;
+        let members = queries::get_group_members(&*self.db.get().db()?, group_id).db()?;
 
         // Check if thin export
         let is_thin = matches!(&options.target, ExportTarget::Group { thin: true, .. });
@@ -173,11 +174,10 @@ impl Exporter {
             let mut agent_exports = Vec::with_capacity(members.len());
 
             for member in &members {
-                let agent =
-                    queries::get_agent(&*self.db.get()?, &member.agent_id)?.ok_or_else(|| {
-                        CoreError::AgentNotFound {
-                            identifier: member.agent_id.clone(),
-                        }
+                let agent = queries::get_agent(&*self.db.get().db()?, &member.agent_id)
+                    .db()?
+                    .ok_or_else(|| CoreError::AgentNotFound {
+                        identifier: member.agent_id.clone(),
                     })?;
 
                 let (agent_export, agent_blocks, agent_stats) =
@@ -253,8 +253,8 @@ impl Exporter {
         let start_time = Utc::now();
 
         // Load all agents and groups
-        let agents = queries::list_agents(&*self.db.get()?)?;
-        let groups = queries::list_groups(&*self.db.get()?)?;
+        let agents = queries::list_agents(&*self.db.get().db()?).db()?;
+        let groups = queries::list_groups(&*self.db.get().db()?).db()?;
 
         let mut collector = BlockCollector::new();
         let mut stats = ExportStats::default();
@@ -292,7 +292,7 @@ impl Exporter {
         let mut group_exports: Vec<GroupExportThin> = Vec::with_capacity(groups.len());
 
         for group in &groups {
-            let members = queries::get_group_members(&*self.db.get()?, &group.id)?;
+            let members = queries::get_group_members(&*self.db.get().db()?, &group.id).db()?;
 
             // Collect agent CIDs for this group
             let agent_cids: Vec<Cid> = members
@@ -338,13 +338,14 @@ impl Exporter {
 
         // Export all memory blocks (for blocks not already exported with agents)
         // and collect all shared attachments
-        let all_blocks = queries::list_all_blocks(&*self.db.get()?)?;
-        let all_attachments = queries::list_all_shared_block_attachments(&*self.db.get()?)?;
+        let all_blocks = queries::list_all_blocks(&*self.db.get().db()?).db()?;
+        let all_attachments =
+            queries::list_all_shared_block_attachments(&*self.db.get().db()?).db()?;
 
         // Track which blocks we've already exported via agents
         let mut exported_block_ids: HashSet<String> = HashSet::new();
         for agent in &agents {
-            let agent_blocks = queries::list_blocks(&*self.db.get()?, &agent.id)?;
+            let agent_blocks = queries::list_blocks(&*self.db.get().db()?, &agent.id).db()?;
             for block in agent_blocks {
                 exported_block_ids.insert(block.id);
             }
@@ -462,7 +463,7 @@ impl Exporter {
         collector: &mut BlockCollector,
         stats: &mut ExportStats,
     ) -> Result<Vec<Cid>> {
-        let blocks = queries::list_blocks(&*self.db.get()?, agent_id)?;
+        let blocks = queries::list_blocks(&*self.db.get().db()?, agent_id).db()?;
         let mut export_cids = Vec::with_capacity(blocks.len());
 
         for block in blocks {
@@ -558,7 +559,8 @@ impl Exporter {
         stats: &mut ExportStats,
     ) -> Result<Vec<Cid>> {
         // Load all messages (including archived) - use a very high limit
-        let messages = queries::get_messages_with_archived(&*self.db.get()?, agent_id, i64::MAX)?;
+        let messages =
+            queries::get_messages_with_archived(&*self.db.get().db()?, agent_id, i64::MAX).db()?;
 
         if messages.is_empty() {
             return Ok(Vec::new());
@@ -641,7 +643,8 @@ impl Exporter {
         stats: &mut ExportStats,
     ) -> Result<Vec<Cid>> {
         // Load all archival entries (use high limit and offset 0)
-        let entries = queries::list_archival_entries(&*self.db.get()?, agent_id, i64::MAX, 0)?;
+        let entries =
+            queries::list_archival_entries(&*self.db.get().db()?, agent_id, i64::MAX, 0).db()?;
 
         let mut cids = Vec::with_capacity(entries.len());
         for entry in entries {
@@ -662,7 +665,7 @@ impl Exporter {
         collector: &mut BlockCollector,
         stats: &mut ExportStats,
     ) -> Result<Vec<Cid>> {
-        let summaries = queries::get_archive_summaries(&*self.db.get()?, agent_id)?;
+        let summaries = queries::get_archive_summaries(&*self.db.get().db()?, agent_id).db()?;
 
         let mut cids = Vec::with_capacity(summaries.len());
         for summary in summaries {
@@ -695,7 +698,8 @@ impl Exporter {
 
         for agent_id in member_agent_ids {
             // Get blocks shared WITH this agent (not owned by them)
-            let attachments = queries::list_agent_shared_blocks(&*self.db.get()?, agent_id)?;
+            let attachments =
+                queries::list_agent_shared_blocks(&*self.db.get().db()?, agent_id).db()?;
             for attachment in attachments {
                 shared_block_ids.insert(attachment.block_id.clone());
                 attachment_exports.push(SharedBlockAttachmentExport::from(&attachment));
@@ -703,12 +707,12 @@ impl Exporter {
         }
 
         // Also get blocks owned by the group itself
-        let group_blocks = queries::list_blocks(&*self.db.get()?, group_id)?;
+        let group_blocks = queries::list_blocks(&*self.db.get().db()?, group_id).db()?;
 
         // Export the shared blocks (avoiding duplicates with agent-owned blocks)
         let mut shared_cids = Vec::new();
         for block_id in &shared_block_ids {
-            if let Some(block) = queries::get_block(&*self.db.get()?, block_id)? {
+            if let Some(block) = queries::get_block(&*self.db.get().db()?, block_id).db()? {
                 // Check if this block is already exported as part of an agent's blocks
                 // by checking if the owner is in our member list
                 if !member_agent_ids.contains(&block.agent_id) {
@@ -843,7 +847,7 @@ impl Exporter {
             .await
             .map_err(|e| CoreError::CarError {
                 operation: "writing manifest".to_string(),
-                cause: e,
+                cause: e.to_string(),
             })?;
 
         // Write agent export data
@@ -852,7 +856,7 @@ impl Exporter {
             .await
             .map_err(|e| CoreError::CarError {
                 operation: "writing agent export".to_string(),
-                cause: e,
+                cause: e.to_string(),
             })?;
 
         // Write all collected blocks
@@ -862,14 +866,14 @@ impl Exporter {
                 .await
                 .map_err(|e| CoreError::CarError {
                     operation: "writing block".to_string(),
-                    cause: e,
+                    cause: e.to_string(),
                 })?;
         }
 
         // Finish the CAR file
         writer.finish().await.map_err(|e| CoreError::CarError {
             operation: "finishing CAR".to_string(),
-            cause: e,
+            cause: e.to_string(),
         })?;
 
         Ok(manifest)
@@ -912,7 +916,7 @@ impl Exporter {
             .await
             .map_err(|e| CoreError::CarError {
                 operation: "writing manifest".to_string(),
-                cause: e,
+                cause: e.to_string(),
             })?;
 
         // Write data
@@ -921,7 +925,7 @@ impl Exporter {
             .await
             .map_err(|e| CoreError::CarError {
                 operation: format!("writing {}", type_name),
-                cause: e,
+                cause: e.to_string(),
             })?;
 
         // Write all collected blocks
@@ -931,14 +935,14 @@ impl Exporter {
                 .await
                 .map_err(|e| CoreError::CarError {
                     operation: "writing block".to_string(),
-                    cause: e,
+                    cause: e.to_string(),
                 })?;
         }
 
         // Finish the CAR file
         writer.finish().await.map_err(|e| CoreError::CarError {
             operation: "finishing CAR".to_string(),
-            cause: e,
+            cause: e.to_string(),
         })?;
 
         Ok(manifest)

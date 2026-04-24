@@ -246,7 +246,9 @@ impl StructuredDocument {
                 crate::types::memory_types::MemoryOp::Overwrite => {
                     crate::types::memory_types::MemoryPermission::ReadWrite
                 }
-                crate::types::memory_types::MemoryOp::Delete => crate::types::memory_types::MemoryPermission::Admin,
+                crate::types::memory_types::MemoryOp::Delete => {
+                    crate::types::memory_types::MemoryPermission::Admin
+                }
             };
             Err(DocumentError::PermissionDenied {
                 operation: format!("{:?}", op),

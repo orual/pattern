@@ -441,10 +441,7 @@ pub enum CoreError {
         code(pattern_core::dagcbor_encoding_error),
         help("failed to encode data as DAG-CBOR")
     )]
-    DagCborEncodingError {
-        data_type: String,
-        cause: String,
-    },
+    DagCborEncodingError { data_type: String, cause: String },
 
     /// DAG-CBOR decoding failed.
     ///
@@ -476,10 +473,7 @@ pub enum CoreError {
         code(pattern_core::car_error),
         help("check CAR file format and iroh-car compatibility")
     )]
-    CarError {
-        operation: String,
-        cause: String,
-    },
+    CarError { operation: String, cause: String },
 
     /// An export operation failed.
     ///
