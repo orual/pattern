@@ -737,4 +737,289 @@ mod tests {
     }
 }
 
+// region: search tests (real FTS5 — MemoryCache + ConstellationDb)
+//
+// `InMemoryMemoryStore.search()` always returns an empty result set (no FTS
+// backend). The following tests use `MemoryCache` + `ConstellationDb::open_in_memory()`
+// — the same pattern used by `crates/pattern_memory/tests/skill_fts5.rs` — to
+// exercise the full FTS5 code path through `handle_search`.
+
+#[cfg(test)]
+mod search_tests {
+    use std::sync::Arc;
+
+    use pattern_db::ConstellationDb;
+    use pattern_memory::MemoryCache;
+    use pattern_memory::fs::markdown_skill::{SkillFile, write_skill_to_loro_doc};
+
+    use pattern_core::types::block::BlockCreate;
+    use pattern_core::types::memory_types::{
+        BlockSchema, MemoryBlockType, SkillMetadata, SkillTrustTier,
+    };
+
+    use super::*;
+
+    const AGENT: &str = "search_agent";
+
+    /// Create a fresh in-memory `ConstellationDb` and matching `MemoryCache`.
+    fn setup() -> (Arc<ConstellationDb>, MemoryCache) {
+        let dbs = Arc::new(ConstellationDb::open_in_memory().unwrap());
+        // Agent row is required for FK constraints on memory_blocks.
+        let agent = pattern_db::models::Agent {
+            id: AGENT.to_string(),
+            name: "Search Test Agent".to_string(),
+            description: None,
+            model_provider: "anthropic".to_string(),
+            model_name: "claude".to_string(),
+            system_prompt: "test".to_string(),
+            config: pattern_db::Json(serde_json::json!({})),
+            enabled_tools: pattern_db::Json(vec![]),
+            tool_rules: None,
+            status: pattern_db::models::AgentStatus::Active,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        pattern_db::queries::create_agent(&dbs.get().unwrap(), &agent)
+            .expect("create agent for search tests");
+        let cache = MemoryCache::new(dbs.clone());
+        (dbs, cache)
+    }
+
+    /// Seed a Skill block into `cache`, wire the LoroDoc, then persist so
+    /// the FTS5 index is updated.
+    fn seed_and_persist(cache: &MemoryCache, label: &str, metadata: SkillMetadata, body: &str) {
+        cache
+            .create_block(
+                AGENT,
+                BlockCreate::new(
+                    label,
+                    MemoryBlockType::Working,
+                    BlockSchema::Skill {
+                        expected_keys: vec![],
+                    },
+                ),
+            )
+            .unwrap();
+
+        let doc = cache
+            .get_block(AGENT, label)
+            .unwrap()
+            .expect("block must exist after create");
+
+        let skill_file = SkillFile {
+            metadata,
+            extras: loro::LoroValue::Map(Default::default()),
+            body: body.to_string(),
+        };
+        write_skill_to_loro_doc(&skill_file, doc.inner()).unwrap();
+        doc.inner().commit();
+
+        cache.mark_dirty(AGENT, label);
+        cache.persist_block(AGENT, label).unwrap();
+    }
+
+    // ---- search_matches_skill_name ---------------------------------------
+
+    #[test]
+    fn search_matches_skill_name() {
+        // Seed a skill whose name contains "authentication". Query must return it
+        // without surfacing the decoy.
+        let (dbs, cache) = setup();
+        let conn = dbs.get().unwrap();
+
+        seed_and_persist(
+            &cache,
+            "auth-skill",
+            SkillMetadata {
+                name: "fix-authentication".to_string(),
+                trust_tier: SkillTrustTier::AdHoc,
+                description: None,
+                keywords: vec![],
+                hooks: serde_json::Value::Null,
+            },
+            "Generic skill body.\n",
+        );
+        seed_and_persist(
+            &cache,
+            "decoy-skill",
+            SkillMetadata {
+                name: "unrelated-work".to_string(),
+                trust_tier: SkillTrustTier::AdHoc,
+                description: None,
+                keywords: vec![],
+                hooks: serde_json::Value::Null,
+            },
+            "Nothing here.\n",
+        );
+
+        let results =
+            handle_search(&cache, &conn, AGENT, "authentication").expect("search should succeed");
+
+        assert_eq!(
+            results.len(),
+            1,
+            "expected exactly 1 result for 'authentication'; got {}: {results:?}",
+            results.len()
+        );
+        assert_eq!(
+            results[0].name, "fix-authentication",
+            "wrong skill returned"
+        );
+    }
+
+    // ---- search_matches_skill_description --------------------------------
+
+    #[test]
+    fn search_matches_skill_description() {
+        // Skill with description mentioning "token-refresh"; query on "token".
+        let (dbs, cache) = setup();
+        let conn = dbs.get().unwrap();
+
+        seed_and_persist(
+            &cache,
+            "desc-skill",
+            SkillMetadata {
+                name: "session-manager".to_string(),
+                trust_tier: SkillTrustTier::ProjectLocal,
+                description: Some("Handles token-refresh for expired sessions".to_string()),
+                keywords: vec![],
+                hooks: serde_json::Value::Null,
+            },
+            "Generic body.\n",
+        );
+        seed_and_persist(
+            &cache,
+            "decoy-skill",
+            SkillMetadata {
+                name: "file-handler".to_string(),
+                trust_tier: SkillTrustTier::AdHoc,
+                description: Some("Manages files on disk".to_string()),
+                keywords: vec![],
+                hooks: serde_json::Value::Null,
+            },
+            "File body.\n",
+        );
+
+        let results = handle_search(&cache, &conn, AGENT, "token").expect("search should succeed");
+
+        assert_eq!(
+            results.len(),
+            1,
+            "expected 1 result for 'token'; got {}: {results:?}",
+            results.len()
+        );
+        assert_eq!(results[0].name, "session-manager");
+    }
+
+    // ---- search_matches_skill_body ---------------------------------------
+
+    #[test]
+    fn search_matches_skill_body() {
+        // Skill whose body contains "Revokes all active sessions".
+        let (dbs, cache) = setup();
+        let conn = dbs.get().unwrap();
+
+        seed_and_persist(
+            &cache,
+            "body-skill",
+            SkillMetadata {
+                name: "logout-handler".to_string(),
+                trust_tier: SkillTrustTier::AdHoc,
+                description: None,
+                keywords: vec![],
+                hooks: serde_json::Value::Null,
+            },
+            "Revokes all active sessions gracefully.\n",
+        );
+        seed_and_persist(
+            &cache,
+            "body-decoy",
+            SkillMetadata {
+                name: "login-handler".to_string(),
+                trust_tier: SkillTrustTier::AdHoc,
+                description: None,
+                keywords: vec![],
+                hooks: serde_json::Value::Null,
+            },
+            "Creates new user sessions.\n",
+        );
+
+        let results =
+            handle_search(&cache, &conn, AGENT, "Revokes").expect("search should succeed");
+
+        assert_eq!(
+            results.len(),
+            1,
+            "expected 1 result for 'Revokes'; got {}: {results:?}",
+            results.len()
+        );
+        assert_eq!(results[0].name, "logout-handler");
+    }
+
+    // ---- search_relevance_ranked ----------------------------------------
+
+    #[test]
+    fn search_relevance_ranked() {
+        // Three skills all contain "security". BM25 ordering is snapshotted.
+        let (dbs, cache) = setup();
+        let conn = dbs.get().unwrap();
+
+        // Skill A: "security" in name, description, keywords, and body.
+        seed_and_persist(
+            &cache,
+            "skill-a",
+            SkillMetadata {
+                name: "security-audit".to_string(),
+                trust_tier: SkillTrustTier::FirstParty,
+                description: Some("Runs a security audit on the codebase".to_string()),
+                keywords: vec!["security".to_string(), "audit".to_string()],
+                hooks: serde_json::Value::Null,
+            },
+            "Checks for vulnerabilities and misconfigurations. security baseline.\n",
+        );
+
+        // Skill B: "security" in keywords and body only.
+        seed_and_persist(
+            &cache,
+            "skill-b",
+            SkillMetadata {
+                name: "access-control".to_string(),
+                trust_tier: SkillTrustTier::ProjectLocal,
+                description: None,
+                keywords: vec!["security".to_string(), "rbac".to_string()],
+                hooks: serde_json::Value::Null,
+            },
+            "Manages role-based access control for security enforcement.\n",
+        );
+
+        // Skill C: "security" in description and body only.
+        seed_and_persist(
+            &cache,
+            "skill-c",
+            SkillMetadata {
+                name: "credential-rotation".to_string(),
+                trust_tier: SkillTrustTier::AdHoc,
+                description: Some("Rotates credentials for security compliance".to_string()),
+                keywords: vec![],
+                hooks: serde_json::Value::Null,
+            },
+            "Automates certificate and API key security rotation.\n",
+        );
+
+        let results =
+            handle_search(&cache, &conn, AGENT, "security").expect("search should succeed");
+
+        assert_eq!(
+            results.len(),
+            3,
+            "all three skills should match 'security'; got {}: {results:?}",
+            results.len()
+        );
+
+        // Snapshot BM25 ordering by name for regression detection.
+        let ordered_names: Vec<&str> = results.iter().map(|r| r.name.as_str()).collect();
+        insta::assert_snapshot!("search_relevance_ranked", ordered_names.join("\n"));
+    }
+}
+
 // endregion: tests

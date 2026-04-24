@@ -6671,6 +6671,7 @@ dependencies = [
  "frunk",
  "futures",
  "genai",
+ "insta",
  "jiff",
  "kdl 6.5.0",
  "knus",

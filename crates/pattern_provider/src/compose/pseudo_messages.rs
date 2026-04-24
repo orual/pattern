@@ -36,6 +36,7 @@
 
 use genai::chat::ChatMessage;
 use pattern_core::types::block::{BlockWrite, BlockWriteKind};
+use pattern_core::types::memory_types::SkillTrustTier;
 use pattern_core::types::origin::Author;
 
 use crate::shaper::wrap_system_reminder;
@@ -113,6 +114,51 @@ pub fn render_change_event(event: &BlockWrite) -> ChatMessage {
 /// ```
 pub fn render_change_events(events: &[BlockWrite]) -> Vec<ChatMessage> {
     events.iter().map(render_change_event).collect()
+}
+
+/// Render a skill-loaded notification as a pseudo-message.
+///
+/// The returned message has `role = User` and carries a
+/// `<system-reminder>`-wrapped body in the canonical form:
+///
+/// ```text
+/// [skill:loaded] name="<name>" trust_tier="<kebab>"
+///
+/// <body>
+///
+/// [skill:loaded:end]
+/// ```
+///
+/// This is injected into segment 2 of the current turn's composed request
+/// when an agent calls `Pattern.Skills.Load`. The format mirrors the
+/// `[memory:written]` / `[memory:updated]` markers produced by
+/// [`render_change_event`] so agents see a consistent pseudo-message shape
+/// for side-effecting SDK calls.
+///
+/// `trust_tier` is rendered as its kebab-case serde form (e.g. `"project-local"`).
+///
+/// # Examples
+///
+/// ```
+/// use pattern_core::types::memory_types::SkillTrustTier;
+/// use pattern_provider::compose::pseudo_messages::render_skill_loaded_event;
+///
+/// let msg = render_skill_loaded_event("my-skill", SkillTrustTier::ProjectLocal, "## Overview\nDoes things.");
+/// assert_eq!(msg.role, genai::chat::ChatRole::User);
+/// ```
+pub fn render_skill_loaded_event(
+    name: &str,
+    trust_tier: SkillTrustTier,
+    body: &str,
+) -> ChatMessage {
+    let tier_str = serde_json::to_string(&trust_tier).unwrap_or_else(|_| "\"unknown\"".to_string());
+    // serde_json wraps the string in quotes; strip them for the inline marker.
+    let tier_kebab = tier_str.trim_matches('"');
+    let content = format!(
+        "[skill:loaded] name=\"{name}\" trust_tier=\"{tier_kebab}\"\n\n{body}\n\n[skill:loaded:end]"
+    );
+    let wrapped = wrap_system_reminder(&content);
+    ChatMessage::user(wrapped)
 }
 
 // ---- Body rendering --------------------------------------------------------
@@ -659,6 +705,71 @@ mod tests {
         assert!(
             text.contains("[memory:updated]"),
             "Replaced must use [memory:updated]: {text}"
+        );
+    }
+
+    // ---- render_skill_loaded_event_snapshot ---------------------------------
+
+    #[test]
+    fn render_skill_loaded_event_snapshot() {
+        // Known input → deterministic pseudo-message text.
+        use pattern_core::types::memory_types::SkillTrustTier;
+
+        let msg = render_skill_loaded_event(
+            "fix-authentication",
+            SkillTrustTier::ProjectLocal,
+            "## Overview\n\nHandles OAuth2 token refresh for expired sessions.",
+        );
+        assert_eq!(msg.role, ChatRole::User);
+        let text = msg_text(&msg);
+        insta::assert_snapshot!(text);
+    }
+
+    // ---- render_skill_loaded_event: trust tier variants --------------------
+
+    #[test]
+    fn render_skill_loaded_event_renders_trust_tier_as_kebab() {
+        use pattern_core::types::memory_types::SkillTrustTier;
+
+        let cases = [
+            (SkillTrustTier::FirstParty, "first-party"),
+            (SkillTrustTier::ProjectLocal, "project-local"),
+            (SkillTrustTier::AdHoc, "ad-hoc"),
+        ];
+
+        for (tier, expected_kebab) in cases {
+            let msg = render_skill_loaded_event("test-skill", tier, "body.");
+            let text = msg_text(&msg);
+            assert!(
+                text.contains(&format!("trust_tier=\"{expected_kebab}\"")),
+                "expected trust_tier=\"{expected_kebab}\" in output; got: {text}"
+            );
+        }
+    }
+
+    // ---- render_skill_loaded_event: structural markers ---------------------
+
+    #[test]
+    fn render_skill_loaded_event_has_opening_and_closing_markers() {
+        use pattern_core::types::memory_types::SkillTrustTier;
+
+        let msg = render_skill_loaded_event("my-skill", SkillTrustTier::AdHoc, "skill body here.");
+        let text = msg_text(&msg);
+        assert!(
+            text.contains("[skill:loaded]"),
+            "missing opening marker: {text}"
+        );
+        assert!(
+            text.contains("[skill:loaded:end]"),
+            "missing closing marker: {text}"
+        );
+        assert!(
+            text.contains("<system-reminder>"),
+            "missing system-reminder wrapper: {text}"
+        );
+        assert!(
+            text.contains("skill body here."),
+            "missing skill body in output: {text}"
         );
     }
 }
