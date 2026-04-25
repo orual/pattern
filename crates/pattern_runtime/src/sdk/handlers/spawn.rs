@@ -190,7 +190,13 @@ fn handle_ephemeral(
     cx.respond(wire)
 }
 
-fn handle_await_spawn(
+/// Await a single in-flight ephemeral by id.
+///
+/// Exposed `pub` so integration tests can drive the `block_on` path from a
+/// `tokio::task::spawn_blocking` context without the full Haskell eval path
+/// (Critical review item C#3). Matches the visibility pattern of
+/// `sdk/handlers/tasks.rs` and `sdk/handlers/skills.rs`.
+pub fn handle_await_spawn(
     id: String,
     cx: &EffectContext<'_, SessionContext>,
 ) -> Result<Value, EffectError> {

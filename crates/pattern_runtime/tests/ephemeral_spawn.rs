@@ -599,3 +599,85 @@ async fn ac3_5_handler_side_concurrency_limit_returns_handler_error() {
     drop(permit_a);
     drop(permit_b);
 }
+
+/// C#3 — `block_on` in the spawn handler arm executes correctly from the
+/// eval-worker thread (simulated via `tokio::task::spawn_blocking`).
+///
+/// This test does NOT go through the full Haskell eval path. Instead:
+/// 1. Constructs a real `SessionContext` with `Handle::current()`.
+/// 2. Registers a scripted child handle whose result future resolves
+///    immediately to a known `SpawnResult`.
+/// 3. Calls `tokio_handle().block_on(registry.wait_for(id))` from a
+///    `spawn_blocking` task, exactly mirroring the pattern in
+///    `handle_await_spawn`, `handle_await_all`, and `handle_sibling`.
+/// 4. Asserts the result matches the registered handle.
+///
+/// If `block_on` deadlocks under a single-worker runtime, this test will
+/// hang (and be caught by the test timeout). The `worker_threads = 2`
+/// annotation ensures at least one thread is available for the tokio
+/// future while `spawn_blocking` occupies the other.
+///
+/// Note: we test the `block_on` invocation directly rather than going
+/// through `handle_await_spawn` itself, because `cx.respond()` requires
+/// the datacon table to have `Pattern.Spawn.SpawnResult` constructors
+/// registered — which is not available outside the GHC eval path.
+/// The root bug (deadlock risk) is in the `block_on` call, not the
+/// downstream `cx.respond` encoding, so this test exercises exactly the
+/// right surface.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn c3_block_on_await_spawn_executes_from_blocking_thread() {
+    use futures::FutureExt;
+    use pattern_runtime::spawn::{
+        ChildSessionHandle, SpawnKind, SpawnResult, TerminationReason,
+    };
+    use pattern_runtime::timeout::CancelState;
+
+    let parent = build_parent(None, None).await;
+
+    // Register a scripted child handle with a known result.
+    let child_id = smol_str::SmolStr::from("c3-test-child");
+    let expected_text = "hello from child".to_string();
+    // Use SpawnResult::new() because SpawnResult is #[non_exhaustive].
+    let mut expected_result = SpawnResult::new(child_id.clone(), TerminationReason::EndTurn);
+    expected_result.final_text = Some(expected_text.clone());
+    expected_result.turns = 1;
+    let result_fut = futures::future::ready(Ok(expected_result)).boxed().shared();
+    parent.spawn_registry().register(ChildSessionHandle {
+        child_id: child_id.clone(),
+        kind: SpawnKind::Ephemeral,
+        cancel_state: Arc::new(CancelState::new()),
+        result: result_fut,
+        _permit: None,
+    });
+
+    // Call `tokio_handle().block_on(registry.wait_for(id))` from
+    // spawn_blocking, mirroring the exact pattern used in the handler arm.
+    // If block_on deadlocks with a single-worker runtime, this test hangs.
+    let parent_for_blocking = parent.clone();
+    let child_id_for_blocking = child_id.clone();
+    let spawn_result = tokio::task::spawn_blocking(move || {
+        let registry = parent_for_blocking.spawn_registry().clone();
+        let handle = parent_for_blocking.tokio_handle().clone();
+        handle.block_on(registry.wait_for(&child_id_for_blocking))
+    })
+    .await
+    .expect("spawn_blocking should not panic")
+    .expect("block_on(wait_for) must succeed for a registered child");
+
+    assert_eq!(
+        spawn_result.child_id.as_str(),
+        "c3-test-child",
+        "child_id must match the registered handle"
+    );
+    assert_eq!(
+        spawn_result.final_text.as_deref(),
+        Some("hello from child"),
+        "final_text must round-trip through the Shared<BoxFuture>"
+    );
+    assert_eq!(spawn_result.turns, 1, "turns must match");
+    assert_eq!(
+        spawn_result.terminated,
+        TerminationReason::EndTurn,
+        "termination reason must match"
+    );
+}
