@@ -826,13 +826,20 @@ fn content_preview(msg: &genai::chat::ChatMessage) -> Option<String> {
 /// Convert a `pattern_core::Message` to a `pattern_db::models::Message` for
 /// storage.
 ///
-/// Attachments are intentionally dropped: pattern_db has no attachment column,
-/// and per Phase 6 design, next session rebuilds snapshots from memory_blocks.
-/// Losing them on the DB path is acceptable.
-fn to_db_message(
+/// Persists three pieces of pattern-level metadata that don't fit on the
+/// `genai::chat::ChatMessage` payload:
+/// - `attachments` → `attachments_json` (write-once `MessageAttachment` vec
+///   for splice-time rendering — must round-trip across restart for
+///   cache-stability).
+/// - `origin` → `origin_json` (turn-scoped on `TurnInput`; persisted on
+///   every message of the turn so single-message queries keep provenance
+///   and turn restoration can recover the original origin rather than
+///   inferring lossy from `batch_type`).
+pub(crate) fn to_db_message(
     msg: &Message,
     agent_id: &str,
     batch_type: pattern_db::models::BatchType,
+    origin: &pattern_core::types::origin::MessageOrigin,
 ) -> Result<pattern_db::models::Message, RuntimeError> {
     let content_json = serde_json::to_value(&msg.chat_message).map_err(|e| {
         RuntimeError::DatabasePersistenceFailed {
@@ -840,6 +847,26 @@ fn to_db_message(
             reason: e.to_string(),
         }
     })?;
+
+    let attachments_json = if msg.attachments.is_empty() {
+        None
+    } else {
+        Some(pattern_db::Json(
+            serde_json::to_value(&msg.attachments).map_err(|e| {
+                RuntimeError::DatabasePersistenceFailed {
+                    step: "serialize attachments".into(),
+                    reason: e.to_string(),
+                }
+            })?,
+        ))
+    };
+
+    let origin_json = Some(pattern_db::Json(serde_json::to_value(origin).map_err(
+        |e| RuntimeError::DatabasePersistenceFailed {
+            step: "serialize origin".into(),
+            reason: e.to_string(),
+        },
+    )?));
 
     Ok(pattern_db::models::Message {
         id: msg.id.to_string(),
@@ -853,6 +880,8 @@ fn to_db_message(
         batch_type: Some(batch_type),
         source: None,
         source_metadata: None,
+        attachments_json,
+        origin_json,
         is_archived: false,
         is_deleted: false,
         // pattern_core::Message.created_at is already jiff::Timestamp; store directly.
@@ -870,6 +899,7 @@ async fn persist_messages(
     messages: &[Message],
     agent_id: &str,
     batch_type: pattern_db::models::BatchType,
+    origin: &pattern_core::types::origin::MessageOrigin,
     step_label: &str,
 ) -> Result<(), RuntimeError> {
     let conn = db
@@ -879,7 +909,7 @@ async fn persist_messages(
             reason: e.to_string(),
         })?;
     for msg in messages {
-        let db_msg = to_db_message(msg, agent_id, batch_type)?;
+        let db_msg = to_db_message(msg, agent_id, batch_type, origin)?;
         pattern_db::queries::upsert_message(&conn, &db_msg).map_err(|e| {
             RuntimeError::DatabasePersistenceFailed {
                 step: step_label.to_string(),
@@ -1213,22 +1243,34 @@ pub async fn drive_step(
         let db = ctx.db();
         let aid = ctx.agent_id();
 
-        // Input messages (from the caller's TurnInput).
+        // Input messages (from the caller's TurnInput). Origin is the
+        // turn's own input origin (whoever activated this turn — Partner,
+        // Human, Agent, or System).
         persist_messages(
             db,
             &recorded_input.messages,
             aid,
             batch_type,
+            &recorded_input.origin,
             "upsert input messages",
         )
         .await?;
 
-        // Output messages (assistant reply + optional tool_result).
+        // Output messages (assistant reply + optional tool_result). The
+        // AGENT authored both — the synthesized tool_result is the agent's
+        // own dispatch product, not a separate System actor.
+        let output_origin = pattern_core::types::origin::MessageOrigin::new(
+            pattern_core::types::origin::Author::Agent(pattern_core::types::origin::AgentAuthor {
+                agent_id: pattern_core::types::ids::AgentId::from(aid),
+            }),
+            recorded_input.origin.sphere.clone(),
+        );
         persist_messages(
             db,
             &turn.messages,
             aid,
             batch_type,
+            &output_origin,
             "upsert output messages",
         )
         .await?;

@@ -484,6 +484,8 @@ impl Importer {
             batch_type: export.batch_type,
             source: export.source.clone(),
             source_metadata: export.source_metadata.clone().map(Json),
+            attachments_json: None,
+            origin_json: None,
             is_archived: export.is_archived,
             is_deleted: export.is_deleted,
             // Export format uses chrono::DateTime<Utc>; DB uses jiff::Timestamp.

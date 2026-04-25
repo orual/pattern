@@ -161,6 +161,8 @@ fn to_db_message(msg: &Message, agent_id: &str) -> pattern_db::models::Message {
         batch_type: Some(BatchType::UserRequest),
         source: None,
         source_metadata: None,
+        attachments_json: None,
+        origin_json: None,
         is_archived: false,
         is_deleted: false,
         // pattern_core::Message.created_at is already jiff::Timestamp; store directly.

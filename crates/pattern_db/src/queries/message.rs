@@ -53,6 +53,8 @@ impl Message {
             batch_type: row.get("batch_type")?,
             source: row.get("source")?,
             source_metadata: row.get("source_metadata")?,
+            attachments_json: row.get("attachments_json")?,
+            origin_json: row.get("origin_json")?,
             is_archived: row.get("is_archived")?,
             is_deleted: row.get("is_deleted")?,
             created_at: parse_timestamp(row, "created_at")?,
@@ -98,7 +100,8 @@ pub fn get_message(conn: &rusqlite::Connection, id: &str) -> DbResult<Option<Mes
     let mut stmt = conn.prepare(
         "SELECT id, agent_id, position, batch_id, sequence_in_batch,
                 role, content_json, content_preview, batch_type,
-                source, source_metadata, is_archived, is_deleted, created_at
+                source, source_metadata, attachments_json, origin_json,
+                is_archived, is_deleted, created_at
          FROM messages WHERE id = ?1 AND is_deleted = 0",
     )?;
     let result = stmt
@@ -116,7 +119,8 @@ pub fn get_messages(
     let mut stmt = conn.prepare(
         "SELECT id, agent_id, position, batch_id, sequence_in_batch,
                 role, content_json, content_preview, batch_type,
-                source, source_metadata, is_archived, is_deleted, created_at
+                source, source_metadata, attachments_json, origin_json,
+                is_archived, is_deleted, created_at
          FROM messages
          WHERE agent_id = ?1 AND is_archived = 0 AND is_deleted = 0
          ORDER BY position DESC LIMIT ?2",
@@ -138,7 +142,8 @@ pub fn get_messages_with_archived(
     let mut stmt = conn.prepare(
         "SELECT id, agent_id, position, batch_id, sequence_in_batch,
                 role, content_json, content_preview, batch_type,
-                source, source_metadata, is_archived, is_deleted, created_at
+                source, source_metadata, attachments_json, origin_json,
+                is_archived, is_deleted, created_at
          FROM messages
          WHERE agent_id = ?1 AND is_deleted = 0
          ORDER BY position DESC LIMIT ?2",
@@ -161,7 +166,8 @@ pub fn get_messages_after(
     let mut stmt = conn.prepare(
         "SELECT id, agent_id, position, batch_id, sequence_in_batch,
                 role, content_json, content_preview, batch_type,
-                source, source_metadata, is_archived, is_deleted, created_at
+                source, source_metadata, attachments_json, origin_json,
+                is_archived, is_deleted, created_at
          FROM messages
          WHERE agent_id = ?1 AND position > ?2 AND is_archived = 0 AND is_deleted = 0
          ORDER BY position ASC LIMIT ?3",
@@ -182,7 +188,8 @@ pub fn get_batch_messages(conn: &rusqlite::Connection, batch_id: &str) -> DbResu
     let mut stmt = conn.prepare(
         "SELECT id, agent_id, position, batch_id, sequence_in_batch,
                 role, content_json, content_preview, batch_type,
-                source, source_metadata, is_archived, is_deleted, created_at
+                source, source_metadata, attachments_json, origin_json,
+                is_archived, is_deleted, created_at
          FROM messages
          WHERE batch_id = ?1 AND is_deleted = 0
          ORDER BY sequence_in_batch",
@@ -204,8 +211,9 @@ pub fn create_message(conn: &rusqlite::Connection, msg: &Message) -> DbResult<()
     conn.execute(
         "INSERT INTO messages (id, agent_id, position, batch_id, sequence_in_batch,
                               role, content_json, content_preview, batch_type,
-                              source, source_metadata, is_archived, is_deleted, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                              source, source_metadata, attachments_json, origin_json,
+                              is_archived, is_deleted, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         rusqlite::params![
             msg.id,
             msg.agent_id,
@@ -218,6 +226,8 @@ pub fn create_message(conn: &rusqlite::Connection, msg: &Message) -> DbResult<()
             msg.batch_type,
             msg.source,
             msg.source_metadata,
+            msg.attachments_json,
+            msg.origin_json,
             msg.is_archived,
             msg.is_deleted,
             created_at,
@@ -237,8 +247,9 @@ pub fn upsert_message(conn: &rusqlite::Connection, msg: &Message) -> DbResult<()
     conn.execute(
         "INSERT INTO messages (id, agent_id, position, batch_id, sequence_in_batch,
                               role, content_json, content_preview, batch_type,
-                              source, source_metadata, is_archived, is_deleted, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                              source, source_metadata, attachments_json, origin_json,
+                              is_archived, is_deleted, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
          ON CONFLICT(id) DO UPDATE SET
              agent_id = excluded.agent_id,
              position = excluded.position,
@@ -250,6 +261,8 @@ pub fn upsert_message(conn: &rusqlite::Connection, msg: &Message) -> DbResult<()
              batch_type = excluded.batch_type,
              source = excluded.source,
              source_metadata = excluded.source_metadata,
+             attachments_json = excluded.attachments_json,
+             origin_json = excluded.origin_json,
              is_archived = excluded.is_archived,
              is_deleted = excluded.is_deleted",
         rusqlite::params![
@@ -264,6 +277,8 @@ pub fn upsert_message(conn: &rusqlite::Connection, msg: &Message) -> DbResult<()
             msg.batch_type,
             msg.source,
             msg.source_metadata,
+            msg.attachments_json,
+            msg.origin_json,
             msg.is_archived,
             msg.is_deleted,
             created_at,

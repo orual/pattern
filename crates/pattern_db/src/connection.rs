@@ -103,8 +103,20 @@ impl ConstellationDb {
             | OpenFlags::SQLITE_OPEN_NO_MUTEX
             | OpenFlags::SQLITE_OPEN_URI;
 
-        // Build pool first. The pool eagerly opens min_idle connections,
-        // which keeps the shared-cache in-memory databases alive.
+        // Open msg DB and run migrations FIRST, before the pool ATTACHes
+        // it. This ensures the pool's eager-init connections see the
+        // already-migrated schema; otherwise their ATTACH cache holds the
+        // pre-migration column list and DDL applied on a separate
+        // connection won't propagate to those statements.
+        //
+        // We hold `msg_conn` alive across pool construction so the
+        // shared-cache in-memory msg DB doesn't vanish before the pool's
+        // first ATTACH bumps the refcount.
+        let mut msg_conn = Connection::open_with_flags(&msg_uri, uri_flags)?;
+        crate::migrations::run_messages_migrations(&mut msg_conn)?;
+
+        // Build pool. The pool eagerly opens min_idle connections, which
+        // keeps the shared-cache in-memory databases alive.
         let msg_uri_owned = msg_uri.clone();
         let manager = SqliteConnectionManager::file(&mem_uri)
             .with_flags(uri_flags)
@@ -116,19 +128,15 @@ impl ConstellationDb {
             .build(manager)
             .map_err(DbError::Pool)?;
 
-        // Run migrations on pool connections so the shared-cache databases
-        // remain alive (they persist as long as at least one connection exists).
+        // Run memory migrations on a pool connection.
         {
             let mut conn = pool.get().map_err(DbError::Pool)?;
             crate::migrations::run_memory_migrations(&mut conn)?;
         }
-        // Run messages migrations on a temporary direct connection to the
-        // msg URI (migrations need to run against the database directly,
-        // not via ATTACH, because rusqlite_migration tracks user_version).
-        {
-            let mut msg_conn = Connection::open_with_flags(&msg_uri, uri_flags)?;
-            crate::migrations::run_messages_migrations(&mut msg_conn)?;
-        }
+
+        // Now safe to drop the temporary msg connection — the pool's
+        // ATTACHed msg DB keeps the shared-cache in-memory database alive.
+        drop(msg_conn);
 
         debug!("in-memory constellation database opened (shared-cache URIs)");
 

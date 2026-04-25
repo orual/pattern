@@ -156,6 +156,8 @@ fn create_test_messages(db: &ConstellationDb, agent_id: &str, count: usize) -> V
             batch_type: Some(BatchType::UserRequest),
             source: Some("test".to_string()),
             source_metadata: Some(Json(serde_json::json!({"test_id": i}))),
+            attachments_json: None,
+            origin_json: None,
             is_archived: i < count / 4, // First quarter is archived
             is_deleted: false,
             created_at: Timestamp::now(),
@@ -1401,6 +1403,8 @@ async fn test_batch_id_consistency_across_chunks() {
             batch_type: Some(BatchType::UserRequest),
             source: None,
             source_metadata: None,
+            attachments_json: None,
+            origin_json: None,
             is_archived: false,
             is_deleted: false,
             created_at: Timestamp::now(),

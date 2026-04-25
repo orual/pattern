@@ -111,6 +111,8 @@ fn insert_message(db: &ConstellationDb, agent_id: &str, content_preview: &str) {
         batch_type: None,
         source: Some("test".to_string()),
         source_metadata: None,
+        attachments_json: None,
+        origin_json: None,
         is_archived: false,
         is_deleted: false,
         created_at: Timestamp::now(),

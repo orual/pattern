@@ -25,6 +25,7 @@
 //! carry the transport-specific identity for each authorship class.
 
 use serde::{Deserialize, Serialize};
+use smol_str::SmolStr;
 
 use crate::types::ids::{AgentId, UserId};
 
@@ -204,9 +205,8 @@ pub struct MessageOrigin {
     pub author: Author,
     /// What visibility sphere it was published into.
     pub sphere: Sphere,
-    // `transport_hint: Option<SmolStr>` will be added in a later phase when
-    // transport-specific display hints are wired through. `#[non_exhaustive]`
-    // lets us add fields without breaking external constructor call sites.
+    /// A transport-specific hint for displaying the message (e.g. channel name).
+    pub transport_hint: Option<SmolStr>,
 }
 
 impl MessageOrigin {
@@ -214,6 +214,15 @@ impl MessageOrigin {
     /// constructor rather than struct-literal syntax so future
     /// `#[non_exhaustive]` fields can be added without breakage.
     pub fn new(author: Author, sphere: Sphere) -> Self {
-        Self { author, sphere }
+        Self {
+            author,
+            sphere,
+            transport_hint: None,
+        }
+    }
+
+    pub fn with_transport_hint(mut self, transport_hint: SmolStr) -> Self {
+        self.transport_hint = Some(transport_hint);
+        self
     }
 }

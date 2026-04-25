@@ -51,6 +51,30 @@ pub struct Message {
     /// Source-specific metadata (channel ID, message ID, etc.)
     pub source_metadata: Option<Json<serde_json::Value>>,
 
+    /// Pattern-level [`MessageAttachment`] vec, serialized as a JSON array.
+    /// `None` is equivalent to an empty Vec.
+    ///
+    /// Attachments are write-once metadata that render onto the wire at
+    /// compose-time but live separately from the stored ChatMessage. They
+    /// must round-trip across process restart so the splice machinery
+    /// produces stable wire bytes (cache-stability invariant).
+    ///
+    /// [`MessageAttachment`]: https://docs.rs/pattern_core/latest/pattern_core/types/message/enum.MessageAttachment.html
+    pub attachments_json: Option<Json<serde_json::Value>>,
+
+    /// Pattern-level [`MessageOrigin`] (author + sphere + transport_hint),
+    /// serialized as JSON. Origin is turn-scoped on `TurnInput` but stored
+    /// redundantly on every message of a turn so single-message queries keep
+    /// origin context; turn restoration uses the first message's origin per
+    /// batch.
+    ///
+    /// `None` falls back to `infer_origin_from_batch_type` for pre-migration
+    /// rows. Eventually expected to subsume `source` + `source_metadata`,
+    /// which are kept as separate columns for now and likely to be deprecated.
+    ///
+    /// [`MessageOrigin`]: https://docs.rs/pattern_core/latest/pattern_core/types/origin/struct.MessageOrigin.html
+    pub origin_json: Option<Json<serde_json::Value>>,
+
     /// Whether this message has been archived (compressed into a summary)
     pub is_archived: bool,
 

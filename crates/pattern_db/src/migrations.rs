@@ -49,9 +49,14 @@ static MEMORY_MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
 // ---------------------------------------------------------------------------
 
 static MESSAGES_MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
-    Migrations::new(vec![M::up(include_str!(
-        "../migrations/messages/0001_messages_init.sql"
-    ))])
+    Migrations::new(vec![
+        M::up(include_str!(
+            "../migrations/messages/0001_messages_init.sql"
+        )),
+        M::up(include_str!(
+            "../migrations/messages/0002_message_attachments.sql"
+        )),
+    ])
 });
 
 /// Apply all pending memory database migrations.

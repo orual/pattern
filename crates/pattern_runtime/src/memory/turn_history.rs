@@ -117,7 +117,7 @@ impl TurnHistory {
         // Build TurnRecords from each batch group.
         let mut active = VecDeque::new();
         // Also track batch_type per batch_id from the DB messages for
-        // origin inference.
+        // origin inference (legacy / pre-migration fallback).
         let batch_types: std::collections::HashMap<String, BatchType> = db_messages
             .iter()
             .filter_map(|m| {
@@ -126,13 +126,45 @@ impl TurnHistory {
                 Some((bid.clone(), bt))
             })
             .collect();
+        // Persisted origin per batch — first User/System-role message with
+        // a populated `origin_json` wins. This is the input-side origin (the
+        // turn's caller); output messages carry a synthesized agent origin
+        // that we deliberately ignore here.
+        let batch_origins: std::collections::HashMap<String, MessageOrigin> = {
+            let mut map = std::collections::HashMap::new();
+            for m in &db_messages {
+                let Some(bid) = m.batch_id.as_ref() else {
+                    continue;
+                };
+                if map.contains_key(bid) {
+                    continue;
+                }
+                if !matches!(
+                    m.role,
+                    pattern_db::models::MessageRole::User | pattern_db::models::MessageRole::System
+                ) {
+                    continue;
+                }
+                let Some(j) = &m.origin_json else { continue };
+                if let Ok(origin) = serde_json::from_value::<MessageOrigin>(j.0.clone()) {
+                    map.insert(bid.clone(), origin);
+                }
+            }
+            map
+        };
 
         for (batch_id, msgs) in &batches {
             let batch_type = batch_types
                 .get(batch_id.as_str())
                 .copied()
                 .unwrap_or(BatchType::UserRequest);
-            let records = build_turn_records_from_batch(batch_id.clone(), msgs.clone(), batch_type);
+            let persisted_origin = batch_origins.get(batch_id.as_str()).cloned();
+            let records = build_turn_records_from_batch(
+                batch_id.clone(),
+                msgs.clone(),
+                batch_type,
+                persisted_origin,
+            );
             active.extend(records);
         }
 
@@ -312,16 +344,29 @@ impl TurnHistory {
 /// Convert a `pattern_db::models::Message` back to a `pattern_core::types::message::Message`.
 ///
 /// Reverses the `to_db_message` conversion in `agent_loop.rs`:
-/// - `content_json` is deserialized back to `genai::chat::ChatMessage`.
-/// - `created_at` is a `jiff::Timestamp` in both the DB model and the core type; copied directly.
-/// - Fields not stored in the DB (`response_meta`, `block_refs`, `attachments`)
-///   are defaulted to empty/None.
-fn db_message_to_core(
+/// - `content_json` → `genai::chat::ChatMessage`.
+/// - `attachments_json` → `Vec<MessageAttachment>` (empty when NULL — pre-
+///   migration rows or messages with no attachments).
+/// - `created_at` is a `jiff::Timestamp` in both the DB model and the core
+///   type; copied directly.
+/// - Fields not stored in the DB (`response_meta`, `block_refs`) default to
+///   empty/None.
+///
+/// `origin_json` is NOT consumed here — origin is turn-scoped on `TurnInput`,
+/// so the restore path (`restore_turns_from_db`) reads it once per batch
+/// rather than per-message.
+pub(crate) fn db_message_to_core(
     db_msg: &pattern_db::models::Message,
 ) -> Result<Message, pattern_db::error::DbError> {
     // Deserialize the ChatMessage from the stored JSON value.
     let chat_message: genai::chat::ChatMessage =
         serde_json::from_value(db_msg.content_json.0.clone())?;
+
+    let attachments: Vec<pattern_core::types::message::MessageAttachment> =
+        match &db_msg.attachments_json {
+            Some(j) => serde_json::from_value(j.0.clone())?,
+            None => Vec::new(),
+        };
 
     // db_msg.created_at is jiff::Timestamp; copy directly into the core message.
     let created_at = db_msg.created_at;
@@ -341,7 +386,7 @@ fn db_message_to_core(
         batch: BatchId::from(batch),
         response_meta: None,
         block_refs: Vec::new(),
-        attachments: Vec::new(),
+        attachments,
     })
 }
 
@@ -476,13 +521,17 @@ fn build_turn_records_from_batch(
     batch_id: BatchId,
     msgs: Vec<Message>,
     batch_type: BatchType,
+    persisted_origin: Option<MessageOrigin>,
 ) -> Vec<TurnRecord> {
     let mut records = Vec::new();
     let mut current_input: Vec<Message> = Vec::new();
     let mut current_output: Vec<Message> = Vec::new();
     let mut in_output = false;
 
-    let origin = infer_origin_from_batch_type(batch_type);
+    // Prefer the persisted input-side origin from the batch's first
+    // User/System message; fall back to legacy batch_type inference for
+    // pre-migration rows that have no `origin_json`.
+    let origin = persisted_origin.unwrap_or_else(|| infer_origin_from_batch_type(batch_type));
 
     for msg in msgs {
         match msg.chat_message.role {
@@ -1015,7 +1064,7 @@ mod tests {
             make_batch_msg("assistant reply", ChatRole::Assistant, &batch_id),
         ];
 
-        let records = build_turn_records_from_batch(batch_id, msgs, BatchType::UserRequest);
+        let records = build_turn_records_from_batch(batch_id, msgs, BatchType::UserRequest, None);
 
         assert_eq!(
             records.len(),
@@ -1047,7 +1096,7 @@ mod tests {
             make_batch_msg("second answer", ChatRole::Assistant, &batch_id),
         ];
 
-        let records = build_turn_records_from_batch(batch_id, msgs, BatchType::UserRequest);
+        let records = build_turn_records_from_batch(batch_id, msgs, BatchType::UserRequest, None);
 
         assert_eq!(
             records.len(),
@@ -1088,7 +1137,7 @@ mod tests {
             make_batch_msg("final reply", ChatRole::Assistant, &batch_id),
         ];
 
-        let records = build_turn_records_from_batch(batch_id, msgs, BatchType::UserRequest);
+        let records = build_turn_records_from_batch(batch_id, msgs, BatchType::UserRequest, None);
 
         // The tool result should bundle with the first assistant, then the
         // second assistant starts a continuation turn (empty input).
@@ -1113,6 +1162,175 @@ mod tests {
             records[1].output.messages.len(),
             1,
             "continuation turn has one output message"
+        );
+    }
+
+    /// Attachments and origin survive round-trip through pattern_db.
+    ///
+    /// Pre-migration, db_message_to_core defaulted attachments to
+    /// `Vec::new()` and origin reconstruction was inferred lossy from
+    /// batch_type. This test pins both fields' actual round-trip — what
+    /// goes in MUST come out byte-identical.
+    #[test]
+    fn db_round_trip_preserves_attachments_and_origin() {
+        use crate::agent_loop::to_db_message;
+        use genai::chat::ChatMessage;
+        use pattern_core::types::ids::{AgentId, MessageId, new_id};
+        use pattern_core::types::memory_types::SkillTrustTier;
+        use pattern_core::types::message::{Message, MessageAttachment};
+        use pattern_core::types::origin::{AgentAuthor, Author, MessageOrigin, Sphere};
+
+        let agent_id = "test-agent";
+
+        // Build an input message carrying a SkillAvailable + Custom
+        // attachment pair (the kinds that are new from the round-2
+        // attachment-pipeline work).
+        let input_msg = Message {
+            chat_message: ChatMessage::user("hello"),
+            id: MessageId::from(new_id()),
+            position: new_snowflake_id(),
+            owner_id: AgentId::from(agent_id),
+            created_at: Timestamp::now(),
+            batch: new_snowflake_id(),
+            response_meta: None,
+            block_refs: vec![],
+            attachments: vec![
+                MessageAttachment::SkillAvailable {
+                    handle: SmolStr::new("skill-1"),
+                    name: "demo-skill".to_string(),
+                    trust_tier: SkillTrustTier::ProjectLocal,
+                    description: Some("rendered into segment 2 next turn".to_string()),
+                    keywords: vec!["a".to_string(), "b".to_string()],
+                },
+                MessageAttachment::Custom {
+                    content: "[custom:event] foo=bar".to_string(),
+                },
+            ],
+        };
+
+        // Distinct, non-default origin so the legacy
+        // infer_origin_from_batch_type fallback (which always returns a
+        // Partner+Private/Internal/SystemTrigger shape) cannot
+        // accidentally produce the same value.
+        let origin = MessageOrigin::new(
+            Author::Agent(AgentAuthor {
+                agent_id: AgentId::from("upstream-agent"),
+            }),
+            Sphere::SemiPrivate,
+        )
+        .with_transport_hint(SmolStr::new("test-transport"));
+
+        // Convert to DB row, then back. This is the same path the
+        // production session restore exercises modulo the actual sqlite
+        // round-trip; the JSON serde is the only lossy step we care
+        // about here.
+        let db_msg = to_db_message(
+            &input_msg,
+            agent_id,
+            pattern_db::models::BatchType::UserRequest,
+            &origin,
+        )
+        .expect("to_db_message must succeed");
+
+        // Verify the JSON columns are populated (not defaulted-None).
+        assert!(
+            db_msg.attachments_json.is_some(),
+            "attachments_json must be Some when input has attachments"
+        );
+        assert!(
+            db_msg.origin_json.is_some(),
+            "origin_json must always be populated"
+        );
+
+        // Round-trip back to core.
+        let restored = db_message_to_core(&db_msg).expect("db_message_to_core must succeed");
+
+        assert_eq!(
+            restored.attachments.len(),
+            2,
+            "both attachments must survive round-trip"
+        );
+        match &restored.attachments[0] {
+            MessageAttachment::SkillAvailable {
+                name,
+                trust_tier,
+                description,
+                keywords,
+                ..
+            } => {
+                assert_eq!(name, "demo-skill");
+                assert_eq!(*trust_tier, SkillTrustTier::ProjectLocal);
+                assert_eq!(
+                    description.as_deref(),
+                    Some("rendered into segment 2 next turn")
+                );
+                assert_eq!(keywords.len(), 2);
+            }
+            other => panic!("expected SkillAvailable, got {other:?}"),
+        }
+        match &restored.attachments[1] {
+            MessageAttachment::Custom { content } => {
+                assert_eq!(content, "[custom:event] foo=bar");
+            }
+            other => panic!("expected Custom, got {other:?}"),
+        }
+
+        // Origin round-trip — the JSON column carries the full
+        // MessageOrigin. db_message_to_core does NOT consume it (origin
+        // is turn-scoped, not message-scoped), but the raw JSON must
+        // deserialize back to the original.
+        let restored_origin: MessageOrigin =
+            serde_json::from_value(db_msg.origin_json.unwrap().0).expect("origin deserializes");
+        assert_eq!(restored_origin, origin, "origin must round-trip exactly");
+    }
+
+    /// `restore_turns_from_db`'s build_turn_records_from_batch path
+    /// prefers persisted origin over batch_type inference when present.
+    #[test]
+    fn build_turn_records_uses_persisted_origin_when_present() {
+        use pattern_core::types::origin::{AgentAuthor, Author, MessageOrigin, Sphere};
+
+        let batch_id = new_snowflake_id();
+        let mk = |role: genai::chat::ChatRole, text: &str| Message {
+            chat_message: genai::chat::ChatMessage::new(role, text.to_string()),
+            id: new_id(),
+            position: new_snowflake_id(),
+            owner_id: SmolStr::new("agent-a"),
+            created_at: Timestamp::now(),
+            batch: batch_id.clone(),
+            response_meta: None,
+            block_refs: vec![],
+            attachments: vec![],
+        };
+        let msgs = vec![mk(ChatRole::User, "hello"), mk(ChatRole::Assistant, "hi")];
+
+        let persisted = MessageOrigin::new(
+            Author::Agent(AgentAuthor {
+                agent_id: AgentId::from("upstream"),
+            }),
+            Sphere::SemiPrivate,
+        );
+
+        // With persisted origin: the resulting TurnRecord's input.origin
+        // is the persisted one, NOT the inferred one.
+        let records = build_turn_records_from_batch(
+            batch_id.clone(),
+            msgs.clone(),
+            BatchType::UserRequest,
+            Some(persisted.clone()),
+        );
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].input.origin, persisted,
+            "persisted origin must be used over inference"
+        );
+
+        // Without persisted origin: falls back to batch_type inference.
+        let records_legacy =
+            build_turn_records_from_batch(batch_id, msgs, BatchType::UserRequest, None);
+        assert_ne!(
+            records_legacy[0].input.origin, persisted,
+            "no persisted origin → fallback to inference path"
         );
     }
 }
