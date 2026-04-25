@@ -889,6 +889,7 @@ async fn cmd_cache_test(
         sink_dyn,
         prelude_dir,
         None,
+        None,
     )
     .await?;
     eprintln!(
@@ -1232,6 +1233,7 @@ async fn cmd_spawn(
         db,
         turn_sink,
         prelude_dir,
+        None,
         None,
     )
     .await?;

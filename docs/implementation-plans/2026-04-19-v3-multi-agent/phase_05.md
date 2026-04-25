@@ -1,8 +1,8 @@
 # v3-multi-agent Phase 5: Fronting and routing
 
-**Goal:** introduce a `FrontingSet` runtime primitive that tracks which persona(s) are "fronting" (the active interface to a human), persist it to `pattern_db` so it survives restart, dispatch incoming messages through a `RoutingTable` that can direct them to specialists by pattern, support direct `@persona-name` addressing that bypasses routing, and ensure the broker's Partner-bypass helper (Phase 4 Task 1) sees the right `MessageOrigin` at every effect-dispatch site so Partner-originated turns short-circuit the permission/policy gate while agent-originated turns still pass through it.
+**Goal:** introduce a `FrontingSet` runtime primitive that tracks which persona(s) are "fronting" (the active interface to a human), persist it to `pattern_db` so it survives restart, dispatch incoming messages through a `RoutingTable` that can direct them to specialists by pattern, support direct `@persona-name` addressing that bypasses routing, and (when applicable) thread the activating `MessageOrigin` into the daemon-actor surface so partner-bound routing decisions and audit logs can attribute correctly. **Note (revised from earlier drafts):** the broker's Partner-bypass is NOT the right tool for Partner-driven turns in the autonomous-model loop — see Phase 1 Task 7 for the rationale. The dispatch origin during normal model-driven activity is `Author::Agent(self)`, so partner-bypass is inert during normal turns. This phase's responsibility is *routing and attribution*, not auto-bypassing the permission gate based on who activated the turn.
 
-**Architecture:** `FrontingSet` is constellation-scoped (not session-scoped) and lives on the daemon actor — one set per runtime instance, persisted in a new `fronting_set` + `routing_rules` table pair in pattern_db's memory database. Load at `DaemonServer::spawn_with_config`; save on mutation. The routing dispatcher sits in front of the `AgentRegistry` added in Phase 4 Task 4 — it resolves an incoming message to a `PersonaId` by: (1) stripping `@persona-name` prefix and sending direct if present, (2) evaluating routing rules in priority order, (3) falling back to the designated fallback persona. Co-fronting (multiple active personas) is a first-class case — unmatched messages fan out to every active persona if no fallback is specified. Partner-as-caller uses the fronting persona's `SessionContext` wholesale; the broker's `request(req, origin, timeout)` method checks `origin.bypasses_permission_gate()` and returns `PermissionGrant::synthesized_partner(...)` without broadcast when the test passes.
+**Architecture:** `FrontingSet` is constellation-scoped (not session-scoped) and lives on the daemon actor — one set per runtime instance, persisted in a new `fronting_set` + `routing_rules` table pair in pattern_db's memory database. Load at `DaemonServer::spawn_with_config`; save on mutation. The routing dispatcher sits in front of the `AgentRegistry` added in Phase 4 Task 4 — it resolves an incoming message to a `PersonaId` by: (1) stripping `@persona-name` prefix and sending direct if present, (2) evaluating routing rules in priority order, (3) falling back to the designated fallback persona. Co-fronting (multiple active personas) is a first-class case — unmatched messages fan out to every active persona if no fallback is specified. Partner-as-caller uses the fronting persona's `SessionContext` wholesale (memory handles, project mount, etc. — AC8.7). The activating `MessageOrigin` is preserved on the `TurnInput` for audit / routing / batch-attribution purposes, but is **not** used to drive the permission-broker bypass — see the Phase 1 Task 7 design discussion. The Phase 1 broker's bypass predicate (`Author::Partner(_)`) remains correct as a *predicate*; what changes vs. early drafts of this plan is that the dispatch origin handlers see during normal autonomous activity is `Author::Agent(self)`, not the activating Partner. Partner-bypass therefore fires only from explicit direct-execution paths that intentionally set the dispatch slot to a Partner — and Phase 5 introduces no such paths.
 
 **Tech Stack:** `rusqlite_migration` 2.5 (already the DB-migration machinery; migration `0012_fronting.sql`), `knus` for any KDL fragment of fronting config (optional, see below), `postcard` for IRPC protocol (already the wire format — new `WireTurnEvent::FrontingChanged` variant), existing `DaemonServer` actor in `pattern_server`.
 
@@ -16,13 +16,13 @@
 
 - ✓ Migration dir `crates/pattern_db/migrations/memory/` with 10 existing migrations. Pattern: `<NNNN>_<name>.sql` embedded via `include_str!` in `crates/pattern_db/src/migrations.rs`. Applied via `rusqlite_migration::Migrations::new_iter`. Phase 5 adds `0012_fronting.sql` with two tables (`fronting_set` for the active persona list, `routing_rules` for dispatch rules). Existing `agents` table (9 fields, incl. `status`) is the style to follow.
 - ✓ `UserId` alias (`SmolStr`) at `crates/pattern_core/src/types/ids.rs:35`. Used via existing `Author::Partner(Partner { user_id })` variant in `MessageOrigin`.
-- ✓ **No separate `Caller` enum.** Phase 4 Task 1 plumbs `&MessageOrigin` through `Router::route`; Phase 5 ensures handlers read the turn's `MessageOrigin` and call `origin.bypasses_permission_gate()` before escalating to the broker. `MessageOrigin` already exists in the codebase with the right four-way `Author` discriminant.
+- ✓ **No separate `Caller` enum.** Phase 4 Task 1 plumbs `&MessageOrigin` through `Router::route`. `MessageOrigin` already exists in the codebase with the right four-way `Author` discriminant. **Revised:** handlers read `current_dispatch_origin` (Phase 1 Task 7), which is the *immediate-caller* origin, not the activating turn's origin. Under the model-driven loop the dispatch origin is `Author::Agent(self)`; partner-bypass therefore does not fire from autonomous activity even on Partner-activated turns.
 - ✓ `DaemonServer` actor in `pattern_server/src/server.rs` spawns via `DaemonServer::spawn_with_config(SessionConfig { sdk, provider })` (called from `pattern_server/src/main.rs:67-137`). Sessions cached per-agent in `DaemonServer.sessions`; project mounts in `.project_mounts`. Add `fronting_set: RwLock<FrontingSet>` as a daemon-level field.
 - ✓ `MessageOrigin { Author, Sphere }` at `crates/pattern_core/src/types/origin.rs:202` — existing discriminant. Phase 5 re-uses it for both attribution (compose/snapshot, unchanged) AND permission-gating dispatch. Single source of truth; no parallel `Caller` type.
 - ✗ No `@persona-name` parsing. Introduce in Phase 5 in the message dispatch layer — a small `fn parse_direct_address(s: &str) -> Option<PersonaId>` that strips a leading `@` and treats the rest as the persona id. Supports both `@alice` (plain) and `@alice: hello there` (prefix form).
 - ✗ `Message` carries no `to: Option<PersonaId>` field. Recipient is dispatch-time. Phase 5 keeps it that way; routing resolves recipient from rules, not from the Message struct.
 - ✓ `WireTurnEvent` at `pattern_server/src/protocol.rs`; variants `Text`, `Thinking`, `ToolCall`, `ToolResult`, `Display`, `Stop`. Phase 4 adds `MessageSent`. Phase 5 adds `FrontingChanged { active: Vec<PersonaId>, fallback: Option<PersonaId>, rules: Vec<RoutingRuleWire> }`. `TaggedTurnEvent` wraps this for multi-agent fan-out already.
-- ⚠ PermissionBroker is rebuilt per-runtime in Phase 1. Phase 1 Task 6 also introduces the `origin: &MessageOrigin` parameter + Partner short-circuit. Phase 5 just ensures every handler call site passes the turn's current origin correctly (reading from the `current_turn_origin` accessor added in Phase 1 Task 7).
+- ⚠ PermissionBroker is rebuilt per-runtime in Phase 1. Phase 1 Task 6 also introduces the `origin: &MessageOrigin` parameter + Partner short-circuit predicate (the predicate stays; its inputs are constrained — see Phase 1 Task 7). Phase 5 ensures the activating `MessageOrigin` reaches the daemon-actor for routing / audit purposes, but does not change the broker's bypass semantics: handlers continue to read `current_dispatch_origin` (Agent during normal turns) for the broker call.
 - ⚠ Draft-persona queue from Phase 4 Task 4 is a transient in-memory stash. Phase 5 does not promote drafts — that's Phase 6. Phase 5 ensures draft personas can NEVER appear as an active front (the setter rejects any `PersonaId` whose registry status is `Draft`).
 
 ### Design decisions locked in
@@ -31,7 +31,7 @@
 - **Co-fronting semantics.** Multiple personas in `FrontingSet.active`. Unrouted messages default to the `fallback` persona; if no fallback, fan out to all active personas (every member receives a copy). The design says fan-out OR discrimination by rules — we support both via the `fallback` field's presence.
 - **Routing-rule matcher types.** `Prefix(String)`, `Contains(String)`, `TopicTag(String)`, `Regex(String)`. `regex` is already a workspace dep (`Cargo.toml: regex = "1"`; used by `pattern_core`, `pattern_runtime`, `pattern_discord`) — compile once per rule at load, hold `regex::Regex` inside `RoutingTable` alongside the source string for persistence.
 - **In-flight routing updates (AC8.8).** Messages already in a mailbox queue use the routing they were resolved under. New messages use the new routing. Concretely: `RouterRegistry::route` is the only point where routing is evaluated; once a `MailboxInput` lands in an mpsc channel it's committed to its target. No re-routing.
-- **Human short-circuit scope.** Applies to `Shell`, `File`, and any handler that today escalates to the broker. It does NOT bypass `MemoryPermission`/`memory_acl::check()` — memory ACL governs what blocks a persona can touch regardless of caller; the human still acts through the fronting persona, and the persona's identity is what the ACL sees.
+- **Human short-circuit scope (deferred).** Earlier drafts framed Partner-activated turns as auto-short-circuiting the broker. That design was retracted (see Phase 1 Task 7): handler-dispatch under the autonomous model loop sees `Author::Agent(self)` as the dispatch origin, so the bypass does not fire even on Partner-activated turns. A future "direct-execution" path (admin REPL, audited sandboxed code) is the right place to wire Partner-bypass — it would explicitly set `current_dispatch_origin` to a Partner before invoking the handler. No such path lands in Phase 5. Memory ACL semantics remain unchanged: `memory_acl::check()` governs what blocks a persona can touch regardless of caller.
 
 ### Empty FrontingSet — default-persona fallback
 
@@ -50,7 +50,7 @@ This avoids forcing the user to manage fronting explicitly before sending the fi
 - **v3-multi-agent.AC8.3 Success:** Incoming message matching no routing rule is delivered to the fallback persona
 - **v3-multi-agent.AC8.4 Success:** Direct addressing (`@persona-name` or explicit PersonaId) bypasses routing; delivered to named persona regardless of routing rules
 - **v3-multi-agent.AC8.5 Success:** Co-fronting with two active personas: both receive copies of unrouted messages (or routing rules discriminate between them)
-- **v3-multi-agent.AC8.6 Success:** the turn's `MessageOrigin.author` is `Author::Partner(Partner{user_id})` for TUI/Partner-initiated turns, `Author::Human(...)` for non-Partner humans, `Author::Agent(AgentAuthor{agent_id})` for agent-initiated turns, `Author::System` for runtime-initiated (wake conditions, housekeeping). Handlers read the origin off the turn's `EffectContext` and call `.bypasses_permission_gate()` for the Partner short-circuit.
+- **v3-multi-agent.AC8.6 Success:** the turn's `MessageOrigin.author` is `Author::Partner(Partner{user_id})` for TUI/Partner-initiated turns, `Author::Human(...)` for non-Partner humans, `Author::Agent(AgentAuthor{agent_id})` for agent-initiated turns, `Author::System` for runtime-initiated (wake conditions, housekeeping). The activating origin is preserved on `TurnInput` for routing and audit purposes; handlers see `current_dispatch_origin` (typically `Author::Agent(self)`) for permission decisions, not the activating origin. The Partner-bypass predicate exists on `MessageOrigin` but is exercised only by direct-execution paths (none in Phase 5).
 - **v3-multi-agent.AC8.7 Success:** Human-as-caller uses fronting persona's SessionContext; all memory handles and project mount are the persona's
 - **v3-multi-agent.AC8.8 Edge:** FrontingSet update while messages are in-flight: messages already queued use old routing; new messages use updated routing (no reprocessing)
 
@@ -360,55 +360,45 @@ pub async fn dispatch_to_mailboxes(
 <!-- END_TASK_4 -->
 
 <!-- START_TASK_5 -->
-### Task 5: Thread `MessageOrigin` into handler escalation; broker Partner short-circuit
+### Task 5: Thread activating `MessageOrigin` into the daemon-actor surface
 
 **Verifies:** AC8.6, AC8.7.
 
 **Files:**
-- Modify: `crates/pattern_runtime/src/sdk/handlers/` — each handler that escalates to the broker reads the current turn's `MessageOrigin` via `EffectContext` (see Implementation).
-- Modify: `crates/pattern_core/src/permission.rs` (the per-runtime broker from Phase 1 Tasks 5-7) — `request(req, origin: &MessageOrigin, timeout)` signature; Partner short-circuit reads `origin.bypasses_permission_gate()` (helper added by Phase 4 Task 1).
-- Modify: `crates/pattern_runtime/src/session.rs` — add a per-turn accessor that makes the turn's `MessageOrigin` reachable from the effect-dispatch path (implementation below).
-- Modify: `crates/pattern_runtime/src/agent_loop.rs` — `drive_step` captures the inbound turn's `MessageOrigin` and makes it available to handlers for the duration of the turn.
+- Modify: `crates/pattern_runtime/src/agent_loop.rs` — confirm `drive_step` continues to publish `Author::Agent(self)` to `current_dispatch_origin` per orchestrate iteration (Phase 1 Task 7 wiring; this task verifies it). The activating `TurnInput.origin` is already preserved on the input itself for batch-type inference, persistence attribution, and routing decisions; no new wiring needed for that.
+- Modify: `crates/pattern_server/` — when receiving a `SendMessage` RPC from the TUI, construct the `TurnInput.origin` as `Author::Partner(...)` with the partner's `UserId`. When a `MessageReq::Send` from another agent activates a turn, the origin is `Author::Agent(...)`. The daemon already constructs `MessageOrigin` for inbound turns; this task tightens the attribution so Partner / Human / Agent / System are correctly discriminated at the source.
+- Modify: `crates/pattern_runtime/src/session.rs` — no broker call-site changes here; Phase 1 Task 7 already wired `HasPermissionBridge` and the dispatch-origin slot.
 
 **Implementation:**
 
-`TurnInput` already carries `origin: MessageOrigin`. No new field anywhere. The only runtime plumbing is: at the start of each `drive_step` invocation, store the current turn's origin somewhere handlers can read it. The busy-flag wrapper from Phase 4 Task 2 already serializes turns, so this is single-writer-single-reader — no race.
+`TurnInput` already carries `origin: MessageOrigin`; `drive_step` (Phase 1 Task 7) already publishes `Author::Agent(self)` to `current_dispatch_origin` per orchestrate iteration. This task's responsibility is to ensure the *activating* origin reaches the daemon correctly attributed. There is no broker bypass change in this task — the bypass predicate stays as it is, and the dispatch origin handlers see continues to be `Author::Agent(self)` during normal turns.
 
 ```rust
-// session.rs — add one field alongside the existing per-turn state:
-//   current_turn_origin: Arc<std::sync::RwLock<Option<MessageOrigin>>>
-//
-// drive_step sets it on entry (inside the busy-flag wrapper), clears on exit.
-// Handlers read via ctx.user().current_turn_origin().
-//
-// The RwLock is write-rare (per-turn) / read-hot (every broker escalation), and
-// because the busy flag already prevents concurrent turns on the same session,
-// the write is uncontested.
+// pattern_server/src/server.rs — when handling SendMessage RPC:
+let activating_origin = MessageOrigin::new(
+    Author::Partner(Partner { user_id: partner_id.clone() }),
+    Sphere::Private,                                    // or sphere from RPC context
+);
+let input = TurnInput {
+    /* … */
+    origin: activating_origin,
+    /* … */
+};
 
-// broker (permission.rs) short-circuit:
-impl PermissionBroker {
-    pub async fn request(
-        &self,
-        req: PermissionRequest,
-        origin: &MessageOrigin,
-        timeout: Duration,
-    ) -> Option<PermissionGrant> {
-        if origin.bypasses_permission_gate() {
-            return Some(PermissionGrant::synthesized_partner(req.scope.clone()));
-        }
-        // existing policy + broadcast flow
-    }
-}
+// Direct-execution paths (NOT in Phase 5, but the shape that would
+// genuinely warrant Partner-bypass) would set the dispatch slot:
+//
+// {
+//     let mut slot = ctx.current_dispatch_origin_slot().write().unwrap();
+//     *slot = Some(MessageOrigin::new(Author::Partner(p), Sphere::Private));
+// }
+// // …invoke handler directly here…
 ```
-
-`synthesized_partner` (name change from earlier drafts) makes the grant's provenance explicit — Partner bypass, not a signed approval.
-
-Handler escalation sites (Shell Task 10, File Task 15): `let origin = cx.user().current_turn_origin().ok_or(EffectError::Handler("no turn origin available"))?; broker.request(req, &origin, timeout).await`.
 
 Human's SessionContext: when a human connects to a fronting persona, the daemon reuses that persona's SessionContext (workspace / project mount / memory handles) — no new context is built. This is the architectural claim in AC8.7; verify by checking that the daemon's `get_or_open_session(fronting_persona)` returns the cached session rather than constructing a new one for the human's turn.
 
 **Testing:**
-- AC8.6: assert the handler-visible `MessageOrigin.author` is `Author::Partner(_)` when the turn originated from `SendMessage` RPC (TUI user is Partner); `Author::Agent(_)` when it originated from `MessageReq::Send` from another agent.
+- AC8.6: assert `TurnInput.origin.author` is `Author::Partner(_)` when the turn originated from `SendMessage` RPC (TUI user is Partner); `Author::Agent(_)` when it originated from `MessageReq::Send` from another agent. Also assert that during the turn, `ctx.current_dispatch_origin()` reports `Author::Agent(self)` regardless of the activating author — this is the security invariant that prevents Partner authority leaking into autonomous agent activity.
 - AC8.7: human (Partner) sends a message to the fronting persona; the turn's context references the persona's project mount + memory handles, not a fresh one.
 - AC2.* regression: shell command that would normally gate still gates for `Author::Agent`; does NOT gate for `Author::Partner`; DOES gate for `Author::Human(_)` (generic human is not Partner).
 

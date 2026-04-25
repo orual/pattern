@@ -318,7 +318,9 @@ Expected: all pre-existing tests still pass; no references to a global `Permissi
 **Implementation:**
 Swap chrono for jiff using the crate-level `jiff::Timestamp` / `jiff::Span`. Reason about expiry with `now + span`. Keep the `request()` method's external `timeout: std::time::Duration` — this is a host-side timeout and doesn't need jiff; the *grant* duration is the one that flows into the agent-visible data.
 
-Extend `request` signature with `origin: &MessageOrigin`. The broker short-circuits at the top: `if origin.bypasses_permission_gate() { return Some(PermissionGrant::synthesized_partner(req.scope.clone())); }`. All existing call sites from Phase 1 Tasks 5 / 10 / 15 pass `&origin` sourced from the current turn (see Task 7 for the accessor). The bypass helper lands in Phase 4 Task 1; until Phase 4 Task 1 commits, stub `bypasses_permission_gate()` as `fn bypasses_permission_gate(&self) -> bool { false }` and wire it to the real match in Phase 4. **No call site has to change between Phase 1 and Phase 4** — the helper is always callable.
+Extend `request` signature with `origin: &MessageOrigin`. The broker short-circuits at the top: `if origin.bypasses_permission_gate() { return Some(PermissionGrant::synthesized_partner(req.scope.clone())); }`. The helper itself ships in this phase as `matches!(self.author, Author::Partner(_))` — it's a pure predicate on `MessageOrigin`, no Phase 4 dependency.
+
+**Important — what `origin` actually is at handler-dispatch sites:** the broker reads "who is asking right now," not "what activated this turn." During a normal model-driven turn loop, the immediate caller of every effect is the agent itself (the model emits a tool_use, the eval worker dispatches, the handler runs). So at handler-dispatch sites the origin is `Author::Agent(self)`, **not** the activating Partner's origin. Partner-bypass therefore does NOT fire during normal autonomous activity inside a Partner-activated turn — that prevents "the user typed a message, so the agent can now `rm -rf` without prompting." Partner-bypass fires only from explicit direct-execution paths (admin REPL, audited sandboxed code, debug surfaces) that *intentionally* set the dispatch origin to a Partner. Phase 1 has no such paths, so the bypass is wired but inert during normal flow; Task 7 sets up the slot semantics, and Tasks 10 / 15 verify gates fire in the normal case.
 
 Add `PermissionGrant::synthesized_partner(scope: PermissionScope) -> PermissionGrant` constructor that produces a grant with a fresh id, no `expires_at`, and a marker in metadata (`{"source": "partner_bypass"}`) for audit.
 
@@ -332,7 +334,7 @@ Timeout path (AC2.8): `request()` already `tokio::time::timeout`s on the oneshot
 - Unit: request flow end-to-end with synthetic `subscribe()` recipient that calls `respond()` — cover ApproveOnce, ApproveForScope (two calls, second short-circuits), ApproveForDuration (advance `jiff::Timestamp` via injected clock), timeout case.
 - Inject a `fn now_fn: Arc<dyn Fn() -> jiff::Timestamp + Send + Sync>` so duration tests don't sleep. Default production constructor uses `jiff::Timestamp::now`.
 - Unit: two broker instances with independent scope caches — approving a scope on instance A does not carry to instance B (AC2.9).
-- Unit: Partner-bypass — construct an origin with `Author::Partner(...)`, call `request(..., &origin, ...)`, assert returns `Some(PermissionGrant)` with `source: partner_bypass` marker WITHOUT broadcast (no subscriber sees a request).
+- Unit: Partner-bypass predicate — construct an origin with `Author::Partner(...)`, call `request(..., &origin, ...)` *directly on the broker* (this isolates the predicate; Phase 1 sessions never feed Partner origin to the broker via the bridge). Assert returns `Some(PermissionGrant)` with `source: partner_bypass` marker WITHOUT broadcast.
 - Unit: non-Partner origins (`Author::Human(_)`, `Author::Agent(_)`, `Author::System`) do NOT short-circuit — broadcast fires normally.
 
 **Verification:**
@@ -343,82 +345,77 @@ Expected: all new behaviour covered; no panics / leaks on timeout.
 <!-- END_TASK_6 -->
 
 <!-- START_TASK_7 -->
-### Task 7: Thread per-runtime broker + `PermissionBridge` + current-turn origin through handler contexts
+### Task 7: Thread per-runtime broker + `PermissionBridge` + current-dispatch origin through handler contexts
 
 **Verifies:** AC2.9, and the plumbing that Task 10 (Shell) and Task 15 (File) rely on.
 
 **Files:**
-- Modify: `crates/pattern_runtime/src/session.rs` — construct the broker alongside the runtime, store as `Arc<PermissionBroker>`, expose through `SessionContext`. Add a per-turn `current_turn_origin: Arc<std::sync::RwLock<Option<MessageOrigin>>>` field — written by `drive_step` on turn entry/exit, read by handlers.
-- Create: `crates/pattern_runtime/src/permission/bridge.rs` — `PermissionBridge` type following the `RouterBridge` (`crates/pattern_runtime/src/router.rs`) pattern: a sync-to-async bridge so handlers on the sync `EvalWorker` thread can request broker grants without `futures::executor::block_on`. One bridge per broker instance.
-- Modify: `crates/pattern_runtime/src/agent_loop.rs` — `drive_step` writes `ctx.current_turn_origin` from `TurnInput::origin` at entry, clears at exit (both arms — panic-safe via the Task 2 defer guard).
+- Modify: `crates/pattern_runtime/src/session.rs` — construct the broker alongside the runtime, store as `Arc<PermissionBroker>`, expose through `SessionContext`. Add a `current_dispatch_origin: Arc<std::sync::RwLock<Option<MessageOrigin>>>` field — written by `agent_loop::drive_step` per orchestrate iteration, read by handlers.
+- Create: `crates/pattern_runtime/src/permission.rs` (single file; promote to a directory only if a second submodule lands later) — `PermissionBridge` type following the `RouterBridge` (`crates/pattern_runtime/src/router.rs`) pattern: a sync-to-async bridge so handlers on the sync `EvalWorker` thread can request broker grants without `futures::executor::block_on`. One bridge per broker instance.
+- Modify: `crates/pattern_runtime/src/agent_loop.rs` — `drive_step` builds an Agent-origin (`Author::Agent { agent_id }`) per orchestrate iteration and writes it to `ctx.current_dispatch_origin` via an RAII guard scoped to that iteration; clears on Drop (panic-safe). The same value is reused for the existing `output_origin` persistence at the bottom of the iteration so we don't construct it twice.
 - Modify: any handler that will consult the broker — expose via a new `HasPermissionBridge` trait alongside `HasCancelState`.
+
+**Why dispatch-origin, not turn-origin:** the broker's bypass check answers "who is asking right now," not "what activated this turn." During autonomous model-driven activity inside a Partner-activated turn, the immediate caller of every effect is the agent itself — the slot must reflect that, not the activating Partner. Pinning the activating Partner's origin would let any tool_use the model emits run with the Partner's elevated permissions ("agent inherits user permissions"), which defeats the gate. The slot is therefore named `current_dispatch_origin` and is set per-iteration to `MessageOrigin::new(Author::Agent { agent_id }, cur_input.origin.sphere)`. Future direct-execution paths (admin REPL, audited sandboxed code) are responsible for overriding the slot with a Partner origin before invoking handlers — Phase 1 has none.
 
 **Implementation:**
 
 ```rust
 // session.rs
 pub trait HasPermissionBridge {
-    fn permission_bridge(&self) -> &Arc<PermissionBridge>;
-    fn current_turn_origin(&self) -> Option<MessageOrigin>;
+    fn permission_bridge(&self) -> Option<&Arc<PermissionBridge>>;
+    fn current_dispatch_origin(&self) -> Option<MessageOrigin>;
 }
 
 impl HasPermissionBridge for SessionContext {
-    fn permission_bridge(&self) -> &Arc<PermissionBridge> { &self.permission_bridge }
-    fn current_turn_origin(&self) -> Option<MessageOrigin> {
-        self.current_turn_origin.read().ok()?.clone()
+    fn permission_bridge(&self) -> Option<&Arc<PermissionBridge>> {
+        self.permission_bridge.as_ref()
+    }
+    fn current_dispatch_origin(&self) -> Option<MessageOrigin> {
+        self.current_dispatch_origin.read().ok()?.clone()
     }
 }
 
-// permission/bridge.rs
+// permission.rs — follows RouterBridge shape (router.rs).
+// tokio::sync::mpsc inbound (UnboundedSender::send is non-tokio-thread safe);
+// std::sync::mpsc::sync_channel for the reply path so the eval-worker
+// thread can block on recv without tokio context.
 pub struct PermissionBridge {
-    request_tx: std::sync::mpsc::Sender<PermissionBridgeRequest>,
+    tx: tokio::sync::mpsc::UnboundedSender<PermissionBridgeRequest>,
 }
 
-struct PermissionBridgeRequest {
-    req: PermissionRequest,
-    origin: MessageOrigin,
-    timeout: Duration,
-    reply_tx: std::sync::mpsc::Sender<Option<PermissionGrant>>,
+// agent_loop.rs — per-iteration RAII guard. The Agent-origin is
+// constructed ONCE per iteration and reused: the existing
+// `output_origin` construction at the bottom of the iteration is
+// replaced with this same value, so handlers and persistence see
+// identical attribution.
+struct CurrentDispatchOriginGuard {
+    slot: Arc<std::sync::RwLock<Option<MessageOrigin>>>,
 }
-
-impl PermissionBridge {
-    pub fn spawn(broker: Arc<PermissionBroker>) -> Arc<Self> {
-        let (tx, rx) = std::sync::mpsc::channel::<PermissionBridgeRequest>();
-        // Pump: one tokio task per bridge drains the sync channel and
-        // invokes broker.request() on the tokio runtime, replying via
-        // the request's reply_tx.
-        let broker = broker.clone();
-        tokio::spawn(async move {
-            // Receive from a sync channel in an async context: use
-            // tokio::task::spawn_blocking for the recv, similar to RouterBridge.
-            // (See router.rs for the exact pattern.)
-        });
-        Arc::new(Self { request_tx: tx })
-    }
-
-    pub fn request_sync(
-        &self,
-        req: PermissionRequest,
-        origin: &MessageOrigin,
-        timeout: Duration,
-    ) -> Option<PermissionGrant> {
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-        let _ = self.request_tx.send(PermissionBridgeRequest {
-            req, origin: origin.clone(), timeout, reply_tx,
-        });
-        reply_rx.recv_timeout(timeout).ok().flatten()
-    }
+impl CurrentDispatchOriginGuard {
+    fn enter(ctx: &SessionContext, origin: &MessageOrigin) -> Self { /* … */ }
 }
+impl Drop for CurrentDispatchOriginGuard { /* clears slot, panic-safe */ }
+
+// inside drive_step's per-iteration loop:
+let dispatch_origin = MessageOrigin::new(
+    Author::Agent(AgentAuthor { agent_id: AgentId::from(ctx.agent_id()) }),
+    cur_input.origin.sphere,
+);
+let _origin_guard = CurrentDispatchOriginGuard::enter(&ctx, &dispatch_origin);
+let turn = orchestrate(/* … */).await?;
+// … later in the same iteration, persistence reuses `dispatch_origin`
+// in place of the previous output_origin construction.
 ```
 
-`SessionContext` holds `permission_bridge: Arc<PermissionBridge>` constructed at session open. Handlers that need the broker take `U: HasCancelState + HasPermissionBridge` and call `cx.user().permission_bridge().request_sync(...)`.
+`SessionContext` constructs the broker eagerly in `from_persona` (sync); the bridge is wired by a `with_permission_bridge` builder called from `open_with_agent_loop` (async — tokio task spawn requires a runtime). The Bridge's `request_sync` matches the broker's `request` parameters (agent_id, tool_name, scope, &origin, reason, metadata, timeout). Handlers that need the broker take `U: HasCancelState + HasPermissionBridge` and call `cx.user().permission_bridge().expect("…").request_sync(…)`.
 
-Do not leave a backwards-compat shim (guidance is explicit). Delete the global; callers fail to compile until updated. Fix every call site in the same task.
+Do not leave a backwards-compat shim. Delete the global (`pattern_core::permission::broker()`); callers fail to compile until updated. Fix every call site in the same task. (The only consumer of the singleton in the active workspace is none — the legacy `pattern_discord` references are out-of-workspace and don't currently build.)
 
 **Testing:**
 - Integration: spin up two `SessionContext`s with independent `PermissionBroker` instances; confirm approving a scope on one does not leak (AC2.9).
 - Integration: Shell/File handler running on the sync EvalWorker thread issues `request_sync`; bridge correctly round-trips to the broker and back without deadlock. Use a scripted subscriber that responds in <10ms.
-- Integration: panic in drive_step still clears `current_turn_origin` (uses the Task 2 defer guard).
+- Integration: panic in drive_step still clears `current_dispatch_origin` (RAII guard's Drop fires on unwind).
+- Integration: a Partner-activated session whose model emits a tool_use call to a gated handler (Shell `rm -rf`) sees the gate fire — the dispatch origin during the model's autonomous activity is `Author::Agent`, NOT the activating Partner, so the bypass does NOT short-circuit. (This is verified end-to-end in Task 10's Shell tests, but is restated here as the wiring's correctness predicate.)
 
 **Verification:**
 `cargo nextest run` full suite. Expected: every handler that consults the broker reaches it through the per-session `SessionContext` via `PermissionBridge`; no `futures::executor::block_on` in any handler.

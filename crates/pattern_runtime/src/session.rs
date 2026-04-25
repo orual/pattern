@@ -118,6 +118,11 @@ pub struct SessionContext {
     /// construction (e.g. lib-module compile failures) and read by the
     /// `Pattern.Diagnostics` effect handler. Read-only after construction.
     diagnostics: Arc<std::sync::Mutex<Vec<crate::sdk::handlers::diagnostics::DiagnosticEvent>>>,
+    /// Capability set scoping which effects this session may invoke.
+    /// `None` means "full power" — back-compat for sessions that pre-date
+    /// capability scoping. Phase 2 spawn paths read this to restrict
+    /// child sessions to a subset of the parent's capabilities.
+    capabilities: Option<pattern_core::CapabilitySet>,
 }
 
 /// Handlers call this to decide whether to short-circuit on soft-cancel.
@@ -193,7 +198,26 @@ impl SessionContext {
             snapshot_policy: persona.context.snapshot_policy.clone(),
             context_policy: persona.context.clone(),
             diagnostics: Arc::new(std::sync::Mutex::new(Vec::new())),
+            capabilities: None,
         }
+    }
+
+    /// Effective capabilities for this session.
+    ///
+    /// `None` means "full power" — sessions that pre-date capability
+    /// scoping or that omit a capability set on open. Phase 2 spawn
+    /// paths use this to enforce that children cannot escalate
+    /// beyond the parent.
+    pub fn capabilities(&self) -> Option<&pattern_core::CapabilitySet> {
+        self.capabilities.as_ref()
+    }
+
+    /// Builder-style: set this session's capability set. Pass `None`
+    /// to leave capabilities unscoped.
+    #[must_use]
+    pub fn with_capabilities(mut self, capabilities: Option<pattern_core::CapabilitySet>) -> Self {
+        self.capabilities = capabilities;
+        self
     }
 
     /// Persona-supplied slot-\[1\] system prompt override, if any.
@@ -465,6 +489,27 @@ impl TidepoolSession {
         self.ctx.cancel_state()
     }
 
+    /// The Haskell preamble built for this session at open-time.
+    /// Returns `None` for sessions opened via [`Self::open`] (no eval
+    /// worker, no preamble); `Some(_)` for sessions opened via
+    /// [`Self::open_with_agent_loop`].
+    ///
+    /// Capability-scoped open paths (Phase 1) build the preamble via
+    /// [`crate::sdk::preamble::build_for`], so the returned string
+    /// already has effects absent from the session's capability set
+    /// stripped from imports and the `type M` row.
+    pub fn preamble(&self) -> Option<&str> {
+        self.preamble.as_deref()
+    }
+
+    /// Shared handle to the session's [`SessionContext`]. Tests can
+    /// borrow this as the `user` argument to
+    /// `tidepool_runtime::compile_and_run` when exercising the
+    /// agent-loop substrate without driving a full step.
+    pub fn context(&self) -> Arc<SessionContext> {
+        self.ctx.clone()
+    }
+
     /// Open a minimal session: initialise context, checkpoint log, and handler
     /// display handle but do NOT spawn an eval worker. Used internally by
     /// [`Self::open_with_agent_loop`] and by `TidepoolRuntime::open_session`
@@ -553,6 +598,7 @@ impl TidepoolSession {
         turn_sink: Arc<dyn TurnSink>,
         prelude_dir: Option<PathBuf>,
         mount_path: Option<PathBuf>,
+        capabilities: Option<pattern_core::CapabilitySet>,
     ) -> Result<Self, RuntimeError> {
         // Capture persona-scoped state we'll seed into the store after the
         // session is constructed. We consume `persona` via `Self::open`
@@ -580,7 +626,9 @@ impl TidepoolSession {
         // from open), so Arc::try_unwrap on ctx will always succeed.
         let ctx_owned =
             Arc::try_unwrap(session.ctx).expect("ctx has no other clones immediately after open()");
-        let ctx_with_sink = ctx_owned.with_turn_sink(turn_sink.clone());
+        let ctx_with_sink = ctx_owned
+            .with_turn_sink(turn_sink.clone())
+            .with_capabilities(capabilities.clone());
 
         // Wire MemoryScope if a mount config declares an isolation policy.
         // Must happen before Arc::new(ctx) so the scope wraps the store
@@ -632,8 +680,13 @@ impl TidepoolSession {
         // flow to CLI/TUI subscribers during eval turns.
         session.display_handle.forward_to_turn_sink(turn_sink);
 
-        // Build the shared preamble once per session.
-        let preamble = crate::sdk::preamble::build(&crate::sdk::bundle::canonical_effect_decls());
+        // Build the shared preamble once per session, scoped to the
+        // caller-supplied capability set. `None` keeps the full canonical
+        // row — back-compat for sessions that pre-date capability scoping.
+        let preamble = match capabilities.as_ref() {
+            Some(caps) => crate::sdk::preamble::build_for(caps),
+            None => crate::sdk::preamble::build(&crate::sdk::bundle::canonical_effect_decls()),
+        };
 
         // Build include paths: SDK dir only. Pattern's haskell/Pattern/
         // tree now includes both the effect GADTs AND the prelude
@@ -1042,6 +1095,7 @@ mod tests {
             sink_dyn,
             None,
             None,
+            None,
         )
         .await
         .expect("open_with_agent_loop should succeed when preflight passes");
@@ -1115,7 +1169,7 @@ mod tests {
         let sink_dyn: Arc<dyn TurnSink> = sink.clone();
 
         let session = TidepoolSession::open_with_agent_loop(
-            persona, &sdk, store, provider, db, sink_dyn, None, None,
+            persona, &sdk, store, provider, db, sink_dyn, None, None, None,
         )
         .await
         .expect("open_with_agent_loop should succeed");

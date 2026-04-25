@@ -274,7 +274,7 @@ async fn ac9_5_session_open_bad_sdk_path_returns_sdk_not_found() {
     let sink: Arc<dyn pattern_core::traits::TurnSink> = Arc::new(pattern_core::traits::NoOpSink);
 
     let err = pattern_runtime::session::TidepoolSession::open_with_agent_loop(
-        persona, &bad_sdk, store, provider, db, sink, None, None,
+        persona, &bad_sdk, store, provider, db, sink, None, None, None,
     )
     .await
     .expect_err("bad SDK path must fail session open");

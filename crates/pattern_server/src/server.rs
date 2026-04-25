@@ -791,6 +791,7 @@ async fn get_or_open_session(
         sink_dyn,
         None, // prelude_dir — SDK bundles the prelude internally.
         Some(project_mount.mount_path.clone()),
+        None, // capabilities — daemon uses full power until per-persona caps land.
     )
     .await
     .map_err(|e| format!("failed to open session for {agent_id}: {e}"))?;
