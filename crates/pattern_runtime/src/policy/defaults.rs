@@ -6,19 +6,7 @@
 //! here — every entry must point at a concrete failure mode the rule
 //! prevents.
 
-use std::path::Path;
-
 use pattern_core::{EffectCategory, PolicyAction, PolicyMatcher, PolicyRule, Precedence};
-
-use crate::policy::config_guard::is_pattern_config_kdl;
-
-/// Predicate adapter for the [`PolicyMatcher::FileWriteShape`] variant.
-/// Hands the call through to [`is_pattern_config_kdl`] and reduces the
-/// rich verdict to a bool — the matcher only needs to know "fire or
-/// don't"; audit logging consults the verdict separately.
-fn config_kdl_shape_check(path: &Path, content: &[u8]) -> bool {
-    is_pattern_config_kdl(path, content).is_config()
-}
 
 /// Build the baseline `Vec<PolicyRule>` seeded into every session's
 /// [`pattern_core::PolicySet`] before KDL / runtime overrides layer on.
@@ -41,19 +29,13 @@ pub fn rust_defaults() -> Vec<PolicyRule> {
         // why: chmod -R 000 locks files out of every user, including
         // root in some configurations; recovery is painful.
         shell_require_approval("chmod -R 000*", "chmod -R 000 locks files"),
-        // why: writes to a Pattern config KDL change agent semantics
-        // mid-session — and the shape detection is content-aware so a
-        // file with a benign name but pattern-shaped contents is also
-        // gated. Locked at `LockedDefault` so KDL `Allow` rules cannot
-        // loosen this gate (AC2.7).
-        PolicyRule::new(
-            EffectCategory::File,
-            PolicyMatcher::FileWriteShape(config_kdl_shape_check),
-            PolicyAction::RequireApproval {
-                reason: Some("write to Pattern config KDL".into()),
-            },
-            Precedence::LockedDefault,
-        ),
+        // (Pattern config KDL writes are gated at the File-handler
+        // level via `policy::config_guard::is_pattern_config_kdl`, not
+        // through a PolicyRule. See `sdk/handlers/file.rs` for the
+        // handler-level short-circuit; the policy system is therefore
+        // never consulted for config-KDL writes, so no `KdlConfig` or
+        // `RuntimeOverride` rule can loosen the gate.)
+
         // why: spawning a new persona identity (rather than a child of
         // the calling agent) is a high-trust operation — Phase 2 wires
         // the Spawn handler that consults this rule.
@@ -125,97 +107,23 @@ mod tests {
     }
 
     #[test]
-    fn defaults_gate_pattern_config_kdl_writes() {
+    fn defaults_do_not_gate_arbitrary_file_writes() {
+        // Phase 1 default policy intentionally has NO File rule —
+        // config-KDL writes are gated at the handler level (see
+        // `sdk/handlers/file.rs`); other File writes pass through.
+        // The locked-invariant tests for config writes live with the
+        // File handler in Task 15.
         use std::path::PathBuf;
         let set = PolicySet::from_rules(rust_defaults());
-        let config_path = PathBuf::from("/proj/.pattern.kdl");
+        let path = PathBuf::from("/proj/notes.md");
         let ctx = PolicyContext::FileWrite {
-            path: &config_path,
-            content: b"",
-        };
-        assert!(matches!(
-            set.evaluate(EffectCategory::File, &ctx),
-            PolicyAction::RequireApproval { .. }
-        ));
-
-        let other_path = PathBuf::from("/proj/notes.md");
-        let other = PolicyContext::FileWrite {
-            path: &other_path,
+            path: &path,
             content: b"",
         };
         assert_eq!(
-            set.evaluate(EffectCategory::File, &other),
-            PolicyAction::Allow
-        );
-    }
-
-    #[test]
-    fn locked_default_beats_kdl_allow_for_config_writes() {
-        // AC2.7 / locked-default semantics: even if a KDL config tries
-        // to allow all file writes, the shape guard's LockedDefault
-        // rule still gates writes that look like Pattern configs.
-        use std::path::PathBuf;
-        let mut rules = rust_defaults();
-        // Layer a KDL Allow-all rule on top.
-        rules.push(PolicyRule::new(
-            EffectCategory::File,
-            PolicyMatcher::FilePath {
-                pattern: "*".into(),
-            },
-            PolicyAction::Allow,
-            Precedence::KdlConfig,
-        ));
-        let set = PolicySet::from_rules(rules);
-
-        // A pattern-config write must still gate, despite the KDL
-        // Allow.
-        let config_path = PathBuf::from("/proj/.pattern.kdl");
-        let ctx = PolicyContext::FileWrite {
-            path: &config_path,
-            content: b"",
-        };
-        assert!(
-            matches!(
-                set.evaluate(EffectCategory::File, &ctx),
-                PolicyAction::RequireApproval { .. }
-            ),
-            "LockedDefault must beat KDL Allow on config writes"
-        );
-
-        // A non-config write picks up the KDL Allow.
-        let other_path = PathBuf::from("/proj/notes.md");
-        let other = PolicyContext::FileWrite {
-            path: &other_path,
-            content: b"",
-        };
-        assert_eq!(
-            set.evaluate(EffectCategory::File, &other),
-            PolicyAction::Allow
-        );
-    }
-
-    #[test]
-    fn locked_default_beats_runtime_override_for_config_writes() {
-        // Even a RuntimeOverride Allow can't loosen a LockedDefault.
-        use std::path::PathBuf;
-        let mut rules = rust_defaults();
-        rules.push(PolicyRule::new(
-            EffectCategory::File,
-            PolicyMatcher::Always,
-            PolicyAction::Allow,
-            Precedence::RuntimeOverride,
-        ));
-        let set = PolicySet::from_rules(rules);
-
-        let config_path = PathBuf::from("/proj/.pattern.kdl");
-        let ctx = PolicyContext::FileWrite {
-            path: &config_path,
-            content: b"",
-        };
-        assert!(matches!(
             set.evaluate(EffectCategory::File, &ctx),
-            PolicyAction::RequireApproval { .. }
-        ));
+            PolicyAction::Allow
+        );
     }
 
     #[test]

@@ -28,6 +28,27 @@
 //! [`jiff::Timestamp`]. The host-side `timeout` parameter on
 //! [`PermissionBroker::request`] stays as `std::time::Duration` because
 //! it is consumed by `tokio::time::timeout` directly.
+//!
+//! # Ephemerality (load-bearing invariant)
+//!
+//! Grants are **session-lifetime by construction**. The broker's
+//! `scope_cache` lives in `Arc<RwLock<...>>` only; the broker itself
+//! is constructed per-`TidepoolSession` and dies with it. There is no
+//! "load grants from disk" code path — KDL on disk holds *rules*
+//! (declarative policy), never *grants* (imperative authorization).
+//!
+//! This is intentional and load-bearing for handler-level locked
+//! invariants (e.g. the File handler's shape-guard for Pattern config
+//! KDL writes — see `pattern_runtime::sdk::handlers::file`). Those
+//! invariants short-circuit `PolicySet` and rely on the broker for
+//! human-in-the-loop escalation; if grants ever became persistent,
+//! a single "approve forever" decision would survive restarts and
+//! defeat the gate.
+//!
+//! **Do not add a persist-grants feature without rethinking the
+//! threat model.** If you need durable trust, express it as a *rule*
+//! (loaded from KDL on each session open and reviewable by the user)
+//! rather than as a grant.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -61,6 +82,15 @@ pub enum PermissionScope {
     DataSourceAction {
         source_id: String,
         action: String,
+    },
+    /// File-write scope keyed on the destination path. Used by the
+    /// File handler's shape-guard short-circuit so the user can
+    /// approve writes to one specific config file for a duration
+    /// without re-prompting on each write within the window — but
+    /// without generalising the grant to other paths (different file
+    /// = different scope = re-prompts).
+    FileWrite {
+        path: String,
     },
 }
 

@@ -52,15 +52,14 @@ pub enum Precedence {
     /// Loaded from `.pattern.kdl` (project) or persona KDL.
     KdlConfig,
     /// Imperative override — admin command, debug surface, etc.
-    /// Wins over `RustDefault` and `KdlConfig` but yields to
-    /// `LockedDefault`.
+    /// Always wins over both default and KDL tiers.
+    ///
+    /// Note: locked invariants (e.g. the shape guard against writes to
+    /// Pattern config KDLs) are enforced at the *handler* layer, not
+    /// via a higher-precedence rule. Bypass-resistance comes from the
+    /// handler short-circuiting before the policy is consulted; see
+    /// the File handler (`sdk/handlers/file.rs`).
     RuntimeOverride,
-    /// Built-in rule that no KDL config or runtime override can
-    /// loosen. Reserved for security-critical defaults whose action
-    /// must hold regardless of how the persona / partner / admin
-    /// configures the session — e.g. the shape-detection guard for
-    /// writes to Pattern's own config files.
-    LockedDefault,
 }
 
 impl Precedence {
@@ -71,7 +70,6 @@ impl Precedence {
             Self::RustDefault => 0,
             Self::KdlConfig => 1,
             Self::RuntimeOverride => 2,
-            Self::LockedDefault => 3,
         }
     }
 }
@@ -97,16 +95,6 @@ pub enum PolicyMatcher {
     /// Matches a [`PermissionScope`] exactly. Useful for tying a
     /// policy rule to a specific tool / data-source action.
     Scope(PermissionScope),
-    /// Built-in shape-based predicate over `(path, content)`. Used by
-    /// the runtime to wire a `LikelyConfig` shape-guard rule that no
-    /// KDL config can construct.
-    ///
-    /// Carries a function pointer rather than a closure so the rule
-    /// remains `Clone` + `Debug` without hidden state. Not serializable
-    /// — KDL-loaded rules can never produce this variant; runtime
-    /// defaults are kept in memory only.
-    #[serde(skip)]
-    FileWriteShape(fn(&Path, &[u8]) -> bool),
 }
 
 /// One declarative gate rule: when a call against `effect` matches
@@ -233,9 +221,6 @@ fn matcher_fires(matcher: &PolicyMatcher, context: &PolicyContext<'_>) -> bool {
             .to_str()
             .map(|s| glob_matches(pattern, s))
             .unwrap_or(false),
-        (PolicyMatcher::FileWriteShape(check), PolicyContext::FileWrite { path, content }) => {
-            check(path, content)
-        }
         // Scope matcher is currently unused at this layer — Phase 1 wires
         // it in when policy gates start consulting `PermissionScope`
         // directly. Returns false until then.
