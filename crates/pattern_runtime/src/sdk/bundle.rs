@@ -176,6 +176,44 @@ mod tests {
         }
     }
 
+    /// Cross-check that every entry in `CANONICAL_EFFECT_ROW` resolves to
+    /// an `EffectCategory` variant, and that every non-reserved
+    /// `EffectCategory` variant has a matching entry in the row.
+    ///
+    /// Adding a 17th handler to `CANONICAL_EFFECT_ROW` without a matching
+    /// `EffectCategory` variant fails this test. Adding a new
+    /// `EffectCategory` variant without listing it in `RESERVED_NOT_IN_ROW`
+    /// (currently just `Wake`, awaiting Phase 4) also fails.
+    #[test]
+    fn canonical_row_matches_effect_category_implemented_set() {
+        use pattern_core::EffectCategory;
+
+        const RESERVED_NOT_IN_ROW: &[EffectCategory] = &[EffectCategory::Wake];
+
+        // Every name in the row resolves to a category.
+        for name in CANONICAL_EFFECT_ROW {
+            let cat = EffectCategory::from_type_name(name).unwrap_or_else(|| {
+                panic!("CANONICAL_EFFECT_ROW entry {name:?} has no matching EffectCategory variant")
+            });
+            assert!(
+                !RESERVED_NOT_IN_ROW.contains(&cat),
+                "{cat:?} is listed as reserved but appears in CANONICAL_EFFECT_ROW"
+            );
+        }
+
+        // Every non-reserved EffectCategory has a row entry.
+        for cat in EffectCategory::ALL.iter().copied() {
+            if RESERVED_NOT_IN_ROW.contains(&cat) {
+                continue;
+            }
+            assert!(
+                CANONICAL_EFFECT_ROW.contains(&cat.type_name()),
+                "EffectCategory::{cat:?} ({:?}) missing from CANONICAL_EFFECT_ROW",
+                cat.type_name()
+            );
+        }
+    }
+
     /// Verify the Pattern.Skills effect registers all five expected methods
     /// and appears immediately after Tasks (tag 4).
     #[test]
