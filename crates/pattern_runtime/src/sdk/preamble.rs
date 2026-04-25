@@ -92,8 +92,9 @@ pub fn build(decls: &[EffectDecl]) -> String {
 
     // Standard imports. Pattern.Prelude is the curated prelude substitute
     // (Text-returning show, list/Map helpers, Aeson construction). It does
-    // NOT re-export the 15 effect modules. The `hiding (error)` suppresses
-    // Prelude.error so agents use the Text-accepting shadow defined below.
+    // NOT re-export the SDK effect modules. The `hiding (error)`
+    // suppresses Prelude.error so agents use the Text-accepting shadow
+    // defined below.
     out.push_str("import Pattern.Prelude hiding (error)\n");
     out.push_str("import qualified Data.Text as T\n");
     out.push_str("import qualified Data.Map.Strict as Map\n");

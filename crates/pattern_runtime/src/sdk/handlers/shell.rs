@@ -122,11 +122,20 @@ where
                     pattern_core::types::origin::Sphere::System,
                 )
             });
+            // Real session agent_id is load-bearing for per-agent
+            // isolation of the broker's scope cache (keyed
+            // `(agent_id, scope)`). Without it we'd silently share
+            // grants across agents in the same runtime — fail closed.
+            let Some(agent) = user.dispatch_agent_id() else {
+                return Err(EffectError::Handler(format!(
+                    "{PERMISSION_DENIED_PREFIX}shell gated but no agent identity \
+                     available for broker attribution"
+                )));
+            };
             let scope = PermissionScope::ToolExecution {
                 tool: "shell".into(),
                 args_digest: Some(short_digest(command)),
             };
-            let agent = pattern_core::AgentId::from("shell-handler-agent");
             let grant = bridge.request_sync(
                 agent,
                 "shell".into(),
@@ -193,6 +202,7 @@ mod tests {
     /// Shell handler. Lets us drive the gate paths without standing up a
     /// full SessionContext.
     struct TestUser {
+        agent_id: pattern_core::AgentId,
         policies: pattern_core::PolicySet,
         bridge: Option<Arc<crate::permission::PermissionBridge>>,
         origin: Option<MessageOrigin>,
@@ -214,6 +224,22 @@ mod tests {
         }
         fn current_dispatch_origin(&self) -> Option<MessageOrigin> {
             self.origin.clone()
+        }
+        fn dispatch_agent_id(&self) -> Option<pattern_core::AgentId> {
+            Some(self.agent_id.clone())
+        }
+    }
+
+    fn make_test_user(
+        agent_id: &str,
+        policies: pattern_core::PolicySet,
+        bridge: Option<Arc<crate::permission::PermissionBridge>>,
+    ) -> TestUser {
+        TestUser {
+            agent_id: pattern_core::AgentId::from(agent_id),
+            policies,
+            bridge,
+            origin: Some(human_origin()),
         }
     }
 
@@ -259,13 +285,13 @@ mod tests {
 
     #[test]
     fn deny_action_returns_permission_denied_prefix() {
-        let user = TestUser {
-            policies: PolicySet::from_rules([shell_rule(PolicyAction::Deny {
+        let user = make_test_user(
+            "agent-deny",
+            PolicySet::from_rules([shell_rule(PolicyAction::Deny {
                 reason: Some("explicit deny".into()),
             })]),
-            bridge: None,
-            origin: Some(human_origin()),
-        };
+            None,
+        );
         let mut h = ShellHandler;
         let table = DataConTable::new();
         let cx = EffectContext::with_user(&table, &user);
@@ -283,13 +309,11 @@ mod tests {
 
     #[test]
     fn require_approval_without_bridge_fails_closed() {
-        let user = TestUser {
-            policies: PolicySet::from_rules([shell_rule(PolicyAction::RequireApproval {
-                reason: None,
-            })]),
-            bridge: None,
-            origin: Some(human_origin()),
-        };
+        let user = make_test_user(
+            "agent-no-bridge",
+            PolicySet::from_rules([shell_rule(PolicyAction::RequireApproval { reason: None })]),
+            None,
+        );
         let mut h = ShellHandler;
         let table = DataConTable::new();
         let cx = EffectContext::with_user(&table, &user);
@@ -322,13 +346,13 @@ mod tests {
         // to poll the bridge pump.
         let bridge_for_thread = bridge.clone();
         let result = tokio::task::spawn_blocking(move || {
-            let user = TestUser {
-                policies: PolicySet::from_rules([shell_rule(PolicyAction::RequireApproval {
+            let user = make_test_user(
+                "agent-approve",
+                PolicySet::from_rules([shell_rule(PolicyAction::RequireApproval {
                     reason: Some("rm-rf-style command".into()),
                 })]),
-                bridge: Some(bridge_for_thread),
-                origin: Some(human_origin()),
-            };
+                Some(bridge_for_thread),
+            );
             let mut h = ShellHandler;
             let table = DataConTable::new();
             let cx = EffectContext::with_user(&table, &user);
@@ -363,13 +387,11 @@ mod tests {
 
         let bridge_for_thread = bridge.clone();
         let result = tokio::task::spawn_blocking(move || {
-            let user = TestUser {
-                policies: PolicySet::from_rules([shell_rule(PolicyAction::RequireApproval {
-                    reason: None,
-                })]),
-                bridge: Some(bridge_for_thread),
-                origin: Some(human_origin()),
-            };
+            let user = make_test_user(
+                "agent-deny",
+                PolicySet::from_rules([shell_rule(PolicyAction::RequireApproval { reason: None })]),
+                Some(bridge_for_thread),
+            );
             let mut h = ShellHandler;
             let table = DataConTable::new();
             let cx = EffectContext::with_user(&table, &user);
@@ -384,5 +406,144 @@ mod tests {
             "expected PermissionDenied marker after denial, got: {msg}"
         );
         responder.await.unwrap();
+    }
+
+    /// Handler-level Partner-bypass: when the dispatch origin IS a
+    /// Partner (only possible from a future direct-execution path —
+    /// `drive_step` always installs `Author::Agent(self)`), the broker
+    /// short-circuits via `bypasses_permission_gate()` and the handler
+    /// returns GateApproved without any responder firing.
+    #[tokio::test]
+    async fn partner_origin_short_circuits_at_handler_level() {
+        use pattern_core::types::origin::Partner;
+        let broker = Arc::new(PermissionBroker::new());
+        let mut rx = broker.subscribe();
+        let saw_request = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let saw_for_thread = saw_request.clone();
+        let _watcher = tokio::spawn(async move {
+            if rx.recv().await.is_ok() {
+                saw_for_thread.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        let bridge = Arc::new(crate::permission::PermissionBridge::spawn(broker));
+        let bridge_for_thread = bridge.clone();
+
+        let result = tokio::task::spawn_blocking(move || {
+            let mut user = make_test_user(
+                "agent-shell-partner",
+                PolicySet::from_rules([shell_rule(PolicyAction::RequireApproval { reason: None })]),
+                Some(bridge_for_thread),
+            );
+            user.origin = Some(MessageOrigin::new(
+                Author::Partner(Partner {
+                    user_id: pattern_core::types::ids::new_id(),
+                }),
+                Sphere::Private,
+            ));
+            let mut h = ShellHandler;
+            let table = DataConTable::new();
+            let cx = EffectContext::with_user(&table, &user);
+            // Even an Always RequireApproval rule should yield to the
+            // partner-bypass when the broker sees a Partner origin.
+            h.handle(ShellReq::Execute("rm -rf /tmp/x".into()), &cx)
+        })
+        .await
+        .expect("blocking task")
+        .expect_err("Phase 1 stub always errors");
+        let msg = result.to_string();
+        assert!(
+            msg.contains(GATE_APPROVED_PREFIX),
+            "Partner-origin should produce GateApproved (synthesized grant), got: {msg}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(
+            !saw_request.load(std::sync::atomic::Ordering::SeqCst),
+            "Partner-origin must short-circuit at the broker — no request should land in the queue"
+        );
+    }
+
+    /// **Critical security invariant** (review fix): the broker's
+    /// `scope_cache` is keyed `(agent_id, scope)`. Two agents in the
+    /// same runtime sharing one bridge MUST NOT cross-pollinate
+    /// approvals — agent A's `ApproveForScope` for `rm -rf /tmp/x`
+    /// must not silently allow agent B to run the same command.
+    #[tokio::test]
+    async fn per_agent_scope_grants_do_not_cross_pollinate() {
+        let broker = Arc::new(PermissionBroker::new());
+        // Approve the FIRST request only; subsequent requests get
+        // denied. Agent B should re-prompt and hit the denial
+        // because its scope key differs from agent A's.
+        let mut rx = broker.subscribe();
+        let broker_for_responder = broker.clone();
+        let prompts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let prompts_for_thread = prompts.clone();
+        let responder = tokio::spawn(async move {
+            while let Ok(req) = rx.recv().await {
+                let n = prompts_for_thread.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let decision = if n == 0 {
+                    PermissionDecisionKind::ApproveForScope
+                } else {
+                    PermissionDecisionKind::Deny
+                };
+                broker_for_responder.resolve(&req.id, decision).await;
+            }
+        });
+        let bridge = Arc::new(crate::permission::PermissionBridge::spawn(broker));
+
+        let bridge_a = bridge.clone();
+        let bridge_b = bridge.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            let mut h = ShellHandler;
+            let table = DataConTable::new();
+
+            let user_a = make_test_user(
+                "agent-A",
+                PolicySet::from_rules([shell_rule(PolicyAction::RequireApproval { reason: None })]),
+                Some(bridge_a),
+            );
+            let cx_a = EffectContext::with_user(&table, &user_a);
+            // Agent A: first request, broker approves-for-scope.
+            let a_result = h
+                .handle(ShellReq::Execute("rm -rf /tmp/x".into()), &cx_a)
+                .expect_err("stub error");
+
+            let user_b = make_test_user(
+                "agent-B",
+                PolicySet::from_rules([shell_rule(PolicyAction::RequireApproval { reason: None })]),
+                Some(bridge_b),
+            );
+            let cx_b = EffectContext::with_user(&table, &user_b);
+            // Agent B: same scope, but different agent_id — must
+            // NOT hit agent A's cached grant. Broker re-prompts;
+            // responder denies.
+            let b_result = h
+                .handle(ShellReq::Execute("rm -rf /tmp/x".into()), &cx_b)
+                .expect_err("stub error");
+
+            (a_result.to_string(), b_result.to_string())
+        })
+        .await
+        .expect("blocking task");
+
+        // Allow the responder a beat to record both prompts.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let (a_msg, b_msg) = outcome;
+        assert!(
+            a_msg.contains(GATE_APPROVED_PREFIX),
+            "agent A should be approved, got: {a_msg}"
+        );
+        assert!(
+            b_msg.contains(PERMISSION_DENIED_PREFIX),
+            "agent B must NOT inherit agent A's grant, got: {b_msg}"
+        );
+        let final_count = prompts.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            final_count, 2,
+            "broker must observe two distinct prompts (one per agent), got {final_count}"
+        );
+
+        drop(bridge);
+        responder.abort();
     }
 }

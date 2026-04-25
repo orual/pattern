@@ -3,7 +3,7 @@
 ⚠️ **CRITICAL WARNING**: DO NOT run `pattern` CLI or test agents during development!
 Production agents are running. CLI commands will disrupt active agents.
 
-Last verified: 2026-04-23
+Last verified: 2026-04-24
 
 Core agent framework, memory trait definitions, tools, and coordination system for Pattern's multi-agent ADHD support. The `MemoryStore` trait is defined here; the canonical implementation (`MemoryCache`) lives in `pattern_memory`.
 
@@ -189,12 +189,109 @@ a `with_permission()` builder. Persona TOML `permission = "read_only"`
 now actually takes effect at block creation time, threaded through
 `MemoryCache::create_block` and `InMemoryMemoryStore::create_block`.
 
-### PersonaSnapshot — enabled_tools removed
+### PersonaSnapshot — capability + policy fields (v3-multi-agent Phase 1)
 
 `PersonaSnapshot.enabled_tools` and its `with_enabled_tools()` builder
-were removed. Permission/capability control will return via a different
-mechanism (effect-level prelude filtering + per-effect permission
-structures) in a future phase.
+were retired in earlier phases; capability control returned in
+v3-multi-agent Phase 1 via two new `PersonaSnapshot` fields:
+
+- `capabilities: Option<CapabilitySet>` — when `Some`, restricts which
+  effects the agent's prelude exposes at compile time. `None` means
+  "full power" (back-compat for personas that pre-date capability
+  scoping). Threaded through `TidepoolSession::open_with_agent_loop`
+  and into `pattern_runtime::sdk::preamble::build_for(caps)`.
+- `policy_rules: Vec<PolicyRule>` — KDL-loaded policy rules carrying
+  `Precedence::KdlConfig`. Layered over `pattern_runtime::policy::rust_defaults()`
+  at session open via `merge_policies`.
+
+KDL persona files now accept `capabilities { effects { ... } flags { ... } }`
+and `policy { rule "name" effect="..." action="..." { matcher "..." pattern="..." } }`
+blocks; `pattern_runtime::persona_loader` parses and converts them.
+
+## Capability + permission system (v3-multi-agent Phase 1)
+
+### `capability` module
+
+Pure-data types backing the runtime's capability/policy machinery.
+`pattern_core` defines the language; concrete enforcement (prelude
+filtering, handler gating) lives in `pattern_runtime`.
+
+- `CapabilitySet { categories: BTreeSet<EffectCategory>, flags: BTreeSet<CapabilityFlag> }`
+  — an agent's permission scope. `CapabilitySet::all()` is the
+  back-compat "full power" default.
+- `EffectCategory` — `#[non_exhaustive]` enum aligned with
+  `pattern_runtime::sdk::bundle::CANONICAL_EFFECT_ROW` (16 live
+  variants: `Memory, Search, Recall, Tasks, Skills, Message, Display,
+  Time, Log, Shell, File, Sources, Mcp, Rpc, Spawn, Diagnostics`,
+  plus `Wake` reserved for the Phase 4 wake-condition effect).
+  `pattern_runtime` carries a `canonical_row_matches_effect_category_implemented_set`
+  cross-check test to prevent drift.
+- `CapabilityFlag` — orthogonal flags (`SpawnNewIdentities`,
+  `WakeConditionRegistration`, `FrontingControl`) that gate runtime
+  behaviours not mappable to a single effect category.
+- `CapabilityError` — surfaces escalation attempts and missing
+  category/flag denials.
+- `CapabilityParseError` — `FromStr` errors for `EffectCategory` /
+  `CapabilityFlag` (used by KDL parsing).
+
+### `capability::policy` submodule
+
+- `PolicyRule` — `{ effect, matcher, action, precedence }`. Construct
+  via `PolicyRule::new(...)`; the struct is `#[non_exhaustive]`.
+- `PolicyMatcher` — `Always | ShellCommand { pattern } | FilePath { pattern } | Scope(PermissionScope)`. Glob semantics: `*` and `?` only.
+- `PolicyAction` — `Allow | RequireApproval { reason } | Deny { reason }`.
+- `Precedence` — `RustDefault < KdlConfig < RuntimeOverride`. Higher
+  weight wins ties.
+- `PolicySet::evaluate(effect, &PolicyContext)` — returns the action
+  of the highest-precedence matching rule; falls through to `Allow`
+  when no rule matches (policy is opt-in; the broker is the gate of
+  last resort).
+- `PolicyContext<'a>` — runtime carrier passed to `evaluate`:
+  `Shell { command }`, `FileWrite { path, content }`, `Generic`.
+
+### `permission` module — per-runtime broker
+
+Rebuilt in v3-multi-agent Phase 1. **No global singleton** — each
+`TidepoolSession` constructs its own `PermissionBroker`. Key changes
+from the pre-v3 shape:
+
+- `PermissionGrant.expires_at: Option<jiff::Timestamp>` (was
+  `chrono::DateTime`).
+- `PermissionDecisionKind::ApproveForDuration(jiff::Span)` (was
+  `std::time::Duration`).
+- `PermissionScope` gained `FileWrite { path: String }` for
+  path-granular file-write grants.
+- Approve-for-scope and approve-for-duration caches keyed
+  `(agent_id, scope)` — per-agent isolation is **load-bearing**;
+  the broker's `request` argument list carries `agent_id` directly.
+- Origin-aware request: `request(... origin: &MessageOrigin, ...)`.
+  Partner-bypass predicate `MessageOrigin::bypasses_permission_gate()`
+  short-circuits the broker when the *immediate dispatcher* is a
+  Partner. Dispatch origin is set by `pattern_runtime::agent_loop::drive_step`
+  to `Author::Agent(self)` per orchestrate iteration — so partner-bypass
+  does NOT fire from autonomous agent activity even on Partner-
+  activated turns. Only explicit direct-execution paths (none in
+  Phase 1) override the slot to a Partner origin.
+- Timeout cleanup: `pending` and `pending_info` maps are pruned on
+  timeout; no leaks across many aborted requests.
+- Injected clock: `PermissionBroker::with_clock(now_fn)` for
+  deterministic duration-cache tests.
+
+**Ephemerality contract**: grants live in RAM only via the broker's
+`scope_cache`. There is no "load grants from disk" path. KDL holds
+*rules* (declarative); grants stay session-scoped (imperative). Module
+docstring spells this out as load-bearing for handler-level locked
+invariants — see `pattern_runtime::sdk::handlers::file` for the
+config-KDL shape guard that depends on this property.
+
+### `MessageOrigin::bypasses_permission_gate()`
+
+Predicate added to `types::origin::MessageOrigin` that returns `true`
+for `Author::Partner(_)` and `false` for everyone else. The broker
+calls it on the *immediate dispatcher* origin (read from
+`SessionContext::current_dispatch_origin`), not the activating turn's
+origin. See `pattern_runtime::CLAUDE.md` for the dispatch-origin
+discipline that keeps this safe.
 
 ### Accessing Data Sources from Tools
 Tools that need typed access to specific DataStream implementations use `as_any()` downcast:

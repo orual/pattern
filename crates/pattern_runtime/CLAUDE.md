@@ -4,7 +4,7 @@ Agent runtime for Pattern v3. Houses Tidepool (Haskell-in-Rust) embedding, the
 agent turn loop, `freer-simple` effect handlers, and turn-level checkpoint
 machinery. Depends only on `pattern_core` trait definitions.
 
-Last verified: 2026-04-24 (post v3-task-skill-blocks Phase 5 Task 9)
+Last verified: 2026-04-24 (post v3-multi-agent Phase 1)
 
 v3-TUI integration note: the runtime is consumed by `pattern_server`'s actor
 via `TidepoolSession`, `MultiplexSink`, and per-batch `TurnSinkBridge`. The
@@ -286,7 +286,7 @@ Gains `snapshot_policy: SnapshotPolicy` field wrapping:
 Agent programs import from the `Pattern.*` SDK module tree (installed at
 `$PATTERN_SDK_DIR` or `crates/pattern_runtime/haskell/Pattern/` by default).
 `tidepool-extract` compiles agents with the SDK directory on its include
-path -- all 14 effect modules plus vendored utility modules are compiled
+path -- all 16 effect modules plus vendored utility modules are compiled
 and linked together.
 
 The SDK uses a hybrid qualified/unqualified import scheme. Modules with
@@ -345,7 +345,7 @@ Display, Time, Log`), then rarer effects (`Shell, File, Sources, Mcp,
 Rpc, Spawn`):
 
 ```
-Memory, Search, Recall, Message, Display, Time, Log, Shell, File,
+Memory, Search, Recall, Tasks, Skills, Message, Display, Time, Log, Shell, File,
 Sources, Mcp, Rpc, Spawn, Diagnostics
 ```
 
@@ -357,7 +357,7 @@ The SDK vendors several utility modules so agents are fully
 self-contained (no tidepool-mcp dependency):
 
 - `Pattern.Prelude` — curated prelude (Text-returning `show`, list/Map
-  helpers, Aeson construction). Does NOT re-export the 14 effect modules.
+  helpers, Aeson construction). Does NOT re-export the 16 effect modules.
 - `Pattern.Aeson`, `Pattern.Aeson.Value`, `Pattern.Aeson.KeyMap`,
   `Pattern.Aeson.Lens` — JSON construction + traversal.
 - `Pattern.Table` — tabular text formatting.
@@ -370,7 +370,7 @@ so agents can `show now` in log lines.
 
 The `code` tool's description (`sdk/code_tool.rs`) is ~6.4 KB and built
 once at process startup from `canonical_effect_decls()`. It contains:
-- Full API reference (every helper signature across all 14 effects).
+- Full API reference (every helper signature across all 16 effects).
 - Effect-row and import-scheme conventions.
 - Common gotchas section (e.g. `Memory.get` returns `Content` not
   `Maybe`, `pure ()` not `return unit`, `Show Instant` works,
@@ -648,3 +648,130 @@ similar parallel-load flakes, these investigation vectors apply:
    `/tmp` or `$XDG_CACHE_HOME` path.
 4. For wall-clock-timing assertions: widen grace ceilings or switch to
    a deterministic tokio-test clock.
+
+## Capability + permission system (v3-multi-agent Phase 1)
+
+### `permission` module
+
+Sync-to-async bridge between the eval-worker thread and the
+async `pattern_core::permission::PermissionBroker`. Same channel
+shape as `RouterBridge` (`router.rs`):
+
+- `PermissionBridge::spawn(broker)` registers a long-lived tokio task
+  that drains an `mpsc::UnboundedSender<PermissionBridgeRequest>` and
+  invokes `broker.request(...)`. Replies travel back via
+  `std::sync::mpsc::sync_channel` so the eval-worker thread can block
+  on the result without needing tokio context.
+- `request_sync(...)` is the handler-facing entry point. Returns
+  `None` on bridge-closed, broker denial, or broker timeout — handlers
+  treat all three as denial.
+- Per-session: each `SessionContext` owns one bridge instance,
+  spawned in `open_with_agent_loop` after the broker is constructed.
+
+### `policy` module
+
+Composes `pattern_core::PolicySet` for each session and ships the
+runtime-side helpers consumed by the gated handlers:
+
+- `rust_defaults()` — conservative baseline: Shell `RequireApproval`
+  on `rm -rf*` / `sudo*` / `mkfs*` / `dd if=*` / `chmod -R 000*`,
+  Spawn `RequireApproval`. Pattern config KDL writes are NOT a
+  default rule — they're enforced at the File handler level.
+- `is_pattern_config_kdl(path, content) -> ConfigGuardVerdict` — shape
+  detection used by the File handler. Filename rule + top-level
+  identifier scan; prefers false positives for safety.
+- `PERMISSION_DENIED_PREFIX` / `GATE_APPROVED_PREFIX` — string
+  prefixes handlers attach to `EffectError::Handler` messages so
+  tests (and the eventual UI) can discriminate denial / approval /
+  pure stub paths without parsing prose.
+
+### `SessionContext` extensions
+
+New fields for the capability + permission machinery:
+
+- `capabilities: Option<pattern_core::CapabilitySet>` — `None` means
+  full power; `Some` restricts the prelude effect row.
+- `policies: Arc<pattern_core::PolicySet>` — composed from
+  `rust_defaults() ++ persona.policy_rules` at session open via
+  `merge_policies`. Reads via `cx.user().policies()`.
+- `permission_broker: Arc<PermissionBroker>` — per-session, no
+  global singleton.
+- `permission_bridge: Option<Arc<PermissionBridge>>` — wired in
+  `open_with_agent_loop` (async context required for the spawn).
+- `current_dispatch_origin: Arc<RwLock<Option<MessageOrigin>>>` —
+  immediate-dispatcher origin slot. **Critical security invariant:**
+  populated by `agent_loop::drive_step` per orchestrate iteration to
+  `Author::Agent(self)` (NOT the activating turn's origin). Handlers
+  read this for the broker's partner-bypass predicate. The
+  distinction prevents an agent's autonomous activity from
+  inheriting Partner authority on a Partner-activated turn — the
+  classic "user typed a message, so the agent can now `rm -rf`
+  without prompting" failure mode. Future direct-execution paths
+  (admin REPL, audited sandboxed code) may explicitly override the
+  slot to a Partner origin before invoking a handler.
+
+New traits:
+
+- `HasPolicySet { fn policies() -> &PolicySet }` — implemented for
+  `SessionContext` and `()` (empty set, Allow-everything).
+- `HasPermissionBridge { fn permission_bridge(); fn current_dispatch_origin(); fn dispatch_agent_id() }`
+  — `dispatch_agent_id` is **load-bearing for per-agent isolation**:
+  the broker's `scope_cache` is keyed `(agent_id, scope)`, so
+  hardcoding a synthetic id would silently collapse two agents'
+  grants. The `()` shim returns `None`; handlers fail closed on
+  missing identity (return `PERMISSION_DENIED_PREFIX` rather than
+  proceeding without attribution).
+
+### `agent_loop::drive_step` dispatch-origin discipline
+
+`CurrentDispatchOriginGuard` (RAII) sets
+`ctx.current_dispatch_origin = Some(MessageOrigin::new(Author::Agent { agent_id }, sphere))`
+at the top of each orchestrate iteration; clears on Drop (panic-safe).
+The same `dispatch_origin` value is reused for the existing
+`output_origin` persistence in the same iteration, so handlers and
+persistence see identical attribution.
+
+### Shell + File handler gating
+
+Both gated handlers (`sdk/handlers/shell.rs` for `Pattern.Shell.Execute`,
+`sdk/handlers/file.rs` for `Pattern.File.Write`) share the shape:
+
+1. Read `cx.user().policies()` and evaluate.
+2. On `Deny`, return `PERMISSION_DENIED_PREFIX`-marked `EffectError::Handler`.
+3. On `RequireApproval`, escalate via `permission_bridge().request_sync(...)`.
+   On grant, return `GATE_APPROVED_PREFIX`-marked stub. On denial /
+   timeout, return `PERMISSION_DENIED_PREFIX`-marked stub.
+4. On `Allow`, return the existing "not implemented" stub error
+   without `GateApproved` marker (lets tests discriminate gate-skip
+   from gate-fire-then-allow).
+
+The File handler additionally short-circuits config-KDL writes via
+`is_pattern_config_kdl` **before** consulting `PolicySet` — the
+locked invariant is structural: no rule of any precedence can loosen
+it because the policy is never consulted on that path.
+
+### Persona KDL: `capabilities {}` and `policy {}` blocks
+
+`persona_loader` parses two new top-level blocks:
+
+```kdl
+capabilities {
+    effects { memory; message; tasks }
+    flags { spawn-new-identities }
+}
+
+policy {
+    rule "allow-git-push" effect="shell" action="allow" {
+        matcher "shell-command" pattern="git push*"
+    }
+    rule "gate-all-file-writes" effect="file" action="require-approval" {
+        matcher "file-path" pattern="*"
+        reason "all file writes gated for this persona"
+    }
+}
+```
+
+Decoded into `PersonaSnapshot.capabilities` (`Option<CapabilitySet>`)
+and `PersonaSnapshot.policy_rules` (`Vec<PolicyRule>` with
+`Precedence::KdlConfig`). `merge_policies(persona)` layers the rules
+over `rust_defaults()` at session open.

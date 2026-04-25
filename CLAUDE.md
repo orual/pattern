@@ -2,9 +2,9 @@
 
 Pattern is a multi-agent ADHD support system providing external executive function through specialized cognitive agents. Each user ("partner") gets their own constellation of agents.
 
-**Current State**: Core framework operational on `batching` branch. V3 foundation + v3-memory-rework (8 phases) + v3-TUI (6 phases) all complete. `pattern_memory` crate extracted with the InRepo/Standalone/Sidecar storage modes. `pattern_server` daemon running over IRPC/QUIC with the `pattern_cli` ratatui TUI and zellij integration. 646/646 tests passing in `pattern-cli + pattern-server + pattern-memory`.
+**Current State**: Core framework operational on `rewrite-v3` branch. V3 foundation + v3-memory-rework (8 phases) + v3-TUI (6 phases) all complete. `pattern_memory` crate extracted with the InRepo/Standalone/Sidecar storage modes. `pattern_server` daemon running over IRPC/QUIC with the `pattern_cli` ratatui TUI and zellij integration. v3-multi-agent Phase 1 complete: capability system, per-runtime permission broker (jiff-based), policy gate with handler-level shape guard for Pattern config writes, KDL `capabilities {}` and `policy {}` blocks. 755/755 tests passing in `pattern-cli + pattern-server + pattern-memory`; 643/643 in `pattern-core + pattern-runtime`.
 
-Last verified: 2026-04-23
+Last verified: 2026-04-24
 
 
 > **For AI Agents**: This is the source of truth for the Pattern codebase. Each crate has its own `CLAUDE.md` with specific implementation guidelines. `AGENTS.md` at root and in each crate is a symlink to the corresponding `CLAUDE.md` for cross-tool compatibility (Codex, Cursor, etc.).
@@ -42,7 +42,7 @@ These crates are part of the current `[workspace]` and build under
 pattern/
 ├── crates/
 │   ├── pattern_cli/      # ratatui TUI + IRPC client, mount/backup/daemon subcommands, zellij integration
-│   ├── pattern_core/     # Agent framework, memory traits, tools, coordination
+│   ├── pattern_core/     # Agent framework, capabilities, permission broker, policy types, memory traits, tools, coordination
 │   ├── pattern_db/       # SQLite (rusqlite) with FTS5 and vector search
 │   ├── pattern_memory/   # Memory subsystem: cache, CRDT sync, VCS, backup, mount modes
 │   ├── pattern_provider/ # LLM provider integration, auth, request shaping

@@ -236,6 +236,15 @@ pub trait HasPermissionBridge {
     /// be a `Partner` only when a future direct-execution path
     /// explicitly overrides the slot before invoking a handler.
     fn current_dispatch_origin(&self) -> Option<pattern_core::types::origin::MessageOrigin>;
+
+    /// Agent identifier for broker attribution. The broker's
+    /// `scope_cache` is keyed `(agent_id, scope)`; using the real
+    /// session agent here is **load-bearing for per-agent isolation** —
+    /// two agents in the same runtime asking for the same scope must
+    /// NOT share a single grant. Returning `None` (the `()` shim's
+    /// behaviour) tells handlers to fail closed: the broker call is
+    /// skipped and the request is treated as a denial.
+    fn dispatch_agent_id(&self) -> Option<pattern_core::AgentId>;
 }
 
 impl HasPermissionBridge for SessionContext {
@@ -246,6 +255,10 @@ impl HasPermissionBridge for SessionContext {
     fn current_dispatch_origin(&self) -> Option<pattern_core::types::origin::MessageOrigin> {
         SessionContext::current_dispatch_origin(self)
     }
+
+    fn dispatch_agent_id(&self) -> Option<pattern_core::AgentId> {
+        Some(pattern_core::AgentId::from(SessionContext::agent_id(self)))
+    }
 }
 
 impl HasPermissionBridge for () {
@@ -253,6 +266,9 @@ impl HasPermissionBridge for () {
         None
     }
     fn current_dispatch_origin(&self) -> Option<pattern_core::types::origin::MessageOrigin> {
+        None
+    }
+    fn dispatch_agent_id(&self) -> Option<pattern_core::AgentId> {
         None
     }
 }
@@ -1526,6 +1542,144 @@ mod tests {
         let policies = merge_policies(&persona);
         // The defaults vec contains five shell rules + one spawn rule.
         assert_eq!(policies.rules().len(), crate::policy::rust_defaults().len());
+    }
+
+    /// AC2.2 end-to-end (review fix): a persona with a KDL `Allow`
+    /// rule for `git push*` reaches the Shell handler, the policy
+    /// evaluates to Allow, and the broker is NOT invoked. Exercises
+    /// the full wire `persona.policy_rules → from_persona →
+    /// SessionContext.policies → ShellHandler reads cx.user().policies()`.
+    #[tokio::test]
+    async fn ac2_2_persona_kdl_allow_reaches_shell_handler_and_skips_broker() {
+        use crate::sdk::handlers::shell::ShellHandler;
+        use crate::sdk::requests::ShellReq;
+        use pattern_core::{EffectCategory, PolicyAction, PolicyMatcher, PolicyRule, Precedence};
+        use tidepool_effect::EffectHandler;
+        use tidepool_repr::DataConTable;
+
+        let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
+        let provider: Arc<dyn ProviderClient> = Arc::new(MockProviderClient::with_turns(vec![]));
+        let db = crate::testing::test_db().await;
+
+        let persona =
+            PersonaSnapshot::new("agent-ac2-2", "AC22").with_policy_rules([PolicyRule::new(
+                EffectCategory::Shell,
+                PolicyMatcher::ShellCommand {
+                    pattern: "git push*".into(),
+                },
+                PolicyAction::Allow,
+                Precedence::KdlConfig,
+            )]);
+
+        // Wire a real broker + bridge, then watch for any traffic.
+        let ctx_owned = SessionContext::from_persona(&persona, store, provider, db);
+        let broker = ctx_owned.permission_broker().clone();
+        let bridge = Arc::new(crate::permission::PermissionBridge::spawn(broker.clone()));
+        let ctx = ctx_owned.with_permission_bridge(bridge);
+
+        let mut rx = broker.subscribe();
+        let saw_broker = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let saw_for_thread = saw_broker.clone();
+        let watcher = tokio::spawn(async move {
+            if rx.recv().await.is_ok() {
+                saw_for_thread.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+
+        let result = tokio::task::spawn_blocking(move || {
+            let mut h = ShellHandler;
+            let table = DataConTable::new();
+            let cx_eff = tidepool_effect::EffectContext::with_user(&table, &ctx);
+            h.handle(ShellReq::Execute("git push origin main".into()), &cx_eff)
+        })
+        .await
+        .expect("blocking task")
+        .expect_err("Phase 1 stub always errors");
+        let msg = result.to_string();
+        // Allow path: stub error WITHOUT GateApproved marker (gate did
+        // not fire because policy returned Allow before any broker call).
+        assert!(
+            msg.contains("Pattern.Shell.Execute is not implemented"),
+            "expected plain stub error, got: {msg}"
+        );
+        assert!(
+            !msg.contains("GateApproved:"),
+            "Allow path must not carry GateApproved marker — gate should be skipped, got: {msg}"
+        );
+
+        // Allow watcher a beat to record any broker traffic.
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert!(
+            !saw_broker.load(std::sync::atomic::Ordering::SeqCst),
+            "broker must NOT receive any request when KDL Allow rule matches"
+        );
+        watcher.abort();
+    }
+
+    /// AC2.3 end-to-end (review fix): a persona with a KDL
+    /// `RequireApproval` rule for all file writes (`*` glob) escalates
+    /// non-config writes through the broker. Exercises the same wire
+    /// as AC2.2 but through the File handler.
+    #[tokio::test]
+    async fn ac2_3_persona_kdl_require_approval_reaches_file_handler_and_invokes_broker() {
+        use crate::sdk::handlers::file::FileHandler;
+        use crate::sdk::requests::FileReq;
+        use pattern_core::permission::PermissionDecisionKind;
+        use pattern_core::{EffectCategory, PolicyAction, PolicyMatcher, PolicyRule, Precedence};
+        use tidepool_effect::EffectHandler;
+        use tidepool_repr::DataConTable;
+
+        let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
+        let provider: Arc<dyn ProviderClient> = Arc::new(MockProviderClient::with_turns(vec![]));
+        let db = crate::testing::test_db().await;
+
+        let persona =
+            PersonaSnapshot::new("agent-ac2-3", "AC23").with_policy_rules([PolicyRule::new(
+                EffectCategory::File,
+                PolicyMatcher::FilePath {
+                    pattern: "*".into(),
+                },
+                PolicyAction::RequireApproval {
+                    reason: Some("all file writes gated for this persona".into()),
+                },
+                Precedence::KdlConfig,
+            )]);
+
+        let ctx_owned = SessionContext::from_persona(&persona, store, provider, db);
+        let broker = ctx_owned.permission_broker().clone();
+        let bridge = Arc::new(crate::permission::PermissionBridge::spawn(broker.clone()));
+        let ctx = ctx_owned.with_permission_bridge(bridge);
+
+        // Subscribe synchronously so the responder never misses.
+        let mut rx = broker.subscribe();
+        let broker_for_responder = broker.clone();
+        let responder = tokio::spawn(async move {
+            if let Ok(req) = rx.recv().await {
+                broker_for_responder
+                    .resolve(&req.id, PermissionDecisionKind::ApproveOnce)
+                    .await;
+            }
+        });
+
+        let result = tokio::task::spawn_blocking(move || {
+            let mut h = FileHandler;
+            let table = DataConTable::new();
+            let cx_eff = tidepool_effect::EffectContext::with_user(&table, &ctx);
+            h.handle(
+                FileReq::Write("/tmp/notes.txt".into(), "hello".into()),
+                &cx_eff,
+            )
+        })
+        .await
+        .expect("blocking task")
+        .expect_err("Phase 1 stub always errors");
+        let msg = result.to_string();
+        assert!(
+            msg.contains("GateApproved:"),
+            "expected GateApproved marker — broker must have observed the prompt and approved, \
+             got: {msg}"
+        );
+        responder.await.unwrap();
     }
 
     #[test]

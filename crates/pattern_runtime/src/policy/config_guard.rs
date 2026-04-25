@@ -1,12 +1,20 @@
 //! Shape-based detection for writes that target a Pattern config KDL.
 //!
-//! The File handler (Task 15) consults this predicate before evaluating
-//! the rest of the policy pipeline so that writes to pattern config
+//! The File handler (Task 15) consults this predicate **before**
+//! evaluating the policy pipeline so that writes to pattern config
 //! files (`.pattern.kdl`, persona KDLs with pattern-shaped top-level
-//! nodes) are gated regardless of any KDL-loaded `Allow` rule the
-//! agent's persona may have layered on top — i.e. it lands as a
-//! [`pattern_core::Precedence::LockedDefault`] in the policy set,
-//! which no `KdlConfig` rule can outweigh.
+//! nodes) escalate directly to the broker without passing through
+//! [`pattern_core::PolicySet`]. Because no rule of any precedence
+//! (`RustDefault`, `KdlConfig`, `RuntimeOverride`) is consulted on
+//! this path, no rule can loosen the gate; the locked invariant is a
+//! structural property of the File handler, not of the policy system.
+//! See `sdk/handlers/file.rs::evaluate_write` for the short-circuit.
+//!
+//! The user can still grant temporary access via the broker's
+//! `ApproveForDuration` / `ApproveForScope` flow — those grants live
+//! in the broker's in-memory `scope_cache` only and die with the
+//! session (see `pattern_core::permission` for the ephemerality
+//! invariant).
 //!
 //! Detection prefers false-positives over false-negatives per design:
 //! a benign `.kdl` file that happens to use one of the pattern-specific
