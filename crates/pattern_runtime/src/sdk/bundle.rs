@@ -63,6 +63,28 @@ pub fn canonical_effect_decls() -> Vec<crate::sdk::describe::EffectDecl> {
     SdkBundle::collect_decls()
 }
 
+/// Filter [`canonical_effect_decls`] down to the effects an agent's
+/// capability set permits.
+///
+/// Decls whose `type_name` doesn't resolve to a known
+/// [`pattern_core::EffectCategory`] are excluded — this protects against
+/// drift where a new handler is added to `CANONICAL_EFFECT_ROW` before
+/// `EffectCategory` has a matching variant (the
+/// `canonical_row_matches_effect_category_implemented_set` test catches
+/// this in CI; this filter fails closed at runtime).
+pub fn filtered_effect_decls(
+    caps: &pattern_core::CapabilitySet,
+) -> Vec<crate::sdk::describe::EffectDecl> {
+    canonical_effect_decls()
+        .into_iter()
+        .filter(|decl| {
+            pattern_core::EffectCategory::from_type_name(decl.type_name)
+                .map(|cat| caps.contains(cat))
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
 /// The canonical effect-row type names in bundle order. Useful for
 /// assertions and documentation.
 pub const CANONICAL_EFFECT_ROW: &[&str] = &[

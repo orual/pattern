@@ -18,16 +18,65 @@
 
 use crate::sdk::describe::EffectDecl;
 
-/// Build the Haskell preamble string.
+/// Import strategy for an SDK effect module in the agent prelude.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImportStyle {
+    /// Dual import: unqualified (terse helpers like `send`, `now`) plus a
+    /// qualified alias for explicit-attribution call sites. Used for the
+    /// four modules whose helper names don't collide with Prelude or each
+    /// other.
+    Dual,
+    /// Qualified-only import. The module's helpers are generic verbs
+    /// (`get`, `read`, `error`) that would shadow Prelude or each other
+    /// without a prefix.
+    QualifiedOnly,
+}
+
+/// Decide the import style for an SDK effect module by name.
 ///
-/// The `decls` parameter (callers pass [`crate::sdk::bundle::canonical_effect_decls()`])
-/// is used to emit an API-documentation comment block listing each effect's
-/// helper signatures — the LLM reads these to discover what operations are
-/// available per effect. GADT declarations and helper bodies are NOT
-/// inlined (the effect modules are imported directly; tidepool's
-/// multi-module compilation works since the DataConTable/CoreExpr bug
-/// was fixed in our fork). The `type M` alias is hardcoded to match the
-/// canonical 16-effect row.
+/// Modules whose helper verbs are unambiguous get dual imports
+/// (`Pattern.<Name>` + `qualified Pattern.<Name> as <Name>`); the
+/// remainder are qualified-only.
+fn import_style(type_name: &str) -> ImportStyle {
+    match type_name {
+        "Message" | "Time" | "Display" | "Spawn" => ImportStyle::Dual,
+        _ => ImportStyle::QualifiedOnly,
+    }
+}
+
+/// Render one entry of the `type M` effect-row alias for an effect
+/// module: `<Name>` for dual-imported modules whose type is in scope
+/// unqualified, `<Name>.<Name>` for qualified-only modules.
+fn type_m_entry(type_name: &str) -> String {
+    match import_style(type_name) {
+        ImportStyle::Dual => type_name.to_string(),
+        ImportStyle::QualifiedOnly => format!("{type_name}.{type_name}"),
+    }
+}
+
+/// Build the Haskell preamble scoped to a [`pattern_core::CapabilitySet`].
+///
+/// Convenience over [`build`]: filters the canonical effect decls down
+/// to the categories `caps` permits, then concatenates the prelude.
+/// Effects absent from `caps` produce neither imports nor `type M`
+/// row entries, so referencing them in agent code fails at Tidepool
+/// compile (AC1.2).
+pub fn build_for(caps: &pattern_core::CapabilitySet) -> String {
+    let decls = crate::sdk::bundle::filtered_effect_decls(caps);
+    build(&decls)
+}
+
+/// Build the Haskell preamble string from an effect-decl slice.
+///
+/// The `decls` parameter (callers pass [`crate::sdk::bundle::canonical_effect_decls`]
+/// for unfiltered output, or [`crate::sdk::bundle::filtered_effect_decls`]
+/// for capability-scoped output) drives both the SDK import block and
+/// the `type M` effect-row alias — an empty slice produces a prelude
+/// with no SDK imports and `type M = '[]`, which still type-checks for
+/// pure-computation agent programs (AC1.6). GADT declarations and
+/// helper bodies are NOT inlined: the effect modules are imported
+/// directly. Tidepool's multi-module compilation works since the
+/// DataConTable/CoreExpr bug was fixed in our fork.
 pub fn build(decls: &[EffectDecl]) -> String {
     let mut out = String::with_capacity(8192);
 
@@ -70,39 +119,43 @@ pub fn build(decls: &[EffectDecl]) -> String {
     // disambiguation at call sites). The four "terse" modules (Message,
     // Time, Display, Spawn) have helper names that don't collide with
     // Prelude or other effects — agents can write bare `send`, `now`,
-    // `chunk`, `start`. The other ten have generic verbs (`get`,
+    // `chunk`, `start`. The other modules have generic verbs (`get`,
     // `read`, `error`, `create`, `list`, etc.) that WOULD collide
     // unqualified, so they ARE ONLY imported qualified (not both). This
     // also gives the LLM a single consistent style (`Memory.put`,
     // `Display.chunk`, `Log.info`, `Tasks.create`) when it
     // pattern-matches off other SDK conventions.
-    out.push_str(
-        "-- Terse-import SDK effects (also qualified for explicit-attribution call sites)\n",
-    );
-    out.push_str("import Pattern.Message\n");
-    out.push_str("import qualified Pattern.Message as Message\n");
-    out.push_str("import Pattern.Time\n");
-    out.push_str("import qualified Pattern.Time as Time\n");
-    out.push_str("import Pattern.Display\n");
-    out.push_str("import qualified Pattern.Display as Display\n");
-    out.push_str("import Pattern.Spawn\n");
-    out.push_str("import qualified Pattern.Spawn as Spawn\n");
     //
-    // Qualified-only: modules with generic verbs (get/put/search/read/write/error)
-    // that would collide with Prelude symbols or with each other if unqualified.
-    out.push_str("-- Qualified-only SDK effects (generic verbs clarified by prefix)\n");
-    out.push_str("import qualified Pattern.Memory as Memory\n");
-    out.push_str("import qualified Pattern.File as File\n");
-    out.push_str("import qualified Pattern.Log as Log\n");
-    out.push_str("import qualified Pattern.Sources as Sources\n");
-    out.push_str("import qualified Pattern.Shell as Shell\n");
-    out.push_str("import qualified Pattern.Rpc as Rpc\n");
-    out.push_str("import qualified Pattern.Mcp as Mcp\n");
-    out.push_str("import qualified Pattern.Search as Search\n");
-    out.push_str("import qualified Pattern.Recall as Recall\n");
-    out.push_str("import qualified Pattern.Tasks as Tasks\n");
-    out.push_str("import qualified Pattern.Skills as Skills\n");
-    out.push_str("import qualified Pattern.Diagnostics as Diagnostics\n");
+    // Imports are emitted from the `decls` slice — capability filtering
+    // (Phase 1) drops effects the agent is not permitted to call before
+    // the slice arrives here, so an empty slice produces no SDK imports
+    // and a `type M = '[]` row (pure-computation programs still compile).
+    let (terse_decls, qualified_decls): (Vec<&EffectDecl>, Vec<&EffectDecl>) = decls
+        .iter()
+        .partition(|d| matches!(import_style(d.type_name), ImportStyle::Dual));
+
+    if !terse_decls.is_empty() {
+        out.push_str(
+            "-- Terse-import SDK effects (also qualified for explicit-attribution call sites)\n",
+        );
+        for decl in &terse_decls {
+            out.push_str(&format!("import Pattern.{}\n", decl.type_name));
+            out.push_str(&format!(
+                "import qualified Pattern.{0} as {0}\n",
+                decl.type_name
+            ));
+        }
+    }
+
+    if !qualified_decls.is_empty() {
+        out.push_str("-- Qualified-only SDK effects (generic verbs clarified by prefix)\n");
+        for decl in &qualified_decls {
+            out.push_str(&format!(
+                "import qualified Pattern.{0} as {0}\n",
+                decl.type_name
+            ));
+        }
+    }
 
     out.push_str("default (Int, Text)\n");
     // Text-accepting error shim. Hides Pattern.Log.error (qualified as
@@ -116,39 +169,41 @@ pub fn build(decls: &[EffectDecl]) -> String {
     // what operations exist on each module. The signatures come from
     // each handler's `DescribeEffect::effect_decl()`.helpers and are
     // comment-only (no semantic effect on compilation) but are visible
-    // in the source the LLM sees when errors quote file content.
-    out.push_str("-- === Pattern SDK API reference ===\n");
-    out.push_str("-- The effects below are available in the `M` row.\n");
-    out.push_str("-- See each module's docs; signatures shown here for reference.\n");
-    for eff in decls {
-        out.push_str("-- \n");
-        out.push_str(&format!("-- {} ({}):\n", eff.type_name, eff.description));
-        for h in eff.helpers {
-            // Helpers are emitted as "sig\nbody" strings — we want the
-            // signature line only (first line) for the docs.
-            if let Some(sig) = h.lines().next() {
-                out.push_str("--   ");
-                out.push_str(sig);
-                out.push('\n');
+    // in the source the LLM sees when errors quote file content. When
+    // `decls` is empty (full capability filtering) the block is omitted —
+    // there's nothing to document.
+    if !decls.is_empty() {
+        out.push_str("-- === Pattern SDK API reference ===\n");
+        out.push_str("-- The effects below are available in the `M` row.\n");
+        out.push_str("-- See each module's docs; signatures shown here for reference.\n");
+        for eff in decls {
+            out.push_str("-- \n");
+            out.push_str(&format!("-- {} ({}):\n", eff.type_name, eff.description));
+            for h in eff.helpers {
+                // Helpers are emitted as "sig\nbody" strings — we want the
+                // signature line only (first line) for the docs.
+                if let Some(sig) = h.lines().next() {
+                    out.push_str("--   ");
+                    out.push_str(sig);
+                    out.push('\n');
+                }
             }
         }
+        out.push_str("-- === end API reference ===\n\n");
     }
-    out.push_str("-- === end API reference ===\n\n");
 
     // Effect-row type synonym. NOTE: `M` is the effect LIST (kind
     // `[* -> *]`), NOT `Eff '[...]`. The result binding in generated
     // snippets is `result :: Eff M Value`, which expands to
     // `Eff '[Memory.Memory, ...] Value`. Wrapping `Eff` into the
     // synonym here would produce `Eff (Eff '[...]) Value` — a kind
-    // error. Canonical order: Memory, Search, Recall, Tasks, Skills,
-    // Message, Display, Time, Log, Shell, File, Sources, Mcp, Rpc,
-    // Spawn, Diagnostics. Must match `SdkBundle` HList in `bundle.rs`.
-    out.push_str(concat!(
-        "type M = '[Memory.Memory, Search.Search, Recall.Recall, Tasks.Tasks, Skills.Skills, ",
-        "Message, Display, Time, Log.Log, Shell.Shell, ",
-        "File.File, Sources.Sources, Mcp.Mcp, Rpc.Rpc, Spawn, ",
-        "Diagnostics.Diagnostics]\n\n",
-    ));
+    // error. The row is built from the canonical-order `decls` slice;
+    // dual-imported modules (Message, Display, Time, Spawn) appear
+    // unqualified, qualified-only modules appear as `<Name>.<Name>`.
+    // An empty slice produces `type M = '[]`, which still type-checks
+    // for pure-computation programs.
+    let type_m_row: Vec<String> = decls.iter().map(|d| type_m_entry(d.type_name)).collect();
+    out.push_str(&format!("type M = '[{}]\n\n", type_m_row.join(", ")));
 
     // Pagination support — pure Haskell functions (no effect types),
     // safe to inline. The non-interactive variant (no Ask drill-down).
@@ -469,5 +524,139 @@ mod tests {
     #[test]
     fn build_effect_stack_type_empty() {
         assert_eq!(build_effect_stack_type(&[]), "'[]");
+    }
+
+    // ── Capability-filtered preamble (Phase 1 Task 3) ────────────────────────
+
+    use pattern_core::{CapabilitySet, EffectCategory};
+
+    #[test]
+    fn build_for_full_capability_set_matches_unfiltered_build() {
+        // AC1.4: CapabilitySet::all() produces the same prelude as the
+        // unfiltered canonical decls.
+        let unfiltered = build(&canonical_effect_decls());
+        let filtered = build_for(&CapabilitySet::all());
+        assert_eq!(
+            filtered, unfiltered,
+            "CapabilitySet::all() must match canonical_effect_decls() output"
+        );
+    }
+
+    #[test]
+    fn filtered_decls_excludes_absent_categories() {
+        // AC1.1: a CapabilitySet missing Shell/Spawn/Wake produces a row
+        // without those constructors.
+        let caps = CapabilitySet::from_iter([
+            EffectCategory::Memory,
+            EffectCategory::Message,
+            EffectCategory::Tasks,
+        ]);
+        let decls = crate::sdk::bundle::filtered_effect_decls(&caps);
+        let names: Vec<&str> = decls.iter().map(|d| d.type_name).collect();
+        // Canonical order in CANONICAL_EFFECT_ROW: Memory, ..., Tasks, ..., Message, ...
+        // Filtering preserves canonical order, not the iter order from the caller.
+        assert_eq!(names, vec!["Memory", "Tasks", "Message"]);
+    }
+
+    #[test]
+    fn build_for_minimal_capability_set_excludes_filtered_imports() {
+        // AC1.1 / AC1.2: capability filtering removes effect imports +
+        // type M entries, so referencing the missing modules can't
+        // compile against this preamble.
+        let caps = CapabilitySet::from_iter([EffectCategory::Memory, EffectCategory::Message]);
+        let preamble = build_for(&caps);
+
+        // Allowed imports / row entries are present.
+        assert!(
+            preamble.contains("import Pattern.Message"),
+            "Message should be dual-imported"
+        );
+        assert!(
+            preamble.contains("import qualified Pattern.Memory as Memory"),
+            "Memory should be qualified-imported"
+        );
+        assert!(
+            preamble.contains("type M = '[Memory.Memory, Message]"),
+            "type M row should contain only allowed effects, got: \
+             {preamble:?}",
+        );
+
+        // Excluded effects must not appear in imports or type M.
+        for excluded in &["Shell", "File", "Spawn", "Diagnostics", "Tasks"] {
+            assert!(
+                !preamble.contains(&format!("import qualified Pattern.{excluded}")),
+                "preamble must not import excluded effect {excluded}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_for_empty_capability_set_produces_pure_computation_prelude() {
+        // AC1.6: an empty CapabilitySet yields a prelude with base types
+        // and `type M = '[]`, but no effect imports or constructors. A
+        // pure-computation agent program still compiles against it.
+        let preamble = build_for(&CapabilitySet::empty());
+
+        // Base imports always emit.
+        assert!(preamble.contains("import Pattern.Prelude"));
+        assert!(preamble.contains("import qualified Data.Text as T"));
+
+        // No SDK effect imports.
+        for sdk_module in &[
+            "Pattern.Memory",
+            "Pattern.Message",
+            "Pattern.Shell",
+            "Pattern.File",
+            "Pattern.Spawn",
+            "Pattern.Tasks",
+            "Pattern.Skills",
+            "Pattern.Diagnostics",
+        ] {
+            assert!(
+                !preamble.contains(&format!("import {sdk_module}")),
+                "empty caps must not emit '{sdk_module}' import"
+            );
+            assert!(
+                !preamble.contains(&format!("import qualified {sdk_module}")),
+                "empty caps must not emit qualified '{sdk_module}' import"
+            );
+        }
+
+        // type M row is empty.
+        assert!(
+            preamble.contains("type M = '[]"),
+            "empty caps must produce `type M = '[]`, got: {preamble}"
+        );
+
+        // No API reference block (it would be empty).
+        assert!(
+            !preamble.contains("=== Pattern SDK API reference ==="),
+            "empty caps must skip API reference block"
+        );
+
+        // Pagination support still emits (pure Haskell, no effect deps).
+        assert!(preamble.contains("paginateResult"));
+    }
+
+    #[test]
+    fn build_for_preserves_canonical_row_order_in_type_m() {
+        // The type M row order must match canonical_effect_decls() order
+        // so the JIT effect-tag indices stay aligned with the bundle.
+        let preamble = build_for(&CapabilitySet::all());
+        let row_start = preamble.find("type M = '[").expect("type M alias");
+        let row_end = preamble[row_start..].find("]\n").expect("type M end") + row_start;
+        let row = &preamble[row_start..=row_end];
+
+        // Spot-check canonical-order prefix.
+        assert!(
+            row.starts_with(
+                "type M = '[Memory.Memory, Search.Search, Recall.Recall, Tasks.Tasks, Skills.Skills, Message"
+            ),
+            "type M must start in canonical order, got: {row}"
+        );
+        assert!(
+            row.ends_with("Spawn, Diagnostics.Diagnostics]"),
+            "type M must end with Spawn, Diagnostics.Diagnostics, got: {row}"
+        );
     }
 }
