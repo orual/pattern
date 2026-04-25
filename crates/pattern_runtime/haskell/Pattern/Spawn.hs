@@ -140,6 +140,31 @@ data SiblingConfig = SiblingConfig
   , siblingSharedBlocks :: [Text]
   }
 
+-- | Status of a sibling spawn — whether the new persona is authorised
+--   for live session-open or sits as a pending draft.
+--
+--   * 'SiblingActive' — parent held @SpawnNewIdentities@; Phase 6 promotes
+--     to a live session.
+--   * 'SiblingDraft'  — parent did not; the draft is pending human-driven
+--     promote.
+--
+-- For @SiblingPersona = ExistingPersona _@ the status is always
+-- 'SiblingActive' (the persona is already a registered identity).
+data SiblingStatus
+  = SiblingActive
+  | SiblingDraft
+
+-- | Typed handle returned by 'sibling'. Pairs the persona id with its
+--   status and (for new-identity drafts) the on-disk path of the
+--   written KDL.
+--
+--   Mirrors @WireSiblingSpawn@ in @crates\/pattern_runtime\/src\/sdk\/requests\/spawn.rs@.
+data SiblingSpawn = SiblingSpawn
+  { siblingSpawnId      :: PersonaId
+  , siblingSpawnStatus  :: SiblingStatus
+  , siblingSpawnKdlPath :: Maybe Text
+  }
+
 -- ── Result types ──────────────────────────────────────────────────────────────
 
 -- | Typed handle returned by 'ephemeral'. Pairs the spawn id with the
@@ -203,7 +228,7 @@ data Spawn a where
   AwaitSpawn :: SpawnId -> Spawn SpawnResult
   AwaitAll   :: [SpawnId] -> Spawn [SpawnAwaitOutcome]
   Fork       :: ForkConfig -> Spawn ForkHandle
-  Sibling    :: SiblingConfig -> Spawn PersonaId
+  Sibling    :: SiblingConfig -> Spawn SiblingSpawn
   Stop       :: SpawnId -> Spawn ()
 
 -- ── Helpers ───────────────────────────────────────────────────────────────────
@@ -230,7 +255,7 @@ fork :: Member Spawn effs => ForkConfig -> Eff effs ForkHandle
 fork cfg = send (Fork cfg)
 
 -- | Spawn a sibling persona. Returns the sibling's 'PersonaId'.
-sibling :: Member Spawn effs => SiblingConfig -> Eff effs PersonaId
+sibling :: Member Spawn effs => SiblingConfig -> Eff effs SiblingSpawn
 sibling cfg = send (Sibling cfg)
 
 -- | Cancel an in-flight spawn by id. Idempotent.

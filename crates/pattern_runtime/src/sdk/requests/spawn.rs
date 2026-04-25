@@ -453,3 +453,48 @@ impl From<Result<SpawnResult, crate::spawn::SpawnError>> for WireSpawnAwaitOutco
         }
     }
 }
+
+/// Wire mirror of [`crate::spawn::sibling::SiblingStatus`]. `Sibling`-prefix
+/// avoids ctor-name clashes with effect ctors.
+#[derive(Debug, ToCore)]
+pub enum WireSiblingStatus {
+    /// Persona is authorised for live session-open (Phase 6 promotes).
+    #[core(module = "Pattern.Spawn", name = "SiblingActive")]
+    Active,
+    /// Persona is a pending draft awaiting human-driven promote.
+    #[core(module = "Pattern.Spawn", name = "SiblingDraft")]
+    Draft,
+}
+
+impl From<crate::spawn::sibling::SiblingStatus> for WireSiblingStatus {
+    fn from(s: crate::spawn::sibling::SiblingStatus) -> Self {
+        match s {
+            crate::spawn::sibling::SiblingStatus::Active => WireSiblingStatus::Active,
+            crate::spawn::sibling::SiblingStatus::Draft => WireSiblingStatus::Draft,
+        }
+    }
+}
+
+/// Wire mirror of the typed handle returned by `Spawn.sibling`.
+///
+/// Carries the new persona id, its `status` (Active / Draft), and the
+/// on-disk path of the draft KDL when applicable. For
+/// `SiblingPersona::Existing` the status is always `Active` and `kdl_path`
+/// is `None`.
+#[derive(Debug, ToCore)]
+#[core(module = "Pattern.Spawn", name = "SiblingSpawn")]
+pub struct WireSiblingSpawn {
+    pub persona_id: String,
+    pub status: WireSiblingStatus,
+    pub kdl_path: Option<String>,
+}
+
+impl From<crate::spawn::sibling::SiblingNewOutcome> for WireSiblingSpawn {
+    fn from(o: crate::spawn::sibling::SiblingNewOutcome) -> Self {
+        Self {
+            persona_id: o.persona_id.to_string(),
+            status: o.status.into(),
+            kdl_path: Some(o.kdl_path.display().to_string()),
+        }
+    }
+}

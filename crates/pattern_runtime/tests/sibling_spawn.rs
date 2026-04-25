@@ -168,17 +168,25 @@ async fn ac5_2_new_sibling_with_spawn_new_identities_writes_draft() {
         RelationshipKind::PeerWith,
     );
 
-    let id = spawn_sibling_new(&parent, &cfg, &persona_cfg, drafts_dir.path())
+    let outcome = spawn_sibling_new(&parent, &cfg, &persona_cfg, drafts_dir.path())
         .await
         .expect("should succeed when parent has SpawnNewIdentities");
 
-    // The draft file must exist in the provided dir.
-    let expected_file = drafts_dir.path().join(format!("{id}.kdl"));
+    // AC5.2 structural gate: parent had the flag → status must be Active.
+    assert_eq!(
+        outcome.status,
+        pattern_runtime::spawn::sibling::SiblingStatus::Active,
+        "parent held SpawnNewIdentities; outcome must be Active"
+    );
+
+    let expected_file = drafts_dir
+        .path()
+        .join(format!("{}.kdl", outcome.persona_id));
     assert!(
         expected_file.exists(),
         "draft KDL must be written to {expected_file:?}"
     );
-    // Confirm the file is non-empty KDL-like content.
+    assert_eq!(outcome.kdl_path, expected_file);
     let content = std::fs::read_to_string(&expected_file).expect("file must be readable");
     assert!(
         content.contains("name"),
@@ -210,13 +218,26 @@ async fn ac5_3_new_sibling_without_flag_writes_draft_no_live_session() {
         RelationshipKind::SpecialistFor,
     );
 
-    let id = spawn_sibling_new(&parent, &cfg, &persona_cfg, drafts_dir.path())
+    let outcome = spawn_sibling_new(&parent, &cfg, &persona_cfg, drafts_dir.path())
         .await
         .expect("draft write must succeed regardless of SpawnNewIdentities flag");
 
-    let expected_file = drafts_dir.path().join(format!("{id}.kdl"));
+    // AC5.3 structural gate: parent lacked the flag → status must be Draft.
+    // The on-disk artefact is still written so Phase 6's promote workflow
+    // has something to ingest, but the wire signals "not authorised for
+    // live session-open."
+    assert_eq!(
+        outcome.status,
+        pattern_runtime::spawn::sibling::SiblingStatus::Draft,
+        "parent lacked SpawnNewIdentities; outcome must be Draft"
+    );
+
+    let expected_file = drafts_dir
+        .path()
+        .join(format!("{}.kdl", outcome.persona_id));
     assert!(
         expected_file.exists(),
         "draft KDL must be written even when flag is absent; path={expected_file:?}"
     );
+    assert_eq!(outcome.kdl_path, expected_file);
 }

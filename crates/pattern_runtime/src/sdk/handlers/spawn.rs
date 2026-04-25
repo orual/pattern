@@ -23,7 +23,9 @@ use pattern_core::types::ids::new_id;
 
 use crate::sdk::describe::{DescribeEffect, EffectDecl};
 use crate::sdk::requests::SpawnReq;
-use crate::sdk::requests::spawn::{WireEphemeralSpawn, WireSpawnAwaitOutcome, WireSpawnResult};
+use crate::sdk::requests::spawn::{
+    WireEphemeralSpawn, WireSiblingSpawn, WireSiblingStatus, WireSpawnAwaitOutcome, WireSpawnResult,
+};
 use crate::session::SessionContext;
 use crate::spawn::sibling::{spawn_sibling_existing, spawn_sibling_new};
 use crate::spawn::{
@@ -46,7 +48,7 @@ impl DescribeEffect for SpawnHandler {
                 "AwaitSpawn :: SpawnId -> Spawn SpawnResult",
                 "AwaitAll   :: [SpawnId] -> Spawn [SpawnAwaitOutcome]",
                 "Fork       :: ForkConfig -> Spawn ForkHandle",
-                "Sibling    :: SiblingConfig -> Spawn PersonaId",
+                "Sibling    :: SiblingConfig -> Spawn SiblingSpawn",
                 "Stop       :: SpawnId -> Spawn ()",
             ],
             type_defs: &[
@@ -58,13 +60,15 @@ impl DescribeEffect for SpawnHandler {
                 "data SpawnResult = SpawnResult { spawnResultChildId :: SpawnId, spawnResultFinalText :: Maybe Text, spawnResultTurns :: Int, spawnResultTerminated :: TerminationReason, spawnResultProgressLogLabel :: Maybe Text }",
                 "data SpawnAwaitOutcome = SpawnOk SpawnResult | SpawnFail Text",
                 "data ForkHandle = ForkHandle { forkHandleId :: SpawnId, forkHandleChildId :: SpawnId }",
+                "data SiblingStatus = SiblingActive | SiblingDraft",
+                "data SiblingSpawn = SiblingSpawn { siblingSpawnId :: PersonaId, siblingSpawnStatus :: SiblingStatus, siblingSpawnKdlPath :: Maybe Text }",
             ],
             helpers: &[
                 "ephemeral :: Member Spawn effs => EphemeralConfig -> Eff effs EphemeralSpawn\nephemeral cfg = send (Ephemeral cfg)",
                 "awaitSpawn :: Member Spawn effs => SpawnId -> Eff effs SpawnResult\nawaitSpawn sid = send (AwaitSpawn sid)",
                 "awaitAll :: Member Spawn effs => [SpawnId] -> Eff effs [SpawnAwaitOutcome]\nawaitAll ids = send (AwaitAll ids)",
                 "fork :: Member Spawn effs => ForkConfig -> Eff effs ForkHandle\nfork cfg = send (Fork cfg)",
-                "sibling :: Member Spawn effs => SiblingConfig -> Eff effs PersonaId\nsibling cfg = send (Sibling cfg)",
+                "sibling :: Member Spawn effs => SiblingConfig -> Eff effs SiblingSpawn\nsibling cfg = send (Sibling cfg)",
                 "stop :: Member Spawn effs => SpawnId -> Eff effs ()\nstop sid = send (Stop sid)",
             ],
         }
@@ -276,35 +280,43 @@ fn handle_sibling(
     let parent: &SessionContext = cx.user();
     let handle = parent.tokio_handle().clone();
 
-    let persona_id: SmolStr = match &cfg.persona {
+    let outcome: WireSiblingSpawn = match &cfg.persona {
         pattern_core::spawn::SiblingPersona::Existing(id) => {
             let resolver = parent.sibling_resolver().clone();
             let id_clone = id.clone();
             let cfg_clone = cfg.clone();
-            handle
+            let persona_id = handle
                 .block_on(spawn_sibling_existing(
                     parent, &cfg_clone, &id_clone, resolver,
                 ))
-                .map_err(|e| EffectError::Handler(e.to_string()))?
+                .map_err(|e| EffectError::Handler(e.to_string()))?;
+            // Existing-persona adoption is always Active — the persona
+            // is already a registered identity, no draft involved.
+            WireSiblingSpawn {
+                persona_id: persona_id.to_string(),
+                status: WireSiblingStatus::Active,
+                kdl_path: None,
+            }
         }
         pattern_core::spawn::SiblingPersona::New(persona_cfg) => {
             let drafts_dir = parent.drafts_dir().to_owned();
             let cfg_clone = cfg.clone();
             let persona_cfg_clone = persona_cfg.clone();
-            handle
+            let new_outcome = handle
                 .block_on(spawn_sibling_new(
                     parent,
                     &cfg_clone,
                     &persona_cfg_clone,
                     &drafts_dir,
                 ))
-                .map_err(|e| EffectError::Handler(e.to_string()))?
+                .map_err(|e| EffectError::Handler(e.to_string()))?;
+            new_outcome.into()
         }
     };
 
     // Siblings are NOT added to the spawn registry — they live independently
     // of the parent session's lifetime.
-    cx.respond(persona_id.to_string())
+    cx.respond(outcome)
 }
 
 #[cfg(test)]

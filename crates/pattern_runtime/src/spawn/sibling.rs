@@ -165,18 +165,59 @@ pub async fn spawn_sibling_existing(
 
 // ── spawn_sibling_new ─────────────────────────────────────────────────────────
 
-/// Mint a draft persona KDL for a new sibling identity and return its id.
+/// Result status of a sibling spawn — distinguishes whether the new persona
+/// is authorised for a live session (`Active`) or sits as a pending draft
+/// awaiting human promotion (`Draft`).
+///
+/// Phase 2 defers the actual session-open to Phase 6 for both branches, but
+/// the structural distinction is wired through the wire grammar so agents
+/// (and Phase 6's promote workflow) can branch without re-deriving the
+/// capability check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SiblingStatus {
+    /// Parent held [`pattern_core::CapabilityFlag::SpawnNewIdentities`];
+    /// the draft is authorised for live session-open. Phase 6 promotes it
+    /// to a running session.
+    Active,
+    /// Parent did NOT hold `SpawnNewIdentities`; the draft is pending
+    /// human-driven promote. Phase 6's promote workflow gates on this.
+    Draft,
+}
+
+/// Outcome of `spawn_sibling_new` — pairs the new persona id with the status
+/// (`Active` or `Draft`) and the on-disk path of the written KDL draft.
+///
+/// The handler arm flattens this to the wire-level [`WireSiblingSpawn`]
+/// (`SiblingSpawn` on the Haskell side); internal callers consume the typed
+/// outcome directly.
+#[derive(Debug, Clone)]
+pub struct SiblingNewOutcome {
+    /// Slugified persona id (used as the KDL filename stem).
+    pub persona_id: PersonaId,
+    /// Status — `Active` or `Draft`.
+    pub status: SiblingStatus,
+    /// On-disk path of the written draft KDL.
+    pub kdl_path: std::path::PathBuf,
+}
+
+/// Mint a draft persona KDL for a new sibling identity and return its id +
+/// status.
 ///
 /// # Phase 2 contract
 ///
-/// Always writes a draft KDL to `drafts_dir/<id>.kdl`. The draft is
-/// authorised for live session-open when the parent holds
-/// [`pattern_core::CapabilityFlag::SpawnNewIdentities`]; otherwise it
-/// remains a pending draft awaiting Phase 6 registry ingestion.
+/// Always writes a draft KDL to `drafts_dir/<id>.kdl`. The returned
+/// [`SiblingNewOutcome`] discriminates between:
 ///
-/// Both paths return `Ok(PersonaId)` in Phase 2 — the "no live session"
-/// distinction lands in Phase 6. The caller can distinguish the two cases via
-/// `parent.capabilities()` after the call if needed.
+/// - [`SiblingStatus::Active`]: parent held
+///   [`pattern_core::CapabilityFlag::SpawnNewIdentities`] (or its caps were
+///   `None`, meaning full power). Phase 6 will open a live session for this
+///   draft.
+/// - [`SiblingStatus::Draft`]: parent did NOT hold the flag. The draft sits
+///   pending human promote (Phase 6 workflow).
+///
+/// Phase 2 does NOT actually open a session for either path — that's
+/// deferred to Phase 6 alongside the registry. The status field gives Phase
+/// 6 the structural signal to gate session-opening.
 ///
 /// # Errors
 ///
@@ -187,39 +228,47 @@ pub async fn spawn_sibling_new(
     _cfg: &SiblingConfig,
     persona_cfg: &PersonaConfig,
     drafts_dir: &std::path::Path,
-) -> Result<PersonaId, SpawnError> {
+) -> Result<SiblingNewOutcome, SpawnError> {
     // Slugify the name to a safe file-stem id.
     let id: SmolStr = slug_from_name(&persona_cfg.name);
 
     // Write the draft KDL to disk.
     let writer = super::draft::RuntimeConfigWriter::new(drafts_dir.to_owned());
     let kdl = mint_draft_kdl(persona_cfg);
-    writer.write_draft(&id, &kdl)?;
+    let kdl_path = writer.write_draft(&id, &kdl)?;
 
-    // Log whether this is a "live-session-approved" draft or "pending" draft.
-    // The capability flag distinction is informational in Phase 2; Phase 6
-    // wires the actual session-open.
+    // Capability gate: parent caps `None` = full power per the
+    // `CapabilitySet::all` convention. Otherwise the flag must be held
+    // for the draft to be marked Active.
     let has_flag = parent
         .capabilities()
         .map(|c| c.has_flag(pattern_core::CapabilityFlag::SpawnNewIdentities))
-        .unwrap_or(true); // None means full power.
-
-    if has_flag {
-        tracing::info!(
-            persona_id = %id,
-            source = "runtime.spawn.sibling",
-            "draft persona written (live session open deferred to Phase 6)"
-        );
+        .unwrap_or(true);
+    let status = if has_flag {
+        SiblingStatus::Active
     } else {
-        tracing::info!(
+        SiblingStatus::Draft
+    };
+
+    match status {
+        SiblingStatus::Active => tracing::info!(
             persona_id = %id,
             source = "runtime.spawn.sibling",
-            "draft persona written (pending: SpawnNewIdentities flag not held; \
-             live session open deferred to Phase 6)"
-        );
+            "draft persona written (Active; live session open deferred to Phase 6)"
+        ),
+        SiblingStatus::Draft => tracing::info!(
+            persona_id = %id,
+            source = "runtime.spawn.sibling",
+            "draft persona written (Draft; SpawnNewIdentities flag not held; \
+             pending human promote in Phase 6)"
+        ),
     }
 
-    Ok(id)
+    Ok(SiblingNewOutcome {
+        persona_id: id,
+        status,
+        kdl_path,
+    })
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
