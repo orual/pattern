@@ -192,6 +192,7 @@ fn discard_persistent_synthetic_handle_surfaces_typed_error() {
             cancel_state: cancel_state.clone(),
         },
         spawner_capabilities: pattern_core::CapabilitySet::all(),
+        cancel_watcher: None,
     };
 
     match handle.discard() {

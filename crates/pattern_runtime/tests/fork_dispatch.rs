@@ -141,15 +141,14 @@ async fn lightweight_fork_inserts_into_registry_and_forks_cache() {
         .get(&ids[0])
         .expect("registered handle");
     let handle = handle_arc.lock();
+    let child_id = handle.child_id.clone();
     match &handle.isolation_state {
-        pattern_runtime::spawn::ForkIsolationState::Lightweight {
-            child_cache,
-            child_session_id,
-            ..
-        } => {
+        pattern_runtime::spawn::ForkIsolationState::Lightweight { child_cache, .. } => {
             // Child cache holds the forked block under the child session id.
+            // ForkHandle.child_id is the authoritative child id; the redundant
+            // child_session_id field was removed from ForkIsolationState::Lightweight (M2).
             let forked = child_cache
-                .get_cached_doc(child_session_id, "notes")
+                .get_cached_doc(&child_id, "notes")
                 .expect("forked block present in child cache");
             // Snapshot to verify content travelled across the fork.
             let snapshot = forked.export_snapshot().expect("export_snapshot");
@@ -438,6 +437,74 @@ async fn fork_op_promote_without_capability() {
     assert!(
         msg.contains("capability") || msg.contains("Capability"),
         "error must mention capability; got: {msg}"
+    );
+}
+
+// ── C1 regression: fork discard must not cancel parent session ──────────────
+
+/// Regression test for C1: `ForkOp::Discard` must NOT set the parent
+/// session's cancel state.
+///
+/// Root cause: `handle_fork` previously passed `parent.cancel_state()` as
+/// the child's cancel state. When `discard()` fired `request_cancel()` on
+/// the child, it was actually firing it on the parent session, which silently
+/// killed the parent's in-flight turns. The fix allocates a fresh
+/// `Arc<CancelState>` for each fork and propagates parent→child cancellation
+/// via a background watcher task that holds only a `Weak<CancelState>` to
+/// the child.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fork_discard_does_not_cancel_parent_session_c1_regression() {
+    let (parent, _parent_cache) = build_parent_with_cache().await;
+
+    // Fork the parent session.
+    let wire_cfg = WireForkConfig {
+        program: String::new(),
+        isolation: WireForkIsolation::Lightweight,
+        capabilities: None,
+        timeout_hint_ms: None,
+        task_ref: None,
+    };
+
+    let parent_for_blocking = parent.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        let table = DataConTable::new();
+        let cx = EffectContext::with_user(&table, parent_for_blocking.as_ref());
+        let mut h = SpawnHandler;
+        h.handle(SpawnReq::Fork(wire_cfg), &cx)
+    })
+    .await
+    .expect("spawn_blocking ok");
+
+    // Get the registered fork id.
+    let ids = parent.fork_registry().list_ids();
+    assert_eq!(ids.len(), 1, "must have exactly one fork registered");
+    let fork_id = ids[0].clone();
+
+    // Parent's cancel state is clear before discard.
+    assert!(
+        !parent.cancel_state().is_cancelled(),
+        "parent must not be cancelled before fork discard"
+    );
+
+    // Discard the fork.
+    let parent_for_blocking = parent.clone();
+    let fork_id_s = fork_id.to_string();
+    let _ = tokio::task::spawn_blocking(move || {
+        let table = DataConTable::new();
+        let cx = EffectContext::with_user(&table, parent_for_blocking.as_ref());
+        let mut h = SpawnHandler;
+        h.handle(SpawnReq::ForkOp(fork_id_s, WireForkOpKind::Discard), &cx)
+    })
+    .await
+    .expect("spawn_blocking ok");
+
+    // Parent's cancel state must remain clear after the fork is discarded.
+    // This is the C1 regression assertion — before the fix, discard() called
+    // request_cancel() on the parent's own cancel state because the fork was
+    // constructed with `parent.cancel_state()` as the child's cancel state.
+    assert!(
+        !parent.cancel_state().is_cancelled(),
+        "parent must NOT be cancelled after fork discard (C1 regression)"
     );
 }
 

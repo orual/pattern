@@ -283,6 +283,7 @@ fn merge_back_wrong_isolation_returns_error() {
             cancel_state,
         },
         spawner_capabilities: pattern_core::CapabilitySet::all(),
+        cancel_watcher: None,
     };
 
     match handle.merge_back_lightweight() {

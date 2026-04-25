@@ -83,6 +83,7 @@ fn merge_back_persistent_synthetic_surfaces_typed_error() {
             cancel_state: cancel,
         },
         spawner_capabilities: pattern_core::CapabilitySet::all(),
+        cancel_watcher: None,
     };
     match handle.merge_back_persistent() {
         Err(ForkError::ParentDropped)

@@ -92,40 +92,131 @@ pub fn populated_spawn_test_table() -> tidepool_repr::DataConTable {
     // rep_arity = number of fields in the struct.
 
     // WireForkHandle { fork_id: String, child_id: String }
-    insert(&mut table, 10_001, "ForkHandle", 1, 2, "Pattern.Spawn.ForkHandle");
+    insert(
+        &mut table,
+        10_001,
+        "ForkHandle",
+        1,
+        2,
+        "Pattern.Spawn.ForkHandle",
+    );
 
     // WireEphemeralSpawn { spawn_id: String, progress_log_label: String }
-    insert(&mut table, 10_002, "EphemeralSpawn", 1, 2, "Pattern.Spawn.EphemeralSpawn");
+    insert(
+        &mut table,
+        10_002,
+        "EphemeralSpawn",
+        1,
+        2,
+        "Pattern.Spawn.EphemeralSpawn",
+    );
 
     // WireSpawnResult { child_id, final_text, turns, terminated, progress_log_label }
-    insert(&mut table, 10_003, "SpawnResult", 1, 5, "Pattern.Spawn.SpawnResult");
+    insert(
+        &mut table,
+        10_003,
+        "SpawnResult",
+        1,
+        5,
+        "Pattern.Spawn.SpawnResult",
+    );
 
     // ── WireTerminationReason (unit enum variants) ──────────────────────────
     //
     // rep_arity = 0 for all (no fields).
 
-    insert(&mut table, 10_010, "TermEndTurn", 1, 0, "Pattern.Spawn.TermEndTurn");
-    insert(&mut table, 10_011, "TermToolUse", 2, 0, "Pattern.Spawn.TermToolUse");
-    insert(&mut table, 10_012, "TermMaxTurns", 3, 0, "Pattern.Spawn.TermMaxTurns");
-    insert(&mut table, 10_013, "TermTimeout", 4, 0, "Pattern.Spawn.TermTimeout");
-    insert(&mut table, 10_014, "TermCancelled", 5, 0, "Pattern.Spawn.TermCancelled");
-    insert(&mut table, 10_015, "TermError", 6, 0, "Pattern.Spawn.TermError");
+    insert(
+        &mut table,
+        10_010,
+        "TermEndTurn",
+        1,
+        0,
+        "Pattern.Spawn.TermEndTurn",
+    );
+    insert(
+        &mut table,
+        10_011,
+        "TermToolUse",
+        2,
+        0,
+        "Pattern.Spawn.TermToolUse",
+    );
+    insert(
+        &mut table,
+        10_012,
+        "TermMaxTurns",
+        3,
+        0,
+        "Pattern.Spawn.TermMaxTurns",
+    );
+    insert(
+        &mut table,
+        10_013,
+        "TermTimeout",
+        4,
+        0,
+        "Pattern.Spawn.TermTimeout",
+    );
+    insert(
+        &mut table,
+        10_014,
+        "TermCancelled",
+        5,
+        0,
+        "Pattern.Spawn.TermCancelled",
+    );
+    insert(
+        &mut table,
+        10_015,
+        "TermError",
+        6,
+        0,
+        "Pattern.Spawn.TermError",
+    );
 
     // ── WireSpawnAwaitOutcome (sum type) ────────────────────────────────────
 
     // SpawnOk(WireSpawnResult) → 1 field
     insert(&mut table, 10_020, "SpawnOk", 1, 1, "Pattern.Spawn.SpawnOk");
     // SpawnFail(String) → 1 field
-    insert(&mut table, 10_021, "SpawnFail", 2, 1, "Pattern.Spawn.SpawnFail");
+    insert(
+        &mut table,
+        10_021,
+        "SpawnFail",
+        2,
+        1,
+        "Pattern.Spawn.SpawnFail",
+    );
 
     // ── WireForkOpResult (sum type) ─────────────────────────────────────────
 
     // ForkOpUnit → 0 fields
-    insert(&mut table, 10_030, "ForkOpUnit", 1, 0, "Pattern.Spawn.ForkOpUnit");
+    insert(
+        &mut table,
+        10_030,
+        "ForkOpUnit",
+        1,
+        0,
+        "Pattern.Spawn.ForkOpUnit",
+    );
     // ForkOpMergeReport(String) → 1 field
-    insert(&mut table, 10_031, "ForkOpMergeReport", 2, 1, "Pattern.Spawn.ForkOpMergeReport");
+    insert(
+        &mut table,
+        10_031,
+        "ForkOpMergeReport",
+        2,
+        1,
+        "Pattern.Spawn.ForkOpMergeReport",
+    );
     // ForkOpPersonaId(String) → 1 field
-    insert(&mut table, 10_032, "ForkOpPersonaId", 3, 1, "Pattern.Spawn.ForkOpPersonaId");
+    insert(
+        &mut table,
+        10_032,
+        "ForkOpPersonaId",
+        3,
+        1,
+        "Pattern.Spawn.ForkOpPersonaId",
+    );
 
     // ── WireSiblingSpawn (sum type) ─────────────────────────────────────────
 

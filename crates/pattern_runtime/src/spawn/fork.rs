@@ -17,7 +17,7 @@
 //!   into the parent cache (Tasks 2-3).
 //! - `discard(self)` — consumes the handle, signals the child's
 //!   `CancelState`, and drops the child cache (Task 3).
-//! - `promote()` and `await_result()` land in Tasks 7-8.
+//! - `promote()` landed in Task 7; `ForkOp` dispatch in Task 8.
 //!
 //! # Phase 2 backward compatibility
 //!
@@ -169,8 +169,6 @@ pub enum ForkIsolationState {
     Lightweight {
         /// The child's in-memory cache of forked LoroDoc instances.
         child_cache: Arc<MemoryCache>,
-        /// Stable identifier for the child session (for log correlation).
-        child_session_id: SmolStr,
         /// Weak reference to the parent's cache.
         ///
         /// `Weak` breaks the reference cycle that would otherwise prevent
@@ -252,6 +250,17 @@ pub struct ForkHandle {
     /// handler overrides it via [`ForkHandle::with_spawner_capabilities`]
     /// using the parent's live caps.
     pub spawner_capabilities: CapabilitySet,
+    /// Cancel-propagation watcher task for parent→child cancel cascading.
+    ///
+    /// The watcher parks on the parent's `wait_for_cancel()` and flips the
+    /// child's cancel state when the parent fires. This handle is stored here
+    /// so that if the fork resolves cleanly (via `discard`, `merge_back`, or
+    /// `promote`) before the parent cancels, we can abort the watcher and
+    /// avoid a perpetual parked task.
+    ///
+    /// `None` when the fork was constructed without a tokio runtime context
+    /// (e.g. in unit tests that build `ForkHandle` directly).
+    pub cancel_watcher: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl ForkHandle {
@@ -287,6 +296,7 @@ impl ForkHandle {
                 cancel_state,
             },
             spawner_capabilities: CapabilitySet::all(),
+            cancel_watcher: None,
         }
     }
 
@@ -304,15 +314,15 @@ impl ForkHandle {
     ) -> Self {
         Self {
             fork_id,
-            child_id: child_id.clone(),
+            child_id,
             isolation_state: ForkIsolationState::Lightweight {
                 child_cache,
-                child_session_id: child_id,
                 parent_cache,
                 parent_agent_id,
                 cancel_state,
             },
             spawner_capabilities: CapabilitySet::all(),
+            cancel_watcher: None,
         }
     }
 
@@ -326,6 +336,25 @@ impl ForkHandle {
     #[must_use]
     pub fn with_spawner_capabilities(mut self, caps: CapabilitySet) -> Self {
         self.spawner_capabilities = caps;
+        self
+    }
+
+    /// Attach the parent→child cancel-propagation watcher task.
+    ///
+    /// The spawn handler spawns a task that parks on
+    /// `parent.wait_for_cancel()` and, when the parent fires, upgrades the
+    /// child's `Weak<CancelState>` and calls `request_cancel()`. The
+    /// resulting `JoinHandle` is stored here so that if the fork resolves
+    /// cleanly (via `discard`, `merge_back`, or `promote`) before the
+    /// parent cancels, the watcher can be aborted and will not remain
+    /// parked indefinitely.
+    ///
+    /// This method is intentionally separate from the constructors so
+    /// that unit tests that build `ForkHandle` directly (without a tokio
+    /// runtime) can omit it and inherit `None`.
+    #[must_use]
+    pub fn with_cancel_watcher(mut self, handle: tokio::task::JoinHandle<()>) -> Self {
+        self.cancel_watcher = Some(handle);
         self
     }
 
@@ -500,6 +529,14 @@ impl ForkHandle {
     /// `ForkError::AlreadyResolved` is reserved for a hypothetical future
     /// `&mut self` variant but is never returned by the current implementation.
     pub fn discard(self) -> Result<(), ForkError> {
+        // Abort the parent→child watcher first. If the fork is being
+        // discarded cleanly (not as a result of parent cancellation), we do
+        // not want the watcher task to wake up and fire `request_cancel` on
+        // the child after the child state has already been dropped.
+        if let Some(watcher) = self.cancel_watcher {
+            watcher.abort();
+        }
+
         match self.isolation_state {
             ForkIsolationState::Lightweight { cancel_state, .. } => {
                 cancel_state.request_cancel();

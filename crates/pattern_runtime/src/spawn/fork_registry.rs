@@ -2,7 +2,7 @@
 //!
 //! Forks created via `Spawn.fork` (`handle_fork`) live in a session-scoped
 //! [`ForkRegistry`] so subsequent `ForkOp` dispatches (`MergeBack`,
-//! `Discard`, `Promote`, `AwaitResult`) can address them by id.
+//! `Discard`, `Promote`) can address them by id.
 //!
 //! The registry is a trait so production paths can swap in a DB-backed
 //! implementation in Phase 6 (mirroring the

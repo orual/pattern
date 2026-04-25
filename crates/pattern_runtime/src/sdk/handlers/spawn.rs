@@ -354,11 +354,37 @@ fn handle_fork(
     let fork_id: smol_str::SmolStr = pattern_core::types::ids::new_id();
     let child_id: smol_str::SmolStr = pattern_core::types::ids::new_id();
     let parent_agent_id: smol_str::SmolStr = parent.agent_id().into();
-    let cancel_state = parent.cancel_state();
+
+    // Allocate a fresh cancel state for the child. The child's cancel state
+    // is NOT the parent's — calling `discard()` (which fires
+    // `child_cancel.request_cancel()`) must not cancel the parent session.
+    //
+    // Parent→child cancellation is wired via a background watcher task
+    // (below) that parks on the parent's `wait_for_cancel()` and propagates
+    // it to the child. The watcher holds only a `Weak<CancelState>` for the
+    // child so that a cleanly-resolved fork (discard/merge/promote) does not
+    // prevent the child's state from being dropped — the `Weak` upgrade will
+    // return `None` and the watcher exits without firing.
+    let child_cancel = Arc::new(crate::timeout::CancelState::new());
     let spawner_caps = parent
         .capabilities()
         .cloned()
         .unwrap_or_else(pattern_core::CapabilitySet::all);
+
+    // Parent→child cancel-propagation watcher. Mirrors the ephemeral pattern
+    // in `session.rs::fork_for_ephemeral`, but propagates to a CancelState
+    // directly rather than to a SpawnRegistry (forks do not have a registry
+    // of their own child sessions at this layer).
+    let parent_cancel_arc = parent.cancel_state();
+    let child_cancel_weak = Arc::downgrade(&child_cancel);
+    let watcher = parent.tokio_handle().spawn(async move {
+        parent_cancel_arc.wait_for_cancel().await;
+        if let Some(child) = child_cancel_weak.upgrade() {
+            child.request_cancel();
+        }
+        // If `upgrade` returned None, the child cancel state was already
+        // dropped (fork resolved cleanly). Nothing to do; closure exits.
+    });
 
     let handle = match cfg.isolation {
         pattern_core::spawn::ForkIsolation::Lightweight => {
@@ -390,20 +416,22 @@ fn handle_fork(
                 child_cache,
                 parent_agent_id.clone(),
                 parent_weak,
-                cancel_state,
+                child_cancel,
             )
             .with_spawner_capabilities(spawner_caps)
+            .with_cancel_watcher(watcher)
         }
         pattern_core::spawn::ForkIsolation::Persistent => handle_fork_persistent(
             parent,
             fork_id.clone(),
             child_id.clone(),
             parent_agent_id.clone(),
-            cancel_state,
+            child_cancel,
             spawner_caps,
             cfg.task_ref.as_ref(),
         )
-        .map_err(|e| EffectError::Handler(e.to_string()))?,
+        .map_err(|e| EffectError::Handler(e.to_string()))?
+        .with_cancel_watcher(watcher),
     };
 
     // Insert into the per-session ForkRegistry so subsequent ForkOps

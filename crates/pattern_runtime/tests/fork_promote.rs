@@ -127,6 +127,7 @@ fn promote_persistent_synthetic_jj_error_or_unavailable() {
             cancel_state: cancel,
         },
         spawner_capabilities: CapabilitySet::all().with_flags([CapabilityFlag::SpawnNewIdentities]),
+        cancel_watcher: None,
     };
 
     let drafts = tempfile::TempDir::new().expect("tempdir");
