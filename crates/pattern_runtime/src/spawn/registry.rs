@@ -156,6 +156,19 @@ pub enum SpawnError {
         /// Compiler diagnostic message.
         message: String,
     },
+    /// The sibling persona resolver could not find the requested persona id.
+    /// Surfaces the id so the caller can produce a clear diagnostic.
+    #[error("sibling persona not found: {id}")]
+    PersonaNotFound {
+        /// The persona id that was looked up and not found.
+        id: smol_str::SmolStr,
+    },
+    /// A draft persona KDL write failed. Carries the underlying I/O reason.
+    #[error("draft persona write failed: {reason}")]
+    DraftWriteFailed {
+        /// Human-readable reason for the failure.
+        reason: String,
+    },
     /// Catch-all for runtime errors propagating from the agent loop or
     /// tidepool eval path. Carries the upstream message verbatim.
     #[error("ephemeral runtime error: {0}")]

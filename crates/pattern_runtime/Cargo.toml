@@ -80,6 +80,9 @@ rustyline-async  = "0.4"
 # `lib/Pattern/SpawnHelpers.hs` module from `EphemeralConfig.program`
 # in a fresh temp dir per child, dropped when the child resolves.
 tempfile         = { workspace = true }
+# v3-multi-agent Phase 2 Tasks 6–7: sibling spawn uses XDG data dir for
+# draft persona KDL files.
+dirs             = { workspace = true }
 
 [dev-dependencies]
 tokio          = { workspace = true, features = ["rt-multi-thread", "test-util", "macros"] }

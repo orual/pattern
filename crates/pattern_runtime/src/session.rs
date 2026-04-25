@@ -46,6 +46,19 @@ fn merge_policies(persona: &PersonaSnapshot) -> pattern_core::PolicySet {
     let kdl = persona.policy_rules.iter().cloned();
     pattern_core::PolicySet::from_rules(defaults.into_iter().chain(kdl))
 }
+
+/// Compute the default draft persona directory.
+///
+/// Resolves to `<XDG_DATA_HOME>/pattern/drafts` when `dirs::data_dir()`
+/// returns `Some`; falls back to `.pattern/drafts` relative to the current
+/// working directory for environments where `XDG_DATA_HOME` is unset
+/// (e.g. restricted CI containers).
+fn default_drafts_dir() -> std::path::PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("pattern")
+        .join("drafts")
+}
 use crate::checkpoint::{CheckpointEvent, CheckpointLog};
 use crate::memory::{MemoryStoreAdapter, TurnHistory};
 use crate::router::{RouterBridge, RouterRegistry};
@@ -209,6 +222,20 @@ pub struct SessionContext {
     /// await path crosses arbitrary user code, and the sync→async glue
     /// keeps the eval worker isolated from that risk.
     tokio_handle: tokio::runtime::Handle,
+    /// Resolver for the sibling spawn path: maps `PersonaId` → KDL file path.
+    ///
+    /// Defaults to [`crate::spawn::sibling::UnconfiguredSiblingResolver`]
+    /// which fails every lookup with `PersonaNotFound`. Phase 6 replaces this
+    /// with a `pattern_db`-backed resolver that queries the persona registry.
+    ///
+    /// The `Arc<dyn ...>` indirection allows tests to inject a
+    /// `StubSiblingResolver` without constructing a full database.
+    sibling_resolver: Arc<dyn crate::spawn::sibling::SiblingPersonaResolver>,
+    /// Root directory for draft persona KDL files written by
+    /// `spawn_sibling_new`. Defaults to
+    /// `<XDG_DATA_HOME>/pattern/drafts` (falling back to `.pattern/drafts`
+    /// relative to the current directory when `XDG_DATA_HOME` is unset).
+    drafts_dir: std::path::PathBuf,
 }
 
 /// Handlers call this to decide whether to short-circuit on soft-cancel.
@@ -408,7 +435,23 @@ impl SessionContext {
             spawn_registry,
             tokio_handle,
             include_paths: Arc::new(Vec::new()),
+            sibling_resolver: Arc::new(crate::spawn::sibling::UnconfiguredSiblingResolver),
+            drafts_dir: default_drafts_dir(),
         }
+    }
+
+    /// Resolver for the sibling spawn path.
+    ///
+    /// Returns the `Arc<dyn SiblingPersonaResolver>` wired at construction
+    /// time. The default is [`crate::spawn::sibling::UnconfiguredSiblingResolver`];
+    /// tests inject a [`crate::spawn::sibling::StubSiblingResolver`].
+    pub fn sibling_resolver(&self) -> &Arc<dyn crate::spawn::sibling::SiblingPersonaResolver> {
+        &self.sibling_resolver
+    }
+
+    /// Root directory for draft persona KDL files.
+    pub fn drafts_dir(&self) -> &std::path::Path {
+        &self.drafts_dir
     }
 
     /// Replace the session's include-paths set. Called by
@@ -526,6 +569,11 @@ impl SessionContext {
             spawn_registry: child_registry,
             tokio_handle: self.tokio_handle.clone(),
             include_paths: child_include_paths,
+            // Inherit parent's resolver so ephemerals can spawn siblings.
+            sibling_resolver: self.sibling_resolver.clone(),
+            // Inherit parent's drafts dir so ephemerals write to the same
+            // location.
+            drafts_dir: self.drafts_dir.clone(),
         };
         Arc::new(child)
     }

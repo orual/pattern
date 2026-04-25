@@ -6667,6 +6667,7 @@ dependencies = [
  "blake3",
  "chrono",
  "clap",
+ "dirs 5.0.1",
  "dotenvy",
  "frunk",
  "futures",

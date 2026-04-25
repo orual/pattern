@@ -29,6 +29,7 @@ use crate::spawn::{
     ChildSessionHandle, SpawnError, SpawnKind, child_include_paths, compute_child_caps,
     run_ephemeral, synthesize_program_lib,
 };
+use crate::spawn::sibling::{spawn_sibling_existing, spawn_sibling_new};
 use crate::timeout::HandlerGuard;
 
 /// Handler for the `Pattern.Spawn` effect.
@@ -86,9 +87,7 @@ impl EffectHandler<SessionContext> for SpawnHandler {
             SpawnReq::Fork(_) => Err(EffectError::Handler(
                 "Pattern.Spawn.Fork is not implemented (wiring lands in Phase 2 Task 8 of the v3-multi-agent plan).".into(),
             )),
-            SpawnReq::Sibling(_) => Err(EffectError::Handler(
-                "Pattern.Spawn.Sibling is not implemented (wiring lands in Phase 2 Tasks 6–7 of the v3-multi-agent plan).".into(),
-            )),
+            SpawnReq::Sibling(wire_cfg) => handle_sibling(wire_cfg, cx),
         }
     }
 }
@@ -224,6 +223,43 @@ fn handle_await_all(
 fn handle_stop(id: String, cx: &EffectContext<'_, SessionContext>) -> Result<Value, EffectError> {
     let _ = cx.user().spawn_registry().cancel_one(&SmolStr::from(id));
     cx.respond(())
+}
+
+fn handle_sibling(
+    wire_cfg: crate::sdk::requests::spawn::WireSiblingConfig,
+    cx: &EffectContext<'_, SessionContext>,
+) -> Result<Value, EffectError> {
+    let cfg: pattern_core::spawn::SiblingConfig = wire_cfg.into();
+    let parent: &SessionContext = cx.user();
+    let handle = parent.tokio_handle().clone();
+
+    let persona_id: SmolStr = match &cfg.persona {
+        pattern_core::spawn::SiblingPersona::Existing(id) => {
+            let resolver = parent.sibling_resolver().clone();
+            let id_clone = id.clone();
+            let cfg_clone = cfg.clone();
+            handle
+                .block_on(spawn_sibling_existing(parent, &cfg_clone, &id_clone, resolver))
+                .map_err(|e| EffectError::Handler(e.to_string()))?
+        }
+        pattern_core::spawn::SiblingPersona::New(persona_cfg) => {
+            let drafts_dir = parent.drafts_dir().to_owned();
+            let cfg_clone = cfg.clone();
+            let persona_cfg_clone = persona_cfg.clone();
+            handle
+                .block_on(spawn_sibling_new(
+                    parent,
+                    &cfg_clone,
+                    &persona_cfg_clone,
+                    &drafts_dir,
+                ))
+                .map_err(|e| EffectError::Handler(e.to_string()))?
+        }
+    };
+
+    // Siblings are NOT added to the spawn registry — they live independently
+    // of the parent session's lifetime.
+    cx.respond(persona_id.to_string())
 }
 
 #[cfg(test)]

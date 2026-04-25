@@ -14,8 +14,10 @@
 //!   `compute_child_caps`, `child_include_paths`,
 //!   `MAX_EPHEMERAL_TURNS`.
 
+pub mod draft;
 pub mod ephemeral;
 pub mod registry;
+pub mod sibling;
 
 pub use ephemeral::{
     MAX_EPHEMERAL_TURNS, build_progress_log_observer, child_include_paths, compute_child_caps,
@@ -23,4 +25,8 @@ pub use ephemeral::{
 };
 pub use registry::{
     ChildSessionHandle, SpawnError, SpawnKind, SpawnRegistry, SpawnResult, TerminationReason,
+};
+pub use sibling::{
+    RegistryError, SiblingPersonaResolver, StubSiblingResolver, UnconfiguredSiblingResolver,
+    spawn_sibling_existing, spawn_sibling_new,
 };
