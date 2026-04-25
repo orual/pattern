@@ -123,6 +123,35 @@ pub struct SessionContext {
     /// capability scoping. Phase 2 spawn paths read this to restrict
     /// child sessions to a subset of the parent's capabilities.
     capabilities: Option<pattern_core::CapabilitySet>,
+    /// Per-runtime [`PermissionBroker`]. One broker per session — no
+    /// global singleton. Phase 1's policy-evaluation handlers escalate
+    /// to this broker via [`Self::permission_bridge`] when a
+    /// `RequireApproval` rule fires.
+    permission_broker: Arc<pattern_core::permission::PermissionBroker>,
+    /// Sync-to-async bridge for handlers running on the eval-worker
+    /// thread. `None` until [`Self::with_permission_bridge`] is called
+    /// from an async context (typically `open_with_agent_loop`).
+    permission_bridge: Option<Arc<crate::permission::PermissionBridge>>,
+    /// Origin of the *immediate dispatcher* of an effect — i.e. who is
+    /// asking right now, not what activated this turn. Written by
+    /// `agent_loop::drive_step` per orchestrate iteration with
+    /// `Author::Agent(self)` (the model is the immediate caller of every
+    /// effect during normal model-driven flow); cleared on Drop
+    /// (panic-safe via RAII guard).
+    ///
+    /// The activating turn's origin (which may be `Author::Partner(_)`)
+    /// stays on the `TurnInput` for batch-type inference, persistence
+    /// attribution, and routing. It is NOT what the broker's
+    /// partner-bypass predicate reads — that distinction prevents the
+    /// agent's autonomous activity from inheriting Partner authority on
+    /// a Partner-activated turn.
+    ///
+    /// Future direct-execution paths (admin REPL, audited sandboxed
+    /// code) may override this slot with a Partner origin before
+    /// invoking a handler directly — that is the only path where the
+    /// broker's partner-bypass actually fires. Phase 1 has none.
+    current_dispatch_origin:
+        Arc<std::sync::RwLock<Option<pattern_core::types::origin::MessageOrigin>>>,
 }
 
 /// Handlers call this to decide whether to short-circuit on soft-cancel.
@@ -140,6 +169,46 @@ pub trait HasCancelState {
 impl HasCancelState for SessionContext {
     fn cancel_state(&self) -> Arc<CancelState> {
         SessionContext::cancel_state(self)
+    }
+}
+
+/// Handlers call this to consult the per-session
+/// [`crate::permission::PermissionBridge`] and the current turn's
+/// originator.
+///
+/// `SessionContext` provides the live wiring; the no-op `()` impl lets
+/// unit tests pass `&()` as the user value (handlers will observe the
+/// gate as missing and fall back to allow-by-default policy paths or
+/// surface a clear error).
+pub trait HasPermissionBridge {
+    /// Sync-to-async bridge to the per-session broker. `None` for
+    /// sessions that haven't been wired yet (or for the `()` test
+    /// shim).
+    fn permission_bridge(&self) -> Option<&Arc<crate::permission::PermissionBridge>>;
+
+    /// Origin of the immediate dispatcher of the current effect —
+    /// `Author::Agent(self)` during normal model-driven dispatch; can
+    /// be a `Partner` only when a future direct-execution path
+    /// explicitly overrides the slot before invoking a handler.
+    fn current_dispatch_origin(&self) -> Option<pattern_core::types::origin::MessageOrigin>;
+}
+
+impl HasPermissionBridge for SessionContext {
+    fn permission_bridge(&self) -> Option<&Arc<crate::permission::PermissionBridge>> {
+        SessionContext::permission_bridge(self)
+    }
+
+    fn current_dispatch_origin(&self) -> Option<pattern_core::types::origin::MessageOrigin> {
+        SessionContext::current_dispatch_origin(self)
+    }
+}
+
+impl HasPermissionBridge for () {
+    fn permission_bridge(&self) -> Option<&Arc<crate::permission::PermissionBridge>> {
+        None
+    }
+    fn current_dispatch_origin(&self) -> Option<pattern_core::types::origin::MessageOrigin> {
+        None
     }
 }
 
@@ -199,7 +268,54 @@ impl SessionContext {
             context_policy: persona.context.clone(),
             diagnostics: Arc::new(std::sync::Mutex::new(Vec::new())),
             capabilities: None,
+            permission_broker: Arc::new(pattern_core::permission::PermissionBroker::new()),
+            permission_bridge: None,
+            current_dispatch_origin: Arc::new(std::sync::RwLock::new(None)),
         }
+    }
+
+    /// Per-runtime [`pattern_core::permission::PermissionBroker`]. Each
+    /// session owns its own broker — there is no shared singleton.
+    pub fn permission_broker(&self) -> &Arc<pattern_core::permission::PermissionBroker> {
+        &self.permission_broker
+    }
+
+    /// Sync-to-async bridge to the broker, used by handlers running on
+    /// the eval-worker thread. `None` until
+    /// [`Self::with_permission_bridge`] has been called.
+    pub fn permission_bridge(&self) -> Option<&Arc<crate::permission::PermissionBridge>> {
+        self.permission_bridge.as_ref()
+    }
+
+    /// Origin of the immediate dispatcher invoking an effect during
+    /// the active orchestrate iteration. Returns `Author::Agent(self)`
+    /// during normal model-driven dispatch — handlers consult this
+    /// (not the activating turn's origin) when feeding the broker's
+    /// partner-bypass predicate, so autonomous agent activity does
+    /// not inherit Partner authority on Partner-activated turns.
+    pub fn current_dispatch_origin(&self) -> Option<pattern_core::types::origin::MessageOrigin> {
+        self.current_dispatch_origin.read().ok()?.clone()
+    }
+
+    /// Internal handle to the current-dispatch-origin slot. Used by
+    /// `agent_loop::drive_step`'s RAII guard to write the origin per
+    /// orchestrate iteration and clear it on Drop.
+    pub(crate) fn current_dispatch_origin_slot(
+        &self,
+    ) -> &Arc<std::sync::RwLock<Option<pattern_core::types::origin::MessageOrigin>>> {
+        &self.current_dispatch_origin
+    }
+
+    /// Builder-style: install a [`crate::permission::PermissionBridge`]
+    /// pumping this session's broker. Must be called from an async
+    /// context (the bridge spawns a tokio task).
+    #[must_use]
+    pub fn with_permission_bridge(
+        mut self,
+        bridge: Arc<crate::permission::PermissionBridge>,
+    ) -> Self {
+        self.permission_bridge = Some(bridge);
+        self
     }
 
     /// Effective capabilities for this session.
@@ -626,9 +742,15 @@ impl TidepoolSession {
         // from open), so Arc::try_unwrap on ctx will always succeed.
         let ctx_owned =
             Arc::try_unwrap(session.ctx).expect("ctx has no other clones immediately after open()");
+        // Spawn a permission bridge over this session's broker. Must
+        // happen in async context (bridge spawns a tokio task).
+        let bridge = Arc::new(crate::permission::PermissionBridge::spawn(
+            ctx_owned.permission_broker().clone(),
+        ));
         let ctx_with_sink = ctx_owned
             .with_turn_sink(turn_sink.clone())
-            .with_capabilities(capabilities.clone());
+            .with_capabilities(capabilities.clone())
+            .with_permission_bridge(bridge);
 
         // Wire MemoryScope if a mount config declares an isolation policy.
         // Must happen before Arc::new(ctx) so the scope wraps the store

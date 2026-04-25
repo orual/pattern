@@ -12,6 +12,7 @@ pub mod agent_loop;
 pub mod checkpoint;
 pub mod compaction;
 pub mod memory;
+pub mod permission;
 pub mod persona_loader;
 pub mod preflight;
 pub mod router;
