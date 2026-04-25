@@ -20,7 +20,7 @@ use pattern_core::{CapabilityFlag, CapabilitySet, EffectCategory, spawn::Sibling
 use pattern_runtime::NopProviderClient;
 use pattern_runtime::session::SessionContext;
 use pattern_runtime::spawn::sibling::{
-    StubSiblingResolver, spawn_sibling_existing, spawn_sibling_new,
+    SiblingExistingOutcome, StubSiblingResolver, spawn_sibling_existing, spawn_sibling_new,
 };
 use pattern_runtime::testing::InMemoryMemoryStore;
 
@@ -66,21 +66,30 @@ async fn ac5_1_existing_persona_adoption_returns_ok() {
         SiblingPersona::Existing("orual".into()),
         RelationshipKind::PeerWith,
     );
-    let id = spawn_sibling_existing(&parent, &cfg, &"orual".into(), resolver)
+    let outcome = spawn_sibling_existing(&parent, &cfg, &"orual".into(), resolver)
         .await
         .expect("should succeed for a known persona id");
     assert_eq!(
-        id.as_str(),
+        outcome.persona_id.as_str(),
         "orual-sibling-test",
         "returned id should match the agent-id in the fixture KDL"
+    );
+    // Important #5: the returned id must differ from the parent's agent_id.
+    assert_ne!(
+        outcome.persona_id.as_str(),
+        parent.agent_id(),
+        "sibling persona_id must differ from the parent's agent_id"
     );
 }
 
 // ── AC5.4 — capabilities come from the sibling's own KDL ────────────────────
 
-/// The fixture persona declares `capabilities { effects { memory } }`. After
-/// load the snapshot's capability set should contain exactly `Memory` and
-/// nothing else. The parent's own capabilities are irrelevant.
+/// The fixture persona declares `capabilities { effects { memory } }`. The
+/// spawn pipeline must return the sibling's own caps in the outcome — NOT
+/// the parent's inherited set.
+///
+/// This test drives the actual `spawn_sibling_existing` spawn pipeline and
+/// asserts on the outcome's `capabilities` field (Important review item I#2).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ac5_4_capabilities_come_from_sibling_own_config() {
     // Give the parent Memory + Shell — the sibling must NOT inherit Shell.
@@ -98,29 +107,26 @@ async fn ac5_4_capabilities_come_from_sibling_own_config() {
         RelationshipKind::PeerWith,
     );
 
-    // Load the persona snapshot directly to inspect its capabilities.
-    let path = fixture_path("sibling_persona.kdl");
-    let snap =
-        pattern_runtime::persona_loader::load_persona(&path).expect("fixture must load cleanly");
+    // Drive spawn_sibling_existing and inspect the returned outcome directly.
+    // The outcome's capabilities field is what the spawn PIPELINE returns —
+    // AC5.4 requires this to come from the sibling's own KDL, not the parent.
+    let outcome: SiblingExistingOutcome = spawn_sibling_existing(&parent, &cfg, &"orual".into(), resolver)
+        .await
+        .expect("should succeed");
+    assert_eq!(outcome.persona_id.as_str(), "orual-sibling-test");
 
-    // AC5.4: capabilities come from the persona's own KDL, not from the parent.
-    let caps = snap
+    // AC5.4: the outcome's capabilities come from the sibling's own KDL config.
+    let caps = outcome
         .capabilities
-        .expect("fixture declares capabilities { effects { memory } }");
+        .expect("fixture declares capabilities { effects { memory } }; outcome must carry them");
     assert!(
         caps.iter_categories().any(|c| c == EffectCategory::Memory),
-        "sibling must have Memory"
+        "sibling outcome must include Memory (from own KDL)"
     );
     assert!(
         !caps.iter_categories().any(|c| c == EffectCategory::Shell),
-        "sibling must NOT inherit Shell from the parent"
+        "sibling outcome must NOT include Shell (parent's cap, not the sibling's)"
     );
-
-    // Verify spawn_sibling_existing also completes without error.
-    let id = spawn_sibling_existing(&parent, &cfg, &"orual".into(), resolver)
-        .await
-        .expect("should succeed");
-    assert_eq!(id.as_str(), "orual-sibling-test");
 }
 
 // ── AC5.6 — unknown persona id → PersonaNotFound ────────────────────────────

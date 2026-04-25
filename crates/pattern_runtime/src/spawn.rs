@@ -29,6 +29,6 @@ pub use registry::{
     ChildSessionHandle, SpawnError, SpawnKind, SpawnRegistry, SpawnResult, TerminationReason,
 };
 pub use sibling::{
-    RegistryError, SiblingPersonaResolver, StubSiblingResolver, UnconfiguredSiblingResolver,
-    spawn_sibling_existing, spawn_sibling_new,
+    RegistryError, SiblingExistingOutcome, SiblingPersonaResolver, StubSiblingResolver,
+    UnconfiguredSiblingResolver, spawn_sibling_existing, spawn_sibling_new,
 };

@@ -27,7 +27,7 @@ use crate::sdk::requests::spawn::{
     WireEphemeralSpawn, WireSiblingSpawn, WireSiblingStatus, WireSpawnAwaitOutcome, WireSpawnResult,
 };
 use crate::session::SessionContext;
-use crate::spawn::sibling::{spawn_sibling_existing, spawn_sibling_new};
+use crate::spawn::sibling::{SiblingExistingOutcome, spawn_sibling_existing, spawn_sibling_new};
 use crate::spawn::{
     ChildSessionHandle, SpawnError, SpawnKind, WireForkHandle, child_include_paths,
     compute_child_caps, run_ephemeral, synthesize_program_lib,
@@ -291,15 +291,17 @@ fn handle_sibling(
             let resolver = parent.sibling_resolver().clone();
             let id_clone = id.clone();
             let cfg_clone = cfg.clone();
-            let persona_id = handle
+            let outcome: SiblingExistingOutcome = handle
                 .block_on(spawn_sibling_existing(
                     parent, &cfg_clone, &id_clone, resolver,
                 ))
                 .map_err(|e| EffectError::Handler(e.to_string()))?;
             // Existing-persona adoption is always Active — the persona
             // is already a registered identity, no draft involved.
+            // `outcome.capabilities` carries the sibling's own caps (T8/
+            // Phase 6 wiring for cap-restricted interactions).
             WireSiblingSpawn {
-                persona_id: persona_id.to_string(),
+                persona_id: outcome.persona_id.to_string(),
                 status: WireSiblingStatus::Active,
                 kdl_path: None,
             }

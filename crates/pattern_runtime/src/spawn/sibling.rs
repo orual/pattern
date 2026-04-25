@@ -124,19 +124,44 @@ impl SiblingPersonaResolver for StubSiblingResolver {
 
 // ── spawn_sibling_existing ────────────────────────────────────────────────────
 
-/// Validate that an existing persona is reachable and return its `PersonaId`.
+/// Typed outcome of a successful `spawn_sibling_existing` call.
+///
+/// Carries the sibling's own persona id and the capability set loaded from
+/// its own KDL config. The capabilities are the sibling's — they come from
+/// the sibling's `capabilities {}` block, NOT from the spawning parent.
+///
+/// Phase 6 will use the `persona_id` to open a live session for the sibling.
+/// The `capabilities` field opens the door to T8/Phase 6 wiring: the handler
+/// can surface the sibling's caps to the parent so the parent can correctly
+/// scope interactions.
+#[derive(Debug, Clone)]
+pub struct SiblingExistingOutcome {
+    /// The sibling's own agent id (from its KDL file's `agent-id` field).
+    pub persona_id: PersonaId,
+    /// Capability set from the sibling's own KDL config.
+    ///
+    /// `None` when the sibling's KDL declares no `capabilities {}` block
+    /// (meaning "full power" per the `CapabilitySet::all` convention).
+    pub capabilities: Option<pattern_core::CapabilitySet>,
+}
+
+/// Validate that an existing persona is reachable and return its id + caps.
 ///
 /// # Phase 2 contract
 ///
 /// - Resolves the persona path via `resolver.resolve_path(persona_id)`.
-/// - Loads the persona snapshot via
-///   [`persona_loader::load_persona`].
-/// - Returns the loaded snapshot's `agent_id` as the `PersonaId`.
+/// - Loads the persona snapshot via [`persona_loader::load_persona`].
+/// - Returns the loaded snapshot's `agent_id` and capability set as a
+///   [`SiblingExistingOutcome`].
+///
+/// The `capabilities` field comes from the sibling's own KDL config — NOT
+/// from the spawning parent. This is the key AC5.4 invariant: a sibling
+/// adopts its own identity with its own scoped capabilities.
 ///
 /// The actual session-open lifecycle (provider, turn sink, eval worker) is
-/// deferred to Phase 6, when the daemon-driven sibling lifecycle lands. Phase 2
-/// verifies AC5.1 (persona reachable), AC5.4 (caps from own config, not
-/// inherited), and AC5.6 (PersonaNotFound on unknown id).
+/// deferred to Phase 6. Phase 2 verifies AC5.1 (persona reachable), AC5.4
+/// (caps from own config, not inherited), and AC5.6 (PersonaNotFound on
+/// unknown id).
 ///
 /// Siblings are NOT registered in the parent's `SpawnRegistry` — they live
 /// independently of the parent's lifetime.
@@ -145,22 +170,25 @@ pub async fn spawn_sibling_existing(
     _cfg: &SiblingConfig,
     persona_id: &PersonaId,
     resolver: Arc<dyn SiblingPersonaResolver>,
-) -> Result<PersonaId, SpawnError> {
+) -> Result<SiblingExistingOutcome, SpawnError> {
     // Step 1: resolve path via the resolver.
     let path = resolver.resolve_path(persona_id).map_err(|e| match e {
         RegistryError::PersonaNotFound(id) => SpawnError::PersonaNotFound { id },
     })?;
 
     // Step 2: load the persona snapshot to validate the KDL and read its
-    // agent_id. The capabilities are in `snap.capabilities` — AC5.4 verifies
-    // these come from the sibling's own config, not from the spawner.
+    // agent_id and capabilities. The capabilities come from the sibling's
+    // own KDL config — AC5.4 verifies these are NOT inherited from the parent.
     let snap =
         persona_loader::load_persona(&path).map_err(|e| SpawnError::Runtime(e.to_string()))?;
 
-    // Step 3: return the persona's own agent_id as the PersonaId. The caller
-    // may cache this id to communicate with the sibling when Phase 6 opens
+    // Step 3: return the persona's own agent_id and capabilities. The caller
+    // may cache the id to communicate with the sibling when Phase 6 opens
     // the live session.
-    Ok(SmolStr::from(snap.agent_id.as_str()))
+    Ok(SiblingExistingOutcome {
+        persona_id: SmolStr::from(snap.agent_id.as_str()),
+        capabilities: snap.capabilities,
+    })
 }
 
 // ── spawn_sibling_new ─────────────────────────────────────────────────────────
