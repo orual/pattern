@@ -751,8 +751,7 @@ mod tests {
     fn render_skill_loaded_text_has_opening_and_closing_markers() {
         use pattern_core::types::memory_types::SkillTrustTier;
 
-        let text =
-            render_skill_loaded_text("my-skill", SkillTrustTier::AdHoc, "skill body here.");
+        let text = render_skill_loaded_text("my-skill", SkillTrustTier::AdHoc, "skill body here.");
         assert!(
             text.contains("[skill:loaded]"),
             "missing opening marker: {text}"

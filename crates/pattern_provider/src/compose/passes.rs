@@ -250,12 +250,7 @@ mod tests {
                 vec![],
                 profile.clone(),
             )),
-            Box::new(Segment2Pass::new(
-                vec![],
-                prior,
-                &writes,
-                profile.clone(),
-            )),
+            Box::new(Segment2Pass::new(vec![], prior, &writes, profile.clone())),
             Box::new(Segment3Pass::new(vec![], profile)),
         ];
 
