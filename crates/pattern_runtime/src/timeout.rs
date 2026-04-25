@@ -12,6 +12,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use tokio::sync::Notify;
+
 use pattern_core::types::snapshot::PersonaSnapshot;
 
 /// Sentinel string embedded in `EffectError::Handler(...)` to mark a
@@ -187,7 +189,7 @@ pub enum BoundedOutcome {
 /// Shared state driving the cancellation handshake. Constructed once per
 /// session and lives on [`crate::session::SessionContext`] for the
 /// session's lifetime.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct CancelState {
     /// Set by the watchdog when budget is exhausted; checked by every
     /// effect handler at entry. Handlers returning on-cancelled propagate
@@ -195,6 +197,22 @@ pub struct CancelState {
     pub cancellation: AtomicBool,
     /// Handler-in-flight counter used by the watchdog to pause budget.
     pub gate: HandlerGate,
+    /// Notified whenever `request_cancel` flips `cancellation` to true.
+    /// Watcher tasks created by `fork_for_ephemeral` park on
+    /// `notify.notified()` instead of polling every 50 ms, which means
+    /// they wake exactly once and then complete — no perpetual tokio
+    /// task leak on long-running parents that never cancel.
+    notify: Notify,
+}
+
+impl Default for CancelState {
+    fn default() -> Self {
+        Self {
+            cancellation: AtomicBool::new(false),
+            gate: HandlerGate::default(),
+            notify: Notify::new(),
+        }
+    }
 }
 
 impl CancelState {
@@ -213,32 +231,49 @@ impl CancelState {
         self.cancellation.load(Ordering::SeqCst)
     }
 
-    /// Request a soft cancel. The running step will observe this at the next
-    /// effect handler boundary and return a cancelled sentinel.
+    /// Request a soft cancel. Sets the atomic flag and wakes all tasks
+    /// currently waiting in `wait_for_cancel`.
+    ///
+    /// The running step will observe the flag at the next effect handler
+    /// boundary and return a cancelled sentinel. Watcher tasks spawned by
+    /// `fork_for_ephemeral` will wake and complete without further polling.
     pub fn request_cancel(&self) {
         self.cancellation.store(true, Ordering::SeqCst);
+        // Wake all waiters. Even if no task is currently parked, future
+        // calls to `notified()` will see the stored permit and return
+        // immediately (Notify::notify_waiters wakes all current waiters;
+        // notify_one would miss concurrent waiters).
+        self.notify.notify_waiters();
     }
 
-    /// Async helper that resolves once the cancellation atomic flips to
-    /// true. Polls every 50 ms — sufficient for cancel-propagation
-    /// timing (Phase 2 spawn lifetime chain), well within the 100 ms
-    /// grace the integration tests assert.
+    /// Async helper that resolves once `request_cancel` is called.
     ///
-    /// Fire-and-forget contract: the returned future is meant to be
-    /// `tokio::spawn`'d and forgotten. The polling wakes up when the
-    /// flag flips and the spawned task drops naturally.
+    /// Uses `tokio::sync::Notify` instead of polling: the task parks
+    /// immediately if the flag is not yet set and wakes exactly once when
+    /// `request_cancel` fires `notify_waiters`. This eliminates the
+    /// perpetual 50 ms polling loop that caused watcher-task leaks in
+    /// long-lived parents that never cancelled their children.
+    ///
+    /// # Lifetime note
+    ///
+    /// The returned future borrows `self`. Callers that need a `'static`
+    /// future (e.g. `tokio::spawn`) must hold the `Arc<CancelState>` and
+    /// move it into an `async move` block that calls this method.
     pub async fn wait_for_cancel(&self) {
-        // Tight initial check before the first sleep — if the flag is
-        // already set, we don't impose a 50 ms latency.
+        // Tight initial check: if already cancelled, return immediately
+        // without even registering a notification listener.
         if self.is_cancelled() {
             return;
         }
-        loop {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            if self.is_cancelled() {
-                return;
-            }
+        // Register interest before the second check to avoid a race where
+        // `request_cancel` fires between the first check and the park.
+        let notified = self.notify.notified();
+        // Second check after registering: handles the case where
+        // `request_cancel` fired between the first check and `notified()`.
+        if self.is_cancelled() {
+            return;
         }
+        notified.await;
     }
 }
 
@@ -290,7 +325,11 @@ pub fn spawn_watchdog(
             // Primary budget check.
             if jit_wall_accumulated >= budget.wall || jit_cpu_accumulated >= budget.cpu {
                 if soft_fired_at.is_none() {
-                    state.cancellation.store(true, Ordering::SeqCst);
+                    // Use `request_cancel` so the Notify waker fires and any
+                    // task parked on `wait_for_cancel` wakes immediately
+                    // (cancel-propagation watchers installed by
+                    // `fork_for_ephemeral` need this signal to cascade).
+                    state.request_cancel();
                     soft_fired_at = Some(now);
                     tracing::info!(
                         wall_ms = jit_wall_accumulated.as_millis() as u64,

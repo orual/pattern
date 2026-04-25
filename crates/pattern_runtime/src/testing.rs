@@ -229,6 +229,37 @@ impl MockProviderClient {
         ]
     }
 
+    /// Build a turn that never produces any events — the stream returned by
+    /// `complete` stays pending indefinitely.
+    ///
+    /// Used by AC3.4 timeout tests to drive `run_ephemeral` with a short
+    /// timeout and verify that `SpawnError::Timeout` is returned. The
+    /// hanging stream simulates a provider that does not respond within the
+    /// configured window.
+    ///
+    /// # Implementation
+    ///
+    /// The returned "events" vec contains a single `Start` event followed by
+    /// a special sentinel. Because we need to produce a stream that blocks
+    /// after the `Start` event, the `complete` override for this case uses
+    /// `futures::stream::pending` spliced in after the start event. We signal
+    /// the hanging intent by encoding the script as a single-element vec of
+    /// `ChatStreamEvent::Start` that is intercepted in the `complete` impl.
+    ///
+    /// This is encoded as a tag: `[ChatStreamEvent::Start]` with the
+    /// `captured_stop_reason` on the End absent is the common marker for
+    /// "interrupted" streams; for hanging specifically we use a completely
+    /// empty vec `[]` as the sentinel.
+    ///
+    /// The `complete` method converts an empty-script vec to a
+    /// `futures::stream::pending()` cast to the stream type, so the returned
+    /// stream never yields any event.
+    pub fn hanging_turn() -> Vec<ChatStreamEvent> {
+        // Empty vec is the sentinel for "hanging" — complete() returns
+        // a pending stream that never yields.
+        vec![]
+    }
+
     /// Build a "tool_use" turn — emits a single `code` tool call with
     /// the given arguments, ends with `stop_reason = ToolCall`. The
     /// orchestrator will dispatch the tool call to its configured
@@ -285,6 +316,14 @@ impl ProviderClient for MockProviderClient {
                 idx
             )
         });
+        // Empty-vec sentinel: `hanging_turn()` encodes a provider that never
+        // produces any events. Return a `futures::stream::pending()` cast to
+        // the correct stream type so the caller blocks indefinitely.
+        if script.is_empty() {
+            return Ok(Box::pin(futures::stream::pending::<
+                Result<ChatStreamEvent, ProviderError>,
+            >()));
+        }
         let stream = futures::stream::iter(script.into_iter().map(Ok));
         Ok(Box::pin(stream))
     }

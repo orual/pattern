@@ -519,14 +519,23 @@ impl SessionContext {
         // cancellation atomic immediately makes `is_cancelled()` true
         // on the child as well. To cascade further down (the child's
         // OWN children — i.e., grandchildren of the parent), spawn a
-        // fire-and-forget watcher that calls cancel_all() on the
-        // child's sub-registry once the parent cancel flag flips.
+        // watcher that calls cancel_all() on the child's sub-registry
+        // once the parent cancel flag flips.
+        //
+        // The watcher handle is stored on the child registry so that
+        // dropping the child registry (when the ephemeral finishes)
+        // aborts the watcher immediately. Without the abort, the
+        // watcher parks on `notify.notified()` until the parent's
+        // `Arc<CancelState>` reaches refcount 0. In a long-lived parent
+        // that never cancels, that is effectively forever, causing one
+        // leaked tokio task per `fork_for_ephemeral` call.
         let parent_cancel_for_watcher = self.cancel_state.clone();
         let child_registry_for_watcher = child_registry.clone();
-        self.tokio_handle.spawn(async move {
+        let watcher_handle = self.tokio_handle.spawn(async move {
             parent_cancel_for_watcher.wait_for_cancel().await;
             child_registry_for_watcher.cancel_all();
         });
+        child_registry.install_watcher(watcher_handle);
 
         let child = SessionContext {
             agent_id: self.agent_id.clone(),

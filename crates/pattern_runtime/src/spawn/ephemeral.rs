@@ -384,11 +384,11 @@ pub async fn run_ephemeral(
         }
         Ok(Err(rt_err)) => Err(SpawnError::Runtime(rt_err.to_string())),
         Err(_elapsed) => {
-            // Timeout fired. Flip the cancel atomic so any straggling
-            // handler sees the cancellation.
-            cancel_state
-                .cancellation
-                .store(true, std::sync::atomic::Ordering::SeqCst);
+            // Timeout fired. Signal cancellation so any straggling
+            // handler sees the flag at its next effect boundary and
+            // any watcher task parked on `wait_for_cancel` wakes
+            // immediately (via the Notify in `request_cancel`).
+            cancel_state.request_cancel();
             Err(SpawnError::Timeout {
                 timeout: timeout_dur,
             })

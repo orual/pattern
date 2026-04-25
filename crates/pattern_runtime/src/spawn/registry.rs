@@ -27,12 +27,12 @@
 //! async context; `parking_lot` works on any thread.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use futures::future::{BoxFuture, Shared};
 use parking_lot::Mutex;
 use smol_str::SmolStr;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::task::JoinHandle;
 
 use crate::timeout::CancelState;
 
@@ -238,6 +238,15 @@ pub struct SpawnRegistry {
     /// ceiling without re-deriving it from `Semaphore::available_permits`
     /// (which fluctuates as permits are acquired and released).
     limit: usize,
+    /// Optional watcher task handle. When `fork_for_ephemeral` installs a
+    /// cancel-propagation watcher on behalf of this child registry, the
+    /// handle is stored here so `Drop` can abort it.
+    ///
+    /// Without abortion the watcher would park on `notify.notified()` until
+    /// the parent's `Arc<CancelState>` reaches refcount 0. In a long-lived
+    /// parent that never cancels, that is effectively forever — a perpetual
+    /// task leak per ephemeral spawn.
+    watcher: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl SpawnRegistry {
@@ -252,7 +261,18 @@ impl SpawnRegistry {
             children: Mutex::new(Vec::new()),
             concurrent_ephemeral_limit: Arc::new(Semaphore::new(limit)),
             limit,
+            watcher: Mutex::new(None),
         }
+    }
+
+    /// Install a cancel-propagation watcher task handle on this registry.
+    ///
+    /// Called by `fork_for_ephemeral` after spawning the watcher. Stores the
+    /// `JoinHandle<()>` so the registry's `Drop` can abort it. This prevents
+    /// the watcher from parking on `notify.notified()` for the lifetime of
+    /// the parent's `Arc<CancelState>` when the parent never cancels.
+    pub fn install_watcher(&self, handle: JoinHandle<()>) {
+        *self.watcher.lock() = Some(handle);
     }
 
     /// Session id of the parent that owns this registry.
@@ -316,10 +336,9 @@ impl SpawnRegistry {
     pub fn cancel_one(&self, id: &SmolStr) -> bool {
         let children = self.children.lock();
         if let Some(handle) = children.iter().find(|h| &h.child_id == id) {
-            handle
-                .cancel_state
-                .cancellation
-                .store(true, Ordering::SeqCst);
+            // Use `request_cancel()` so the Notify waker fires and any
+            // parked `wait_for_cancel` future wakes immediately.
+            handle.cancel_state.request_cancel();
             true
         } else {
             false
@@ -342,11 +361,12 @@ impl SpawnRegistry {
         // child's next handler boundary observes the flag before any permit
         // is released back into the semaphore (ordering is not load-bearing
         // here, but it communicates intent clearly).
+        //
+        // Use `request_cancel()` (not a raw `.store(true)`) so the Notify
+        // waker fires and any task parked on `wait_for_cancel` wakes
+        // immediately rather than spinning.
         for child in children.iter() {
-            child
-                .cancel_state
-                .cancellation
-                .store(true, Ordering::SeqCst);
+            child.cancel_state.request_cancel();
         }
         // Clear the vec: drops permits (releases semaphore slots) and drops
         // Shared<BoxFuture> result caches. The underlying tokio tasks
@@ -362,6 +382,14 @@ impl Drop for SpawnRegistry {
         // children automatically. No async context required — cancel_all is
         // sync.
         self.cancel_all();
+        // Abort the cancel-propagation watcher installed by
+        // `fork_for_ephemeral`, if any. Without this, the watcher parks on
+        // `notify.notified()` until the parent's `Arc<CancelState>` reaches
+        // refcount 0 — effectively forever in a long-lived parent that never
+        // cancels, causing one leaked tokio task per ephemeral spawn.
+        if let Some(handle) = self.watcher.lock().take() {
+            handle.abort();
+        }
     }
 }
 
