@@ -31,6 +31,14 @@ use uuid::Uuid;
 /// An agent identifier. Accepts arbitrary strings (human-chosen or generated).
 pub type AgentId = SmolStr;
 
+/// A persona identifier.
+///
+/// Same underlying type as [`AgentId`]; used in multi-agent code where the
+/// distinction matters semantically. A persona is the persistent identity
+/// config (KDL file + registry entry); an agent is a running session. Most
+/// spawn-related APIs accept a `PersonaId` to name which persona to open.
+pub type PersonaId = SmolStr;
+
 /// A user identifier.
 pub type UserId = SmolStr;
 

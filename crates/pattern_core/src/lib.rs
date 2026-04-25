@@ -42,6 +42,7 @@ pub mod memory;
 // `memory_acl` module removed: MemoryOp, MemoryGate, and check() are
 // canonical in types::memory_types::core_types (as methods on MemoryGate).
 pub mod permission;
+pub mod spawn;
 pub mod traits;
 pub mod types;
 pub mod utils;
@@ -81,8 +82,9 @@ pub use traits::{
 // message `position`).
 pub use types::ids::{
     AgentId, BatchId, ConstellationId, ConversationId, DiscordIdentityId, EventId, GroupId,
-    MemoryId, MessageId, ModelId, OAuthTokenId, ProjectId, QueuedMessageId, RelationId, RequestId,
-    SessionId, TaskId, ToolCallId, UserId, WakeupId, WorkspaceId, new_id, new_snowflake_id,
+    MemoryId, MessageId, ModelId, OAuthTokenId, PersonaId, ProjectId, QueuedMessageId, RelationId,
+    RequestId, SessionId, TaskId, ToolCallId, UserId, WakeupId, WorkspaceId, new_id,
+    new_snowflake_id,
 };
 
 // Message / batch
@@ -104,6 +106,12 @@ pub use types::snapshot::{PersonaSnapshot, SessionSnapshot};
 
 // Embedding value types
 pub use types::embedding::{Embedding, EmbeddingResult};
+
+// Spawn-config types — multi-agent session spawning primitives.
+pub use spawn::{
+    EphemeralConfig, ForkConfig, ForkIsolation, PersonaConfig, RelationshipKind, SiblingConfig,
+    SiblingPersona,
+};
 
 // Provider request / response types + genai re-exports for callers that
 // want `use pattern_core::*` without also depending on genai directly.
