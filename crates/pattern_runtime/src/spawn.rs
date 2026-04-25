@@ -16,6 +16,7 @@
 
 pub mod draft;
 pub mod ephemeral;
+pub mod fork;
 pub mod registry;
 pub mod sibling;
 
@@ -23,6 +24,7 @@ pub use ephemeral::{
     MAX_EPHEMERAL_TURNS, build_progress_log_observer, child_include_paths, compute_child_caps,
     create_progress_log_block, run_ephemeral, synthesize_program_lib,
 };
+pub use fork::{ForkHandle, WireForkHandle, check_promote_capability};
 pub use registry::{
     ChildSessionHandle, SpawnError, SpawnKind, SpawnRegistry, SpawnResult, TerminationReason,
 };

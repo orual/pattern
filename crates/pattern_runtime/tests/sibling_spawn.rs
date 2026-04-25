@@ -14,13 +14,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use pattern_core::spawn::{PersonaConfig, RelationshipKind, SiblingPersona};
 use pattern_core::types::snapshot::PersonaSnapshot;
 use pattern_core::{CapabilityFlag, CapabilitySet, EffectCategory, spawn::SiblingConfig};
-use pattern_core::spawn::{RelationshipKind, SiblingPersona, PersonaConfig};
 use pattern_runtime::NopProviderClient;
 use pattern_runtime::session::SessionContext;
 use pattern_runtime::spawn::sibling::{
-    spawn_sibling_existing, spawn_sibling_new, StubSiblingResolver,
+    StubSiblingResolver, spawn_sibling_existing, spawn_sibling_new,
 };
 use pattern_runtime::testing::InMemoryMemoryStore;
 
@@ -100,8 +100,8 @@ async fn ac5_4_capabilities_come_from_sibling_own_config() {
 
     // Load the persona snapshot directly to inspect its capabilities.
     let path = fixture_path("sibling_persona.kdl");
-    let snap = pattern_runtime::persona_loader::load_persona(&path)
-        .expect("fixture must load cleanly");
+    let snap =
+        pattern_runtime::persona_loader::load_persona(&path).expect("fixture must load cleanly");
 
     // AC5.4: capabilities come from the persona's own KDL, not from the parent.
     let caps = snap

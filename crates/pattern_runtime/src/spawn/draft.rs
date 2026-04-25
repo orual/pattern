@@ -87,7 +87,9 @@ mod tests {
         let writer = RuntimeConfigWriter::new(drafts.clone());
         let kdl = "name \"test\"\n";
 
-        let path = writer.write_draft("my-persona", kdl).expect("write must succeed");
+        let path = writer
+            .write_draft("my-persona", kdl)
+            .expect("write must succeed");
 
         assert!(path.exists(), "draft file must exist");
         assert_eq!(

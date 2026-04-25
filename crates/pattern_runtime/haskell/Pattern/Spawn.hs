@@ -33,20 +33,6 @@ type SpawnId = Text
 --   host runtime's @AgentId@.
 type PersonaId = Text
 
--- | JSON-encoded payload returned by 'awaitSpawn' for a completed
---   ephemeral. Phase 2 surfaces this opaquely; Phase 3 Task 8 may add
---   field accessors.
-type SpawnResult = Text
-
--- | JSON-encoded @[Either SpawnError SpawnResult]@ returned by 'awaitAll'.
---   Order matches the input id list. Partial failure is preserved.
-type AwaitAllResult = Text
-
--- | Opaque token referencing a fork. Resolution helpers
---   (@awaitResult@ \/ @mergeBack@ \/ @discard@ \/ @promote@) land in
---   Phase 3 Task 8.
-type ForkHandle = Text
-
 -- | Reference to a memory block (label + storage id + owning agent).
 data BlockRef = BlockRef
   { blockRefLabel    :: Text
@@ -154,32 +140,91 @@ data SiblingConfig = SiblingConfig
   , siblingSharedBlocks :: [Text]
   }
 
+-- ── Result types ──────────────────────────────────────────────────────────────
+
+-- | Typed handle returned by 'ephemeral'. Pairs the spawn id with the
+--   constellation-scoped progress-log block label so the parent can read
+--   live progress without waiting for the child to complete.
+--
+--   Mirrors @WireEphemeralSpawn@ in @crates\/pattern_runtime\/src\/sdk\/requests\/spawn.rs@.
+data EphemeralSpawn = EphemeralSpawn
+  { ephemeralSpawnId       :: SpawnId
+  , ephemeralSpawnLogLabel :: Text
+  }
+
+-- | Why an ephemeral child stopped running.
+--
+--   Mirrors @WireTerminationReason@. The @Term@ prefix avoids clashing
+--   with other constructors.
+data TerminationReason
+  = TermEndTurn    -- ^ Model produced final text (normal completion).
+  | TermToolUse    -- ^ Stopped at a tool boundary.
+  | TermMaxTurns   -- ^ Hit the per-ephemeral max-turns ceiling.
+  | TermTimeout    -- ^ Exceeded the configured timeout.
+  | TermCancelled  -- ^ Parent cancelled the child.
+  | TermError      -- ^ Child failed with a runtime error.
+
+-- | Result returned when a child session completes.
+--
+--   Mirrors @WireSpawnResult@.
+data SpawnResult = SpawnResult
+  { spawnResultChildId          :: SpawnId
+  , spawnResultFinalText        :: Maybe Text
+  , spawnResultTurns            :: Int
+  , spawnResultTerminated       :: TerminationReason
+  , spawnResultProgressLogLabel :: Maybe Text
+  }
+
+-- | Per-id outcome from 'awaitAll'. Partial failure is preserved so
+--   ensemble \/ voting patterns can inspect individual results.
+--
+--   Mirrors @WireSpawnAwaitOutcome@.
+data SpawnAwaitOutcome
+  = SpawnOk SpawnResult
+  | SpawnFail Text
+
+-- | Typed handle referencing an in-progress fork.
+--
+--   Phase 2: scaffold only; @forkHandleId@ and @forkHandleChildId@ are
+--   generated ids but no computation is running. Resolution helpers
+--   (@awaitResult@, @mergeBack@, @discard@, @promote@) land in Phase 3.
+--
+--   Mirrors @WireForkHandle@.
+data ForkHandle = ForkHandle
+  { forkHandleId      :: SpawnId
+  , forkHandleChildId :: SpawnId
+  }
+
+-- ── Effect algebra ────────────────────────────────────────────────────────────
+
 -- | Effect algebra.
 data Spawn a where
-  Ephemeral  :: EphemeralConfig -> Spawn SpawnId
+  Ephemeral  :: EphemeralConfig -> Spawn EphemeralSpawn
   AwaitSpawn :: SpawnId -> Spawn SpawnResult
-  AwaitAll   :: [SpawnId] -> Spawn AwaitAllResult
+  AwaitAll   :: [SpawnId] -> Spawn [SpawnAwaitOutcome]
   Fork       :: ForkConfig -> Spawn ForkHandle
   Sibling    :: SiblingConfig -> Spawn PersonaId
   Stop       :: SpawnId -> Spawn ()
 
--- | Spawn an ephemeral worker; returns a 'SpawnId' immediately. The
---   child runs in the background; use 'awaitSpawn' to block on the
+-- ── Helpers ───────────────────────────────────────────────────────────────────
+
+-- | Spawn an ephemeral worker; returns an 'EphemeralSpawn' immediately.
+--   The child runs in the background; use 'awaitSpawn' to block on the
 --   result.
-ephemeral :: Member Spawn effs => EphemeralConfig -> Eff effs SpawnId
+ephemeral :: Member Spawn effs => EphemeralConfig -> Eff effs EphemeralSpawn
 ephemeral cfg = send (Ephemeral cfg)
 
--- | Block until the given ephemeral completes; return its result.
+-- | Block until the given ephemeral completes; return its 'SpawnResult'.
 awaitSpawn :: Member Spawn effs => SpawnId -> Eff effs SpawnResult
 awaitSpawn sid = send (AwaitSpawn sid)
 
 -- | Await many ephemerals concurrently in a single sync-bridge round
 --   trip. Order of results matches the input list; per-id failure is
 --   preserved so ensemble \/ voting patterns can inspect partial outcomes.
-awaitAll :: Member Spawn effs => [SpawnId] -> Eff effs AwaitAllResult
+awaitAll :: Member Spawn effs => [SpawnId] -> Eff effs [SpawnAwaitOutcome]
 awaitAll ids = send (AwaitAll ids)
 
--- | Spawn a fork. Returns an opaque @ForkHandle@; resolution helpers
+-- | Spawn a fork. Returns a typed 'ForkHandle'; resolution helpers
 --   land in Phase 3.
 fork :: Member Spawn effs => ForkConfig -> Eff effs ForkHandle
 fork cfg = send (Fork cfg)

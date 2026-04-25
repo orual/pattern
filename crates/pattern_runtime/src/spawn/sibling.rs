@@ -147,17 +147,15 @@ pub async fn spawn_sibling_existing(
     resolver: Arc<dyn SiblingPersonaResolver>,
 ) -> Result<PersonaId, SpawnError> {
     // Step 1: resolve path via the resolver.
-    let path = resolver
-        .resolve_path(persona_id)
-        .map_err(|e| match e {
-            RegistryError::PersonaNotFound(id) => SpawnError::PersonaNotFound { id },
-        })?;
+    let path = resolver.resolve_path(persona_id).map_err(|e| match e {
+        RegistryError::PersonaNotFound(id) => SpawnError::PersonaNotFound { id },
+    })?;
 
     // Step 2: load the persona snapshot to validate the KDL and read its
     // agent_id. The capabilities are in `snap.capabilities` — AC5.4 verifies
     // these come from the sibling's own config, not from the spawner.
-    let snap = persona_loader::load_persona(&path)
-        .map_err(|e| SpawnError::Runtime(e.to_string()))?;
+    let snap =
+        persona_loader::load_persona(&path).map_err(|e| SpawnError::Runtime(e.to_string()))?;
 
     // Step 3: return the persona's own agent_id as the PersonaId. The caller
     // may cache this id to communicate with the sibling when Phase 6 opens
@@ -312,18 +310,27 @@ mod tests {
 
     #[test]
     fn slug_lowercases_and_hyphenates() {
-        assert_eq!(slug_from_name("My Test Persona"), SmolStr::from("my-test-persona"));
+        assert_eq!(
+            slug_from_name("My Test Persona"),
+            SmolStr::from("my-test-persona")
+        );
     }
 
     #[test]
     fn slug_handles_special_chars() {
-        assert_eq!(slug_from_name("orual's helper!"), SmolStr::from("orual-s-helper"));
+        assert_eq!(
+            slug_from_name("orual's helper!"),
+            SmolStr::from("orual-s-helper")
+        );
     }
 
     #[test]
     fn slug_empty_falls_back() {
         assert_eq!(slug_from_name(""), SmolStr::new_static("unnamed-persona"));
-        assert_eq!(slug_from_name("---"), SmolStr::new_static("unnamed-persona"));
+        assert_eq!(
+            slug_from_name("---"),
+            SmolStr::new_static("unnamed-persona")
+        );
     }
 
     // ── mint_draft_kdl ──────────────────────────────────────────────────────
@@ -340,7 +347,10 @@ mod tests {
         assert!(kdl.contains("agent-id"), "must have agent-id");
         assert!(kdl.contains("system-prompt"), "must have system-prompt");
         assert!(kdl.contains("model"), "must have model block");
-        assert!(kdl.contains("memory"), "must have capabilities.effects.memory");
+        assert!(
+            kdl.contains("memory"),
+            "must have capabilities.effects.memory"
+        );
     }
 
     #[test]

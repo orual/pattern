@@ -25,11 +25,11 @@ use crate::sdk::describe::{DescribeEffect, EffectDecl};
 use crate::sdk::requests::SpawnReq;
 use crate::sdk::requests::spawn::{WireEphemeralSpawn, WireSpawnAwaitOutcome, WireSpawnResult};
 use crate::session::SessionContext;
-use crate::spawn::{
-    ChildSessionHandle, SpawnError, SpawnKind, child_include_paths, compute_child_caps,
-    run_ephemeral, synthesize_program_lib,
-};
 use crate::spawn::sibling::{spawn_sibling_existing, spawn_sibling_new};
+use crate::spawn::{
+    ChildSessionHandle, SpawnError, SpawnKind, WireForkHandle, child_include_paths,
+    compute_child_caps, run_ephemeral, synthesize_program_lib,
+};
 use crate::timeout::HandlerGuard;
 
 /// Handler for the `Pattern.Spawn` effect.
@@ -52,8 +52,12 @@ impl DescribeEffect for SpawnHandler {
             type_defs: &[
                 "type SpawnId   = Text",
                 "type PersonaId = Text",
-                "type ForkHandle = Text  -- opaque token; resolution helpers land in Phase 3.",
-                // Config + return record types live in Pattern.Spawn.hs.
+                // Typed records — full field definitions live in Pattern.Spawn.hs.
+                "data EphemeralSpawn = EphemeralSpawn { ephemeralSpawnId :: SpawnId, ephemeralSpawnLogLabel :: Text }",
+                "data TerminationReason = TermEndTurn | TermToolUse | TermMaxTurns | TermTimeout | TermCancelled | TermError",
+                "data SpawnResult = SpawnResult { spawnResultChildId :: SpawnId, spawnResultFinalText :: Maybe Text, spawnResultTurns :: Int, spawnResultTerminated :: TerminationReason, spawnResultProgressLogLabel :: Maybe Text }",
+                "data SpawnAwaitOutcome = SpawnOk SpawnResult | SpawnFail Text",
+                "data ForkHandle = ForkHandle { forkHandleId :: SpawnId, forkHandleChildId :: SpawnId }",
             ],
             helpers: &[
                 "ephemeral :: Member Spawn effs => EphemeralConfig -> Eff effs EphemeralSpawn\nephemeral cfg = send (Ephemeral cfg)",
@@ -84,9 +88,7 @@ impl EffectHandler<SessionContext> for SpawnHandler {
             SpawnReq::AwaitSpawn(id) => handle_await_spawn(id, cx),
             SpawnReq::AwaitAll(ids) => handle_await_all(ids, cx),
             SpawnReq::Stop(id) => handle_stop(id, cx),
-            SpawnReq::Fork(_) => Err(EffectError::Handler(
-                "Pattern.Spawn.Fork is not implemented (wiring lands in Phase 2 Task 8 of the v3-multi-agent plan).".into(),
-            )),
+            SpawnReq::Fork(wire_cfg) => handle_fork(wire_cfg, cx),
             SpawnReq::Sibling(wire_cfg) => handle_sibling(wire_cfg, cx),
         }
     }
@@ -225,6 +227,47 @@ fn handle_stop(id: String, cx: &EffectContext<'_, SessionContext>) -> Result<Val
     cx.respond(())
 }
 
+fn handle_fork(
+    wire_cfg: crate::sdk::requests::spawn::WireForkConfig,
+    cx: &EffectContext<'_, SessionContext>,
+) -> Result<Value, EffectError> {
+    let cfg: pattern_core::spawn::ForkConfig = wire_cfg.into();
+    let parent: &SessionContext = cx.user();
+
+    // Both isolation paths exercise the capability gate so Phase 2
+    // wire-grammar verification works end-to-end.
+    let phantom_eph = phantom_eph_cfg_for_fork(&cfg);
+    compute_child_caps(parent, &phantom_eph).map_err(|e| EffectError::Handler(e.to_string()))?;
+
+    match cfg.isolation {
+        pattern_core::spawn::ForkIsolation::Lightweight => {
+            // Phase 2 scaffold: generate ids but do not execute the fork's
+            // program. Phase 3 wires LoroDoc::fork() + real compute path.
+            let fork_id = pattern_core::types::ids::new_id();
+            let child_id = pattern_core::types::ids::new_id();
+            let handle = crate::spawn::ForkHandle { fork_id, child_id };
+            let wire: WireForkHandle = handle.into();
+            cx.respond(wire)
+        }
+        pattern_core::spawn::ForkIsolation::Persistent => Err(EffectError::Handler(
+            "ForkIsolation::Persistent requires Phase 3 (jj workspace path not wired)".to_string(),
+        )),
+    }
+}
+
+/// Builds a minimal `EphemeralConfig` from a `ForkConfig` so that
+/// `compute_child_caps` (which takes `EphemeralConfig`) can be reused as
+/// the capability gate for fork paths.
+fn phantom_eph_cfg_for_fork(
+    fork_cfg: &pattern_core::spawn::ForkConfig,
+) -> pattern_core::spawn::EphemeralConfig {
+    let mut eph = pattern_core::spawn::EphemeralConfig::new(&fork_cfg.program);
+    if let Some(caps) = fork_cfg.capabilities.clone() {
+        eph = eph.with_capabilities(caps);
+    }
+    eph
+}
+
 fn handle_sibling(
     wire_cfg: crate::sdk::requests::spawn::WireSiblingConfig,
     cx: &EffectContext<'_, SessionContext>,
@@ -239,7 +282,9 @@ fn handle_sibling(
             let id_clone = id.clone();
             let cfg_clone = cfg.clone();
             handle
-                .block_on(spawn_sibling_existing(parent, &cfg_clone, &id_clone, resolver))
+                .block_on(spawn_sibling_existing(
+                    parent, &cfg_clone, &id_clone, resolver,
+                ))
                 .map_err(|e| EffectError::Handler(e.to_string()))?
         }
         pattern_core::spawn::SiblingPersona::New(persona_cfg) => {
