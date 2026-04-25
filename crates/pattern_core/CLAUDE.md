@@ -3,7 +3,7 @@
 ⚠️ **CRITICAL WARNING**: DO NOT run `pattern` CLI or test agents during development!
 Production agents are running. CLI commands will disrupt active agents.
 
-Last verified: 2026-04-24
+Last verified: 2026-04-25
 
 Core agent framework, memory trait definitions, tools, and coordination system for Pattern's multi-agent ADHD support. The `MemoryStore` trait is defined here; the canonical implementation (`MemoryCache`) lives in `pattern_memory`.
 
@@ -289,12 +289,15 @@ config-KDL shape guard that depends on this property.
 Pure-data types describing what kind of child session to open. No execution
 machinery — dispatch lives in `pattern_runtime::sdk::handlers::spawn`.
 
-- `EphemeralConfig { program, costume, capabilities, timeout }` —
+- `EphemeralConfig { program, costume, capabilities, timeout, prompt }` —
   short-lived worker. Lifetime is bounded by the parent session.
   `#[non_exhaustive]`. Builder: `EphemeralConfig::new(program)` +
-  `.with_costume` / `.with_capabilities` / `.with_timeout`. (A `metadata`
-  field is intentionally absent — adding fields with no consumer creates
-  speculative tech debt; it lands when an actual sink for it does.)
+  `.with_costume` / `.with_capabilities` / `.with_timeout` /
+  `.with_prompt`. `prompt: Option<String>` seeds the child's initial
+  human-role message; `None` means run on costume/system-prompt alone.
+  (A `metadata` field is intentionally absent — adding fields with no
+  consumer creates speculative tech debt; it lands when an actual sink
+  for it does.)
 - `ForkConfig { program, isolation, capabilities, timeout_hint, task_ref }` —
   copy of parent's memory state. `ForkIsolation::Lightweight` (in-memory
   `LoroDoc::fork()`; Phase 2) or `ForkIsolation::Persistent` (jj workspace;

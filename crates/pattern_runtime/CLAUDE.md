@@ -4,7 +4,7 @@ Agent runtime for Pattern v3. Houses Tidepool (Haskell-in-Rust) embedding, the
 agent turn loop, `freer-simple` effect handlers, and turn-level checkpoint
 machinery. Depends only on `pattern_core` trait definitions.
 
-Last verified: 2026-04-24 (post v3-multi-agent Phase 1)
+Last verified: 2026-04-25 (post v3-multi-agent Phase 2)
 
 v3-TUI integration note: the runtime is consumed by `pattern_server`'s actor
 via `TidepoolSession`, `MultiplexSink`, and per-batch `TurnSinkBridge`. The
@@ -113,7 +113,11 @@ The agent loop is split into two layers:
   `TurnInput::continuation(batch_id, agent_id)` (empty messages --
   prior tool_result lives in TurnHistory). Records `(input, output)`
   pairs atomically via `hist.record()`. Returns `StepReply` when
-  `stop_reason.is_terminal()`.
+  `stop_reason.is_terminal()`. Accepts `on_turn: Option<TurnObserver>`
+  (Phase 2): an optional per-turn callback invoked after each turn is
+  recorded. `TurnObserver = Arc<dyn Fn(&TurnOutput) + Send + Sync>`.
+  Existing callers pass `None`; ephemeral spawn uses it for progress-log
+  entries.
 
 ### Batch-anchored snapshot attachments
 
@@ -237,7 +241,11 @@ becomes unusable (channel closed); callers observe channel-closed errors
 on the next dispatch. This is the intended failure mode (fail loud; no
 silent deadlock).
 
-Freshness date: 2026-04-20 (v3-memory-rework Phase 8).
+`LIVE_EVAL_WORKERS: AtomicUsize` (Phase 2): global counter incremented
+on thread spawn, decremented via RAII guard inside the worker closure.
+`live_eval_workers()` accessor exposed for tests. Used by AC3.6 leak-
+detection tests to assert that all child eval workers terminate after
+the parent session resolves.
 
 ### `<mount>/lib/` include-path extension
 
@@ -710,6 +718,26 @@ New fields for the capability + permission machinery:
   (admin REPL, audited sandboxed code) may explicitly override the
   slot to a Partner origin before invoking a handler.
 
+Phase 2 spawn fields:
+
+- `spawn_registry: Arc<SpawnRegistry>` — per-parent child tracking with
+  semaphore-bounded ephemeral concurrency (default limit 8). Cancel-on-
+  drop: all children cancelled when parent session ends.
+- `tokio_handle: tokio::runtime::Handle` — explicit runtime handle for
+  sync-to-async `block_on` in the spawn handler (and future sandbox-io
+  PortRegistry). See `block_on` safety policy below.
+- `include_paths: Arc<Vec<PathBuf>>` — GHC include paths inherited by
+  child sessions. Extended with synthesized lib dirs for ephemerals.
+- `sibling_resolver: Arc<dyn SiblingPersonaResolver>` — maps PersonaId
+  to KDL path. Default: `UnconfiguredSiblingResolver` (all lookups fail).
+  Phase 6 replaces with `pattern_db`-backed resolver.
+- `drafts_dir: PathBuf` — root for draft persona KDL files. Default:
+  `<XDG_DATA_HOME>/pattern/drafts`.
+
+New builders: `with_sibling_resolver`, `with_drafts_dir`. New method:
+`fork_for_ephemeral(&self)` (constructs child `SessionContext`). Test-
+only: `replace_spawn_registry_for_test(usize)`.
+
 New traits:
 
 - `HasPolicySet { fn policies() -> &PolicySet }` — implemented for
@@ -721,6 +749,9 @@ New traits:
   grants. The `()` shim returns `None`; handlers fail closed on
   missing identity (return `PERMISSION_DENIED_PREFIX` rather than
   proceeding without attribution).
+- `HasSpawnRegistry { fn spawn_registry() -> &Arc<SpawnRegistry> }` —
+  `SessionContext` exposes the live registry; `()` shim returns a
+  zero-limit registry (no accidental spawns in unit tests).
 
 ### `agent_loop::drive_step` dispatch-origin discipline
 
@@ -775,3 +806,114 @@ Decoded into `PersonaSnapshot.capabilities` (`Option<CapabilitySet>`)
 and `PersonaSnapshot.policy_rules` (`Vec<PolicyRule>` with
 `Precedence::KdlConfig`). `merge_policies(persona)` layers the rules
 over `rust_defaults()` at session open.
+
+## Spawn infrastructure (v3-multi-agent Phase 2)
+
+### `spawn` module
+
+Child session lifecycle: registry, ephemeral runner, sibling resolver,
+draft writer, fork scaffold. Module layout:
+
+- `spawn::registry` — `SpawnRegistry` (tokio `Semaphore`-bounded,
+  `parking_lot::Mutex`-guarded, cancel-on-drop via `Drop` impl).
+  `ChildSessionHandle` holds `cancel_state`, `Shared<BoxFuture<Result<
+  SpawnResult, SpawnError>>>`, and optional `OwnedSemaphorePermit`.
+  Methods: `try_acquire_ephemeral_slot`, `register`, `wait_for(id)`
+  (async), `cancel_one(id)`, `cancel_all`, `install_watcher`.
+  `SpawnKind { Ephemeral, Fork, Sibling }`, `TerminationReason
+  { EndTurn, ToolUse, MaxTurns, Timeout, Cancelled, Error }`,
+  `SpawnResult { child_id, final_text, turns, terminated,
+  progress_log_label }` (`#[non_exhaustive]`, `SpawnResult::new`
+  constructor).
+- `spawn::ephemeral` — `run_ephemeral` (drives child's `drive_step`
+  inside `tokio::time::timeout`), `fork_for_ephemeral` (method on
+  `SessionContext`, constructs child context with inherited state),
+  `synthesize_program_lib` (writes `lib/Pattern/SpawnHelpers.hs` to a
+  `tempfile::TempDir`), `compute_child_caps` (intersection via
+  `restrict_to`; escalation is `SpawnError::CapabilityEscalation`),
+  `child_include_paths`, `MAX_EPHEMERAL_TURNS = 32`,
+  `create_progress_log_block`, `build_progress_log_observer`.
+- `spawn::sibling` — `SiblingPersonaResolver` trait (seam for Phase 6
+  `pattern_db`-backed resolver). `UnconfiguredSiblingResolver` (prod
+  default; all lookups fail) + `StubSiblingResolver` (test, `HashMap`).
+  `spawn_sibling_existing` — resolves persona, loads KDL snapshot,
+  returns `SiblingExistingOutcome { persona_id, capabilities }` (caps
+  from the sibling's own KDL, NOT inherited from parent). Siblings are
+  NOT registered in the parent's `SpawnRegistry`.
+  `spawn_sibling_new` — writes draft KDL via `RuntimeConfigWriter`,
+  returns `SiblingNewOutcome { persona_id, status, kdl_path }`. Status
+  is `Active` (parent holds `SpawnNewIdentities`) or `Draft` (pending
+  human promote). Both emit `tracing::info!` with
+  `source = "runtime.spawn.sibling"`.
+- `spawn::draft` — `RuntimeConfigWriter` writes draft persona KDL to
+  `drafts_dir/<id>.kdl`. Creates directories lazily. Writes bypass the
+  `Pattern.File` handler policy gate (runtime-authorised bookkeeping).
+- `spawn::fork` — `ForkHandle { fork_id, child_id }`, `WireForkHandle`
+  (`ToCore` derive). `check_promote_capability` gates Phase 3 promote
+  on `SpawnNewIdentities`. `ForkIsolation::Persistent` returns a
+  "deferred to Phase 3" error; `Lightweight` returns a scaffold handle
+  with generated ids.
+
+### `CancelState` Notify-based waiting (Phase 2)
+
+`CancelState` gained a `notify: tokio::sync::Notify` field.
+`request_cancel()` flips the atomic AND calls `notify.notify_waiters()`.
+`wait_for_cancel()` is an `async fn` that parks on `notify.notified()`
+instead of polling every 50 ms. This eliminates watcher-task leaks in
+long-lived parents: the watcher wakes exactly once and completes.
+
+Watcher tasks spawned by `fork_for_ephemeral` capture
+`Weak<SpawnRegistry>` to break the Arc cycle that previously prevented
+`Drop::abort()` from firing. The registry's `Drop` impl aborts the
+watcher task via the stored `JoinHandle`.
+
+### `Pattern.Spawn` wire grammar (Phase 2)
+
+6 GADT variants: `Ephemeral | AwaitSpawn | AwaitAll | Fork | Sibling |
+Stop`. Typed records for return values in
+`sdk::requests::spawn`: `WireEphemeralSpawn`, `WireSpawnResult`,
+`WireSpawnAwaitOutcome` (sum: `Ok(WireSpawnResult) | Fail(String)`),
+`WireForkHandle`, `WireSiblingSpawn` (sum:
+`ExistingActive | NewActive | NewDraft`). No JSON-over-string — typed
+Core values via `FromCore` (incoming) + `ToCore` (outgoing). First
+typed-record returns in the runtime crate. Wire types in
+`sdk/requests/spawn.rs`; Haskell counterpart in
+`haskell/Pattern/Spawn.hs`.
+
+### Spawn handler (`sdk/handlers/spawn.rs`)
+
+Tightened to `EffectHandler<SessionContext>` (was generic
+`<U: HasCancelState>`). Uses `cx.user().tokio_handle().block_on(
+registry.wait_for(...))` for sync-to-async glue from the eval-worker
+thread. The await target is bounded by `tokio::time::timeout` on the
+child's `run_ephemeral` future — no plugin code in the await path.
+
+### `tokio_handle` threading and `block_on` safety
+
+`TidepoolRuntime::new` and `with_default_sdk` take
+`tokio_handle: tokio::runtime::Handle` as an explicit parameter
+(preempted from sandbox-io Phase 3 Task 5). Stored on both
+`TidepoolRuntime` and `SessionContext`. First consumer: the spawn
+handler's `block_on` path.
+
+**Decision rule** (when to use `block_on` vs. a bridge):
+- `block_on` is safe when: the await path is bounded by enforced
+  time/memory limits, no plugin-provided code in the await path, and
+  blocking matches the semantic contract.
+- A bridge is required when: network calls lack a top-level timeout,
+  plugin code could appear in the await path, or the sync wait would
+  prevent necessary concurrent work.
+- `PermissionBridge` is a candidate to migrate to `block_on` later
+  (broker is bounded, no plugin code). `RouterBridge` stays as a
+  bridge — routers may dispatch to plugin-provided endpoints.
+
+See the memory note at
+`~/.claude/projects/.../memory/project_eval_worker_block_on_safety.md`
+for the full rationale and migration-state-of-the-world.
+
+### `TidepoolRuntime` constructor change
+
+Both `TidepoolRuntime::new(...)` and `with_default_sdk(...)` now require
+a `tokio_handle: tokio::runtime::Handle` parameter. All call sites
+(pattern_server, tests) updated. The sandbox-io plan inherits this
+threading.
