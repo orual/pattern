@@ -632,34 +632,56 @@ Use `knus::parse` only if we already have a lightweight entry point; otherwise a
 <!-- END_TASK_11 -->
 
 <!-- START_TASK_12 -->
-### Task 12: Hook `is_pattern_config_kdl` into the policy pipeline
+### Task 12: Wire `is_pattern_config_kdl` as a handler-level locked invariant
 
-**Verifies:** AC2.7 (pipeline wiring).
+**Verifies:** AC2.7 (Phase 1 wiring; AC2.7 end-to-end is finalised by Task 15's File handler).
+
+**Revised approach (2026-04-24):** earlier drafts of this task generalised the shape-guard semantics into the policy system as a new `Precedence::LockedDefault` tier plus a `PolicyMatcher::FileWriteShape(fn(...))` variant. That was rejected in mid-execution review for being premature abstraction (one rule, one use case, plus a fragile `#[serde(skip)]` on a fn-pointer variant). The locked-default semantic is now enforced at the **handler level** instead: the File handler short-circuits config-KDL writes directly to the broker, never consulting `PolicySet` for them. KDL config rules cannot loosen what they cannot reach.
 
 **Files:**
-- Modify: `crates/pattern_runtime/src/policy/defaults.rs` — replace the placeholder `FilePath` rule from Task 9 with a `PolicyAction::RequireApproval` rule that's evaluated **after** the shape check produces `LikelyConfig`. Structurally: add a new `PolicyMatcher::FileWriteShape { guard: ConfigGuardFn }` variant and wire the default rule to use it.
-- Modify: `crates/pattern_core/src/capability/policy.rs` — add the `FileWriteShape` variant to `PolicyMatcher`. Because the guard function holds no config data, use a function pointer (`fn(&Path, &[u8]) -> bool`) rather than a closure — keeps `Serialize` behaviour.
+- No change to `crates/pattern_core/src/capability/policy.rs` — the policy types stay pure-data with `RustDefault / KdlConfig / RuntimeOverride` precedence only.
+- Modify: `crates/pattern_core/src/permission.rs` — add a `PermissionScope::FileWrite { path: String }` variant so the broker's approve-for-duration / approve-for-scope cache can key on path-level granularity (user approves writes to one specific config file for 5 min, not every config file globally).
+- Modify: `crates/pattern_runtime/src/policy/defaults.rs` — drop the placeholder `FilePath { pattern: "*/.pattern.kdl" }` rule that Task 9 added. The handler enforces directly; no PolicySet rule is needed.
+- Document: `crates/pattern_core/src/permission.rs` module docstring — call out that the broker's `scope_cache` is intentionally session-lifetime and must not gain a persist path. Grants live in RAM only; restart re-prompts. This is a **load-bearing invariant** for the locked-default semantics.
 
 **Implementation:**
-`PolicyMatcher::FileWriteShape { check: fn(&Path, &[u8]) -> bool }`. The default rule's `check` field references `is_pattern_config_kdl(...).is_config()` (a helper on the verdict enum).
 
-Serialization concern: a function pointer isn't serde-friendly out of the box. Two options:
-- **A.** Gate this variant behind `#[serde(skip)]` — it's a built-in rule, never loaded from config.
-- **B.** Define a separate `RuntimePolicyRule` in `pattern_runtime` for built-in rules that can't round-trip, and keep `PolicyRule` in core pure-data.
+The shape detection itself lives where Task 11 already put it (`crates/pattern_runtime/src/policy/config_guard.rs`). Task 15's File handler consumes it:
 
-Choose **(B)** — preserves `pattern_core` purity (matches the trait-only rule). `PolicySet` stays in core and accepts a `Vec<Box<dyn PolicyEvaluator>>` (trait object the runtime supplies). The runtime's built-in rules implement the trait; KDL-loaded rules are plain `PolicyRule` values.
+```rust
+// File handler, on Write(path, content):
+fn handle_write(path, content, cx) -> Result {
+    // (1) Locked invariant — shape detection short-circuits to broker.
+    //     The PolicySet is NOT consulted for config writes; no rule
+    //     (RustDefault, KdlConfig, RuntimeOverride) can loosen this.
+    if is_pattern_config_kdl(path, content).is_config() {
+        let scope = PermissionScope::FileWrite { path: path.display().to_string() };
+        return escalate_via_broker(scope, "write to Pattern config KDL");
+    }
 
-This is a minor scope expansion vs. what Task 8 shipped — if the user pushes back, fall back to (A) and accept the serde-skip.
+    // (2) Non-config writes flow through the normal policy pipeline.
+    match cx.user().policies().evaluate(EffectCategory::File, &policy_ctx) {
+        PolicyAction::Deny { ... }       => err with PERMISSION_DENIED_PREFIX,
+        PolicyAction::RequireApproval{}  => escalate_via_broker(...),
+        PolicyAction::Allow              => stub_not_implemented(),
+    }
+}
+```
 
-Add this rule to `rust_defaults()` so File writes are always evaluated against the guard. The rule outcome for `LikelyConfig` is `RequireApproval { reason: "writing to pattern config KDL" }`; it is NOT loosable by KDL config (rule carries `cannot_override: true` or lives in a separate "locked defaults" list that `PolicySet::evaluate` consults before any others).
+The broker's existing `ApproveForDuration` / `ApproveForScope` flow handles temporary approvals: user approves a config-KDL write to `/proj/.pattern.kdl` for 5 min → broker caches `(agent_id, FileWrite { path }) → grant` → subsequent writes to the same path within the window short-circuit on the cache. Different paths re-prompt.
 
-**Testing:**
-- Unit: integration of shape guard + policy — a `PolicySet` seeded with `rust_defaults()` returns `RequireApproval` when asked to evaluate a File write to `/foo/.pattern.kdl`, even after a KDL-config `Allow` rule for all file writes is layered on top (locked-defaults semantics, AC2.7).
+**Why this is the right place to enforce**: the policy system's job is "let the persona / partner / admin describe per-effect rules"; the locked-default's job is "this invariant must hold regardless of any rule." Mixing them entangled two concerns. Handler-level enforcement keeps PolicySet declarative + roundtrippable and keeps the locked invariant a structural property of the File handler.
+
+**Testing (verified end-to-end in Task 15):**
+- Shape match → broker request observed with `FileWrite { path }` scope.
+- KDL config seeded with an `Allow` rule for all file writes still surfaces a broker request for config writes (because the policy pipeline isn't consulted for shape matches at all).
+- Non-config write goes through PolicySet normally.
+- Approve-for-duration on a config write caches; second write to the same path within the window does not re-prompt; second write to a different config path does re-prompt.
 
 **Verification:**
-`cargo nextest run -p pattern-runtime policy::defaults config_guard`
+`cargo nextest run -p pattern-runtime config_guard policy file`
 
-**Commit:** `[pattern-runtime] lock pattern-config-KDL writes behind shape-based default`
+**Commit:** `[pattern-core] [pattern-runtime] drop LockedDefault precedence; add PermissionScope::FileWrite for handler-level shape guard`
 <!-- END_TASK_12 -->
 
 <!-- END_SUBCOMPONENT_E -->
