@@ -140,30 +140,33 @@ data SiblingConfig = SiblingConfig
   , siblingSharedBlocks :: [Text]
   }
 
--- | Status of a sibling spawn — whether the new persona is authorised
---   for live session-open or sits as a pending draft.
+-- | Typed handle returned by 'sibling'. Each constructor encodes a distinct
+--   outcome so agents can pattern-match without inspecting optional fields:
 --
---   * 'SiblingActive' — parent held @SpawnNewIdentities@; Phase 6 promotes
---     to a live session.
---   * 'SiblingDraft'  — parent did not; the draft is pending human-driven
---     promote.
---
--- For @SiblingPersona = ExistingPersona _@ the status is always
--- 'SiblingActive' (the persona is already a registered identity).
-data SiblingStatus
-  = SiblingActive
-  | SiblingDraft
-
--- | Typed handle returned by 'sibling'. Pairs the persona id with its
---   status and (for new-identity drafts) the on-disk path of the
---   written KDL.
+--   * 'SiblingExistingActive' — an existing registered persona was adopted.
+--     Always authorised for live session-open (Phase 6). No draft KDL path.
+--   * 'SiblingNewActive'      — a new identity was minted AND the parent held
+--     @SpawnNewIdentities@; Phase 6 promotes to a live session. Carries the
+--     on-disk KDL draft path.
+--   * 'SiblingNewDraft'       — a new identity was minted but the parent lacked
+--     @SpawnNewIdentities@; pending human-driven promote. Carries the on-disk
+--     KDL draft path.
 --
 --   Mirrors @WireSiblingSpawn@ in @crates\/pattern_runtime\/src\/sdk\/requests\/spawn.rs@.
-data SiblingSpawn = SiblingSpawn
-  { siblingSpawnId      :: PersonaId
-  , siblingSpawnStatus  :: SiblingStatus
-  , siblingSpawnKdlPath :: Maybe Text
-  }
+--
+--   The old flat-record shape permitted meaningless states such as
+--   @SiblingActive@ with a @kdlPath = Just _@ (existing adoptions have no
+--   draft file) or @SiblingDraft@ with @kdlPath = Nothing@ (drafts always
+--   have a path). The sum type makes those impossible to construct.
+data SiblingSpawn
+  = SiblingExistingActive PersonaId
+    -- ^ Existing persona adopted; always authorised for live session-open.
+  | SiblingNewActive PersonaId Text
+    -- ^ New persona minted and authorised (parent held SpawnNewIdentities).
+    --   Second field is the on-disk KDL draft path.
+  | SiblingNewDraft PersonaId Text
+    -- ^ New persona minted but pending human-driven promote.
+    --   Second field is the on-disk KDL draft path.
 
 -- ── Result types ──────────────────────────────────────────────────────────────
 

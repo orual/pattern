@@ -24,7 +24,7 @@ use pattern_core::types::ids::new_id;
 use crate::sdk::describe::{DescribeEffect, EffectDecl};
 use crate::sdk::requests::SpawnReq;
 use crate::sdk::requests::spawn::{
-    WireEphemeralSpawn, WireSiblingSpawn, WireSiblingStatus, WireSpawnAwaitOutcome, WireSpawnResult,
+    WireEphemeralSpawn, WireSiblingSpawn, WireSpawnAwaitOutcome, WireSpawnResult,
 };
 use crate::session::SessionContext;
 use crate::spawn::sibling::{SiblingExistingOutcome, spawn_sibling_existing, spawn_sibling_new};
@@ -60,8 +60,7 @@ impl DescribeEffect for SpawnHandler {
                 "data SpawnResult = SpawnResult { spawnResultChildId :: SpawnId, spawnResultFinalText :: Maybe Text, spawnResultTurns :: Int, spawnResultTerminated :: TerminationReason, spawnResultProgressLogLabel :: Maybe Text }",
                 "data SpawnAwaitOutcome = SpawnOk SpawnResult | SpawnFail Text",
                 "data ForkHandle = ForkHandle { forkHandleId :: SpawnId, forkHandleChildId :: SpawnId }",
-                "data SiblingStatus = SiblingActive | SiblingDraft",
-                "data SiblingSpawn = SiblingSpawn { siblingSpawnId :: PersonaId, siblingSpawnStatus :: SiblingStatus, siblingSpawnKdlPath :: Maybe Text }",
+                "data SiblingSpawn = SiblingExistingActive PersonaId | SiblingNewActive PersonaId Text | SiblingNewDraft PersonaId Text",
             ],
             helpers: &[
                 "ephemeral :: Member Spawn effs => EphemeralConfig -> Eff effs EphemeralSpawn\nephemeral cfg = send (Ephemeral cfg)",
@@ -296,15 +295,11 @@ fn handle_sibling(
                     parent, &cfg_clone, &id_clone, resolver,
                 ))
                 .map_err(|e| EffectError::Handler(e.to_string()))?;
-            // Existing-persona adoption is always Active — the persona
-            // is already a registered identity, no draft involved.
+            // Existing-persona adoption is always ExistingActive — the
+            // persona is already a registered identity, no draft involved.
             // `outcome.capabilities` carries the sibling's own caps (T8/
             // Phase 6 wiring for cap-restricted interactions).
-            WireSiblingSpawn {
-                persona_id: outcome.persona_id.to_string(),
-                status: WireSiblingStatus::Active,
-                kdl_path: None,
-            }
+            WireSiblingSpawn::ExistingActive(outcome.persona_id.to_string())
         }
         pattern_core::spawn::SiblingPersona::New(persona_cfg) => {
             let drafts_dir = parent.drafts_dir().to_owned();
