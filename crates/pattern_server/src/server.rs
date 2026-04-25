@@ -788,6 +788,7 @@ async fn get_or_open_session(
         project_mount.cache.clone(),
         config.provider.clone(),
         project_mount.db.clone(),
+        tokio::runtime::Handle::current(),
         sink_dyn,
         None, // prelude_dir — SDK bundles the prelude internally.
         Some(project_mount.mount_path.clone()),

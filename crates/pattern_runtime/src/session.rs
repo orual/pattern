@@ -184,6 +184,23 @@ pub struct SessionContext {
     /// The default limit of 8 is a conservative starting point for ensembles.
     /// Revisit when ensemble patterns in Phase 7 stress this ceiling.
     spawn_registry: Arc<SpawnRegistry>,
+    /// Caller-supplied tokio runtime handle. Borrowed for sync handler
+    /// paths (e.g. the eval-worker thread) that need to `block_on` an
+    /// async future without magic-capturing via `Handle::current()`.
+    ///
+    /// First consumer: the v3-multi-agent spawn handler. Ephemeral /
+    /// AwaitSpawn / AwaitAll arms call `cx.user().tokio_handle().block_on`
+    /// against the registry's `Shared<BoxFuture<SpawnResult>>`. The
+    /// sandbox-io Phase 3 PortRegistry actor will reuse the same handle
+    /// when it lands.
+    ///
+    /// Note on existing bridges: `PermissionBridge` could later migrate
+    /// to this approach (broker calls are well-bounded; no plugin code
+    /// in the await path). `RouterBridge` deliberately stays as a bridge
+    /// — router endpoints may dispatch to plugin-provided code where the
+    /// await path crosses arbitrary user code, and the sync→async glue
+    /// keeps the eval worker isolated from that risk.
+    tokio_handle: tokio::runtime::Handle,
 }
 
 /// Handlers call this to decide whether to short-circuit on soft-cancel.
@@ -340,6 +357,7 @@ impl SessionContext {
         memory_store: Arc<dyn MemoryStore>,
         provider: Arc<dyn ProviderClient>,
         db: Arc<pattern_db::ConstellationDb>,
+        tokio_handle: tokio::runtime::Handle,
     ) -> Self {
         let agent_id = persona.agent_id.to_string();
         let budget = Budget::from_persona(persona);
@@ -380,7 +398,15 @@ impl SessionContext {
             permission_bridge: None,
             current_dispatch_origin: Arc::new(std::sync::RwLock::new(None)),
             spawn_registry,
+            tokio_handle,
         }
+    }
+
+    /// Caller-supplied tokio runtime handle. Borrowed for sync handler
+    /// paths that need to `block_on` an async future without
+    /// magic-capturing via `Handle::current()`.
+    pub fn tokio_handle(&self) -> &tokio::runtime::Handle {
+        &self.tokio_handle
     }
 
     /// Active policy set for this session. Handlers consult this
@@ -771,6 +797,7 @@ impl TidepoolSession {
         memory_store: Arc<dyn MemoryStore>,
         provider: Arc<dyn ProviderClient>,
         db: Arc<pattern_db::ConstellationDb>,
+        tokio_handle: tokio::runtime::Handle,
     ) -> Result<Self, RuntimeError> {
         crate::preflight::check()?;
         let _ = sdk; // sdk.resolve() is deferred to open_with_agent_loop
@@ -785,8 +812,14 @@ impl TidepoolSession {
         // `TidepoolSession` reads it directly in the agent-loop path.
         let current_turn = Arc::new(AtomicU64::new(0));
         let ctx = Arc::new(
-            SessionContext::from_persona(&persona, memory_store, provider.clone(), db)
-                .with_checkpoint_log(checkpoint_log.clone(), current_turn),
+            SessionContext::from_persona(
+                &persona,
+                memory_store,
+                provider.clone(),
+                db,
+                tokio_handle,
+            )
+            .with_checkpoint_log(checkpoint_log.clone(), current_turn),
         );
 
         let display = DisplayHandler::new();
@@ -842,6 +875,7 @@ impl TidepoolSession {
         memory_store: Arc<dyn MemoryStore>,
         provider: Arc<dyn ProviderClient>,
         db: Arc<pattern_db::ConstellationDb>,
+        tokio_handle: tokio::runtime::Handle,
         turn_sink: Arc<dyn TurnSink>,
         prelude_dir: Option<PathBuf>,
         mount_path: Option<PathBuf>,
@@ -856,7 +890,7 @@ impl TidepoolSession {
         let store_for_seed = memory_store.clone();
 
         // Initialise the base session (preflight, context, checkpoint log).
-        let mut session = Self::open(persona, sdk, memory_store, provider, db)?;
+        let mut session = Self::open(persona, sdk, memory_store, provider, db, tokio_handle)?;
 
         // Seed persona-declared memory blocks into the store. Blocks that
         // already exist (e.g. restored from a persistent DB on re-spawn)
@@ -1265,8 +1299,15 @@ mod tests {
         let persona = PersonaSnapshot::new("agent-a", "A");
         let sdk = SdkLocation::default();
 
-        let session = TidepoolSession::open(persona, &sdk, store, provider, db)
-            .expect("open should succeed when preflight passes");
+        let session = TidepoolSession::open(
+            persona,
+            &sdk,
+            store,
+            provider,
+            db,
+            tokio::runtime::Handle::current(),
+        )
+        .expect("open should succeed when preflight passes");
 
         let result = session.step_with_agent_loop(test_turn_input()).await;
         match result {
@@ -1345,6 +1386,7 @@ mod tests {
             store,
             provider_dyn,
             db,
+            tokio::runtime::Handle::current(),
             sink_dyn,
             None,
             None,
@@ -1422,7 +1464,16 @@ mod tests {
         let sink_dyn: Arc<dyn TurnSink> = sink.clone();
 
         let session = TidepoolSession::open_with_agent_loop(
-            persona, &sdk, store, provider, db, sink_dyn, None, None, None,
+            persona,
+            &sdk,
+            store,
+            provider,
+            db,
+            tokio::runtime::Handle::current(),
+            sink_dyn,
+            None,
+            None,
+            None,
         )
         .await
         .expect("open_with_agent_loop should succeed");
@@ -1626,7 +1677,13 @@ mod tests {
             )]);
 
         // Wire a real broker + bridge, then watch for any traffic.
-        let ctx_owned = SessionContext::from_persona(&persona, store, provider, db);
+        let ctx_owned = SessionContext::from_persona(
+            &persona,
+            store,
+            provider,
+            db,
+            tokio::runtime::Handle::current(),
+        );
         let broker = ctx_owned.permission_broker().clone();
         let bridge = Arc::new(crate::permission::PermissionBridge::spawn(broker.clone()));
         let ctx = ctx_owned.with_permission_bridge(bridge);
@@ -1699,7 +1756,13 @@ mod tests {
                 Precedence::KdlConfig,
             )]);
 
-        let ctx_owned = SessionContext::from_persona(&persona, store, provider, db);
+        let ctx_owned = SessionContext::from_persona(
+            &persona,
+            store,
+            provider,
+            db,
+            tokio::runtime::Handle::current(),
+        );
         let broker = ctx_owned.permission_broker().clone();
         let bridge = Arc::new(crate::permission::PermissionBridge::spawn(broker.clone()));
         let ctx = ctx_owned.with_permission_bridge(bridge);
@@ -1751,7 +1814,7 @@ mod tests {
             CapabilitySet::from_iter([EffectCategory::Memory, EffectCategory::Message]),
         ));
 
-        let ctx = SessionContext::from_persona(&persona, store, provider, db);
+        let ctx = SessionContext::from_persona(&persona, store, provider, db, rt.handle().clone());
         let caps = ctx.capabilities().expect("persona caps should propagate");
         assert!(caps.contains(EffectCategory::Memory));
         assert!(caps.contains(EffectCategory::Message));

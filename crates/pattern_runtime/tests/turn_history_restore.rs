@@ -56,7 +56,14 @@ async fn setup(
     let sink: Arc<dyn TurnSink> = Arc::new(VecSink::new());
     let persona = PersonaSnapshot::new("agent-a", "Test Agent");
     let ctx = Arc::new(
-        SessionContext::from_persona(&persona, store, provider, db.clone()).with_turn_sink(sink),
+        SessionContext::from_persona(
+            &persona,
+            store,
+            provider,
+            db.clone(),
+            tokio::runtime::Handle::current(),
+        )
+        .with_turn_sink(sink),
     );
     (ctx, db, provider_concrete)
 }

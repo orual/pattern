@@ -181,7 +181,14 @@ mod tests {
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
         let provider: Arc<dyn ProviderClient> = Arc::new(NopProviderClient);
         let persona = PersonaSnapshot::new("agent-a", "A");
-        SessionContext::from_persona(&persona, store, provider, db).with_router(Arc::new(registry))
+        SessionContext::from_persona(
+            &persona,
+            store,
+            provider,
+            db,
+            tokio::runtime::Handle::current(),
+        )
+        .with_router(Arc::new(registry))
     }
 
     /// Build a DataConTable that includes the `()` constructor needed by

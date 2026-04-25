@@ -67,6 +67,7 @@ async fn open_session_with_caps(agent_id: &str, caps: CapabilitySet) -> Tidepool
         store,
         provider,
         db,
+        tokio::runtime::Handle::current(),
         sink,
         None,
         None,

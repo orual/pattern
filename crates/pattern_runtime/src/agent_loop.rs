@@ -2123,7 +2123,14 @@ mod tests {
         let sink_dyn: Arc<dyn TurnSink> = sink.clone();
         let persona = PersonaSnapshot::new("agent-a", "A");
         let ctx = Arc::new(
-            SessionContext::from_persona(&persona, store, provider, db).with_turn_sink(sink_dyn),
+            SessionContext::from_persona(
+                &persona,
+                store,
+                provider,
+                db,
+                tokio::runtime::Handle::current(),
+            )
+            .with_turn_sink(sink_dyn),
         );
         (ctx, sink, provider_concrete)
     }
@@ -3668,8 +3675,14 @@ mod tests {
             cp
         });
         let ctx = Arc::new(
-            crate::session::SessionContext::from_persona(&persona, store, provider, db)
-                .with_turn_sink(sink_dyn),
+            crate::session::SessionContext::from_persona(
+                &persona,
+                store,
+                provider,
+                db,
+                tokio::runtime::Handle::current(),
+            )
+            .with_turn_sink(sink_dyn),
         );
         (ctx, sink, provider_concrete)
     }

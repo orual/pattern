@@ -168,6 +168,7 @@ mod tests {
             Arc::new(InMemoryMemoryStore::new()),
             Arc::new(NopProviderClient),
             db,
+            tokio::runtime::Handle::current(),
         )
     }
 
@@ -183,6 +184,7 @@ mod tests {
                 store.clone(),
                 Arc::new(NopProviderClient) as Arc<dyn ProviderClient>,
                 db,
+                tokio::runtime::Handle::current(),
             );
             let cx = EffectContext::with_user(&table, &ctx);
             let mut h = SearchHandler::new(store);

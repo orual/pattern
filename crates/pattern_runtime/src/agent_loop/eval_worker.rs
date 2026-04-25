@@ -304,7 +304,13 @@ mod tests {
         let provider: Arc<dyn ProviderClient> = Arc::new(NopProviderClient);
         let db = crate::testing::test_db().await;
         let persona = PersonaSnapshot::new("agent-a", "A");
-        let ctx = Arc::new(SessionContext::from_persona(&persona, store, provider, db));
+        let ctx = Arc::new(SessionContext::from_persona(
+            &persona,
+            store,
+            provider,
+            db,
+            tokio::runtime::Handle::current(),
+        ));
         let sdk_dir = SdkLocation::default()
             .resolve()
             .expect("SDK dir should resolve for tests");
@@ -425,7 +431,13 @@ mod tests {
         let db = crate::testing::test_db().await;
         let persona = PersonaSnapshot::new("agent-a", "A");
         // ctx is needed for its Drop to run after the test body.
-        let _ctx = Arc::new(SessionContext::from_persona(&persona, store, provider, db));
+        let _ctx = Arc::new(SessionContext::from_persona(
+            &persona,
+            store,
+            provider,
+            db,
+            tokio::runtime::Handle::current(),
+        ));
 
         // Create a worker whose sender leads to a dropped receiver.
         // Simulate by dropping the receiver manually via a one-off

@@ -769,6 +769,7 @@ mod tests {
             Arc::new(NeverStore),
             Arc::new(NopProviderClient),
             db,
+            tokio::runtime::Handle::current(),
         )
     }
 
@@ -778,8 +779,13 @@ mod tests {
         let db = crate::testing::test_db().await;
         let persona = PersonaSnapshot::new("agent-a", "A");
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
-        let ctx =
-            SessionContext::from_persona(&persona, store.clone(), Arc::new(NopProviderClient), db);
+        let ctx = SessionContext::from_persona(
+            &persona,
+            store.clone(),
+            Arc::new(NopProviderClient),
+            db,
+            tokio::runtime::Handle::current(),
+        );
         (ctx, store)
     }
 
@@ -830,7 +836,13 @@ mod tests {
         let err_msg = tokio::task::spawn_blocking(move || {
             let table = standard_datacon_table();
             let persona = PersonaSnapshot::new("agent-a", "A");
-            let ctx = SessionContext::from_persona(&persona, store, provider_for_ctx, db);
+            let ctx = SessionContext::from_persona(
+                &persona,
+                store,
+                provider_for_ctx,
+                db,
+                tokio::runtime::Handle::current(),
+            );
             let cx = EffectContext::with_user(&table, &ctx);
             let mut h = MemoryHandler::new();
             let err = h

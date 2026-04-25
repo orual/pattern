@@ -108,6 +108,7 @@ async fn memory_round_trip_through_session() {
         store.clone(),
         provider,
         db,
+        tokio::runtime::Handle::current(),
         sink,
         None,
         None,
@@ -187,6 +188,7 @@ async fn checkpoint_and_restore_round_trips() {
         store.clone(),
         provider,
         db.clone(),
+        tokio::runtime::Handle::current(),
         sink,
         None,
         None,
@@ -219,7 +221,16 @@ async fn checkpoint_and_restore_round_trips() {
     let sink2: Arc<dyn TurnSink> = Arc::new(VecSink::new());
 
     let mut session2 = TidepoolSession::open_with_agent_loop(
-        persona, &sdk, store2, provider2, db, sink2, None, None, None,
+        persona,
+        &sdk,
+        store2,
+        provider2,
+        db,
+        tokio::runtime::Handle::current(),
+        sink2,
+        None,
+        None,
+        None,
     )
     .await
     .expect("second open should succeed");
@@ -281,6 +292,7 @@ async fn concurrent_session_isolation() {
         store_a,
         provider_a,
         db.clone(),
+        tokio::runtime::Handle::current(),
         sink_a,
         None,
         None,
@@ -303,6 +315,7 @@ async fn concurrent_session_isolation() {
         store_b,
         provider_b,
         db.clone(),
+        tokio::runtime::Handle::current(),
         sink_b,
         None,
         None,

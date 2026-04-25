@@ -207,7 +207,13 @@ async fn message_stub_reports_ask_candidate_for_removal_hang_free() {
     let provider: Arc<dyn ProviderClient> = Arc::new(NopProviderClient);
     let db = pattern_runtime::testing::test_db().await;
     let persona = PersonaSnapshot::new("agent-a", "A");
-    let ctx = SessionContext::from_persona(&persona, store, provider, db);
+    let ctx = SessionContext::from_persona(
+        &persona,
+        store,
+        provider,
+        db,
+        tokio::runtime::Handle::current(),
+    );
 
     run_stub_case!(
         "message_stub",

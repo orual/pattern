@@ -40,21 +40,45 @@ pub struct TidepoolRuntime {
     /// Constellation database handle. Threaded to every session opened
     /// by this runtime. Required for message persistence + compaction.
     db: Arc<pattern_db::ConstellationDb>,
+    /// Caller-supplied tokio runtime handle. Threaded to every session so
+    /// sync handler paths (e.g. the eval-worker thread) can `block_on` an
+    /// async future against an explicit, stable runtime instead of
+    /// magic-capturing via `Handle::current()` from arbitrary context.
+    ///
+    /// Explicit-param rationale: `Handle::current()` only resolves inside
+    /// an async context, single-threaded runtimes silently change blocking
+    /// semantics, and capture-at-use makes the dependency invisible in the
+    /// type signature. Surfacing this as a constructor param documents
+    /// that the runtime borrows the caller's tokio runtime.
+    ///
+    /// First consumer: the v3-multi-agent spawn handler (Ephemeral /
+    /// AwaitSpawn / AwaitAll arms `block_on` the registry's
+    /// `Shared<BoxFuture<SpawnResult>>` from the eval-worker thread).
+    /// The sandbox-io Phase 3 PortRegistry actor will share this same
+    /// handle when it lands.
+    tokio_handle: tokio::runtime::Handle,
 }
 
 impl TidepoolRuntime {
-    /// Construct with an explicit SDK location and memory store.
+    /// Construct with an explicit SDK location, memory store, provider, db,
+    /// and tokio handle.
+    ///
+    /// `tokio_handle` is borrowed from the caller's tokio runtime; see the
+    /// field-level docs on [`TidepoolRuntime::tokio_handle`] for the
+    /// rationale.
     pub fn new(
         sdk: SdkLocation,
         memory_store: Arc<dyn MemoryStore>,
         provider: Arc<dyn ProviderClient>,
         db: Arc<pattern_db::ConstellationDb>,
+        tokio_handle: tokio::runtime::Handle,
     ) -> Self {
         Self {
             sdk,
             memory_store,
             provider,
             db,
+            tokio_handle,
         }
     }
 
@@ -63,8 +87,22 @@ impl TidepoolRuntime {
         memory_store: Arc<dyn MemoryStore>,
         provider: Arc<dyn ProviderClient>,
         db: Arc<pattern_db::ConstellationDb>,
+        tokio_handle: tokio::runtime::Handle,
     ) -> Self {
-        Self::new(SdkLocation::default(), memory_store, provider, db)
+        Self::new(
+            SdkLocation::default(),
+            memory_store,
+            provider,
+            db,
+            tokio_handle,
+        )
+    }
+
+    /// Caller-supplied tokio runtime handle. Borrowed by sessions opened
+    /// from this runtime; consumed by sync handler paths that need to
+    /// `block_on` an async future without depending on `Handle::current()`.
+    pub fn tokio_handle(&self) -> &tokio::runtime::Handle {
+        &self.tokio_handle
     }
 }
 
@@ -81,8 +119,9 @@ impl AgentRuntime for TidepoolRuntime {
         let memory_store = self.memory_store.clone();
         let provider = self.provider.clone();
         let db = self.db.clone();
+        let tokio_handle = self.tokio_handle.clone();
         let mut session = tokio::task::spawn_blocking(move || {
-            TidepoolSession::open(persona, &sdk, memory_store, provider, db)
+            TidepoolSession::open(persona, &sdk, memory_store, provider, db, tokio_handle)
         })
         .await
         .map_err(|e| RuntimeError::JoinError {

@@ -336,7 +336,13 @@ mod tests {
 
     fn sctx(store: Arc<dyn MemoryStore>, db: Arc<pattern_db::ConstellationDb>) -> SessionContext {
         let persona = PersonaSnapshot::new("agent-a", "A");
-        SessionContext::from_persona(&persona, store, Arc::new(NopProviderClient), db)
+        SessionContext::from_persona(
+            &persona,
+            store,
+            Arc::new(NopProviderClient),
+            db,
+            tokio::runtime::Handle::current(),
+        )
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
