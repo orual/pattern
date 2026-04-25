@@ -36,6 +36,7 @@
 //! ```
 
 pub mod base_instructions;
+pub mod capability;
 pub mod error;
 pub mod memory;
 // `memory_acl` module removed: MemoryOp, MemoryGate, and check() are
@@ -51,6 +52,9 @@ pub mod test_helpers;
 // ── Common re-exports ────────────────────────────────────────────────────────
 
 pub use base_instructions::DEFAULT_BASE_INSTRUCTIONS;
+pub use capability::{
+    CapabilityError, CapabilityFlag, CapabilityParseError, CapabilitySet, EffectCategory,
+};
 
 /// Reserved memory-block label for the agent's persona content.
 /// Segment 1 reads this block to inject persona into the system prompt.
