@@ -89,7 +89,17 @@ mod parity {
         ("SourcesReq", &["Stream", "Subscribe", "List"]),
         ("McpReq", &["Use"]),
         ("RpcReq", &["Call", "Recv"]),
-        ("SpawnReq", &["Start", "Stop"]),
+        (
+            "SpawnReq",
+            &[
+                "Ephemeral",
+                "AwaitSpawn",
+                "AwaitAll",
+                "Fork",
+                "Sibling",
+                "Stop",
+            ],
+        ),
         ("DiagnosticsReq", &["GetDiagnostics"]),
         (
             "TasksReq",
@@ -277,9 +287,38 @@ mod parity {
     #[test]
     fn spawn_req_variants() {
         use super::SpawnReq;
-        let _ = SpawnReq::Start(String::new());
+        use super::spawn::{
+            WireEphemeralConfig, WireForkConfig, WireForkIsolation, WireRelationshipKind,
+            WireSiblingConfig, WireSiblingPersona,
+        };
+        // Exhaustively construct every variant so a rename or added variant
+        // forces a compile error or count mismatch. Empty payloads are fine —
+        // this only exercises the type shape.
+        let eph = WireEphemeralConfig {
+            program: String::new(),
+            costume: None,
+            capabilities: None,
+            timeout_ms: None,
+        };
+        let fork = WireForkConfig {
+            program: String::new(),
+            isolation: WireForkIsolation::Lightweight,
+            capabilities: None,
+            timeout_hint_ms: None,
+            task_ref: None,
+        };
+        let sib = WireSiblingConfig {
+            persona: WireSiblingPersona::Existing(String::new()),
+            relationship: WireRelationshipKind::PeerWith,
+            shared_blocks: Vec::new(),
+        };
+        let _ = SpawnReq::Ephemeral(eph);
+        let _ = SpawnReq::AwaitSpawn(String::new());
+        let _ = SpawnReq::AwaitAll(Vec::<String>::new());
+        let _ = SpawnReq::Fork(fork);
+        let _ = SpawnReq::Sibling(sib);
         let _ = SpawnReq::Stop(String::new());
-        assert_eq!(count("SpawnReq"), 2);
+        assert_eq!(count("SpawnReq"), 6);
     }
 
     #[test]

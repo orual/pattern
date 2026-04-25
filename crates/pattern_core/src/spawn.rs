@@ -41,22 +41,18 @@ pub struct EphemeralConfig {
     pub capabilities: Option<CapabilitySet>,
     /// Execution time limit. `None` falls back to the runtime default.
     pub timeout: Option<jiff::Span>,
-    /// Caller-supplied tags forwarded to the structured log sink.
-    pub metadata: serde_json::Value,
 }
 
 impl EphemeralConfig {
     /// Construct an ephemeral config with sensible defaults.
     ///
-    /// Sets `costume`, `capabilities`, and `timeout` to `None`; `metadata`
-    /// to `serde_json::Value::Null`.
+    /// Sets `costume`, `capabilities`, and `timeout` to `None`.
     pub fn new(program: impl Into<String>) -> Self {
         Self {
             program: program.into(),
             costume: None,
             capabilities: None,
             timeout: None,
-            metadata: serde_json::Value::Null,
         }
     }
 
@@ -78,12 +74,6 @@ impl EphemeralConfig {
     /// Set an execution time limit.
     pub fn with_timeout(mut self, span: jiff::Span) -> Self {
         self.timeout = Some(span);
-        self
-    }
-
-    /// Attach caller-supplied metadata for log correlation.
-    pub fn with_metadata(mut self, meta: serde_json::Value) -> Self {
-        self.metadata = meta;
         self
     }
 }
@@ -268,8 +258,6 @@ pub enum RelationshipKind {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-
     use super::*;
     use crate::capability::{CapabilityFlag, EffectCategory};
 
@@ -288,7 +276,6 @@ mod tests {
             costume: Some("be terse".to_string()),
             capabilities: Some(sample_capability_set()),
             timeout: None,
-            metadata: json!({"source": "test"}),
         };
 
         let json = serde_json::to_string(&original).expect("serialise must succeed");
@@ -299,7 +286,6 @@ mod tests {
         assert_eq!(recovered.costume, original.costume);
         assert_eq!(recovered.capabilities, original.capabilities);
         assert!(recovered.timeout.is_none());
-        assert_eq!(recovered.metadata, original.metadata);
     }
 
     #[test]
@@ -309,7 +295,6 @@ mod tests {
         assert!(cfg.costume.is_none());
         assert!(cfg.capabilities.is_none());
         assert!(cfg.timeout.is_none());
-        assert_eq!(cfg.metadata, serde_json::Value::Null);
     }
 
     #[test]
@@ -317,20 +302,10 @@ mod tests {
         let caps = sample_capability_set();
         let cfg = EphemeralConfig::new("pure ()")
             .with_costume("be terse")
-            .with_capabilities(caps.clone())
-            .with_metadata(json!({"tag": "v1"}));
+            .with_capabilities(caps.clone());
 
         assert_eq!(cfg.costume.as_deref(), Some("be terse"));
         assert_eq!(cfg.capabilities.as_ref(), Some(&caps));
-        assert_eq!(cfg.metadata, json!({"tag": "v1"}));
-    }
-
-    #[test]
-    fn ephemeral_config_null_metadata_round_trip() {
-        let cfg = EphemeralConfig::new("pure ()");
-        let json = serde_json::to_string(&cfg).expect("serialise must succeed");
-        let back: EphemeralConfig = serde_json::from_str(&json).expect("deserialise must succeed");
-        assert_eq!(back.metadata, serde_json::Value::Null);
     }
 
     // ── ForkConfig ───────────────────────────────────────────────────────────

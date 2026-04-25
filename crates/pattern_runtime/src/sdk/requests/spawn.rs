@@ -1,12 +1,354 @@
 //! Mirror of `Pattern.Spawn` (`haskell/Pattern/Spawn.hs`).
+//!
+//! Configs cross the Haskell/Rust boundary as typed Core values — each
+//! wire struct derives [`FromCore`] and converts to the corresponding
+//! `pattern_core::spawn` domain type via a `From<Wire*>` impl. This keeps
+//! `pattern_core` free of any Tidepool-VM dependency while delivering a
+//! fully-typed wire format end-to-end (no JSON-over-string).
+//!
+//! Naming:
+//!
+//! - Wire structs that map 1:1 onto a single Haskell record use the
+//!   `Wire*` prefix on the Rust side and the unprefixed name on the
+//!   Haskell side (e.g. `WireEphemeralConfig` ↔ Haskell `EphemeralConfig`).
+//! - Unit-variant enums use the `Cat` / `Flag` / etc. prefix on the
+//!   Haskell ctors to avoid namespace collisions with effect GADT ctors
+//!   (matches `Pattern.Memory`'s `BlockCore` / `SchemaText` precedent).
 
+use jiff::Span;
+use smol_str::SmolStr;
 use tidepool_bridge_derive::FromCore;
+
+use pattern_core::types::ids::PersonaId;
+use pattern_core::{
+    BlockRef, CapabilityFlag, CapabilitySet, EffectCategory,
+    spawn::{
+        EphemeralConfig, ForkConfig, ForkIsolation, PersonaConfig, RelationshipKind, SiblingConfig,
+        SiblingPersona,
+    },
+};
+
+// ── BlockRef ─────────────────────────────────────────────────────────────────
+
+/// Wire mirror of [`pattern_core::BlockRef`].
+#[derive(Debug, FromCore)]
+#[core(module = "Pattern.Spawn", name = "BlockRef")]
+pub struct WireBlockRef {
+    pub label: String,
+    pub block_id: String,
+    pub agent_id: String,
+}
+
+impl From<WireBlockRef> for BlockRef {
+    fn from(w: WireBlockRef) -> Self {
+        BlockRef::with_owner(w.label, w.block_id, w.agent_id)
+    }
+}
+
+// ── EffectCategory ───────────────────────────────────────────────────────────
+
+/// Wire mirror of [`pattern_core::EffectCategory`].
+///
+/// Constructor names are `Cat`-prefixed on the Haskell side to avoid
+/// clashing with effect GADT type names visible in the same import
+/// scope.
+#[derive(Debug, FromCore)]
+pub enum WireEffectCategory {
+    #[core(module = "Pattern.Spawn", name = "CatMemory")]
+    Memory,
+    #[core(module = "Pattern.Spawn", name = "CatSearch")]
+    Search,
+    #[core(module = "Pattern.Spawn", name = "CatRecall")]
+    Recall,
+    #[core(module = "Pattern.Spawn", name = "CatTasks")]
+    Tasks,
+    #[core(module = "Pattern.Spawn", name = "CatSkills")]
+    Skills,
+    #[core(module = "Pattern.Spawn", name = "CatMessage")]
+    Message,
+    #[core(module = "Pattern.Spawn", name = "CatDisplay")]
+    Display,
+    #[core(module = "Pattern.Spawn", name = "CatTime")]
+    Time,
+    #[core(module = "Pattern.Spawn", name = "CatLog")]
+    Log,
+    #[core(module = "Pattern.Spawn", name = "CatShell")]
+    Shell,
+    #[core(module = "Pattern.Spawn", name = "CatFile")]
+    File,
+    #[core(module = "Pattern.Spawn", name = "CatSources")]
+    Sources,
+    #[core(module = "Pattern.Spawn", name = "CatMcp")]
+    Mcp,
+    #[core(module = "Pattern.Spawn", name = "CatRpc")]
+    Rpc,
+    #[core(module = "Pattern.Spawn", name = "CatSpawn")]
+    Spawn,
+    #[core(module = "Pattern.Spawn", name = "CatDiagnostics")]
+    Diagnostics,
+    #[core(module = "Pattern.Spawn", name = "CatWake")]
+    Wake,
+}
+
+impl From<WireEffectCategory> for EffectCategory {
+    fn from(w: WireEffectCategory) -> Self {
+        match w {
+            WireEffectCategory::Memory => EffectCategory::Memory,
+            WireEffectCategory::Search => EffectCategory::Search,
+            WireEffectCategory::Recall => EffectCategory::Recall,
+            WireEffectCategory::Tasks => EffectCategory::Tasks,
+            WireEffectCategory::Skills => EffectCategory::Skills,
+            WireEffectCategory::Message => EffectCategory::Message,
+            WireEffectCategory::Display => EffectCategory::Display,
+            WireEffectCategory::Time => EffectCategory::Time,
+            WireEffectCategory::Log => EffectCategory::Log,
+            WireEffectCategory::Shell => EffectCategory::Shell,
+            WireEffectCategory::File => EffectCategory::File,
+            WireEffectCategory::Sources => EffectCategory::Sources,
+            WireEffectCategory::Mcp => EffectCategory::Mcp,
+            WireEffectCategory::Rpc => EffectCategory::Rpc,
+            WireEffectCategory::Spawn => EffectCategory::Spawn,
+            WireEffectCategory::Diagnostics => EffectCategory::Diagnostics,
+            WireEffectCategory::Wake => EffectCategory::Wake,
+        }
+    }
+}
+
+// ── CapabilityFlag ───────────────────────────────────────────────────────────
+
+/// Wire mirror of [`pattern_core::CapabilityFlag`]. Haskell ctors carry a
+/// `Flag` prefix.
+#[derive(Debug, FromCore)]
+pub enum WireCapabilityFlag {
+    #[core(module = "Pattern.Spawn", name = "FlagSpawnNewIdentities")]
+    SpawnNewIdentities,
+    #[core(module = "Pattern.Spawn", name = "FlagWakeConditionRegistration")]
+    WakeConditionRegistration,
+    #[core(module = "Pattern.Spawn", name = "FlagFrontingControl")]
+    FrontingControl,
+}
+
+impl From<WireCapabilityFlag> for CapabilityFlag {
+    fn from(w: WireCapabilityFlag) -> Self {
+        match w {
+            WireCapabilityFlag::SpawnNewIdentities => CapabilityFlag::SpawnNewIdentities,
+            WireCapabilityFlag::WakeConditionRegistration => {
+                CapabilityFlag::WakeConditionRegistration
+            }
+            WireCapabilityFlag::FrontingControl => CapabilityFlag::FrontingControl,
+        }
+    }
+}
+
+// ── CapabilitySet ────────────────────────────────────────────────────────────
+
+/// Wire mirror of [`pattern_core::CapabilitySet`].
+///
+/// `categories` and `flags` are lists on the wire; the conversion to the
+/// `BTreeSet`-backed domain type dedups silently.
+#[derive(Debug, FromCore)]
+#[core(module = "Pattern.Spawn", name = "CapabilitySet")]
+pub struct WireCapabilitySet {
+    pub categories: Vec<WireEffectCategory>,
+    pub flags: Vec<WireCapabilityFlag>,
+}
+
+impl From<WireCapabilitySet> for CapabilitySet {
+    fn from(w: WireCapabilitySet) -> Self {
+        let set = w
+            .categories
+            .into_iter()
+            .map(EffectCategory::from)
+            .collect::<CapabilitySet>();
+        set.with_flags(w.flags.into_iter().map(CapabilityFlag::from))
+    }
+}
+
+// ── ForkIsolation ────────────────────────────────────────────────────────────
+
+#[derive(Debug, FromCore)]
+pub enum WireForkIsolation {
+    #[core(module = "Pattern.Spawn", name = "Lightweight")]
+    Lightweight,
+    #[core(module = "Pattern.Spawn", name = "Persistent")]
+    Persistent,
+}
+
+impl From<WireForkIsolation> for ForkIsolation {
+    fn from(w: WireForkIsolation) -> Self {
+        match w {
+            WireForkIsolation::Lightweight => ForkIsolation::Lightweight,
+            WireForkIsolation::Persistent => ForkIsolation::Persistent,
+        }
+    }
+}
+
+// ── RelationshipKind ─────────────────────────────────────────────────────────
+
+#[derive(Debug, FromCore)]
+pub enum WireRelationshipKind {
+    #[core(module = "Pattern.Spawn", name = "SupervisorOf")]
+    SupervisorOf,
+    #[core(module = "Pattern.Spawn", name = "SpecialistFor")]
+    SpecialistFor,
+    #[core(module = "Pattern.Spawn", name = "PeerWith")]
+    PeerWith,
+    #[core(module = "Pattern.Spawn", name = "ObserverOf")]
+    ObserverOf,
+}
+
+impl From<WireRelationshipKind> for RelationshipKind {
+    fn from(w: WireRelationshipKind) -> Self {
+        match w {
+            WireRelationshipKind::SupervisorOf => RelationshipKind::SupervisorOf,
+            WireRelationshipKind::SpecialistFor => RelationshipKind::SpecialistFor,
+            WireRelationshipKind::PeerWith => RelationshipKind::PeerWith,
+            WireRelationshipKind::ObserverOf => RelationshipKind::ObserverOf,
+        }
+    }
+}
+
+// ── PersonaConfig ────────────────────────────────────────────────────────────
+
+#[derive(Debug, FromCore)]
+#[core(module = "Pattern.Spawn", name = "PersonaConfig")]
+pub struct WirePersonaConfig {
+    pub name: String,
+    pub system_prompt: String,
+    pub capabilities: WireCapabilitySet,
+}
+
+impl From<WirePersonaConfig> for PersonaConfig {
+    fn from(w: WirePersonaConfig) -> Self {
+        PersonaConfig::new(w.name, w.system_prompt, w.capabilities.into())
+    }
+}
+
+// ── SiblingPersona ───────────────────────────────────────────────────────────
+
+#[derive(Debug, FromCore)]
+pub enum WireSiblingPersona {
+    #[core(module = "Pattern.Spawn", name = "ExistingPersona")]
+    Existing(String),
+    #[core(module = "Pattern.Spawn", name = "NewPersona")]
+    New(WirePersonaConfig),
+}
+
+impl From<WireSiblingPersona> for SiblingPersona {
+    fn from(w: WireSiblingPersona) -> Self {
+        match w {
+            WireSiblingPersona::Existing(id) => {
+                SiblingPersona::Existing(PersonaId::from(SmolStr::from(id)))
+            }
+            WireSiblingPersona::New(cfg) => SiblingPersona::New(cfg.into()),
+        }
+    }
+}
+
+// ── EphemeralConfig ──────────────────────────────────────────────────────────
+
+#[derive(Debug, FromCore)]
+#[core(module = "Pattern.Spawn", name = "EphemeralConfig")]
+pub struct WireEphemeralConfig {
+    pub program: String,
+    pub costume: Option<String>,
+    pub capabilities: Option<WireCapabilitySet>,
+    /// Timeout in milliseconds; converted to `jiff::Span` at the handler boundary.
+    pub timeout_ms: Option<i64>,
+}
+
+impl From<WireEphemeralConfig> for EphemeralConfig {
+    fn from(w: WireEphemeralConfig) -> Self {
+        let mut cfg = EphemeralConfig::new(w.program);
+        if let Some(c) = w.costume {
+            cfg = cfg.with_costume(c);
+        }
+        if let Some(caps) = w.capabilities {
+            cfg = cfg.with_capabilities(caps.into());
+        }
+        if let Some(ms) = w.timeout_ms {
+            cfg = cfg.with_timeout(Span::new().milliseconds(ms));
+        }
+        cfg
+    }
+}
+
+// ── ForkConfig ───────────────────────────────────────────────────────────────
+
+#[derive(Debug, FromCore)]
+#[core(module = "Pattern.Spawn", name = "ForkConfig")]
+pub struct WireForkConfig {
+    pub program: String,
+    pub isolation: WireForkIsolation,
+    pub capabilities: Option<WireCapabilitySet>,
+    pub timeout_hint_ms: Option<i64>,
+    pub task_ref: Option<WireBlockRef>,
+}
+
+impl From<WireForkConfig> for ForkConfig {
+    fn from(w: WireForkConfig) -> Self {
+        let mut cfg = ForkConfig::new(w.program);
+        cfg.isolation = w.isolation.into();
+        if let Some(caps) = w.capabilities {
+            cfg = cfg.with_capabilities(caps.into());
+        }
+        if let Some(ms) = w.timeout_hint_ms {
+            cfg = cfg.with_timeout_hint(Span::new().milliseconds(ms));
+        }
+        if let Some(r) = w.task_ref {
+            cfg = cfg.with_task_ref(r.into());
+        }
+        cfg
+    }
+}
+
+// ── SiblingConfig ────────────────────────────────────────────────────────────
+
+#[derive(Debug, FromCore)]
+#[core(module = "Pattern.Spawn", name = "SiblingConfig")]
+pub struct WireSiblingConfig {
+    pub persona: WireSiblingPersona,
+    pub relationship: WireRelationshipKind,
+    pub shared_blocks: Vec<String>,
+}
+
+impl From<WireSiblingConfig> for SiblingConfig {
+    fn from(w: WireSiblingConfig) -> Self {
+        SiblingConfig::new(w.persona.into(), w.relationship.into())
+            .with_shared_blocks(w.shared_blocks)
+    }
+}
+
+// ── SpawnReq ─────────────────────────────────────────────────────────────────
 
 /// Rust mirror of the Haskell `Spawn` GADT.
 #[derive(Debug, FromCore)]
 pub enum SpawnReq {
-    #[core(module = "Pattern.Spawn", name = "Start")]
-    Start(String),
+    /// Non-blocking spawn; returns a `SpawnId` immediately. Use
+    /// [`SpawnReq::AwaitSpawn`] (or [`SpawnReq::AwaitAll`]) to block on
+    /// the result.
+    #[core(module = "Pattern.Spawn", name = "Ephemeral")]
+    Ephemeral(WireEphemeralConfig),
+
+    /// Block until the given ephemeral completes; return its result.
+    #[core(module = "Pattern.Spawn", name = "AwaitSpawn")]
+    AwaitSpawn(String /* SpawnId */),
+
+    /// Block until every id completes; return per-id results in id-order.
+    /// Handler uses `futures::future::join_all` (not `try_join_all`) so
+    /// partial failures are preserved.
+    #[core(module = "Pattern.Spawn", name = "AwaitAll")]
+    AwaitAll(Vec<String> /* [SpawnId] */),
+
+    /// Spawn a fork. Returns a `ForkHandle` opaque token.
+    #[core(module = "Pattern.Spawn", name = "Fork")]
+    Fork(WireForkConfig),
+
+    /// Spawn a sibling persona; returns the sibling's `PersonaId`.
+    #[core(module = "Pattern.Spawn", name = "Sibling")]
+    Sibling(WireSiblingConfig),
+
+    /// Cancel an in-flight spawn by id. Idempotent.
     #[core(module = "Pattern.Spawn", name = "Stop")]
-    Stop(String),
+    Stop(String /* SpawnId */),
 }

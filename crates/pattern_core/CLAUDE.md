@@ -284,6 +284,38 @@ docstring spells this out as load-bearing for handler-level locked
 invariants — see `pattern_runtime::sdk::handlers::file` for the
 config-KDL shape guard that depends on this property.
 
+### `spawn` module — spawn-config types (v3-multi-agent Phase 2)
+
+Pure-data types describing what kind of child session to open. No execution
+machinery — dispatch lives in `pattern_runtime::sdk::handlers::spawn`.
+
+- `EphemeralConfig { program, costume, capabilities, timeout }` —
+  short-lived worker. Lifetime is bounded by the parent session.
+  `#[non_exhaustive]`. Builder: `EphemeralConfig::new(program)` +
+  `.with_costume` / `.with_capabilities` / `.with_timeout`. (A `metadata`
+  field is intentionally absent — adding fields with no consumer creates
+  speculative tech debt; it lands when an actual sink for it does.)
+- `ForkConfig { program, isolation, capabilities, timeout_hint, task_ref }` —
+  copy of parent's memory state. `ForkIsolation::Lightweight` (in-memory
+  `LoroDoc::fork()`; Phase 2) or `ForkIsolation::Persistent` (jj workspace;
+  Phase 3). `#[non_exhaustive]`. Builder: `ForkConfig::new(program)` +
+  `.persistent()` / `.with_capabilities` / `.with_timeout_hint` /
+  `.with_task_ref`.
+- `SiblingConfig { persona, relationship, shared_blocks }` — independent
+  session with its own `CapabilitySet`. NOT tracked by parent's registry;
+  lives beyond parent lifetime. `#[non_exhaustive]`. Builder:
+  `SiblingConfig::new(persona, relationship)` + `.with_shared_blocks`.
+- `SiblingPersona` — `Existing(PersonaId)` (open known persona) or
+  `New(PersonaConfig)` (create a new persona; requires
+  `CapabilityFlag::SpawnNewIdentities` for live session; otherwise
+  creates a draft in Phase 2 Task 7).
+- `PersonaConfig { name, system_prompt, capabilities }` — minimal seed
+  for a new sibling identity. Full `PersonaSnapshot` is a superset;
+  Phase 6 registry work adds more fields. `#[non_exhaustive]`.
+- `RelationshipKind` — `SupervisorOf | SpecialistFor | PeerWith | ObserverOf`.
+  Semantic label for structured logging; no behavioural semantics in Phase 2.
+- `ForkIsolation` — `Lightweight | Persistent`. `Copy + PartialEq`.
+
 ### `MessageOrigin::bypasses_permission_gate()`
 
 Predicate added to `types::origin::MessageOrigin` that returns `true`
@@ -333,6 +365,12 @@ Two minting functions:
 Convention: `BatchId` and `TurnId` use snowflakes; `MessageId` and
 `AgentId` use UUIDs. The crate-root doctest teaches `new_snowflake_id`
 for `TurnId`.
+
+`PersonaId = SmolStr` was added in v3-multi-agent Phase 2 as a readability
+alias alongside `AgentId`. Both are the same underlying type; the distinction
+signals "this names a persona config entry (KDL + registry)" vs. "this names
+a running session". Spawn-related APIs (`SiblingPersona::Existing`,
+`SiblingConfig`, etc.) accept `PersonaId`.
 
 Rationale: the previous `define_id_type!` macro generated newtypes
 with prefixed-UUID displays, `Display`/`FromStr`/`from_uuid`/`generate`
