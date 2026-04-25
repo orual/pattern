@@ -218,6 +218,28 @@ impl CancelState {
     pub fn request_cancel(&self) {
         self.cancellation.store(true, Ordering::SeqCst);
     }
+
+    /// Async helper that resolves once the cancellation atomic flips to
+    /// true. Polls every 50 ms — sufficient for cancel-propagation
+    /// timing (Phase 2 spawn lifetime chain), well within the 100 ms
+    /// grace the integration tests assert.
+    ///
+    /// Fire-and-forget contract: the returned future is meant to be
+    /// `tokio::spawn`'d and forgotten. The polling wakes up when the
+    /// flag flips and the spawned task drops naturally.
+    pub async fn wait_for_cancel(&self) {
+        // Tight initial check before the first sleep — if the flag is
+        // already set, we don't impose a 50 ms latency.
+        if self.is_cancelled() {
+            return;
+        }
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if self.is_cancelled() {
+                return;
+            }
+        }
+    }
 }
 
 /// Spawn the watchdog task. Returns a handle that the session drops

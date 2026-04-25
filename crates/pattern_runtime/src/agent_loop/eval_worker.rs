@@ -67,6 +67,22 @@ use crate::session::SessionContext;
 
 use super::EvalDispatcher;
 
+/// Counter of live eval-worker OS threads.
+///
+/// Phase 2 Task 5 instrumentation: incremented in
+/// [`EvalWorker::spawn_with_includes`] before the thread is launched,
+/// decremented via an RAII guard inside the worker closure when the
+/// thread exits. Tests assert this returns to its baseline after
+/// spawn-chain teardown — load-bearing AC3.6 evidence (no orphan eval
+/// workers when the parent session resolves).
+pub static LIVE_EVAL_WORKERS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Read the current live-eval-worker count. Exposed for test use.
+pub fn live_eval_workers() -> usize {
+    LIVE_EVAL_WORKERS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// One pending eval request: the complete Haskell source (preamble +
 /// user code + `result` binding) plus a oneshot reply channel.
 struct EvalRequest {
@@ -134,10 +150,29 @@ impl EvalWorker {
         let (tx, rx) = std::sync::mpsc::channel::<EvalRequest>();
         let session_id_for_worker = session_id.clone();
 
+        // Phase 2 Task 5 — deterministic leak instrumentation.
+        // Increment on spawn; decrement on thread exit via the RAII
+        // guard inside the worker closure. The counter is the
+        // ground-truth answer to "did all spawned ephemerals' eval
+        // workers wind down?" — tests assert it returns to baseline
+        // after spawn-chain teardown.
+        LIVE_EVAL_WORKERS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
         let join_handle = std::thread::Builder::new()
             .name(format!("pattern-eval-worker-{session_id_for_worker}"))
             .stack_size(256 * 1024 * 1024)
             .spawn(move || {
+                // RAII guard: decrement the live counter when the
+                // closure exits, regardless of how (normal channel
+                // close, panic, etc.).
+                struct LiveGuard;
+                impl Drop for LiveGuard {
+                    fn drop(&mut self) {
+                        LIVE_EVAL_WORKERS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+                let _live_guard = LiveGuard;
+
                 // Plain OS thread — no tokio runtime context. The
                 // MemoryStore trait is sync (v3-memory-rework Phase 3),
                 // so handlers call store methods directly. Async dispatch

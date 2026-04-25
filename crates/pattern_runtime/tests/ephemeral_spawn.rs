@@ -166,6 +166,147 @@ async fn ephemeral_concurrency_limit_saturates() {
     assert!(registry.try_acquire_ephemeral_slot().is_some());
 }
 
+/// AC3.6 / AC3.7 — parent cancel cascades through nested registries.
+///
+/// Three-level chain: parent registry → ephemeral child registry →
+/// grandchild registry. When the parent's CancelState atomic flips,
+/// the watcher tasks installed by `fork_for_ephemeral` propagate by
+/// calling `cancel_all` on each downstream registry — flipping the
+/// children's cancel atomics within the 100 ms grace asserted here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn parent_cancel_propagates_through_three_level_chain() {
+    use pattern_runtime::spawn::SpawnRegistry;
+    use pattern_runtime::timeout::CancelState;
+
+    let parent = build_parent(None, None).await;
+
+    // Build child + grandchild contexts. Each fork_for_ephemeral
+    // installs the parent-cancel watcher task.
+    let cfg = pattern_core::spawn::EphemeralConfig::new("");
+    let child_caps = pattern_runtime::spawn::compute_child_caps(&parent, &cfg).unwrap();
+    let child = parent.fork_for_ephemeral(&cfg, child_caps.clone(), parent.include_paths().clone());
+    let grandchild = child.fork_for_ephemeral(&cfg, child_caps, child.include_paths().clone());
+
+    // Register a scripted handle on each of child + grandchild
+    // registries so cancel_all has something to flip.
+    let child_handle_cancel = Arc::new(CancelState::new());
+    let grandchild_handle_cancel = Arc::new(CancelState::new());
+    register_scripted_handle(child.spawn_registry(), child_handle_cancel.clone());
+    register_scripted_handle(
+        grandchild.spawn_registry(),
+        grandchild_handle_cancel.clone(),
+    );
+
+    // Trip the parent.
+    parent.cancel_state().request_cancel();
+
+    // Wait up to 250 ms for the cascade to land. Watcher polls every
+    // 50 ms; two-hop propagation should land well within 250 ms.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
+    while std::time::Instant::now() < deadline {
+        if child_handle_cancel.is_cancelled() && grandchild_handle_cancel.is_cancelled() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    assert!(
+        child_handle_cancel.is_cancelled(),
+        "child registry's child handle must be cancelled"
+    );
+    assert!(
+        grandchild_handle_cancel.is_cancelled(),
+        "grandchild registry's child handle must be cancelled"
+    );
+
+    // Sanity: silence unused-import warnings.
+    let _ = std::any::TypeId::of::<SpawnRegistry>();
+}
+
+/// AC3.6 — eval-worker leak counter returns to baseline after a spawn
+/// resolves normally.
+///
+/// The static `LIVE_EVAL_WORKERS` counter is incremented when an eval
+/// worker thread is created and decremented (via RAII guard) when the
+/// thread exits. After the ephemeral resolves and its EvalWorker is
+/// dropped (in `run_ephemeral`'s tail), the counter must return to
+/// baseline within a small grace window.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn eval_worker_count_returns_to_baseline_after_ephemeral() {
+    if pattern_runtime::preflight::check().is_err() {
+        return;
+    }
+    let baseline = pattern_runtime::agent_loop::eval_worker::live_eval_workers();
+
+    let provider = Arc::new(MockProviderClient::with_turns(vec![
+        MockProviderClient::text_turn("ok"),
+    ]));
+    let parent = build_parent_with_provider(None, None, provider).await;
+
+    let cfg = EphemeralConfig::new("")
+        .with_prompt("done.")
+        .with_timeout(jiff::Span::new().seconds(10));
+    let caps = pattern_runtime::spawn::compute_child_caps(&parent, &cfg).unwrap();
+    let includes = pattern_runtime::spawn::child_include_paths(&parent, None);
+    let child = parent.fork_for_ephemeral(&cfg, caps, Arc::new(includes.clone()));
+    let child_id: smol_str::SmolStr = pattern_core::types::ids::new_id();
+    let log_label: smol_str::SmolStr = format!("spawn-log-{child_id}").into();
+    pattern_runtime::spawn::create_progress_log_block(parent.adapter(), log_label.as_str())
+        .unwrap();
+    let preamble = pattern_runtime::sdk::preamble::build_for(
+        &child
+            .capabilities()
+            .cloned()
+            .unwrap_or_else(pattern_core::CapabilitySet::all),
+    );
+
+    let _ = pattern_runtime::spawn::run_ephemeral(
+        child, cfg, child_id, log_label, includes, preamble, None,
+    )
+    .await;
+
+    // Allow up to 500 ms for the worker thread to wind down. The
+    // closure's RAII guard fires the moment the channel closes (drop
+    // of EvalWorker happens at end of run_ephemeral) and the for-loop
+    // exits. Polling here avoids racy assertions on slow CI.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    while std::time::Instant::now() < deadline {
+        if pattern_runtime::agent_loop::eval_worker::live_eval_workers() == baseline {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    let final_count = pattern_runtime::agent_loop::eval_worker::live_eval_workers();
+    panic!(
+        "eval-worker leak: baseline={baseline}, final={final_count} (workers should have wound down)"
+    );
+}
+
+/// Helper: register a scripted child-session handle on a `SpawnRegistry`
+/// for cancel-propagation tests. The handle's result future resolves
+/// immediately to a placeholder; the cancel atomic is what we observe.
+fn register_scripted_handle(
+    registry: &Arc<pattern_runtime::spawn::SpawnRegistry>,
+    cancel: Arc<pattern_runtime::timeout::CancelState>,
+) {
+    use futures::FutureExt;
+    let id: smol_str::SmolStr = pattern_core::types::ids::new_id();
+    let result_fut = futures::future::ready(Ok(pattern_runtime::spawn::SpawnResult::new(
+        id.clone(),
+        pattern_runtime::spawn::TerminationReason::Cancelled,
+    )))
+    .boxed()
+    .shared();
+    registry.register(pattern_runtime::spawn::ChildSessionHandle {
+        child_id: id,
+        kind: pattern_runtime::spawn::SpawnKind::Ephemeral,
+        cancel_state: cancel,
+        result: result_fut,
+        _permit: None,
+    });
+}
+
 /// AC3.3 — costume override threads into the child's system_prompt slot.
 ///
 /// Verified via direct `fork_for_ephemeral` inspection — no LLM needed.

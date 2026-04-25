@@ -94,6 +94,22 @@ pub struct SpawnResult {
     pub progress_log_label: Option<String>,
 }
 
+impl SpawnResult {
+    /// Build a `SpawnResult` with the minimum required fields and
+    /// every optional slot empty. Provided for downstream consumers
+    /// (notably integration tests) that need to construct the
+    /// `#[non_exhaustive]` struct without listing every field.
+    pub fn new(child_id: impl Into<SmolStr>, terminated: TerminationReason) -> Self {
+        Self {
+            child_id: child_id.into(),
+            final_text: None,
+            turns: 0,
+            terminated,
+            progress_log_label: None,
+        }
+    }
+}
+
 /// Errors a spawn operation can produce.
 #[derive(Debug, thiserror::Error, Clone)]
 #[non_exhaustive]

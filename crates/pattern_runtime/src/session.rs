@@ -471,6 +471,20 @@ impl SessionContext {
         // otherwise inherit parent's.
         let system_prompt = cfg.costume.clone().or_else(|| self.system_prompt.clone());
 
+        // Cancel-propagation chain (Phase 2 Task 5): the child SHARES
+        // the parent's cancel_state Arc, so flipping the parent's
+        // cancellation atomic immediately makes `is_cancelled()` true
+        // on the child as well. To cascade further down (the child's
+        // OWN children — i.e., grandchildren of the parent), spawn a
+        // fire-and-forget watcher that calls cancel_all() on the
+        // child's sub-registry once the parent cancel flag flips.
+        let parent_cancel_for_watcher = self.cancel_state.clone();
+        let child_registry_for_watcher = child_registry.clone();
+        self.tokio_handle.spawn(async move {
+            parent_cancel_for_watcher.wait_for_cancel().await;
+            child_registry_for_watcher.cancel_all();
+        });
+
         let child = SessionContext {
             agent_id: self.agent_id.clone(),
             model_id: self.model_id.clone(),
