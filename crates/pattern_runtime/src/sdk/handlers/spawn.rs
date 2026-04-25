@@ -262,8 +262,8 @@ fn handle_fork(
             // wired. Until then, the handler returns a valid ForkHandle with an empty
             // child cache — callers that immediately call `merge_back` will get a
             // no-op merge, and `discard` works correctly.
-            let fork_id: smol_str::SmolStr = pattern_core::types::ids::new_id().into();
-            let child_id: smol_str::SmolStr = pattern_core::types::ids::new_id().into();
+            let fork_id: smol_str::SmolStr = pattern_core::types::ids::new_id();
+            let child_id: smol_str::SmolStr = pattern_core::types::ids::new_id();
             let child_cache = {
                 // Empty child cache backed by a fresh in-memory DB — no blocks forked yet.
                 // Replaced in Task 8 by a real fork of the parent's MemoryCache.
@@ -288,10 +288,31 @@ fn handle_fork(
             let wire = WireForkHandle::from(&handle);
             cx.respond(wire)
         }
-        pattern_core::spawn::ForkIsolation::Persistent => Err(EffectError::Handler(
-            "ForkIsolation::Persistent requires Phase 3 Tasks 4-6 (jj workspace path not wired)"
+        pattern_core::spawn::ForkIsolation::Persistent => {
+            // Persistent fork dispatch (Phase 3 Tasks 4-6).
+            //
+            // The persistent path needs three things from the parent
+            // session that are not yet plumbed onto `SessionContext`:
+            //
+            // 1. `MountInfo` — repo_root, workspace_root, mode, jj_enabled.
+            // 2. `Arc<MemoryCache>` for the parent (for the child cache fork).
+            // 3. The mount config's `jj.enabled` flag.
+            //
+            // Until those land (parallel work, see plan T4 plumbing
+            // section), every persistent-fork request returns
+            // `PersistentNotAvailable`. The error type, fork-bookmark
+            // helper, `ForkHandle::new_persistent`, `merge_back_persistent`,
+            // and persistent `discard` ARE landed — Subcomponent C can use
+            // them once mount/cache plumbing is in place.
+            Err(EffectError::Handler(
+                crate::spawn::fork::ForkError::PersistentNotAvailable {
+                    mode: "session has no mount info wired (Phase 3 Subcomponent B \
+                           plumbing pending; see fork.rs)"
+                        .into(),
+                }
                 .to_string(),
-        )),
+            ))
+        }
     }
 }
 

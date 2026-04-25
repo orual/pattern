@@ -25,7 +25,9 @@ pub use ephemeral::{
     MAX_EPHEMERAL_TURNS, build_progress_log_observer, child_include_paths, compute_child_caps,
     create_progress_log_block, run_ephemeral, synthesize_program_lib,
 };
-pub use fork::{ForkError, ForkHandle, ForkIsolationState, WireForkHandle, check_promote_capability};
+pub use fork::{
+    ForkError, ForkHandle, ForkIsolationState, WireForkHandle, check_promote_capability,
+};
 pub use merge::{ConflictSummary, MergeReport};
 pub use registry::{
     ChildSessionHandle, SpawnError, SpawnKind, SpawnRegistry, SpawnResult, TerminationReason,

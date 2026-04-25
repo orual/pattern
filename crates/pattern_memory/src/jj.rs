@@ -36,9 +36,11 @@
 
 pub mod adapter;
 pub mod error;
+pub mod fork_bookmark;
 pub mod templates;
 pub mod types;
 pub mod version;
 
 pub use adapter::JjAdapter;
 pub use error::{JjError, JjResult};
+pub use fork_bookmark::fork_bookmark_name;

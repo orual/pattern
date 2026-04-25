@@ -4242,7 +4242,11 @@ mod tests {
         // Write different content in the child.
         {
             let child_doc = child_cache.blocks.iter().next().unwrap();
-            child_doc.value().doc.set_text("child-change", true).unwrap();
+            child_doc
+                .value()
+                .doc
+                .set_text("child-change", true)
+                .unwrap();
         }
 
         // Parent should still read the initial value.

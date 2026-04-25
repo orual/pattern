@@ -19,16 +19,14 @@ use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::BlockCreate;
 use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
 use pattern_memory::MemoryCache;
-use pattern_runtime::spawn::fork::{ForkHandle, ForkError};
+use pattern_runtime::spawn::fork::{ForkError, ForkHandle};
 
 // ---------------------------------------------------------------------------
 // Shared fixture helpers
 // ---------------------------------------------------------------------------
 
 fn open_cache(parent_id: &str, child_id: &str) -> Arc<MemoryCache> {
-    let db = Arc::new(
-        pattern_db::ConstellationDb::open_in_memory().expect("open in-memory db"),
-    );
+    let db = Arc::new(pattern_db::ConstellationDb::open_in_memory().expect("open in-memory db"));
     for id in [parent_id, child_id] {
         let agent = pattern_db::models::Agent {
             id: id.to_string(),
@@ -120,7 +118,10 @@ fn merge_back_imports_fork_write_ac4_3() {
         .merge_back_lightweight()
         .expect("merge_back_lightweight must succeed");
 
-    assert_eq!(report.blocks_merged, 1, "one block should be reported merged");
+    assert_eq!(
+        report.blocks_merged, 1,
+        "one block should be reported merged"
+    );
 
     // Parent now reflects the fork's content (merged via LoroDoc::import).
     let parent_doc = parent_cache
@@ -193,7 +194,9 @@ fn diamond_concurrent_edit_merges_both_sides_ac4_9() {
         let child_doc = child_cache
             .get_cached_doc(child_id, "notes")
             .expect("child notes block");
-        child_doc.append_text(" fork", true).expect("append_text on child");
+        child_doc
+            .append_text(" fork", true)
+            .expect("append_text on child");
     }
 
     // Merge back.
@@ -201,7 +204,10 @@ fn diamond_concurrent_edit_merges_both_sides_ac4_9() {
         .merge_back_lightweight()
         .expect("merge_back_lightweight must succeed");
 
-    assert_eq!(report.blocks_merged, 1, "one block should be reported merged");
+    assert_eq!(
+        report.blocks_merged, 1,
+        "one block should be reported merged"
+    );
 
     // Get final merged content and snapshot it.
     let parent_doc = parent_cache
@@ -242,9 +248,7 @@ fn merge_report_counts_are_accurate() {
 
     let (_, handle) = make_fork_handle(&parent_cache, parent_id, child_id);
 
-    let report = handle
-        .merge_back_lightweight()
-        .expect("merge must succeed");
+    let report = handle.merge_back_lightweight().expect("merge must succeed");
 
     assert_eq!(
         report.blocks_merged, 2,
@@ -261,10 +265,23 @@ fn merge_report_counts_are_accurate() {
 fn merge_back_wrong_isolation_returns_error() {
     use pattern_runtime::spawn::fork::ForkIsolationState;
 
+    let db = std::sync::Arc::new(
+        pattern_db::ConstellationDb::open_in_memory().expect("open in-memory db"),
+    );
+    let child_cache = std::sync::Arc::new(pattern_memory::MemoryCache::new(db));
+    let cancel_state = std::sync::Arc::new(pattern_runtime::timeout::CancelState::new());
     let handle = ForkHandle {
         fork_id: "test-fork".into(),
         child_id: "test-child".into(),
-        isolation_state: ForkIsolationState::Persistent {},
+        isolation_state: ForkIsolationState::Persistent {
+            workspace_path: std::path::PathBuf::from("/tmp/nonexistent-fork-ws"),
+            bookmark_name: "agent/test".into(),
+            repo_root: std::path::PathBuf::from("/tmp/nonexistent-fork-repo"),
+            child_cache,
+            parent_cache: std::sync::Weak::new(),
+            parent_agent_id: "test-parent".into(),
+            cancel_state,
+        },
     };
 
     match handle.merge_back_lightweight() {

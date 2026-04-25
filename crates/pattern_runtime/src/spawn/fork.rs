@@ -25,9 +25,11 @@
 //! `ForkHandle` gained a richer `isolation_state` field in place of the
 //! plain placeholder ids. `check_promote_capability` is preserved.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Weak};
 
 use pattern_memory::MemoryCache;
+use pattern_memory::jj::JjAdapter;
 use smol_str::SmolStr;
 use tidepool_bridge_derive::ToCore;
 
@@ -70,7 +72,58 @@ pub enum ForkError {
     /// An error occurred in a memory store operation.
     #[error("memory store error: {0}")]
     MemoryStore(String),
-    // Persistent-isolation variants (jj workflow) land in Tasks 4-6.
+
+    /// Persistent fork was requested but the active mount does not support it.
+    ///
+    /// Examples: `InRepo` mount with `jj` disabled in `.pattern.kdl`, or no
+    /// mount info available on the session at all (e.g. ephemeral test
+    /// session built via `from_persona`).
+    #[error("persistent fork not available for mount mode: {mode}")]
+    PersistentNotAvailable {
+        /// Human-readable descriptor of the mount mode that rejected the fork.
+        mode: String,
+    },
+
+    /// `jj` was required but is not available on the host.
+    #[error("jj is not installed or not on PATH; persistent fork requires a working jj")]
+    JjUnavailable,
+
+    /// A persistent fork could not be created because the bookmark name is
+    /// already in use.
+    #[error(
+        "bookmark already exists: {name} (use a different task ref or discard the existing fork)"
+    )]
+    BookmarkConflict {
+        /// The conflicting bookmark name.
+        name: String,
+    },
+
+    /// A `jj merge` operation failed during `merge_back_persistent`.
+    #[error("jj merge of {revsets} failed: {message}")]
+    JjMerge {
+        /// The revsets that were being merged (joined with ", ").
+        revsets: String,
+        /// Stringified source error from the jj adapter.
+        message: String,
+    },
+
+    /// One or more best-effort cleanup operations failed during persistent
+    /// `discard`.
+    ///
+    /// Both `workspace_forget` and `bookmark_delete` are attempted; failures
+    /// are collected here so callers can diagnose partial-cleanup state.
+    #[error("persistent fork discard cleanup had {} failures: {}", errors.len(), errors.join("; "))]
+    DiscardCleanup {
+        /// Stringified failure messages for each failed cleanup step.
+        errors: Vec<String>,
+    },
+
+    /// A `jj` operation other than merge failed.
+    #[error("jj operation failed: {message}")]
+    JjOp {
+        /// Stringified source error from the jj adapter.
+        message: String,
+    },
 }
 
 // ── ForkIsolationState ────────────────────────────────────────────────────────
@@ -109,12 +162,32 @@ pub enum ForkIsolationState {
         cancel_state: Arc<CancelState>,
     },
 
-    /// Persistent fork backed by a jj workspace (Tasks 4-6 stub).
+    /// Persistent fork backed by a jj workspace.
     ///
-    /// No fields yet — the struct is `#[non_exhaustive]` via the enum's
-    /// containing type. Construction and resolution land in Tasks 4-6.
+    /// The fork lives in a dedicated jj workspace rooted at `workspace_path`,
+    /// tracked by `bookmark_name`. The child cache mirrors the workspace's
+    /// on-disk LoroDoc state. Resolution uses jj-level merge plus loro
+    /// snapshot import (`merge_back_persistent`) or workspace + bookmark
+    /// teardown (`discard`).
     Persistent {
-        // Populated in Tasks 4-6.
+        /// On-disk path to the new jj workspace (mount-mode dependent).
+        workspace_path: PathBuf,
+        /// Namespaced bookmark `<agent>/<task>` pinning the fork's working
+        /// copy. Constructed via [`pattern_memory::jj::fork_bookmark_name`].
+        bookmark_name: String,
+        /// Repository root used for jj `workspace_add` / `bookmark_set` /
+        /// `bookmark_delete` invocations. For Standalone and Sidecar this is
+        /// the mount path itself (the standalone mount IS the jj repo);
+        /// InRepo-with-jj would use the project root.
+        repo_root: PathBuf,
+        /// The child's in-memory cache of forked LoroDoc instances.
+        child_cache: Arc<MemoryCache>,
+        /// Weak reference to the parent's cache for `merge_back_persistent`.
+        parent_cache: Weak<MemoryCache>,
+        /// Agent ID of the parent session.
+        parent_agent_id: SmolStr,
+        /// Cancellation handle for the child session.
+        cancel_state: Arc<CancelState>,
     },
 }
 
@@ -144,6 +217,40 @@ pub struct ForkHandle {
 }
 
 impl ForkHandle {
+    /// Construct a persistent `ForkHandle`.
+    ///
+    /// Called from the spawn handler after `JjAdapter::workspace_add` and
+    /// `JjAdapter::bookmark_set` have succeeded. The handler is responsible
+    /// for cleaning up the workspace and bookmark on any failure between
+    /// those steps and this constructor — once the handle exists, cleanup
+    /// flows through [`ForkHandle::discard`] or [`ForkHandle::merge_back_persistent`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_persistent(
+        fork_id: SmolStr,
+        child_id: SmolStr,
+        workspace_path: PathBuf,
+        bookmark_name: String,
+        repo_root: PathBuf,
+        child_cache: Arc<MemoryCache>,
+        parent_agent_id: SmolStr,
+        parent_cache: Weak<MemoryCache>,
+        cancel_state: Arc<CancelState>,
+    ) -> Self {
+        Self {
+            fork_id,
+            child_id,
+            isolation_state: ForkIsolationState::Persistent {
+                workspace_path,
+                bookmark_name,
+                repo_root,
+                child_cache,
+                parent_cache,
+                parent_agent_id,
+                cancel_state,
+            },
+        }
+    }
+
     /// Construct a lightweight `ForkHandle`.
     ///
     /// Called from the spawn handler once `MemoryCache::fork_for_child` has
@@ -225,21 +332,171 @@ impl ForkHandle {
         Ok(report)
     }
 
+    /// Import the persistent fork's CRDT state back into the parent cache.
+    ///
+    /// Composes a jj-level merge with a loro-level snapshot import:
+    /// 1. Commit any outstanding child writes in the workspace so the merge
+    ///    sees a clean working copy.
+    /// 2. Run `jj new <bookmark> @` (with a synthesized describe) to create
+    ///    a merge commit in the parent's workspace.
+    /// 3. For each block in the child cache, apply its LoroDoc snapshot to
+    ///    the matching parent block (or insert it if new).
+    ///
+    /// jj-level conflicts (concurrent edits to the same path on both sides)
+    /// surface in the working-copy state, not as adapter errors — Loro CRDT
+    /// converges deterministically on the in-memory side regardless. The
+    /// `JjMerge` variant exists for actual command failures (unknown revset,
+    /// IO error, etc.).
+    ///
+    /// Returns `ForkError::WrongIsolation` if called on a `Lightweight` fork.
+    /// Returns `ForkError::ParentDropped` if the parent `Arc` was dropped.
+    pub fn merge_back_persistent(&self) -> Result<crate::spawn::merge::MergeReport, ForkError> {
+        let (workspace_path, bookmark_name, repo_root, child_cache, parent_weak, parent_agent_id) =
+            match &self.isolation_state {
+                ForkIsolationState::Persistent {
+                    workspace_path,
+                    bookmark_name,
+                    repo_root,
+                    child_cache,
+                    parent_cache,
+                    parent_agent_id,
+                    ..
+                } => (
+                    workspace_path,
+                    bookmark_name,
+                    repo_root,
+                    child_cache,
+                    parent_cache,
+                    parent_agent_id,
+                ),
+                ForkIsolationState::Lightweight { .. } => return Err(ForkError::WrongIsolation),
+            };
+
+        let parent_cache = parent_weak.upgrade().ok_or(ForkError::ParentDropped)?;
+        let adapter = JjAdapter::detect()
+            .map_err(|e| ForkError::JjOp {
+                message: e.to_string(),
+            })?
+            .ok_or(ForkError::JjUnavailable)?;
+
+        // 1. Commit outstanding child writes. `jj commit` succeeds even on an
+        //    empty working copy, so this is safe to run unconditionally.
+        adapter
+            .commit(
+                workspace_path,
+                &format!("fork merge_back from {}", bookmark_name),
+            )
+            .map_err(|e| ForkError::JjOp {
+                message: e.to_string(),
+            })?;
+
+        // 2. Run the jj-level merge in the repo root's workspace.
+        let bookmark_ref: &str = bookmark_name.as_str();
+        let parents: [&str; 2] = [bookmark_ref, "@"];
+        adapter
+            .merge(
+                repo_root,
+                &parents,
+                Some(&format!("merge fork {}", bookmark_name)),
+            )
+            .map_err(|e| ForkError::JjMerge {
+                revsets: format!("{}, @", bookmark_name),
+                message: e.to_string(),
+            })?;
+
+        // 3. Reconcile loro state by importing every child block snapshot
+        //    into the parent cache. Loro CRDT convergence handles concurrent
+        //    edits deterministically.
+        let mut report = crate::spawn::merge::MergeReport::default();
+        for child_doc in child_cache.snapshot_cached_docs() {
+            let snapshot = child_doc
+                .export_snapshot()
+                .map_err(|e| ForkError::Document(e.to_string()))?;
+            let label = child_doc.label().to_string();
+
+            match parent_cache.get_cached_doc(parent_agent_id, &label) {
+                Some(parent_doc) => {
+                    parent_doc
+                        .apply_updates(&snapshot)
+                        .map_err(|e| ForkError::Document(e.to_string()))?;
+                }
+                None => {
+                    parent_cache
+                        .insert_from_snapshot(parent_agent_id, label, snapshot)
+                        .map_err(|e| ForkError::MemoryStore(e.to_string()))?;
+                }
+            }
+            report.blocks_merged += 1;
+        }
+        Ok(report)
+    }
+
     /// Discard the fork: signal the child's cancel state and drop the child
-    /// cache without propagating any of its writes to the parent.
+    /// state without propagating any of its writes to the parent.
+    ///
+    /// For a `Lightweight` fork this is a pure in-memory teardown — the
+    /// child cache Arc is dropped at end of scope.
+    ///
+    /// For a `Persistent` fork this also runs a best-effort cleanup of the
+    /// jj workspace and bookmark via `workspace_forget` + `bookmark_delete`.
+    /// Both steps are attempted regardless of individual failures; any
+    /// errors are collected into `ForkError::DiscardCleanup` so the caller
+    /// can diagnose partial-cleanup state.
     ///
     /// Consumes `self` so it cannot be called twice (compile-time guarantee).
     /// `ForkError::AlreadyResolved` is reserved for a hypothetical future
     /// `&mut self` variant but is never returned by the current implementation.
     pub fn discard(self) -> Result<(), ForkError> {
-        match &self.isolation_state {
+        match self.isolation_state {
             ForkIsolationState::Lightweight { cancel_state, .. } => {
                 cancel_state.request_cancel();
                 // Dropping `self` here releases the child_cache Arc and all
                 // forked LoroDoc instances. No import to parent occurs.
                 Ok(())
             }
-            ForkIsolationState::Persistent { .. } => Err(ForkError::WrongIsolation),
+            ForkIsolationState::Persistent {
+                workspace_path,
+                bookmark_name,
+                repo_root,
+                cancel_state,
+                ..
+            } => {
+                // Cancel first so no in-flight child writes race the delete.
+                cancel_state.request_cancel();
+
+                let adapter = JjAdapter::detect()
+                    .map_err(|e| ForkError::JjOp {
+                        message: e.to_string(),
+                    })?
+                    .ok_or(ForkError::JjUnavailable)?;
+
+                // jj `workspace forget` takes the workspace name (not path).
+                // The workspace_add path uses the directory-name-as-name
+                // convention; pull it from the path's final component.
+                let workspace_name = workspace_path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .ok_or_else(|| ForkError::JjOp {
+                        message: format!(
+                            "workspace path has no file name: {}",
+                            workspace_path.display()
+                        ),
+                    })?;
+
+                let mut errs: Vec<String> = Vec::new();
+                if let Err(e) = adapter.workspace_forget(&repo_root, workspace_name) {
+                    errs.push(format!("workspace_forget({}): {}", workspace_name, e));
+                }
+                if let Err(e) = adapter.bookmark_delete(&repo_root, &bookmark_name) {
+                    errs.push(format!("bookmark_delete({}): {}", bookmark_name, e));
+                }
+
+                if errs.is_empty() {
+                    Ok(())
+                } else {
+                    Err(ForkError::DiscardCleanup { errors: errs })
+                }
+            }
         }
     }
 }
@@ -369,10 +626,30 @@ mod tests {
             ForkError::AlreadyResolved,
             ForkError::Document("doc-err".into()),
             ForkError::MemoryStore("store-err".into()),
+            ForkError::PersistentNotAvailable {
+                mode: "in-repo".into(),
+            },
+            ForkError::JjUnavailable,
+            ForkError::BookmarkConflict {
+                name: "agent/foo".into(),
+            },
+            ForkError::JjMerge {
+                revsets: "agent/foo, @".into(),
+                message: "boom".into(),
+            },
+            ForkError::DiscardCleanup {
+                errors: vec!["a".into(), "b".into()],
+            },
+            ForkError::JjOp {
+                message: "boom".into(),
+            },
         ];
         for err in cases {
             let msg = err.to_string();
-            assert!(!msg.is_empty(), "ForkError display must not be empty: {err:?}");
+            assert!(
+                !msg.is_empty(),
+                "ForkError display must not be empty: {err:?}"
+            );
         }
     }
 }
