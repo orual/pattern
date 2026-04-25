@@ -147,6 +147,22 @@ pub struct PersonaSnapshot {
     #[serde(default)]
     pub budgets: RuntimeBudgets,
 
+    // -- Capabilities + policy ------------------------------------------
+    /// Capability scoping for this persona's session — which effect
+    /// categories the agent's prelude exposes, plus orthogonal flag
+    /// gates. `None` means "full power" (back-compat for personas that
+    /// pre-date capability scoping).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<crate::CapabilitySet>,
+
+    /// KDL-loaded policy rules (Phase 1 Task 13). Layered with
+    /// `Precedence::KdlConfig` over the runtime's Rust defaults at
+    /// session open. Rules constructed via the `PolicyRule::new`
+    /// builder; the runtime guarantees these arrive at the correct
+    /// precedence regardless of what the KDL author writes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub policy_rules: Vec<crate::PolicyRule>,
+
     // -- Escape hatch ----------------------------------------------------
     /// Free-form extra metadata that hasn't earned a first-class field
     /// yet. Intended for experiments and plugin-scope configuration.
@@ -177,8 +193,27 @@ impl PersonaSnapshot {
             router: None,
             context: ContextPolicy::default(),
             budgets: RuntimeBudgets::default(),
+            capabilities: None,
+            policy_rules: Vec::new(),
             extra: serde_json::Value::Null,
         }
+    }
+
+    /// Set the persona's capability scoping. Pass `None` for "full
+    /// power" — the back-compat default.
+    pub fn with_capabilities(mut self, capabilities: Option<crate::CapabilitySet>) -> Self {
+        self.capabilities = capabilities;
+        self
+    }
+
+    /// Replace the persona-level policy rule list. Rules are merged
+    /// over Rust defaults at session open with `Precedence::KdlConfig`.
+    pub fn with_policy_rules<I: IntoIterator<Item = crate::PolicyRule>>(
+        mut self,
+        rules: I,
+    ) -> Self {
+        self.policy_rules = rules.into_iter().collect();
+        self
     }
 
     /// Set the per-turn wall-clock budget in milliseconds.

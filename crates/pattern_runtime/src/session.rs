@@ -28,6 +28,23 @@ use pattern_core::types::snapshot::{PersonaSnapshot, SessionSnapshot};
 use pattern_core::types::turn::{StepReply, TurnInput};
 
 use crate::agent_loop::EvalWorker;
+
+/// Compose the session's effective [`pattern_core::PolicySet`] from
+/// runtime defaults plus the persona's KDL-loaded rules.
+///
+/// Order is irrelevant for evaluation correctness — `PolicySet::evaluate`
+/// sorts by `Precedence` at lookup time — but constructing the vec
+/// once at session open keeps allocation off the hot path.
+///
+/// Phase 1 Task 14 wires persona-level rules; project-level
+/// `.pattern.kdl` policy and runtime overrides will layer in via
+/// follow-up phases without changing this composition site (just
+/// extend the iterator chain).
+fn merge_policies(persona: &PersonaSnapshot) -> pattern_core::PolicySet {
+    let defaults = crate::policy::rust_defaults();
+    let kdl = persona.policy_rules.iter().cloned();
+    pattern_core::PolicySet::from_rules(defaults.into_iter().chain(kdl))
+}
 use crate::checkpoint::{CheckpointEvent, CheckpointLog};
 use crate::memory::{MemoryStoreAdapter, TurnHistory};
 use crate::router::{RouterBridge, RouterRegistry};
@@ -295,10 +312,8 @@ impl SessionContext {
             snapshot_policy: persona.context.snapshot_policy.clone(),
             context_policy: persona.context.clone(),
             diagnostics: Arc::new(std::sync::Mutex::new(Vec::new())),
-            capabilities: None,
-            policies: Arc::new(pattern_core::PolicySet::from_rules(
-                crate::policy::rust_defaults(),
-            )),
+            capabilities: persona.capabilities.clone(),
+            policies: Arc::new(merge_policies(persona)),
             permission_broker: Arc::new(pattern_core::permission::PermissionBroker::new()),
             permission_bridge: None,
             current_dispatch_origin: Arc::new(std::sync::RwLock::new(None)),
@@ -1455,5 +1470,83 @@ mod tests {
             Ok(()) => panic!("expected SharedBlockRefNotSupported error, got Ok"),
             Err(other) => panic!("expected SharedBlockRefNotSupported, got: {other:?}"),
         }
+    }
+
+    // -- Task 14: persona-level KDL rules merge into PolicySet ------------
+
+    #[tokio::test]
+    async fn merge_policies_layers_kdl_over_rust_defaults() {
+        // Persona declares a KDL Allow rule for `git push*`. The
+        // composed PolicySet should evaluate `git push origin main` as
+        // Allow (KDL beats RustDefault), while `rm -rf /` still
+        // RequireApproval (no KDL rule covers it).
+        use pattern_core::{
+            EffectCategory, PolicyAction, PolicyContext, PolicyMatcher, PolicyRule, Precedence,
+        };
+
+        let persona =
+            PersonaSnapshot::new("agent-task14", "T14").with_policy_rules([PolicyRule::new(
+                EffectCategory::Shell,
+                PolicyMatcher::ShellCommand {
+                    pattern: "git push*".into(),
+                },
+                PolicyAction::Allow,
+                Precedence::KdlConfig,
+            )]);
+
+        let policies = merge_policies(&persona);
+
+        // KDL Allow wins over the absence of a default for git push.
+        assert_eq!(
+            policies.evaluate(
+                EffectCategory::Shell,
+                &PolicyContext::Shell {
+                    command: "git push origin main",
+                },
+            ),
+            PolicyAction::Allow,
+            "KDL Allow rule should reach the evaluator"
+        );
+
+        // Rust default still gates rm -rf — the KDL rule doesn't shadow it.
+        match policies.evaluate(
+            EffectCategory::Shell,
+            &PolicyContext::Shell {
+                command: "rm -rf /tmp/x",
+            },
+        ) {
+            PolicyAction::RequireApproval { .. } => {}
+            other => panic!("rm -rf should still RequireApproval, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_policies_with_no_persona_rules_returns_just_defaults() {
+        let persona = PersonaSnapshot::new("default-only", "D");
+        let policies = merge_policies(&persona);
+        // The defaults vec contains five shell rules + one spawn rule.
+        assert_eq!(policies.rules().len(), crate::policy::rust_defaults().len());
+    }
+
+    #[test]
+    fn from_persona_threads_persona_capabilities_through() {
+        use pattern_core::{CapabilitySet, EffectCategory};
+        let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
+        let provider: Arc<dyn ProviderClient> = Arc::new(MockProviderClient::with_turns(vec![]));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let db = rt.block_on(crate::testing::test_db());
+
+        let persona = PersonaSnapshot::new("caps-thru", "C").with_capabilities(Some(
+            CapabilitySet::from_iter([EffectCategory::Memory, EffectCategory::Message]),
+        ));
+
+        let ctx = SessionContext::from_persona(&persona, store, provider, db);
+        let caps = ctx.capabilities().expect("persona caps should propagate");
+        assert!(caps.contains(EffectCategory::Memory));
+        assert!(caps.contains(EffectCategory::Message));
+        assert!(!caps.contains(EffectCategory::Shell));
     }
 }

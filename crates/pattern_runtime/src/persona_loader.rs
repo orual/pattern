@@ -347,6 +347,127 @@ struct PersonaFile {
     /// `memory` node containing named memory block children.
     #[knus(child, default)]
     memory: MemorySection,
+
+    /// `capabilities` node — effect-category visibility + flags.
+    /// Optional; absent means "full power" (back-compat).
+    #[knus(child)]
+    capabilities: Option<CapabilitiesSection>,
+
+    /// `policy` node — list of policy rules layered with
+    /// `Precedence::KdlConfig` over Rust defaults at session open.
+    #[knus(child)]
+    policy: Option<PolicySectionDoc>,
+}
+
+/// `capabilities` section.
+///
+/// KDL:
+/// ```text
+/// capabilities {
+///     effects {
+///         memory
+///         message
+///         tasks
+///     }
+///     flags {
+///         spawn-new-identities
+///     }
+/// }
+/// ```
+#[derive(Debug, Decode, Default)]
+struct CapabilitiesSection {
+    /// `effects` block: each child node's name is an effect category
+    /// (case-insensitive). Absent → empty effect set.
+    #[knus(child)]
+    effects: Option<EffectsBlock>,
+
+    /// `flags` block: each child node's name is a capability flag
+    /// (kebab-case). Absent → empty flag set.
+    #[knus(child)]
+    flags: Option<FlagsBlock>,
+}
+
+#[derive(Debug, Decode, Default)]
+struct EffectsBlock {
+    /// Each child node's name is an effect-category identifier.
+    #[knus(children)]
+    items: Vec<NamedNode>,
+}
+
+#[derive(Debug, Decode, Default)]
+struct FlagsBlock {
+    /// Each child node's name is a flag identifier (kebab-case).
+    #[knus(children)]
+    items: Vec<NamedNode>,
+}
+
+/// Empty-payload node used to encode "the name itself is the value"
+/// — e.g. `memory` inside `effects { ... }`.
+#[derive(Debug, Decode, Default)]
+struct NamedNode {
+    #[knus(node_name)]
+    name: String,
+}
+
+/// `policy` section.
+///
+/// KDL:
+/// ```text
+/// policy {
+///     rule "allow-git-push" effect="shell" action="allow" {
+///         matcher "shell-command" pattern="git push*"
+///     }
+///     rule "gate-all-file-writes" effect="file" action="require-approval" {
+///         matcher "file-path" pattern="**/*"
+///         reason "all file writes gated for this persona"
+///     }
+/// }
+/// ```
+#[derive(Debug, Decode, Default)]
+struct PolicySectionDoc {
+    #[knus(children(name = "rule"))]
+    rules: Vec<RuleDoc>,
+}
+
+/// One `rule` child of `policy`. Name is the rule's first positional
+/// argument (used for diagnostics; not stored on `PolicyRule` itself).
+#[derive(Debug, Decode)]
+struct RuleDoc {
+    /// Rule name — diagnostics only.
+    #[knus(argument)]
+    #[allow(dead_code)]
+    name: String,
+
+    /// Effect category the rule applies to (case-insensitive).
+    #[knus(property)]
+    effect: String,
+
+    /// Action: "allow", "require-approval", or "deny".
+    #[knus(property)]
+    action: String,
+
+    /// Optional reason — surfaced to the partner when the gate prompts.
+    #[knus(child, unwrap(argument), default)]
+    reason: Option<String>,
+
+    /// Matcher specifying when the rule fires.
+    #[knus(child)]
+    matcher: MatcherDoc,
+}
+
+/// `matcher` child of `rule`. The first positional argument selects
+/// the matcher kind; subsequent properties carry the predicate data.
+#[derive(Debug, Decode)]
+struct MatcherDoc {
+    /// Matcher kind: "always", "shell-command", "file-path".
+    /// `scope` and `file-write-shape` are runtime-only and cannot be
+    /// constructed via KDL.
+    #[knus(argument)]
+    kind: String,
+
+    /// Glob pattern for `shell-command` and `file-path` matchers.
+    #[knus(property, default)]
+    pattern: Option<String>,
 }
 
 /// `model` node.
@@ -626,7 +747,156 @@ fn convert(
         snap = snap.with_memory_block(SmolStr::from(label), spec);
     }
 
+    // -- capabilities --
+    if let Some(caps_section) = file.capabilities {
+        let caps = convert_capabilities(caps_section, path_str)?;
+        snap = snap.with_capabilities(Some(caps));
+    }
+
+    // -- policy --
+    if let Some(policy_section) = file.policy {
+        let rules = convert_policy(policy_section, path_str)?;
+        snap = snap.with_policy_rules(rules);
+    }
+
     Ok(snap)
+}
+
+/// Convert a parsed `capabilities {}` section into a [`CapabilitySet`].
+///
+/// An empty `capabilities {}` block (no `effects`, no `flags`) decodes
+/// to [`CapabilitySet::empty`] — pure-computation persona. Unknown
+/// effect or flag identifiers produce a parse error naming the field.
+fn convert_capabilities(
+    section: CapabilitiesSection,
+    path_str: &str,
+) -> Result<pattern_core::CapabilitySet, PersonaLoadError> {
+    use pattern_core::{CapabilityFlag, CapabilitySet, EffectCategory};
+    use std::str::FromStr;
+
+    let mut categories = std::collections::BTreeSet::new();
+    if let Some(effects) = section.effects {
+        for node in effects.items {
+            let cat =
+                EffectCategory::from_str(&node.name).map_err(|_| PersonaLoadError::Parse {
+                    path: path_str.into(),
+                    message: format!("unknown effect category {:?} in capabilities", node.name),
+                })?;
+            categories.insert(cat);
+        }
+    }
+
+    let mut flags = std::collections::BTreeSet::new();
+    if let Some(flag_block) = section.flags {
+        for node in flag_block.items {
+            let flag =
+                CapabilityFlag::from_str(&node.name).map_err(|_| PersonaLoadError::Parse {
+                    path: path_str.into(),
+                    message: format!("unknown capability flag {:?} in capabilities", node.name),
+                })?;
+            flags.insert(flag);
+        }
+    }
+
+    let mut caps = CapabilitySet::empty();
+    caps.categories = categories;
+    caps.flags = flags;
+    Ok(caps)
+}
+
+/// Convert a parsed `policy {}` section into a `Vec<PolicyRule>` with
+/// `Precedence::KdlConfig`. Rules are emitted in declaration order; the
+/// runtime's `PolicySet::evaluate` is in charge of precedence-based
+/// ordering at evaluation time.
+fn convert_policy(
+    section: PolicySectionDoc,
+    path_str: &str,
+) -> Result<Vec<pattern_core::PolicyRule>, PersonaLoadError> {
+    use pattern_core::{EffectCategory, PolicyAction, PolicyMatcher, PolicyRule, Precedence};
+    use std::str::FromStr;
+
+    let mut out = Vec::with_capacity(section.rules.len());
+    for rule_doc in section.rules {
+        let effect =
+            EffectCategory::from_str(&rule_doc.effect).map_err(|_| PersonaLoadError::Parse {
+                path: path_str.into(),
+                message: format!(
+                    "unknown effect {:?} in policy rule {:?}",
+                    rule_doc.effect, rule_doc.name
+                ),
+            })?;
+
+        let action = match rule_doc.action.as_str() {
+            "allow" => PolicyAction::Allow,
+            "require-approval" => PolicyAction::RequireApproval {
+                reason: rule_doc.reason,
+            },
+            "deny" => PolicyAction::Deny {
+                reason: rule_doc.reason,
+            },
+            other => {
+                return Err(PersonaLoadError::Parse {
+                    path: path_str.into(),
+                    message: format!(
+                        "unknown action {other:?} in policy rule {:?}; expected \
+                         \"allow\", \"require-approval\", or \"deny\"",
+                        rule_doc.name
+                    ),
+                });
+            }
+        };
+
+        let matcher = match rule_doc.matcher.kind.as_str() {
+            "always" => PolicyMatcher::Always,
+            "shell-command" => {
+                let pattern = rule_doc
+                    .matcher
+                    .pattern
+                    .ok_or_else(|| PersonaLoadError::Parse {
+                        path: path_str.into(),
+                        message: format!(
+                            "shell-command matcher in rule {:?} requires a \
+                             pattern=\"...\" property",
+                            rule_doc.name
+                        ),
+                    })?;
+                PolicyMatcher::ShellCommand { pattern }
+            }
+            "file-path" => {
+                let pattern = rule_doc
+                    .matcher
+                    .pattern
+                    .ok_or_else(|| PersonaLoadError::Parse {
+                        path: path_str.into(),
+                        message: format!(
+                            "file-path matcher in rule {:?} requires a \
+                             pattern=\"...\" property",
+                            rule_doc.name
+                        ),
+                    })?;
+                PolicyMatcher::FilePath { pattern }
+            }
+            other => {
+                return Err(PersonaLoadError::Parse {
+                    path: path_str.into(),
+                    message: format!(
+                        "unknown matcher kind {other:?} in rule {:?}; expected \
+                         \"always\", \"shell-command\", or \"file-path\" \
+                         (scope and file-write-shape are runtime-only)",
+                        rule_doc.name
+                    ),
+                });
+            }
+        };
+
+        out.push(PolicyRule::new(
+            effect,
+            matcher,
+            action,
+            Precedence::KdlConfig,
+        ));
+    }
+    Ok(out)
 }
 
 /// Resolve a value that may be provided inline or via a file path reference.
@@ -1273,6 +1543,215 @@ context {
         assert!(
             msg.contains("aggressive") || msg.contains("mid_batch"),
             "error should mention the bad value, got: {msg}"
+        );
+    }
+
+    // -- Capabilities + policy KDL parsing (Phase 1 Task 13) --------------
+
+    #[test]
+    fn capabilities_block_decodes_effects_and_flags() {
+        use pattern_core::{CapabilityFlag, EffectCategory};
+
+        let dir = TempDir::new().unwrap();
+        let kdl_content = r#"
+name "scoped-agent"
+
+capabilities {
+    effects {
+        memory
+        message
+        tasks
+    }
+    flags {
+        spawn-new-identities
+    }
+}
+"#;
+        let path = write_file(&dir, "p.kdl", kdl_content);
+        let snap = load_persona(&path).unwrap();
+        let caps = snap.capabilities.expect("capabilities should decode");
+        assert!(caps.contains(EffectCategory::Memory));
+        assert!(caps.contains(EffectCategory::Message));
+        assert!(caps.contains(EffectCategory::Tasks));
+        assert!(!caps.contains(EffectCategory::Shell));
+        assert!(caps.has_flag(CapabilityFlag::SpawnNewIdentities));
+    }
+
+    #[test]
+    fn capabilities_with_only_effects_block_decodes_with_empty_flags() {
+        use pattern_core::EffectCategory;
+
+        let dir = TempDir::new().unwrap();
+        let kdl_content = r#"
+name "effects-only"
+
+capabilities {
+    effects {
+        memory
+    }
+}
+"#;
+        let path = write_file(&dir, "p.kdl", kdl_content);
+        let snap = load_persona(&path).unwrap();
+        let caps = snap.capabilities.expect("capabilities should decode");
+        assert!(caps.contains(EffectCategory::Memory));
+        assert_eq!(caps.iter_flags().count(), 0);
+    }
+
+    #[test]
+    fn empty_capabilities_block_decodes_to_empty_set() {
+        let dir = TempDir::new().unwrap();
+        let kdl_content = r#"
+name "pure"
+
+capabilities {
+}
+"#;
+        let path = write_file(&dir, "p.kdl", kdl_content);
+        let snap = load_persona(&path).unwrap();
+        let caps = snap.capabilities.expect("capabilities should decode");
+        assert_eq!(caps.iter_categories().count(), 0);
+        assert_eq!(caps.iter_flags().count(), 0);
+    }
+
+    #[test]
+    fn no_capabilities_block_means_unset() {
+        let dir = TempDir::new().unwrap();
+        let kdl_content = r#"name "default-caps""#;
+        let path = write_file(&dir, "p.kdl", kdl_content);
+        let snap = load_persona(&path).unwrap();
+        assert!(
+            snap.capabilities.is_none(),
+            "no capabilities block → field stays None (back-compat)"
+        );
+    }
+
+    #[test]
+    fn unknown_effect_in_capabilities_errors() {
+        let dir = TempDir::new().unwrap();
+        let kdl_content = r#"
+name "bad-effect"
+
+capabilities {
+    effects {
+        memory
+        nonsense
+    }
+}
+"#;
+        let path = write_file(&dir, "p.kdl", kdl_content);
+        let err = load_persona(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("nonsense"),
+            "error should name the bad effect, got: {err}"
+        );
+    }
+
+    #[test]
+    fn unknown_flag_in_capabilities_errors() {
+        let dir = TempDir::new().unwrap();
+        let kdl_content = r#"
+name "bad-flag"
+
+capabilities {
+    flags {
+        unauthorized-magic
+    }
+}
+"#;
+        let path = write_file(&dir, "p.kdl", kdl_content);
+        let err = load_persona(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("unauthorized-magic"),
+            "error should name the bad flag, got: {err}"
+        );
+    }
+
+    #[test]
+    fn policy_block_decodes_rules() {
+        use pattern_core::{EffectCategory, PolicyAction, PolicyMatcher, Precedence};
+
+        let dir = TempDir::new().unwrap();
+        let kdl_content = r#"
+name "policy-test"
+
+policy {
+    rule "allow-git-push" effect="shell" action="allow" {
+        matcher "shell-command" pattern="git push*"
+    }
+    rule "gate-all-file-writes" effect="file" action="require-approval" {
+        matcher "file-path" pattern="*"
+        reason "all file writes gated for this persona"
+    }
+}
+"#;
+        let path = write_file(&dir, "p.kdl", kdl_content);
+        let snap = load_persona(&path).unwrap();
+        assert_eq!(snap.policy_rules.len(), 2);
+
+        let allow = &snap.policy_rules[0];
+        assert_eq!(allow.effect, EffectCategory::Shell);
+        assert!(matches!(allow.precedence, Precedence::KdlConfig));
+        assert!(matches!(allow.action, PolicyAction::Allow));
+        match &allow.matcher {
+            PolicyMatcher::ShellCommand { pattern } => assert_eq!(pattern, "git push*"),
+            other => panic!("expected ShellCommand matcher, got {other:?}"),
+        }
+
+        let gate = &snap.policy_rules[1];
+        assert_eq!(gate.effect, EffectCategory::File);
+        match &gate.action {
+            PolicyAction::RequireApproval { reason } => {
+                assert_eq!(
+                    reason.as_deref(),
+                    Some("all file writes gated for this persona")
+                );
+            }
+            other => panic!("expected RequireApproval, got {other:?}"),
+        }
+        match &gate.matcher {
+            PolicyMatcher::FilePath { pattern } => assert_eq!(pattern, "*"),
+            other => panic!("expected FilePath matcher, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn policy_rule_with_unknown_action_errors() {
+        let dir = TempDir::new().unwrap();
+        let kdl_content = r#"
+name "bad-action"
+
+policy {
+    rule "weird" effect="shell" action="meh" {
+        matcher "always"
+    }
+}
+"#;
+        let path = write_file(&dir, "p.kdl", kdl_content);
+        let err = load_persona(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("meh"),
+            "error should name the bad action, got: {err}"
+        );
+    }
+
+    #[test]
+    fn policy_shell_command_matcher_requires_pattern_property() {
+        let dir = TempDir::new().unwrap();
+        let kdl_content = r#"
+name "missing-pattern"
+
+policy {
+    rule "no-pattern" effect="shell" action="allow" {
+        matcher "shell-command"
+    }
+}
+"#;
+        let path = write_file(&dir, "p.kdl", kdl_content);
+        let err = load_persona(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("pattern"),
+            "error should mention missing pattern, got: {err}"
         );
     }
 }
