@@ -14,6 +14,7 @@ pub mod compaction;
 pub mod memory;
 pub mod permission;
 pub mod persona_loader;
+pub mod policy;
 pub mod preflight;
 pub mod router;
 pub mod runtime;
