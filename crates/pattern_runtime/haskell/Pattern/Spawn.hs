@@ -124,6 +124,10 @@ data EphemeralConfig = EphemeralConfig
   , ephemeralCostume      :: Maybe Text
   , ephemeralCapabilities :: Maybe CapabilitySet
   , ephemeralTimeoutMs    :: Maybe Int
+    -- | Optional initial human-role prompt seeded into the child's first
+    --   turn. @Nothing@ leaves the child to open on @costume@/system-prompt
+    --   alone with no human turn.
+  , ephemeralPrompt       :: Maybe Text
   }
 
 -- | Config for a forked child session.

@@ -255,6 +255,9 @@ pub struct WireEphemeralConfig {
     pub capabilities: Option<WireCapabilitySet>,
     /// Timeout in milliseconds; converted to `jiff::Span` at the handler boundary.
     pub timeout_ms: Option<i64>,
+    /// Optional initial human-role prompt seeded into the child's first
+    /// turn input.
+    pub prompt: Option<String>,
 }
 
 impl From<WireEphemeralConfig> for EphemeralConfig {
@@ -268,6 +271,9 @@ impl From<WireEphemeralConfig> for EphemeralConfig {
         }
         if let Some(ms) = w.timeout_ms {
             cfg = cfg.with_timeout(Span::new().milliseconds(ms));
+        }
+        if let Some(p) = w.prompt {
+            cfg = cfg.with_prompt(p);
         }
         cfg
     }

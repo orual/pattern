@@ -20,6 +20,7 @@ pub mod router;
 pub mod runtime;
 pub mod sdk;
 pub mod session;
+pub mod spawn;
 pub mod tidepool;
 pub mod timeout;
 pub use runtime::TidepoolRuntime;

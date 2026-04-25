@@ -299,6 +299,7 @@ mod parity {
             costume: None,
             capabilities: None,
             timeout_ms: None,
+            prompt: None,
         };
         let fork = WireForkConfig {
             program: String::new(),

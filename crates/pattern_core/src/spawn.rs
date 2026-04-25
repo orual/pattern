@@ -30,35 +30,53 @@ use crate::{BlockRef, CapabilitySet};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct EphemeralConfig {
-    /// Haskell source to compile and run inside the child session.
+    /// Haskell helper source compiled into a synthesized lib module the
+    /// child can `import` from its eval-tool snippets. Treated as a
+    /// `Pattern.SpawnHelpers` module — the runner writes it into a temp
+    /// directory and adds that directory to the child's include path.
+    /// Empty / blank values cause the runner to skip lib synthesis
+    /// entirely.
     pub program: String,
     /// System-prompt override. The parent identity is retained in logs;
     /// the costume changes only the prompt presented to the model.
     pub costume: Option<String>,
     /// Capability restriction. `None` means inherit the parent's full set.
-    /// Any capabilities listed here that exceed the parent's set are silently
-    /// clamped to the intersection at spawn time.
+    /// Any capabilities listed here that exceed the parent's set are
+    /// rejected as `SpawnError::CapabilityEscalation` at spawn time.
     pub capabilities: Option<CapabilitySet>,
     /// Execution time limit. `None` falls back to the runtime default.
     pub timeout: Option<jiff::Span>,
+    /// Optional initial human-role prompt. When `Some`, the child's first
+    /// `TurnInput` carries this as a single user message; when `None`,
+    /// the child opens on `costume`/system-prompt alone with no human
+    /// turn.
+    pub prompt: Option<String>,
 }
 
 impl EphemeralConfig {
     /// Construct an ephemeral config with sensible defaults.
     ///
-    /// Sets `costume`, `capabilities`, and `timeout` to `None`.
+    /// Sets `costume`, `capabilities`, `timeout`, and `prompt` to `None`.
     pub fn new(program: impl Into<String>) -> Self {
         Self {
             program: program.into(),
             costume: None,
             capabilities: None,
             timeout: None,
+            prompt: None,
         }
     }
 
     /// Override the system prompt with a costume string.
     pub fn with_costume(mut self, costume: impl Into<String>) -> Self {
         self.costume = Some(costume.into());
+        self
+    }
+
+    /// Set the initial human-role prompt seeded into the child's first
+    /// turn input.
+    pub fn with_prompt(mut self, prompt: impl Into<String>) -> Self {
+        self.prompt = Some(prompt.into());
         self
     }
 
@@ -276,6 +294,7 @@ mod tests {
             costume: Some("be terse".to_string()),
             capabilities: Some(sample_capability_set()),
             timeout: None,
+            prompt: Some("hello".to_string()),
         };
 
         let json = serde_json::to_string(&original).expect("serialise must succeed");
@@ -286,6 +305,7 @@ mod tests {
         assert_eq!(recovered.costume, original.costume);
         assert_eq!(recovered.capabilities, original.capabilities);
         assert!(recovered.timeout.is_none());
+        assert_eq!(recovered.prompt.as_deref(), Some("hello"));
     }
 
     #[test]
@@ -295,6 +315,7 @@ mod tests {
         assert!(cfg.costume.is_none());
         assert!(cfg.capabilities.is_none());
         assert!(cfg.timeout.is_none());
+        assert!(cfg.prompt.is_none());
     }
 
     #[test]
@@ -302,10 +323,12 @@ mod tests {
         let caps = sample_capability_set();
         let cfg = EphemeralConfig::new("pure ()")
             .with_costume("be terse")
-            .with_capabilities(caps.clone());
+            .with_capabilities(caps.clone())
+            .with_prompt("focus on this task");
 
         assert_eq!(cfg.costume.as_deref(), Some("be terse"));
         assert_eq!(cfg.capabilities.as_ref(), Some(&caps));
+        assert_eq!(cfg.prompt.as_deref(), Some("focus on this task"));
     }
 
     // ── ForkConfig ───────────────────────────────────────────────────────────

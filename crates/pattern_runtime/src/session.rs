@@ -28,6 +28,7 @@ use pattern_core::types::snapshot::{PersonaSnapshot, SessionSnapshot};
 use pattern_core::types::turn::{StepReply, TurnInput};
 
 use crate::agent_loop::EvalWorker;
+use crate::spawn::SpawnRegistry;
 
 /// Compose the session's effective [`pattern_core::PolicySet`] from
 /// runtime defaults plus the persona's KDL-loaded rules.
@@ -174,6 +175,15 @@ pub struct SessionContext {
     /// broker's partner-bypass actually fires. Phase 1 has none.
     current_dispatch_origin:
         Arc<std::sync::RwLock<Option<pattern_core::types::origin::MessageOrigin>>>,
+    /// Registry tracking live child session handles spawned by this session.
+    ///
+    /// Enforces a per-parent concurrency limit on ephemeral children via a
+    /// `tokio::sync::Semaphore`. When the parent session ends (this registry
+    /// is dropped), all registered children have their cancel state flipped.
+    ///
+    /// The default limit of 8 is a conservative starting point for ensembles.
+    /// Revisit when ensemble patterns in Phase 7 stress this ceiling.
+    spawn_registry: Arc<SpawnRegistry>,
 }
 
 /// Handlers call this to decide whether to short-circuit on soft-cancel.
@@ -287,6 +297,36 @@ impl HasCancelState for () {
     }
 }
 
+/// Handlers call this to reach the per-session [`SpawnRegistry`].
+///
+/// `SessionContext` exposes the live registry; the `()` shim returns a
+/// shared zero-limit registry so unit tests using `&()` as their user
+/// context compile without error. The `()` registry's limit of 0 means
+/// all `try_acquire_ephemeral_slot` calls return `None` — appropriate for
+/// handler unit tests that are not testing spawn semantics.
+pub trait HasSpawnRegistry {
+    /// Per-session spawn registry. Handlers use this to acquire slots,
+    /// register child handles, and surface the concurrency limit in errors.
+    fn spawn_registry(&self) -> &Arc<SpawnRegistry>;
+}
+
+impl HasSpawnRegistry for SessionContext {
+    fn spawn_registry(&self) -> &Arc<SpawnRegistry> {
+        &self.spawn_registry
+    }
+}
+
+impl HasSpawnRegistry for () {
+    fn spawn_registry(&self) -> &Arc<SpawnRegistry> {
+        // Zero-limit registry shared across all `()` calls. Unit tests
+        // that use `&()` as their user context are not testing spawn
+        // semantics; a limit-0 registry ensures no accidental spawns while
+        // satisfying the trait bound.
+        static SHIM: std::sync::OnceLock<Arc<SpawnRegistry>> = std::sync::OnceLock::new();
+        SHIM.get_or_init(|| Arc::new(SpawnRegistry::new("test-shim", 0)))
+    }
+}
+
 impl SessionContext {
     /// Build a context from a persona + store handle. The store is wrapped
     /// in a [`MemoryStoreAdapter`] that records `BlockWrite` entries;
@@ -304,6 +344,12 @@ impl SessionContext {
         let agent_id = persona.agent_id.to_string();
         let budget = Budget::from_persona(persona);
         let adapter = Arc::new(MemoryStoreAdapter::new(memory_store, &agent_id));
+        // Default concurrency limit of 8: a conservative starting point for
+        // ensemble patterns. Revisit when Phase 7 ensemble patterns stress
+        // this ceiling. The agent_id is the natural parent identifier at this
+        // stage; TidepoolSession::open will have the session_id but from_persona
+        // does not — agent_id is stable and unambiguous as a parent label.
+        let spawn_registry = Arc::new(SpawnRegistry::new(agent_id.clone(), 8));
         Self {
             agent_id,
             // Thread the caller's declared model through so the composer's
@@ -333,6 +379,7 @@ impl SessionContext {
             permission_broker: Arc::new(pattern_core::permission::PermissionBroker::new()),
             permission_bridge: None,
             current_dispatch_origin: Arc::new(std::sync::RwLock::new(None)),
+            spawn_registry,
         }
     }
 
@@ -584,6 +631,13 @@ impl SessionContext {
     /// wire turn. Never `None` — sessions default to [`NoOpSink`].
     pub fn turn_sink(&self) -> &Arc<dyn TurnSink> {
         &self.turn_sink
+    }
+
+    /// Per-session spawn registry. Tracks live child handles, enforces
+    /// the ephemeral concurrency limit, and cancels all children when
+    /// the registry is dropped.
+    pub fn spawn_registry(&self) -> &Arc<SpawnRegistry> {
+        &self.spawn_registry
     }
 
     /// Replace the router registry and spawn the async router bridge.

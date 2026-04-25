@@ -6678,6 +6678,7 @@ dependencies = [
  "loro",
  "metrics",
  "miette 7.6.0",
+ "parking_lot",
  "pattern-core",
  "pattern-db",
  "pattern-memory",

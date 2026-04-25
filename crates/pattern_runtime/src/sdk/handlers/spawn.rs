@@ -96,6 +96,7 @@ mod tests {
             costume: None,
             capabilities: None,
             timeout_ms: None,
+            prompt: None,
         }
     }
 
