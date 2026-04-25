@@ -13,6 +13,10 @@
 //!   `PolicyRule`s before each handler dispatch, escalating to the
 //!   `PermissionBroker` when human approval is required.
 
+pub mod policy;
+
+pub use policy::{PolicyAction, PolicyContext, PolicyMatcher, PolicyRule, PolicySet, Precedence};
+
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
