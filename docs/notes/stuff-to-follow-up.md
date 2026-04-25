@@ -7,6 +7,4 @@ autonomous activation infra plus wiring completion notifications into it (with d
 
 
 
- /orual-plan-and-execute-popup:execute-implementation-plan
-  /home/orual/Projects/PatternProject/pattern/docs/implementation-plans/2026-04-19-v3-sandbox-io
-  /home/orual/Projects/PatternProject/pattern
+ /orual-plan-and-execute-popup:execute-implementation-plan /home/orual/Projects/PatternProject/pattern/docs/implementation-plans/2026-04-19-v3-multi-agent /home/orual/Projects/PatternProject/pattern
