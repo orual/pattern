@@ -922,6 +922,42 @@ async fn persist_messages(
 
 // ---- drive_step — loop driver -------------------------------------------
 
+/// RAII guard that publishes the immediate-dispatcher
+/// [`pattern_core::types::origin::MessageOrigin`] onto the session
+/// context for the lifetime of one orchestrate iteration. Drops on
+/// panic or normal exit and clears the slot — a subsequent iteration
+/// (or a follow-up turn) cannot see a stale dispatch origin.
+///
+/// The origin published here is `Author::Agent(self)` during normal
+/// model-driven dispatch: the model is the entity that immediately
+/// invoked the effect, regardless of who activated the turn. This is
+/// the security-critical distinction that prevents the agent's
+/// autonomous activity from inheriting Partner authority during a
+/// Partner-activated turn — see `SessionContext::current_dispatch_origin`.
+struct CurrentDispatchOriginGuard {
+    slot: Arc<std::sync::RwLock<Option<pattern_core::types::origin::MessageOrigin>>>,
+}
+
+impl CurrentDispatchOriginGuard {
+    fn enter(ctx: &SessionContext, origin: &pattern_core::types::origin::MessageOrigin) -> Self {
+        let slot = ctx.current_dispatch_origin_slot().clone();
+        if let Ok(mut guard) = slot.write() {
+            *guard = Some(origin.clone());
+        }
+        Self { slot }
+    }
+}
+
+impl Drop for CurrentDispatchOriginGuard {
+    fn drop(&mut self) {
+        // RwLock poisoning is the only error case; even then, drop
+        // is best-effort cleanup — the runtime is already in trouble.
+        if let Ok(mut guard) = self.slot.write() {
+            *guard = None;
+        }
+    }
+}
+
 /// Drive one user-visible exchange: repeatedly call `orchestrate`
 /// until `stop_reason.is_terminal()`, recording each turn's full
 /// round-trip (input + output) to `TurnHistory` and threading
@@ -1078,6 +1114,20 @@ pub async fn drive_step(
         // to hist.record after orchestrate completes. orchestrate takes
         // ownership of TurnInput (it reads batch_id from it during the turn).
         let recorded_input = cur_input.clone();
+
+        // Build the dispatch origin once per iteration: the agent itself
+        // is the immediate caller of every effect dispatched during this
+        // orchestrate call (the model emits a tool_use → eval worker
+        // dispatches handlers → handler reads dispatch origin → decides
+        // gate). Reused below for the persisted `output_origin` so the
+        // value lives in one place.
+        let dispatch_origin = pattern_core::types::origin::MessageOrigin::new(
+            pattern_core::types::origin::Author::Agent(pattern_core::types::origin::AgentAuthor {
+                agent_id: agent_id.clone(),
+            }),
+            cur_input.origin.sphere,
+        );
+        let _dispatch_origin_guard = CurrentDispatchOriginGuard::enter(&ctx, &dispatch_origin);
 
         let turn = orchestrate(
             req,
@@ -1258,19 +1308,16 @@ pub async fn drive_step(
 
         // Output messages (assistant reply + optional tool_result). The
         // AGENT authored both — the synthesized tool_result is the agent's
-        // own dispatch product, not a separate System actor.
-        let output_origin = pattern_core::types::origin::MessageOrigin::new(
-            pattern_core::types::origin::Author::Agent(pattern_core::types::origin::AgentAuthor {
-                agent_id: pattern_core::types::ids::AgentId::from(aid),
-            }),
-            recorded_input.origin.sphere,
-        );
+        // own dispatch product, not a separate System actor. Reuses the
+        // `dispatch_origin` built before orchestrate so the value handlers
+        // saw and the value persisted are identical (same Author, same
+        // Sphere).
         persist_messages(
             db,
             &turn.messages,
             aid,
             batch_type,
-            &output_origin,
+            &dispatch_origin,
             "upsert output messages",
         )
         .await?;
