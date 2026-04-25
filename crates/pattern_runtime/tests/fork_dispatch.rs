@@ -195,15 +195,18 @@ async fn persistent_fork_without_mount_info_typed_error() {
     );
 }
 
-/// Test path WITHOUT `with_memory_cache` falls back to the empty-cache
-/// scaffold so callers that don't provide a cache still get a working
-/// (no-op merge) lightweight fork. The registry insertion still happens.
+/// Test path WITHOUT `with_memory_cache` returns an error (I4: no silent
+/// fallback to an empty cache that would silently drop merge_back writes).
+///
+/// Before the I4 fix, the handler silently fell back to an empty child cache,
+/// making merge_back a no-op and causing data loss. Now it returns a
+/// descriptive error so misconfigured sessions fail loudly at fork time.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn lightweight_fork_without_memory_cache_uses_empty_scaffold() {
+async fn lightweight_fork_without_memory_cache_returns_error_i4() {
     let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
     let provider: Arc<dyn ProviderClient> = Arc::new(NopProviderClient);
     let db = pattern_runtime::testing::test_db().await;
-    let persona = PersonaSnapshot::new("scaffold-parent", "scaffold-parent");
+    let persona = PersonaSnapshot::new("no-cache-parent", "no-cache-parent");
     let parent = Arc::new(SessionContext::from_persona(
         &persona,
         store,
@@ -211,6 +214,7 @@ async fn lightweight_fork_without_memory_cache_uses_empty_scaffold() {
         db,
         tokio::runtime::Handle::current(),
     ));
+    // Intentionally do NOT call .with_memory_cache() here.
 
     let wire_cfg = WireForkConfig {
         program: String::new(),
@@ -221,7 +225,7 @@ async fn lightweight_fork_without_memory_cache_uses_empty_scaffold() {
     };
 
     let parent_for_blocking = parent.clone();
-    let _ = tokio::task::spawn_blocking(move || {
+    let result = tokio::task::spawn_blocking(move || {
         let table = DataConTable::new();
         let cx = EffectContext::with_user(&table, parent_for_blocking.as_ref());
         let mut h = SpawnHandler;
@@ -230,26 +234,22 @@ async fn lightweight_fork_without_memory_cache_uses_empty_scaffold() {
     .await
     .expect("spawn_blocking ok");
 
-    // Registry must hold a handle even when no memory cache was wired.
-    let ids = parent.fork_registry().list_ids();
-    assert_eq!(ids.len(), 1, "scaffold path must still register the fork");
+    // Must error — not silently succeed with an empty cache.
+    let err = result.expect_err("fork without memory_cache must fail");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("memory cache") || msg.contains("memory_cache"),
+        "error must mention the missing memory cache; got: {msg}"
+    );
 
-    // Child cache exists but is empty (no parent blocks to fork).
-    let handle_arc = parent.fork_registry().get(&ids[0]).expect("registered");
-    let handle = handle_arc.lock();
-    match &handle.isolation_state {
-        pattern_runtime::spawn::ForkIsolationState::Lightweight { child_cache, .. } => {
-            assert_eq!(
-                child_cache.snapshot_cached_docs().len(),
-                0,
-                "scaffold child cache must be empty"
-            );
-        }
-        other => panic!("expected Lightweight; got {other:?}"),
-    }
+    // Registry must remain empty — the handle must not be inserted on failure.
+    assert!(
+        parent.fork_registry().list_ids().is_empty(),
+        "registry must be empty after failed fork (no handle leaked)"
+    );
 
     // Silence unused import warning for SmolStr in this test only.
-    let _ = SmolStr::from(ids[0].as_str());
+    let _ = SmolStr::from("unused");
 }
 
 // ── Helper: register a fork then return its id ──────────────────────────────

@@ -13,6 +13,7 @@
 use std::sync::Arc;
 
 use pattern_core::spawn::PersonaConfig;
+use pattern_core::traits::MemoryStore;
 use pattern_core::types::ids::PersonaId;
 use pattern_core::{CapabilityFlag, CapabilitySet};
 use pattern_db::ConstellationDb;
@@ -45,11 +46,72 @@ fn sample_persona_cfg(name: &str) -> PersonaConfig {
 }
 
 /// AC4.7 — spawner with `SpawnNewIdentities` can promote a lightweight fork
-/// into a draft persona; the draft KDL file lands on disk.
+/// into a draft persona; the draft KDL file lands on disk and the seed cache
+/// is persisted to `<drafts>/<id>.cache/` (C3 fix).
 #[test]
 fn promote_lightweight_with_flag_creates_draft() {
+    use pattern_core::types::block::BlockCreate;
+    use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
+
     let caps = CapabilitySet::all().with_flags([CapabilityFlag::SpawnNewIdentities]);
-    let handle = build_lightweight_fork(caps);
+
+    // Build a fork handle whose child cache contains a seeded block so we can
+    // verify the .cache dir content.
+    let db = Arc::new(ConstellationDb::open_in_memory().expect("open in-memory db"));
+    let parent_cache = Arc::new(MemoryCache::new(db.clone()));
+    // Seed agent FK so create_block succeeds.
+    let agent = pattern_db::models::Agent {
+        id: "parent-agent".to_string(),
+        name: "Parent Agent".to_string(),
+        description: None,
+        model_provider: "anthropic".to_string(),
+        model_name: "claude".to_string(),
+        system_prompt: "test".to_string(),
+        config: pattern_db::Json(serde_json::json!({})),
+        enabled_tools: pattern_db::Json(vec![]),
+        tool_rules: None,
+        status: pattern_db::models::AgentStatus::Active,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    pattern_db::queries::create_agent(&db.get().unwrap(), &agent).expect("seed agent");
+    pattern_db::queries::create_agent(
+        &db.get().unwrap(),
+        &pattern_db::models::Agent {
+            id: "child-promote".to_string(),
+            name: "Child Agent Promote".to_string(),
+            ..agent.clone()
+        },
+    )
+    .expect("seed child agent");
+    parent_cache
+        .create_block(
+            "parent-agent",
+            BlockCreate::new(
+                "notes".to_string(),
+                MemoryBlockType::Working,
+                BlockSchema::text(),
+            ),
+        )
+        .expect("create_block");
+    let parent_doc = parent_cache.get("parent-agent", "notes").unwrap().unwrap();
+    parent_doc.set_text("seed-text", true).expect("set_text");
+
+    let child_cache = Arc::new(
+        parent_cache
+            .fork_for_child("parent-agent", "child-promote")
+            .expect("fork_for_child"),
+    );
+    let cancel = Arc::new(CancelState::new());
+    let handle = ForkHandle::new_lightweight(
+        "fork-promote".into(),
+        "child-promote".into(),
+        child_cache,
+        "parent-agent".into(),
+        Arc::downgrade(&parent_cache),
+        cancel,
+    )
+    .with_spawner_capabilities(caps);
 
     let drafts = tempfile::TempDir::new().expect("tempdir");
     let cfg = sample_persona_cfg("teal-draft");
@@ -64,17 +126,45 @@ fn promote_lightweight_with_flag_creates_draft() {
         "draft KDL must be written at <drafts>/<id>.kdl"
     );
     let content = std::fs::read_to_string(&kdl_path).expect("read draft");
+    // The draft uses sibling::mint_draft_kdl format: hyphened field names.
     assert!(
         content.contains("name \"teal-draft\""),
         "draft KDL must contain the persona name; got:\n{content}"
     );
     assert!(
-        content.contains("system_prompt \"you are a fork-promoted draft\""),
+        content.contains("system-prompt \"you are a fork-promoted draft\""),
         "draft KDL must contain the system prompt; got:\n{content}"
     );
+    // capabilities block only emitted when the capability set is non-empty;
+    // the test uses CapabilitySet::empty() so it should NOT be present.
     assert!(
-        content.contains("capabilities"),
-        "draft KDL must include a capabilities block; got:\n{content}"
+        !content.contains("capabilities"),
+        "draft KDL must NOT include capabilities block for empty capability set; got:\n{content}"
+    );
+    // Required structural fields from sibling::mint_draft_kdl.
+    assert!(
+        content.contains("agent-id"),
+        "draft KDL must contain agent-id field; got:\n{content}"
+    );
+    assert!(
+        content.contains("model provider="),
+        "draft KDL must contain model block; got:\n{content}"
+    );
+
+    // C3 fix: seed cache persisted to <drafts>/<id>.cache/*.loro
+    let cache_dir = drafts.path().join("teal-draft.cache");
+    assert!(
+        cache_dir.exists(),
+        "seed cache directory must be created at <drafts>/<id>.cache/"
+    );
+    let snap_files: Vec<_> = std::fs::read_dir(&cache_dir)
+        .expect("read cache dir")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().map(|x| x == "loro").unwrap_or(false))
+        .collect();
+    assert!(
+        !snap_files.is_empty(),
+        "at least one .loro snapshot must be persisted in the seed cache dir"
     );
 }
 

@@ -30,7 +30,7 @@ pub use fork::{
     ForkError, ForkHandle, ForkIsolationState, WireForkHandle, check_promote_capability,
 };
 pub use fork_registry::{ForkRegistry, InMemoryForkRegistry};
-pub use merge::{ConflictSummary, MergeReport};
+pub use merge::MergeReport;
 pub use registry::{
     ChildSessionHandle, SpawnError, SpawnKind, SpawnRegistry, SpawnResult, TerminationReason,
 };

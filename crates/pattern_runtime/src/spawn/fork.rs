@@ -403,8 +403,16 @@ impl ForkHandle {
                 None => {
                     // Block was created inside the fork (no parent equivalent).
                     // Insert the snapshot directly into the parent cache.
+                    // Preserve the originating document's schema and block_type
+                    // so the subscriber worker renders the correct file format.
                     parent_cache
-                        .insert_from_snapshot(parent_agent_id, label, snapshot)
+                        .insert_from_snapshot(
+                            parent_agent_id,
+                            label,
+                            snapshot,
+                            child_doc.schema().clone(),
+                            child_doc.block_type(),
+                        )
                         .map_err(|e| ForkError::MemoryStore(e.to_string()))?;
                     report.blocks_merged += 1;
                 }
@@ -504,7 +512,13 @@ impl ForkHandle {
                 }
                 None => {
                     parent_cache
-                        .insert_from_snapshot(parent_agent_id, label, snapshot)
+                        .insert_from_snapshot(
+                            parent_agent_id,
+                            label,
+                            snapshot,
+                            child_doc.schema().clone(),
+                            child_doc.block_type(),
+                        )
                         .map_err(|e| ForkError::MemoryStore(e.to_string()))?;
                 }
             }
@@ -599,11 +613,11 @@ impl ForkHandle {
     /// outstanding writes are committed as a final revset prior to
     /// extraction so the promoted persona starts from a clean state.
     ///
-    /// On success the seed memory cache is currently dropped at the end
-    /// of this function — Phase 6's persona registry will attach it to
-    /// the draft entry. The intermediate state is logged via
-    /// [`tracing::info!`] with `seed_cache_present=true` so observability
-    /// captures the moment of promotion.
+    /// The seed memory cache is persisted to
+    /// `<drafts_dir>/<persona_id>.cache/<label>.loro` (one file per cached
+    /// LoroDoc) so the promoted persona's memory state survives the call.
+    /// Phase 6's persona registry will re-load these snapshots when the
+    /// draft is promoted to a live session.
     ///
     /// Returns the [`PersonaId`] minted from `cfg.name`. The draft KDL
     /// is written to `<drafts_dir>/<persona_id>.kdl` via
@@ -615,8 +629,8 @@ impl ForkHandle {
     ///   `SpawnNewIdentities`.
     /// - [`ForkError::JjUnavailable`] / [`ForkError::JjOp`] if a
     ///   persistent fork's final commit fails.
-    /// - [`ForkError::Document`] if the draft KDL write fails (the
-    ///   draft writer's I/O error is wrapped here for uniform reporting).
+    /// - [`ForkError::Document`] if the draft KDL or seed-cache write
+    ///   fails (I/O error is wrapped here for uniform reporting).
     pub fn promote(self, cfg: PersonaConfig, drafts_dir: &Path) -> Result<PersonaId, ForkError> {
         if !self
             .spawner_capabilities
@@ -666,19 +680,37 @@ impl ForkHandle {
             .write_draft(persona_id.as_str(), &kdl)
             .map_err(|e| ForkError::Document(format!("draft write: {e}")))?;
 
+        // Persist the seed cache to disk so the promoted persona's memory
+        // state survives this call. Each cached LoroDoc is exported as a
+        // raw snapshot and written to
+        //   <drafts_dir>/<persona_id>.cache/<label>.loro
+        // Phase 6's registry will re-load these files when wiring the
+        // new live session.
+        let cache_dir = drafts_dir.join(format!("{persona_id}.cache"));
+        std::fs::create_dir_all(&cache_dir).map_err(|e| {
+            ForkError::Document(format!("create seed cache dir {cache_dir:?}: {e}"))
+        })?;
+        let mut docs_persisted: u32 = 0;
+        for doc in seed_cache.snapshot_cached_docs() {
+            let snapshot = doc
+                .export_snapshot()
+                .map_err(|e| ForkError::Document(format!("export_snapshot: {e}")))?;
+            // Use the block label as the filename. Labels are validated by
+            // `BlockCreate` so they are safe for use as path components; we
+            // still sanitise `/` in case of composite labels.
+            let safe_label = doc.label().replace('/', "__");
+            let snap_path = cache_dir.join(format!("{safe_label}.loro"));
+            std::fs::write(&snap_path, &snapshot)
+                .map_err(|e| ForkError::Document(format!("write seed cache {snap_path:?}: {e}")))?;
+            docs_persisted += 1;
+        }
+
         tracing::info!(
             persona_id = %persona_id,
+            docs_persisted,
             source = "runtime.spawn.fork.promote",
-            seed_cache_present = true,
-            "fork promoted to draft persona"
+            "fork promoted to draft persona; seed cache persisted"
         );
-
-        // Phase 3 contract: the seed cache exists for the lifetime of
-        // this call. Phase 6's registry will attach it to the draft
-        // entry; the binding here keeps it alive until function exit
-        // so any in-flight subscribers tied to the cache see consistent
-        // state through the promotion event.
-        let _ = seed_cache;
 
         Ok(persona_id)
     }

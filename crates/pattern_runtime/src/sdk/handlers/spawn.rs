@@ -388,28 +388,22 @@ fn handle_fork(
 
     let handle = match cfg.isolation {
         pattern_core::spawn::ForkIsolation::Lightweight => {
-            // Production daemon paths populate `memory_cache` via
-            // `with_memory_cache`. Test paths that don't can still
-            // construct a fork; in that case we fall back to an empty
-            // child cache + dangling weak parent — `merge_back` becomes
-            // a no-op and `discard` works correctly. This preserves the
-            // ergonomics of the previous scaffold without losing the
-            // real-fork semantics for production callers.
-            let (child_cache, parent_weak) = if let Some(parent_cache) = parent.memory_cache() {
-                let forked = parent_cache
-                    .fork_for_child(parent_agent_id.as_str(), child_id.as_str())
-                    .map_err(|e| EffectError::Handler(e.to_string()))?;
-                (Arc::new(forked), Arc::downgrade(parent_cache))
-            } else {
-                let db = Arc::new(
-                    pattern_db::ConstellationDb::open_in_memory()
-                        .map_err(|e| EffectError::Handler(e.to_string()))?,
-                );
-                (
-                    Arc::new(pattern_memory::MemoryCache::new(db)),
-                    std::sync::Weak::new(),
+            // `memory_cache` must be wired on the session. A missing cache
+            // would silently make `merge_back` a no-op, causing data loss when
+            // the fork's writes are never propagated to the parent. Returning
+            // an error here makes the misconfiguration visible at fork time
+            // rather than at a silent merge-back that discards all changes.
+            let parent_cache = parent.memory_cache().cloned().ok_or_else(|| {
+                EffectError::Handler(
+                    "lightweight fork requires a memory cache wired on the session; \
+                         call with_memory_cache() before opening a session that forks"
+                        .to_string(),
                 )
-            };
+            })?;
+            let forked = parent_cache
+                .fork_for_child(parent_agent_id.as_str(), child_id.as_str())
+                .map_err(|e| EffectError::Handler(e.to_string()))?;
+            let (child_cache, parent_weak) = (Arc::new(forked), Arc::downgrade(&parent_cache));
             crate::spawn::ForkHandle::new_lightweight(
                 fork_id.clone(),
                 child_id.clone(),

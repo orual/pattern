@@ -1358,23 +1358,27 @@ impl MemoryCache {
     /// does not yet exist on the parent side. The block is registered in the
     /// in-memory map only — it becomes a DB row on the next `persist()` call.
     ///
-    /// `agent_id` and `label` are used to reconstruct minimal metadata so the
-    /// block is retrievable via `get_cached_doc`.
+    /// `agent_id` and `label` are used to reconstruct the block metadata.
+    /// `schema` and `block_type` must match the originating document — passing
+    /// the wrong schema causes the subscriber worker to misrender the block on
+    /// the next persist cycle.
     pub fn insert_from_snapshot(
         &self,
         agent_id: &str,
         label: String,
         snapshot: Vec<u8>,
+        schema: pattern_core::types::memory_types::BlockSchema,
+        block_type: pattern_core::types::memory_types::MemoryBlockType,
     ) -> Result<(), MemoryError> {
         use pattern_core::memory::StructuredDocument;
-        use pattern_core::types::memory_types::{BlockMetadata, BlockSchema, MemoryBlockType};
+        use pattern_core::types::memory_types::BlockMetadata;
         use uuid::Uuid;
 
-        let mut metadata = BlockMetadata::standalone(BlockSchema::text());
+        let mut metadata = BlockMetadata::standalone(schema);
         metadata.id = Uuid::new_v4().to_string();
         metadata.agent_id = agent_id.to_string();
         metadata.label = label;
-        metadata.block_type = MemoryBlockType::Working;
+        metadata.block_type = block_type;
 
         let doc = StructuredDocument::from_snapshot_with_metadata(&snapshot, metadata, None)
             .map_err(|e| MemoryError::Other(e.to_string()))?;
