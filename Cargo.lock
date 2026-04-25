@@ -6613,6 +6613,7 @@ dependencies = [
  "serde_cbor",
  "serde_ipld_dagcbor",
  "serde_json",
+ "smol_str",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",

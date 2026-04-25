@@ -13,7 +13,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::Receiver;
 use loro::LoroDoc;
@@ -23,6 +23,8 @@ use pattern_db::ConstellationDb;
 use tokio_util::sync::CancellationToken;
 
 use crate::fs::kdl::TopShape;
+use crate::loro_sync::{SyncedDoc, WriteNotification};
+use crate::subscriber::bridge::BlockSchemaBridge;
 use crate::subscriber::event::{CommitEvent, Heartbeat, ReembedRequest};
 
 /// Derive the file extension and serialized bytes for a document based on its
@@ -186,24 +188,26 @@ pub(crate) struct WorkerConfig {
     pub reembed_tx: tokio::sync::mpsc::UnboundedSender<ReembedRequest>,
     /// Sender for heartbeats to the supervisor.
     pub heartbeat_tx: crossbeam_channel::Sender<Heartbeat>,
-    /// Base path for canonical file output.
+    /// Base path for canonical file output. Used to construct the block file
+    /// path for FTS/reembed side-effects; the actual disk write is via
+    /// `synced_doc.write_rendered`.
     pub mount_path: Arc<PathBuf>,
-    /// The disk_doc (forked from memory_doc). All rendering is done from
-    /// this doc, which is kept in sync via Loro update byte imports.
-    pub disk_doc: Arc<LoroDoc>,
     /// The StructuredDocument (memory_doc), used only for FTS preview
-    /// rendering (which needs the human-readable representation).
+    /// rendering (which needs the human-readable representation) and
+    /// pause/resume VV reconciliation.
     pub doc: StructuredDocument,
-    /// Shared mtime tracker for self-echo suppression. Updated after each
-    /// successful atomic_write so the watcher can skip re-importing files
-    /// we wrote ourselves.
-    pub last_written_mtime: Arc<Mutex<Option<SystemTime>>>,
     /// Shared pause flag — when true, the worker enters its pause loop.
     pub paused: Arc<AtomicBool>,
     /// Worker signals pause completion here (sets bool to true, notifies).
     pub pause_complete: Arc<(Mutex<bool>, Condvar)>,
     /// Worker waits on this for the resume signal from `resume_subscribers`.
     pub resume_signal: Arc<(Mutex<bool>, Condvar)>,
+    /// Owns disk_doc, last_written_mtime/hash (echo suppression), atomic_write,
+    /// and last_saved_frontier. The worker imports Loro update bytes into
+    /// `synced_doc.disk_doc()`, renders via `render_canonical_from_disk_doc`,
+    /// then calls `synced_doc.write_rendered(bytes)` to write and record state.
+    /// External edits arrive via `synced_doc.apply_external_bytes`.
+    pub synced_doc: Arc<SyncedDoc<BlockSchemaBridge>>,
 }
 
 /// Debounce window: accumulate events for this long before acting.
@@ -224,14 +228,24 @@ pub(crate) fn run_subscriber(config: WorkerConfig) {
         db,
         reembed_tx,
         heartbeat_tx,
-        mount_path,
-        disk_doc,
+        mount_path: _mount_path,
         doc,
-        last_written_mtime,
         paused,
         pause_complete,
         resume_signal,
+        synced_doc,
     } = config;
+
+    // Convenience: get a reference to the disk_doc owned by synced_doc.
+    // The worker imports Loro update bytes here; synced_doc.write_rendered()
+    // handles the disk write and echo-suppression bookkeeping.
+    let disk_doc = synced_doc.disk_doc();
+
+    // Subscribe to write notifications from synced_doc so the worker can
+    // trigger FTS5 + re-embed after each disk write (both local and external
+    // edit paths). The channel is bounded (64); slow consumers drop events
+    // rather than blocking the ingest thread.
+    let write_rx = synced_doc.subscribe_writes();
 
     let mut last_emitted_hash: Option<[u8; 32]> = None;
 
@@ -246,10 +260,9 @@ pub(crate) fn run_subscriber(config: WorkerConfig) {
                 &block_id,
                 &schema,
                 &rx,
-                &disk_doc,
+                disk_doc,
                 &doc,
-                &mount_path,
-                &last_written_mtime,
+                &synced_doc,
                 &db,
                 &reembed_tx,
                 &heartbeat_tx,
@@ -259,17 +272,59 @@ pub(crate) fn run_subscriber(config: WorkerConfig) {
                 &cancel,
                 &mut last_emitted_hash,
             );
+            // Drain write notifications accumulated during pause. These are
+            // safe to discard: handle_pause already ran render_cycle (which
+            // includes FTS + reembed) for any writes that happened during the
+            // flush phase, and the subscriber loop will reconcile further changes
+            // on resume via version-vector diff.
+            while write_rx.try_recv().is_ok() {}
             // After resume, continue the normal loop.
             continue;
         }
 
-        // Block waiting for an event or send a heartbeat on timeout.
+        // Block waiting for a commit event, a write notification, or timeout.
+        //
+        // `write_rx` wakes this loop when synced_doc.write_rendered fires —
+        // i.e., after any disk write, including writes from paths outside the
+        // normal CommitEvent → render_cycle flow (e.g., direct calls to
+        // write_rendered from a future coordinator). For writes that arrive via
+        // CommitEvent, render_cycle has already run FTS + reembed; the
+        // write_rx arm re-enters render_cycle, which detects the unchanged hash
+        // via `last_emitted_hash` and returns early (no duplicate work).
         let first_event: Option<CommitEvent>;
         crossbeam_channel::select! {
             recv(rx) -> msg => {
                 match msg {
                     Ok(ev) => { first_event = Some(ev); }
                     Err(_) => break, // Sender dropped — unload in progress.
+                }
+            }
+            recv(write_rx) -> notification => {
+                match notification {
+                    Ok(WriteNotification { content_hash }) => {
+                        // A disk write occurred outside the CommitEvent path.
+                        // If the hash is new, run the full FTS+reembed cycle.
+                        // render_cycle checks last_emitted_hash and returns
+                        // early if this write was already processed.
+                        if Some(content_hash) != last_emitted_hash {
+                            render_cycle(
+                                &block_id,
+                                &schema,
+                                disk_doc,
+                                &doc,
+                                &synced_doc,
+                                &db,
+                                &reembed_tx,
+                                &heartbeat_tx,
+                                &mut last_emitted_hash,
+                            );
+                        }
+                        continue;
+                    }
+                    Err(_) => {
+                        // write_rx disconnected — synced_doc dropped. Exit cleanly.
+                        break;
+                    }
                 }
             }
             default(Duration::from_millis(DEBOUNCE_MS)) => {
@@ -287,7 +342,7 @@ pub(crate) fn run_subscriber(config: WorkerConfig) {
         let deadline = Instant::now() + Duration::from_millis(DEBOUNCE_MS);
         let mut got_event = first_event.is_some();
 
-        // Import the first event's bytes into disk_doc.
+        // Import the first event's bytes into disk_doc (owned by synced_doc).
         if let Some(ref event) = first_event
             && let Err(e) = disk_doc.import(&event.update_bytes)
         {
@@ -317,18 +372,17 @@ pub(crate) fn run_subscriber(config: WorkerConfig) {
             continue;
         }
 
-        // Render canonical bytes, write to disk, update FTS, reconcile
-        // schema-specific tables (TaskList → tasks/task_edges), re-embed,
-        // heartbeat. Centralised in render_cycle so every event path —
+        // Render canonical bytes, write to disk via synced_doc.write_rendered,
+        // update FTS, reconcile schema-specific tables (TaskList → tasks/task_edges),
+        // re-embed, heartbeat. Centralised in render_cycle so every event path —
         // normal loop, quiesce pause-flush, and post-resume — runs the same
         // code; no path can silently skip the TaskList reconcile.
         render_cycle(
             &block_id,
             &schema,
-            &disk_doc,
+            disk_doc,
             &doc,
-            &mount_path,
-            &last_written_mtime,
+            &synced_doc,
             &db,
             &reembed_tx,
             &heartbeat_tx,
@@ -338,7 +392,9 @@ pub(crate) fn run_subscriber(config: WorkerConfig) {
 }
 
 /// Execute one full render cycle from disk_doc to disk: render canonical bytes,
-/// check hash, atomic_write, update mtime, FTS, TaskList reconcile, re-embed,
+/// check hash, write via `synced_doc.write_rendered` (which handles atomic_write,
+/// echo suppression state, and `last_saved_frontier`), then update FTS,
+/// reconcile schema-specific tables (TaskList → tasks/task_edges), re-embed,
 /// heartbeat.
 ///
 /// Centralised here so every event path — normal loop, quiesce pause-flush,
@@ -351,8 +407,7 @@ fn render_cycle(
     schema: &BlockSchema,
     disk_doc: &LoroDoc,
     doc: &StructuredDocument,
-    mount_path: &std::path::Path,
-    last_written_mtime: &Mutex<Option<SystemTime>>,
+    synced_doc: &SyncedDoc<BlockSchemaBridge>,
     db: &ConstellationDb,
     reembed_tx: &tokio::sync::mpsc::UnboundedSender<ReembedRequest>,
     heartbeat_tx: &crossbeam_channel::Sender<Heartbeat>,
@@ -379,19 +434,20 @@ fn render_cycle(
         return;
     }
 
-    let file_path = mount_path.join(format!("{}.{}", block_id, ext));
-    if let Err(e) = crate::fs::atomic_write(&file_path, &canonical_bytes) {
+    // Delegate atomic_write + echo-suppression bookkeeping to synced_doc.
+    // write_rendered writes the pre-rendered bytes to disk without going
+    // through the bridge (disk_doc is already up to date), and records
+    // last_written_mtime, last_written_hash, and last_saved_frontier.
+    if let Err(e) = synced_doc.write_rendered(&canonical_bytes) {
         metrics::counter!("memory.subscriber.fs_write_failed").increment(1);
-        tracing::error!(path = ?file_path, error = %e, "atomic_write failed");
+        tracing::error!(path = ?synced_doc.path(), error = %e, "write_rendered failed");
         return;
     }
 
-    if let Ok(metadata) = std::fs::metadata(&file_path)
-        && let Ok(mtime) = metadata.modified()
-        && let Ok(mut guard) = last_written_mtime.lock()
-    {
-        *guard = Some(mtime);
-    }
+    // The extension and path are owned by synced_doc (configured at open time).
+    // FTS uses block_id; TaskList reconcile uses disk_doc; no further use of
+    // the canonical file path is needed here.
+    let _ = ext;
 
     // Update persistent index tables. The strategy depends on schema:
     //
@@ -521,8 +577,7 @@ fn handle_pause(
     rx: &Receiver<CommitEvent>,
     disk_doc: &LoroDoc,
     doc: &StructuredDocument,
-    mount_path: &std::path::Path,
-    last_written_mtime: &Mutex<Option<SystemTime>>,
+    synced_doc: &SyncedDoc<BlockSchemaBridge>,
     db: &ConstellationDb,
     reembed_tx: &tokio::sync::mpsc::UnboundedSender<ReembedRequest>,
     heartbeat_tx: &crossbeam_channel::Sender<Heartbeat>,
@@ -581,8 +636,7 @@ fn handle_pause(
         schema,
         disk_doc,
         doc,
-        mount_path,
-        last_written_mtime,
+        synced_doc,
         db,
         reembed_tx,
         heartbeat_tx,
@@ -689,8 +743,7 @@ fn handle_pause(
         schema,
         disk_doc,
         doc,
-        mount_path,
-        last_written_mtime,
+        synced_doc,
         db,
         reembed_tx,
         heartbeat_tx,
@@ -758,6 +811,54 @@ mod tests {
         pattern_db::queries::create_block(&conn, &block).unwrap();
     }
 
+    /// Map a `BlockSchema` to its canonical file extension (used for test file
+    /// path construction). Mirrors the `block_schema_extension` helper in
+    /// `cache.rs` but scoped to tests here to avoid cross-module visibility.
+    fn schema_ext(schema: &BlockSchema) -> &'static str {
+        match schema {
+            BlockSchema::Text { .. } | BlockSchema::Skill { .. } => "md",
+            BlockSchema::Map { .. }
+            | BlockSchema::Composite { .. }
+            | BlockSchema::List { .. }
+            | BlockSchema::TaskList { .. } => "kdl",
+            BlockSchema::Log { .. } => "jsonl",
+            _ => "dat",
+        }
+    }
+
+    /// Build an `Arc<SyncedDoc<BlockSchemaBridge>>` for use in worker tests.
+    ///
+    /// Uses `open_router_owned` so no filesystem watcher is started.
+    /// The `memory_doc` is a reference clone of `doc.inner()` — they share the
+    /// same underlying Loro state, so writes via `doc` are immediately visible
+    /// to the `SyncedDoc` ingest thread.
+    ///
+    /// The file path is `dir/<block_id>.<ext>` where `ext` is determined from
+    /// `schema`. The file need not exist before calling this function.
+    fn make_synced_doc(
+        block_id: &str,
+        schema: &BlockSchema,
+        doc: &StructuredDocument,
+        dir: &tempfile::TempDir,
+    ) -> Arc<SyncedDoc<BlockSchemaBridge>> {
+        use crate::loro_sync::{ConflictPolicy, SyncedDocConfig};
+
+        let ext = schema_ext(schema);
+        let path = dir.path().join(format!("{block_id}.{ext}"));
+        let memory_doc = Arc::new(doc.inner().clone());
+        let bridge = Arc::new(BlockSchemaBridge::new(schema.clone()));
+        Arc::new(
+            SyncedDoc::open_router_owned(SyncedDocConfig {
+                path,
+                memory_doc,
+                bridge,
+                event_channel_bound: 64,
+                conflict_policy: ConflictPolicy::AutoMerge,
+            })
+            .expect("open_router_owned must succeed in tests"),
+        )
+    }
+
     /// Create default pause state for tests that don't exercise pause/resume.
     #[allow(clippy::type_complexity)]
     fn default_pause_state() -> (
@@ -786,8 +887,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let (reembed_tx, _reembed_rx) = tokio::sync::mpsc::unbounded_channel();
         let (hb_tx, _hb_rx) = crossbeam_channel::bounded(64);
-        let disk_doc = Arc::new(doc.inner().fork());
-        let last_written_mtime = Arc::new(Mutex::new(None));
+        let synced_doc = make_synced_doc(block_id, &schema, &doc, dir);
         let (paused, pause_complete, resume_signal) = default_pause_state();
 
         let cancel_clone = cancel.clone();
@@ -805,9 +905,8 @@ mod tests {
                 reembed_tx,
                 heartbeat_tx: hb_tx,
                 mount_path: mount_clone,
-                disk_doc,
                 doc,
-                last_written_mtime,
+                synced_doc,
                 paused,
                 pause_complete,
                 resume_signal,
@@ -1053,24 +1152,24 @@ mod tests {
         let db = Arc::new(ConstellationDb::open_in_memory().unwrap());
         let dir = tempfile::tempdir().unwrap();
         let doc = StructuredDocument::new_text();
-        let disk_doc = Arc::new(doc.inner().fork());
-        let last_written_mtime = Arc::new(Mutex::new(None));
+        let schema = BlockSchema::text();
+        let synced_doc = make_synced_doc("test_block", &schema, &doc, &dir);
         let (paused, pause_complete, resume_signal) = default_pause_state();
 
         let cancel_clone = cancel.clone();
+        let mount_path = Arc::new(dir.path().to_path_buf());
         let handle = std::thread::spawn(move || {
             run_subscriber(WorkerConfig {
                 block_id: "test_block".to_string(),
-                schema: BlockSchema::text(),
+                schema,
                 rx,
                 cancel: cancel_clone,
                 db,
                 reembed_tx,
                 heartbeat_tx: hb_tx,
-                mount_path: Arc::new(dir.path().to_path_buf()),
-                disk_doc,
+                mount_path,
                 doc,
-                last_written_mtime,
+                synced_doc,
                 paused,
                 pause_complete,
                 resume_signal,
@@ -1091,23 +1190,23 @@ mod tests {
         let db = Arc::new(ConstellationDb::open_in_memory().unwrap());
         let dir = tempfile::tempdir().unwrap();
         let doc = StructuredDocument::new_text();
-        let disk_doc = Arc::new(doc.inner().fork());
-        let last_written_mtime = Arc::new(Mutex::new(None));
+        let schema = BlockSchema::text();
+        let synced_doc = make_synced_doc("test_block", &schema, &doc, &dir);
         let (paused, pause_complete, resume_signal) = default_pause_state();
+        let mount_path = Arc::new(dir.path().to_path_buf());
 
         let handle = std::thread::spawn(move || {
             run_subscriber(WorkerConfig {
                 block_id: "test_block".to_string(),
-                schema: BlockSchema::text(),
+                schema,
                 rx,
                 cancel,
                 db,
                 reembed_tx,
                 heartbeat_tx: hb_tx,
-                mount_path: Arc::new(dir.path().to_path_buf()),
-                disk_doc,
+                mount_path,
                 doc,
-                last_written_mtime,
+                synced_doc,
                 paused,
                 pause_complete,
                 resume_signal,
@@ -1170,8 +1269,8 @@ mod tests {
         }
 
         let doc = StructuredDocument::new_text();
-        let disk_doc = Arc::new(doc.inner().fork());
-        let last_written_mtime = Arc::new(Mutex::new(None));
+        let schema = BlockSchema::text();
+        let synced_doc = make_synced_doc("test_block", &schema, &doc, &dir);
         let (paused, pause_complete, resume_signal) = default_pause_state();
 
         // Capture the update bytes when we write to the memory_doc.
@@ -1189,16 +1288,15 @@ mod tests {
         let handle = std::thread::spawn(move || {
             run_subscriber(WorkerConfig {
                 block_id: "test_block".to_string(),
-                schema: BlockSchema::text(),
+                schema,
                 rx,
                 cancel: cancel_clone,
                 db: db.clone(),
                 reembed_tx,
                 heartbeat_tx: hb_tx,
                 mount_path: mount_clone,
-                disk_doc,
                 doc,
-                last_written_mtime,
+                synced_doc,
                 paused,
                 pause_complete,
                 resume_signal,
@@ -1282,8 +1380,8 @@ mod tests {
         }
 
         let doc = StructuredDocument::new_text();
-        let disk_doc = Arc::new(doc.inner().fork());
-        let last_written_mtime = Arc::new(Mutex::new(None));
+        let schema = BlockSchema::text();
+        let synced_doc = make_synced_doc("echo_block", &schema, &doc, &dir);
         let (paused, pause_complete, resume_signal) = default_pause_state();
 
         // Capture the update bytes.
@@ -1296,19 +1394,19 @@ mod tests {
         };
 
         let cancel_clone = cancel.clone();
+        let mount_path = Arc::new(dir.path().to_path_buf());
         let handle = std::thread::spawn(move || {
             run_subscriber(WorkerConfig {
                 block_id: "echo_block".to_string(),
-                schema: BlockSchema::text(),
+                schema,
                 rx,
                 cancel: cancel_clone,
                 db,
                 reembed_tx,
                 heartbeat_tx: hb_tx,
-                mount_path: Arc::new(dir.path().to_path_buf()),
-                disk_doc,
+                mount_path,
                 doc,
-                last_written_mtime,
+                synced_doc,
                 paused,
                 pause_complete,
                 resume_signal,
@@ -1467,13 +1565,13 @@ mod tests {
         let doc = StructuredDocument::new_text();
         // Clone before spawning — both test and worker share the same Arc<LoroDoc>.
         let doc_clone = doc.clone();
-        let disk_doc = Arc::new(doc.inner().fork());
+        let schema = BlockSchema::text();
+        let synced_doc = make_synced_doc("pr_block", &schema, &doc, &dir);
 
         let (tx, rx) = crossbeam_channel::bounded(64);
         let cancel = CancellationToken::new();
         let (reembed_tx, _reembed_rx) = tokio::sync::mpsc::unbounded_channel();
         let (hb_tx, _hb_rx) = crossbeam_channel::bounded(64);
-        let last_written_mtime = Arc::new(Mutex::new(None));
         let paused = Arc::new(AtomicBool::new(false));
         let pause_complete = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
         let resume_signal_arc = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
@@ -1492,16 +1590,15 @@ mod tests {
         let handle = std::thread::spawn(move || {
             run_subscriber(WorkerConfig {
                 block_id: "pr_block".to_string(),
-                schema: BlockSchema::text(),
+                schema,
                 rx,
                 cancel: cancel_clone,
                 db,
                 reembed_tx,
                 heartbeat_tx: hb_tx,
                 mount_path: mount_clone,
-                disk_doc,
                 doc: doc_clone,
-                last_written_mtime,
+                synced_doc,
                 paused: paused_worker,
                 pause_complete: pc_worker,
                 resume_signal: rs_worker,
@@ -1581,14 +1678,16 @@ mod tests {
 
         let doc = StructuredDocument::new_text();
         let doc_clone = doc.clone();
-        let disk_doc = Arc::new(doc.inner().fork());
-        let disk_doc_test = Arc::clone(&disk_doc);
+        let schema = BlockSchema::text();
+        let synced_doc = make_synced_doc("ext_block", &schema, &doc, &dir);
+        // Retain a reference to disk_doc so the test can inject an external edit
+        // directly (simulating what the watcher does on a human file edit).
+        let disk_doc_test = Arc::clone(synced_doc.disk_doc());
 
         let (tx, rx) = crossbeam_channel::bounded(64);
         let cancel = CancellationToken::new();
         let (reembed_tx, _reembed_rx) = tokio::sync::mpsc::unbounded_channel();
         let (hb_tx, _hb_rx) = crossbeam_channel::bounded(64);
-        let last_written_mtime = Arc::new(Mutex::new(None));
         let paused = Arc::new(AtomicBool::new(false));
         let pause_complete = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
         let resume_signal_arc = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
@@ -1607,16 +1706,15 @@ mod tests {
         let handle = std::thread::spawn(move || {
             run_subscriber(WorkerConfig {
                 block_id: "ext_block".to_string(),
-                schema: BlockSchema::text(),
+                schema,
                 rx,
                 cancel: cancel_clone,
                 db,
                 reembed_tx,
                 heartbeat_tx: hb_tx,
                 mount_path: mount_clone,
-                disk_doc,
                 doc: doc_clone,
-                last_written_mtime,
+                synced_doc,
                 paused: paused_worker,
                 pause_complete: pc_worker,
                 resume_signal: rs_worker,
@@ -1984,13 +2082,12 @@ mod tests {
 
         let doc = StructuredDocument::new(schema.clone());
         let doc_clone = doc.clone();
-        let disk_doc = Arc::new(doc.inner().fork());
+        let synced_doc = make_synced_doc("pr_tl_block", &schema, &doc, &dir);
 
         let (tx, rx) = crossbeam_channel::bounded(64);
         let cancel = CancellationToken::new();
         let (reembed_tx, _reembed_rx) = tokio::sync::mpsc::unbounded_channel();
         let (hb_tx, _hb_rx) = crossbeam_channel::bounded(64);
-        let last_written_mtime = Arc::new(Mutex::new(None));
         let paused = Arc::new(AtomicBool::new(false));
         let pause_complete = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
         let resume_signal_arc = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
@@ -2033,9 +2130,8 @@ mod tests {
                 reembed_tx,
                 heartbeat_tx: hb_tx,
                 mount_path: mount_clone,
-                disk_doc,
                 doc: doc_clone,
-                last_written_mtime,
+                synced_doc,
                 paused: paused_worker,
                 pause_complete: pc_worker,
                 resume_signal: rs_worker,

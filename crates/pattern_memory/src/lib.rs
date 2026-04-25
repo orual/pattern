@@ -22,6 +22,7 @@ pub mod db_bridge;
 pub mod export;
 pub mod fs;
 pub mod jj;
+pub mod loro_sync;
 pub mod modes;
 pub mod mount;
 pub mod paths;

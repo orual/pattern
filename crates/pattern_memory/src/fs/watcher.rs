@@ -1,43 +1,29 @@
 //! File system watcher for external edits to canonical memory block files.
 //!
-//! Uses `notify-debouncer-full` (500ms debounce) to detect changes made by
-//! human editors to `.md`, `.kdl`, and `.jsonl` files in the memory mount.
-//! On detecting a change:
-//!
-//! 1. Read the file and check its mtime.
-//! 2. Compare mtime against `last_written_mtime` from the subscriber — if it
-//!    matches, this is a self-echo from our own `atomic_write` and is suppressed.
-//! 3. Parse the file through the appropriate format module.
-//! 4. If parsing fails (e.g., invalid KDL), log a warning, increment a metric,
-//!    and skip the merge.
-//! 5. Otherwise, apply the parsed content to `disk_doc` as Loro operations,
-//!    then propagate the CRDT update to `memory_doc` via
-//!    `MemoryCache::apply_external_edit`.
+//! `MountWatcher` is a thin wrapper around `DirWatcher<BlockFanoutRouter>`.
+//! The `BlockFanoutRouter` handles block-path filtering, self-echo suppression,
+//! format validation, and delegates to `MemoryCache::apply_external_edit` for
+//! the CRDT merge.
 
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use notify::RecursiveMode;
-use notify_debouncer_full::{DebounceEventResult, new_debouncer};
-
 use crate::cache::MemoryCache;
 use crate::fs::FsError;
-use crate::subscriber::SubscriberHandle;
+use crate::loro_sync::dir_watcher::{DirWatcher, DirWatcherConfig};
+use crate::loro_sync::routers::BlockFanoutRouter;
 
 /// A running file system watcher for a memory mount directory.
 ///
 /// Watches for external edits to canonical block files and triggers CRDT
 /// merges via the two-doc model. Dropping this struct stops the watcher.
 pub struct MountWatcher {
-    /// The debouncer holds the underlying `notify::RecommendedWatcher` and
-    /// its background thread. Dropping it stops watching.
-    _debouncer: notify_debouncer_full::Debouncer<
-        notify::RecommendedWatcher,
-        notify_debouncer_full::RecommendedCache,
-    >,
-    /// Join handle for the ingest thread.
-    _ingest_thread: std::thread::JoinHandle<()>,
+    /// The underlying `DirWatcher<BlockFanoutRouter>`. Dropping it cancels
+    /// the watcher and its ingest thread.
+    _dir_watcher: DirWatcher,
 }
 
 /// Configuration for the mount watcher.
@@ -51,196 +37,36 @@ pub struct WatcherConfig {
 impl MountWatcher {
     /// Start watching the given mount path for external file edits.
     ///
-    /// The debouncer fires after 500ms of quiet for each file. Events are
-    /// forwarded to an ingest thread that performs self-echo suppression
-    /// (via mtime comparison), parsing, and triggers the CRDT merge via
-    /// `MemoryCache::apply_external_edit`.
+    /// Constructs a `DirWatcher` with a `BlockFanoutRouter` that performs
+    /// block-path filtering, self-echo suppression, format validation, and
+    /// CRDT merge via `MemoryCache::apply_external_edit`.
     pub fn start(config: WatcherConfig) -> Result<Self, FsError> {
-        let (tx, rx) =
-            crossbeam_channel::bounded::<Vec<notify_debouncer_full::DebouncedEvent>>(256);
-
-        let mut debouncer = new_debouncer(
-            Duration::from_millis(500),
-            None,
-            move |result: DebounceEventResult| {
-                if let Ok(events) = result {
-                    let _ = tx.try_send(events);
-                }
-            },
-        )
-        .map_err(|e| FsError::Io {
-            path: config.mount_path.clone(),
+        let dir_watcher_cfg = DirWatcherConfig {
+            root: config.mount_path.clone(),
+            recursive: notify::RecursiveMode::Recursive,
+            debounce: Duration::from_millis(500),
+        };
+        let router = BlockFanoutRouter::new(config.cache);
+        let dir_watcher = DirWatcher::start(dir_watcher_cfg, router).map_err(|e| FsError::Io {
+            path: config.mount_path,
             source: std::io::Error::other(e.to_string()),
         })?;
-
-        debouncer
-            .watch(&config.mount_path, RecursiveMode::Recursive)
-            .map_err(|e| FsError::Io {
-                path: config.mount_path.clone(),
-                source: std::io::Error::other(e.to_string()),
-            })?;
-
-        let cache = config.cache;
-
-        let ingest_thread = std::thread::Builder::new()
-            .name("mount-watcher-ingest".into())
-            .spawn(move || {
-                ingest_loop(rx, cache);
-            })
-            .map_err(|e| FsError::Io {
-                path: config.mount_path.clone(),
-                source: e,
-            })?;
-
         Ok(MountWatcher {
-            _debouncer: debouncer,
-            _ingest_thread: ingest_thread,
+            _dir_watcher: dir_watcher,
         })
     }
 }
 
-/// Check whether a path looks like a block file we manage.
-///
-/// Accepts `.md`, `.kdl`, `.jsonl` files. Rejects temporary files from
-/// `atomic_write` (which have extensions like `.md.tmp`).
+/// Re-export for tests that previously used the local helpers.
+#[cfg(test)]
 fn is_block_path(path: &Path) -> bool {
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    // Accept only canonical block file extensions. The atomic_write helper
-    // produces files like `block.md.tmp` whose extension is "tmp", so they
-    // are naturally excluded by the extension whitelist.
-    matches!(ext, "md" | "kdl" | "jsonl")
+    crate::loro_sync::routers::is_block_path(path)
 }
 
-/// Extract the block ID from a canonical block file path.
-///
-/// The worker writes files as `{block_id}.{ext}`. The block ID is the stem
-/// (filename without extension). Returns `None` if the path has no stem.
+/// Re-export for tests that previously used the local helpers.
+#[cfg(test)]
 fn block_id_from_path(path: &Path) -> Option<String> {
-    path.file_stem()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_string())
-}
-
-/// Check if a file change was written by us (self-echo suppression).
-///
-/// Compares the file's current mtime against the subscriber's
-/// `last_written_mtime`. If they match, the file change was caused by our
-/// own `atomic_write` and should be skipped.
-fn is_self_echo(path: &Path, subscriber: &SubscriberHandle) -> bool {
-    let file_mtime = match std::fs::metadata(path).and_then(|m| m.modified()) {
-        Ok(mtime) => mtime,
-        Err(_) => return false, // Can't read mtime — not a self-echo.
-    };
-
-    if let Ok(guard) = subscriber.last_written_mtime.lock()
-        && let Some(last_written) = *guard
-    {
-        return file_mtime == last_written;
-    }
-
-    false
-}
-
-/// Main ingest loop running on a dedicated OS thread.
-fn ingest_loop(
-    rx: crossbeam_channel::Receiver<Vec<notify_debouncer_full::DebouncedEvent>>,
-    cache: Arc<MemoryCache>,
-) {
-    while let Ok(debounced_events) = rx.recv() {
-        for debounced in debounced_events {
-            // Only process modify/create events.
-            use notify::EventKind;
-            match debounced.event.kind {
-                EventKind::Create(_) | EventKind::Modify(_) => {}
-                _ => continue,
-            }
-
-            for path in &debounced.event.paths {
-                if !is_block_path(path) {
-                    continue;
-                }
-
-                let Some(block_id) = block_id_from_path(path) else {
-                    continue;
-                };
-
-                // Self-echo suppression via mtime comparison.
-                if let Some(subscriber) = cache.subscriber_handle(&block_id)
-                    && is_self_echo(path, &subscriber)
-                {
-                    continue;
-                }
-
-                // Read the file content.
-                let content = match std::fs::read(path) {
-                    Ok(bytes) => bytes,
-                    Err(e) => {
-                        tracing::debug!(path = ?path, error = %e, "failed to read changed file");
-                        continue;
-                    }
-                };
-
-                // Validate the file format before attempting a CRDT import.
-                // This catches syntax errors early and avoids importing corrupt
-                // content into the LoroDoc.
-                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                let format_ok = match ext {
-                    "md" => true, // Markdown is passthrough — always valid.
-                    "kdl" => match String::from_utf8(content.clone()) {
-                        Ok(text) => match crate::fs::kdl::parse_kdl(&text) {
-                            Ok(_) => true,
-                            Err(e) => {
-                                metrics::counter!("memory.kdl.parse_failed").increment(1);
-                                tracing::warn!(
-                                    path = ?path, error = %e,
-                                    "invalid KDL from external edit; skipping merge"
-                                );
-                                false
-                            }
-                        },
-                        Err(e) => {
-                            tracing::warn!(
-                                path = ?path, error = %e,
-                                "KDL file is not valid UTF-8"
-                            );
-                            false
-                        }
-                    },
-                    "jsonl" => match String::from_utf8(content.clone()) {
-                        Ok(text) => match crate::fs::jsonl::jsonl_to_log_entries(&text) {
-                            Ok(_) => true,
-                            Err(e) => {
-                                metrics::counter!("memory.jsonl.parse_failed").increment(1);
-                                tracing::warn!(
-                                    path = ?path, error = %e,
-                                    "invalid JSONL from external edit; skipping merge"
-                                );
-                                false
-                            }
-                        },
-                        Err(e) => {
-                            tracing::warn!(
-                                path = ?path, error = %e,
-                                "JSONL file is not valid UTF-8"
-                            );
-                            false
-                        }
-                    },
-                    _ => false, // Unknown extension — shouldn't happen due to is_block_path.
-                };
-
-                if !format_ok {
-                    continue;
-                }
-
-                // Import the content into the LoroDoc via two-doc CRDT merge.
-                // apply_external_edit handles schema-aware parsing and the
-                // disk_doc → memory_doc update propagation.
-                cache.apply_external_edit(&block_id, &content);
-                metrics::counter!("memory.external_edit.merged").increment(1);
-            }
-        }
-    }
+    crate::loro_sync::routers::block_id_from_path(path)
 }
 
 #[cfg(test)]

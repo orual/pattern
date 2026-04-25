@@ -215,6 +215,32 @@ mod tests {
                 // Add a dummy SubscriberHandle so the supervisor can cancel and join it.
                 let worker_cancel = WorkerCancel::new();
                 let worker_cancel_clone = worker_cancel.clone();
+                // Build a minimal SyncedDoc for the dummy handle. The supervisor
+                // only calls cancel + join on it; the SyncedDoc is never actually
+                // written to or read from, but the type system requires a
+                // fully-initialised handle.
+                let dummy_synced_doc = {
+                    use crate::loro_sync::{ConflictPolicy, SyncedDoc, SyncedDocConfig};
+                    use crate::subscriber::bridge::BlockSchemaBridge;
+                    use pattern_core::memory::StructuredDocument;
+                    use pattern_core::types::memory_types::BlockSchema;
+
+                    let doc = StructuredDocument::new_text();
+                    // open_router_owned works even if the file does not exist.
+                    let path = std::path::PathBuf::from("/tmp/stale-block-dummy.md");
+                    let memory_doc = Arc::new(doc.inner().clone());
+                    let bridge = Arc::new(BlockSchemaBridge::new(BlockSchema::text()));
+                    Arc::new(
+                        SyncedDoc::open_router_owned(SyncedDocConfig {
+                            path,
+                            memory_doc,
+                            bridge,
+                            event_channel_bound: 1,
+                            conflict_policy: ConflictPolicy::AutoMerge,
+                        })
+                        .expect("open_router_owned must succeed in supervisor test"),
+                    )
+                };
                 let dummy_handle = SubscriberHandle {
                     cancel: worker_cancel_clone,
                     thread: std::thread::spawn(move || {
@@ -230,11 +256,10 @@ mod tests {
                         let doc = loro::LoroDoc::new();
                         doc.subscribe_local_update(Box::new(|_| true))
                     },
-                    disk_doc: Arc::new(loro::LoroDoc::new()),
-                    last_written_mtime: Arc::new(Mutex::new(None)),
                     paused: Arc::new(AtomicBool::new(false)),
                     pause_complete: Arc::new((Mutex::new(false), std::sync::Condvar::new())),
                     resume_signal: Arc::new((Mutex::new(false), std::sync::Condvar::new())),
+                    synced_doc: dummy_synced_doc,
                 };
                 subscribers.insert("stale-block".to_string(), dummy_handle);
 

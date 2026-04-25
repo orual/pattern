@@ -35,8 +35,8 @@ This phase implements and tests:
 - **v3-sandbox-io.AC1.4 Success:** Self-emit-echo detection: agent write → file change → watcher fires → content hash match → no redundant merge triggered
 - **v3-sandbox-io.AC1.5 Success:** `close()` drops the LoroDoc and unsubscribes the watcher; no resources leaked
 - **v3-sandbox-io.AC1.6 Failure:** Opening a nonexistent file returns `FileError::NotFound(path)` (here `LoroSyncError::NotFound`; Phase 2's `FileError` wraps it)
-- **v3-sandbox-io.AC1.7 Edge:** Concurrent edits by agent and external process to different regions of the same file merge cleanly (both changes preserved, no data loss)
-- **v3-sandbox-io.AC1.8 Edge:** Concurrent edits to the same region merge via loro CRDT semantics (last-writer-wins per character position, deterministic)
+- **v3-sandbox-io.AC1.7 Edge:** Realistic external editor (open-edit-save: reads current disk content, modifies, saves) edits a different region from the agent's prior write — both edits preserved deterministically. This is the sequential merge case; not the stale-base concurrent case. Stale-base concurrent writes (external writer didn't see agent's prior save) are explicitly NOT covered by AC1.7's "both edits preserved" — under `ConflictPolicy::AutoMerge` (block path default) the result is line-level last-content-write-wins (snapshot-locked); under `ConflictPolicy::RejectAndNotify` (Phase 2 FileHandler default) the conflict surfaces as `ExternalChangeEvent::ConflictDetected` and the merge is NOT applied. See AC1.8 for ordering tests and the design rationale at the top of `crates/pattern_memory/src/loro_sync/synced_doc.rs`.
+- **v3-sandbox-io.AC1.8 Edge:** Overlapping-region edits resolve via *line-level* last-content-write-wins (Myers-diff via loro `text.update_by_line`), deterministic per ingest-thread arrival order. Two snapshot tests lock the two outcomes — `e2e_overlapping_edits_agent_first_then_external` and `e2e_overlapping_edits_external_first_then_agent`. The line-level granularity (versus character-level) is a deliberate Phase 1 choice for size/perf on large files; future phases may revisit if finer-granularity merging is needed.
 
 ---
 

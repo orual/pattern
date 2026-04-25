@@ -25,6 +25,7 @@
 //! The supervisor is an async tokio task that watches heartbeats from each
 //! subscriber and restarts workers that fail or become unresponsive.
 
+pub mod bridge;
 pub mod event;
 pub mod supervisor;
 pub mod task;
@@ -35,10 +36,11 @@ pub use event::{CommitEvent, Heartbeat, ReembedRequest};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
-use std::time::SystemTime;
 
-use loro::LoroDoc;
 use tokio_util::sync::CancellationToken;
+
+use crate::loro_sync::SyncedDoc;
+use crate::subscriber::bridge::BlockSchemaBridge;
 
 /// Handle to a running per-doc sync subscriber OS thread.
 ///
@@ -58,13 +60,6 @@ pub struct SubscriberHandle {
     /// The loro subscription guard — dropping this unsubscribes the callback.
     /// Must outlive the worker thread.
     pub _subscription: loro::Subscription,
-    /// The disk_doc that mirrors the on-disk state. Shared with the worker
-    /// (via Arc in WorkerConfig) for external edit application.
-    pub disk_doc: Arc<LoroDoc>,
-    /// Tracks the mtime of the last file we wrote ourselves, for self-echo
-    /// suppression in the watcher. Updated by the worker after each
-    /// successful atomic_write.
-    pub last_written_mtime: Arc<Mutex<Option<SystemTime>>>,
     /// When true, the `subscribe_local_update` callback skips `try_send` and
     /// the worker enters its pause loop. Set by `pause_subscribers`, cleared
     /// by the worker on resume.
@@ -75,4 +70,11 @@ pub struct SubscriberHandle {
     /// `resume_subscribers` sets the inner bool to true and notifies to wake
     /// the parked worker.
     pub resume_signal: Arc<(Mutex<bool>, Condvar)>,
+    /// The `SyncedDoc<BlockSchemaBridge>` that owns the two-doc CRDT machinery:
+    /// disk_doc, last_written_mtime + last_written_hash (echo suppression),
+    /// atomic_write, and last_saved_frontier. External edits arrive via
+    /// `synced_doc.apply_external_bytes`; the worker drives local-update
+    /// coalescing and calls `synced_doc.write_rendered` after each debounce
+    /// window.
+    pub synced_doc: Arc<SyncedDoc<BlockSchemaBridge>>,
 }
