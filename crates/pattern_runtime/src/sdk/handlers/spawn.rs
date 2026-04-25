@@ -243,10 +243,14 @@ fn handle_fork(
     let cfg: pattern_core::spawn::ForkConfig = wire_cfg.into();
     let parent: &SessionContext = cx.user();
 
-    // Both isolation paths exercise the capability gate so Phase 2
-    // wire-grammar verification works end-to-end.
-    let phantom_eph = phantom_eph_cfg_for_fork(&cfg);
-    compute_child_caps(parent, &phantom_eph).map_err(|e| EffectError::Handler(e.to_string()))?;
+    // Gate: validate the requested capability set against the parent's before
+    // doing any work. `compute_child_caps` takes `EphemeralConfig`; build a
+    // minimal one carrying the fork's program and capabilities directly.
+    let mut cap_check_cfg = pattern_core::spawn::EphemeralConfig::new(&cfg.program);
+    if let Some(caps) = cfg.capabilities.clone() {
+        cap_check_cfg = cap_check_cfg.with_capabilities(caps);
+    }
+    compute_child_caps(parent, &cap_check_cfg).map_err(|e| EffectError::Handler(e.to_string()))?;
 
     match cfg.isolation {
         pattern_core::spawn::ForkIsolation::Lightweight => {
@@ -262,19 +266,6 @@ fn handle_fork(
             "ForkIsolation::Persistent requires Phase 3 (jj workspace path not wired)".to_string(),
         )),
     }
-}
-
-/// Builds a minimal `EphemeralConfig` from a `ForkConfig` so that
-/// `compute_child_caps` (which takes `EphemeralConfig`) can be reused as
-/// the capability gate for fork paths.
-fn phantom_eph_cfg_for_fork(
-    fork_cfg: &pattern_core::spawn::ForkConfig,
-) -> pattern_core::spawn::EphemeralConfig {
-    let mut eph = pattern_core::spawn::EphemeralConfig::new(&fork_cfg.program);
-    if let Some(caps) = fork_cfg.capabilities.clone() {
-        eph = eph.with_capabilities(caps);
-    }
-    eph
 }
 
 fn handle_sibling(

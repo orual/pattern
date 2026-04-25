@@ -458,8 +458,11 @@ async fn watcher_tasks_are_aborted_on_child_registry_drop() {
     let first_child = &children[0];
     let grandchild_caps =
         pattern_runtime::spawn::compute_child_caps(first_child, &first_grandchild_cfg).unwrap();
-    let grandchild =
-        first_child.fork_for_ephemeral(&first_grandchild_cfg, grandchild_caps, parent.include_paths().clone());
+    let grandchild = first_child.fork_for_ephemeral(
+        &first_grandchild_cfg,
+        grandchild_caps,
+        parent.include_paths().clone(),
+    );
     register_scripted_handle(grandchild.spawn_registry(), deep_cancel.clone());
 
     // Drop all N immediate children. Each drop triggers
@@ -563,6 +566,48 @@ async fn ac3_4_timeout_fires_cancel_and_returns_timeout_error() {
     );
 }
 
+/// Important #1 — `WireForkIsolation::Persistent` returns an error whose
+/// message contains "Phase 3" verbatim.
+///
+/// The `ForkIsolation::Persistent` path is explicitly deferred to Phase 3.
+/// The handler must surface a clear diagnostic rather than silently
+/// succeeding or returning an opaque error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn persistent_fork_stub_returns_phase_3_error() {
+    use pattern_runtime::sdk::handlers::spawn::SpawnHandler;
+    use pattern_runtime::sdk::requests::SpawnReq;
+    use pattern_runtime::sdk::requests::spawn::{WireForkConfig, WireForkIsolation};
+    use tidepool_effect::{EffectContext, EffectHandler};
+    use tidepool_repr::DataConTable;
+
+    let parent = build_parent(None, None).await;
+    let wire_cfg = WireForkConfig {
+        program: String::new(),
+        isolation: WireForkIsolation::Persistent,
+        capabilities: None,
+        timeout_hint_ms: None,
+        task_ref: None,
+    };
+
+    // Drive the handler from spawn_blocking (simulating eval-worker context).
+    let parent_for_blocking = parent.clone();
+    let err = tokio::task::spawn_blocking(move || {
+        let table = DataConTable::new();
+        let cx = EffectContext::with_user(&table, parent_for_blocking.as_ref());
+        let mut h = SpawnHandler;
+        h.handle(SpawnReq::Fork(wire_cfg), &cx)
+    })
+    .await
+    .expect("spawn_blocking should not panic")
+    .expect_err("Persistent fork must return an error in Phase 2");
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Phase 3"),
+        "error message must contain 'Phase 3'; got: {msg}"
+    );
+}
+
 /// Important #4 / AC3.5 — handler-side `handle_ephemeral` returns
 /// `EffectError::Handler` containing "concurrent ephemeral limit" on the
 /// third call when the registry limit is 2.
@@ -589,8 +634,8 @@ async fn ac3_5_handler_side_concurrency_limit_returns_handler_error() {
     assert!(permit_c.is_none(), "third slot must be denied: limit=2");
 
     // The handler constructs SpawnError and wraps it; verify the message.
-    let err_msg = pattern_runtime::spawn::SpawnError::ConcurrencyLimitExceeded { limit: 2 }
-        .to_string();
+    let err_msg =
+        pattern_runtime::spawn::SpawnError::ConcurrencyLimitExceeded { limit: 2 }.to_string();
     assert!(
         err_msg.contains("concurrent ephemeral limit"),
         "error message must contain 'concurrent ephemeral limit'; got: {err_msg}"
@@ -627,9 +672,7 @@ async fn ac3_5_handler_side_concurrency_limit_returns_handler_error() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c3_block_on_await_spawn_executes_from_blocking_thread() {
     use futures::FutureExt;
-    use pattern_runtime::spawn::{
-        ChildSessionHandle, SpawnKind, SpawnResult, TerminationReason,
-    };
+    use pattern_runtime::spawn::{ChildSessionHandle, SpawnKind, SpawnResult, TerminationReason};
     use pattern_runtime::timeout::CancelState;
 
     let parent = build_parent(None, None).await;

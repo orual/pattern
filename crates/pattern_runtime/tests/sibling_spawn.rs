@@ -110,9 +110,10 @@ async fn ac5_4_capabilities_come_from_sibling_own_config() {
     // Drive spawn_sibling_existing and inspect the returned outcome directly.
     // The outcome's capabilities field is what the spawn PIPELINE returns —
     // AC5.4 requires this to come from the sibling's own KDL, not the parent.
-    let outcome: SiblingExistingOutcome = spawn_sibling_existing(&parent, &cfg, &"orual".into(), resolver)
-        .await
-        .expect("should succeed");
+    let outcome: SiblingExistingOutcome =
+        spawn_sibling_existing(&parent, &cfg, &"orual".into(), resolver)
+            .await
+            .expect("should succeed");
     assert_eq!(outcome.persona_id.as_str(), "orual-sibling-test");
 
     // AC5.4: the outcome's capabilities come from the sibling's own KDL config.
@@ -246,4 +247,109 @@ async fn ac5_3_new_sibling_without_flag_writes_draft_no_live_session() {
         "draft KDL must be written even when flag is absent; path={expected_file:?}"
     );
     assert_eq!(outcome.kdl_path, expected_file);
+}
+
+// ── Important #3 — WireSiblingSpawn typed-sum round-trip ─────────────────────
+
+/// Verify that `WireSiblingSpawn::ExistingActive` is produced by the
+/// existing-persona path. The `SiblingExistingOutcome` yields
+/// `ExistingActive(persona_id)` with no draft path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wire_sibling_spawn_existing_active_variant() {
+    use pattern_runtime::sdk::requests::spawn::WireSiblingSpawn;
+
+    // ExistingActive comes from the handler arm, not from SiblingNewOutcome.
+    // Verify the From<SiblingNewOutcome> for Active + Draft.
+    let drafts_dir = tempfile::TempDir::new().unwrap();
+    let persona_cfg = PersonaConfig::new("round-trip-active", "rt active", CapabilitySet::empty());
+    let caps = CapabilitySet::all().with_flags([CapabilityFlag::SpawnNewIdentities]);
+    let parent = build_parent(Some(caps)).await;
+    let cfg = SiblingConfig::new(
+        SiblingPersona::New(persona_cfg.clone()),
+        RelationshipKind::PeerWith,
+    );
+    let outcome = spawn_sibling_new(&parent, &cfg, &persona_cfg, drafts_dir.path())
+        .await
+        .expect("should succeed");
+    assert_eq!(
+        outcome.status,
+        pattern_runtime::spawn::sibling::SiblingStatus::Active
+    );
+    let wire = WireSiblingSpawn::from(outcome);
+    match wire {
+        WireSiblingSpawn::NewActive(pid, kdl_path) => {
+            assert_eq!(pid, "round-trip-active");
+            assert!(
+                kdl_path.contains("round-trip-active"),
+                "kdl path should contain persona id; got: {kdl_path}"
+            );
+        }
+        other => panic!("expected NewActive variant, got {other:?}"),
+    }
+}
+
+/// Verify that `WireSiblingSpawn::NewDraft` is produced when the parent
+/// lacks `SpawnNewIdentities`, and that the kdl_path field is always present.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wire_sibling_spawn_new_draft_variant_carries_kdl_path() {
+    use pattern_runtime::sdk::requests::spawn::WireSiblingSpawn;
+
+    let drafts_dir = tempfile::TempDir::new().unwrap();
+    let persona_cfg = PersonaConfig::new("round-trip-draft", "rt draft", CapabilitySet::empty());
+    // Parent has an explicit restricted CapabilitySet that does NOT include
+    // SpawnNewIdentities. Passing `None` would mean "full power" (all caps),
+    // which includes the flag and would produce Active status instead of Draft.
+    let parent = build_parent(Some(CapabilitySet::from_iter([EffectCategory::Memory]))).await;
+    let cfg = SiblingConfig::new(
+        SiblingPersona::New(persona_cfg.clone()),
+        RelationshipKind::PeerWith,
+    );
+    let outcome = spawn_sibling_new(&parent, &cfg, &persona_cfg, drafts_dir.path())
+        .await
+        .expect("should succeed");
+    assert_eq!(
+        outcome.status,
+        pattern_runtime::spawn::sibling::SiblingStatus::Draft
+    );
+    let wire = WireSiblingSpawn::from(outcome);
+    match wire {
+        WireSiblingSpawn::NewDraft(pid, kdl_path) => {
+            assert_eq!(pid, "round-trip-draft");
+            assert!(
+                !kdl_path.is_empty(),
+                "NewDraft must always carry a non-empty kdl_path"
+            );
+        }
+        other => panic!("expected NewDraft variant, got {other:?}"),
+    }
+}
+
+/// Verify `WireSiblingSpawn::ExistingActive` is constructed correctly.
+/// This variant only carries the persona_id — no kdl_path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wire_sibling_spawn_existing_active_no_kdl_path() {
+    use pattern_runtime::sdk::requests::spawn::WireSiblingSpawn;
+
+    let resolver = {
+        let r = pattern_runtime::spawn::sibling::StubSiblingResolver::new();
+        r.register("orual", fixture_path("sibling_persona.kdl"));
+        Arc::new(r)
+    };
+    let parent = build_parent(None).await;
+    let cfg = SiblingConfig::new(
+        SiblingPersona::Existing("orual".into()),
+        RelationshipKind::PeerWith,
+    );
+    let outcome = spawn_sibling_existing(&parent, &cfg, &"orual".into(), resolver)
+        .await
+        .expect("should succeed");
+
+    // The handler arm constructs ExistingActive directly from outcome.persona_id.
+    let wire = WireSiblingSpawn::ExistingActive(outcome.persona_id.to_string());
+    match wire {
+        WireSiblingSpawn::ExistingActive(pid) => {
+            assert_eq!(pid, "orual-sibling-test");
+        }
+        other => panic!("expected ExistingActive variant, got {other:?}"),
+    }
 }

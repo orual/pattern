@@ -449,9 +449,33 @@ impl SessionContext {
         &self.sibling_resolver
     }
 
+    /// Builder-style: replace the sibling persona resolver.
+    ///
+    /// Tests inject a [`crate::spawn::sibling::StubSiblingResolver`]; Phase 6
+    /// replaces the default [`crate::spawn::sibling::UnconfiguredSiblingResolver`]
+    /// with a `pattern_db`-backed resolver.
+    #[must_use]
+    pub fn with_sibling_resolver(
+        mut self,
+        resolver: std::sync::Arc<dyn crate::spawn::sibling::SiblingPersonaResolver>,
+    ) -> Self {
+        self.sibling_resolver = resolver;
+        self
+    }
+
     /// Root directory for draft persona KDL files.
     pub fn drafts_dir(&self) -> &std::path::Path {
         &self.drafts_dir
+    }
+
+    /// Builder-style: replace the drafts directory.
+    ///
+    /// Used by tests and by Phase 6 daemon wiring to route draft KDL files to
+    /// an explicit location rather than the XDG default.
+    #[must_use]
+    pub fn with_drafts_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.drafts_dir = dir;
+        self
     }
 
     /// Replace the session's include-paths set. Called by

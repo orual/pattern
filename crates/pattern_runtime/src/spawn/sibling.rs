@@ -443,4 +443,62 @@ mod tests {
             "should not emit empty capabilities block; got:\n{kdl}"
         );
     }
+
+    // ── spawn_sibling_new tracing ───────────────────────────────────────────
+
+    /// M#2 — `spawn_sibling_new` emits a tracing `info!` event containing
+    /// both `source = "runtime.spawn.sibling"` and the persona id.
+    ///
+    /// Verifies the structured log fields so the ops team can grep for sibling
+    /// spawn events in production logs by source tag.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tracing_test::traced_test]
+    async fn spawn_sibling_new_emits_tracing_info_with_source_and_persona_id() {
+        use crate::NopProviderClient;
+        use crate::session::SessionContext;
+        use crate::testing::InMemoryMemoryStore;
+        use pattern_core::spawn::{PersonaConfig, RelationshipKind, SiblingPersona};
+        use pattern_core::types::snapshot::PersonaSnapshot;
+        use pattern_core::{CapabilitySet, EffectCategory, spawn::SiblingConfig};
+
+        let store = std::sync::Arc::new(InMemoryMemoryStore::new());
+        let db = crate::testing::test_db().await;
+        let persona = PersonaSnapshot::new("tracer-parent", "tracer-parent");
+        let ctx = SessionContext::from_persona(
+            &persona,
+            store,
+            std::sync::Arc::new(NopProviderClient),
+            db,
+            tokio::runtime::Handle::current(),
+        );
+
+        let drafts_dir = tempfile::TempDir::new().expect("tempdir must succeed");
+        let persona_cfg = PersonaConfig::new(
+            "tracer-persona",
+            "system prompt for tracing test.",
+            CapabilitySet::from_iter([EffectCategory::Memory]),
+        );
+        let sib_cfg = SiblingConfig::new(
+            SiblingPersona::New(persona_cfg.clone()),
+            RelationshipKind::PeerWith,
+        );
+
+        let outcome = super::spawn_sibling_new(&ctx, &sib_cfg, &persona_cfg, drafts_dir.path())
+            .await
+            .expect("spawn_sibling_new must succeed");
+
+        // The `persona_id` derived from "tracer-persona" is "tracer-persona".
+        assert_eq!(outcome.persona_id.as_str(), "tracer-persona");
+
+        // Verify the tracing info event was emitted. `traced_test` captures
+        // all log output; assert on the field values that operators use.
+        assert!(
+            logs_contain("runtime.spawn.sibling"),
+            "tracing output must contain source = \"runtime.spawn.sibling\""
+        );
+        assert!(
+            logs_contain("tracer-persona"),
+            "tracing output must contain the persona_id field"
+        );
+    }
 }
