@@ -423,27 +423,40 @@ async fn ephemeral_success_returns_final_text_and_logs_progress() {
 /// alive until the parent's `Arc<CancelState>` reaches refcount 0 —
 /// effectively forever in a long-lived non-cancelling parent.
 ///
-/// This test:
-/// 1. Spawns N=10 child contexts.
-/// 2. Drops all N children (their registry drops abort their watchers).
-/// 3. Trips the parent cancel.
-/// 4. Asserts that the cascade still reaches a separately-registered child
-///    cancel flag within the grace window (i.e., the watcher abort does not
-///    break cancel propagation for still-live children).
+/// This test verifies the watcher leak fix is REAL by measuring
+/// `Arc::strong_count(&parent.cancel_state)` directly. Each
+/// `fork_for_ephemeral` clones the parent's `Arc<CancelState>` into the
+/// watcher closure; if the watcher leaks (parked on `notify.notified()`
+/// indefinitely), the strong count stays elevated even after the child
+/// `Arc<SessionContext>` is dropped.
 ///
-/// Task count is verified indirectly via a spawned monotonic-id counter: we
-/// measure how many tokio tasks are alive before spawning children, then
-/// verify the count does not increase after all children are dropped
-/// (allowing one yield for the aborted watchers to settle).
+/// The previous version of this test only asserted cascade propagation
+/// to a still-live grandchild — that assertion would have passed even
+/// with the leak intact. The Arc-strong-count check is the authoritative
+/// signal: if the count returns to baseline, watcher tasks were
+/// genuinely aborted; if it stays elevated, the leak persists.
+///
+/// Steps:
+/// 1. Record `baseline = Arc::strong_count(&parent.cancel_state)`.
+/// 2. Fork N=10 children. Each clones the parent's cancel_state into a
+///    watcher closure → expected count = baseline + N during the loop.
+/// 3. Drop all N children (their `SpawnRegistry::Drop` aborts watchers).
+/// 4. Yield + poll until count returns to baseline (or 500 ms grace
+///    expires).
+/// 5. Assert count is back to baseline.
+/// 6. Separately verify cascade still works for a live grandchild after
+///    parent cancel — confirms the abort path doesn't break propagation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn watcher_tasks_are_aborted_on_child_registry_drop() {
     let parent = build_parent(None, None).await;
     let cfg = pattern_core::spawn::EphemeralConfig::new("");
 
     const N: usize = 10;
+    let baseline = Arc::strong_count(&parent.cancel_state());
 
     // Build N child contexts. Each `fork_for_ephemeral` installs a watcher
-    // task on the child's registry.
+    // task on the child's registry, with the watcher closure holding a
+    // clone of `parent.cancel_state()`.
     let children: Vec<_> = (0..N)
         .map(|_| {
             let caps = pattern_runtime::spawn::compute_child_caps(&parent, &cfg).unwrap();
@@ -451,35 +464,61 @@ async fn watcher_tasks_are_aborted_on_child_registry_drop() {
         })
         .collect();
 
-    // Register one live child handle on a child-of-child registry to verify
-    // cancel propagation is not broken by the watcher abort path.
-    let deep_cancel = Arc::new(pattern_runtime::timeout::CancelState::new());
-    let first_grandchild_cfg = pattern_core::spawn::EphemeralConfig::new("");
-    let first_child = &children[0];
+    // While the children are alive, the watchers hold N additional Arc
+    // references on parent.cancel_state. Account for the children themselves
+    // also cloning cancel_state into their SessionContext.cancel_state field:
+    // each child holds 1 Arc directly + 1 in its watcher = 2 per child.
+    let elevated = Arc::strong_count(&parent.cancel_state());
+    assert!(
+        elevated >= baseline + N,
+        "expected at least baseline+N=({} + {}) Arc clones during fan-out, got {}",
+        baseline,
+        N,
+        elevated
+    );
+
+    // Drop all N immediate children. Each drop triggers
+    // SpawnRegistry::Drop → cancel_all + watcher.abort(). Aborted watchers
+    // release their parent_cancel_for_watcher Arc clones.
+    drop(children);
+
+    // Poll until the count returns to baseline. The watcher's `abort()`
+    // schedules cancellation but doesn't synchronously join — the
+    // executor needs a few yields to process the abort + drop the
+    // closure's captures.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    while std::time::Instant::now() < deadline {
+        if Arc::strong_count(&parent.cancel_state()) == baseline {
+            break;
+        }
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let after_drop = Arc::strong_count(&parent.cancel_state());
+    assert_eq!(
+        after_drop, baseline,
+        "Arc<CancelState> strong count must return to baseline ({}) after children dropped; \
+         got {} — indicates leaked watcher tasks holding cancel_state clones",
+        baseline, after_drop
+    );
+
+    // Separately verify cascade still works for a live grandchild after
+    // parent cancel — confirms the Weak<SpawnRegistry> upgrade path
+    // doesn't break propagation when the registry IS still alive.
+    let grandchild_cfg = pattern_core::spawn::EphemeralConfig::new("");
     let grandchild_caps =
-        pattern_runtime::spawn::compute_child_caps(first_child, &first_grandchild_cfg).unwrap();
-    let grandchild = first_child.fork_for_ephemeral(
-        &first_grandchild_cfg,
+        pattern_runtime::spawn::compute_child_caps(&parent, &grandchild_cfg).unwrap();
+    let live_child = parent.fork_for_ephemeral(
+        &grandchild_cfg,
         grandchild_caps,
         parent.include_paths().clone(),
     );
-    register_scripted_handle(grandchild.spawn_registry(), deep_cancel.clone());
+    let deep_cancel = Arc::new(pattern_runtime::timeout::CancelState::new());
+    register_scripted_handle(live_child.spawn_registry(), deep_cancel.clone());
 
-    // Drop all N immediate children. Each drop triggers
-    // SpawnRegistry::Drop → cancel_all + watcher.abort().
-    drop(children);
-
-    // Yield to let the tokio executor process the watcher abort
-    // completions. A single yield is generally sufficient; we allow a
-    // small sleep in case the executor needs more time.
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-    // Trip the parent cancel. The grandchild's registry still lives (we
-    // kept `grandchild` alive) and its watcher should still fire because
-    // that child has not been dropped.
     parent.cancel_state().request_cancel();
 
-    // Wait for cascade to land on the deep handle.
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
     while std::time::Instant::now() < deadline {
         if deep_cancel.is_cancelled() {
@@ -490,10 +529,11 @@ async fn watcher_tasks_are_aborted_on_child_registry_drop() {
 
     assert!(
         deep_cancel.is_cancelled(),
-        "cancel should propagate to the still-live grandchild's handle after parent cancel"
+        "cancel must propagate to still-live grandchild after parent cancel \
+         (Weak::upgrade succeeds when registry is alive)"
     );
 
-    drop(grandchild);
+    drop(live_child);
 }
 
 /// AC3.4 — timeout fires `SpawnError::Timeout` and marks child cancelled.
@@ -608,41 +648,113 @@ async fn persistent_fork_stub_returns_phase_3_error() {
     );
 }
 
-/// Important #4 / AC3.5 — handler-side `handle_ephemeral` returns
-/// `EffectError::Handler` containing "concurrent ephemeral limit" on the
-/// third call when the registry limit is 2.
+/// Important #4 / AC3.5 — handler-side concurrency limit enforcement.
 ///
-/// Drives the handler directly without the full Haskell eval path.
-/// `replace_spawn_registry_for_test(2)` sets up a limit-2 registry.
-/// We call `try_acquire_ephemeral_slot` three times via the registry
-/// directly to mimic the handler arm's gate (the handler calls this under
-/// the hood; direct registry calls verify the same semaphore).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// Drives `SpawnHandler::handle(SpawnReq::Ephemeral(_))` three times in
+/// sequence on a parent with `replace_spawn_registry_for_test(2)`.
+/// Asserts the third call returns `EffectError::Handler` whose message
+/// contains "concurrent ephemeral limit reached" — verifying the
+/// handler arm correctly translates a `None` permit into the wire-level
+/// error, NOT just that the underlying semaphore saturates.
+///
+/// Pattern matches `persistent_fork_stub_returns_phase_3_error` for the
+/// handler-via-`spawn_blocking` invocation shape.
+///
+/// Preflight-gated: requires `tidepool-extract` because the first two
+/// successful Ephemeral calls construct an `EvalWorker` per spawn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ac3_5_handler_side_concurrency_limit_returns_handler_error() {
-    // Build a parent with a limit-2 spawn registry.
-    let parent = build_parent(None, Some(2)).await;
-    let registry = parent.spawn_registry();
+    use pattern_runtime::sdk::handlers::spawn::SpawnHandler;
+    use pattern_runtime::sdk::requests::SpawnReq;
+    use pattern_runtime::sdk::requests::spawn::WireEphemeralConfig;
+    use tidepool_effect::{EffectContext, EffectHandler};
+    use tidepool_repr::DataConTable;
 
-    // Acquire the two available slots.
-    let permit_a = registry.try_acquire_ephemeral_slot();
-    let permit_b = registry.try_acquire_ephemeral_slot();
-    // Third slot must be denied — mimicking the handler arm.
-    let permit_c = registry.try_acquire_ephemeral_slot();
+    if pattern_runtime::preflight::check().is_err() {
+        // The first two successful calls actually fork an EvalWorker, which
+        // requires the harness binary on PATH. Skip cleanly without it.
+        return;
+    }
 
-    assert!(permit_a.is_some(), "first slot must be available");
-    assert!(permit_b.is_some(), "second slot must be available");
-    assert!(permit_c.is_none(), "third slot must be denied: limit=2");
+    // Build a parent with a limit-2 spawn registry. Use a hanging mock
+    // provider so the children stay alive (don't complete and free their
+    // permits) while we test saturation.
+    // Two hanging scripts — one per successful Ephemeral. The third call
+    // rejects at the registry (try_acquire returns None) before reaching
+    // the provider, so 2 scripts is exactly right; a third would be unused.
+    let provider = Arc::new(MockProviderClient::with_turns(vec![
+        MockProviderClient::hanging_turn(),
+        MockProviderClient::hanging_turn(),
+    ]));
+    let parent = build_parent_with_provider(None, Some(2), provider).await;
 
-    // The handler constructs SpawnError and wraps it; verify the message.
-    let err_msg =
-        pattern_runtime::spawn::SpawnError::ConcurrencyLimitExceeded { limit: 2 }.to_string();
+    // Drive the handler 3 times in sequence from `spawn_blocking` —
+    // mirroring the eval-worker thread context that the handler runs
+    // under in production.
+    let parent_for_blocking = parent.clone();
+    let outcomes = tokio::task::spawn_blocking(move || {
+        let table = DataConTable::new();
+        let cx = EffectContext::with_user(&table, parent_for_blocking.as_ref());
+        let mut handler = SpawnHandler;
+
+        let mk = || WireEphemeralConfig {
+            program: String::new(),
+            costume: None,
+            capabilities: None,
+            timeout_ms: None,
+            prompt: None,
+        };
+
+        let r1 = handler.handle(SpawnReq::Ephemeral(mk()), &cx);
+        let r2 = handler.handle(SpawnReq::Ephemeral(mk()), &cx);
+        let r3 = handler.handle(SpawnReq::Ephemeral(mk()), &cx);
+        (
+            r1.map(|_| ()).map_err(|e| e.to_string()),
+            r2.map(|_| ()).map_err(|e| e.to_string()),
+            r3.map(|_| ()).map_err(|e| e.to_string()),
+        )
+    })
+    .await
+    .expect("spawn_blocking should not panic");
+
+    // Calls 1 and 2 may fail at the wire-encode step (the test's empty
+    // DataConTable doesn't know `Pattern.Spawn.EphemeralSpawn`), but the
+    // permit is acquired BEFORE encode and stored on the registered
+    // ChildSessionHandle, so the registry is saturated regardless. The
+    // load-bearing assertion is on call 3's error mode.
+    let third_err = outcomes
+        .2
+        .expect_err("third Ephemeral must return Err — registry saturated at limit=2");
     assert!(
-        err_msg.contains("concurrent ephemeral limit"),
-        "error message must contain 'concurrent ephemeral limit'; got: {err_msg}"
+        third_err.contains("concurrent ephemeral limit"),
+        "third call must fail with the concurrency-limit message, NOT with an \
+         encode/bridge error. Got: {third_err}"
     );
+    assert!(
+        third_err.contains("2"),
+        "error must surface the configured limit (2); got: {third_err}"
+    );
+    // Defensive: if calls 1 and 2 had ALSO returned the concurrency-limit
+    // error, the test would be a false positive (limit would never have
+    // been hit because permits weren't acquired). Verify the first two
+    // didn't return a concurrency-limit error.
+    if let Err(e) = &outcomes.0 {
+        assert!(
+            !e.contains("concurrent ephemeral limit"),
+            "first call must not report concurrency-limit (it should have acquired \
+             the first permit); got: {e}"
+        );
+    }
+    if let Err(e) = &outcomes.1 {
+        assert!(
+            !e.contains("concurrent ephemeral limit"),
+            "second call must not report concurrency-limit (it should have acquired \
+             the second permit); got: {e}"
+        );
+    }
 
-    drop(permit_a);
-    drop(permit_b);
+    // Tear down the parent so its watcher tasks abort cleanly.
+    drop(parent);
 }
 
 /// C#3 — `block_on` in the spawn handler arm executes correctly from the

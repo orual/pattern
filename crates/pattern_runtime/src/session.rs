@@ -546,18 +546,26 @@ impl SessionContext {
         // watcher that calls cancel_all() on the child's sub-registry
         // once the parent cancel flag flips.
         //
-        // The watcher handle is stored on the child registry so that
-        // dropping the child registry (when the ephemeral finishes)
-        // aborts the watcher immediately. Without the abort, the
-        // watcher parks on `notify.notified()` until the parent's
-        // `Arc<CancelState>` reaches refcount 0. In a long-lived parent
-        // that never cancels, that is effectively forever, causing one
-        // leaked tokio task per `fork_for_ephemeral` call.
+        // The watcher closure captures a `Weak<SpawnRegistry>` rather
+        // than a strong `Arc` — load-bearing for AC3.6 leak-freedom on
+        // the happy path. If the closure held an Arc, the registry's
+        // strong count would never drop to zero (the closure is parked
+        // on `notify.notified()` indefinitely until the parent cancels),
+        // so `SpawnRegistry::Drop` would be unreachable in long-lived
+        // parents. With Weak, the consumer-side drop of
+        // `Arc<SessionContext>` brings the registry's strong count to
+        // zero, `Drop` fires, and the stored watcher handle is
+        // `abort()`'d immediately — no leaked tokio task.
         let parent_cancel_for_watcher = self.cancel_state.clone();
-        let child_registry_for_watcher = child_registry.clone();
+        let child_registry_weak = Arc::downgrade(&child_registry);
         let watcher_handle = self.tokio_handle.spawn(async move {
             parent_cancel_for_watcher.wait_for_cancel().await;
-            child_registry_for_watcher.cancel_all();
+            if let Some(reg) = child_registry_weak.upgrade() {
+                reg.cancel_all();
+            }
+            // If `upgrade` returned None, the registry was already
+            // dropped — nothing to cancel. Closure exits, releasing
+            // its `Arc<CancelState>`.
         });
         child_registry.install_watcher(watcher_handle);
 
