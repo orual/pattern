@@ -1,22 +1,37 @@
-//! Stub handler for `Pattern.Spawn`. Returns a per-variant `Handler`
-//! error identifying the Phase 2 task that wires the real implementation.
+//! Handler for `Pattern.Spawn`. Wires Ephemeral / AwaitSpawn / AwaitAll
+//! / Stop to the spawn registry + ephemeral runner. Sibling and Fork
+//! remain stubs returning per-task placeholder errors (Tasks 6/7 and 8
+//! of the v3-multi-agent plan).
 //!
-//! Phase 2 Task 2 (this file) lands the typed wire grammar and the
-//! per-variant stub messages. Subsequent tasks replace the stubs:
-//! Task 4 wires `Ephemeral` / `AwaitSpawn` / `AwaitAll` / `Stop`;
-//! Tasks 6+7 wire `Sibling`; Task 8 scaffolds `Fork` (lightweight only;
-//! persistent isolation is Phase 3).
+//! Sync→async glue: handlers run on the eval-worker OS thread (no
+//! ambient tokio runtime). For paths that need to await a future, this
+//! handler uses `cx.user().tokio_handle().block_on(...)`. The await
+//! target is bounded — the `SpawnRegistry`'s `Shared<BoxFuture>`
+//! resolves when the child's `run_ephemeral` future completes, which is
+//! itself bounded by `tokio::time::timeout`. No plugin code in the
+//! await path; sandbox-io's "block_on can deadlock if plugin code
+//! recursively calls spawn_blocking" caution does not apply here.
 
+use std::sync::Arc;
+
+use futures::FutureExt;
+use smol_str::SmolStr;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use tidepool_eval::Value;
 
+use pattern_core::types::ids::new_id;
+
 use crate::sdk::describe::{DescribeEffect, EffectDecl};
 use crate::sdk::requests::SpawnReq;
-use crate::session::HasCancelState;
+use crate::sdk::requests::spawn::{WireEphemeralSpawn, WireSpawnAwaitOutcome, WireSpawnResult};
+use crate::session::SessionContext;
+use crate::spawn::{
+    ChildSessionHandle, SpawnError, SpawnKind, child_include_paths, compute_child_caps,
+    run_ephemeral, synthesize_program_lib,
+};
 use crate::timeout::HandlerGuard;
 
-/// Not-implemented placeholder for the Spawn effect. Real implementation
-/// arrives in Phase 2 Tasks 4–8 of the v3-multi-agent plan.
+/// Handler for the `Pattern.Spawn` effect.
 #[derive(Default, Clone)]
 pub struct SpawnHandler;
 
@@ -26,9 +41,9 @@ impl DescribeEffect for SpawnHandler {
             type_name: "Spawn",
             description: "Subagent / child-agent lifecycle: ephemeral workers, forks, sibling personas, await + stop",
             constructors: &[
-                "Ephemeral  :: EphemeralConfig -> Spawn SpawnId",
+                "Ephemeral  :: EphemeralConfig -> Spawn EphemeralSpawn",
                 "AwaitSpawn :: SpawnId -> Spawn SpawnResult",
-                "AwaitAll   :: [SpawnId] -> Spawn AwaitAllResult",
+                "AwaitAll   :: [SpawnId] -> Spawn [SpawnAwaitOutcome]",
                 "Fork       :: ForkConfig -> Spawn ForkHandle",
                 "Sibling    :: SiblingConfig -> Spawn PersonaId",
                 "Stop       :: SpawnId -> Spawn ()",
@@ -36,19 +51,13 @@ impl DescribeEffect for SpawnHandler {
             type_defs: &[
                 "type SpawnId   = Text",
                 "type PersonaId = Text",
-                // Result types remain opaque text in Phase 2; ergonomic
-                // accessors land in Task 9 / Phase 3.
-                "type SpawnResult     = Text",
-                "type AwaitAllResult  = Text",
-                "type ForkHandle      = Text",
-                // Config records — full record definitions live in
-                // Pattern.Spawn.hs; agents construct them positionally
-                // or via the helper functions below.
+                "type ForkHandle = Text  -- opaque token; resolution helpers land in Phase 3.",
+                // Config + return record types live in Pattern.Spawn.hs.
             ],
             helpers: &[
-                "ephemeral :: Member Spawn effs => EphemeralConfig -> Eff effs SpawnId\nephemeral cfg = send (Ephemeral cfg)",
+                "ephemeral :: Member Spawn effs => EphemeralConfig -> Eff effs EphemeralSpawn\nephemeral cfg = send (Ephemeral cfg)",
                 "awaitSpawn :: Member Spawn effs => SpawnId -> Eff effs SpawnResult\nawaitSpawn sid = send (AwaitSpawn sid)",
-                "awaitAll :: Member Spawn effs => [SpawnId] -> Eff effs AwaitAllResult\nawaitAll ids = send (AwaitAll ids)",
+                "awaitAll :: Member Spawn effs => [SpawnId] -> Eff effs [SpawnAwaitOutcome]\nawaitAll ids = send (AwaitAll ids)",
                 "fork :: Member Spawn effs => ForkConfig -> Eff effs ForkHandle\nfork cfg = send (Fork cfg)",
                 "sibling :: Member Spawn effs => SiblingConfig -> Eff effs PersonaId\nsibling cfg = send (Sibling cfg)",
                 "stop :: Member Spawn effs => SpawnId -> Eff effs ()\nstop sid = send (Stop sid)",
@@ -57,28 +66,158 @@ impl DescribeEffect for SpawnHandler {
     }
 }
 
-impl<U> EffectHandler<U> for SpawnHandler
-where
-    U: HasCancelState,
-{
+impl EffectHandler<SessionContext> for SpawnHandler {
     type Request = SpawnReq;
 
-    fn handle(&mut self, req: SpawnReq, cx: &EffectContext<'_, U>) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        req: SpawnReq,
+        cx: &EffectContext<'_, SessionContext>,
+    ) -> Result<Value, EffectError> {
         // Uniform HandlerGate entry — see ShellHandler for the rationale.
         let state = cx.user().cancel_state();
         let _guard = HandlerGuard::enter(&state.gate);
-        let (variant, wiring_task) = match &req {
-            SpawnReq::Ephemeral(_) => ("Ephemeral", "Phase 2 Task 4"),
-            SpawnReq::AwaitSpawn(_) => ("AwaitSpawn", "Phase 2 Task 4"),
-            SpawnReq::AwaitAll(_) => ("AwaitAll", "Phase 2 Task 4"),
-            SpawnReq::Fork(_) => ("Fork", "Phase 2 Task 8"),
-            SpawnReq::Sibling(_) => ("Sibling", "Phase 2 Tasks 6–7"),
-            SpawnReq::Stop(_) => ("Stop", "Phase 2 Task 4"),
-        };
-        Err(EffectError::Handler(format!(
-            "Pattern.Spawn.{variant} is not implemented (wiring lands in {wiring_task} of the v3-multi-agent plan)."
-        )))
+
+        match req {
+            SpawnReq::Ephemeral(wire_cfg) => handle_ephemeral(wire_cfg, cx),
+            SpawnReq::AwaitSpawn(id) => handle_await_spawn(id, cx),
+            SpawnReq::AwaitAll(ids) => handle_await_all(ids, cx),
+            SpawnReq::Stop(id) => handle_stop(id, cx),
+            SpawnReq::Fork(_) => Err(EffectError::Handler(
+                "Pattern.Spawn.Fork is not implemented (wiring lands in Phase 2 Task 8 of the v3-multi-agent plan).".into(),
+            )),
+            SpawnReq::Sibling(_) => Err(EffectError::Handler(
+                "Pattern.Spawn.Sibling is not implemented (wiring lands in Phase 2 Tasks 6–7 of the v3-multi-agent plan).".into(),
+            )),
+        }
     }
+}
+
+fn handle_ephemeral(
+    wire_cfg: crate::sdk::requests::spawn::WireEphemeralConfig,
+    cx: &EffectContext<'_, SessionContext>,
+) -> Result<Value, EffectError> {
+    let cfg: pattern_core::spawn::EphemeralConfig = wire_cfg.into();
+    let parent: &SessionContext = cx.user();
+    let parent_arc = parent.spawn_registry().clone();
+    let _ = parent_arc; // silence: we use parent's registry directly below.
+
+    // Acquire concurrency permit. Fail fast on saturation.
+    let registry = parent.spawn_registry().clone();
+    let permit = registry.try_acquire_ephemeral_slot().ok_or_else(|| {
+        EffectError::Handler(
+            SpawnError::ConcurrencyLimitExceeded {
+                limit: registry.concurrent_ephemeral_limit(),
+            }
+            .to_string(),
+        )
+    })?;
+
+    // Compute child capabilities (subset of parent).
+    let child_caps =
+        compute_child_caps(parent, &cfg).map_err(|e| EffectError::Handler(e.to_string()))?;
+
+    // Synthesize lib module from cfg.program (if non-empty) — owned by
+    // the spawned future for lifetime alignment.
+    let lib_dir =
+        synthesize_program_lib(&cfg.program).map_err(|e| EffectError::Handler(e.to_string()))?;
+
+    // Build child include paths + child SessionContext via the parent's
+    // fork helper (capability set + costume override applied there).
+    let child_includes = child_include_paths(parent, lib_dir.as_ref());
+    let child_ctx = parent.fork_for_ephemeral(&cfg, child_caps, Arc::new(child_includes.clone()));
+
+    // Mint the child id + progress-log label.
+    let child_id: SmolStr = new_id();
+    let progress_log_label: SmolStr = format!("spawn-log-{child_id}").into();
+
+    // Build the child's preamble from its restricted capability set.
+    let child_caps_for_preamble = child_ctx
+        .capabilities()
+        .cloned()
+        .unwrap_or_else(pattern_core::CapabilitySet::all);
+    let preamble = crate::sdk::preamble::build_for(&child_caps_for_preamble);
+
+    // Spawn the child task on the runtime. The lib_dir TempDir is moved
+    // into the future so its drop is tied to the future's lifetime —
+    // the temp directory cleans up when the spawn resolves or is
+    // dropped via the registry's cancel-on-drop.
+    let runner_fut = run_ephemeral(
+        child_ctx.clone(),
+        cfg,
+        child_id.clone(),
+        progress_log_label.clone(),
+        child_includes,
+        preamble,
+        lib_dir,
+    );
+    let join = parent.tokio_handle().spawn(runner_fut);
+
+    // Adapt JoinHandle<Result<SpawnResult, SpawnError>> → BoxFuture
+    // mapping JoinError to SpawnError::JoinPanicked.
+    let result = async move {
+        match join.await {
+            Ok(r) => r,
+            Err(je) => Err(SpawnError::JoinPanicked(je.to_string())),
+        }
+    }
+    .boxed()
+    .shared();
+
+    registry.register(ChildSessionHandle {
+        child_id: child_id.clone(),
+        kind: SpawnKind::Ephemeral,
+        cancel_state: child_ctx.cancel_state().clone(),
+        result,
+        _permit: Some(permit),
+    });
+
+    let wire = WireEphemeralSpawn {
+        spawn_id: child_id.into(),
+        progress_log_label: progress_log_label.into(),
+    };
+    cx.respond(wire)
+}
+
+fn handle_await_spawn(
+    id: String,
+    cx: &EffectContext<'_, SessionContext>,
+) -> Result<Value, EffectError> {
+    let registry = cx.user().spawn_registry().clone();
+    let handle = cx.user().tokio_handle().clone();
+    let id: SmolStr = id.into();
+    let outcome = handle
+        .block_on(registry.wait_for(&id))
+        .map_err(|e| EffectError::Handler(e.to_string()))?;
+    let wire = WireSpawnResult::from(outcome);
+    cx.respond(wire)
+}
+
+fn handle_await_all(
+    ids: Vec<String>,
+    cx: &EffectContext<'_, SessionContext>,
+) -> Result<Value, EffectError> {
+    let registry = cx.user().spawn_registry().clone();
+    let handle = cx.user().tokio_handle().clone();
+    let outcomes: Vec<Result<crate::spawn::SpawnResult, SpawnError>> =
+        handle.block_on(async move {
+            let futures = ids.into_iter().map(|id| {
+                let reg = registry.clone();
+                let id: SmolStr = id.into();
+                async move { reg.wait_for(&id).await }
+            });
+            futures::future::join_all(futures).await
+        });
+    let wires: Vec<WireSpawnAwaitOutcome> = outcomes
+        .into_iter()
+        .map(WireSpawnAwaitOutcome::from)
+        .collect();
+    cx.respond(wires)
+}
+
+fn handle_stop(id: String, cx: &EffectContext<'_, SessionContext>) -> Result<Value, EffectError> {
+    let _ = cx.user().spawn_registry().cancel_one(&SmolStr::from(id));
+    cx.respond(())
 }
 
 #[cfg(test)]
@@ -88,7 +227,6 @@ mod tests {
         WireEphemeralConfig, WireForkConfig, WireForkIsolation, WireRelationshipKind,
         WireSiblingConfig, WireSiblingPersona,
     };
-    use tidepool_repr::DataConTable;
 
     fn empty_ephemeral() -> WireEphemeralConfig {
         WireEphemeralConfig {
@@ -119,39 +257,6 @@ mod tests {
     }
 
     #[test]
-    fn spawn_stub_reports_not_implemented_per_variant() {
-        let mut h = SpawnHandler;
-        let table = DataConTable::new();
-        let cx = EffectContext::with_user(&table, &());
-
-        let err = h
-            .handle(SpawnReq::Ephemeral(empty_ephemeral()), &cx)
-            .unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("Pattern.Spawn.Ephemeral"), "got: {msg}");
-        assert!(msg.contains("not implemented"), "got: {msg}");
-        assert!(msg.contains("Phase 2 Task 4"), "got: {msg}");
-
-        let err = h
-            .handle(SpawnReq::Sibling(empty_sibling()), &cx)
-            .unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("Pattern.Spawn.Sibling"), "got: {msg}");
-        assert!(msg.contains("Phase 2 Tasks 6"), "got: {msg}");
-
-        let err = h.handle(SpawnReq::Fork(empty_fork()), &cx).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("Pattern.Spawn.Fork"), "got: {msg}");
-        assert!(msg.contains("Phase 2 Task 8"), "got: {msg}");
-
-        let err = h
-            .handle(SpawnReq::AwaitAll(vec!["a".into(), "b".into()]), &cx)
-            .unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("Pattern.Spawn.AwaitAll"), "got: {msg}");
-    }
-
-    #[test]
     fn effect_decl_advertises_six_constructors_and_helpers() {
         let decl = SpawnHandler::effect_decl();
         let names: Vec<&str> = decl
@@ -175,7 +280,6 @@ mod tests {
             !names.contains(&"Start"),
             "legacy `Start` constructor must be retired"
         );
-
         for ctor in [
             "Ephemeral",
             "AwaitSpawn",
@@ -189,5 +293,10 @@ mod tests {
                 "no helper references constructor {ctor}"
             );
         }
+        // Silence dead-code warnings on the test fixtures imported above
+        // for use by the integration test file.
+        let _ = empty_ephemeral();
+        let _ = empty_fork();
+        let _ = empty_sibling();
     }
 }

@@ -184,6 +184,14 @@ pub struct SessionContext {
     /// The default limit of 8 is a conservative starting point for ensembles.
     /// Revisit when ensemble patterns in Phase 7 stress this ceiling.
     spawn_registry: Arc<SpawnRegistry>,
+    /// GHC include paths threaded into the session's eval worker. Persisted
+    /// here so child sessions (ephemerals, forks) can extend the parent's
+    /// include set with their own synthesized lib directories without
+    /// re-deriving the path list. Populated at session-open time by
+    /// [`TidepoolSession::open_with_agent_loop`]; left as an empty `Arc<Vec>`
+    /// for sessions constructed via `from_persona` directly (test paths
+    /// that don't run an eval worker).
+    include_paths: Arc<Vec<std::path::PathBuf>>,
     /// Caller-supplied tokio runtime handle. Borrowed for sync handler
     /// paths (e.g. the eval-worker thread) that need to `block_on` an
     /// async future without magic-capturing via `Handle::current()`.
@@ -399,7 +407,113 @@ impl SessionContext {
             current_dispatch_origin: Arc::new(std::sync::RwLock::new(None)),
             spawn_registry,
             tokio_handle,
+            include_paths: Arc::new(Vec::new()),
         }
+    }
+
+    /// Replace the session's include-paths set. Called by
+    /// [`TidepoolSession::open_with_agent_loop`] after lib-module
+    /// validation; child-session forks (`fork_for_ephemeral`) read this
+    /// to inherit the parent's resolved set.
+    pub(crate) fn set_include_paths(&mut self, paths: Arc<Vec<std::path::PathBuf>>) {
+        self.include_paths = paths;
+    }
+
+    /// Replace the session's spawn registry with a fresh one carrying
+    /// a custom concurrency ceiling. Only available under
+    /// `feature = "test-support"` — production code MUST use the
+    /// default ceiling threaded via `from_persona`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn replace_spawn_registry_for_test(&mut self, limit: usize) {
+        self.spawn_registry = Arc::new(SpawnRegistry::new(self.agent_id.clone(), limit));
+    }
+
+    /// GHC include paths threaded into this session's eval worker.
+    ///
+    /// Empty for sessions constructed via `from_persona` without an
+    /// eval worker (test paths). Populated at session-open time by
+    /// [`TidepoolSession::open_with_agent_loop`].
+    pub fn include_paths(&self) -> &Arc<Vec<std::path::PathBuf>> {
+        &self.include_paths
+    }
+
+    /// Build a child session context for an ephemeral spawn.
+    ///
+    /// What's shared (Arc-cloned from parent): provider, db, router,
+    /// adapter (MemoryStoreAdapter — child reads parent's memory),
+    /// cancel_state (parent's cancel propagates to child), tokio_handle.
+    ///
+    /// What's fresh: pending_messages, checkpoint_log, current_turn,
+    /// spawn_registry (sub-registry), current_dispatch_origin, diagnostics,
+    /// permission_broker (no bridge yet — handler-side concern).
+    ///
+    /// What's overridden: capabilities (caller-supplied subset),
+    /// system_prompt (`cfg.costume` when set; otherwise inherits parent's),
+    /// agent_id (same as parent — persona identity stays in logs per
+    /// AC3.3).
+    ///
+    /// Returns the constructed child context as `Arc<SessionContext>`.
+    /// Caller is responsible for the spawn-lib synthesis + child
+    /// include-path extension.
+    pub fn fork_for_ephemeral(
+        &self,
+        cfg: &pattern_core::spawn::EphemeralConfig,
+        child_caps: pattern_core::CapabilitySet,
+        child_include_paths: Arc<Vec<std::path::PathBuf>>,
+    ) -> Arc<SessionContext> {
+        // Sub-registry concurrency limit. Half the parent's default is a
+        // conservative starting point — ensembles-of-ensembles are a
+        // Phase 7 concern; revisit when the workload demands it.
+        let sub_limit: usize = (self.spawn_registry.concurrent_ephemeral_limit() / 2).max(1);
+        let child_registry = Arc::new(SpawnRegistry::new(self.agent_id.clone(), sub_limit));
+
+        // Costume override: replace the system_prompt slot when set;
+        // otherwise inherit parent's.
+        let system_prompt = cfg.costume.clone().or_else(|| self.system_prompt.clone());
+
+        let child = SessionContext {
+            agent_id: self.agent_id.clone(),
+            model_id: self.model_id.clone(),
+            system_prompt,
+            chat_options: self.chat_options.clone(),
+            budget: self.budget,
+            // Shared cancel state — parent cancel propagates to child.
+            cancel_state: self.cancel_state.clone(),
+            // Shared adapter — child reads parent's memory. Write
+            // restriction is enforced by the child's capability set
+            // (the caller restricted it via restrict_to() before this
+            // call).
+            adapter: self.adapter.clone(),
+            provider: self.provider.clone(),
+            db: self.db.clone(),
+            router: self.router.clone(),
+            // No router bridge: the child runs without RouterBridge
+            // wired; messaging effects must be opt-in via the child's
+            // CapabilitySet.
+            router_bridge: None,
+            pending_messages: Arc::new(std::sync::Mutex::new(Vec::new())),
+            // Inherit parent's turn sink so the child's display events
+            // surface in the same place as the parent's. Subscribers
+            // should disambiguate by agent_id when needed.
+            turn_sink: self.turn_sink.clone(),
+            checkpoint_log: Arc::new(std::sync::Mutex::new(CheckpointLog::new())),
+            current_turn: Arc::new(AtomicU64::new(0)),
+            snapshot_policy: self.snapshot_policy.clone(),
+            context_policy: self.context_policy.clone(),
+            diagnostics: Arc::new(std::sync::Mutex::new(Vec::new())),
+            capabilities: Some(child_caps),
+            policies: self.policies.clone(),
+            permission_broker: Arc::new(pattern_core::permission::PermissionBroker::new()),
+            // Permission bridge is None; ephemerals don't currently
+            // route gated effects through the broker (Phase 4+ may
+            // revisit).
+            permission_bridge: None,
+            current_dispatch_origin: Arc::new(std::sync::RwLock::new(None)),
+            spawn_registry: child_registry,
+            tokio_handle: self.tokio_handle.clone(),
+            include_paths: child_include_paths,
+        };
+        Arc::new(child)
     }
 
     /// Caller-supplied tokio runtime handle. Borrowed for sync handler
@@ -961,12 +1075,6 @@ impl TidepoolSession {
             ctx_with_sink
         };
 
-        session.ctx = Arc::new(ctx_with_scope);
-
-        // Wire the turn sink into the DisplayHandler so Display events
-        // flow to CLI/TUI subscribers during eval turns.
-        session.display_handle.forward_to_turn_sink(turn_sink);
-
         // Build the shared preamble once per session, scoped to the
         // caller-supplied capability set. `None` keeps the full canonical
         // row — back-compat for sessions that pre-date capability scoping.
@@ -991,25 +1099,38 @@ impl TidepoolSession {
         // Extend include path with `<mount>/lib/` if present.
         // Approach A: probe-compile each module individually via
         // compile_haskell. See `sdk::lib_modules` for details.
-        if let Some(mount) = mount_path.as_deref() {
+        let lib_failures = if let Some(mount) = mount_path.as_deref() {
             let lib_validation =
                 crate::sdk::lib_modules::validate_and_resolve(mount, &include_paths);
             include_paths.extend(lib_validation.successful_paths);
-            // Stash failures into diagnostics for Pattern.Diagnostics.
-            if !lib_validation.failures.is_empty() {
-                let mut diags = session
-                    .ctx
-                    .diagnostics
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                diags.extend(
-                    lib_validation
-                        .failures
-                        .into_iter()
-                        .map(crate::sdk::handlers::diagnostics::DiagnosticEvent::from),
-                );
-            }
+            lib_validation.failures
+        } else {
+            Vec::new()
+        };
+
+        // Persist the resolved include path on SessionContext BEFORE the
+        // final Arc-wrap so child-session forks (Phase 2 spawn) can
+        // inherit them. Stash diagnostics from any lib-compile failures
+        // here too, while we still have `&mut` access on the inner ctx.
+        let mut ctx_with_paths = ctx_with_scope;
+        ctx_with_paths.set_include_paths(Arc::new(include_paths.clone()));
+        if !lib_failures.is_empty() {
+            let mut diags = ctx_with_paths
+                .diagnostics
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            diags.extend(
+                lib_failures
+                    .into_iter()
+                    .map(crate::sdk::handlers::diagnostics::DiagnosticEvent::from),
+            );
         }
+
+        session.ctx = Arc::new(ctx_with_paths);
+
+        // Wire the turn sink into the DisplayHandler so Display events
+        // flow to CLI/TUI subscribers during eval turns.
+        session.display_handle.forward_to_turn_sink(turn_sink);
 
         // Spawn the eval worker.
         let worker = EvalWorker::spawn_with_includes(

@@ -17,7 +17,7 @@
 
 use jiff::Span;
 use smol_str::SmolStr;
-use tidepool_bridge_derive::FromCore;
+use tidepool_bridge_derive::{FromCore, ToCore};
 
 use pattern_core::types::ids::PersonaId;
 use pattern_core::{
@@ -27,6 +27,8 @@ use pattern_core::{
         SiblingPersona,
     },
 };
+
+use crate::spawn::{SpawnResult, TerminationReason};
 
 // ── BlockRef ─────────────────────────────────────────────────────────────────
 
@@ -357,4 +359,97 @@ pub enum SpawnReq {
     /// Cancel an in-flight spawn by id. Idempotent.
     #[core(module = "Pattern.Spawn", name = "Stop")]
     Stop(String /* SpawnId */),
+}
+
+// ── Return-direction wire types (Rust → Haskell, derive ToCore) ──────────────
+//
+// The next batch of types crosses the boundary in the OTHER direction:
+// the handler builds a Rust value and returns it to the Haskell caller as
+// a typed Core record. Each type derives `ToCore`.
+
+/// Wire mirror of the typed handle returned by `Spawn.ephemeral`.
+///
+/// Pairs the spawn id with the constellation-scoped progress-log block
+/// label so the parent can read live progress without waiting for the
+/// child to complete.
+#[derive(Debug, ToCore)]
+#[core(module = "Pattern.Spawn", name = "EphemeralSpawn")]
+pub struct WireEphemeralSpawn {
+    pub spawn_id: String,
+    pub progress_log_label: String,
+}
+
+/// Wire mirror of [`crate::spawn::TerminationReason`]. `Term`-prefix on
+/// ctors keeps this from clashing with effect ctor names.
+#[derive(Debug, ToCore)]
+pub enum WireTerminationReason {
+    #[core(module = "Pattern.Spawn", name = "TermEndTurn")]
+    EndTurn,
+    #[core(module = "Pattern.Spawn", name = "TermToolUse")]
+    ToolUse,
+    #[core(module = "Pattern.Spawn", name = "TermMaxTurns")]
+    MaxTurns,
+    #[core(module = "Pattern.Spawn", name = "TermTimeout")]
+    Timeout,
+    #[core(module = "Pattern.Spawn", name = "TermCancelled")]
+    Cancelled,
+    #[core(module = "Pattern.Spawn", name = "TermError")]
+    Error,
+}
+
+impl From<TerminationReason> for WireTerminationReason {
+    fn from(t: TerminationReason) -> Self {
+        match t {
+            TerminationReason::EndTurn => Self::EndTurn,
+            TerminationReason::ToolUse => Self::ToolUse,
+            TerminationReason::MaxTurns => Self::MaxTurns,
+            TerminationReason::Timeout => Self::Timeout,
+            TerminationReason::Cancelled => Self::Cancelled,
+            TerminationReason::Error => Self::Error,
+        }
+    }
+}
+
+/// Wire mirror of [`crate::spawn::SpawnResult`] returned by
+/// `Spawn.awaitSpawn`.
+#[derive(Debug, ToCore)]
+#[core(module = "Pattern.Spawn", name = "SpawnResult")]
+pub struct WireSpawnResult {
+    pub child_id: String,
+    pub final_text: Option<String>,
+    pub turns: i64,
+    pub terminated: WireTerminationReason,
+    pub progress_log_label: Option<String>,
+}
+
+impl From<SpawnResult> for WireSpawnResult {
+    fn from(r: SpawnResult) -> Self {
+        Self {
+            child_id: r.child_id.to_string(),
+            final_text: r.final_text,
+            turns: r.turns as i64,
+            terminated: r.terminated.into(),
+            progress_log_label: r.progress_log_label.map(|s| s.to_string()),
+        }
+    }
+}
+
+/// Wire mirror of a per-id `awaitAll` outcome. Avoids reaching into
+/// `Data.Either` for the Core encoding by keeping a typed sum local to
+/// `Pattern.Spawn`.
+#[derive(Debug, ToCore)]
+pub enum WireSpawnAwaitOutcome {
+    #[core(module = "Pattern.Spawn", name = "SpawnOk")]
+    Ok(WireSpawnResult),
+    #[core(module = "Pattern.Spawn", name = "SpawnFail")]
+    Fail(String /* SpawnError display */),
+}
+
+impl From<Result<SpawnResult, crate::spawn::SpawnError>> for WireSpawnAwaitOutcome {
+    fn from(r: Result<SpawnResult, crate::spawn::SpawnError>) -> Self {
+        match r {
+            Ok(s) => WireSpawnAwaitOutcome::Ok(s.into()),
+            Err(e) => WireSpawnAwaitOutcome::Fail(e.to_string()),
+        }
+    }
 }

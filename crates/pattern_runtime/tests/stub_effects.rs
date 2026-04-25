@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 
 use pattern_runtime::sdk::handlers::{
     file::FileHandler, mcp::McpHandler, message::MessageHandler, rpc::RpcHandler,
-    shell::ShellHandler, sources::SourcesHandler, spawn::SpawnHandler,
+    shell::ShellHandler, sources::SourcesHandler,
 };
 
 /// Shared per-namespace deadline. The first test across the binary
@@ -164,19 +164,6 @@ fn rpc_stub_reports_not_implemented_hang_free() {
         RpcHandler,
         (),
         "Pattern.Rpc",
-        "not implemented",
-    );
-}
-
-#[test]
-fn spawn_stub_reports_not_implemented_hang_free() {
-    preflight_or_fail();
-    run_stub_case!(
-        "spawn_stub",
-        include_str!("fixtures/spawn_stub.hs"),
-        SpawnHandler,
-        (),
-        "Pattern.Spawn",
         "not implemented",
     );
 }
