@@ -2,11 +2,11 @@
 
 **Goal:** Replace the Sources and Rpc handler stubs (and the `DataStream`/`SourceManager` traits in `pattern_core`) with a single unified `Port` trait + `PortRegistry` runtime coordinator + `PortHandler` SDK effect. A `Port` is the agent's call/subscribe interface to any external service. Plugin-registered ports (Plan 4 — v3-extensibility) and runtime-provided ports (Phase 5's `HttpPort`) consume this trait.
 
-**Architecture:** `Port` trait lives in `pattern_core` (replaces `DataStream`); it has `id`, `metadata`, `subscribe`, `call`, `capabilities`, and `library` methods. `PortRegistry` lives in `pattern_runtime` (replaces `SourceManager`); it's runtime-global like ProcessManager — one per `TidepoolRuntime`, shared across sessions via `Arc`. `PortHandler<SessionContext>` dispatches `PortReq` to `cx.user().port_registry()`. The `library()` method returns optional Haskell helper source compiled into the agent's prelude when the port is in the agent's `CapabilitySet` — gives agents typed ergonomic access without manual JSON construction. Subscriptions deliver events through the canonical pseudo-message pipeline (`pattern_provider::compose::pseudo_messages::render_port_event(...)` → `adapter.record_pseudo_message(msg)`) — same as `Pattern.Skills.Load`, Phase 2's file edits, and Phase 3's shell output. **No new `MessageAttachment` variant.** Per-session subscription state (the `tokio::AbortHandle` so `Unsubscribe` can stop a stream) lives on `SessionContext`.
+**Architecture:** `Port` trait lives in `pattern_core` (replaces `DataStream`); it has `id`, `metadata`, `subscribe`, `call`, `capabilities`, and `library` methods. `PortRegistry` lives in `pattern_runtime` (replaces `SourceManager`); it's runtime-global like ProcessManager — one per `TidepoolRuntime`, shared across sessions via `Arc`. `PortHandler<SessionContext>` dispatches `PortReq` to `cx.user().port_registry()`. The `library()` method returns optional Haskell helper source compiled into the agent's prelude when the port is in the agent's `CapabilitySet` — gives agents typed ergonomic access without manual JSON construction. Subscription events use the same between-turn async-reminder buffer Phase 2 introduces (`SessionContext::record_async_reminder`); Phase 4 adds a `MessageAttachment::PortEvent { port_id, payload, at }` top-level variant in `pattern_core/src/types/message.rs` next to Phase 2's `FileEdit` and Phase 3's `ShellOutput`. The dispatcher actor's per-subscription drain task converts each `PortEvent` into the attachment and enqueues it. Compose-time drain in agent_loop splices onto the next turn's first user message; Segment2Pass renders as a `<system-reminder>` block. Per-session subscription state (the `tokio::AbortHandle` so `Unsubscribe` can stop a stream) lives on the dispatcher actor.
 
 **Tech Stack:** Rust async (tokio), `async_trait`, `futures::stream::BoxStream`, `serde_json::Value` (port payloads), `dashmap`, `smol_str` (PortId).
 
-**Scope:** Phase 4 of 5. Independent of Phases 1-3 *except* for the `MessageAttachment` plumbing — Phase 2 introduces the splice mechanism with `FileEdits`, Phase 3 adds `ShellOutput`, Phase 4 adds `PortEvents`. Depends on **Plan 3 (v3-multi-agent) Phase 1** for `CapabilitySet` (agents see only ports their capability set permits). Plan 4 (v3-extensibility) **depends on this phase** — plugins register as Ports, so the trait must be stable here first.
+**Scope:** Phase 4 of 5. Independent of Phases 1-3 *except* for the between-turn async-reminder buffer Phase 2 introduces (`SessionContext::record_async_reminder`). Phase 4 adds a `MessageAttachment::PortEvent { port_id, payload, at }` top-level variant in `pattern_core/src/types/message.rs` next to Phase 2's `FileEdit` and Phase 3's `ShellOutput`, plus a render arm in `Segment2Pass`, plus the dispatcher actor's drain task that builds/enqueues the variant. Depends on **Plan 3 (v3-multi-agent) Phase 1** for `CapabilitySet` (agents see only ports their capability set permits). Plan 4 (v3-extensibility) **depends on this phase** — plugins register as Ports, so the trait must be stable here first.
 
 **Codebase verified:** 2026-04-24. Evidence:
 - `SourcesHandler` stub at `crates/pattern_runtime/src/sdk/handlers/sources.rs:1-72`. `RpcHandler` stub at `crates/pattern_runtime/src/sdk/handlers/rpc.rs:1-71`.
@@ -137,6 +137,10 @@ pub enum PortError {
     BadPayload { port: PortId, method: String, message: String },
     #[error("capability denied: port {0} not in agent's CapabilitySet")]
     CapabilityDenied(PortId),
+    #[error("port {0} is already registered")]
+    AlreadyRegistered(PortId),
+    #[error("port dispatcher actor closed (runtime shutting down?)")]
+    DispatcherClosed,
 }
 ```
 
@@ -248,42 +252,76 @@ pub trait PortRegistry: Send + Sync {
 <!-- END_TASK_2 -->
 
 <!-- START_TASK_3 -->
-### Task 3: `PortRegistryImpl` — concrete impl in pattern_runtime
+### Task 3: `PortRegistryImpl` — registry storage + dispatcher actor
 
 **Files:**
-- Create: `crates/pattern_runtime/src/port_registry.rs` — `PortRegistryImpl`.
+- Create: `crates/pattern_runtime/src/port_registry/mod.rs` — module root.
+- Create: `crates/pattern_runtime/src/port_registry/registry.rs` — `PortRegistryImpl` (storage + lifecycle).
+- Create: `crates/pattern_runtime/src/port_registry/dispatcher.rs` — actor task + `Op` enum + dispatcher handle.
 
-**Implementation:**
+**Architecture:** the registry is a sync DashMap of registered ports (CRUD ops are infrequent and don't need an actor). The `dispatcher` is the actor task that drives async work for handler-side `Call` and `Subscribe` requests. Handler dispatches via crossbeam → actor task on tokio runtime → `port.call(...).await` → crossbeam reply.
+
+**Op channel design** (handler ↔ actor):
+- Handler → actor: `tokio::sync::mpsc::Sender<Op>` with a generous bound (256). Handler does `tx.blocking_send(op)` from sync code (works without runtime context — `Sender::blocking_send` is documented for non-async callers; the bounded channel is required because `UnboundedSender` doesn't expose `blocking_send`). If the channel ever fills, the eval worker blocks on send — an observable diagnostic, not a silent stall.
+- Actor → handler reply: `crossbeam_channel::Sender<Result<...>>` embedded in each Op variant. Actor does `reply.send(...)` (sync, non-blocking on bounded(1)). Handler does `reply.recv_timeout(...)` (sync, with timeout).
 
 ```rust
+// port_registry/registry.rs
 use std::sync::Arc;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use pattern_core::traits::{Port, PortRegistry};
 use pattern_core::types::port::{PortError, PortId, PortMetadata};
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct PortRegistryImpl {
-    ports: DashMap<PortId, Arc<dyn Port>>,
+    ports: Arc<DashMap<PortId, Arc<dyn Port>>>,
+    /// Handle to the dispatcher actor. Created at TidepoolRuntime::new
+    /// (Task 4) using the supplied tokio Handle.
+    /// Crate-public so `TidepoolRuntime`'s Drop impl can `try_send` an
+    /// `Op::Shutdown` directly (Drop can't `await`, and going through an
+    /// accessor would require returning a `&Sender` from `&self` which is
+    /// fine but adds noise; field visibility is the simpler path).
+    pub(crate) dispatcher_tx: tokio::sync::mpsc::Sender<crate::port_registry::dispatcher::Op>,
 }
 
 impl PortRegistryImpl {
-    pub fn new() -> Self { Self::default() }
+    pub fn dispatcher(&self) -> &tokio::sync::mpsc::Sender<crate::port_registry::dispatcher::Op> {
+        &self.dispatcher_tx
+    }
+
+    /// Sync registration path — for boot-time use from `TidepoolRuntime::new`
+    /// (which is sync) and any other non-async caller. Functionally equivalent
+    /// to `register()` but skips the async trait method to avoid the need for
+    /// a runtime context. Both ports map and refcount are sync DashMap inserts;
+    /// no work needs awaiting.
+    pub fn register_sync(&self, port: Arc<dyn Port>) -> Result<(), PortError> {
+        let id = port.id().clone();
+        match self.ports.entry(id.clone()) {
+            dashmap::mapref::entry::Entry::Occupied(_) => Err(PortError::AlreadyRegistered(id)),
+            dashmap::mapref::entry::Entry::Vacant(e) => { e.insert(port); Ok(()) }
+        }
+    }
 }
 
 #[async_trait]
 impl PortRegistry for PortRegistryImpl {
     async fn register(&self, port: Arc<dyn Port>) -> Result<(), PortError> {
         let id = port.id().clone();
-        if self.ports.contains_key(&id) {
-            return Err(PortError::CallFailed(id, "already registered".into()));
+        // dashmap::entry is sync and gives us atomic check-and-insert.
+        match self.ports.entry(id.clone()) {
+            dashmap::mapref::entry::Entry::Occupied(_) => Err(PortError::AlreadyRegistered(id)),
+            dashmap::mapref::entry::Entry::Vacant(e) => { e.insert(port); Ok(()) }
         }
-        self.ports.insert(id, port);
-        Ok(())
     }
 
     async fn unregister(&self, id: &PortId) {
         self.ports.remove(id);
+        // Cancel any active subscriptions for this port. Dispatcher owns
+        // the AbortHandles; send a CancelAllSubscriptionsFor(id) op.
+        let _ = self.dispatcher_tx.send(
+            crate::port_registry::dispatcher::Op::CancelSubscriptionsFor(id.clone())
+        ).await;
     }
 
     fn list(&self) -> Vec<PortMetadata> {
@@ -296,17 +334,146 @@ impl PortRegistry for PortRegistryImpl {
 }
 ```
 
-**Verifies:** AC4.2.
+```rust
+// port_registry/dispatcher.rs
+use std::collections::HashMap;
+use std::sync::Arc;
+use crossbeam_channel::Sender as XSender;
+use dashmap::DashMap;
+use futures::StreamExt;
+use pattern_core::traits::Port;
+use pattern_core::types::port::{PortError, PortEvent, PortId};
+use crate::memory::MemoryStoreAdapter;
+
+/// Operations the handler enqueues for the dispatcher actor.
+pub enum Op {
+    Call {
+        port_id: PortId,
+        method: String,
+        payload: serde_json::Value,
+        reply: XSender<Result<serde_json::Value, PortError>>,
+    },
+    Subscribe {
+        port_id: PortId,
+        config: serde_json::Value,
+        /// Handle to the session's between-turn async-reminder buffer
+        /// (Phase 2 introduced). Drain task pushes PortEvent attachments
+        /// here; compose-time drain on the next turn surfaces them.
+        async_reminder_queue: Arc<Mutex<Vec<MessageAttachment>>>,
+        /// Per-session subscription key — typically the session id, used so
+        /// dispatcher can cancel all subscriptions for a session on shutdown.
+        session_key: String,
+        reply: XSender<Result<(), PortError>>,
+    },
+    Unsubscribe {
+        port_id: PortId,
+        session_key: String,
+        reply: XSender<Result<(), PortError>>,
+    },
+    CancelSubscriptionsFor(PortId),
+    Shutdown,
+}
+
+/// Active subscription: per-session, per-port. Holding the AbortHandle is
+/// what lets us stop the drain task on Unsubscribe / Shutdown.
+type SubscriptionKey = (String /* session_key */, PortId);
+
+pub async fn run(
+    mut rx: tokio::sync::mpsc::Receiver<Op>,
+    ports: Arc<DashMap<PortId, Arc<dyn Port>>>,
+) {
+    let mut subscriptions: HashMap<SubscriptionKey, tokio::task::AbortHandle> = HashMap::new();
+
+    while let Some(op) = rx.recv().await {
+        match op {
+            Op::Call { port_id, method, payload, reply } => {
+                let port = match ports.get(&port_id) {
+                    Some(p) => Arc::clone(p.value()),
+                    None => { let _ = reply.send(Err(PortError::NotFound(port_id))); continue; }
+                };
+                // Plugin code runs here. NOT block_on — we're already on the
+                // runtime. If the plugin's call() future hangs, this actor
+                // task hangs with it, but only this one task — handler is
+                // protected by its own recv_timeout.
+                let result = port.call(&method, payload).await;
+                let _ = reply.send(result);
+            }
+            Op::Subscribe { port_id, config, async_reminder_queue, session_key, reply } => {
+                let port = match ports.get(&port_id) {
+                    Some(p) => Arc::clone(p.value()),
+                    None => { let _ = reply.send(Err(PortError::NotFound(port_id))); continue; }
+                };
+                let stream_result = port.subscribe(config).await;
+                let stream = match stream_result {
+                    Ok(s) => s,
+                    Err(e) => { let _ = reply.send(Err(e)); continue; }
+                };
+                let key = (session_key.clone(), port_id.clone());
+                if let Some(prev) = subscriptions.remove(&key) { prev.abort(); }
+                let port_id_for_task = port_id.clone();
+                let task = tokio::spawn(drain_subscription(
+                    port_id_for_task, stream, async_reminder_queue,
+                ));
+                subscriptions.insert(key, task.abort_handle());
+                let _ = reply.send(Ok(()));
+            }
+            Op::Unsubscribe { port_id, session_key, reply } => {
+                let key = (session_key, port_id);
+                if let Some(handle) = subscriptions.remove(&key) {
+                    handle.abort();
+                }
+                let _ = reply.send(Ok(()));
+            }
+            Op::CancelSubscriptionsFor(port_id) => {
+                let to_remove: Vec<_> = subscriptions.keys()
+                    .filter(|(_, p)| p == &port_id).cloned().collect();
+                for key in to_remove {
+                    if let Some(h) = subscriptions.remove(&key) { h.abort(); }
+                }
+            }
+            Op::Shutdown => {
+                for (_, h) in subscriptions.drain() { h.abort(); }
+                break;
+            }
+        }
+    }
+}
+
+async fn drain_subscription(
+    port_id: PortId,
+    mut stream: futures::stream::BoxStream<'static, PortEvent>,
+    queue: Arc<Mutex<Vec<MessageAttachment>>>,
+) {
+    while let Some(event) = stream.next().await {
+        let attachment = MessageAttachment::PortEvent {
+            port_id: port_id.to_string(),
+            payload: event.payload,
+            at: event.at,
+        };
+        queue.lock().unwrap().push(attachment);
+    }
+    // Stream end (server disconnect, etc.) is silent — agent learns from
+    // the absence of further events. Future enhancement: emit a sentinel
+    // PortEvent at stream-end if reviewer wants it.
+}
+```
+
+**I13 fix (resolved):** the dispatcher actor processes ops serially (single recv loop, no `tokio::select` over multiple channels), so an Unsubscribe op queued after this Subscribe waits for the spawn-and-insert sequence to complete. The original I13 concern about a race window between spawn and insert (in a hypothetical multi-threaded receiver) does not apply to this actor design. Spawn-then-insert order is correct because the AbortHandle comes from the JoinHandle returned by `tokio::spawn`.
+
+**I12 fix:** `register_duplicate` now returns `PortError::AlreadyRegistered(id)` (the new variant added in Task 1), not the misused `CallFailed` variant.
+
+**Verifies:** AC4.2 (registry CRUD), mechanism for AC4.3 / AC4.4 / AC4.5 (dispatcher).
 
 **Verification:**
 - `cargo check -p pattern-runtime`.
 - Unit tests:
     - `register_then_get_returns_port` — register a `MockPort`; `get(id)` returns it.
-    - `register_duplicate_fails` — second register with same id returns CallFailed("already registered").
+    - `register_duplicate_fails_with_already_registered` — second register returns `PortError::AlreadyRegistered`.
     - `unregister_removes_entry` — `get(id)` after unregister returns None.
     - `list_returns_all_metadata` — three ports → list len 3.
+    - Dispatcher tests live in Task 9.
 
-**Commit:** `[pattern-runtime] PortRegistryImpl over DashMap`
+**Commit:** `[pattern-runtime] PortRegistryImpl + dispatcher actor (sync handler boundary, async port impls)`
 <!-- END_TASK_3 -->
 
 <!-- END_SUBCOMPONENT_A -->
@@ -316,117 +483,130 @@ impl PortRegistry for PortRegistryImpl {
 <!-- START_SUBCOMPONENT_B (tasks 4-5) -->
 
 <!-- START_TASK_4 -->
-### Task 4: Wire `PortRegistryImpl` into `TidepoolRuntime` + `SessionContext`
+### Task 4: Wire `PortRegistryImpl` + dispatcher actor into `TidepoolRuntime` + `SessionContext`
 
 **Files:**
-- Modify: `crates/pattern_runtime/src/runtime.rs:32` — add `port_registry: Arc<dyn PortRegistry>` field.
-- Modify: `crates/pattern_runtime/src/session.rs:40-121` — add `port_registry: Arc<dyn PortRegistry>` field on SessionContext + `port_registry()` accessor.
+- Modify: `crates/pattern_runtime/src/runtime.rs:32` — add `port_registry: Arc<PortRegistryImpl>` field. (Concrete type, not `Arc<dyn PortRegistry>`, so callers can reach `.dispatcher()` for handler-side dispatch.)
+- Modify: `crates/pattern_runtime/src/runtime.rs` — add `impl Drop for TidepoolRuntime` that sends `Op::Shutdown` to `self.port_registry.dispatcher_tx` via best-effort `try_send` (Drop can't `await`). Without this the dispatcher actor task leaks every time a runtime is constructed and dropped — common in test fixtures (I-NEW-4 fix).
+- Modify: `crates/pattern_runtime/src/session.rs:40-121` — add `port_registry: Arc<PortRegistryImpl>` field on SessionContext + `port_registry()` accessor.
+
+**Note on Phase 3 dependency:** `TidepoolRuntime::new` already takes a `tokio::runtime::Handle` (Phase 3 Task 5). PortRegistry uses it to spawn the dispatcher actor task at construction.
 
 **Implementation:**
 
-In `TidepoolRuntime::new`:
+Add `PortRegistryImpl::new(tokio_handle: &tokio::runtime::Handle) -> Self` (M-NEW-3 — match the `ProcessManager::new` constructor convention) that handles ports map + dispatcher channel + actor spawn internally:
+
 ```rust
-let port_registry: Arc<dyn PortRegistry> = Arc::new(PortRegistryImpl::new());
+// port_registry/registry.rs
+impl PortRegistryImpl {
+    pub fn new(tokio_handle: &tokio::runtime::Handle) -> Self {
+        let ports = Arc::new(DashMap::new());
+        let (dispatcher_tx, dispatcher_rx) = tokio::sync::mpsc::channel(256);
+        tokio_handle.spawn(crate::port_registry::dispatcher::run(
+            dispatcher_rx, Arc::clone(&ports),
+        ));
+        Self { ports, dispatcher_tx }
+    }
+}
+```
+
+Then in `TidepoolRuntime::new`:
+```rust
+let port_registry = Arc::new(PortRegistryImpl::new(&tokio_handle));
 ```
 
 Flows into `SessionContext` at session-open time (cloned `Arc`).
 
 ```rust
 // session.rs
-pub fn port_registry(&self) -> &Arc<dyn PortRegistry> { &self.port_registry }
+pub fn port_registry(&self) -> &Arc<PortRegistryImpl> { &self.port_registry }
 ```
 
-`TidepoolRuntime` exposes `pub fn port_registry(&self) -> &Arc<dyn PortRegistry>` so callers (Phase 5 HttpPort registration, Plan 4 plugin loader) can register at startup.
+`TidepoolRuntime` exposes `pub fn port_registry(&self) -> &Arc<PortRegistryImpl>` so callers (Phase 5's HttpPort registration, Plan 4's plugin loader) can register at startup.
 
-**Verifies:** Mechanism — handler reaches registry via `cx.user().port_registry()`.
+**Why explicit `Arc<PortRegistryImpl>` (not `Arc<dyn PortRegistry>`)?** Handler dispatch needs `.dispatcher()` access, which is not part of the trait (the trait stays plugin-facing). External callers that only want the trait API can do `Arc<dyn PortRegistry>` via coercion: `let trait_obj: Arc<dyn PortRegistry> = registry.clone();`.
+
+**Shutdown:** `TidepoolRuntime`'s Drop impl sends `Op::Shutdown` to the dispatcher; the actor loop breaks on `Op::Shutdown`, aborts all live subscriptions, and exits. Drop is sync, so use `try_send` (best-effort — if the runtime that owns the dispatcher is already torn down, or the channel is full, the send fails silently and the actor task is leaked at process exit, which is acceptable).
+
+```rust
+impl Drop for TidepoolRuntime {
+    fn drop(&mut self) {
+        // try_send is non-blocking; safe to call from Drop. Failure means
+        // either the dispatcher's tokio runtime is already gone (acceptable,
+        // task is leaked but process is exiting anyway) or the Op channel
+        // is at its 256-bound (extremely unlikely at shutdown — log only).
+        if let Err(e) = self.port_registry.dispatcher_tx.try_send(
+            crate::port_registry::dispatcher::Op::Shutdown
+        ) {
+            tracing::debug!(error = %e, "TidepoolRuntime drop: dispatcher shutdown send skipped");
+        }
+    }
+}
+```
+
+**Verifies:** Mechanism — handler reaches registry via `cx.user().port_registry()`, then dispatcher via `.dispatcher()`.
 
 **Verification:**
 - `cargo check -p pattern-runtime`.
 - Existing `session_lifecycle.rs` tests still pass.
 
-**Commit:** `[pattern-runtime] PortRegistry on TidepoolRuntime + SessionContext`
+**Commit:** `[pattern-runtime] PortRegistryImpl + dispatcher actor on TidepoolRuntime + SessionContext`
 <!-- END_TASK_4 -->
 
 <!-- START_TASK_5 -->
-### Task 5: Subscription delivery — `render_port_event` + `start_port_subscription`
+### Task 5: `MessageAttachment::PortEvent` variant + Segment2Pass render arm
 
 **Files:**
-- Modify: `crates/pattern_provider/src/compose/pseudo_messages.rs` — add `render_port_event(port_id, payload, at) -> ChatMessage`.
-- Modify: `crates/pattern_runtime/src/session.rs` — `SessionContext` gains `active_port_subscriptions: DashMap<PortId, tokio::task::AbortHandle>` (no pending queue — events go straight to the adapter).
-- Modify: `crates/pattern_runtime/src/session.rs` — add `start_port_subscription(port_id, stream, handle)` and `stop_port_subscription(port_id)` methods that drain the stream into adapter pseudo-messages.
+- Modify: `crates/pattern_core/src/types/message.rs` — add `MessageAttachment::PortEvent { port_id: String, payload: serde_json::Value, at: jiff::Timestamp }` variant alongside Phase 2's `FileEdit` and Phase 3's `ShellOutput`.
+- Modify: `crates/pattern_provider/src/compose/passes/segment_2.rs` — add a render arm for `MessageAttachment::PortEvent` next to the others.
 
-**Implementation:**
+**Note on what moved.** Subscription lifecycle (AbortHandles, drain task spawning) lives inside the dispatcher actor (Task 3). SessionContext doesn't need subscription-specific fields — only the shared `async_reminder_queue` Phase 2 introduced. The actor's drain task pushes `MessageAttachment::PortEvent` entries into that queue; compose-time drain in agent_loop splices them onto the next turn's first user message.
 
-Per-session subscription state stays on `SessionContext` (the AbortHandle so `Unsubscribe` can stop it); event delivery goes straight through the adapter. No pending-queue, no agent_loop splice.
+**Variant + render:**
 
 ```rust
-// session.rs
-pub struct SessionContext {
-    // … existing fields …
-    /// Live port subscriptions keyed by PortId. Tracked here so
-    /// `Pattern.Port.Unsubscribe` can stop the corresponding tokio task.
-    active_port_subscriptions: DashMap<PortId, tokio::task::AbortHandle>,
-}
-
-impl SessionContext {
-    /// Spawn a background task that drains `stream` into the session
-    /// adapter as pseudo-messages. Idempotent re-subscribe aborts the
-    /// prior task before replacing.
-    pub fn start_port_subscription(
-        &self,
-        port_id: PortId,
-        mut stream: BoxStream<'static, PortEvent>,
-        handle: tokio::runtime::Handle,
-    ) {
-        let adapter = Arc::clone(self.adapter());
-        let port_id_for_task = port_id.clone();
-        let task = handle.spawn(async move {
-            use futures::StreamExt;
-            while let Some(evt) = stream.next().await {
-                let m = pattern_provider::compose::pseudo_messages::
-                    render_port_event(&port_id_for_task, &evt.payload, evt.at);
-                adapter.record_pseudo_message(m);
-            }
-        });
-        if let Some((_, prev)) = self.active_port_subscriptions.remove(&port_id) {
-            prev.abort();
-        }
-        self.active_port_subscriptions.insert(port_id, task.abort_handle());
-    }
-
-    pub fn stop_port_subscription(&self, port_id: &PortId) {
-        if let Some((_, h)) = self.active_port_subscriptions.remove(port_id) {
-            h.abort();
-        }
-    }
+// pattern_core/src/types/message.rs (addition)
+pub enum MessageAttachment {
+    BatchOpeningSnapshot { /* existing */ },
+    FileEdit { /* Phase 2 */ },
+    ShellOutput { /* Phase 3 */ },
+    /// One subscription event delivered by a Port. The dispatcher actor's
+    /// drain task (Phase 4 Task 3) builds these from the BoxStream<PortEvent>
+    /// returned by the Port impl's subscribe() and enqueues them via
+    /// SessionContext::record_async_reminder.
+    PortEvent {
+        port_id: String,
+        payload: serde_json::Value,
+        at: jiff::Timestamp,
+    },
 }
 ```
 
 ```rust
-// pattern_provider/src/compose/pseudo_messages.rs (addition)
-pub fn render_port_event(
-    port_id: &PortId,
-    payload: &serde_json::Value,
-    at: jiff::Timestamp,
-) -> ChatMessage {
-    let body = format!(
-        "<system-reminder>\n\
-         Port event from {port_id} @ {at}:\n\
-         ```json\n{}\n```\n\
-         </system-reminder>",
-        serde_json::to_string_pretty(payload).unwrap_or_else(|_| payload.to_string()),
-    );
-    ChatMessage::user(body)
+// pattern_provider/src/compose/passes/segment_2.rs (addition)
+match attachment {
+    // … existing arms …
+    MessageAttachment::PortEvent { port_id, payload, at } => {
+        let body = format!(
+            "<system-reminder>\n\
+             Port event from {port_id} @ {at}:\n\
+             ```json\n{}\n```\n\
+             </system-reminder>",
+            serde_json::to_string_pretty(payload).unwrap_or_else(|_| payload.to_string()),
+        );
+        push_user_block(message, body);
+    }
 }
 ```
 
-**Verifies:** Mechanism for AC4.4 + AC4.5.
+**Verifies:** AC4.4 (variant + render — actually consumed by the dispatcher's drain task in Task 3).
 
 **Verification:**
 - `cargo check --workspace`.
-- Unit test in `session.rs`: start a subscription with a hand-rolled stream of three events; tick the executor; assert `adapter.drain_pending_pseudo_messages()` returns three messages with bodies containing the port id. Then `stop_port_subscription`; push another event; assert no further messages added.
+- Unit tests on the Segment2Pass arm: snapshot-test the body for known inputs via `insta`.
+- Lifecycle tests live in Task 9 (full subscribe → event → next-turn-attachment integration via the dispatcher).
 
-**Commit:** `[pattern-provider] [pattern-runtime] render_port_event + per-session subscription lifecycle`
+**Commit:** `[pattern-core] [pattern-provider] PortEvent attachment variant + Segment2Pass render arm`
 <!-- END_TASK_5 -->
 
 <!-- END_SUBCOMPONENT_B -->
@@ -495,6 +675,15 @@ impl DescribeEffect for PortHandler {
     }
 }
 
+```rust
+// SAFETY / DESIGN NOTE: PortHandler runs on the Tidepool eval worker —
+// a dedicated OS thread with NO ambient tokio runtime. This handler does
+// NOT call `block_on` against arbitrary plugin code. Instead it sends an
+// `Op` to the dispatcher actor task (running on the runtime's tokio
+// runtime via the Handle supplied at TidepoolRuntime::new) and waits on
+// a crossbeam reply channel with `recv_timeout`. The actor handles all
+// `await`s including those into plugin code; if a plugin's call() hangs,
+// only the actor task hangs, not the eval worker.
 impl EffectHandler<SessionContext> for PortHandler {
     type Request = PortReq;
 
@@ -505,12 +694,17 @@ impl EffectHandler<SessionContext> for PortHandler {
         let _guard = HandlerGuard::enter(&state.gate);
         let registry = cx.user().port_registry().clone();
         let cap = cx.user().capability_set().clone();
-        let handle = cx.user().tokio_handle().clone();
+        let session_key = cx.user().session_id().to_string();
+        let dispatcher = registry.dispatcher().clone();
+
+        // Tunable bounds. List/Unsubscribe are fast (no plugin code);
+        // Call/Subscribe wait on plugin code so they get a longer cap.
+        const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+        const FAST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
         match req {
             PortReq::List => {
                 let metadatas = registry.list();
-                // Filter to ports the agent's capability set permits.
                 let visible: Vec<_> = metadatas.into_iter()
                     .filter(|m| cap.has_port(&m.id))
                     .map(|m| serde_json::to_string(&m).unwrap_or_default())
@@ -524,12 +718,19 @@ impl EffectHandler<SessionContext> for PortHandler {
                         PortError::CapabilityDenied(port_id).to_string()
                     ));
                 }
-                let port = registry.get(&port_id)
-                    .ok_or_else(|| EffectError::Handler(PortError::NotFound(port_id.clone()).to_string()))?;
                 let payload: serde_json::Value = serde_json::from_str(&payload_json)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Port.Call: invalid payload JSON: {e}")))?;
-                let response = handle.block_on(port.call(&method, payload))
-                    .map_err(|e| EffectError::Handler(e.to_string()))?;
+
+                let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+                // tokio::sync::mpsc::Sender::blocking_send works from any
+                // thread, including non-runtime threads like the eval worker.
+                dispatcher.blocking_send(crate::port_registry::dispatcher::Op::Call {
+                    port_id, method, payload, reply: reply_tx,
+                }).map_err(|_| EffectError::Handler(PortError::DispatcherClosed.to_string()))?;
+
+                let result = reply_rx.recv_timeout(CALL_TIMEOUT)
+                    .map_err(|_| EffectError::Handler("Pattern.Port.Call: dispatcher reply timeout".to_string()))?;
+                let response = result.map_err(|e| EffectError::Handler(e.to_string()))?;
                 cx.respond(serde_json::to_string(&response).unwrap_or_default())
             }
             PortReq::Subscribe(port_id, config_json) => {
@@ -539,18 +740,29 @@ impl EffectHandler<SessionContext> for PortHandler {
                         PortError::CapabilityDenied(port_id).to_string()
                     ));
                 }
-                let port = registry.get(&port_id)
-                    .ok_or_else(|| EffectError::Handler(PortError::NotFound(port_id.clone()).to_string()))?;
                 let config: serde_json::Value = serde_json::from_str(&config_json)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Port.Subscribe: invalid config JSON: {e}")))?;
-                let stream = handle.block_on(port.subscribe(config))
-                    .map_err(|e| EffectError::Handler(e.to_string()))?;
-                cx.user().start_port_subscription(port_id, stream, handle.clone());
+
+                let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+                dispatcher.blocking_send(crate::port_registry::dispatcher::Op::Subscribe {
+                    port_id, config,
+                    async_reminder_queue: Arc::clone(cx.user().async_reminder_queue()),
+                    session_key,
+                    reply: reply_tx,
+                }).map_err(|_| EffectError::Handler(PortError::DispatcherClosed.to_string()))?;
+
+                let result = reply_rx.recv_timeout(CALL_TIMEOUT)
+                    .map_err(|_| EffectError::Handler("Pattern.Port.Subscribe: dispatcher reply timeout".to_string()))?;
+                result.map_err(|e| EffectError::Handler(e.to_string()))?;
                 cx.respond(())
             }
             PortReq::Unsubscribe(port_id) => {
                 let port_id = PortId::new(port_id);
-                cx.user().stop_port_subscription(&port_id);
+                let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+                dispatcher.blocking_send(crate::port_registry::dispatcher::Op::Unsubscribe {
+                    port_id, session_key, reply: reply_tx,
+                }).map_err(|_| EffectError::Handler(PortError::DispatcherClosed.to_string()))?;
+                let _ = reply_rx.recv_timeout(FAST_TIMEOUT);
                 cx.respond(())
             }
         }
@@ -558,7 +770,7 @@ impl EffectHandler<SessionContext> for PortHandler {
 }
 ```
 
-**Note on `cap.has_port(&port_id)`:** Plan 3 needs to expose port-level capability checks. If Plan 3 only exposes effect-category-level (`has_port_effect()`), Phase 4 surfaces the gap as a scope question. Defaulted assumption: Plan 3 supports per-port granularity since the design plan (this phase, AC4.7/4.9) requires it.
+**Capability gating (I14 explicit prereq):** `cap.has_port(&port_id)` requires Plan 3's `CapabilitySet` to expose **per-port granularity** (not just per-effect-category). Phase 4 execution should verify this is the case as the first step — `grep -rn 'has_port\|fn has_port' crates/pattern_core/src` after Plan 3 lands. If only `has_port_effect()` exists, surface as a scope question before proceeding (per implementation guidance: do not stub or skate). AC4.7 / AC4.9 require this granularity.
 
 **Haskell `Pattern/Port.hs`:**
 
@@ -673,8 +885,11 @@ httpPost url body = call "http" "post" (A.encode (A.object ["url" A..= url, "bod
 ### Task 8: Retire `DataStream`/`SourceManager`; delete Sources/Rpc stubs
 
 **Files:**
-- Delete: `crates/pattern_core/src/traits/data_stream.rs` (and remove from `traits` module re-exports).
+- Delete: `crates/pattern_core/src/traits/data_stream.rs`.
 - Delete: `crates/pattern_core/src/traits/source_manager.rs`.
+- Modify: `crates/pattern_core/src/traits.rs:20-27` — remove `pub mod data_stream;` and `pub mod source_manager;` plus the `pub use data_stream::{DataStream, StreamEvent};` and `pub use source_manager::{SourceManager, SourceName};` re-exports. (Investigator confirmed exact line numbers; verify at execution time.)
+- Modify: `crates/pattern_core/src/lib.rs:67-68` — remove the crate-root `pub use traits::{DataStream, SourceManager}` re-exports.
+- (CLAUDE.md updates moved to Phase 5 Task 3 to consolidate documentation edits — M19. Phase 4 Task 8 only deletes code.)
 - Delete: `crates/pattern_runtime/src/sdk/handlers/sources.rs`.
 - Delete: `crates/pattern_runtime/src/sdk/handlers/rpc.rs`.
 - Delete: `crates/pattern_runtime/src/sdk/requests/sources.rs`.
@@ -686,7 +901,13 @@ httpPost url body = call "http" "post" (A.encode (A.object ["url" A..= url, "bod
 - Modify: `crates/pattern_runtime/src/sdk/requests.rs:34, 38, 88-91, 255-274` — remove SourcesReq + RpcReq pub use, parity entries, and asserts.
 - Modify: `crates/pattern_runtime/src/sdk/preamble.rs:6,11-13` — drop the "16" count or change to "15"; better: drop the literal count and say "the SDK effect modules" so future row changes don't require source edits.
 - Modify: any Haskell code-tool preamble references — same drop.
-- Modify: agent test fixtures that import `Pattern.Sources` or `Pattern.Rpc` — update or delete (search `crates/pattern_runtime/tests/fixtures` and crate test files for references).
+- Test fixture cleanup (I-NEW-5 — enumerated explicitly per round-2 review):
+    - Modify: `crates/pattern_runtime/tests/stub_effects.rs:30-31` — remove `SourcesHandler` and `RpcHandler` imports.
+    - Modify: `crates/pattern_runtime/tests/stub_effects.rs:138, 164` — delete the `sources_stub_*` and `rpc_stub_*` test functions (their stubs are gone; tests would fail to compile).
+    - Modify: `crates/pattern_runtime/tests/fixtures/cross_module_collision.hs` — adjust effect-row tuple to remove `Sources` and `Rpc` and add `Port` (effect-row position-shift impact: handlers after Sources shift up by 2, then `Port` lands wherever the SdkBundle HList places it; verify positions against the updated bundle).
+    - Modify: `crates/pattern_runtime/tests/fixtures/file_stub_full_bundle.hs` — same effect-row adjustment.
+    - Delete: `crates/pattern_runtime/tests/fixtures/sources_stub.hs`.
+    - Delete: `crates/pattern_runtime/tests/fixtures/rpc_stub.hs`.
 
 **Verification beyond `cargo check`:**
 
@@ -738,7 +959,7 @@ pub struct MockPort {
 | 4.1 | Covered by Task 1's doctest. | — |
 | 4.2 | `port_list_returns_registered_metadatas` | Register 3 MockPorts; `Port.List` returns 3 entries. |
 | 4.3 | `port_call_dispatches_to_registered_port` | MockPort with call_response = `{"ok": true}`; `Port.Call("mock", "ping", "{}")` returns the response. |
-| 4.4 | `port_subscribe_delivers_events_via_pseudo_messages` | Subscribe; push 3 events via MockPort's tx; await scheduler; assert `adapter.drain_pending_pseudo_messages()` (or `most_recent_pseudo_messages` after a turn boundary) contains 3 messages whose bodies reference the port id. |
+| 4.4 | `port_subscribe_delivers_events_via_attachments` | Subscribe; push 3 events via MockPort's tx; await scheduler tick + one turn boundary; assert the next turn's first user message has 3 `MessageAttachment::PortEvent { port_id, payload, .. }` entries matching the pushed events. |
 | 4.5 | `port_unsubscribe_stops_event_delivery` | Subscribe + push 1 event + drain. Unsubscribe + push another event + tick + drain — second event NOT present (AbortHandle stopped the task). |
 | 4.6 | `port_library_appended_to_preamble_when_capable` | MockPort with `library_src = Some("module Mock where mockFn = ...")`; build preamble with capability granted; assert preamble contains `mockFn`. |
 | 4.7 | `port_call_capability_denied_blocks_dispatch` | Capability set without the port; `Port.Call("mock", ...)` returns `PortError::CapabilityDenied`. |
@@ -761,11 +982,11 @@ pub struct MockPort {
 
 ## Open questions for human review (foreground at end of plan-write)
 
-**Q1: Per-port vs per-effect-category capability granularity.** Plan assumes `cap.has_port(&port_id)` exists in Plan 3. If only `has_port_effect()` (the whole Port effect category, not per-port) lands in Plan 3, AC4.7/4.9's per-port granularity isn't satisfiable and Phase 4 needs to surface the gap. Flag for early verification when Plan 3 lands.
+**Q1 [resolved 2026-04-24 → explicit prereq check]:** Per-port granularity (`cap.has_port(&port_id)`) is required for AC4.7/4.9. Phase 4 Task 6 now contains an explicit verification step that runs *before* execution begins: confirm Plan 3 exposes per-port granularity (not just `has_port_effect()`). If Plan 3 lands narrower, surface as a scope question, do not stub.
 
-**Q2: SubscriptionId vs PortId-keyed subscriptions.** The plan tracks one active subscription per `(session, port_id)` — re-subscribing replaces the prior. Alternative: assign a SubscriptionId per call so an agent can have multiple parallel subscriptions to the same port. Defaulted to one-per-port (simpler, matches typical use); flag if reviewer wants the SubscriptionId model.
+**Q2: SubscriptionId vs PortId-keyed subscriptions.** The dispatcher tracks one active subscription per `(session_key, port_id)` — re-subscribing replaces the prior. Alternative: assign a SubscriptionId per call so an agent can have multiple parallel subscriptions to the same port. Defaulted to one-per-port (simpler, matches typical use); flag if reviewer wants the SubscriptionId model.
 
-**Q3: Sync `cx.respond` + async port `call`/`subscribe`.** The handler bridges via `tokio::Handle::block_on`, same pattern as Phase 3. If a port's call hangs, the handler thread blocks. Should there be a per-call timeout (analogous to Shell.Execute's timeout)? Defaulted to no — port impls own their own timeout discipline; agents see hangs surface as agent-loop watchdog timeouts. Flag if reviewer wants a runtime-level cap.
+**Q3 [resolved 2026-04-24]:** Originally proposed `Handle::block_on` from the handler. Updated: handler dispatches via crossbeam to the dispatcher actor task on the runtime's tokio runtime, and waits for reply via `recv_timeout`. **No `block_on` against arbitrary plugin code.** Plugin's `port.call().await` runs on the actor task; if it hangs, only that task hangs (handler is protected by `CALL_TIMEOUT = 60s`). Eval worker stays sync.
 
 **Q4: `library()` returning `&'static str` vs `Cow<'static, str>` or `Arc<str>`.** Plan defaults to `&'static str` because typical port libraries are `include_str!` or `concat!` literals. Plugins building libraries at runtime would need `Box::leak`. Same trade-off discussion as Phase 1's bridge-extension `&'static str`; defaulted to the same answer. Flag if reviewer wants `Cow` or `Arc<str>` for plugin flexibility.
 

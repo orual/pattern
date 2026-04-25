@@ -2,11 +2,17 @@
 
 **Goal:** Replace the `ShellHandler` stub with a real implementation dispatching into a runtime-global `ProcessManager` coordinator. ProcessManager owns a map of `ShellSession` instances (each wrapping a persistent PTY-backed shell with OSC prompt markers for exit-code detection). Operations: `Execute` (sync, returns output + exit code), `Spawn` (async, output via system reminders), `Kill`, `Status`. Process output also written to a per-session log file as a reliability backstop.
 
-**Architecture:** `ShellHandler<SessionContext>` (tightened from the stub's `HasCancelState` — matches `SkillsHandler` and Phase 2's `FileHandler`) dispatches `ShellReq` to `cx.user().process_manager()`. ProcessManager is `Arc<ProcessManager>` held on the `TidepoolRuntime` (one per runtime instance, shared across sessions via Arc — different from Phase 2's per-session FileManager because shell sessions have global semantics: an agent shouldn't lose its bash session across pattern session boundaries). It exposes a `ShellBackend` trait (one impl: `LocalPtyBackend` ported from v2 reference code at `rewrite-staging/runtime_subsystems/data_source/process/`). Spawned processes stream output to a tokio `broadcast::channel`; a per-spawn listener task takes the session's `Arc<MemoryStoreAdapter>` (from `cx.user().adapter()` at `Shell.Spawn` dispatch time) and bridges chunks via `pattern_provider::compose::pseudo_messages::render_shell_output_event(...) -> ChatMessage` + `adapter.record_pseudo_message(msg)` — same canonical pipeline as `Pattern.Skills.Load` and Phase 2's file edits. **No new `MessageAttachment` variant** — the existing pseudo-message pipe carries shell output into segment 2. Permission gating via Plan 3's `CapabilitySet` (Shell effect category) + a future "destructive command" policy layer (out of scope for this phase — surface the structural seam, defer the rules).
+**Architecture:** `ShellHandler<SessionContext>` (tightened from the stub's `HasCancelState` — matches `SkillsHandler` and Phase 2's `FileHandler`) dispatches `ShellReq` to `cx.user().process_manager()`. ProcessManager is `Arc<ProcessManager>` held on the `TidepoolRuntime` (one per runtime instance, shared across sessions via Arc — different from Phase 2's per-session FileManager because shell sessions have global semantics: an agent shouldn't lose its bash session across pattern session boundaries).
+
+**ProcessManager is sync at every layer; no tokio.** Each `ShellSession` is a dedicated OS thread (`std::thread::spawn`) owning its `pty_process::Pty` via the crate's sync API. The handler dispatches via `crossbeam_channel`: handler sends `Op::Execute { cmd, timeout, reply: crossbeam::Sender<...> }`, the session thread reads PTY synchronously until the prompt marker, sends the reply, handler does `reply.recv_timeout()`. Spawned processes (`Shell.Spawn`) get an OS reader thread that pushes chunks into a crossbeam channel; a per-spawn bridge thread converts those chunks to `MessageAttachment::ShellOutput { … }` (new top-level variant; see Task 7) and enqueues via `cx.user().record_async_reminder(...)` — the between-turn buffer Phase 2 introduced. Compose-time drain on the next turn splices each attachment onto the first user message; Segment2Pass renders them as `<system-reminder>` blocks.
+
+**Why no tokio in ProcessManager?** PTY operations are sync syscalls at the OS level. Wrapping them in tokio adds nothing and would force the eval worker into a `block_on` it shouldn't be doing (eval worker runs without an ambient runtime; `Handle::block_on` against arbitrary plugin code risks deadlock if the awaited future calls `spawn_blocking` against a saturated pool). Pure std::thread + crossbeam keeps the eval worker isolated from runtime concerns and matches the existing pattern_memory subscriber-worker idiom.
+
+Permission gating via Plan 3's `CapabilitySet` (Shell effect category) + a future "destructive command" policy layer (out of scope for this phase — surface the structural seam, defer the rules).
 
 **Tech Stack:** Rust async (tokio), `pty-process = "0.5"`, `strip-ansi-escapes = "0.2"`, `dashmap`, `uuid` (process IDs and exit-marker nonces), `tokio` (broadcast/oneshot channels), `tokio-util` (CancellationToken), `tracing`, `jiff` (timestamps for log rotation).
 
-**Scope:** Phase 3 of 5. Independent of Phase 1/2 except for the `MessageAttachment` plumbing (Phase 2 introduces the `FileEdits` variant; Phase 3 adds a `ShellOutput` variant alongside, sharing the same Segment-2 render machinery). Depends on **Plan 3 (v3-multi-agent) Phase 1** for `CapabilitySet`. User noted this; Phase 3 execution parks until Plan 3 lands.
+**Scope:** Phase 3 of 5. Independent of Phase 1/2 except for the between-turn async-reminder buffer Phase 2 introduces (`SessionContext::record_async_reminder`). Phase 3 adds a `MessageAttachment::ShellOutput { … }` top-level variant in `pattern_core/src/types/message.rs`, a render arm in `Segment2Pass`, and a per-spawn bridge thread that builds/enqueues the variant. Depends on **Plan 3 (v3-multi-agent) Phase 1** for `CapabilitySet`. User noted this; Phase 3 execution parks until Plan 3 lands.
 
 **Codebase verified:** 2026-04-24. Evidence:
 - `ShellHandler` stub at `crates/pattern_runtime/src/sdk/handlers/shell.rs:1-79`.
@@ -29,7 +35,7 @@
 - Runtime-global wiring template: `crates/pattern_runtime/src/runtime.rs:32` (`TidepoolRuntime` struct).
 - Per-session access: `cx.user()` returns `&SessionContext`; for runtime-global state, accessor on `SessionContext` (`process_manager()`) returns the runtime's `Arc<ProcessManager>`.
 - Existing deps: `pty-process = { version = "0.5", features = ["async"] }` and `strip-ansi-escapes = "0.2"` listed in `crates/pattern_core/Cargo.toml:98-99` but unused in source — Phase 3 moves them to `crates/pattern_runtime/Cargo.toml` and removes from pattern_core.
-- System reminder integration: same canonical pseudo-message pipeline as `Pattern.Skills.Load` and Phase 2 — `adapter.record_pseudo_message(render_shell_output_event(...))`. See `crates/pattern_runtime/src/sdk/handlers/skills.rs` (search for `record_pseudo_message`) for the canonical template established by previous work; `pattern_provider::compose::pseudo_messages` is the renderer module.
+- System reminder integration: same between-turn buffer Phase 2 introduces (`SessionContext::record_async_reminder(MessageAttachment)`). Phase 3 adds a `MessageAttachment::ShellOutput { … }` top-level variant in `pattern_core/src/types/message.rs` next to Phase 2's `FileEdit` variant. Render arm added to `pattern_provider::compose::passes::Segment2Pass`. Bridge thread (per spawned process) is a `std::thread::spawn`, drains the crossbeam Receiver of OutputChunks, builds attachments, enqueues.
 
 ---
 
@@ -61,15 +67,17 @@
 <!-- START_SUBCOMPONENT_A (tasks 1-3) -->
 
 <!-- START_TASK_1 -->
-### Task 1: Types — `ShellError`, `TaskId`, `ExecuteResult`, `OutputChunk`, `ShellPermission`
+### Task 1: Types — `ShellError`, `TaskId`, `ExecuteResult`, `OutputChunk`, `ShellPermission` + `ShellReq::Execute` timeout arg
 
 **Files:**
 - Create: `crates/pattern_runtime/src/process_manager/mod.rs` — module root.
 - Create: `crates/pattern_runtime/src/process_manager/types.rs` — `TaskId`, `ExecuteResult`, `OutputChunk`, `ShellPermission`.
 - Create: `crates/pattern_runtime/src/process_manager/error.rs` — `ShellError`.
 - Modify: `crates/pattern_runtime/src/lib.rs` — `pub mod process_manager;`.
-- Modify: `crates/pattern_runtime/Cargo.toml` — add `pty-process = { version = "0.5", features = ["async"] }`, `strip-ansi-escapes = "0.2"`, `uuid = { workspace = true, features = ["v4"] }` (verify uuid is workspace).
+- Modify: `crates/pattern_runtime/Cargo.toml` — add `pty-process = "0.5"` (no `async` feature — sync API; see Task 3), `strip-ansi-escapes = "0.2"`, `uuid = { workspace = true, features = ["v4"] }` (verify uuid is workspace), `crossbeam-channel = { workspace = true }`.
 - Modify: `crates/pattern_core/Cargo.toml:98-99` — **remove** the unused `pty-process` and `strip-ansi-escapes` lines (per `[pattern-core] stays trait-only` rule in CLAUDE.md, these were stale).
+- Modify: `crates/pattern_runtime/src/sdk/requests/shell.rs:1-17` — change `Execute(String)` variant to `Execute(String, i64)` per AC3.1's literal `Shell.Execute("echo hello", 30)` signature (timeout in seconds; 0 means use SessionContext default). Add corresponding line to the parity table at `crates/pattern_runtime/src/sdk/requests.rs`.
+- Modify: `crates/pattern_runtime/haskell/Pattern/Shell.hs` — change the `Execute` GADT constructor to `Execute :: Command -> Int -> Shell Text` and update the `execute` helper signature.
 
 **Implementation:**
 
@@ -100,9 +108,22 @@ impl std::fmt::Display for TaskId {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ExecuteResult {
+    /// Output captured up to the moment the call returned.
     pub output: String,
+    /// `Some(code)` when the command finished within the timeout. `None`
+    /// when the timeout fired and the command was backgrounded — agent
+    /// learns the actual exit code later via the spawn-output stream
+    /// (`MessageAttachment::ShellOutput { kind: Exit, .. }`).
     pub exit_code: Option<i32>,
     pub duration_ms: u64,
+    /// `Some(task_id)` when the call's `timeout` fired and the running
+    /// command was backgrounded rather than killed. The task continues
+    /// running; the agent can `Shell.Status` to see it and will receive
+    /// further output as `MessageAttachment::ShellOutput` entries on the
+    /// next turn(s). Mirrors Claude Code's bash tool behavior — long-running
+    /// commands don't get cut off, they just transition to background.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backgrounded_as: Option<TaskId>,
 }
 
 #[derive(Debug, Clone)]
@@ -176,46 +197,55 @@ pub enum ShellError {
 <!-- END_TASK_1 -->
 
 <!-- START_TASK_2 -->
-### Task 2: `ShellBackend` trait
+### Task 2: `ShellBackend` trait — sync
 
 **Files:**
 - Create: `crates/pattern_runtime/src/process_manager/backend.rs` — trait definition.
 
 **Implementation:**
 
-Direct port from v2's `backend.rs:63-117`:
+Sync trait. The v2 reference is async (`async_trait`); this version is sync because the backend's call site is the eval worker (no runtime). Each method blocks the calling thread for at most `timeout` — fine because handler dispatch is one-call-at-a-time, and the calling thread is the eval worker (one thread per session).
 
 ```rust
 use std::path::PathBuf;
 use std::time::Duration;
-use tokio::sync::broadcast;
+use crossbeam_channel::Receiver;
 use crate::process_manager::error::ShellError;
 use crate::process_manager::types::{ExecuteResult, OutputChunk, TaskId};
 
-#[async_trait::async_trait]
 pub trait ShellBackend: Send + Sync + std::fmt::Debug {
-    /// Execute a command and wait for completion. Session state (cwd, env)
-    /// persists across calls.
-    async fn execute(&self, command: &str, timeout: Duration)
+    /// Execute a command. Session state (cwd, env) persists across calls.
+    /// Blocks the calling thread until the command finishes OR `timeout`
+    /// fires. **On timeout the command is NOT killed** — the backend
+    /// transitions it to a background task and returns
+    /// `ExecuteResult { exit_code: None, backgrounded_as: Some(task_id), output: <so far>, … }`.
+    /// The task keeps running in the same shell session; further output
+    /// arrives via the spawn-output `MessageAttachment::ShellOutput` stream. Mirrors Claude
+    /// Code's bash tool behavior. Caller can `kill` the backgrounded task
+    /// explicitly if needed.
+    fn execute(&self, command: &str, timeout: Duration)
         -> Result<ExecuteResult, ShellError>;
 
     /// Spawn a long-running command with streaming output. Returns the
-    /// new task ID + a receiver for output chunks. The sender remains
-    /// alive (held by the backend) until the process exits.
-    async fn spawn_streaming(&self, command: &str)
-        -> Result<(TaskId, broadcast::Receiver<OutputChunk>), ShellError>;
+    /// new task ID + a crossbeam receiver of output chunks. The sender
+    /// is owned by the backend's per-task reader thread and stays alive
+    /// until the process exits or `kill` is called.
+    fn spawn_streaming(&self, command: &str)
+        -> Result<(TaskId, Receiver<OutputChunk>), ShellError>;
 
     /// Kill a running spawned process.
-    async fn kill(&self, task_id: &TaskId) -> Result<(), ShellError>;
+    fn kill(&self, task_id: &TaskId) -> Result<(), ShellError>;
 
     /// List currently running task IDs.
     fn running_tasks(&self) -> Vec<TaskId>;
 
     /// Get current working directory of the persistent session.
     /// Returns `None` until the session is initialized (lazy first-`execute`).
-    async fn cwd(&self) -> Option<PathBuf>;
+    fn cwd(&self) -> Option<PathBuf>;
 }
 ```
+
+**Note: no `async_trait`, no `tokio::sync::broadcast`.** The crossbeam receiver is `Send` and `Sync`; bridge threads (Task 7) consume it directly without going through a runtime.
 
 **Verifies:** Scaffolding only.
 
@@ -225,44 +255,51 @@ pub trait ShellBackend: Send + Sync + std::fmt::Debug {
 <!-- END_TASK_2 -->
 
 <!-- START_TASK_3 -->
-### Task 3: `LocalPtyBackend` — port v2 implementation
+### Task 3: `LocalPtyBackend` — port v2 algorithm, switch async→sync (M18)
 
 **Files:**
-- Create: `crates/pattern_runtime/src/process_manager/local_pty.rs` — port of `rewrite-staging/runtime_subsystems/data_source/process/local_pty.rs`.
+- Create: `crates/pattern_runtime/src/process_manager/local_pty.rs`.
 
-**Scope:** mechanical port. The v2 file is 600 lines; the port preserves the algorithms (PTY init via `pty_process::open()`, OSC prompt marker detection in `read_until_prompt`, exit-marker nonce wrapping, `cwd` cache via `pwd` query, `spawn_streaming` with abort handle + kill channel) and updates only:
+**Scope:** algorithmic port from `rewrite-staging/runtime_subsystems/data_source/process/local_pty.rs` (600 lines). PTY mechanics (init, OSC prompt detection, exit-marker nonce, cwd cache via `pwd`) port mostly verbatim. The async layer flips to sync per the architecture decision in this phase header — no tokio in ProcessManager.
 
-- Imports use the new module path (`crate::process_manager::*` instead of `super::*`).
-- Error type is the new `ShellError` (same variants, same shape).
-- Tracing `target!` strings change from `data_source::process` to `process_manager`.
-- The MOVING TO comment header is removed.
-- `find_default_shell` retains the bash-first preference (NixOS-aware: `command -v bash` shellout).
+**Async→sync substitutions** (the non-mechanical part of the port):
 
-**Things to keep unchanged from v2 (load-bearing decisions verified by v2 tests):**
-- `PROMPT_MARKER = "\x1b]pattern-done\x07"` — OSC escape, not a regular string.
-- `STREAMING_READ_TIMEOUT = Duration::from_secs(60)` — stall detection for spawn_streaming reads.
-- Exit marker shape: `__PATTERN_EXIT_<8-char-uuid>__` — nonce avoids output-injection attacks (AC3.9).
-- `--norc --noprofile` shell args by default — ensures predictable PS1 / no shell-config interference.
-- `PS1` env var set to `PROMPT_MARKER`, `PS2` set to empty — required for prompt detection.
+- `pty_process::Pty` async API → sync API (`pty-process` 0.5 supports both; use `std::io::{Read,Write}` impls instead of `AsyncReadExt`/`AsyncWriteExt`).
+- `tokio::io::BufReader` → `std::io::BufReader`.
+- `tokio::sync::Mutex` (`session`, `cached_cwd`, `running` map) → `std::sync::Mutex`.
+- `tokio::sync::broadcast::Sender<OutputChunk>` per running process → `crossbeam_channel::Sender<OutputChunk>` bounded(64) per spawn.
+- `tokio::sync::oneshot::Sender<()>` (kill_tx) → `crossbeam_channel::Sender<()>` bounded(1); reader thread `try_recv`s in its loop.
+- `tokio::task::AbortHandle` → `Arc<AtomicBool>` cancellation flag the reader thread checks each iteration.
+- `tokio::time::timeout(...)` in `read_until_prompt` → `std::time::Instant` deadline polling. Pick a sync-readable PTY pattern at execution time (raw fd + `nix::poll` with timeout, or `pty-process`'s sync nonblocking read with `set_read_timeout`); document choice. v2's chunked-read shape (`min(remaining, 100ms)`) is a fine starting point.
+
+**Things to keep unchanged from v2** (load-bearing decisions verified by v2 tests):
+- `PROMPT_MARKER = "\x1b]pattern-done\x07"` — OSC escape literal.
+- `STREAMING_READ_TIMEOUT = Duration::from_secs(60)` — stall detection for streaming reads.
+- Exit marker shape `__PATTERN_EXIT_<8-char-uuid>__` (AC3.9 nonce).
+- `--norc --noprofile` shell args by default.
+- `PS1 = PROMPT_MARKER`, `PS2 = ""`.
 - ANSI strip via `strip_ansi_escapes::strip` before returning output.
-- `read_until_prompt` returns `ShellError::SessionDied` on EOF (raw_os_error == 5 or read returns 0).
-- `reinitialize_session` clears the session + cached cwd on death.
-- Wrapped command shape: `format!("{command}; echo \"{exit_marker}:$?\"")`.
+- `read_until_prompt` returns `ShellError::SessionDied` on EOF (raw_os_error == 5 or read 0).
+- `reinitialize_session` clears session + cached cwd on death.
+- Wrapped command shape `format!("{command}; echo \"{exit_marker}:$?\"")`.
+- `find_default_shell` bash-first preference (NixOS-aware: `command -v bash` shellout).
 
 **Things to drop from v2:**
-- The `ShellPermission` enum's `RequestedFor` field (was a permission-wrapping experiment in v2; v3 capability gating is at the handler boundary).
-- The mount/sandbox path-checking that v2 did internally (Phase 2 owns path policy via FilePolicy; ProcessManager doesn't try to second-guess it).
+- `ShellPermission::RequestedFor` field (Plan 3 capability gating is at the handler boundary).
+- Mount/sandbox path-checking that v2 did internally (Phase 2 owns path policy via FilePolicy).
 
-**Tracing decisions:** keep the v2 `debug!`/`trace!` calls verbatim — they were tuned during v2 development and prevent silent debugging issues.
+**Per-session OS thread structure:** `ShellSession` owns a `std::thread::JoinHandle<()>` plus a `crossbeam::Sender<SessionOp>` where `SessionOp` is the request enum (`Execute { cmd, timeout, reply }`, `Spawn { cmd, reply }`, `Kill { task_id, reply }`, `Cwd { reply }`, `Shutdown`). The thread loop owns the PTY, services ops one at a time (PTY is single-stream; can't multiplex commands), and tracks per-spawn reader sub-threads. Dropping the `ShellSession` sends `Shutdown` and joins.
 
-**Verifies:** AC3.1, AC3.2, AC3.6, AC3.7, AC3.9 mechanism (all via the LocalPtyBackend impl).
+**Tracing decisions:** keep v2's `debug!`/`trace!` calls verbatim — tuned during v2 development.
+
+**Verifies:** AC3.1, AC3.2, AC3.6, AC3.7, AC3.9 mechanism.
 
 **Verification:**
 - `cargo check -p pattern-runtime`.
-- `cargo nextest run -p pattern-runtime --lib process_manager::local_pty` — port over the v2 test cases at `rewrite-staging/runtime_subsystems/data_source/process/tests.rs` that exercise LocalPtyBackend directly (skip the `source.rs` integration tests; those are obsolete in v3). Estimate: ~12 LocalPty-level tests survive the port.
-- Tests must use `bash` if available, fall back to `sh`. CI environment per `crates/pattern_runtime/CLAUDE.md` "Smoke-test procedure" section: NixOS devshell has bash; non-Nix CI has bash via the dependent OSes.
+- `cargo nextest run -p pattern-runtime --lib process_manager::local_pty`. Port the v2 LocalPty-direct test cases at `rewrite-staging/runtime_subsystems/data_source/process/tests.rs:1-565` (skip `source.rs` tests — obsolete). Tests no longer need `#[tokio::test]`; plain `#[test]` works because everything is sync.
+- Tests use `bash` if available, fall back to `sh`. NixOS devshell + standard CI both have bash.
 
-**Commit:** `[pattern-runtime] LocalPtyBackend ported from v2 reference`
+**Commit:** `[pattern-runtime] LocalPtyBackend — port from v2 + async→sync conversion`
 <!-- END_TASK_3 -->
 
 <!-- END_SUBCOMPONENT_A -->
@@ -272,146 +309,136 @@ pub trait ShellBackend: Send + Sync + std::fmt::Debug {
 <!-- START_SUBCOMPONENT_B (tasks 4-5) -->
 
 <!-- START_TASK_4 -->
-### Task 4: `ProcessManager` coordinator
+### Task 4: `ProcessManager` coordinator — sync, no tokio
 
 **Files:**
 - Create: `crates/pattern_runtime/src/process_manager/manager.rs`.
 
 **Implementation:**
 
-ProcessManager wraps a `ShellBackend` and adds:
-- The `running_processes` registry (delegated to the backend's internal map for spawn/kill/status).
-- The session lifetime — currently one shared `LocalPtyBackend` per ProcessManager instance, but designed so future variants (per-agent shells, isolated bubblewrap shells, container shells) can swap the backend without touching the manager.
-- Optional capability gating (Plan 3 `CapabilitySet` accessor; for Phase 3 this is a stub that always allows when the cap is in the set).
-- Per-spawn listener bridge that drains the broadcast receiver and pushes pseudo-messages via `adapter.record_pseudo_message` (Task 7 wires this).
+ProcessManager wraps a single `Arc<dyn ShellBackend>` (sync, from Task 2). All methods sync. No tokio runtime, no DashMap of broadcast receivers — `spawn` returns the crossbeam Receiver directly to the caller (handler in Task 6) which wires it into a bridge thread (Task 7). Capability gating happens in the handler, not here — keeps ProcessManager free of Plan 3 imports.
 
 ```rust
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use dashmap::DashMap;
-use tokio::sync::broadcast;
-use tokio_util::sync::CancellationToken;
-use pattern_core::capability::CapabilitySet; // Plan 3
+use crossbeam_channel::Receiver;
 use crate::process_manager::backend::ShellBackend;
 use crate::process_manager::local_pty::LocalPtyBackend;
 use crate::process_manager::types::{ExecuteResult, OutputChunk, TaskId};
 use crate::process_manager::error::ShellError;
 
+#[derive(Debug)]
 pub struct ProcessManager {
     backend: Arc<dyn ShellBackend>,
-    /// Per-spawned-process broadcast subscribers. Phase 3 owns the
-    /// listener bridge that pushes chunks via `adapter.record_pseudo_message`;
-    /// see Task 7. Keyed by TaskId.
-    spawn_subscribers: DashMap<TaskId, broadcast::Receiver<OutputChunk>>,
-    cancel: CancellationToken,
 }
 
 impl ProcessManager {
-    pub fn new(initial_cwd: std::path::PathBuf) -> Self {
-        Self {
-            backend: Arc::new(LocalPtyBackend::new(initial_cwd)),
-            spawn_subscribers: DashMap::new(),
-            cancel: CancellationToken::new(),
-        }
+    pub fn new(initial_cwd: PathBuf) -> Self {
+        Self { backend: Arc::new(LocalPtyBackend::new(initial_cwd)) }
     }
 
     /// Constructor for test/alternative-backend usage.
     pub fn with_backend(backend: Arc<dyn ShellBackend>) -> Self {
-        Self {
-            backend,
-            spawn_subscribers: DashMap::new(),
-            cancel: CancellationToken::new(),
-        }
+        Self { backend }
     }
 
-    pub async fn execute(&self, capability: &CapabilitySet, command: &str, timeout: Duration)
+    /// Execute a command and wait for completion or timeout. On timeout
+    /// the command is NOT killed — the backend transitions it to a
+    /// background task and returns `ExecuteResult { backgrounded_as: Some(task_id), … }`.
+    /// The handler emits a sentinel `MessageAttachment::ShellOutput { kind: Backgrounded, .. }` at that transition so
+    /// the agent learns the backgrounding happened immediately, then
+    /// receives further output via the standard spawn-output bridge.
+    /// Mirrors Claude Code's bash tool behavior.
+    pub fn execute(&self, command: &str, timeout: Duration)
         -> Result<ExecuteResult, ShellError>
     {
-        if !capability.has_shell() { return Err(ShellError::CapabilityDenied); }
-        self.backend.execute(command, timeout).await
+        self.backend.execute(command, timeout)
     }
 
-    pub async fn spawn(&self, capability: &CapabilitySet, command: &str)
-        -> Result<TaskId, ShellError>
+    /// Spawn a streaming process. Returns the task id and a crossbeam
+    /// receiver of OutputChunks. Caller (handler in Task 6) hands the
+    /// receiver to a bridge thread (Task 7) that converts chunks to
+    /// `MessageAttachment::ShellOutput` entries via `record_async_reminder`.
+    pub fn spawn(&self, command: &str)
+        -> Result<(TaskId, Receiver<OutputChunk>), ShellError>
     {
-        if !capability.has_shell() { return Err(ShellError::CapabilityDenied); }
-        let (task_id, rx) = self.backend.spawn_streaming(command).await?;
-        // Stash the receiver here so the listener bridge (Task 7) can pick
-        // it up. Caller of ProcessManager doesn't see the receiver directly —
-        // output flows through adapter.record_pseudo_message via the listener.
-        self.spawn_subscribers.insert(task_id.clone(), rx);
-        Ok(task_id)
+        self.backend.spawn_streaming(command)
     }
 
-    pub async fn kill(&self, capability: &CapabilitySet, task_id: &TaskId)
-        -> Result<(), ShellError>
-    {
-        if !capability.has_shell() { return Err(ShellError::CapabilityDenied); }
-        self.backend.kill(task_id).await?;
-        self.spawn_subscribers.remove(task_id);
-        Ok(())
+    pub fn kill(&self, task_id: &TaskId) -> Result<(), ShellError> {
+        self.backend.kill(task_id)
     }
 
     pub fn status(&self) -> Vec<TaskId> { self.backend.running_tasks() }
 
-    pub async fn cwd(&self) -> Option<std::path::PathBuf> { self.backend.cwd().await }
-
-    /// Take ownership of a spawn receiver for the listener bridge.
-    /// Returns None if not registered (already taken).
-    pub(crate) fn take_spawn_receiver(&self, task_id: &TaskId)
-        -> Option<broadcast::Receiver<OutputChunk>>
-    {
-        self.spawn_subscribers.remove(task_id).map(|(_, rx)| rx)
-    }
+    pub fn cwd(&self) -> Option<PathBuf> { self.backend.cwd() }
 }
 
-impl Drop for ProcessManager {
-    fn drop(&mut self) { self.cancel.cancel(); }
-}
+// No Drop impl needed — backend's session threads observe Sender drop
+// when the Arc<dyn ShellBackend> hits zero refcount, then exit cleanly
+// via their internal Shutdown handling.
 ```
 
-**Note on `capability.has_shell()`:** matches the `has_file()` pattern from Phase 2 — Plan 3 provides per-effect-category methods on `CapabilitySet`.
+**Capability gating moved to the handler.** `ShellHandler::handle` (Task 6) checks `cap.has_shell()` once at dispatch before forwarding to ProcessManager. Keeps ProcessManager runtime-internal and policy-free; isolates Plan 3's `CapabilitySet` import in the handler.
 
-**Verifies:** Mechanism for AC3.1, AC3.2, AC3.3, AC3.4, AC3.5, AC3.6 (delegated to backend).
+**Verifies:** Mechanism for AC3.1, AC3.2, AC3.3, AC3.4, AC3.5, AC3.6.
 
 **Verification:**
 - `cargo check -p pattern-runtime`.
 
-**Commit:** `[pattern-runtime] ProcessManager coordinator over ShellBackend`
+**Commit:** `[pattern-runtime] ProcessManager — sync wrapper over ShellBackend`
 <!-- END_TASK_4 -->
 
 <!-- START_TASK_5 -->
-### Task 5: Wire `ProcessManager` into `TidepoolRuntime` + `SessionContext`
+### Task 5: Wire `ProcessManager` + `tokio::runtime::Handle` into `TidepoolRuntime` + `SessionContext`
 
 **Files:**
-- Modify: `crates/pattern_runtime/src/runtime.rs:32` — add `process_manager: Arc<ProcessManager>` field; construct in `TidepoolRuntime::new`.
-- Modify: `crates/pattern_runtime/src/session.rs:40-121` — add `process_manager: Arc<ProcessManager>` field on SessionContext (cloned from runtime at session-open time) + `process_manager()` accessor.
+- Modify: `crates/pattern_runtime/src/runtime.rs:32-69` — add `process_manager: Arc<ProcessManager>` field; add `tokio_handle: tokio::runtime::Handle` field; thread the handle through `TidepoolRuntime::new` + `with_default_sdk` (explicit caller-supplied param).
+- Modify: `crates/pattern_runtime/src/session.rs:40-121` — add `process_manager: Arc<ProcessManager>` and `tokio_handle: tokio::runtime::Handle` fields on `SessionContext`; expose `process_manager()` and `tokio_handle()` accessors.
+- Modify: `TidepoolSession::open` and any other call site of `from_persona` — thread the runtime references through (full call-site list per investigator: `session.rs:546-619`; verify with `grep -rn 'from_persona' crates/pattern_runtime/src` at execution time).
+- Modify: `crates/pattern_server` and `crates/pattern_cli` — if these construct `TidepoolRuntime`, supply their tokio handle. (Should be one call site each; verify with `grep -rn 'TidepoolRuntime::new\|with_default_sdk' crates/`.)
+- Modify: existing test fixtures that construct `TidepoolRuntime` — pass `Handle::current()` (tests run under `#[tokio::test]`).
 
 **Implementation:**
 
-In `TidepoolRuntime::new`:
+`TidepoolRuntime::new` becomes:
 ```rust
-let process_manager = Arc::new(ProcessManager::new(
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
-));
+pub fn new(
+    sdk: SdkLocation,
+    memory_store: Arc<dyn MemoryStore>,
+    provider: Arc<dyn ProviderClient>,
+    db: Arc<pattern_db::ConstellationDb>,
+    tokio_handle: tokio::runtime::Handle,   // explicit; honest about the dependency
+) -> Self {
+    let process_manager = Arc::new(ProcessManager::new(
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
+    ));
+    Self { sdk, memory_store, provider, db, tokio_handle, process_manager }
+}
 ```
 
-The runtime's `process_manager` field flows into each `SessionContext` constructed by `TidepoolSession::open_with_agent_loop` (investigator pointed to `session.rs:546-619`).
+`with_default_sdk` likewise gains the param. `TidepoolRuntime::tokio_handle() -> &tokio::runtime::Handle` is exposed for Phase 4's PortRegistry to consume at construction.
 
-`SessionContext` accessor:
+**Why explicit at `new`?** `Handle::current()` magic-capture is brittle — caller must be in async context at construction time, single-threaded runtimes silently change semantics, etc. Explicit param surfaces the contract in the type signature and documents that the runtime borrows the caller's tokio runtime.
+
+**Why does ProcessManager not need the handle?** ProcessManager is pure std::thread + crossbeam (Task 4). It runs no async code. The handle exists on the runtime + SessionContext for *Phase 4's* PortRegistry actor and any future async-needing subsystem.
+
+`SessionContext` accessors:
 ```rust
 pub fn process_manager(&self) -> &Arc<ProcessManager> { &self.process_manager }
+pub fn tokio_handle(&self) -> &tokio::runtime::Handle { &self.tokio_handle }
 ```
 
-**Note on initial cwd:** Phase 3 takes the runtime's process cwd. Phase 4+ may want per-session cwd from persona config; out of scope here. Document for follow-up.
+**Note on initial cwd:** Phase 3 takes the runtime's process cwd. Phase 4+ may want per-session cwd from persona config; out of scope here.
 
 **Verifies:** Mechanism for all AC3 — handler can reach ProcessManager via `cx.user().process_manager()`.
 
 **Verification:**
-- `cargo check -p pattern-runtime`.
-- Existing `session_lifecycle.rs` tests still pass.
+- `cargo check --workspace`. The `Handle` param ripples to every `TidepoolRuntime::new` callsite.
+- Existing `session_lifecycle.rs` tests still pass (just gain a `Handle::current()` arg).
 
-**Commit:** `[pattern-runtime] ProcessManager on TidepoolRuntime + SessionContext`
+**Commit:** `[pattern-runtime] ProcessManager + tokio_handle on TidepoolRuntime + SessionContext`
 <!-- END_TASK_5 -->
 
 <!-- END_SUBCOMPONENT_B -->
@@ -428,15 +455,18 @@ pub fn process_manager(&self) -> &Arc<ProcessManager> { &self.process_manager }
 
 **Implementation:**
 
-Tighten bound from `HasCancelState` to `SessionContext`. The handler dispatch is async-flavoured (PTY is async) but `EffectHandler::handle` is synchronous — bridge via `tokio::runtime::Handle::current().block_on`. Other v3 handlers that need async work do the same; verify the pattern at `cx.user().db().get()` callsites — actually those are sync. The skill handler calls async via the eval worker; for the shell handler, the Tidepool eval worker is what's calling `handle()` — that's a dedicated OS thread (`crates/pattern_runtime/src/agent_loop/eval_worker.rs`), so blocking on a tokio runtime handle there is wrong (no current handle).
-
-**Resolution:** the eval worker doesn't have a current tokio runtime. Two options:
-1. Spawn a one-shot tokio runtime per shell call (expensive — each `Execute` pays runtime startup cost).
-2. The runtime hands the eval worker a tokio `Handle` at startup, which the handler uses via `handle.block_on(future)`.
-
-Option 2 is the cleaner fit. The `Handle` is cheap to clone, and the runtime already owns a tokio Runtime for provider work. Add a `tokio_handle: tokio::runtime::Handle` field to `ProcessManager` (or to `SessionContext`), populated at construction. The handler:
+Tighten the trait bound from `HasCancelState` to `SessionContext` (matches `SkillsHandler`). All dispatch is **sync** — ProcessManager is sync (Task 4), and the eval worker has no ambient tokio runtime by design (`crates/pattern_runtime/CLAUDE.md` "Eval worker" section: explicit "no nested tokio runtime, no Handle::current().block_on"). Capability check happens once at the top before any dispatch.
 
 ```rust
+// SAFETY / DESIGN NOTE for future maintainers:
+// This handler runs on the Tidepool eval worker — a dedicated OS thread
+// with NO ambient tokio runtime. Do NOT introduce `block_on` here, even
+// against a Handle stashed on SessionContext. block_on against arbitrary
+// plugin code can deadlock if the awaited future calls `spawn_blocking`
+// against a saturated pool (or runs on a single-thread runtime). All
+// dispatched subsystems exposed at this boundary MUST be sync at the API
+// surface; ProcessManager is, and Phase 4's PortRegistry is sync at the
+// boundary too (its actor task hides the async work internally).
 impl EffectHandler<SessionContext> for ShellHandler {
     type Request = ShellReq;
 
@@ -446,33 +476,64 @@ impl EffectHandler<SessionContext> for ShellHandler {
         let state = cx.user().cancel_state();
         let _guard = HandlerGuard::enter(&state.gate);
         let pm = cx.user().process_manager().clone();
-        let cap = cx.user().capability_set().clone(); // Plan 3 accessor
-        let handle = cx.user().tokio_handle().clone();
+        let cap = cx.user().capability_set();
+        if !cap.has_shell() {
+            return Err(EffectError::Handler(
+                "Pattern.Shell: capability denied (Shell effect not in agent's CapabilitySet)".to_string()
+            ));
+        }
+        let queue = Arc::clone(cx.user().async_reminder_queue());
+        let default_timeout = cx.user().shell_default_timeout(); // SessionContext config knob
 
         match req {
-            ShellReq::Execute(cmd) => {
-                let result = handle.block_on(pm.execute(
-                    &cap, &cmd, Duration::from_secs(30) // TODO Phase 3 follow-up: pass timeout from agent
-                )).map_err(|e| EffectError::Handler(format!("Pattern.Shell.Execute: {e}")))?;
+            ShellReq::Execute(cmd, timeout_secs) => {
+                let timeout = if timeout_secs > 0 {
+                    Duration::from_secs(timeout_secs as u64)
+                } else {
+                    default_timeout
+                };
+                let result = pm.execute(&cmd, timeout)
+                    .map_err(|e| EffectError::Handler(format!("Pattern.Shell.Execute: {e}")))?;
+
+                // Timeout-backgrounded transition: enqueue a sentinel
+                // ShellOutput attachment (kind = Backgrounded) so the agent
+                // learns the backgrounding happened on its next turn, and
+                // start the spawn-output bridge so subsequent output flows
+                // through the same async-reminder queue.
+                if let Some(task_id) = &result.backgrounded_as {
+                    queue.lock().unwrap().push(MessageAttachment::ShellOutput {
+                        task_id: task_id.to_string(),
+                        kind: ShellOutputKind::Backgrounded { partial_output: result.output.clone() },
+                        at: jiff::Timestamp::now(),
+                    });
+                    // The backend stashed the spawn receiver under this
+                    // task_id when it transitioned the Execute to background;
+                    // ProcessManager exposes it via take_backgrounded_receiver.
+                    // The bridge thread (Task 7) takes ownership and pushes
+                    // each subsequent OutputChunk as a ShellOutput attachment.
+                    if let Some(rx) = pm.take_backgrounded_receiver(task_id) {
+                        spawn_output_bridge(task_id.clone(), rx, Arc::clone(&queue));
+                    }
+                }
                 cx.respond(serde_json::to_string(&result).unwrap_or_default())
             }
             ShellReq::Spawn(cmd) => {
-                let task_id = handle.block_on(pm.spawn(&cap, &cmd))
+                let (task_id, rx) = pm.spawn(&cmd)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Shell.Spawn: {e}")))?;
-                // Spawn the listener task; pushes pseudo-messages via the
-                // session adapter (Task 7).
-                spawn_output_listener(&pm, &task_id, cx.user().adapter().clone(), handle.clone());
+                // Bridge thread (std::thread::spawn) drains the crossbeam
+                // receiver and enqueues each chunk as a ShellOutput attachment.
+                spawn_output_bridge(task_id.clone(), rx, Arc::clone(&queue));
                 cx.respond(task_id.to_string())
             }
             ShellReq::Kill(pid_int) => {
                 let task_id = TaskId(pid_int.to_string());
-                handle.block_on(pm.kill(&cap, &task_id))
+                pm.kill(&task_id)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Shell.Kill: {e}")))?;
                 cx.respond(())
             }
             ShellReq::Status(_pid) => {
-                // Per AC3.5 the operation lists all sessions; the i64 in the
-                // request is unused (legacy Haskell signature placeholder).
+                // AC3.5: list all running tasks. The i64 arg is currently
+                // unused; see open question Q2 for the GADT cleanup.
                 let tasks = pm.status();
                 cx.respond(tasks.iter().map(|t| t.to_string()).collect::<Vec<_>>())
             }
@@ -481,112 +542,139 @@ impl EffectHandler<SessionContext> for ShellHandler {
 }
 ```
 
-**Note on `ShellReq::Status(i64)`:** the existing enum signature carries an `i64` even though AC3.5 says Status should list *all*. Two options: (a) ignore the i64 (current), (b) change the Haskell signature to take no arg. Defaulted to (a) for compatibility; flag for follow-up to clean up the GADT shape.
+**Capability check:** Done once at the top of `handle`. `cap.has_shell()` is the Plan 3 method; same shape as Phase 2's `cap.has_file()`.
 
-**Note on Execute's hardcoded 30s timeout:** the Haskell GADT `Execute :: Command -> Shell Text` doesn't pass a timeout. Two options: (a) hardcode a per-runtime default with a config knob, (b) add a `Execute2 :: Command -> Int -> Shell Text` variant. AC3.1 and AC3.7 imply a timeout is configurable. **Defaulted to (a)** with a 30s default + `RuntimeConfig::shell_default_timeout` knob; flag for follow-up.
+**Execute timeout signature (I10 resolution):** Per AC3.1's literal example `Shell.Execute("echo hello", 30)`, the GADT takes a timeout argument. Phase 3 Task 1 changes `ShellReq::Execute(String)` → `Execute(String, i64)` and the Haskell `Pattern.Shell` GADT to match. Default (when agent passes 0 or omits) comes from `SessionContext::shell_default_timeout()` — runtime config knob, default 30s.
 
-**Verifies:** AC3.1, AC3.4, AC3.5, AC3.7.
+**Status arg (Q2):** `Status(i64)` keeps the unused `i64` for now to avoid touching the Haskell GADT a second time. Cleanup is a follow-up.
+
+**Verifies:** AC3.1, AC3.2, AC3.4, AC3.5, AC3.7.
 
 **Verification:**
 - `cargo check -p pattern-runtime`.
 - Existing stub test deleted; new tests in Task 9.
 
-**Commit:** `[pattern-runtime] ShellHandler dispatches to ProcessManager`
+**Commit:** `[pattern-runtime] ShellHandler — sync dispatch, capability check, timeout-background sentinel`
 <!-- END_TASK_6 -->
 
 <!-- START_TASK_7 -->
-### Task 7: `render_shell_output_event` + spawn listener
+### Task 7: `MessageAttachment::ShellOutput` variant + Segment2Pass render arm + spawn-output bridge
 
 **Files:**
-- Modify: `crates/pattern_provider/src/compose/pseudo_messages.rs` — add `render_shell_output_event(task_id, chunk, at) -> ChatMessage` alongside `render_skill_loaded_event` / `render_file_edit_event`.
-- Modify: `crates/pattern_runtime/src/process_manager/manager.rs` — add `spawn_output_listener(pm, task_id, adapter, tokio_handle)` that drains the broadcast receiver and pushes a pseudo-message per chunk via the adapter.
-- Modify: `crates/pattern_runtime/src/sdk/handlers/shell.rs` (Task 6 callsite) — pass `cx.user().adapter().clone()` into `spawn_output_listener` at `Shell.Spawn` dispatch time.
+- Modify: `crates/pattern_core/src/types/message.rs` — add `MessageAttachment::ShellOutput { task_id, kind, at }` variant alongside Phase 2's `FileEdit`. Define `ShellOutputKind { Output(String), Exit { code: Option<i32>, duration_ms: u64 }, Backgrounded { partial_output: String } }` next to it.
+- Modify: `crates/pattern_provider/src/compose/passes/segment_2.rs` — add a render arm for `MessageAttachment::ShellOutput` alongside Phase 2's `FileEdit` arm.
+- Modify: `crates/pattern_runtime/src/process_manager/manager.rs` — add `pub fn spawn_output_bridge(task_id: TaskId, rx: Receiver<OutputChunk>, queue: Arc<Mutex<Vec<MessageAttachment>>>)` that spawns a `std::thread` to drain the crossbeam receiver and enqueue ShellOutput attachments. Also add `pub fn take_backgrounded_receiver(&self, task_id) -> Option<Receiver<OutputChunk>>` for the timeout-backgrounded path (LocalPtyBackend stashes the receiver under that task_id when it transitions an Execute to background).
 
 **Implementation:**
 
 ```rust
-// pattern_provider/src/compose/pseudo_messages.rs (addition)
-pub fn render_shell_output_event(
-    task_id: &str,
-    chunk: ShellOutputChunkRef<'_>,   // borrowed view; same data as v2 OutputChunk
-    at: jiff::Timestamp,
-) -> ChatMessage {
-    let mut body = format!("<system-reminder>\nshell task {task_id} @ {at}:\n");
-    match chunk {
-        ShellOutputChunkRef::Output(text) => {
-            body.push_str("```\n");
-            body.push_str(text);
-            body.push_str("\n```");
-        }
-        ShellOutputChunkRef::Exit { code, duration_ms } => {
-            body.push_str(&format!("[exited {code:?} in {duration_ms}ms]"));
-        }
-    }
-    body.push_str("\n</system-reminder>");
-    ChatMessage::user(body)
+// pattern_core/src/types/message.rs (additions)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ShellOutputKind {
+    /// Streaming output chunk from a spawned process.
+    Output(String),
+    /// Process exited; final delivery on the bridge.
+    Exit { code: Option<i32>, duration_ms: u64 },
+    /// Sentinel emitted at the moment a `Shell.Execute` call's timeout
+    /// fires and the running command transitions to background. Agent
+    /// learns the transition; subsequent chunks arrive as `Output` /
+    /// `Exit` variants.
+    Backgrounded { partial_output: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum MessageAttachment {
+    BatchOpeningSnapshot { /* existing */ },
+    FileEdit { /* Phase 2 */ },
+    /// One spawned-shell event. Bridge thread enqueues one of these per
+    /// OutputChunk arriving from the PTY; compose-time drain splices
+    /// them onto the next turn's first user message.
+    ShellOutput {
+        task_id: String,
+        kind: ShellOutputKind,
+        at: jiff::Timestamp,
+    },
+    // (Phase 4 adds PortEvent.)
 }
 ```
-
-`ShellOutputChunkRef` is a borrow-compatible mirror of `process_manager::types::OutputChunk`; the renderer takes `&` so the listener doesn't need to clone. Defined in pattern_provider next to the renderer.
 
 ```rust
-// process_manager/manager.rs — listener
-pub(crate) fn spawn_output_listener(
-    pm: &Arc<ProcessManager>,
-    task_id: &TaskId,
-    adapter: Arc<MemoryStoreAdapter>,
-    handle: tokio::runtime::Handle,
-) {
-    let Some(mut rx) = pm.take_spawn_receiver(task_id) else { return };
-    let task_id_str = task_id.to_string();
-    let cancel = pm.cancel.clone();
-
-    handle.spawn(async move {
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => break,
-                msg = rx.recv() => match msg {
-                    Ok(OutputChunk::Output(text)) => {
-                        let m = pattern_provider::compose::pseudo_messages::
-                            render_shell_output_event(
-                                &task_id_str,
-                                ShellOutputChunkRef::Output(&text),
-                                jiff::Timestamp::now(),
-                            );
-                        adapter.record_pseudo_message(m);
-                    }
-                    Ok(OutputChunk::Exit { code, duration_ms }) => {
-                        let m = pattern_provider::compose::pseudo_messages::
-                            render_shell_output_event(
-                                &task_id_str,
-                                ShellOutputChunkRef::Exit { code, duration_ms },
-                                jiff::Timestamp::now(),
-                            );
-                        adapter.record_pseudo_message(m);
-                        break;
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(task_id = %task_id_str, lagged = n,
-                                       "shell output broadcast lagged");
-                    }
-                }
-            }
-        }
-    });
+// pattern_provider/src/compose/passes/segment_2.rs (addition)
+match attachment {
+    // … existing arms …
+    MessageAttachment::ShellOutput { task_id, kind, at } => {
+        let body = match kind {
+            ShellOutputKind::Output(text) => format!(
+                "<system-reminder>\nshell task {task_id} @ {at}:\n```\n{text}\n```\n</system-reminder>"
+            ),
+            ShellOutputKind::Exit { code, duration_ms } => format!(
+                "<system-reminder>\nshell task {task_id} @ {at}: [exited {code:?} in {duration_ms}ms]\n</system-reminder>"
+            ),
+            ShellOutputKind::Backgrounded { partial_output } => format!(
+                "<system-reminder>\n\
+                 Shell.Execute timed out and was backgrounded as task {task_id} @ {at}.\n\
+                 Output captured before backgrounding (more will follow as it arrives):\n\
+                 ```\n{partial_output}\n```\n\
+                 </system-reminder>"
+            ),
+        };
+        push_user_block(message, body);
+    }
 }
 ```
 
-**Note on chunking granularity.** Pushing one pseudo-message per output chunk means a chatty process can produce many segment-2 entries. For very chunky processes the Segment2Pass may want to coalesce consecutive shell-output reminders for the same task — out of scope for this phase, but flag for follow-up.
+```rust
+// process_manager/manager.rs — bridge thread
+pub fn spawn_output_bridge(
+    task_id: TaskId,
+    rx: crossbeam_channel::Receiver<OutputChunk>,
+    queue: Arc<Mutex<Vec<MessageAttachment>>>,
+) {
+    // std::thread::spawn — NOT a tokio task. ProcessManager has no tokio
+    // runtime by design (see Phase 3 architecture note). Bridge runs as
+    // long as the receiver yields; exits when the backend's sender drops
+    // (process exit / kill / Shutdown).
+    let task_id_str = task_id.to_string();
+    std::thread::Builder::new()
+        .name(format!("shell-output-bridge:{task_id_str}"))
+        .spawn(move || {
+            for chunk in rx.iter() {
+                let attachment = MessageAttachment::ShellOutput {
+                    task_id: task_id_str.clone(),
+                    kind: match &chunk {
+                        OutputChunk::Output(text) => ShellOutputKind::Output(text.clone()),
+                        OutputChunk::Exit { code, duration_ms } => ShellOutputKind::Exit {
+                            code: *code, duration_ms: *duration_ms,
+                        },
+                    },
+                    at: jiff::Timestamp::now(),
+                };
+                queue.lock().unwrap().push(attachment);
+                if matches!(chunk, OutputChunk::Exit { .. }) { break; }
+            }
+            // rx.iter() returns None when the sender drops; thread exits.
+        })
+        .expect("failed to spawn shell-output bridge thread");
+}
+```
 
-**Verifies:** AC3.3.
+**Why std::thread, not handle.spawn?** Two reasons:
+1. ProcessManager is sync top-to-bottom (Phase 3 design). Introducing a tokio task here would re-introduce the runtime coupling we explicitly avoided.
+2. The bridge work is a tight `recv → enqueue` loop. It blocks on `rx.iter()` — appropriate for an OS thread, wasteful for a tokio worker. Hundreds of bridge threads would still be cheap; the agent typically has at most a handful of background processes at any time.
+
+**Note on chunking granularity.** Pushing one attachment per output chunk means a chatty process can produce many segment-2 entries. Coalescing consecutive shell-output reminders for the same task at compose time is a follow-up.
+
+**Note on autonomous activation:** the design plan calls out backgrounded-exec completion as the canonical first hook for autonomous activation. When the bridge enqueues the final `Exit` attachment for a backgrounded task, a future plan can subscribe to that signal and trigger an autonomous turn so the agent sees the completion immediately rather than waiting for the next human-driven turn.
+
+**Verifies:** AC3.3 (output streams via the async-reminder buffer); the Backgrounded variant verifies the AC3.7 update.
 
 **Verification:**
 - `cargo check --workspace`.
-- Unit test on `render_shell_output_event` — snapshot-test the body for both `Output` and `Exit` chunk variants via `insta`.
-- Integration test in Task 9 exercises spawn → wait one turn → assert the spawned task's chunks appear in `most_recent_pseudo_messages` with the right task_id substring.
+- Unit tests on the Segment2Pass render arm — snapshot-test bodies for `Output` / `Exit` / `Backgrounded` via `insta`.
+- Integration test in Task 9 exercises spawn → wait one turn → assert the spawned task's chunks appear as `MessageAttachment::ShellOutput` on the next turn's first user message with the right task_id substring.
 
-**Commit:** `[pattern-provider] [pattern-runtime] render_shell_output_event + spawn listener via adapter`
+**Commit:** `[pattern-core] [pattern-provider] [pattern-runtime] ShellOutput attachment variant + std::thread bridge`
 <!-- END_TASK_7 -->
 
 <!-- END_SUBCOMPONENT_C -->
@@ -600,7 +688,7 @@ pub(crate) fn spawn_output_listener(
 
 **Files:**
 - Create: `crates/pattern_runtime/src/process_manager/logger.rs` — `ProcessLogger` writing chunks to `<cache_dir>/shell/<task_id>.log`.
-- Modify: `crates/pattern_runtime/src/process_manager/manager.rs` — call logger from inside `spawn_output_listener` (alongside the pending-output push).
+- Modify: `crates/pattern_runtime/src/process_manager/manager.rs` — call logger from inside `spawn_output_bridge` (alongside the queue enqueue).
 
 **Implementation:**
 
@@ -685,11 +773,12 @@ The `flush()` per write is a deliberate cost: AC3.10 says the log "is written ev
 |----|-----------|-----------|
 | 3.1 | `execute_returns_output_and_exit_code` | `pm.execute(cap, "echo hello", 30s)` → output `"hello\n"`, exit_code `Some(0)`, duration_ms reasonable. |
 | 3.2 | `execute_auto_spawns_then_reuses_session` | First execute initialises session (cwd unset → set after); second execute reuses (cwd cache hit). Verify with two `pwd` calls in a row. |
-| 3.3 | `spawn_streams_output_via_pseudo_messages` | Spawn `for i in 1 2 3; do echo line$i; sleep 0.05; done`; wait one turn; assert the next turn's `recent_pseudo_messages` (or `adapter.drain_pending_pseudo_messages()` directly) contains entries whose bodies include `line1`, `line2`, `line3`, and an `[exited` marker. |
+| 3.3 | `spawn_streams_output_via_attachments` | Spawn `for i in 1 2 3; do echo line$i; sleep 0.05; done`; wait one turn boundary; assert the next turn's first user message has `MessageAttachment::ShellOutput` entries with `kind = ShellOutputKind::Output` matching `line1`/`line2`/`line3` and one `kind = ShellOutputKind::Exit { code: Some(0), .. }`. |
 | 3.4 | `kill_terminates_running_process` | Spawn `sleep 60`; immediately `kill(task_id)`; verify `status()` no longer lists the task; verify the broadcast `Exit` chunk arrives. |
 | 3.5 | `status_lists_running_tasks` | Spawn two long-running processes; assert `status()` returns both task IDs. |
 | 3.6 | `cwd_persists_across_executions` | `execute("cd /tmp")` then `execute("pwd")` → output contains `/tmp`. |
-| 3.7 | `execute_timeout_kills_command` | `execute("sleep 60", 1s)` → returns `ShellError::Timeout(1s)` quickly (under 2s elapsed). |
+| 3.7 | `execute_timeout_backgrounds_not_kills` | `execute("sleep 2 && echo done", 1s)` → returns `ExecuteResult { exit_code: None, backgrounded_as: Some(task_id), output: <empty>, … }` quickly (under 2s elapsed). Then `pm.status()` lists the task as still running. After ~2s, the spawn-output bridge enqueues `MessageAttachment::ShellOutput` entries containing `done` + an `Exit` variant; assert they appear on the next turn boundary. Mirrors Claude Code's bash tool behavior. |
+| 3.7b | `execute_timeout_emits_backgrounded_sentinel` | `execute("sleep 5", 1s)`; immediately call `session.drain_async_reminders()` after the call returns; assert one entry is `MessageAttachment::ShellOutput { kind: ShellOutputKind::Backgrounded { partial_output }, .. }` matching the returned task id. |
 | 3.8 | `kill_unknown_task_returns_error` | `kill(TaskId("not-a-real-id"))` → `ShellError::UnknownTask("not-a-real-id")`. |
 | 3.9 | `exit_code_parser_resists_injection` | Run command whose output contains `__PATTERN_EXIT_deadbeef__:1`. The actual exit-marker nonce is unique per call, so the spurious string doesn't match. Verify exit_code is the actual command exit code, not 1. |
 | 3.10 | `process_output_logged_to_file` | Spawn process with known output; wait for completion; read `<cache_dir>/shell/<task_id>.log`; verify each output line + the EXIT line are present. |
@@ -716,7 +805,7 @@ The `flush()` per write is a deliberate cost: AC3.10 says the log "is written ev
 
 ## Open questions for human review (foreground at end of plan-write)
 
-**Q1: Execute timeout argument.** The Haskell GADT `Execute :: Command -> Shell Text` has no timeout. Phase 3 hardcodes a 30s default with a runtime-config knob. Cleaner: add `Execute2 :: Command -> Int -> Shell Text` (or change the existing) so agents can pass timeout. Defaulted to the hardcoded path; flag if reviewer wants the GADT change.
+**Q1 [resolved 2026-04-24]:** `ShellReq::Execute(String)` → `Execute(String, i64)` per AC3.1's literal signature. Haskell GADT updated. Timeout `0` means use SessionContext default (`shell_default_timeout`, default 30s). Per the additional design discussion (this phase header), timeout fires → command is **backgrounded, not killed** — see `ExecuteResult.backgrounded_as`.
 
 **Q2: `Status` ignoring its `i64` argument.** The current `ShellReq::Status(i64)` takes an unused arg. Possibilities: (a) ignore (current); (b) drop the arg from the GADT; (c) repurpose as "filter to this task ID". Defaulted to (a); reviewer may prefer (b) or (c).
 

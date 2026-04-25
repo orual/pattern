@@ -59,7 +59,7 @@ Subcomponent A's tests (Task 5) close AC1.1-1.8. Subcomponent B is a refactor; v
 - Create: `crates/pattern_memory/src/loro_sync/bridge.rs` — `LoroDocBridge` trait + `BridgeError`.
 - Create: `crates/pattern_memory/src/loro_sync/router.rs` — `EventRouter` trait.
 - Create: `crates/pattern_memory/src/loro_sync/error.rs` — `SyncedDocError` + `LoroSyncError` alias.
-- Modify: `crates/pattern_memory/Cargo.toml` — add `smol_str = { workspace = true }` under `[dependencies]`.
+- Modify: `crates/pattern_memory/Cargo.toml` — add `smol_str = { workspace = true }` under `[dependencies]`. Verify with `grep -n 'smol_str' crates/pattern_memory/Cargo.toml` first — if it's already present (transitively elevated by a later phase), skip the addition (M20 fix).
 - Modify: `crates/pattern_memory/src/lib.rs:17-37` — add `pub mod loro_sync;` between `jj` and `modes`.
 
 **Implementation:**
@@ -718,10 +718,17 @@ pub(crate) fn apply_block_external_edit(
     content: &[u8],
     path: &Path,
 ) -> Result<(), BridgeError> {
-    // Ported from cache.rs:841-1044 — one match arm per BlockSchema variant
-    // (Text, Map, Composite, List, Log, TaskList, Skill). String errors →
-    // BridgeError::Utf8 / Parse / Loro variants.
-    todo!("mechanical port from cache.rs:841-1044")
+    // BODY: port the existing per-schema match arms from
+    // crates/pattern_memory/src/cache.rs:841-1044. One arm per BlockSchema
+    // variant (Text, Map, Composite, List, Log, TaskList, Skill). String
+    // errors in the original become BridgeError::Utf8 / Parse / Loro variants
+    // here. The body is mechanical translation; do not ship a `todo!()` —
+    // implement fully in this task. (See phase 1 task 8 regression sweep.)
+    unimplemented!(
+        "TASK 6 IMPLEMENTOR: port cache.rs:841-1044 per-schema arms here. \
+         Do NOT leave this unimplemented!() in a commit — task 8 regression \
+         sweep verifies no `todo!`/`unimplemented!` lingers in pattern_memory."
+    )
 }
 ```
 
@@ -739,16 +746,20 @@ impl BlockFanoutRouter {
 
 impl EventRouter for BlockFanoutRouter {
     fn handle(&mut self, events: Vec<DebouncedEvent>) {
-        // Ported from fs/watcher.rs:144-244. Logic:
+        // BODY: port the existing ingest_loop from
+        // crates/pattern_memory/src/fs/watcher.rs:144-244. Steps:
         //   1. Filter events to Modify/Create.
         //   2. Filter paths via is_block_path (.md | .kdl | .jsonl).
         //   3. Extract block_id = path.file_stem().
         //   4. Look up subscriber; is_self_echo via mtime → skip if echo.
         //   5. Read file; validate format (parse as KDL/JSONL, or passthrough for MD).
         //   6. self.cache.apply_external_edit(block_id, content).
-        // is_block_path, block_id_from_path, is_self_echo helpers move here
-        // (or stay pub(crate) in fs/watcher.rs; task chooses one).
-        todo!("port from fs/watcher.rs:144-244")
+        // The is_block_path / block_id_from_path / is_self_echo helpers
+        // move here (or stay pub(crate) in fs/watcher.rs; task implementor
+        // picks one — both are fine, neither is a stub).
+        // Do NOT leave this unimplemented!() in a commit — task 8
+        // regression sweep verifies no `todo!`/`unimplemented!` lingers.
+        unimplemented!("TASK 6 IMPLEMENTOR: port the ingest_loop body here")
     }
 }
 ```
@@ -775,9 +786,7 @@ impl EventRouter for BlockFanoutRouter {
 - **Stays in `SyncWorker`/`SubscriberHandle`:** OS thread, WorkerConfig, SubscriberHandle (unchanged public fields), pause/resume signalling (quiesce machinery), heartbeat emission, FTS5 update via `update_block_preview`, reembed queue push, cancellation token check.
 - **Moves into `SyncedDoc<BlockSchemaBridge>`:** two-doc model, `last_written_mtime` + `last_written_hash`, `atomic_write` on local updates, schema-aware render (via bridge), schema-aware external-edit apply (via bridge), local-update subscription on memory_doc.
 
-The worker constructs its `SyncedDoc<BlockSchemaBridge>` at startup using `open_with_subscription` — the subscription comes from the mount's shared `DirWatcher<BlockFanoutRouter>`? **No** — blocks don't fit the PathFanoutRouter model because events are routed by block_id, not path. Blocks use `DirWatcher<BlockFanoutRouter>`, and the worker's `SyncedDoc` uses `open_standalone` on the block's per-file notify (wait — that double-watches).
-
-**Clean resolution:** the block subscriber's `SyncedDoc` does *not* own a watcher. `MountWatcher`'s `DirWatcher<BlockFanoutRouter>` receives events and calls `cache.apply_external_edit`, which now delegates to the appropriate `SyncedDoc`'s external-edit handler (exposed via a new method `SyncedDoc::apply_external_from_router(bytes)`). The local-update side (agent writes) continues to work via the `subscribe_local_update` hook wired inside SyncedDoc.
+**Watcher ownership for the block path:** the block subscriber's `SyncedDoc` does NOT own a watcher. The mount's single `DirWatcher<BlockFanoutRouter>` (replacement for the existing `MountWatcher`) is the sole filesystem watcher; it routes events by `block_id` (via stem lookup) to `cache.apply_external_edit`, which now delegates to the appropriate `SyncedDoc`'s external-edit handler (exposed via a new method `SyncedDoc::apply_external_from_router(bytes)`). The local-update side (agent writes propagating to disk) continues to work via the `subscribe_local_update` hook wired inside SyncedDoc. This avoids any double-watching: blocks are routed by `block_id` not exact path, so the BlockFanoutRouter owns path→block_id resolution; the SyncedDoc just handles bytes.
 
 Concretely, add to `SyncedDoc`:
 

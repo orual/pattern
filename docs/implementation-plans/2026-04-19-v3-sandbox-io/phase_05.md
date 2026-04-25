@@ -2,7 +2,7 @@
 
 **Goal:** Ship `HttpPort` as the first concrete `Port` impl (registered at runtime startup); write the end-to-end smoke test that exercises shell + file + port surfaces deterministically; finalize cleanup so only Spawn (Plan 3) and Mcp (Plan 4) handler stubs remain.
 
-**Architecture:** `HttpPort` lives in `crates/pattern_runtime/src/ports/http.rs` and uses `reqwest` (already a workspace dep, used by `pattern_core` and `pattern_mcp`). Methods: `configure` (set base URL / default headers / timeout), `get`, `post`, `put`, `delete`, `head`. No `subscribe` — `HttpPort::capabilities()` returns `subscribable: false`. The `library()` returns a Haskell `Pattern.Http` module with typed wrappers around the JSON payload format. **System reminder unification: not needed.** Phases 2/3/4 each use the canonical `adapter.record_pseudo_message` pipeline (the `Skills.Load` template) — there is no fragmentation to consolidate. Phase 5 dropped the originally-planned unification task. Smoke test at `crates/pattern_runtime/tests/sandbox_io_smoke.rs` runs the full `TidepoolSession` lifecycle exercising all three subsystems; uses a mock provider (no live model dependency).
+**Architecture:** `HttpPort` lives in `crates/pattern_runtime/src/ports/http.rs` and uses `reqwest` (already a workspace dep, used by `pattern_core` and `pattern_mcp`). Methods: `configure` (set base URL / default headers / timeout), `get`, `post`, `put`, `delete`, `head`. No `subscribe` — `HttpPort::capabilities()` returns `subscribable: false`. The `library()` returns a Haskell `Pattern.Http` module with typed wrappers around the JSON payload format. **System reminder unification: not needed.** Phases 2/3/4 use the shared `SessionContext::async_reminder_queue` (Phase 2 introduces it) from the start; all three sources (FileEdit, ShellOutput, PortEvent) flow through the same buffer with their own top-level `MessageAttachment` variants. Phase 5 dropped the originally-planned unification task. Smoke test at `crates/pattern_runtime/tests/sandbox_io_smoke.rs` runs the full `TidepoolSession` lifecycle exercising all three subsystems; uses a mock provider (no live model dependency).
 
 **Tech Stack:** Rust async, `reqwest = "0.12"` (workspace), `wiremock` (test-only — already used by pattern_provider for HTTP-mocked tests, verify at execution time).
 
@@ -12,7 +12,7 @@
 - `reqwest` is a workspace dep at `Cargo.toml`. `pattern_core/Cargo.toml:38` and `pattern_mcp/Cargo.toml:35` consume it.
 - Test layout at `crates/pattern_runtime/tests/`: 16 existing integration tests; new `sandbox_io_smoke.rs` slots in.
 - `wiremock`: investigator did not confirm; verify with `grep wiremock crates/*/Cargo.toml` at execution time. If absent, **ask orual** before adding.
-- `MessageAttachment` plumbing (introduced by Phase 2): `compose_request_for_turn` in `crates/pattern_runtime/src/agent_loop.rs` already does the splice-on-first-user-message dance for `BatchOpeningSnapshot`. Phases 2-4 each add their own `drain_*` + splice block; Phase 5 collapses these into one helper.
+- Between-turn async-reminder buffer introduced by Phase 2: `SessionContext::async_reminder_queue: Arc<Mutex<Vec<MessageAttachment>>>` + `record_async_reminder(MessageAttachment)` accessor + compose-time drain in `agent_loop::compose_request_for_turn` that splices entries onto the next turn's first user message. Phases 2/3/4 each add one top-level `MessageAttachment` variant (`FileEdit`, `ShellOutput`, `PortEvent`) and one Segment2Pass render arm. Phase 5 has nothing to consolidate — all three sources flow through the single shared queue from the start.
 - Stubs remaining after Phases 1-4: `SpawnHandler` (Plan 3 — v3-multi-agent owns it) and `McpHandler` (Plan 4 — v3-extensibility owns it). Both stay as stubs.
 
 ---
@@ -21,7 +21,7 @@
 
 ### v3-sandbox-io.AC5: Integration and cleanup
 - **v3-sandbox-io.AC5.1 Success:** `HttpPort` registered as runtime-provided port; `Port.Call("http", "get", {url})` performs HTTP request and returns response
-- **v3-sandbox-io.AC5.2 Success:** System reminders from file watches, shell spawn output, and port subscriptions all appear in segment 2 of the agent's next turn — satisfied by Phases 2-4 each using the canonical `adapter.record_pseudo_message` → `TurnOutput::pseudo_messages` → `Segment2Pass::recent_pseudo_messages` pipeline. Phase 5's smoke test (Task 4) provides the cross-phase verification.
+- **v3-sandbox-io.AC5.2 Success:** System reminders from file watches, shell spawn output, and port subscriptions all appear in segment 2 of the agent's next turn — satisfied by Phases 2-4 each using the shared `SessionContext::async_reminder_queue` → compose-time drain → first-user-message-attachment → Segment2Pass render pipeline. Phase 5's smoke test (Task 4) provides the cross-phase verification.
 - **v3-sandbox-io.AC5.3 Success:** Smoke test at `crates/pattern_runtime/tests/sandbox_io_smoke.rs` passes deterministically: exercises shell execute, file open+write+external-edit+merge, port call+subscribe
 - **v3-sandbox-io.AC5.4 Success:** Sources handler stub and Rpc handler stub deleted; only Spawn (Plan 3) and Mcp (Plan 4) stubs remain
 - **v3-sandbox-io.AC5.5 Success:** `canonical_effect_decls()` updated for Shell, File, Port effects; removed Sources and Rpc declarations
@@ -36,7 +36,7 @@
 - **B (task 3): Cleanup — `canonical_effect_decls`, preamble, stub audit, CLAUDE.md refresh.**
 - **C (tasks 4-5): End-to-end smoke test + final regression sweep.**
 
-(Original layout had a separate "system reminder unification" subcomponent. Dropped — Phases 2/3/4 already use the canonical pseudo-message pipeline introduced via `adapter.record_pseudo_message`. No code-path consolidation needed.)
+(Original layout had a separate "system reminder unification" subcomponent. Dropped — Phases 2/3/4 use the shared `SessionContext::async_reminder_queue` from the start. No code-path consolidation needed.)
 
 ---
 
@@ -223,12 +223,45 @@ impl HttpPort {
         let headers: std::collections::BTreeMap<String, String> = response.headers().iter()
             .filter_map(|(k, v)| v.to_str().ok().map(|s| (k.to_string(), s.to_string())))
             .collect();
+
+        // Reject binary content (I15 fix). Sandboxed agents shouldn't pull
+        // arbitrary binaries into the loop — if they need binary data they
+        // can use Shell.Execute with curl + permission. text/* and
+        // application/json (+ a couple of well-known structured-text types)
+        // are accepted; everything else errors with a clear message.
+        let content_type = headers.get("content-type")
+            .map(|s| s.as_str()).unwrap_or("");
+        if !is_text_content_type(content_type) {
+            return Err(PortError::CallFailed(
+                self.id.clone(),
+                format!(
+                    "non-text response Content-Type: {content_type}. \
+                     HttpPort returns text-only bodies; for binary content \
+                     use Shell.Execute with curl after appropriate permission."
+                ),
+            ));
+        }
+
         let body = response.text().await
             .map_err(|e| PortError::CallFailed(self.id.clone(), e.to_string()))?;
         let resp = ResponsePayload { status, headers, body };
         serde_json::to_value(&resp)
             .map_err(|e| PortError::CallFailed(self.id.clone(), e.to_string()))
     }
+}
+
+/// Allowlist of Content-Types HttpPort will return. Conservative — extend
+/// only when there's a concrete need.
+fn is_text_content_type(ct: &str) -> bool {
+    let main = ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    main.starts_with("text/")
+        || main == "application/json"
+        || main == "application/xml"
+        || main == "application/x-www-form-urlencoded"
+        || main == "application/javascript"
+        || main == "application/x-yaml"
+        || main == "application/yaml"
+        || main.is_empty() // some servers omit; allow with the body's bytes-as-utf8 fallback
 }
 ```
 
@@ -286,9 +319,13 @@ encode = TL.toStrict . TLE.decodeUtf8 . A.encode
 **Files:**
 - Modify: `crates/pattern_runtime/src/runtime.rs` — in `TidepoolRuntime::new`, after the `port_registry` is constructed, register `HttpPort`:
     ```rust
-    let _ = handle.block_on(port_registry.register(Arc::new(HttpPort::new())));
+    // Sync registration path — `register_sync` is just a DashMap insert,
+    // no runtime context needed. Avoids `Handle::block_on` from inside
+    // `TidepoolRuntime::new` (which is sync and may be called from a
+    // single-thread runtime where block_on deadlocks).
+    let _ = port_registry.register_sync(Arc::new(HttpPort::new()));
     ```
-    (`handle` is the runtime's tokio Handle established for ProcessManager in Phase 3 Task 5.)
+    (No `handle` needed here — registration is sync. The tokio Handle established in Phase 3 Task 5 is used by the dispatcher actor and the Phase 4 PortHandler dispatch path, not by boot-time registration.)
 
 **Note on capability gate:** registration happens unconditionally at runtime startup. Per-agent visibility is enforced at handler dispatch time via `cap.has_port(&port_id)` (Phase 4 Task 6). An agent without HTTP in its CapabilitySet sees the port absent from `Port.List` and gets `CapabilityDenied` on `Port.Call`.
 
@@ -352,10 +389,10 @@ encode = TL.toStrict . TLE.decodeUtf8 . A.encode
 3. **Step 1 — shell execute** — agent code calls `Shell.execute "echo hello"`; assert `ExecuteResult` with output `"hello\n"` + exit 0.
 4. **Step 2 — file open + write** — agent opens a file in the tempdir, writes content, asserts read back matches.
 5. **Step 3 — external edit** — test harness writes to the same file via `std::fs::write` from outside the agent. Wait for the SyncedDoc merge (condition-based, 5s deadline).
-6. **Step 4 — next turn shows file edit reminder** — agent's next turn `Segment2Pass::recent_pseudo_messages` (or equivalently `most_recent_pseudo_messages`) contains a message whose body references the file path.
-7. **Step 5 — shell spawn + output reminder** — agent calls `Shell.spawn "for i in 1 2 3; do echo line$i; sleep 0.05; done"`. Wait one turn boundary; assert `SystemReminder::ShellOutput` chunks contain "line1", "line2", "line3", and an `Exit` chunk.
+6. **Step 4 — next turn shows file edit reminder** — agent's next turn's first user message has an `attachments` entry of variant `MessageAttachment::FileEdit { path, .. }` matching the path; rendered Segment2Pass body contains the path substring.
+7. **Step 5 — shell spawn + output reminder** — agent calls `Shell.spawn "for i in 1 2 3; do echo line$i; sleep 0.05; done"`. Wait one turn boundary; assert the next turn's first user message has `MessageAttachment::ShellOutput { kind: ShellOutputKind::Output(text), .. }` entries matching `line1`/`line2`/`line3` plus an `Exit` entry.
 8. **Step 6 — port call** — agent calls `Port.call "mock" "ping" "{}"`. MockPort returns scripted response. Assert response shape.
-9. **Step 7 — port subscribe + event reminder** — agent calls `Port.subscribe "mock" "{}"`. Test harness pushes an event into MockPort. Wait one turn; assert `SystemReminder::PortEvent` with the right port_id.
+9. **Step 7 — port subscribe + event reminder** — agent calls `Port.subscribe "mock" "{}"`. Test harness pushes an event into MockPort. Wait one turn; assert the next turn's first user message has `MessageAttachment::PortEvent { port_id: "mock", payload, .. }` matching the pushed event.
 10. **Step 8 — capability denial** — agent (with `CapabilitySet` constructed without HTTP) calls `Port.call "http" "get" {url:"http://example.com"}`. Assert error contains "CapabilityDenied".
 11. **Step 9 — file policy denial** — agent writes to a path outside the policy allow list. Assert error contains "PermissionDenied" + names the rule.
 12. **Cleanup** — drop session; assert no leaked threads (verify cancel cascade works) by checking thread count delta is 0 after a brief wait.
@@ -363,7 +400,7 @@ encode = TL.toStrict . TLE.decodeUtf8 . A.encode
 **Each step uses a labeled assertion** so AC5.6 ("error identifies which step and which assertion") is satisfied:
 
 ```rust
-.with_context(|| format!("step 4: file edit reminder — expected at least one SystemReminder::FileEdit"))
+.with_context(|| format!("step 4: file edit reminder — expected at least one MessageAttachment::FileEdit on the next turn's first user message"))
 ```
 
 **Concurrency** (AC5.7): all paths use tempdirs; no shared `/tmp` paths; no shared globals. Run with `cargo nextest run --test-threads=4` to verify.
@@ -397,8 +434,8 @@ Plus:
 2. **Dead code audit:** `cargo clippy --all-features --all-targets -- -W dead_code` for `pattern_runtime` and `pattern_core`. Old Sources/Rpc references should be gone; any remaining `dead_code` warnings are real and need fixing.
 3. **Doc-test pass:** `cargo test --doc --workspace`. The Port doctest from Phase 4 Task 1 must pass. The DataStream / SourceManager doctests from `pattern_core/src/traits/` are gone; no stale references.
 4. **Test count:** record final `cargo nextest run --workspace` count. Plan 1 baseline was 646. Phase 1-5 add roughly: 8 (AC1) + 13 (AC2) + 10 (AC3) + 9 (AC4) + 1 smoke (AC5) + ~30 unit tests across phases = ~70 new. Final count should be in the 700-720 range. Numbers diverging dramatically signal silently-skipped tests; investigate.
-5. **Documentation refresh:**
-    - `crates/pattern_runtime/CLAUDE.md` — update the "canonical row" section + remove any Sources/Rpc references.
+5. **Documentation refresh verification** (M-NEW-2 — Task 3 already covered `crates/pattern_runtime/CLAUDE.md` "canonical row"; this step verifies the prior task's changes landed and adds the two CLAUDE.mds Task 3 didn't touch):
+    - Verify Task 3's `crates/pattern_runtime/CLAUDE.md` updates are consistent with the final SdkBundle ordering (no new edits expected here — read-only sanity check).
     - `crates/pattern_core/CLAUDE.md` — remove the data_source/source_manager mentions; add Port trait note.
     - `crates/pattern_memory/CLAUDE.md` — note the new `loro_sync` module and SyncedDoc/DirWatcher primitives if not already documented.
 
@@ -415,9 +452,9 @@ Plus:
 
 **Q1: `wiremock` for HttpPort tests.** Investigator did not confirm presence in workspace. If absent, **ask orual** before adding. Alternative: skip the over-the-wire test and rely on `wiremock`-equivalent unit tests for the `do_request` payload shape (deserialize the constructed `reqwest::Request` rather than sending it). Defaulted to ask first.
 
-**Q2 [resolved 2026-04-24]:** Originally proposed introducing then unifying three `MessageAttachment` variants. Updated: Phases 2/3/4 use the canonical `adapter.record_pseudo_message` pipeline (the `Skills.Load` template established by previous work), and there's nothing to unify. Phase 5's unification task removed.
+**Q2 [resolved 2026-04-24, revised 2026-04-24]:** First proposed introducing then unifying three plural `MessageAttachment` variants. Then briefly tried using a pseudo-message pipeline (which had been removed from the codebase between plan-write and review). Final: Phases 2/3/4 each ship one singular top-level variant (`FileEdit`, `ShellOutput`, `PortEvent`) flowing through the shared `SessionContext::async_reminder_queue` Phase 2 introduces. Nothing for Phase 5 to consolidate; original unification task removed.
 
-**Q3: HttpPort response body as `String` vs `Vec<u8>`.** Plan returns `body` as `String`. Binary responses (images, PDFs) get garbled or lossy-decoded. Defaults are sensible for typical agent use (text APIs); a `body_b64` alternative variant could be added later. Flag if reviewer wants the binary-safe variant in scope.
+**Q3 [resolved 2026-04-24]:** HttpPort errors on non-text Content-Type (`is_text_content_type` allowlist). Sandboxed agents shouldn't pull arbitrary binaries into the loop; they can use `Shell.Execute` with `curl` after appropriate permission for binary work. Allowlist deliberately conservative; extend only with concrete need.
 
 **Q4: HttpPort + auth.** Plan ships no built-in auth helpers. Bearer tokens, basic auth, etc. land via the agent passing headers manually. Defaulted to "agents handle auth via headers" — keeps the port simple. Future port impls (e.g., `OAuthPort` wrapping HttpPort) can layer auth. Flag if reviewer wants OAuth helpers in scope.
 
