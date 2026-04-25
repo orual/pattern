@@ -98,6 +98,7 @@ mod parity {
                 "Fork",
                 "Sibling",
                 "Stop",
+                "ForkOp",
             ],
         ),
         ("DiagnosticsReq", &["GetDiagnostics"]),
@@ -288,8 +289,9 @@ mod parity {
     fn spawn_req_variants() {
         use super::SpawnReq;
         use super::spawn::{
-            WireEphemeralConfig, WireForkConfig, WireForkIsolation, WireRelationshipKind,
-            WireSiblingConfig, WireSiblingPersona,
+            WireCapabilitySet, WireEphemeralConfig, WireForkConfig, WireForkIsolation,
+            WireForkOpKind, WirePersonaConfig, WireRelationshipKind, WireSiblingConfig,
+            WireSiblingPersona,
         };
         // Exhaustively construct every variant so a rename or added variant
         // forces a compile error or count mismatch. Empty payloads are fine —
@@ -313,13 +315,25 @@ mod parity {
             relationship: WireRelationshipKind::PeerWith,
             shared_blocks: Vec::new(),
         };
+        let persona_cfg = WirePersonaConfig {
+            name: String::new(),
+            system_prompt: String::new(),
+            capabilities: WireCapabilitySet {
+                categories: Vec::new(),
+                flags: Vec::new(),
+            },
+        };
         let _ = SpawnReq::Ephemeral(eph);
         let _ = SpawnReq::AwaitSpawn(String::new());
         let _ = SpawnReq::AwaitAll(Vec::<String>::new());
         let _ = SpawnReq::Fork(fork);
         let _ = SpawnReq::Sibling(sib);
         let _ = SpawnReq::Stop(String::new());
-        assert_eq!(count("SpawnReq"), 6);
+        // ForkOp: exercise all three operation variants.
+        let _ = SpawnReq::ForkOp(String::new(), WireForkOpKind::MergeBack);
+        let _ = SpawnReq::ForkOp(String::new(), WireForkOpKind::Discard);
+        let _ = SpawnReq::ForkOp(String::new(), WireForkOpKind::Promote(persona_cfg));
+        assert_eq!(count("SpawnReq"), 7);
     }
 
     #[test]

@@ -215,13 +215,63 @@ data SpawnAwaitOutcome
 --
 --   Phase 2: scaffold only; @forkHandleId@ and @forkHandleChildId@ are
 --   generated ids but no computation is running. Resolution helpers
---   (@awaitResult@, @mergeBack@, @discard@, @promote@) land in Phase 3.
+--   ('mergeBack', 'discardFork', 'promoteFork') landed in Phase 3 Task 8.3.
 --
 --   Mirrors @WireForkHandle@.
 data ForkHandle = ForkHandle
   { forkHandleId      :: SpawnId
   , forkHandleChildId :: SpawnId
   }
+
+-- | Operation to perform on a fork. Passed as the second argument to
+--   'ForkOp'.
+--
+--   Three resolution paths (no @AwaitResult@ — lightweight forks are
+--   memory snapshots, not running sessions; there is nothing to await):
+--
+--   * 'ForkOpMergeBack' — import the fork's CRDT state into the parent.
+--     The handle STAYS in the registry after merge so callers may merge
+--     multiple times or follow up with 'ForkOpDiscard'.
+--   * 'ForkOpDiscard'   — drop the fork without propagating. Handle is
+--     REMOVED from the registry.
+--   * 'ForkOpPromote'   — mint a draft persona from the fork's memory
+--     state. Handle is REMOVED. Requires @SpawnNewIdentities@ capability
+--     on the spawner's snapshot.
+--
+--   The @ForkOp@ constructor prefix mirrors the @Cat@\/@Flag@ convention:
+--   it prevents namespace collisions with other constructors imported in
+--   the same scope.
+--
+--   Mirrors @WireForkOpKind@ in
+--   @crates\/pattern_runtime\/src\/sdk\/requests\/spawn.rs@.
+data ForkOpKind
+  = ForkOpMergeBack
+    -- ^ Import the fork's CRDT state into the parent; handle stays in
+    --   registry.
+  | ForkOpDiscard
+    -- ^ Drop the fork without propagating; handle removed from registry.
+  | ForkOpPromote PersonaConfig
+    -- ^ Promote the fork to a draft persona; handle removed; requires
+    --   @SpawnNewIdentities@.
+
+-- | Result returned by 'ForkOp'. Each constructor corresponds to a
+--   distinct outcome:
+--
+--   * 'ForkOpUnit'        — @Discard@ succeeded; no payload.
+--   * 'ForkOpMergeReport' — @MergeBack@ succeeded; payload is an opaque
+--     text summary of the merge. Phase 7+ may add structured accessors.
+--   * 'ForkOpPersonaId'   — @Promote@ succeeded; payload is the new
+--     persona id (same shape as 'PersonaId').
+--
+--   Mirrors @WireForkOpResult@ in
+--   @crates\/pattern_runtime\/src\/sdk\/requests\/spawn.rs@.
+data ForkOpResult
+  = ForkOpUnit
+    -- ^ Returned by 'ForkOpDiscard'.
+  | ForkOpMergeReport Text
+    -- ^ Returned by 'ForkOpMergeBack'. Opaque text summary.
+  | ForkOpPersonaId PersonaId
+    -- ^ Returned by 'ForkOpPromote'. The newly-minted persona id.
 
 -- ── Effect algebra ────────────────────────────────────────────────────────────
 
@@ -233,6 +283,7 @@ data Spawn a where
   Fork       :: ForkConfig -> Spawn ForkHandle
   Sibling    :: SiblingConfig -> Spawn SiblingSpawn
   Stop       :: SpawnId -> Spawn ()
+  ForkOp     :: SpawnId -> ForkOpKind -> Spawn ForkOpResult
 
 -- ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -252,8 +303,8 @@ awaitSpawn sid = send (AwaitSpawn sid)
 awaitAll :: Member Spawn effs => [SpawnId] -> Eff effs [SpawnAwaitOutcome]
 awaitAll ids = send (AwaitAll ids)
 
--- | Spawn a fork. Returns a typed 'ForkHandle'; resolution helpers
---   land in Phase 3.
+-- | Spawn a fork. Returns a typed 'ForkHandle'; use 'mergeBack',
+--   'discardFork', or 'promoteFork' to resolve.
 fork :: Member Spawn effs => ForkConfig -> Eff effs ForkHandle
 fork cfg = send (Fork cfg)
 
@@ -264,3 +315,28 @@ sibling cfg = send (Sibling cfg)
 -- | Cancel an in-flight spawn by id. Idempotent.
 stop :: Member Spawn effs => SpawnId -> Eff effs ()
 stop sid = send (Stop sid)
+
+-- | Import the fork's CRDT state into the parent.
+--
+--   The fork handle STAYS in the registry after merge so callers may
+--   continue operating on it (e.g. merge again, then 'discardFork').
+--   Use 'forkHandleId' to obtain the 'SpawnId' from a 'ForkHandle'.
+mergeBack :: Member Spawn effs => SpawnId -> Eff effs ForkOpResult
+mergeBack fid = send (ForkOp fid ForkOpMergeBack)
+
+-- | Drop the fork without propagating its state to the parent.
+--
+--   The handle is REMOVED from the registry. The name @discardFork@
+--   avoids a collision with the @stop@ helper (which cancels in-flight
+--   ephemeral spawns, a distinct concept).
+discardFork :: Member Spawn effs => SpawnId -> Eff effs ForkOpResult
+discardFork fid = send (ForkOp fid ForkOpDiscard)
+
+-- | Promote the fork to a draft persona identity.
+--
+--   The handle is REMOVED from the registry. The spawner must hold the
+--   @SpawnNewIdentities@ capability flag or the handler returns a
+--   capability-denied error. The @PersonaId@ in the result can be used
+--   to reference the new draft in subsequent 'Sibling' spawn calls.
+promoteFork :: Member Spawn effs => SpawnId -> PersonaConfig -> Eff effs ForkOpResult
+promoteFork fid cfg = send (ForkOp fid (ForkOpPromote cfg))

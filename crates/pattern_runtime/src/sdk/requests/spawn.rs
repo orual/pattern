@@ -359,6 +359,15 @@ pub enum SpawnReq {
     /// Cancel an in-flight spawn by id. Idempotent.
     #[core(module = "Pattern.Spawn", name = "Stop")]
     Stop(String /* SpawnId */),
+
+    /// Resolve a fork by id. Carries the fork id and the operation to perform.
+    ///
+    /// This variant is NOT a GADT constructor on the Haskell side in the
+    /// traditional sense — on the Haskell side the GADT ctor is `ForkOp ::
+    /// SpawnId -> ForkOpKind -> Spawn ForkOpResult`. On the Rust side we
+    /// carry the id as a plain `String` and the op as a typed sum.
+    #[core(module = "Pattern.Spawn", name = "ForkOp")]
+    ForkOp(String /* fork_id */, WireForkOpKind),
 }
 
 // ── Return-direction wire types (Rust → Haskell, derive ToCore) ──────────────
@@ -443,6 +452,56 @@ pub enum WireSpawnAwaitOutcome {
     Ok(WireSpawnResult),
     #[core(module = "Pattern.Spawn", name = "SpawnFail")]
     Fail(String /* SpawnError display */),
+}
+
+// ── ForkOp wire types (Phase 3 Task 8.3) ────────────────────────────────────
+//
+// These types carry the Haskell→Rust direction for fork resolution ops
+// (`FromCore`) and the Rust→Haskell direction for results (`ToCore`).
+
+/// Wire mirror of the Haskell `ForkOpKind` sum. Incoming from Haskell.
+///
+/// The `ForkOp` prefix on constructors mirrors the Haskell naming convention
+/// — same rationale as `Cat*` for `EffectCategory` and `Flag*` for
+/// `CapabilityFlag`: avoids namespace clashes in the GADT constructor scope.
+///
+/// Three resolution paths (no `AwaitResult` — lightweight forks are memory
+/// snapshots, not running sessions; there is nothing to await):
+///
+/// - `MergeBack`: import the fork's CRDT state into the parent; handle STAYS
+///   in the registry so callers may merge again.
+/// - `Discard`: drop the fork without propagating; handle REMOVED from registry.
+/// - `Promote`: mint a draft persona from the fork; handle REMOVED from registry.
+///   Requires `SpawnNewIdentities` on the spawner's capability snapshot.
+#[derive(Debug, FromCore)]
+pub enum WireForkOpKind {
+    #[core(module = "Pattern.Spawn", name = "ForkOpMergeBack")]
+    MergeBack,
+    #[core(module = "Pattern.Spawn", name = "ForkOpDiscard")]
+    Discard,
+    #[core(module = "Pattern.Spawn", name = "ForkOpPromote")]
+    Promote(WirePersonaConfig),
+}
+
+/// Wire mirror of the Haskell `ForkOpResult` sum. Outgoing to Haskell.
+///
+/// Three variants matching the three resolution paths:
+///
+/// - `Unit`: returned by `Discard` (no meaningful payload).
+/// - `MergeReport`: returned by `MergeBack`; payload is a JSON-ish debug
+///   rendering of the merge report. Phase 7+ may add structured accessors.
+/// - `PersonaId`: returned by `Promote`; payload is the new persona id.
+#[derive(Debug, ToCore)]
+pub enum WireForkOpResult {
+    /// `Discard` returns unit.
+    #[core(module = "Pattern.Spawn", name = "ForkOpUnit")]
+    Unit,
+    /// `MergeBack` returns an opaque merge-report text.
+    #[core(module = "Pattern.Spawn", name = "ForkOpMergeReport")]
+    MergeReport(String),
+    /// `Promote` returns the new persona id.
+    #[core(module = "Pattern.Spawn", name = "ForkOpPersonaId")]
+    PersonaId(String),
 }
 
 impl From<Result<SpawnResult, crate::spawn::SpawnError>> for WireSpawnAwaitOutcome {

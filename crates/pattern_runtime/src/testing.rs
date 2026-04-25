@@ -27,6 +27,230 @@ use pattern_core::types::provider::{CompletionRequest, TokenCount};
 #[cfg(test)]
 pub use tidepool_testing::r#gen::standard_datacon_table;
 
+/// Build a [`tidepool_repr::DataConTable`] pre-populated with every
+/// `Pattern.Spawn` DataCon that the spawn handlers encode via `cx.respond(Wire*)`.
+///
+/// # Background
+///
+/// Production sessions populate the table from CBOR metadata produced by
+/// `tidepool-extract` during Haskell compilation. Tests that drive
+/// `SpawnHandler::handle` from `spawn_blocking` (without going through
+/// `compile_and_run`) get an empty table by default — `cx.respond` then
+/// fails with `Bridge error: Unknown DataCon qualified name: Pattern.Spawn.X`
+/// for every typed-record return.
+///
+/// This helper enumerates every `Wire*` type's `#[core(name = "...")]`
+/// attribute (hand-curated from `sdk/requests/spawn.rs`; drift is caught by
+/// [`populated_spawn_test_table_parity`] below) and inserts a matching
+/// `DataCon` into a fresh table that also includes the standard boxing
+/// constructors from `standard_datacon_table()`.
+///
+/// Use this in place of `DataConTable::new()` in any test that drives
+/// `SpawnHandler::handle` through `spawn_blocking`.
+///
+/// # Long-term migration
+///
+/// The hand-curated list here is the short-term fix. The proper long-term
+/// fix is a proc-macro upgrade in `tidepool-bridge-derive` that auto-emits
+/// a `register_in(table: &mut DataConTable)` method per `ToCore` type —
+/// eliminating the possibility of drift between this list and the actual
+/// wire types.
+///
+/// # DataCon id allocation
+///
+/// IDs start at 10_000 to avoid collisions with the standard-boxing
+/// constructors from `standard_datacon_table()` (which use low IDs).
+#[cfg(test)]
+pub fn populated_spawn_test_table() -> tidepool_repr::DataConTable {
+    use tidepool_repr::{DataCon, DataConId, SrcBang};
+
+    // Start from standard boxing constructors (I#, W#, (), Maybe, etc.)
+    let mut table = standard_datacon_table();
+
+    /// Insert a single DataCon with the given qualified name and arity.
+    fn insert(
+        table: &mut tidepool_repr::DataConTable,
+        id: u64,
+        name: &str,
+        tag: u32,
+        rep_arity: u32,
+        qualified: &str,
+    ) {
+        let bangs: Vec<SrcBang> = (0..rep_arity).map(|_| SrcBang::NoSrcBang).collect();
+        table.insert(DataCon {
+            id: DataConId(id),
+            name: name.to_string(),
+            tag,
+            rep_arity,
+            field_bangs: bangs,
+            qualified_name: Some(qualified.to_string()),
+        });
+    }
+
+    // ── Struct types (ToCore on structs → single constructor) ──────────────
+    //
+    // rep_arity = number of fields in the struct.
+
+    // WireForkHandle { fork_id: String, child_id: String }
+    insert(&mut table, 10_001, "ForkHandle", 1, 2, "Pattern.Spawn.ForkHandle");
+
+    // WireEphemeralSpawn { spawn_id: String, progress_log_label: String }
+    insert(&mut table, 10_002, "EphemeralSpawn", 1, 2, "Pattern.Spawn.EphemeralSpawn");
+
+    // WireSpawnResult { child_id, final_text, turns, terminated, progress_log_label }
+    insert(&mut table, 10_003, "SpawnResult", 1, 5, "Pattern.Spawn.SpawnResult");
+
+    // ── WireTerminationReason (unit enum variants) ──────────────────────────
+    //
+    // rep_arity = 0 for all (no fields).
+
+    insert(&mut table, 10_010, "TermEndTurn", 1, 0, "Pattern.Spawn.TermEndTurn");
+    insert(&mut table, 10_011, "TermToolUse", 2, 0, "Pattern.Spawn.TermToolUse");
+    insert(&mut table, 10_012, "TermMaxTurns", 3, 0, "Pattern.Spawn.TermMaxTurns");
+    insert(&mut table, 10_013, "TermTimeout", 4, 0, "Pattern.Spawn.TermTimeout");
+    insert(&mut table, 10_014, "TermCancelled", 5, 0, "Pattern.Spawn.TermCancelled");
+    insert(&mut table, 10_015, "TermError", 6, 0, "Pattern.Spawn.TermError");
+
+    // ── WireSpawnAwaitOutcome (sum type) ────────────────────────────────────
+
+    // SpawnOk(WireSpawnResult) → 1 field
+    insert(&mut table, 10_020, "SpawnOk", 1, 1, "Pattern.Spawn.SpawnOk");
+    // SpawnFail(String) → 1 field
+    insert(&mut table, 10_021, "SpawnFail", 2, 1, "Pattern.Spawn.SpawnFail");
+
+    // ── WireForkOpResult (sum type) ─────────────────────────────────────────
+
+    // ForkOpUnit → 0 fields
+    insert(&mut table, 10_030, "ForkOpUnit", 1, 0, "Pattern.Spawn.ForkOpUnit");
+    // ForkOpMergeReport(String) → 1 field
+    insert(&mut table, 10_031, "ForkOpMergeReport", 2, 1, "Pattern.Spawn.ForkOpMergeReport");
+    // ForkOpPersonaId(String) → 1 field
+    insert(&mut table, 10_032, "ForkOpPersonaId", 3, 1, "Pattern.Spawn.ForkOpPersonaId");
+
+    // ── WireSiblingSpawn (sum type) ─────────────────────────────────────────
+
+    // SiblingExistingActive(String) → 1 field
+    insert(
+        &mut table,
+        10_040,
+        "SiblingExistingActive",
+        1,
+        1,
+        "Pattern.Spawn.SiblingExistingActive",
+    );
+    // SiblingNewActive(String, String) → 2 fields
+    insert(
+        &mut table,
+        10_041,
+        "SiblingNewActive",
+        2,
+        2,
+        "Pattern.Spawn.SiblingNewActive",
+    );
+    // SiblingNewDraft(String, String) → 2 fields
+    insert(
+        &mut table,
+        10_042,
+        "SiblingNewDraft",
+        3,
+        2,
+        "Pattern.Spawn.SiblingNewDraft",
+    );
+
+    table
+}
+
+/// Parity test: every `Wire*` spawn type that derives `ToCore` must round-trip
+/// successfully when `to_value(&populated_spawn_test_table())` is called.
+///
+/// If a new `Wire*` type is added to `sdk/requests/spawn.rs` without updating
+/// `populated_spawn_test_table()`, this test will fail with a `BridgeError`.
+#[cfg(test)]
+#[test]
+fn populated_spawn_test_table_parity() {
+    use tidepool_bridge::ToCore;
+
+    use crate::sdk::requests::spawn::{
+        WireEphemeralSpawn, WireForkOpResult, WireSiblingSpawn, WireSpawnAwaitOutcome,
+        WireSpawnResult, WireTerminationReason,
+    };
+    use crate::spawn::WireForkHandle;
+    use crate::spawn::{SpawnResult, TerminationReason};
+
+    let table = populated_spawn_test_table();
+
+    // WireForkHandle
+    let fork_handle = WireForkHandle {
+        fork_id: "fork-1".to_string(),
+        child_id: "child-1".to_string(),
+    };
+    fork_handle
+        .to_value(&table)
+        .expect("WireForkHandle must encode with populated table");
+
+    // WireEphemeralSpawn
+    let ephemeral = WireEphemeralSpawn {
+        spawn_id: "spawn-1".to_string(),
+        progress_log_label: "log-1".to_string(),
+    };
+    ephemeral
+        .to_value(&table)
+        .expect("WireEphemeralSpawn must encode with populated table");
+
+    // WireTerminationReason (all variants)
+    for reason in [
+        WireTerminationReason::EndTurn,
+        WireTerminationReason::ToolUse,
+        WireTerminationReason::MaxTurns,
+        WireTerminationReason::Timeout,
+        WireTerminationReason::Cancelled,
+        WireTerminationReason::Error,
+    ] {
+        reason
+            .to_value(&table)
+            .expect("WireTerminationReason variant must encode");
+    }
+
+    // WireSpawnResult (requires WireTerminationReason)
+    let result = WireSpawnResult::from(SpawnResult::new("child-1", TerminationReason::EndTurn));
+    result
+        .to_value(&table)
+        .expect("WireSpawnResult must encode with populated table");
+
+    // WireSpawnAwaitOutcome (both variants)
+    WireSpawnAwaitOutcome::Ok(WireSpawnResult::from(SpawnResult::new(
+        "child-1",
+        TerminationReason::EndTurn,
+    )))
+    .to_value(&table)
+    .expect("WireSpawnAwaitOutcome::Ok must encode");
+    WireSpawnAwaitOutcome::Fail("error".to_string())
+        .to_value(&table)
+        .expect("WireSpawnAwaitOutcome::Fail must encode");
+
+    // WireForkOpResult (all variants)
+    WireForkOpResult::Unit
+        .to_value(&table)
+        .expect("ForkOpUnit must encode");
+    WireForkOpResult::MergeReport("report".to_string())
+        .to_value(&table)
+        .expect("ForkOpMergeReport must encode");
+    WireForkOpResult::PersonaId("persona".to_string())
+        .to_value(&table)
+        .expect("ForkOpPersonaId must encode");
+
+    // WireSiblingSpawn (all variants)
+    WireSiblingSpawn::ExistingActive("persona-1".to_string())
+        .to_value(&table)
+        .expect("SiblingExistingActive must encode");
+    WireSiblingSpawn::NewActive("p".to_string(), "path".to_string())
+        .to_value(&table)
+        .expect("SiblingNewActive must encode");
+    WireSiblingSpawn::NewDraft("p".to_string(), "path".to_string())
+        .to_value(&table)
+        .expect("SiblingNewDraft must encode");
+}
+
 /// Open a fresh in-memory [`pattern_db::ConstellationDb`] for test isolation.
 ///
 /// Each call creates a new SQLite in-memory database with all migrations

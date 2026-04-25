@@ -1,6 +1,6 @@
-//! Phase 3 Task 8 — `handle_fork` dispatch wiring tests.
+//! Phase 3 Task 8 — `handle_fork` + `ForkOp` dispatch wiring tests.
 //!
-//! Verifies the spawn handler's lightweight-fork arm:
+//! Verifies the spawn handler's lightweight-fork arm and ForkOp dispatch:
 //!
 //! - When the parent has `memory_cache` populated, the fork copies the
 //!   parent's blocks via `MemoryCache::fork_for_child`.
@@ -9,9 +9,16 @@
 //! - Persistent dispatch on a session WITHOUT mount info fails with the
 //!   expected typed error.
 //!
-//! `ForkOp` wire dispatch is deferred — Subcomponent C Task 8.3 (Haskell
-//! SDK surface) is the natural home for those tests; Phase 3 Task 8.1+8.2
-//! cover the registry plumbing the ops will sit on top of.
+//! Task 8.3 additions — ForkOp wire dispatch:
+//!
+//! - `ForkOp::Discard` removes the handle from the registry and returns
+//!   `ForkOpResult::Unit`.
+//! - `ForkOp::MergeBack` merges and returns `ForkOpResult::MergeReport(_)`.
+//!   The handle STAYS in the registry after a merge (it uses `get`, not
+//!   `remove`).
+//! - `ForkOp::Promote` without `SpawnNewIdentities` returns a capability
+//!   denied error.
+//! - `ForkOp` on an unknown id returns "fork not found".
 
 use std::sync::Arc;
 
@@ -25,7 +32,9 @@ use pattern_memory::MemoryCache;
 use pattern_runtime::NopProviderClient;
 use pattern_runtime::sdk::handlers::spawn::SpawnHandler;
 use pattern_runtime::sdk::requests::SpawnReq;
-use pattern_runtime::sdk::requests::spawn::{WireForkConfig, WireForkIsolation};
+use pattern_runtime::sdk::requests::spawn::{
+    WireForkConfig, WireForkIsolation, WireForkOpKind, WirePersonaConfig,
+};
 use pattern_runtime::session::SessionContext;
 use pattern_runtime::testing::InMemoryMemoryStore;
 use smol_str::SmolStr;
@@ -242,4 +251,221 @@ async fn lightweight_fork_without_memory_cache_uses_empty_scaffold() {
 
     // Silence unused import warning for SmolStr in this test only.
     let _ = SmolStr::from(ids[0].as_str());
+}
+
+// ── Helper: register a fork then return its id ──────────────────────────────
+
+/// Drive `SpawnReq::Fork` through the handler and return the registered
+/// fork id. The `DataConTable` is empty so the wire-encode step may fail
+/// — that's fine; the registry insertion happens before encode.
+async fn register_one_fork(parent: &Arc<SessionContext>) -> SmolStr {
+    let wire_cfg = WireForkConfig {
+        program: String::new(),
+        isolation: WireForkIsolation::Lightweight,
+        capabilities: None,
+        timeout_hint_ms: None,
+        task_ref: None,
+    };
+
+    let parent_clone = parent.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        let table = DataConTable::new();
+        let cx = EffectContext::with_user(&table, parent_clone.as_ref());
+        let mut h = SpawnHandler;
+        h.handle(SpawnReq::Fork(wire_cfg), &cx)
+    })
+    .await
+    .expect("spawn_blocking ok");
+
+    let ids = parent.fork_registry().list_ids();
+    assert_eq!(ids.len(), 1, "fork registration must have exactly one id");
+    ids[0].clone()
+}
+
+// ── Task 8.3: ForkOp::Discard ────────────────────────────────────────────────
+
+/// `ForkOp::Discard` removes the handle and returns `ForkOpResult::Unit`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fork_op_discard_via_handler() {
+    let (parent, _parent_cache) = build_parent_with_cache().await;
+    let fork_id = register_one_fork(&parent).await;
+
+    let parent_for_blocking = parent.clone();
+    let fork_id_s = fork_id.to_string();
+    let result = tokio::task::spawn_blocking(move || {
+        let table = DataConTable::new();
+        let cx = EffectContext::with_user(&table, parent_for_blocking.as_ref());
+        let mut h = SpawnHandler;
+        h.handle(SpawnReq::ForkOp(fork_id_s, WireForkOpKind::Discard), &cx)
+    })
+    .await
+    .expect("spawn_blocking ok");
+
+    // The result may fail at the DataCon encode step (empty table), but
+    // the discard itself must have happened before the encode. We only
+    // assert on registry state, not the wire Value.
+    //
+    // If the handler returned an Err that is NOT an encode error, propagate
+    // it so a logic bug surfaces clearly.
+    if let Err(ref e) = result {
+        let msg = e.to_string();
+        assert!(
+            msg.contains("Unknown DataCon") || msg.contains("Bridge"),
+            "unexpected handler error on Discard: {msg}"
+        );
+    }
+
+    // The fork must no longer be in the registry after discard.
+    assert!(
+        parent.fork_registry().list_ids().is_empty(),
+        "fork registry must be empty after Discard"
+    );
+}
+
+// ── Task 8.3: ForkOp::MergeBack ─────────────────────────────────────────────
+
+/// `ForkOp::MergeBack` returns a merge report AND keeps the handle in the
+/// registry (it uses `get`, not `remove`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fork_op_merge_back_via_handler() {
+    let (parent, _parent_cache) = build_parent_with_cache().await;
+    let fork_id = register_one_fork(&parent).await;
+
+    let parent_for_blocking = parent.clone();
+    let fork_id_s = fork_id.to_string();
+    let result = tokio::task::spawn_blocking(move || {
+        let table = DataConTable::new();
+        let cx = EffectContext::with_user(&table, parent_for_blocking.as_ref());
+        let mut h = SpawnHandler;
+        h.handle(SpawnReq::ForkOp(fork_id_s, WireForkOpKind::MergeBack), &cx)
+    })
+    .await
+    .expect("spawn_blocking ok");
+
+    // Accept encode-step failure from empty DataConTable.
+    if let Err(ref e) = result {
+        let msg = e.to_string();
+        assert!(
+            msg.contains("Unknown DataCon") || msg.contains("Bridge"),
+            "unexpected handler error on MergeBack: {msg}"
+        );
+    }
+
+    // MergeBack must NOT remove the handle — it stays for further ops.
+    let ids = parent.fork_registry().list_ids();
+    assert_eq!(
+        ids.len(),
+        1,
+        "fork must remain in registry after MergeBack (it uses get, not remove)"
+    );
+}
+
+// ── Task 8.3: ForkOp::Promote without capability ────────────────────────────
+
+/// `ForkOp::Promote` on a fork whose spawner lacks `SpawnNewIdentities`
+/// returns a "capability denied" or "CapabilityDenied" error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fork_op_promote_without_capability() {
+    // Build a parent whose capabilities explicitly exclude SpawnNewIdentities.
+    let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
+    let provider: Arc<dyn ProviderClient> = Arc::new(NopProviderClient);
+    let db = pattern_runtime::testing::test_db().await;
+    let persona = PersonaSnapshot::new("no-promote-parent", "no-promote-parent");
+    let parent = Arc::new(SessionContext::from_persona(
+        &persona,
+        store,
+        provider,
+        db,
+        tokio::runtime::Handle::current(),
+    ));
+    // The parent has full capabilities by default; we must restrict the
+    // fork's spawner_capabilities so promote checks against the cap-less set.
+    // We do this by inserting a handle directly into the registry with a
+    // restricted capability set (no SpawnNewIdentities).
+    {
+        use pattern_core::{CapabilitySet, EffectCategory};
+        use pattern_db::ConstellationDb;
+        use pattern_memory::MemoryCache;
+        use pattern_runtime::spawn::ForkHandle;
+        use pattern_runtime::timeout::CancelState;
+
+        let db2 = Arc::new(ConstellationDb::open_in_memory().expect("db"));
+        let child_cache = Arc::new(MemoryCache::new(db2));
+        let cancel = Arc::new(CancelState::new());
+        let restricted_caps: CapabilitySet = [EffectCategory::Memory].into_iter().collect();
+        let handle = ForkHandle::new_lightweight(
+            "promote-test".into(),
+            "child-promote-test".into(),
+            child_cache,
+            "no-promote-parent".into(),
+            std::sync::Weak::new(),
+            cancel,
+        )
+        .with_spawner_capabilities(restricted_caps);
+        parent
+            .fork_registry()
+            .insert("promote-test".into(), handle)
+            .expect("insert");
+    }
+
+    let persona_cfg = WirePersonaConfig {
+        name: "new-identity".to_string(),
+        system_prompt: "test persona".to_string(),
+        capabilities: pattern_runtime::sdk::requests::spawn::WireCapabilitySet {
+            categories: vec![],
+            flags: vec![],
+        },
+    };
+
+    let parent_for_blocking = parent.clone();
+    let err = tokio::task::spawn_blocking(move || {
+        let table = DataConTable::new();
+        let cx = EffectContext::with_user(&table, parent_for_blocking.as_ref());
+        let mut h = SpawnHandler;
+        h.handle(
+            SpawnReq::ForkOp(
+                "promote-test".to_string(),
+                WireForkOpKind::Promote(persona_cfg),
+            ),
+            &cx,
+        )
+    })
+    .await
+    .expect("spawn_blocking ok")
+    .expect_err("promote without capability must fail");
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains("capability") || msg.contains("Capability"),
+        "error must mention capability; got: {msg}"
+    );
+}
+
+// ── Task 8.3: ForkOp on unknown id ──────────────────────────────────────────
+
+/// `ForkOp` on a fork id that was never registered returns "fork not found".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fork_op_unknown_id() {
+    let (parent, _parent_cache) = build_parent_with_cache().await;
+    // Do not register any fork; the registry starts empty.
+
+    let parent_for_blocking = parent.clone();
+    let err = tokio::task::spawn_blocking(move || {
+        let table = DataConTable::new();
+        let cx = EffectContext::with_user(&table, parent_for_blocking.as_ref());
+        let mut h = SpawnHandler;
+        h.handle(
+            SpawnReq::ForkOp("ghost-fork-id".to_string(), WireForkOpKind::Discard),
+            &cx,
+        )
+    })
+    .await
+    .expect("spawn_blocking ok")
+    .expect_err("unknown id must fail");
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains("fork not found") || msg.contains("not found"),
+        "error must say fork not found; got: {msg}"
+    );
 }

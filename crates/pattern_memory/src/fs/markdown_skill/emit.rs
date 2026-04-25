@@ -185,14 +185,58 @@ fn float_to_yaml(f: f64) -> Yaml<'static> {
     }
 }
 
+/// Emit a string as a YAML node, forcing double-quoted style when the value
+/// would be misinterpreted as a non-string scalar by saphyr's parser.
+///
+/// saphyr 0.0.6's `need_quotes()` function in its emitter handles `0x`
+/// (hex-prefixed integers) but does NOT handle `0o` / `0O` (octal-prefixed
+/// integers). The parser however DOES recognise `0o...` as an octal integer
+/// (`Scalar::Integer`) when the scalar is unquoted. This mismatch causes a
+/// round-trip failure: emit writes `0o0` unquoted, parser reads it back as
+/// integer 0, breaking equality for keyword strings like `"0o0"`.
+///
+/// We work around the gap by forcing `DoubleQuoted` representation for any
+/// string that would be mis-read by the parser but not quoted by
+/// `need_quotes`. Specifically:
+/// - `0o…` / `0O…` — saphyr parses as octal integer.
+///
+/// `0x…` is already covered by saphyr's `need_quotes` so no special handling
+/// is needed for hex. Other ambiguous forms (plain integers, floats, booleans,
+/// `null`) are also already handled by saphyr's `need_quotes` — those reach
+/// the `Yaml::Value(Scalar::String)` branch just fine because the emitter
+/// adds quotes automatically.
+///
+/// For keywords and other agent-supplied data the cost is cosmetically
+/// double-quoted output for these corner cases, which is valid YAML and
+/// round-trips correctly.
 fn yaml_owned_string(s: String) -> Yaml<'static> {
-    Yaml::Value(Scalar::String(Cow::Owned(s)))
+    if string_needs_forced_quoting(&s) {
+        Yaml::Representation(Cow::Owned(s), ScalarStyle::DoubleQuoted, None)
+    } else {
+        Yaml::Value(Scalar::String(Cow::Owned(s)))
+    }
+}
+
+/// Returns `true` when a string must be emitted as a double-quoted YAML
+/// scalar to survive a saphyr parse round-trip.
+///
+/// This supplements saphyr's built-in `need_quotes` to cover the `0o`/`0O`
+/// octal prefix that `need_quotes` misses in saphyr 0.0.6.
+fn string_needs_forced_quoting(s: &str) -> bool {
+    // saphyr parses `0o...` and `0O...` as octal integers when unquoted.
+    // (saphyr's `need_quotes` already covers `0x...` / `0X...` for hex.)
+    let lower = s.to_ascii_lowercase();
+    lower.starts_with("0o")
 }
 
 /// Build a [`Yaml`] string node from a `'static` string slice, borrowing
 /// rather than cloning. Use this for the five fixed field-name keys
 /// (`name`, `trust_tier`, `description`, `keywords`, `hooks`) so their
 /// storage is zero-copy.
+///
+/// Keys are always safe ASCII identifiers that never trigger any scalar-
+/// reinterpretation by the YAML parser, so no forced-quoting check is
+/// needed here.
 fn yaml_borrowed_static(s: &'static str) -> Yaml<'static> {
     Yaml::Value(Scalar::String(Cow::Borrowed(s)))
 }
@@ -541,6 +585,42 @@ mod tests {
     }
 
     // endregion: string quoting edge cases
+
+    // region: octal-prefix quoting (C4)
+
+    /// C4: keyword strings that look like octal integer literals (`0o0`,
+    /// `0O777`) must round-trip correctly. saphyr's emitter `need_quotes()`
+    /// does not cover the `0o` prefix in version 0.0.6, so the emitter must
+    /// force double-quoting explicitly.
+    ///
+    /// The proptest regression seed for this case was:
+    ///   `keywords: ["0o0"]` → emitted bare → parsed as integer 0.
+    #[test]
+    fn octal_prefixed_keyword_survives_roundtrip() {
+        let meta = SkillMetadata {
+            name: "octal-test".to_string(),
+            trust_tier: SkillTrustTier::AdHoc,
+            description: None,
+            keywords: vec!["0o0".to_string(), "0O777".to_string(), "normal".to_string()],
+            hooks: serde_json::Value::Null,
+        };
+        let out = emit(&meta, &empty_extras(), "body\n").unwrap();
+
+        // The octal-looking keywords must be quoted in the output.
+        assert!(
+            out.contains("\"0o0\"") || out.contains("'0o0'"),
+            "0o0 must be quoted in emitted YAML; got:\n{out}"
+        );
+
+        let parsed = parse(out.as_bytes()).unwrap();
+        assert_eq!(
+            parsed.metadata.keywords,
+            vec!["0o0".to_string(), "0O777".to_string(), "normal".to_string()],
+            "octal-looking keywords must round-trip as strings"
+        );
+    }
+
+    // endregion: octal-prefix quoting (C4)
 
     // region: numeric edge cases (C2, C3)
 

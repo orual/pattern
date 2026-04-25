@@ -24,9 +24,11 @@ use pattern_core::types::ids::new_id;
 use crate::sdk::describe::{DescribeEffect, EffectDecl};
 use crate::sdk::requests::SpawnReq;
 use crate::sdk::requests::spawn::{
-    WireEphemeralSpawn, WireSiblingSpawn, WireSpawnAwaitOutcome, WireSpawnResult,
+    WireEphemeralSpawn, WireForkOpKind, WireForkOpResult, WireSiblingSpawn, WireSpawnAwaitOutcome,
+    WireSpawnResult,
 };
 use crate::session::SessionContext;
+use crate::spawn::ForkIsolationState;
 use crate::spawn::sibling::{SiblingExistingOutcome, spawn_sibling_existing, spawn_sibling_new};
 use crate::spawn::{
     ChildSessionHandle, SpawnError, SpawnKind, WireForkHandle, child_include_paths,
@@ -50,6 +52,7 @@ impl DescribeEffect for SpawnHandler {
                 "Fork       :: ForkConfig -> Spawn ForkHandle",
                 "Sibling    :: SiblingConfig -> Spawn SiblingSpawn",
                 "Stop       :: SpawnId -> Spawn ()",
+                "ForkOp     :: SpawnId -> ForkOpKind -> Spawn ForkOpResult",
             ],
             type_defs: &[
                 "type SpawnId   = Text",
@@ -61,6 +64,13 @@ impl DescribeEffect for SpawnHandler {
                 "data SpawnAwaitOutcome = SpawnOk SpawnResult | SpawnFail Text",
                 "data ForkHandle = ForkHandle { forkHandleId :: SpawnId, forkHandleChildId :: SpawnId }",
                 "data SiblingSpawn = SiblingExistingActive PersonaId | SiblingNewActive PersonaId Text | SiblingNewDraft PersonaId Text",
+                // Fork resolution types (Task 8.3). Three resolution paths:
+                // MergeBack (non-consuming, handle stays), Discard (consuming),
+                // Promote (consuming; requires SpawnNewIdentities capability).
+                // No AwaitResult — lightweight forks are memory snapshots, not
+                // running sessions; there is nothing to await.
+                "data ForkOpKind = ForkOpMergeBack | ForkOpDiscard | ForkOpPromote PersonaConfig",
+                "data ForkOpResult = ForkOpUnit | ForkOpMergeReport Text | ForkOpPersonaId PersonaId",
             ],
             helpers: &[
                 "ephemeral :: Member Spawn effs => EphemeralConfig -> Eff effs EphemeralSpawn\nephemeral cfg = send (Ephemeral cfg)",
@@ -69,6 +79,9 @@ impl DescribeEffect for SpawnHandler {
                 "fork :: Member Spawn effs => ForkConfig -> Eff effs ForkHandle\nfork cfg = send (Fork cfg)",
                 "sibling :: Member Spawn effs => SiblingConfig -> Eff effs SiblingSpawn\nsibling cfg = send (Sibling cfg)",
                 "stop :: Member Spawn effs => SpawnId -> Eff effs ()\nstop sid = send (Stop sid)",
+                "mergeBack :: Member Spawn effs => SpawnId -> Eff effs ForkOpResult\nmergeBack fid = send (ForkOp fid ForkOpMergeBack)",
+                "discardFork :: Member Spawn effs => SpawnId -> Eff effs ForkOpResult\ndiscardFork fid = send (ForkOp fid ForkOpDiscard)",
+                "promoteFork :: Member Spawn effs => SpawnId -> PersonaConfig -> Eff effs ForkOpResult\npromoteFork fid cfg = send (ForkOp fid (ForkOpPromote cfg))",
             ],
         }
     }
@@ -93,6 +106,7 @@ impl EffectHandler<SessionContext> for SpawnHandler {
             SpawnReq::Stop(id) => handle_stop(id, cx),
             SpawnReq::Fork(wire_cfg) => handle_fork(wire_cfg, cx),
             SpawnReq::Sibling(wire_cfg) => handle_sibling(wire_cfg, cx),
+            SpawnReq::ForkOp(id, op) => handle_fork_op(id, op, cx),
         }
     }
 }
@@ -234,6 +248,91 @@ fn handle_await_all(
 fn handle_stop(id: String, cx: &EffectContext<'_, SessionContext>) -> Result<Value, EffectError> {
     let _ = cx.user().spawn_registry().cancel_one(&SmolStr::from(id));
     cx.respond(())
+}
+
+/// Resolve a fork via one of the three operations: `MergeBack`, `Discard`,
+/// or `Promote`.
+///
+/// - `MergeBack` is non-consuming: the handle stays in the registry so the
+///   caller may continue operating on it (e.g. merge again, then discard).
+///   Internally it calls `ForkHandle::merge_back_lightweight` or
+///   `ForkHandle::merge_back_persistent` depending on isolation mode.
+///
+/// - `Discard` consumes the handle. The outer `Option` on `registry.remove`
+///   is "is the id known?"; the inner `Option` is "could we take ownership?"
+///   (it is `None` when another call still holds the `Arc<Mutex<ForkHandle>>`
+///   from a `get` call). We surface both cases as distinct errors rather than
+///   silently succeeding.
+///
+/// - `Promote` also consumes the handle and requires `SpawnNewIdentities` on
+///   the spawner's capability snapshot. It delegates to
+///   `ForkHandle::promote(cfg, drafts_dir)`.
+fn handle_fork_op(
+    id: String,
+    op: WireForkOpKind,
+    cx: &EffectContext<'_, SessionContext>,
+) -> Result<Value, EffectError> {
+    let registry = cx.user().fork_registry().clone();
+    let id: SmolStr = id.into();
+
+    match op {
+        WireForkOpKind::MergeBack => {
+            // Non-consuming path — `get` borrows the handle via the registry's
+            // Arc<Mutex>. The lock is dropped at end of this block.
+            let arc = registry
+                .get(&id)
+                .ok_or_else(|| EffectError::Handler(format!("fork not found: {id}")))?;
+            let handle = arc.lock();
+            let report = match &handle.isolation_state {
+                ForkIsolationState::Lightweight { .. } => handle.merge_back_lightweight(),
+                ForkIsolationState::Persistent { .. } => handle.merge_back_persistent(),
+            }
+            .map_err(|e| EffectError::Handler(e.to_string()))?;
+            cx.respond(WireForkOpResult::MergeReport(format!("{:?}", report)))
+        }
+
+        WireForkOpKind::Discard => {
+            // Consuming path — `remove` takes ownership of the inner ForkHandle.
+            // Outer None: fork id not known.
+            // Inner None: Arc is outstanding from a concurrent `get` call.
+            let handle = match registry.remove(&id) {
+                None => {
+                    return Err(EffectError::Handler(format!("fork not found: {id}")));
+                }
+                Some(None) => {
+                    return Err(EffectError::Handler(format!(
+                        "fork in use; cannot discard now: {id}"
+                    )));
+                }
+                Some(Some(h)) => h,
+            };
+            handle
+                .discard()
+                .map_err(|e| EffectError::Handler(e.to_string()))?;
+            cx.respond(WireForkOpResult::Unit)
+        }
+
+        WireForkOpKind::Promote(persona_cfg) => {
+            // Consuming path — same remove-pattern as Discard.
+            let handle = match registry.remove(&id) {
+                None => {
+                    return Err(EffectError::Handler(format!("fork not found: {id}")));
+                }
+                Some(None) => {
+                    return Err(EffectError::Handler(format!(
+                        "fork in use; cannot promote now: {id}"
+                    )));
+                }
+                Some(Some(h)) => h,
+            };
+            let cfg: pattern_core::spawn::PersonaConfig = persona_cfg.into();
+            let drafts_dir = cx.user().drafts_dir().to_owned();
+            let pid = handle
+                .promote(cfg, &drafts_dir)
+                .map_err(|e| EffectError::Handler(e.to_string()))?;
+            cx.respond(WireForkOpResult::PersonaId(pid.to_string()))
+        }
+    }
 }
 
 fn handle_fork(
@@ -519,7 +618,7 @@ mod tests {
     }
 
     #[test]
-    fn effect_decl_advertises_six_constructors_and_helpers() {
+    fn effect_decl_advertises_seven_constructors_and_helpers() {
         let decl = SpawnHandler::effect_decl();
         let names: Vec<&str> = decl
             .constructors
@@ -534,7 +633,8 @@ mod tests {
                 "AwaitAll",
                 "Fork",
                 "Sibling",
-                "Stop"
+                "Stop",
+                "ForkOp",
             ],
             "constructor list drift; update Pattern.Spawn.hs in lockstep"
         );
@@ -542,6 +642,8 @@ mod tests {
             !names.contains(&"Start"),
             "legacy `Start` constructor must be retired"
         );
+        // Each constructor must have a corresponding helper.
+        // ForkOp has three helpers (mergeBack, discardFork, promoteFork).
         for ctor in [
             "Ephemeral",
             "AwaitSpawn",
@@ -549,12 +651,29 @@ mod tests {
             "Fork",
             "Sibling",
             "Stop",
+            "ForkOp",
         ] {
             assert!(
                 decl.helpers.iter().any(|h| h.contains(ctor)),
                 "no helper references constructor {ctor}"
             );
         }
+        // Verify the three ForkOp-specific helpers exist and name the
+        // right operations.
+        let helper_text: Vec<&str> = decl.helpers.to_vec();
+        let joined = helper_text.join("\n");
+        assert!(
+            joined.contains("mergeBack"),
+            "mergeBack helper must be declared"
+        );
+        assert!(
+            joined.contains("discardFork"),
+            "discardFork helper must be declared"
+        );
+        assert!(
+            joined.contains("promoteFork"),
+            "promoteFork helper must be declared"
+        );
         // Silence dead-code warnings on the test fixtures imported above
         // for use by the integration test file.
         let _ = empty_ephemeral();
