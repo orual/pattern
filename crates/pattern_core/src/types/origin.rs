@@ -225,4 +225,16 @@ impl MessageOrigin {
         self.transport_hint = Some(transport_hint);
         self
     }
+
+    /// Whether this origin should short-circuit the permission gate.
+    ///
+    /// Partner-driven turns (the constellation owner directly addressing
+    /// an agent) bypass approval — they're acting as an authenticated
+    /// human-in-the-loop and don't need to gate themselves through the
+    /// broker. All other authorship classes (other humans in shared
+    /// channels, sibling agents, system-emitted messages) flow through
+    /// the normal `PolicySet` + `PermissionBroker` pipeline.
+    pub fn bypasses_permission_gate(&self) -> bool {
+        matches!(self.author, Author::Partner(_))
+    }
 }
