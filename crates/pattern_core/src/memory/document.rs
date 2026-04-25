@@ -195,6 +195,21 @@ impl StructuredDocument {
         self.metadata.agent_id = new_owner.to_string();
     }
 
+    /// Override the Loro peer ID used to author new operations on this document.
+    ///
+    /// Normally the Loro runtime assigns a random peer ID. This method allows
+    /// callers to set a deterministic value — useful for reproducible test
+    /// fixtures, migration tools, and scenarios where you need consistent
+    /// vector-clock ordering across multiple documents.
+    ///
+    /// Returns an error if the document already has uncommitted ops with a
+    /// different peer (see `loro::LoroDoc::set_peer_id`).
+    pub fn set_peer_id(&self, peer_id: u64) -> Result<(), DocumentError> {
+        self.doc
+            .set_peer_id(peer_id)
+            .map_err(|e| DocumentError::Other(e.to_string()))
+    }
+
     // ========== Metadata Accessors ==========
 
     /// Get the full block metadata.
