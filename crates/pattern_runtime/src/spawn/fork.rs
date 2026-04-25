@@ -657,11 +657,11 @@ impl ForkHandle {
             }
         };
 
-        // Mint the draft KDL. Phase 2's `RuntimeConfigWriter` is reused
-        // verbatim — the file format is identical to a sibling-new
-        // draft.
+        // Mint the draft KDL. Delegates to `sibling::mint_draft_kdl` —
+        // the same helper used by `spawn_sibling_new` — so the file
+        // format is identical and the persona loader ingests both shapes.
         let writer = RuntimeConfigWriter::new(drafts_dir.to_owned());
-        let kdl = mint_draft_kdl(&cfg);
+        let kdl = crate::spawn::sibling::mint_draft_kdl(&cfg);
         writer
             .write_draft(persona_id.as_str(), &kdl)
             .map_err(|e| ForkError::Document(format!("draft write: {e}")))?;
@@ -682,36 +682,6 @@ impl ForkHandle {
 
         Ok(persona_id)
     }
-}
-
-/// Render a minimal persona KDL fragment from a [`PersonaConfig`].
-///
-/// Mirrors the Phase 2 sibling-new draft format closely so the registry
-/// can ingest both shapes uniformly.
-fn mint_draft_kdl(cfg: &PersonaConfig) -> String {
-    let mut out = String::new();
-    out.push_str(&format!("name {:?}\n", cfg.name));
-    out.push_str(&format!("system_prompt {:?}\n", cfg.system_prompt));
-    // Capabilities: emit as a `capabilities { effects { ... } flags { ... } }`
-    // block. Empty sets emit empty braces (still parses).
-    out.push_str("capabilities {\n");
-    out.push_str("    effects {\n");
-    for cat in cfg.capabilities.iter_categories() {
-        // KDL persona loader matches on lowercased type_name (see
-        // `pattern_runtime::persona_loader`); lowercase them here.
-        out.push_str(&format!(
-            "        {}\n",
-            cat.type_name().to_ascii_lowercase()
-        ));
-    }
-    out.push_str("    }\n");
-    out.push_str("    flags {\n");
-    for flag in cfg.capabilities.iter_flags() {
-        out.push_str(&format!("        {}\n", flag.name()));
-    }
-    out.push_str("    }\n");
-    out.push_str("}\n");
-    out
 }
 
 // ── WireForkHandle ────────────────────────────────────────────────────────────

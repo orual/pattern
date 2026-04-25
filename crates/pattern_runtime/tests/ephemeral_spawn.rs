@@ -661,8 +661,8 @@ async fn persistent_fork_without_mount_info_returns_persistent_not_available() {
 /// handler arm correctly translates a `None` permit into the wire-level
 /// error, NOT just that the underlying semaphore saturates.
 ///
-/// Pattern matches `persistent_fork_stub_returns_phase_3_error` for the
-/// handler-via-`spawn_blocking` invocation shape.
+/// Follows the handler-via-`spawn_blocking` invocation shape used by fork
+/// dispatch tests (`fork_dispatch.rs`).
 ///
 /// Preflight-gated: requires `tidepool-extract` because the first two
 /// successful Ephemeral calls construct an `EvalWorker` per spawn.
