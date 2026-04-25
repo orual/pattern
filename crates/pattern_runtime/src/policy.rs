@@ -7,8 +7,10 @@
 //! this module owns the conservative baseline (`defaults`) and the
 //! Phase 1 Task 12 / Task 14 wiring that layers KDL on top.
 
+pub mod config_guard;
 pub mod defaults;
 
+pub use config_guard::{ConfigGuardVerdict, is_pattern_config_kdl};
 pub use defaults::rust_defaults;
 
 /// Error-message prefix used by handlers to flag a policy denial. Tests

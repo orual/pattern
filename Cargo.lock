@@ -6683,6 +6683,7 @@ dependencies = [
  "pattern-memory",
  "pattern-provider",
  "pattern-runtime",
+ "proptest",
  "regex",
  "rusqlite",
  "rustyline-async",
