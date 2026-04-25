@@ -1183,6 +1183,7 @@ impl TidepoolSession {
             cache_profile,
             worker,
             preamble,
+            None,
         )
         .await
     }

@@ -131,6 +131,12 @@ fn handle_ephemeral(
     let child_id: SmolStr = new_id();
     let progress_log_label: SmolStr = format!("spawn-log-{child_id}").into();
 
+    // Create the constellation-scoped progress-log block synchronously
+    // before the runner is spawned. The parent gets the label back as
+    // part of EphemeralSpawn and may read the block immediately.
+    crate::spawn::create_progress_log_block(child_ctx.adapter(), progress_log_label.as_str())
+        .map_err(|e| EffectError::Handler(e.to_string()))?;
+
     // Build the child's preamble from its restricted capability set.
     let child_caps_for_preamble = child_ctx
         .capabilities()

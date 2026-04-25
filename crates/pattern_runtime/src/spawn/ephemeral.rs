@@ -22,17 +22,23 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use jiff::{Span, Timestamp};
+use serde_json::json;
 use smol_str::SmolStr;
 use tempfile::TempDir;
 
+use pattern_core::traits::MemoryStore;
+use pattern_core::types::block::BlockCreate;
 use pattern_core::types::ids::{AgentId, BatchId, MessageId, new_id, new_snowflake_id};
+use pattern_core::types::memory_types::{
+    BlockSchema, CONSTELLATION_OWNER, LogEntrySchema, MemoryBlockType,
+};
 use pattern_core::types::message::Message;
 use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
-use pattern_core::types::turn::TurnInput;
+use pattern_core::types::turn::{TurnInput, TurnOutput};
 use pattern_core::{CapabilitySet, spawn::EphemeralConfig};
 
-use crate::agent_loop::{EvalWorker, drive_step};
-use crate::memory::TurnHistory;
+use crate::agent_loop::{EvalWorker, TurnObserver, drive_step};
+use crate::memory::{MemoryStoreAdapter, TurnHistory};
 use crate::session::SessionContext;
 use crate::spawn::{SpawnError, SpawnResult, TerminationReason};
 use crate::timeout::CancelState;
@@ -125,6 +131,107 @@ pub fn child_include_paths(parent: &SessionContext, lib_dir: Option<&TempDir>) -
     paths
 }
 
+/// Create the constellation-scoped progress-log block that an ephemeral
+/// writes per-turn entries to.
+///
+/// Owner is [`CONSTELLATION_OWNER`] so any agent in the constellation
+/// can read the block (no shared-blocks Phase 6 plumbing required).
+/// Schema is [`BlockSchema::Log`] with display_limit=50 and timestamp
+/// auto-fields enabled. Failures bubble up as
+/// [`SpawnError::Runtime`] — the spawn aborts before the runner starts
+/// because the parent expects the label to be live by the time the
+/// handler returns.
+pub fn create_progress_log_block(
+    adapter: &MemoryStoreAdapter,
+    label: &str,
+) -> Result<(), SpawnError> {
+    let schema = BlockSchema::Log {
+        display_limit: 50,
+        entry_schema: LogEntrySchema {
+            timestamp: true,
+            agent_id: false,
+            fields: vec![],
+        },
+    };
+    let create = BlockCreate::new(label.to_string(), MemoryBlockType::Working, schema)
+        .with_description(format!("Progress log for ephemeral spawn {label}"));
+    adapter
+        .create_block(CONSTELLATION_OWNER, create)
+        .map(|_| ())
+        .map_err(|e| SpawnError::Runtime(format!("create progress-log block: {e}")))
+}
+
+/// Build a per-turn observer hook for the child's [`drive_step`] loop
+/// that appends a structured Log entry to the spawn-log block on each
+/// completed wire turn.
+///
+/// Best-effort: any failure (block missing, mutex poisoned, append
+/// error) emits a `tracing::warn!` and is swallowed. Spawn must not
+/// fail just because progress logging stumbled.
+pub fn build_progress_log_observer(
+    adapter: Arc<MemoryStoreAdapter>,
+    label: SmolStr,
+) -> TurnObserver {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    let turn_counter = Arc::new(AtomicU32::new(0));
+    Arc::new(move |turn: &TurnOutput| {
+        let n = turn_counter
+            .fetch_add(1, Ordering::SeqCst)
+            .saturating_add(1);
+        let entry = build_progress_entry(n, turn);
+        match adapter.get_block(CONSTELLATION_OWNER, label.as_str()) {
+            Ok(Some(doc)) => {
+                if let Err(e) = doc.append_log_entry(entry, true) {
+                    tracing::warn!(
+                        log_block = %label,
+                        error = %e,
+                        "spawn progress-log append failed"
+                    );
+                }
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    log_block = %label,
+                    "spawn progress-log block missing at append time"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    log_block = %label,
+                    error = %e,
+                    "spawn progress-log block lookup failed"
+                );
+            }
+        }
+    })
+}
+
+/// Build a single progress-log entry's JSON shape from a turn output.
+/// On-disk we keep the full assistant text + tool-call payloads;
+/// display-time truncation is a future concern, not Phase 2 scope.
+fn build_progress_entry(turn_number: u32, turn: &TurnOutput) -> serde_json::Value {
+    let assistant_text: Option<String> = turn
+        .messages
+        .iter()
+        .find_map(|m| m.chat_message.content.joined_texts());
+    let tool_calls: Vec<serde_json::Value> = turn
+        .tool_calls
+        .iter()
+        .map(|tc| {
+            json!({
+                "tool": tc.fn_name,
+                "summary": tc.fn_arguments.to_string(),
+            })
+        })
+        .collect();
+    json!({
+        "turn_number": turn_number,
+        "assistant_text": assistant_text,
+        "tool_calls": tool_calls,
+        "stop_reason": format!("{:?}", turn.stop_reason),
+    })
+}
+
 /// Construct the initial [`TurnInput`] for the child from the optional
 /// caller prompt.
 ///
@@ -211,6 +318,14 @@ pub async fn run_ephemeral(
     // pattern_provider's compose surface.
     let cache_profile = pattern_provider::compose::CacheProfile::default_anthropic_subscriber();
 
+    // Build the per-turn observer that appends to the spawn-log block.
+    // Best-effort writes — failures get logged via tracing but never
+    // fail the spawn.
+    let observer: Option<TurnObserver> = Some(build_progress_log_observer(
+        child_ctx.adapter().clone(),
+        progress_log_label.clone(),
+    ));
+
     let drive_fut = drive_step(
         initial_input,
         child_ctx.clone(),
@@ -218,6 +333,7 @@ pub async fn run_ephemeral(
         cache_profile,
         &worker,
         &preamble,
+        observer,
     );
 
     let outcome = tokio::time::timeout(std_timeout, drive_fut).await;

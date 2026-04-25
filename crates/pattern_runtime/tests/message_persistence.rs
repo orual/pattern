@@ -117,6 +117,7 @@ async fn single_text_turn_persists_user_and_assistant_messages() {
         pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
         &NoOpDispatcher,
         "",
+        None,
     )
     .await
     .expect("drive_step should succeed");
@@ -199,6 +200,7 @@ async fn two_step_exchange_accumulates_messages_in_db() {
         pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
         &NoOpDispatcher,
         "",
+        None,
     )
     .await
     .expect("step 1 should succeed");
@@ -213,6 +215,7 @@ async fn two_step_exchange_accumulates_messages_in_db() {
         pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
         &NoOpDispatcher,
         "",
+        None,
     )
     .await
     .expect("step 2 should succeed");
@@ -297,6 +300,7 @@ async fn tool_use_turn_persists_assistant_and_tool_result_messages() {
         pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
         &SuccessDispatcher,
         "",
+        None,
     )
     .await
     .expect("drive_step should succeed");
@@ -361,6 +365,7 @@ async fn upsert_idempotency_does_not_duplicate_messages() {
         pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
         &NoOpDispatcher,
         "",
+        None,
     )
     .await
     .expect("step 1 should succeed");
@@ -379,6 +384,7 @@ async fn upsert_idempotency_does_not_duplicate_messages() {
         pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
         &NoOpDispatcher,
         "",
+        None,
     )
     .await
     .expect("step 2 should succeed");

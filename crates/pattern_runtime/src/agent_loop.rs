@@ -972,6 +972,15 @@ impl Drop for CurrentDispatchOriginGuard {
 /// `TurnOutput`.
 ///
 /// [`TurnHistory`]: crate::memory::TurnHistory
+/// Optional per-wire-turn observer hook.
+///
+/// Fires after each [`TurnOutput`] is recorded into the session's
+/// [`TurnHistory`]. The hook borrows the turn read-only — it must not
+/// mutate session state. Used by ephemeral spawn (Phase 2 Task 4) to
+/// write progress entries into a constellation-scoped Log block;
+/// production sessions pass `None`.
+pub type TurnObserver = std::sync::Arc<dyn Fn(&TurnOutput) + Send + Sync>;
+
 pub async fn drive_step(
     initial_input: TurnInput,
     ctx: Arc<SessionContext>,
@@ -979,6 +988,7 @@ pub async fn drive_step(
     cache_profile: CacheProfile,
     dispatcher: &dyn EvalDispatcher,
     preamble: &str,
+    on_turn: Option<TurnObserver>,
 ) -> Result<StepReply, RuntimeError> {
     let batch_id = initial_input.batch_id.clone();
     let agent_id = AgentId::from(ctx.agent_id());
@@ -1281,6 +1291,13 @@ pub async fn drive_step(
                 recorded_input.clone(),
                 turn.clone(),
             );
+        }
+
+        // Fire the optional per-turn observer. Borrowed read-only;
+        // hook must not mutate session state. Used by ephemeral spawn
+        // for progress-log block appends.
+        if let Some(hook) = on_turn.as_ref() {
+            hook(&turn);
         }
 
         // ---- Persist messages to pattern_db ----
@@ -2362,6 +2379,7 @@ mod tests {
             pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
             &dispatcher,
             "",
+            None,
         )
         .await
         .expect("drive_step should succeed");
@@ -2662,6 +2680,7 @@ mod tests {
             pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
             &dispatcher,
             "",
+            None,
         )
         .await
         .expect("drive_step should succeed even when tool errors");
@@ -2766,6 +2785,7 @@ mod tests {
             pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
             &dispatcher,
             "",
+            None,
         )
         .await
         .expect("drive_step should succeed");
@@ -2892,6 +2912,7 @@ mod tests {
             pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
             &dispatcher,
             "",
+            None,
         )
         .await
         .expect("drive_step should succeed");
@@ -3719,6 +3740,7 @@ mod tests {
             pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
             &dispatcher,
             "",
+            None,
         )
         .await
         .expect("drive_step should succeed");
@@ -3778,6 +3800,7 @@ mod tests {
             pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
             &dispatcher,
             "",
+            None,
         )
         .await
         .expect("drive_step should succeed");

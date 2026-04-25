@@ -130,6 +130,7 @@ async fn load_single_turn_restores_one_record() {
         pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
         &NoOpDispatcher,
         "",
+        None,
     )
     .await
     .expect("drive_step should succeed");
@@ -214,6 +215,7 @@ async fn load_tool_use_turn_restores_two_records() {
         pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
         &SuccessDispatcher,
         "",
+        None,
     )
     .await
     .expect("drive_step should succeed");
@@ -287,6 +289,7 @@ async fn load_preserves_active_messages_order() {
         pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
         &NoOpDispatcher,
         "",
+        None,
     )
     .await
     .expect("step 1 should succeed");
@@ -301,6 +304,7 @@ async fn load_preserves_active_messages_order() {
         pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
         &NoOpDispatcher,
         "",
+        None,
     )
     .await
     .expect("step 2 should succeed");
@@ -365,6 +369,7 @@ async fn load_excludes_archived_messages() {
         pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
         &NoOpDispatcher,
         "",
+        None,
     )
     .await
     .expect("step 1 should succeed");
@@ -378,6 +383,7 @@ async fn load_excludes_archived_messages() {
         pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
         &NoOpDispatcher,
         "",
+        None,
     )
     .await
     .expect("step 2 should succeed");

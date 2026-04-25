@@ -18,8 +18,8 @@ pub mod ephemeral;
 pub mod registry;
 
 pub use ephemeral::{
-    MAX_EPHEMERAL_TURNS, child_include_paths, compute_child_caps, run_ephemeral,
-    synthesize_program_lib,
+    MAX_EPHEMERAL_TURNS, build_progress_log_observer, child_include_paths, compute_child_caps,
+    create_progress_log_block, run_ephemeral, synthesize_program_lib,
 };
 pub use registry::{
     ChildSessionHandle, SpawnError, SpawnKind, SpawnRegistry, SpawnResult, TerminationReason,

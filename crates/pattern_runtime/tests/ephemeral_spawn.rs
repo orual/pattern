@@ -1,10 +1,16 @@
 //! Phase 2 Task 4 — ephemeral spawn integration tests.
 //!
-//! Covers AC3.2 (capability escalation rejection) and AC3.5 (concurrency
-//! limit enforcement) — the deterministic, non-LLM-driven slice. AC3.1
-//! (success path), AC3.3 (costume), and AC3.4 (timeout) are
-//! mock-provider tests that land in a follow-up alongside the
-//! progress-log block wiring.
+//! Covers AC3.1 (success path with mock-LLM), AC3.2 (capability
+//! escalation rejection), AC3.3 (costume + persona-identity
+//! preservation), and AC3.5 (concurrency limit enforcement) — plus the
+//! progress-log block creation + per-turn append wiring.
+//!
+//! AC3.4 (timeout) is deferred — testing it deterministically needs a
+//! hangable mock provider (the current `MockProviderClient` panics on
+//! exhausted scripts rather than blocking), and `tokio::time::pause()`
+//! interactions with the eval-worker thread are non-trivial. The
+//! timeout code path itself is exercised by the `tokio::time::timeout`
+//! wrapper in `run_ephemeral`; verifying it end-to-end is a follow-up.
 
 use std::sync::Arc;
 
@@ -14,14 +20,21 @@ use pattern_core::types::snapshot::PersonaSnapshot;
 use pattern_core::{CapabilityFlag, CapabilitySet, EffectCategory, spawn::EphemeralConfig};
 use pattern_runtime::NopProviderClient;
 use pattern_runtime::session::SessionContext;
-use pattern_runtime::testing::InMemoryMemoryStore;
+use pattern_runtime::testing::{InMemoryMemoryStore, MockProviderClient};
 
 async fn build_parent(
     parent_caps: Option<CapabilitySet>,
     spawn_limit: Option<usize>,
 ) -> Arc<SessionContext> {
+    build_parent_with_provider(parent_caps, spawn_limit, Arc::new(NopProviderClient)).await
+}
+
+async fn build_parent_with_provider(
+    parent_caps: Option<CapabilitySet>,
+    spawn_limit: Option<usize>,
+    provider: Arc<dyn ProviderClient>,
+) -> Arc<SessionContext> {
     let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
-    let provider: Arc<dyn ProviderClient> = Arc::new(NopProviderClient);
     let db = pattern_runtime::testing::test_db().await;
     let mut persona = PersonaSnapshot::new("ephemeral-parent", "ephemeral-parent");
     if let Some(caps) = parent_caps {
@@ -103,6 +116,31 @@ async fn capability_subset_is_accepted() {
     assert!(!child_caps.contains(EffectCategory::Shell));
 }
 
+/// Progress-log block creation succeeds against an empty in-memory store
+/// and is callable repeatedly with distinct labels.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_progress_log_block_creates_constellation_scoped_log() {
+    use pattern_core::traits::MemoryStore;
+    use pattern_core::types::memory_types::{BlockSchema, CONSTELLATION_OWNER};
+
+    let parent = build_parent(None, None).await;
+    let label = "spawn-log-test-progress";
+
+    pattern_runtime::spawn::create_progress_log_block(parent.adapter(), label).unwrap();
+
+    let block = parent
+        .adapter()
+        .get_block(CONSTELLATION_OWNER, label)
+        .unwrap()
+        .expect("block must exist after creation");
+    let metadata = block.metadata();
+    assert!(
+        matches!(metadata.schema, BlockSchema::Log { .. }),
+        "expected Log schema, got {:?}",
+        metadata.schema
+    );
+}
+
 /// AC3.5 — registry with limit=2 saturates at the third acquire.
 ///
 /// Verifies the dispatch-time gate: `try_acquire_ephemeral_slot` returns
@@ -126,4 +164,116 @@ async fn ephemeral_concurrency_limit_saturates() {
 
     // Slot freed; subsequent acquire succeeds.
     assert!(registry.try_acquire_ephemeral_slot().is_some());
+}
+
+/// AC3.3 — costume override threads into the child's system_prompt slot.
+///
+/// Verified via direct `fork_for_ephemeral` inspection — no LLM needed.
+/// AC3.3 also stipulates "persona identity remains the parent's in
+/// logs"; the child's `agent_id` matching the parent's confirms that.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn costume_overrides_system_prompt_and_preserves_persona_identity() {
+    let parent = build_parent(None, None).await;
+    let parent_agent_id = parent.agent_id().to_string();
+
+    let cfg = EphemeralConfig::new("").with_costume("be terse");
+    let caps = pattern_runtime::spawn::compute_child_caps(&parent, &cfg).unwrap();
+    let child = parent.fork_for_ephemeral(&cfg, caps, parent.include_paths().clone());
+
+    // Persona identity preserved (AC3.3 second clause).
+    assert_eq!(
+        child.agent_id(),
+        parent_agent_id,
+        "child must share parent's agent_id so logs attribute to the parent persona"
+    );
+    // Costume installed on the system_prompt slot. SessionContext
+    // doesn't expose system_prompt directly, but the child is
+    // distinguishable from the parent by capabilities being Some(set).
+    // For the prompt assertion we round-trip via Debug to verify the
+    // string is reachable.
+    let dbg = format!("{:?}", child);
+    assert!(
+        dbg.contains("be terse"),
+        "child SessionContext debug must contain costume; got: {dbg}"
+    );
+}
+
+/// AC3.1 — success path: ephemeral runs a single end-turn wire turn,
+/// returns a SpawnResult with `final_text = Some("ok")` and a populated
+/// progress-log block.
+///
+/// Mock provider scripts a single text-turn response, so no code-tool
+/// dispatch happens — the EvalWorker spawns but is never invoked, which
+/// means tidepool-extract is not strictly required for this test.
+/// `program` is empty (no helper synthesis); `prompt` is what the LLM
+/// "responds" to.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ephemeral_success_returns_final_text_and_logs_progress() {
+    if pattern_runtime::preflight::check().is_err() {
+        // Even though we don't dispatch the code tool, EvalWorker
+        // creation may fail without the harness in some configs.
+        // Skip cleanly on systems without it.
+        return;
+    }
+
+    let provider = Arc::new(MockProviderClient::with_turns(vec![
+        MockProviderClient::text_turn("ok"),
+    ]));
+    let parent = build_parent_with_provider(None, None, provider).await;
+
+    let cfg = EphemeralConfig::new("")
+        .with_prompt("Respond ok and stop.")
+        .with_timeout(jiff::Span::new().seconds(10));
+    let child_caps = pattern_runtime::spawn::compute_child_caps(&parent, &cfg).unwrap();
+    let child_includes = pattern_runtime::spawn::child_include_paths(&parent, None);
+    let child = parent.fork_for_ephemeral(&cfg, child_caps, Arc::new(child_includes.clone()));
+
+    let child_id: smol_str::SmolStr = pattern_core::types::ids::new_id();
+    let log_label: smol_str::SmolStr = format!("spawn-log-{child_id}").into();
+
+    pattern_runtime::spawn::create_progress_log_block(parent.adapter(), log_label.as_str())
+        .unwrap();
+
+    let preamble = pattern_runtime::sdk::preamble::build_for(
+        &child
+            .capabilities()
+            .cloned()
+            .unwrap_or_else(pattern_core::CapabilitySet::all),
+    );
+
+    let result = pattern_runtime::spawn::run_ephemeral(
+        child.clone(),
+        cfg,
+        child_id.clone(),
+        log_label.clone(),
+        child_includes,
+        preamble,
+        None,
+    )
+    .await
+    .expect("run_ephemeral must succeed for end-turn-only mock script");
+
+    assert_eq!(result.child_id, child_id);
+    assert_eq!(result.final_text.as_deref(), Some("ok"));
+    assert!(result.turns >= 1, "at least one wire turn should have run");
+    assert_eq!(
+        result.progress_log_label.as_deref(),
+        Some(log_label.as_str())
+    );
+
+    // Progress-log block should now contain at least one entry.
+    use pattern_core::traits::MemoryStore;
+    use pattern_core::types::memory_types::CONSTELLATION_OWNER;
+    let block = parent
+        .adapter()
+        .get_block(CONSTELLATION_OWNER, log_label.as_str())
+        .unwrap()
+        .expect("progress-log block must exist after run");
+    let entries = block.log_entries(None);
+    assert!(
+        !entries.is_empty(),
+        "progress-log block should have at least one entry appended; got {} entries, render={:?}",
+        entries.len(),
+        block.render()
+    );
 }
