@@ -282,6 +282,7 @@ fn merge_back_wrong_isolation_returns_error() {
             parent_agent_id: "test-parent".into(),
             cancel_state,
         },
+        spawner_capabilities: pattern_core::CapabilitySet::all(),
     };
 
     match handle.merge_back_lightweight() {

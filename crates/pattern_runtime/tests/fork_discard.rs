@@ -191,6 +191,7 @@ fn discard_persistent_synthetic_handle_surfaces_typed_error() {
             parent_agent_id: "test-parent".into(),
             cancel_state: cancel_state.clone(),
         },
+        spawner_capabilities: pattern_core::CapabilitySet::all(),
     };
 
     match handle.discard() {

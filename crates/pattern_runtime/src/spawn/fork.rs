@@ -25,15 +25,19 @@
 //! `ForkHandle` gained a richer `isolation_state` field in place of the
 //! plain placeholder ids. `check_promote_capability` is preserved.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
 
+use pattern_core::spawn::PersonaConfig;
+use pattern_core::types::ids::PersonaId;
+use pattern_core::{CapabilityFlag, CapabilitySet};
 use pattern_memory::MemoryCache;
 use pattern_memory::jj::JjAdapter;
 use smol_str::SmolStr;
 use tidepool_bridge_derive::ToCore;
 
 use crate::spawn::SpawnError;
+use crate::spawn::draft::RuntimeConfigWriter;
 use crate::timeout::CancelState;
 
 // ── ForkError ─────────────────────────────────────────────────────────────────
@@ -124,6 +128,16 @@ pub enum ForkError {
         /// Stringified source error from the jj adapter.
         message: String,
     },
+
+    /// `promote()` was called by a spawner that does not hold
+    /// [`pattern_core::CapabilityFlag::SpawnNewIdentities`].
+    ///
+    /// The check runs against the spawner's capability snapshot captured
+    /// at fork-construction time — not against the fork's own (possibly
+    /// narrower) capabilities. The authority to mint a new persona
+    /// identity belongs to the spawner.
+    #[error("promote() requires CapabilityFlag::SpawnNewIdentities; spawner does not hold it")]
+    CapabilityDenied,
 }
 
 // ── ForkIsolationState ────────────────────────────────────────────────────────
@@ -214,6 +228,17 @@ pub struct ForkHandle {
     pub child_id: SmolStr,
     /// Runtime isolation state: in-memory or persistent.
     pub isolation_state: ForkIsolationState,
+    /// Snapshot of the spawner's capability set at fork-construction
+    /// time.
+    ///
+    /// Consulted by [`ForkHandle::promote`] — the authority to mint a
+    /// new persona identity belongs to the spawner, not to the fork
+    /// (which may have been restricted to a narrower capability set).
+    /// Defaults to [`CapabilitySet::all`] when constructed via the
+    /// `new_lightweight` / `new_persistent` constructors; the spawn
+    /// handler overrides it via [`ForkHandle::with_spawner_capabilities`]
+    /// using the parent's live caps.
+    pub spawner_capabilities: CapabilitySet,
 }
 
 impl ForkHandle {
@@ -248,6 +273,7 @@ impl ForkHandle {
                 parent_agent_id,
                 cancel_state,
             },
+            spawner_capabilities: CapabilitySet::all(),
         }
     }
 
@@ -273,7 +299,21 @@ impl ForkHandle {
                 parent_agent_id,
                 cancel_state,
             },
+            spawner_capabilities: CapabilitySet::all(),
         }
+    }
+
+    /// Override the spawner-capability snapshot.
+    ///
+    /// The spawn handler calls this immediately after constructing the
+    /// handle to attach the live parent's capability set; tests that
+    /// care about capability gating may also call it explicitly. Test
+    /// fixtures that don't exercise [`ForkHandle::promote`] can omit
+    /// this and inherit the [`CapabilitySet::all`] default.
+    #[must_use]
+    pub fn with_spawner_capabilities(mut self, caps: CapabilitySet) -> Self {
+        self.spawner_capabilities = caps;
+        self
     }
 
     /// Import the fork's CRDT state back into the parent cache.
@@ -499,6 +539,126 @@ impl ForkHandle {
             }
         }
     }
+
+    /// Promote the fork into a new draft persona identity.
+    ///
+    /// Capability is checked against the spawner's snapshot — only a
+    /// spawner with [`CapabilityFlag::SpawnNewIdentities`] may mint a
+    /// new persona. The fork's current memory cache is extracted before
+    /// the handle is consumed; for `Persistent` forks the workspace's
+    /// outstanding writes are committed as a final revset prior to
+    /// extraction so the promoted persona starts from a clean state.
+    ///
+    /// On success the seed memory cache is currently dropped at the end
+    /// of this function — Phase 6's persona registry will attach it to
+    /// the draft entry. The intermediate state is logged via
+    /// [`tracing::info!`] with `seed_cache_present=true` so observability
+    /// captures the moment of promotion.
+    ///
+    /// Returns the [`PersonaId`] minted from `cfg.name`. The draft KDL
+    /// is written to `<drafts_dir>/<persona_id>.kdl` via
+    /// [`RuntimeConfigWriter`]; the writer creates the directory lazily.
+    ///
+    /// # Errors
+    ///
+    /// - [`ForkError::CapabilityDenied`] if the spawner snapshot lacks
+    ///   `SpawnNewIdentities`.
+    /// - [`ForkError::JjUnavailable`] / [`ForkError::JjOp`] if a
+    ///   persistent fork's final commit fails.
+    /// - [`ForkError::Document`] if the draft KDL write fails (the
+    ///   draft writer's I/O error is wrapped here for uniform reporting).
+    pub fn promote(self, cfg: PersonaConfig, drafts_dir: &Path) -> Result<PersonaId, ForkError> {
+        if !self.spawner_capabilities.has_flag(CapabilityFlag::SpawnNewIdentities) {
+            return Err(ForkError::CapabilityDenied);
+        }
+
+        let persona_id: PersonaId = SmolStr::from(cfg.name.clone());
+
+        // Extract the fork's memory state. For Persistent, commit any
+        // outstanding workspace writes first so the promoted persona
+        // can later inherit a clean revset. We do NOT delete the
+        // bookmark — the promoted persona is expected to inherit it
+        // (Phase 6 wires the inheritance).
+        let seed_cache: Arc<MemoryCache> = match self.isolation_state {
+            ForkIsolationState::Lightweight { child_cache, .. } => child_cache,
+            ForkIsolationState::Persistent {
+                child_cache,
+                workspace_path,
+                bookmark_name,
+                ..
+            } => {
+                let adapter = JjAdapter::detect()
+                    .map_err(|e| ForkError::JjOp {
+                        message: e.to_string(),
+                    })?
+                    .ok_or(ForkError::JjUnavailable)?;
+                adapter
+                    .commit(
+                        &workspace_path,
+                        &format!("fork promote: {persona_id} (bookmark {bookmark_name})"),
+                    )
+                    .map_err(|e| ForkError::JjOp {
+                        message: e.to_string(),
+                    })?;
+                child_cache
+            }
+        };
+
+        // Mint the draft KDL. Phase 2's `RuntimeConfigWriter` is reused
+        // verbatim — the file format is identical to a sibling-new
+        // draft.
+        let writer = RuntimeConfigWriter::new(drafts_dir.to_owned());
+        let kdl = mint_draft_kdl(&cfg);
+        writer
+            .write_draft(persona_id.as_str(), &kdl)
+            .map_err(|e| ForkError::Document(format!("draft write: {e}")))?;
+
+        tracing::info!(
+            persona_id = %persona_id,
+            source = "runtime.spawn.fork.promote",
+            seed_cache_present = true,
+            "fork promoted to draft persona"
+        );
+
+        // Phase 3 contract: the seed cache exists for the lifetime of
+        // this call. Phase 6's registry will attach it to the draft
+        // entry; the binding here keeps it alive until function exit
+        // so any in-flight subscribers tied to the cache see consistent
+        // state through the promotion event.
+        let _ = seed_cache;
+
+        Ok(persona_id)
+    }
+}
+
+/// Render a minimal persona KDL fragment from a [`PersonaConfig`].
+///
+/// Mirrors the Phase 2 sibling-new draft format closely so the registry
+/// can ingest both shapes uniformly.
+fn mint_draft_kdl(cfg: &PersonaConfig) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("name {:?}\n", cfg.name));
+    out.push_str(&format!("system_prompt {:?}\n", cfg.system_prompt));
+    // Capabilities: emit as a `capabilities { effects { ... } flags { ... } }`
+    // block. Empty sets emit empty braces (still parses).
+    out.push_str("capabilities {\n");
+    out.push_str("    effects {\n");
+    for cat in cfg.capabilities.iter_categories() {
+        // KDL persona loader matches on lowercased type_name (see
+        // `pattern_runtime::persona_loader`); lowercase them here.
+        out.push_str(&format!(
+            "        {}\n",
+            cat.type_name().to_ascii_lowercase()
+        ));
+    }
+    out.push_str("    }\n");
+    out.push_str("    flags {\n");
+    for flag in cfg.capabilities.iter_flags() {
+        out.push_str(&format!("        {}\n", flag.name()));
+    }
+    out.push_str("    }\n");
+    out.push_str("}\n");
+    out
 }
 
 // ── WireForkHandle ────────────────────────────────────────────────────────────
@@ -643,6 +803,7 @@ mod tests {
             ForkError::JjOp {
                 message: "boom".into(),
             },
+            ForkError::CapabilityDenied,
         ];
         for err in cases {
             let msg = err.to_string();

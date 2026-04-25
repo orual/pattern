@@ -82,6 +82,7 @@ fn merge_back_persistent_synthetic_surfaces_typed_error() {
             parent_agent_id: "parent".into(),
             cancel_state: cancel,
         },
+        spawner_capabilities: pattern_core::CapabilitySet::all(),
     };
     match handle.merge_back_persistent() {
         Err(ForkError::ParentDropped)
