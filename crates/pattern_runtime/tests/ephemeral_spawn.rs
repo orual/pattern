@@ -606,14 +606,18 @@ async fn ac3_4_timeout_fires_cancel_and_returns_timeout_error() {
     );
 }
 
-/// Important #1 — `WireForkIsolation::Persistent` returns an error whose
-/// message contains "Phase 3" verbatim.
+/// `WireForkIsolation::Persistent` on a session without `MountInfo`
+/// returns `ForkError::PersistentNotAvailable` with a message naming
+/// the missing mount-info wiring.
 ///
-/// The `ForkIsolation::Persistent` path is explicitly deferred to Phase 3.
-/// The handler must surface a clear diagnostic rather than silently
-/// succeeding or returning an opaque error.
+/// In Phase 2 this returned a "Phase 3" placeholder error; Phase 3 Task
+/// 8 wired the persistent dispatch. Daemon callers populate `MountInfo`
+/// via `SessionContext::with_mount_info`. Sessions constructed via
+/// `from_persona` directly (test paths) do not have a mount, so the
+/// path should fail closed with a clear diagnostic rather than silently
+/// succeeding.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn persistent_fork_stub_returns_phase_3_error() {
+async fn persistent_fork_without_mount_info_returns_persistent_not_available() {
     use pattern_runtime::sdk::handlers::spawn::SpawnHandler;
     use pattern_runtime::sdk::requests::SpawnReq;
     use pattern_runtime::sdk::requests::spawn::{WireForkConfig, WireForkIsolation};
@@ -639,12 +643,12 @@ async fn persistent_fork_stub_returns_phase_3_error() {
     })
     .await
     .expect("spawn_blocking should not panic")
-    .expect_err("Persistent fork must return an error in Phase 2");
+    .expect_err("Persistent fork on mountless session must return an error");
 
     let msg = err.to_string();
     assert!(
-        msg.contains("Phase 3"),
-        "error message must contain 'Phase 3'; got: {msg}"
+        msg.contains("persistent fork not available") && msg.contains("no mount info"),
+        "error must surface PersistentNotAvailable with mount-info diagnostic; got: {msg}"
     );
 }
 

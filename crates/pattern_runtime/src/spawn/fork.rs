@@ -129,6 +129,19 @@ pub enum ForkError {
         message: String,
     },
 
+    /// A fork id collision was detected when inserting into the
+    /// [`crate::spawn::fork_registry::ForkRegistry`].
+    ///
+    /// Only happens if the id-minting layer produces a duplicate (which
+    /// it shouldn't — `pattern_core::types::ids::new_id` is UUID-backed)
+    /// or if a caller passes a hand-crafted id. Callers that hit this
+    /// must remove the existing entry before retrying.
+    #[error("fork id already registered: {fork_id}")]
+    AlreadyExists {
+        /// The duplicate id.
+        fork_id: String,
+    },
+
     /// `promote()` was called by a spawner that does not hold
     /// [`pattern_core::CapabilityFlag::SpawnNewIdentities`].
     ///
@@ -568,7 +581,10 @@ impl ForkHandle {
     /// - [`ForkError::Document`] if the draft KDL write fails (the
     ///   draft writer's I/O error is wrapped here for uniform reporting).
     pub fn promote(self, cfg: PersonaConfig, drafts_dir: &Path) -> Result<PersonaId, ForkError> {
-        if !self.spawner_capabilities.has_flag(CapabilityFlag::SpawnNewIdentities) {
+        if !self
+            .spawner_capabilities
+            .has_flag(CapabilityFlag::SpawnNewIdentities)
+        {
             return Err(ForkError::CapabilityDenied);
         }
 

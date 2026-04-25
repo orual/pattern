@@ -37,7 +37,11 @@ fn build_lightweight_fork(spawner_caps: CapabilitySet) -> ForkHandle {
 }
 
 fn sample_persona_cfg(name: &str) -> PersonaConfig {
-    PersonaConfig::new(name, "you are a fork-promoted draft", CapabilitySet::empty())
+    PersonaConfig::new(
+        name,
+        "you are a fork-promoted draft",
+        CapabilitySet::empty(),
+    )
 }
 
 /// AC4.7 — spawner with `SpawnNewIdentities` can promote a lightweight fork
@@ -55,7 +59,10 @@ fn promote_lightweight_with_flag_creates_draft() {
 
     assert_eq!(pid.as_str(), "teal-draft", "promote returns the cfg name");
     let kdl_path = drafts.path().join("teal-draft.kdl");
-    assert!(kdl_path.exists(), "draft KDL must be written at <drafts>/<id>.kdl");
+    assert!(
+        kdl_path.exists(),
+        "draft KDL must be written at <drafts>/<id>.kdl"
+    );
     let content = std::fs::read_to_string(&kdl_path).expect("read draft");
     assert!(
         content.contains("name \"teal-draft\""),
@@ -119,8 +126,7 @@ fn promote_persistent_synthetic_jj_error_or_unavailable() {
             parent_agent_id: "parent".into(),
             cancel_state: cancel,
         },
-        spawner_capabilities: CapabilitySet::all()
-            .with_flags([CapabilityFlag::SpawnNewIdentities]),
+        spawner_capabilities: CapabilitySet::all().with_flags([CapabilityFlag::SpawnNewIdentities]),
     };
 
     let drafts = tempfile::TempDir::new().expect("tempdir");

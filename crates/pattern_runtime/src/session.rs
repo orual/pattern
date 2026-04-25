@@ -28,7 +28,31 @@ use pattern_core::types::snapshot::{PersonaSnapshot, SessionSnapshot};
 use pattern_core::types::turn::{StepReply, TurnInput};
 
 use crate::agent_loop::EvalWorker;
-use crate::spawn::SpawnRegistry;
+use crate::spawn::{ForkRegistry, InMemoryForkRegistry, SpawnRegistry};
+
+/// Mount-level metadata describing where the session's memory lives on disk.
+///
+/// Populated by daemon callers that want to enable persistent forks; left
+/// `None` for sessions constructed via [`SessionContext::from_persona`]
+/// directly (test paths, in-memory-only scenarios). The persistent-fork
+/// path in `handle_fork` consults this to locate the jj repo root and
+/// workspace directory; without it, persistent forks fail with
+/// `ForkError::PersistentNotAvailable` and lightweight forks proceed
+/// against the in-memory cache only.
+#[derive(Debug, Clone)]
+pub struct MountInfo {
+    /// Repository root used for jj `workspace_add` / `bookmark_set`.
+    pub repo_root: std::path::PathBuf,
+    /// Root under which fork workspaces are created (typically
+    /// `<repo_root>/.pattern/workspaces` or similar).
+    pub workspace_root: std::path::PathBuf,
+    /// Storage mode of the mount (controls whether jj is required).
+    pub mode: pattern_memory::modes::StorageMode,
+    /// Whether jj is available + enabled for this mount. Even on
+    /// `InRepo` mode this may be `true` if the project opted into a
+    /// jj checkout.
+    pub jj_enabled: bool,
+}
 
 /// Compose the session's effective [`pattern_core::PolicySet`] from
 /// runtime defaults plus the persona's KDL-loaded rules.
@@ -236,6 +260,28 @@ pub struct SessionContext {
     /// `<XDG_DATA_HOME>/pattern/drafts` (falling back to `.pattern/drafts`
     /// relative to the current directory when `XDG_DATA_HOME` is unset).
     drafts_dir: std::path::PathBuf,
+    /// Per-session registry tracking outstanding fork handles.
+    ///
+    /// Forks created via `Spawn.fork` are inserted here so subsequent
+    /// `ForkOp` dispatches (`MergeBack`, `Discard`, `Promote`) can reach
+    /// them by id. The `Arc<dyn ForkRegistry>` indirection mirrors
+    /// [`Self::sibling_resolver`] — Phase 6 swaps the in-memory default
+    /// for a DB-backed registry.
+    fork_registry: Arc<dyn ForkRegistry>,
+    /// Concrete `Arc<MemoryCache>` for the parent's memory state.
+    ///
+    /// Populated by daemon paths that want lightweight forks to copy
+    /// the parent's actual block set; left `None` for the test path
+    /// where `from_persona` constructs the session against the
+    /// `MemoryStoreAdapter` only. When `None`, lightweight forks fall
+    /// back to an empty child cache; persistent forks return
+    /// `ForkError::PersistentNotAvailable`.
+    memory_cache: Option<Arc<pattern_memory::MemoryCache>>,
+    /// Mount metadata used by the persistent-fork path.
+    ///
+    /// Set via [`Self::with_mount_info`]; `None` means persistent forks
+    /// are not available on this session.
+    mount_info: Option<MountInfo>,
 }
 
 /// Handlers call this to decide whether to short-circuit on soft-cancel.
@@ -437,6 +483,9 @@ impl SessionContext {
             include_paths: Arc::new(Vec::new()),
             sibling_resolver: Arc::new(crate::spawn::sibling::UnconfiguredSiblingResolver),
             drafts_dir: default_drafts_dir(),
+            fork_registry: Arc::new(InMemoryForkRegistry::new()),
+            memory_cache: None,
+            mount_info: None,
         }
     }
 
@@ -475,6 +524,51 @@ impl SessionContext {
     #[must_use]
     pub fn with_drafts_dir(mut self, dir: std::path::PathBuf) -> Self {
         self.drafts_dir = dir;
+        self
+    }
+
+    /// Per-session fork registry. Read by the spawn handler when
+    /// inserting freshly-created forks and dispatching `ForkOp`s.
+    pub fn fork_registry(&self) -> &Arc<dyn ForkRegistry> {
+        &self.fork_registry
+    }
+
+    /// Builder-style: replace the fork registry. Phase 6 wires a
+    /// DB-backed implementation here; Phase 3 production paths use
+    /// the [`InMemoryForkRegistry`] default seeded by `from_persona`.
+    #[must_use]
+    pub fn with_fork_registry(mut self, registry: Arc<dyn ForkRegistry>) -> Self {
+        self.fork_registry = registry;
+        self
+    }
+
+    /// Concrete `Arc<MemoryCache>` for the parent's memory state.
+    ///
+    /// Populated only when the daemon (or test fixture) explicitly
+    /// wires it via [`Self::with_memory_cache`]. The lightweight-fork
+    /// path uses this to call `MemoryCache::fork_for_child`; without
+    /// it the fork starts from an empty child cache.
+    pub fn memory_cache(&self) -> Option<&Arc<pattern_memory::MemoryCache>> {
+        self.memory_cache.as_ref()
+    }
+
+    /// Builder-style: attach the parent's `Arc<MemoryCache>`.
+    #[must_use]
+    pub fn with_memory_cache(mut self, cache: Arc<pattern_memory::MemoryCache>) -> Self {
+        self.memory_cache = Some(cache);
+        self
+    }
+
+    /// Mount-level metadata for this session. `None` means no mount is
+    /// attached (persistent forks unavailable).
+    pub fn mount_info(&self) -> Option<&MountInfo> {
+        self.mount_info.as_ref()
+    }
+
+    /// Builder-style: attach mount metadata.
+    #[must_use]
+    pub fn with_mount_info(mut self, info: MountInfo) -> Self {
+        self.mount_info = Some(info);
         self
     }
 
@@ -615,6 +709,13 @@ impl SessionContext {
             // Inherit parent's drafts dir so ephemerals write to the same
             // location.
             drafts_dir: self.drafts_dir.clone(),
+            // Each child gets its own fork registry; forks scoped to the
+            // child's own session lifetime do not bleed up to the parent.
+            fork_registry: Arc::new(InMemoryForkRegistry::new()),
+            // Inherit parent's memory cache + mount info so children that
+            // use Spawn.fork can copy the same block set the parent holds.
+            memory_cache: self.memory_cache.clone(),
+            mount_info: self.mount_info.clone(),
         };
         Arc::new(child)
     }

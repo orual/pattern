@@ -17,6 +17,7 @@
 pub mod draft;
 pub mod ephemeral;
 pub mod fork;
+pub mod fork_registry;
 pub mod merge;
 pub mod registry;
 pub mod sibling;
@@ -28,6 +29,7 @@ pub use ephemeral::{
 pub use fork::{
     ForkError, ForkHandle, ForkIsolationState, WireForkHandle, check_promote_capability,
 };
+pub use fork_registry::{ForkRegistry, InMemoryForkRegistry};
 pub use merge::{ConflictSummary, MergeReport};
 pub use registry::{
     ChildSessionHandle, SpawnError, SpawnKind, SpawnRegistry, SpawnResult, TerminationReason,

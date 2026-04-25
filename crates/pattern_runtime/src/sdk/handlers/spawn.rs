@@ -252,68 +252,189 @@ fn handle_fork(
     }
     compute_child_caps(parent, &cap_check_cfg).map_err(|e| EffectError::Handler(e.to_string()))?;
 
-    match cfg.isolation {
+    let fork_id: smol_str::SmolStr = pattern_core::types::ids::new_id();
+    let child_id: smol_str::SmolStr = pattern_core::types::ids::new_id();
+    let parent_agent_id: smol_str::SmolStr = parent.agent_id().into();
+    let cancel_state = parent.cancel_state();
+    let spawner_caps = parent
+        .capabilities()
+        .cloned()
+        .unwrap_or_else(pattern_core::CapabilitySet::all);
+
+    let handle = match cfg.isolation {
         pattern_core::spawn::ForkIsolation::Lightweight => {
-            // Phase 3 scaffold (Task 1): the capability gate passes and the wire
-            // grammar returns a typed ForkHandle. The real LoroDoc::fork() path
-            // (fork parent's MemoryCache and spin up the child's EvalWorker) requires
-            // `Arc<MemoryCache>` to be reachable from `SessionContext`, which lands
-            // in Task 8 when `ForkRegistry` + `SessionContext::memory_cache()` are
-            // wired. Until then, the handler returns a valid ForkHandle with an empty
-            // child cache — callers that immediately call `merge_back` will get a
-            // no-op merge, and `discard` works correctly.
-            let fork_id: smol_str::SmolStr = pattern_core::types::ids::new_id();
-            let child_id: smol_str::SmolStr = pattern_core::types::ids::new_id();
-            let child_cache = {
-                // Empty child cache backed by a fresh in-memory DB — no blocks forked yet.
-                // Replaced in Task 8 by a real fork of the parent's MemoryCache.
+            // Production daemon paths populate `memory_cache` via
+            // `with_memory_cache`. Test paths that don't can still
+            // construct a fork; in that case we fall back to an empty
+            // child cache + dangling weak parent — `merge_back` becomes
+            // a no-op and `discard` works correctly. This preserves the
+            // ergonomics of the previous scaffold without losing the
+            // real-fork semantics for production callers.
+            let (child_cache, parent_weak) = if let Some(parent_cache) = parent.memory_cache() {
+                let forked = parent_cache
+                    .fork_for_child(parent_agent_id.as_str(), child_id.as_str())
+                    .map_err(|e| EffectError::Handler(e.to_string()))?;
+                (Arc::new(forked), Arc::downgrade(parent_cache))
+            } else {
                 let db = Arc::new(
                     pattern_db::ConstellationDb::open_in_memory()
                         .map_err(|e| EffectError::Handler(e.to_string()))?,
                 );
-                std::sync::Arc::new(pattern_memory::MemoryCache::new(db))
+                (
+                    Arc::new(pattern_memory::MemoryCache::new(db)),
+                    std::sync::Weak::new(),
+                )
             };
-            let parent_agent_id: smol_str::SmolStr = parent.agent_id().into();
-            let cancel_state = parent.cancel_state();
-            let handle = crate::spawn::ForkHandle::new_lightweight(
-                fork_id,
-                child_id,
+            crate::spawn::ForkHandle::new_lightweight(
+                fork_id.clone(),
+                child_id.clone(),
                 child_cache,
-                parent_agent_id,
-                // Weak::new() — dangling ref. Replaced in Task 8 once the parent's
-                // Arc<MemoryCache> is accessible from SessionContext.
-                std::sync::Weak::new(),
+                parent_agent_id.clone(),
+                parent_weak,
                 cancel_state,
-            );
-            let wire = WireForkHandle::from(&handle);
-            cx.respond(wire)
+            )
+            .with_spawner_capabilities(spawner_caps)
         }
-        pattern_core::spawn::ForkIsolation::Persistent => {
-            // Persistent fork dispatch (Phase 3 Tasks 4-6).
-            //
-            // The persistent path needs three things from the parent
-            // session that are not yet plumbed onto `SessionContext`:
-            //
-            // 1. `MountInfo` — repo_root, workspace_root, mode, jj_enabled.
-            // 2. `Arc<MemoryCache>` for the parent (for the child cache fork).
-            // 3. The mount config's `jj.enabled` flag.
-            //
-            // Until those land (parallel work, see plan T4 plumbing
-            // section), every persistent-fork request returns
-            // `PersistentNotAvailable`. The error type, fork-bookmark
-            // helper, `ForkHandle::new_persistent`, `merge_back_persistent`,
-            // and persistent `discard` ARE landed — Subcomponent C can use
-            // them once mount/cache plumbing is in place.
-            Err(EffectError::Handler(
-                crate::spawn::fork::ForkError::PersistentNotAvailable {
-                    mode: "session has no mount info wired (Phase 3 Subcomponent B \
-                           plumbing pending; see fork.rs)"
-                        .into(),
-                }
-                .to_string(),
-            ))
-        }
+        pattern_core::spawn::ForkIsolation::Persistent => handle_fork_persistent(
+            parent,
+            fork_id.clone(),
+            child_id.clone(),
+            parent_agent_id.clone(),
+            cancel_state,
+            spawner_caps,
+            cfg.task_ref.as_ref(),
+        )
+        .map_err(|e| EffectError::Handler(e.to_string()))?,
+    };
+
+    // Insert into the per-session ForkRegistry so subsequent ForkOps
+    // (`MergeBack`, `Discard`, `Promote`) can address the fork by id.
+    parent
+        .fork_registry()
+        .insert(fork_id.clone(), handle)
+        .map_err(|e| EffectError::Handler(e.to_string()))?;
+
+    let wire = WireForkHandle {
+        fork_id: fork_id.to_string(),
+        child_id: child_id.to_string(),
+    };
+    cx.respond(wire)
+}
+
+/// Build a persistent `ForkHandle`. Sequence:
+/// 1. Verify mount + memory_cache are wired and jj is available.
+/// 2. Compute the bookmark name and resolve the workspace path.
+/// 3. Pre-check for bookmark collision.
+/// 4. Run `workspace_add` + `bookmark_set`. Cleanup on failure.
+/// 5. Fork the parent's memory cache. Cleanup on failure.
+fn handle_fork_persistent(
+    parent: &SessionContext,
+    fork_id: SmolStr,
+    child_id: SmolStr,
+    parent_agent_id: SmolStr,
+    cancel_state: Arc<crate::timeout::CancelState>,
+    spawner_caps: pattern_core::CapabilitySet,
+    task_ref: Option<&pattern_core::BlockRef>,
+) -> Result<crate::spawn::ForkHandle, crate::spawn::fork::ForkError> {
+    use crate::spawn::fork::ForkError;
+    use pattern_memory::jj::JjAdapter;
+    use pattern_memory::jj::fork_bookmark::fork_bookmark_name;
+
+    let mount = parent
+        .mount_info()
+        .ok_or_else(|| ForkError::PersistentNotAvailable {
+            mode: "session has no mount info wired".into(),
+        })?;
+    if !mount.mode.requires_jj() && !mount.jj_enabled {
+        return Err(ForkError::PersistentNotAvailable {
+            mode: format!("{:?} mode without jj enabled", mount.mode),
+        });
     }
+    let parent_cache =
+        parent
+            .memory_cache()
+            .cloned()
+            .ok_or_else(|| ForkError::PersistentNotAvailable {
+                mode: "session has no memory_cache wired".into(),
+            })?;
+
+    let adapter = JjAdapter::detect()
+        .map_err(|e| ForkError::JjOp {
+            message: e.to_string(),
+        })?
+        .ok_or(ForkError::JjUnavailable)?;
+
+    let bookmark_name = fork_bookmark_name(&parent_agent_id, task_ref);
+
+    // Pre-check for bookmark conflicts before mutating the workspace.
+    let bookmarks = adapter
+        .bookmark_list(&mount.repo_root)
+        .map_err(|e| ForkError::JjOp {
+            message: format!("bookmark_list: {e}"),
+        })?;
+    if bookmarks.iter().any(|b| b.name == bookmark_name) {
+        return Err(ForkError::BookmarkConflict {
+            name: bookmark_name,
+        });
+    }
+
+    // Resolve workspace path. Mode-dependent; conservative default
+    // places fork workspaces under `<workspace_root>/workspaces/<bookmark>`.
+    // Bookmark names contain `/`, so flatten for filesystem use.
+    let safe_dir = bookmark_name.replace('/', "__");
+    let workspace_path = mount.workspace_root.join("workspaces").join(&safe_dir);
+    if let Some(parent_dir) = workspace_path.parent() {
+        std::fs::create_dir_all(parent_dir).map_err(|e| ForkError::JjOp {
+            message: format!("create_dir_all({parent_dir:?}): {e}"),
+        })?;
+    }
+
+    adapter
+        .workspace_add(&mount.repo_root, &workspace_path)
+        .map_err(|e| ForkError::JjOp {
+            message: format!("workspace_add: {e}"),
+        })?;
+
+    if let Err(e) = adapter.bookmark_set(&mount.repo_root, &bookmark_name, "@") {
+        // Cleanup: rollback the workspace_add.
+        let workspace_name = workspace_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        let _ = adapter.workspace_forget(&mount.repo_root, workspace_name);
+        return Err(ForkError::JjOp {
+            message: format!("bookmark_set: {e}"),
+        });
+    }
+
+    // Fork the parent's memory cache. Cleanup workspace + bookmark on
+    // failure so the session doesn't leak persistent state.
+    let child_cache = match parent_cache.fork_for_child(parent_agent_id.as_str(), child_id.as_str())
+    {
+        Ok(c) => Arc::new(c),
+        Err(e) => {
+            let workspace_name = workspace_path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            let _ = adapter.workspace_forget(&mount.repo_root, workspace_name);
+            let _ = adapter.bookmark_delete(&mount.repo_root, &bookmark_name);
+            return Err(ForkError::MemoryStore(e.to_string()));
+        }
+    };
+
+    Ok(crate::spawn::ForkHandle::new_persistent(
+        fork_id,
+        child_id,
+        workspace_path,
+        bookmark_name,
+        mount.repo_root.clone(),
+        child_cache,
+        parent_agent_id,
+        Arc::downgrade(&parent_cache),
+        cancel_state,
+    )
+    .with_spawner_capabilities(spawner_caps))
 }
 
 fn handle_sibling(
