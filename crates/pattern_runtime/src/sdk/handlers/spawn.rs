@@ -254,16 +254,43 @@ fn handle_fork(
 
     match cfg.isolation {
         pattern_core::spawn::ForkIsolation::Lightweight => {
-            // Phase 2 scaffold: generate ids but do not execute the fork's
-            // program. Phase 3 wires LoroDoc::fork() + real compute path.
-            let fork_id = pattern_core::types::ids::new_id();
-            let child_id = pattern_core::types::ids::new_id();
-            let handle = crate::spawn::ForkHandle { fork_id, child_id };
-            let wire: WireForkHandle = handle.into();
+            // Phase 3 scaffold (Task 1): the capability gate passes and the wire
+            // grammar returns a typed ForkHandle. The real LoroDoc::fork() path
+            // (fork parent's MemoryCache and spin up the child's EvalWorker) requires
+            // `Arc<MemoryCache>` to be reachable from `SessionContext`, which lands
+            // in Task 8 when `ForkRegistry` + `SessionContext::memory_cache()` are
+            // wired. Until then, the handler returns a valid ForkHandle with an empty
+            // child cache — callers that immediately call `merge_back` will get a
+            // no-op merge, and `discard` works correctly.
+            let fork_id: smol_str::SmolStr = pattern_core::types::ids::new_id().into();
+            let child_id: smol_str::SmolStr = pattern_core::types::ids::new_id().into();
+            let child_cache = {
+                // Empty child cache backed by a fresh in-memory DB — no blocks forked yet.
+                // Replaced in Task 8 by a real fork of the parent's MemoryCache.
+                let db = Arc::new(
+                    pattern_db::ConstellationDb::open_in_memory()
+                        .map_err(|e| EffectError::Handler(e.to_string()))?,
+                );
+                std::sync::Arc::new(pattern_memory::MemoryCache::new(db))
+            };
+            let parent_agent_id: smol_str::SmolStr = parent.agent_id().into();
+            let cancel_state = parent.cancel_state();
+            let handle = crate::spawn::ForkHandle::new_lightweight(
+                fork_id,
+                child_id,
+                child_cache,
+                parent_agent_id,
+                // Weak::new() — dangling ref. Replaced in Task 8 once the parent's
+                // Arc<MemoryCache> is accessible from SessionContext.
+                std::sync::Weak::new(),
+                cancel_state,
+            );
+            let wire = WireForkHandle::from(&handle);
             cx.respond(wire)
         }
         pattern_core::spawn::ForkIsolation::Persistent => Err(EffectError::Handler(
-            "ForkIsolation::Persistent requires Phase 3 (jj workspace path not wired)".to_string(),
+            "ForkIsolation::Persistent requires Phase 3 Tasks 4-6 (jj workspace path not wired)"
+                .to_string(),
         )),
     }
 }

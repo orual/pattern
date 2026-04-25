@@ -1297,6 +1297,143 @@ impl MemoryCache {
     }
 }
 
+impl MemoryCache {
+    // ========== Fork / isolation helpers ==========
+
+    /// Insert a pre-built `CachedBlock` directly into the cache map.
+    ///
+    /// `pub(crate)` — only used by [`fork_for_child`](Self::fork_for_child).
+    /// This bypasses the DB-backed load path intentionally: the forked doc
+    /// is not a DB row yet; it lives in memory until an explicit persist.
+    pub(crate) fn insert_cached_block(&self, block_id: String, block: CachedBlock) {
+        self.blocks.insert(block_id, block);
+    }
+
+    /// Return the number of blocks currently held in the in-memory cache.
+    ///
+    /// Useful for tests and diagnostics. Does not trigger DB access.
+    pub fn cached_block_count(&self) -> usize {
+        self.blocks.len()
+    }
+
+    /// Look up a cached block by the owning agent's ID and the block label,
+    /// returning a cloned `StructuredDocument` if the block is in memory.
+    ///
+    /// Unlike [`get`](Self::get), this does NOT consult the database — it
+    /// only scans the in-memory map. Returns `None` when:
+    /// - the block has not yet been loaded (cache miss), or
+    /// - no in-memory block matches both `agent_id` and `label`.
+    ///
+    /// Primarily used by the fork/merge path where a forked child cache holds
+    /// docs that have no corresponding DB row yet.
+    pub fn get_cached_doc(&self, agent_id: &str, label: &str) -> Option<StructuredDocument> {
+        for entry in self.blocks.iter() {
+            let cached = entry.value();
+            if cached.doc.agent_id() == agent_id && cached.doc.label() == label {
+                return Some(cached.doc.clone());
+            }
+        }
+        None
+    }
+
+    /// Return all in-memory cached documents as a snapshot.
+    ///
+    /// Returns a `Vec` of cloned `StructuredDocument` instances for every
+    /// block currently held in the in-memory map. Used by
+    /// `merge_back_lightweight` to walk the child's blocks without requiring a
+    /// DB round-trip.
+    ///
+    /// Cloning a `StructuredDocument` is cheap because `LoroDoc` is
+    /// internally reference-counted.
+    pub fn snapshot_cached_docs(&self) -> Vec<StructuredDocument> {
+        self.blocks
+            .iter()
+            .map(|entry| entry.value().doc.clone())
+            .collect()
+    }
+
+    /// Insert a block into the cache from a raw Loro snapshot byte slice.
+    ///
+    /// Used by `merge_back_lightweight` when the fork created a block that
+    /// does not yet exist on the parent side. The block is registered in the
+    /// in-memory map only — it becomes a DB row on the next `persist()` call.
+    ///
+    /// `agent_id` and `label` are used to reconstruct minimal metadata so the
+    /// block is retrievable via `get_cached_doc`.
+    pub fn insert_from_snapshot(
+        &self,
+        agent_id: &str,
+        label: String,
+        snapshot: Vec<u8>,
+    ) -> Result<(), MemoryError> {
+        use pattern_core::memory::StructuredDocument;
+        use pattern_core::types::memory_types::{BlockMetadata, BlockSchema, MemoryBlockType};
+        use uuid::Uuid;
+
+        let mut metadata = BlockMetadata::standalone(BlockSchema::text());
+        metadata.id = Uuid::new_v4().to_string();
+        metadata.agent_id = agent_id.to_string();
+        metadata.label = label;
+        metadata.block_type = MemoryBlockType::Working;
+
+        let doc = StructuredDocument::from_snapshot_with_metadata(&snapshot, metadata, None)
+            .map_err(|e| MemoryError::Other(e.to_string()))?;
+
+        let block_id = doc.id().to_string();
+        self.insert_cached_block(
+            block_id,
+            CachedBlock {
+                doc,
+                last_seq: 0,
+                last_persisted_frontier: None,
+                dirty: true,
+                last_accessed: Utc::now(),
+            },
+        );
+        Ok(())
+    }
+
+    /// Fork every block whose embedded `agent_id` matches `parent_agent`,
+    /// producing a new `MemoryCache` over the forked `LoroDoc` instances.
+    ///
+    /// Shared infrastructure (DB handle) is Arc-cloned cheaply. Foreign-owned
+    /// blocks (owned by agents other than `parent_agent`) are skipped — the
+    /// child cache contains only blocks the parent itself owns, retagged with
+    /// `child_agent` as the new owner.
+    ///
+    /// The child cache starts with `dirty = false` on all blocks because the
+    /// parent's pending in-memory writes have NOT been transferred — only the
+    /// committed CRDT state is forked. This is intentional: a fork is a
+    /// snapshot of the committed state, not a capture of in-flight edits.
+    pub fn fork_for_child(
+        &self,
+        parent_agent: &str,
+        child_agent: &str,
+    ) -> Result<MemoryCache, MemoryError> {
+        let child = MemoryCache::new(Arc::clone(&self.db));
+        for entry in self.blocks.iter() {
+            let (block_id, cached) = (entry.key().clone(), entry.value());
+            if cached.doc.agent_id() != parent_agent {
+                continue;
+            }
+            let mut forked_doc = cached.doc.fork();
+            forked_doc.retag_owner(child_agent);
+            child.insert_cached_block(
+                block_id,
+                CachedBlock {
+                    doc: forked_doc,
+                    last_seq: cached.last_seq,
+                    last_persisted_frontier: cached.last_persisted_frontier.clone(),
+                    // Fork starts clean — parent's pending writes do not transfer.
+                    dirty: false,
+                    last_accessed: Utc::now(),
+                },
+            );
+        }
+        Ok(child)
+    }
+}
+
 impl Drop for MemoryCache {
     fn drop(&mut self) {
         // Cancel the supervisor task when the cache is dropped.
@@ -4016,4 +4153,108 @@ mod tests {
     }
 
     // endregion: trust-tier override tests (C5-test)
+
+    // region: fork_for_child
+
+    /// `fork_for_child` forks only blocks owned by the parent agent, skipping
+    /// foreign-owned blocks, and retags ownership on the forked copies.
+    #[test]
+    fn fork_for_child_only_forks_parent_owned_blocks() {
+        let (_dir, db) = test_dbs();
+        let parent_id = "parent-agent";
+        let other_id = "other-agent";
+        let child_id = "child-agent";
+
+        create_test_agent(&db, parent_id);
+        create_test_agent(&db, other_id);
+        create_test_agent(&db, child_id);
+
+        let cache = MemoryCache::new(db);
+
+        // Create a block owned by the parent.
+        let parent_bc = pattern_core::types::block::BlockCreate::new(
+            "notes".to_string(),
+            pattern_core::types::memory_types::MemoryBlockType::Working,
+            pattern_core::types::memory_types::BlockSchema::text(),
+        );
+        cache.create_block(parent_id, parent_bc).unwrap();
+
+        // Create a block owned by another agent — should NOT appear in fork.
+        let other_bc = pattern_core::types::block::BlockCreate::new(
+            "other-notes".to_string(),
+            pattern_core::types::memory_types::MemoryBlockType::Working,
+            pattern_core::types::memory_types::BlockSchema::text(),
+        );
+        cache.create_block(other_id, other_bc).unwrap();
+
+        let child_cache = cache
+            .fork_for_child(parent_id, child_id)
+            .expect("fork_for_child must succeed");
+
+        // The child cache has the parent's block retagged to child ownership.
+        assert_eq!(
+            child_cache.blocks.len(),
+            1,
+            "child cache should contain exactly one block (the parent's)"
+        );
+        let child_block = child_cache.blocks.iter().next().unwrap();
+        assert_eq!(
+            child_block.value().doc.agent_id(),
+            child_id,
+            "forked block should be retagged with child agent id"
+        );
+        assert_eq!(
+            child_block.value().doc.label(),
+            "notes",
+            "forked block label should match parent's block"
+        );
+    }
+
+    /// Writes to a forked child cache do not affect the parent cache.
+    #[test]
+    fn fork_for_child_writes_do_not_propagate_to_parent() {
+        let (_dir, db) = test_dbs();
+        let parent_id = "isolate-parent";
+        let child_id = "isolate-child";
+
+        create_test_agent(&db, parent_id);
+        create_test_agent(&db, child_id);
+
+        let cache = MemoryCache::new(db);
+
+        let bc = pattern_core::types::block::BlockCreate::new(
+            "notes".to_string(),
+            pattern_core::types::memory_types::MemoryBlockType::Working,
+            pattern_core::types::memory_types::BlockSchema::text(),
+        );
+        cache.create_block(parent_id, bc).unwrap();
+
+        // Write initial content to the parent.
+        {
+            let doc = cache.get(parent_id, "notes").unwrap().unwrap();
+            doc.set_text("initial", true).unwrap();
+        }
+
+        let child_cache = cache
+            .fork_for_child(parent_id, child_id)
+            .expect("fork_for_child must succeed");
+
+        // Write different content in the child.
+        {
+            let child_doc = child_cache.blocks.iter().next().unwrap();
+            child_doc.value().doc.set_text("child-change", true).unwrap();
+        }
+
+        // Parent should still read the initial value.
+        {
+            let parent_doc = cache.get(parent_id, "notes").unwrap().unwrap();
+            assert_eq!(
+                parent_doc.text_content(),
+                "initial",
+                "parent should not observe child's write"
+            );
+        }
+    }
+
+    // endregion: fork_for_child
 }

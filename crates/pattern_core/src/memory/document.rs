@@ -125,12 +125,74 @@ impl StructuredDocument {
         Self::from_snapshot_with_metadata(snapshot, BlockMetadata::standalone(schema), None)
     }
 
-    /// Apply updates to the document
+    /// Apply updates to the document.
+    ///
+    /// Accepts any byte slice produced by `LoroDoc::export_snapshot()` or
+    /// `LoroDoc::export(ExportMode::updates(...))`. Used by the lightweight
+    /// fork `merge_back` path.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::memory::StructuredDocument;
+    ///
+    /// let source = StructuredDocument::new_text();
+    /// source.set_text("hello", true).unwrap();
+    /// let snapshot = source.export_snapshot().unwrap();
+    ///
+    /// let target = StructuredDocument::new_text();
+    /// target.apply_updates(&snapshot).unwrap();
+    /// assert_eq!(target.text_content(), "hello");
+    /// ```
     pub fn apply_updates(&self, updates: &[u8]) -> Result<(), DocumentError> {
         self.doc
             .import(updates)
             .map_err(|e| DocumentError::ImportFailed(e.to_string()))?;
         Ok(())
+    }
+
+    // ========== Fork / isolation helpers ==========
+
+    /// Fork the underlying `LoroDoc`, returning a new `StructuredDocument` whose
+    /// CRDT state diverges from the parent after this point.
+    ///
+    /// The forked document inherits all committed ops from the source at fork
+    /// time. Subsequent writes on either side do not propagate until an explicit
+    /// `apply_updates` call imports the snapshot. Metadata fields (label, schema,
+    /// permissions) are cloned verbatim; use [`retag_owner`](Self::retag_owner)
+    /// to rewrite ownership on the child.
+    pub fn fork(&self) -> Self {
+        let forked_doc = self.doc.fork();
+        Self::from_forked_doc(forked_doc, self.metadata_snapshot())
+    }
+
+    /// Construct a `StructuredDocument` from a pre-forked `LoroDoc` and a
+    /// metadata snapshot.
+    ///
+    /// The `accessor_agent_id` is left blank on the forked copy; the caller
+    /// may set it after construction if attribution is required.
+    pub fn from_forked_doc(doc: LoroDoc, metadata: BlockMetadata) -> Self {
+        Self {
+            doc,
+            accessor_agent_id: None,
+            metadata,
+        }
+    }
+
+    /// Clone the current block metadata.
+    ///
+    /// Used by [`fork`](Self::fork) to carry metadata into the child without
+    /// holding a borrow across the `LoroDoc::fork()` call.
+    pub fn metadata_snapshot(&self) -> BlockMetadata {
+        self.metadata.clone()
+    }
+
+    /// Rewrite the owning agent recorded in the embedded metadata.
+    ///
+    /// Called by `MemoryCache::fork_for_child` after forking each block to
+    /// attribute the forked copy to the child agent rather than the parent.
+    pub fn retag_owner(&mut self, new_owner: &str) {
+        self.metadata.agent_id = new_owner.to_string();
     }
 
     // ========== Metadata Accessors ==========
@@ -2567,4 +2629,61 @@ mod tests {
     }
 
     // endregion: Skill import_from_json
+
+    // region: fork
+
+    /// `StructuredDocument::fork` snapshot-matches the source at fork time,
+    /// and diverges independently after writes.
+    #[test]
+    fn fork_matches_source_at_fork_time_and_diverges_after_writes() {
+        let parent = StructuredDocument::new_text();
+        parent.set_text("initial", true).unwrap();
+
+        let child = parent.fork();
+
+        // At fork time: both see "initial".
+        assert_eq!(
+            parent.text_content(),
+            "initial",
+            "parent should still read 'initial' after fork"
+        );
+        assert_eq!(
+            child.text_content(),
+            "initial",
+            "child should read 'initial' at fork time"
+        );
+
+        // After divergent writes: each side sees only its own content.
+        parent.set_text("parent-change", true).unwrap();
+        child.set_text("child-change", true).unwrap();
+
+        assert_eq!(
+            parent.text_content(),
+            "parent-change",
+            "parent should read its own write"
+        );
+        assert_eq!(
+            child.text_content(),
+            "child-change",
+            "child should read its own write without seeing parent's write"
+        );
+    }
+
+    /// `retag_owner` replaces the `agent_id` in the embedded metadata.
+    #[test]
+    fn retag_owner_changes_agent_id() {
+        let mut doc = StructuredDocument::new_text();
+        // Manually seed an agent_id via metadata_mut (the public path).
+        doc.metadata_mut().agent_id = "original-agent".to_string();
+
+        doc.retag_owner("new-agent");
+
+        assert_eq!(
+            doc.agent_id(),
+            "new-agent",
+            "retag_owner should update agent_id in metadata"
+        );
+    }
+
+    // endregion: fork
 }
