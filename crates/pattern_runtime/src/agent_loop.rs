@@ -1263,7 +1263,7 @@ pub async fn drive_step(
             pattern_core::types::origin::Author::Agent(pattern_core::types::origin::AgentAuthor {
                 agent_id: pattern_core::types::ids::AgentId::from(aid),
             }),
-            recorded_input.origin.sphere.clone(),
+            recorded_input.origin.sphere,
         );
         persist_messages(
             db,
