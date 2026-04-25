@@ -123,6 +123,11 @@ pub struct SessionContext {
     /// capability scoping. Phase 2 spawn paths read this to restrict
     /// child sessions to a subset of the parent's capabilities.
     capabilities: Option<pattern_core::CapabilitySet>,
+    /// Composed policy set: Rust defaults seeded at session open, with
+    /// KDL config + runtime overrides layered on by Tasks 13/14. Read
+    /// by handlers (Task 10 Shell, Task 15 File) before each effect
+    /// dispatch.
+    policies: Arc<pattern_core::PolicySet>,
     /// Per-runtime [`PermissionBroker`]. One broker per session — no
     /// global singleton. Phase 1's policy-evaluation handlers escalate
     /// to this broker via [`Self::permission_bridge`] when a
@@ -169,6 +174,29 @@ pub trait HasCancelState {
 impl HasCancelState for SessionContext {
     fn cancel_state(&self) -> Arc<CancelState> {
         SessionContext::cancel_state(self)
+    }
+}
+
+/// Handlers call this to read the active [`pattern_core::PolicySet`].
+///
+/// `SessionContext` exposes the live, KDL-merged set; the `()` shim
+/// returns an always-empty set so unit tests using `&()` see every
+/// effect as [`pattern_core::PolicyAction::Allow`] (i.e. they fall
+/// straight through to the handler's existing "no gate" path).
+pub trait HasPolicySet {
+    fn policies(&self) -> &pattern_core::PolicySet;
+}
+
+impl HasPolicySet for SessionContext {
+    fn policies(&self) -> &pattern_core::PolicySet {
+        SessionContext::policies(self)
+    }
+}
+
+impl HasPolicySet for () {
+    fn policies(&self) -> &pattern_core::PolicySet {
+        static EMPTY: std::sync::OnceLock<pattern_core::PolicySet> = std::sync::OnceLock::new();
+        EMPTY.get_or_init(pattern_core::PolicySet::new)
     }
 }
 
@@ -268,10 +296,28 @@ impl SessionContext {
             context_policy: persona.context.clone(),
             diagnostics: Arc::new(std::sync::Mutex::new(Vec::new())),
             capabilities: None,
+            policies: Arc::new(pattern_core::PolicySet::from_rules(
+                crate::policy::rust_defaults(),
+            )),
             permission_broker: Arc::new(pattern_core::permission::PermissionBroker::new()),
             permission_bridge: None,
             current_dispatch_origin: Arc::new(std::sync::RwLock::new(None)),
         }
+    }
+
+    /// Active policy set for this session. Handlers consult this
+    /// before each effect dispatch; the result drives the broker
+    /// escalation decision.
+    pub fn policies(&self) -> &Arc<pattern_core::PolicySet> {
+        &self.policies
+    }
+
+    /// Builder-style: replace the policy set (Phase 1 Task 14 wires
+    /// KDL + runtime overrides over the seeded defaults).
+    #[must_use]
+    pub fn with_policies(mut self, policies: Arc<pattern_core::PolicySet>) -> Self {
+        self.policies = policies;
+        self
     }
 
     /// Per-runtime [`pattern_core::permission::PermissionBroker`]. Each
