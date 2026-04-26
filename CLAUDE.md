@@ -2,9 +2,9 @@
 
 Pattern is a multi-agent ADHD support system providing external executive function through specialized cognitive agents. Each user ("partner") gets their own constellation of agents.
 
-**Current State**: Core framework operational on `rewrite-v3` branch. V3 foundation + v3-memory-rework (8 phases) + v3-TUI (6 phases) all complete. `pattern_memory` crate extracted with the InRepo/Standalone/Sidecar storage modes. `pattern_server` daemon running over IRPC/QUIC with the `pattern_cli` ratatui TUI and zellij integration. v3-multi-agent Phase 1 complete: capability system, per-runtime permission broker (jiff-based), policy gate with handler-level shape guard for Pattern config writes, KDL `capabilities {}` and `policy {}` blocks. 755/755 tests passing in `pattern-cli + pattern-server + pattern-memory`; 643/643 in `pattern-core + pattern-runtime`.
+**Current State**: Core framework operational on `rewrite-v3` branch. V3 foundation + v3-memory-rework (8 phases) + v3-TUI (6 phases) all complete. `pattern_memory` crate extracted with the InRepo/Standalone/Sidecar storage modes. `pattern_server` daemon running over IRPC/QUIC with the `pattern_cli` ratatui TUI and zellij integration. v3-multi-agent Phases 1-4 complete: capability system, per-runtime permission broker (jiff-based), policy gate with handler-level shape guard for Pattern config writes, KDL `capabilities {}` and `policy {}` blocks; spawn infrastructure with `SpawnRegistry` (semaphore-bounded, cancel-on-drop), ephemeral child sessions, sibling persona spawn, fork lifecycle, `ForkRegistry` trait + `InMemoryForkRegistry`, `ForkOp` dispatch, `Pattern.Spawn` GADT with 7 constructors; Phase 4: `Pattern.Wake` effect (interval/task-dep/block-changed/custom conditions), `WakeRegistry` with atomic `route_or_queue` TOCTOU fix on `AgentRegistry`, `SessionRegistries` + `WakeRegistryExtras` structs for daemon-side wiring, `AgentRegistry` + `RouterRegistry` + `WakeRegistry` all wired in `pattern_server::get_or_open_session`. v3-sandbox-io (5 phases) complete: `LoroSyncedFile` + `DirWatcher` CRDT primitives in `pattern_memory`; `FileHandler` + `FileManager` with pooled DirWatcher, per-file open/watch lifecycle, async-reminder queue, `FilePolicy` default-deny from `.pattern.kdl`; `ShellHandler` + `ProcessManager` with `LocalPtyBackend`, background spawn streaming, `ProcessLogger`; unified `Port` trait replacing retired Sources/Rpc effects, `PortRegistryImpl` with dispatcher actor, `HttpPort`, plugin-style port-library materialization; `pattern_server` threads `FilePolicy` through `ProjectMount` and builds the port registry via `with_runtime_ports`. 2009/2009 tests passing workspace-wide.
 
-Last verified: 2026-04-24
+Last verified: 2026-04-26
 
 
 > **For AI Agents**: This is the source of truth for the Pattern codebase. Each crate has its own `CLAUDE.md` with specific implementation guidelines. `AGENTS.md` at root and in each crate is a symlink to the corresponding `CLAUDE.md` for cross-tool compatibility (Codex, Cursor, etc.).
@@ -42,11 +42,11 @@ These crates are part of the current `[workspace]` and build under
 pattern/
 ├── crates/
 │   ├── pattern_cli/      # ratatui TUI + IRPC client, mount/backup/daemon subcommands, zellij integration
-│   ├── pattern_core/     # Agent framework, capabilities, permission broker, policy types, memory traits, tools, coordination
+│   ├── pattern_core/     # Agent framework, capabilities, permission broker, policy types, Port trait, memory traits, tools, coordination
 │   ├── pattern_db/       # SQLite (rusqlite) with FTS5 and vector search
-│   ├── pattern_memory/   # Memory subsystem: cache, CRDT sync, VCS, backup, mount modes
-│   ├── pattern_provider/ # LLM provider integration, auth, request shaping
-│   ├── pattern_runtime/  # Agent runtime (Tidepool, turn loop, SDK)
+│   ├── pattern_memory/   # Memory subsystem: cache, CRDT sync, loro_sync primitives, VCS, backup, mount modes
+│   ├── pattern_provider/ # LLM provider integration, auth, request shaping, attachment rendering
+│   ├── pattern_runtime/  # Agent runtime (Tidepool, turn loop, SDK, FileManager, ProcessManager, PortRegistry)
 │   └── pattern_server/   # Pattern daemon server (IRPC/QUIC)
 ├── docs/                 # Architecture docs, implementation plans, design plans
 └── justfile              # Build automation

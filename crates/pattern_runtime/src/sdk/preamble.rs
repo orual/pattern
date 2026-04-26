@@ -20,7 +20,7 @@ use crate::sdk::describe::EffectDecl;
 
 /// Import strategy for an SDK effect module in the agent prelude.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ImportStyle {
+pub(crate) enum ImportStyle {
     /// Dual import: unqualified (terse helpers like `send`, `now`) plus a
     /// qualified alias for explicit-attribution call sites. Used for the
     /// four modules whose helper names don't collide with Prelude or each
@@ -37,7 +37,7 @@ enum ImportStyle {
 /// Modules whose helper verbs are unambiguous get dual imports
 /// (`Pattern.<Name>` + `qualified Pattern.<Name> as <Name>`); the
 /// remainder are qualified-only.
-fn import_style(type_name: &str) -> ImportStyle {
+pub(crate) fn import_style(type_name: &str) -> ImportStyle {
     match type_name {
         "Message" | "Time" | "Display" | "Spawn" => ImportStyle::Dual,
         _ => ImportStyle::QualifiedOnly,
@@ -47,7 +47,7 @@ fn import_style(type_name: &str) -> ImportStyle {
 /// Render one entry of the `type M` effect-row alias for an effect
 /// module: `<Name>` for dual-imported modules whose type is in scope
 /// unqualified, `<Name>.<Name>` for qualified-only modules.
-fn type_m_entry(type_name: &str) -> String {
+pub(crate) fn type_m_entry(type_name: &str) -> String {
     match import_style(type_name) {
         ImportStyle::Dual => type_name.to_string(),
         ImportStyle::QualifiedOnly => format!("{type_name}.{type_name}"),

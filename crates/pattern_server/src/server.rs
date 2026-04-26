@@ -96,6 +96,25 @@ pub(crate) struct ProjectMount {
     pub db: Arc<pattern_db::ConstellationDb>,
     /// Mount root directory.
     pub mount_path: PathBuf,
+    /// Compiled file policy from the mount's `.pattern.kdl` `file-policy {}`
+    /// block. Threaded into each session's `FileManager` so `Pattern.File.*`
+    /// effects gate correctly.
+    ///
+    /// **Safe-default contract:** `get_or_mount_project` always populates
+    /// this with `Some(policy)` — never `None`. The three populated cases:
+    ///
+    /// - `Some(rules)` when the block declares at least one allow/deny.
+    /// - `Some(empty)` when the block is empty/absent — every File op is
+    ///   denied via the policy module's "no matching rule" path. This
+    ///   surfaces a clearer error than `None` (which would lie about the
+    ///   mount config's existence).
+    /// - `Some(empty)` when the block has malformed globs — logged loud
+    ///   at error level, then a default-deny FM is wired so File ops
+    ///   produce a uniform policy denial instead of a missing-FM error.
+    ///
+    /// `None` is reserved for callers that build `ProjectMount` outside
+    /// the daemon's mount path (test harnesses, future plugin integration).
+    pub file_policy: Option<pattern_runtime::file_manager::FilePolicy>,
     /// Keeps the `MountedStore` alive for RAII (watcher, backup scheduler).
     _mounted: pattern_memory::mount::MountedStore,
 }
@@ -735,10 +754,55 @@ impl DaemonServer {
         )
         .map_err(|e| format!("failed to attach mount at {}: {e}", canonical.display()))?;
 
+        // Compile the mount's `file-policy { }` block once at mount time.
+        //
+        // Safe-default policy: this branch ALWAYS produces `Some(policy)`
+        // — never `None`. A FileManager is always wired so agent File.*
+        // effects surface the policy module's "no matching rule" denial,
+        // not the generic "no file manager configured" error (which
+        // lies about mount config presence). The three cases:
+        //
+        //   * Block has rules → `Some(rules)`.
+        //   * Block is empty (or absent) → `Some(empty)`. Every File op
+        //     is denied via the default-deny path. Logged as a warning.
+        //   * Block has malformed globs → `Some(empty)` after logging
+        //     loud at error level. Surfaces a uniform "no matching rule"
+        //     denial instead of breaking the FM wiring entirely.
+        let file_policy = {
+            let section = mounted.config.file_policy.clone();
+            let policy = if section.rules.is_empty() {
+                tracing::warn!(
+                    mount = %mounted.mount_path.display(),
+                    "file-policy block is empty or absent; every agent File.* effect \
+                     will be denied by the policy gate until `.pattern.kdl` declares \
+                     allow/deny rules"
+                );
+                pattern_runtime::file_manager::FilePolicy::from_rules(Vec::new())
+                    .expect("empty rule list is always valid")
+            } else {
+                match pattern_runtime::file_manager::FilePolicy::from_section(section) {
+                    Ok(policy) => policy,
+                    Err(err) => {
+                        tracing::error!(
+                            mount = %mounted.mount_path.display(),
+                            error = %err,
+                            "failed to compile file-policy from .pattern.kdl; falling \
+                             back to default-deny so agent File.* effects surface a \
+                             policy denial instead of a missing-FM error"
+                        );
+                        pattern_runtime::file_manager::FilePolicy::from_rules(Vec::new())
+                            .expect("empty rule list is always valid")
+                    }
+                }
+            };
+            Some(policy)
+        };
+
         let mount = Arc::new(ProjectMount {
             cache: mounted.cache.clone(),
             db: mounted.db.clone(),
             mount_path: mounted.mount_path.clone(),
+            file_policy,
             _mounted: mounted,
         });
 
@@ -797,6 +861,7 @@ async fn get_or_open_session(
         Some(project_mount.mount_path.clone()),
         None, // capabilities — daemon uses full power until per-persona caps land.
         config.port_registry.clone(),
+        project_mount.file_policy.clone(),
     )
     .await
     .map_err(|e| format!("failed to open session for {agent_id}: {e}"))?;

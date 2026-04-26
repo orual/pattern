@@ -130,10 +130,16 @@ async fn cmd_start(port: u16, echo: bool) -> miette::Result<()> {
         // Resolve SDK location.
         let sdk = pattern_runtime::sdk::SdkLocation::default();
 
-        let port_registry =
-            std::sync::Arc::new(pattern_runtime::port_registry::PortRegistryImpl::new(
+        // Use `with_runtime_ports` (NOT `new`) so the daemon's registry
+        // ships HttpPort and any other runtime-provided ports. Building
+        // the registry via `new` directly leaves the daemon with no
+        // HTTP capability and breaks `Port.call("http", ...)` at
+        // dispatch time — surfaced by the v3-sandbox-io final review.
+        let port_registry = std::sync::Arc::new(
+            pattern_runtime::port_registry::PortRegistryImpl::with_runtime_ports(
                 &tokio::runtime::Handle::current(),
-            ));
+            ),
+        );
         let config = SessionConfig {
             sdk,
             provider,

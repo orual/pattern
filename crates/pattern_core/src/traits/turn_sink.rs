@@ -9,11 +9,11 @@
 //! # Naming
 //!
 //! `TurnEvent` / `TurnSink` (rather than the more generic
-//! `StreamEvent` / `StreamSink`) because `pattern_core::traits::data_stream`
-//! already exposes a `StreamEvent` struct for data-source payloads;
-//! the turn-centric naming keeps the two concepts separable at a
-//! glance and avoids a path collision at the `traits::` re-export
-//! level.
+//! `StreamEvent` / `StreamSink`) because the agent loop's emissions
+//! are turn-centric: each event has a wire-turn position and is part
+//! of one user-visible exchange. The turn-centric naming keeps the
+//! intent obvious at every call site and matches the `BatchId` /
+//! `TurnId` shape used throughout the runtime.
 //!
 //! # Why a sink instead of a `Stream` return value
 //!

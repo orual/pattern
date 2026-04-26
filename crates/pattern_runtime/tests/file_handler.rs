@@ -718,6 +718,7 @@ async fn snapshot_restores_open_files() {
         None,
         None,
         port_registry.clone(),
+        None,
     )
     .await
     .expect("open_with_agent_loop must succeed");
@@ -792,6 +793,7 @@ async fn snapshot_restores_open_files() {
         None,
         None,
         port_registry2,
+        None,
     )
     .await
     .expect("second open_with_agent_loop must succeed");

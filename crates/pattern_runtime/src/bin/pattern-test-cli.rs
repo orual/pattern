@@ -894,6 +894,7 @@ async fn cmd_cache_test(
         None,
         None,
         port_registry,
+        None,
     )
     .await?;
     eprintln!(
@@ -1243,6 +1244,7 @@ async fn cmd_spawn(
         None,
         None,
         port_registry,
+        None,
     )
     .await?;
     eprintln!(

@@ -91,7 +91,8 @@ impl TidepoolRuntime {
         db: Arc<pattern_db::ConstellationDb>,
         tokio_handle: tokio::runtime::Handle,
     ) -> Self {
-        let port_registry = Arc::new(PortRegistryImpl::new(&tokio_handle));
+        let port_registry = Arc::new(PortRegistryImpl::with_runtime_ports(&tokio_handle));
+
         Self {
             sdk,
             memory_store,
@@ -195,5 +196,39 @@ impl AgentRuntime for TidepoolRuntime {
         // No runtime-level resources to release. Sessions own their JIT
         // machines and drop them in their own `Drop` impl (via SessionMachine).
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use pattern_core::traits::PortRegistry;
+    use pattern_core::types::port::PortId;
+
+    use crate::testing::{InMemoryMemoryStore, NopProviderClient, test_db};
+
+    use super::*;
+
+    /// AC5.1: `HttpPort` is registered at runtime construction and accessible
+    /// via `port_registry().get(&PortId::new("http"))`.
+    #[tokio::test]
+    async fn http_port_registered_at_runtime_construction() {
+        let db = test_db().await;
+        let store = Arc::new(InMemoryMemoryStore::new());
+        let provider = Arc::new(NopProviderClient);
+        let runtime = TidepoolRuntime::new(
+            SdkLocation::default(),
+            store,
+            provider,
+            db,
+            tokio::runtime::Handle::current(),
+        );
+
+        let port = runtime.port_registry().get(&PortId::new("http"));
+        assert!(
+            port.is_some(),
+            "HttpPort must be registered at runtime startup"
+        );
     }
 }

@@ -47,6 +47,177 @@ fn merge_policies(persona: &PersonaSnapshot) -> pattern_core::PolicySet {
     let kdl = persona.policy_rules.iter().cloned();
     pattern_core::PolicySet::from_rules(defaults.into_iter().chain(kdl))
 }
+
+/// Extract the module name from a Haskell source file. Looks past
+/// `--` line comments, `{-# … #-}` pragmas (single- and multi-line),
+/// and `{- … -}` block comments to find the `module Foo.Bar where`
+/// header.
+///
+/// Returns `None` only when no `module` keyword is found in the
+/// cleaned source.
+fn parse_module_name(src: &str) -> Option<String> {
+    // Strip comments and pragmas first; we don't need a full Haskell
+    // lexer, just enough to look past the noise that typically precedes
+    // a module declaration. Multi-line LANGUAGE pragmas are common, so
+    // we MUST handle them — the previous line-by-line implementation
+    // bailed out on the second line of a multi-line pragma.
+    let cleaned = strip_haskell_noise(src);
+    let mut tokens = cleaned.split_whitespace();
+    while let Some(tok) = tokens.next() {
+        if tok == "module" {
+            let raw = tokens.next()?;
+            // The name runs up to `(` (export list) or end. The token
+            // may also be `Foo.Bar(...)` glued together.
+            let name: String = raw.chars().take_while(|c| *c != '(').collect();
+            let name = name.trim_end_matches(',').trim();
+            if name.is_empty() {
+                return None;
+            }
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
+/// Strip `--` line comments, `{-# … #-}` pragma blocks, and `{- … -}`
+/// block comments (with proper nesting per Haskell spec) from `src`.
+/// Newlines are preserved so downstream parsers' line numbers stay
+/// aligned with the original source.
+///
+/// The token markers (`--`, `{-`, `{-#`, `-}`, `#-}`) are pure ASCII,
+/// so we look for them via byte-level comparisons on `src.as_bytes()`.
+/// All other content is preserved by copying the matching `&str` slice
+/// verbatim — never by casting individual bytes to `char`. That casting
+/// approach (used in an earlier draft) was incorrect for non-ASCII
+/// content: a UTF-8 continuation byte would be reinterpreted as a
+/// Latin-1 code point.
+fn strip_haskell_noise(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut out = String::with_capacity(bytes.len());
+    let mut i = 0;
+    // Track the start of the current run of preserved bytes so we can
+    // copy [`src[run..i]`](str) verbatim when we hit a comment marker.
+    let mut run = 0;
+
+    while i < bytes.len() {
+        // `{-# … #-}` pragma — scan to matching `#-}`. ASCII-only by
+        // construction; preserve newlines for line-number alignment.
+        if i + 2 < bytes.len() && &bytes[i..i + 3] == b"{-#" {
+            // Flush preserved run before the pragma.
+            out.push_str(&src[run..i]);
+            let mut j = i + 3;
+            while j + 2 < bytes.len() && &bytes[j..j + 3] != b"#-}" {
+                if bytes[j] == b'\n' {
+                    out.push('\n');
+                }
+                j += 1;
+            }
+            i = (j + 3).min(bytes.len());
+            run = i;
+            continue;
+        }
+        // `{- … -}` block comment with Haskell nesting.
+        if i + 1 < bytes.len() && &bytes[i..i + 2] == b"{-" {
+            out.push_str(&src[run..i]);
+            let mut depth = 1;
+            let mut j = i + 2;
+            while j + 1 < bytes.len() && depth > 0 {
+                if &bytes[j..j + 2] == b"{-" {
+                    depth += 1;
+                    j += 2;
+                } else if &bytes[j..j + 2] == b"-}" {
+                    depth -= 1;
+                    j += 2;
+                } else {
+                    if bytes[j] == b'\n' {
+                        out.push('\n');
+                    }
+                    j += 1;
+                }
+            }
+            i = j;
+            run = i;
+            continue;
+        }
+        // `--` line comment per Haskell 2010 §2.3: a sequence of two
+        // or more `-` characters is a comment iff the dashes do NOT
+        // form part of a legal lexeme. Equivalently: `--` opens a
+        // comment when the byte before it is the start of input, a
+        // whitespace character, or any other non-symbol character —
+        // which excludes operators like `<--`, `--->`, `|--|`, etc.
+        if i + 1 < bytes.len() && &bytes[i..i + 2] == b"--" {
+            // The character class is for ASCII-symbol bytes. Non-ASCII
+            // bytes can't be part of an operator under standard Haskell
+            // lexeme rules (Unicode operators are a different
+            // discussion); treat them as non-symbol.
+            let prev_is_symbol = i > 0 && is_haskell_symbol_byte(bytes[i - 1]);
+            // Also: a run of more than two dashes is still a comment as
+            // long as no other symbol char follows the dashes. Per §2.3
+            // the comment continues while the line keeps starting with
+            // dashes that aren't followed by a symbol — e.g. `------`
+            // is a banner comment. We reach this branch on the first
+            // two-dash run; if the previous byte was a symbol AND a
+            // longer dash run is possible, this is an operator, not a
+            // comment.
+            if !prev_is_symbol {
+                out.push_str(&src[run..i]);
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                run = i;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    // Flush any trailing preserved run.
+    out.push_str(&src[run..]);
+    out
+}
+
+/// True iff `b` is one of the ASCII characters that participate in
+/// Haskell symbolic operators (Haskell 2010 §2.4 `symbol`). Used by
+/// `strip_haskell_noise` to disambiguate `--` line comments from
+/// operators like `<--` and `--->`.
+fn is_haskell_symbol_byte(b: u8) -> bool {
+    matches!(
+        b,
+        b'!' | b'#'
+            | b'$'
+            | b'%'
+            | b'&'
+            | b'*'
+            | b'+'
+            | b'.'
+            | b'/'
+            | b'<'
+            | b'='
+            | b'>'
+            | b'?'
+            | b'@'
+            | b'\\'
+            | b'^'
+            | b'|'
+            | b'-'
+            | b'~'
+            | b':'
+    )
+}
+
+/// Convert a Haskell module name (`Pattern.Http`) to its on-disk relative
+/// path (`Pattern/Http.hs`).
+fn module_name_to_path(module_name: &str) -> std::path::PathBuf {
+    let mut p = std::path::PathBuf::new();
+    let mut parts = module_name.split('.').peekable();
+    while let Some(part) = parts.next() {
+        if parts.peek().is_none() {
+            p.push(format!("{part}.hs"));
+        } else {
+            p.push(part);
+        }
+    }
+    p
+}
 use crate::checkpoint::{CheckpointEvent, CheckpointLog};
 use crate::memory::{MemoryStoreAdapter, TurnHistory};
 use crate::router::{RouterBridge, RouterRegistry};
@@ -851,6 +1022,22 @@ pub struct TidepoolSession {
     /// [`CacheProfile::default_anthropic_subscriber`] — all-1h per
     /// the research note in `docs/notes/2026-04-18-cache-ttl-research.md`.
     cache_profile: pattern_provider::compose::CacheProfile,
+    /// Per-session tempdir holding materialized port-library Haskell
+    /// modules. Each registered port whose [`pattern_core::traits::Port::library`]
+    /// returns `Some` writes its source here at session open under the
+    /// path implied by its `module X.Y.Z where` declaration; the
+    /// tempdir's path is added to the GHC include path so agent code
+    /// can `import qualified Pattern.Http as Http` (or any other plugin
+    /// module). `None` when the session was opened against a registry
+    /// with no port libraries.
+    ///
+    /// Load-bearing despite never being read after initialisation:
+    /// `tempfile::TempDir` removes the directory from disk on drop, so
+    /// the field's lifetime IS the directory's lifetime. The leading
+    /// underscore marks the field as RAII-only and silences the
+    /// unused-field lint without `#[allow]`. Do not remove and do not
+    /// rename.
+    _port_lib_tempdir: Option<tempfile::TempDir>,
 }
 
 impl std::fmt::Debug for TidepoolSession {
@@ -960,6 +1147,7 @@ impl TidepoolSession {
             eval_worker: None,
             preamble: None,
             cache_profile: pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
+            _port_lib_tempdir: None,
         })
     }
 
@@ -993,6 +1181,12 @@ impl TidepoolSession {
     /// - Spawns an [`EvalWorker`] with an include path of `[sdk.resolve()]`
     ///   plus the optional `prelude_dir`.
     ///
+    /// `file_policy`, when `Some`, causes a [`crate::file_manager::FileManager`]
+    /// to be constructed against the session's queue, bridge, and persona
+    /// agent_id and wired into the context before the eval worker spawns.
+    /// `None` preserves the current behavior — sessions without a file
+    /// manager surface a clear error from `Pattern.File.*` handlers.
+    ///
     /// Use [`Self::step_with_agent_loop`] to drive turns on sessions
     /// opened via this constructor.
     #[allow(clippy::too_many_arguments)]
@@ -1007,6 +1201,7 @@ impl TidepoolSession {
         mount_path: Option<PathBuf>,
         capabilities: Option<pattern_core::CapabilitySet>,
         port_registry: Arc<PortRegistryImpl>,
+        file_policy: Option<crate::file_manager::FilePolicy>,
     ) -> Result<Self, RuntimeError> {
         // Capture persona-scoped state we'll seed into the store after the
         // session is constructed. We consume `persona` via `Self::open`
@@ -1017,7 +1212,14 @@ impl TidepoolSession {
         let store_for_seed = memory_store.clone();
 
         // Initialise the base session (preflight, context, checkpoint log).
-        let mut session = Self::open(persona, sdk, memory_store, provider, db, port_registry)?;
+        let mut session = Self::open(
+            persona,
+            sdk,
+            memory_store,
+            provider,
+            db,
+            port_registry.clone(),
+        )?;
 
         // Seed persona-declared memory blocks into the store. Blocks that
         // already exist (e.g. restored from a persistent DB on re-spawn)
@@ -1039,10 +1241,35 @@ impl TidepoolSession {
         let bridge = Arc::new(crate::permission::PermissionBridge::spawn(
             ctx_owned.permission_broker().clone(),
         ));
+        // Build the FileManager (when a policy was supplied) before the
+        // ctx is locked into an Arc. The FM shares the ctx's
+        // `async_reminder_queue`, the freshly spawned `bridge`, and the
+        // persona's `agent_id`. Capabilities default to "all" if the
+        // session was opened unscoped, so a present `file_policy` still
+        // produces a usable FM in tests that pass `capabilities = None`.
+        let fm_opt = file_policy.map(|policy| {
+            let fm_caps = Arc::new(
+                capabilities
+                    .clone()
+                    .unwrap_or_else(pattern_core::CapabilitySet::all),
+            );
+            Arc::new(crate::file_manager::FileManager::new(
+                policy,
+                ctx_owned.async_reminder_queue().clone(),
+                fm_caps,
+                bridge.clone(),
+                pattern_core::AgentId::from(agent_id_for_seed.as_str()),
+            ))
+        });
+
         let ctx_with_sink = ctx_owned
             .with_turn_sink(turn_sink.clone())
             .with_capabilities(capabilities.clone())
             .with_permission_bridge(bridge);
+        let ctx_with_sink = match fm_opt {
+            Some(fm) => ctx_with_sink.with_file_manager(fm),
+            None => ctx_with_sink,
+        };
 
         // Wire MemoryScope if a mount config declares an isolation policy.
         // Must happen before Arc::new(ctx) so the scope wraps the store
@@ -1102,18 +1329,74 @@ impl TidepoolSession {
             None => crate::sdk::preamble::build(&crate::sdk::bundle::canonical_effect_decls()),
         };
 
-        // Build include paths: SDK dir only. Pattern's haskell/Pattern/
-        // tree now includes both the effect GADTs AND the prelude
-        // substitute. No separate "tidepool prelude dir" is needed.
+        // Build include paths: SDK dir + optional prelude_dir + per-session
+        // port-library materialization dir.
         //
-        // The `prelude_dir` parameter is honoured for back-compat —
-        // callers who still pass one get it appended, but it's
-        // optional.
+        // SDK dir: ships the canonical `Pattern.*` effect modules + the
+        // prelude substitute.
+        //
+        // Port libraries (HttpPort and any plugin-provided ports) live
+        // OUTSIDE the SDK include tree — they're delivered via
+        // `Port::library()`. We materialize each registered port's
+        // source onto disk in a per-session tempdir at the path implied
+        // by its module declaration (`module Pattern.Http where` →
+        // `Pattern/Http.hs`) and add the tempdir to `include_paths` so
+        // GHC resolves `import qualified Pattern.Http`. The tempdir is
+        // held on the session and cleaned up on drop. This is the same
+        // delivery path a third-party plugin's port would use.
         let sdk_dir = sdk.resolve()?;
         let mut include_paths = vec![sdk_dir];
         if let Some(dir) = prelude_dir {
             include_paths.push(dir);
         }
+
+        // Materialize port libraries.
+        let port_lib_tempdir = {
+            let libs = port_registry.port_libraries();
+            if libs.is_empty() {
+                None
+            } else {
+                let dir = tempfile::Builder::new()
+                    .prefix("pattern-port-libs-")
+                    .tempdir()
+                    .map_err(|e| RuntimeError::PortLibrarySetupFailed {
+                        port_id: "<tempdir>".to_string(),
+                        op: "create-tempdir".to_string(),
+                        cause: e.to_string(),
+                    })?;
+                for (port_id, src) in libs {
+                    let pid = port_id.as_str().to_string();
+                    let module_name = parse_module_name(src).ok_or_else(|| {
+                        RuntimeError::PortLibrarySetupFailed {
+                            port_id: pid.clone(),
+                            op: "parse-module-name".to_string(),
+                            cause: "no `module X where` header in library source".to_string(),
+                        }
+                    })?;
+                    let rel = module_name_to_path(&module_name);
+                    let abs = dir.path().join(&rel);
+                    if let Some(parent) = abs.parent() {
+                        std::fs::create_dir_all(parent).map_err(|e| {
+                            RuntimeError::PortLibrarySetupFailed {
+                                port_id: pid.clone(),
+                                op: "create-parent-dir".to_string(),
+                                cause: format!("{}: {e}", parent.display()),
+                            }
+                        })?;
+                    }
+                    std::fs::write(&abs, src).map_err(|e| {
+                        RuntimeError::PortLibrarySetupFailed {
+                            port_id: pid.clone(),
+                            op: "write-source".to_string(),
+                            cause: format!("{}: {e}", abs.display()),
+                        }
+                    })?;
+                }
+                include_paths.push(dir.path().to_path_buf());
+                Some(dir)
+            }
+        };
+        session._port_lib_tempdir = port_lib_tempdir;
 
         // Extend include path with `<mount>/lib/` if present.
         // Approach A: probe-compile each module individually via
@@ -1427,6 +1710,126 @@ mod tests {
     use pattern_core::types::snapshot::PersonaSnapshot;
     use pattern_core::types::turn::StopReason;
 
+    // ── parse_module_name / module_name_to_path ──────────────────────────
+
+    #[test]
+    fn parse_module_name_simple_header() {
+        let src = "module Foo where\nfoo = 1\n";
+        assert_eq!(parse_module_name(src), Some("Foo".to_string()));
+    }
+
+    #[test]
+    fn parse_module_name_dotted() {
+        let src = "module Pattern.Http where\n";
+        assert_eq!(parse_module_name(src), Some("Pattern.Http".to_string()));
+    }
+
+    #[test]
+    fn parse_module_name_with_export_list() {
+        let src = "module Pattern.Http (httpGet, httpPost) where\n";
+        assert_eq!(parse_module_name(src), Some("Pattern.Http".to_string()));
+    }
+
+    #[test]
+    fn parse_module_name_after_single_line_pragma() {
+        let src = "{-# LANGUAGE OverloadedStrings #-}\nmodule Foo.Bar where\n";
+        assert_eq!(parse_module_name(src), Some("Foo.Bar".to_string()));
+    }
+
+    #[test]
+    fn parse_module_name_after_multi_line_pragma() {
+        // The previous line-by-line implementation bailed out on the
+        // second line of a multi-line pragma. This test pins the fix.
+        let src = "{-# LANGUAGE\n      OverloadedStrings,\n      FlexibleContexts\n  #-}\nmodule Foo where\n";
+        assert_eq!(parse_module_name(src), Some("Foo".to_string()));
+    }
+
+    #[test]
+    fn parse_module_name_after_block_comment() {
+        let src = "{- The grand description\n   spans many lines -}\nmodule Foo where\n";
+        assert_eq!(parse_module_name(src), Some("Foo".to_string()));
+    }
+
+    #[test]
+    fn parse_module_name_after_nested_block_comment() {
+        let src = "{- outer {- inner -} still outer -}\nmodule Foo where\n";
+        assert_eq!(parse_module_name(src), Some("Foo".to_string()));
+    }
+
+    #[test]
+    fn parse_module_name_after_line_comments() {
+        let src = "-- header banner\n-- another line\nmodule Foo where\n";
+        assert_eq!(parse_module_name(src), Some("Foo".to_string()));
+    }
+
+    #[test]
+    fn parse_module_name_returns_none_when_missing() {
+        let src = "import Data.Text\nfoo = 1\n";
+        assert_eq!(parse_module_name(src), None);
+    }
+
+    #[test]
+    fn parse_module_name_skips_lines_above_module() {
+        // Some plugin authors stick imports above the module header
+        // (unusual, but not catastrophic). We keep scanning.
+        let src = "import Data.Text\nmodule Foo where\n";
+        assert_eq!(parse_module_name(src), Some("Foo".to_string()));
+    }
+
+    #[test]
+    fn parse_module_name_after_operator_with_double_dash() {
+        // `<--` is a valid Haskell operator (e.g. used in some lens
+        // libraries). The simplified `--` rule from earlier drafts ate
+        // it. This test pins the §2.3 contract: only `--` preceded by
+        // a non-symbol char opens a line comment.
+        let src = "infixl 4 <--\nmodule Foo where\n";
+        assert_eq!(parse_module_name(src), Some("Foo".to_string()));
+    }
+
+    #[test]
+    fn parse_module_name_with_utf8_block_comment() {
+        // The previous byte-iteration draft cast each byte to char,
+        // which Latin-1-reinterpreted UTF-8 continuation bytes. This
+        // test pins the slice-based fix: non-ASCII content inside a
+        // block comment must not corrupt module-name detection.
+        let src = "{- αβγ — header with non-ASCII -}\nmodule Foo where\n";
+        assert_eq!(parse_module_name(src), Some("Foo".to_string()));
+    }
+
+    #[test]
+    fn parse_module_name_with_utf8_outside_comment() {
+        // Non-ASCII chars in code outside a comment must round-trip
+        // through the cleaner without corruption (they don't affect
+        // the result here, but the cleaner's output must still be
+        // valid UTF-8).
+        let src = "x = \"αβγ\"\nmodule Foo where\n";
+        assert_eq!(parse_module_name(src), Some("Foo".to_string()));
+    }
+
+    #[test]
+    fn module_name_to_path_simple() {
+        assert_eq!(
+            module_name_to_path("Foo"),
+            std::path::PathBuf::from("Foo.hs")
+        );
+    }
+
+    #[test]
+    fn module_name_to_path_dotted() {
+        assert_eq!(
+            module_name_to_path("Pattern.Http"),
+            std::path::PathBuf::from("Pattern/Http.hs")
+        );
+    }
+
+    #[test]
+    fn module_name_to_path_deep() {
+        assert_eq!(
+            module_name_to_path("A.B.C.D"),
+            std::path::PathBuf::from("A/B/C/D.hs")
+        );
+    }
+
     fn test_turn_input() -> TurnInput {
         // Fresh batch start: turn_id == batch_id (first turn IS the batch).
         let id = new_snowflake_id();
@@ -1550,6 +1953,7 @@ mod tests {
             None,
             None,
             port_registry,
+            None,
         )
         .await
         .expect("open_with_agent_loop should succeed when preflight passes");
@@ -1636,6 +2040,7 @@ mod tests {
             None,
             None,
             port_registry,
+            None,
         )
         .await
         .expect("open_with_agent_loop should succeed");

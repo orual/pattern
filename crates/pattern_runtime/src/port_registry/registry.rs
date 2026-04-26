@@ -73,6 +73,41 @@ impl PortRegistryImpl {
     pub fn dispatcher(&self) -> &tokio::sync::mpsc::Sender<dispatcher::Op> {
         &self.dispatcher_tx
     }
+
+    /// Construct a registry pre-populated with every runtime-provided
+    /// port (currently just [`crate::ports::http::HttpPort`]). Both
+    /// `TidepoolRuntime::new` and the `pattern-server` daemon must
+    /// build their registry through this helper so agent code that
+    /// imports `Pattern.Http` (or any other runtime-provided port
+    /// library) finds the port at dispatch time. Constructing the
+    /// registry directly via [`Self::new`] and then forgetting to
+    /// register the runtime ports is a foot-gun the daemon hit before
+    /// this helper existed.
+    pub fn with_runtime_ports(tokio_handle: &tokio::runtime::Handle) -> Self {
+        let registry = Self::new(tokio_handle);
+        // Registration is sync (DashMap insert) and the only failure
+        // mode is `AlreadyRegistered`, which cannot happen here because
+        // we just constructed the registry.
+        registry
+            .register_sync(Arc::new(crate::ports::http::HttpPort::new()))
+            .expect("HttpPort cannot already be registered on a fresh registry");
+        registry
+    }
+
+    /// Collect `(PortId, library_source)` for every registered port whose
+    /// [`Port::library`] returns `Some`. Consumed by
+    /// [`crate::session::TidepoolSession::open_with_agent_loop`] to
+    /// materialize each library on disk in the session's port-lib
+    /// tempdir at the path implied by the module declaration; the
+    /// tempdir is then added to the GHC include path so agent code can
+    /// `import qualified Pattern.Http as Http` (or any other plugin
+    /// module name).
+    pub fn port_libraries(&self) -> Vec<(PortId, &'static str)> {
+        self.ports
+            .iter()
+            .filter_map(|e| e.value().library().map(|src| (e.key().clone(), src)))
+            .collect()
+    }
 }
 
 #[async_trait]
@@ -260,5 +295,27 @@ mod tests {
                 .unwrap_err(),
             PortError::AlreadyRegistered(_)
         ));
+    }
+
+    /// Locked-in invariant: `with_runtime_ports` ships every
+    /// runtime-provided port. The daemon (`pattern-server::main`) and
+    /// `TidepoolRuntime::new` must both build the registry through
+    /// this helper — building via `new` directly leaks the daemon
+    /// out of HTTP capability (the v3-sandbox-io final-review found
+    /// that exact regression).
+    #[tokio::test]
+    async fn with_runtime_ports_registers_http_port() {
+        let r = PortRegistryImpl::with_runtime_ports(&tokio::runtime::Handle::current());
+        let http = r
+            .get(&PortId::new("http"))
+            .expect("http port must be registered by with_runtime_ports");
+        assert_eq!(http.id().as_str(), "http");
+        // Library is the typed `Pattern.Http` wrapper, materialized
+        // into per-session tempdirs by `open_with_agent_loop`.
+        assert!(
+            http.library()
+                .is_some_and(|s| s.contains("module Pattern.Http")),
+            "HttpPort must expose its Pattern.Http library source"
+        );
     }
 }

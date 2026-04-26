@@ -75,6 +75,7 @@ async fn open_session_with_caps(agent_id: &str, caps: CapabilitySet) -> Tidepool
         None,
         Some(caps),
         port_registry,
+        None,
     )
     .await
     .expect("open_with_agent_loop should succeed")

@@ -316,6 +316,51 @@ pub enum RuntimeError {
         reason: String,
     },
 
+    /// Failed to materialize a registered port's `library()` Haskell
+    /// source on disk during session open. Each port whose
+    /// `Port::library()` returns `Some` is written to a per-session
+    /// tempdir at the path implied by its `module X.Y where` header so
+    /// the GHC harness resolves agent imports against it. This error
+    /// fires when the tempdir cannot be created, the source has no
+    /// parseable module header, or the file write fails.
+    ///
+    /// `port_id` identifies which port's library failed (or
+    /// `"<tempdir>"` for the up-front directory creation step that
+    /// precedes any per-port work). `op` describes the step
+    /// (`"create-tempdir"`, `"parse-module-name"`, `"create-parent-dir"`,
+    /// `"write-source"`). `cause` carries the underlying I/O or parse
+    /// failure message.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::RuntimeError;
+    ///
+    /// let err = RuntimeError::PortLibrarySetupFailed {
+    ///     port_id: "http".into(),
+    ///     op: "parse-module-name".into(),
+    ///     cause: "no `module X where` header".into(),
+    /// };
+    /// assert!(err.to_string().contains("port library"));
+    /// assert!(err.to_string().contains("http"));
+    /// ```
+    #[error("port library setup failed for port {port_id} during {op}: {cause}")]
+    #[diagnostic(
+        code(pattern_core::runtime::port_library_setup_failed),
+        help(
+            "verify the port's library() source begins with `module X.Y where` and that the runtime has write access to the system temp directory"
+        )
+    )]
+    PortLibrarySetupFailed {
+        /// The PortId of the port whose library failed to materialize, or
+        /// `"<tempdir>"` for the up-front directory creation step.
+        port_id: String,
+        /// The materialization step that failed.
+        op: String,
+        /// Underlying I/O or parse failure message.
+        cause: String,
+    },
+
     /// The session was poisoned by a hard-abandoned turn and can no longer
     /// be stepped. Callers must open a fresh session.
     ///

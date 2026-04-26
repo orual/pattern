@@ -56,6 +56,25 @@ outputs the full self object as NDJSON. Serde deserialization is forgiving
 
 **Entry point:** `pattern_memory::jj::JjAdapter`
 
+## `loro_sync` module (v3-sandbox-io Phase 1)
+
+Shared CRDT primitives for keeping in-memory `LoroDoc` state in sync with
+on-disk text/structured documents:
+
+- `SyncedDoc<B>` — generic two-doc CRDT model (`memory_doc` for the agent's
+  view, `disk_doc` for the on-disk render). Bridge trait `LoroDocBridge`
+  provides schema-aware reconciliation. Conflict policies: `AutoMerge`
+  (default for memory blocks) and `RejectAndNotify` (used by file flows
+  in Phase 2's FileHandler).
+- `LoroSyncedFile` — newtype over `SyncedDoc<TextBridge>` for the file
+  handler's open-file lifecycle (Phase 2).
+- `BlockSchemaBridge` — concrete bridge implementing schema-aware Loro ↔
+  rendered-text reconciliation; ported from `cache.rs:809-1044` to be
+  reusable across memory blocks and the file handler.
+- `DirWatcher<R>` — pluggable directory watcher with an `EventRouter`
+  trait for fan-out (used by FileManager in Phase 2 for external-edit
+  detection).
+
 ## quiesce (`src/quiesce.rs`)
 
 Universal pre-commit step, invoked regardless of storage mode. Uses a
@@ -205,6 +224,9 @@ and updates FTS5 indexes.
 - `subscriber::worker` — `SyncWorker` with two-doc model (memory_doc + disk_doc).
 - `subscriber::supervisor` — respawns crashed workers automatically.
 - `subscriber::event` — `SyncEvent` enum for the channel protocol.
+- `subscriber::bridge` — `BlockSchemaBridge` (concrete `LoroDocBridge` impl for
+  schema-aware reconciliation). Extracted from `cache.rs` in v3-sandbox-io Phase 1
+  so it can be shared between the subscriber worker and the file handler.
 
 Workers support pause/resume for quiesce (see above) and drain for shutdown.
 
@@ -214,6 +236,12 @@ Workers support pause/resume for quiesce (see above) and drain for shutdown.
 
 Typed parsing of `.pattern.kdl` config files via `knus` (KDL derive decoder).
 Validates storage mode, project identity, isolation policy, and backup schedule.
+
+The `PatternConfig.file_policy` field (`FilePolicySection`) carries allow/deny
+rules from the `file_policy {}` KDL block. `FilePolicyMode` (Allow/Deny)
+maps to `pattern_runtime::file_manager::policy::RuleMode`. Last-match-wins
+evaluation semantics. When the block is absent, an empty rules list produces
+a default-deny policy at the runtime layer.
 
 **Entry point:** `pattern_memory::config::pattern_kdl::PatternConfig`
 
@@ -256,7 +284,7 @@ translates between the on-disk file format and LoroDoc state.
 
 ## Status
 
-Last verified: 2026-04-24
+Last verified: 2026-04-26
 
 Created 2026-04-19 during v3-memory-rework Phase 1; populated incrementally
 in Phases 1-8. All 8 phases complete.

@@ -3,11 +3,15 @@
 Daemon server for Pattern, exposing agent runtime over IRPC (QUIC transport).
 The binary is `pattern-server`. The CLI manages it via `pattern daemon {start,stop,status}`.
 
-Last verified: 2026-04-23
+Last verified: 2026-04-26
 
 ## Current status
 
-All 6 phases of the v3-TUI plan are complete. The daemon provides:
+All 6 phases of the v3-TUI plan are complete. v3-sandbox-io wiring is
+integrated: `ProjectMount.file_policy` carries per-mount file-access rules
+derived from `.pattern.kdl`; the port registry is built via
+`PortRegistryImpl::with_runtime_ports` so `HttpPort` is always available.
+The daemon provides:
 
 - IRPC-based message routing over QUIC (localhost)
 - Actor model: `DaemonServer` owns the event bus and dispatches protocol messages
@@ -27,7 +31,11 @@ All 6 phases of the v3-TUI plan are complete. The daemon provides:
 - `event_rx`: tagged events from `TurnSinkBridge`s (unbounded mpsc)
 - `subscribers`: `HashMap<AgentId, Vec<irpc::channel::mpsc::Sender<TaggedTurnEvent>>>`
 - `project_mounts`: `Arc<DashMap<PathBuf, Arc<ProjectMount>>>` — cached project mounts
-  keyed by canonical path; populated by `InitSession`, used by `SendMessage`
+  keyed by canonical path; populated by `InitSession`, used by `SendMessage`.
+  Each `ProjectMount` carries `file_policy: Option<FilePolicy>` (always `Some`
+  from `get_or_mount_project` per the safe-default contract) derived from the
+  mount's `.pattern.kdl` `file_policy {}` block. When the block is absent,
+  an empty-rules policy (default-deny) is used.
 - `current_mount`: `Option<Arc<ProjectMount>>` — the active project (last `InitSession`
   wins; one project at a time for now)
 - `sessions`: `Arc<DashMap<AgentId, AgentSession>>` — shared with spawned tasks so
@@ -151,6 +159,26 @@ entries whose agent has been idle beyond a threshold and has no active connectio
 Until then, operators should restart the daemon periodically to reclaim resources.
 The `--stop-daemon-on-exit` flag on the CLI provides a development-time escape hatch
 for flushing all state between sessions.
+
+## v3-sandbox-io wiring
+
+### `ProjectMount.file_policy`
+
+`get_or_mount_project` reads the mount's `.pattern.kdl` `file_policy {}`
+section (via `pattern_memory::config::PatternConfig`) and converts it to
+a `FilePolicy` via `FilePolicy::from_section()`. If the section is absent,
+`FilePolicy::from_rules(Vec::new())` produces a default-deny policy.
+The field is always `Some` — the absence sentinel is reserved for callers
+that build a `ProjectMount` outside the normal mount path (e.g. test
+fixtures). `open_with_agent_loop` receives the policy as a parameter and
+constructs the `FileManager` before the eval worker spawns.
+
+### Port registry
+
+`main.rs` builds the port registry via
+`PortRegistryImpl::with_runtime_ports(&tokio_handle)` (NOT `::new`) so
+`HttpPort` and any future runtime-provided ports are always registered.
+The registry is passed to `open_with_agent_loop` for each new session.
 
 ## Development guidelines
 

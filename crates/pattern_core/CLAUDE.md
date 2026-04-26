@@ -3,7 +3,7 @@
 ⚠️ **CRITICAL WARNING**: DO NOT run `pattern` CLI or test agents during development!
 Production agents are running. CLI commands will disrupt active agents.
 
-Last verified: 2026-04-24
+Last verified: 2026-04-26
 
 Core agent framework, memory trait definitions, tools, and coordination system for Pattern's multi-agent ADHD support. The `MemoryStore` trait is defined here; the canonical implementation (`MemoryCache`) lives in `pattern_memory`.
 
@@ -43,7 +43,7 @@ Following Letta/MemGPT patterns with multi-operation tools:
 
 5. **shell** - Command execution via PTY
    - Operations: `execute`, `spawn`, `kill`, `status`
-   - Uses `ProcessSource` DataStream for execution
+   - Implemented via the Phase 3 ProcessManager + LocalPtyBackend in pattern_runtime; per-session session context.
    - Permission validation via `CommandValidator` trait
    - Blocklist for dangerous commands (rm -rf /, etc.)
    - Three permission levels: `ReadOnly`, `ReadWrite`, `Admin`
@@ -136,16 +136,6 @@ Key types:
 5. **Database** (`../pattern_db`)
    - SQLite embedded databases
 
-6. **Data Sources** (`data_source/`)
-   - Generic trait for pull/push consumption
-   - Type-erased wrapper for concrete→generic bridging
-   - Prompt templates using minijinja
-   - **bluesky/**: ATProto firehose consumption
-   - **process/**: Shell command execution via PTY
-     - `LocalPtyBackend`: Persistent shell session with cwd/env
-     - `ProcessSource`: DataStream wrapper with notifications
-     - `CommandValidator`: Security policy enforcement
-
 ## Common Patterns
 
 ### Creating a Tool
@@ -220,10 +210,12 @@ filtering, handler gating) lives in `pattern_runtime`.
   — an agent's permission scope. `CapabilitySet::all()` is the
   back-compat "full power" default.
 - `EffectCategory` — `#[non_exhaustive]` enum aligned with
-  `pattern_runtime::sdk::bundle::CANONICAL_EFFECT_ROW` (16 live
-  variants: `Memory, Search, Recall, Tasks, Skills, Message, Display,
-  Time, Log, Shell, File, Sources, Mcp, Rpc, Spawn, Diagnostics`,
-  plus `Wake` reserved for the Phase 4 wake-condition effect).
+  `pattern_runtime::sdk::bundle::CANONICAL_EFFECT_ROW` (15 live SDK
+  effects: `Memory, Search, Recall, Tasks, Skills, Message, Display,
+  Time, Log, Shell, File, Mcp, Spawn, Diagnostics, Port`;
+  `Sources` and `Rpc` removed in v3-sandbox-io Phase 4 and replaced
+  by the unified `Port` effect; `Wake` is forward-reserved but not
+  yet wired as an SDK effect row entry).
   `pattern_runtime` carries a `canonical_row_matches_effect_category_implemented_set`
   cross-check test to prevent drift.
 - `CapabilityFlag` — orthogonal flags (`SpawnNewIdentities`,
@@ -293,26 +285,17 @@ calls it on the *immediate dispatcher* origin (read from
 origin. See `pattern_runtime::CLAUDE.md` for the dispatch-origin
 discipline that keeps this safe.
 
-### Accessing Data Sources from Tools
-Tools that need typed access to specific DataStream implementations use `as_any()` downcast:
-```rust
-// DataStream trait includes as_any() for downcasting
-fn find_process_source(&self, sources: &dyn SourceManager) -> Result<Arc<dyn DataStream>> {
-    // Try explicit source_id, then default ID, then first matching type
-    for id in sources.list_streams() {
-        if let Some(source) = sources.get_stream_source(&id) {
-            if source.as_any().is::<ProcessSource>() {
-                return Ok(source);
-            }
-        }
-    }
-    Err(CoreError::tool_exec_msg("shell", "no process source"))
-}
+### Port trait (v3-sandbox-io Phase 4)
 
-// Downcast at point of use
-let process_source = source.as_any().downcast_ref::<ProcessSource>()?;
-```
-See `docs/data-sources-guide.md` for full pattern documentation.
+External-service ports use the unified `Port` trait at `traits/port.rs` —
+one `id()`, one `metadata()`, one `subscribe()`, one `call()`, plus a
+`library()` for optional Haskell wrapper code spliced into the agent's
+prelude. Ports register with the runtime's `PortRegistry` (concrete impl
+lives in `pattern_runtime`) at boot. Per-port capability gating via
+`CapabilitySet::has_port(port_id)` filters which ports each agent sees
+in `Pattern.Port.List` and which it can `Call`/`Subscribe`. See
+`crates/pattern_runtime/CLAUDE.md` for the registry + dispatcher actor
+implementation details.
 
 ## Identifier Types
 
@@ -361,8 +344,7 @@ and interop is straightforward.
 
 ### Test Utilities (`tool/builtin/test_utils.rs`)
 Shared test infrastructure for tool testing:
-- `MockToolContext`: Implements `ToolContext` with optional SourceManager
-- `MockSourceManager`: Implements `SourceManager` for DataStream testing
+- `MockToolContext`: Implements `ToolContext` for tool testing
 - `MockToolContextBuilder`: Fluent builder for configurable test contexts
 - `create_test_context_with_agent()`: Quick setup for simple tests
 - `create_test_agent_in_db()`: Helper for FK constraint satisfaction

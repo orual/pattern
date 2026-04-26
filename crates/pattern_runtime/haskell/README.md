@@ -16,11 +16,20 @@ Source of truth for the Pattern agent-SDK effect algebras.
   (RecallInsert/RecallSearch/RecallGet/RecallDelete). Phase 5.
 - `Pattern/Message.hs` — GADT declared; Send/Reply/Notify wired to
   the router registry (Phase 5 Task 20). Ask is stubbed.
-- `Pattern/Shell.hs`, `Pattern/File.hs`, `Pattern/Sources.hs`,
-  `Pattern/Mcp.hs`, `Pattern/Rpc.hs`, `Pattern/Spawn.hs` — stubs
-  pending their respective post-foundation plans.
-- `Pattern/Prelude.hs` — convenience re-export of the full 13-module
-  SDK surface.
+- `Pattern/Shell.hs` — fully wired (v3-sandbox-io Phase 3).
+- `Pattern/File.hs` — fully wired (v3-sandbox-io Phase 2).
+- `Pattern/Port.hs` — unified external-service port (v3-sandbox-io Phase 4).
+  Replaces the retired `Pattern/Sources.hs` and `Pattern/Rpc.hs`.
+- `Pattern/Mcp.hs`, `Pattern/Spawn.hs` — stubs pending their respective
+  post-foundation plans.
+- `Pattern/Prelude.hs` — convenience re-export of the SDK surface.
+
+Port libraries (e.g. `Pattern/Http.hs`) live OUTSIDE this directory at
+`crates/pattern_runtime/haskell/ports/` so they are not auto-resolved
+via the SDK include path. They are delivered through `Port::library()`
+and materialized into a per-session tempdir at session open by
+`TidepoolSession::open_with_agent_loop`. This is the same path a
+third-party plugin's port library uses.
 
 ## Parity with Rust
 

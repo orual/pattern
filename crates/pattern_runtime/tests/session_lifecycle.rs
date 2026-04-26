@@ -116,6 +116,7 @@ async fn memory_round_trip_through_session() {
         None,
         None,
         port_registry,
+        None,
     )
     .await
     .expect("open should succeed");
@@ -199,6 +200,7 @@ async fn checkpoint_and_restore_round_trips() {
         None,
         None,
         port_registry,
+        None,
     )
     .await
     .expect("open should succeed");
@@ -240,6 +242,7 @@ async fn checkpoint_and_restore_round_trips() {
         None,
         None,
         port_registry2,
+        None,
     )
     .await
     .expect("second open should succeed");
@@ -309,6 +312,7 @@ async fn concurrent_session_isolation() {
         None,
         None,
         port_registry_a,
+        None,
     )
     .await
     .expect("open A");
@@ -335,6 +339,7 @@ async fn concurrent_session_isolation() {
         None,
         None,
         port_registry_b,
+        None,
     )
     .await
     .expect("open B");
