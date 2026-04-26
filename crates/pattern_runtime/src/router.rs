@@ -26,6 +26,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use pattern_core::types::message::Message;
+use pattern_core::types::origin::MessageOrigin;
 
 // ---------------------------------------------------------------------------
 // RouterBridge — sync ↔ async bridge for eval worker → router dispatch
@@ -33,6 +34,7 @@ use pattern_core::types::message::Message;
 
 /// Request sent from the eval worker thread to the async router task.
 struct RouterRequest {
+    sender: MessageOrigin,
     recipient: String,
     message: Message,
     reply: std::sync::mpsc::SyncSender<Result<(), RouterError>>,
@@ -64,7 +66,9 @@ impl RouterBridge {
 
         tokio::spawn(async move {
             while let Some(req) = rx.recv().await {
-                let result = registry.route(&req.recipient, &req.message).await;
+                let result = registry
+                    .route(&req.sender, &req.recipient, &req.message)
+                    .await;
                 // Reply channel may be closed if the eval worker timed
                 // out or was cancelled — that is not an error.
                 let _ = req.reply.send(result);
@@ -80,9 +84,21 @@ impl RouterBridge {
     ///
     /// Safe to call from a plain OS thread (no tokio runtime context
     /// required).
-    pub fn route_sync(&self, recipient: &str, message: &Message) -> Result<(), RouterError> {
+    ///
+    /// `sender` is the [`MessageOrigin`] of the dispatcher — typically
+    /// `Author::Agent` for autonomous turns, or `Author::Partner` for
+    /// direct partner-driven dispatch. Routers carrying this through to
+    /// receivers (TUI, mailbox, transport endpoints) lets downstream
+    /// consumers attribute the message correctly.
+    pub fn route_sync(
+        &self,
+        sender: &MessageOrigin,
+        recipient: &str,
+        message: &Message,
+    ) -> Result<(), RouterError> {
         let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
         let request = RouterRequest {
+            sender: sender.clone(),
             recipient: recipient.to_string(),
             message: message.clone(),
             reply: reply_tx,
@@ -142,11 +158,23 @@ pub trait Router: Send + Sync {
     /// The URI scheme this router handles (e.g. `"cli"`).
     fn scheme(&self) -> &str;
 
-    /// Route a message to the given target. The target is the portion
-    /// of the recipient AFTER the scheme prefix was stripped (or the
-    /// full original recipient when this is the default-scheme
-    /// fallback).
-    async fn route(&self, target: &str, body: &Message) -> Result<(), RouterError>;
+    /// Route a message to the given target.
+    ///
+    /// `sender` is the [`MessageOrigin`] of the dispatcher — used for
+    /// attribution at the receiver (TUI rendering, mailbox tagging,
+    /// transport-side identity). Implementations should NOT use
+    /// `sender` for permission gating; that happens upstream in the
+    /// handler before `route` is called.
+    ///
+    /// `target` is the portion of the recipient AFTER the scheme
+    /// prefix was stripped (or the full original recipient when this
+    /// is the default-scheme fallback).
+    async fn route(
+        &self,
+        sender: &MessageOrigin,
+        target: &str,
+        body: &Message,
+    ) -> Result<(), RouterError>;
 }
 
 /// Registry of scheme-dispatched routers.
@@ -216,14 +244,19 @@ impl RouterRegistry {
     /// 4. Otherwise return [`RouterError::NoRouterForScheme`] (or
     ///    [`RouterError::MalformedRecipient`] if step 1 failed and
     ///    there's no default).
-    pub async fn route(&self, recipient: &str, body: &Message) -> Result<(), RouterError> {
+    pub async fn route(
+        &self,
+        sender: &MessageOrigin,
+        recipient: &str,
+        body: &Message,
+    ) -> Result<(), RouterError> {
         if let Some((scheme, target)) = recipient.split_once(':') {
             if let Some(router) = self.routers.get(scheme) {
-                return router.route(target, body).await;
+                return router.route(sender, target, body).await;
             }
             // Scheme not registered — try default.
             if let Some(router) = self.default_router() {
-                return router.route(recipient, body).await;
+                return router.route(sender, recipient, body).await;
             }
             Err(RouterError::NoRouterForScheme {
                 scheme: scheme.into(),
@@ -232,7 +265,7 @@ impl RouterRegistry {
         } else {
             // Malformed — no scheme separator. Try default.
             if let Some(router) = self.default_router() {
-                return router.route(recipient, body).await;
+                return router.route(sender, recipient, body).await;
             }
             Err(RouterError::MalformedRecipient(recipient.into()))
         }
@@ -259,6 +292,16 @@ mod tests {
     use jiff::Timestamp;
     use pattern_core::types::ids::{AgentId, BatchId, MessageId, new_id, new_snowflake_id};
     use pattern_core::types::message::Message;
+    use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
+
+    fn test_sender() -> MessageOrigin {
+        MessageOrigin::new(
+            Author::System {
+                reason: SystemReason::Timer,
+            },
+            Sphere::System,
+        )
+    }
 
     /// Create a minimal test message.
     fn test_message() -> Message {
@@ -300,7 +343,12 @@ mod tests {
             self.scheme_name
         }
 
-        async fn route(&self, target: &str, _body: &Message) -> Result<(), RouterError> {
+        async fn route(
+            &self,
+            _sender: &MessageOrigin,
+            target: &str,
+            _body: &Message,
+        ) -> Result<(), RouterError> {
             self.called.lock().unwrap().push(target.to_string());
             Ok(())
         }
@@ -313,7 +361,7 @@ mod tests {
         registry.register(mock.clone());
 
         let msg = test_message();
-        registry.route("test:target", &msg).await.unwrap();
+        registry.route(&test_sender(), "test:target", &msg).await.unwrap();
 
         let calls = mock.calls();
         assert_eq!(calls.len(), 1);
@@ -331,7 +379,7 @@ mod tests {
 
         let msg = test_message();
         registry
-            .route("discord:#general:thread-42", &msg)
+            .route(&test_sender(), "discord:#general:thread-42", &msg)
             .await
             .unwrap();
 
@@ -342,7 +390,7 @@ mod tests {
     async fn route_unknown_scheme_without_default_returns_error() {
         let registry = RouterRegistry::new();
         let msg = test_message();
-        let err = registry.route("unknown:target", &msg).await.unwrap_err();
+        let err = registry.route(&test_sender(), "unknown:target", &msg).await.unwrap_err();
         assert!(
             matches!(
                 err,
@@ -357,7 +405,7 @@ mod tests {
     async fn route_malformed_recipient_without_default_returns_error() {
         let registry = RouterRegistry::new();
         let msg = test_message();
-        let err = registry.route("no-colon-here", &msg).await.unwrap_err();
+        let err = registry.route(&test_sender(), "no-colon-here", &msg).await.unwrap_err();
         assert!(
             matches!(err, RouterError::MalformedRecipient(_)),
             "expected MalformedRecipient, got: {err:?}"
@@ -371,7 +419,7 @@ mod tests {
         registry.register(cli.clone());
 
         let msg = test_message();
-        registry.route("just-a-bare-string", &msg).await.unwrap();
+        registry.route(&test_sender(), "just-a-bare-string", &msg).await.unwrap();
 
         // Default router receives the FULL original recipient as target.
         let calls = cli.calls();
@@ -386,7 +434,7 @@ mod tests {
         registry.register(cli.clone());
 
         let msg = test_message();
-        registry.route("agent:pattern-entropy", &msg).await.unwrap();
+        registry.route(&test_sender(), "agent:pattern-entropy", &msg).await.unwrap();
 
         // Default router receives the full "agent:pattern-entropy"
         // string so it can surface what was attempted.
@@ -404,7 +452,7 @@ mod tests {
         registry.register(agent.clone());
 
         let msg = test_message();
-        registry.route("agent:pattern-entropy", &msg).await.unwrap();
+        registry.route(&test_sender(), "agent:pattern-entropy", &msg).await.unwrap();
 
         assert!(
             cli.calls().is_empty(),
@@ -420,7 +468,7 @@ mod tests {
         // router doesn't magic one into existence.
         let registry = RouterRegistry::new().with_default_scheme("cli");
         let msg = test_message();
-        let err = registry.route("bare-string", &msg).await.unwrap_err();
+        let err = registry.route(&test_sender(), "bare-string", &msg).await.unwrap_err();
         assert!(
             matches!(err, RouterError::MalformedRecipient(_)),
             "expected MalformedRecipient (no fallback router registered), got: {err:?}"
@@ -436,7 +484,7 @@ mod tests {
         registry.register(second.clone());
 
         let msg = test_message();
-        registry.route("test:x", &msg).await.unwrap();
+        registry.route(&test_sender(), "test:x", &msg).await.unwrap();
 
         assert!(
             first.calls().is_empty(),

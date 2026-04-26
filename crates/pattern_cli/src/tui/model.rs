@@ -141,6 +141,24 @@ impl Section {
 
 /// Truncate a string to at most `max_chars` characters, appending `...`
 /// if truncated. Replaces newlines with spaces for single-line display.
+/// Render a short label for a [`pattern_core::types::origin::Author`] suitable
+/// for prefixing a one-line outbound-message line in the conversation view.
+fn format_sender_label(author: &pattern_core::types::origin::Author) -> String {
+    use pattern_core::types::origin::Author;
+    match author {
+        Author::Partner(_) => "[partner]".to_string(),
+        Author::Human(h) => match &h.display_name {
+            Some(name) => format!("[{name}]"),
+            None => "[human]".to_string(),
+        },
+        Author::Agent(a) => format!("[{}]", a.agent_id),
+        Author::System { reason } => format!("[system:{reason:?}]"),
+        // `Author` is `#[non_exhaustive]`; future variants render
+        // generically until a dedicated label is added.
+        _ => "[unknown]".to_string(),
+    }
+}
+
 fn truncate_preview(s: &str, max_chars: usize) -> String {
     let cleaned: String = s.chars().map(|c| if c == '\n' { ' ' } else { c }).collect();
     if cleaned.chars().count() <= max_chars {
@@ -250,6 +268,22 @@ impl RenderBatch {
                 self.sections.push(Section::new(SectionKind::Display {
                     kind: *kind,
                     text: text.clone(),
+                }));
+            }
+            WireTurnEvent::MessageSent {
+                recipient,
+                body,
+                from,
+            } => {
+                // Render outbound agent traffic as a Display::Note section
+                // with a "→ recipient" prefix. Phase 4 introduces the
+                // event; future work may dedicate a SectionKind for it
+                // once the design settles. For now the existing Display
+                // path keeps the rendering surface narrow.
+                let label = format_sender_label(from);
+                self.sections.push(Section::new(SectionKind::Display {
+                    kind: pattern_core::traits::turn_sink::DisplayKind::Note,
+                    text: format!("{label} → {recipient}: {body}"),
                 }));
             }
             WireTurnEvent::Stop(_) => {

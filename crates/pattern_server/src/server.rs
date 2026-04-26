@@ -1011,6 +1011,12 @@ fn estimate_batch_tokens(user_message: &Option<String>, events: &[WireTurnEvent]
                 total_chars += content_json.len();
             }
             WireTurnEvent::Display { text, .. } => total_chars += text.len(),
+            WireTurnEvent::MessageSent {
+                recipient, body, ..
+            } => {
+                total_chars += recipient.len();
+                total_chars += body.len();
+            }
             WireTurnEvent::Stop(_) => {}
         }
     }

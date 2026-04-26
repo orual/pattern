@@ -1,12 +1,21 @@
 //! CLI router: routes messages to a CLI consumer via an unbounded channel.
 //!
-//! The caller (CLI binary, test harness) creates a `CliRouter`, registers
-//! it with the `RouterRegistry` (from `super`), and holds the receiver side to
-//! consume agent-to-human output.
+//! The caller (CLI binary, test harness, daemon actor) creates a
+//! `CliRouter`, registers it with the `RouterRegistry` (from `super`), and
+//! holds the receiver side to consume agent-to-human output.
 //!
 //! Phase 5 foundation: all `cli:*` recipients go to the single registered
 //! sink. Mapping to multiple CLI consumers (by target id) is future
-//! scope; the target is ignored for now.
+//! scope; the target is currently passed through verbatim on
+//! [`CliRouterEvent::target`] so consumers can dispatch on it.
+//!
+//! Phase 4 (v3-multi-agent): the channel item is [`CliRouterEvent`] —
+//! a typed envelope carrying the [`MessageOrigin`] of the dispatcher
+//! plus the target string and the message body. The daemon's actor
+//! consumes these events and fans them out to subscribed TUI clients
+//! as `WireTurnEvent::MessageSent` so the recipient can render with
+//! sender attribution. Pre-Phase-4 callers that only needed the
+//! `Message` should access `event.body`.
 //!
 //! Registering a `CliRouter` with
 //! `RouterRegistry::with_default_scheme("cli")` makes it absorb
@@ -16,21 +25,39 @@
 
 use async_trait::async_trait;
 use pattern_core::types::message::Message;
+use pattern_core::types::origin::MessageOrigin;
 use tokio::sync::mpsc;
 
 use super::{Router, RouterError};
 
+/// Envelope sent on a [`CliRouter`]'s channel.
+///
+/// Carries enough provenance for the consumer (typically the daemon
+/// actor) to construct an attribution-tagged event for the TUI.
+#[derive(Debug, Clone)]
+pub struct CliRouterEvent {
+    /// Origin of the dispatcher — used for sender attribution at the
+    /// consumer.
+    pub sender: MessageOrigin,
+    /// Target portion of the recipient as received by the router.
+    /// For `cli:*` routes this is the part after `cli:`; for default-
+    /// scheme fallback this is the full original recipient string.
+    pub target: String,
+    /// The message body being routed.
+    pub body: Message,
+}
+
 /// Routes messages to a CLI consumer via a `tokio::sync::mpsc` channel.
 pub struct CliRouter {
-    sink: mpsc::UnboundedSender<Message>,
+    sink: mpsc::UnboundedSender<CliRouterEvent>,
 }
 
 impl CliRouter {
     /// Create a new CLI router and its paired receiver.
     ///
-    /// The caller holds the receiver to consume routed messages
-    /// (agent -> human output).
-    pub fn new() -> (Self, mpsc::UnboundedReceiver<Message>) {
+    /// The caller holds the receiver to consume routed events
+    /// (agent → human output, with sender attribution).
+    pub fn new() -> (Self, mpsc::UnboundedReceiver<CliRouterEvent>) {
         let (tx, rx) = mpsc::unbounded_channel();
         (Self { sink: tx }, rx)
     }
@@ -42,12 +69,19 @@ impl Router for CliRouter {
         "cli"
     }
 
-    async fn route(&self, _target: &str, body: &Message) -> Result<(), RouterError> {
-        // Target is ignored for Phase 5 foundation — all `cli:*`
-        // recipients (and any fallback-routed strings when this router
-        // is the registry's default) go to the single registered sink.
+    async fn route(
+        &self,
+        sender: &MessageOrigin,
+        target: &str,
+        body: &Message,
+    ) -> Result<(), RouterError> {
+        let event = CliRouterEvent {
+            sender: sender.clone(),
+            target: target.to_string(),
+            body: body.clone(),
+        };
         self.sink
-            .send(body.clone())
+            .send(event)
             .map_err(|e| RouterError::RouteFailed(format!("cli sink closed: {e}")))
     }
 }
@@ -57,6 +91,7 @@ mod tests {
     use super::*;
     use jiff::Timestamp;
     use pattern_core::types::ids::{AgentId, BatchId, MessageId, new_id, new_snowflake_id};
+    use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
 
     fn test_message(text: &str) -> Message {
         Message {
@@ -75,15 +110,35 @@ mod tests {
         }
     }
 
+    fn test_sender() -> MessageOrigin {
+        MessageOrigin::new(
+            Author::System {
+                reason: SystemReason::Timer,
+            },
+            Sphere::System,
+        )
+    }
+
     #[tokio::test]
-    async fn cli_router_delivers_message() {
+    async fn cli_router_delivers_message_with_sender() {
         let (router, mut rx) = CliRouter::new();
         let msg = test_message("hello from agent");
-        router.route("cli:user", &msg).await.unwrap();
+        let sender = test_sender();
+        router.route(&sender, "user", &msg).await.unwrap();
 
         let received = rx.recv().await.unwrap();
-        // Verify the message content was preserved.
+        // Sender attribution preserved.
+        assert!(matches!(
+            received.sender.author,
+            Author::System {
+                reason: SystemReason::Timer
+            }
+        ));
+        // Target preserved (post-scheme-strip).
+        assert_eq!(received.target, "user");
+        // Body content preserved.
         let text = received
+            .body
             .chat_message
             .content
             .first_text()
@@ -102,7 +157,10 @@ mod tests {
         let (router, rx) = CliRouter::new();
         drop(rx);
         let msg = test_message("orphaned");
-        let err = router.route("cli:user", &msg).await.unwrap_err();
+        let err = router
+            .route(&test_sender(), "user", &msg)
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, RouterError::RouteFailed(_)),
             "expected RouteFailed, got: {err:?}"

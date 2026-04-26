@@ -14,6 +14,7 @@ use irpc::{
     rpc_requests,
 };
 use pattern_core::traits::turn_sink::{DisplayKind, TurnEvent};
+use pattern_core::types::origin::Author;
 use pattern_core::types::provider::{ContentPart, ToolOutcome};
 use pattern_core::types::turn::StopReason;
 use serde::{Deserialize, Serialize};
@@ -83,6 +84,26 @@ pub enum WireTurnEvent {
     },
     /// Agent display output (chunk/final/note).
     Display { kind: DisplayKind, text: String },
+    /// An agent sent a message via `Pattern.Message.Send`/`Reply`/`Notify`
+    /// or, in Phase 4+, `Delegate`. Routed through the daemon's
+    /// `CliRouter` and fanned out to subscribed TUI clients so the
+    /// recipient's outbound traffic can be rendered with sender
+    /// attribution.
+    ///
+    /// Phase 4 (v3-multi-agent) introduces this variant. Older clients
+    /// that don't understand `MessageSent` should treat it as an
+    /// unknown event and skip rather than fail-closed.
+    MessageSent {
+        /// Recipient address as the agent supplied it (post-scheme-
+        /// strip in the runtime, e.g. `"user"` or `"agent:entropy"`).
+        recipient: String,
+        /// Message body text. The on-wire structured `Message` would
+        /// drag genai types into the postcard surface, so we project
+        /// to plain text here.
+        body: String,
+        /// Sender attribution.
+        from: Author,
+    },
     /// Wire turn ended.
     Stop(StopReason),
 }

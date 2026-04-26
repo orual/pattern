@@ -155,7 +155,25 @@ fn dispatch_outbound(
              (session must be opened with a router via with_router)"
         ))
     })?;
-    bridge.route_sync(recipient, &msg).map_err(|e| {
+
+    // Sender attribution: read the immediate-dispatch origin set by
+    // `agent_loop::drive_step` per orchestrate iteration. Phase 1's
+    // dispatch-origin discipline guarantees this is populated for
+    // every handler invocation that runs inside a real turn — see
+    // `current_dispatch_origin` on `SessionContext`. A `None` here
+    // means the handler is being called outside that discipline
+    // (e.g. a test fixture that bypasses `drive_step`); fail loudly
+    // rather than silently synthesising a sender that misattributes
+    // the message.
+    let sender = cx.user().current_dispatch_origin().ok_or_else(|| {
+        EffectError::Handler(format!(
+            "Pattern.Message.{op_name}: no dispatch origin available \
+             (handler invoked outside a turn — drive_step is responsible \
+             for populating SessionContext::current_dispatch_origin)"
+        ))
+    })?;
+
+    bridge.route_sync(&sender, recipient, &msg).map_err(|e| {
         EffectError::Handler(format!("Pattern.Message.{op_name}: routing failed: {e}"))
     })?;
 
@@ -178,17 +196,31 @@ mod tests {
         registry: RouterRegistry,
         db: Arc<pattern_db::ConstellationDb>,
     ) -> SessionContext {
+        use pattern_core::types::origin::{AgentAuthor, Author, MessageOrigin, Sphere};
+
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
         let provider: Arc<dyn ProviderClient> = Arc::new(NopProviderClient);
         let persona = PersonaSnapshot::new("agent-a", "A");
-        SessionContext::from_persona(
+        let ctx = SessionContext::from_persona(
             &persona,
             store,
             provider,
             db,
             tokio::runtime::Handle::current(),
         )
-        .with_router(Arc::new(registry))
+        .with_router(Arc::new(registry));
+
+        // Tests bypass `drive_step`, so they must populate the
+        // dispatch-origin slot themselves to satisfy the handler's
+        // attribution invariant.
+        *ctx.current_dispatch_origin_slot().write().unwrap() = Some(MessageOrigin::new(
+            Author::Agent(AgentAuthor {
+                agent_id: "agent-a".into(),
+            }),
+            Sphere::Internal,
+        ));
+
+        ctx
     }
 
     /// Build a DataConTable that includes the `()` constructor needed by
@@ -245,9 +277,19 @@ mod tests {
 
         assert!(result.is_ok(), "Send should succeed; got: {result:?}");
 
-        // Verify the receiver got the message.
-        let received = rx.recv().await.expect("should receive routed message");
+        // Verify the receiver got the routed event with sender attribution.
+        let received = rx.recv().await.expect("should receive routed event");
+        // Default-fallback sender is Author::Agent(self) — the session's
+        // own agent_id ("agent-a" per `sctx_with_router`).
+        use pattern_core::types::origin::Author;
+        match &received.sender.author {
+            Author::Agent(a) => assert_eq!(a.agent_id.as_str(), "agent-a"),
+            other => panic!("expected Author::Agent attribution, got: {other:?}"),
+        }
+        // Target is post-scheme-strip ("user", not "cli:user").
+        assert_eq!(received.target, "user");
         let text = received
+            .body
             .chat_message
             .content
             .first_text()
@@ -276,6 +318,40 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("routing failed"), "got: {msg}");
         assert!(msg.contains("unknown"), "got: {msg}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_without_dispatch_origin_returns_error() {
+        // Construct a session context that explicitly clears the
+        // dispatch-origin slot. The handler must reject the call
+        // rather than synthesise an attribution.
+        let (cli_router, _rx) = CliRouter::new();
+        let mut registry = RouterRegistry::new();
+        registry.register(Arc::new(cli_router));
+        let db = crate::testing::test_db().await;
+        let ctx = sctx_with_router(registry, db);
+        // Wipe the slot the helper populates.
+        *ctx.current_dispatch_origin_slot().write().unwrap() = None;
+
+        let table = handler_table();
+
+        let result = tokio::task::spawn_blocking(move || {
+            let cx = EffectContext::with_user(&table, &ctx);
+            let mut h = MessageHandler;
+            h.handle(
+                MessageReq::Send("cli:user".into(), "body".into()),
+                &cx,
+            )
+        })
+        .await
+        .unwrap();
+
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no dispatch origin available"),
+            "expected dispatch-origin error; got: {msg}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
