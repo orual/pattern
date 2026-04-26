@@ -429,26 +429,69 @@ proptest! {
             );
         }
 
-        // Assertion 4: commutativity / idempotence — merging again (using the
-        // report's snapshot) produces the same result. Since merge_back imports
-        // snapshots from the child cache into the parent, a second call after
-        // the first should be a no-op (Loro's vector-clock semantics mean
-        // already-imported ops are skipped).
+        // Assertion 4: commutativity — merge(parent_ops into fork) produces
+        // the same WORD-SET as merge(fork_ops into parent) above.
         //
-        // Re-read the parent's current text and call merge_back on the SAME
-        // handle — this exercises the non-consuming `&self` path. The result
-        // must still contain all the same words.
+        // We build a second independent fork pair seeded identically. This
+        // time, we apply fork_appends to the new parent (call it P2) and
+        // parent_appends to the new fork (F2). Then we merge F2 into P2.
+        // The resulting word-set in P2 must equal the word-set in P1 (the
+        // original merged result above), because CRDT merge is commutative:
+        // the union of operations is the same regardless of which side holds
+        // which ops.
         //
-        // Note: handle was consumed by merge_back_lightweight (it takes &self),
-        // so we can't call it again here without re-constructing. Instead we
-        // verify idempotence by applying the child snapshot to the parent doc
-        // directly using `apply_updates` — same as what the second merge_back
-        // call would do.
-        let text_after_first_merge = merged.clone();
-        prop_assert_eq!(
-            &text_after_first_merge,
-            &merged,
-            "merge result must be stable (idempotence check)"
-        );
+        // We compare word-sets (sorted unique words) rather than raw text
+        // because Loro's deterministic tie-breaking may order concurrent ops
+        // differently when the "first" side swaps — the SET must be identical
+        // even if the string representation isn't byte-for-byte identical.
+        {
+            let p2_id = "prop-parent-2";
+            let c2_id = "prop-child-2";
+            let parent_cache_2 = open_cache(p2_id, c2_id);
+            seed_text_block(&parent_cache_2, p2_id, "notes", "seedword");
+            let _ = parent_cache_2.get(p2_id, "notes").unwrap().unwrap();
+
+            let (child_cache_2, handle_2) = make_fork_handle(&parent_cache_2, p2_id, c2_id);
+
+            // Reversed: apply fork_appends to P2, parent_appends to F2.
+            for text in &fork_appends {
+                let doc = parent_cache_2
+                    .get(p2_id, "notes")
+                    .expect("get p2 doc")
+                    .expect("p2 notes block present");
+                doc.append_text(&format!(" {text}"), true).expect("p2 append_text");
+            }
+            for text in &parent_appends {
+                let doc = child_cache_2
+                    .get_cached_doc(c2_id, "notes")
+                    .expect("c2 notes block");
+                doc.append_text(&format!(" {text}"), true).expect("c2 append_text");
+            }
+
+            let _report2 = handle_2
+                .merge_back_lightweight()
+                .expect("reversed merge must not fail");
+
+            let merged_2 = parent_cache_2
+                .get(p2_id, "notes")
+                .expect("get p2 doc after merge")
+                .expect("p2 block must still be present after merge")
+                .text_content();
+
+            // Extract word-sets from both results and compare. Splitting on
+            // whitespace is sufficient because all test words are [a-z]+ and
+            // the seed is "seedword" (no spaces within words).
+            let mut words_1: Vec<&str> = merged.split_whitespace().collect();
+            let mut words_2: Vec<&str> = merged_2.split_whitespace().collect();
+            words_1.sort_unstable();
+            words_1.dedup();
+            words_2.sort_unstable();
+            words_2.dedup();
+            prop_assert!(
+                words_1 == words_2,
+                "merge word-set must be identical regardless of which side's ops come first \
+                 (commutativity); got words_1={words_1:?} words_2={words_2:?}"
+            );
+        }
     }
 }
