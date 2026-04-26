@@ -238,7 +238,98 @@ Runtime budget: < 30 seconds. If the test takes longer, the scripted provider or
 <!-- END_TASK_5 -->
 
 <!-- START_TASK_6 -->
-### Task 6: Audit + final cleanup
+### Task 6: Custom Haskell wake-condition evaluator
+
+**Verifies:** closes the Phase 4 Task 9 deferral. After this task, `ctx.wake.register` accepting a custom Haskell condition no longer logs-and-returns — it actually evaluates the user's program on its trigger and pokes the mailbox if the result is true.
+
+**Background:** Phase 4 Task 9 shipped the registration path (`Pattern.Wake.register`) and the `CapabilityFlag::WakeConditionRegistration` gate, but stored the user's program without running it. The deferral was on Tidepool concurrent-evaluation design — running periodic Haskell condition checks alongside the agent's main turn loop wasn't scoped. Phase 7 closes it now that the broader multi-agent surface is settled.
+
+**Files:**
+- Modify: `crates/pattern_runtime/src/wake/mod.rs` — replace the no-op storage with a `CustomEvaluator` that owns a tokio task per registered condition.
+- Modify: `crates/pattern_runtime/src/sdk/handlers/wake.rs` — `WakeReq::Register` for `WakeCondition::Custom { id, program }` now spawns the evaluator instead of logging.
+- Modify: `crates/pattern_runtime/haskell/Pattern/Wake.hs` — delete the "evaluator deferred" comment in the docstring.
+- Modify: `crates/pattern_runtime/CLAUDE.md` — remove the "deferred to when Tidepool concurrent evaluation is better understood" note added in Phase 4.
+- Tests: integration test exercising a custom interval condition that fires and pokes the mailbox.
+
+**Architecture:**
+
+One tokio task per registered custom condition. Triggered by:
+- `Interval(period)` — `tokio::time::interval(period)` ticks; min period 1s (rejected at register-time if smaller — **no subsecond polling**).
+- `BlockChanged(label)` — piggyback on the existing `pattern_memory::subscriber` fan-out introduced in Phase 4 Task 8.
+
+On trigger, the evaluator runs the user's Haskell condition program once via a fresh **`compile_and_run`** dispatch on a dedicated 256 MiB OS thread (matching the eval-worker pattern from `agent_loop::eval_worker.rs`). Bounded by `tokio::time::timeout` (default: 30s per evaluation; rejects evaluation if a prior one is still running for the same condition — single-flight). The condition program's effect row is restricted to **read-only** capabilities (Time, Log, Memory.Get, Search) — no `Memory.Put`, no `Message.Send`, no `Spawn`. The condition program returns `Bool`.
+
+If the result is `True`, the evaluator pushes a `MailboxInput::Message` (synthesised with `MessageOrigin::Author::System { reason: SystemReason::CustomWake { id } }`) onto the agent's mailbox. The agent's next idle moment surfaces the wake.
+
+**Resource accounting:**
+- Per-session cap: at most 32 concurrent registered custom conditions (configurable via `SessionContext::with_max_custom_wakes`). Registration beyond cap returns `EffectError::Handler("CustomWakeLimit: ...")`.
+- Per-evaluation cap: 30s wall-clock timeout.
+- Single-flight per condition: a still-running evaluation skips the next trigger and emits a `tracing::warn!` instead of queuing.
+
+**Implementation:**
+
+```rust
+// pattern_runtime/src/wake/custom.rs (new file)
+pub struct CustomEvaluator {
+    /// Registered conditions, keyed by user id.
+    tasks: parking_lot::Mutex<HashMap<SmolStr, JoinHandle<()>>>,
+    mailbox_tx: mpsc::UnboundedSender<MailboxInput>,
+    sdk_dir: PathBuf,
+    // Restricted bundle for evaluating user programs (read-only).
+    bundle_factory: Arc<dyn Fn() -> ReadOnlyBundle + Send + Sync>,
+    inflight: Arc<DashMap<SmolStr, ()>>,
+}
+
+impl CustomEvaluator {
+    pub fn register(&self, id: SmolStr, condition: WakeCondition, program: String) -> Result<(), WakeError> {
+        // Validate: min period 1s, cap not exceeded.
+        // Spawn tokio task with the appropriate trigger source.
+    }
+
+    pub fn unregister(&self, id: &SmolStr) {
+        // Abort the JoinHandle; remove from map.
+    }
+}
+```
+
+Trigger task body (sketch):
+```rust
+let mut interval = tokio::time::interval(period);
+loop {
+    interval.tick().await;
+    if inflight.contains_key(&id) {
+        tracing::warn!(?id, "custom wake skipped: prior evaluation still running");
+        continue;
+    }
+    inflight.insert(id.clone(), ());
+    let result = tokio::time::timeout(EVAL_TIMEOUT, run_user_program(&program)).await;
+    inflight.remove(&id);
+    match result {
+        Ok(Ok(true)) => { let _ = mailbox_tx.send(make_custom_wake_input(&id)); }
+        Ok(Ok(false)) | Ok(Err(_)) | Err(_) => {} // log; do nothing
+    }
+}
+```
+
+`run_user_program` spawns the OS thread and `compile_and_run`s the user's program against the read-only bundle.
+
+**Testing:**
+- Integration: register a custom condition that returns `True` on every other tick. Verify the mailbox receives exactly the expected number of wake messages over a 5s window.
+- Integration: register a long-running custom program (sleep 60s). Verify timeout fires, no mailbox poke, condition stays registered for next trigger.
+- Integration: register a condition that uses `Memory.Put` (a write effect). Verify Tidepool compile rejects with capability error.
+- Integration: register two conditions with overlapping triggers, both fire correctly, single-flight per condition.
+- Negative: register with `period: Duration::from_millis(500)`. Verify register returns the min-period error, no task spawned.
+
+**Verification:**
+`cargo nextest run -p pattern-runtime wake::custom`
+
+**Future improvement (post-Phase 7):** the architecturally cleaner shape is to queue custom-wake evaluations on the **session's existing eval worker** at a lower priority than normal turn inputs, rather than spawning a fresh OS thread per evaluation. This avoids per-eval thread cost and cleanly bounds resource use to the one worker that's already accounted for. The async/separate-thread impl described above is the explicit ship-now choice — simpler to land, isolated, no priority-queue scheduler work needed. Switch when the eval worker grows a priority queue (likely alongside any future "agent thinks while idle" feature that wants the same primitive).
+
+**Commit:** `[pattern-runtime] implement custom Haskell wake-condition evaluator`
+<!-- END_TASK_6 -->
+
+<!-- START_TASK_7 -->
+### Task 7: Audit + final cleanup
 
 **Verifies:** overall phase integrity.
 

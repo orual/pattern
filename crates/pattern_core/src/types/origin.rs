@@ -24,10 +24,48 @@
 //! classes. Supporting types [`Partner`], [`Human`], and [`AgentAuthor`]
 //! carry the transport-specific identity for each authorship class.
 
+use jiff::Span;
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
+use crate::types::block_ref::BlockRef;
 use crate::types::ids::{AgentId, UserId};
+
+/// `jiff::Span` wrapper that opts into fieldwise equality.
+///
+/// `Span` itself does not implement `PartialEq<Self>` — span equality is
+/// calendar-dependent (e.g. "1 month" vs. "30 days" cannot be decided
+/// without a reference instant). [`SpanCompare`] commits to fieldwise
+/// equality (same y/m/w/d/h/m/s/ms/us/ns), so it can derive
+/// `PartialEq`/`Eq`/`Hash` for embedding in types like [`SystemReason`]
+/// that participate in derived comparisons. Serializes transparently as
+/// the underlying `Span`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SpanCompare(pub Span);
+
+impl From<Span> for SpanCompare {
+    fn from(s: Span) -> Self {
+        Self(s)
+    }
+}
+
+impl PartialEq for SpanCompare {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.fieldwise() == other.0.fieldwise()
+    }
+}
+
+impl Eq for SpanCompare {}
+
+impl std::hash::Hash for SpanCompare {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Hash via the canonical field tuple. `SpanFieldwise` impls
+        // Hash directly; delegate to it so two `SpanCompare`s that
+        // compare equal also hash equal.
+        self.0.fieldwise().hash(state);
+    }
+}
 
 /// Visibility sphere — where a message was published.
 ///
@@ -161,8 +199,18 @@ pub enum Author {
 /// Used on [`Author::System`] to distinguish the concrete cause of a
 /// system-authored message. `#[non_exhaustive]` so plugin/integration code
 /// can add variants in future phases without breaking match arms.
+///
+/// Variants are data-bearing where the cause has structured payload —
+/// rather than dropping a positional `block_refs[0]` convention on every
+/// caller, the affected refs / spans / ids live on the variant itself.
+/// Phase 4 wake-condition primitives (`TaskTimeout`, `TaskDependencyResolved`,
+/// `BlockChanged`, `Interval`, `CustomWake`) all use this shape.
+///
+/// `Copy` is dropped because some payloads (e.g. `BlockRef`, `SmolStr`)
+/// allocate. Equality + hashing work because span values are stored as
+/// [`jiff::SpanFieldwise`] (calendar-independent fieldwise compare).
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SystemReason {
     /// A generic timer effect fired. Use a more specific variant below when
@@ -177,6 +225,37 @@ pub enum SystemReason {
     MemoryChange,
     /// Turn was triggered by a tool-call follow-up.
     ToolCall,
+    /// A task's deadline elapsed without the agent completing it.
+    TaskTimeout {
+        /// The task whose timer fired.
+        task: BlockRef,
+        /// How long the timer was set for. Echoed back so the agent
+        /// can branch on duration without re-reading the task.
+        elapsed: SpanCompare,
+    },
+    /// A dependency task transitioned to `Completed`.
+    TaskDependencyResolved {
+        /// The dependency that just resolved.
+        task: BlockRef,
+    },
+    /// A specific block's content changed (any author). Used when the
+    /// agent registered explicit interest in a memory location.
+    BlockChanged {
+        /// The block whose content changed.
+        block: BlockRef,
+    },
+    /// A periodic interval wake fired.
+    Interval {
+        /// The interval period.
+        period: SpanCompare,
+    },
+    /// A Haskell-registered custom wake fired. Phase 4 ships the
+    /// registration path; the evaluator that runs the user's condition is
+    /// deferred.
+    CustomWake {
+        /// User-supplied identifier from `ctx.wake.register`.
+        id: SmolStr,
+    },
 }
 
 /// Provenance for a single inbound message.
@@ -205,7 +284,10 @@ pub struct MessageOrigin {
     pub author: Author,
     /// What visibility sphere it was published into.
     pub sphere: Sphere,
-    /// A transport-specific hint for displaying the message (e.g. channel name).
+    /// A transport-specific hint for displaying the message (e.g.
+    /// channel name). Phase 4 also uses this slot for the
+    /// custom-wake id when [`Author::System`] carries
+    /// [`SystemReason::CustomWake`].
     pub transport_hint: Option<SmolStr>,
 }
 

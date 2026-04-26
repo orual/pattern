@@ -1071,12 +1071,22 @@ pub struct TidepoolSession {
     /// Long-lived Haskell eval worker. Spawned by
     /// [`TidepoolSession::open_with_agent_loop`]. Required by
     /// [`TidepoolSession::step_with_agent_loop`].
-    eval_worker: Option<EvalWorker>,
+    eval_worker: Option<Arc<EvalWorker>>,
     /// Shared Haskell preamble: GADT declarations + effect-row alias +
     /// helpers assembled once at session open from
     /// [`crate::sdk::bundle::canonical_effect_decls`]. Passed verbatim
     /// to every [`EvalWorker::dispatch`] call.
-    preamble: Option<String>,
+    ///
+    /// Stored as `Arc<str>` so the per-session mailbox task (Phase 4
+    /// T3) can hold its own clone for drive_step calls without
+    /// duplicating the (~6 KB) preamble buffer.
+    preamble: Option<Arc<str>>,
+    /// Handle to the per-session mailbox-drain task spawned at session
+    /// open (Phase 4 T3). `None` for sessions opened via
+    /// [`Self::open`] which skip eval-worker bootstrap; `Some` for
+    /// [`Self::open_with_agent_loop`]. Aborted on Drop so the task
+    /// exits when the session ends.
+    mailbox_task: Option<tokio::task::JoinHandle<()>>,
     /// Session-latched cache profile. Consumed by the composer
     /// pipeline inside [`crate::agent_loop::drive_step`] to place
     /// segment-1/2/3 `cache_control` markers with the configured
@@ -1097,6 +1107,11 @@ impl std::fmt::Debug for TidepoolSession {
             .finish_non_exhaustive()
     }
 }
+
+// `Drop for TidepoolSession` aborting the mailbox task lands in Phase 4 T3
+// alongside the actual spawn. The Drop impl conflicts with the
+// `Arc::try_unwrap(session.ctx)` move during open; T3 uses
+// `std::mem::replace` to thread around that.
 
 impl TidepoolSession {
     /// Return a clone of the session's DisplayHandler (Arc-shared
@@ -1198,6 +1213,7 @@ impl TidepoolSession {
             turn_history: Arc::new(std::sync::Mutex::new(TurnHistory::empty())),
             eval_worker: None,
             preamble: None,
+            mailbox_task: None,
             cache_profile: pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
         })
     }
@@ -1391,8 +1407,12 @@ impl TidepoolSession {
             session.session_id.clone(),
         );
 
+        let worker = Arc::new(worker);
+        let preamble: Arc<str> = Arc::from(preamble.into_boxed_str());
         session.eval_worker = Some(worker);
         session.preamble = Some(preamble);
+        // Mailbox-drain task spawned in Phase 4 T3.
+        session.mailbox_task = None;
 
         // Restore turn history from persisted messages so re-spawning
         // against the same data-dir resumes conversation state.
@@ -1433,7 +1453,7 @@ impl TidepoolSession {
             self.ctx.clone(),
             self.turn_history.clone(),
             cache_profile,
-            worker,
+            worker.as_ref(),
             preamble,
             None,
         )

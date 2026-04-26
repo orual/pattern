@@ -2,73 +2,59 @@
 //! turn loop.
 //!
 //! v3-multi-agent Phase 4 introduces *mailboxes* — every active session
-//! owns one [`Mailbox`] that buffers three kinds of activations:
+//! owns one [`Mailbox`] that buffers inbound activations and feeds the
+//! [`MailboxTask`] (T3) which calls `drive_step` whenever the session
+//! is idle.
 //!
-//! 1. **Direct messages** sent by another agent or the partner via
-//!    `Pattern.Message.Send`/`Reply`/`Notify`.
-//! 2. **Task assignments** delegated by another agent. Carry an
-//!    extra [`BlockRef`] that gets pinned into the recipient's
-//!    snapshot selection so the assigned task shows up in their
-//!    composed context.
-//! 3. **Wake events** triggered by registered conditions (timers,
-//!    block-changed subscribers, task-dependency resolvers; see
-//!    [`pattern_core::wake::WakeReason`]).
+//! All inbound activations — direct messages, task assignments, and
+//! wake events fired by registered conditions — share a single carrier:
+//! a [`pattern_core::Message`] paired with the dispatcher's
+//! [`MessageOrigin`]. Wake-triggered activations distinguish themselves
+//! by setting the origin's `author` to
+//! [`pattern_core::SystemReason::TaskTimeout`] /
+//! [`Interval`](pattern_core::SystemReason::Interval) /
+//! [`BlockChanged`](pattern_core::SystemReason::BlockChanged) etc., and
+//! by attaching the same structured payload (block refs, elapsed spans)
+//! to the variant. There is no separate "wake reason" axis on the
+//! turn input — `Author::System { reason }` already answers the
+//! "why is this turn happening" question.
 //!
-//! T2 lands the *data carriers*: the [`MailboxInput`] enum, the
-//! [`Mailbox`] struct holding a tokio mpsc, and the
-//! [`SessionContext`](crate::session::SessionContext) busy-flag pair
-//! ([`is_in_turn`](crate::session::SessionContext::is_in_turn) +
-//! [`turn_done`](crate::session::SessionContext::turn_done)) that the
-//! `MailboxTask` (T3) waits on.
+//! Task assignments are messages with the assigned task pinned into
+//! the message's `block_refs`; the snapshot composer sees the
+//! `BlockRef` automatically without a separate dispatch path.
 //!
-//! The `MailboxTask` itself — the tokio task that drains the inbox and
-//! calls `drive_step` when the session is idle — lands in T3.
+//! T2 lands the *data carriers*: the [`MailboxInput`] struct, the
+//! [`Mailbox`] itself, and the busy-flag pair on
+//! [`SessionContext`](crate::session::SessionContext). T3 wires the
+//! [`MailboxTask`] that drains the inbox and calls `drive_step`.
 
 use std::sync::Arc;
 
-use pattern_core::types::block_ref::BlockRef;
 use pattern_core::types::ids::PersonaId;
 use pattern_core::types::message::Message;
 use pattern_core::types::origin::MessageOrigin;
-use pattern_core::wake::WakeReason;
 use tokio::sync::{Mutex, mpsc};
 
 /// A single activation enqueued into a session's mailbox.
 ///
-/// Three shapes today; `#[non_exhaustive]` so future transports
-/// (RPC, plugin-injected events) can grow the enum without breaking
-/// match arms.
-#[non_exhaustive]
+/// The carrier is uniformly `(Message, MessageOrigin)`. The origin's
+/// `author` field discriminates direct sends (`Agent` / `Partner` /
+/// `Human`) from system-emitted wakes (`System { reason: TaskTimeout
+/// { .. } }`, etc.). Task assignments are conveyed by populating the
+/// message's `block_refs` — the snapshot composer reads them without
+/// any mailbox-level branching.
 #[derive(Debug, Clone)]
-pub enum MailboxInput {
-    /// A direct message from another agent or the partner.
-    Message {
-        /// The body to deliver as a turn input.
-        msg: Message,
-        /// Sender origin — used by handlers + TUI for attribution.
-        from: MessageOrigin,
-    },
-    /// A task assignment from another agent.
-    ///
-    /// The recipient's [`MailboxTask`] (T3) appends `task` to the
-    /// message's `block_refs` so the snapshot composer pins the task
-    /// into the agent's working memory for that turn.
-    TaskAssigned {
-        /// The task block being assigned.
-        task: BlockRef,
-        /// Persona id of the assigner — printed in observability logs
-        /// and surfaced to the agent's prompt pipeline.
-        from: PersonaId,
-        /// The accompanying message body. Typically a short
-        /// instruction or context note from the assigner.
-        msg: Message,
-    },
-    /// A registered wake condition fired.
-    Wake {
-        /// Why this wake was triggered. Round-trips to the agent's
-        /// Haskell program via `TurnInput::wake` (added in T6).
-        reason: WakeReason,
-    },
+pub struct MailboxInput {
+    /// Sender attribution: who/what is activating the agent. Wake
+    /// sources synthesise an `Author::System { reason: ... }` origin
+    /// carrying the structured payload (block ref + elapsed span)
+    /// directly on the variant.
+    pub from: MessageOrigin,
+    /// The message body to deliver as a turn input. Task-assignment
+    /// activations populate `msg.block_refs` so the snapshot composer
+    /// pins the assigned task into the recipient's working memory
+    /// for that turn.
+    pub msg: Message,
 }
 
 /// Per-session inbox.
@@ -81,7 +67,7 @@ pub enum MailboxInput {
 /// this agent.
 ///
 /// The mailbox itself does not drive any turn loop — the
-/// [`MailboxTask`] in T3 owns the receiver guard for as long as the
+/// [`MailboxTask`] (T3) owns the receiver guard for as long as the
 /// session lives. This struct just bundles the send + receive halves
 /// with the persona id that owns it for clearer observability.
 pub struct Mailbox {
@@ -121,7 +107,9 @@ impl Mailbox {
     /// Acquire the receiver guard. The [`MailboxTask`] (T3) holds this
     /// for the lifetime of its loop; tests can use it to assert that a
     /// specific input was delivered.
-    pub async fn lock_rx(&self) -> tokio::sync::MutexGuard<'_, mpsc::UnboundedReceiver<MailboxInput>> {
+    pub async fn lock_rx(
+        &self,
+    ) -> tokio::sync::MutexGuard<'_, mpsc::UnboundedReceiver<MailboxInput>> {
         self.rx.lock().await
     }
 }
@@ -173,31 +161,23 @@ mod tests {
         let (mbx, tx_a) = Mailbox::new(PersonaId::from("agent-a"));
         let tx_b = mbx.sender();
 
-        tx_a.send(MailboxInput::Message {
-            msg: test_message("from-a"),
+        tx_a.send(MailboxInput {
             from: test_origin(),
+            msg: test_message("from-a"),
         })
         .unwrap();
-        tx_b.send(MailboxInput::Message {
-            msg: test_message("from-b"),
+        tx_b.send(MailboxInput {
             from: test_origin(),
+            msg: test_message("from-b"),
         })
         .unwrap();
 
         let mut rx = mbx.lock_rx().await;
         let first = rx.recv().await.expect("first input");
         let second = rx.recv().await.expect("second input");
-        match (first, second) {
-            (
-                MailboxInput::Message { msg: m1, .. },
-                MailboxInput::Message { msg: m2, .. },
-            ) => {
-                let t1 = m1.chat_message.content.first_text().unwrap();
-                let t2 = m2.chat_message.content.first_text().unwrap();
-                assert_eq!((t1, t2), ("from-a", "from-b"));
-            }
-            other => panic!("expected two Message variants, got {other:?}"),
-        }
+        let t1 = first.msg.chat_message.content.first_text().unwrap();
+        let t2 = second.msg.chat_message.content.first_text().unwrap();
+        assert_eq!((t1, t2), ("from-a", "from-b"));
     }
 
     #[tokio::test]
