@@ -112,13 +112,23 @@ pub enum Sphere {
 /// use pattern_core::types::origin::Partner;
 /// use pattern_core::types::ids::new_id;
 ///
-/// let p = Partner { user_id: new_id() };
-/// assert_eq!(p.user_id.len(), 32);
+/// let p = Partner { user_id: new_id(), display_name: Some("orual".into()) };
+/// assert_eq!(p.display_name.as_deref(), Some("orual"));
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Partner {
     /// The partner's stable user id.
     pub user_id: UserId,
+    /// Optional human-readable display name for attribution.
+    ///
+    /// Used for rendering (e.g. `[orual] hello`) but never for identity
+    /// matching — `user_id` is the authoritative identity key. A `None`
+    /// value means "anonymous partner" and renders as a generic label.
+    ///
+    /// The config path for setting this is `.pattern.kdl`
+    /// `partner { display_name "..." }` — see Phase 6 for the full
+    /// partner-config KDL section.
+    pub display_name: Option<String>,
 }
 
 /// The identity of a non-partner human participant.
@@ -175,7 +185,7 @@ pub struct AgentAuthor {
 /// use pattern_core::types::origin::{Author, Partner};
 /// use pattern_core::types::ids::new_id;
 ///
-/// let a = Author::Partner(Partner { user_id: new_id() });
+/// let a = Author::Partner(Partner { user_id: new_id(), display_name: None });
 /// matches!(a, Author::Partner(_));
 /// ```
 #[non_exhaustive]

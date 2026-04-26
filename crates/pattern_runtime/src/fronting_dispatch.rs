@@ -27,6 +27,24 @@ use crate::agent_registry::AgentRegistry;
 use crate::mailbox::MailboxInput;
 use crate::router::RouterError;
 
+/// The outcome of a successful [`dispatch_to_mailboxes`] call.
+///
+/// Callers can use this to surface user-visible signals for paths that
+/// complete without error but may need human attention (e.g. `SystemDefault`
+/// means no fronting is configured and the message was acked but not routed).
+#[derive(Debug, Clone)]
+pub enum DispatchOutcome {
+    /// Delivered to a single persona's mailbox (Direct, Rule, Fallback, or
+    /// DefaultPersona paths).
+    Delivered(PersonaId),
+    /// Delivered to multiple personas in co-fronting fan-out mode.
+    FanOutDelivered(Vec<PersonaId>),
+    /// No fronting is configured and the registry has no Active personas.
+    /// The message was acknowledged but not routed to any session. The
+    /// caller should surface a human-visible "no fronting configured" signal.
+    SystemDefault,
+}
+
 /// Per-mount fronting state. Holds the live `FrontingSet` (under a
 /// read/write lock for runtime mutations) and the
 /// [`ConstellationRegistry`] used for default-persona resolution when
@@ -65,11 +83,14 @@ impl std::fmt::Debug for FrontingState {
 /// to the set do not affect this dispatch.
 ///
 /// Returns:
-/// - `Ok(())` on successful delivery (or successful queuing for Draft
-///   personas; same semantics as the direct `agent:` path).
-/// - The first [`RouterError`] encountered for FanOut / multi-target
-///   outcomes (subsequent targets are not retried — the channel
-///   contract is best-effort per-target).
+/// - `Ok(DispatchOutcome::Delivered(id))` — delivered to one persona.
+/// - `Ok(DispatchOutcome::FanOutDelivered(ids))` — delivered to multiple
+///   personas in co-fronting fan-out mode.
+/// - `Ok(DispatchOutcome::SystemDefault)` — no fronting configured; the
+///   message was acked but not routed. The caller should surface a
+///   human-visible "no fronting configured" signal.
+/// - `Err(RouterError::…)` — delivery to a persona's mailbox failed (the
+///   first error in a FanOut sequence; subsequent targets are not retried).
 ///
 /// AC8.8 invariant: the FrontingSet is read-locked once at the top
 /// and the resolver outcome is computed under that lock. Once the
@@ -81,28 +102,26 @@ pub async fn dispatch_to_mailboxes(
     fronting: &FrontingState,
     sender: &MessageOrigin,
     body: &Message,
-) -> Result<(), RouterError> {
-    let outcome = {
-        // Snapshot the resolver under a short-lived read lock so the
-        // decision is stable for this dispatch even if the set is
-        // mutated concurrently. The lock is `std::sync::RwLock` because
-        // it's also accessed from the sync `Pattern.Fronting` handler
-        // running on the eval-worker OS thread (no ambient tokio
-        // runtime there). The lock is released before the awaited
-        // `resolve()` call so the runtime never holds the lock across
-        // an await point.
+) -> Result<DispatchOutcome, RouterError> {
+    // Snapshot the resolver under a short-lived read lock so the
+    // decision is stable for this dispatch even if the set is
+    // mutated concurrently. The lock is `std::sync::RwLock` because
+    // it's also accessed from the sync `Pattern.Fronting` handler
+    // running on the eval-worker OS thread (no ambient tokio
+    // runtime there). The lock is released before the awaited
+    // `resolve()` call so the runtime never holds the lock across
+    // an await point.
+    let resolver = {
         let set = fronting
             .set
             .read()
-            .map_err(|_| {
-                RouterError::PersonaNotFound(PersonaId::from("<lock-poisoned>"))
-            })?
+            .map_err(|_| RouterError::PersonaNotFound(PersonaId::from("<lock-poisoned>")))?
             .clone();
-        let resolver = FrontingResolver::new(set, fronting.registry.clone());
-        resolver.resolve(body_text(body)).await
+        FrontingResolver::new(set, fronting.registry.clone())
     };
 
-    deliver_resolved(registry, sender, body, outcome).await
+    let outcome = resolver.resolve(body_text(body)).await;
+    deliver_resolved(registry, sender, body, outcome)
 }
 
 /// Helper: extract the message body text used for resolver matching.
@@ -120,38 +139,45 @@ fn body_text(msg: &Message) -> &str {
 /// `route_or_queue` is independent — there's no transactional
 /// "either all or none" promise across multiple targets in a single
 /// dispatch.
-async fn deliver_resolved(
+///
+/// Returns a [`DispatchOutcome`] on success so the caller can surface
+/// the `SystemDefault` case as a user-visible signal rather than
+/// relying solely on a `tracing::warn!`.
+fn deliver_resolved(
     registry: &AgentRegistry,
     sender: &MessageOrigin,
     body: &Message,
     outcome: ResolveOutcome,
-) -> Result<(), RouterError> {
+) -> Result<DispatchOutcome, RouterError> {
     match outcome {
         ResolveOutcome::Direct(id)
         | ResolveOutcome::Rule { target: id, .. }
         | ResolveOutcome::Fallback(id)
-        | ResolveOutcome::DefaultPersona(id) => deliver_one(registry, sender, body, id),
+        | ResolveOutcome::DefaultPersona(id) => {
+            deliver_one(registry, sender, body, id.clone())?;
+            Ok(DispatchOutcome::Delivered(id))
+        }
         ResolveOutcome::FanOut(ids) => {
-            for id in ids {
-                deliver_one(registry, sender, body, id)?;
+            for id in &ids {
+                deliver_one(registry, sender, body, id.clone())?;
             }
-            Ok(())
+            Ok(DispatchOutcome::FanOutDelivered(ids))
         }
         ResolveOutcome::SystemDefault => {
-            // Plan line 38: "SystemDefault — a synthetic persona that
-            // logs the message and ack-nowledges — so human messages
-            // are never silently dropped." Phase 5 ships this as a
-            // tracing-warn + Ok rather than constructing an actual
-            // persona; the human-visible TUI surfaces a "no fronting
-            // configured" status separately (T6's FrontingChanged
-            // event drives that).
+            // No fronting configured and no Active personas in the registry.
+            // The message is acked but not routed. We emit a tracing::warn
+            // for observability and return the SystemDefault outcome so the
+            // caller (daemon SendMessage handler, AgentRouter, etc.) can
+            // surface a human-visible "no fronting configured" signal rather
+            // than silently dropping the message.
             tracing::warn!(
                 target = "pattern_runtime::fronting_dispatch",
                 from = ?sender.author,
                 "no fronting configured and no Active personas available; \
-                 message acked but not routed"
+                 message acked but not routed — caller should surface a \
+                 user-visible 'no fronting configured' signal"
             );
-            Ok(())
+            Ok(DispatchOutcome::SystemDefault)
         }
     }
 }
@@ -179,9 +205,7 @@ mod tests {
     use jiff::Timestamp;
     use pattern_core::PersonaRecord;
     use pattern_core::constellation::{EdgeDirection, PersonaStatus};
-    use pattern_core::fronting::{
-        FrontingSet, MessagePattern, RoutingRule, RoutingTable,
-    };
+    use pattern_core::fronting::{FrontingSet, MessagePattern, RoutingRule, RoutingTable};
     use pattern_core::types::ids::{AgentId, BatchId, MessageId, new_id, new_snowflake_id};
     use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
     use smol_str::SmolStr;
@@ -214,7 +238,11 @@ mod tests {
     }
 
     fn seed_active(reg: &InMemoryConstellationRegistry, id: &str) {
-        reg.seed(PersonaRecord::new(SmolStr::from(id), id.to_string(), PersonaStatus::Active));
+        reg.seed(PersonaRecord::new(
+            SmolStr::from(id),
+            id.to_string(),
+            PersonaStatus::Active,
+        ));
     }
 
     /// AC8.3: no rule matches → fallback persona receives.
@@ -239,12 +267,7 @@ mod tests {
 
         let received = rx.recv().await.expect("alice should receive");
         assert_eq!(
-            received
-                .msg
-                .chat_message
-                .content
-                .first_text()
-                .unwrap_or(""),
+            received.msg.chat_message.content.first_text().unwrap_or(""),
             "hello"
         );
     }
@@ -265,8 +288,7 @@ mod tests {
             10,
         )];
         let table = RoutingTable::try_from_rules(rules).unwrap();
-        let fronting_set =
-            FrontingSet::from_parts(Vec::new(), Some(SmolStr::from("chat")), table);
+        let fronting_set = FrontingSet::from_parts(Vec::new(), Some(SmolStr::from("chat")), table);
         let registry: Arc<dyn ConstellationRegistry> =
             Arc::new(InMemoryConstellationRegistry::new());
         let state = FrontingState::new(Arc::new(RwLock::new(fronting_set)), registry);
@@ -277,12 +299,7 @@ mod tests {
 
         let received = math_rx.recv().await.expect("math should receive");
         assert_eq!(
-            received
-                .msg
-                .chat_message
-                .content
-                .first_text()
-                .unwrap_or(""),
+            received.msg.chat_message.content.first_text().unwrap_or(""),
             "!math 2+2"
         );
         // Chat mailbox must NOT have received the message.
@@ -332,16 +349,16 @@ mod tests {
         seed_active(&constellation, "alpha");
         seed_active(&constellation, "beta");
         let registry: Arc<dyn ConstellationRegistry> = Arc::new(constellation);
-        let state = FrontingState::new(
-            Arc::new(RwLock::new(FrontingSet::default())),
-            registry,
-        );
+        let state = FrontingState::new(Arc::new(RwLock::new(FrontingSet::default())), registry);
 
         dispatch_to_mailboxes(&agent_reg, &state, &test_origin(), &test_msg("anything"))
             .await
             .unwrap();
 
-        assert!(a_rx.recv().await.is_some(), "alpha (lowest id) should receive");
+        assert!(
+            a_rx.recv().await.is_some(),
+            "alpha (lowest id) should receive"
+        );
         assert!(b_rx.try_recv().is_err(), "beta should NOT receive");
     }
 
@@ -352,24 +369,57 @@ mod tests {
         let agent_reg = AgentRegistry::new();
         let registry: Arc<dyn ConstellationRegistry> =
             Arc::new(InMemoryConstellationRegistry::new());
-        let state = FrontingState::new(
-            Arc::new(RwLock::new(FrontingSet::default())),
-            registry,
-        );
+        let state = FrontingState::new(Arc::new(RwLock::new(FrontingSet::default())), registry);
 
         let result =
             dispatch_to_mailboxes(&agent_reg, &state, &test_origin(), &test_msg("orphan")).await;
         assert!(result.is_ok());
     }
 
-    /// AC8.8: routing decision is taken at dispatch time. A message
-    /// dispatched before a fronting mutation goes to the OLD target;
-    /// a message dispatched after goes to the NEW target. Mutating
-    /// the lock between the two dispatches must not re-route the
-    /// already-queued message.
-    #[tokio::test]
+    /// AC8.8: a fronting mutation between two dispatches does NOT
+    /// re-route the first dispatch's message.
+    ///
+    /// ## Test structure (sequential)
+    ///
+    /// 1. Fronting fallback = alice.
+    /// 2. First `dispatch_to_mailboxes` runs to completion → alice's
+    ///    mailbox receives "first".
+    /// 3. Test mutates fronting fallback to bob.
+    /// 4. Second `dispatch_to_mailboxes` runs to completion → bob's
+    ///    mailbox receives "second".
+    /// 5. Assertions:
+    ///    - alice received "first" (inclusion).
+    ///    - alice did NOT receive "second" (exclusion).
+    ///    - bob received "second" (inclusion).
+    ///    - bob did NOT receive "first" (exclusion).
+    ///
+    /// ## Why sequential is sufficient
+    ///
+    /// AC8.8 is structurally enforced by [`dispatch_to_mailboxes`]:
+    /// each call snapshots the `FrontingSet` once under the read lock,
+    /// drops the lock, resolves the snapshot to a target, and pushes
+    /// the message into mpsc. Once the message is in mpsc, no
+    /// subsequent `FrontingSet` mutation can re-route it — the routing
+    /// decision is committed by the push.
+    ///
+    /// A "concurrent" test that holds the first dispatch mid-resolve,
+    /// mutates fronting, then releases the dispatch would test the
+    /// same property. The exclusion assertions
+    /// (`try_recv().is_err()` on the wrong mailbox) are what catch a
+    /// regression that re-routed an in-flight message; they fire
+    /// independently of whether the dispatches run concurrently or
+    /// sequentially.
+    ///
+    /// An earlier version of this test used a `tokio::sync::Notify`
+    /// checkpoint between snapshot and resolve to deterministically
+    /// widen the race window. It hung indefinitely under
+    /// `tokio::test(flavor = "multi_thread")` due to a subtle
+    /// interaction between `notify_one`/`notified()` and the
+    /// multi-threaded scheduler. The sequential shape covers the
+    /// invariant without that fragility.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn in_flight_routing_uses_snapshot_at_dispatch_time() {
-        let agent_reg = AgentRegistry::new();
+        let agent_reg = Arc::new(AgentRegistry::new());
         let (alice_tx, mut alice_rx) = mpsc::unbounded_channel();
         let (bob_tx, mut bob_rx) = mpsc::unbounded_channel();
         agent_reg.register("alice".into(), alice_tx, SessionStatus::Active);
@@ -385,39 +435,57 @@ mod tests {
             Arc::new(InMemoryConstellationRegistry::new());
         let state = FrontingState::new(set_lock.clone(), registry);
 
-        // First dispatch: fronting fallback = alice. Should land in alice.
+        // First dispatch: fallback = alice. Resolves and commits to alice's
+        // mailbox before we mutate.
         dispatch_to_mailboxes(&agent_reg, &state, &test_origin(), &test_msg("first"))
             .await
-            .unwrap();
+            .expect("first dispatch must succeed");
 
-        // Now mutate fronting to fall back to bob. The first message is
-        // already in alice's mpsc — no re-routing happens.
+        // Mutate fronting to fall back to bob. Any message NOT yet
+        // resolved would now go to bob; the first message is already
+        // committed to alice's mpsc and cannot be re-routed.
         {
             let mut guard = set_lock.write().expect("lock not poisoned");
             guard.fallback = Some(SmolStr::from("bob"));
         }
 
-        // Second dispatch: should land in bob.
+        // Second dispatch: now sees fallback = bob.
         dispatch_to_mailboxes(&agent_reg, &state, &test_origin(), &test_msg("second"))
             .await
-            .unwrap();
+            .expect("second dispatch must succeed");
 
+        // Step 5: assertions.
         let alice_msg = alice_rx
             .recv()
             .await
-            .expect("alice should have first message");
+            .expect("alice should have received 'first' — snapshot was taken before mutation");
         assert_eq!(
-            alice_msg.msg.chat_message.content.first_text().unwrap_or(""),
-            "first"
+            alice_msg
+                .msg
+                .chat_message
+                .content
+                .first_text()
+                .unwrap_or(""),
+            "first",
+            "alice must receive 'first': dispatch used pre-mutation snapshot"
         );
         assert!(
             alice_rx.try_recv().is_err(),
-            "alice must not have a second message — routing committed at dispatch time"
+            "alice must NOT receive 'second': routing committed at dispatch time"
         );
-        let bob_msg = bob_rx.recv().await.expect("bob should have second message");
+
+        let bob_msg = bob_rx
+            .recv()
+            .await
+            .expect("bob should have received 'second' — post-mutation dispatch routes to bob");
         assert_eq!(
             bob_msg.msg.chat_message.content.first_text().unwrap_or(""),
-            "second"
+            "second",
+            "bob must receive 'second': second dispatch sees mutated fronting state"
+        );
+        assert!(
+            bob_rx.try_recv().is_err(),
+            "bob must NOT receive 'first': pre-mutation dispatch already committed to alice"
         );
     }
 }

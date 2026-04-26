@@ -1509,8 +1509,7 @@ impl TidepoolSession {
             let ctx = if let Some(extras) = regs.wake_registry_extras {
                 let mailbox_tx = ctx.mailbox().sender();
                 let tokio_handle = ctx.tokio_handle().clone();
-                let mut wake_reg =
-                    crate::wake::WakeRegistry::new(mailbox_tx, tokio_handle);
+                let mut wake_reg = crate::wake::WakeRegistry::new(mailbox_tx, tokio_handle);
                 if let Some(notifier) = extras.block_change_notifier {
                     wake_reg = wake_reg.with_block_change_notifier(notifier);
                 }

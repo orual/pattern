@@ -101,10 +101,7 @@ async fn register_with_capability_succeeds_for_interval() {
     let mut h = WakeHandler;
     let cx = EffectContext::with_user(&table, &*ctx);
     let _ = h
-        .handle(
-            WakeReq::Register(WireWakeCondition::Interval(60_000)),
-            &cx,
-        )
+        .handle(WakeReq::Register(WireWakeCondition::Interval(60_000)), &cx)
         .expect("interval registration should succeed");
     assert_eq!(ctx.wake_registry().expect("registry").len(), 1);
 }
@@ -121,10 +118,7 @@ async fn register_without_capabilities_set_is_denied() {
     let mut h = WakeHandler;
     let cx = EffectContext::with_user(&table, &*ctx);
     let err = h
-        .handle(
-            WakeReq::Register(WireWakeCondition::Interval(60_000)),
-            &cx,
-        )
+        .handle(WakeReq::Register(WireWakeCondition::Interval(60_000)), &cx)
         .expect_err("None caps must be denied (fail-closed)");
     let msg = err.to_string();
     assert!(
@@ -142,10 +136,7 @@ async fn register_without_wake_registry_returns_registry_missing_prefix() {
     let mut h = WakeHandler;
     let cx = EffectContext::with_user(&table, &*ctx);
     let err = h
-        .handle(
-            WakeReq::Register(WireWakeCondition::Interval(60_000)),
-            &cx,
-        )
+        .handle(WakeReq::Register(WireWakeCondition::Interval(60_000)), &cx)
         .expect_err("missing registry must return an error");
     let msg = err.to_string();
     assert!(

@@ -203,9 +203,8 @@ fn handle_current(
             .collect(),
     };
 
-    let json_str = serde_json::to_string(&snapshot).map_err(|e| {
-        EffectError::Handler(format!("failed to serialize fronting snapshot: {e}"))
-    })?;
+    let json_str = serde_json::to_string(&snapshot)
+        .map_err(|e| EffectError::Handler(format!("failed to serialize fronting snapshot: {e}")))?;
 
     cx.respond(json_str)
 }

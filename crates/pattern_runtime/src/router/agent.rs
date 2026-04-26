@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use pattern_core::fronting::parse_direct_address;
+use pattern_core::fronting::{parse_direct_address, strip_direct_address};
 use pattern_core::types::ids::PersonaId;
 use pattern_core::types::message::Message;
 use pattern_core::types::origin::MessageOrigin;
@@ -114,12 +114,35 @@ impl Router for AgentRouter {
         // (1) Empty or "auto" target → fronting-aware dispatch.
         if target.is_empty() || target == "auto" {
             return match &self.fronting {
-                Some(state) => dispatch_to_mailboxes(&self.registry, state, sender, body).await,
+                Some(state) => {
+                    // dispatch_to_mailboxes returns DispatchOutcome on success.
+                    // Router::route must return Result<(), RouterError>; we
+                    // surface SystemDefault at trace level here so SDK callers
+                    // (whose route() return value is `()`) leave a breadcrumb
+                    // when their message hit the no-fronting-configured path
+                    // — the daemon's SendMessage handler emits a Display::Note
+                    // for human-visible signal, but SDK callers don't have
+                    // that surface available.
+                    let outcome = dispatch_to_mailboxes(&self.registry, state, sender, body).await?;
+                    if matches!(
+                        outcome,
+                        crate::fronting_dispatch::DispatchOutcome::SystemDefault
+                    ) {
+                        tracing::warn!(
+                            target = "pattern_runtime::router::agent",
+                            from = ?sender.author,
+                            "agent router: fronting resolved to SystemDefault \
+                             (no fronting configured + no Active personas); \
+                             message acked but not delivered"
+                        );
+                    }
+                    Ok(())
+                }
                 None => {
-                    tracing::debug!(
-                        "agent router: empty/auto target with no fronting state wired"
-                    );
-                    Err(RouterError::PersonaNotFound(PersonaId::from("<unspecified>")))
+                    tracing::debug!("agent router: empty/auto target with no fronting state wired");
+                    Err(RouterError::PersonaNotFound(PersonaId::from(
+                        "<unspecified>",
+                    )))
                 }
             };
         }
@@ -129,28 +152,46 @@ impl Router for AgentRouter {
         // already handled the empty-target case above, so this branch
         // fires when callers used `agent:@alice` (legacy / convenience
         // form) — strip the `@` from the target and route direct.
-        let direct_id: PersonaId =
-            if let Some(stripped) = target.strip_prefix('@') {
-                PersonaId::from(stripped)
-            } else if let Some(parsed) =
-                parse_direct_address(body.chat_message.content.first_text().unwrap_or(""))
-            {
-                // The recipient string is a literal persona id but the
-                // body opens with `@persona-id`. Honour the body's
-                // directive and override target. This keeps the `@`
-                // semantics consistent across SDK call shapes.
-                if parsed.as_str() == target {
-                    PersonaId::from(target)
-                } else {
-                    parsed
-                }
-            } else {
+        //
+        // When the @-prefix is parsed FROM the body (target was a plain
+        // persona id but body opens with `@persona-id`), we also strip
+        // the prefix from the body before delivery so the recipient
+        // doesn't see the routing marker. This matches the plan's
+        // "@persona-name parsing" section: "Snip the prefix off the
+        // message body before delivery."
+        let mut delivery_body = body.clone();
+        let direct_id: PersonaId = if let Some(stripped) = target.strip_prefix('@') {
+            PersonaId::from(stripped)
+        } else if let Some(parsed) =
+            parse_direct_address(body.chat_message.content.first_text().unwrap_or(""))
+        {
+            // The recipient string is a literal persona id but the
+            // body opens with `@persona-id`. Honour the body's
+            // directive and override target.
+            let resolved = if parsed.as_str() == target {
                 PersonaId::from(target)
+            } else {
+                parsed
             };
+            // Strip the leading `@<persona-id>[:[ ]]` token from the
+            // body's first text part so the recipient sees a clean
+            // message. We rebuild the ChatMessage with the cleaned
+            // text and copy the rest of the Message verbatim.
+            if let Some(text) = body.chat_message.content.first_text() {
+                let cleaned = strip_direct_address(text);
+                delivery_body.chat_message = genai::chat::ChatMessage::new(
+                    body.chat_message.role.clone(),
+                    cleaned,
+                );
+            }
+            resolved
+        } else {
+            PersonaId::from(target)
+        };
 
         let input = MailboxInput {
             from: sender.clone(),
-            msg: body.clone(),
+            msg: delivery_body,
         };
 
         // route_or_queue atomically checks status and delivers/queues.
@@ -184,9 +225,14 @@ impl std::fmt::Debug for AgentRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::InMemoryConstellationRegistry;
     use jiff::Timestamp;
+    use pattern_core::constellation::ConstellationRegistry;
+    use pattern_core::fronting::{FrontingSet, MessagePattern, RoutingRule, RoutingTable};
     use pattern_core::types::ids::{AgentId, BatchId, MessageId, new_id, new_snowflake_id};
     use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
+    use smol_str::SmolStr;
+    use std::sync::RwLock;
     use tokio::sync::mpsc;
 
     fn test_message(body: &str) -> Message {
@@ -343,5 +389,213 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, 10, "all 10 messages must be delivered");
+    }
+
+    // ── Fronting-aware dispatch tests ─────────────────────────────────────────
+
+    /// Empty target with fronting configured routes through the resolver
+    /// (fallback path) and delivers to the fallback persona.
+    #[tokio::test]
+    async fn empty_target_with_fronting_routes_via_resolver() {
+        let reg = Arc::new(AgentRegistry::new());
+        let (alice_tx, mut alice_rx) = mpsc::unbounded_channel::<MailboxInput>();
+        reg.register("alice".into(), alice_tx, SessionStatus::Active);
+
+        let fronting_set = FrontingSet::from_parts(
+            Vec::new(),
+            Some(SmolStr::from("alice")),
+            RoutingTable::default(),
+        );
+        let constellation: Arc<dyn ConstellationRegistry> =
+            Arc::new(InMemoryConstellationRegistry::new());
+        let state = FrontingState::new(Arc::new(RwLock::new(fronting_set)), constellation);
+
+        let router = AgentRouter::new(Arc::clone(&reg)).with_fronting(state);
+        // Empty target → fronting resolver → fallback = alice.
+        router
+            .route(&test_sender(), "", &test_message("hi"))
+            .await
+            .unwrap();
+
+        let received = alice_rx.recv().await.expect("alice must receive message");
+        assert_eq!(
+            received.msg.chat_message.content.first_text().unwrap_or(""),
+            "hi"
+        );
+    }
+
+    /// `"auto"` target with fronting configured routes through the resolver
+    /// (same as empty target — both are the fronting dispatch trigger).
+    #[tokio::test]
+    async fn auto_target_with_fronting_routes_via_resolver() {
+        let reg = Arc::new(AgentRegistry::new());
+        let (bob_tx, mut bob_rx) = mpsc::unbounded_channel::<MailboxInput>();
+        reg.register("bob".into(), bob_tx, SessionStatus::Active);
+
+        let fronting_set = FrontingSet::from_parts(
+            Vec::new(),
+            Some(SmolStr::from("bob")),
+            RoutingTable::default(),
+        );
+        let constellation: Arc<dyn ConstellationRegistry> =
+            Arc::new(InMemoryConstellationRegistry::new());
+        let state = FrontingState::new(Arc::new(RwLock::new(fronting_set)), constellation);
+
+        let router = AgentRouter::new(Arc::clone(&reg)).with_fronting(state);
+        // "auto" target → fronting resolver → fallback = bob.
+        router
+            .route(&test_sender(), "auto", &test_message("ping"))
+            .await
+            .unwrap();
+
+        let received = bob_rx.recv().await.expect("bob must receive message");
+        assert_eq!(
+            received.msg.chat_message.content.first_text().unwrap_or(""),
+            "ping"
+        );
+    }
+
+    /// `@alice` target strips the `@` prefix and delivers direct to alice,
+    /// bypassing the fronting resolver entirely.
+    #[tokio::test]
+    async fn target_with_at_prefix_strips_and_delivers_direct() {
+        let reg = Arc::new(AgentRegistry::new());
+        let (alice_tx, mut alice_rx) = mpsc::unbounded_channel::<MailboxInput>();
+        let (bob_tx, mut bob_rx) = mpsc::unbounded_channel::<MailboxInput>();
+        reg.register("alice".into(), alice_tx, SessionStatus::Active);
+        reg.register("bob".into(), bob_tx, SessionStatus::Active);
+
+        // Fronting fallback = bob, but @alice should bypass it.
+        let fronting_set = FrontingSet::from_parts(
+            Vec::new(),
+            Some(SmolStr::from("bob")),
+            RoutingTable::default(),
+        );
+        let constellation: Arc<dyn ConstellationRegistry> =
+            Arc::new(InMemoryConstellationRegistry::new());
+        let state = FrontingState::new(Arc::new(RwLock::new(fronting_set)), constellation);
+
+        let router = AgentRouter::new(Arc::clone(&reg)).with_fronting(state);
+        // "@alice" target → strip '@' → deliver direct to alice.
+        router
+            .route(&test_sender(), "@alice", &test_message("direct"))
+            .await
+            .unwrap();
+
+        let received = alice_rx
+            .recv()
+            .await
+            .expect("alice must receive direct message");
+        assert_eq!(
+            received.msg.chat_message.content.first_text().unwrap_or(""),
+            "direct",
+            "alice should receive the direct-addressed message"
+        );
+        // Bob (the fronting fallback) must NOT receive it.
+        assert!(
+            bob_rx.try_recv().is_err(),
+            "bob (fallback) must not receive a message directly addressed to alice"
+        );
+    }
+
+    /// When the message body opens with `@bob …`, the body-override logic
+    /// in the router honours the in-body direct address even when the
+    /// target string itself is a persona name (without the `@` prefix).
+    ///
+    /// This tests the "body says @bob, target says alice" override path at
+    /// agent.rs:135-148 which picks `bob` when body has `@bob` and target
+    /// does not match bob.
+    #[tokio::test]
+    async fn at_prefix_in_body_overrides_target() {
+        let reg = Arc::new(AgentRegistry::new());
+        let (alice_tx, mut alice_rx) = mpsc::unbounded_channel::<MailboxInput>();
+        let (bob_tx, mut bob_rx) = mpsc::unbounded_channel::<MailboxInput>();
+        reg.register("alice".into(), alice_tx, SessionStatus::Active);
+        reg.register("bob".into(), bob_tx, SessionStatus::Active);
+
+        let router = AgentRouter::new(Arc::clone(&reg));
+        // target = "alice", but body starts with "@bob" — override to bob.
+        let msg = test_message("@bob please help");
+        router.route(&test_sender(), "alice", &msg).await.unwrap();
+
+        let received = bob_rx
+            .recv()
+            .await
+            .expect("bob should receive body-directed message");
+        // The `@bob` prefix is stripped before delivery — the recipient
+        // sees a clean message body.
+        assert_eq!(
+            received.msg.chat_message.content.first_text().unwrap_or(""),
+            "please help",
+            "bob should receive the body with the leading `@bob` stripped"
+        );
+        assert!(
+            alice_rx.try_recv().is_err(),
+            "alice (target string) must not receive when body overrides to bob"
+        );
+    }
+
+    /// Empty target with NO fronting configured returns
+    /// `PersonaNotFound("<unspecified>")` — not a panic, not a silent drop.
+    #[tokio::test]
+    async fn empty_target_no_fronting_returns_unspecified() {
+        let reg = Arc::new(AgentRegistry::new());
+        // No personas registered, no fronting wired.
+        let router = AgentRouter::new(reg);
+        let err = router
+            .route(&test_sender(), "", &test_message("lost"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                RouterError::PersonaNotFound(id) if id.as_str() == "<unspecified>"
+            ),
+            "expected PersonaNotFound(<unspecified>), got: {err:?}"
+        );
+    }
+
+    /// Routing rule (Prefix) matches body → routes to the rule's target,
+    /// not the fallback.
+    #[tokio::test]
+    async fn routing_rule_prefix_match_routes_to_rule_target() {
+        let reg = Arc::new(AgentRegistry::new());
+        let (math_tx, mut math_rx) = mpsc::unbounded_channel::<MailboxInput>();
+        let (chat_tx, mut chat_rx) = mpsc::unbounded_channel::<MailboxInput>();
+        reg.register("math".into(), math_tx, SessionStatus::Active);
+        reg.register("chat".into(), chat_tx, SessionStatus::Active);
+
+        let rules = vec![RoutingRule::new(
+            "math-rule".to_string(),
+            MessagePattern::Prefix("!math".to_string()),
+            SmolStr::from("math"),
+            10,
+        )];
+        let table = RoutingTable::try_from_rules(rules).unwrap();
+        let fronting_set = FrontingSet::from_parts(Vec::new(), Some(SmolStr::from("chat")), table);
+        let constellation: Arc<dyn ConstellationRegistry> =
+            Arc::new(InMemoryConstellationRegistry::new());
+        let state = FrontingState::new(Arc::new(RwLock::new(fronting_set)), constellation);
+
+        let router = AgentRouter::new(Arc::clone(&reg)).with_fronting(state);
+        // Empty target + body starting with "!math" → rule match → math.
+        router
+            .route(&test_sender(), "", &test_message("!math 2+2"))
+            .await
+            .unwrap();
+
+        let received = math_rx
+            .recv()
+            .await
+            .expect("math must receive the rule-matched message");
+        assert_eq!(
+            received.msg.chat_message.content.first_text().unwrap_or(""),
+            "!math 2+2"
+        );
+        // Chat (fallback) must not receive anything.
+        assert!(
+            chat_rx.try_recv().is_err(),
+            "chat fallback must not receive rule-matched message"
+        );
     }
 }

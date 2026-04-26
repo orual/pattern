@@ -165,9 +165,7 @@ impl AgentRegistry {
         // the shard write lock for its duration; any concurrent get() Ref on
         // the same shard will hold us off until that Ref drops, and once we
         // hold the write lock no concurrent reader can observe a torn state.
-        let prev = self
-            .slots
-            .insert(id, AgentSlot::Active { tx: tx.clone() });
+        let prev = self.slots.insert(id, AgentSlot::Active { tx: tx.clone() });
 
         // If the previous slot was Draft, drain its queue and replay onto tx.
         // The queue is now uniquely owned by us (moved out of the map), so

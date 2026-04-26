@@ -439,7 +439,10 @@ mod tests {
 
     fn partner_origin() -> MessageOrigin {
         MessageOrigin::new(
-            Author::Partner(Partner { user_id: new_id() }),
+            Author::Partner(Partner {
+                user_id: new_id(),
+                display_name: None,
+            }),
             Sphere::Private,
         )
     }

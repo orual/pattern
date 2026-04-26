@@ -34,7 +34,9 @@ fn dummy_input() -> MailboxInput {
     use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
     MailboxInput {
         from: MessageOrigin::new(
-            Author::System { reason: SystemReason::Timer },
+            Author::System {
+                reason: SystemReason::Timer,
+            },
             Sphere::System,
         ),
         msg: Message {
@@ -106,7 +108,9 @@ async fn consolidation_probe_zero_loss_heavy() {
             let handle = tokio::spawn(async move {
                 for _ in 0..MSGS_PER_SENDER {
                     match reg_clone.route_or_queue(&id_clone, dummy_input()) {
-                        Ok(()) => { oc.fetch_add(1, Ordering::Relaxed); }
+                        Ok(()) => {
+                            oc.fetch_add(1, Ordering::Relaxed);
+                        }
                         Err(pattern_runtime::router::RouterError::PersonaNotFound(_)) => {
                             nfc.fetch_add(1, Ordering::Relaxed);
                         }
@@ -183,7 +187,8 @@ async fn consolidation_probe_zero_loss_heavy() {
         total_not_found,
     );
     assert_eq!(
-        total_delivered, total_ok,
+        total_delivered,
+        total_ok,
         "silent message loss: ok={} delivered={} loss={}",
         total_ok,
         total_delivered,

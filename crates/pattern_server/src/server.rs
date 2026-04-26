@@ -29,13 +29,14 @@ use dashmap::DashMap;
 use irpc::{Client, WithChannels};
 use pattern_core::CapabilitySet;
 use pattern_core::ProviderClient;
+use pattern_core::constellation::ConstellationRegistry;
+use pattern_core::fronting::{FrontingResolver, ResolveOutcome};
 use pattern_core::traits::MemoryStore;
 use pattern_core::traits::turn_sink::{DisplayKind, TurnEvent, TurnSink};
 use pattern_core::types::ids::{
     AgentId as CoreAgentId, BatchId as CoreBatchId, MessageId, new_id, new_snowflake_id,
 };
 use pattern_core::types::message::Message;
-use pattern_core::types::origin::{Author, MessageOrigin, Partner, Sphere};
 use pattern_core::types::provider::{ChatMessage, ContentPart};
 use pattern_core::types::snapshot::PersonaSnapshot;
 use pattern_core::types::turn::{StopReason, TurnInput};
@@ -131,9 +132,12 @@ impl ProjectMount {
     /// snapshot before the error is returned, so callers never see a
     /// committed-in-RAM-but-not-on-disk fronting set.
     ///
-    /// The write lock is held across the entire sequence (snapshot →
-    /// mutate → save → release-or-revert) to prevent concurrent readers
-    /// from observing a half-saved state.
+    /// # Lock release timing
+    ///
+    /// Phase 1: snapshot + apply mutator under the sync write lock.
+    /// The block expression at the end of Phase 1 releases the write guard
+    /// before the spawn_blocking await below — sync `RwLockWriteGuard` is
+    /// `!Send` and would otherwise prevent the future from being `Send`.
     ///
     /// Returns the new [`FrontingSet`] snapshot on success so the caller
     /// can fan it out as a [`crate::protocol::WireTurnEvent::FrontingChanged`]
@@ -147,58 +151,90 @@ impl ProjectMount {
             &mut pattern_core::fronting::FrontingSet,
         ) -> Result<(), pattern_core::fronting::FrontingLoadError>,
     {
-        // Phase 1: snapshot + apply mutator under the sync write lock.
-        // Released before the spawn_blocking below so async readers don't
-        // observe the lock held across an await point.
-        let (snapshot, to_save) = {
-            let mut guard = self
-                .fronting
+        update_fronting_inner(&self.fronting, &self.db, mutator).await
+    }
+}
+
+/// Three-phase commit for a `FrontingSet` mutation.
+///
+/// Extracted as a free function so tests can exercise the same code path
+/// as production [`ProjectMount::update_fronting`] without constructing a
+/// full `ProjectMount` (which requires a live `MountedStore` + RAII
+/// watcher / backup scheduler).
+///
+/// Phase 1: snapshot + apply mutator under sync write lock; revert on
+/// mutator rejection.
+/// Phase 2: persist on a blocking task (rusqlite is sync).
+/// Phase 3: handle the spawn_blocking outcome — revert to pre-mutation
+/// snapshot on Join failure or DB error.
+pub(crate) async fn update_fronting_inner<F>(
+    fronting: &Arc<std::sync::RwLock<pattern_core::fronting::FrontingSet>>,
+    db: &Arc<pattern_db::ConstellationDb>,
+    mutator: F,
+) -> Result<pattern_core::fronting::FrontingSet, FrontingUpdateError>
+where
+    F: FnOnce(
+        &mut pattern_core::fronting::FrontingSet,
+    ) -> Result<(), pattern_core::fronting::FrontingLoadError>,
+{
+    // Phase 1: snapshot + apply mutator under the sync write lock.
+    // The block expression releases the write guard before the
+    // spawn_blocking await below.
+    let (snapshot, to_save) = {
+        let mut guard = fronting
+            .write()
+            .map_err(|_| FrontingUpdateError::PoisonedLock)?;
+        let snap = guard.clone();
+        if let Err(e) = mutator(&mut guard) {
+            // Mutator rejected the change (e.g. invalid regex). The
+            // mutator's contract is "all-or-nothing" but we can't
+            // enforce that, so revert defensively to be safe.
+            *guard = snap;
+            return Err(FrontingUpdateError::Mutator(e));
+        }
+        (snap, guard.clone())
+    };
+
+    // Phase 2: persist on a blocking task (rusqlite is sync).
+    let db_clone = db.clone();
+    let join_result =
+        tokio::task::spawn_blocking(move || -> Result<(), pattern_db::error::DbError> {
+            let mut conn = db_clone.get()?;
+            pattern_db::queries::fronting::save_fronting_set(&mut conn, &to_save)
+        })
+        .await;
+
+    // Phase 3: handle the spawn_blocking outcome. On JoinError or DB
+    // error, revert to the pre-mutation snapshot.
+    match join_result {
+        Err(join_err) => {
+            let mut guard = fronting
                 .write()
                 .map_err(|_| FrontingUpdateError::PoisonedLock)?;
-            let snap = guard.clone();
-            if let Err(e) = mutator(&mut guard) {
-                // Mutator rejected the change (e.g. invalid regex). The
-                // mutator's contract is "all-or-nothing" but we can't
-                // enforce that, so revert defensively to be safe.
-                *guard = snap;
-                return Err(FrontingUpdateError::Mutator(e));
-            }
-            (snap, guard.clone())
-        };
-
-        // Phase 2: persist on a blocking task (rusqlite is sync).
-        let db = self.db.clone();
-        let save_result = tokio::task::spawn_blocking(
-            move || -> Result<(), pattern_db::error::DbError> {
-                let mut conn = db.get()?;
-                pattern_db::queries::fronting::save_fronting_set(&mut conn, &to_save)
-            },
-        )
-        .await
-        .map_err(FrontingUpdateError::Join)?;
-
-        if let Err(e) = save_result {
+            *guard = snapshot;
+            return Err(FrontingUpdateError::Join(join_err));
+        }
+        Ok(Err(e)) => {
             // DB save failed. Re-take the write lock and revert. Brief
-            // window between phase-1 release and phase-3 reacquire where a
-            // reader could see the about-to-be-reverted state — acceptable
-            // for the rare save-failure path.
-            let mut guard = self
-                .fronting
+            // window between phase-1 release and phase-3 reacquire where
+            // a reader could see the about-to-be-reverted state —
+            // acceptable for the rare save-failure path.
+            let mut guard = fronting
                 .write()
                 .map_err(|_| FrontingUpdateError::PoisonedLock)?;
             *guard = snapshot;
             return Err(FrontingUpdateError::Save(e));
         }
-
-        // Read the now-saved state for the caller. Brief read-lock
-        // acquire; read poisoning is fatal here too.
-        let final_state = self
-            .fronting
-            .read()
-            .map_err(|_| FrontingUpdateError::PoisonedLock)?
-            .clone();
-        Ok(final_state)
+        Ok(Ok(())) => {}
     }
+
+    // Read the now-saved state for the caller. Brief read-lock
+    // acquire; read poisoning is fatal here too.
+    let final_state = fronting
+        .read()
+        .map_err(|_| FrontingUpdateError::PoisonedLock)?
+        .clone();
+    Ok(final_state)
 }
 
 /// Errors produced by [`ProjectMount::update_fronting`].
@@ -214,8 +250,10 @@ pub enum FrontingUpdateError {
     #[error("fronting save failed: {0}")]
     Save(#[source] pattern_db::error::DbError),
     /// The blocking task that ran the save panicked or was cancelled.
-    /// In-memory state may be in an indeterminate state — callers should
-    /// treat this as a hard error and reload from disk on next access.
+    /// In-memory state has been reverted to the pre-mutation snapshot (the
+    /// on-disk state is unknown — the blocking task may or may not have
+    /// completed its write). Callers that need certainty should call
+    /// `GetFronting` after receiving this error to reload from disk.
     #[error("fronting save task failed to join: {0}")]
     Join(#[source] tokio::task::JoinError),
     /// The fronting RwLock was poisoned by a panic in another thread
@@ -278,8 +316,11 @@ pub struct DaemonServer {
     session_locks: Arc<DashMap<AgentId, Arc<tokio::sync::Mutex<()>>>>,
     /// Stable partner identity for this daemon session.
     ///
-    /// Minted once at spawn time so all messages from this session carry the
-    /// same `Author::Partner` identity, rather than minting a fresh ID per message.
+    /// Minted once at spawn time and returned in every [`SessionInfo`] response
+    /// so that TUI clients have a consistent `user_id` for constructing
+    /// `Author::Partner` origins. Daemon-level identity, not per-session.
+    /// The SendMessage handler no longer uses this directly — clients carry it
+    /// from InitSession and embed it in every `AgentMessage::origin`.
     partner_id: SmolStr,
     /// Number of available personas discovered during the last InitSession.
     /// Updated each time InitSession is called, used by GetStatus to report
@@ -430,16 +471,23 @@ impl DaemonServer {
             PatternMessage::SendMessage(req) => {
                 let WithChannels { tx, inner, .. } = req;
                 let batch_id = inner.batch_id.clone();
-                let agent_id = inner.agent_id.clone();
 
-                // Track batch → agent so CancelBatch can find the right session.
-                self.batch_to_agent
-                    .insert(batch_id.clone(), agent_id.clone());
-
-                // Acknowledge receipt — the client unblocks immediately.
-                let _ = tx.send(()).await;
-
+                // Echo mode uses a synthetic agent_id for fan-out keying.
+                // Real mode resolves the agent_id from the recipient below.
                 if self.echo {
+                    let agent_id: AgentId = match &inner.recipient {
+                        Recipient::Direct(id) => id.clone(),
+                        Recipient::Address(id) => SmolStr::from(id.trim_start_matches('@')),
+                        Recipient::Auto => "echo-auto".into(),
+                    };
+
+                    // Track batch → agent so CancelBatch can find the right session.
+                    self.batch_to_agent
+                        .insert(batch_id.clone(), agent_id.clone());
+
+                    // Acknowledge receipt — the client unblocks immediately.
+                    let _ = tx.send(()).await;
+
                     // Echo mode: extract text from parts, emit "echo: {text}" + Stop.
                     // This is instant so it stays inline in the actor loop.
                     let bridge = TurnSinkBridge::new(batch_id, agent_id, self.event_tx.clone());
@@ -454,102 +502,201 @@ impl DaemonServer {
                         .join("");
                     bridge.emit(TurnEvent::Text(format!("echo: {text}")));
                     bridge.emit(TurnEvent::Stop(StopReason::EndTurn));
-                } else if let Some(mount) = &self.current_mount {
-                    // Real session mode: spawn a task to handle session open
-                    // and step. The actor loop stays responsive — session open
-                    // may trigger tidepool Haskell compilation (5-10s).
-                    let sessions = self.sessions.clone();
-                    let session_locks = self.session_locks.clone();
-                    let config = self.session_config.clone().unwrap();
-                    let event_tx = self.event_tx.clone();
-                    let partner_id = self.partner_id.clone();
-                    let mount = mount.clone();
-                    let batch_to_agent = self.batch_to_agent.clone();
+                    return;
+                }
 
-                    tokio::spawn(async move {
-                        // Hold a guard for the lifetime of this task. If the task
-                        // exits early (error return) or panics, the guard's Drop
-                        // removes the batch → agent entry so the map doesn't leak.
-                        // The fan_out cleanup on Stop is left as a defensive
-                        // double-remove; DashMap::remove is a no-op when absent.
-                        let _batch_guard = BatchGuard {
-                            map: batch_to_agent,
-                            batch_id: batch_id.clone(),
-                        };
-
-                        // 1. Get or open session (may block during compilation).
-                        let agent_session = match get_or_open_session(
-                            &agent_id,
-                            &sessions,
-                            &session_locks,
-                            &config,
-                            &mount,
-                        )
-                        .await
-                        {
-                            Ok(s) => s,
-                            Err(e) => {
-                                warn!(agent_id = %agent_id, error = %e, "failed to open session");
-                                let bridge = TurnSinkBridge::new(batch_id, agent_id, event_tx);
-                                bridge.emit(TurnEvent::Display {
-                                    kind: DisplayKind::Note,
-                                    text: format!("error: {e}"),
-                                });
-                                bridge.emit(TurnEvent::Stop(StopReason::EndTurn));
-                                return;
-                            }
-                        };
-
-                        // 2. Acquire the per-agent serialization lock. This
-                        //    serializes set_inner + step so concurrent
-                        //    SendMessage calls for the same agent don't
-                        //    interleave bridge swaps.
-                        let agent_lock = session_locks
-                            .entry(agent_id.clone())
-                            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                            .clone();
-                        let _guard = agent_lock.lock().await;
-
-                        // 3. Build bridge and swap into mux sink.
-                        let bridge = Arc::new(TurnSinkBridge::new(
-                            batch_id.clone(),
-                            agent_id.clone(),
-                            event_tx,
-                        ));
-                        agent_session.mux_sink.set_inner(bridge.clone());
-
-                        // 4. Build turn input and drive step.
-                        let session_agent_id = agent_session.session.agent_id().to_string();
-                        let turn_input = build_turn_input(&inner, &partner_id, &session_agent_id);
-
-                        match agent_session.session.step_with_agent_loop(turn_input).await {
-                            Ok(_reply) => {
-                                // Events already emitted via the bridge.
-                            }
-                            Err(e) => {
-                                warn!(
-                                    agent_id = %agent_id,
-                                    batch_id = %batch_id,
-                                    error = %e,
-                                    "step_with_agent_loop failed"
-                                );
-                                bridge.emit(TurnEvent::Display {
-                                    kind: DisplayKind::Note,
-                                    text: format!("error: {e}"),
-                                });
-                                bridge.emit(TurnEvent::Stop(StopReason::EndTurn));
-                            }
-                        }
-                    });
-                } else {
+                let Some(mount) = self.current_mount.clone() else {
                     // No mount available — send InitSession first.
-                    let bridge = TurnSinkBridge::new(batch_id, agent_id, self.event_tx.clone());
+                    let _ = tx.send(()).await;
+                    let bridge =
+                        TurnSinkBridge::new(batch_id, "no-mount".into(), self.event_tx.clone());
                     bridge.emit(TurnEvent::Display {
                         kind: DisplayKind::Note,
                         text: "no project mounted — send InitSession first".into(),
                     });
                     bridge.emit(TurnEvent::Stop(StopReason::EndTurn));
-                }
+                    return;
+                };
+
+                // Pre-resolve the target agent_id from the Recipient directive.
+                // Done here (synchronously, before ack) so the batch_to_agent
+                // entry carries the correct resolved id from the start.
+                //
+                // Recipient::Auto routes through the FrontingResolver, taking a
+                // snapshot of the current FrontingSet (AC8.8: the snapshot is
+                // taken at dispatch time; later mutations don't re-route this
+                // message).
+                let resolved_agent_id: AgentId = match &inner.recipient {
+                    Recipient::Direct(id) => id.clone(),
+                    Recipient::Address(persona_id) => {
+                        SmolStr::from(persona_id.trim_start_matches('@'))
+                    }
+                    Recipient::Auto => {
+                        // Snapshot the fronting set under a short-lived read lock.
+                        // `snapshot_fronting_set` takes the lock, clones the set, and
+                        // returns, ensuring the RwLockReadGuard (!Send) is fully
+                        // dropped before we hit any await point below.
+                        let set_snapshot_opt = snapshot_fronting_set(&mount.fronting);
+                        let set_snapshot = match set_snapshot_opt {
+                            Some(s) => s,
+                            None => {
+                                // Lock poisoned — emit a user-visible note.
+                                let _ = tx.send(()).await;
+                                let bridge = TurnSinkBridge::new(
+                                    batch_id,
+                                    "no-mount".into(),
+                                    self.event_tx.clone(),
+                                );
+                                bridge.emit(TurnEvent::Display {
+                                    kind: DisplayKind::Note,
+                                    text: "fronting lock poisoned; cannot route message".into(),
+                                });
+                                bridge.emit(TurnEvent::Stop(StopReason::EndTurn));
+                                return;
+                            }
+                        };
+                        let empty_registry: Arc<dyn ConstellationRegistry> =
+                            Arc::new(pattern_core::constellation::EmptyConstellationRegistry);
+                        let body_text = inner
+                            .parts
+                            .iter()
+                            .filter_map(|p| match p {
+                                ContentPart::Text(s) => Some(s.as_str()),
+                                _ => None,
+                            })
+                            .next()
+                            .unwrap_or("");
+                        let resolver = FrontingResolver::new(set_snapshot, empty_registry);
+                        let outcome = resolver.resolve(body_text).await;
+                        match outcome {
+                            ResolveOutcome::Direct(id)
+                            | ResolveOutcome::Rule { target: id, .. }
+                            | ResolveOutcome::Fallback(id)
+                            | ResolveOutcome::DefaultPersona(id) => id,
+                            ResolveOutcome::FanOut(ids) => {
+                                // Co-fronting fan-out: for TUI input pick the first
+                                // (lexicographically lowest after sort). The full
+                                // FanOut semantics for SDK messages are handled by
+                                // dispatch_to_mailboxes; this path is human input.
+                                ids.into_iter().next().expect("FanOut never empty")
+                            }
+                            ResolveOutcome::SystemDefault => {
+                                // No fronting configured. Acknowledge the message but
+                                // emit a user-visible note so the partner knows it
+                                // wasn't silently dropped.
+                                let _ = tx.send(()).await;
+                                let bridge = TurnSinkBridge::new(
+                                    batch_id,
+                                    "daemon".into(),
+                                    self.event_tx.clone(),
+                                );
+                                bridge.emit(TurnEvent::Display {
+                                    kind: DisplayKind::Note,
+                                    text: "no fronting configured — message was not routed; \
+                                           use SetFronting or configure a persona to receive messages"
+                                        .into(),
+                                });
+                                bridge.emit(TurnEvent::Stop(StopReason::EndTurn));
+                                return;
+                            }
+                        }
+                    }
+                };
+
+                // Track batch → agent so CancelBatch can find the right session.
+                self.batch_to_agent
+                    .insert(batch_id.clone(), resolved_agent_id.clone());
+
+                // Acknowledge receipt — the client unblocks immediately.
+                let _ = tx.send(()).await;
+
+                // Real session mode: spawn a task to handle session open
+                // and step. The actor loop stays responsive — session open
+                // may trigger tidepool Haskell compilation (5-10s).
+                let sessions = self.sessions.clone();
+                let session_locks = self.session_locks.clone();
+                let config = self.session_config.clone().unwrap();
+                let event_tx = self.event_tx.clone();
+                let batch_to_agent = self.batch_to_agent.clone();
+                let agent_id = resolved_agent_id;
+
+                tokio::spawn(async move {
+                    // Hold a guard for the lifetime of this task. If the task
+                    // exits early (error return) or panics, the guard's Drop
+                    // removes the batch → agent entry so the map doesn't leak.
+                    // The fan_out cleanup on Stop is left as a defensive
+                    // double-remove; DashMap::remove is a no-op when absent.
+                    let _batch_guard = BatchGuard {
+                        map: batch_to_agent,
+                        batch_id: batch_id.clone(),
+                    };
+
+                    // 1. Get or open session (may block during compilation).
+                    let agent_session = match get_or_open_session(
+                        &agent_id,
+                        &sessions,
+                        &session_locks,
+                        &config,
+                        &mount,
+                    )
+                    .await
+                    {
+                        Ok(s) => s,
+                        Err(e) => {
+                            warn!(agent_id = %agent_id, error = %e, "failed to open session");
+                            let bridge = TurnSinkBridge::new(batch_id, agent_id, event_tx);
+                            bridge.emit(TurnEvent::Display {
+                                kind: DisplayKind::Note,
+                                text: format!("error: {e}"),
+                            });
+                            bridge.emit(TurnEvent::Stop(StopReason::EndTurn));
+                            return;
+                        }
+                    };
+
+                    // 2. Acquire the per-agent serialization lock. This
+                    //    serializes set_inner + step so concurrent
+                    //    SendMessage calls for the same agent don't
+                    //    interleave bridge swaps.
+                    let agent_lock = session_locks
+                        .entry(agent_id.clone())
+                        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                        .clone();
+                    let _guard = agent_lock.lock().await;
+
+                    // 3. Build bridge and swap into mux sink.
+                    let bridge = Arc::new(TurnSinkBridge::new(
+                        batch_id.clone(),
+                        agent_id.clone(),
+                        event_tx,
+                    ));
+                    agent_session.mux_sink.set_inner(bridge.clone());
+
+                    // 4. Build turn input and drive step.
+                    // The caller-supplied origin is passed through unchanged;
+                    // the daemon does not override or default the author.
+                    let session_agent_id = agent_session.session.agent_id().to_string();
+                    let turn_input = build_turn_input(&inner, &session_agent_id);
+
+                    match agent_session.session.step_with_agent_loop(turn_input).await {
+                        Ok(_reply) => {
+                            // Events already emitted via the bridge.
+                        }
+                        Err(e) => {
+                            warn!(
+                                agent_id = %agent_id,
+                                batch_id = %batch_id,
+                                error = %e,
+                                "step_with_agent_loop failed"
+                            );
+                            bridge.emit(TurnEvent::Display {
+                                kind: DisplayKind::Note,
+                                text: format!("error: {e}"),
+                            });
+                            bridge.emit(TurnEvent::Stop(StopReason::EndTurn));
+                        }
+                    }
+                });
             }
             PatternMessage::SubscribeOutput(req) => {
                 let WithChannels { tx, inner, .. } = req;
@@ -743,15 +890,8 @@ impl DaemonServer {
                                 .collect();
                             FrontingGetResponse {
                                 set: WireFrontingSet {
-                                    active: guard
-                                        .active
-                                        .iter()
-                                        .map(|id| id.to_string())
-                                        .collect(),
-                                    fallback: guard
-                                        .fallback
-                                        .as_ref()
-                                        .map(|id| id.to_string()),
+                                    active: guard.active.iter().map(|id| id.to_string()).collect(),
+                                    fallback: guard.fallback.as_ref().map(|id| id.to_string()),
                                     rules,
                                 },
                             }
@@ -811,9 +951,7 @@ impl DaemonServer {
                 } else {
                     FrontingSetResponse {
                         success: false,
-                        error: Some(
-                            "no project mounted — send InitSession first".to_string(),
-                        ),
+                        error: Some("no project mounted — send InitSession first".to_string()),
                     }
                 };
                 let _ = tx.send(response).await;
@@ -850,9 +988,7 @@ impl DaemonServer {
                 } else {
                     UpdateRoutingResponse {
                         success: false,
-                        error: Some(
-                            "no project mounted — send InitSession first".to_string(),
-                        ),
+                        error: Some("no project mounted — send InitSession first".to_string()),
                     }
                 };
                 let _ = tx.send(response).await;
@@ -895,6 +1031,9 @@ impl DaemonServer {
                             agent_id: inner.default_agent,
                             persona_name: "echo".into(),
                             available_agents: vec![],
+                            partner_id: self.partner_id.clone(),
+                            // Phase 6: read from .pattern.kdl partner { display_name "..." }
+                            partner_display_name: None,
                             error: None,
                         })
                         .await;
@@ -911,6 +1050,9 @@ impl DaemonServer {
                                 agent_id: inner.default_agent,
                                 persona_name: String::new(),
                                 available_agents: vec![],
+                                partner_id: self.partner_id.clone(),
+                                // Phase 6: read from .pattern.kdl partner { display_name "..." }
+                                partner_display_name: None,
                                 error: Some(format!(
                                     "failed to mount project at {}: {e}",
                                     inner.project_path.display()
@@ -961,6 +1103,9 @@ impl DaemonServer {
                         agent_id,
                         persona_name,
                         available_agents: available,
+                        partner_id: self.partner_id.clone(),
+                        // Phase 6: read from .pattern.kdl partner { display_name "..." }
+                        partner_display_name: None,
                         error: None,
                     })
                     .await;
@@ -1046,10 +1191,7 @@ impl DaemonServer {
     /// Fan out a `FrontingChanged` event derived from `new_set` to all
     /// subscribers. Uses the `"fronting"` / `"daemon"` sentinel batch/agent IDs
     /// so TUI clients can distinguish fronting events from per-agent turn events.
-    async fn fan_out_fronting_changed(
-        &mut self,
-        new_set: &pattern_core::fronting::FrontingSet,
-    ) {
+    async fn fan_out_fronting_changed(&mut self, new_set: &pattern_core::fronting::FrontingSet) {
         let rules = new_set
             .routing
             .rules
@@ -1076,6 +1218,17 @@ impl DaemonServer {
         };
         self.fan_out(event).await;
     }
+}
+
+/// Snapshot the current [`FrontingSet`] from the given lock without holding
+/// the guard across any `.await`.
+///
+/// Returns `None` if the lock is poisoned. The caller is responsible for
+/// surfacing the poison case to the user.
+fn snapshot_fronting_set(
+    lock: &std::sync::RwLock<pattern_core::fronting::FrontingSet>,
+) -> Option<pattern_core::fronting::FrontingSet> {
+    lock.read().ok().map(|guard| guard.clone())
 }
 
 /// Project a [`pattern_core::fronting::MessagePattern`] to its wire representation.
@@ -1106,12 +1259,7 @@ fn wire_rule_to_domain(w: WireRoutingRule) -> pattern_core::fronting::RoutingRul
         // will succeed and the rule will match nothing meaningful.
         _ => pattern_core::fronting::MessagePattern::Prefix(String::new()),
     };
-    pattern_core::fronting::RoutingRule::new(
-        w.id,
-        pattern,
-        w.target.as_str(),
-        w.priority,
-    )
+    pattern_core::fronting::RoutingRule::new(w.id, pattern, w.target.as_str(), w.priority)
 }
 
 /// Get or open a session for the given agent.
@@ -1262,10 +1410,12 @@ fn resolve_persona(
 
 /// Build a [`TurnInput`] from an [`AgentMessage`].
 ///
-/// Mints fresh turn and batch IDs, wraps the client's content parts into
-/// a user [`ChatMessage`], and sets the origin to `Author::Partner` using
-/// the stable `partner_id` minted once at server spawn time.
-fn build_turn_input(msg: &AgentMessage, partner_id: &SmolStr, session_agent_id: &str) -> TurnInput {
+/// Mints fresh turn and batch IDs, wraps the client's content parts into a
+/// user [`ChatMessage`], and passes the caller-supplied [`MessageOrigin`]
+/// through directly to `TurnInput::origin`. The daemon does **not** override
+/// or default the author — each RPC client is responsible for supplying its
+/// own identity (Partner, Agent, Human, System).
+fn build_turn_input(msg: &AgentMessage, session_agent_id: &str) -> TurnInput {
     let batch_id = CoreBatchId::from(msg.batch_id.to_string());
     // Use the session's persona agent_id for message ownership — not the
     // client-sent routing key, which may differ (e.g. "default" vs
@@ -1298,12 +1448,10 @@ fn build_turn_input(msg: &AgentMessage, partner_id: &SmolStr, session_agent_id: 
     TurnInput {
         turn_id: new_snowflake_id(),
         batch_id,
-        origin: MessageOrigin::new(
-            Author::Partner(Partner {
-                user_id: partner_id.clone(),
-            }),
-            Sphere::Private,
-        ),
+        // Pass the caller-supplied origin through unchanged. The client is
+        // responsible for constructing the appropriate Author (Partner, Agent,
+        // Human, System); the daemon must not assume any specific variant.
+        origin: msg.origin.clone(),
         messages: vec![message],
     }
 }
@@ -1450,8 +1598,19 @@ fn estimate_batch_tokens(user_message: &Option<String>, events: &[WireTurnEvent]
 mod tests {
     use super::*;
     use crate::client::DaemonClient;
-    use pattern_core::types::ids::new_snowflake_id;
+    use pattern_core::types::ids::{new_id, new_snowflake_id};
+    use pattern_core::types::origin::{Author, MessageOrigin, Partner, Sphere};
     use smol_str::SmolStr;
+
+    fn test_origin() -> MessageOrigin {
+        MessageOrigin::new(
+            Author::Partner(Partner {
+                user_id: new_id(),
+                display_name: None,
+            }),
+            Sphere::Private,
+        )
+    }
 
     #[tokio::test]
     async fn send_message_returns_batch_id_and_emits_events() {
@@ -1461,13 +1620,15 @@ mod tests {
         // Subscribe before sending so we don't miss events.
         let mut events = client.subscribe_output("test-agent".into()).await.unwrap();
 
-        // Send a message (client mints the batch_id).
+        // Send a message (client mints the batch_id). Use Direct to match
+        // the subscribe target agent so events fan-out to our subscriber.
         let batch_id: SmolStr = new_snowflake_id();
         client
             .send_message(
                 batch_id.clone(),
-                "test-agent".into(),
+                Recipient::Direct("test-agent".into()),
                 vec![ContentPart::Text("hello".into())],
+                test_origin(),
             )
             .await
             .unwrap();
@@ -1490,8 +1651,9 @@ mod tests {
         client
             .send_message(
                 batch_id.clone(),
-                "test-agent".into(),
+                Recipient::Direct("test-agent".into()),
                 vec![ContentPart::Text("shared".into())],
+                test_origin(),
             )
             .await
             .unwrap();
@@ -1529,6 +1691,7 @@ mod tests {
         assert_eq!(info.agent_id, "my-agent");
         assert_eq!(info.persona_name, "echo");
         assert!(info.available_agents.is_empty());
+        assert!(!info.partner_id.is_empty(), "partner_id must be non-empty");
         assert!(info.error.is_none());
     }
 
@@ -1590,8 +1753,9 @@ mod tests {
             client
                 .send_message(
                     batch_id.clone(),
-                    "retire-test-agent".into(),
+                    Recipient::Direct("retire-test-agent".into()),
                     vec![ContentPart::Text("ping".into())],
+                    test_origin(),
                 )
                 .await
                 .unwrap();
@@ -1656,4 +1820,81 @@ mod tests {
             "BatchGuard must remove the entry on task exit; entry still present"
         );
     }
+
+    /// `update_fronting` reverts in-memory state when the DB save fails.
+    ///
+    /// This test:
+    /// 1. Creates a `ProjectMount` backed by an in-memory `ConstellationDb`.
+    /// 2. Drops the `fronting_set` table to force the SQL write to fail.
+    /// 3. Calls `update_fronting` with a mutator that changes the active set.
+    /// 4. Asserts `Err(FrontingUpdateError::Save(_))` is returned.
+    /// 5. Re-reads the fronting lock and asserts it matches the pre-mutation
+    ///    state — verifying the rollback invariant.
+    #[tokio::test]
+    async fn update_fronting_reverts_on_save_failure() {
+        use pattern_core::fronting::FrontingSet;
+        use pattern_core::types::ids::PersonaId;
+        use smol_str::SmolStr;
+
+        // Open an in-memory DB and seed a FrontingSet we can observe.
+        let db = Arc::new(
+            pattern_db::ConstellationDb::open_in_memory().expect("in-memory DB must open"),
+        );
+
+        // Build the original fronting set (fallback = "alice").
+        let original = FrontingSet::from_parts(
+            vec![SmolStr::from("alice")],
+            Some(SmolStr::from("alice")),
+            pattern_core::fronting::RoutingTable::default(),
+        );
+
+        // Save it so the row exists before we break the table.
+        {
+            let mut conn = db.get().expect("pool connection must be available");
+            pattern_db::queries::fronting::save_fronting_set(&mut conn, &original)
+                .expect("initial save must succeed");
+        }
+
+        // Now drop the `fronting_set` table to make future writes fail.
+        {
+            let conn = db.get().expect("pool connection must be available");
+            conn.execute_batch(
+                "DROP TABLE IF EXISTS fronting_set; DROP TABLE IF EXISTS routing_rules;",
+            )
+            .expect("DROP TABLE must succeed");
+        }
+
+        // Build the fronting lock for the test. Calls the SAME free
+        // function that `ProjectMount::update_fronting` uses in
+        // production — no copy-paste — so a refactor of the
+        // three-phase commit logic gets caught by this test.
+        let fronting_lock = Arc::new(std::sync::RwLock::new(original.clone()));
+
+        let update_result = super::update_fronting_inner(&fronting_lock, &db, |set| {
+            set.active = vec![PersonaId::new("bob")];
+            Ok(())
+        })
+        .await;
+
+        // The save should have failed because the table was dropped.
+        assert!(
+            matches!(update_result, Err(FrontingUpdateError::Save(_))),
+            "expected Save error after table drop; got: {update_result:?}"
+        );
+
+        // The in-memory state must be reverted to the original.
+        let after_failure = fronting_lock
+            .read()
+            .expect("lock must not be poisoned")
+            .clone();
+        assert_eq!(
+            after_failure.active, original.active,
+            "in-memory active set must revert to pre-mutation state after save failure"
+        );
+        assert_eq!(
+            after_failure.fallback, original.fallback,
+            "in-memory fallback must revert to pre-mutation state after save failure"
+        );
+    }
+
 }

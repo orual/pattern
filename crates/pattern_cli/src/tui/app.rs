@@ -21,9 +21,10 @@ use smol_str::SmolStr;
 use tokio::time;
 
 use pattern_core::traits::turn_sink::DisplayKind;
-use pattern_core::types::ids::new_snowflake_id;
+use pattern_core::types::ids::{new_id, new_snowflake_id};
+use pattern_core::types::origin::{Author, MessageOrigin, Partner, Sphere};
 use pattern_server::client::DaemonClient;
-use pattern_server::protocol::{TaggedTurnEvent, WireTurnEvent};
+use pattern_server::protocol::{Recipient, TaggedTurnEvent, WireTurnEvent};
 
 use super::autocomplete::{AutocompleteState, AutocompleteWidget};
 use super::commands::{
@@ -101,6 +102,14 @@ pub struct App {
     client: Option<DaemonClient>,
     /// The agent currently receiving messages.
     current_agent: SmolStr,
+    /// Stable identity for this TUI session. Minted once at startup and used
+    /// to construct `Author::Partner` origins on outbound messages. A fresh
+    /// id is minted per-process so that concurrent TUI sessions are
+    /// distinguishable in the agent's message history.
+    partner_id: SmolStr,
+    /// Optional human-readable display name for this partner, sourced from
+    /// daemon `SessionInfo.partner_display_name` after `InitSession`.
+    partner_display_name: Option<String>,
     /// Whether we are connected to the daemon.
     connected: bool,
     /// Number of active agents (from daemon status polls).
@@ -171,6 +180,12 @@ impl App {
             focus: Focus::Input,
             client: None,
             current_agent: agent_id,
+            // Mint a stable partner identity for this TUI process. The daemon no
+            // longer generates partner IDs — each client owns its own. Using
+            // `new_id()` (UUID-v4) guarantees this TUI session is distinguishable
+            // from other concurrent sessions in the agent's message history.
+            partner_id: new_id(),
+            partner_display_name: None,
             connected: false,
             agent_count: 0,
             context_tokens: 0,
@@ -208,6 +223,29 @@ impl App {
     /// always take precedence.
     pub fn set_daemon_commands(&mut self, commands: Vec<(String, String)>) {
         self.command_registry.register_daemon_commands(commands);
+    }
+
+    /// Override the TUI's partner identity with the one provided by the daemon.
+    ///
+    /// Called from the startup path after a successful `InitSession`, using the
+    /// `partner_id` from [`pattern_server::protocol::SessionInfo`]. This ensures
+    /// the TUI uses the daemon's stable identity rather than the per-process
+    /// self-minted one, so the agent's message history shows consistent
+    /// `Author::Partner` attribution across reconnections.
+    ///
+    /// Phase 6 Task 8 will wire multi-fronting routing through this path.
+    pub fn set_partner_id(&mut self, partner_id: SmolStr) {
+        self.partner_id = partner_id;
+    }
+
+    /// Set the human-readable display name for this partner.
+    ///
+    /// Called from the startup path when `SessionInfo.partner_display_name` is
+    /// non-empty after a successful `InitSession`. Used to populate
+    /// `Author::Partner.display_name` on outbound messages so attribution in
+    /// the agent's message history is human-readable.
+    pub fn set_partner_display_name(&mut self, name: String) {
+        self.partner_display_name = Some(name);
     }
 
     /// Update the zellij environment state.
@@ -746,9 +784,29 @@ impl App {
                     let client = client.clone();
                     let bid = batch_id;
                     let result_tx = self.result_tx.clone();
+                    // Construct the Partner origin using this TUI's stable
+                    // partner_id. The daemon does not mint partner IDs — each
+                    // client supplies its own Author so that different callers
+                    // (TUI, agent-to-agent, system services) are distinguishable
+                    // in the agent's message history.
+                    let origin = MessageOrigin::new(
+                        Author::Partner(Partner {
+                            user_id: self.partner_id.clone(),
+                            display_name: self.partner_display_name.clone(),
+                        }),
+                        Sphere::Private,
+                    );
                     tokio::spawn(async move {
                         tracing::debug!("sending message batch={bid} agent={agent_id}");
-                        if let Err(e) = client.send_message(bid.clone(), agent_id, parts).await {
+                        // TUI uses Recipient::Direct with the currently-active agent.
+                        // Fronting-aware routing (Recipient::Auto) is used when the
+                        // TUI has no preferred agent — direct addressing preserves the
+                        // explicit `/front @agent` selection made by the user.
+                        let recipient = Recipient::Direct(agent_id.clone());
+                        if let Err(e) = client
+                            .send_message(bid.clone(), recipient, parts, origin)
+                            .await
+                        {
                             tracing::error!("send_message failed batch={bid}: {e:?}");
                             let _ = result_tx.send(format!("send failed: {e}"));
                         }

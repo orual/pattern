@@ -19,17 +19,17 @@
 
 use std::sync::Arc;
 
+use pattern_core::CapabilitySet;
 use pattern_core::traits::{TurnSink, VecSink};
 use pattern_core::types::ids::PersonaId;
 use pattern_core::types::snapshot::PersonaSnapshot;
-use pattern_core::CapabilitySet;
 use pattern_runtime::NopProviderClient;
 use pattern_runtime::SdkLocation;
 use pattern_runtime::agent_registry::{AgentRegistry, SessionStatus};
 use pattern_runtime::router::RouterError;
-use pattern_runtime::session::{SessionRegistries, TidepoolSession, WakeRegistryExtras};
 use pattern_runtime::router::RouterRegistry;
 use pattern_runtime::router::agent::AgentRouter;
+use pattern_runtime::session::{SessionRegistries, TidepoolSession, WakeRegistryExtras};
 use pattern_runtime::testing::InMemoryMemoryStore;
 
 /// Build a simple NoOp turn sink for tests that don't need event observation.
@@ -98,13 +98,15 @@ async fn open_with_agent_loop_wires_session_registries() {
     // NoRouterForScheme, which would indicate the AgentRouter was never wired.
     //
     // Use a *different* persona_id to ensure PersonaNotFound (not delivery).
+    use jiff::Timestamp;
+    use pattern_core::types::ids::{AgentId, BatchId, MessageId, new_id, new_snowflake_id};
     use pattern_core::types::message::Message;
     use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
-    use pattern_core::types::ids::{AgentId, BatchId, MessageId, new_id, new_snowflake_id};
-    use jiff::Timestamp;
 
     let sender = MessageOrigin::new(
-        Author::System { reason: SystemReason::Timer },
+        Author::System {
+            reason: SystemReason::Timer,
+        },
         Sphere::System,
     );
     let msg = Message {
@@ -174,7 +176,7 @@ async fn open_with_agent_loop_none_registries_leaves_agent_registry_unwired() {
         None,
         None,
         None,
-        None,   // no registries
+        None, // no registries
     )
     .await
     .expect("open should succeed without registries");

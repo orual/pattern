@@ -120,9 +120,17 @@ daemon via `run_command`. The plugin system is future work.
 
 ### `/front` limitation
 
-`/front` is client-side only. The daemon has no persistent fronting state, so
-restarting the TUI resets to the default agent. When multi-agent fronting lands,
-add a `SetFront` RPC.
+`/front` is client-side only — the TUI tracks which agent it's locked to and
+sends every message with `Recipient::Direct(agent_id)`. As of v3-multi-agent
+Phase 5, the daemon DOES persist a `FrontingSet` (per-mount, in pattern_db) and
+exposes `GetFronting` / `SetFronting` / `UpdateRouting` RPCs, but the TUI does
+not yet consume them.
+
+The full TUI fronting integration (default outbound to `Recipient::Auto`,
+dynamic fronting status bar driven by `WireTurnEvent::FrontingChanged`,
+multi-agent attribution rendering, `/agent <id>` one-shot direct override) is
+Phase 6 Task 8 — see
+`docs/implementation-plans/2026-04-19-v3-multi-agent/phase_06.md`.
 
 ## Command dispatch flow
 

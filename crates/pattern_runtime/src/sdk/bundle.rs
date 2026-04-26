@@ -254,10 +254,7 @@ mod tests {
             .enumerate()
             .find(|(_, d)| d.type_name == "Fronting")
             .expect("Fronting must appear in canonical decls");
-        assert_eq!(
-            tag, 17,
-            "Fronting must be at slot 17 (appended after Wake)"
-        );
+        assert_eq!(tag, 17, "Fronting must be at slot 17 (appended after Wake)");
         assert_eq!(
             fronting.constructors.len(),
             4,

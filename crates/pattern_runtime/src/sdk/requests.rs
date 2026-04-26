@@ -391,8 +391,8 @@ mod parity {
     #[test]
     fn fronting_req_variants() {
         use super::FrontingReq;
-        use super::fronting::WireRoutingRule;
         use super::fronting::WireMessagePattern;
+        use super::fronting::WireRoutingRule;
         let _ = FrontingReq::Current;
         let _ = FrontingReq::Set(vec!["alice".to_string()], Some("alice".to_string()));
         let _ = FrontingReq::Route(vec![WireRoutingRule {

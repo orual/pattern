@@ -16,6 +16,7 @@ use irpc::channel::mpsc;
 use smol_str::SmolStr;
 use thiserror::Error;
 
+use pattern_core::types::origin::{Author, MessageOrigin, Partner, Sphere};
 use pattern_core::types::provider::ContentPart;
 
 use crate::protocol::*;
@@ -109,25 +110,61 @@ impl DaemonClient {
         })
     }
 
-    /// Send a user message to an agent.
+    /// Send a message to an agent with explicit origin attribution.
     ///
     /// Returns once the daemon has acknowledged receipt (not completion).
     /// Events are delivered via a separate [`subscribe_output`](Self::subscribe_output)
     /// stream.
+    ///
+    /// The `recipient` determines how the daemon routes the message:
+    /// - [`Recipient::Direct`] — deliver to the named agent's session.
+    /// - [`Recipient::Auto`] — route through the fronting resolver.
+    /// - [`Recipient::Address`] — `@persona-name` direct addressing.
+    ///
+    /// The `origin` is passed through to the agent's [`TurnInput`](pattern_core::types::turn::TurnInput)
+    /// unchanged. Callers are responsible for constructing the appropriate
+    /// [`MessageOrigin`] for their identity — the daemon does not assume
+    /// `Author::Partner` or any other specific author.
     pub async fn send_message(
         &self,
         batch_id: SmolStr,
-        agent_id: SmolStr,
+        recipient: Recipient,
         parts: Vec<ContentPart>,
+        origin: MessageOrigin,
     ) -> Result<()> {
         self.inner
             .rpc(AgentMessage {
                 batch_id,
-                agent_id,
+                recipient,
                 parts,
+                origin,
             })
             .await?;
         Ok(())
+    }
+
+    /// Convenience wrapper: send directly to a named agent with a Partner origin.
+    ///
+    /// Equivalent to [`send_message`](Self::send_message) with
+    /// [`Recipient::Direct`] and `Author::Partner`. Use this for TUI callers
+    /// that have a stable `partner_id` (received from `InitSession`) and are
+    /// routing directly to a known agent.
+    pub async fn send_message_direct(
+        &self,
+        batch_id: SmolStr,
+        agent_id: SmolStr,
+        parts: Vec<ContentPart>,
+        partner_id: SmolStr,
+    ) -> Result<()> {
+        let origin = MessageOrigin::new(
+            Author::Partner(Partner {
+                user_id: partner_id,
+                display_name: None,
+            }),
+            Sphere::Private,
+        );
+        self.send_message(batch_id, Recipient::Direct(agent_id), parts, origin)
+            .await
     }
 
     /// Subscribe to turn events for a specific agent.

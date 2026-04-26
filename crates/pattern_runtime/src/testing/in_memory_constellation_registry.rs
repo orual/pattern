@@ -144,9 +144,7 @@ mod tests {
         reg.seed(active_record("bob"));
 
         let mut charlie = active_record("charlie");
-        charlie
-            .project_attachments
-            .push(project_path.clone());
+        charlie.project_attachments.push(project_path.clone());
         reg.seed(charlie);
 
         let all = reg.list(RegistryScope::All).await.unwrap();

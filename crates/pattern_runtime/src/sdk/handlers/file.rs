@@ -463,6 +463,7 @@ mod tests {
             user.origin = Some(MessageOrigin::new(
                 Author::Partner(Partner {
                     user_id: pattern_core::types::ids::new_id(),
+                    display_name: None,
                 }),
                 Sphere::Private,
             ));

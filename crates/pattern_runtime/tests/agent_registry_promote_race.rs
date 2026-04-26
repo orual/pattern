@@ -183,7 +183,8 @@ async fn route_or_queue_never_returns_persona_not_found_during_promotion() {
     // No tolerance — with the single-map consolidation zero loss is the invariant.
     // If this assertion fails, the consolidation has a bug; do not add tolerance.
     assert_eq!(
-        delivered_total, ok_count,
+        delivered_total,
+        ok_count,
         "silent message loss: ok={ok_count} delivered={delivered_total} \
          loss={}",
         ok_count.saturating_sub(delivered_total),

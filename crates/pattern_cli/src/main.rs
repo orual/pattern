@@ -414,6 +414,17 @@ async fn run_chat(cmd: ChatCmd) -> MietteResult<()> {
     // Wire up the zellij state so /pane and /float know whether they can act.
     app.set_zellij_state(zellij_state);
 
+    // Wire the daemon's stable partner identity into the app so that outbound
+    // messages carry a consistent Author::Partner attribution. If the session
+    // was offline or InitSession failed, the app keeps its self-minted id.
+    if let Some(pid) = session.partner_id {
+        app.set_partner_id(pid);
+    }
+    // Wire the optional display name for Author::Partner attribution rendering.
+    if let Some(name) = session.partner_display_name {
+        app.set_partner_display_name(name);
+    }
+
     // Populate the available agents list so /front can validate names.
     if !session.available_agents.is_empty() {
         app.set_available_agents(session.available_agents);
@@ -481,6 +492,14 @@ struct SessionResult {
     history: Vec<pattern_server::protocol::HistoricalBatch>,
     /// Plugin commands fetched from the daemon for autocomplete registration.
     daemon_commands: Vec<(String, String)>,
+    /// Stable partner identity from the daemon. Used to construct
+    /// `Author::Partner` origins for `AgentMessage::origin`. The TUI stores
+    /// this and passes it as `user_id` in every `SendMessage`.
+    partner_id: Option<smol_str::SmolStr>,
+    /// Optional human-readable display name for the partner from the daemon.
+    /// Sourced from `SessionInfo.partner_display_name` (Phase 6 wires
+    /// `.pattern.kdl` partner config; `None` until then).
+    partner_display_name: Option<String>,
 }
 
 impl SessionResult {
@@ -494,6 +513,8 @@ impl SessionResult {
             available_agents: vec![],
             history: vec![],
             daemon_commands: vec![],
+            partner_id: None,
+            partner_display_name: None,
         }
     }
 }
@@ -550,6 +571,8 @@ async fn init_session_and_subscribe(
                 available_agents: info.available_agents,
                 history,
                 daemon_commands,
+                partner_id: Some(info.partner_id),
+                partner_display_name: info.partner_display_name,
             }
         }
         Err(e) => {
@@ -563,6 +586,8 @@ async fn init_session_and_subscribe(
                 available_agents: vec![],
                 history: vec![],
                 daemon_commands: vec![],
+                partner_id: None,
+                partner_display_name: None,
             }
         }
     }

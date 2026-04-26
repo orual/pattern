@@ -8,13 +8,25 @@
 //! Tests run in the same tokio runtime as the server actor, so async message
 //! passing is exercised without mocking.
 
-use pattern_core::types::ids::new_snowflake_id;
+use pattern_core::types::ids::{new_id, new_snowflake_id};
+use pattern_core::types::origin::{Author, MessageOrigin, Partner, Sphere};
 use pattern_core::types::provider::ContentPart;
 use pattern_server::client::DaemonClient;
-use pattern_server::protocol::WireTurnEvent;
+use pattern_server::protocol::{Recipient, WireTurnEvent};
 use pattern_server::server::DaemonServer;
 use smol_str::SmolStr;
 use tokio::time::{Duration, timeout};
+
+/// Build a test partner origin for use in integration tests.
+fn test_origin() -> MessageOrigin {
+    MessageOrigin::new(
+        Author::Partner(Partner {
+            user_id: new_id(),
+            display_name: None,
+        }),
+        Sphere::Private,
+    )
+}
 
 /// Maximum time to wait for a single event before failing the test.
 ///
@@ -41,8 +53,9 @@ async fn full_send_subscribe_flow() {
     client
         .send_message(
             batch_id.clone(),
-            "agent-1".into(),
+            Recipient::Direct("agent-1".into()),
             vec![ContentPart::Text("what is 2+2?".into())],
+            test_origin(),
         )
         .await
         .unwrap();
@@ -106,6 +119,7 @@ async fn init_session_echo_mode() {
     assert_eq!(info.agent_id, "pattern-default");
     assert_eq!(info.persona_name, "echo");
     assert!(info.available_agents.is_empty());
+    assert!(!info.partner_id.is_empty(), "partner_id must be non-empty");
 }
 
 /// A subscriber registered for agent-1 must not receive events emitted for
@@ -125,8 +139,9 @@ async fn subscriber_filtering_by_agent() {
     client
         .send_message(
             new_snowflake_id(),
-            "agent-2".into(),
+            Recipient::Direct("agent-2".into()),
             vec![ContentPart::Text("hello from agent-2".into())],
+            test_origin(),
         )
         .await
         .unwrap();
@@ -136,8 +151,9 @@ async fn subscriber_filtering_by_agent() {
     client
         .send_message(
             batch_id_1.clone(),
-            "agent-1".into(),
+            Recipient::Direct("agent-1".into()),
             vec![ContentPart::Text("hello from agent-1".into())],
+            test_origin(),
         )
         .await
         .unwrap();

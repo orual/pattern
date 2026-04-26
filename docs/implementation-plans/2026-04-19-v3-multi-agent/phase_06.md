@@ -6,7 +6,7 @@
 
 **Tech Stack:** `rusqlite_migration` (new migrations `0013_agents_extend.sql`, `0014_persona_relationships.sql`, `0015_drop_legacy_coordination.sql`), existing `Json<T>` wrapper at `crates/pattern_db/src/json_wrapper.rs` for enum columns, `smol_str::SmolStr` for ids, `jiff::Timestamp` for timestamps.
 
-**Scope:** 6 of 7. Closes AC5 (the registry-facing parts — AC5.5, AC5.7 — left open by Phase 2), AC9 fully. Also performs the schema cleanup of the legacy coordination tables. The retirement of the staging-era types is straightforward code deletion.
+**Scope:** 6 of 7. Closes AC5 (the registry-facing parts — AC5.5, AC5.7 — left open by Phase 2), AC9 fully. Also performs the schema cleanup of the legacy coordination tables. The retirement of the staging-era types is straightforward code deletion. **Carry-over from Phase 5 review (Task 8):** the TUI's fronting integration — removing the forced-agent assumption at InitSession, defaulting outbound to `Recipient::Auto`, and rendering responses with per-agent attribution — lands here so Phase 5's routing infrastructure has a complete human-facing surface.
 
 **Codebase verified:** 2026-04-23.
 
@@ -407,6 +407,50 @@ CLI commands: parse args, call the new daemon RPCs (`ListPersonas`, `PromoteDraf
 **Commit:** `[pattern-cli] add constellation subcommands + TUI panel`
 <!-- END_TASK_7 -->
 
+<!-- START_TASK_8 -->
+### Task 8: TUI fronting integration — drive conversation flow from FrontingSet
+
+**Verifies:** AC8.* end-to-end via the human-facing surface; resolves the Phase 5 review carry-over (TUI forcing a specific agent at InitSession).
+
+**Context:** Phase 5 introduced `Recipient::Auto` on the SendMessage RPC and made the daemon route via `FrontingResolver` — but the TUI still pre-selects a single `agent_id` at `InitSession` time, hardcodes that agent on every outbound message, and subscribes only to that agent's event stream. The result: a TUI user typing "!math 2+2" with a configured fronting set still gets routed to whatever agent they picked at startup, not math-specialist. This task removes the forced-agent assumption from the TUI and makes the FrontingSet drive the visible conversation.
+
+**Files:**
+- Modify: `crates/pattern_server/src/protocol.rs` — `InitSession` becomes per-mount (drop the `preferred_agent_id` hard-pick or make it advisory). `SessionInfo` carries the partner_id (for `Recipient`/`MessageOrigin` construction TUI-side) and the active `FrontingSet` snapshot. New event subscription mode: `SubscribeAll { mount_path }` returning `TaggedTurnEvent`s for every agent in the mount, not just one. Existing per-agent `SubscribeOutput` retained for backwards-compat / specialist views.
+- Modify: `crates/pattern_server/src/server.rs` — the per-mount subscriber set, `SubscribeAll` handler, and `FrontingChanged` fan-out (already exists from Phase 5; verify TUI receives it on the all-mount channel).
+- Modify: `crates/pattern_cli/src/tui/app.rs` — drop the `agent_id`-locked state. The TUI is now scoped to a *mount*, not an agent. Track the active fronting set + per-agent batches.
+- Modify: `crates/pattern_cli/src/tui/model.rs` — `RenderBatch` already carries `agent_name`. Use it: render every section under a per-batch `[agent-name]` header so multi-agent fronting (fan-out) produces visible attribution. When a single agent is fronting, render compactly (the header collapses to a status-line indicator).
+- Modify: `crates/pattern_cli/src/tui/status_bar.rs` — replace the static persona indicator with a dynamic "fronting: alice, bob (fallback: alice)" rendering driven by the latest `FrontingChanged` event. On `FrontingChanged`, re-render.
+- Modify: `crates/pattern_cli/src/tui/input.rs` — outgoing messages default to `Recipient::Auto`. `@alice` prefix in the input parses to `Recipient::Address(alice)`. Slash-command `/agent <id>` (new) sets a one-shot `Recipient::Direct(id)` for the next message (overrides fronting for that send).
+- Modify: `crates/pattern_cli/src/commands/chat.rs` (or wherever `pattern chat` initialises) — drop the `[AGENT]` arg as required input. Optional: `--default-agent <id>` for power users who want a one-shot direct override on launch (translates to a leading `/agent <id>` command).
+- Modify: `crates/pattern_cli/src/tui/conversation.rs` — display batches from multiple agents interleaved by timestamp/batch-id. The existing per-batch `Section` model already supports this; the change is in how new TaggedTurnEvents are bucketed.
+
+**Implementation notes:**
+
+1. **Default subscription is mount-wide.** The TUI's `App::run` calls `SubscribeAll { mount_path }` instead of `SubscribeOutput { agent_id }`. The fan-out shape is the same (`TaggedTurnEvent` stream); the daemon-side change is to fan out to subscribers keyed by mount, not by agent_id. Existing per-agent subscribers remain functional for any specialised view (e.g. a future "watch only alice" panel), but the default chat view sees everyone.
+
+2. **Outbound defaults to `Recipient::Auto`.** The TUI no longer needs to know "which agent you're talking to" — it asks fronting. The visible response attribution comes from the `TaggedTurnEvent.agent_id` on the way back, rendered in the conversation view's batch header.
+
+3. **`@persona` in input → `Recipient::Address`.** The InputHandler already detects slash commands; extend to detect a leading `@<persona-id>` and produce `Recipient::Address(persona_id)`. The `@` token is stripped from the visible message so the recipient sees a clean body.
+
+4. **Status bar shows fronting.** Subscribe to `FrontingChanged` on the all-mount channel; on every event, update the status-bar widget to display `fronting: <active>… (fallback: <fallback>)`. When the FrontingSet is empty, show "no fronting configured".
+
+5. **Conversation rendering — multi-agent fan-out.** When two agents both respond to a single user message (FanOut outcome), the conversation view renders two side-by-side batches each labelled with its agent name. This is mechanical: existing `RenderBatch.agent_name` is set per-batch from `TaggedTurnEvent.agent_id`. The visual layout (vertical stack vs side-by-side panels) is a UX call — keep it vertical-stacked for Phase 6 to keep scope bounded.
+
+6. **Persona change indicator.** When a `FrontingChanged` event arrives mid-conversation, the TUI shows a one-line system note ("fronting changed: alice → bob") in the conversation view so the user has context for the next response coming from a different agent.
+
+**Testing:**
+- Integration: TUI sends "!math 2+2"; daemon routes via fronting (Prefix("!math") rule); math-specialist's `TaggedTurnEvent.agent_id` arrives in the all-mount stream; conversation view renders the response under a `[math-specialist]` header.
+- Integration: TUI sends "@alice please draft"; alice receives the message regardless of rules.
+- Integration: TUI sends "hello" with empty fronting + no Active personas → SystemDefault; status bar shows "no fronting configured" + a system note in the conversation.
+- Snapshot test (insta): conversation view rendering with two interleaved agent batches.
+- Snapshot test: status bar rendering with various fronting states (single active, co-fronting, empty, system-default).
+
+**Verification:**
+`cargo nextest run -p pattern-cli tui_fronting && cargo nextest run -p pattern-server subscribe_all`
+
+**Commit:** `[pattern-cli] [pattern-server] TUI fronting integration: per-mount subscription, Recipient::Auto default, dynamic fronting status`
+<!-- END_TASK_8 -->
+
 <!-- END_SUBCOMPONENT_C -->
 
 ---
@@ -419,6 +463,7 @@ CLI commands: parse args, call the new daemon RPCs (`ListPersonas`, `PromoteDraf
 - [ ] Sibling spawn auto-registers with relationship edges.
 - [ ] Draft personas appear in `list()`; `PromoteDraft` RPC opens a session and drains the draft queue.
 - [ ] CLI / TUI surfaces for list / promote / relate / groups land.
+- [ ] TUI no longer forces a specific agent at InitSession; default outbound recipient is `Recipient::Auto` (fronting-driven); status bar reflects active fronting personas; FanOut renders attributed batches per-agent.
 - [ ] No references to `CoordinationPattern` / `agent_groups` / `group_members` / `coordination_tasks` remain in active code or types.
 - [ ] All existing tests still green.
 

@@ -47,7 +47,10 @@ pub fn load_fronting_set(conn: &Connection) -> DbResult<Option<FrontingSet>> {
 
     // Step 2: deserialize active personas from JSON.
     let active_strs: Vec<String> = serde_json::from_str(&active_json)?;
-    let active: Vec<PersonaId> = active_strs.iter().map(|s| PersonaId::new(s.as_str())).collect();
+    let active: Vec<PersonaId> = active_strs
+        .iter()
+        .map(|s| PersonaId::new(s.as_str()))
+        .collect();
 
     let fallback: Option<PersonaId> = fallback_str.map(|s| PersonaId::new(s.as_str()));
 
@@ -87,9 +90,8 @@ pub fn load_fronting_set(conn: &Connection) -> DbResult<Option<FrontingSet>> {
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     // Step 4: compile regex patterns.
-    let routing = RoutingTable::try_from_rules(rules).map_err(|e| {
-        DbError::invalid_data(format!("failed to compile routing rules: {e}"))
-    })?;
+    let routing = RoutingTable::try_from_rules(rules)
+        .map_err(|e| DbError::invalid_data(format!("failed to compile routing rules: {e}")))?;
 
     Ok(Some(FrontingSet::from_parts(active, fallback, routing)))
 }
@@ -238,10 +240,18 @@ mod tests {
             "routing rule count must match"
         );
 
-        let original_ids: Vec<&str> = original.routing.rules.iter().map(|r| r.id.as_str()).collect();
+        let original_ids: Vec<&str> = original
+            .routing
+            .rules
+            .iter()
+            .map(|r| r.id.as_str())
+            .collect();
         let loaded_ids: Vec<&str> = loaded.routing.rules.iter().map(|r| r.id.as_str()).collect();
         for id in &original_ids {
-            assert!(loaded_ids.contains(id), "rule {id} must be present after load");
+            assert!(
+                loaded_ids.contains(id),
+                "rule {id} must be present after load"
+            );
         }
     }
 
@@ -344,7 +354,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(rule_count > 0, "routing_rules should be non-empty before clear");
+        assert!(
+            rule_count > 0,
+            "routing_rules should be non-empty before clear"
+        );
 
         // Clear.
         clear_fronting_set(&mut conn).unwrap();
@@ -357,10 +370,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(
-            set_count_after, 0,
-            "fronting_set must be empty after clear"
-        );
+        assert_eq!(set_count_after, 0, "fronting_set must be empty after clear");
 
         let rule_count_after: i64 = conn
             .query_row(

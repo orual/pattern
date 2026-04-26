@@ -94,10 +94,7 @@ async fn set_without_capability_is_denied() {
     let mut h = FrontingHandler;
     let cx = EffectContext::with_user(&table, &*ctx);
     let err = h
-        .handle(
-            FrontingReq::Set(vec!["alice".to_string()], None),
-            &cx,
-        )
+        .handle(FrontingReq::Set(vec!["alice".to_string()], None), &cx)
         .expect_err("Set without FrontingControl must be denied");
     let msg = err.to_string();
     assert!(
@@ -188,10 +185,7 @@ async fn set_with_capability_succeeds() {
     let fs = ctx.fronting_set().expect("FrontingSet must be wired");
     let guard = fs.read().unwrap();
     assert_eq!(guard.active.len(), 2, "expected two active personas");
-    assert!(
-        guard.fallback.is_some(),
-        "expected fallback to be set"
-    );
+    assert!(guard.fallback.is_some(), "expected fallback to be set");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -215,10 +209,14 @@ async fn current_returns_json_snapshot() {
         .expect("Current must return a Text value decodable as String");
     let parsed: serde_json::Value =
         serde_json::from_str(&json_str).expect("Current must return valid JSON");
-    let active = parsed["active"].as_array().expect("active must be an array");
+    let active = parsed["active"]
+        .as_array()
+        .expect("active must be an array");
     assert_eq!(active.len(), 1, "expected one active persona");
     assert_eq!(active[0], "alice");
-    let fallback = parsed["fallback"].as_str().expect("fallback must be a string");
+    let fallback = parsed["fallback"]
+        .as_str()
+        .expect("fallback must be a string");
     assert_eq!(fallback, "bob");
 }
 
@@ -282,5 +280,8 @@ async fn clear_resets_to_default() {
     let guard = fs.read().unwrap();
     assert!(guard.active.is_empty(), "Clear must reset active personas");
     assert!(guard.fallback.is_none(), "Clear must reset fallback");
-    assert!(guard.routing.rules.is_empty(), "Clear must reset routing rules");
+    assert!(
+        guard.routing.rules.is_empty(),
+        "Clear must reset routing rules"
+    );
 }

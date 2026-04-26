@@ -19,7 +19,6 @@ use tokio::task::JoinHandle;
 
 use crate::mailbox::MailboxInput;
 
-
 /// A wake-condition declaration, decoupled from its evaluator.
 ///
 /// Each variant pairs with a Rust evaluator (T7/T8/T9) or a Haskell
@@ -641,8 +640,8 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         let handle = rt.handle().clone();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let reg = WakeRegistry::new(tx, handle)
-            .with_min_period(jiff::Span::new().milliseconds(100));
+        let reg =
+            WakeRegistry::new(tx, handle).with_min_period(jiff::Span::new().milliseconds(100));
 
         // Call register from a plain OS thread — no ambient tokio context.
         // This must not panic with "no reactor running".

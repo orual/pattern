@@ -1,0 +1,33 @@
+// supervisor_persona.kdl — supervisor fixture for the Phase 5 T7 integration test.
+//
+// The supervisor is permanently fronting with FrontingControl capability.
+// Used by tests/fronting_supervisor.rs to verify end-to-end routing through
+// the fallback path and persistence of FrontingSet.
+
+name "supervisor"
+agent-id "supervisor"
+
+system-prompt "You are the supervisor. You handle all messages that don't match a routing rule."
+
+model provider="anthropic" model-id="claude-sonnet-4-6" {
+    temperature 0.0
+    max-tokens 256
+}
+
+capabilities {
+    effects {
+        memory
+        message
+    }
+    flags {
+        fronting-control
+    }
+}
+
+memory {
+    persona content="Supervisor persona for Pattern project routing tests." {
+        memory-type "core"
+        permission "read_only"
+        pinned true
+    }
+}

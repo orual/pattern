@@ -231,9 +231,7 @@ impl MessagePattern {
                     .map(|re| re.is_match(msg_body))
                     .unwrap_or(false)
             }
-            Self::Regex(_) => compiled_re
-                .map(|re| re.is_match(msg_body))
-                .unwrap_or(false),
+            Self::Regex(_) => compiled_re.map(|re| re.is_match(msg_body)).unwrap_or(false),
         }
     }
 }
@@ -265,10 +263,7 @@ pub enum ResolveOutcome {
     /// The message addressed a persona directly via `@persona-id` prefix.
     Direct(PersonaId),
     /// A routing rule matched.
-    Rule {
-        rule_id: String,
-        target: PersonaId,
-    },
+    Rule { rule_id: String, target: PersonaId },
     /// No rule matched; the configured fallback persona receives the message.
     Fallback(PersonaId),
     /// No fallback is configured; all active personas receive a copy.
@@ -355,7 +350,15 @@ impl FrontingResolver {
             }
             // If the registry is unavailable, fall through to SystemDefault
             // rather than crashing — message delivery must never fail-close.
-            Err(_) => ResolveOutcome::SystemDefault,
+            Err(e) => {
+                tracing::warn!(
+                    target = "pattern_core::fronting",
+                    error = ?e,
+                    "ConstellationRegistry::list failed during default-persona fallback; \
+                     using SystemDefault outcome"
+                );
+                ResolveOutcome::SystemDefault
+            }
         }
     }
 }
@@ -396,6 +399,35 @@ pub fn parse_direct_address(msg_body: &str) -> Option<PersonaId> {
     Some(PersonaId::new(id.as_str()))
 }
 
+/// Strip a leading `@<persona-id>[:][ \t]+` direct-address marker from
+/// `msg_body` so the recipient sees a clean message after routing.
+///
+/// Returns the input verbatim when no leading `@<id>` is present.
+/// Mirrors [`parse_direct_address`]'s id-extraction rules: id ends at
+/// the first whitespace or `:`. The optional trailing `:` and any run
+/// of horizontal whitespace immediately after are also stripped, so
+/// `"@alice: hello"` → `"hello"` and `"@alice  hello"` → `"hello"`.
+pub fn strip_direct_address(msg_body: &str) -> String {
+    let Some(rest) = msg_body.strip_prefix('@') else {
+        return msg_body.to_string();
+    };
+    // Length of id portion (chars until whitespace or ':').
+    let id_len: usize = rest
+        .chars()
+        .take_while(|c| !c.is_whitespace() && *c != ':')
+        .map(char::len_utf8)
+        .sum();
+    if id_len == 0 {
+        // Bare `@` with no id — leave the body alone.
+        return msg_body.to_string();
+    }
+    let after_id = &rest[id_len..];
+    // Skip an optional trailing `:` and any run of whitespace.
+    let after_colon = after_id.strip_prefix(':').unwrap_or(after_id);
+    let cleaned = after_colon.trim_start();
+    cleaned.to_string()
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -426,7 +458,10 @@ mod tests {
         }
 
         fn seed(&self, record: PersonaRecord) {
-            self.records.lock().unwrap().insert(record.id.clone(), record);
+            self.records
+                .lock()
+                .unwrap()
+                .insert(record.id.clone(), record);
         }
     }
 
@@ -458,7 +493,10 @@ mod tests {
         PersonaRecord::new(id, format!("{id} name"), PersonaStatus::Draft)
     }
 
-    fn make_resolver(set: FrontingSet, registry: Arc<dyn ConstellationRegistry>) -> FrontingResolver {
+    fn make_resolver(
+        set: FrontingSet,
+        registry: Arc<dyn ConstellationRegistry>,
+    ) -> FrontingResolver {
         FrontingResolver::new(set, registry)
     }
 
@@ -728,7 +766,9 @@ mod tests {
 
         let err = RoutingTable::try_from_rules(rules).unwrap_err();
         match err {
-            FrontingLoadError::InvalidRegex { rule_id, source, .. } => {
+            FrontingLoadError::InvalidRegex {
+                rule_id, source, ..
+            } => {
                 assert_eq!(rule_id, "bad-rule");
                 assert_eq!(source, "[invalid regex");
             }
@@ -813,9 +853,7 @@ mod tests {
         recovered.routing.compile().expect("must compile");
 
         // Verify the rule re-compiles and functions correctly.
-        let m = recovered
-            .routing
-            .first_match("deadline: 2026-04-25");
+        let m = recovered.routing.first_match("deadline: 2026-04-25");
         assert!(m.is_some(), "regex rule must match after re-compile");
         assert_eq!(m.unwrap().1.as_str(), "date-handler");
     }

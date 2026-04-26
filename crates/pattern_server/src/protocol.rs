@@ -14,7 +14,7 @@ use irpc::{
     rpc_requests,
 };
 use pattern_core::traits::turn_sink::{DisplayKind, TurnEvent};
-use pattern_core::types::origin::Author;
+use pattern_core::types::origin::{Author, MessageOrigin};
 use pattern_core::types::provider::{ContentPart, ToolOutcome};
 use pattern_core::types::turn::StopReason;
 use serde::{Deserialize, Serialize};
@@ -30,21 +30,73 @@ pub type BatchId = SmolStr;
 /// Identifier for a running agent.
 pub type AgentId = SmolStr;
 
-/// A message from a TUI client to an agent.
+/// Identifier for a persona by name (used in direct `@persona` addressing).
+pub type PersonaId = SmolStr;
+
+/// Routing directive for an [`AgentMessage`].
+///
+/// Controls how the daemon routes the message:
+///
+/// - [`Recipient::Direct`] — deliver to the named agent's mailbox, bypassing
+///   the fronting resolver entirely.
+/// - [`Recipient::Auto`] — let the fronting resolver pick a target based on
+///   the current [`FrontingSet`] rules and the message body.
+/// - [`Recipient::Address`] — `@persona-name` direct addressing; always
+///   delivers to the named persona regardless of the routing rules.
+///
+/// TUI callers that had a fixed `agent_id` before Phase 5 should use
+/// `Recipient::Direct(agent_id)` to preserve the old semantics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Recipient {
+    /// Deliver directly to the named agent's session, bypassing the resolver.
+    Direct(AgentId),
+    /// Route through the fronting resolver: rules → fallback → fan-out →
+    /// default-persona → system-default. The daemon pre-resolves to a single
+    /// agent before opening/driving the session.
+    Auto,
+    /// Direct `@persona-name` addressing. The leading `@` is stripped
+    /// (or may be absent) before resolving the persona.
+    Address(PersonaId),
+}
+
+/// A message from any RPC caller to an agent.
 ///
 /// The client mints the `batch_id` (a snowflake) before sending. The daemon
 /// uses it to correlate every [`TaggedTurnEvent`] emitted during this exchange
 /// back to the originating batch, enabling concurrent rendering.
+///
+/// The `origin` field carries full caller attribution. The daemon does **not**
+/// assume `Author::Partner` — each caller provides its own [`MessageOrigin`]:
+///
+/// - TUI callers construct `Author::Partner` using the `partner_id` received
+///   at `InitSession` time (or stored from a prior session).
+/// - Agent-to-agent callers construct `Author::Agent { agent_id }`.
+/// - System/scheduler callers construct `Author::System { reason }`.
+/// - Third-party human callers construct `Author::Human { user_id, display_name }`.
+///
+/// This makes the RPC layer symmetric: any client that can connect to the
+/// daemon can supply its own identity rather than having the daemon guess.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentMessage {
     /// Client-minted batch ID (snowflake). The daemon uses this to tag all
     /// TurnEvents for this exchange, enabling concurrent batch rendering.
     pub batch_id: BatchId,
-    /// Target agent.
-    pub agent_id: AgentId,
+    /// Routing directive. Specifies how the daemon should resolve the target
+    /// agent for this message. Use [`Recipient::Direct`] to preserve
+    /// pre-Phase-5 behaviour (fixed agent_id).
+    ///
+    /// When `Recipient::Auto`, the daemon calls the fronting resolver on the
+    /// active mount's `FrontingSet` and routes to the resolved persona.
+    pub recipient: Recipient,
     /// Message content parts — text, images, binary attachments.
-    /// The daemon wraps these into a `ChatMessage::user()` when constructing `TurnInput`.
+    /// The daemon wraps these into a `ChatMessage::user()` when constructing
+    /// [`pattern_core::types::turn::TurnInput`].
     pub parts: Vec<ContentPart>,
+    /// Caller-supplied origin attribution. The daemon passes this through
+    /// directly to [`pattern_core::types::turn::TurnInput::origin`] — it does
+    /// **not** override or default the author. Each RPC client is responsible
+    /// for constructing the appropriate [`MessageOrigin`] for its identity.
+    pub origin: MessageOrigin,
 }
 
 /// Request to subscribe to an agent's turn event stream.
@@ -371,6 +423,27 @@ pub struct SessionInfo {
     pub persona_name: String,
     /// All available personas discovered for this project.
     pub available_agents: Vec<AgentId>,
+    /// Stable partner identity for this daemon session.
+    ///
+    /// Clients use this to construct `Author::Partner(Partner { user_id })`
+    /// when building the `origin` field of [`AgentMessage`]. The daemon mints
+    /// this once at spawn time so all clients that connected to the same daemon
+    /// process share a consistent partner identity in the agents' message
+    /// history.
+    ///
+    /// TUI clients should store this and pass it as `user_id` in every
+    /// subsequent `SendMessage`. Phase 6 Task 8 will wire this into the
+    /// multi-fronting TUI path.
+    pub partner_id: SmolStr,
+    /// Optional human-readable display name for the partner.
+    ///
+    /// Sourced from `.pattern.kdl` `partner { display_name "..." }` when
+    /// present. `None` means no display name was configured — TUI should
+    /// fall back to an anonymous label (e.g. "you").
+    ///
+    /// Phase 6 will complete `.pattern.kdl` partner-config parsing; until
+    /// then the daemon always returns `None`.
+    pub partner_display_name: Option<String>,
     /// Set when session initialization failed. The session is in a degraded
     /// state — the TUI should surface this error to the user.
     pub error: Option<String>,
@@ -506,7 +579,18 @@ pub enum PatternProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pattern_core::types::origin::{Partner, Sphere};
     use pattern_core::types::turn::StopReason;
+
+    fn test_partner_origin() -> MessageOrigin {
+        MessageOrigin::new(
+            Author::Partner(Partner {
+                user_id: "test-user-id".into(),
+                display_name: None,
+            }),
+            Sphere::Private,
+        )
+    }
 
     #[test]
     fn shutdown_request_roundtrip() {
@@ -534,32 +618,99 @@ mod tests {
         let _decoded: ShutdownResponse = postcard::from_bytes(&bytes).unwrap();
     }
 
+    /// Verifies that `AgentMessage` with a Partner origin round-trips through
+    /// both JSON (serde) and postcard (IRPC wire format).
     #[test]
-    fn agent_message_roundtrip() {
+    fn agent_message_direct_roundtrip() {
         let msg = AgentMessage {
             batch_id: "batch-001".into(),
-            agent_id: "agent-1".into(),
+            recipient: Recipient::Direct("agent-1".into()),
             parts: vec![ContentPart::Text("hello".into())],
+            origin: test_partner_origin(),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: AgentMessage = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded.agent_id, "agent-1");
+        assert!(
+            matches!(&decoded.recipient, Recipient::Direct(id) if id == "agent-1"),
+            "expected Direct recipient"
+        );
         assert_eq!(decoded.batch_id, "batch-001");
+        // Also verify postcard round-trip (IRPC wire format).
+        let bytes = postcard::to_allocvec(&msg).unwrap();
+        let decoded2: AgentMessage = postcard::from_bytes(&bytes).unwrap();
+        assert!(
+            matches!(&decoded2.recipient, Recipient::Direct(id) if id == "agent-1"),
+            "postcard: expected Direct recipient"
+        );
+    }
+
+    #[test]
+    fn agent_message_auto_roundtrip() {
+        let msg = AgentMessage {
+            batch_id: "batch-002".into(),
+            recipient: Recipient::Auto,
+            parts: vec![ContentPart::Text("hello fronting".into())],
+            origin: test_partner_origin(),
+        };
+        let bytes = postcard::to_allocvec(&msg).unwrap();
+        let decoded: AgentMessage = postcard::from_bytes(&bytes).unwrap();
+        assert!(matches!(decoded.recipient, Recipient::Auto));
+    }
+
+    #[test]
+    fn agent_message_address_roundtrip() {
+        let msg = AgentMessage {
+            batch_id: "batch-003".into(),
+            recipient: Recipient::Address("alice".into()),
+            parts: vec![ContentPart::Text("@alice hi".into())],
+            origin: test_partner_origin(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let decoded: AgentMessage = serde_json::from_str(&json).unwrap();
+        assert!(
+            matches!(&decoded.recipient, Recipient::Address(id) if id == "alice"),
+            "expected Address recipient"
+        );
     }
 
     #[test]
     fn agent_message_roundtrip_preserves_parts() {
         let msg = AgentMessage {
             batch_id: "b".into(),
-            agent_id: "a".into(),
+            recipient: Recipient::Direct("a".into()),
             parts: vec![
                 ContentPart::Text("first".into()),
                 ContentPart::Text("second".into()),
             ],
+            origin: test_partner_origin(),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: AgentMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.parts.len(), 2);
+    }
+
+    /// Verifies that `AgentMessage` with an `Agent` origin (agent-to-agent RPC)
+    /// round-trips correctly — not just Partner origins.
+    #[test]
+    fn agent_message_agent_origin_roundtrip() {
+        use pattern_core::types::origin::AgentAuthor;
+        let msg = AgentMessage {
+            batch_id: "batch-004".into(),
+            recipient: Recipient::Auto,
+            parts: vec![ContentPart::Text("cross-agent message".into())],
+            origin: MessageOrigin::new(
+                Author::Agent(AgentAuthor {
+                    agent_id: "sender-agent".into(),
+                }),
+                Sphere::System,
+            ),
+        };
+        let bytes = postcard::to_allocvec(&msg).unwrap();
+        let decoded: AgentMessage = postcard::from_bytes(&bytes).unwrap();
+        assert!(
+            matches!(&decoded.origin.author, Author::Agent(a) if a.agent_id == "sender-agent"),
+            "Agent origin must survive postcard round-trip"
+        );
     }
 
     #[test]
@@ -636,6 +787,8 @@ mod tests {
             agent_id: "pattern-default".into(),
             persona_name: "Pattern Default".into(),
             available_agents: vec!["pattern-default".into(), "supervisor".into()],
+            partner_id: "test-partner-abc123".into(),
+            partner_display_name: Some("orual".into()),
             error: None,
         };
         let json = serde_json::to_string(&info).unwrap();
@@ -643,6 +796,8 @@ mod tests {
         assert_eq!(decoded.agent_id, "pattern-default");
         assert_eq!(decoded.persona_name, "Pattern Default");
         assert_eq!(decoded.available_agents.len(), 2);
+        assert_eq!(decoded.partner_id, "test-partner-abc123");
+        assert_eq!(decoded.partner_display_name.as_deref(), Some("orual"));
     }
 
     #[test]

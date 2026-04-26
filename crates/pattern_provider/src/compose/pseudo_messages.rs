@@ -619,6 +619,7 @@ mod tests {
             None,
             Author::Partner(Partner {
                 user_id: SmolStr::new("user123"),
+                display_name: None,
             }),
         );
         let msg = render_change_event(&event);

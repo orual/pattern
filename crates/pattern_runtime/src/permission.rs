@@ -241,7 +241,10 @@ mod tests {
             args_digest: None,
         };
         let partner = MessageOrigin::new(
-            Author::Partner(pattern_core::types::origin::Partner { user_id: new_id() }),
+            Author::Partner(pattern_core::types::origin::Partner {
+                user_id: new_id(),
+                display_name: None,
+            }),
             Sphere::Private,
         );
         let bridge_for_thread = bridge.clone();

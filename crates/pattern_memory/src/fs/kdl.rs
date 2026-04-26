@@ -1101,13 +1101,19 @@ mod tests {
     #[test]
     fn kdl_string_entry_rejects_del() {
         let result = kdl_string_entry("hello\u{007F}world");
-        assert!(result.is_err(), "kdl_string_entry should reject U+007F (DEL)");
+        assert!(
+            result.is_err(),
+            "kdl_string_entry should reject U+007F (DEL)"
+        );
     }
 
     #[test]
     fn kdl_string_entry_rejects_bidi_control() {
         let result = kdl_string_entry("text\u{200E}more");
-        assert!(result.is_err(), "kdl_string_entry should reject U+200E (LRM BIDI control)");
+        assert!(
+            result.is_err(),
+            "kdl_string_entry should reject U+200E (LRM BIDI control)"
+        );
     }
 
     #[test]
