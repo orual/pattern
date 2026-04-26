@@ -18,6 +18,7 @@ use pattern_core::types::message::Message;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use tidepool_eval::Value;
 
+use crate::router::{ROUTER_ERROR_PREFIX, RouterError};
 use crate::sdk::describe::{DescribeEffect, EffectDecl};
 use crate::sdk::requests::MessageReq;
 use crate::session::SessionContext;
@@ -32,12 +33,13 @@ impl DescribeEffect for MessageHandler {
     fn effect_decl() -> EffectDecl {
         EffectDecl {
             type_name: "Message",
-            description: "Inter-agent and outbound messaging (Ask/Send/Reply/Notify)",
+            description: "Inter-agent and outbound messaging (Ask/Send/Reply/Notify/Delegate)",
             constructors: &[
-                "Ask    :: Request -> Message (MessageContent, Usage)",
-                "Send   :: Recipient -> Body -> Message ()",
-                "Reply  :: MessageId -> Body -> Message ()",
-                "Notify :: ChannelId -> Body -> Message ()",
+                "Ask      :: Request -> Message (MessageContent, Usage)",
+                "Send     :: Recipient -> Body -> Message ()",
+                "Reply    :: MessageId -> Body -> Message ()",
+                "Notify   :: ChannelId -> Body -> Message ()",
+                "Delegate :: DelegateReq -> Message ()",
             ],
             type_defs: &[
                 "type Request = Text",
@@ -47,12 +49,16 @@ impl DescribeEffect for MessageHandler {
                 "type Body = Text",
                 "type MessageId = Text",
                 "type ChannelId = Text",
+                "data DelegateReq = DelegateReq { delegateTaskLabel :: Text, \
+                 delegateTaskBlockId :: Text, delegateTaskAgentId :: Text, \
+                 delegateRecipient :: Text, delegateBody :: Text }",
             ],
             helpers: &[
                 "ask :: Member Message effs => Request -> Eff effs (MessageContent, Usage)\nask r = Freer.send (Ask r)",
                 "send :: Member Message effs => Recipient -> Body -> Eff effs ()\nsend r b = Freer.send (Send r b)",
                 "reply :: Member Message effs => MessageId -> Body -> Eff effs ()\nreply m b = Freer.send (Reply m b)",
                 "notify :: Member Message effs => ChannelId -> Body -> Eff effs ()\nnotify c b = Freer.send (Notify c b)",
+                "delegate :: Member Message effs => DelegateReq -> Eff effs ()\ndelegate d = Freer.send (Delegate d)",
             ],
         }
     }
@@ -105,6 +111,22 @@ impl EffectHandler<SessionContext> for MessageHandler {
                 let agent_id = cx.user().agent_id().to_string();
                 dispatch_outbound(cx, &agent_id, &channel_id, &body, "Notify")
             }
+            MessageReq::Delegate(wire) => {
+                let agent_id = cx.user().agent_id().to_string();
+                let task_ref = pattern_core::BlockRef::with_owner(
+                    wire.task_label,
+                    wire.task_block_id,
+                    wire.task_agent_id,
+                );
+                dispatch_delegate(
+                    cx,
+                    &agent_id,
+                    &wire.recipient,
+                    &wire.body,
+                    task_ref,
+                    "Delegate",
+                )
+            }
         };
 
         // Record exchange on success (same pattern as MemoryHandler).
@@ -115,6 +137,74 @@ impl EffectHandler<SessionContext> for MessageHandler {
         }
         result
     }
+}
+
+/// Construct a delegation `Message` — body plus the task's `BlockRef` pinned
+/// into `block_refs` — and dispatch it to `recipient`.
+///
+/// Inserting the `BlockRef` here causes the snapshot composer at the
+/// recipient's session to pin the task into its working-memory selection for
+/// the incoming turn (AC6.3).
+fn dispatch_delegate(
+    cx: &EffectContext<'_, SessionContext>,
+    agent_id: &str,
+    recipient: &str,
+    body: &str,
+    task_ref: pattern_core::BlockRef,
+    op_name: &str,
+) -> Result<Value, EffectError> {
+    let msg = Message {
+        chat_message: genai::chat::ChatMessage::new(
+            genai::chat::ChatRole::Assistant,
+            body.to_string(),
+        ),
+        id: MessageId::from(new_id().to_string()),
+        position: new_snowflake_id(),
+        owner_id: AgentId::from(agent_id),
+        created_at: Timestamp::now(),
+        batch: BatchId::from(new_snowflake_id()),
+        response_meta: None,
+        // Pin the assigned task — snapshot composer reads this at the
+        // recipient's turn entry to include the task block in context.
+        block_refs: vec![task_ref],
+        attachments: vec![],
+    };
+
+    // Push into pending_messages for turn-close drain (same as Send).
+    cx.user()
+        .pending_messages()
+        .lock()
+        .unwrap()
+        .push(msg.clone());
+
+    let bridge = cx.user().router_bridge().ok_or_else(|| {
+        EffectError::Handler(format!(
+            "Pattern.Message.{op_name}: no router bridge configured \
+             (session must be opened with a router via with_router)"
+        ))
+    })?;
+
+    let sender = cx.user().current_dispatch_origin().ok_or_else(|| {
+        EffectError::Handler(format!(
+            "Pattern.Message.{op_name}: no dispatch origin available \
+             (handler invoked outside a turn — drive_step is responsible \
+             for populating SessionContext::current_dispatch_origin)"
+        ))
+    })?;
+
+    bridge
+        .route_sync(&sender, recipient, &msg)
+        .map_err(|e| match &e {
+            RouterError::PersonaNotFound(id) => {
+                EffectError::Handler(format!("{ROUTER_ERROR_PREFIX}PersonaNotFound: {id}"))
+            }
+            RouterError::MailboxClosed => {
+                EffectError::Handler(format!("{ROUTER_ERROR_PREFIX}MailboxClosed"))
+            }
+            _ => EffectError::Handler(format!("Pattern.Message.{op_name}: routing failed: {e}")),
+        })?;
+
+    cx.respond(())
 }
 
 /// Construct a `Message` from the body, push it into pending_messages,
@@ -174,7 +264,19 @@ fn dispatch_outbound(
     })?;
 
     bridge.route_sync(&sender, recipient, &msg).map_err(|e| {
-        EffectError::Handler(format!("Pattern.Message.{op_name}: routing failed: {e}"))
+        // PersonaNotFound and MailboxClosed carry the ROUTER_ERROR_PREFIX so
+        // consumers (tests, TUI, CLI) can discriminate routing failures from
+        // other handler errors without parsing free-form prose. All other
+        // routing errors surface via the generic "routing failed" wrapper.
+        match &e {
+            RouterError::PersonaNotFound(id) => {
+                EffectError::Handler(format!("{ROUTER_ERROR_PREFIX}PersonaNotFound: {id}"))
+            }
+            RouterError::MailboxClosed => {
+                EffectError::Handler(format!("{ROUTER_ERROR_PREFIX}MailboxClosed"))
+            }
+            _ => EffectError::Handler(format!("Pattern.Message.{op_name}: routing failed: {e}")),
+        }
     })?;
 
     cx.respond(())
@@ -338,10 +440,7 @@ mod tests {
         let result = tokio::task::spawn_blocking(move || {
             let cx = EffectContext::with_user(&table, &ctx);
             let mut h = MessageHandler;
-            h.handle(
-                MessageReq::Send("cli:user".into(), "body".into()),
-                &cx,
-            )
+            h.handle(MessageReq::Send("cli:user".into(), "body".into()), &cx)
         })
         .await
         .unwrap();
@@ -376,5 +475,106 @@ mod tests {
 
         let msgs = pending.lock().unwrap();
         assert_eq!(msgs.len(), 1, "should have 1 pending message");
+    }
+
+    /// AC6.3: delegate dispatches with the task's BlockRef pinned into
+    /// the outgoing message's block_refs. The recipient's snapshot composer
+    /// will include the task in the working-memory selection for that turn.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delegate_pins_task_block_ref_in_message() {
+        use crate::agent_registry::{AgentRegistry, SessionStatus};
+        use crate::router::agent::AgentRouter;
+        use tokio::sync::mpsc;
+
+        // Set up a shared registry with an "active" recipient persona.
+        let reg = Arc::new(AgentRegistry::new());
+        let (tx, mut rx) = mpsc::unbounded_channel::<crate::mailbox::MailboxInput>();
+        reg.register("recipient-r".into(), tx, SessionStatus::Active);
+
+        let agent_router = Arc::new(AgentRouter::new(Arc::clone(&reg)));
+        let mut registry = RouterRegistry::new();
+        registry.register(agent_router);
+
+        let db = crate::testing::test_db().await;
+        let ctx = sctx_with_router(registry, db);
+        let table = handler_table();
+
+        let result = tokio::task::spawn_blocking(move || {
+            let cx = EffectContext::with_user(&table, &ctx);
+            let mut h = MessageHandler;
+            h.handle(
+                MessageReq::Delegate(crate::sdk::requests::message::WireDelegateReq {
+                    task_label: "my-task".into(),
+                    task_block_id: "block-123".into(),
+                    task_agent_id: "agent-a".into(),
+                    recipient: "agent:recipient-r".into(),
+                    body: "please handle this".into(),
+                }),
+                &cx,
+            )
+        })
+        .await
+        .unwrap();
+
+        assert!(result.is_ok(), "Delegate should succeed; got: {result:?}");
+
+        // Verify the recipient's mailbox got a message with the task's BlockRef.
+        let mailbox_input = rx.recv().await.expect("recipient should receive a message");
+        let block_refs = &mailbox_input.msg.block_refs;
+        assert_eq!(block_refs.len(), 1, "message should have 1 block_ref");
+        assert_eq!(block_refs[0].block_id, "block-123");
+        assert_eq!(block_refs[0].label, "my-task");
+        assert_eq!(block_refs[0].agent_id, "agent-a");
+
+        // Body text is correct.
+        let text = mailbox_input.msg.chat_message.content.first_text().unwrap();
+        assert_eq!(text, "please handle this");
+    }
+
+    /// AC6.4: sending to a nonexistent agent persona produces an error with
+    /// the ROUTER_ERROR_PREFIX followed by "PersonaNotFound: <persona-id>".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_to_nonexistent_agent_produces_router_error_prefix() {
+        use crate::agent_registry::AgentRegistry;
+        use crate::router::ROUTER_ERROR_PREFIX;
+        use crate::router::agent::AgentRouter;
+
+        let reg = Arc::new(AgentRegistry::new());
+        // No persona registered — any send to agent: scheme is PersonaNotFound.
+        let agent_router = Arc::new(AgentRouter::new(Arc::clone(&reg)));
+        let mut registry = RouterRegistry::new();
+        registry.register(agent_router);
+
+        let db = crate::testing::test_db().await;
+        let ctx = sctx_with_router(registry, db);
+        let table = handler_table();
+
+        let result = tokio::task::spawn_blocking(move || {
+            let cx = EffectContext::with_user(&table, &ctx);
+            let mut h = MessageHandler;
+            h.handle(
+                MessageReq::Send("agent:ghost-persona".into(), "hello?".into()),
+                &cx,
+            )
+        })
+        .await
+        .unwrap();
+
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        // Must start with the well-known prefix.
+        assert!(
+            msg.contains(ROUTER_ERROR_PREFIX),
+            "expected ROUTER_ERROR_PREFIX in error; got: {msg}"
+        );
+        // Must contain the target persona-id fragment.
+        assert!(
+            msg.contains("ghost-persona"),
+            "expected persona-id in error; got: {msg}"
+        );
+        assert!(
+            msg.contains("PersonaNotFound"),
+            "expected PersonaNotFound in error; got: {msg}"
+        );
     }
 }

@@ -19,6 +19,7 @@
 //! Inter-agent (`agent:`), Discord (`discord:`), Bluesky (`bluesky:`)
 //! routers are future scope.
 
+pub mod agent;
 pub mod cli;
 
 use std::collections::HashMap;
@@ -140,7 +141,34 @@ pub enum RouterError {
     /// The router attempted delivery but failed.
     #[error("route failed: {0}")]
     RouteFailed(String),
+
+    /// No registered persona with the given id. Returned by the
+    /// `agent:` scheme router when the target is unknown or `Inactive`.
+    ///
+    /// Well-known prefix used by the message handler to convert this to
+    /// `EffectError::Handler` with a parseable prefix; see
+    /// [`ROUTER_ERROR_PREFIX`].
+    #[error("persona not found: {0}")]
+    PersonaNotFound(pattern_core::types::ids::PersonaId),
+
+    /// The persona's mailbox channel is closed (the session has ended).
+    /// The sending end was obtained from the registry but the receiving
+    /// end has since been dropped.
+    #[error("persona mailbox is closed")]
+    MailboxClosed,
 }
+
+/// Well-known prefix attached to `EffectError::Handler` messages produced
+/// when an `AgentRouter` call fails. Consumers (tests, TUI, CLI) match on
+/// this prefix to distinguish routing failures from other handler errors
+/// without parsing free-form prose.
+///
+/// Pattern:
+/// ```text
+/// RouterError: PersonaNotFound: <persona-id>
+/// RouterError: MailboxClosed
+/// ```
+pub const ROUTER_ERROR_PREFIX: &str = "RouterError: ";
 
 /// A scheme-specific message router.
 ///
@@ -361,7 +389,10 @@ mod tests {
         registry.register(mock.clone());
 
         let msg = test_message();
-        registry.route(&test_sender(), "test:target", &msg).await.unwrap();
+        registry
+            .route(&test_sender(), "test:target", &msg)
+            .await
+            .unwrap();
 
         let calls = mock.calls();
         assert_eq!(calls.len(), 1);
@@ -390,7 +421,10 @@ mod tests {
     async fn route_unknown_scheme_without_default_returns_error() {
         let registry = RouterRegistry::new();
         let msg = test_message();
-        let err = registry.route(&test_sender(), "unknown:target", &msg).await.unwrap_err();
+        let err = registry
+            .route(&test_sender(), "unknown:target", &msg)
+            .await
+            .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -405,7 +439,10 @@ mod tests {
     async fn route_malformed_recipient_without_default_returns_error() {
         let registry = RouterRegistry::new();
         let msg = test_message();
-        let err = registry.route(&test_sender(), "no-colon-here", &msg).await.unwrap_err();
+        let err = registry
+            .route(&test_sender(), "no-colon-here", &msg)
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, RouterError::MalformedRecipient(_)),
             "expected MalformedRecipient, got: {err:?}"
@@ -419,7 +456,10 @@ mod tests {
         registry.register(cli.clone());
 
         let msg = test_message();
-        registry.route(&test_sender(), "just-a-bare-string", &msg).await.unwrap();
+        registry
+            .route(&test_sender(), "just-a-bare-string", &msg)
+            .await
+            .unwrap();
 
         // Default router receives the FULL original recipient as target.
         let calls = cli.calls();
@@ -434,7 +474,10 @@ mod tests {
         registry.register(cli.clone());
 
         let msg = test_message();
-        registry.route(&test_sender(), "agent:pattern-entropy", &msg).await.unwrap();
+        registry
+            .route(&test_sender(), "agent:pattern-entropy", &msg)
+            .await
+            .unwrap();
 
         // Default router receives the full "agent:pattern-entropy"
         // string so it can surface what was attempted.
@@ -452,7 +495,10 @@ mod tests {
         registry.register(agent.clone());
 
         let msg = test_message();
-        registry.route(&test_sender(), "agent:pattern-entropy", &msg).await.unwrap();
+        registry
+            .route(&test_sender(), "agent:pattern-entropy", &msg)
+            .await
+            .unwrap();
 
         assert!(
             cli.calls().is_empty(),
@@ -468,7 +514,10 @@ mod tests {
         // router doesn't magic one into existence.
         let registry = RouterRegistry::new().with_default_scheme("cli");
         let msg = test_message();
-        let err = registry.route(&test_sender(), "bare-string", &msg).await.unwrap_err();
+        let err = registry
+            .route(&test_sender(), "bare-string", &msg)
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, RouterError::MalformedRecipient(_)),
             "expected MalformedRecipient (no fallback router registered), got: {err:?}"
@@ -484,7 +533,10 @@ mod tests {
         registry.register(second.clone());
 
         let msg = test_message();
-        registry.route(&test_sender(), "test:x", &msg).await.unwrap();
+        registry
+            .route(&test_sender(), "test:x", &msg)
+            .await
+            .unwrap();
 
         assert!(
             first.calls().is_empty(),

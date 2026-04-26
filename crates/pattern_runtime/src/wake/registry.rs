@@ -166,11 +166,7 @@ impl WakeRegistry {
 
     /// Register a wake condition. Returns the id used to refer to it
     /// in [`Self::unregister`].
-    pub fn register(
-        &self,
-        id: SmolStr,
-        condition: WakeCondition,
-    ) -> Result<SmolStr, WakeError> {
+    pub fn register(&self, id: SmolStr, condition: WakeCondition) -> Result<SmolStr, WakeError> {
         // Duplicate-id check.
         {
             let conds = self.conditions.lock();
@@ -191,8 +187,7 @@ impl WakeRegistry {
                     self.mailbox_tx.clone(),
                 )?
             }
-            WakeCondition::BlockChanged { .. }
-            | WakeCondition::TaskDependencyResolved { .. } => {
+            WakeCondition::BlockChanged { .. } | WakeCondition::TaskDependencyResolved { .. } => {
                 // T8/T9 wire these through the loro subscriber
                 // fan-out. Until they land, the registry returns
                 // `CustomEvaluatorNotConfigured` rather than

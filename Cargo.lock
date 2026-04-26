@@ -6667,6 +6667,7 @@ dependencies = [
  "blake3",
  "chrono",
  "clap",
+ "dashmap",
  "dirs 5.0.1",
  "dotenvy",
  "frunk",

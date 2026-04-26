@@ -73,6 +73,9 @@ loro             = { version = "1.10", features = ["counter"] }
 rusqlite         = { version = "0.39", features = ["bundled-full"] }
 smol_str         = { workspace = true }
 parking_lot      = { workspace = true }
+# v3-multi-agent Phase 4 T4: AgentRegistry uses DashMap for lock-free
+# concurrent persona → mailbox-sender resolution. Same version as pattern_memory.
+dashmap          = { version = "6.1.0" }
 regex            = { workspace = true }
 # Stable content hashing for snapshot delta detection.
 blake3           = { workspace = true }

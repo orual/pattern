@@ -9,6 +9,11 @@
 -- from the active session — agents specify who they're TALKING TO, not who
 -- they are. 'Recipient' is a flexible address (other agent, group, discord
 -- channel, bluesky handle, cli, etc.) that the runtime parses.
+--
+-- v3-multi-agent Phase 4 (Task 5) adds 'Delegate' for task-pinning
+-- delegation. The delegated task's block reference is included in the
+-- routed message's @block_refs@, causing the recipient's snapshot
+-- composer to pin the task into working memory for that turn.
 module Pattern.Message where
 
 import Control.Monad.Freer (Eff, Member)
@@ -39,12 +44,38 @@ type MessageId = Text
 -- | Coordination channel identifier.
 type ChannelId = Text
 
+-- | Wire record for 'Delegate'. Carries the task's block reference (label,
+-- block-id, agent-id) plus the routing target and message body.
+--
+-- Record selectors carry the @delegate@ prefix to avoid name collisions
+-- when multiple records are in scope without @DuplicateRecordFields@.
+data DelegateReq = DelegateReq
+  { delegateTaskLabel   :: Text
+  -- ^ Human-readable label for the task block (shown in snapshot display).
+  , delegateTaskBlockId :: Text
+  -- ^ Storage block ID of the task to pin into the recipient's context.
+  , delegateTaskAgentId :: Text
+  -- ^ Agent ID that owns the task block.
+  , delegateRecipient   :: Text
+  -- ^ Routing target — typically @"agent:<persona-id>"@.
+  , delegateBody        :: Text
+  -- ^ Message body sent to the recipient alongside the task pin.
+  }
+
 -- | Message effect algebra.
 data Message a where
-  Ask    :: Request -> Message (MessageContent, Usage)
-  Send   :: Recipient -> Body -> Message ()
-  Reply  :: MessageId -> Body -> Message ()
-  Notify :: ChannelId -> Body -> Message ()
+  Ask      :: Request -> Message (MessageContent, Usage)
+  Send     :: Recipient -> Body -> Message ()
+  Reply    :: MessageId -> Body -> Message ()
+  Notify   :: ChannelId -> Body -> Message ()
+  -- | Delegate a task to another agent.
+  --
+  -- The runtime constructs a message to 'delegateRecipient' with
+  -- 'delegateBody' as the body text and the task referenced by
+  -- 'delegateTaskBlockId' pinned into @block_refs@. The recipient's
+  -- snapshot composer then includes the task block in working memory
+  -- for that turn (AC6.3).
+  Delegate :: DelegateReq -> Message ()
 
 ask :: Member Message effs => Request -> Eff effs (MessageContent, Usage)
 ask r = Freer.send (Ask r)
@@ -60,3 +91,23 @@ reply m b = Freer.send (Reply m b)
 
 notify :: Member Message effs => ChannelId -> Body -> Eff effs ()
 notify c b = Freer.send (Notify c b)
+
+-- | Delegate a task to another agent.
+--
+-- Constructs a task-pinning message: the task's block reference is embedded
+-- in @block_refs@ of the outgoing message so the recipient's snapshot
+-- composer pins it into working memory for the incoming turn.
+--
+-- Usage:
+--
+-- @
+-- delegate (DelegateReq
+--   { delegateTaskLabel   = "clean-up-backlog"
+--   , delegateTaskBlockId = taskRef
+--   , delegateTaskAgentId = myAgentId
+--   , delegateRecipient   = "agent:worker-persona"
+--   , delegateBody        = "please handle the backlog task"
+--   })
+-- @
+delegate :: Member Message effs => DelegateReq -> Eff effs ()
+delegate d = Freer.send (Delegate d)

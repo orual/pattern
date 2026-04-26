@@ -30,8 +30,7 @@ use super::registry::{WakeError, wake_mailbox_input};
 pub(super) fn span_to_duration(span: jiff::Span) -> Result<Duration, WakeError> {
     // Try direct conversion. `Span::try_into` for Duration only
     // succeeds on spans without calendar units.
-    Duration::try_from(span)
-        .map_err(|e| WakeError::NonWallClockSpan(e.to_string()))
+    Duration::try_from(span).map_err(|e| WakeError::NonWallClockSpan(e.to_string()))
 }
 
 /// Validate that an interval period meets the registry's minimum.
@@ -40,10 +39,7 @@ pub(super) fn span_to_duration(span: jiff::Span) -> Result<Duration, WakeError> 
 /// the evaluator task. Pulled out here so the same check applies to
 /// future call sites (e.g. when a custom-wake registration falls
 /// back to an interval pulse).
-pub(super) fn validate_period(
-    period: jiff::Span,
-    min: jiff::Span,
-) -> Result<(), WakeError> {
+pub(super) fn validate_period(period: jiff::Span, min: jiff::Span) -> Result<(), WakeError> {
     let req = span_to_duration(period)?;
     let min_dur = span_to_duration(min)?;
     if req < min_dur {
