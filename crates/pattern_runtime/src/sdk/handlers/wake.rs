@@ -170,4 +170,3 @@ fn handle_unregister(
     let removed = registry.unregister(&SmolStr::from(id));
     cx.respond(removed)
 }
-

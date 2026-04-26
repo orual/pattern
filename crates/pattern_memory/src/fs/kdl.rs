@@ -136,7 +136,14 @@ pub fn loro_value_to_kdl(
             });
         }
     }
-    doc.autoformat();
+    // Note: doc.autoformat() is intentionally NOT called here.
+    //
+    // autoformat() strips the double-quote format metadata from string
+    // entries whose text happens to look like a KDL number literal (e.g.
+    // "+.0", "-.5"). The resulting unquoted token is parsed back as a float,
+    // not a string, breaking the round-trip. Relying on the entry's
+    // inherent KdlValue::String type (set via kdl_string_entry) without
+    // autoformat() keeps the KDL compact but correct.
     Ok(doc)
 }
 
@@ -229,6 +236,45 @@ pub fn loro_value_to_json(value: &LoroValue) -> Option<serde_json::Value> {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+/// Build a `KdlEntry` whose value is the given string, guaranteed to be
+/// serialized with KDL double-quote syntax.
+///
+/// `KdlEntry::new(s)` does not preserve format information, so the `kdl`
+/// crate renders strings like `"+.0"` or `"true"` as unquoted bare tokens
+/// that the KDL parser then re-interprets as numbers or booleans. Round-trips
+/// through `KdlDocument::to_string()` + `KdlDocument::parse()` therefore
+/// fail silently.
+///
+/// The fix: parse the literal from a minimal KDL document that already uses
+/// double-quote syntax. The resulting entry carries the quote format metadata
+/// and is rendered quoted on every subsequent serialisation.
+pub(super) fn kdl_string_entry(s: &str) -> KdlEntry {
+    // Escape all characters that are special inside a KDL double-quoted
+    // string. KDL v6 double-quoted strings use the same escape sequences
+    // as JSON:
+    //   \\  → literal backslash
+    //   \"  → literal double-quote
+    //   \n  → newline (LF)
+    //   \r  → carriage return
+    //   \t  → horizontal tab
+    // Unescaped newlines inside a quoted string are not valid KDL, so \n
+    // and \r must be escaped. Tabs are allowed raw but escaping them is
+    // harmless and keeps the generated KDL readable on a single line.
+    let escaped = s
+        .replace('\\', r"\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t");
+    let doc_src = format!("_ \"{}\"", escaped);
+    let doc = KdlDocument::parse(&doc_src)
+        // This can only fail if the escape logic above is wrong. All
+        // printable or control characters produce valid KDL quoted-string
+        // syntax after the above escaping.
+        .unwrap_or_else(|e| panic!("kdl_string_entry: generated invalid KDL for {s:?}: {e}"));
+    doc.nodes()[0].entries()[0].clone()
+}
+
 /// Convert a single `LoroValue` into a `KdlNode` with the given name.
 pub(super) fn loro_value_to_kdl_node(
     name: &str,
@@ -249,7 +295,11 @@ pub(super) fn loro_value_to_kdl_node(
             node.push(KdlEntry::new(i128::from(*i)));
         }
         LoroValue::String(s) => {
-            node.push(KdlEntry::new(s.as_str()));
+            // Use kdl_string_entry to ensure the value is serialized with
+            // double-quote syntax. KdlEntry::new(s) does not carry format
+            // metadata, so strings like "+.0" or "true" are rendered as bare
+            // tokens that the KDL parser re-interprets as numbers or booleans.
+            node.push(kdl_string_entry(s.as_str()));
         }
         LoroValue::List(l) => {
             if l.is_empty() {
@@ -322,7 +372,7 @@ fn scalar_loro_to_kdl_entry(value: &LoroValue) -> Result<KdlEntry, KdlConversion
         LoroValue::Bool(b) => Ok(KdlEntry::new(*b)),
         LoroValue::Double(d) => Ok(KdlEntry::new(*d)),
         LoroValue::I64(i) => Ok(KdlEntry::new(i128::from(*i))),
-        LoroValue::String(s) => Ok(KdlEntry::new(s.as_str())),
+        LoroValue::String(s) => Ok(kdl_string_entry(s.as_str())),
         other => Err(KdlConversionError::UnsupportedVariant(format!(
             "scalar-only context, got {other:?}"
         ))),

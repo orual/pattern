@@ -4,7 +4,7 @@ Agent runtime for Pattern v3. Houses Tidepool (Haskell-in-Rust) embedding, the
 agent turn loop, `freer-simple` effect handlers, and turn-level checkpoint
 machinery. Depends only on `pattern_core` trait definitions.
 
-Last verified: 2026-04-25 (post v3-multi-agent Phase 3)
+Last verified: 2026-04-26 (post v3-multi-agent Phase 4)
 
 v3-TUI integration note: the runtime is consumed by `pattern_server`'s actor
 via `TidepoolSession`, `MultiplexSink`, and per-batch `TurnSinkBridge`. The
@@ -604,17 +604,19 @@ break-detection output (Phase 5 Task 11).
 - No cross-provider routing demo. Same provider per session.
 - No constellation / multi-agent paths. Foundation is single-agent.
 
-## Open work: Router trait + daemon CliRouter
+## Open work: CliRouter TUI integration (Phase 5+)
 
-**Status:** blocked on Router trait fix. Do not attempt CliRouter until this is resolved.
+**Status (post Phase 4):** `AgentRegistry`, `RouterRegistry`, and `WakeRegistry`
+are now wired in `pattern_server::get_or_open_session` via `SessionRegistries`.
+Agent-to-agent routing (`agent:` scheme) works end-to-end. The remaining gap is
+the `CliRouter` for surfacing agent-to-cli messages in the TUI.
 
 **Problem:** The `Router` trait (`router.rs`) does not carry origin information
-(who sent the message, from which session/batch). `route(&self, target, &Message)`
-only has the target and the message body. A correct `CliRouter` for the daemon
-needs origin metadata to tag outbound `WireTurnEvent::MessageSent` events for
-the TUI.
+(who sent the message, from which session/batch). A correct `CliRouter` for the
+daemon needs origin metadata to tag outbound `WireTurnEvent::MessageSent` events
+for the TUI.
 
-**Required changes (in order):**
+**Remaining required changes:**
 
 1. **Fix Router trait**: `route()` should receive origin context — at minimum the
    sender's agent_id. Design decision needed on whether this is a parameter, a
@@ -625,19 +627,16 @@ the TUI.
    concept — no internal `TurnEvent` variant needed.
 
 3. **Add `WireTurnEvent::Text` agent name prefix**: Text events should render
-   with `[agent-name]` prefix in the TUI (like `[you]` for user messages).
-   Thread agent name through `RenderBatch`.
+   with `[agent-name]` prefix in the TUI. Thread agent name through `RenderBatch`.
 
 4. **Implement `CliRouter`**: holds a channel to the daemon's event bus. On
    `route()`, constructs `TaggedTurnEvent` with `MessageSent` and sends it.
    Registered as the default scheme in the daemon's `RouterRegistry`.
 
-5. **Wire RouterRegistry into daemon sessions**: `get_or_open_session` creates
-   a registry, registers the CliRouter, calls `ctx.with_router(registry)`.
-
-**Current state:** `RouterBridge` (sync-to-async channel bridge) is implemented
-and working. The Message handler uses it. But no router is registered in daemon
-sessions, so `Message.Send` returns "no router bridge configured."
+**Current state (Phase 4):** `RouterRegistry` is created per session in
+`get_or_open_session`. The `AgentRouter` (`agent:` scheme) is registered and
+routes to other agent mailboxes. No `CliRouter` registered yet — `Message.Send`
+to `"cli:..."` targets will return "no router found for scheme cli".
 
 ## Known flakes — historical note
 
@@ -986,3 +985,94 @@ Both `TidepoolRuntime::new(...)` and `with_default_sdk(...)` now require
 a `tokio_handle: tokio::runtime::Handle` parameter. All call sites
 (pattern_server, tests) updated. The sandbox-io plan inherits this
 threading.
+
+## Wake system (v3-multi-agent Phase 4)
+
+### `Pattern.Wake` effect
+
+Four wake condition types implemented in `sdk/requests/wake.rs` and
+`sdk/handlers/wake.rs`:
+
+- **Interval** — fires every `period_ms` milliseconds. Backed by
+  `tokio::time::interval` in `wake::rust_primitives`.
+- **TaskDep** — fires when a task block item transitions to a terminal
+  status. Backed by `wake::task_dep::TaskDepCondition`, which polls
+  `MemoryStore::get_block` on a configurable period.
+- **BlockChanged** — fires when any block matching a label/scope changes.
+  Backed by `wake::block_changed::BlockChangedCondition`, which hooks into
+  `pattern_memory::subscriber::BlockChangeNotifier`.
+- **Custom** — caller-defined predicate evaluated against a memory snapshot.
+  Backed by a parked evaluator in `WakeRegistry`.
+
+`WAKE_REGISTRY_MISSING_PREFIX: &str = "WakeRegistryMissing: "` is the
+error prefix returned when `Pattern.Wake.Register` is invoked but no
+`WakeRegistry` is wired (e.g. in test sessions that don't wire it).
+Tests can check for this prefix to distinguish missing-registry errors
+from capability-denied errors.
+
+### `WakeRegistry` (`wake/registry.rs`)
+
+Per-session registry. Manages a `DashMap` of `WakeHandle`s keyed by
+`WakeId` (UUID-based). Each handle wraps an `Arc<dyn WakeCondition>` plus
+a tokio `JoinHandle` for the evaluator task. `register(condition)` spawns
+the evaluator and inserts the handle. `unregister(id)` aborts the evaluator.
+Registry drop aborts all outstanding evaluators.
+
+`WakeRegistry` requires:
+- `tokio_handle: Handle` — to spawn evaluator tasks from the sync handler context.
+- `mailbox_tx: UnboundedSender<MailboxInput>` — the session's own mailbox,
+  so activated wake conditions can deliver a wake-up message.
+- Optional `BlockChangeNotifier` (for BlockChanged conditions).
+- Optional `Arc<dyn MemoryStore>` (for TaskDep and Custom conditions).
+
+### `AgentRegistry::route_or_queue` (Critical TOCTOU fix)
+
+`route_or_queue(&self, id, msg)` atomically checks the persona's `SessionStatus`
+and either delivers to the active mailbox or appends to the draft queue, all
+under the same DashMap shard read lock. This prevents the race where:
+1. Caller observes `Draft` status
+2. Promoter removes draft queue + updates entry to `Active`
+3. Caller calls `queue_for_draft` → queue gone → `PersonaNotFound`
+
+`route_or_queue` is the preferred routing entry point. `queue_for_draft` is
+retained as a lower-level method for callers that have already confirmed Draft
+status outside this function.
+
+### Session wiring: `SessionRegistries` and `WakeRegistryExtras`
+
+`open_with_agent_loop` now accepts `registries: Option<SessionRegistries>`.
+
+```rust
+pub struct SessionRegistries {
+    pub agent_registry: Option<Arc<AgentRegistry>>,
+    pub router_registry: Option<Arc<RouterRegistry>>,
+    pub wake_registry_extras: Option<WakeRegistryExtras>,
+}
+pub struct WakeRegistryExtras {
+    pub block_change_notifier: Option<BlockChangeNotifier>,
+    pub memory_store: Option<Arc<dyn MemoryStore>>,
+}
+```
+
+When `Some(registries)` is passed:
+- `agent_registry` → `ctx.with_agent_registry(...)` (session registers itself
+  as Active on open, unregisters on drop via `RegistryGuard`).
+- `router_registry` → `ctx.with_router(registry)` (after wiring `AgentRouter`
+  into the registry).
+- `wake_registry_extras` → `WakeRegistry` is built from the session's own
+  mailbox sender + the extras, then wired into `SessionContext`.
+
+All existing callers pass `None`; only `pattern_server::get_or_open_session`
+passes `Some(...)`.
+
+### Daemon wiring (`pattern_server/src/server.rs`)
+
+`ProjectMount` gains `agent_registry: Arc<AgentRegistry>` (shared across all
+sessions for the same project). `ProjectMount.cache` is stored as
+`Arc<MemoryCache>` (narrowed from `Arc<dyn MemoryStore>`) to expose
+`block_change_notifier()`.
+
+`get_or_open_session` builds per-session `RouterRegistry` + `SessionRegistries`
+and passes them with `CapabilitySet::all()` (fail-closed: no partial capability
+grants from daemon sessions). The `WakeRegistry` is built inside
+`open_with_agent_loop` (needs the session's mailbox sender).

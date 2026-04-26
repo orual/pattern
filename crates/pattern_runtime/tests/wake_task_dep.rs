@@ -49,9 +49,7 @@ fn seed_block(store: &dyn MemoryStore, agent: &str, label: &str) -> String {
 }
 
 fn sample_spec(subject: &str) -> String {
-    format!(
-        "{{\"subject\":\"{subject}\",\"description\":\"\",\"metadata\":null}}"
-    )
+    format!("{{\"subject\":\"{subject}\",\"description\":\"\",\"metadata\":null}}")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

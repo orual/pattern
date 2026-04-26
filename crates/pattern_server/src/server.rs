@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use irpc::{Client, WithChannels};
+use pattern_core::CapabilitySet;
 use pattern_core::ProviderClient;
 use pattern_core::traits::MemoryStore;
 use pattern_core::traits::turn_sink::{DisplayKind, TurnEvent, TurnSink};
@@ -38,7 +39,6 @@ use pattern_core::types::origin::{Author, MessageOrigin, Partner, Sphere};
 use pattern_core::types::provider::{ChatMessage, ContentPart};
 use pattern_core::types::snapshot::PersonaSnapshot;
 use pattern_core::types::turn::{StopReason, TurnInput};
-use pattern_core::CapabilitySet;
 use pattern_runtime::agent_registry::AgentRegistry;
 use pattern_runtime::router::RouterRegistry;
 use pattern_runtime::router::agent::AgentRouter;
@@ -811,7 +811,9 @@ async fn get_or_open_session(
     // explicit `cli:` prefix.
     let (cli_router, _cli_rx) = CliRouter::new();
     let mut router_reg = RouterRegistry::new().with_default_scheme("cli");
-    router_reg.register(Arc::new(AgentRouter::new(project_mount.agent_registry.clone())));
+    router_reg.register(Arc::new(AgentRouter::new(
+        project_mount.agent_registry.clone(),
+    )));
     router_reg.register(Arc::new(cli_router));
     let router_reg = Arc::new(router_reg);
 

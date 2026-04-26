@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 44525bc1de22ce64ace1e75cfe192550d1e209ddadc595397c557a8be49cb0e2 # shrinks to value = Map(LoroMapValue({"items": List(LoroListValue([Map(LoroMapValue({"blocks": List(LoroListValue([])), "created_at": String(LoroStringValue("2026-01-01T00:00:00Z")), "status": String(LoroStringValue("pending")), "metadata": Map(LoroMapValue({"a": Map(LoroMapValue({"a": String(LoroStringValue("+.0"))}))})), "description": String(LoroStringValue("")), "id": String(LoroStringValue("32006008776556544")), "updated_at": String(LoroStringValue("2026-04-23T12:00:00Z")), "subject": String(LoroStringValue(" ")), "comments": List(LoroListValue([]))}))])), "schema": String(LoroStringValue("task-list"))}))

@@ -240,6 +240,13 @@ Canonical file format converters. Each block schema has a converter that
 translates between the on-disk file format and LoroDoc state.
 
 - `fs::kdl` — KDL serializer/deserializer for Map, Composite, List, TaskList schemas.
+  **String encoding note:** `kdl_string_entry(s)` is the internal helper for
+  creating string entries. It parses from a minimal quoted-literal KDL document
+  to carry double-quote format metadata. `KdlEntry::new(s)` is NOT used for
+  strings because `kdl` v6's `autoformat()` strips quotes from strings that look
+  like number literals (e.g. `"+.0"` → `+.0`), breaking the round-trip.
+  `autoformat()` is intentionally not called in `kdl.rs` or `kdl_task_list.rs`
+  for the same reason — it would strip those quotes again after construction.
 - `fs::markdown` — Passthrough markdown for Text schema.
 - `fs::jsonl` — Newline-delimited JSON for Log schema.
 - `fs::markdown_skill` — YAML-frontmatter + markdown body for Skill schema.
@@ -285,7 +292,7 @@ forks. Sanitization via `sanitize_slug`: lowercase ASCII-alphanumeric +
 
 ## Status
 
-Last verified: 2026-04-25
+Last verified: 2026-04-26
 
 Created 2026-04-19 during v3-memory-rework Phase 1; populated incrementally
 in Phases 1-8. All 8 phases complete.
@@ -336,3 +343,11 @@ name + description + keywords + body as the `content_preview` string so all
 fields are indexed in `memory_blocks_fts`. Integration test file
 `crates/pattern_memory/tests/skill_fts5.rs` covers search by name, description,
 keyword, body, and BM25 ordering (insta snapshot). 554/554 tests passing.
+
+v3-multi-agent Phase 4 code review (2026-04-26): KDL string encoding bug fixed.
+`kdl::autoformat()` strips double-quote format metadata from strings that look
+like KDL number literals (e.g. `"+.0"`), causing round-trip parse failures.
+Fix: `kdl_string_entry(s)` helper builds entries by parsing from a quoted literal
+(carries format metadata); `autoformat()` calls removed from `kdl.rs` and
+`kdl_task_list.rs`. Proptest `round_trip_preserves_content` now passes 256 cases.
+423/423 tests passing.

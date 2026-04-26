@@ -33,7 +33,7 @@ use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use loro::LoroValue;
 use pattern_core::types::memory_types::TaskEdgeRef;
 
-use super::kdl::KdlConversionError;
+use super::kdl::{KdlConversionError, kdl_string_entry};
 
 /// Convert a task-list `LoroValue::Map` to a `KdlDocument`.
 ///
@@ -53,12 +53,12 @@ pub(super) fn task_list_to_kdl(value: &LoroValue) -> Result<KdlDocument, KdlConv
 
     // Properties.
     if let Some(LoroValue::String(s)) = map.get("default_status") {
-        let mut entry = KdlEntry::new(s.as_str());
+        let mut entry = kdl_string_entry(s.as_str());
         entry.set_name(Some("default_status"));
         root_node.push(entry);
     }
     if let Some(LoroValue::String(s)) = map.get("default_owner") {
-        let mut entry = KdlEntry::new(s.as_str());
+        let mut entry = kdl_string_entry(s.as_str());
         entry.set_name(Some("default_owner"));
         root_node.push(entry);
     }
@@ -79,7 +79,10 @@ pub(super) fn task_list_to_kdl(value: &LoroValue) -> Result<KdlDocument, KdlConv
 
     let mut doc = KdlDocument::new();
     doc.nodes_mut().push(root_node);
-    doc.autoformat();
+    // Note: doc.autoformat() is intentionally NOT called here.
+    // See the equivalent comment in kdl.rs: autoformat() strips
+    // double-quote format metadata from strings that look like KDL
+    // number literals (e.g. "+.0"), breaking the round-trip.
     Ok(doc)
 }
 
@@ -175,7 +178,7 @@ fn task_item_to_kdl_node(value: &LoroValue) -> Result<KdlNode, KdlConversionErro
     // subject.
     if let Some(LoroValue::String(s)) = map.get("subject") {
         let mut n = KdlNode::new("subject");
-        n.push(KdlEntry::new(s.as_str()));
+        n.push(kdl_string_entry(s.as_str()));
         children.nodes_mut().push(n);
     }
 
@@ -190,14 +193,14 @@ fn task_item_to_kdl_node(value: &LoroValue) -> Result<KdlNode, KdlConversionErro
         && !s.is_empty()
     {
         let mut n = KdlNode::new("description");
-        n.push(KdlEntry::new(s.as_str()));
+        n.push(kdl_string_entry(s.as_str()));
         children.nodes_mut().push(n);
     }
 
     // active_form.
     if let Some(LoroValue::String(s)) = map.get("active_form") {
         let mut n = KdlNode::new("active_form");
-        n.push(KdlEntry::new(s.as_str()));
+        n.push(kdl_string_entry(s.as_str()));
         children.nodes_mut().push(n);
     }
 
@@ -224,7 +227,7 @@ fn task_item_to_kdl_node(value: &LoroValue) -> Result<KdlNode, KdlConversionErro
                     Some(id) => format!("{handle}#{id}"),
                     None => handle,
                 };
-                let mut entry = KdlEntry::new(display.as_str());
+                let mut entry = kdl_string_entry(display.as_str());
                 entry.set_ty("block");
                 // Each typed entry is a child node named "-".
                 let mut entry_node = KdlNode::new("-");
@@ -250,7 +253,7 @@ fn task_item_to_kdl_node(value: &LoroValue) -> Result<KdlNode, KdlConversionErro
                 // text child.
                 if let Some(LoroValue::String(t)) = cm.get("text") {
                     let mut text_node = KdlNode::new("text");
-                    text_node.push(KdlEntry::new(t.as_str()));
+                    text_node.push(kdl_string_entry(t.as_str()));
                     let mut inner = KdlDocument::new();
                     inner.nodes_mut().push(text_node);
                     entry_node.set_children(inner);
@@ -289,7 +292,7 @@ fn task_item_to_kdl_node(value: &LoroValue) -> Result<KdlNode, KdlConversionErro
 
 fn push_str_prop(node: &mut KdlNode, key: &str, map: &loro::LoroMapValue) {
     if let Some(LoroValue::String(s)) = map.get(key) {
-        let mut entry = KdlEntry::new(s.as_str());
+        let mut entry = kdl_string_entry(s.as_str());
         entry.set_name(Some(key));
         node.push(entry);
     }
@@ -298,7 +301,7 @@ fn push_str_prop(node: &mut KdlNode, key: &str, map: &loro::LoroMapValue) {
 fn push_str_child(children: &mut KdlDocument, key: &str, map: &loro::LoroMapValue) {
     if let Some(LoroValue::String(s)) = map.get(key) {
         let mut n = KdlNode::new(key);
-        n.push(KdlEntry::new(s.as_str()));
+        n.push(kdl_string_entry(s.as_str()));
         children.nodes_mut().push(n);
     }
 }
