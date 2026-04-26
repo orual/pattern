@@ -286,6 +286,11 @@ fn handle_fork_op(
             let report = match &handle.isolation_state {
                 ForkIsolationState::Lightweight { .. } => handle.merge_back_lightweight(),
                 ForkIsolationState::Persistent { .. } => handle.merge_back_persistent(),
+                ForkIsolationState::Resolved => {
+                    return Err(EffectError::Handler(format!(
+                        "fork already resolved: {id}"
+                    )));
+                }
             }
             .map_err(|e| EffectError::Handler(e.to_string()))?;
             cx.respond(WireForkOpResult::MergeReport(format!("{:?}", report)))

@@ -161,6 +161,14 @@ pub enum ForkError {
 /// that will be fleshed out in Tasks 4-6.
 #[derive(Debug)]
 pub enum ForkIsolationState {
+    /// Sentinel used after `discard()` or `promote()` consume the fork state.
+    ///
+    /// `ForkHandle::Drop` checks for this variant and skips cleanup work (the
+    /// state was already handled by the explicit resolution method). External
+    /// callers should never construct or observe this variant directly — it is
+    /// only visible because `ForkIsolationState` is `pub` for test construction.
+    Resolved,
+
     /// In-memory fork backed by `LoroDoc::fork()`.
     ///
     /// The child cache owns forked CRDT documents. No disk writes are
@@ -380,6 +388,7 @@ impl ForkHandle {
                 ..
             } => (child_cache, parent_cache, parent_agent_id),
             ForkIsolationState::Persistent { .. } => return Err(ForkError::WrongIsolation),
+            ForkIsolationState::Resolved => return Err(ForkError::AlreadyResolved),
         };
 
         let parent_cache = parent_weak.upgrade().ok_or(ForkError::ParentDropped)?;
@@ -460,6 +469,7 @@ impl ForkHandle {
                     parent_agent_id,
                 ),
                 ForkIsolationState::Lightweight { .. } => return Err(ForkError::WrongIsolation),
+                ForkIsolationState::Resolved => return Err(ForkError::AlreadyResolved),
             };
 
         let parent_cache = parent_weak.upgrade().ok_or(ForkError::ParentDropped)?;
@@ -542,16 +552,24 @@ impl ForkHandle {
     /// Consumes `self` so it cannot be called twice (compile-time guarantee).
     /// `ForkError::AlreadyResolved` is reserved for a hypothetical future
     /// `&mut self` variant but is never returned by the current implementation.
-    pub fn discard(self) -> Result<(), ForkError> {
+    pub fn discard(mut self) -> Result<(), ForkError> {
         // Abort the parent→child watcher first. If the fork is being
         // discarded cleanly (not as a result of parent cancellation), we do
         // not want the watcher task to wake up and fire `request_cancel` on
         // the child after the child state has already been dropped.
-        if let Some(watcher) = self.cancel_watcher {
+        //
+        // We use `take()` so that when `Drop` runs on `self` at the end of
+        // this method, the watcher field is already `None` and the Drop impl
+        // does not attempt a redundant abort.
+        if let Some(watcher) = self.cancel_watcher.take() {
             watcher.abort();
         }
 
-        match self.isolation_state {
+        // Replace isolation_state with the sentinel before matching, so that
+        // Drop (which runs when `self` goes out of scope at the end of this
+        // method) observes `Resolved` and skips redundant cleanup.
+        let state = std::mem::replace(&mut self.isolation_state, ForkIsolationState::Resolved);
+        match state {
             ForkIsolationState::Lightweight { cancel_state, .. } => {
                 cancel_state.request_cancel();
                 // Dropping `self` here releases the child_cache Arc and all
@@ -601,6 +619,12 @@ impl ForkHandle {
                     Err(ForkError::DiscardCleanup { errors: errs })
                 }
             }
+            ForkIsolationState::Resolved => {
+                // `mem::replace` already set this sentinel; `Drop` will see
+                // `Resolved` and skip. This arm is unreachable in correct
+                // usage but must be exhaustive.
+                unreachable!("discard called on an already-resolved ForkHandle")
+            }
         }
     }
 
@@ -631,12 +655,18 @@ impl ForkHandle {
     ///   persistent fork's final commit fails.
     /// - [`ForkError::Document`] if the draft KDL or seed-cache write
     ///   fails (I/O error is wrapped here for uniform reporting).
-    pub fn promote(self, cfg: PersonaConfig, drafts_dir: &Path) -> Result<PersonaId, ForkError> {
+    pub fn promote(mut self, cfg: PersonaConfig, drafts_dir: &Path) -> Result<PersonaId, ForkError> {
         if !self
             .spawner_capabilities
             .has_flag(CapabilityFlag::SpawnNewIdentities)
         {
             return Err(ForkError::CapabilityDenied);
+        }
+
+        // Abort the watcher before any fallible work so it never fires
+        // redundantly after the fork is consumed.
+        if let Some(watcher) = self.cancel_watcher.take() {
+            watcher.abort();
         }
 
         let persona_id: PersonaId = SmolStr::from(cfg.name.clone());
@@ -646,7 +676,11 @@ impl ForkHandle {
         // can later inherit a clean revset. We do NOT delete the
         // bookmark — the promoted persona is expected to inherit it
         // (Phase 6 wires the inheritance).
-        let seed_cache: Arc<MemoryCache> = match self.isolation_state {
+        //
+        // Replace isolation_state with the sentinel so Drop sees `Resolved`
+        // rather than attempting cleanup after the state is already consumed.
+        let state = std::mem::replace(&mut self.isolation_state, ForkIsolationState::Resolved);
+        let seed_cache: Arc<MemoryCache> = match state {
             ForkIsolationState::Lightweight { child_cache, .. } => child_cache,
             ForkIsolationState::Persistent {
                 child_cache,
@@ -668,6 +702,9 @@ impl ForkHandle {
                         message: e.to_string(),
                     })?;
                 child_cache
+            }
+            ForkIsolationState::Resolved => {
+                unreachable!("promote called on an already-resolved ForkHandle")
             }
         };
 
@@ -713,6 +750,34 @@ impl ForkHandle {
         );
 
         Ok(persona_id)
+    }
+}
+
+// ── Drop ──────────────────────────────────────────────────────────────────────
+
+impl Drop for ForkHandle {
+    /// Abort the cancel-propagation watcher task on every resolution path.
+    ///
+    /// The watcher parks on `parent.wait_for_cancel()` and holds a strong
+    /// `Arc<CancelState>` for the parent. Without this abort, an unresolved
+    /// fork (dropped without calling `discard`, `merge_back`, or `promote`)
+    /// keeps the watcher task alive indefinitely, extending the parent's
+    /// `CancelState` lifetime and leaking a tokio task.
+    ///
+    /// Explicit resolution methods (`discard`, `promote`) already call
+    /// `self.cancel_watcher.take().map(|h| h.abort())` before returning, so
+    /// when `Drop` runs after them the field is already `None` and this abort
+    /// call is a cheap no-op.
+    fn drop(&mut self) {
+        if let Some(handle) = self.cancel_watcher.take() {
+            handle.abort();
+        }
+        // isolation_state is NOT cleaned up here beyond its own Drop —
+        // for Persistent forks, the destructor intentionally does NOT
+        // run `workspace_forget` / `bookmark_delete` (that requires async
+        // I/O and a live jj adapter). Callers are expected to call `discard`
+        // explicitly for Persistent forks; bare-drop silently leaks the
+        // workspace, which is acceptable for the error/panic path.
     }
 }
 
