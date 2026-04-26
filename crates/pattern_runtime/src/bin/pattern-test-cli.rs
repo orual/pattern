@@ -891,7 +891,7 @@ async fn cmd_cache_test(
         prelude_dir,
         None,
         None,
-        None,
+        None, // registries — test CLI, no inter-session routing needed.
     )
     .await?;
     eprintln!(
@@ -1238,7 +1238,7 @@ async fn cmd_spawn(
         prelude_dir,
         None,
         None,
-        None,
+        None, // registries — test CLI, no inter-session routing needed.
     )
     .await?;
     eprintln!(

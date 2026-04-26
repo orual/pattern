@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use pattern_core::types::block_ref::BlockRef;
 use pattern_core::types::origin::{SpanCompare, SystemReason};
+use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -23,10 +24,10 @@ use crate::mailbox::MailboxInput;
 use super::registry::{WakeError, wake_mailbox_input};
 
 /// Convert a `jiff::Span` carrying only wall-clock units (h/m/s/ms/us/ns
-/// + days) into a `std::time::Duration`. Returns
-/// [`WakeError::NonWallClockSpan`] when the span carries calendar
-/// units (years/months/weeks) that need a reference instant to
-/// resolve.
+/// + days) into a `std::time::Duration`.
+///
+/// Returns [`WakeError::NonWallClockSpan`] when the span carries calendar
+/// units (years/months/weeks) that need a reference instant to resolve.
 pub(super) fn span_to_duration(span: jiff::Span) -> Result<Duration, WakeError> {
     // Try direct conversion. `Span::try_into` for Duration only
     // succeeds on spans without calendar units.
@@ -43,10 +44,12 @@ pub(super) fn validate_period(period: jiff::Span, min: jiff::Span) -> Result<(),
     let req = span_to_duration(period)?;
     let min_dur = span_to_duration(min)?;
     if req < min_dur {
-        return Err(WakeError::PeriodTooShort {
-            requested: period,
-            minimum: min,
-        });
+        return Err(WakeError::PeriodTooShort(Box::new(
+            crate::wake::registry::PeriodTooShortDetails {
+                requested: period,
+                minimum: min,
+            },
+        )));
     }
     Ok(())
 }
@@ -56,14 +59,18 @@ pub(super) fn validate_period(period: jiff::Span, min: jiff::Span) -> Result<(),
 ///
 /// The task sleeps the deadline and then sends one wake activation.
 /// On send failure (mailbox closed) it exits silently.
+///
+/// `tokio_handle` is required because this function may be called from
+/// the eval-worker OS thread, which has no ambient tokio runtime.
 pub(super) fn spawn_task_timeout(
     task: BlockRef,
     deadline: jiff::Span,
     mailbox_tx: mpsc::UnboundedSender<MailboxInput>,
+    tokio_handle: &Handle,
 ) -> Result<JoinHandle<()>, WakeError> {
     let dur = span_to_duration(deadline)?;
     let span_compare = SpanCompare(deadline);
-    Ok(tokio::spawn(async move {
+    Ok(tokio_handle.spawn(async move {
         tokio::time::sleep(dur).await;
         let body = format!(
             "wake: task timeout — {} elapsed without completion",
@@ -87,13 +94,17 @@ pub(super) fn spawn_task_timeout(
 ///
 /// The task uses `tokio::time::interval` and emits one wake
 /// activation per tick. Exits when the mailbox channel closes.
+///
+/// `tokio_handle` is required because this function may be called from
+/// the eval-worker OS thread, which has no ambient tokio runtime.
 pub(super) fn spawn_interval(
     period: jiff::Span,
     mailbox_tx: mpsc::UnboundedSender<MailboxInput>,
+    tokio_handle: &Handle,
 ) -> Result<JoinHandle<()>, WakeError> {
     let dur = span_to_duration(period)?;
     let span_compare = SpanCompare(period);
-    Ok(tokio::spawn(async move {
+    Ok(tokio_handle.spawn(async move {
         let mut ticker = tokio::time::interval(dur);
         // Skip the immediate first tick — interval semantics fire
         // "every period", not "once now then every period".
@@ -101,7 +112,7 @@ pub(super) fn spawn_interval(
         ticker.tick().await; // consume the immediate tick
         loop {
             ticker.tick().await;
-            let body = format!("wake: interval tick");
+            let body = "wake: interval tick".to_string();
             let input = wake_mailbox_input(
                 SystemReason::Interval {
                     period: span_compare.clone(),
@@ -128,7 +139,8 @@ mod tests {
     /// production safeguard.
     fn fast_registry() -> (WakeRegistry, mpsc::UnboundedReceiver<MailboxInput>) {
         let (tx, rx) = mpsc::unbounded_channel();
-        let reg = WakeRegistry::new(tx).with_min_period(jiff::Span::new().milliseconds(10));
+        let reg = WakeRegistry::new(tx, tokio::runtime::Handle::current())
+            .with_min_period(jiff::Span::new().milliseconds(10));
         (reg, rx)
     }
 
@@ -252,7 +264,7 @@ mod tests {
     async fn subsecond_interval_rejected_at_register() {
         let (tx, _rx) = mpsc::unbounded_channel();
         // Production registry — default min_period 1s.
-        let reg = WakeRegistry::new(tx);
+        let reg = WakeRegistry::new(tx, tokio::runtime::Handle::current());
         let err = reg
             .register(
                 "iv".into(),
@@ -262,7 +274,7 @@ mod tests {
             )
             .expect_err("subsecond interval must be rejected");
         assert!(
-            matches!(err, WakeError::PeriodTooShort { .. }),
+            matches!(err, WakeError::PeriodTooShort(_)),
             "expected PeriodTooShort, got {err:?}"
         );
     }
@@ -328,7 +340,8 @@ mod tests {
         // "channel closed, recv returns None".
         let (tx, mut rx) = mpsc::unbounded_channel();
         let _keepalive = tx.clone();
-        let reg = WakeRegistry::new(tx).with_min_period(jiff::Span::new().milliseconds(10));
+        let reg = WakeRegistry::new(tx, tokio::runtime::Handle::current())
+            .with_min_period(jiff::Span::new().milliseconds(10));
         let _ = reg
             .register(
                 "iv".into(),

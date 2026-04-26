@@ -38,4 +38,4 @@ pub mod registry;
 pub mod rust_primitives;
 pub mod task_dep;
 
-pub use registry::{WakeCondition, WakeError, WakeRegistry};
+pub use registry::{PeriodTooShortDetails, WakeCondition, WakeError, WakeRegistry};

@@ -41,7 +41,10 @@ async fn build_session_opts(
     );
     let ctx = if wire_registry {
         let (mailbox_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let registry = Arc::new(WakeRegistry::new(mailbox_tx));
+        let registry = Arc::new(WakeRegistry::new(
+            mailbox_tx,
+            tokio::runtime::Handle::current(),
+        ));
         ctx.with_wake_registry(registry)
     } else {
         ctx
@@ -60,10 +63,7 @@ async fn register_without_capability_is_denied() {
     let table = standard_datacon_table();
     let mut h = WakeHandler;
     let cx = EffectContext::with_user(&table, &*ctx);
-    let res = h.handle(
-        WakeReq::Register(WireWakeCondition::Interval(60_000)),
-        &cx,
-    );
+    let res = h.handle(WakeReq::Register(WireWakeCondition::Interval(60_000)), &cx);
     let err = res.expect_err("registration without flag must be denied");
     let msg = err.to_string();
     assert!(

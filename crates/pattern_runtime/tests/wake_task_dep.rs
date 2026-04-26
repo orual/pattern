@@ -67,7 +67,7 @@ async fn task_dep_resolved_fires_on_completion() {
 
     let notifier = pattern_memory::subscriber::BlockChangeNotifier::new();
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let registry = WakeRegistry::new(tx)
+    let registry = WakeRegistry::new(tx, tokio::runtime::Handle::current())
         .with_block_change_notifier(notifier.clone())
         .with_memory_store(store.clone());
 

@@ -13,10 +13,12 @@ use pattern_core::types::block_ref::BlockRef;
 use pattern_core::types::memory_types::TaskEdgeRef;
 use pattern_core::types::origin::SpanCompare;
 use smol_str::SmolStr;
+use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::mailbox::MailboxInput;
+
 
 /// A wake-condition declaration, decoupled from its evaluator.
 ///
@@ -75,6 +77,17 @@ pub enum WakeCondition {
     },
 }
 
+/// Details for the [`WakeError::PeriodTooShort`] variant.
+///
+/// Boxed to keep `WakeError` small (clippy `result_large_err`).
+#[derive(Debug)]
+pub struct PeriodTooShortDetails {
+    /// What the caller asked for.
+    pub requested: jiff::Span,
+    /// The enforced minimum.
+    pub minimum: jiff::Span,
+}
+
 /// Errors produced by [`WakeRegistry::register`].
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -82,13 +95,8 @@ pub enum WakeError {
     /// Caller asked for an interval period below the registry's
     /// minimum (1s). Subsecond polling is rejected to prevent
     /// runaway resource use.
-    #[error("interval period {requested:?} is below the minimum {minimum:?}")]
-    PeriodTooShort {
-        /// What the caller asked for.
-        requested: jiff::Span,
-        /// The enforced minimum.
-        minimum: jiff::Span,
-    },
+    #[error("interval period {0:?} is below the minimum")]
+    PeriodTooShort(Box<PeriodTooShortDetails>),
     /// Span carried a calendar unit (years/months/weeks) that cannot
     /// be converted to a wall-clock duration without a reference
     /// instant. Wake timers are wall-clock events; callers should
@@ -186,7 +194,13 @@ struct RegisteredCondition {
 /// and subscribers it spawned.
 ///
 /// Constructed via [`WakeRegistry::new`] with the session's mailbox
-/// sender; evaluator tasks deliver activations through that sender.
+/// sender and a tokio runtime handle; evaluator tasks deliver
+/// activations through that sender.
+///
+/// The `tokio_handle` is required because `register` is called from
+/// the eval-worker OS thread, which has no ambient tokio runtime.
+/// All `spawn` calls go through the stored handle rather than
+/// `tokio::spawn` (which would panic outside a runtime context).
 ///
 /// To enable [`WakeCondition::BlockChanged`], wire a
 /// [`pattern_memory::subscriber::BlockChangeNotifier`] via
@@ -196,6 +210,10 @@ struct RegisteredCondition {
 pub struct WakeRegistry {
     conditions: Mutex<Vec<RegisteredCondition>>,
     mailbox_tx: mpsc::UnboundedSender<MailboxInput>,
+    /// Tokio runtime handle for spawning evaluator tasks. Required because
+    /// `register` is called from the eval-worker OS thread, which has no
+    /// ambient tokio runtime. Without this, `tokio::spawn` would panic.
+    tokio_handle: Handle,
     /// Minimum interval period the registry will accept. Defaults to
     /// 1 second; tuned via [`Self::with_min_period`] (test path only —
     /// production callers use the default).
@@ -215,10 +233,18 @@ pub struct WakeRegistry {
 impl WakeRegistry {
     /// Construct a new registry that delivers wake activations
     /// through `mailbox_tx`.
-    pub fn new(mailbox_tx: mpsc::UnboundedSender<MailboxInput>) -> Self {
+    ///
+    /// `tokio_handle` must be a live runtime handle so that evaluator
+    /// tasks can be spawned from the eval-worker OS thread (which has
+    /// no ambient tokio context). Callers in production pass
+    /// `cx.user().tokio_handle().clone()`; tests pass
+    /// `tokio::runtime::Handle::current()` from inside a
+    /// `#[tokio::test]`.
+    pub fn new(mailbox_tx: mpsc::UnboundedSender<MailboxInput>, tokio_handle: Handle) -> Self {
         Self {
             conditions: Mutex::new(Vec::new()),
             mailbox_tx,
+            tokio_handle,
             min_period: jiff::Span::new().seconds(1),
             block_change_notifier: None,
             memory_store: None,
@@ -271,13 +297,18 @@ impl WakeRegistry {
         let handle = match &condition {
             WakeCondition::Interval { period } => {
                 super::rust_primitives::validate_period(period.0, self.min_period)?;
-                super::rust_primitives::spawn_interval(period.0, self.mailbox_tx.clone())?
+                super::rust_primitives::spawn_interval(
+                    period.0,
+                    self.mailbox_tx.clone(),
+                    &self.tokio_handle,
+                )?
             }
             WakeCondition::TaskTimeout { task, deadline } => {
                 super::rust_primitives::spawn_task_timeout(
                     task.clone(),
                     deadline.0,
                     self.mailbox_tx.clone(),
+                    &self.tokio_handle,
                 )?
             }
             WakeCondition::BlockChanged { block } => {
@@ -289,6 +320,7 @@ impl WakeRegistry {
                     block.clone(),
                     notifier.clone(),
                     self.mailbox_tx.clone(),
+                    &self.tokio_handle,
                 )
             }
             WakeCondition::TaskDependencyResolved { task, agent_id } => {
@@ -329,6 +361,7 @@ impl WakeRegistry {
                     store.clone(),
                     notifier.clone(),
                     self.mailbox_tx.clone(),
+                    &self.tokio_handle,
                 )
             }
             WakeCondition::Custom { id, program } => {
@@ -344,7 +377,8 @@ impl WakeRegistry {
                     program_bytes = program.len(),
                     "custom wake condition registered; evaluator deferred (Phase 7 Task 6)"
                 );
-                tokio::spawn(async move { std::future::pending::<()>().await })
+                self.tokio_handle
+                    .spawn(async move { std::future::pending::<()>().await })
             }
         };
 
@@ -451,7 +485,8 @@ mod tests {
 
     fn fresh_registry() -> (WakeRegistry, mpsc::UnboundedReceiver<MailboxInput>) {
         let (tx, rx) = mpsc::unbounded_channel();
-        (WakeRegistry::new(tx), rx)
+        let handle = tokio::runtime::Handle::current();
+        (WakeRegistry::new(tx, handle), rx)
     }
 
     #[tokio::test]
@@ -477,7 +512,8 @@ mod tests {
     async fn task_dep_without_store_is_memory_store_not_configured() {
         let (tx, _rx) = mpsc::unbounded_channel();
         let notifier = pattern_memory::subscriber::BlockChangeNotifier::new();
-        let reg = WakeRegistry::new(tx).with_block_change_notifier(notifier);
+        let reg = WakeRegistry::new(tx, tokio::runtime::Handle::current())
+            .with_block_change_notifier(notifier);
         let edge = TaskEdgeRef {
             block: SmolStr::new("tasks"),
             task_item: Some(SmolStr::new("item-1")),
@@ -500,7 +536,7 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let notifier = pattern_memory::subscriber::BlockChangeNotifier::new();
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
-        let reg = WakeRegistry::new(tx)
+        let reg = WakeRegistry::new(tx, tokio::runtime::Handle::current())
             .with_block_change_notifier(notifier)
             .with_memory_store(store);
         let edge = TaskEdgeRef {
@@ -525,7 +561,7 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let notifier = pattern_memory::subscriber::BlockChangeNotifier::new();
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
-        let reg = WakeRegistry::new(tx)
+        let reg = WakeRegistry::new(tx, tokio::runtime::Handle::current())
             .with_block_change_notifier(notifier)
             .with_memory_store(store);
         let edge = TaskEdgeRef {
@@ -553,7 +589,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn custom_condition_is_accepted_with_parked_evaluator() {
         let (tx, rx) = mpsc::unbounded_channel();
-        let reg = WakeRegistry::new(tx);
+        let reg = WakeRegistry::new(tx, tokio::runtime::Handle::current());
         let id = reg
             .register(
                 SmolStr::new("custom-1"),
@@ -586,5 +622,41 @@ mod tests {
 
         assert!(reg.unregister(&SmolStr::new("custom-1")));
         assert_eq!(reg.len(), 0);
+    }
+
+    /// Regression test for Critical 1: `WakeRegistry::register` must not panic
+    /// when called from a non-tokio thread (i.e. the eval-worker OS thread).
+    ///
+    /// Before the fix, every `spawn_*` helper called bare `tokio::spawn(...)`,
+    /// which panics with "no reactor running" when invoked outside a tokio
+    /// runtime context. The fix stores the runtime `Handle` and calls
+    /// `handle.spawn(...)` instead.
+    ///
+    /// This test is deliberately a plain `#[test]` (NOT `#[tokio::test]`) so
+    /// it reproduces the eval-worker path exactly: the registering thread has
+    /// no ambient tokio runtime.
+    #[test]
+    fn register_from_sync_thread_does_not_panic() {
+        // Build a real multi-threaded runtime to host evaluator tasks.
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let handle = rt.handle().clone();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let reg = WakeRegistry::new(tx, handle)
+            .with_min_period(jiff::Span::new().milliseconds(100));
+
+        // Call register from a plain OS thread — no ambient tokio context.
+        // This must not panic with "no reactor running".
+        std::thread::spawn(move || {
+            reg.register(
+                SmolStr::new("interval-sync"),
+                WakeCondition::Interval {
+                    period: SpanCompare(jiff::Span::new().milliseconds(200)),
+                },
+            )
+            .expect("register from sync thread must not panic");
+            assert_eq!(reg.len(), 1);
+        })
+        .join()
+        .expect("sync thread must not panic");
     }
 }

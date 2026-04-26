@@ -596,25 +596,6 @@ impl SessionContext {
         self.memory_cache.as_ref()
     }
 
-    /// Per-session wake-condition registry. `None` for sessions that
-    /// were not wired with one — the `Pattern.Wake` handler surfaces
-    /// `EffectError::Handler` in that case rather than silently
-    /// dropping registrations.
-    pub fn wake_registry(&self) -> Option<&Arc<crate::wake::WakeRegistry>> {
-        self.wake_registry.as_ref()
-    }
-
-    /// Builder-style: attach a [`crate::wake::WakeRegistry`] to this
-    /// session. Production callers wire one whose mailbox sender
-    /// targets `self.mailbox.input_sender()`, with the
-    /// `block_change_notifier` and `memory_store` builders applied
-    /// when a `MemoryCache` is available.
-    #[must_use]
-    pub fn with_wake_registry(mut self, registry: Arc<crate::wake::WakeRegistry>) -> Self {
-        self.wake_registry = Some(registry);
-        self
-    }
-
     /// Builder-style: attach the parent's `Arc<MemoryCache>`.
     #[must_use]
     pub fn with_memory_cache(mut self, cache: Arc<pattern_memory::MemoryCache>) -> Self {
@@ -788,9 +769,8 @@ impl SessionContext {
             // Ephemeral children do not register with the agent registry —
             // they are transient and not addressable by peer sessions.
             agent_registry: None,
-            // Wake registrations are tied to a session's lifetime; child
-            // sessions do not inherit the parent's registry. If a child
-            // needs wakes, the runtime would wire its own.
+            // Ephemeral children do not get a wake registry — they are
+            // transient and cannot register long-running wake conditions.
             wake_registry: None,
         };
         Arc::new(child)
@@ -1091,7 +1071,8 @@ impl SessionContext {
     /// spawns a tokio task). After this call, handlers can use
     /// [`Self::router_bridge`] to dispatch messages from a plain OS
     /// thread without needing `Handle::current()`.
-    pub fn with_router(mut self, router: Arc<RouterRegistry>) -> Self {
+    #[allow(dead_code)]
+    pub(crate) fn with_router(mut self, router: Arc<RouterRegistry>) -> Self {
         self.router_bridge = Some(RouterBridge::spawn(router.clone()));
         self.router = router;
         self
@@ -1122,6 +1103,25 @@ impl SessionContext {
         registry: Arc<crate::agent_registry::AgentRegistry>,
     ) -> Self {
         self.agent_registry = Some(registry);
+        self
+    }
+
+    /// Per-session wake-condition registry. `None` for sessions that
+    /// were not wired with one — the `Pattern.Wake` handler surfaces
+    /// `EffectError::Handler` in that case rather than silently
+    /// dropping registrations.
+    pub fn wake_registry(&self) -> Option<&Arc<crate::wake::WakeRegistry>> {
+        self.wake_registry.as_ref()
+    }
+
+    /// Builder-style: attach a [`crate::wake::WakeRegistry`] to this
+    /// session. Production callers wire one whose mailbox sender
+    /// targets `self.mailbox.input_sender()`, with the
+    /// `block_change_notifier` and `memory_store` builders applied
+    /// when a `MemoryCache` is available.
+    #[must_use]
+    pub fn with_wake_registry(mut self, registry: Arc<crate::wake::WakeRegistry>) -> Self {
+        self.wake_registry = Some(registry);
         self
     }
 }
@@ -1164,8 +1164,7 @@ pub struct WakeRegistryExtras {
     /// Optional block-change notifier for [`crate::wake::WakeCondition::BlockChanged`]
     /// and [`crate::wake::WakeCondition::TaskDependencyResolved`]. Production
     /// callers pass `cache.block_change_notifier().clone()`.
-    pub block_change_notifier:
-        Option<pattern_memory::subscriber::BlockChangeNotifier>,
+    pub block_change_notifier: Option<pattern_memory::subscriber::BlockChangeNotifier>,
     /// Optional memory store for `TaskDependencyResolved` evaluators. Production
     /// callers pass `cx.user().memory_store()` or the mounted store.
     pub memory_store: Option<Arc<dyn MemoryStore>>,
@@ -1454,10 +1453,13 @@ impl TidepoolSession {
             };
 
             // Build and wire WakeRegistry from the session's own mailbox sender.
-            // The sender is available on the SessionContext's mailbox field.
-            let ctx = if let Some(extras) = regs.wake_registry_extras {
+            // Thread the tokio_handle so evaluator tasks can be spawned from the
+            // eval-worker OS thread (which has no ambient runtime context).
+            if let Some(extras) = regs.wake_registry_extras {
                 let mailbox_tx = ctx.mailbox().sender();
-                let mut wake_reg = crate::wake::WakeRegistry::new(mailbox_tx);
+                let tokio_handle = ctx.tokio_handle().clone();
+                let mut wake_reg =
+                    crate::wake::WakeRegistry::new(mailbox_tx, tokio_handle);
                 if let Some(notifier) = extras.block_change_notifier {
                     wake_reg = wake_reg.with_block_change_notifier(notifier);
                 }
@@ -1467,13 +1469,10 @@ impl TidepoolSession {
                 ctx.with_wake_registry(Arc::new(wake_reg))
             } else {
                 ctx
-            };
-
-            ctx
+            }
         } else {
             ctx_with_sink_base
         };
-
         // Wire MemoryScope if a mount config declares an isolation policy.
         // Must happen before Arc::new(ctx) so the scope wraps the store
         // before any other reference to ctx exists.
@@ -1985,7 +1984,7 @@ mod tests {
             None,
             None,
             None,
-            None,
+            None, // registries — test session, no inter-session routing needed.
         )
         .await
         .expect("open_with_agent_loop should succeed when preflight passes");
@@ -2069,7 +2068,7 @@ mod tests {
             None,
             None,
             None,
-            None,
+            None, // registries — test session, no inter-session routing needed.
         )
         .await
         .expect("open_with_agent_loop should succeed");

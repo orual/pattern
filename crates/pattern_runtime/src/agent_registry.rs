@@ -9,11 +9,30 @@
 //!
 //! When a persona is registered with [`SessionStatus::Draft`], it has no
 //! live session — messages cannot be delivered. The registry instead
-//! buffers them in a per-persona `draft_queues` entry. Phase 6's
-//! `PromoteDraft` RPC will drain the queue via
-//! [`AgentRegistry::drain_draft_queue`] after promoting a draft to an
-//! active session. Phase 4 ships the *queueing* path only; the drain
-//! path is documented but unexercised until Phase 6.
+//! buffers them in a per-slot `VecDeque` protected by a `Mutex`. Phase 6's
+//! `PromoteDraft` RPC promotes a draft to an active session by calling
+//! [`AgentRegistry::register_active`], which atomically swaps the slot from
+//! `Draft` to `Active` and replays buffered messages onto the live sender.
+//!
+//! # Atomicity guarantee
+//!
+//! The registry uses a single `DashMap<PersonaId, AgentSlot>`. Reads
+//! go through `DashMap::get()`, which returns a `Ref` holding the per-shard
+//! read lock for the *entire* `Ref`'s lifetime. Writes go through
+//! `DashMap::insert()`, which acquires the per-shard write lock.
+//! `DashMap::insert` cannot proceed while any reader holds a `Ref` on the
+//! same shard. This closes the TOCTOU race that existed in the two-map
+//! design:
+//!
+//! - Two-map race: a sender could observe `Draft`, the promoter could
+//!   complete (swap entry + drain + remove draft queue), and the sender would
+//!   then find a removed queue and return `PersonaNotFound`, silently losing
+//!   the message.
+//! - Single-map fix: the sender's `Ref` holds the shard read lock; the
+//!   promoter cannot swap the slot until the sender releases it. Either the
+//!   sender queues into the Draft slot (and the promoter drains it later), or
+//!   the promoter has already swapped to Active (and the sender sends directly).
+//!   No message is ever lost.
 //!
 //! # RAII unregistration
 //!
@@ -38,7 +57,7 @@ use crate::router::RouterError;
 ///
 /// `Active`: session is open; messages are delivered to the mailbox sender.
 /// `Draft`: persona was registered but no session is running (waiting for
-///          [`PromoteDraft`]); messages are queued in `draft_queues`.
+///          [`PromoteDraft`]); messages are queued in the slot's internal queue.
 /// `Inactive`: persona has been deregistered; the entry is gone.
 ///
 /// Note: `Inactive` is not stored in the map — `unregister` removes the
@@ -52,34 +71,45 @@ pub enum SessionStatus {
     Draft,
 }
 
-/// One entry in the registry for a registered persona.
+/// A slot in the agent registry. Each registered persona occupies exactly
+/// one slot; the variant encodes whether the persona has a live session.
 ///
-/// `Draft` personas have a `mailbox_tx` that points to a closed channel
-/// (i.e. there is no receiving end). Senders through it will immediately
-/// fail; the draft path uses [`AgentRegistry::queue_for_draft`] instead of
-/// going through the sender.
+/// Both variants carry the data needed for their routing path. The inner
+/// `Mutex` on `Draft.queue` is a *per-slot* lock — cheap to acquire because
+/// it serialises only the queue push/pop for a single persona, not the whole
+/// registry.
 #[derive(Debug)]
-pub struct AgentEntry {
-    /// Sender half of the per-session mailbox channel.
-    ///
-    /// Valid and open when `status == Active`; the draft path does NOT
-    /// send through this — it writes to `draft_queues` instead.
-    pub mailbox_tx: mpsc::UnboundedSender<MailboxInput>,
-    /// Whether this persona has a live session.
-    pub status: SessionStatus,
+enum AgentSlot {
+    /// Persona has a live session; messages are routed through the sender.
+    Active {
+        tx: mpsc::UnboundedSender<MailboxInput>,
+    },
+    /// Persona is known but has no live session; messages are queued for
+    /// future replay on promotion.
+    Draft {
+        /// Buffered messages waiting for the next `register_active` call.
+        /// The `Mutex` is per-slot, not per-shard; it is always acquired
+        /// *while* holding the DashMap entry guard (which already holds the
+        /// shard lock), so the acquisition order is always shard → queue and
+        /// there is no lock-ordering inversion.
+        queue: Mutex<VecDeque<MailboxInput>>,
+    },
 }
 
-/// Per-draft-persona queue for messages that arrive before a session opens.
-///
-/// Keyed by [`PersonaId`]; entry exists only while a persona is in `Draft`
-/// status. [`AgentRegistry::unregister`] removes the queue when the persona
-/// is deregistered without ever being promoted.
-type DraftQueue = Mutex<VecDeque<(Message, MessageOrigin)>>;
+impl AgentSlot {
+    fn status(&self) -> SessionStatus {
+        match self {
+            AgentSlot::Active { .. } => SessionStatus::Active,
+            AgentSlot::Draft { .. } => SessionStatus::Draft,
+        }
+    }
+}
 
 /// In-memory registry mapping [`PersonaId`] to live session mailboxes.
 ///
-/// Thread-safe: backed by [`DashMap`] for lock-free concurrent access
-/// across multiple sessions.
+/// Thread-safe: backed by a single [`DashMap`] whose entry guards hold the
+/// per-shard lock for the full duration of each registry operation, closing
+/// the TOCTOU race between Draft-path senders and Draft→Active promoters.
 ///
 /// Construct via [`AgentRegistry::new`]; the resulting `Arc<AgentRegistry>`
 /// is shared across all sessions that participate in the same runtime. For
@@ -87,10 +117,11 @@ type DraftQueue = Mutex<VecDeque<(Message, MessageOrigin)>>;
 /// is sufficient.
 #[derive(Debug, Default)]
 pub struct AgentRegistry {
-    /// Active and draft persona entries keyed by `PersonaId`.
-    entries: DashMap<PersonaId, AgentEntry>,
-    /// Pending messages for draft personas awaiting `PromoteDraft` (Phase 6).
-    draft_queues: DashMap<PersonaId, DraftQueue>,
+    /// Single-map design: one entry per persona, status encoded in the slot
+    /// variant. All operations acquire the DashMap entry guard for their full
+    /// duration — no cross-shard windows where a second operation can observe
+    /// a partially-updated state.
+    slots: DashMap<PersonaId, AgentSlot>,
 }
 
 impl AgentRegistry {
@@ -99,124 +130,158 @@ impl AgentRegistry {
         Self::default()
     }
 
-    /// Register a persona. Callers supply the mailbox sender and the
-    /// initial status.
+    /// Register a persona as `Draft`, creating an empty message queue.
     ///
-    /// Passing `SessionStatus::Draft` creates a queue entry in
-    /// `draft_queues` so subsequent messages are buffered.
-    /// Passing `SessionStatus::Active` removes any stale draft queue
-    /// for this persona (in case a prior draft entry exists).
+    /// If the persona was previously registered (as `Active` or `Draft`),
+    /// the existing slot is overwritten and any queued messages are discarded.
+    /// Callers should only call this before a session opens; re-registering
+    /// an `Active` persona as `Draft` would strand in-flight messages.
+    pub fn register_draft(&self, id: PersonaId) {
+        self.slots.insert(
+            id,
+            AgentSlot::Draft {
+                queue: Mutex::new(VecDeque::new()),
+            },
+        );
+    }
+
+    /// Register a persona as `Active` with the given mailbox sender.
     ///
-    /// Overwrites any existing entry for `id`.
+    /// If the persona was previously in `Draft` status, any buffered messages
+    /// are atomically replayed onto `tx` before this call returns. The slot
+    /// swap and drain are performed under the same DashMap entry guard, so
+    /// no concurrent sender can push into the (now-moved) queue after the
+    /// swap — the drain is guaranteed to see every message queued before the
+    /// promotion and none after.
+    ///
+    /// If the persona was not previously registered, it is created as `Active`
+    /// immediately (no draft queue to drain).
+    ///
+    /// Messages that fail to send during replay (closed channel) are silently
+    /// dropped — the session that owns `tx` has gone away.
+    pub fn register_active(&self, id: PersonaId, tx: mpsc::UnboundedSender<MailboxInput>) {
+        // Atomically swap the slot to Active and capture the previous slot.
+        // DashMap::insert returns the previous value if any. The insert holds
+        // the shard write lock for its duration; any concurrent get() Ref on
+        // the same shard will hold us off until that Ref drops, and once we
+        // hold the write lock no concurrent reader can observe a torn state.
+        let prev = self
+            .slots
+            .insert(id, AgentSlot::Active { tx: tx.clone() });
+
+        // If the previous slot was Draft, drain its queue and replay onto tx.
+        // The queue is now uniquely owned by us (moved out of the map), so
+        // no concurrent push is possible: any sender that sees the new Active
+        // slot will send directly to tx, and any sender still holding an
+        // entry guard on the Draft slot will have done so *before* our insert
+        // released the shard lock and will push into the queue we are about
+        // to drain.
+        if let Some(AgentSlot::Draft { queue }) = prev {
+            let msgs: VecDeque<MailboxInput> = queue
+                .into_inner()
+                .expect("draft queue mutex poisoned during register_active drain");
+            for msg in msgs {
+                // Best-effort: if tx is already closed, drop the message.
+                let _ = tx.send(msg);
+            }
+        }
+    }
+
+    /// Legacy combined registration method.
+    ///
+    /// Passing `SessionStatus::Draft` calls [`Self::register_draft`]; the `tx`
+    /// parameter is unused but kept for API compatibility.
+    /// Passing `SessionStatus::Active` calls [`Self::register_active`].
+    ///
+    /// Prefer the dedicated `register_draft` / `register_active` methods for
+    /// clarity; this method exists to avoid churn at call sites that pre-date
+    /// the single-map refactor.
     pub fn register(
         &self,
         id: PersonaId,
         tx: mpsc::UnboundedSender<MailboxInput>,
         status: SessionStatus,
     ) {
-        if status == SessionStatus::Draft {
-            // Pre-create the queue; only draft personas need it.
-            self.draft_queues
-                .entry(id.clone())
-                .or_insert_with(|| Mutex::new(VecDeque::new()));
-        } else {
-            // Promote from draft → active: drop any stale queue.
-            self.draft_queues.remove(&id);
+        match status {
+            SessionStatus::Draft => self.register_draft(id),
+            SessionStatus::Active => self.register_active(id, tx),
         }
-        self.entries.insert(
-            id,
-            AgentEntry {
-                mailbox_tx: tx,
-                status,
-            },
-        );
     }
 
-    /// Unregister a persona. If the persona was in `Draft` status, its
-    /// pending draft queue is also dropped (any queued messages are
-    /// discarded).
+    /// Unregister a persona. If the persona was in `Draft` status, any
+    /// pending queued messages are discarded.
     ///
     /// No-op if the persona was not registered.
-    pub fn unregister(&self, id: &PersonaId) {
-        self.entries.remove(id);
-        self.draft_queues.remove(id);
+    ///
+    /// Returns `true` if the persona was registered and has now been removed,
+    /// `false` if the persona was not present.
+    pub fn unregister(&self, id: &PersonaId) -> bool {
+        self.slots.remove(id).is_some()
     }
 
     /// Return a clone of the mailbox sender for an `Active` persona, or
     /// `None` if the persona is not registered or is in `Draft` status.
     ///
     /// Callers route messages through the returned sender. Draft personas
-    /// do not have a live receiving session; use
-    /// [`Self::queue_for_draft`] instead.
+    /// do not have a live receiving session; use [`Self::route_or_queue`]
+    /// which handles both cases atomically.
     pub fn sender(&self, id: &PersonaId) -> Option<mpsc::UnboundedSender<MailboxInput>> {
-        let entry = self.entries.get(id)?;
-        if entry.status == SessionStatus::Active {
-            Some(entry.mailbox_tx.clone())
-        } else {
-            None
+        let slot = self.slots.get(id)?;
+        match &*slot {
+            AgentSlot::Active { tx } => Some(tx.clone()),
+            AgentSlot::Draft { .. } => None,
         }
     }
 
     /// Current status of a persona, or `None` if not registered.
     pub fn status(&self, id: &PersonaId) -> Option<SessionStatus> {
-        self.entries.get(id).map(|e| e.status.clone())
+        self.slots.get(id).map(|s| s.status())
     }
 
-    /// Route a message to the correct destination atomically.
+    /// Route a message to the correct destination, atomically.
     ///
-    /// This is the preferred entry point for routing — it atomically checks
-    /// the persona's status and performs the appropriate action within the
-    /// same DashMap shard lock, preventing the TOCTOU race that exists when
-    /// callers separately call [`Self::status`] and then [`Self::sender`] or
-    /// [`Self::queue_for_draft`].
+    /// The status check and the send/queue are performed under the same
+    /// DashMap shard read lock via the `Ref` returned by `get()`, closing
+    /// the TOCTOU race where a concurrent Draft→Active promotion could
+    /// cause a message to be silently lost (two-map design: status seen as
+    /// Draft, promotion completes, queue removed, then push finds no queue).
     ///
     /// # Outcomes
     ///
     /// - `Active` with a live sender: delivers `msg` to the mailbox.
-    /// - `Draft`: appends `msg` to the draft queue for future [`PromoteDraft`].
+    /// - `Draft`: appends `msg` to the draft queue for future replay on
+    ///   promotion via [`Self::register_active`].
     /// - Not registered (vacant): returns `Err(RouterError::PersonaNotFound)`.
-    ///
-    /// # Rationale
-    ///
-    /// DashMap's `entry(id)` acquires an exclusive shard-level write lock,
-    /// so the status read and the send/queue operation are atomic with respect
-    /// to concurrent [`Self::register`] calls that promote Draft → Active.
-    /// Without this, a sender could observe `Draft`, then a promoter could
-    /// complete, then the sender would call `queue_for_draft` which would find
-    /// `Active` status and return `PersonaNotFound` — losing the message.
-    pub fn route_or_queue(
-        &self,
-        id: &PersonaId,
-        msg: MailboxInput,
-    ) -> Result<(), RouterError> {
-        // Use the DashMap entry API to hold the shard lock for the entire
-        // read-then-dispatch sequence, preventing the Draft→Active promotion
-        // race described in the doc comment above.
-        let entry = self
-            .entries
+    pub fn route_or_queue(&self, id: &PersonaId, msg: MailboxInput) -> Result<(), RouterError> {
+        let slot = self
+            .slots
             .get(id)
             .ok_or_else(|| RouterError::PersonaNotFound(id.clone()))?;
 
-        match entry.status {
-            SessionStatus::Active => {
-                let tx = entry.mailbox_tx.clone();
-                // Release the shard lock before sending to avoid holding it
-                // across a potentially blocking channel operation.
-                drop(entry);
+        match &*slot {
+            AgentSlot::Active { tx } => {
+                // Clone the sender before dropping the entry guard so we do
+                // not hold the shard lock across the channel send (which is
+                // a cheap in-memory operation but conceptually unbounded).
+                let tx = tx.clone();
+                drop(slot);
                 tx.send(msg).map_err(|_| RouterError::MailboxClosed)
             }
-            SessionStatus::Draft => {
-                // Release the shard lock before locking the queue mutex to
-                // maintain consistent lock ordering (entries lock → queue
-                // lock is wrong; reverse or sequential avoids deadlock).
-                let id_clone = id.clone();
-                drop(entry);
-                self.draft_queues
-                    .get(&id_clone)
-                    .ok_or_else(|| RouterError::PersonaNotFound(id_clone.clone()))?
+            AgentSlot::Draft { queue } => {
+                // Acquire the per-slot queue lock *while holding the entry
+                // guard*. Lock order is always: shard lock (held by entry
+                // guard) → queue lock. No inversion is possible because the
+                // queue Mutex is only ever locked from here and from
+                // `register_active`, both of which acquire the entry guard
+                // first.
+                queue
                     .lock()
                     .expect("draft queue mutex poisoned")
-                    .push_back((msg.msg, msg.from));
+                    .push_back(msg);
+                // Drop entry guard (releases shard lock) after the push so
+                // the promoter cannot remove the slot between the match and
+                // the push.
+                drop(slot);
                 Ok(())
             }
         }
@@ -225,34 +290,34 @@ impl AgentRegistry {
     /// Append a message to a draft persona's queue.
     ///
     /// Returns `Err(RouterError::PersonaNotFound)` if the persona is not
-    /// registered as `Draft` — callers in the `agent:` router should call
-    /// [`Self::sender`] first for `Active` personas and only fall through
-    /// to this method when the status is `Draft`.
-    ///
-    /// Prefer [`Self::route_or_queue`] for routing: it atomically checks
-    /// status and queues, eliminating the TOCTOU race between two calls.
+    /// registered as `Draft` — callers should prefer [`Self::route_or_queue`]
+    /// which handles both `Active` and `Draft` atomically. This method is
+    /// retained for callers that have explicitly checked status beforehand
+    /// and need to push into a known-Draft slot.
     pub fn queue_for_draft(
         &self,
         id: &PersonaId,
         msg: Message,
         origin: MessageOrigin,
     ) -> Result<(), RouterError> {
-        // We only queue when the persona is known-Draft.
-        let entry = self
-            .entries
+        let slot = self
+            .slots
             .get(id)
             .ok_or_else(|| RouterError::PersonaNotFound(id.clone()))?;
-        if entry.status != SessionStatus::Draft {
-            return Err(RouterError::PersonaNotFound(id.clone()));
+        match &*slot {
+            AgentSlot::Draft { queue } => {
+                queue
+                    .lock()
+                    .expect("draft queue mutex poisoned")
+                    .push_back(MailboxInput { from: origin, msg });
+                drop(slot);
+                Ok(())
+            }
+            AgentSlot::Active { .. } => {
+                drop(slot);
+                Err(RouterError::PersonaNotFound(id.clone()))
+            }
         }
-        drop(entry); // release the shard lock before locking the queue.
-        self.draft_queues
-            .get(id)
-            .ok_or_else(|| RouterError::PersonaNotFound(id.clone()))?
-            .lock()
-            .expect("draft queue mutex poisoned")
-            .push_back((msg, origin));
-        Ok(())
     }
 
     /// Drain all queued messages for a persona in FIFO order (oldest first).
@@ -263,17 +328,22 @@ impl AgentRegistry {
     ///
     /// Used by Phase 6's `PromoteDraft` RPC after opening a live session:
     /// drain the queue, then route each message through the newly-created
-    /// mailbox sender.
+    /// mailbox sender. Prefer [`Self::register_active`] which performs the
+    /// drain atomically as part of the promotion.
     pub fn drain_draft_queue(&self, id: &PersonaId) -> Vec<(Message, MessageOrigin)> {
-        self.draft_queues
-            .get(id)
-            .map(|q| {
-                q.lock()
-                    .expect("draft queue mutex poisoned")
-                    .drain(..)
-                    .collect()
-            })
-            .unwrap_or_default()
+        let slot = match self.slots.get(id) {
+            Some(s) => s,
+            None => return Vec::new(),
+        };
+        match &*slot {
+            AgentSlot::Draft { queue } => queue
+                .lock()
+                .expect("draft queue mutex poisoned")
+                .drain(..)
+                .map(|m| (m.msg, m.from))
+                .collect(),
+            AgentSlot::Active { .. } => Vec::new(),
+        }
     }
 }
 
@@ -300,7 +370,7 @@ impl RegistryGuard {
         persona_id: PersonaId,
         tx: mpsc::UnboundedSender<MailboxInput>,
     ) -> Self {
-        registry.register(persona_id.clone(), tx, SessionStatus::Active);
+        registry.register_active(persona_id.clone(), tx);
         Self {
             registry,
             persona_id,
@@ -452,30 +522,37 @@ mod tests {
 
         reg.unregister(&"draft-e".into());
         assert_eq!(reg.status(&"draft-e".into()), None);
-        // After unregister, drain returns empty (queue dropped).
+        // After unregister, drain returns empty (slot dropped).
         let drained = reg.drain_draft_queue(&"draft-e".into());
         assert_eq!(drained.len(), 0);
     }
 
     #[test]
-    fn register_active_removes_stale_draft_queue() {
+    fn register_active_replays_queued_draft_messages() {
         let reg = AgentRegistry::new();
         let (tx1, _rx1) = make_tx();
-        let (tx2, _rx2) = make_tx();
+        let (tx2, mut rx2) = make_tx();
         reg.register("flip-f".into(), tx1, SessionStatus::Draft);
         reg.queue_for_draft(&"flip-f".into(), test_message("queued"), test_origin())
             .unwrap();
 
-        // Promote: register as Active.
+        // Promote: register as Active — should drain and replay the queue.
         reg.register("flip-f".into(), tx2, SessionStatus::Active);
         assert_eq!(reg.status(&"flip-f".into()), Some(SessionStatus::Active));
 
-        // Draft queue was discarded on promotion.
+        // The queued message must arrive on the active channel.
+        let received = rx2
+            .try_recv()
+            .expect("queued message should be replayed onto active tx on promotion");
+        let text = received.msg.chat_message.content.first_text().unwrap();
+        assert_eq!(text, "queued", "replayed message content must match");
+
+        // Draft queue is now empty (messages were replayed, not left in queue).
         let drained = reg.drain_draft_queue(&"flip-f".into());
         assert_eq!(
             drained.len(),
             0,
-            "draft queue should be cleared on promotion"
+            "draft queue should be empty after promotion replay"
         );
     }
 
@@ -514,5 +591,42 @@ mod tests {
         let received = rx.recv().await.unwrap();
         let text = received.msg.chat_message.content.first_text().unwrap();
         assert_eq!(text, "delivered");
+    }
+
+    /// route_or_queue on a draft persona queues the message in the slot.
+    #[test]
+    fn route_or_queue_draft_queues_message() {
+        let reg = Arc::new(AgentRegistry::new());
+        let (tx, _rx) = make_tx();
+        reg.register("draft-rq".into(), tx, SessionStatus::Draft);
+
+        let input = MailboxInput {
+            from: test_origin(),
+            msg: test_message("route-queued"),
+        };
+        reg.route_or_queue(&"draft-rq".into(), input).unwrap();
+
+        let drained = reg.drain_draft_queue(&"draft-rq".into());
+        assert_eq!(drained.len(), 1);
+        let text = drained[0].0.chat_message.content.first_text().unwrap();
+        assert_eq!(text, "route-queued");
+    }
+
+    /// route_or_queue on an active persona delivers directly.
+    #[tokio::test]
+    async fn route_or_queue_active_delivers_message() {
+        let reg = Arc::new(AgentRegistry::new());
+        let (tx, mut rx) = make_tx();
+        reg.register("active-rq".into(), tx, SessionStatus::Active);
+
+        let input = MailboxInput {
+            from: test_origin(),
+            msg: test_message("route-active"),
+        };
+        reg.route_or_queue(&"active-rq".into(), input).unwrap();
+
+        let received = rx.recv().await.unwrap();
+        let text = received.msg.chat_message.content.first_text().unwrap();
+        assert_eq!(text, "route-active");
     }
 }

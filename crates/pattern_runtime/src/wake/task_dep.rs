@@ -26,6 +26,7 @@ use pattern_core::types::block_ref::BlockRef;
 use pattern_core::types::memory_types::{TaskEdgeRef, TaskStatus};
 use pattern_core::types::origin::SystemReason;
 use smol_str::SmolStr;
+use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -47,6 +48,9 @@ use crate::wake::registry::wake_mailbox_input;
 /// Task 9). Future `BlockChanged` fires after that point are dropped.
 /// The subscription guard stays alive until the registry aborts the
 /// task; the `fired` flag is the actual disabling primitive.
+///
+/// `tokio_handle` is required because this function may be called from
+/// the eval-worker OS thread, which has no ambient tokio runtime.
 pub(super) fn spawn_task_dependency_resolved(
     parent_block: BlockRef,
     task: TaskEdgeRef,
@@ -54,6 +58,7 @@ pub(super) fn spawn_task_dependency_resolved(
     store: Arc<dyn MemoryStore>,
     notifier: pattern_memory::subscriber::BlockChangeNotifier,
     mailbox_tx: mpsc::UnboundedSender<MailboxInput>,
+    tokio_handle: &Handle,
 ) -> JoinHandle<()> {
     let fired = Arc::new(AtomicBool::new(false));
     let fired_cb = fired.clone();
@@ -104,7 +109,7 @@ pub(super) fn spawn_task_dependency_resolved(
     // yield to the executor before the subscription is live.
     let subscription = notifier.subscribe(&parent_block.block_id, callback);
 
-    tokio::spawn(async move {
+    tokio_handle.spawn(async move {
         let _subscription = subscription;
         std::future::pending::<()>().await;
     })

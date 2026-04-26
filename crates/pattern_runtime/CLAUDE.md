@@ -1025,14 +1025,33 @@ Registry drop aborts all outstanding evaluators.
 - Optional `BlockChangeNotifier` (for BlockChanged conditions).
 - Optional `Arc<dyn MemoryStore>` (for TaskDep and Custom conditions).
 
-### `AgentRegistry::route_or_queue` (Critical TOCTOU fix)
+### `AgentRegistry` — single-map consolidation (cycle-3 TOCTOU fix)
 
-`route_or_queue(&self, id, msg)` atomically checks the persona's `SessionStatus`
-and either delivers to the active mailbox or appends to the draft queue, all
-under the same DashMap shard read lock. This prevents the race where:
-1. Caller observes `Draft` status
-2. Promoter removes draft queue + updates entry to `Active`
-3. Caller calls `queue_for_draft` → queue gone → `PersonaNotFound`
+`AgentRegistry` uses a single `DashMap<PersonaId, AgentSlot>` where `AgentSlot` is
+a sum type (`Active { tx }` | `Draft { queue: Mutex<VecDeque<MailboxInput>> }`).
+Reads use `DashMap::get()`'s `Ref` (shard read lock held for the `Ref`'s lifetime);
+writes use `DashMap::insert()` (shard write lock). `insert` cannot acquire the
+write lock while any reader holds a `Ref` on the same shard, so the status check
+and dispatch run under a stable view.
+
+This closes the TOCTOU race that existed in the cycle-1/cycle-2 two-map design
+(`entries: DashMap` + `draft_queues: DashMap`), where a sender could observe
+`Draft` status, the promoter could complete (swap entry + drain + remove queue),
+and the sender would then find a removed queue and silently drop the message.
+The cycle-2 reorder narrowed but did not close the race (~1 loss per 6M sends
+remained, confirmed by the heavy probe at `tests/probe_consolidation.rs`).
+
+With the single-map design:
+- `route_or_queue` holds the entry guard for the full status-check + queue-push
+  (Draft path) or status-check + tx-clone (Active path). No window exists for the
+  promoter to remove the slot between the check and the push.
+- `register_active` swaps the slot to `Active` via `DashMap::insert`, then drains
+  the previous Draft queue. The queue is uniquely owned after the swap; no
+  concurrent push is possible because any sender that sees the new `Active` slot
+  sends directly to `tx`, and any sender that held a Draft entry guard before the
+  swap will push into the queue that is now being drained.
+- Zero message loss and zero `PersonaNotFound` errors verified by
+  `tests/probe_consolidation.rs` (64×500×200 sends, 5-yield promoter, 8 runs).
 
 `route_or_queue` is the preferred routing entry point. `queue_for_draft` is
 retained as a lower-level method for callers that have already confirmed Draft

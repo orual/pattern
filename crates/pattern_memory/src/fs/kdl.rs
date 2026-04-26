@@ -248,7 +248,47 @@ pub fn loro_value_to_json(value: &LoroValue) -> Option<serde_json::Value> {
 /// The fix: parse the literal from a minimal KDL document that already uses
 /// double-quote syntax. The resulting entry carries the quote format metadata
 /// and is rendered quoted on every subsequent serialisation.
-pub(super) fn kdl_string_entry(s: &str) -> KdlEntry {
+///
+/// # Errors
+///
+/// Returns [`KdlConversionError::ParseError`] if `s` contains codepoints
+/// that KDL v6 disallows inside double-quoted strings after the standard
+/// escape pass. Specifically: U+0000–U+0008, U+000E–U+001F, U+007F (DEL),
+/// Unicode BIDI control characters (U+200E, U+200F, U+202A–U+202E,
+/// U+2066–U+2069), and the BOM (U+FEFF). Strings with these codepoints
+/// cannot be represented in KDL without loss; callers must sanitise them
+/// before storage or handle the error by surfacing it to the user.
+pub(super) fn kdl_string_entry(s: &str) -> Result<KdlEntry, KdlConversionError> {
+    // Check for KDL-disallowed codepoints before escaping.
+    // KDL v6 spec §6.2 bans these inside double-quoted strings (and raw strings).
+    for ch in s.chars() {
+        let cp = ch as u32;
+        let disallowed = matches!(cp,
+            // C0 controls except the ones we escape (\t=0x09, \n=0x0A, \r=0x0D)
+            0x0000..=0x0008 |   // NUL through BS
+            0x000B..=0x000C |   // VT, FF
+            0x000E..=0x001F |   // SO through US
+            // DEL
+            0x007F |
+            // BIDI controls
+            0x200E | 0x200F |   // LRM, RLM
+            0x202A..=0x202E |   // LRE, RLE, PDF, LRO, RLO
+            0x2066..=0x2069 |   // LRI, RLI, FSI, PDI
+            // BOM
+            0xFEFF
+        );
+        if disallowed {
+            return Err(KdlConversionError::ParseError(format!(
+                "string contains KDL-disallowed codepoint U+{cp:04X} at byte offset {}; \
+                 strip or replace control characters before storing in a KDL block",
+                s.char_indices()
+                    .find(|(_, c)| *c == ch)
+                    .map(|(i, _)| i)
+                    .unwrap_or(0)
+            )));
+        }
+    }
+
     // Escape all characters that are special inside a KDL double-quoted
     // string. KDL v6 double-quoted strings use the same escape sequences
     // as JSON:
@@ -267,12 +307,13 @@ pub(super) fn kdl_string_entry(s: &str) -> KdlEntry {
         .replace('\r', "\\r")
         .replace('\t', "\\t");
     let doc_src = format!("_ \"{}\"", escaped);
-    let doc = KdlDocument::parse(&doc_src)
-        // This can only fail if the escape logic above is wrong. All
-        // printable or control characters produce valid KDL quoted-string
-        // syntax after the above escaping.
-        .unwrap_or_else(|e| panic!("kdl_string_entry: generated invalid KDL for {s:?}: {e}"));
-    doc.nodes()[0].entries()[0].clone()
+    KdlDocument::parse(&doc_src)
+        .map_err(|e| {
+            KdlConversionError::ParseError(format!(
+                "kdl_string_entry: generated invalid KDL for input: {e}"
+            ))
+        })
+        .map(|doc| doc.nodes()[0].entries()[0].clone())
 }
 
 /// Convert a single `LoroValue` into a `KdlNode` with the given name.
@@ -299,7 +340,7 @@ pub(super) fn loro_value_to_kdl_node(
             // double-quote syntax. KdlEntry::new(s) does not carry format
             // metadata, so strings like "+.0" or "true" are rendered as bare
             // tokens that the KDL parser re-interprets as numbers or booleans.
-            node.push(kdl_string_entry(s.as_str()));
+            node.push(kdl_string_entry(s.as_str())?);
         }
         LoroValue::List(l) => {
             if l.is_empty() {
@@ -372,7 +413,7 @@ fn scalar_loro_to_kdl_entry(value: &LoroValue) -> Result<KdlEntry, KdlConversion
         LoroValue::Bool(b) => Ok(KdlEntry::new(*b)),
         LoroValue::Double(d) => Ok(KdlEntry::new(*d)),
         LoroValue::I64(i) => Ok(KdlEntry::new(i128::from(*i))),
-        LoroValue::String(s) => Ok(kdl_string_entry(s.as_str())),
+        LoroValue::String(s) => kdl_string_entry(s.as_str()),
         other => Err(KdlConversionError::UnsupportedVariant(format!(
             "scalar-only context, got {other:?}"
         ))),
@@ -1030,5 +1071,53 @@ mod tests {
         let mid = LoroValue::Map(vec![("child".to_string(), deep)].into());
         let value = LoroValue::Map(vec![("root".to_string(), mid)].into());
         assert_round_trip_map(&value);
+    }
+
+    // -----------------------------------------------------------------------
+    // kdl_string_entry control-character rejection (Important 3)
+    // -----------------------------------------------------------------------
+
+    /// Regression test: `kdl_string_entry` must reject KDL-disallowed
+    /// codepoints rather than panicking or producing unparseable KDL.
+    ///
+    /// KDL v6 §6.2 bans U+0000–U+0008, U+000E–U+001F, U+007F, BIDI
+    /// controls (U+200E, U+200F, U+202A–U+202E, U+2066–U+2069), and
+    /// U+FEFF inside double-quoted strings. Strings with these characters
+    /// previously caused an `unwrap_or_else(panic!)` to fire.
+    #[test]
+    fn kdl_string_entry_rejects_nul_control_character() {
+        let result = kdl_string_entry("a\u{0001}b");
+        assert!(
+            result.is_err(),
+            "kdl_string_entry should reject U+0001 (SOH control character)"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("U+0001"),
+            "error message should identify the disallowed codepoint; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn kdl_string_entry_rejects_del() {
+        let result = kdl_string_entry("hello\u{007F}world");
+        assert!(result.is_err(), "kdl_string_entry should reject U+007F (DEL)");
+    }
+
+    #[test]
+    fn kdl_string_entry_rejects_bidi_control() {
+        let result = kdl_string_entry("text\u{200E}more");
+        assert!(result.is_err(), "kdl_string_entry should reject U+200E (LRM BIDI control)");
+    }
+
+    #[test]
+    fn kdl_string_entry_accepts_normal_text_and_standard_escapes() {
+        // Normal printable text must succeed.
+        assert!(kdl_string_entry("hello world").is_ok());
+        // Strings with \n, \r, \t are escaped and accepted.
+        assert!(kdl_string_entry("line1\nline2").is_ok());
+        assert!(kdl_string_entry("col1\tcol2").is_ok());
+        // Unicode above the banned ranges is accepted.
+        assert!(kdl_string_entry("emoji: \u{1F600}").is_ok());
     }
 }

@@ -829,7 +829,6 @@ async fn get_or_open_session(
         router_registry: Some(router_reg),
         wake_registry_extras: Some(wake_extras),
     };
-
     let session = TidepoolSession::open_with_agent_loop(
         persona,
         &config.sdk,

@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use pattern_core::types::block_ref::BlockRef;
 use pattern_core::types::origin::SystemReason;
+use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -30,10 +31,14 @@ use crate::wake::registry::wake_mailbox_input;
 /// `block.block_id` (matches what
 /// [`pattern_memory::subscriber::worker::WorkerConfig::block_id`]
 /// passes to the notifier on fire).
+///
+/// `tokio_handle` is required because this function may be called from
+/// the eval-worker OS thread, which has no ambient tokio runtime.
 pub(super) fn spawn_block_changed(
     block: BlockRef,
     notifier: pattern_memory::subscriber::BlockChangeNotifier,
     mailbox_tx: mpsc::UnboundedSender<MailboxInput>,
+    tokio_handle: &Handle,
 ) -> JoinHandle<()> {
     let block_for_callback = block.clone();
     let mailbox_tx_inner = mailbox_tx.clone();
@@ -57,7 +62,7 @@ pub(super) fn spawn_block_changed(
     // unintuitive for tests.
     let subscription = notifier.subscribe(&block.block_id, callback);
 
-    tokio::spawn(async move {
+    tokio_handle.spawn(async move {
         // Hold the subscription guard for the task's lifetime. Drop
         // on abort unsubscribes the callback from the notifier.
         let _subscription = subscription;
@@ -83,7 +88,12 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let block = br("notes", "block-notes");
 
-        let handle = spawn_block_changed(block.clone(), notifier.clone(), tx);
+        let handle = spawn_block_changed(
+            block.clone(),
+            notifier.clone(),
+            tx,
+            &tokio::runtime::Handle::current(),
+        );
 
         // Yield so the task subscribes before we fire.
         tokio::task::yield_now().await;
@@ -115,7 +125,12 @@ mod tests {
         let _keepalive = tx.clone();
         let block = br("notes", "block-notes");
 
-        let handle = spawn_block_changed(block.clone(), notifier.clone(), tx);
+        let handle = spawn_block_changed(
+            block.clone(),
+            notifier.clone(),
+            tx,
+            &tokio::runtime::Handle::current(),
+        );
         tokio::task::yield_now().await;
         assert_eq!(notifier.subscriber_count(&block.block_id), 1);
 

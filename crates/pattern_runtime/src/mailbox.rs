@@ -239,19 +239,41 @@ async fn mailbox_task_body(
 
         // Phase 3: dispatch. drive_step manages its own busy flag via
         // BusyFlagGuard; we don't set is_in_turn ourselves here.
+        //
+        // Run inside a child task so a panic in drive_step (or the eval
+        // dispatcher) is caught by the JoinHandle rather than propagating
+        // out and killing this drain loop. The BusyFlagGuard inside
+        // drive_step clears is_in_turn on panic via Drop, so subsequent
+        // activations are not permanently blocked.
         let turn_input = build_turn_input(input, &ctx);
-        if let Err(err) = drive_step(
-            turn_input,
-            ctx.clone(),
-            turn_history.clone(),
-            cache_profile.clone(),
-            dispatcher.as_ref(),
-            &preamble,
-            None,
-        )
-        .await
-        {
-            tracing::warn!(error = ?err, "mailbox-triggered drive_step failed");
+        let ctx_c = ctx.clone();
+        let hist_c = turn_history.clone();
+        let cp = cache_profile.clone();
+        let disp = dispatcher.clone();
+        let pre = preamble.clone();
+        let step_handle = tokio::spawn(async move {
+            drive_step(turn_input, ctx_c, hist_c, cp, disp.as_ref(), &pre, None).await
+        });
+        match step_handle.await {
+            Ok(Ok(_reply)) => {}
+            Ok(Err(err)) => {
+                tracing::warn!(
+                    error = ?err,
+                    "mailbox-triggered drive_step failed; drain loop continues"
+                );
+            }
+            Err(join_err) if join_err.is_panic() => {
+                tracing::error!(
+                    "mailbox-triggered drive_step panicked; \
+                     BusyFlagGuard cleared is_in_turn; drain loop continues"
+                );
+            }
+            Err(join_err) => {
+                tracing::warn!(
+                    error = ?join_err,
+                    "mailbox-triggered drive_step task cancelled; drain loop continues"
+                );
+            }
         }
     }
 }
@@ -429,44 +451,46 @@ mod tests {
             .expect("task panicked");
     }
 
-    /// BusyFlagGuard panic path: a panicking EvalDispatcher causes drive_step
-    /// to unwind, which fires BusyFlagGuard::drop. Assert that after the
-    /// panic:
-    ///   (a) is_in_turn is false
-    ///   (b) turn_done has fired (notify_waiters was called)
+    /// Claim (c): the mailbox drain loop (`spawn_mailbox_task`) must survive
+    /// a panicking turn and continue processing subsequent inputs.
     ///
-    /// We test this by calling drive_step directly inside tokio::spawn (so the
-    /// panic is caught by the JoinHandle) and using a MockProviderClient that
-    /// returns a tool_use stop reason, forcing drive_step to call the panicking
-    /// dispatcher.
+    /// Uses `spawn_mailbox_task` (not bare `drive_step`) so the test exercises
+    /// the production code path. A `MaybePanickingDispatcher` panics on the
+    /// first dispatch call (first input triggers a tool_use) and succeeds on
+    /// subsequent calls.
+    ///
+    /// Assertion: after the first input causes a panic, the second input is
+    /// processed and recorded in `TurnHistory`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn busy_flag_guard_clears_on_dispatcher_panic() {
-        use crate::agent_loop::{EvalDispatcher, drive_step};
+    async fn drain_loop_survives_panicking_turn() {
+        use crate::agent_loop::EvalDispatcher;
         use crate::testing::{InMemoryMemoryStore, MockProviderClient};
         use async_trait::async_trait;
         use pattern_core::traits::MemoryStore;
-        use pattern_core::types::ids::new_snowflake_id;
         use pattern_core::types::provider::{ToolCall, ToolOutcome};
         use pattern_core::types::snapshot::PersonaSnapshot;
-        use std::sync::atomic::Ordering;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
-        // Dispatcher that unconditionally panics — triggers the panic-unwind
-        // path through drive_step so BusyFlagGuard::drop is exercised.
-        struct PanickingDispatcher;
+        // Panics on the first dispatch, succeeds (no-op) on subsequent calls.
+        // This lets the first turn panic (triggering BusyFlagGuard cleanup)
+        // while the second turn succeeds via the MockProvider text response.
+        struct MaybePanickingDispatcher(AtomicUsize);
         #[async_trait]
-        impl EvalDispatcher for PanickingDispatcher {
+        impl EvalDispatcher for MaybePanickingDispatcher {
             async fn dispatch(&self, _: ToolCall, _: &str) -> ToolOutcome {
-                panic!("deliberate panic in test dispatcher");
+                let prev = self.0.fetch_add(1, Ordering::SeqCst);
+                if prev == 0 {
+                    panic!("deliberate first-dispatch panic in drain_loop test");
+                }
+                ToolOutcome::Error("subsequent dispatch (should not happen in this test)".into())
             }
         }
 
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
-        // Seed an agent row so drive_step's message-persistence path has the
-        // FK it needs.
         let db = crate::testing::test_db().await;
         let agent_row = pattern_db::models::Agent {
-            id: "mbx-panic-agent".to_string(),
-            name: "Panic Test".to_string(),
+            id: "mbx-drain-survive-agent".to_string(),
+            name: "Drain Survive Test".to_string(),
             description: None,
             model_provider: "test".to_string(),
             model_name: "test-model".to_string(),
@@ -480,7 +504,8 @@ mod tests {
         };
         pattern_db::queries::create_agent(&db.get().unwrap(), &agent_row).unwrap();
 
-        // Provider returns a tool_use stop so drive_step calls the dispatcher.
+        // First provider response: tool_use (triggers the panicking dispatcher).
+        // Second provider response: plain text (processed by the second input).
         let provider: Arc<dyn pattern_core::ProviderClient> =
             Arc::new(MockProviderClient::with_turns(vec![
                 MockProviderClient::tool_use_turn(
@@ -488,9 +513,10 @@ mod tests {
                     "code",
                     serde_json::json!({"code": "pure ()"}),
                 ),
+                MockProviderClient::text_turn("second turn ack"),
             ]));
 
-        let persona = PersonaSnapshot::new("mbx-panic-agent", "Panic Test");
+        let persona = PersonaSnapshot::new("mbx-drain-survive-agent", "Drain Survive Test");
         let ctx = Arc::new(SessionContext::from_persona(
             &persona,
             store,
@@ -499,65 +525,90 @@ mod tests {
             tokio::runtime::Handle::current(),
         ));
 
-        // Watch turn_done: park a waiter so we can assert it fires.
-        let is_in_turn = ctx.is_in_turn().clone();
-        let turn_done = ctx.turn_done().clone();
-        let watcher_done = turn_done.clone();
-        let waiter = tokio::spawn(async move { watcher_done.notified().await });
-        tokio::task::yield_now().await; // let the waiter reach notified()
+        let dispatcher: Arc<dyn EvalDispatcher> =
+            Arc::new(MaybePanickingDispatcher(AtomicUsize::new(0)));
+        let preamble: Arc<str> = Arc::from("");
+        let turn_history = Arc::new(std::sync::Mutex::new(crate::memory::TurnHistory::empty()));
 
-        let turn_input = {
-            let id = new_snowflake_id();
-            pattern_core::types::turn::TurnInput {
-                turn_id: id.clone(),
-                batch_id: pattern_core::types::ids::BatchId::from(id),
-                origin: test_origin(),
-                messages: vec![test_message("trigger tool use")],
+        let mut tasks = tokio::task::JoinSet::new();
+        spawn_mailbox_task(
+            &mut tasks,
+            ctx.clone(),
+            turn_history.clone(),
+            dispatcher,
+            preamble,
+            pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
+        );
+
+        let sender = ctx.mailbox().sender();
+
+        // Input 1: triggers the panicking turn (tool_use response → dispatcher panics).
+        sender
+            .send(MailboxInput {
+                from: MessageOrigin::new(
+                    Author::System {
+                        reason: SystemReason::Timer,
+                    },
+                    Sphere::System,
+                ),
+                msg: test_message("first: triggers panic"),
+            })
+            .unwrap();
+
+        // Wait for the panic to be processed and is_in_turn to clear.
+        // The drain loop must survive and become idle again.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            use std::sync::atomic::Ordering;
+            if !ctx.is_in_turn().load(Ordering::SeqCst) {
+                // Drain loop is idle; ready for second input.
+                break;
             }
-        };
+            if std::time::Instant::now() > deadline {
+                panic!(
+                    "is_in_turn did not clear within 5s after panicking turn; \
+                     drain loop may be stuck"
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
 
-        let ctx_clone = ctx.clone();
-        let turn_history =
-            Arc::new(std::sync::Mutex::new(crate::memory::TurnHistory::empty()));
-        let th_clone = turn_history.clone();
-        let dispatcher = Arc::new(PanickingDispatcher);
+        let history_before = turn_history.lock().unwrap().active_len();
 
-        // Spawn drive_step so the panic is caught by the JoinHandle.
-        let task = tokio::spawn(async move {
-            let _ = drive_step(
-                turn_input,
-                ctx_clone,
-                th_clone,
-                pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
-                dispatcher.as_ref(),
-                "",
-                None,
-            )
-            .await;
-        });
+        // Input 2: a plain message that should be processed by the surviving drain loop.
+        sender
+            .send(MailboxInput {
+                from: MessageOrigin::new(
+                    Author::System {
+                        reason: SystemReason::Timer,
+                    },
+                    Sphere::System,
+                ),
+                msg: test_message("second: after panic"),
+            })
+            .unwrap();
 
-        // The task must have panicked.
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            task,
-        )
-        .await
-        .expect("drive_step task must complete within 5s");
-        assert!(
-            result.unwrap_err().is_panic(),
-            "expected the task to have panicked"
-        );
+        // Wait for the second turn to be recorded.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let len = turn_history.lock().unwrap().active_len();
+            if len > history_before {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!(
+                    "drain loop did not process second input within 5s after panic; \
+                     drain loop may have died from the first panic"
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
 
-        // (a) BusyFlagGuard::drop must have cleared is_in_turn.
-        assert!(
-            !is_in_turn.load(Ordering::SeqCst),
-            "is_in_turn must be false after drive_step panic"
-        );
-
-        // (b) turn_done must have fired — the waiter task should resolve.
-        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+        ctx.cancel_state().request_cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(2), tasks.join_next())
             .await
-            .expect("turn_done must fire from BusyFlagGuard::drop on panic")
-            .expect("waiter task panicked");
+            .expect("mailbox task did not exit within 2s of cancel")
+            .expect("JoinSet had no task")
+            .expect("drain task itself panicked (unexpected)");
     }
 }

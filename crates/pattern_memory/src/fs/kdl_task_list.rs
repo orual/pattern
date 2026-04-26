@@ -53,12 +53,12 @@ pub(super) fn task_list_to_kdl(value: &LoroValue) -> Result<KdlDocument, KdlConv
 
     // Properties.
     if let Some(LoroValue::String(s)) = map.get("default_status") {
-        let mut entry = kdl_string_entry(s.as_str());
+        let mut entry = kdl_string_entry(s.as_str())?;
         entry.set_name(Some("default_status"));
         root_node.push(entry);
     }
     if let Some(LoroValue::String(s)) = map.get("default_owner") {
-        let mut entry = kdl_string_entry(s.as_str());
+        let mut entry = kdl_string_entry(s.as_str())?;
         entry.set_name(Some("default_owner"));
         root_node.push(entry);
     }
@@ -168,9 +168,9 @@ fn task_item_to_kdl_node(value: &LoroValue) -> Result<KdlNode, KdlConversionErro
     let mut node = KdlNode::new("item");
 
     // Properties on the node itself.
-    push_str_prop(&mut node, "id", map);
-    push_str_prop(&mut node, "status", map);
-    push_str_prop(&mut node, "owner", map);
+    push_str_prop(&mut node, "id", map)?;
+    push_str_prop(&mut node, "status", map)?;
+    push_str_prop(&mut node, "owner", map)?;
 
     // Children.
     let mut children = KdlDocument::new();
@@ -178,7 +178,7 @@ fn task_item_to_kdl_node(value: &LoroValue) -> Result<KdlNode, KdlConversionErro
     // subject.
     if let Some(LoroValue::String(s)) = map.get("subject") {
         let mut n = KdlNode::new("subject");
-        n.push(kdl_string_entry(s.as_str()));
+        n.push(kdl_string_entry(s.as_str())?);
         children.nodes_mut().push(n);
     }
 
@@ -193,14 +193,14 @@ fn task_item_to_kdl_node(value: &LoroValue) -> Result<KdlNode, KdlConversionErro
         && !s.is_empty()
     {
         let mut n = KdlNode::new("description");
-        n.push(kdl_string_entry(s.as_str()));
+        n.push(kdl_string_entry(s.as_str())?);
         children.nodes_mut().push(n);
     }
 
     // active_form.
     if let Some(LoroValue::String(s)) = map.get("active_form") {
         let mut n = KdlNode::new("active_form");
-        n.push(kdl_string_entry(s.as_str()));
+        n.push(kdl_string_entry(s.as_str())?);
         children.nodes_mut().push(n);
     }
 
@@ -227,7 +227,7 @@ fn task_item_to_kdl_node(value: &LoroValue) -> Result<KdlNode, KdlConversionErro
                     Some(id) => format!("{handle}#{id}"),
                     None => handle,
                 };
-                let mut entry = kdl_string_entry(display.as_str());
+                let mut entry = kdl_string_entry(display.as_str())?;
                 entry.set_ty("block");
                 // Each typed entry is a child node named "-".
                 let mut entry_node = KdlNode::new("-");
@@ -248,12 +248,12 @@ fn task_item_to_kdl_node(value: &LoroValue) -> Result<KdlNode, KdlConversionErro
         for c in comments.iter() {
             if let LoroValue::Map(cm) = c {
                 let mut entry_node = KdlNode::new("entry");
-                push_str_prop(&mut entry_node, "author", cm);
-                push_str_prop(&mut entry_node, "timestamp", cm);
+                push_str_prop(&mut entry_node, "author", cm)?;
+                push_str_prop(&mut entry_node, "timestamp", cm)?;
                 // text child.
                 if let Some(LoroValue::String(t)) = cm.get("text") {
                     let mut text_node = KdlNode::new("text");
-                    text_node.push(kdl_string_entry(t.as_str()));
+                    text_node.push(kdl_string_entry(t.as_str())?);
                     let mut inner = KdlDocument::new();
                     inner.nodes_mut().push(text_node);
                     entry_node.set_children(inner);
@@ -283,27 +283,37 @@ fn task_item_to_kdl_node(value: &LoroValue) -> Result<KdlNode, KdlConversionErro
     }
 
     // created_at / updated_at.
-    push_str_child(&mut children, "created_at", map);
-    push_str_child(&mut children, "updated_at", map);
+    push_str_child(&mut children, "created_at", map)?;
+    push_str_child(&mut children, "updated_at", map)?;
 
     node.set_children(children);
     Ok(node)
 }
 
-fn push_str_prop(node: &mut KdlNode, key: &str, map: &loro::LoroMapValue) {
+fn push_str_prop(
+    node: &mut KdlNode,
+    key: &str,
+    map: &loro::LoroMapValue,
+) -> Result<(), KdlConversionError> {
     if let Some(LoroValue::String(s)) = map.get(key) {
-        let mut entry = kdl_string_entry(s.as_str());
+        let mut entry = kdl_string_entry(s.as_str())?;
         entry.set_name(Some(key));
         node.push(entry);
     }
+    Ok(())
 }
 
-fn push_str_child(children: &mut KdlDocument, key: &str, map: &loro::LoroMapValue) {
+fn push_str_child(
+    children: &mut KdlDocument,
+    key: &str,
+    map: &loro::LoroMapValue,
+) -> Result<(), KdlConversionError> {
     if let Some(LoroValue::String(s)) = map.get(key) {
         let mut n = KdlNode::new(key);
-        n.push(kdl_string_entry(s.as_str()));
+        n.push(kdl_string_entry(s.as_str())?);
         children.nodes_mut().push(n);
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

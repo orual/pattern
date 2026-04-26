@@ -1697,8 +1697,25 @@ mod tests {
             cvar.notify_one();
         }
 
-        // Wait for the worker to reconcile.
-        std::thread::sleep(Duration::from_millis(300));
+        // Wait for the worker to reconcile by polling the on-disk file until
+        // it shows the expected content. A fixed sleep of 300 ms was prone to
+        // flakes on loaded CI machines because `block_change_notifier.fire`
+        // now runs inline in `render_cycle` (adding a small amount of work to
+        // the resume path). Polling with a deadline is robust against timing
+        // variation.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(content) = std::fs::read_to_string(&file_path)
+                && content == "human edited"
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "worker did not reconcile disk file to 'human edited' within 5 s"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
 
         // Step 5: verify memory_doc has the external edit.
         let mem_content = doc.text_content();
@@ -1707,7 +1724,7 @@ mod tests {
             "memory_doc should contain the external edit after pause-resume reconciliation"
         );
 
-        // Also verify the file on disk was updated.
+        // Verify the file on disk was updated (already confirmed by poll above).
         let file_content = std::fs::read_to_string(&file_path).unwrap();
         assert_eq!(
             file_content, "human edited",
