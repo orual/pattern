@@ -174,6 +174,18 @@ pub struct SessionContext {
     /// broker's partner-bypass actually fires. Phase 1 has none.
     current_dispatch_origin:
         Arc<std::sync::RwLock<Option<pattern_core::types::origin::MessageOrigin>>>,
+    /// Between-turn async-reminder buffer. Listener threads (file watch,
+    /// future shell spawn output, port subscribe events) enqueue
+    /// `MessageAttachment` entries here; agent_loop's
+    /// `compose_request_for_turn` drains and splices onto the next turn's
+    /// first user message. Distinct from the adapter's `record_attachment`
+    /// buffer (which handles in-turn handler-originated attachments at
+    /// turn close).
+    async_reminder_queue:
+        Arc<std::sync::Mutex<Vec<pattern_core::types::message::MessageAttachment>>>,
+    /// Per-session file manager. `None` until session open constructs it
+    /// from the mount config's file-policy.
+    file_manager: Option<Arc<crate::file_manager::FileManager>>,
 }
 
 /// Handlers call this to decide whether to short-circuit on soft-cancel.
@@ -287,6 +299,31 @@ impl HasCancelState for () {
     }
 }
 
+/// Handlers call this to access the session's [`crate::file_manager::FileManager`].
+///
+/// `SessionContext` returns the live optional manager (present once
+/// `with_file_manager` has been called); the `()` shim returns `None`
+/// so unit tests that don't wire a file manager see a clear "not
+/// configured" error rather than panicking.
+pub trait HasFileManager {
+    /// The optional file manager for this session. `None` means the
+    /// file manager was not wired in (e.g. in unit tests or sessions
+    /// opened without a mount config).
+    fn file_manager(&self) -> Option<&Arc<crate::file_manager::FileManager>>;
+}
+
+impl HasFileManager for SessionContext {
+    fn file_manager(&self) -> Option<&Arc<crate::file_manager::FileManager>> {
+        SessionContext::file_manager(self)
+    }
+}
+
+impl HasFileManager for () {
+    fn file_manager(&self) -> Option<&Arc<crate::file_manager::FileManager>> {
+        None
+    }
+}
+
 impl SessionContext {
     /// Build a context from a persona + store handle. The store is wrapped
     /// in a [`MemoryStoreAdapter`] that records `BlockWrite` entries;
@@ -333,6 +370,8 @@ impl SessionContext {
             permission_broker: Arc::new(pattern_core::permission::PermissionBroker::new()),
             permission_bridge: None,
             current_dispatch_origin: Arc::new(std::sync::RwLock::new(None)),
+            async_reminder_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
+            file_manager: None,
         }
     }
 
@@ -599,6 +638,44 @@ impl SessionContext {
     pub(crate) fn with_router(mut self, router: Arc<RouterRegistry>) -> Self {
         self.router_bridge = Some(RouterBridge::spawn(router.clone()));
         self.router = router;
+        self
+    }
+
+    /// Record an async reminder for delivery on the next turn.
+    /// Background listener threads use `async_reminder_queue()` directly;
+    /// this method is for callers that already hold a `&SessionContext`.
+    pub fn record_async_reminder(
+        &self,
+        attachment: pattern_core::types::message::MessageAttachment,
+    ) {
+        self.async_reminder_queue.lock().unwrap().push(attachment);
+    }
+
+    /// Drain all pending async reminders. Called by `compose_request_for_turn`
+    /// to splice onto the next turn's first user message.
+    pub fn drain_async_reminders(&self) -> Vec<pattern_core::types::message::MessageAttachment> {
+        std::mem::take(&mut *self.async_reminder_queue.lock().unwrap())
+    }
+
+    /// Shared handle to the between-turn async-reminder queue. Sub-coordinators
+    /// (FileManager, future ProcessManager-listener, Port dispatcher) that need
+    /// to enqueue from background threads receive a clone of this Arc.
+    pub fn async_reminder_queue(
+        &self,
+    ) -> &Arc<std::sync::Mutex<Vec<pattern_core::types::message::MessageAttachment>>> {
+        &self.async_reminder_queue
+    }
+
+    /// Per-session file manager. `None` if no file-policy was configured
+    /// (all File ops will fail with `CapabilityDenied` or `PermissionDenied`).
+    pub fn file_manager(&self) -> Option<&Arc<crate::file_manager::FileManager>> {
+        self.file_manager.as_ref()
+    }
+
+    /// Builder-style: install a file manager.
+    #[must_use]
+    pub fn with_file_manager(mut self, fm: Arc<crate::file_manager::FileManager>) -> Self {
+        self.file_manager = Some(fm);
         self
     }
 }
@@ -997,7 +1074,20 @@ impl Session for TidepoolSession {
             .map_err(|_| RuntimeError::CheckpointFailed {
                 reason: "checkpoint log mutex poisoned".into(),
             })?;
-        log.snapshot(&self.session_id, self.ctx.agent_id())
+        let mut snapshot = log.snapshot(&self.session_id, self.ctx.agent_id())?;
+
+        // Populate open_files on the first (and only) persona snapshot so
+        // the restore path can re-open them. The FileManager stores the
+        // canonicalized paths keyed in its DashMap; we snapshot them here
+        // verbatim — LoroDoc state is deliberately NOT captured (loro docs
+        // are ephemeral per design; restore gives each file a fresh doc).
+        if let Some(persona) = snapshot.personas.first_mut() {
+            if let Some(fm) = self.ctx.file_manager() {
+                persona.open_files = fm.open_paths();
+            }
+        }
+
+        Ok(snapshot)
     }
 
     async fn restore(&mut self, snapshot: SessionSnapshot) -> Result<(), RuntimeError> {
@@ -1013,6 +1103,26 @@ impl Session for TidepoolSession {
                 reason: "checkpoint log mutex poisoned".into(),
             })?;
         log.reset_to(events);
+        drop(log); // release the mutex before re-opening files.
+
+        // Re-open files that were open at snapshot time. The FileManager
+        // gives each path a fresh LoroDoc — no CRDT state persists across
+        // snapshot boundaries. Missing files (deleted between snapshot and
+        // restore) are logged and skipped; they do not abort the restore.
+        if let Some(persona) = snapshot.personas.first() {
+            if let Some(fm) = self.ctx.file_manager() {
+                for path in &persona.open_files {
+                    if let Err(e) = fm.open(path) {
+                        tracing::warn!(
+                            path = ?path,
+                            error = %e,
+                            "failed to re-open file from snapshot; skipping"
+                        );
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 }

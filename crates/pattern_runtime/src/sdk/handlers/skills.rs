@@ -461,7 +461,7 @@ pub fn handle_load(
     // 5. Render markers + body. No <system-reminder> wrap — tool_result has
     //    its own role; the markers themselves are the framing the agent
     //    pattern-matches on.
-    let rendered = pattern_provider::compose::pseudo_messages::render_skill_loaded_text(
+    let rendered = pattern_provider::compose::render::render_skill_loaded_text(
         &metadata.name,
         metadata.trust_tier,
         &body,

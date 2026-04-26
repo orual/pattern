@@ -17,9 +17,10 @@ pub mod policy;
 
 pub use policy::{PolicyAction, PolicyContext, PolicyMatcher, PolicyRule, PolicySet, Precedence};
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
+use smol_str::SmolStr;
 
 /// A category of agent-callable effect.
 ///
@@ -161,15 +162,30 @@ impl std::str::FromStr for CapabilityFlag {
     }
 }
 
-/// The set of effect categories and capability flags an agent may use.
+/// The set of effect categories, capability flags, and optional per-category
+/// resource allowlists that describe what an agent is permitted to do.
 ///
-/// `categories` controls which `EffectDecl`s land in the agent's
-/// generated Haskell prelude (compile-time visibility). `flags` gate
-/// orthogonal behaviours that don't map to a single effect.
+/// `categories` controls which `EffectDecl`s land in the agent's generated
+/// Haskell prelude (compile-time visibility). `flags` gate orthogonal
+/// behaviours that don't map to a single effect category. `resources` provides
+/// fine-grained allowlisting within a category when category-level grants are
+/// too broad.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilitySet {
     pub categories: BTreeSet<EffectCategory>,
     pub flags: BTreeSet<CapabilityFlag>,
+    /// Optional per-category allowlist of resource identifiers. When a
+    /// category has an entry here with a non-empty set, only those resource
+    /// IDs are permitted within that category. When the category is absent
+    /// from the map (or maps to an empty set), the category-level grant via
+    /// `categories` is unrestricted within that category.
+    ///
+    /// Used initially by Phase 4 (PortRegistry) for per-port granularity:
+    /// an agent with `categories.contains(Sources)` can use any port unless
+    /// `resources[Sources]` is non-empty, in which case only the listed port
+    /// IDs are accessible. The same shape can carry Shell command allowlists,
+    /// File path-prefix allowlists, etc. when those phases need it.
+    resources: BTreeMap<EffectCategory, BTreeSet<SmolStr>>,
 }
 
 impl CapabilitySet {
@@ -180,12 +196,14 @@ impl CapabilitySet {
         Self::default()
     }
 
-    /// Full power: every effect category + every flag. Used for
-    /// back-compat with sessions that predate capability scoping.
+    /// Full power: every effect category + every flag. Used for back-compat
+    /// with sessions that predate capability scoping. `resources` is left
+    /// empty — no per-resource restrictions anywhere.
     pub fn all() -> Self {
         Self {
             categories: EffectCategory::ALL.iter().copied().collect(),
             flags: CapabilityFlag::ALL.iter().copied().collect(),
+            resources: BTreeMap::new(),
         }
     }
 
@@ -212,17 +230,114 @@ impl CapabilitySet {
         self.flags.iter().copied()
     }
 
-    /// Non-strict subset: every category and flag in `self` is present
-    /// in `other`.
+    /// Granular access check: returns true iff the category is allowed AND
+    /// (the resource allowlist for that category is absent/empty, OR the list
+    /// contains `resource_id`). Use this for per-resource gating; use
+    /// `contains(category)` for category-level checks where no resource
+    /// granularity is meaningful.
+    pub fn has_resource(&self, category: EffectCategory, resource_id: &str) -> bool {
+        if !self.categories.contains(&category) {
+            return false;
+        }
+        match self.resources.get(&category) {
+            // No allowlist entry → unrestricted within the category.
+            None => true,
+            // Empty set treated as unrestricted (erased by `with_resources`).
+            Some(set) if set.is_empty() => true,
+            Some(set) => set.contains(resource_id),
+        }
+    }
+
+    /// Builder-style: set the resource allowlist for a category. Replaces any
+    /// existing entry. Passing an empty iterator erases the entry, returning
+    /// the category to unrestricted status.
+    #[must_use]
+    pub fn with_resources<I: IntoIterator<Item = SmolStr>>(
+        mut self,
+        category: EffectCategory,
+        ids: I,
+    ) -> Self {
+        let set: BTreeSet<SmolStr> = ids.into_iter().collect();
+        if set.is_empty() {
+            self.resources.remove(&category);
+        } else {
+            self.resources.insert(category, set);
+        }
+        self
+    }
+
+    /// Iterate the resource allowlist for a category. Yields nothing when the
+    /// category is unrestricted (no entry, or empty entry which `with_resources`
+    /// erases on insert).
+    pub fn iter_resources(&self, category: EffectCategory) -> impl Iterator<Item = &SmolStr> {
+        self.resources
+            .get(&category)
+            .into_iter()
+            .flat_map(|s| s.iter())
+    }
+
+    /// Convenience: returns true iff `File` is in the category set.
+    pub fn has_file(&self) -> bool {
+        self.categories.contains(&EffectCategory::File)
+    }
+
+    /// Convenience: returns true iff `Shell` is in the category set.
+    pub fn has_shell(&self) -> bool {
+        self.categories.contains(&EffectCategory::Shell)
+    }
+
+    /// Per-port granular check. Maps to the `Sources` effect category, which
+    /// Phase 4 will fold into a unified `Port` category. When Phase 4 lands,
+    /// this method's body will switch to check `EffectCategory::Port` (or
+    /// whatever Phase 4 names it).
+    pub fn has_port(&self, port_id: &str) -> bool {
+        self.has_resource(EffectCategory::Sources, port_id)
+    }
+
+    /// Non-strict subset: every category, flag, and resource allowlist in
+    /// `self` is permitted by `other`.
+    ///
+    /// Resource subset semantics: if `other` has a non-empty allowlist for a
+    /// category, `self` must also have a non-empty allowlist that is a subset
+    /// of it. A `self` that is unrestricted (no entry) within a category where
+    /// `other` is restricted escalates beyond `other` — this returns false.
     pub fn is_subset_of(&self, other: &Self) -> bool {
-        self.categories.is_subset(&other.categories) && self.flags.is_subset(&other.flags)
+        if !self.categories.is_subset(&other.categories) {
+            return false;
+        }
+        if !self.flags.is_subset(&other.flags) {
+            return false;
+        }
+        // Check resource constraints for every category self participates in.
+        for cat in &self.categories {
+            let other_entry = other.resources.get(cat);
+            // Other unrestricted (absent or empty entry) → no constraint on self.
+            let other_set = match other_entry {
+                None => continue,
+                Some(s) if s.is_empty() => continue,
+                Some(s) => s,
+            };
+            // Other has a non-empty allowlist — self must have a non-empty subset.
+            let self_entry = self.resources.get(cat);
+            match self_entry {
+                // Self is unrestricted while other is restricted — escalation.
+                None => return false,
+                Some(s) if s.is_empty() => return false,
+                Some(self_set) => {
+                    if !self_set.is_subset(other_set) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
     }
 
     /// Verify `self` is a subset of `parent`; otherwise surface every
-    /// category and flag that would represent escalation.
+    /// category, flag, and resource that would represent escalation.
     ///
-    /// Used by spawn paths (ephemeral / fork) to enforce that children
-    /// cannot acquire capabilities the parent lacks.
+    /// Used by spawn paths (ephemeral / fork) to enforce that children cannot
+    /// acquire capabilities the parent lacks.
     pub fn restrict_to(self, parent: &Self) -> Result<Self, CapabilityError> {
         let added_categories: Vec<_> = self
             .categories
@@ -230,12 +345,66 @@ impl CapabilitySet {
             .copied()
             .collect();
         let added_flags: Vec<_> = self.flags.difference(&parent.flags).copied().collect();
-        if !added_categories.is_empty() || !added_flags.is_empty() {
+
+        // Compute per-category resource escalations.
+        let mut added_resources: BTreeMap<EffectCategory, Vec<SmolStr>> = BTreeMap::new();
+        let mut parent_resources_snapshot: BTreeMap<EffectCategory, Vec<SmolStr>> = BTreeMap::new();
+
+        for cat in &self.categories {
+            // Skip categories already flagged as escalated at the category level;
+            // the category escalation is the primary signal in that case.
+            if !parent.categories.contains(cat) {
+                continue;
+            }
+            let self_entry = self.resources.get(cat);
+            let parent_entry = parent.resources.get(cat);
+
+            // Parent is unrestricted for this category — no resource escalation.
+            let parent_set = match parent_entry {
+                None => continue,
+                Some(s) if s.is_empty() => continue,
+                Some(s) => s,
+            };
+
+            match self_entry {
+                // Self is unrestricted while parent is restricted — escalation.
+                // Represent this as an empty Vec (signals "child was unrestricted",
+                // distinct from "child had specific extra resources").
+                None => {
+                    added_resources.entry(*cat).or_default();
+                    parent_resources_snapshot
+                        .entry(*cat)
+                        .or_insert_with(|| parent_set.iter().cloned().collect());
+                }
+                Some(self_set) if self_set.is_empty() => {
+                    // Empty set was erased by `with_resources`, so this branch is
+                    // unreachable in practice; guarded for belt-and-suspenders.
+                    added_resources.entry(*cat).or_default();
+                    parent_resources_snapshot
+                        .entry(*cat)
+                        .or_insert_with(|| parent_set.iter().cloned().collect());
+                }
+                Some(self_set) => {
+                    // Collect resources in self but not in parent.
+                    let extras: Vec<SmolStr> = self_set.difference(parent_set).cloned().collect();
+                    if !extras.is_empty() {
+                        added_resources.insert(*cat, extras);
+                        parent_resources_snapshot
+                            .entry(*cat)
+                            .or_insert_with(|| parent_set.iter().cloned().collect());
+                    }
+                }
+            }
+        }
+
+        if !added_categories.is_empty() || !added_flags.is_empty() || !added_resources.is_empty() {
             return Err(CapabilityError::Escalation {
                 added_categories,
                 added_flags,
                 parent_categories: parent.categories.iter().copied().collect(),
                 parent_flags: parent.flags.iter().copied().collect(),
+                added_resources,
+                parent_resources: parent_resources_snapshot,
             });
         }
         Ok(self)
@@ -243,12 +412,14 @@ impl CapabilitySet {
 }
 
 impl FromIterator<EffectCategory> for CapabilitySet {
-    /// Build a set from effect categories; flags default empty.
-    /// Chain `with_flags` afterward to add capability flags.
+    /// Build a set from effect categories; flags and resources default empty.
+    /// Chain `with_flags` to add capability flags, or `with_resources` to add
+    /// per-category resource allowlists.
     fn from_iter<I: IntoIterator<Item = EffectCategory>>(iter: I) -> Self {
         Self {
             categories: iter.into_iter().collect(),
             flags: BTreeSet::new(),
+            resources: BTreeMap::new(),
         }
     }
 }
@@ -259,14 +430,21 @@ impl FromIterator<EffectCategory> for CapabilitySet {
 pub enum CapabilityError {
     #[error(
         "capability escalation: cannot add categories {added_categories:?} or flags \
-         {added_flags:?} to a set restricted to categories {parent_categories:?} flags \
-         {parent_flags:?}"
+         {added_flags:?} or resources {added_resources:?} to a set restricted to categories \
+         {parent_categories:?} flags {parent_flags:?} resources {parent_resources:?}"
     )]
     Escalation {
         added_categories: Vec<EffectCategory>,
         added_flags: Vec<CapabilityFlag>,
         parent_categories: Vec<EffectCategory>,
         parent_flags: Vec<CapabilityFlag>,
+        /// Per-category resources the child claims that escalate beyond the parent's
+        /// allowlist. An empty `Vec` for a category means the child is unrestricted
+        /// while the parent has a non-empty allowlist (which is itself an escalation).
+        added_resources: BTreeMap<EffectCategory, Vec<SmolStr>>,
+        /// The parent's resource allowlist at the time of the escalation check, for
+        /// diagnostic context.
+        parent_resources: BTreeMap<EffectCategory, Vec<SmolStr>>,
     },
 
     #[error("capability denied: effect {category:?} not present in set")]
@@ -518,6 +696,254 @@ mod tests {
             let decoded: CapabilitySet =
                 serde_json::from_str(&encoded).expect("deserialize");
             prop_assert_eq!(set, decoded);
+        }
+    }
+
+    // ─── per-resource granularity tests ───────────────────────────────────────
+
+    #[test]
+    fn has_resource_true_when_unrestricted_category_grant() {
+        // Category present, no resources entry → unrestricted, any id passes.
+        let set = CapabilitySet::from_iter([EffectCategory::Sources]);
+        assert!(set.has_resource(EffectCategory::Sources, "any-port-id"));
+        assert!(set.has_resource(EffectCategory::Sources, ""));
+    }
+
+    #[test]
+    fn has_resource_true_when_id_in_allowlist() {
+        let set = CapabilitySet::from_iter([EffectCategory::Sources]).with_resources(
+            EffectCategory::Sources,
+            [SmolStr::from("a"), SmolStr::from("b")],
+        );
+        assert!(set.has_resource(EffectCategory::Sources, "a"));
+        assert!(set.has_resource(EffectCategory::Sources, "b"));
+        assert!(!set.has_resource(EffectCategory::Sources, "c"));
+    }
+
+    #[test]
+    fn has_resource_false_when_category_missing() {
+        // No category grant at all → false regardless of resources map.
+        let set = CapabilitySet::empty();
+        assert!(!set.has_resource(EffectCategory::Sources, "any-port-id"));
+        // Also false even if resources are populated for a different category.
+        let set2 = CapabilitySet::from_iter([EffectCategory::Memory])
+            .with_resources(EffectCategory::Memory, [SmolStr::from("x")]);
+        // Sources is not in categories.
+        assert!(!set2.has_resource(EffectCategory::Sources, "x"));
+    }
+
+    #[test]
+    fn has_resource_empty_set_unrestricted() {
+        // with_resources(cat, []) should erase the entry → unrestricted.
+        let set = CapabilitySet::from_iter([EffectCategory::Sources])
+            .with_resources(EffectCategory::Sources, [SmolStr::from("a")])
+            .with_resources(EffectCategory::Sources, Vec::<SmolStr>::new());
+        // Entry should be gone; any id permitted.
+        assert!(set.has_resource(EffectCategory::Sources, "a"));
+        assert!(set.has_resource(EffectCategory::Sources, "z"));
+        // Verify via iter_resources that no entries remain.
+        assert_eq!(set.iter_resources(EffectCategory::Sources).count(), 0);
+    }
+
+    #[test]
+    fn with_resources_replaces_existing_entry() {
+        let set = CapabilitySet::from_iter([EffectCategory::Sources])
+            .with_resources(EffectCategory::Sources, [SmolStr::from("a")])
+            .with_resources(EffectCategory::Sources, [SmolStr::from("b")]);
+        // Only "b" should be present.
+        assert!(!set.has_resource(EffectCategory::Sources, "a"));
+        assert!(set.has_resource(EffectCategory::Sources, "b"));
+        assert_eq!(set.iter_resources(EffectCategory::Sources).count(), 1);
+    }
+
+    #[test]
+    fn with_resources_empty_erases_entry() {
+        let set = CapabilitySet::from_iter([EffectCategory::Sources])
+            .with_resources(EffectCategory::Sources, [SmolStr::from("a")])
+            .with_resources(EffectCategory::Sources, Vec::<SmolStr>::new());
+        assert_eq!(set.iter_resources(EffectCategory::Sources).count(), 0);
+        // Semantically unrestricted after erasure.
+        assert!(set.has_resource(EffectCategory::Sources, "anything"));
+    }
+
+    #[test]
+    fn is_subset_of_resource_escalation_caught() {
+        // Parent allows [a, b]; child claims [a, c] → not a subset.
+        let parent = CapabilitySet::from_iter([EffectCategory::Sources]).with_resources(
+            EffectCategory::Sources,
+            [SmolStr::from("a"), SmolStr::from("b")],
+        );
+        let child = CapabilitySet::from_iter([EffectCategory::Sources]).with_resources(
+            EffectCategory::Sources,
+            [SmolStr::from("a"), SmolStr::from("c")],
+        );
+        assert!(!child.is_subset_of(&parent));
+    }
+
+    #[test]
+    fn is_subset_of_child_unrestricted_escalation_caught() {
+        // Parent has [a, b]; child is unrestricted (empty resources) → escalates,
+        // not a subset.
+        let parent = CapabilitySet::from_iter([EffectCategory::Sources]).with_resources(
+            EffectCategory::Sources,
+            [SmolStr::from("a"), SmolStr::from("b")],
+        );
+        let child = CapabilitySet::from_iter([EffectCategory::Sources]);
+        assert!(!child.is_subset_of(&parent));
+    }
+
+    #[test]
+    fn is_subset_of_resource_ok_when_truly_subset() {
+        // Parent [a, b, c]; child [a, b] → legitimate subset.
+        let parent = CapabilitySet::from_iter([EffectCategory::Sources]).with_resources(
+            EffectCategory::Sources,
+            [SmolStr::from("a"), SmolStr::from("b"), SmolStr::from("c")],
+        );
+        let child = CapabilitySet::from_iter([EffectCategory::Sources]).with_resources(
+            EffectCategory::Sources,
+            [SmolStr::from("a"), SmolStr::from("b")],
+        );
+        assert!(child.is_subset_of(&parent));
+    }
+
+    #[test]
+    fn is_subset_of_parent_unrestricted_child_restricted_ok() {
+        // Parent unrestricted (no resources entry); child restricted → child is
+        // a subset (narrower than parent).
+        let parent = CapabilitySet::from_iter([EffectCategory::Sources]);
+        let child = CapabilitySet::from_iter([EffectCategory::Sources])
+            .with_resources(EffectCategory::Sources, [SmolStr::from("a")]);
+        assert!(child.is_subset_of(&parent));
+    }
+
+    #[test]
+    fn restrict_to_returns_escalation_with_resource_diff() {
+        // Parent [a, b]; child [a, c] → Escalation with added_resources populated.
+        let parent = CapabilitySet::from_iter([EffectCategory::Sources]).with_resources(
+            EffectCategory::Sources,
+            [SmolStr::from("a"), SmolStr::from("b")],
+        );
+        let child = CapabilitySet::from_iter([EffectCategory::Sources]).with_resources(
+            EffectCategory::Sources,
+            [SmolStr::from("a"), SmolStr::from("c")],
+        );
+        let err = child.restrict_to(&parent).unwrap_err();
+        match err {
+            CapabilityError::Escalation {
+                added_resources,
+                parent_resources,
+                added_categories,
+                added_flags,
+                ..
+            } => {
+                assert!(added_categories.is_empty());
+                assert!(added_flags.is_empty());
+                // "c" is the resource child claims but parent doesn't allow.
+                assert!(
+                    added_resources
+                        .get(&EffectCategory::Sources)
+                        .map(|v| v.contains(&SmolStr::from("c")))
+                        .unwrap_or(false),
+                    "added_resources should contain 'c' for Sources, got: {added_resources:?}"
+                );
+                // parent_resources should record parent's allowlist.
+                assert!(
+                    parent_resources
+                        .get(&EffectCategory::Sources)
+                        .map(|v| v.contains(&SmolStr::from("a")) && v.contains(&SmolStr::from("b")))
+                        .unwrap_or(false),
+                    "parent_resources should contain ['a','b'] for Sources, got: {parent_resources:?}"
+                );
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn restrict_to_escalation_when_child_unrestricted_parent_restricted() {
+        // Parent [a, b]; child unrestricted → escalates.
+        let parent = CapabilitySet::from_iter([EffectCategory::Sources]).with_resources(
+            EffectCategory::Sources,
+            [SmolStr::from("a"), SmolStr::from("b")],
+        );
+        let child = CapabilitySet::from_iter([EffectCategory::Sources]);
+        let err = child.restrict_to(&parent).unwrap_err();
+        match err {
+            CapabilityError::Escalation {
+                added_resources, ..
+            } => {
+                // added_resources[Sources] should be non-empty to indicate escalation.
+                assert!(
+                    !added_resources.is_empty(),
+                    "escalation map should be non-empty, got: {added_resources:?}"
+                );
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn has_port_delegates_to_sources() {
+        let set = CapabilitySet::from_iter([EffectCategory::Sources]).with_resources(
+            EffectCategory::Sources,
+            [SmolStr::from("github"), SmolStr::from("discord")],
+        );
+        assert!(set.has_port("github"));
+        assert!(set.has_port("discord"));
+        assert!(!set.has_port("slack"));
+    }
+
+    #[test]
+    fn has_file_and_has_shell_convenience_methods() {
+        let neither = CapabilitySet::empty();
+        assert!(!neither.has_file());
+        assert!(!neither.has_shell());
+
+        let both = CapabilitySet::from_iter([EffectCategory::File, EffectCategory::Shell]);
+        assert!(both.has_file());
+        assert!(both.has_shell());
+
+        let file_only = CapabilitySet::from_iter([EffectCategory::File]);
+        assert!(file_only.has_file());
+        assert!(!file_only.has_shell());
+    }
+
+    #[test]
+    fn all_leaves_resources_empty_unrestricted() {
+        // CapabilitySet::all() must leave resources empty — unrestricted everywhere.
+        let set = CapabilitySet::all();
+        for cat in EffectCategory::ALL {
+            assert_eq!(
+                set.iter_resources(*cat).count(),
+                0,
+                "all() should have no resource restrictions for {cat:?}"
+            );
+            // Every id must pass for every category in all().
+            assert!(
+                set.has_resource(*cat, "any-id"),
+                "all() should be unrestricted for {cat:?}"
+            );
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn roundtrip_with_resources_has_resource(
+            ids in prop::collection::vec("[a-z]{1,8}", 1..6),
+            probe in "[a-z]{1,8}",
+        ) {
+            let smol_ids: Vec<SmolStr> = ids.iter().map(|s| SmolStr::from(s.as_str())).collect();
+            let set = CapabilitySet::from_iter([EffectCategory::Sources])
+                .with_resources(EffectCategory::Sources, smol_ids.clone());
+            // Every id we inserted must be accessible.
+            for id in &ids {
+                assert!(set.has_resource(EffectCategory::Sources, id.as_str()));
+            }
+            // Probe passes iff it's in the original set.
+            let expected = ids.iter().any(|id| id.as_str() == probe.as_str());
+            prop_assert_eq!(set.has_resource(EffectCategory::Sources, probe.as_str()), expected);
         }
     }
 }

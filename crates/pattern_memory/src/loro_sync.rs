@@ -34,7 +34,7 @@ pub use bridge::{BridgeError, LoroDocBridge};
 pub use dir_watcher::{DirWatcher, DirWatcherConfig};
 pub use error::{LoroSyncError, SyncedDocError};
 pub use router::EventRouter;
-pub use routers::PathFanoutRouter;
+pub use routers::{PathFanoutRouter, PathFanoutSubscription};
 pub use synced_doc::{
     ConflictPolicy, ExternalChangeEvent, SyncedDoc, SyncedDocConfig, SyncedDocConfigBuilder,
     WriteNotification,

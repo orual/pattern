@@ -162,8 +162,48 @@ impl LoroSyncedFile {
         self.inner.path()
     }
 
+    /// Force-apply raw bytes as if they were an external edit, bypassing
+    /// the watcher's stale-base conflict check. Used by `File.ForceWrite`
+    /// to overwrite the disk version with the agent's content.
+    pub fn apply_external_bytes(&self, content: &[u8]) -> Result<(), LoroSyncError> {
+        self.inner.apply_external_bytes(content)
+    }
+
+    /// Discard uncommitted memory_doc edits, replace with current disk content.
+    ///
+    /// Recovery path from `FileConflict` when the agent decides to take
+    /// the disk version. After reload, `has_unsaved_edits()` returns
+    /// `false` and `read()` returns the disk content.
+    pub fn reload(&self) -> Result<String, LoroSyncError> {
+        let disk_bytes = self.inner.reload()?;
+        String::from_utf8(disk_bytes).map_err(|e| {
+            LoroSyncError::Bridge(BridgeError::Utf8 {
+                path: self.inner.path().to_owned(),
+                source: e.utf8_error(),
+            })
+        })
+    }
+
+    /// Returns `true` if `memory_doc` has edits beyond the last successful
+    /// local save (i.e., the agent has pending writes not yet rendered to disk).
+    pub fn has_unsaved_edits(&self) -> bool {
+        self.inner.has_unsaved_edits()
+    }
+
     /// Close the file and stop the watcher. Optional — drop also cleans up.
     pub fn close(self) {
         self.inner.close()
+    }
+
+    /// Force `has_unsaved_edits()` to return `true` by clearing the saved
+    /// frontier. Test-only — deterministically sets up the conflict path
+    /// without relying on timing between the ingest thread and watcher debounce.
+    ///
+    /// Available under `#[cfg(test)]` (unit tests) and when the `test-support`
+    /// feature is enabled (integration tests in `tests/`).
+    /// Never call this in production code.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn clear_saved_frontier_for_test(&self) {
+        self.inner.clear_saved_frontier_for_test();
     }
 }

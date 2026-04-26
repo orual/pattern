@@ -11,6 +11,7 @@
 pub mod agent_loop;
 pub mod checkpoint;
 pub mod compaction;
+pub mod file_manager;
 pub mod memory;
 pub mod permission;
 pub mod persona_loader;

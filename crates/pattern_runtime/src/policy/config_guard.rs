@@ -45,17 +45,25 @@ impl ConfigGuardVerdict {
 /// Pattern-specific top-level node identifiers we treat as a "this is
 /// a Pattern config" signal when found at column 0 (or column-0 after
 /// optional `-` / whitespace, which KDL allows).
-const PATTERN_TOP_LEVEL_KEYS: &[&str] = &[
-    "mount",
-    "personas",
-    "isolate-from-persona",
-    "jj",
-    "project",
+///
+/// This is the **canonical** list shared between the handler-level shape
+/// guard (`is_pattern_config_kdl`) and the FileManager-level guard
+/// (`config_detect::is_pattern_config_write`). Both check sites exist
+/// as defense-in-depth; consolidating the key list ensures they agree.
+pub const PATTERN_TOP_LEVEL_KEYS: &[&str] = &[
     "backup",
     "capabilities",
-    "policy",
-    "persona",
+    "file-policy",
+    "isolation",
+    "isolate-from-persona",
+    "jj",
+    "mount",
     "name",
+    "persona",
+    "personas",
+    "policy",
+    "project",
+    "storage-mode",
     "system-prompt",
 ];
 

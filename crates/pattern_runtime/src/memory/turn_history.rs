@@ -1284,6 +1284,113 @@ mod tests {
         assert_eq!(restored_origin, origin, "origin must round-trip exactly");
     }
 
+    /// DB round-trip for FileEdit, FileConflict, and BlockWriteNotifications
+    /// attachment variants introduced in Phase 2.
+    #[test]
+    fn db_round_trip_preserves_file_and_block_write_attachments() {
+        use crate::agent_loop::to_db_message;
+        use genai::chat::ChatMessage;
+        use pattern_core::types::block::{BlockWrite, BlockWriteKind};
+        use pattern_core::types::ids::{AgentId, MessageId, new_id};
+        use pattern_core::types::memory_types::MemoryBlockType;
+        use pattern_core::types::message::{FileEditKind, Message, MessageAttachment};
+        use pattern_core::types::origin::{AgentAuthor, Author, MessageOrigin, Sphere};
+
+        let agent_id = "test-agent";
+        let now = Timestamp::now();
+
+        let input_msg = Message {
+            chat_message: ChatMessage::user("check files"),
+            id: MessageId::from(new_id()),
+            position: new_snowflake_id(),
+            owner_id: AgentId::from(agent_id),
+            created_at: now,
+            batch: new_snowflake_id(),
+            response_meta: None,
+            block_refs: vec![],
+            attachments: vec![
+                MessageAttachment::FileEdit {
+                    path: std::path::PathBuf::from("/tmp/test.txt"),
+                    kind: FileEditKind::Open,
+                    at: now,
+                    diff: Some("--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new".to_string()),
+                },
+                MessageAttachment::FileConflict {
+                    path: std::path::PathBuf::from("/tmp/conflict.txt"),
+                    at: now,
+                },
+                MessageAttachment::BlockWriteNotifications {
+                    writes: vec![BlockWrite {
+                        handle: SmolStr::new("scratchpad"),
+                        memory_id: SmolStr::new("mem-001"),
+                        block_type: MemoryBlockType::Working,
+                        kind: BlockWriteKind::Created,
+                        rendered_content: "hello".to_string(),
+                        previous_content_hash: None,
+                        previous_rendered_content: None,
+                        at: now,
+                        author: Author::Agent(AgentAuthor {
+                            agent_id: AgentId::from("test-agent"),
+                        }),
+                    }],
+                },
+            ],
+        };
+
+        let origin = MessageOrigin::new(
+            Author::Agent(AgentAuthor {
+                agent_id: AgentId::from("test-agent"),
+            }),
+            Sphere::Internal,
+        );
+
+        let db_msg = to_db_message(
+            &input_msg,
+            agent_id,
+            pattern_db::models::BatchType::UserRequest,
+            &origin,
+        )
+        .expect("to_db_message must succeed");
+
+        assert!(
+            db_msg.attachments_json.is_some(),
+            "attachments_json must be Some"
+        );
+
+        let restored = db_message_to_core(&db_msg).expect("db_message_to_core must succeed");
+        assert_eq!(
+            restored.attachments.len(),
+            3,
+            "all three attachments must survive round-trip"
+        );
+
+        match &restored.attachments[0] {
+            MessageAttachment::FileEdit {
+                path, kind, diff, ..
+            } => {
+                assert_eq!(path.to_str().unwrap(), "/tmp/test.txt");
+                assert_eq!(*kind, FileEditKind::Open);
+                assert!(diff.is_some(), "diff must survive round-trip");
+            }
+            other => panic!("expected FileEdit, got {other:?}"),
+        }
+
+        match &restored.attachments[1] {
+            MessageAttachment::FileConflict { path, .. } => {
+                assert_eq!(path.to_str().unwrap(), "/tmp/conflict.txt");
+            }
+            other => panic!("expected FileConflict, got {other:?}"),
+        }
+
+        match &restored.attachments[2] {
+            MessageAttachment::BlockWriteNotifications { writes } => {
+                assert_eq!(writes.len(), 1);
+                assert_eq!(writes[0].handle.as_str(), "scratchpad");
+            }
+            other => panic!("expected BlockWriteNotifications, got {other:?}"),
+        }
+    }
+
     /// `restore_turns_from_db`'s build_turn_records_from_batch path
     /// prefers persisted origin over batch_type inference when present.
     #[test]

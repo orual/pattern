@@ -41,8 +41,8 @@
 
 use genai::chat::ChatMessage;
 use pattern_core::memory::StructuredDocument;
-use pattern_core::types::memory_types::MemoryBlockType;
 
+use super::render::render_block_type;
 use crate::shaper::wrap_system_reminder;
 
 // ---- Public API ------------------------------------------------------------
@@ -107,15 +107,6 @@ fn render_block(block: &StructuredDocument) -> String {
     };
 
     format!("{open_tag}\n{inner}\n{close_tag}")
-}
-
-/// Human-readable label for a [`MemoryBlockType`].
-fn render_block_type(bt: MemoryBlockType) -> &'static str {
-    match bt {
-        MemoryBlockType::Core => "core",
-        MemoryBlockType::Working => "working",
-        _ => "working",
-    }
 }
 
 // ---- Tests -----------------------------------------------------------------

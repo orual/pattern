@@ -85,7 +85,19 @@ mod parity {
         ("RecallReq", &["RecallInsert", "RecallSearch", "RecallGet"]),
         ("MessageReq", &["Ask", "Send", "Reply", "Notify"]),
         ("ShellReq", &["Execute", "Spawn", "Kill", "Status"]),
-        ("FileReq", &["Read", "Write", "ListDir"]),
+        (
+            "FileReq",
+            &[
+                "Read",
+                "Write",
+                "ListDir",
+                "Open",
+                "Close",
+                "Watch",
+                "Reload",
+                "ForceWrite",
+            ],
+        ),
         ("SourcesReq", &["Stream", "Subscribe", "List"]),
         ("McpReq", &["Use"]),
         ("RpcReq", &["Call", "Recv"]),
@@ -246,8 +258,13 @@ mod parity {
         use super::FileReq;
         let _ = FileReq::Read(String::new());
         let _ = FileReq::Write(String::new(), String::new());
-        let _ = FileReq::ListDir(String::new());
-        assert_eq!(count("FileReq"), 3);
+        let _ = FileReq::ListDir(String::new(), String::new());
+        let _ = FileReq::Open(String::new());
+        let _ = FileReq::Close(String::new());
+        let _ = FileReq::Watch(String::new());
+        let _ = FileReq::Reload(String::new());
+        let _ = FileReq::ForceWrite(String::new(), String::new());
+        assert_eq!(count("FileReq"), 8);
     }
 
     #[test]

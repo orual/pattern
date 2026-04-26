@@ -84,6 +84,7 @@ pub struct Message {
 /// cache-stability story — a message's wire bytes stay stable across turns
 /// because the attachments don't mutate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum MessageAttachment {
     /// Memory snapshot attached to a batch-initiating user message
     /// (or to mid-batch tool_result messages when external memory
@@ -134,6 +135,61 @@ pub enum MessageAttachment {
         /// content. Caller handles all formatting.
         content: String,
     },
+    /// An external edit was detected on a file the agent has open or is
+    /// watching. Queued by file-manager listener threads into the
+    /// between-turn async-reminder buffer; the compose-time drain
+    /// splices it onto the next turn's first user message.
+    ///
+    /// The renderer (Task 8) converts this into a `<system-reminder>`
+    /// block showing the path and edit kind.
+    FileEdit {
+        /// Absolute path to the changed file.
+        path: std::path::PathBuf,
+        /// Whether the file was opened for editing or watched read-only.
+        kind: FileEditKind,
+        /// When the external edit was detected.
+        at: jiff::Timestamp,
+        /// Optional unified diff of the change. `None` for watch-only
+        /// files and until Task 8 wires the diff payload.
+        diff: Option<String>,
+    },
+    /// An external edit conflicted with the agent's unsaved CRDT state
+    /// under `RejectAndNotify` policy. The agent must call `File.Reload`
+    /// or `File.ForceWrite` to resolve.
+    ///
+    /// The renderer (Task 8) converts this into a `<system-reminder>`
+    /// block showing the path and conflict details.
+    FileConflict {
+        /// Absolute path to the conflicted file.
+        path: std::path::PathBuf,
+        /// When the conflict was detected.
+        at: jiff::Timestamp,
+    },
+    /// Memory block writes that occurred during a turn. Attached to the
+    /// message that executed the writes (typically the tool_result that
+    /// closed out the dispatch). Replaces the old pseudo-message path
+    /// where `Segment2Pass` rendered `BlockWrite`s as standalone
+    /// synthetic `ChatMessage`s.
+    ///
+    /// The compose-time renderer converts this into a
+    /// `<system-reminder>` block showing what changed, using the same
+    /// body format as the retired `render_change_events` pseudo-message
+    /// renderer.
+    BlockWriteNotifications {
+        /// The block writes that occurred. Rendered as a group into a
+        /// single `<system-reminder>` block at compose time.
+        writes: Vec<crate::types::block::BlockWrite>,
+    },
+}
+
+/// Whether an external edit notification is for a file the agent has
+/// opened for editing or is watching read-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FileEditKind {
+    /// File was opened via `File.Open` — agent has an active CRDT doc.
+    Open,
+    /// File was registered via `File.Watch` — read-only observation.
+    Watch,
 }
 
 /// Whether a [`MessageAttachment::BatchOpeningSnapshot`] is a full memory

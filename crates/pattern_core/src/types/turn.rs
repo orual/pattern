@@ -3,7 +3,7 @@
 //! A *turn* is the unit of agent execution: one activation of the agent loop,
 //! from receiving caller input through producing a final reply and recording
 //! all side effects. Turns are checkpointable (Phase 3) and their outputs
-//! drive pseudo-message emission (Phase 5).
+//! drive attachment rendering via the compose pipeline.
 //!
 //! # Turn contract
 //!

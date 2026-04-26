@@ -202,6 +202,9 @@ which = "8.0"
 # Fuzzy matching
 nucleo = "0.5"
 
+# Glob pattern matching for FilePolicy (v3-sandbox-io Phase 2).
+globset = "0.4"
+
 # Template rendering (zellij layout generation)
 askama = "0.15"
 

@@ -39,16 +39,16 @@ use crate::loro_sync::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConflictPolicy {
     /// Apply external edits via the bridge's `apply_external` regardless of
-    /// whether `disk_doc_matches_disk()`. The block subscriber path uses this
+    /// whether `has_unsaved_edits()` returns true. The block subscriber path uses this
     /// because block-level edits are always delta-based (coming from the
     /// subscriber loop or `apply_external_bytes`, not arbitrary external editors).
     ///
     /// Callers must opt in explicitly; the default is `RejectAndNotify`.
     AutoMerge,
-    /// Before applying an external edit, check whether the on-disk content
-    /// matches the bridge's render of `disk_doc`. If they differ (stale base),
-    /// emit `ExternalChangeEvent::ConflictDetected` and do NOT apply. If they
-    /// match (clean external edit), apply as in `AutoMerge`.
+    /// Before applying an external edit, check whether the agent has
+    /// uncommitted edits in `memory_doc` beyond `last_saved_frontier`. If
+    /// so, emit `ExternalChangeEvent::ConflictDetected` and do NOT apply.
+    /// If memory_doc is in sync (no pending edits), apply as in `AutoMerge`.
     ///
     /// This is the default. Phase 2's `FileHandler` relies on this behaviour to
     /// surface conflicts to the user instead of silently applying a Myers-diff
@@ -221,7 +221,7 @@ struct SharedState {
     /// successful local write (SyncWrite or LocalUpdate that resulted in a
     /// successful `atomic_write`). `None` until the first successful write.
     ///
-    /// Used by `has_unsaved_edits()` and `disk_doc_matches_disk()` to answer
+    /// Used by `has_unsaved_edits()` to answer
     /// "does the current in-memory state differ from what is on disk?". Also
     /// read by Phase 2's `FileHandler` to implement `ConflictPolicy::RejectAndNotify`.
     last_saved_frontier: Mutex<Option<VersionVector>>,
@@ -498,26 +498,89 @@ impl<B: LoroDocBridge> SyncedDoc<B> {
     /// opened) and `memory_doc` is non-empty — the initial seed counts as
     /// "unsaved" because nothing has been written by the agent yet.
     pub fn has_unsaved_edits(&self) -> bool {
-        let frontier = self
+        has_unsaved_edits_internal(&self.inner.memory_doc, &self.inner.shared)
+    }
+
+    /// Force `has_unsaved_edits()` to return `true` by clearing the saved
+    /// frontier. Used in tests to deterministically set up the conflict path
+    /// (external edit arrives after this call → `ConflictDetected` fires)
+    /// without relying on timing between the local-update ingest thread and
+    /// the watcher debounce window.
+    ///
+    /// Available under `#[cfg(test)]` (unit tests) and when the `test-support`
+    /// feature is enabled (integration tests in `tests/`).
+    /// Never call this in production code.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn clear_saved_frontier_for_test(&self) {
+        *self.inner.shared.last_saved_frontier.lock().unwrap() = None;
+    }
+
+    /// Discard uncommitted memory_doc edits and replace with current disk content.
+    ///
+    /// Recovery path from `FileConflict` when the agent decides to take
+    /// the disk version. Applies disk content directly to memory_doc via
+    /// the bridge (Myers-diff to target state), then syncs disk_doc to
+    /// match. After reload, `has_unsaved_edits()` returns `false`.
+    ///
+    /// Also updates `last_saved_frontier`, `last_written_mtime`, and
+    /// `last_written_hash` to reflect the current file state.
+    ///
+    /// **Note on op-log retention:** the agent's pre-reload ops are not
+    /// deleted from memory_doc's op log — Myers-diff produces new ops that
+    /// transform the current text to disk content. The discarded edits
+    /// remain in history and could potentially be resurrected via Loro's
+    /// `checkout`/`travel`-style APIs in a future "undo reload" path.
+    /// Op-log growth from repeated reloads will be addressed by snapshot/
+    /// trim policy at session restart.
+    pub fn reload(&self) -> Result<Vec<u8>, SyncedDocError> {
+        let path = &self.inner.path;
+        let disk_bytes = std::fs::read(path).map_err(|e| SyncedDocError::Io {
+            path: path.clone(),
+            source: e,
+        })?;
+
+        // Apply disk content to memory_doc. The bridge's `apply_external`
+        // uses Myers-diff (`text.update_by_line`) which transforms
+        // memory_doc's text to match disk_bytes, regardless of what
+        // memory_doc currently contains. This effectively discards all
+        // pending agent edits.
+        self.inner
+            .bridge
+            .apply_external(&self.inner.memory_doc, &disk_bytes, path)
+            .map_err(SyncedDocError::Bridge)?;
+        self.inner.memory_doc.commit();
+
+        // Capture memory_doc's version vector before exporting ops.
+        let mem_vv_before_export = self.inner.disk_doc.oplog_vv();
+
+        // Export memory_doc's new ops and import into disk_doc to keep
+        // them in sync.
+        let update = self
             .inner
-            .shared
-            .last_saved_frontier
-            .lock()
-            .unwrap()
-            .clone();
-        match frontier {
-            None => {
-                // No local write has ever succeeded. Treat as unsaved.
-                true
-            }
-            Some(saved_vv) => {
-                // Check if memory_doc's oplog contains ops not in the
-                // saved frontier. If the version vectors differ, there are
-                // unsaved edits.
-                let current_vv = self.inner.memory_doc.oplog_vv();
-                current_vv != saved_vv
-            }
+            .memory_doc
+            .export(loro::ExportMode::updates(&mem_vv_before_export))
+            .map_err(|e| SyncedDocError::Watcher {
+                path: path.to_owned(),
+                message: format!("reload export failed: {e}"),
+            })?;
+        if let Err(e) = self.inner.disk_doc.import(&update) {
+            tracing::debug!(path = ?path, error = %e, "failed to import reload update into disk_doc");
         }
+
+        // Update echo-suppression and frontier state.
+        if let Ok(meta) = std::fs::metadata(path)
+            && let Ok(mtime) = meta.modified()
+        {
+            *self.inner.shared.last_written_mtime.lock().unwrap() = Some(mtime);
+        }
+        let hash: [u8; 32] = *blake3::hash(&disk_bytes).as_bytes();
+        *self.inner.shared.last_written_hash.lock().unwrap() = Some(hash);
+
+        // Set last_saved_frontier to memory_doc's current vv — no unsaved edits remain.
+        *self.inner.shared.last_saved_frontier.lock().unwrap() =
+            Some(self.inner.memory_doc.oplog_vv());
+
+        Ok(disk_bytes)
     }
 
     /// Apply external bytes directly, bypassing the watcher subscription.
@@ -643,13 +706,23 @@ fn open_impl<B: LoroDocBridge>(
     // cache.rs.
     let disk_doc = Arc::new(memory_doc.fork());
 
+    // Initialize last_saved_frontier to the current oplog vv. At open time,
+    // memory_doc and disk_doc are in sync (both seeded from disk content).
+    // Setting the frontier means `has_unsaved_edits()` returns `false` for
+    // a freshly opened file with no agent edits — so external writes apply
+    // cleanly under RejectAndNotify instead of being treated as conflicts.
+    let initial_frontier = if bytes.is_empty() {
+        None
+    } else {
+        Some(memory_doc.oplog_vv())
+    };
+
     let shared = Arc::new(SharedState {
         last_written_mtime: Mutex::new(initial_mtime),
         last_written_hash: Mutex::new(initial_hash),
         external_subscribers: Mutex::new(Vec::new()),
         write_subscribers: Mutex::new(Vec::new()),
-        // No local write has occurred yet — the doc was just opened from disk.
-        last_saved_frontier: Mutex::new(None),
+        last_saved_frontier: Mutex::new(initial_frontier),
         conflict_policy: cfg.conflict_policy,
     });
 
@@ -771,9 +844,7 @@ fn wire_watcher(
                         if cancel2.is_cancelled() {
                             break;
                         }
-                        match ext_rx
-                            .recv_timeout(std::time::Duration::from_millis(50))
-                        {
+                        match ext_rx.recv_timeout(std::time::Duration::from_millis(50)) {
                             Ok(ev) => {
                                 let _ = ingest_tx.try_send(IngestEvent::External(ev));
                             }
@@ -832,9 +903,7 @@ fn wire_watcher(
                         if cancel2.is_cancelled() {
                             break;
                         }
-                        match ext_rx
-                            .recv_timeout(std::time::Duration::from_millis(50))
-                        {
+                        match ext_rx.recv_timeout(std::time::Duration::from_millis(50)) {
                             Ok(ev) => {
                                 let _ = ingest_tx.try_send(IngestEvent::External(ev));
                             }
@@ -1051,22 +1120,12 @@ fn handle_external_event<B: LoroDocBridge>(
             }
         }
         ConflictPolicy::RejectAndNotify => {
-            // Compare the just-read disk content against the bridge's render
-            // of `disk_doc` (what we believe is on disk). If they differ,
-            // the external writer had a stale view — emit ConflictDetected and
-            // do not apply.
-            if disk_content_matches_disk_doc_render(&bytes, disk_doc, bridge) {
-                // Clean external edit: the writer was working from the same
-                // base as our disk_doc. Apply normally.
-                if let Err(e) = apply_external(&bytes, path, disk_doc, memory_doc, bridge, shared)
-                {
-                    tracing::warn!(
-                        path = ?path, error = %e,
-                        "apply_external failed in RejectAndNotify clean-edit path"
-                    );
-                }
-            } else {
-                // Stale-base: the external writer did not see our last write.
+            // Only emit ConflictDetected if the agent has uncommitted
+            // memory_doc edits beyond last_saved_frontier. If memory_doc is
+            // in sync with disk (no pending edits), the external write is a
+            // clean external sync — apply normally and emit Applied.
+            if has_unsaved_edits_internal(memory_doc, shared) {
+                // Agent has pending edits. External write conflicts.
                 // Do NOT apply. Emit ConflictDetected so the caller can decide.
                 let frontier = shared.last_saved_frontier.lock().unwrap().clone();
                 let ev = ExternalChangeEvent::ConflictDetected {
@@ -1084,27 +1143,32 @@ fn handle_external_event<B: LoroDocBridge>(
                         Err(crossbeam_channel::TrySendError::Disconnected(_))
                     )
                 });
+            } else {
+                // No pending agent edits. Clean external edit — apply normally.
+                if let Err(e) = apply_external(&bytes, path, disk_doc, memory_doc, bridge, shared) {
+                    tracing::warn!(
+                        path = ?path, error = %e,
+                        "apply_external failed in RejectAndNotify clean-edit path"
+                    );
+                }
             }
         }
     }
 }
 
-/// Compare disk bytes against the bridge's render of `disk_doc`. Returns
-/// `true` when they match (no stale-base drift). Used by
-/// `ConflictPolicy::RejectAndNotify` to avoid a second `fs::read` call when
-/// we already have the bytes from the external-event handler.
-fn disk_content_matches_disk_doc_render<B: LoroDocBridge>(
-    disk_bytes: &[u8],
-    disk_doc: &Arc<LoroDoc>,
-    bridge: &Arc<B>,
-) -> bool {
-    match bridge.render(disk_doc) {
-        Ok((_ext, rendered)) => disk_bytes == rendered.as_slice(),
-        Err(e) => {
-            // If render fails we cannot determine match — treat as mismatch
-            // (safe default: don't silently apply a potentially conflicting edit).
-            tracing::warn!(error = %e, "disk_doc render failed during conflict check; treating as stale");
-            false
+/// Free helper: returns `true` iff `memory_doc.oplog_vv()` is strictly ahead
+/// of `last_saved_frontier`. Reusable by the ingest thread without going
+/// through `SyncedDoc::has_unsaved_edits(&self)`.
+fn has_unsaved_edits_internal(memory_doc: &LoroDoc, shared: &SharedState) -> bool {
+    let frontier = shared.last_saved_frontier.lock().unwrap().clone();
+    match frontier {
+        None => {
+            // No local write has ever succeeded. Treat as unsaved.
+            true
+        }
+        Some(saved_vv) => {
+            let current_vv = memory_doc.oplog_vv();
+            current_vv != saved_vv
         }
     }
 }

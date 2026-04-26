@@ -1,17 +1,16 @@
 //! Segment 2 composer pass — prior-turn conversation history +
-//! summary-head prepend + memory-change pseudo-messages + cache marker.
+//! summary-head prepend + inline attachment rendering + cache marker.
 //!
 //! # Message ordering (matters for cache boundary)
 //!
 //! 1. Summary-head messages (synthesized from archive summaries,
 //!    pre-rendered by the caller).
-//! 2. Prior-turn messages (from `TurnHistory::active_messages`).
-//! 3. Memory-change pseudo-messages (from `render_change_events`,
-//!    Task 6 renderer).
+//! 2. Prior-turn Pattern Messages (from `TurnHistory::active_messages`),
+//!    with attachments (snapshots, block-write notifications, file-edit
+//!    reminders, etc.) rendered inline via the `compose::render` module.
 //!
 //! The segment-2 cache marker lands on the **last** message pushed by
-//! this pass. Fresh user input is NOT part of segment 2 — the caller
-//! appends it after all three passes have run, so it remains uncached.
+//! this pass. Fresh user input is handled by [`super::FreshInputPass`].
 //!
 //! # Summary-head rendering
 //!
@@ -19,15 +18,13 @@
 //! (depth, position range, text) into a `ChatMessage::user` wrapped in
 //! `<system-reminder>` tags. The function accepts individual fields
 //! rather than `pattern_db::ArchiveSummary` so `pattern_provider` does
-//! not depend on `pattern_db`. The turn loop in `pattern_runtime` is
-//! responsible for calling this helper with the right fields.
+//! not depend on `pattern_db`.
 
 use genai::chat::ChatMessage;
 use pattern_core::error::ProviderError;
-use pattern_core::types::block::BlockWrite;
-use smol_str::SmolStr;
+use pattern_core::types::message::Message;
 
-use crate::compose::pseudo_messages::render_change_events;
+use crate::compose::render::{render_attachments_for_message, splice_text_onto_message};
 use crate::compose::{BreakpointLocation, CacheProfile, ComposerPass, PartialRequest};
 use crate::shaper::wrap_system_reminder;
 
@@ -58,48 +55,43 @@ pub fn synthesize_summary_message(
 
 // ---- Segment2Pass -----------------------------------------------------------
 
-/// Segment 2: prior-turn conversation history + summary-head +
-/// memory-change pseudo-messages.
+/// Segment 2: prior-turn conversation history + summary-head.
 ///
-/// Does NOT include fresh user input — the caller appends that after
-/// all three passes have run so the cache boundary stays correct.
+/// Takes full Pattern `Message`s for prior-turn history. Attachments
+/// on each message are rendered inline at `apply()` time via
+/// [`crate::compose::render::render_attachments_for_message`] and
+/// spliced onto the corresponding `ChatMessage`. This eliminates the
+/// need for a post-compose attachment splice in the agent loop.
+///
+/// Does NOT include fresh user input — that is handled by
+/// [`super::FreshInputPass`].
 pub struct Segment2Pass {
     /// Pre-rendered summary-head messages. The turn loop calls
     /// [`synthesize_summary_message`] for each `ArchiveSummary` and
     /// passes the results here.
     summary_head_messages: Vec<ChatMessage>,
-    /// Prior-turn messages from `TurnHistory::active_messages`,
-    /// paired with their Pattern `MessageId` for origin tagging.
-    prior_messages: Vec<(SmolStr, ChatMessage)>,
-    /// Pseudo-messages rendered from the most-recent turn's
-    /// `BlockWrite`s via the Task 6 renderer.
-    pseudo_messages: Vec<ChatMessage>,
+    /// Prior-turn Pattern Messages from `TurnHistory::active_messages`.
+    /// Their `attachments` field is rendered inline at `apply()` time.
+    prior_messages: Vec<Message>,
     /// Session-latched cache profile.
     profile: CacheProfile,
 }
 
 impl Segment2Pass {
-    /// Construct from pre-rendered summary-head messages and raw
-    /// prior-turn messages (with their MessageIds) + block writes.
+    /// Construct from pre-rendered summary-head messages and full
+    /// Pattern Messages for prior-turn history.
     ///
-    /// Each prior message is paired with the Pattern `MessageId` it
-    /// originated from. Summary-head and pseudo-messages have no
-    /// Pattern Message identity and are tagged with `None` origin.
-    ///
-    /// The block-write → pseudo-message rendering happens inline
-    /// (via [`render_change_events`]) so the caller doesn't need to
-    /// call the renderer separately.
+    /// Block-write notifications are now carried as
+    /// `MessageAttachment::BlockWriteNotifications` on the relevant
+    /// Pattern Messages — no separate `recent_block_writes` parameter.
     pub fn new(
         summary_head_messages: Vec<ChatMessage>,
-        prior_messages: Vec<(SmolStr, ChatMessage)>,
-        recent_block_writes: &[BlockWrite],
+        prior_messages: Vec<Message>,
         profile: CacheProfile,
     ) -> Self {
-        let pseudo_messages = render_change_events(recent_block_writes);
         Self {
             summary_head_messages,
             prior_messages,
-            pseudo_messages,
             profile,
         }
     }
@@ -111,27 +103,23 @@ impl ComposerPass for Segment2Pass {
     }
 
     fn apply(&self, partial: &mut PartialRequest) -> Result<(), ProviderError> {
-        // Append in canonical order, using push_message to maintain
-        // the message_origins parallel vector.
-
         // Summary-head messages have no Pattern Message identity.
         for msg in &self.summary_head_messages {
             partial.push_message(msg.clone(), None);
         }
 
-        // Prior messages carry their Pattern MessageId as origin.
-        for (id, msg) in &self.prior_messages {
-            partial.push_message(msg.clone(), Some(id.clone()));
-        }
-
-        // Pseudo-messages (block-write notifications) are synthetic.
-        for msg in &self.pseudo_messages {
-            partial.push_message(msg.clone(), None);
+        // Prior messages: render attachments inline, splice, push with origin.
+        for msg in &self.prior_messages {
+            let mut chat = msg.chat_message.clone();
+            if let Some(rendered) = render_attachments_for_message(&msg.attachments) {
+                splice_text_onto_message(&mut chat, &rendered);
+            }
+            partial.push_message(chat, Some(msg.id.clone()));
         }
 
         // Place marker on the last message we just pushed. If we
-        // pushed nothing (empty history + no summaries + no writes),
-        // skip the marker — the segment is empty.
+        // pushed nothing (empty history + no summaries), skip the
+        // marker — the segment is empty.
         if !partial.messages.is_empty() {
             let last_idx = partial.messages.len() - 1;
             let control = self.profile.segment_2_control();
@@ -152,7 +140,9 @@ mod tests {
     use smol_str::SmolStr;
 
     use pattern_core::types::block::{BlockWrite, BlockWriteKind};
+    use pattern_core::types::ids::new_snowflake_id;
     use pattern_core::types::memory_types::MemoryBlockType;
+    use pattern_core::types::message::MessageAttachment;
     use pattern_core::types::origin::{Author, SystemReason};
 
     use crate::compose::breakpoints::BreakpointLocation;
@@ -179,6 +169,25 @@ mod tests {
             author: Author::System {
                 reason: SystemReason::ToolCall,
             },
+        }
+    }
+
+    /// Build a Pattern `Message` from a `ChatMessage` with optional attachments.
+    fn make_pattern_message(
+        id: &str,
+        chat: ChatMessage,
+        attachments: Vec<MessageAttachment>,
+    ) -> Message {
+        Message {
+            chat_message: chat,
+            id: SmolStr::new(id),
+            position: new_snowflake_id(),
+            owner_id: SmolStr::new("agent-1"),
+            created_at: Timestamp::UNIX_EPOCH,
+            batch: new_snowflake_id(),
+            response_meta: None,
+            block_refs: vec![],
+            attachments,
         }
     }
 
@@ -217,28 +226,33 @@ mod tests {
         );
     }
 
-    // ---- AC8.3: pseudo-message in segment 2 after block edits ---------------
+    // ---- BlockWriteNotifications rendered inline in segment 2 ---------------
 
     #[test]
-    fn pseudo_messages_appear_in_segment_2_for_block_writes() {
+    fn block_write_attachments_rendered_inline_in_segment_2() {
         let writes = vec![make_block_write("task_list", BlockWriteKind::Updated)];
         let prior = vec![
-            (SmolStr::new("msg-1"), ChatMessage::user("hello")),
-            (SmolStr::new("msg-2"), ChatMessage::assistant("hi")),
+            make_pattern_message("msg-1", ChatMessage::user("hello"), vec![]),
+            make_pattern_message(
+                "msg-2",
+                ChatMessage::assistant("hi"),
+                vec![MessageAttachment::BlockWriteNotifications { writes }],
+            ),
         ];
 
-        let pass = Segment2Pass::new(vec![], prior, &writes, test_profile());
+        let pass = Segment2Pass::new(vec![], prior, test_profile());
         let mut partial = PartialRequest::new("claude-opus-4-7");
         pass.apply(&mut partial).unwrap();
 
-        // Should have: 2 prior + 1 pseudo = 3 messages.
-        assert_eq!(partial.messages.len(), 3);
+        // Should have: 2 prior messages (no separate pseudo-message).
+        assert_eq!(partial.messages.len(), 2);
 
-        // The pseudo-message must contain [memory:updated].
-        let last_text = msg_text(&partial.messages[2]);
+        // The assistant message (index 1) must have [memory:updated]
+        // rendered inline via its BlockWriteNotifications attachment.
+        let last_text = msg_text(&partial.messages[1]);
         assert!(
             last_text.contains("[memory:updated]"),
-            "pseudo-message missing [memory:updated]: {last_text}"
+            "block write attachment not rendered inline: {last_text}"
         );
     }
 
@@ -247,9 +261,13 @@ mod tests {
     #[test]
     fn summary_head_messages_appear_before_prior() {
         let summary = synthesize_summary_message(0, "pos_a", "pos_b", "summary text");
-        let prior = vec![(SmolStr::new("msg-1"), ChatMessage::user("recent message"))];
+        let prior = vec![make_pattern_message(
+            "msg-1",
+            ChatMessage::user("recent message"),
+            vec![],
+        )];
 
-        let pass = Segment2Pass::new(vec![summary], prior, &[], test_profile());
+        let pass = Segment2Pass::new(vec![summary], prior, test_profile());
         let mut partial = PartialRequest::new("claude-opus-4-7");
         pass.apply(&mut partial).unwrap();
 
@@ -271,12 +289,12 @@ mod tests {
     #[test]
     fn marker_placed_on_last_message() {
         let prior = vec![
-            (SmolStr::new("msg-1"), ChatMessage::user("msg1")),
-            (SmolStr::new("msg-2"), ChatMessage::assistant("msg2")),
-            (SmolStr::new("msg-3"), ChatMessage::user("msg3")),
+            make_pattern_message("msg-1", ChatMessage::user("msg1"), vec![]),
+            make_pattern_message("msg-2", ChatMessage::assistant("msg2"), vec![]),
+            make_pattern_message("msg-3", ChatMessage::user("msg3"), vec![]),
         ];
 
-        let pass = Segment2Pass::new(vec![], prior, &[], test_profile());
+        let pass = Segment2Pass::new(vec![], prior, test_profile());
         let mut partial = PartialRequest::new("claude-opus-4-7");
         pass.apply(&mut partial).unwrap();
 
@@ -295,7 +313,7 @@ mod tests {
 
     #[test]
     fn empty_segment_2_no_marker() {
-        let pass = Segment2Pass::new(vec![], vec![], &[], test_profile());
+        let pass = Segment2Pass::new(vec![], vec![], test_profile());
         let mut partial = PartialRequest::new("claude-opus-4-7");
         pass.apply(&mut partial).unwrap();
 
@@ -303,26 +321,23 @@ mod tests {
         assert_eq!(partial.breakpoints.count(), 0);
     }
 
-    // ---- Cache control from profile -----------------------------------------
-
     // ---- message_origins populated correctly ----------------------------------
 
     #[test]
     fn message_origins_tags_prior_messages_with_ids() {
         let summary = synthesize_summary_message(0, "pos_a", "pos_b", "summary");
         let prior = vec![
-            (SmolStr::new("id-aaa"), ChatMessage::user("hello")),
-            (SmolStr::new("id-bbb"), ChatMessage::assistant("hi")),
+            make_pattern_message("id-aaa", ChatMessage::user("hello"), vec![]),
+            make_pattern_message("id-bbb", ChatMessage::assistant("hi"), vec![]),
         ];
-        let writes = vec![make_block_write("tasks", BlockWriteKind::Updated)];
 
-        let pass = Segment2Pass::new(vec![summary], prior, &writes, test_profile());
+        let pass = Segment2Pass::new(vec![summary], prior, test_profile());
         let mut partial = PartialRequest::new("claude-opus-4-7");
         pass.apply(&mut partial).unwrap();
 
-        // Expected order: [summary(None), prior-aaa(Some), prior-bbb(Some), pseudo(None)].
-        assert_eq!(partial.messages.len(), 4);
-        assert_eq!(partial.message_origins.len(), 4);
+        // Expected order: [summary(None), prior-aaa(Some), prior-bbb(Some)].
+        assert_eq!(partial.messages.len(), 3);
+        assert_eq!(partial.message_origins.len(), 3);
         assert_eq!(partial.message_origins[0], None, "summary should be None");
         assert_eq!(
             partial.message_origins[1],
@@ -334,20 +349,115 @@ mod tests {
             Some(SmolStr::new("id-bbb")),
             "second prior should carry its id"
         );
-        assert_eq!(partial.message_origins[3], None, "pseudo should be None");
     }
 
     // ---- Cache control from profile -----------------------------------------
 
     #[test]
     fn cache_control_uses_segment_2_control() {
-        let prior = vec![(SmolStr::new("msg-1"), ChatMessage::user("msg"))];
-        let pass = Segment2Pass::new(vec![], prior, &[], test_profile());
+        let prior = vec![make_pattern_message(
+            "msg-1",
+            ChatMessage::user("msg"),
+            vec![],
+        )];
+        let pass = Segment2Pass::new(vec![], prior, test_profile());
         let mut partial = PartialRequest::new("claude-opus-4-7");
         pass.apply(&mut partial).unwrap();
 
         let placements = partial.breakpoints.placements();
         // All-1h default profile per long-running-agent policy.
         assert_eq!(placements[0].control, CacheControl::Ephemeral1h);
+    }
+
+    // ---- Tool-result message with FileEdit attachment via compose pipeline ---
+
+    /// Bug-fix verification test: a tool-result Pattern Message with a
+    /// FileEdit attachment, walked through the compose pipeline, must have
+    /// the `<system-reminder>` block rendered on the tool-result message.
+    /// This is the gap the previous architecture had — tool-result messages
+    /// in history might not have their attachments rendered if
+    /// `message_origins` didn't tag them correctly.
+    #[test]
+    fn tool_result_with_file_edit_attachment_renders_via_compose() {
+        use genai::chat::{ContentPart, MessageContent, ToolResponse};
+
+        let tool_response = ToolResponse {
+            call_id: "call-123".to_string(),
+            content: serde_json::json!("file written successfully"),
+        };
+        let tool_msg = ChatMessage {
+            role: genai::chat::ChatRole::Tool,
+            content: MessageContent::from_parts(vec![ContentPart::ToolResponse(tool_response)]),
+            options: None,
+        };
+        let prior = vec![
+            make_pattern_message("msg-1", ChatMessage::user("write a file"), vec![]),
+            make_pattern_message("msg-2", ChatMessage::assistant("calling tool"), vec![]),
+            make_pattern_message(
+                "msg-3",
+                tool_msg,
+                vec![MessageAttachment::FileEdit {
+                    path: std::path::PathBuf::from("/tmp/test.txt"),
+                    kind: pattern_core::types::message::FileEditKind::Open,
+                    at: Timestamp::from_second(1_745_000_000).unwrap(),
+                    diff: None,
+                }],
+            ),
+        ];
+
+        let pass = Segment2Pass::new(vec![], prior, test_profile());
+        let mut partial = PartialRequest::new("claude-opus-4-7");
+        pass.apply(&mut partial).unwrap();
+
+        assert_eq!(partial.messages.len(), 3);
+
+        // The tool-result message (index 2) must have the FileEdit
+        // attachment rendered inline via splice_text_onto_message.
+        let tool_text = partial.messages[2]
+            .content
+            .parts()
+            .iter()
+            .filter_map(|p| match p {
+                ContentPart::ToolResponse(tr) => {
+                    // The spliced content lives inside the tool response's
+                    // content array as a JSON text block.
+                    Some(tr.content.to_string())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            tool_text.contains("External edit") || tool_text.contains("system-reminder"),
+            "FileEdit attachment not rendered on tool-result message: {tool_text}"
+        );
+    }
+
+    // ---- Assistant message with BlockWrite attachment via compose pipeline ---
+
+    #[test]
+    fn assistant_message_with_block_write_attachment_renders_via_compose() {
+        let writes = vec![make_block_write("scratchpad", BlockWriteKind::Created)];
+        let prior = vec![
+            make_pattern_message("msg-1", ChatMessage::user("remember this"), vec![]),
+            make_pattern_message(
+                "msg-2",
+                ChatMessage::assistant("stored in scratchpad"),
+                vec![MessageAttachment::BlockWriteNotifications { writes }],
+            ),
+        ];
+
+        let pass = Segment2Pass::new(vec![], prior, test_profile());
+        let mut partial = PartialRequest::new("claude-opus-4-7");
+        pass.apply(&mut partial).unwrap();
+
+        assert_eq!(partial.messages.len(), 2);
+
+        // The assistant message must have the block write rendered inline.
+        let text = msg_text(&partial.messages[1]);
+        assert!(
+            text.contains("[memory:written]"),
+            "BlockWrite Created attachment not rendered on assistant message: {text}"
+        );
     }
 }

@@ -15,6 +15,7 @@ mod pattern_kdl;
 
 pub use error::ConfigError;
 pub use pattern_kdl::{
-    BackupSection, IsolateSection, JjSection, ModeKind, MountConfig, MountSection, PersonaBinding,
-    PersonasSection, ProjectSection, load_mount_config, parse_duration_str,
+    BackupSection, FilePolicyMode, FilePolicySection, IsolateSection, JjSection, ModeKind,
+    MountConfig, MountSection, PersonaBinding, PersonasSection, ProjectSection, load_mount_config,
+    parse_duration_str,
 };

@@ -117,7 +117,7 @@ fn shell_stub_reports_not_implemented_hang_free() {
 }
 
 #[test]
-fn file_stub_reports_not_implemented_hang_free() {
+fn file_stub_reports_no_file_manager_hang_free() {
     preflight_or_fail();
     run_stub_case!(
         "file_stub",
@@ -125,7 +125,7 @@ fn file_stub_reports_not_implemented_hang_free() {
         FileHandler,
         (),
         "Pattern.File",
-        "not implemented",
+        "no file manager configured",
     );
 }
 

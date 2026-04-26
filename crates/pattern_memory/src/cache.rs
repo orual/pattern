@@ -843,57 +843,58 @@ impl MemoryCache {
         // content (bridge call → disk_doc update → memory_doc CRDT import).
         //
         // For all other schemas, content is passed through unchanged.
-        let content_to_apply: std::borrow::Cow<[u8]> = if matches!(schema, BlockSchema::Skill { .. }) {
-            match (|| -> Result<Vec<u8>, String> {
-                let mut skill_file = crate::fs::markdown_skill::parse(content)
-                    .map_err(|e| format!("Skill parse failed: {e}"))?;
+        let content_to_apply: std::borrow::Cow<[u8]> =
+            if matches!(schema, BlockSchema::Skill { .. }) {
+                match (|| -> Result<Vec<u8>, String> {
+                    let mut skill_file = crate::fs::markdown_skill::parse(content)
+                        .map_err(|e| format!("Skill parse failed: {e}"))?;
 
-                let file_path = self
-                    .mount_path
-                    .as_deref()
-                    .map(|mp| mp.join(format!("{block_id}.md")));
-                let fp_ref = self.first_party_skills_dir.as_deref();
-                let mount_paths: Vec<PathBuf> = self
-                    .mount_path
-                    .as_deref()
-                    .map(|mp| vec![mp.to_path_buf()])
-                    .unwrap_or_default();
-                let mount_refs: Vec<&std::path::Path> =
-                    mount_paths.iter().map(|p| p.as_path()).collect();
-                if let Some(ref fp) = file_path {
-                    let source = resolve_source_for_path(fp, fp_ref, &mount_refs);
-                    let provenance = SkillProvenance {
-                        source,
-                        declared_tier: Some(skill_file.metadata.trust_tier),
-                    };
-                    skill_file.metadata.trust_tier = assign_trust_tier(&provenance);
-                }
+                    let file_path = self
+                        .mount_path
+                        .as_deref()
+                        .map(|mp| mp.join(format!("{block_id}.md")));
+                    let fp_ref = self.first_party_skills_dir.as_deref();
+                    let mount_paths: Vec<PathBuf> = self
+                        .mount_path
+                        .as_deref()
+                        .map(|mp| vec![mp.to_path_buf()])
+                        .unwrap_or_default();
+                    let mount_refs: Vec<&std::path::Path> =
+                        mount_paths.iter().map(|p| p.as_path()).collect();
+                    if let Some(ref fp) = file_path {
+                        let source = resolve_source_for_path(fp, fp_ref, &mount_refs);
+                        let provenance = SkillProvenance {
+                            source,
+                            declared_tier: Some(skill_file.metadata.trust_tier),
+                        };
+                        skill_file.metadata.trust_tier = assign_trust_tier(&provenance);
+                    }
 
-                // Re-emit with the corrected trust tier so synced_doc's bridge
-                // processes trust-safe bytes — write_skill_to_loro_doc inside
-                // the bridge will then record the correct tier in disk_doc.
-                let corrected = crate::fs::markdown_skill::emit(
-                    &skill_file.metadata,
-                    &skill_file.extras,
-                    &skill_file.body,
-                )
-                .map_err(|e| format!("Skill emit failed after trust-tier correction: {e}"))?;
-                Ok(corrected.into_bytes())
-            })() {
-                Ok(bytes) => std::borrow::Cow::Owned(bytes),
-                Err(e) => {
-                    tracing::error!(
-                        block_id = %block_id,
-                        error = %e,
-                        "Skill trust-tier enforcement failed; skipping external edit"
-                    );
-                    metrics::counter!("memory.external_edit.import_failed").increment(1);
-                    return;
+                    // Re-emit with the corrected trust tier so synced_doc's bridge
+                    // processes trust-safe bytes — write_skill_to_loro_doc inside
+                    // the bridge will then record the correct tier in disk_doc.
+                    let corrected = crate::fs::markdown_skill::emit(
+                        &skill_file.metadata,
+                        &skill_file.extras,
+                        &skill_file.body,
+                    )
+                    .map_err(|e| format!("Skill emit failed after trust-tier correction: {e}"))?;
+                    Ok(corrected.into_bytes())
+                })() {
+                    Ok(bytes) => std::borrow::Cow::Owned(bytes),
+                    Err(e) => {
+                        tracing::error!(
+                            block_id = %block_id,
+                            error = %e,
+                            "Skill trust-tier enforcement failed; skipping external edit"
+                        );
+                        metrics::counter!("memory.external_edit.import_failed").increment(1);
+                        return;
+                    }
                 }
-            }
-        } else {
-            std::borrow::Cow::Borrowed(content)
-        };
+            } else {
+                std::borrow::Cow::Borrowed(content)
+            };
 
         // Route through synced_doc.apply_external_bytes. This is the single
         // source of truth for the external-edit pipeline: bridge call →
