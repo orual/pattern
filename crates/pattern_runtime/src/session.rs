@@ -299,6 +299,19 @@ pub struct SessionContext {
     /// The `MailboxTask` parks on `notified()` while the session is
     /// busy and wakes on each turn-end edge to drain the queue.
     turn_done: Arc<tokio::sync::Notify>,
+    /// Optional shared [`AgentRegistry`] for inter-session routing.
+    ///
+    /// When `Some`, the session's persona is registered with `Active`
+    /// status at open time (via [`AgentRegistry::register`]) and
+    /// unregistered on drop (via [`RegistryGuard`] held by
+    /// [`TidepoolSession`]). When `None`, the session participates in
+    /// no inter-agent registry — suitable for ephemeral children and
+    /// test sessions that do not need peer-to-peer routing.
+    ///
+    /// The `AgentRouter` looks up recipients here. Wired by the daemon
+    /// via [`SessionContext::with_agent_registry`] before
+    /// `Arc::new(ctx)`.
+    agent_registry: Option<Arc<crate::agent_registry::AgentRegistry>>,
 }
 
 /// Handlers call this to decide whether to short-circuit on soft-cancel.
@@ -506,6 +519,7 @@ impl SessionContext {
             mailbox: crate::mailbox::Mailbox::new(persona.agent_id.clone()).0,
             is_in_turn: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             turn_done: Arc::new(tokio::sync::Notify::new()),
+            agent_registry: None,
         }
     }
 
@@ -742,6 +756,9 @@ impl SessionContext {
             mailbox: crate::mailbox::Mailbox::new(self.agent_id.clone().into()).0,
             is_in_turn: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             turn_done: Arc::new(tokio::sync::Notify::new()),
+            // Ephemeral children do not register with the agent registry —
+            // they are transient and not addressable by peer sessions.
+            agent_registry: None,
         };
         Arc::new(child)
     }
@@ -1047,6 +1064,34 @@ impl SessionContext {
         self.router = router;
         self
     }
+
+    /// Shared [`AgentRegistry`] for inter-session routing, if wired.
+    ///
+    /// `None` for ephemeral children and test sessions that do not need
+    /// peer-to-peer routing. `Some` for daemon-backed sessions where the
+    /// `agent:` scheme router resolves recipients.
+    pub fn agent_registry(&self) -> Option<&Arc<crate::agent_registry::AgentRegistry>> {
+        self.agent_registry.as_ref()
+    }
+
+    /// Builder-style: attach the shared agent registry.
+    ///
+    /// Must be called before `Arc::new(ctx)`. The daemon wires a single
+    /// shared `Arc<AgentRegistry>` to every session it opens; the
+    /// `AgentRouter` holds the same `Arc` and looks up senders here.
+    ///
+    /// Registering the session with `Active` status is done separately
+    /// via [`crate::agent_registry::RegistryGuard::register_active`] at
+    /// the session-open site so the caller can control the persona-id
+    /// used.
+    #[must_use]
+    pub fn with_agent_registry(
+        mut self,
+        registry: Arc<crate::agent_registry::AgentRegistry>,
+    ) -> Self {
+        self.agent_registry = Some(registry);
+        self
+    }
 }
 
 /// A running session: owns the handler bundle, eval worker, and checkpoint log.
@@ -1098,6 +1143,21 @@ pub struct TidepoolSession {
     /// [`CacheProfile::default_anthropic_subscriber`] — all-1h per
     /// the research note in `docs/notes/2026-04-18-cache-ttl-research.md`.
     cache_profile: pattern_provider::compose::CacheProfile,
+    /// RAII guard that unregisters this session from the
+    /// [`AgentRegistry`](crate::agent_registry::AgentRegistry) when the
+    /// session is dropped.
+    ///
+    /// `None` for sessions opened without an agent registry (e.g. test
+    /// sessions, ephemeral children). `Some` when the daemon wires a
+    /// registry via [`SessionContext::with_agent_registry`] and the session
+    /// is registered at open time.
+    ///
+    /// The `JoinSet::Drop` cleans up async tasks; this guard handles the
+    /// synchronous registry unregistration. We hold it here rather than
+    /// on `SessionContext` because `TidepoolSession` owns the session
+    /// lifecycle — the guard fires on `TidepoolSession::drop`, not on
+    /// `SessionContext::drop` (which may be shared via `Arc`).
+    _registry_guard: Option<crate::agent_registry::RegistryGuard>,
 }
 
 impl std::fmt::Debug for TidepoolSession {
@@ -1213,6 +1273,7 @@ impl TidepoolSession {
             preamble: None,
             tasks: tokio::task::JoinSet::new(),
             cache_profile: pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
+            _registry_guard: None,
         })
     }
 
@@ -1393,6 +1454,23 @@ impl TidepoolSession {
         }
 
         session.ctx = Arc::new(ctx_with_paths);
+
+        // Register this session with the AgentRegistry (Phase 4 T4) if the
+        // caller wired a registry via `SessionContext::with_agent_registry`.
+        // The RAII guard is held on `TidepoolSession` so the unregistration
+        // fires when the session is dropped, not when `SessionContext` is
+        // dropped (the ctx `Arc` may be shared after open).
+        if let Some(registry) = session.ctx.agent_registry().cloned() {
+            let persona_id: pattern_core::types::ids::PersonaId =
+                session.ctx.agent_id().into();
+            let mailbox_tx = session.ctx.mailbox().sender();
+            let guard = crate::agent_registry::RegistryGuard::register_active(
+                registry,
+                persona_id,
+                mailbox_tx,
+            );
+            session._registry_guard = Some(guard);
+        }
 
         // Wire the turn sink into the DisplayHandler so Display events
         // flow to CLI/TUI subscribers during eval turns.

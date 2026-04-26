@@ -18,6 +18,7 @@ use pattern_core::types::message::Message;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use tidepool_eval::Value;
 
+use crate::router::{RouterError, ROUTER_ERROR_PREFIX};
 use crate::sdk::describe::{DescribeEffect, EffectDecl};
 use crate::sdk::requests::MessageReq;
 use crate::session::SessionContext;
@@ -174,7 +175,19 @@ fn dispatch_outbound(
     })?;
 
     bridge.route_sync(&sender, recipient, &msg).map_err(|e| {
-        EffectError::Handler(format!("Pattern.Message.{op_name}: routing failed: {e}"))
+        // PersonaNotFound and MailboxClosed carry the ROUTER_ERROR_PREFIX so
+        // consumers (tests, TUI, CLI) can discriminate routing failures from
+        // other handler errors without parsing free-form prose. All other
+        // routing errors surface via the generic "routing failed" wrapper.
+        match &e {
+            RouterError::PersonaNotFound(id) => EffectError::Handler(format!(
+                "{ROUTER_ERROR_PREFIX}PersonaNotFound: {id}"
+            )),
+            RouterError::MailboxClosed => EffectError::Handler(format!(
+                "{ROUTER_ERROR_PREFIX}MailboxClosed"
+            )),
+            _ => EffectError::Handler(format!("Pattern.Message.{op_name}: routing failed: {e}")),
+        }
     })?;
 
     cx.respond(())
@@ -376,5 +389,52 @@ mod tests {
 
         let msgs = pending.lock().unwrap();
         assert_eq!(msgs.len(), 1, "should have 1 pending message");
+    }
+
+    /// AC6.4: sending to a nonexistent agent persona produces an error with
+    /// the ROUTER_ERROR_PREFIX followed by "PersonaNotFound: <persona-id>".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_to_nonexistent_agent_produces_router_error_prefix() {
+        use crate::agent_registry::AgentRegistry;
+        use crate::router::agent::AgentRouter;
+        use crate::router::ROUTER_ERROR_PREFIX;
+
+        let reg = Arc::new(AgentRegistry::new());
+        // No persona registered — any send to agent: scheme is PersonaNotFound.
+        let agent_router = Arc::new(AgentRouter::new(Arc::clone(&reg)));
+        let mut registry = RouterRegistry::new();
+        registry.register(agent_router);
+
+        let db = crate::testing::test_db().await;
+        let ctx = sctx_with_router(registry, db);
+        let table = handler_table();
+
+        let result = tokio::task::spawn_blocking(move || {
+            let cx = EffectContext::with_user(&table, &ctx);
+            let mut h = MessageHandler;
+            h.handle(
+                MessageReq::Send("agent:ghost-persona".into(), "hello?".into()),
+                &cx,
+            )
+        })
+        .await
+        .unwrap();
+
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        // Must start with the well-known prefix.
+        assert!(
+            msg.contains(ROUTER_ERROR_PREFIX),
+            "expected ROUTER_ERROR_PREFIX in error; got: {msg}"
+        );
+        // Must contain the target persona-id fragment.
+        assert!(
+            msg.contains("ghost-persona"),
+            "expected persona-id in error; got: {msg}"
+        );
+        assert!(
+            msg.contains("PersonaNotFound"),
+            "expected PersonaNotFound in error; got: {msg}"
+        );
     }
 }

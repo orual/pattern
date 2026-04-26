@@ -19,6 +19,7 @@
 //! Inter-agent (`agent:`), Discord (`discord:`), Bluesky (`bluesky:`)
 //! routers are future scope.
 
+pub mod agent;
 pub mod cli;
 
 use std::collections::HashMap;
@@ -140,7 +141,34 @@ pub enum RouterError {
     /// The router attempted delivery but failed.
     #[error("route failed: {0}")]
     RouteFailed(String),
+
+    /// No registered persona with the given id. Returned by the
+    /// `agent:` scheme router when the target is unknown or `Inactive`.
+    ///
+    /// Well-known prefix used by the message handler to convert this to
+    /// `EffectError::Handler` with a parseable prefix; see
+    /// [`ROUTER_ERROR_PREFIX`].
+    #[error("persona not found: {0}")]
+    PersonaNotFound(pattern_core::types::ids::PersonaId),
+
+    /// The persona's mailbox channel is closed (the session has ended).
+    /// The sending end was obtained from the registry but the receiving
+    /// end has since been dropped.
+    #[error("persona mailbox is closed")]
+    MailboxClosed,
 }
+
+/// Well-known prefix attached to `EffectError::Handler` messages produced
+/// when an `AgentRouter` call fails. Consumers (tests, TUI, CLI) match on
+/// this prefix to distinguish routing failures from other handler errors
+/// without parsing free-form prose.
+///
+/// Pattern:
+/// ```text
+/// RouterError: PersonaNotFound: <persona-id>
+/// RouterError: MailboxClosed
+/// ```
+pub const ROUTER_ERROR_PREFIX: &str = "RouterError: ";
 
 /// A scheme-specific message router.
 ///

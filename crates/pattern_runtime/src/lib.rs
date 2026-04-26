@@ -9,6 +9,7 @@
 //! - Phase 5: Memory adapter (wraps preserved storage), pseudo-message emission, pre-turn `current_state` pseudo-turn.
 
 pub mod agent_loop;
+pub mod agent_registry;
 pub mod checkpoint;
 pub mod compaction;
 pub mod mailbox;
@@ -24,6 +25,7 @@ pub mod session;
 pub mod spawn;
 pub mod tidepool;
 pub mod timeout;
+pub mod wake;
 pub use runtime::TidepoolRuntime;
 pub use sdk::SdkLocation;
 pub use session::{SessionContext, TidepoolSession};
