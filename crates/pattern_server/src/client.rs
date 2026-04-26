@@ -230,6 +230,43 @@ impl DaemonClient {
         self.inner.rpc(ShutdownRequest).await?;
         Ok(())
     }
+
+    /// Read the current fronting state for the active project mount.
+    ///
+    /// Returns an empty [`WireFrontingSet`] if no project is mounted.
+    pub async fn get_fronting(&self) -> Result<FrontingGetResponse> {
+        let response = self.inner.rpc(FrontingGetRequest {}).await?;
+        Ok(response)
+    }
+
+    /// Set the active fronting personas and optional fallback.
+    ///
+    /// On success, the daemon fans out a [`WireTurnEvent::FrontingChanged`]
+    /// to all subscribers.
+    pub async fn set_fronting(
+        &self,
+        active: Vec<String>,
+        fallback: Option<String>,
+    ) -> Result<FrontingSetResponse> {
+        let response = self
+            .inner
+            .rpc(FrontingSetRequest { active, fallback })
+            .await?;
+        Ok(response)
+    }
+
+    /// Replace the routing rules for the current project mount.
+    ///
+    /// Rules are compiled server-side — invalid regex patterns are rejected
+    /// and the existing rules are left unchanged. On success, the daemon fans
+    /// out a [`WireTurnEvent::FrontingChanged`] to all subscribers.
+    pub async fn update_routing(
+        &self,
+        rules: Vec<WireRoutingRule>,
+    ) -> Result<UpdateRoutingResponse> {
+        let response = self.inner.rpc(UpdateRoutingRequest { rules }).await?;
+        Ok(response)
+    }
 }
 
 #[cfg(test)]

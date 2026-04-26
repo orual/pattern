@@ -90,6 +90,8 @@ pub enum WireEffectCategory {
     Diagnostics,
     #[core(module = "Pattern.Spawn", name = "CatWake")]
     Wake,
+    #[core(module = "Pattern.Spawn", name = "CatFronting")]
+    Fronting,
 }
 
 impl From<WireEffectCategory> for EffectCategory {
@@ -112,6 +114,7 @@ impl From<WireEffectCategory> for EffectCategory {
             WireEffectCategory::Spawn => EffectCategory::Spawn,
             WireEffectCategory::Diagnostics => EffectCategory::Diagnostics,
             WireEffectCategory::Wake => EffectCategory::Wake,
+            WireEffectCategory::Fronting => EffectCategory::Fronting,
         }
     }
 }

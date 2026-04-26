@@ -320,7 +320,7 @@ pub fn build_effect_stack_type(decls: &[EffectDecl]) -> String {
         "'[Memory.Memory, Search.Search, Recall.Recall, Tasks.Tasks, Skills.Skills, ",
         "Message, Display, Time, Log.Log, Shell.Shell, ",
         "File.File, Sources.Sources, Mcp.Mcp, Rpc.Rpc, Spawn, ",
-        "Diagnostics.Diagnostics]"
+        "Diagnostics.Diagnostics, Wake.Wake, Fronting.Fronting]"
     )
     .to_string()
 }
@@ -415,9 +415,9 @@ mod tests {
         );
         assert!(
             preamble.contains(
-                "File.File, Sources.Sources, Mcp.Mcp, Rpc.Rpc, Spawn, Diagnostics.Diagnostics, Wake.Wake]"
+                "File.File, Sources.Sources, Mcp.Mcp, Rpc.Rpc, Spawn, Diagnostics.Diagnostics, Wake.Wake, Fronting.Fronting]"
             ),
-            "missing File/Sources/Mcp/Rpc/Spawn/Diagnostics/Wake in type M"
+            "missing File/Sources/Mcp/Rpc/Spawn/Diagnostics/Wake/Fronting in type M"
         );
     }
 
@@ -517,8 +517,8 @@ mod tests {
             "expected qualified form with Skills after Tasks; got: {stack}"
         );
         assert!(
-            stack.ends_with("Diagnostics.Diagnostics]"),
-            "expected Diagnostics.Diagnostics] at end; got: {stack}"
+            stack.ends_with("Fronting.Fronting]"),
+            "expected Fronting.Fronting] at end; got: {stack}"
         );
     }
 
@@ -656,8 +656,8 @@ mod tests {
             "type M must start in canonical order, got: {row}"
         );
         assert!(
-            row.ends_with("Spawn, Diagnostics.Diagnostics, Wake.Wake]"),
-            "type M must end with Spawn, Diagnostics.Diagnostics, Wake.Wake, got: {row}"
+            row.ends_with("Spawn, Diagnostics.Diagnostics, Wake.Wake, Fronting.Fronting]"),
+            "type M must end with Spawn, Diagnostics.Diagnostics, Wake.Wake, Fronting.Fronting, got: {row}"
         );
     }
 }

@@ -16,6 +16,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use pattern_core::fronting::parse_direct_address;
 use pattern_core::types::ids::PersonaId;
 use pattern_core::types::message::Message;
 use pattern_core::types::origin::MessageOrigin;
@@ -23,6 +24,7 @@ use pattern_core::types::origin::MessageOrigin;
 use crate::agent_registry::AgentRegistry;
 #[cfg(test)]
 use crate::agent_registry::SessionStatus;
+use crate::fronting_dispatch::{FrontingState, dispatch_to_mailboxes};
 use crate::mailbox::MailboxInput;
 use crate::router::{Router, RouterError};
 
@@ -31,14 +33,52 @@ use crate::router::{Router, RouterError};
 /// Backed by an [`Arc<AgentRegistry>`] shared across all sessions in the
 /// same runtime. The router is stateless after construction — all
 /// mutable state lives in the registry.
+///
+/// # Routing behaviour
+///
+/// `AgentRouter` is the single entry point for `agent:` scheme deliveries
+/// per the v3-multi-agent Phase 5 design. Behaviour by `target`:
+///
+/// - `target == "<persona-id>"` (non-empty, not `"auto"`): direct delivery
+///   to the named persona via [`AgentRegistry::route_or_queue`]. Honours the
+///   Phase 4 cycle-3 atomicity guarantees (no silent message loss across
+///   concurrent Draft→Active promotions).
+/// - `target` starts with `@` (e.g. `"@alice"` or `"@alice please…"`):
+///   parse the leading direct-address marker and route direct to that
+///   persona. The `@…` prefix is stripped from the body before delivery.
+/// - `target == ""` or `target == "auto"`: dispatch through the
+///   [`FrontingState`] resolver (Phase 5 T4) — fronting rules, fallback,
+///   fan-out, default-persona. Requires [`Self::with_fronting`]; otherwise
+///   returns [`RouterError::PersonaNotFound`] with id `"<unspecified>"`.
 pub struct AgentRouter {
     registry: Arc<AgentRegistry>,
+    /// Optional fronting-aware dispatch state. When set, `route()` with
+    /// an empty or `"auto"` target consults the resolver. When None,
+    /// such targets fail with `PersonaNotFound("<unspecified>")` so
+    /// callers see a clear "fronting not wired" signal rather than
+    /// silently dropping the message.
+    fronting: Option<FrontingState>,
 }
 
 impl AgentRouter {
-    /// Create a new agent router backed by `registry`.
+    /// Create a new agent router backed by `registry`. Fronting-aware
+    /// dispatch is disabled by default; wire it via
+    /// [`Self::with_fronting`].
     pub fn new(registry: Arc<AgentRegistry>) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            fronting: None,
+        }
+    }
+
+    /// Builder-style: enable fronting-aware dispatch. Production
+    /// callers (the daemon's `get_or_open_session`) wire this so
+    /// unqualified `agent:` / `agent:auto` recipients route through
+    /// the resolver.
+    #[must_use]
+    pub fn with_fronting(mut self, fronting: FrontingState) -> Self {
+        self.fronting = Some(fronting);
+        self
     }
 
     /// Expose the underlying registry (e.g. for session registration).
@@ -71,7 +111,42 @@ impl Router for AgentRouter {
         target: &str,
         body: &Message,
     ) -> Result<(), RouterError> {
-        let id: PersonaId = target.into();
+        // (1) Empty or "auto" target → fronting-aware dispatch.
+        if target.is_empty() || target == "auto" {
+            return match &self.fronting {
+                Some(state) => dispatch_to_mailboxes(&self.registry, state, sender, body).await,
+                None => {
+                    tracing::debug!(
+                        "agent router: empty/auto target with no fronting state wired"
+                    );
+                    Err(RouterError::PersonaNotFound(PersonaId::from("<unspecified>")))
+                }
+            };
+        }
+
+        // (2) `@persona-name` direct addressing in the BODY (recipient
+        // string is just `agent:`, body says `@alice please…`). We've
+        // already handled the empty-target case above, so this branch
+        // fires when callers used `agent:@alice` (legacy / convenience
+        // form) — strip the `@` from the target and route direct.
+        let direct_id: PersonaId =
+            if let Some(stripped) = target.strip_prefix('@') {
+                PersonaId::from(stripped)
+            } else if let Some(parsed) =
+                parse_direct_address(body.chat_message.content.first_text().unwrap_or(""))
+            {
+                // The recipient string is a literal persona id but the
+                // body opens with `@persona-id`. Honour the body's
+                // directive and override target. This keeps the `@`
+                // semantics consistent across SDK call shapes.
+                if parsed.as_str() == target {
+                    PersonaId::from(target)
+                } else {
+                    parsed
+                }
+            } else {
+                PersonaId::from(target)
+            };
 
         let input = MailboxInput {
             from: sender.clone(),
@@ -80,25 +155,20 @@ impl Router for AgentRouter {
 
         // route_or_queue atomically checks status and delivers/queues.
         // Returns PersonaNotFound if the persona is not registered.
-        match self.registry.route_or_queue(&id, input) {
+        match self.registry.route_or_queue(&direct_id, input) {
             Ok(()) => {
-                // Log draft-queuing separately for observability (we can't
-                // tell the outcome from the Ok(()), but the registry already
-                // logged on the draft path internally). Log at trace level
-                // here to keep the hot path quiet.
                 tracing::trace!(
-                    persona_id = %id,
+                    persona_id = %direct_id,
                     "agent router: message dispatched (active deliver or draft queue)"
                 );
                 Ok(())
             }
             Err(RouterError::PersonaNotFound(_)) => {
-                // AC6.4: persona does not exist → surface as error.
                 tracing::debug!(
-                    persona_id = %id,
+                    persona_id = %direct_id,
                     "agent router: persona not found"
                 );
-                Err(RouterError::PersonaNotFound(id))
+                Err(RouterError::PersonaNotFound(direct_id))
             }
             Err(e) => Err(e),
         }

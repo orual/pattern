@@ -59,9 +59,9 @@ use pattern_core::types::provider::{ToolCall, ToolOutcome};
 use crate::sdk::bundle::SdkBundle;
 use crate::sdk::code_tool::{CodeToolInput, template_source};
 use crate::sdk::handlers::{
-    DisplayHandler, FileHandler, LogHandler, McpHandler, MemoryHandler, MessageHandler,
-    RecallHandler, RpcHandler, SearchHandler, ShellHandler, SkillsHandler, SourcesHandler,
-    SpawnHandler, TasksHandler, TimeHandler,
+    DisplayHandler, FileHandler, FrontingHandler, LogHandler, McpHandler, MemoryHandler,
+    MessageHandler, RecallHandler, RpcHandler, SearchHandler, ShellHandler, SkillsHandler,
+    SourcesHandler, SpawnHandler, TasksHandler, TimeHandler,
 };
 use crate::session::SessionContext;
 
@@ -303,6 +303,7 @@ fn run_eval(
         SpawnHandler,
         diagnostics_handler,
         crate::sdk::handlers::WakeHandler,
+        FrontingHandler,
     ];
 
     // Coerce the owned PathBufs into the &[&Path] slice

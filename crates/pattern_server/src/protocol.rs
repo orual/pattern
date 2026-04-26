@@ -104,8 +104,109 @@ pub enum WireTurnEvent {
         /// Sender attribution.
         from: Author,
     },
+    /// The daemon's active fronting set changed.
+    ///
+    /// Emitted after a successful `SetFronting` or `UpdateRouting` RPC, or
+    /// after an agent with `FrontingControl` mutates the set via the SDK.
+    /// Subscribed TUI clients should re-render the fronting status line.
+    ///
+    /// Phase 5 (v3-multi-agent) introduces this variant. Older clients
+    /// that don't understand `FrontingChanged` should skip it.
+    ///
+    /// TODO(T3): `DaemonServer` emits this after each successful
+    /// `update_fronting` call when Block B wiring lands.
+    FrontingChanged {
+        /// Currently active persona IDs (stable `String` for wire stability;
+        /// `PersonaId` is a `SmolStr` alias that serializes identically).
+        active: Vec<String>,
+        /// Fallback persona ID, if configured.
+        fallback: Option<String>,
+        /// Updated routing rules.
+        rules: Vec<WireRoutingRule>,
+    },
     /// Wire turn ended.
     Stop(StopReason),
+}
+
+/// Wire mirror of a routing rule, used in [`WireTurnEvent::FrontingChanged`]
+/// and in the `GetFronting` / `SetFronting` RPCs.
+///
+/// `PersonaId` is represented as `String` on the wire for stability.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireRoutingRule {
+    /// Stable identifier for this rule.
+    pub id: String,
+    /// Pattern type: `"Prefix"`, `"Contains"`, `"TopicTag"`, or `"Regex"`.
+    pub pattern_type: String,
+    /// Pattern value (the prefix string, search term, tag, or regex source).
+    pub pattern_value: String,
+    /// Delivery target persona ID.
+    pub target: String,
+    /// Priority: higher values are evaluated first.
+    pub priority: u32,
+}
+
+/// Wire mirror of [`pattern_core::fronting::FrontingSet`].
+///
+/// Used in `FrontingGetResponse` and `FrontingSetRequest`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireFrontingSet {
+    /// Currently active persona IDs.
+    pub active: Vec<String>,
+    /// Fallback persona ID, if configured.
+    pub fallback: Option<String>,
+    /// Routing rules.
+    pub rules: Vec<WireRoutingRule>,
+}
+
+/// Request payload for [`PatternProtocol::GetFronting`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FrontingGetRequest {}
+
+/// Response to [`PatternProtocol::GetFronting`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FrontingGetResponse {
+    /// Current fronting state.
+    pub set: WireFrontingSet,
+}
+
+/// Request payload for [`PatternProtocol::SetFronting`].
+///
+/// Replaces the active personas and fallback. Use `UpdateRouting` to
+/// modify routing rules independently.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FrontingSetRequest {
+    /// New active persona IDs.
+    pub active: Vec<String>,
+    /// New fallback persona ID, or `None` to enable fan-out mode.
+    pub fallback: Option<String>,
+}
+
+/// Response to [`PatternProtocol::SetFronting`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FrontingSetResponse {
+    /// Whether the update was applied successfully.
+    pub success: bool,
+    /// Error message if `success == false`.
+    pub error: Option<String>,
+}
+
+/// Request payload for [`PatternProtocol::UpdateRouting`].
+///
+/// Replaces the routing rules independently of the active persona set.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateRoutingRequest {
+    /// New routing rules (replaces all existing rules).
+    pub rules: Vec<WireRoutingRule>,
+}
+
+/// Response to [`PatternProtocol::UpdateRouting`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateRoutingResponse {
+    /// Whether the rules were compiled and applied successfully.
+    pub success: bool,
+    /// Error message if `success == false` (e.g. invalid regex in a rule).
+    pub error: Option<String>,
 }
 
 impl WireTurnEvent {
@@ -299,13 +400,6 @@ pub struct CommandResult {
 /// required [`irpc::Service`] / [`irpc::RemoteService`] trait impls.
 /// The daemon server actor receives `PatternMessage` values and pattern-matches
 /// on them to dispatch work.
-///
-/// Design note: `set_fronting(Vec<PersonaId>)` is intentionally not a
-/// separate typed variant here. It routes through [`RunCommand`] until
-/// multi-agent fronting is implemented in a later phase. A dedicated
-/// `SetFronting` variant can be added at that time without breaking the
-/// existing wire contract (irpc is forward-extensible via non-exhaustive
-/// matching on the generated enum).
 #[rpc_requests(message = PatternMessage)]
 #[derive(Serialize, Deserialize, Debug)]
 pub enum PatternProtocol {
@@ -375,6 +469,38 @@ pub enum PatternProtocol {
     /// terminates the process.
     #[rpc(tx = oneshot::Sender<ShutdownResponse>)]
     Shutdown(ShutdownRequest),
+
+    /// Read the current fronting state for the active project mount.
+    ///
+    /// Returns the active personas, fallback, and routing rules as a
+    /// [`FrontingGetResponse`]. If no project is mounted, returns an empty
+    /// `WireFrontingSet`.
+    ///
+    /// Phase 5 (v3-multi-agent) introduces this variant.
+    #[rpc(tx = oneshot::Sender<FrontingGetResponse>)]
+    GetFronting(FrontingGetRequest),
+
+    /// Set the active fronting personas and optional fallback for the current
+    /// project mount.
+    ///
+    /// The mutation is persisted to the mount's DB via
+    /// [`crate::server::ProjectMount::update_fronting`]. On success, fans out
+    /// a [`WireTurnEvent::FrontingChanged`] to all subscribers.
+    ///
+    /// Phase 5 (v3-multi-agent) introduces this variant.
+    #[rpc(tx = oneshot::Sender<FrontingSetResponse>)]
+    SetFronting(FrontingSetRequest),
+
+    /// Replace the routing rules for the current project mount.
+    ///
+    /// Rules are compiled before the write lock is acquired — invalid regex
+    /// patterns are rejected and the existing rules are left unchanged.
+    /// On success, fans out a [`WireTurnEvent::FrontingChanged`] to all
+    /// subscribers.
+    ///
+    /// Phase 5 (v3-multi-agent) introduces this variant.
+    #[rpc(tx = oneshot::Sender<UpdateRoutingResponse>)]
+    UpdateRouting(UpdateRoutingRequest),
 }
 
 #[cfg(test)]
@@ -517,5 +643,99 @@ mod tests {
         assert_eq!(decoded.agent_id, "pattern-default");
         assert_eq!(decoded.persona_name, "Pattern Default");
         assert_eq!(decoded.available_agents.len(), 2);
+    }
+
+    #[test]
+    fn wire_routing_rule_roundtrip() {
+        // Postcard-safe: all fields are plain strings + u32.
+        let rule = WireRoutingRule {
+            id: "rule-1".into(),
+            pattern_type: "Prefix".into(),
+            pattern_value: "!cmd".into(),
+            target: "entropy".into(),
+            priority: 100,
+        };
+        let bytes = postcard::to_allocvec(&rule).unwrap();
+        let decoded: WireRoutingRule = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.id, "rule-1");
+        assert_eq!(decoded.pattern_type, "Prefix");
+        assert_eq!(decoded.priority, 100);
+    }
+
+    #[test]
+    fn wire_fronting_set_roundtrip() {
+        let set = WireFrontingSet {
+            active: vec!["alice".into(), "bob".into()],
+            fallback: Some("charlie".into()),
+            rules: vec![WireRoutingRule {
+                id: "r1".into(),
+                pattern_type: "Contains".into(),
+                pattern_value: "#art".into(),
+                target: "alice".into(),
+                priority: 10,
+            }],
+        };
+        let json = serde_json::to_string(&set).unwrap();
+        let decoded: WireFrontingSet = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.active.len(), 2);
+        assert_eq!(decoded.fallback.as_deref(), Some("charlie"));
+        assert_eq!(decoded.rules.len(), 1);
+
+        // Also verify postcard round-trip.
+        let bytes = postcard::to_allocvec(&set).unwrap();
+        let decoded2: WireFrontingSet = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded2.active, decoded.active);
+    }
+
+    #[test]
+    fn fronting_changed_wire_event_roundtrip() {
+        let event = TaggedTurnEvent {
+            batch_id: "b3".into(),
+            agent_id: "a3".into(),
+            event: WireTurnEvent::FrontingChanged {
+                active: vec!["alice".into()],
+                fallback: None,
+                rules: vec![],
+            },
+        };
+        let bytes = postcard::to_allocvec(&event).unwrap();
+        let decoded: TaggedTurnEvent = postcard::from_bytes(&bytes).unwrap();
+        assert!(matches!(
+            decoded.event,
+            WireTurnEvent::FrontingChanged {
+                ref active,
+                fallback: None,
+                ..
+            } if active == &["alice"]
+        ));
+    }
+
+    #[test]
+    fn fronting_set_request_roundtrip() {
+        let req = FrontingSetRequest {
+            active: vec!["alice".into()],
+            fallback: Some("bob".into()),
+        };
+        let bytes = postcard::to_allocvec(&req).unwrap();
+        let decoded: FrontingSetRequest = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.active, ["alice"]);
+        assert_eq!(decoded.fallback.as_deref(), Some("bob"));
+    }
+
+    #[test]
+    fn update_routing_request_roundtrip() {
+        let req = UpdateRoutingRequest {
+            rules: vec![WireRoutingRule {
+                id: "r2".into(),
+                pattern_type: "Regex".into(),
+                pattern_value: "^hello".into(),
+                target: "orual".into(),
+                priority: 50,
+            }],
+        };
+        let bytes = postcard::to_allocvec(&req).unwrap();
+        let decoded: UpdateRoutingRequest = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.rules.len(), 1);
+        assert_eq!(decoded.rules[0].pattern_type, "Regex");
     }
 }

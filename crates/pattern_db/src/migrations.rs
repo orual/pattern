@@ -41,6 +41,7 @@ static MEMORY_MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!(
             "../migrations/memory/0012_skill_usage_stats.sql"
         )),
+        M::up(include_str!("../migrations/memory/0013_fronting.sql")),
     ])
 });
 

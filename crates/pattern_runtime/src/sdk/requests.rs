@@ -9,6 +9,7 @@
 pub mod diagnostics;
 pub mod display;
 pub mod file;
+pub mod fronting;
 pub mod log;
 pub mod mcp;
 pub mod memory;
@@ -27,6 +28,7 @@ pub mod wake;
 pub use diagnostics::DiagnosticsReq;
 pub use display::DisplayReq;
 pub use file::FileReq;
+pub use fronting::FrontingReq;
 pub use log::LogReq;
 pub use mcp::McpReq;
 pub use memory::MemoryReq;
@@ -122,6 +124,7 @@ mod parity {
             &["List", "GetMetadata", "Load", "Search", "GetUsageStats"],
         ),
         ("WakeReq", &["Register", "Unregister"]),
+        ("FrontingReq", &["Current", "Set", "Route", "Clear"]),
     ];
 
     /// Sanity check: the table isn't empty and each entry lists at least
@@ -130,8 +133,8 @@ mod parity {
     fn parity_table_is_populated() {
         assert_eq!(
             EXPECTED.len(),
-            17,
-            "expected 17 SDK namespaces; update this test when adding/removing one"
+            18,
+            "expected 18 SDK namespaces; update this test when adding/removing one"
         );
         for (enum_name, variants) in EXPECTED {
             assert!(
@@ -383,6 +386,23 @@ mod parity {
         let _ = SkillsReq::Search(String::new());
         let _ = SkillsReq::GetUsageStats(String::new());
         assert_eq!(count("SkillsReq"), 5);
+    }
+
+    #[test]
+    fn fronting_req_variants() {
+        use super::FrontingReq;
+        use super::fronting::WireRoutingRule;
+        use super::fronting::WireMessagePattern;
+        let _ = FrontingReq::Current;
+        let _ = FrontingReq::Set(vec!["alice".to_string()], Some("alice".to_string()));
+        let _ = FrontingReq::Route(vec![WireRoutingRule {
+            id: "r1".to_string(),
+            pattern: WireMessagePattern::Prefix("!cmd".to_string()),
+            target: "alice".to_string(),
+            priority: 1,
+        }]);
+        let _ = FrontingReq::Clear;
+        assert_eq!(count("FrontingReq"), 4);
     }
 
     /// Look up the expected variant count from the table.

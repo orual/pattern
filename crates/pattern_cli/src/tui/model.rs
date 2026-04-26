@@ -289,6 +289,12 @@ impl RenderBatch {
             WireTurnEvent::Stop(_) => {
                 self.streaming = false;
             }
+            WireTurnEvent::FrontingChanged { .. } => {
+                // Phase 5: fronting-state notifications. The TUI's
+                // status line / fronting-status indicator is the
+                // intended consumer; the conversation view does not
+                // render this event as a section.
+            }
         }
     }
 

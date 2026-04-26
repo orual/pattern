@@ -50,6 +50,10 @@ pub enum EffectCategory {
     /// conditions deliver activations to the agent's mailbox. v3-multi-agent
     /// Phase 4.
     Wake,
+    /// The fronting effect (`Pattern.Fronting`) — read and mutate the
+    /// constellation's active fronting set and routing rules. v3-multi-agent
+    /// Phase 5.
+    Fronting,
 }
 
 impl EffectCategory {
@@ -75,6 +79,7 @@ impl EffectCategory {
         Self::Spawn,
         Self::Diagnostics,
         Self::Wake,
+        Self::Fronting,
     ];
 
     /// Canonical type name string. Matches `EffectDecl::type_name`
@@ -98,6 +103,7 @@ impl EffectCategory {
             Self::Spawn => "Spawn",
             Self::Diagnostics => "Diagnostics",
             Self::Wake => "Wake",
+            Self::Fronting => "Fronting",
         }
     }
 
@@ -315,6 +321,7 @@ mod tests {
             EffectCategory::Spawn,
             EffectCategory::Diagnostics,
             EffectCategory::Wake,
+            EffectCategory::Fronting,
         ] {
             // Force exhaustive coverage at compile time. If a new variant
             // is added, the match below stops compiling until it's listed.
@@ -335,7 +342,8 @@ mod tests {
                 | EffectCategory::Rpc
                 | EffectCategory::Spawn
                 | EffectCategory::Diagnostics
-                | EffectCategory::Wake => out.push(cat),
+                | EffectCategory::Wake
+                | EffectCategory::Fronting => out.push(cat),
             }
         }
         out

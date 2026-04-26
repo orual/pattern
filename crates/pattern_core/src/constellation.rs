@@ -154,6 +154,26 @@ pub trait ConstellationRegistry: Send + Sync {
     async fn get(&self, id: &PersonaId) -> Result<Option<PersonaRecord>, RegistryError>;
 }
 
-// `GroupId` is defined in `crate::types::ids` and re-exported from the crate
-// root. `PersonaRecord.group_memberships` uses that type directly; no
-// re-declaration is needed in this module.
+/// Always-empty `ConstellationRegistry` used as a Phase 5 placeholder
+/// until the Phase 6 `pattern_db`-backed implementation lands.
+///
+/// `list` returns `Ok(vec![])` and `get` returns `Ok(None)` for every
+/// id. Daemon callers wire this into `FrontingState` so the
+/// empty-fronting path falls through to
+/// `ResolveOutcome::SystemDefault` (the documented "no fronting
+/// configured" behaviour). Phase 6 will replace this with a real
+/// registry that loads persona records from the project's
+/// `pattern_db`.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EmptyConstellationRegistry;
+
+#[async_trait]
+impl ConstellationRegistry for EmptyConstellationRegistry {
+    async fn list(&self, _scope: RegistryScope) -> Result<Vec<PersonaRecord>, RegistryError> {
+        Ok(Vec::new())
+    }
+
+    async fn get(&self, _id: &PersonaId) -> Result<Option<PersonaRecord>, RegistryError> {
+        Ok(None)
+    }
+}

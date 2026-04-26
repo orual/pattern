@@ -106,8 +106,122 @@ pub(crate) struct ProjectMount {
     /// within the same project share one registry so they can route messages
     /// to each other via the `agent:` scheme. Created with the mount.
     pub agent_registry: Arc<AgentRegistry>,
+    /// Constellation-scoped fronting set. One per mount (a constellation is
+    /// a project's set of personas). Loaded from `fronting_set` /
+    /// `routing_rules` tables in the mount's `memory.db` at attach time;
+    /// mutated through [`Self::update_fronting`] which holds the write lock
+    /// across the in-memory mutate + DB save and rolls back on save failure.
+    ///
+    /// `RoutingTable` deserializes with an empty compiled-regex cache; the
+    /// load path calls [`RoutingTable::compile`] to populate it before
+    /// publishing the value here.
+    ///
+    /// Uses `std::sync::RwLock` (sync) rather than `tokio::sync::RwLock`
+    /// (async) so the same `Arc` can be shared with `SessionContext.fronting_set`,
+    /// which is read by the sync `Pattern.Fronting` handler running on the
+    /// eval-worker OS thread (no ambient tokio runtime there).
+    pub fronting: Arc<std::sync::RwLock<pattern_core::fronting::FrontingSet>>,
     /// Keeps the `MountedStore` alive for RAII (watcher, backup scheduler).
     _mounted: pattern_memory::mount::MountedStore,
+}
+
+impl ProjectMount {
+    /// Atomically mutate the fronting set and persist the change. If the
+    /// DB save fails, the in-memory state is reverted to its pre-mutation
+    /// snapshot before the error is returned, so callers never see a
+    /// committed-in-RAM-but-not-on-disk fronting set.
+    ///
+    /// The write lock is held across the entire sequence (snapshot →
+    /// mutate → save → release-or-revert) to prevent concurrent readers
+    /// from observing a half-saved state.
+    ///
+    /// Returns the new [`FrontingSet`] snapshot on success so the caller
+    /// can fan it out as a [`crate::protocol::WireTurnEvent::FrontingChanged`]
+    /// without re-reading the lock.
+    pub async fn update_fronting<F>(
+        &self,
+        mutator: F,
+    ) -> Result<pattern_core::fronting::FrontingSet, FrontingUpdateError>
+    where
+        F: FnOnce(
+            &mut pattern_core::fronting::FrontingSet,
+        ) -> Result<(), pattern_core::fronting::FrontingLoadError>,
+    {
+        // Phase 1: snapshot + apply mutator under the sync write lock.
+        // Released before the spawn_blocking below so async readers don't
+        // observe the lock held across an await point.
+        let (snapshot, to_save) = {
+            let mut guard = self
+                .fronting
+                .write()
+                .map_err(|_| FrontingUpdateError::PoisonedLock)?;
+            let snap = guard.clone();
+            if let Err(e) = mutator(&mut guard) {
+                // Mutator rejected the change (e.g. invalid regex). The
+                // mutator's contract is "all-or-nothing" but we can't
+                // enforce that, so revert defensively to be safe.
+                *guard = snap;
+                return Err(FrontingUpdateError::Mutator(e));
+            }
+            (snap, guard.clone())
+        };
+
+        // Phase 2: persist on a blocking task (rusqlite is sync).
+        let db = self.db.clone();
+        let save_result = tokio::task::spawn_blocking(
+            move || -> Result<(), pattern_db::error::DbError> {
+                let mut conn = db.get()?;
+                pattern_db::queries::fronting::save_fronting_set(&mut conn, &to_save)
+            },
+        )
+        .await
+        .map_err(FrontingUpdateError::Join)?;
+
+        if let Err(e) = save_result {
+            // DB save failed. Re-take the write lock and revert. Brief
+            // window between phase-1 release and phase-3 reacquire where a
+            // reader could see the about-to-be-reverted state — acceptable
+            // for the rare save-failure path.
+            let mut guard = self
+                .fronting
+                .write()
+                .map_err(|_| FrontingUpdateError::PoisonedLock)?;
+            *guard = snapshot;
+            return Err(FrontingUpdateError::Save(e));
+        }
+
+        // Read the now-saved state for the caller. Brief read-lock
+        // acquire; read poisoning is fatal here too.
+        let final_state = self
+            .fronting
+            .read()
+            .map_err(|_| FrontingUpdateError::PoisonedLock)?
+            .clone();
+        Ok(final_state)
+    }
+}
+
+/// Errors produced by [`ProjectMount::update_fronting`].
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum FrontingUpdateError {
+    /// The caller-supplied mutator returned an error (e.g. an invalid
+    /// regex in a routing rule). In-memory state has been reverted.
+    #[error("fronting mutation rejected: {0}")]
+    Mutator(#[source] pattern_core::fronting::FrontingLoadError),
+    /// The DB save failed. In-memory state has been reverted to match
+    /// what's on disk.
+    #[error("fronting save failed: {0}")]
+    Save(#[source] pattern_db::error::DbError),
+    /// The blocking task that ran the save panicked or was cancelled.
+    /// In-memory state may be in an indeterminate state — callers should
+    /// treat this as a hard error and reload from disk on next access.
+    #[error("fronting save task failed to join: {0}")]
+    Join(#[source] tokio::task::JoinError),
+    /// The fronting RwLock was poisoned by a panic in another thread
+    /// holding it. Treat as fatal; the daemon should restart.
+    #[error("fronting lock poisoned (a thread panicked while holding it)")]
+    PoisonedLock,
 }
 
 /// A cached agent session: the tidepool session and its multiplexing sink.
@@ -604,6 +718,145 @@ impl DaemonServer {
                     std::process::exit(0);
                 });
             }
+            PatternMessage::GetFronting(req) => {
+                let WithChannels { tx, .. } = req;
+                // Build the response under a synchronous read lock, then drop
+                // the guard before the async `tx.send(...).await` so the guard
+                // (which is not `Send`) is never held across an await point.
+                let response = if let Some(mount) = &self.current_mount {
+                    match mount.fronting.read() {
+                        Ok(guard) => {
+                            let rules = guard
+                                .routing
+                                .rules
+                                .iter()
+                                .map(|r| {
+                                    let (pt, pv) = wire_pattern(&r.pattern);
+                                    WireRoutingRule {
+                                        id: r.id.clone(),
+                                        pattern_type: pt.to_string(),
+                                        pattern_value: pv,
+                                        target: r.target.to_string(),
+                                        priority: r.priority,
+                                    }
+                                })
+                                .collect();
+                            FrontingGetResponse {
+                                set: WireFrontingSet {
+                                    active: guard
+                                        .active
+                                        .iter()
+                                        .map(|id| id.to_string())
+                                        .collect(),
+                                    fallback: guard
+                                        .fallback
+                                        .as_ref()
+                                        .map(|id| id.to_string()),
+                                    rules,
+                                },
+                            }
+                            // `guard` drops here — lock released before await.
+                        }
+                        Err(_) => {
+                            warn!("fronting lock poisoned; returning empty set");
+                            FrontingGetResponse {
+                                set: WireFrontingSet {
+                                    active: vec![],
+                                    fallback: None,
+                                    rules: vec![],
+                                },
+                            }
+                        }
+                    }
+                } else {
+                    FrontingGetResponse {
+                        set: WireFrontingSet {
+                            active: vec![],
+                            fallback: None,
+                            rules: vec![],
+                        },
+                    }
+                };
+                let _ = tx.send(response).await;
+            }
+            PatternMessage::SetFronting(req) => {
+                let WithChannels { tx, inner, .. } = req;
+                let response = if let Some(mount) = &self.current_mount {
+                    let active_ids = inner.active.clone();
+                    let fallback_id = inner.fallback.clone();
+                    let result = mount
+                        .update_fronting(|set| {
+                            set.active = active_ids
+                                .into_iter()
+                                .map(|s| pattern_core::types::ids::PersonaId::new(s.as_str()))
+                                .collect();
+                            set.fallback = fallback_id
+                                .map(|s| pattern_core::types::ids::PersonaId::new(s.as_str()));
+                            Ok(())
+                        })
+                        .await;
+                    match result {
+                        Ok(new_set) => {
+                            self.fan_out_fronting_changed(&new_set).await;
+                            FrontingSetResponse {
+                                success: true,
+                                error: None,
+                            }
+                        }
+                        Err(e) => FrontingSetResponse {
+                            success: false,
+                            error: Some(e.to_string()),
+                        },
+                    }
+                } else {
+                    FrontingSetResponse {
+                        success: false,
+                        error: Some(
+                            "no project mounted — send InitSession first".to_string(),
+                        ),
+                    }
+                };
+                let _ = tx.send(response).await;
+            }
+            PatternMessage::UpdateRouting(req) => {
+                let WithChannels { tx, inner, .. } = req;
+                let response = if let Some(mount) = &self.current_mount {
+                    let wire_rules = inner.rules.clone();
+                    let result = mount
+                        .update_fronting(|set| {
+                            let domain_rules: Vec<pattern_core::fronting::RoutingRule> =
+                                wire_rules.into_iter().map(wire_rule_to_domain).collect();
+                            // `try_from_rules` returns `FrontingLoadError` on
+                            // invalid regex — propagate directly with `?`.
+                            let table =
+                                pattern_core::fronting::RoutingTable::try_from_rules(domain_rules)?;
+                            set.routing = table;
+                            Ok(())
+                        })
+                        .await;
+                    match result {
+                        Ok(new_set) => {
+                            self.fan_out_fronting_changed(&new_set).await;
+                            UpdateRoutingResponse {
+                                success: true,
+                                error: None,
+                            }
+                        }
+                        Err(e) => UpdateRoutingResponse {
+                            success: false,
+                            error: Some(e.to_string()),
+                        },
+                    }
+                } else {
+                    UpdateRoutingResponse {
+                        success: false,
+                        error: Some(
+                            "no project mounted — send InitSession first".to_string(),
+                        ),
+                    }
+                };
+                let _ = tx.send(response).await;
+            }
             PatternMessage::GetClientCount(req) => {
                 let WithChannels { tx, .. } = req;
                 // Dead senders are only lazily pruned during fan_out. Since
@@ -745,6 +998,36 @@ impl DaemonServer {
         )
         .map_err(|e| format!("failed to attach mount at {}: {e}", canonical.display()))?;
 
+        // Load the persisted FrontingSet for this constellation. A missing
+        // row is fine (default-empty); a malformed row is logged and treated
+        // as default so a corrupt fronting_set never blocks mount-attach —
+        // the user can re-set fronting through the SDK or RPC.
+        let fronting_loaded = {
+            let conn_result = mounted.db.get();
+            match conn_result {
+                Ok(conn) => match pattern_db::queries::fronting::load_fronting_set(&conn) {
+                    Ok(Some(set)) => set,
+                    Ok(None) => pattern_core::fronting::FrontingSet::default(),
+                    Err(e) => {
+                        tracing::warn!(
+                            target = "pattern_server::fronting",
+                            error = %e,
+                            "failed to load FrontingSet from DB; starting with default"
+                        );
+                        pattern_core::fronting::FrontingSet::default()
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        target = "pattern_server::fronting",
+                        error = %e,
+                        "failed to acquire DB connection for FrontingSet load; starting with default"
+                    );
+                    pattern_core::fronting::FrontingSet::default()
+                }
+            }
+        };
+
         let mount = Arc::new(ProjectMount {
             cache: mounted.cache.clone(),
             db: mounted.db.clone(),
@@ -752,12 +1035,83 @@ impl DaemonServer {
             // One AgentRegistry per mount: all sessions in this project share
             // it so they can route to each other via the `agent:` scheme.
             agent_registry: Arc::new(AgentRegistry::new()),
+            fronting: Arc::new(std::sync::RwLock::new(fronting_loaded)),
             _mounted: mounted,
         });
 
         self.project_mounts.insert(canonical, mount.clone());
         Ok(mount)
     }
+
+    /// Fan out a `FrontingChanged` event derived from `new_set` to all
+    /// subscribers. Uses the `"fronting"` / `"daemon"` sentinel batch/agent IDs
+    /// so TUI clients can distinguish fronting events from per-agent turn events.
+    async fn fan_out_fronting_changed(
+        &mut self,
+        new_set: &pattern_core::fronting::FrontingSet,
+    ) {
+        let rules = new_set
+            .routing
+            .rules
+            .iter()
+            .map(|r| {
+                let (pt, pv) = wire_pattern(&r.pattern);
+                WireRoutingRule {
+                    id: r.id.clone(),
+                    pattern_type: pt.to_string(),
+                    pattern_value: pv,
+                    target: r.target.to_string(),
+                    priority: r.priority,
+                }
+            })
+            .collect();
+        let event = TaggedTurnEvent {
+            batch_id: "fronting".into(),
+            agent_id: "daemon".into(),
+            event: WireTurnEvent::FrontingChanged {
+                active: new_set.active.iter().map(|id| id.to_string()).collect(),
+                fallback: new_set.fallback.as_ref().map(|id| id.to_string()),
+                rules,
+            },
+        };
+        self.fan_out(event).await;
+    }
+}
+
+/// Project a [`pattern_core::fronting::MessagePattern`] to its wire representation.
+///
+/// Returns a `(&'static str, String)` pair of `(pattern_type, pattern_value)` in
+/// the same format as the [`WireRoutingRule`] fields.
+fn wire_pattern(p: &pattern_core::fronting::MessagePattern) -> (&'static str, String) {
+    match p {
+        pattern_core::fronting::MessagePattern::Prefix(s) => ("Prefix", s.clone()),
+        pattern_core::fronting::MessagePattern::Contains(s) => ("Contains", s.clone()),
+        pattern_core::fronting::MessagePattern::TopicTag(s) => ("TopicTag", s.clone()),
+        pattern_core::fronting::MessagePattern::Regex(s) => ("Regex", s.clone()),
+        // Forward-compat: unknown patterns are preserved as an opaque pair so
+        // they survive a round-trip without being silently dropped.
+        _ => ("Unknown", String::new()),
+    }
+}
+
+/// Convert a [`WireRoutingRule`] from the RPC wire format to a domain
+/// [`pattern_core::fronting::RoutingRule`].
+fn wire_rule_to_domain(w: WireRoutingRule) -> pattern_core::fronting::RoutingRule {
+    let pattern = match w.pattern_type.as_str() {
+        "Prefix" => pattern_core::fronting::MessagePattern::Prefix(w.pattern_value),
+        "Contains" => pattern_core::fronting::MessagePattern::Contains(w.pattern_value),
+        "TopicTag" => pattern_core::fronting::MessagePattern::TopicTag(w.pattern_value),
+        "Regex" => pattern_core::fronting::MessagePattern::Regex(w.pattern_value),
+        // Unknown types round-trip as Prefix with empty value — compilation
+        // will succeed and the rule will match nothing meaningful.
+        _ => pattern_core::fronting::MessagePattern::Prefix(String::new()),
+    };
+    pattern_core::fronting::RoutingRule::new(
+        w.id,
+        pattern,
+        w.target.as_str(),
+        w.priority,
+    )
 }
 
 /// Get or open a session for the given agent.
@@ -811,9 +1165,21 @@ async fn get_or_open_session(
     // explicit `cli:` prefix.
     let (cli_router, _cli_rx) = CliRouter::new();
     let mut router_reg = RouterRegistry::new().with_default_scheme("cli");
-    router_reg.register(Arc::new(AgentRouter::new(
-        project_mount.agent_registry.clone(),
-    )));
+
+    // Phase 5: AgentRouter gains fronting-aware dispatch. The
+    // FrontingState points at the mount's canonical FrontingSet lock
+    // and a placeholder ConstellationRegistry. Phase 6 will swap in a
+    // pattern_db-backed registry; for now an empty in-memory one means
+    // the empty-fronting path falls through to SystemDefault, which
+    // matches the documented "no fronting configured" behaviour.
+    let fronting_state = pattern_runtime::fronting_dispatch::FrontingState::new(
+        project_mount.fronting.clone(),
+        Arc::new(pattern_core::constellation::EmptyConstellationRegistry)
+            as Arc<dyn pattern_core::constellation::ConstellationRegistry>,
+    );
+    router_reg.register(Arc::new(
+        AgentRouter::new(project_mount.agent_registry.clone()).with_fronting(fronting_state),
+    ));
     router_reg.register(Arc::new(cli_router));
     let router_reg = Arc::new(router_reg);
 
@@ -828,6 +1194,7 @@ async fn get_or_open_session(
         agent_registry: Some(project_mount.agent_registry.clone()),
         router_registry: Some(router_reg),
         wake_registry_extras: Some(wake_extras),
+        fronting_set: Some(project_mount.fronting.clone()),
     };
     let session = TidepoolSession::open_with_agent_loop(
         persona,
@@ -1069,6 +1436,9 @@ fn estimate_batch_tokens(user_message: &Option<String>, events: &[WireTurnEvent]
                 total_chars += body.len();
             }
             WireTurnEvent::Stop(_) => {}
+            // FrontingChanged is a notification event (no agent-side
+            // text); does not contribute to token estimates.
+            WireTurnEvent::FrontingChanged { .. } => {}
         }
     }
 

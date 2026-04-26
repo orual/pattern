@@ -42,3 +42,15 @@ pub const GATE_APPROVED_PREFIX: &str = "GateApproved: ";
 /// `starts_with(CAPABILITY_DENIED_PREFIX)` check identifies the
 /// category and the trailing token names the missing flag.
 pub const CAPABILITY_DENIED_PREFIX: &str = "CapabilityDenied: ";
+
+/// Error-message prefix used by [`crate::sdk::handlers::fronting::FrontingHandler`]
+/// when it is invoked on a session that has no `FrontingSet` wired.
+///
+/// A missing fronting set means the daemon's Block B (T3) has not yet wired
+/// `SessionContext::with_fronting_set` — appropriate for test sessions and
+/// non-daemon paths. After T3 lands the daemon always wires a set on session open,
+/// so this prefix should only appear in test sessions.
+///
+/// Tests that verify the not-wired path match on this prefix to distinguish
+/// from capability-denial or other handler errors without parsing free-form prose.
+pub const FRONTING_NOT_WIRED_PREFIX: &str = "FrontingNotWired: ";

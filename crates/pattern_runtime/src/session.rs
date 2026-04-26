@@ -321,6 +321,17 @@ pub struct SessionContext {
     /// and unsubscribes the loro callbacks they hold. Eligible
     /// receivers for wake activations are this session's [`Mailbox`].
     wake_registry: Option<Arc<crate::wake::WakeRegistry>>,
+    /// Shared fronting set for the daemon-level routing configuration.
+    ///
+    /// Populated by daemon callers via `with_fronting_set` when the
+    /// session should have read/write access to the constellation's
+    /// active fronting state. `None` for test sessions and sessions
+    /// that do not participate in the fronting system.
+    ///
+    /// The `Pattern.Fronting` handler returns a
+    /// `FRONTING_NOT_WIRED_PREFIX`-marked error when this field is
+    /// `None` — wiring it is T3's responsibility.
+    fronting_set: Option<Arc<std::sync::RwLock<pattern_core::fronting::FrontingSet>>>,
 }
 
 /// Handlers call this to decide whether to short-circuit on soft-cancel.
@@ -530,6 +541,7 @@ impl SessionContext {
             turn_done: Arc::new(tokio::sync::Notify::new()),
             agent_registry: None,
             wake_registry: None,
+            fronting_set: None,
         }
     }
 
@@ -772,6 +784,9 @@ impl SessionContext {
             // Ephemeral children do not get a wake registry — they are
             // transient and cannot register long-running wake conditions.
             wake_registry: None,
+            // Ephemeral children do not participate in the fronting system —
+            // they are transient workers, not addressable fronting personas.
+            fronting_set: None,
         };
         Arc::new(child)
     }
@@ -1124,6 +1139,33 @@ impl SessionContext {
         self.wake_registry = Some(registry);
         self
     }
+
+    /// Shared fronting set for read/write access from the
+    /// `Pattern.Fronting` handler. `None` for sessions that have not
+    /// been wired with one (test sessions, ephemeral children).
+    ///
+    /// The `Pattern.Fronting` handler returns a
+    /// [`crate::sdk::handlers::fronting::FRONTING_NOT_WIRED_PREFIX`]-marked
+    /// error when this is `None`.
+    pub fn fronting_set(
+        &self,
+    ) -> Option<&Arc<std::sync::RwLock<pattern_core::fronting::FrontingSet>>> {
+        self.fronting_set.as_ref()
+    }
+
+    /// Builder-style: attach a shared `FrontingSet` lock to this session.
+    ///
+    /// Daemon callers wire the constellation-level `Arc<RwLock<FrontingSet>>`
+    /// here so the `Pattern.Fronting` handler can read and mutate it. T3
+    /// (`DaemonServer`) owns and wires the Arc.
+    #[must_use]
+    pub fn with_fronting_set(
+        mut self,
+        fronting: Arc<std::sync::RwLock<pattern_core::fronting::FrontingSet>>,
+    ) -> Self {
+        self.fronting_set = Some(fronting);
+        self
+    }
 }
 
 /// Optional registries passed to [`TidepoolSession::open_with_agent_loop`] to
@@ -1152,6 +1194,15 @@ pub struct SessionRegistries {
     /// with the session's own mailbox sender (not yet available at call-site).
     /// Pass `None` to leave wake support unwired.
     pub wake_registry_extras: Option<WakeRegistryExtras>,
+    /// Optional shared `FrontingSet` lock. When set, the session's
+    /// `Pattern.Fronting` handler reads/mutates this same value (the daemon's
+    /// canonical fronting state). `None` leaves fronting unwired and the
+    /// handler returns `FRONTING_NOT_WIRED_PREFIX`-marked errors.
+    ///
+    /// Phase 5 v3-multi-agent: the daemon constructs one Arc per
+    /// `ProjectMount` and shares it with every session opened against
+    /// that mount.
+    pub fronting_set: Option<Arc<std::sync::RwLock<pattern_core::fronting::FrontingSet>>>,
 }
 
 /// Extras required to construct a [`crate::wake::WakeRegistry`] inside
@@ -1455,7 +1506,7 @@ impl TidepoolSession {
             // Build and wire WakeRegistry from the session's own mailbox sender.
             // Thread the tokio_handle so evaluator tasks can be spawned from the
             // eval-worker OS thread (which has no ambient runtime context).
-            if let Some(extras) = regs.wake_registry_extras {
+            let ctx = if let Some(extras) = regs.wake_registry_extras {
                 let mailbox_tx = ctx.mailbox().sender();
                 let tokio_handle = ctx.tokio_handle().clone();
                 let mut wake_reg =
@@ -1467,6 +1518,14 @@ impl TidepoolSession {
                     wake_reg = wake_reg.with_memory_store(store);
                 }
                 ctx.with_wake_registry(Arc::new(wake_reg))
+            } else {
+                ctx
+            };
+
+            // Wire FrontingSet (Phase 5). Shared with the daemon's
+            // canonical state; used by the Pattern.Fronting handler.
+            if let Some(fronting) = regs.fronting_set {
+                ctx.with_fronting_set(fronting)
             } else {
                 ctx
             }

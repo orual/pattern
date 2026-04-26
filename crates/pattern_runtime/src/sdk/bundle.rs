@@ -24,19 +24,20 @@
 
 use crate::sdk::describe::CollectEffectDecls;
 use crate::sdk::handlers::{
-    DiagnosticsHandler, DisplayHandler, FileHandler, LogHandler, McpHandler, MemoryHandler,
-    MessageHandler, RecallHandler, RpcHandler, SearchHandler, ShellHandler, SkillsHandler,
-    SourcesHandler, SpawnHandler, TasksHandler, TimeHandler, WakeHandler,
+    DiagnosticsHandler, DisplayHandler, FileHandler, FrontingHandler, LogHandler, McpHandler,
+    MemoryHandler, MessageHandler, RecallHandler, RpcHandler, SearchHandler, ShellHandler,
+    SkillsHandler, SourcesHandler, SpawnHandler, TasksHandler, TimeHandler, WakeHandler,
 };
 
-/// The full 17-handler SDK bundle, typed as a `frunk::HList`.
+/// The full 18-handler SDK bundle, typed as a `frunk::HList`.
 ///
 /// Order: `Memory, Search, Recall, Tasks, Skills, Message, Display, Time, Log,
-/// Shell, File, Sources, Mcp, Rpc, Spawn, Diagnostics, Wake`. Search, Recall,
-/// Tasks, and Skills are placed immediately after Memory (storage-adjacent) so
-/// cross-agent search, archival, task-graph, and skill operations cluster
-/// together. Diagnostics is session-level introspection; Wake follows it as
-/// the latest entry — agent programs encode effect positions in their
+/// Shell, File, Sources, Mcp, Rpc, Spawn, Diagnostics, Wake, Fronting`.
+/// Search, Recall, Tasks, and Skills are placed immediately after Memory
+/// (storage-adjacent) so cross-agent search, archival, task-graph, and skill
+/// operations cluster together. Diagnostics is session-level introspection;
+/// Wake follows it as the second-to-last entry; Fronting is appended last
+/// as the newest effect — agent programs encode effect positions in their
 /// `Eff '[...]` row shapes, so adding to the end (rather than mid-list) keeps
 /// previously-compiled programs valid.
 pub type SdkBundle = frunk::HList![
@@ -57,6 +58,7 @@ pub type SdkBundle = frunk::HList![
     SpawnHandler,
     DiagnosticsHandler,
     WakeHandler,
+    FrontingHandler,
 ];
 
 /// Collect [`crate::sdk::describe::EffectDecl`] from every handler in
@@ -108,6 +110,7 @@ pub const CANONICAL_EFFECT_ROW: &[&str] = &[
     "Spawn",
     "Diagnostics",
     "Wake",
+    "Fronting",
 ];
 
 #[cfg(test)]
@@ -115,12 +118,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_decls_has_17_entries() {
+    fn canonical_decls_has_18_entries() {
         let decls = canonical_effect_decls();
         assert_eq!(
             decls.len(),
-            17,
-            "expected 17 handler decls, got {}",
+            18,
+            "expected 18 handler decls, got {}",
             decls.len()
         );
     }
@@ -237,6 +240,38 @@ mod tests {
                 CANONICAL_EFFECT_ROW.contains(&cat.type_name()),
                 "EffectCategory::{cat:?} ({:?}) missing from CANONICAL_EFFECT_ROW",
                 cat.type_name()
+            );
+        }
+    }
+
+    /// Verify `Pattern.Fronting` registers with four constructors and appears
+    /// at slot 17 (0-indexed), the last entry in the canonical row.
+    #[test]
+    fn fronting_effect_registers_with_four_methods_at_tag_17() {
+        let decls = canonical_effect_decls();
+        let (tag, fronting) = decls
+            .iter()
+            .enumerate()
+            .find(|(_, d)| d.type_name == "Fronting")
+            .expect("Fronting must appear in canonical decls");
+        assert_eq!(
+            tag, 17,
+            "Fronting must be at slot 17 (appended after Wake)"
+        );
+        assert_eq!(
+            fronting.constructors.len(),
+            4,
+            "Pattern.Fronting must enumerate all 4 constructors"
+        );
+        let names: std::collections::HashSet<&str> = fronting
+            .constructors
+            .iter()
+            .filter_map(|c| c.split_whitespace().next())
+            .collect();
+        for expected in ["Current", "Set", "Route", "Clear"] {
+            assert!(
+                names.contains(expected),
+                "missing Pattern.Fronting constructor {expected:?}, got {names:?}"
             );
         }
     }

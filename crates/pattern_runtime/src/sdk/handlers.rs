@@ -8,6 +8,7 @@
 pub mod diagnostics;
 pub mod display;
 pub mod file;
+pub mod fronting;
 pub mod log;
 pub mod mcp;
 pub mod memory;
@@ -27,6 +28,7 @@ pub mod wake;
 pub use diagnostics::DiagnosticsHandler;
 pub use display::DisplayHandler;
 pub use file::FileHandler;
+pub use fronting::FrontingHandler;
 pub use log::LogHandler;
 pub use mcp::McpHandler;
 pub use memory::MemoryHandler;
