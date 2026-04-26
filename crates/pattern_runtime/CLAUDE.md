@@ -4,7 +4,7 @@ Agent runtime for Pattern v3. Houses Tidepool (Haskell-in-Rust) embedding, the
 agent turn loop, `freer-simple` effect handlers, and turn-level checkpoint
 machinery. Depends only on `pattern_core` trait definitions.
 
-Last verified: 2026-04-25 (post v3-multi-agent Phase 2)
+Last verified: 2026-04-25 (post v3-multi-agent Phase 3)
 
 v3-TUI integration note: the runtime is consumed by `pattern_server`'s actor
 via `TidepoolSession`, `MultiplexSink`, and per-batch `TurnSinkBridge`. The
@@ -392,6 +392,16 @@ for LLM discoverability. GADT declarations are NOT inlined -- the
 effect modules are imported directly (viable since the tidepool
 multi-module compilation bug was fixed in our fork).
 
+### `populated_spawn_test_table()` (`testing.rs`)
+
+**Feature gate:** `#[cfg(any(test, feature = "test-support"))]`.
+Hand-curated `DataConTable` registration for all `ToCore` wire types
+used by the spawn handler (Phase 3 adds `WireForkOpResult`,
+`WireForkOpKind`, `WireForkHandle`). Integration tests in `tests/`
+that exercise handler dispatch through `tidepool_eval` must call
+`populated_spawn_test_table()` to get a table with the spawn-specific
+DataCon entries, rather than `standard_datacon_table()` which lacks them.
+
 ### In-memory test double (`testing/in_memory_store.rs`)
 
 **Feature gate:** `pub mod testing` is gated behind
@@ -718,7 +728,7 @@ New fields for the capability + permission machinery:
   (admin REPL, audited sandboxed code) may explicitly override the
   slot to a Partner origin before invoking a handler.
 
-Phase 2 spawn fields:
+Phase 2-3 spawn fields:
 
 - `spawn_registry: Arc<SpawnRegistry>` — per-parent child tracking with
   semaphore-bounded ephemeral concurrency (default limit 8). Cancel-on-
@@ -733,10 +743,25 @@ Phase 2 spawn fields:
   Phase 6 replaces with `pattern_db`-backed resolver.
 - `drafts_dir: PathBuf` — root for draft persona KDL files. Default:
   `<XDG_DATA_HOME>/pattern/drafts`.
+- `fork_registry: Arc<dyn ForkRegistry>` (Phase 3) — per-session fork
+  handle tracking. Default: `InMemoryForkRegistry`. Accessed via
+  `fork_registry()`. Forks are session-scoped; when the session drops
+  the registry drops and all outstanding handles are discarded.
+- `memory_cache: Option<Arc<MemoryCache>>` (Phase 3) — the session's
+  live `MemoryCache`. Wired by daemon callers via `with_memory_cache()`.
+  Required for fork dispatch (`handle_fork` fails with an informative
+  error if missing). `fork_for_ephemeral` clones the Arc into child
+  contexts.
+- `mount_info: Option<MountInfo>` (Phase 3) — mount-level metadata
+  (repo_root, workspace_root, StorageMode, jj_enabled). Required for
+  persistent forks; `None` means persistent forks fail with
+  `ForkError::PersistentNotAvailable`, lightweight forks proceed
+  against the in-memory cache only.
 
-New builders: `with_sibling_resolver`, `with_drafts_dir`. New method:
-`fork_for_ephemeral(&self)` (constructs child `SessionContext`). Test-
-only: `replace_spawn_registry_for_test(usize)`.
+New builders: `with_sibling_resolver`, `with_drafts_dir`,
+`with_memory_cache`, `with_mount_info`, `with_fork_registry`. New
+method: `fork_for_ephemeral(&self)` (constructs child `SessionContext`).
+Test-only: `replace_spawn_registry_for_test(usize)`.
 
 New traits:
 
@@ -807,12 +832,12 @@ and `PersonaSnapshot.policy_rules` (`Vec<PolicyRule>` with
 `Precedence::KdlConfig`). `merge_policies(persona)` layers the rules
 over `rust_defaults()` at session open.
 
-## Spawn infrastructure (v3-multi-agent Phase 2)
+## Spawn infrastructure (v3-multi-agent Phases 2-3)
 
 ### `spawn` module
 
 Child session lifecycle: registry, ephemeral runner, sibling resolver,
-draft writer, fork scaffold. Module layout:
+draft writer, fork lifecycle, fork registry. Module layout:
 
 - `spawn::registry` — `SpawnRegistry` (tokio `Semaphore`-bounded,
   `parking_lot::Mutex`-guarded, cancel-on-drop via `Drop` impl).
@@ -848,11 +873,29 @@ draft writer, fork scaffold. Module layout:
 - `spawn::draft` — `RuntimeConfigWriter` writes draft persona KDL to
   `drafts_dir/<id>.kdl`. Creates directories lazily. Writes bypass the
   `Pattern.File` handler policy gate (runtime-authorised bookkeeping).
-- `spawn::fork` — `ForkHandle { fork_id, child_id }`, `WireForkHandle`
-  (`ToCore` derive). `check_promote_capability` gates Phase 3 promote
-  on `SpawnNewIdentities`. `ForkIsolation::Persistent` returns a
-  "deferred to Phase 3" error; `Lightweight` returns a scaffold handle
-  with generated ids.
+- `spawn::fork` — `ForkHandle`, `ForkIsolationState { Resolved |
+  Lightweight | Persistent }`, `ForkError` (16 variants, `#[non_exhaustive]`),
+  `WireForkHandle` (`ToCore` derive). `check_promote_capability` gates
+  promote on `SpawnNewIdentities`. Resolution helpers:
+  `merge_back_lightweight` (CRDT import via `LoroDoc::export_snapshot` +
+  `apply_updates`), `merge_back_persistent` (jj merge commit via
+  `jj new <workspace>@- @` + loro snapshot import), `discard` (consumes
+  handle; lightweight = cancel + drop; persistent = cancel + best-effort
+  `workspace_forget` + `bookmark_delete`), `promote` (consumes handle;
+  writes draft KDL + seed cache to `<drafts_dir>/<persona_id>.cache/`).
+  `Drop` impl aborts the `cancel_watcher` `JoinHandle` on all resolution
+  paths (explicit resolution methods `take()` the watcher first; Drop
+  is a cheap no-op after them; bare-drop aborts to prevent parked-task leak).
+  Persistent forks intentionally do NOT run jj cleanup in Drop (requires
+  async I/O); callers must call `discard` explicitly.
+- `spawn::fork_registry` — `ForkRegistry` trait + `InMemoryForkRegistry`.
+  Per-session tracking of outstanding `ForkHandle`s by id. `insert`,
+  `get` (returns `Arc<Mutex<ForkHandle>>`), `remove` (returns
+  `Option<Option<ForkHandle>>` — outer None = unknown id, inner None =
+  Arc still shared; entry is re-inserted on contention so retry works),
+  `list_ids`. Phase 6 swaps in a DB-backed implementation.
+- `spawn::merge` — `MergeReport { blocks_merged: u32 }`. Returned by
+  both `merge_back_lightweight` and `merge_back_persistent`.
 
 ### `CancelState` Notify-based waiting (Phase 2)
 
@@ -867,18 +910,24 @@ Watcher tasks spawned by `fork_for_ephemeral` capture
 `Drop::abort()` from firing. The registry's `Drop` impl aborts the
 watcher task via the stored `JoinHandle`.
 
-### `Pattern.Spawn` wire grammar (Phase 2)
+### `Pattern.Spawn` wire grammar (Phase 2-3)
 
-6 GADT variants: `Ephemeral | AwaitSpawn | AwaitAll | Fork | Sibling |
-Stop`. Typed records for return values in
+7 GADT variants: `Ephemeral | AwaitSpawn | AwaitAll | Fork | Sibling |
+Stop | ForkOp`. Typed records for return values in
 `sdk::requests::spawn`: `WireEphemeralSpawn`, `WireSpawnResult`,
 `WireSpawnAwaitOutcome` (sum: `Ok(WireSpawnResult) | Fail(String)`),
 `WireForkHandle`, `WireSiblingSpawn` (sum:
-`ExistingActive | NewActive | NewDraft`). No JSON-over-string — typed
-Core values via `FromCore` (incoming) + `ToCore` (outgoing). First
-typed-record returns in the runtime crate. Wire types in
-`sdk/requests/spawn.rs`; Haskell counterpart in
-`haskell/Pattern/Spawn.hs`.
+`ExistingActive | NewActive | NewDraft`), `WireForkOpKind` (sum:
+`MergeBack | Discard | Promote(WirePersonaConfig)`), `WireForkOpResult`
+(sum: `Unit | MergeReport(String) | PersonaId(String)`). No
+JSON-over-string — typed Core values via `FromCore` (incoming) + `ToCore`
+(outgoing). Wire types in `sdk/requests/spawn.rs`; Haskell counterpart
+in `haskell/Pattern/Spawn.hs`.
+
+Haskell helpers for fork resolution: `mergeBack` (non-consuming;
+handle stays in registry), `discardFork` (consuming), `promoteFork`
+(consuming; requires `SpawnNewIdentities`). No `AwaitResult` for
+forks — they are memory snapshots, not running sessions.
 
 ### Spawn handler (`sdk/handlers/spawn.rs`)
 
@@ -887,6 +936,26 @@ Tightened to `EffectHandler<SessionContext>` (was generic
 registry.wait_for(...))` for sync-to-async glue from the eval-worker
 thread. The await target is bounded by `tokio::time::timeout` on the
 child's `run_ephemeral` future — no plugin code in the await path.
+
+Phase 3 additions: `handle_fork` dispatches lightweight and persistent
+paths via `parent.memory_cache()` + `parent.mount_info()`. Spawns a
+parent-to-child cancel-propagation watcher (holds `Weak<CancelState>`
+for the child to break reference cycles). Inserts the handle into
+`parent.fork_registry()`. `handle_fork_persistent` sequence: verify
+mount + jj available, compute bookmark name via
+`fork_bookmark_name(agent, task_ref)`, pre-check bookmark collision,
+`workspace_add` + `bookmark_set` (rollback on failure), fork parent
+cache (rollback workspace + bookmark on failure).
+
+`handle_fork_op` dispatches `WireForkOpKind`:
+- `MergeBack` — non-consuming (`registry.get`); dispatches to
+  `merge_back_lightweight` or `merge_back_persistent` based on
+  isolation mode; returns `WireForkOpResult::MergeReport`.
+- `Discard` — consuming (`registry.remove`); calls `handle.discard()`;
+  returns `WireForkOpResult::Unit`.
+- `Promote` — consuming (`registry.remove`); calls
+  `handle.promote(cfg, drafts_dir)`; returns
+  `WireForkOpResult::PersonaId`.
 
 ### `tokio_handle` threading and `block_on` safety
 

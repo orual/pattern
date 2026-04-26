@@ -254,9 +254,38 @@ translates between the on-disk file format and LoroDoc state.
 
 **Entry point:** `pattern_memory::fs::markdown_skill`
 
+## Fork support (v3-multi-agent Phase 3)
+
+### `MemoryCache` fork helpers (`src/cache.rs`)
+
+Three methods added for the fork lifecycle:
+
+- `fork_for_child(parent_agent, child_agent) -> Result<MemoryCache>` —
+  forks every block whose `agent_id` matches `parent_agent` via
+  `LoroDoc::fork()`, retags the owner to `child_agent`, returns a new
+  `MemoryCache` over the forked docs. Foreign-owned blocks are skipped.
+  Child starts with `dirty = false` (committed CRDT state only; in-flight
+  edits do not transfer). Shared infrastructure (DB handle) is Arc-cloned.
+- `snapshot_cached_docs() -> Vec<StructuredDocument>` — returns cloned
+  `StructuredDocument` instances for every block in the in-memory map.
+  Used by `merge_back_lightweight` to walk the child's blocks.
+- `insert_from_snapshot(agent_id, label, snapshot, schema, block_type)` —
+  inserts a block from a raw Loro snapshot byte slice. Used when a fork
+  created a block that does not exist in the parent. Calls
+  `StructuredDocument::from_snapshot_with_metadata`. Block is in-memory
+  only until next `persist()`.
+
+### `jj::fork_bookmark` (`src/jj/fork_bookmark.rs`)
+
+`fork_bookmark_name(agent, task: Option<&BlockRef>) -> String` —
+constructs the namespaced bookmark `<agent>/<task-slug>` for persistent
+forks. Sanitization via `sanitize_slug`: lowercase ASCII-alphanumeric +
+`-`; leading/trailing dashes trimmed. Empty task slug falls back to
+`anon-<short-uuid>` (first 8 chars of `new_id()`).
+
 ## Status
 
-Last verified: 2026-04-24
+Last verified: 2026-04-25
 
 Created 2026-04-19 during v3-memory-rework Phase 1; populated incrementally
 in Phases 1-8. All 8 phases complete.
