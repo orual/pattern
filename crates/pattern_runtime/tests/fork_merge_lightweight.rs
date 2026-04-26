@@ -370,28 +370,40 @@ proptest! {
         let parent_id = "prop-parent";
         let child_id = "prop-child";
 
+        // Deterministic peer IDs: the SAME peer authors the SAME ops in both
+        // the forward and reversed pair below. With identical (op, peer) sets
+        // applied via Loro's CRDT merge, the final text is byte-identical
+        // regardless of which side held which ops. This is the strict
+        // commutativity property — stronger than word-set equality.
+        const PARENT_PEER: u64 = 0x1111_1111_1111_1111;
+        const CHILD_PEER: u64 = 0x2222_2222_2222_2222;
+
         let parent_cache = open_cache(parent_id, child_id);
         seed_text_block(&parent_cache, parent_id, "notes", "seedword");
-        // Force the block into the cache before forking.
-        let _ = parent_cache.get(parent_id, "notes").unwrap().unwrap();
+        // Force the block into the cache before forking. Pin the parent peer
+        // ID immediately after the seed write commits so subsequent appends
+        // on this side are attributed to PARENT_PEER.
+        let parent_doc = parent_cache.get(parent_id, "notes").unwrap().unwrap();
+        parent_doc.set_peer_id(PARENT_PEER).expect("set parent peer");
 
         let (child_cache, handle) = make_fork_handle(&parent_cache, parent_id, child_id);
+        let child_doc = child_cache
+            .get_cached_doc(child_id, "notes")
+            .expect("child notes block");
+        child_doc.set_peer_id(CHILD_PEER).expect("set child peer");
 
         // Apply parent-side appends (each as a distinct word separated by spaces).
         for text in &parent_appends {
-            let doc = parent_cache
-                .get(parent_id, "notes")
-                .expect("get parent doc")
-                .expect("parent notes block present");
-            doc.append_text(&format!(" {text}"), true).expect("parent append_text");
+            parent_doc
+                .append_text(&format!(" {text}"), true)
+                .expect("parent append_text");
         }
 
         // Apply fork-side appends (same pattern on the child side).
         for text in &fork_appends {
-            let doc = child_cache
-                .get_cached_doc(child_id, "notes")
-                .expect("child notes block");
-            doc.append_text(&format!(" {text}"), true).expect("fork append_text");
+            child_doc
+                .append_text(&format!(" {text}"), true)
+                .expect("fork append_text");
         }
 
         // Merge must succeed without error.
@@ -429,43 +441,47 @@ proptest! {
             );
         }
 
-        // Assertion 4: commutativity — merge(parent_ops into fork) produces
-        // the same WORD-SET as merge(fork_ops into parent) above.
+        // Assertion 4: strict commutativity — merge(child_ops into parent) and
+        // merge(parent_ops into child) yield byte-identical text when the same
+        // (op, peer) pairs participate.
         //
         // We build a second independent fork pair seeded identically. This
-        // time, we apply fork_appends to the new parent (call it P2) and
-        // parent_appends to the new fork (F2). Then we merge F2 into P2.
-        // The resulting word-set in P2 must equal the word-set in P1 (the
-        // original merged result above), because CRDT merge is commutative:
-        // the union of operations is the same regardless of which side holds
-        // which ops.
-        //
-        // We compare word-sets (sorted unique words) rather than raw text
-        // because Loro's deterministic tie-breaking may order concurrent ops
-        // differently when the "first" side swaps — the SET must be identical
-        // even if the string representation isn't byte-for-byte identical.
+        // time the SIDES that hold each set of appends are swapped: P2 holds
+        // fork_appends, F2 holds parent_appends. To preserve byte-equal output,
+        // we keep the (op, peer) attribution stable by setting peer IDs to
+        // CHILD_PEER on P2's side (it now authors what was the child's ops in
+        // pair 1) and PARENT_PEER on F2's side. After merging F2 into P2, the
+        // resulting Loro op-graph contains the same set of (op, peer, lamport)
+        // tuples as pair 1, so the deterministic merge produces identical text.
         {
             let p2_id = "prop-parent-2";
             let c2_id = "prop-child-2";
             let parent_cache_2 = open_cache(p2_id, c2_id);
             seed_text_block(&parent_cache_2, p2_id, "notes", "seedword");
-            let _ = parent_cache_2.get(p2_id, "notes").unwrap().unwrap();
+            // Force the block into the cache and pin peer IDs after the seed
+            // commits. P2 plays the role of "side that authors fork_appends",
+            // so it gets CHILD_PEER. F2 plays "side that authors parent_appends",
+            // so it gets PARENT_PEER.
+            let p2_doc = parent_cache_2.get(p2_id, "notes").unwrap().unwrap();
+            p2_doc.set_peer_id(CHILD_PEER).expect("set p2 peer");
 
             let (child_cache_2, handle_2) = make_fork_handle(&parent_cache_2, p2_id, c2_id);
+            let f2_doc = child_cache_2
+                .get_cached_doc(c2_id, "notes")
+                .expect("c2 notes block");
+            f2_doc.set_peer_id(PARENT_PEER).expect("set f2 peer");
 
-            // Reversed: apply fork_appends to P2, parent_appends to F2.
+            // Reversed: P2 (CHILD_PEER) authors fork_appends, F2 (PARENT_PEER)
+            // authors parent_appends.
             for text in &fork_appends {
-                let doc = parent_cache_2
-                    .get(p2_id, "notes")
-                    .expect("get p2 doc")
-                    .expect("p2 notes block present");
-                doc.append_text(&format!(" {text}"), true).expect("p2 append_text");
+                p2_doc
+                    .append_text(&format!(" {text}"), true)
+                    .expect("p2 append_text");
             }
             for text in &parent_appends {
-                let doc = child_cache_2
-                    .get_cached_doc(c2_id, "notes")
-                    .expect("c2 notes block");
-                doc.append_text(&format!(" {text}"), true).expect("c2 append_text");
+                f2_doc
+                    .append_text(&format!(" {text}"), true)
+                    .expect("f2 append_text");
             }
 
             let _report2 = handle_2
@@ -478,19 +494,13 @@ proptest! {
                 .expect("p2 block must still be present after merge")
                 .text_content();
 
-            // Extract word-sets from both results and compare. Splitting on
-            // whitespace is sufficient because all test words are [a-z]+ and
-            // the seed is "seedword" (no spaces within words).
-            let mut words_1: Vec<&str> = merged.split_whitespace().collect();
-            let mut words_2: Vec<&str> = merged_2.split_whitespace().collect();
-            words_1.sort_unstable();
-            words_1.dedup();
-            words_2.sort_unstable();
-            words_2.dedup();
-            prop_assert!(
-                words_1 == words_2,
-                "merge word-set must be identical regardless of which side's ops come first \
-                 (commutativity); got words_1={words_1:?} words_2={words_2:?}"
+            // Strict commutativity: byte-identical text. With deterministic
+            // peer IDs ensuring the same (op, peer) set in both pairs, Loro's
+            // CRDT merge must produce the same ordering and the same final
+            // text — regardless of which side held which ops before merge.
+            prop_assert_eq!(
+                &merged, &merged_2,
+                "byte-identical merge result required under deterministic peer IDs"
             );
         }
     }
