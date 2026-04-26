@@ -28,6 +28,7 @@ use pattern_core::types::snapshot::{PersonaSnapshot, SessionSnapshot};
 use pattern_core::types::turn::{StepReply, TurnInput};
 
 use crate::agent_loop::EvalWorker;
+use crate::port_registry::PortRegistryImpl;
 use crate::process_manager::ProcessManager;
 
 /// Compose the session's effective [`pattern_core::PolicySet`] from
@@ -206,6 +207,21 @@ pub struct SessionContext {
     /// Default: 30 s (mirrors AC3.1's literal example
     /// `Shell.Execute("echo hello", 30)`).
     shell_default_timeout: std::time::Duration,
+    /// Runtime-global port registry. Cloned Arc from `TidepoolRuntime` at
+    /// session open time. `PortHandler` dispatches through this.
+    ///
+    /// `None` only in test contexts that build a `SessionContext` directly via
+    /// `from_persona` without a `TidepoolRuntime`. Tests that exercise
+    /// `PortHandler` must call `with_port_registry` to inject a real registry.
+    port_registry: Option<Arc<PortRegistryImpl>>,
+    /// Session-scoped identifier (new UUID minted at open time). Used as the
+    /// `session_key` in dispatcher subscription tracking so per-session
+    /// subscriptions can be cancelled independently.
+    ///
+    /// Matches `TidepoolSession::session_id` for sessions opened via
+    /// `TidepoolSession::open`; `from_persona` mints its own id for
+    /// test/standalone use.
+    session_id: String,
 }
 
 /// Handlers call this to decide whether to short-circuit on soft-cancel.
@@ -414,6 +430,12 @@ impl SessionContext {
                     .join("pattern"),
             )),
             shell_default_timeout: std::time::Duration::from_secs(30),
+            // Port registry and session id are `None` / fresh id when building
+            // from persona alone (test / standalone contexts). Callers that
+            // have a `TidepoolRuntime` call `with_port_registry` to wire the
+            // shared registry in before using the context.
+            port_registry: None,
+            session_id: pattern_core::types::ids::new_id().to_string(),
         }
     }
 
@@ -757,6 +779,39 @@ impl SessionContext {
         self.shell_default_timeout = d;
         self
     }
+
+    /// Runtime-global port registry. Returns `None` for sessions built
+    /// without a `TidepoolRuntime` (test/standalone contexts).
+    ///
+    /// `PortHandler` calls `.expect()` on this — sessions that will exercise
+    /// port dispatch must wire a registry via `with_port_registry`.
+    pub fn port_registry(&self) -> Option<&Arc<PortRegistryImpl>> {
+        self.port_registry.as_ref()
+    }
+
+    /// Builder-style: install a runtime-global port registry. Called by
+    /// `TidepoolSession::open` after `from_persona` so the handler bundle
+    /// has access to the shared registry. Also used in integration tests
+    /// that need port dispatch without a full runtime.
+    #[must_use]
+    pub fn with_port_registry(mut self, registry: Arc<PortRegistryImpl>) -> Self {
+        self.port_registry = Some(registry);
+        self
+    }
+
+    /// Session-scoped identifier. Used as the `session_key` in dispatcher
+    /// subscription tracking. Stable for the lifetime of the session.
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// Override the session id. Used by `TidepoolSession::open` to align
+    /// the context's id with the session's id so subscription keys are
+    /// consistent.
+    pub(crate) fn with_session_id(mut self, id: String) -> Self {
+        self.session_id = id;
+        self
+    }
 }
 
 /// A running session: owns the handler bundle, eval worker, and checkpoint log.
@@ -873,6 +928,7 @@ impl TidepoolSession {
         memory_store: Arc<dyn MemoryStore>,
         provider: Arc<dyn ProviderClient>,
         db: Arc<pattern_db::ConstellationDb>,
+        port_registry: Arc<PortRegistryImpl>,
     ) -> Result<Self, RuntimeError> {
         crate::preflight::check()?;
         let _ = sdk; // sdk.resolve() is deferred to open_with_agent_loop
@@ -888,7 +944,9 @@ impl TidepoolSession {
         let current_turn = Arc::new(AtomicU64::new(0));
         let ctx = Arc::new(
             SessionContext::from_persona(&persona, memory_store, provider.clone(), db)
-                .with_checkpoint_log(checkpoint_log.clone(), current_turn),
+                .with_checkpoint_log(checkpoint_log.clone(), current_turn)
+                .with_port_registry(port_registry)
+                .with_session_id(session_id.clone()),
         );
 
         let display = DisplayHandler::new();
@@ -948,6 +1006,7 @@ impl TidepoolSession {
         prelude_dir: Option<PathBuf>,
         mount_path: Option<PathBuf>,
         capabilities: Option<pattern_core::CapabilitySet>,
+        port_registry: Arc<PortRegistryImpl>,
     ) -> Result<Self, RuntimeError> {
         // Capture persona-scoped state we'll seed into the store after the
         // session is constructed. We consume `persona` via `Self::open`
@@ -958,7 +1017,7 @@ impl TidepoolSession {
         let store_for_seed = memory_store.clone();
 
         // Initialise the base session (preflight, context, checkpoint log).
-        let mut session = Self::open(persona, sdk, memory_store, provider, db)?;
+        let mut session = Self::open(persona, sdk, memory_store, provider, db, port_registry)?;
 
         // Seed persona-declared memory blocks into the store. Blocks that
         // already exist (e.g. restored from a persistent DB on re-spawn)
@@ -1400,7 +1459,10 @@ mod tests {
         let persona = PersonaSnapshot::new("agent-a", "A");
         let sdk = SdkLocation::default();
 
-        let session = TidepoolSession::open(persona, &sdk, store, provider, db)
+        let port_registry = std::sync::Arc::new(crate::port_registry::PortRegistryImpl::new(
+            &tokio::runtime::Handle::current(),
+        ));
+        let session = TidepoolSession::open(persona, &sdk, store, provider, db, port_registry)
             .expect("open should succeed when preflight passes");
 
         let result = session.step_with_agent_loop(test_turn_input()).await;
@@ -1474,6 +1536,9 @@ mod tests {
         let sink = Arc::new(VecSink::new());
         let sink_dyn: Arc<dyn TurnSink> = sink.clone();
 
+        let port_registry = std::sync::Arc::new(crate::port_registry::PortRegistryImpl::new(
+            &tokio::runtime::Handle::current(),
+        ));
         let session = TidepoolSession::open_with_agent_loop(
             persona,
             &sdk,
@@ -1484,6 +1549,7 @@ mod tests {
             None,
             None,
             None,
+            port_registry,
         )
         .await
         .expect("open_with_agent_loop should succeed when preflight passes");
@@ -1556,8 +1622,20 @@ mod tests {
         let sink = Arc::new(VecSink::new());
         let sink_dyn: Arc<dyn TurnSink> = sink.clone();
 
+        let port_registry = std::sync::Arc::new(crate::port_registry::PortRegistryImpl::new(
+            &tokio::runtime::Handle::current(),
+        ));
         let session = TidepoolSession::open_with_agent_loop(
-            persona, &sdk, store, provider, db, sink_dyn, None, None, None,
+            persona,
+            &sdk,
+            store,
+            provider,
+            db,
+            sink_dyn,
+            None,
+            None,
+            None,
+            port_registry,
         )
         .await
         .expect("open_with_agent_loop should succeed");

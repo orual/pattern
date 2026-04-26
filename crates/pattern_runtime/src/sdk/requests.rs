@@ -13,12 +13,11 @@ pub mod log;
 pub mod mcp;
 pub mod memory;
 pub mod message;
+pub mod port;
 pub mod recall;
-pub mod rpc;
 pub mod search;
 pub mod shell;
 pub mod skills;
-pub mod sources;
 pub mod spawn;
 pub mod tasks;
 pub mod time;
@@ -30,12 +29,11 @@ pub use log::LogReq;
 pub use mcp::McpReq;
 pub use memory::MemoryReq;
 pub use message::MessageReq;
+pub use port::PortReq;
 pub use recall::RecallReq;
-pub use rpc::RpcReq;
 pub use search::SearchReq;
 pub use shell::ShellReq;
 pub use skills::SkillsReq;
-pub use sources::SourcesReq;
 pub use spawn::SpawnReq;
 pub use tasks::TasksReq;
 pub use time::TimeReq;
@@ -98,9 +96,7 @@ mod parity {
                 "ForceWrite",
             ],
         ),
-        ("SourcesReq", &["Stream", "Subscribe", "List"]),
         ("McpReq", &["Use"]),
-        ("RpcReq", &["Call", "Recv"]),
         ("SpawnReq", &["Start", "Stop"]),
         ("DiagnosticsReq", &["GetDiagnostics"]),
         (
@@ -120,6 +116,7 @@ mod parity {
             "SkillsReq",
             &["List", "GetMetadata", "Load", "Search", "GetUsageStats"],
         ),
+        ("PortReq", &["List", "Call", "Subscribe", "Unsubscribe"]),
     ];
 
     /// Sanity check: the table isn't empty and each entry lists at least
@@ -128,8 +125,8 @@ mod parity {
     fn parity_table_is_populated() {
         assert_eq!(
             EXPECTED.len(),
-            16,
-            "expected 16 SDK namespaces; update this test when adding/removing one"
+            15,
+            "expected 15 SDK namespaces; update this test when adding/removing one"
         );
         for (enum_name, variants) in EXPECTED {
             assert!(
@@ -273,27 +270,10 @@ mod parity {
     }
 
     #[test]
-    fn sources_req_variants() {
-        use super::SourcesReq;
-        let _ = SourcesReq::Stream(String::new());
-        let _ = SourcesReq::Subscribe(String::new(), String::new());
-        let _ = SourcesReq::List;
-        assert_eq!(count("SourcesReq"), 3);
-    }
-
-    #[test]
     fn mcp_req_variants() {
         use super::McpReq;
         let _ = McpReq::Use(String::new(), String::new());
         assert_eq!(count("McpReq"), 1);
-    }
-
-    #[test]
-    fn rpc_req_variants() {
-        use super::RpcReq;
-        let _ = RpcReq::Call(String::new(), String::new());
-        let _ = RpcReq::Recv(String::new());
-        assert_eq!(count("RpcReq"), 2);
     }
 
     #[test]
@@ -339,6 +319,18 @@ mod parity {
         let _ = SkillsReq::Search(String::new());
         let _ = SkillsReq::GetUsageStats(String::new());
         assert_eq!(count("SkillsReq"), 5);
+    }
+
+    #[test]
+    fn port_req_variants() {
+        use super::PortReq;
+        // Exhaustively construct every variant so a rename or added variant
+        // forces a compile error or count mismatch.
+        let _ = PortReq::List;
+        let _ = PortReq::Call(String::new(), String::new(), String::new());
+        let _ = PortReq::Subscribe(String::new(), String::new());
+        let _ = PortReq::Unsubscribe(String::new());
+        assert_eq!(count("PortReq"), 4);
     }
 
     /// Look up the expected variant count from the table.

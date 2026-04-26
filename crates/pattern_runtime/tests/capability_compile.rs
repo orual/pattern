@@ -61,6 +61,9 @@ async fn open_session_with_caps(agent_id: &str, caps: CapabilitySet) -> Tidepool
     let sdk = SdkLocation::default();
     let sink: Arc<dyn TurnSink> = Arc::new(VecSink::new());
 
+    let port_registry = std::sync::Arc::new(pattern_runtime::port_registry::PortRegistryImpl::new(
+        &tokio::runtime::Handle::current(),
+    ));
     TidepoolSession::open_with_agent_loop(
         persona,
         &sdk,
@@ -71,6 +74,7 @@ async fn open_session_with_caps(agent_id: &str, caps: CapabilitySet) -> Tidepool
         None,
         None,
         Some(caps),
+        port_registry,
     )
     .await
     .expect("open_with_agent_loop should succeed")

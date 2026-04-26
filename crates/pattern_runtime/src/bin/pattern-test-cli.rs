@@ -880,6 +880,9 @@ async fn cmd_cache_test(
 
     eprintln!("[session] opening TidepoolSession...");
     let session_start = std::time::Instant::now();
+    let port_registry = std::sync::Arc::new(pattern_runtime::port_registry::PortRegistryImpl::new(
+        &tokio::runtime::Handle::current(),
+    ));
     let session = TidepoolSession::open_with_agent_loop(
         persona,
         &sdk,
@@ -890,6 +893,7 @@ async fn cmd_cache_test(
         prelude_dir,
         None,
         None,
+        port_registry,
     )
     .await?;
     eprintln!(
@@ -1225,6 +1229,9 @@ async fn cmd_spawn(
 
     eprintln!("[spawn] opening TidepoolSession...");
     let open_start = std::time::Instant::now();
+    let port_registry = std::sync::Arc::new(pattern_runtime::port_registry::PortRegistryImpl::new(
+        &tokio::runtime::Handle::current(),
+    ));
     let session = TidepoolSession::open_with_agent_loop(
         persona,
         &sdk,
@@ -1235,6 +1242,7 @@ async fn cmd_spawn(
         prelude_dir,
         None,
         None,
+        port_registry,
     )
     .await?;
     eprintln!(

@@ -1,10 +1,10 @@
-//! Bundle the full 16-handler SDK into a single `DispatchEffect`.
+//! Bundle the full 15-handler SDK into a single `DispatchEffect`.
 //!
 //! Handler position in the HList is the JIT effect tag: agent programs must
 //! declare `Eff '[...]` rows whose head prefix aligns with this order. The
 //! canonical order is: `Memory, Search, Recall, Tasks, Skills` (storage-adjacent),
 //! then `Message, Display, Time, Log` (Prelude-5 minus Memory), then rarer
-//! effects (`Shell, File, Sources, Mcp, Rpc, Spawn, Diagnostics`).
+//! effects (`Shell, File, Mcp, Spawn, Diagnostics, Port`).
 //!
 //! **Why Prelude-5-first (historical note):** originally this ordering was
 //! required to avoid DataCon name collisions: tidepool-bridge looked up
@@ -25,18 +25,18 @@
 use crate::sdk::describe::CollectEffectDecls;
 use crate::sdk::handlers::{
     DiagnosticsHandler, DisplayHandler, FileHandler, LogHandler, McpHandler, MemoryHandler,
-    MessageHandler, RecallHandler, RpcHandler, SearchHandler, ShellHandler, SkillsHandler,
-    SourcesHandler, SpawnHandler, TasksHandler, TimeHandler,
+    MessageHandler, PortHandler, RecallHandler, SearchHandler, ShellHandler, SkillsHandler,
+    SpawnHandler, TasksHandler, TimeHandler,
 };
 
-/// The full 16-handler SDK bundle, typed as a `frunk::HList`.
+/// The full 15-handler SDK bundle, typed as a `frunk::HList`.
 ///
 /// Order: `Memory, Search, Recall, Tasks, Skills, Message, Display, Time, Log,
-/// Shell, File, Sources, Mcp, Rpc, Spawn, Diagnostics`. Search, Recall, Tasks,
-/// and Skills are placed immediately after Memory (storage-adjacent) so
+/// Shell, File, Mcp, Spawn, Diagnostics, Port`. Search, Recall, Tasks, and
+/// Skills are placed immediately after Memory (storage-adjacent) so
 /// cross-agent search, archival, task-graph, and skill operations cluster
-/// together. Diagnostics is last (rarely used; session-level
-/// introspection only).
+/// together. Diagnostics is last-but-one (rarely used; session-level
+/// introspection only). Port is last (unified external-service port, Phase 4).
 pub type SdkBundle = frunk::HList![
     MemoryHandler,
     SearchHandler,
@@ -49,11 +49,10 @@ pub type SdkBundle = frunk::HList![
     LogHandler,
     ShellHandler,
     FileHandler,
-    SourcesHandler,
     McpHandler,
-    RpcHandler,
     SpawnHandler,
     DiagnosticsHandler,
+    PortHandler,
 ];
 
 /// Collect [`crate::sdk::describe::EffectDecl`] from every handler in
@@ -99,11 +98,10 @@ pub const CANONICAL_EFFECT_ROW: &[&str] = &[
     "Log",
     "Shell",
     "File",
-    "Sources",
     "Mcp",
-    "Rpc",
     "Spawn",
     "Diagnostics",
+    "Port",
 ];
 
 #[cfg(test)]
@@ -111,12 +109,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_decls_has_16_entries() {
+    fn canonical_decls_has_15_entries() {
         let decls = canonical_effect_decls();
         assert_eq!(
             decls.len(),
-            16,
-            "expected 16 handler decls, got {}",
+            15,
+            "expected 15 handler decls, got {}",
             decls.len()
         );
     }
@@ -210,6 +208,9 @@ mod tests {
     fn canonical_row_matches_effect_category_implemented_set() {
         use pattern_core::EffectCategory;
 
+        // `Wake` is reserved for a future wake-condition effect (no handler
+        // yet). `Port` shipped in Phase 4 Task 6 and now has a handler in
+        // `CANONICAL_EFFECT_ROW` — it is no longer reserved.
         const RESERVED_NOT_IN_ROW: &[EffectCategory] = &[EffectCategory::Wake];
 
         // Every name in the row resolves to a category.

@@ -42,9 +42,10 @@ pub enum EffectCategory {
     Log,
     Shell,
     File,
-    Sources,
+    /// Unified external-service port. Gate for per-port allowlisting via
+    /// `CapabilitySet::has_port`.
+    Port,
     Mcp,
-    Rpc,
     Spawn,
     Diagnostics,
     /// Forward-reserved for the Phase 4 wake-condition effect.
@@ -68,9 +69,8 @@ impl EffectCategory {
         Self::Log,
         Self::Shell,
         Self::File,
-        Self::Sources,
+        Self::Port,
         Self::Mcp,
-        Self::Rpc,
         Self::Spawn,
         Self::Diagnostics,
         Self::Wake,
@@ -91,9 +91,8 @@ impl EffectCategory {
             Self::Log => "Log",
             Self::Shell => "Shell",
             Self::File => "File",
-            Self::Sources => "Sources",
+            Self::Port => "Port",
             Self::Mcp => "Mcp",
-            Self::Rpc => "Rpc",
             Self::Spawn => "Spawn",
             Self::Diagnostics => "Diagnostics",
             Self::Wake => "Wake",
@@ -180,9 +179,9 @@ pub struct CapabilitySet {
     /// from the map (or maps to an empty set), the category-level grant via
     /// `categories` is unrestricted within that category.
     ///
-    /// Used initially by Phase 4 (PortRegistry) for per-port granularity:
-    /// an agent with `categories.contains(Sources)` can use any port unless
-    /// `resources[Sources]` is non-empty, in which case only the listed port
+    /// Used by the `Port` effect category for per-port granularity:
+    /// an agent with `categories.contains(Port)` can use any port unless
+    /// `resources[Port]` is non-empty, in which case only the listed port
     /// IDs are accessible. The same shape can carry Shell command allowlists,
     /// File path-prefix allowlists, etc. when those phases need it.
     resources: BTreeMap<EffectCategory, BTreeSet<SmolStr>>,
@@ -286,12 +285,11 @@ impl CapabilitySet {
         self.categories.contains(&EffectCategory::Shell)
     }
 
-    /// Per-port granular check. Maps to the `Sources` effect category, which
-    /// Phase 4 will fold into a unified `Port` category. When Phase 4 lands,
-    /// this method's body will switch to check `EffectCategory::Port` (or
-    /// whatever Phase 4 names it).
+    /// Per-port granular check. Returns true iff the `Port` effect category
+    /// is present and (if the resource allowlist is non-empty) `port_id` is
+    /// in the allowlist.
     pub fn has_port(&self, port_id: &str) -> bool {
-        self.has_resource(EffectCategory::Sources, port_id)
+        self.has_resource(EffectCategory::Port, port_id)
     }
 
     /// Non-strict subset: every category, flag, and resource allowlist in
@@ -485,9 +483,8 @@ mod tests {
             EffectCategory::Log,
             EffectCategory::Shell,
             EffectCategory::File,
-            EffectCategory::Sources,
+            EffectCategory::Port,
             EffectCategory::Mcp,
-            EffectCategory::Rpc,
             EffectCategory::Spawn,
             EffectCategory::Diagnostics,
             EffectCategory::Wake,
@@ -506,9 +503,8 @@ mod tests {
                 | EffectCategory::Log
                 | EffectCategory::Shell
                 | EffectCategory::File
-                | EffectCategory::Sources
+                | EffectCategory::Port
                 | EffectCategory::Mcp
-                | EffectCategory::Rpc
                 | EffectCategory::Spawn
                 | EffectCategory::Diagnostics
                 | EffectCategory::Wake => out.push(cat),
@@ -704,77 +700,77 @@ mod tests {
     #[test]
     fn has_resource_true_when_unrestricted_category_grant() {
         // Category present, no resources entry → unrestricted, any id passes.
-        let set = CapabilitySet::from_iter([EffectCategory::Sources]);
-        assert!(set.has_resource(EffectCategory::Sources, "any-port-id"));
-        assert!(set.has_resource(EffectCategory::Sources, ""));
+        let set = CapabilitySet::from_iter([EffectCategory::Port]);
+        assert!(set.has_resource(EffectCategory::Port, "any-port-id"));
+        assert!(set.has_resource(EffectCategory::Port, ""));
     }
 
     #[test]
     fn has_resource_true_when_id_in_allowlist() {
-        let set = CapabilitySet::from_iter([EffectCategory::Sources]).with_resources(
-            EffectCategory::Sources,
+        let set = CapabilitySet::from_iter([EffectCategory::Port]).with_resources(
+            EffectCategory::Port,
             [SmolStr::from("a"), SmolStr::from("b")],
         );
-        assert!(set.has_resource(EffectCategory::Sources, "a"));
-        assert!(set.has_resource(EffectCategory::Sources, "b"));
-        assert!(!set.has_resource(EffectCategory::Sources, "c"));
+        assert!(set.has_resource(EffectCategory::Port, "a"));
+        assert!(set.has_resource(EffectCategory::Port, "b"));
+        assert!(!set.has_resource(EffectCategory::Port, "c"));
     }
 
     #[test]
     fn has_resource_false_when_category_missing() {
         // No category grant at all → false regardless of resources map.
         let set = CapabilitySet::empty();
-        assert!(!set.has_resource(EffectCategory::Sources, "any-port-id"));
+        assert!(!set.has_resource(EffectCategory::Port, "any-port-id"));
         // Also false even if resources are populated for a different category.
         let set2 = CapabilitySet::from_iter([EffectCategory::Memory])
             .with_resources(EffectCategory::Memory, [SmolStr::from("x")]);
-        // Sources is not in categories.
-        assert!(!set2.has_resource(EffectCategory::Sources, "x"));
+        // Port is not in categories.
+        assert!(!set2.has_resource(EffectCategory::Port, "x"));
     }
 
     #[test]
     fn has_resource_empty_set_unrestricted() {
         // with_resources(cat, []) should erase the entry → unrestricted.
-        let set = CapabilitySet::from_iter([EffectCategory::Sources])
-            .with_resources(EffectCategory::Sources, [SmolStr::from("a")])
-            .with_resources(EffectCategory::Sources, Vec::<SmolStr>::new());
+        let set = CapabilitySet::from_iter([EffectCategory::Port])
+            .with_resources(EffectCategory::Port, [SmolStr::from("a")])
+            .with_resources(EffectCategory::Port, Vec::<SmolStr>::new());
         // Entry should be gone; any id permitted.
-        assert!(set.has_resource(EffectCategory::Sources, "a"));
-        assert!(set.has_resource(EffectCategory::Sources, "z"));
+        assert!(set.has_resource(EffectCategory::Port, "a"));
+        assert!(set.has_resource(EffectCategory::Port, "z"));
         // Verify via iter_resources that no entries remain.
-        assert_eq!(set.iter_resources(EffectCategory::Sources).count(), 0);
+        assert_eq!(set.iter_resources(EffectCategory::Port).count(), 0);
     }
 
     #[test]
     fn with_resources_replaces_existing_entry() {
-        let set = CapabilitySet::from_iter([EffectCategory::Sources])
-            .with_resources(EffectCategory::Sources, [SmolStr::from("a")])
-            .with_resources(EffectCategory::Sources, [SmolStr::from("b")]);
+        let set = CapabilitySet::from_iter([EffectCategory::Port])
+            .with_resources(EffectCategory::Port, [SmolStr::from("a")])
+            .with_resources(EffectCategory::Port, [SmolStr::from("b")]);
         // Only "b" should be present.
-        assert!(!set.has_resource(EffectCategory::Sources, "a"));
-        assert!(set.has_resource(EffectCategory::Sources, "b"));
-        assert_eq!(set.iter_resources(EffectCategory::Sources).count(), 1);
+        assert!(!set.has_resource(EffectCategory::Port, "a"));
+        assert!(set.has_resource(EffectCategory::Port, "b"));
+        assert_eq!(set.iter_resources(EffectCategory::Port).count(), 1);
     }
 
     #[test]
     fn with_resources_empty_erases_entry() {
-        let set = CapabilitySet::from_iter([EffectCategory::Sources])
-            .with_resources(EffectCategory::Sources, [SmolStr::from("a")])
-            .with_resources(EffectCategory::Sources, Vec::<SmolStr>::new());
-        assert_eq!(set.iter_resources(EffectCategory::Sources).count(), 0);
+        let set = CapabilitySet::from_iter([EffectCategory::Port])
+            .with_resources(EffectCategory::Port, [SmolStr::from("a")])
+            .with_resources(EffectCategory::Port, Vec::<SmolStr>::new());
+        assert_eq!(set.iter_resources(EffectCategory::Port).count(), 0);
         // Semantically unrestricted after erasure.
-        assert!(set.has_resource(EffectCategory::Sources, "anything"));
+        assert!(set.has_resource(EffectCategory::Port, "anything"));
     }
 
     #[test]
     fn is_subset_of_resource_escalation_caught() {
         // Parent allows [a, b]; child claims [a, c] → not a subset.
-        let parent = CapabilitySet::from_iter([EffectCategory::Sources]).with_resources(
-            EffectCategory::Sources,
+        let parent = CapabilitySet::from_iter([EffectCategory::Port]).with_resources(
+            EffectCategory::Port,
             [SmolStr::from("a"), SmolStr::from("b")],
         );
-        let child = CapabilitySet::from_iter([EffectCategory::Sources]).with_resources(
-            EffectCategory::Sources,
+        let child = CapabilitySet::from_iter([EffectCategory::Port]).with_resources(
+            EffectCategory::Port,
             [SmolStr::from("a"), SmolStr::from("c")],
         );
         assert!(!child.is_subset_of(&parent));
@@ -784,23 +780,23 @@ mod tests {
     fn is_subset_of_child_unrestricted_escalation_caught() {
         // Parent has [a, b]; child is unrestricted (empty resources) → escalates,
         // not a subset.
-        let parent = CapabilitySet::from_iter([EffectCategory::Sources]).with_resources(
-            EffectCategory::Sources,
+        let parent = CapabilitySet::from_iter([EffectCategory::Port]).with_resources(
+            EffectCategory::Port,
             [SmolStr::from("a"), SmolStr::from("b")],
         );
-        let child = CapabilitySet::from_iter([EffectCategory::Sources]);
+        let child = CapabilitySet::from_iter([EffectCategory::Port]);
         assert!(!child.is_subset_of(&parent));
     }
 
     #[test]
     fn is_subset_of_resource_ok_when_truly_subset() {
         // Parent [a, b, c]; child [a, b] → legitimate subset.
-        let parent = CapabilitySet::from_iter([EffectCategory::Sources]).with_resources(
-            EffectCategory::Sources,
+        let parent = CapabilitySet::from_iter([EffectCategory::Port]).with_resources(
+            EffectCategory::Port,
             [SmolStr::from("a"), SmolStr::from("b"), SmolStr::from("c")],
         );
-        let child = CapabilitySet::from_iter([EffectCategory::Sources]).with_resources(
-            EffectCategory::Sources,
+        let child = CapabilitySet::from_iter([EffectCategory::Port]).with_resources(
+            EffectCategory::Port,
             [SmolStr::from("a"), SmolStr::from("b")],
         );
         assert!(child.is_subset_of(&parent));
@@ -810,21 +806,21 @@ mod tests {
     fn is_subset_of_parent_unrestricted_child_restricted_ok() {
         // Parent unrestricted (no resources entry); child restricted → child is
         // a subset (narrower than parent).
-        let parent = CapabilitySet::from_iter([EffectCategory::Sources]);
-        let child = CapabilitySet::from_iter([EffectCategory::Sources])
-            .with_resources(EffectCategory::Sources, [SmolStr::from("a")]);
+        let parent = CapabilitySet::from_iter([EffectCategory::Port]);
+        let child = CapabilitySet::from_iter([EffectCategory::Port])
+            .with_resources(EffectCategory::Port, [SmolStr::from("a")]);
         assert!(child.is_subset_of(&parent));
     }
 
     #[test]
     fn restrict_to_returns_escalation_with_resource_diff() {
         // Parent [a, b]; child [a, c] → Escalation with added_resources populated.
-        let parent = CapabilitySet::from_iter([EffectCategory::Sources]).with_resources(
-            EffectCategory::Sources,
+        let parent = CapabilitySet::from_iter([EffectCategory::Port]).with_resources(
+            EffectCategory::Port,
             [SmolStr::from("a"), SmolStr::from("b")],
         );
-        let child = CapabilitySet::from_iter([EffectCategory::Sources]).with_resources(
-            EffectCategory::Sources,
+        let child = CapabilitySet::from_iter([EffectCategory::Port]).with_resources(
+            EffectCategory::Port,
             [SmolStr::from("a"), SmolStr::from("c")],
         );
         let err = child.restrict_to(&parent).unwrap_err();
@@ -841,18 +837,18 @@ mod tests {
                 // "c" is the resource child claims but parent doesn't allow.
                 assert!(
                     added_resources
-                        .get(&EffectCategory::Sources)
+                        .get(&EffectCategory::Port)
                         .map(|v| v.contains(&SmolStr::from("c")))
                         .unwrap_or(false),
-                    "added_resources should contain 'c' for Sources, got: {added_resources:?}"
+                    "added_resources should contain 'c' for Port, got: {added_resources:?}"
                 );
                 // parent_resources should record parent's allowlist.
                 assert!(
                     parent_resources
-                        .get(&EffectCategory::Sources)
+                        .get(&EffectCategory::Port)
                         .map(|v| v.contains(&SmolStr::from("a")) && v.contains(&SmolStr::from("b")))
                         .unwrap_or(false),
-                    "parent_resources should contain ['a','b'] for Sources, got: {parent_resources:?}"
+                    "parent_resources should contain ['a','b'] for Port, got: {parent_resources:?}"
                 );
             }
             other => panic!("unexpected variant: {other:?}"),
@@ -862,17 +858,17 @@ mod tests {
     #[test]
     fn restrict_to_escalation_when_child_unrestricted_parent_restricted() {
         // Parent [a, b]; child unrestricted → escalates.
-        let parent = CapabilitySet::from_iter([EffectCategory::Sources]).with_resources(
-            EffectCategory::Sources,
+        let parent = CapabilitySet::from_iter([EffectCategory::Port]).with_resources(
+            EffectCategory::Port,
             [SmolStr::from("a"), SmolStr::from("b")],
         );
-        let child = CapabilitySet::from_iter([EffectCategory::Sources]);
+        let child = CapabilitySet::from_iter([EffectCategory::Port]);
         let err = child.restrict_to(&parent).unwrap_err();
         match err {
             CapabilityError::Escalation {
                 added_resources, ..
             } => {
-                // added_resources[Sources] should be non-empty to indicate escalation.
+                // added_resources[Port] should be non-empty to indicate escalation.
                 assert!(
                     !added_resources.is_empty(),
                     "escalation map should be non-empty, got: {added_resources:?}"
@@ -883,9 +879,9 @@ mod tests {
     }
 
     #[test]
-    fn has_port_delegates_to_sources() {
-        let set = CapabilitySet::from_iter([EffectCategory::Sources]).with_resources(
-            EffectCategory::Sources,
+    fn has_port_uses_port_category() {
+        let set = CapabilitySet::from_iter([EffectCategory::Port]).with_resources(
+            EffectCategory::Port,
             [SmolStr::from("github"), SmolStr::from("discord")],
         );
         assert!(set.has_port("github"));
@@ -935,15 +931,15 @@ mod tests {
             probe in "[a-z]{1,8}",
         ) {
             let smol_ids: Vec<SmolStr> = ids.iter().map(|s| SmolStr::from(s.as_str())).collect();
-            let set = CapabilitySet::from_iter([EffectCategory::Sources])
-                .with_resources(EffectCategory::Sources, smol_ids.clone());
+            let set = CapabilitySet::from_iter([EffectCategory::Port])
+                .with_resources(EffectCategory::Port, smol_ids.clone());
             // Every id we inserted must be accessible.
             for id in &ids {
-                assert!(set.has_resource(EffectCategory::Sources, id.as_str()));
+                assert!(set.has_resource(EffectCategory::Port, id.as_str()));
             }
             // Probe passes iff it's in the original set.
             let expected = ids.iter().any(|id| id.as_str() == probe.as_str());
-            prop_assert_eq!(set.has_resource(EffectCategory::Sources, probe.as_str()), expected);
+            prop_assert_eq!(set.has_resource(EffectCategory::Port, probe.as_str()), expected);
         }
     }
 }

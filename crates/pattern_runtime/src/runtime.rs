@@ -38,6 +38,7 @@ use pattern_core::error::RuntimeError;
 use pattern_core::traits::{AgentRuntime, MemoryStore};
 use pattern_core::types::snapshot::{PersonaSnapshot, SessionSnapshot};
 
+use crate::port_registry::PortRegistryImpl;
 use crate::sdk::SdkLocation;
 use crate::session::TidepoolSession;
 
@@ -67,6 +68,13 @@ pub struct TidepoolRuntime {
     /// that run async work — currently Phase 4's PortRegistry; potentially
     /// future event-broadcast infrastructure.
     tokio_handle: tokio::runtime::Handle,
+    /// Runtime-global port registry. One per `TidepoolRuntime`, shared
+    /// across all sessions via `Arc`. The dispatcher actor task is spawned
+    /// on `tokio_handle` at construction time and aborted on Drop.
+    ///
+    /// Plugins register ports at boot via `port_registry().register_sync()`;
+    /// agents access them via `SessionContext::port_registry()` (cloned Arc).
+    port_registry: Arc<PortRegistryImpl>,
 }
 
 impl TidepoolRuntime {
@@ -83,12 +91,14 @@ impl TidepoolRuntime {
         db: Arc<pattern_db::ConstellationDb>,
         tokio_handle: tokio::runtime::Handle,
     ) -> Self {
+        let port_registry = Arc::new(PortRegistryImpl::new(&tokio_handle));
         Self {
             sdk,
             memory_store,
             provider,
             db,
             tokio_handle,
+            port_registry,
         }
     }
 
@@ -118,6 +128,37 @@ impl TidepoolRuntime {
     pub fn tokio_handle(&self) -> &tokio::runtime::Handle {
         &self.tokio_handle
     }
+
+    /// The runtime-global port registry.
+    ///
+    /// Plugins (Plan 4) and runtime-provided ports (Phase 5's `HttpPort`)
+    /// register at startup via `registry.register_sync()`. Sessions get a
+    /// cloned `Arc` so they can reach the registry and dispatcher without
+    /// touching the runtime directly.
+    pub fn port_registry(&self) -> &Arc<PortRegistryImpl> {
+        &self.port_registry
+    }
+}
+
+impl Drop for TidepoolRuntime {
+    fn drop(&mut self) {
+        // Best-effort shutdown of the dispatcher actor. `try_send` is
+        // non-blocking and safe to call from Drop. Failure is acceptable:
+        // if the runtime's tokio runtime is already gone the task will be
+        // leaked at process exit, which is fine. If the 256-bound channel
+        // is somehow full at runtime drop (extreme corner case during
+        // shutdown) we log at debug and move on.
+        if let Err(e) = self
+            .port_registry
+            .dispatcher_tx
+            .try_send(crate::port_registry::dispatcher::Op::Shutdown)
+        {
+            tracing::debug!(
+                error = %e,
+                "TidepoolRuntime drop: dispatcher shutdown send skipped (actor may already be gone)"
+            );
+        }
+    }
 }
 
 #[async_trait]
@@ -133,8 +174,9 @@ impl AgentRuntime for TidepoolRuntime {
         let memory_store = self.memory_store.clone();
         let provider = self.provider.clone();
         let db = self.db.clone();
+        let port_registry = self.port_registry.clone();
         let mut session = tokio::task::spawn_blocking(move || {
-            TidepoolSession::open(persona, &sdk, memory_store, provider, db)
+            TidepoolSession::open(persona, &sdk, memory_store, provider, db, port_registry)
         })
         .await
         .map_err(|e| RuntimeError::JoinError {

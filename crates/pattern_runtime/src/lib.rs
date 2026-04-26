@@ -16,6 +16,7 @@ pub mod memory;
 pub mod permission;
 pub mod persona_loader;
 pub mod policy;
+pub mod port_registry;
 pub mod preflight;
 pub mod process_manager;
 pub mod router;

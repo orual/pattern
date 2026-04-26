@@ -286,7 +286,7 @@ Gains `snapshot_policy: SnapshotPolicy` field wrapping:
 Agent programs import from the `Pattern.*` SDK module tree (installed at
 `$PATTERN_SDK_DIR` or `crates/pattern_runtime/haskell/Pattern/` by default).
 `tidepool-extract` compiles agents with the SDK directory on its include
-path -- all 16 effect modules plus vendored utility modules are compiled
+path -- the SDK effect modules plus vendored utility modules are compiled
 and linked together.
 
 The SDK uses a hybrid qualified/unqualified import scheme. Modules with
@@ -340,16 +340,20 @@ name = "...")]` on every SDK request variant).
 
 Effect-row ordering matters: handler position in the `SdkBundle` HList
 determines the JIT effect tag. The canonical order is storage-adjacent
-first (`Memory, Search, Recall`), then messaging/display (`Message,
-Display, Time, Log`), then rarer effects (`Shell, File, Sources, Mcp,
-Rpc, Spawn`):
+first (`Memory, Search, Recall, Tasks, Skills`), then messaging/display
+(`Message, Display, Time, Log`), then rarer effects (`Shell, File, Mcp,
+Spawn, Diagnostics`), then `Port` last (the unified external-service
+port from v3-sandbox-io Phase 4 — replaces the retired `Sources` and
+`Rpc` effects):
 
 ```
-Memory, Search, Recall, Tasks, Skills, Message, Display, Time, Log, Shell, File,
-Sources, Mcp, Rpc, Spawn, Diagnostics
+Memory, Search, Recall, Tasks, Skills, Message, Display, Time, Log,
+Shell, File, Mcp, Spawn, Diagnostics, Port
 ```
 
-Agent `Eff '[...]` rows must line up with this prefix.
+Agent `Eff '[...]` rows must line up with this prefix. The
+`canonical_decls_has_15_entries` test in `sdk/bundle.rs` is the source
+of truth for the ordering and entry count.
 
 ### Vendored utility modules
 
@@ -357,7 +361,7 @@ The SDK vendors several utility modules so agents are fully
 self-contained (no tidepool-mcp dependency):
 
 - `Pattern.Prelude` — curated prelude (Text-returning `show`, list/Map
-  helpers, Aeson construction). Does NOT re-export the 16 effect modules.
+  helpers, Aeson construction). Does NOT re-export the SDK effect modules.
 - `Pattern.Aeson`, `Pattern.Aeson.Value`, `Pattern.Aeson.KeyMap`,
   `Pattern.Aeson.Lens` — JSON construction + traversal.
 - `Pattern.Table` — tabular text formatting.
@@ -370,7 +374,7 @@ so agents can `show now` in log lines.
 
 The `code` tool's description (`sdk/code_tool.rs`) is ~6.4 KB and built
 once at process startup from `canonical_effect_decls()`. It contains:
-- Full API reference (every helper signature across all 16 effects).
+- Full API reference (every helper signature across the SDK effects).
 - Effect-row and import-scheme conventions.
 - Common gotchas section (e.g. `Memory.get` returns `Content` not
   `Maybe`, `pure ()` not `return unit`, `Show Instant` works,

@@ -7,8 +7,9 @@
 --   * 'Reload' / 'ForceWrite' added as agent recourse on 'FileConflict'
 --     system reminders from stale-base external writes (Phase 1 amendment).
 --
--- 'ListDir' is named to avoid colliding with 'Pattern.Sources.List'.
--- 'read' uses qualified import ('File.read') to avoid shadowing 'Prelude.read'.
+-- 'ListDir' is named to avoid colliding with a generic 'List' constructor in
+-- other effect modules. 'read' uses qualified import ('File.read') to avoid
+-- shadowing 'Prelude.read'.
 module Pattern.File where
 
 import Control.Monad.Freer (Eff, Member)

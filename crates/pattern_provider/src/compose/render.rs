@@ -10,6 +10,7 @@
 //! - [`render_file_edit_attachment`] — FileEdit -> `<system-reminder>` string.
 //! - [`render_file_conflict_attachment`] — FileConflict -> `<system-reminder>` string.
 //! - [`render_block_write_attachment`] — BlockWriteNotifications -> `<system-reminder>` string.
+//! - [`render_port_event_attachment`] — PortEvent -> `<system-reminder>` string.
 //!
 //! Composite renderers:
 //! - [`render_attachment_content`] — single attachment -> raw text (no wrapper).
@@ -78,6 +79,18 @@ pub fn render_shell_output_attachment(
     at: jiff::Timestamp,
 ) -> String {
     wrap_system_reminder(&render_shell_output_body(task_id, kind, at))
+}
+
+/// Render a `MessageAttachment::PortEvent` as a `<system-reminder>` string.
+///
+/// The payload is pretty-printed JSON; a single-line compact form would lose
+/// structure for deeply-nested event payloads (e.g. Slack message objects).
+pub fn render_port_event_attachment(
+    port_id: &str,
+    payload: &serde_json::Value,
+    at: jiff::Timestamp,
+) -> String {
+    wrap_system_reminder(&render_port_event_body(port_id, payload, at))
 }
 
 // ---- Composite renderers ---------------------------------------------------
@@ -169,6 +182,11 @@ pub fn render_attachment_content(attachment: &MessageAttachment) -> String {
         MessageAttachment::ShellOutput { task_id, kind, at } => {
             render_shell_output_body(task_id, kind, *at)
         }
+        MessageAttachment::PortEvent {
+            port_id,
+            payload,
+            at,
+        } => render_port_event_body(port_id, payload, *at),
         // Future variants — skip gracefully.
         _ => String::new(),
     }
@@ -423,6 +441,17 @@ fn render_shell_output_body(task_id: &str, kind: &ShellOutputKind, at: jiff::Tim
             )
         }
     }
+}
+
+/// `PortEvent` body WITHOUT `<system-reminder>` wrap (for grouping when
+/// multiple attachments land on the same message).
+fn render_port_event_body(
+    port_id: &str,
+    payload: &serde_json::Value,
+    at: jiff::Timestamp,
+) -> String {
+    let payload_str = serde_json::to_string_pretty(payload).unwrap_or_else(|_| payload.to_string());
+    format!("[port:event] port=\"{port_id}\" at={at}\n{payload_str}")
 }
 
 /// FileConflict body WITHOUT `<system-reminder>` wrap (for grouping).
@@ -902,6 +931,62 @@ mod tests {
         assert!(
             content.contains("2000"),
             "missing duration_ms in exit render: {content}"
+        );
+    }
+
+    // ---- PortEvent attachment rendering ------------------------------------
+
+    fn port_at() -> jiff::Timestamp {
+        // Fixed timestamp for snapshot stability.
+        jiff::Timestamp::from_second(1_745_000_000).unwrap()
+    }
+
+    #[test]
+    fn render_port_event_scalar_payload_snapshot() {
+        let at = port_at();
+        let rendered = render_port_event_attachment(
+            "weather-api",
+            &serde_json::json!({"temp_c": 22, "condition": "sunny"}),
+            at,
+        );
+        insta::assert_snapshot!(rendered);
+    }
+
+    #[test]
+    fn render_port_event_renders_through_render_attachment_content() {
+        let at = port_at();
+        let attachment = MessageAttachment::PortEvent {
+            port_id: "slack".to_string(),
+            payload: serde_json::json!({"text": "hello team", "channel": "#general"}),
+            at,
+        };
+        let content = render_attachment_content(&attachment);
+        assert!(
+            content.contains("[port:event]"),
+            "missing port:event tag: {content}"
+        );
+        assert!(
+            content.contains("slack"),
+            "missing port_id in content: {content}"
+        );
+        assert!(
+            content.contains("hello team"),
+            "missing payload in content: {content}"
+        );
+    }
+
+    #[test]
+    fn render_port_event_wraps_in_system_reminder() {
+        let at = port_at();
+        let rendered =
+            render_port_event_attachment("http", &serde_json::json!({"status": 200}), at);
+        assert!(
+            rendered.contains("<system-reminder>"),
+            "missing system-reminder: {rendered}"
+        );
+        assert!(
+            rendered.contains("[port:event]"),
+            "missing port:event tag: {rendered}"
         );
     }
 

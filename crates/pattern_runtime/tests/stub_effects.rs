@@ -27,8 +27,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use pattern_runtime::sdk::handlers::{
-    file::FileHandler, mcp::McpHandler, message::MessageHandler, rpc::RpcHandler,
-    sources::SourcesHandler, spawn::SpawnHandler,
+    file::FileHandler, mcp::McpHandler, message::MessageHandler, spawn::SpawnHandler,
 };
 
 /// Shared per-namespace deadline. The first test across the binary
@@ -106,6 +105,10 @@ macro_rules! run_stub_case {
 // shell_stub_reports_not_implemented_hang_free was removed in Phase 3 Task 6.
 // ShellHandler is now a real implementation bound to SessionContext (no longer
 // a stub); the AC tests in tests/shell_handler.rs cover the shell surface.
+//
+// sources_stub_reports_not_implemented_hang_free and
+// rpc_stub_reports_not_implemented_hang_free were removed in Phase 4 Task 8.
+// SourcesHandler and RpcHandler are retired; the Port handler replaces them.
 
 #[test]
 fn file_stub_reports_no_file_manager_hang_free() {
@@ -121,19 +124,6 @@ fn file_stub_reports_no_file_manager_hang_free() {
 }
 
 #[test]
-fn sources_stub_reports_not_implemented_hang_free() {
-    preflight_or_fail();
-    run_stub_case!(
-        "sources_stub",
-        include_str!("fixtures/sources_stub.hs"),
-        SourcesHandler,
-        (),
-        "Pattern.Sources",
-        "not implemented",
-    );
-}
-
-#[test]
 fn mcp_stub_reports_not_implemented_hang_free() {
     preflight_or_fail();
     run_stub_case!(
@@ -142,19 +132,6 @@ fn mcp_stub_reports_not_implemented_hang_free() {
         McpHandler,
         (),
         "Pattern.Mcp",
-        "not implemented",
-    );
-}
-
-#[test]
-fn rpc_stub_reports_not_implemented_hang_free() {
-    preflight_or_fail();
-    run_stub_case!(
-        "rpc_stub",
-        include_str!("fixtures/rpc_stub.hs"),
-        RpcHandler,
-        (),
-        "Pattern.Rpc",
         "not implemented",
     );
 }

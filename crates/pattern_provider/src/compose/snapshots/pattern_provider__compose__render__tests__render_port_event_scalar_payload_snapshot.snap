@@ -1,0 +1,11 @@
+---
+source: crates/pattern_provider/src/compose/render.rs
+expression: rendered
+---
+<system-reminder>
+[port:event] port="weather-api" at=2025-04-18T18:13:20Z
+{
+  "condition": "sunny",
+  "temp_c": 22
+}
+</system-reminder>

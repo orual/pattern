@@ -102,6 +102,9 @@ async fn memory_round_trip_through_session() {
     let sdk = SdkLocation::default();
     let sink: Arc<dyn TurnSink> = Arc::new(VecSink::new());
 
+    let port_registry = std::sync::Arc::new(pattern_runtime::port_registry::PortRegistryImpl::new(
+        &tokio::runtime::Handle::current(),
+    ));
     let session = TidepoolSession::open_with_agent_loop(
         persona,
         &sdk,
@@ -112,6 +115,7 @@ async fn memory_round_trip_through_session() {
         None,
         None,
         None,
+        port_registry,
     )
     .await
     .expect("open should succeed");
@@ -181,6 +185,9 @@ async fn checkpoint_and_restore_round_trips() {
     let sdk = SdkLocation::default();
     let sink: Arc<dyn TurnSink> = Arc::new(VecSink::new());
 
+    let port_registry = std::sync::Arc::new(pattern_runtime::port_registry::PortRegistryImpl::new(
+        &tokio::runtime::Handle::current(),
+    ));
     let session = TidepoolSession::open_with_agent_loop(
         persona.clone(),
         &sdk,
@@ -191,6 +198,7 @@ async fn checkpoint_and_restore_round_trips() {
         None,
         None,
         None,
+        port_registry,
     )
     .await
     .expect("open should succeed");
@@ -218,8 +226,20 @@ async fn checkpoint_and_restore_round_trips() {
     let provider2: Arc<dyn ProviderClient> = Arc::new(MockProviderClient::with_turns(vec![]));
     let sink2: Arc<dyn TurnSink> = Arc::new(VecSink::new());
 
+    let port_registry2 = std::sync::Arc::new(
+        pattern_runtime::port_registry::PortRegistryImpl::new(&tokio::runtime::Handle::current()),
+    );
     let mut session2 = TidepoolSession::open_with_agent_loop(
-        persona, &sdk, store2, provider2, db, sink2, None, None, None,
+        persona,
+        &sdk,
+        store2,
+        provider2,
+        db,
+        sink2,
+        None,
+        None,
+        None,
+        port_registry2,
     )
     .await
     .expect("second open should succeed");
@@ -275,6 +295,9 @@ async fn concurrent_session_isolation() {
     let sink_a: Arc<dyn TurnSink> = Arc::new(VecSink::new());
     let persona_a = PersonaSnapshot::new("agent-alpha", "Alpha");
 
+    let port_registry_a = std::sync::Arc::new(
+        pattern_runtime::port_registry::PortRegistryImpl::new(&tokio::runtime::Handle::current()),
+    );
     let session_a = TidepoolSession::open_with_agent_loop(
         persona_a,
         &sdk,
@@ -285,6 +308,7 @@ async fn concurrent_session_isolation() {
         None,
         None,
         None,
+        port_registry_a,
     )
     .await
     .expect("open A");
@@ -297,6 +321,9 @@ async fn concurrent_session_isolation() {
     let sink_b: Arc<dyn TurnSink> = Arc::new(VecSink::new());
     let persona_b = PersonaSnapshot::new("agent-beta", "Beta");
 
+    let port_registry_b = std::sync::Arc::new(
+        pattern_runtime::port_registry::PortRegistryImpl::new(&tokio::runtime::Handle::current()),
+    );
     let session_b = TidepoolSession::open_with_agent_loop(
         persona_b,
         &sdk,
@@ -307,6 +334,7 @@ async fn concurrent_session_isolation() {
         None,
         None,
         None,
+        port_registry_b,
     )
     .await
     .expect("open B");

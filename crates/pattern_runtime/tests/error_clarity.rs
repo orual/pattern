@@ -273,8 +273,20 @@ async fn ac9_5_session_open_bad_sdk_path_returns_sdk_not_found() {
     let persona = PersonaSnapshot::new("test-agent", "Test");
     let sink: Arc<dyn pattern_core::traits::TurnSink> = Arc::new(pattern_core::traits::NoOpSink);
 
+    let port_registry = std::sync::Arc::new(pattern_runtime::port_registry::PortRegistryImpl::new(
+        &tokio::runtime::Handle::current(),
+    ));
     let err = pattern_runtime::session::TidepoolSession::open_with_agent_loop(
-        persona, &bad_sdk, store, provider, db, sink, None, None, None,
+        persona,
+        &bad_sdk,
+        store,
+        provider,
+        db,
+        sink,
+        None,
+        None,
+        None,
+        port_registry,
     )
     .await
     .expect_err("bad SDK path must fail session open");

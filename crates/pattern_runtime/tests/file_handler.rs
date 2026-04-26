@@ -704,6 +704,9 @@ async fn snapshot_restores_open_files() {
 
     let persona = PersonaSnapshot::new("agent-snap", "Snap");
 
+    let port_registry = std::sync::Arc::new(pattern_runtime::port_registry::PortRegistryImpl::new(
+        &tokio::runtime::Handle::current(),
+    ));
     let session = TidepoolSession::open_with_agent_loop(
         persona.clone(),
         &sdk,
@@ -714,6 +717,7 @@ async fn snapshot_restores_open_files() {
         None,
         None,
         None,
+        port_registry.clone(),
     )
     .await
     .expect("open_with_agent_loop must succeed");
@@ -774,8 +778,20 @@ async fn snapshot_restores_open_files() {
     let provider2: Arc<dyn ProviderClient> = Arc::new(MockProviderClient::with_turns(vec![]));
     let sink2: Arc<dyn TurnSink> = Arc::new(VecSink::new());
 
+    let port_registry2 = std::sync::Arc::new(
+        pattern_runtime::port_registry::PortRegistryImpl::new(&tokio::runtime::Handle::current()),
+    );
     let mut session2 = TidepoolSession::open_with_agent_loop(
-        persona, &sdk, store2, provider2, db, sink2, None, None, None,
+        persona,
+        &sdk,
+        store2,
+        provider2,
+        db,
+        sink2,
+        None,
+        None,
+        None,
+        port_registry2,
     )
     .await
     .expect("second open_with_agent_loop must succeed");

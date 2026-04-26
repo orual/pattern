@@ -230,6 +230,26 @@ pub enum MessageAttachment {
         /// When this event was enqueued by the bridge thread.
         at: jiff::Timestamp,
     },
+
+    /// One subscription event delivered by a `Pattern.Port.Subscribe` stream
+    /// (Phase 4). The dispatcher actor's per-subscription drain task builds
+    /// these from the `BoxStream<PortEvent>` returned by the `Port` impl's
+    /// `subscribe()` and pushes them onto the session's async-reminder
+    /// buffer; compose-time drain on the next turn splices them onto the
+    /// first user message and `Segment2Pass` renders each one as a
+    /// `<system-reminder>` block.
+    ///
+    /// The `port_id` is the registered port handle (string form of
+    /// `pattern_core::types::port::PortId`) — not the raw event source's
+    /// internal id, in case those ever diverge.
+    PortEvent {
+        /// Registered port id (e.g. `"http"`, `"slack"`, `"weather-api"`).
+        port_id: String,
+        /// Opaque event payload. Interpretation is port-specific.
+        payload: serde_json::Value,
+        /// When the event was enqueued by the dispatcher's drain task.
+        at: jiff::Timestamp,
+    },
 }
 
 /// Whether an external edit notification is for a file the agent has

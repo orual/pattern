@@ -130,7 +130,15 @@ async fn cmd_start(port: u16, echo: bool) -> miette::Result<()> {
         // Resolve SDK location.
         let sdk = pattern_runtime::sdk::SdkLocation::default();
 
-        let config = SessionConfig { sdk, provider };
+        let port_registry =
+            std::sync::Arc::new(pattern_runtime::port_registry::PortRegistryImpl::new(
+                &tokio::runtime::Handle::current(),
+            ));
+        let config = SessionConfig {
+            sdk,
+            provider,
+            port_registry,
+        };
 
         info!("starting daemon");
         DaemonServer::spawn_with_config(config)

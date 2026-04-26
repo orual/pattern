@@ -78,6 +78,10 @@ pub struct SessionConfig {
     pub sdk: SdkLocation,
     /// LLM provider client (e.g. `PatternGatewayClient`).
     pub provider: Arc<dyn ProviderClient>,
+    /// Runtime-global port registry. Shared across all sessions opened by
+    /// this daemon instance. Plugins register at boot; agents dispatch
+    /// through it via `PortHandler`.
+    pub port_registry: std::sync::Arc<pattern_runtime::port_registry::PortRegistryImpl>,
 }
 
 /// Cached project mount state.
@@ -792,6 +796,7 @@ async fn get_or_open_session(
         None, // prelude_dir — SDK bundles the prelude internally.
         Some(project_mount.mount_path.clone()),
         None, // capabilities — daemon uses full power until per-persona caps land.
+        config.port_registry.clone(),
     )
     .await
     .map_err(|e| format!("failed to open session for {agent_id}: {e}"))?;

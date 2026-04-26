@@ -4,9 +4,9 @@
 -- Stubbed in Phase 3. The runtime currently returns NotImplemented. Real
 -- implementation lives in the post-foundation plugin-system plan.
 --
--- @Use@ rather than @Call@ to avoid colliding with 'Pattern.Rpc.Call'
--- (generic RPC) and to match AI-agent parlance — "the agent uses the
--- search tool".
+-- @Use@ is chosen to match AI-agent parlance — "the agent uses the
+-- search tool" — and to avoid a generic @Call@ constructor that could
+-- collide with other effect modules.
 module Pattern.Mcp where
 
 import Control.Monad.Freer (Eff, Member, send)
