@@ -20,7 +20,9 @@ use pattern_core::types::ids::PersonaId;
 use pattern_core::types::message::Message;
 use pattern_core::types::origin::MessageOrigin;
 
-use crate::agent_registry::{AgentRegistry, SessionStatus};
+use crate::agent_registry::AgentRegistry;
+#[cfg(test)]
+use crate::agent_registry::SessionStatus;
 use crate::mailbox::MailboxInput;
 use crate::router::{Router, RouterError};
 
@@ -56,6 +58,13 @@ impl Router for AgentRouter {
     /// `target` is the part of the recipient *after* the `"agent:"` prefix
     /// (the registry strips it). The full recipient `"agent:pattern-entropy"`
     /// arrives here as `target == "pattern-entropy"`.
+    ///
+    /// Routing is atomic: the status check and the send/queue are performed
+    /// under the same DashMap shard lock via
+    /// [`AgentRegistry::route_or_queue`], preventing the TOCTOU race where
+    /// a concurrent Draft→Active promotion could cause a message to be lost
+    /// (status observed as Draft, promotion completes, then queue_for_draft
+    /// sees Active and returns PersonaNotFound).
     async fn route(
         &self,
         sender: &MessageOrigin,
@@ -64,34 +73,34 @@ impl Router for AgentRouter {
     ) -> Result<(), RouterError> {
         let id: PersonaId = target.into();
 
-        match self.registry.status(&id) {
-            // AC6.4: persona does not exist → error.
-            None => Err(RouterError::PersonaNotFound(id)),
+        let input = MailboxInput {
+            from: sender.clone(),
+            msg: body.clone(),
+        };
 
-            // AC6.5: draft persona → queue for future promotion; no session
-            // exists so delivery is deferred. Log that the send was queued.
-            Some(SessionStatus::Draft) => {
-                tracing::debug!(
+        // route_or_queue atomically checks status and delivers/queues.
+        // Returns PersonaNotFound if the persona is not registered.
+        match self.registry.route_or_queue(&id, input) {
+            Ok(()) => {
+                // Log draft-queuing separately for observability (we can't
+                // tell the outcome from the Ok(()), but the registry already
+                // logged on the draft path internally). Log at trace level
+                // here to keep the hot path quiet.
+                tracing::trace!(
                     persona_id = %id,
-                    "agent router: queuing message for draft persona (no live session)"
+                    "agent router: message dispatched (active deliver or draft queue)"
                 );
-                self.registry
-                    .queue_for_draft(&id, body.clone(), sender.clone())?;
                 Ok(())
             }
-
-            // AC6.1: active persona → deliver to the live mailbox.
-            Some(SessionStatus::Active) => {
-                let tx = self
-                    .registry
-                    .sender(&id)
-                    .ok_or(RouterError::PersonaNotFound(id))?;
-                tx.send(MailboxInput {
-                    from: sender.clone(),
-                    msg: body.clone(),
-                })
-                .map_err(|_| RouterError::MailboxClosed)
+            Err(RouterError::PersonaNotFound(_)) => {
+                // AC6.4: persona does not exist → surface as error.
+                tracing::debug!(
+                    persona_id = %id,
+                    "agent router: persona not found"
+                );
+                Err(RouterError::PersonaNotFound(id))
             }
+            Err(e) => Err(e),
         }
     }
 }

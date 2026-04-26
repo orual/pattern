@@ -891,6 +891,7 @@ async fn cmd_cache_test(
         prelude_dir,
         None,
         None,
+        None,
     )
     .await?;
     eprintln!(
@@ -1235,6 +1236,7 @@ async fn cmd_spawn(
         tokio::runtime::Handle::current(),
         turn_sink,
         prelude_dir,
+        None,
         None,
         None,
     )

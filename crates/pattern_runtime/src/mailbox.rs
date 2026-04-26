@@ -422,12 +422,142 @@ mod tests {
         ctx.cancel_state().request_cancel();
 
         // Wait for the task to finish.
-        let join_result =
-            tokio::time::timeout(std::time::Duration::from_secs(2), tasks.join_next())
-                .await
-                .expect("mailbox task did not exit within 2s of cancel")
-                .expect("JoinSet had no task")
-                .expect("task panicked");
-        let _ = join_result;
+        tokio::time::timeout(std::time::Duration::from_secs(2), tasks.join_next())
+            .await
+            .expect("mailbox task did not exit within 2s of cancel")
+            .expect("JoinSet had no task")
+            .expect("task panicked");
+    }
+
+    /// BusyFlagGuard panic path: a panicking EvalDispatcher causes drive_step
+    /// to unwind, which fires BusyFlagGuard::drop. Assert that after the
+    /// panic:
+    ///   (a) is_in_turn is false
+    ///   (b) turn_done has fired (notify_waiters was called)
+    ///
+    /// We test this by calling drive_step directly inside tokio::spawn (so the
+    /// panic is caught by the JoinHandle) and using a MockProviderClient that
+    /// returns a tool_use stop reason, forcing drive_step to call the panicking
+    /// dispatcher.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn busy_flag_guard_clears_on_dispatcher_panic() {
+        use crate::agent_loop::{EvalDispatcher, drive_step};
+        use crate::testing::{InMemoryMemoryStore, MockProviderClient};
+        use async_trait::async_trait;
+        use pattern_core::traits::MemoryStore;
+        use pattern_core::types::ids::new_snowflake_id;
+        use pattern_core::types::provider::{ToolCall, ToolOutcome};
+        use pattern_core::types::snapshot::PersonaSnapshot;
+        use std::sync::atomic::Ordering;
+
+        // Dispatcher that unconditionally panics — triggers the panic-unwind
+        // path through drive_step so BusyFlagGuard::drop is exercised.
+        struct PanickingDispatcher;
+        #[async_trait]
+        impl EvalDispatcher for PanickingDispatcher {
+            async fn dispatch(&self, _: ToolCall, _: &str) -> ToolOutcome {
+                panic!("deliberate panic in test dispatcher");
+            }
+        }
+
+        let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
+        // Seed an agent row so drive_step's message-persistence path has the
+        // FK it needs.
+        let db = crate::testing::test_db().await;
+        let agent_row = pattern_db::models::Agent {
+            id: "mbx-panic-agent".to_string(),
+            name: "Panic Test".to_string(),
+            description: None,
+            model_provider: "test".to_string(),
+            model_name: "test-model".to_string(),
+            system_prompt: "test".to_string(),
+            config: pattern_db::Json(serde_json::json!({})),
+            enabled_tools: pattern_db::Json(vec![]),
+            tool_rules: None,
+            status: pattern_db::models::AgentStatus::Active,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        pattern_db::queries::create_agent(&db.get().unwrap(), &agent_row).unwrap();
+
+        // Provider returns a tool_use stop so drive_step calls the dispatcher.
+        let provider: Arc<dyn pattern_core::ProviderClient> =
+            Arc::new(MockProviderClient::with_turns(vec![
+                MockProviderClient::tool_use_turn(
+                    "toolu_panic",
+                    "code",
+                    serde_json::json!({"code": "pure ()"}),
+                ),
+            ]));
+
+        let persona = PersonaSnapshot::new("mbx-panic-agent", "Panic Test");
+        let ctx = Arc::new(SessionContext::from_persona(
+            &persona,
+            store,
+            provider,
+            db,
+            tokio::runtime::Handle::current(),
+        ));
+
+        // Watch turn_done: park a waiter so we can assert it fires.
+        let is_in_turn = ctx.is_in_turn().clone();
+        let turn_done = ctx.turn_done().clone();
+        let watcher_done = turn_done.clone();
+        let waiter = tokio::spawn(async move { watcher_done.notified().await });
+        tokio::task::yield_now().await; // let the waiter reach notified()
+
+        let turn_input = {
+            let id = new_snowflake_id();
+            pattern_core::types::turn::TurnInput {
+                turn_id: id.clone(),
+                batch_id: pattern_core::types::ids::BatchId::from(id),
+                origin: test_origin(),
+                messages: vec![test_message("trigger tool use")],
+            }
+        };
+
+        let ctx_clone = ctx.clone();
+        let turn_history =
+            Arc::new(std::sync::Mutex::new(crate::memory::TurnHistory::empty()));
+        let th_clone = turn_history.clone();
+        let dispatcher = Arc::new(PanickingDispatcher);
+
+        // Spawn drive_step so the panic is caught by the JoinHandle.
+        let task = tokio::spawn(async move {
+            let _ = drive_step(
+                turn_input,
+                ctx_clone,
+                th_clone,
+                pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
+                dispatcher.as_ref(),
+                "",
+                None,
+            )
+            .await;
+        });
+
+        // The task must have panicked.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            task,
+        )
+        .await
+        .expect("drive_step task must complete within 5s");
+        assert!(
+            result.unwrap_err().is_panic(),
+            "expected the task to have panicked"
+        );
+
+        // (a) BusyFlagGuard::drop must have cleared is_in_turn.
+        assert!(
+            !is_in_turn.load(Ordering::SeqCst),
+            "is_in_turn must be false after drive_step panic"
+        );
+
+        // (b) turn_done must have fired — the waiter task should resolve.
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("turn_done must fire from BusyFlagGuard::drop on panic")
+            .expect("waiter task panicked");
     }
 }

@@ -302,6 +302,7 @@ fn run_eval(
         RpcHandler,
         SpawnHandler,
         diagnostics_handler,
+        crate::sdk::handlers::WakeHandler,
     ];
 
     // Coerce the owned PathBufs into the &[&Path] slice

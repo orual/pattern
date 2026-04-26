@@ -30,6 +30,7 @@ use smol_str::SmolStr;
 
 use crate::types::block_ref::BlockRef;
 use crate::types::ids::{AgentId, UserId};
+use crate::types::memory_types::TaskEdgeRef;
 
 /// `jiff::Span` wrapper that opts into fieldwise equality.
 ///
@@ -234,9 +235,15 @@ pub enum SystemReason {
         elapsed: SpanCompare,
     },
     /// A dependency task transitioned to `Completed`.
+    ///
+    /// Tasks live as items inside `BlockSchema::TaskList` blocks; the
+    /// reference identifies both the parent block (`task.block`) and
+    /// the specific item (`task.task_item`). For block-level
+    /// references the agent is woken when *any* item in the block
+    /// reaches `Completed`.
     TaskDependencyResolved {
         /// The dependency that just resolved.
-        task: BlockRef,
+        task: TaskEdgeRef,
     },
     /// A specific block's content changed (any author). Used when the
     /// agent registered explicit interest in a memory location.

@@ -29,3 +29,16 @@ pub const PERMISSION_DENIED_PREFIX: &str = "PermissionDenied: ";
 /// approval was granted, but the handler's real implementation lands
 /// in a later plan. Used by Shell (Task 10) and File (Task 15) stubs.
 pub const GATE_APPROVED_PREFIX: &str = "GateApproved: ";
+
+/// Error-message prefix used by handlers to flag a static capability
+/// (`CapabilityFlag`) denial — distinct from a runtime
+/// [`PolicySet`]/`PermissionBroker` denial. Tests and UI code key off
+/// this prefix to discriminate "missing flag in persona caps" from
+/// "policy gate denied this action".
+///
+/// The companion suffix is the kebab-case flag name from
+/// [`pattern_core::CapabilityFlag::name`] (e.g.
+/// `"CapabilityDenied: wake-condition-registration"`), so a single
+/// `starts_with(CAPABILITY_DENIED_PREFIX)` check identifies the
+/// category and the trailing token names the missing flag.
+pub const CAPABILITY_DENIED_PREFIX: &str = "CapabilityDenied: ";

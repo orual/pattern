@@ -22,6 +22,7 @@ pub mod sources;
 pub mod spawn;
 pub mod tasks;
 pub mod time;
+pub mod wake;
 
 pub use diagnostics::DiagnosticsReq;
 pub use display::DisplayReq;
@@ -39,6 +40,7 @@ pub use sources::SourcesReq;
 pub use spawn::SpawnReq;
 pub use tasks::TasksReq;
 pub use time::TimeReq;
+pub use wake::WakeReq;
 
 #[cfg(test)]
 mod parity {
@@ -119,6 +121,7 @@ mod parity {
             "SkillsReq",
             &["List", "GetMetadata", "Load", "Search", "GetUsageStats"],
         ),
+        ("WakeReq", &["Register", "Unregister"]),
     ];
 
     /// Sanity check: the table isn't empty and each entry lists at least
@@ -127,8 +130,8 @@ mod parity {
     fn parity_table_is_populated() {
         assert_eq!(
             EXPECTED.len(),
-            16,
-            "expected 16 SDK namespaces; update this test when adding/removing one"
+            17,
+            "expected 17 SDK namespaces; update this test when adding/removing one"
         );
         for (enum_name, variants) in EXPECTED {
             assert!(
@@ -358,6 +361,15 @@ mod parity {
         let _ = TasksReq::QueryGraph(String::new(), String::new());
         let _ = TasksReq::AddComment(String::new(), String::new());
         assert_eq!(count("TasksReq"), 8);
+    }
+
+    #[test]
+    fn wake_req_variants() {
+        use super::WakeReq;
+        use super::wake::WireWakeCondition;
+        let _ = WakeReq::Register(WireWakeCondition::Interval(1000));
+        let _ = WakeReq::Unregister(String::new());
+        assert_eq!(count("WakeReq"), 2);
     }
 
     #[test]

@@ -26,17 +26,19 @@ use crate::sdk::describe::CollectEffectDecls;
 use crate::sdk::handlers::{
     DiagnosticsHandler, DisplayHandler, FileHandler, LogHandler, McpHandler, MemoryHandler,
     MessageHandler, RecallHandler, RpcHandler, SearchHandler, ShellHandler, SkillsHandler,
-    SourcesHandler, SpawnHandler, TasksHandler, TimeHandler,
+    SourcesHandler, SpawnHandler, TasksHandler, TimeHandler, WakeHandler,
 };
 
-/// The full 16-handler SDK bundle, typed as a `frunk::HList`.
+/// The full 17-handler SDK bundle, typed as a `frunk::HList`.
 ///
 /// Order: `Memory, Search, Recall, Tasks, Skills, Message, Display, Time, Log,
-/// Shell, File, Sources, Mcp, Rpc, Spawn, Diagnostics`. Search, Recall, Tasks,
-/// and Skills are placed immediately after Memory (storage-adjacent) so
+/// Shell, File, Sources, Mcp, Rpc, Spawn, Diagnostics, Wake`. Search, Recall,
+/// Tasks, and Skills are placed immediately after Memory (storage-adjacent) so
 /// cross-agent search, archival, task-graph, and skill operations cluster
-/// together. Diagnostics is last (rarely used; session-level
-/// introspection only).
+/// together. Diagnostics is session-level introspection; Wake follows it as
+/// the latest entry — agent programs encode effect positions in their
+/// `Eff '[...]` row shapes, so adding to the end (rather than mid-list) keeps
+/// previously-compiled programs valid.
 pub type SdkBundle = frunk::HList![
     MemoryHandler,
     SearchHandler,
@@ -54,6 +56,7 @@ pub type SdkBundle = frunk::HList![
     RpcHandler,
     SpawnHandler,
     DiagnosticsHandler,
+    WakeHandler,
 ];
 
 /// Collect [`crate::sdk::describe::EffectDecl`] from every handler in
@@ -104,6 +107,7 @@ pub const CANONICAL_EFFECT_ROW: &[&str] = &[
     "Rpc",
     "Spawn",
     "Diagnostics",
+    "Wake",
 ];
 
 #[cfg(test)]
@@ -111,12 +115,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_decls_has_16_entries() {
+    fn canonical_decls_has_17_entries() {
         let decls = canonical_effect_decls();
         assert_eq!(
             decls.len(),
-            16,
-            "expected 16 handler decls, got {}",
+            17,
+            "expected 17 handler decls, got {}",
             decls.len()
         );
     }
@@ -202,15 +206,16 @@ mod tests {
     /// an `EffectCategory` variant, and that every non-reserved
     /// `EffectCategory` variant has a matching entry in the row.
     ///
-    /// Adding a 17th handler to `CANONICAL_EFFECT_ROW` without a matching
+    /// Adding an 18th handler to `CANONICAL_EFFECT_ROW` without a matching
     /// `EffectCategory` variant fails this test. Adding a new
     /// `EffectCategory` variant without listing it in `RESERVED_NOT_IN_ROW`
-    /// (currently just `Wake`, awaiting Phase 4) also fails.
+    /// also fails. After v3-multi-agent Phase 4, every `EffectCategory`
+    /// variant is live (no reservations).
     #[test]
     fn canonical_row_matches_effect_category_implemented_set() {
         use pattern_core::EffectCategory;
 
-        const RESERVED_NOT_IN_ROW: &[EffectCategory] = &[EffectCategory::Wake];
+        const RESERVED_NOT_IN_ROW: &[EffectCategory] = &[];
 
         // Every name in the row resolves to a category.
         for name in CANONICAL_EFFECT_ROW {

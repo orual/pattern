@@ -284,6 +284,7 @@ async fn ac9_5_session_open_bad_sdk_path_returns_sdk_not_found() {
         None,
         None,
         None,
+        None,
     )
     .await
     .expect_err("bad SDK path must fail session open");

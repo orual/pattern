@@ -113,6 +113,7 @@ async fn memory_round_trip_through_session() {
         None,
         None,
         None,
+        None,
     )
     .await
     .expect("open should succeed");
@@ -193,6 +194,7 @@ async fn checkpoint_and_restore_round_trips() {
         None,
         None,
         None,
+        None,
     )
     .await
     .expect("open should succeed");
@@ -228,6 +230,7 @@ async fn checkpoint_and_restore_round_trips() {
         db,
         tokio::runtime::Handle::current(),
         sink2,
+        None,
         None,
         None,
         None,
@@ -297,6 +300,7 @@ async fn concurrent_session_isolation() {
         None,
         None,
         None,
+        None,
     )
     .await
     .expect("open A");
@@ -317,6 +321,7 @@ async fn concurrent_session_isolation() {
         db.clone(),
         tokio::runtime::Handle::current(),
         sink_b,
+        None,
         None,
         None,
         None,

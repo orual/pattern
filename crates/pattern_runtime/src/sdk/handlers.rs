@@ -22,6 +22,7 @@ pub mod sources;
 pub mod spawn;
 pub mod tasks;
 pub mod time;
+pub mod wake;
 
 pub use diagnostics::DiagnosticsHandler;
 pub use display::DisplayHandler;
@@ -39,3 +40,4 @@ pub use sources::SourcesHandler;
 pub use spawn::SpawnHandler;
 pub use tasks::TasksHandler;
 pub use time::TimeHandler;
+pub use wake::WakeHandler;

@@ -36,5 +36,6 @@
 pub mod block_changed;
 pub mod registry;
 pub mod rust_primitives;
+pub mod task_dep;
 
 pub use registry::{WakeCondition, WakeError, WakeRegistry};

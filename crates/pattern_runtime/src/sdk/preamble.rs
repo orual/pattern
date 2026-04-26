@@ -415,9 +415,9 @@ mod tests {
         );
         assert!(
             preamble.contains(
-                "File.File, Sources.Sources, Mcp.Mcp, Rpc.Rpc, Spawn, Diagnostics.Diagnostics]"
+                "File.File, Sources.Sources, Mcp.Mcp, Rpc.Rpc, Spawn, Diagnostics.Diagnostics, Wake.Wake]"
             ),
-            "missing File/Sources/Mcp/Rpc/Spawn/Diagnostics in type M"
+            "missing File/Sources/Mcp/Rpc/Spawn/Diagnostics/Wake in type M"
         );
     }
 
@@ -656,8 +656,8 @@ mod tests {
             "type M must start in canonical order, got: {row}"
         );
         assert!(
-            row.ends_with("Spawn, Diagnostics.Diagnostics]"),
-            "type M must end with Spawn, Diagnostics.Diagnostics, got: {row}"
+            row.ends_with("Spawn, Diagnostics.Diagnostics, Wake.Wake]"),
+            "type M must end with Spawn, Diagnostics.Diagnostics, Wake.Wake, got: {row}"
         );
     }
 }

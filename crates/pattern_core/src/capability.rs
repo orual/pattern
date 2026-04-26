@@ -46,7 +46,9 @@ pub enum EffectCategory {
     Rpc,
     Spawn,
     Diagnostics,
-    /// Forward-reserved for the Phase 4 wake-condition effect.
+    /// The wake-condition effect (`Pattern.Wake`) — registered/unregistered
+    /// conditions deliver activations to the agent's mailbox. v3-multi-agent
+    /// Phase 4.
     Wake,
 }
 

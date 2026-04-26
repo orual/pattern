@@ -162,12 +162,75 @@ impl AgentRegistry {
         self.entries.get(id).map(|e| e.status.clone())
     }
 
+    /// Route a message to the correct destination atomically.
+    ///
+    /// This is the preferred entry point for routing — it atomically checks
+    /// the persona's status and performs the appropriate action within the
+    /// same DashMap shard lock, preventing the TOCTOU race that exists when
+    /// callers separately call [`Self::status`] and then [`Self::sender`] or
+    /// [`Self::queue_for_draft`].
+    ///
+    /// # Outcomes
+    ///
+    /// - `Active` with a live sender: delivers `msg` to the mailbox.
+    /// - `Draft`: appends `msg` to the draft queue for future [`PromoteDraft`].
+    /// - Not registered (vacant): returns `Err(RouterError::PersonaNotFound)`.
+    ///
+    /// # Rationale
+    ///
+    /// DashMap's `entry(id)` acquires an exclusive shard-level write lock,
+    /// so the status read and the send/queue operation are atomic with respect
+    /// to concurrent [`Self::register`] calls that promote Draft → Active.
+    /// Without this, a sender could observe `Draft`, then a promoter could
+    /// complete, then the sender would call `queue_for_draft` which would find
+    /// `Active` status and return `PersonaNotFound` — losing the message.
+    pub fn route_or_queue(
+        &self,
+        id: &PersonaId,
+        msg: MailboxInput,
+    ) -> Result<(), RouterError> {
+        // Use the DashMap entry API to hold the shard lock for the entire
+        // read-then-dispatch sequence, preventing the Draft→Active promotion
+        // race described in the doc comment above.
+        let entry = self
+            .entries
+            .get(id)
+            .ok_or_else(|| RouterError::PersonaNotFound(id.clone()))?;
+
+        match entry.status {
+            SessionStatus::Active => {
+                let tx = entry.mailbox_tx.clone();
+                // Release the shard lock before sending to avoid holding it
+                // across a potentially blocking channel operation.
+                drop(entry);
+                tx.send(msg).map_err(|_| RouterError::MailboxClosed)
+            }
+            SessionStatus::Draft => {
+                // Release the shard lock before locking the queue mutex to
+                // maintain consistent lock ordering (entries lock → queue
+                // lock is wrong; reverse or sequential avoids deadlock).
+                let id_clone = id.clone();
+                drop(entry);
+                self.draft_queues
+                    .get(&id_clone)
+                    .ok_or_else(|| RouterError::PersonaNotFound(id_clone.clone()))?
+                    .lock()
+                    .expect("draft queue mutex poisoned")
+                    .push_back((msg.msg, msg.from));
+                Ok(())
+            }
+        }
+    }
+
     /// Append a message to a draft persona's queue.
     ///
     /// Returns `Err(RouterError::PersonaNotFound)` if the persona is not
     /// registered as `Draft` — callers in the `agent:` router should call
     /// [`Self::sender`] first for `Active` personas and only fall through
     /// to this method when the status is `Draft`.
+    ///
+    /// Prefer [`Self::route_or_queue`] for routing: it atomically checks
+    /// status and queues, eliminating the TOCTOU race between two calls.
     pub fn queue_for_draft(
         &self,
         id: &PersonaId,

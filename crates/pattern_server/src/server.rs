@@ -38,8 +38,13 @@ use pattern_core::types::origin::{Author, MessageOrigin, Partner, Sphere};
 use pattern_core::types::provider::{ChatMessage, ContentPart};
 use pattern_core::types::snapshot::PersonaSnapshot;
 use pattern_core::types::turn::{StopReason, TurnInput};
+use pattern_core::CapabilitySet;
+use pattern_runtime::agent_registry::AgentRegistry;
+use pattern_runtime::router::RouterRegistry;
+use pattern_runtime::router::agent::AgentRouter;
+use pattern_runtime::router::cli::CliRouter;
 use pattern_runtime::sdk::SdkLocation;
-use pattern_runtime::session::TidepoolSession;
+use pattern_runtime::session::{SessionRegistries, TidepoolSession, WakeRegistryExtras};
 use smol_str::SmolStr;
 use tracing::{info, warn};
 
@@ -87,11 +92,20 @@ pub struct SessionConfig {
 /// RAII (filesystem watcher, backup scheduler).
 pub(crate) struct ProjectMount {
     /// The in-memory cache backing the `MemoryStore` trait.
-    pub cache: Arc<dyn MemoryStore>,
+    ///
+    /// Stored as `Arc<MemoryCache>` (not `Arc<dyn MemoryStore>`) so the server
+    /// can access `block_change_notifier()` for wiring `WakeRegistry` at
+    /// session open. The `Arc` coerces to `Arc<dyn MemoryStore>` at call sites
+    /// that need the trait object.
+    pub cache: Arc<pattern_memory::cache::MemoryCache>,
     /// Constellation database handle (memory.db + messages.db).
     pub db: Arc<pattern_db::ConstellationDb>,
     /// Mount root directory.
     pub mount_path: PathBuf,
+    /// Shared `AgentRegistry` for all sessions in this mount. All sessions
+    /// within the same project share one registry so they can route messages
+    /// to each other via the `agent:` scheme. Created with the mount.
+    pub agent_registry: Arc<AgentRegistry>,
     /// Keeps the `MountedStore` alive for RAII (watcher, backup scheduler).
     _mounted: pattern_memory::mount::MountedStore,
 }
@@ -735,6 +749,9 @@ impl DaemonServer {
             cache: mounted.cache.clone(),
             db: mounted.db.clone(),
             mount_path: mounted.mount_path.clone(),
+            // One AgentRegistry per mount: all sessions in this project share
+            // it so they can route to each other via the `agent:` scheme.
+            agent_registry: Arc::new(AgentRegistry::new()),
             _mounted: mounted,
         });
 
@@ -782,6 +799,35 @@ async fn get_or_open_session(
     let mux_sink = Arc::new(MultiplexSink::new());
     let sink_dyn: Arc<dyn TurnSink> = mux_sink.clone();
 
+    // Build a RouterRegistry with:
+    //   - `agent:` scheme → AgentRouter backed by the per-mount registry.
+    //   - `cli:` scheme (default) → CliRouter for human-visible output.
+    //
+    // The CliRouter's receiver is dropped here — CLI/TUI output travels via
+    // the TurnSink/MultiplexSink path (WireTurnEvent fan-out), not via the
+    // router channel. Registering a CliRouter as the default scheme ensures
+    // malformed or unknown-scheme recipients don't return a hard error when
+    // a session tries to send to a human-visible recipient without an
+    // explicit `cli:` prefix.
+    let (cli_router, _cli_rx) = CliRouter::new();
+    let mut router_reg = RouterRegistry::new().with_default_scheme("cli");
+    router_reg.register(Arc::new(AgentRouter::new(project_mount.agent_registry.clone())));
+    router_reg.register(Arc::new(cli_router));
+    let router_reg = Arc::new(router_reg);
+
+    // Wake registry extras: wire the mount's memory cache notifier and store
+    // so BlockChanged / TaskDependencyResolved evaluators have what they need.
+    let wake_extras = WakeRegistryExtras {
+        block_change_notifier: Some(project_mount.cache.block_change_notifier().clone()),
+        memory_store: Some(project_mount.cache.clone() as Arc<dyn MemoryStore>),
+    };
+
+    let registries = SessionRegistries {
+        agent_registry: Some(project_mount.agent_registry.clone()),
+        router_registry: Some(router_reg),
+        wake_registry_extras: Some(wake_extras),
+    };
+
     let session = TidepoolSession::open_with_agent_loop(
         persona,
         &config.sdk,
@@ -792,7 +838,11 @@ async fn get_or_open_session(
         sink_dyn,
         None, // prelude_dir — SDK bundles the prelude internally.
         Some(project_mount.mount_path.clone()),
-        None, // capabilities — daemon uses full power until per-persona caps land.
+        // Explicitly pass CapabilitySet::all() so sessions have full power
+        // (daemon uses full power until per-persona caps land; but pass Some
+        // so the wake handler's fail-closed gate passes rather than denying).
+        Some(CapabilitySet::all()),
+        Some(registries),
     )
     .await
     .map_err(|e| format!("failed to open session for {agent_id}: {e}"))?;
