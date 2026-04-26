@@ -21,10 +21,12 @@ use pattern_core::types::provider::{CompletionRequest, TokenCount};
 /// `[]`/`:` constructors pre-registered. Use in handler tests rather than
 /// hand-building a table per test.
 ///
-/// Gated on `cfg(test)` because `tidepool-testing` is a dev-dependency
-/// (not available to library builds); consumers who need this in their
-/// own `#[cfg(test)]` scope should depend on `tidepool-testing` directly.
-#[cfg(test)]
+/// Gated on `cfg(any(test, feature = "test-support"))` so that integration
+/// tests in `tests/` can call it when building with `--features test-support`.
+/// The underlying `tidepool-testing` crate is a dev-dependency, which is
+/// available for both `#[cfg(test)]` compilation and feature-gated test-support
+/// builds.
+#[cfg(any(test, feature = "test-support"))]
 pub use tidepool_testing::r#gen::standard_datacon_table;
 
 /// Build a [`tidepool_repr::DataConTable`] pre-populated with every
@@ -60,7 +62,7 @@ pub use tidepool_testing::r#gen::standard_datacon_table;
 ///
 /// IDs start at 10_000 to avoid collisions with the standard-boxing
 /// constructors from `standard_datacon_table()` (which use low IDs).
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn populated_spawn_test_table() -> tidepool_repr::DataConTable {
     use tidepool_repr::{DataCon, DataConId, SrcBang};
 
@@ -256,7 +258,7 @@ pub fn populated_spawn_test_table() -> tidepool_repr::DataConTable {
 ///
 /// If a new `Wire*` type is added to `sdk/requests/spawn.rs` without updating
 /// `populated_spawn_test_table()`, this test will fail with a `BridgeError`.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[test]
 fn populated_spawn_test_table_parity() {
     use tidepool_bridge::ToCore;

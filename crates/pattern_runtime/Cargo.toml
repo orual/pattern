@@ -22,7 +22,13 @@ test-hooks = []
 # builds used by downstream crates. Enable it in integration tests via
 # the dev-dependency self-ref below; enable it in any binary that needs
 # the test doubles (e.g. `pattern-test-cli`).
-test-support = []
+#
+# Also enables `tidepool-testing` as a real dependency (needed by
+# `populated_spawn_test_table` and `standard_datacon_table`), because
+# when this feature is active in a non-test lib build (e.g. the
+# dev-dep self-reference compiles the lib with test-support before
+# building integration test binaries), dev-dependencies are not in scope.
+test-support = ["dep:tidepool-testing"]
 
 # Forward pattern-provider's subscription-oauth feature. When enabled,
 # the `pattern-test-cli` bin exposes the interactive PKCE flow and the
@@ -45,6 +51,10 @@ tidepool-bridge  = { workspace = true }
 tidepool-bridge-derive = { workspace = true }
 tidepool-repr    = { workspace = true }
 tidepool-eval    = { workspace = true }
+# Optional: enabled by `test-support` feature. Required because the dev-dep
+# self-reference compiles the lib with test-support active in non-test mode,
+# where dev-dependencies (including tidepool-testing) are not in scope.
+tidepool-testing = { workspace = true, optional = true }
 genai            = { workspace = true }
 frunk            = { workspace = true }
 which            = { workspace = true }

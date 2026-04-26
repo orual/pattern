@@ -621,8 +621,8 @@ async fn persistent_fork_without_mount_info_returns_persistent_not_available() {
     use pattern_runtime::sdk::handlers::spawn::SpawnHandler;
     use pattern_runtime::sdk::requests::SpawnReq;
     use pattern_runtime::sdk::requests::spawn::{WireForkConfig, WireForkIsolation};
+    use pattern_runtime::testing::populated_spawn_test_table;
     use tidepool_effect::{EffectContext, EffectHandler};
-    use tidepool_repr::DataConTable;
 
     let parent = build_parent(None, None).await;
     let wire_cfg = WireForkConfig {
@@ -636,7 +636,7 @@ async fn persistent_fork_without_mount_info_returns_persistent_not_available() {
     // Drive the handler from spawn_blocking (simulating eval-worker context).
     let parent_for_blocking = parent.clone();
     let err = tokio::task::spawn_blocking(move || {
-        let table = DataConTable::new();
+        let table = populated_spawn_test_table();
         let cx = EffectContext::with_user(&table, parent_for_blocking.as_ref());
         let mut h = SpawnHandler;
         h.handle(SpawnReq::Fork(wire_cfg), &cx)
@@ -671,8 +671,8 @@ async fn ac3_5_handler_side_concurrency_limit_returns_handler_error() {
     use pattern_runtime::sdk::handlers::spawn::SpawnHandler;
     use pattern_runtime::sdk::requests::SpawnReq;
     use pattern_runtime::sdk::requests::spawn::WireEphemeralConfig;
+    use pattern_runtime::testing::populated_spawn_test_table;
     use tidepool_effect::{EffectContext, EffectHandler};
-    use tidepool_repr::DataConTable;
 
     if pattern_runtime::preflight::check().is_err() {
         // The first two successful calls actually fork an EvalWorker, which
@@ -697,7 +697,7 @@ async fn ac3_5_handler_side_concurrency_limit_returns_handler_error() {
     // under in production.
     let parent_for_blocking = parent.clone();
     let outcomes = tokio::task::spawn_blocking(move || {
-        let table = DataConTable::new();
+        let table = populated_spawn_test_table();
         let cx = EffectContext::with_user(&table, parent_for_blocking.as_ref());
         let mut handler = SpawnHandler;
 
@@ -721,11 +721,10 @@ async fn ac3_5_handler_side_concurrency_limit_returns_handler_error() {
     .await
     .expect("spawn_blocking should not panic");
 
-    // Calls 1 and 2 may fail at the wire-encode step (the test's empty
-    // DataConTable doesn't know `Pattern.Spawn.EphemeralSpawn`), but the
-    // permit is acquired BEFORE encode and stored on the registered
-    // ChildSessionHandle, so the registry is saturated regardless. The
-    // load-bearing assertion is on call 3's error mode.
+    // Calls 1 and 2 acquire a permit and register a ChildSessionHandle
+    // before the wire-encode step, so the registry is saturated
+    // regardless of whether the EvalWorker launch ultimately fails.
+    // The load-bearing assertion is on call 3's error mode.
     let third_err = outcomes
         .2
         .expect_err("third Ephemeral must return Err — registry saturated at limit=2");

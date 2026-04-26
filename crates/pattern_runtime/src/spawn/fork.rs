@@ -677,7 +677,11 @@ impl ForkHandle {
     ///   persistent fork's final commit fails.
     /// - [`ForkError::Document`] if the draft KDL or seed-cache write
     ///   fails (I/O error is wrapped here for uniform reporting).
-    pub fn promote(mut self, cfg: PersonaConfig, drafts_dir: &Path) -> Result<PersonaId, ForkError> {
+    pub fn promote(
+        mut self,
+        cfg: PersonaConfig,
+        drafts_dir: &Path,
+    ) -> Result<PersonaId, ForkError> {
         if !self
             .spawner_capabilities
             .has_flag(CapabilityFlag::SpawnNewIdentities)

@@ -54,8 +54,7 @@ fn build_lightweight(
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
-    pattern_db::queries::create_agent(&db.get().unwrap(), &agent)
-        .expect("seed parent agent");
+    pattern_db::queries::create_agent(&db.get().unwrap(), &agent).expect("seed parent agent");
     pattern_db::queries::create_agent(
         &db.get().unwrap(),
         &pattern_db::models::Agent {
@@ -108,8 +107,7 @@ fn spawn_watcher(counter: Arc<AtomicUsize>) -> tokio::task::JoinHandle<()> {
 /// Wait up to `timeout_ms` for `Arc::strong_count(arc)` to equal `expected`.
 /// Yields to the tokio executor between checks.
 async fn wait_for_count<T>(arc: &Arc<T>, expected: usize, timeout_ms: u64) {
-    let deadline = std::time::Instant::now()
-        + std::time::Duration::from_millis(timeout_ms);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
     loop {
         tokio::task::yield_now().await;
         if Arc::strong_count(arc) == expected {
@@ -168,8 +166,8 @@ async fn watcher_aborted_after_merge_back_lightweight_and_drop() {
 /// After `promote` consumes the handle, the watcher task must be aborted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn watcher_aborted_after_promote() {
-    use pattern_core::spawn::PersonaConfig;
     use pattern_core::CapabilityFlag;
+    use pattern_core::spawn::PersonaConfig;
 
     let counter = Arc::new(AtomicUsize::new(0));
     assert_eq!(Arc::strong_count(&counter), 1);

@@ -17,9 +17,9 @@
 //! `discard`) take `&self` / `self` respectively, but multiple callers
 //! may race on the same fork via `MergeBack` (which preserves the handle)
 //! and `Discard` / `Promote` (which consume it). Serialisation through
-//! the mutex preserves the consume-once invariant: `remove` returns an
-//! `Option<Arc<Mutex<ForkHandle>>>` and the caller must `try_unwrap` the
-//! Arc to gain ownership for `discard` / `promote`.
+//! the mutex preserves the consume-once invariant: `remove` attempts
+//! `Arc::try_unwrap` and re-inserts the entry on contention so the caller
+//! can retry; the entry is gone only once ownership is transferred.
 //!
 //! # Lifetime
 //!
@@ -59,10 +59,12 @@ pub trait ForkRegistry: Send + Sync + std::fmt::Debug {
     /// Remove a handle and return ownership of the inner [`ForkHandle`].
     ///
     /// Returns `None` if the id is not registered. Returns `Some(None)`
-    /// when the id is registered but another caller still holds an
-    /// `Arc` to the wrapping mutex; the caller must retry. The double
-    /// `Option` keeps the contract honest about consume-once semantics
-    /// without pulling in additional sync primitives.
+    /// when the id is registered but another caller still holds an `Arc`
+    /// to the wrapping mutex; the entry is **re-inserted** in that case
+    /// so the caller can retry (a subsequent call will return `Some(None)`
+    /// or `Some(Some(_))` depending on whether the competing `Arc` has been
+    /// released). The double `Option` keeps the contract honest about
+    /// consume-once semantics without pulling in additional sync primitives.
     fn remove(&self, fork_id: &SmolStr) -> Option<Option<ForkHandle>>;
 
     /// List the ids of all currently-registered handles, for diagnostics
@@ -100,13 +102,18 @@ impl ForkRegistry for InMemoryForkRegistry {
     }
 
     fn remove(&self, fork_id: &SmolStr) -> Option<Option<ForkHandle>> {
-        let arc = self.inner.lock().remove(fork_id)?;
+        let mut g = self.inner.lock();
+        let arc = g.remove(fork_id)?;
         // Try to gain ownership. If another caller still holds an Arc
-        // (e.g. mid-MergeBack), surface the partial result so the
-        // caller can retry rather than silently dropping the handle.
+        // (e.g. mid-MergeBack), re-insert the entry so the caller can retry.
+        // Without re-inserting, a subsequent call would return `None`
+        // (entry not found), making the retry contract impossible to honour.
         match Arc::try_unwrap(arc) {
             Ok(mutex) => Some(Some(mutex.into_inner())),
-            Err(_arc_still_shared) => Some(None),
+            Err(arc_still_shared) => {
+                g.insert(fork_id.clone(), arc_still_shared);
+                Some(None)
+            }
         }
     }
 
@@ -188,13 +195,35 @@ mod tests {
         reg.insert("shared".into(), build_fork("shared"))
             .expect("insert");
         // Hold an Arc concurrently.
-        let _outstanding = reg.get(&SmolStr::from("shared")).expect("get");
+        let outstanding = reg.get(&SmolStr::from("shared")).expect("get");
         let result = reg
             .remove(&SmolStr::from("shared"))
             .expect("entry was registered");
         assert!(
             result.is_none(),
             "remove must surface Some(None) when another Arc is still held"
+        );
+        // The entry must still be in the registry (re-inserted) so the caller
+        // can retry once the competing Arc is dropped.
+        assert!(
+            reg.get(&SmolStr::from("shared")).is_some(),
+            "entry must be re-inserted after failed try_unwrap so retry is possible"
+        );
+
+        // Drop the competing Arc; retry must now return ownership.
+        drop(outstanding);
+        let owned = reg
+            .remove(&SmolStr::from("shared"))
+            .expect("entry still registered")
+            .expect("no other Arc held after drop → ownership must be available");
+        assert_eq!(
+            owned.fork_id.as_str(),
+            "shared",
+            "must return the correct handle"
+        );
+        assert!(
+            reg.list_ids().is_empty(),
+            "registry must be empty after successful remove"
         );
     }
 }

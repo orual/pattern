@@ -166,6 +166,34 @@ fn promote_lightweight_with_flag_creates_draft() {
         !snap_files.is_empty(),
         "at least one .loro snapshot must be persisted in the seed cache dir"
     );
+
+    // Round-trip: each .loro file must be importable via StructuredDocument
+    // and must contain the seed text written before promote. This verifies
+    // that the bytes on disk are a valid Loro snapshot, not a truncated or
+    // corrupted write.
+    use pattern_core::memory::StructuredDocument;
+    use pattern_core::types::memory_types::BlockMetadata;
+
+    let mut found_seed_text = false;
+    for entry in &snap_files {
+        let bytes = std::fs::read(entry.path()).expect("read .loro file");
+        let doc = StructuredDocument::from_snapshot_with_metadata(
+            &bytes,
+            BlockMetadata::standalone(BlockSchema::text()),
+            None,
+        )
+        .expect("round-trip .loro snapshot via StructuredDocument::from_snapshot_with_metadata");
+        let text = doc.text_content();
+        if text.contains("seed-text") {
+            found_seed_text = true;
+        }
+    }
+    assert!(
+        found_seed_text,
+        "round-tripped .loro snapshots must contain the original seed text 'seed-text'; \
+         files inspected: {:?}",
+        snap_files.iter().map(|e| e.path()).collect::<Vec<_>>()
+    );
 }
 
 /// AC4.8 — spawner without `SpawnNewIdentities` is denied.

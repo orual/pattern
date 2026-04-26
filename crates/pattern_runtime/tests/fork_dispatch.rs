@@ -36,10 +36,9 @@ use pattern_runtime::sdk::requests::spawn::{
     WireForkConfig, WireForkIsolation, WireForkOpKind, WirePersonaConfig,
 };
 use pattern_runtime::session::SessionContext;
-use pattern_runtime::testing::InMemoryMemoryStore;
+use pattern_runtime::testing::{InMemoryMemoryStore, populated_spawn_test_table};
 use smol_str::SmolStr;
 use tidepool_effect::{EffectContext, EffectHandler};
-use tidepool_repr::DataConTable;
 
 async fn build_parent_with_cache() -> (Arc<SessionContext>, Arc<MemoryCache>) {
     let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
@@ -112,20 +111,15 @@ async fn lightweight_fork_inserts_into_registry_and_forks_cache() {
     };
 
     let parent_for_blocking = parent.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let table = DataConTable::new();
+    tokio::task::spawn_blocking(move || {
+        let table = populated_spawn_test_table();
         let cx = EffectContext::with_user(&table, parent_for_blocking.as_ref());
         let mut h = SpawnHandler;
         h.handle(SpawnReq::Fork(wire_cfg), &cx)
     })
     .await
-    .expect("spawn_blocking ok");
-
-    // The handler may fail at the wire-encode step if the test's empty
-    // DataConTable doesn't know `Pattern.Spawn.ForkHandle`, but the
-    // registry insertion happens BEFORE the encode call, so the registry
-    // must contain exactly one entry regardless.
-    let _ = result; // Don't unwrap — encode-step failure is unrelated.
+    .expect("spawn_blocking ok")
+    .expect("lightweight fork via handler must succeed with a populated DataConTable");
 
     let ids = parent.fork_registry().list_ids();
     assert_eq!(
@@ -173,7 +167,7 @@ async fn persistent_fork_without_mount_info_typed_error() {
 
     let parent_for_blocking = parent.clone();
     let err = tokio::task::spawn_blocking(move || {
-        let table = DataConTable::new();
+        let table = populated_spawn_test_table();
         let cx = EffectContext::with_user(&table, parent_for_blocking.as_ref());
         let mut h = SpawnHandler;
         h.handle(SpawnReq::Fork(wire_cfg), &cx)
@@ -225,17 +219,15 @@ async fn lightweight_fork_without_memory_cache_returns_error_i4() {
     };
 
     let parent_for_blocking = parent.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let table = DataConTable::new();
+    let err = tokio::task::spawn_blocking(move || {
+        let table = populated_spawn_test_table();
         let cx = EffectContext::with_user(&table, parent_for_blocking.as_ref());
         let mut h = SpawnHandler;
         h.handle(SpawnReq::Fork(wire_cfg), &cx)
     })
     .await
-    .expect("spawn_blocking ok");
-
-    // Must error — not silently succeed with an empty cache.
-    let err = result.expect_err("fork without memory_cache must fail");
+    .expect("spawn_blocking ok")
+    .expect_err("fork without memory_cache must fail");
     let msg = err.to_string();
     assert!(
         msg.contains("memory cache") || msg.contains("memory_cache"),
@@ -247,16 +239,12 @@ async fn lightweight_fork_without_memory_cache_returns_error_i4() {
         parent.fork_registry().list_ids().is_empty(),
         "registry must be empty after failed fork (no handle leaked)"
     );
-
-    // Silence unused import warning for SmolStr in this test only.
-    let _ = SmolStr::from("unused");
 }
 
 // ── Helper: register a fork then return its id ──────────────────────────────
 
 /// Drive `SpawnReq::Fork` through the handler and return the registered
-/// fork id. The `DataConTable` is empty so the wire-encode step may fail
-/// — that's fine; the registry insertion happens before encode.
+/// fork id.
 async fn register_one_fork(parent: &Arc<SessionContext>) -> SmolStr {
     let wire_cfg = WireForkConfig {
         program: String::new(),
@@ -267,14 +255,15 @@ async fn register_one_fork(parent: &Arc<SessionContext>) -> SmolStr {
     };
 
     let parent_clone = parent.clone();
-    let _ = tokio::task::spawn_blocking(move || {
-        let table = DataConTable::new();
+    tokio::task::spawn_blocking(move || {
+        let table = populated_spawn_test_table();
         let cx = EffectContext::with_user(&table, parent_clone.as_ref());
         let mut h = SpawnHandler;
         h.handle(SpawnReq::Fork(wire_cfg), &cx)
     })
     .await
-    .expect("spawn_blocking ok");
+    .expect("spawn_blocking ok")
+    .expect("register_one_fork: fork must succeed with populated DataConTable");
 
     let ids = parent.fork_registry().list_ids();
     assert_eq!(ids.len(), 1, "fork registration must have exactly one id");
@@ -291,28 +280,15 @@ async fn fork_op_discard_via_handler() {
 
     let parent_for_blocking = parent.clone();
     let fork_id_s = fork_id.to_string();
-    let result = tokio::task::spawn_blocking(move || {
-        let table = DataConTable::new();
+    tokio::task::spawn_blocking(move || {
+        let table = populated_spawn_test_table();
         let cx = EffectContext::with_user(&table, parent_for_blocking.as_ref());
         let mut h = SpawnHandler;
         h.handle(SpawnReq::ForkOp(fork_id_s, WireForkOpKind::Discard), &cx)
     })
     .await
-    .expect("spawn_blocking ok");
-
-    // The result may fail at the DataCon encode step (empty table), but
-    // the discard itself must have happened before the encode. We only
-    // assert on registry state, not the wire Value.
-    //
-    // If the handler returned an Err that is NOT an encode error, propagate
-    // it so a logic bug surfaces clearly.
-    if let Err(ref e) = result {
-        let msg = e.to_string();
-        assert!(
-            msg.contains("Unknown DataCon") || msg.contains("Bridge"),
-            "unexpected handler error on Discard: {msg}"
-        );
-    }
+    .expect("spawn_blocking ok")
+    .expect("ForkOp::Discard must succeed with a populated DataConTable");
 
     // The fork must no longer be in the registry after discard.
     assert!(
@@ -332,23 +308,15 @@ async fn fork_op_merge_back_via_handler() {
 
     let parent_for_blocking = parent.clone();
     let fork_id_s = fork_id.to_string();
-    let result = tokio::task::spawn_blocking(move || {
-        let table = DataConTable::new();
+    tokio::task::spawn_blocking(move || {
+        let table = populated_spawn_test_table();
         let cx = EffectContext::with_user(&table, parent_for_blocking.as_ref());
         let mut h = SpawnHandler;
         h.handle(SpawnReq::ForkOp(fork_id_s, WireForkOpKind::MergeBack), &cx)
     })
     .await
-    .expect("spawn_blocking ok");
-
-    // Accept encode-step failure from empty DataConTable.
-    if let Err(ref e) = result {
-        let msg = e.to_string();
-        assert!(
-            msg.contains("Unknown DataCon") || msg.contains("Bridge"),
-            "unexpected handler error on MergeBack: {msg}"
-        );
-    }
+    .expect("spawn_blocking ok")
+    .expect("ForkOp::MergeBack must succeed with a populated DataConTable");
 
     // MergeBack must NOT remove the handle — it stays for further ops.
     let ids = parent.fork_registry().list_ids();
@@ -418,7 +386,7 @@ async fn fork_op_promote_without_capability() {
 
     let parent_for_blocking = parent.clone();
     let err = tokio::task::spawn_blocking(move || {
-        let table = DataConTable::new();
+        let table = populated_spawn_test_table();
         let cx = EffectContext::with_user(&table, parent_for_blocking.as_ref());
         let mut h = SpawnHandler;
         h.handle(
@@ -466,14 +434,15 @@ async fn fork_discard_does_not_cancel_parent_session_c1_regression() {
     };
 
     let parent_for_blocking = parent.clone();
-    let _ = tokio::task::spawn_blocking(move || {
-        let table = DataConTable::new();
+    tokio::task::spawn_blocking(move || {
+        let table = populated_spawn_test_table();
         let cx = EffectContext::with_user(&table, parent_for_blocking.as_ref());
         let mut h = SpawnHandler;
         h.handle(SpawnReq::Fork(wire_cfg), &cx)
     })
     .await
-    .expect("spawn_blocking ok");
+    .expect("spawn_blocking ok")
+    .expect("fork must succeed in C1 regression test");
 
     // Get the registered fork id.
     let ids = parent.fork_registry().list_ids();
@@ -489,14 +458,15 @@ async fn fork_discard_does_not_cancel_parent_session_c1_regression() {
     // Discard the fork.
     let parent_for_blocking = parent.clone();
     let fork_id_s = fork_id.to_string();
-    let _ = tokio::task::spawn_blocking(move || {
-        let table = DataConTable::new();
+    tokio::task::spawn_blocking(move || {
+        let table = populated_spawn_test_table();
         let cx = EffectContext::with_user(&table, parent_for_blocking.as_ref());
         let mut h = SpawnHandler;
         h.handle(SpawnReq::ForkOp(fork_id_s, WireForkOpKind::Discard), &cx)
     })
     .await
-    .expect("spawn_blocking ok");
+    .expect("spawn_blocking ok")
+    .expect("discard must succeed in C1 regression test");
 
     // Parent's cancel state must remain clear after the fork is discarded.
     // This is the C1 regression assertion — before the fix, discard() called
@@ -518,7 +488,7 @@ async fn fork_op_unknown_id() {
 
     let parent_for_blocking = parent.clone();
     let err = tokio::task::spawn_blocking(move || {
-        let table = DataConTable::new();
+        let table = populated_spawn_test_table();
         let cx = EffectContext::with_user(&table, parent_for_blocking.as_ref());
         let mut h = SpawnHandler;
         h.handle(

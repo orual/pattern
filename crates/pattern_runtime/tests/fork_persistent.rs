@@ -363,9 +363,7 @@ fn merge_back_persistent_reconciles_crdt_state_jj_gated() {
     let log_entries = adapter
         .log(&repo_root, "all()")
         .expect("jj log must succeed after merge_back_persistent");
-    let has_merge_commit = log_entries
-        .iter()
-        .any(|entry| entry.parents.len() >= 2);
+    let has_merge_commit = log_entries.iter().any(|entry| entry.parents.len() >= 2);
     assert!(
         has_merge_commit,
         "jj repo must contain a merge commit (≥ 2 parents) after merge_back_persistent; \
@@ -395,9 +393,8 @@ async fn handle_fork_returns_bookmark_conflict_when_bookmark_exists_i5() {
     use pattern_runtime::sdk::requests::SpawnReq;
     use pattern_runtime::sdk::requests::spawn::{WireForkConfig, WireForkIsolation};
     use pattern_runtime::session::{MountInfo, SessionContext};
-    use pattern_runtime::testing::InMemoryMemoryStore;
+    use pattern_runtime::testing::{InMemoryMemoryStore, populated_spawn_test_table};
     use tidepool_effect::{EffectContext, EffectHandler};
-    use tidepool_repr::DataConTable;
 
     let adapter = match JjAdapter::detect() {
         Ok(Some(a)) => a,
@@ -478,7 +475,7 @@ async fn handle_fork_returns_bookmark_conflict_when_bookmark_exists_i5() {
 
     let parent_clone = parent.clone();
     let err = tokio::task::spawn_blocking(move || {
-        let table = DataConTable::new();
+        let table = populated_spawn_test_table();
         let cx = EffectContext::with_user(&table, parent_clone.as_ref());
         let mut h = SpawnHandler;
         h.handle(SpawnReq::Fork(wire_cfg), &cx)
@@ -502,24 +499,52 @@ async fn handle_fork_returns_bookmark_conflict_when_bookmark_exists_i5() {
 }
 
 // ---------------------------------------------------------------------------
-// I6: partial-failure cleanup — workspace_forget runs when bookmark_set fails
+// I6: cleanup via handler path — workspace_forget + bookmark_delete both run
 // ---------------------------------------------------------------------------
 
-/// Verify that if `workspace_add` succeeds but `bookmark_set` fails, the
-/// handler cleans up the workspace. The only situation where `bookmark_set`
-/// can fail via the JjAdapter is an internal jj error (invalid revset, etc.);
-/// we test the cleanup structure by confirming that `workspace_forget` +
-/// `bookmark_delete` on the real jj repo produce the expected state.
+/// Verify that when a persistent fork is discarded through the handler, BOTH
+/// `workspace_forget` AND `bookmark_delete` are called, leaving the jj repo in
+/// a clean state with no leaked workspace or bookmark.
 ///
-/// Since we cannot trigger `fork_for_child` to fail (it always succeeds with
-/// an empty cache), this test validates the `bookmark_set`-failure cleanup
-/// path by using `workspace_forget` directly to confirm cleanup is idempotent
-/// and that a successfully-added workspace can be cleaned up after a simulated
-/// mid-setup failure.
+/// This test drives the full handler path:
+///   `SpawnHandler::handle(Fork)` → `SpawnHandler::handle(ForkOp::Discard)`
+///
+/// Cleanup validation:
+/// - The workspace must be absent from `jj workspace list` after discard.
+/// - The bookmark must be absent from `jj bookmark list` after discard.
+///
+/// `ForkHandle::discard()` for a Persistent handle calls both
+/// `workspace_forget` and `bookmark_delete` unconditionally, which is the
+/// same pair of cleanup calls that `handle_fork_persistent` makes when
+/// `fork_for_child` fails mid-setup. Driving them through the handler path
+/// (rather than via `JjAdapter` directly) tests that the handler correctly
+/// wires the cleanup without leaking resources.
+///
+/// The partial-failure scenario (workspace_add succeeds but bookmark_set
+/// fails, calling workspace_forget only) cannot be exercised reliably without
+/// a `JjAdapter` test-double seam — `bookmark_set` with revset `@` is always
+/// valid in a properly initialised repo. That path is covered by reading the
+/// handler source directly; the observable invariant here is the end-state
+/// after a full discard.
 ///
 /// Skipped cleanly when `jj` is not on PATH.
-#[test]
-fn persistent_fork_workspace_cleaned_up_on_bookmark_set_failure_i6() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn persistent_fork_handler_cleanup_both_workspace_and_bookmark_i6() {
+    use pattern_core::ProviderClient;
+    use pattern_core::traits::MemoryStore;
+    use pattern_core::types::block_ref::BlockRef;
+    use pattern_core::types::snapshot::PersonaSnapshot;
+    use pattern_memory::modes::StorageMode;
+    use pattern_runtime::NopProviderClient;
+    use pattern_runtime::sdk::handlers::spawn::SpawnHandler;
+    use pattern_runtime::sdk::requests::SpawnReq;
+    use pattern_runtime::sdk::requests::spawn::{
+        WireBlockRef, WireForkConfig, WireForkIsolation, WireForkOpKind,
+    };
+    use pattern_runtime::session::{MountInfo, SessionContext};
+    use pattern_runtime::testing::{InMemoryMemoryStore, populated_spawn_test_table};
+    use tidepool_effect::{EffectContext, EffectHandler};
+
     let adapter = match JjAdapter::detect() {
         Ok(Some(a)) => a,
         Ok(None) => {
@@ -532,43 +557,125 @@ fn persistent_fork_workspace_cleaned_up_on_bookmark_set_failure_i6() {
         }
     };
 
+    const AGENT_ID: &str = "i6-cleanup-agent";
+    const TASK_LABEL: &str = "i6-cleanup-task";
+
     let tmp = tempfile::tempdir().expect("tempdir");
     let repo_root = tmp.path().to_path_buf();
     adapter.init_repo(&repo_root).expect("jj git init");
     adapter.commit(&repo_root, "init").expect("initial commit");
 
-    // Simulate the state after workspace_add succeeds but bookmark_set fails:
-    // the workspace exists in the repo but no bookmark was created.
-    let workspace_path = repo_root.join("workspaces").join("cleanup-test-ws");
-    std::fs::create_dir_all(&workspace_path).expect("create workspaces dir");
-    adapter
-        .workspace_add(&repo_root, &workspace_path)
-        .expect("workspace_add succeeds");
-
-    let workspace_name = workspace_path.file_name().unwrap().to_str().unwrap();
-
-    // Confirm workspace was added.
-    let ws_list = adapter.workspace_list(&repo_root).expect("workspace_list");
-    assert!(
-        ws_list.iter().any(|w| w.name.contains(workspace_name)),
-        "workspace must be listed after workspace_add: {ws_list:?}"
+    // Build a parent session with MountInfo pointing at the real repo.
+    let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
+    let provider: Arc<dyn ProviderClient> = Arc::new(NopProviderClient);
+    let db = Arc::new(pattern_db::ConstellationDb::open_in_memory().expect("open db"));
+    let db_with_agents = open_db_with_agents(&[AGENT_ID]);
+    let parent_cache = Arc::new(MemoryCache::new(db_with_agents));
+    let persona = PersonaSnapshot::new(AGENT_ID, AGENT_ID);
+    let workspace_root = repo_root.join("workspaces");
+    std::fs::create_dir_all(&workspace_root).expect("create workspaces dir");
+    let parent = Arc::new(
+        SessionContext::from_persona(
+            &persona,
+            store,
+            provider,
+            db,
+            tokio::runtime::Handle::current(),
+        )
+        .with_memory_cache(parent_cache)
+        .with_mount_info(MountInfo {
+            repo_root: repo_root.clone(),
+            workspace_root: workspace_root.clone(),
+            mode: StorageMode::Standalone {
+                mount_path: repo_root.clone(),
+                project_id: "test-project".to_string(),
+            },
+            jj_enabled: true,
+        }),
     );
 
-    // Simulate the cleanup path from handle_fork_persistent when bookmark_set fails.
-    adapter
-        .workspace_forget(&repo_root, workspace_name)
-        .expect("workspace_forget must succeed for cleanup");
+    // Step 1: Fork via the handler (creates workspace + bookmark in jj).
+    let wire_cfg = WireForkConfig {
+        program: String::new(),
+        isolation: WireForkIsolation::Persistent,
+        capabilities: None,
+        timeout_hint_ms: None,
+        task_ref: Some(WireBlockRef {
+            label: TASK_LABEL.to_string(),
+            block_id: "test-block-id".to_string(),
+            agent_id: "_constellation_".to_string(),
+        }),
+    };
+    let parent_clone = parent.clone();
+    tokio::task::spawn_blocking(move || {
+        let table = populated_spawn_test_table();
+        let cx = EffectContext::with_user(&table, parent_clone.as_ref());
+        let mut h = SpawnHandler;
+        h.handle(SpawnReq::Fork(wire_cfg), &cx)
+    })
+    .await
+    .expect("spawn_blocking ok")
+    .expect("persistent Fork via handler must succeed");
 
-    // After cleanup: workspace must be gone.
-    let ws_list = adapter.workspace_list(&repo_root).expect("workspace_list");
+    // Confirm jj repo has the workspace and bookmark after the fork.
+    let task_ref = BlockRef::new(TASK_LABEL, "test-block-id");
+    let expected_bookmark = fork_bookmark_name(AGENT_ID, Some(&task_ref));
+
+    let ws_list = adapter
+        .workspace_list(&repo_root)
+        .expect("workspace_list after fork");
+    let safe_dir = expected_bookmark.replace('/', "__");
     assert!(
-        !ws_list.iter().any(|w| w.name.contains(workspace_name)),
-        "workspace must be gone after cleanup: {ws_list:?}"
+        ws_list.iter().any(|w| w.name.contains(&safe_dir)),
+        "workspace must exist in jj after Fork via handler; got: {ws_list:?}"
+    );
+    let bm_list = adapter
+        .bookmark_list(&repo_root)
+        .expect("bookmark_list after fork");
+    assert!(
+        bm_list.iter().any(|b| b.name == expected_bookmark),
+        "bookmark must exist in jj after Fork via handler; got: {bm_list:?}"
     );
 
-    // No bookmark was ever set in this scenario — nothing to delete.
-    // The test confirms the cleanup code path (workspace_forget) works
-    // correctly and leaves the repo in a consistent state.
+    // Step 2: Discard via the handler (cleans up workspace + bookmark).
+    let fork_ids = parent.fork_registry().list_ids();
+    assert_eq!(fork_ids.len(), 1, "must have exactly one fork registered");
+    let fork_id = fork_ids[0].to_string();
+
+    let parent_clone = parent.clone();
+    let fork_id_s = fork_id.clone();
+    tokio::task::spawn_blocking(move || {
+        let table = populated_spawn_test_table();
+        let cx = EffectContext::with_user(&table, parent_clone.as_ref());
+        let mut h = SpawnHandler;
+        h.handle(SpawnReq::ForkOp(fork_id_s, WireForkOpKind::Discard), &cx)
+    })
+    .await
+    .expect("spawn_blocking ok")
+    .expect("ForkOp::Discard via handler must succeed");
+
+    // Confirm both workspace AND bookmark are gone after discard — the
+    // cleanup must have called workspace_forget AND bookmark_delete.
+    let ws_list = adapter
+        .workspace_list(&repo_root)
+        .expect("workspace_list after discard");
+    assert!(
+        !ws_list.iter().any(|w| w.name.contains(&safe_dir)),
+        "workspace must be gone after discard (workspace_forget ran); got: {ws_list:?}"
+    );
+    let bm_list = adapter
+        .bookmark_list(&repo_root)
+        .expect("bookmark_list after discard");
+    assert!(
+        !bm_list.iter().any(|b| b.name == expected_bookmark),
+        "bookmark must be gone after discard (bookmark_delete ran); got: {bm_list:?}"
+    );
+
+    // Registry must also be empty after discard.
+    assert!(
+        parent.fork_registry().list_ids().is_empty(),
+        "fork registry must be empty after discard"
+    );
 }
 
 // ---------------------------------------------------------------------------
