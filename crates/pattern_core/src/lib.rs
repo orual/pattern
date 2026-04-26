@@ -44,6 +44,7 @@ pub mod memory;
 pub mod permission;
 pub mod spawn;
 pub mod traits;
+pub mod wake;
 pub mod types;
 pub mod utils;
 
@@ -112,6 +113,9 @@ pub use spawn::{
     EphemeralConfig, ForkConfig, ForkIsolation, PersonaConfig, RelationshipKind, SiblingConfig,
     SiblingPersona,
 };
+
+// Wake-condition types — agent-activation reasons (Phase 4).
+pub use wake::WakeReason;
 
 // Provider request / response types + genai re-exports for callers that
 // want `use pattern_core::*` without also depending on genai directly.

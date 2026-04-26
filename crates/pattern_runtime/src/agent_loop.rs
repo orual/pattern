@@ -981,6 +981,28 @@ impl Drop for CurrentDispatchOriginGuard {
 /// production sessions pass `None`.
 pub type TurnObserver = std::sync::Arc<dyn Fn(&TurnOutput) + Send + Sync>;
 
+/// RAII guard that clears `SessionContext::is_in_turn` and signals
+/// `turn_done` on `Drop`, so panic and early-return paths both leave
+/// the mailbox a coherent edge to wake on. Sync drop is sufficient —
+/// both operations are synchronous (atomic store + Notify wake).
+struct BusyFlagGuard {
+    is_in_turn: Arc<std::sync::atomic::AtomicBool>,
+    turn_done: Arc<tokio::sync::Notify>,
+}
+
+impl Drop for BusyFlagGuard {
+    fn drop(&mut self) {
+        self.is_in_turn
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        // `notify_waiters` wakes ALL parked waiters — multiple
+        // mailboxes-or-tests may be observing the same edge. We never
+        // want a parked waiter to miss the turn-end signal because a
+        // single `notify_one` had already been consumed by an earlier
+        // observer.
+        self.turn_done.notify_waiters();
+    }
+}
+
 pub async fn drive_step(
     initial_input: TurnInput,
     ctx: Arc<SessionContext>,
@@ -990,6 +1012,18 @@ pub async fn drive_step(
     preamble: &str,
     on_turn: Option<TurnObserver>,
 ) -> Result<StepReply, RuntimeError> {
+    // Busy-flag wrapping (Phase 4 T2): set the session's `is_in_turn`
+    // flag at entry, clear + notify on exit (RAII so panic and
+    // early-return paths both fire). The mailbox task (T3) parks on
+    // `turn_done.notified()` while busy and wakes on each turn-end
+    // edge.
+    ctx.is_in_turn()
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let _busy_guard = BusyFlagGuard {
+        is_in_turn: ctx.is_in_turn().clone(),
+        turn_done: ctx.turn_done().clone(),
+    };
+
     let batch_id = initial_input.batch_id.clone();
     let agent_id = AgentId::from(ctx.agent_id());
     let mut turns: Vec<TurnOutput> = Vec::new();
@@ -2355,6 +2389,89 @@ mod tests {
             events.last(),
             Some(TurnEvent::Stop(StopReason::ToolUse))
         ));
+    }
+
+    #[tokio::test]
+    async fn drive_step_clears_busy_flag_and_signals_turn_done_on_success() {
+        let (ctx, _sink, _provider) =
+            mock_session(vec![MockProviderClient::text_turn("hello")]).await;
+        let dispatcher = MockSuccessDispatcher::default();
+
+        // Pre-condition: not busy.
+        assert!(
+            !ctx.is_in_turn().load(std::sync::atomic::Ordering::SeqCst),
+            "is_in_turn should be false before drive_step"
+        );
+
+        // Park a waiter on turn_done BEFORE calling drive_step so we
+        // observe the rising edge once the turn finishes. Tokio's
+        // Notify only wakes waiters parked at the time of `notify_*`,
+        // so this ordering matters.
+        let turn_done = ctx.turn_done().clone();
+        let waiter = tokio::spawn(async move {
+            turn_done.notified().await;
+        });
+
+        drive_step(
+            test_turn_input(),
+            ctx.clone(),
+            Arc::new(std::sync::Mutex::new(crate::memory::TurnHistory::empty())),
+            pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
+            &dispatcher,
+            "",
+            None,
+        )
+        .await
+        .expect("drive_step");
+
+        // Post-condition: cleared.
+        assert!(
+            !ctx.is_in_turn().load(std::sync::atomic::Ordering::SeqCst),
+            "is_in_turn must be false after drive_step returns"
+        );
+        // turn_done waiter must have been woken.
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("turn_done should fire within 1s of drive_step exit")
+            .expect("waiter task panicked");
+    }
+
+    #[tokio::test]
+    async fn busy_flag_guard_clears_and_notifies_on_drop() {
+        // Direct test of the RAII guard: covers panic and early-return
+        // paths uniformly because both invoke Drop.
+        let is_in_turn = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let turn_done = Arc::new(tokio::sync::Notify::new());
+
+        // Park a waiter before constructing the guard so it observes
+        // the rising edge from `notify_waiters`.
+        let watcher_done = turn_done.clone();
+        let waiter = tokio::spawn(async move {
+            watcher_done.notified().await;
+        });
+        // Yield so the spawned task definitely reaches `notified()`.
+        tokio::task::yield_now().await;
+
+        {
+            let _guard = BusyFlagGuard {
+                is_in_turn: is_in_turn.clone(),
+                turn_done: turn_done.clone(),
+            };
+            // Mid-scope: still busy.
+            assert!(
+                is_in_turn.load(std::sync::atomic::Ordering::SeqCst),
+                "guard must not clear flag until Drop"
+            );
+        }
+        // Drop fired on scope exit.
+        assert!(
+            !is_in_turn.load(std::sync::atomic::Ordering::SeqCst),
+            "Drop must clear is_in_turn"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("turn_done must fire from guard Drop")
+            .expect("waiter panicked");
     }
 
     #[tokio::test]

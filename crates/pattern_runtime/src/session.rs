@@ -282,6 +282,23 @@ pub struct SessionContext {
     /// Set via [`Self::with_mount_info`]; `None` means persistent forks
     /// are not available on this session.
     mount_info: Option<MountInfo>,
+    /// Per-session inbox for messages, task assignments, and wake
+    /// activations. Constructed eagerly at session-open time so peers
+    /// can hand a sender clone to the [`AgentRegistry`] (T4) without
+    /// races. The [`MailboxTask`] (T3) drains this when the session
+    /// is idle.
+    mailbox: Arc<crate::mailbox::Mailbox>,
+    /// Live busy flag for the agent's turn loop.
+    ///
+    /// Set to `true` by `agent_loop::drive_step` at entry, cleared at
+    /// exit (panic-safe via RAII guard). The `MailboxTask` reads it to
+    /// decide whether to pull the next input or park on
+    /// [`Self::turn_done`] until the current turn finishes.
+    is_in_turn: Arc<std::sync::atomic::AtomicBool>,
+    /// Notify edge raised whenever `is_in_turn` flips back to `false`.
+    /// The `MailboxTask` parks on `notified()` while the session is
+    /// busy and wakes on each turn-end edge to drain the queue.
+    turn_done: Arc<tokio::sync::Notify>,
 }
 
 /// Handlers call this to decide whether to short-circuit on soft-cancel.
@@ -486,6 +503,9 @@ impl SessionContext {
             fork_registry: Arc::new(InMemoryForkRegistry::new()),
             memory_cache: None,
             mount_info: None,
+            mailbox: crate::mailbox::Mailbox::new(persona.agent_id.clone()).0,
+            is_in_turn: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            turn_done: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -716,6 +736,12 @@ impl SessionContext {
             // use Spawn.fork can copy the same block set the parent holds.
             memory_cache: self.memory_cache.clone(),
             mount_info: self.mount_info.clone(),
+            // Each child gets its own mailbox + busy flag — children
+            // run independent turn loops, and a parent's busy state
+            // says nothing about whether the child is mid-turn.
+            mailbox: crate::mailbox::Mailbox::new(self.agent_id.clone().into()).0,
+            is_in_turn: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            turn_done: Arc::new(tokio::sync::Notify::new()),
         };
         Arc::new(child)
     }
@@ -725,6 +751,28 @@ impl SessionContext {
     /// magic-capturing via `Handle::current()`.
     pub fn tokio_handle(&self) -> &tokio::runtime::Handle {
         &self.tokio_handle
+    }
+
+    /// The session's mailbox — sender clones flow out via
+    /// [`crate::mailbox::Mailbox::sender`] so peers can deliver
+    /// activations; the [`MailboxTask`](crate::mailbox) (T3) holds the
+    /// receiver guard for the lifetime of the session.
+    pub fn mailbox(&self) -> &Arc<crate::mailbox::Mailbox> {
+        &self.mailbox
+    }
+
+    /// Live busy flag — `true` while `agent_loop::drive_step` is
+    /// executing on this session. The mailbox task reads it (and parks
+    /// on [`Self::turn_done`] when set) before pulling the next input.
+    pub fn is_in_turn(&self) -> &Arc<std::sync::atomic::AtomicBool> {
+        &self.is_in_turn
+    }
+
+    /// Notify edge raised whenever the busy flag flips back to
+    /// `false`. The mailbox task awaits `notified()` while busy and
+    /// resumes drain on each turn-end edge.
+    pub fn turn_done(&self) -> &Arc<tokio::sync::Notify> {
+        &self.turn_done
     }
 
     /// Active policy set for this session. Handlers consult this
