@@ -10,8 +10,12 @@ use serde::Deserialize;
 /// A single log entry from `jj log -T 'json(self) ++ "\n"'`.
 ///
 /// `jj log` outputs one JSON object per commit. We capture only the fields
-/// Pattern uses for VCS history navigation: identity (change_id, commit_id)
-/// and the commit message.
+/// Pattern uses for VCS history navigation: identity (change_id, commit_id),
+/// the commit message, and parent commit IDs.
+///
+/// The `parents` field contains the commit IDs of the immediate parent(s).
+/// A commit with `parents.len() >= 2` is a merge commit (created via
+/// `jj new <rev1> <rev2> ...`).
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct JjLogEntry {
     /// The jj change ID (a content-stable identifier across rewrites).
@@ -20,6 +24,10 @@ pub struct JjLogEntry {
     pub commit_id: String,
     /// The commit description (message). May contain a trailing newline.
     pub description: String,
+    /// Parent commit IDs. A root commit has zero parents; a merge commit
+    /// has two or more.
+    #[serde(default)]
+    pub parents: Vec<String>,
 }
 
 /// The target commit information embedded in a workspace listing.

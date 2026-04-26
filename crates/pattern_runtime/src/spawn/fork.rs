@@ -491,8 +491,30 @@ impl ForkHandle {
             })?;
 
         // 2. Run the jj-level merge in the repo root's workspace.
-        let bookmark_ref: &str = bookmark_name.as_str();
-        let parents: [&str; 2] = [bookmark_ref, "@"];
+        //
+        // We use `<workspace-name>@` to refer to the fork workspace's HEAD
+        // AFTER the commit above. The bookmark is set at fork creation time
+        // and does NOT auto-advance when `jj commit` runs in the child
+        // workspace, so using the bookmark revset as a parent would merge
+        // the fork's *pre-commit* state (the same as the root's `@`), which
+        // collapses the merge to a single-parent fast-forward.
+        //
+        // `<name>@` is jj's revset syntax for "the working-copy commit of
+        // workspace <name>"; after `jj commit`, the workspace `@` moves to
+        // the new empty commit that follows the committed snapshot.
+        let workspace_name = workspace_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| ForkError::JjOp {
+                message: format!(
+                    "workspace path has no file name: {}",
+                    workspace_path.display()
+                ),
+            })?;
+        // After `jj commit` the workspace `@` is the new empty continuation.
+        // The committed snapshot is the parent of `@` — i.e. `<workspace>@-`.
+        let fork_rev = format!("{workspace_name}@-");
+        let parents: [&str; 2] = [fork_rev.as_str(), "@"];
         adapter
             .merge(
                 repo_root,
@@ -500,7 +522,7 @@ impl ForkHandle {
                 Some(&format!("merge fork {}", bookmark_name)),
             )
             .map_err(|e| ForkError::JjMerge {
-                revsets: format!("{}, @", bookmark_name),
+                revsets: format!("{workspace_name}@-, @"),
                 message: e.to_string(),
             })?;
 

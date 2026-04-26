@@ -225,17 +225,24 @@ fn persistent_discard_round_trip_jj_gated() {
 }
 
 // ---------------------------------------------------------------------------
-// C2: jj-gated merge_back_persistent — CRDT state reconciled after jj merge
+// C2: jj-gated merge_back_persistent — diamond concurrent edit + jj merge
 // ---------------------------------------------------------------------------
 
-/// End-to-end smoke against a real jj repo: create workspace + bookmark,
-/// write content in the fork's child cache, call `merge_back_persistent`,
-/// and verify the parent cache received the fork's writes.
+/// Diamond concurrent-edit test for `merge_back_persistent`:
 ///
-/// This is the C2 regression coverage: `merge_back_persistent` was previously
-/// untested at the CRDT level. The jj-level merge commits are exercised as a
-/// side effect; the assertion focuses on Loro CRDT convergence in the parent
-/// cache.
+/// 1. Parent writes "parent-initial" (write A).
+/// 2. Fork for child.
+/// 3. Fork (child cache) writes "child-write-b" (write B).
+/// 4. Parent (parent cache) writes "parent-write-c" CONCURRENTLY (write C).
+/// 5. `merge_back_persistent` — jj-level merge + Loro CRDT convergence.
+/// 6. Both B and C must survive in the merged parent cache (all appends
+///    preserved — the CRDT invariant).
+/// 7. The jj repo must contain a merge commit (2 parents) for `merge_back`'s
+///    `jj new <bookmark> @` step.
+///
+/// This is the full C2 regression coverage. The previous test only verified
+/// write B; this also verifies concurrent write C and the jj-level merge
+/// commit, matching the lightweight diamond test in `fork_merge_lightweight.rs`.
 ///
 /// Skipped cleanly when `jj` is not on PATH.
 #[test]
@@ -260,7 +267,7 @@ fn merge_back_persistent_reconciles_crdt_state_jj_gated() {
     let db = open_db_with_agents(&[PARENT_ID, CHILD_ID]);
     let parent_cache = Arc::new(MemoryCache::new(Arc::clone(&db)));
 
-    // Seed a block on the parent before forking.
+    // Write A: seed a block on the parent before forking.
     seed_text_block(&parent_cache, PARENT_ID, LABEL, "parent-initial");
     // Ensure it's in the cache before fork.
     let _ = parent_cache.get(PARENT_ID, LABEL).unwrap().unwrap();
@@ -292,14 +299,28 @@ fn merge_back_persistent_reconciles_crdt_state_jj_gated() {
         .bookmark_set(&repo_root, &bookmark_name, "@")
         .expect("bookmark_set");
 
-    // Write divergent content in the fork's child cache.
+    // Write B: fork writes divergent content into the child cache.
     {
         let child_doc = child_cache
             .get_cached_doc(CHILD_ID, LABEL)
             .expect("child notes block must exist in child cache");
         child_doc
-            .set_text("child-write", true)
-            .expect("set_text on child");
+            .append_text(" child-write-b", true)
+            .expect("append_text on child");
+    }
+
+    // Write C: CONCURRENT edit on the parent's cache (after the fork but
+    // before merge_back). This simulates the parent session continuing to
+    // work while the fork runs in parallel. Both B and C must survive via
+    // Loro CRDT convergence.
+    {
+        let parent_doc = parent_cache
+            .get(PARENT_ID, LABEL)
+            .expect("get parent doc")
+            .expect("notes block must exist");
+        parent_doc
+            .append_text(" parent-write-c", true)
+            .expect("append_text on parent (concurrent write C)");
     }
 
     // Build the persistent ForkHandle and call merge_back.
@@ -320,15 +341,35 @@ fn merge_back_persistent_reconciles_crdt_state_jj_gated() {
         .merge_back_persistent()
         .expect("merge_back_persistent must succeed with a real jj repo");
 
-    // Parent cache must now contain the child's write (CRDT convergence).
+    // Assertion 1: CRDT convergence — both B and C must appear in the
+    // merged parent cache. Neither write must be silently discarded.
     let parent_doc = parent_cache
         .get(PARENT_ID, LABEL)
         .expect("get")
         .expect("notes block must be in parent cache");
     let text = parent_doc.text_content();
     assert!(
-        text.contains("child-write"),
-        "parent cache must contain child's write after merge_back_persistent; got: {text:?}"
+        text.contains("child-write-b"),
+        "parent cache must contain fork's write B after merge_back_persistent; got: {text:?}"
+    );
+    assert!(
+        text.contains("parent-write-c"),
+        "parent cache must contain parent's concurrent write C after merge_back_persistent; got: {text:?}"
+    );
+
+    // Assertion 2: jj-level merge commit. `merge_back_persistent` runs
+    // `jj new <bookmark> @` which creates a commit with exactly two parents.
+    // We inspect the jj log and check that at least one commit has ≥ 2 parents.
+    let log_entries = adapter
+        .log(&repo_root, "all()")
+        .expect("jj log must succeed after merge_back_persistent");
+    let has_merge_commit = log_entries
+        .iter()
+        .any(|entry| entry.parents.len() >= 2);
+    assert!(
+        has_merge_commit,
+        "jj repo must contain a merge commit (≥ 2 parents) after merge_back_persistent; \
+         log entries: {log_entries:?}"
     );
 }
 
