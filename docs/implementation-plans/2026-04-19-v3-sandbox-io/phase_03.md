@@ -14,6 +14,92 @@ Permission gating via Plan 3's `CapabilitySet` (Shell effect category) + a futur
 
 **Scope:** Phase 3 of 5. Independent of Phase 1/2 except for the between-turn async-reminder buffer Phase 2 introduces (`SessionContext::record_async_reminder`). Phase 3 adds a `MessageAttachment::ShellOutput { … }` top-level variant in `pattern_core/src/types/message.rs`, a render arm in `Segment2Pass`, and a per-spawn bridge thread that builds/enqueues the variant. Depends on **Plan 3 (v3-multi-agent) Phase 1** for `CapabilitySet`. User noted this; Phase 3 execution parks until Plan 3 lands.
 
+---
+
+## Amendment 2026-04-26 — Q4 resolved: per-session ProcessManager (NOT runtime-global)
+
+The original plan defaulted to runtime-global ProcessManager (`Arc<ProcessManager>` on
+`TidepoolRuntime`, shared across sessions). This is reversed: **ProcessManager is
+per-session, owned directly by `SessionContext`.**
+
+**Why:** runtime-global means session A's `cd /tmp` would be visible to session B's
+next `pwd`, working against agent isolation. The same per-session granularity preference
+applies here as in Phase 4's PortRegistry decision. Mirrors Phase 2's per-session
+`FileManager` pattern. Cost: shell sessions don't survive across pattern session
+restarts — acceptable, agents are between-session-stateless anyway.
+
+**Affected tasks (overrides take precedence over the original task text below):**
+
+- **Task 4 (`ProcessManager` coordinator):** unchanged in shape. Constructor signature
+  unchanged.
+- **Task 5 (wiring):** ProcessManager goes on `SessionContext`, not `TidepoolRuntime`.
+  Constructed at session-open time with the session's initial cwd (runtime cwd for now;
+  per-session cwd from persona config is a Phase 4+ concern). `SessionContext::process_manager()`
+  returns `&Arc<ProcessManager>` (Arc preserved so the spawn-output bridge thread can
+  hold a reference for its lifetime — bridge outlives any single handler call).
+  `TidepoolRuntime` does NOT carry ProcessManager. `tokio_handle` still goes on
+  `TidepoolRuntime` (Phase 4's PortRegistry needs it; ProcessManager doesn't).
+
+- **All references in Tasks 1-9 to "runtime-global ProcessManager", "shared across sessions",
+  or `TidepoolRuntime::process_manager()` are hereby reinterpreted as the per-session
+  shape described above.**
+
+**Test fixture impact (Task 9):** tests construct one `SessionContext` with its own
+`ProcessManager`, same as Phase 2's FileManager fixtures. No multi-session sharing tests
+needed (and would be wrong to write).
+
+---
+
+## Amendment 2026-04-26 — AC3.7 resolved: timeout = kill (v2 semantics), NOT background
+
+The original task bodies in Tasks 1, 4, 6, and 7 described a "timeout backgrounds the
+running command and surfaces output via `MessageAttachment::ShellOutput`" pathway. This
+introduced a design tension with the persistent-PTY model: a backgrounded command would
+keep the persistent shell session occupied, forcing subsequent `Shell.Execute` calls to
+either block behind it (defeating the convenience) or error out as "session busy". The
+clean solutions (per-execute subshell-in-PTY, or per-execute fresh PTY with synthesized
+cwd/env tracking) are real engineering work and out of scope here.
+
+**Decision: ship v2 semantics. Timeout = kill.** AC3.7 reads "command exceeding timeout
+is killed; response indicates timeout", which is what we implement. If the agent wants
+long-running execution, it uses `Shell.Spawn` (which already has clean per-spawn isolated
+PTYs and bridge-thread streaming).
+
+**Affected tasks (overrides take precedence over original task body text):**
+
+- **Task 1 / `ExecuteResult`:** the `backgrounded_as: Option<TaskId>` field stays on the
+  struct (forward compatibility) but the backend in Task 3 always returns `None`. Doc
+  comment on the field explicitly notes "currently always `None`; reserved for a future
+  per-execute subshell model where backgrounding-on-timeout is feasible. Until then,
+  agents that need long-running execution should use `Shell.Spawn`."
+- **Task 3 / `LocalPtyBackend::execute`:** on timeout, send Ctrl-C (`0x03`) into the PTY,
+  drain output until prompt is restored (with a short bounded post-kill drain timeout
+  ~1s), return `ExecuteResult { exit_code: None, backgrounded_as: None, output: <captured>, duration_ms }`. Surface the timeout via `ShellError::Timeout` or via the result struct
+  with `exit_code: None` and a sentinel marker — TBD during implementation; the existing
+  `ShellError::Timeout(Duration)` variant is the natural fit.
+- **Task 6 / handler:** the `if let Some(task_id) = &result.backgrounded_as { … }` branch
+  in the original task body is dead code paths under v2 semantics. Implement the handler
+  without that branch. The `MessageAttachment::ShellOutput { kind: Backgrounded { … } }`
+  variant defined in Task 7 is also currently unused; keep the variant defined (forward
+  compat) but it's not enqueued by any code path until the future per-execute subshell
+  model lands.
+- **Task 9 / tests:** AC3.7 test asserts `execute("sleep 5", 1)` returns within ~1s with
+  `exit_code: None` and an error or sentinel indicating timeout. The "AC3.7b backgrounded
+  sentinel" sub-test described in the original task body is removed (no Backgrounded
+  attachment is enqueued under v2 semantics).
+
+**Why this is the right call:** the agent already has `Shell.Spawn` for long-running
+work. The "auto-background on timeout" convenience is a UX nicety that requires a
+genuinely different backend architecture (per-execute subshell or fresh PTY) to
+implement cleanly. Shipping it half-implemented (backgrounding-but-blocks) would be
+worse than the explicit "use Spawn for that" affordance.
+
+**Forward compat:** the `ShellOutputKind::Backgrounded { … }` variant from Task 7 stays
+defined. If a future phase re-architects the backend to per-execute subshells, the
+attachment variant + handler branch are already in place.
+
+---
+
 **Codebase verified:** 2026-04-24. Evidence:
 - `ShellHandler` stub at `crates/pattern_runtime/src/sdk/handlers/shell.rs:1-79`.
 - `ShellReq` enum at `crates/pattern_runtime/src/sdk/requests/shell.rs:1-17` — already has the right four variants (`Execute`, `Spawn`, `Kill`, `Status`); **no enum change required**.

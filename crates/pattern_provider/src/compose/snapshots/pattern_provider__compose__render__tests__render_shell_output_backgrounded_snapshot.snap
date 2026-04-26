@@ -1,0 +1,11 @@
+---
+source: crates/pattern_provider/src/compose/render.rs
+expression: rendered
+---
+<system-reminder>
+Shell.Execute timed out; backgrounded as task a1b2c3d4 @ 2025-04-18T18:13:20Z.
+Output captured before backgrounding (more will follow as it arrives):
+```
+partial output before timeout
+```
+</system-reminder>

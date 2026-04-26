@@ -95,8 +95,6 @@ regex = "1.11.1"
 fend-core = "1.5.7"
 
 # Shell tool dependencies
-pty-process = { version = "0.5", features = ["async"] }
-strip-ansi-escapes = "0.2"
 shellexpand = { version = "3.1.1", features = ["full"] }
 
 # Local crates (to be added later)

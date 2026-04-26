@@ -73,6 +73,39 @@ pub struct Message {
     pub attachments: Vec<MessageAttachment>,
 }
 
+/// Output event from a spawned shell process, carried by
+/// [`MessageAttachment::ShellOutput`].
+///
+/// Defined next to `MessageAttachment` for locality. `Backgrounded` is
+/// forward-compat for the future per-execute subshell model where
+/// `Shell.Execute` timeout transitions to background rather than kill; it
+/// is **never enqueued** by any code path under the current v2-semantics
+/// decision (Amendment 2026-04-26, phase_03.md). Keep it defined so a future
+/// phase can emit it without a breaking schema change.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ShellOutputKind {
+    /// Streaming output chunk from a spawned process.
+    Output(String),
+    /// Process exited; final delivery on the bridge. Always the last chunk
+    /// for a given `task_id`.
+    Exit {
+        /// OS exit code. `None` if the process was killed or the code could
+        /// not be parsed.
+        code: Option<i32>,
+        /// Wall-clock elapsed since the process was spawned, in milliseconds.
+        duration_ms: u64,
+    },
+    /// Forward-compat sentinel for the future per-execute subshell model
+    /// where `Shell.Execute` timeout transitions to background. Currently
+    /// unused — no code path enqueues this variant under the v2-semantics
+    /// decision (phase_03.md AC3.7 amendment 2026-04-26). Until then, agents
+    /// that need long-running execution should use `Shell.Spawn`.
+    Backgrounded {
+        /// Output captured before the timeout fired.
+        partial_output: String,
+    },
+}
+
 /// Pattern-level metadata that renders as content onto the wire at compose-time
 /// but is not part of the stored `ChatMessage` structure. Exists so the
 /// conversational record stays uncontaminated by ephemeral context reminders,
@@ -179,6 +212,23 @@ pub enum MessageAttachment {
         /// The block writes that occurred. Rendered as a group into a
         /// single `<system-reminder>` block at compose time.
         writes: Vec<crate::types::block::BlockWrite>,
+    },
+    /// One shell output event from a spawned process. The bridge thread
+    /// (Task 7) enqueues one of these per `OutputChunk` arriving from the
+    /// PTY; the compose-time drain splices them onto the next turn's first
+    /// user message.
+    ///
+    /// `Output` chunks carry live stdout/stderr text. `Exit` is the final
+    /// chunk signalling process completion. `Backgrounded` is forward-compat
+    /// and is currently never enqueued (see [`ShellOutputKind`]).
+    ShellOutput {
+        /// Stable task identifier assigned at `Shell.Spawn` time.
+        task_id: String,
+        /// The event kind: streaming output, exit, or (future) background
+        /// sentinel.
+        kind: ShellOutputKind,
+        /// When this event was enqueued by the bridge thread.
+        at: jiff::Timestamp,
     },
 }
 

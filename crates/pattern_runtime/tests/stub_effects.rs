@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 
 use pattern_runtime::sdk::handlers::{
     file::FileHandler, mcp::McpHandler, message::MessageHandler, rpc::RpcHandler,
-    shell::ShellHandler, sources::SourcesHandler, spawn::SpawnHandler,
+    sources::SourcesHandler, spawn::SpawnHandler,
 };
 
 /// Shared per-namespace deadline. The first test across the binary
@@ -103,18 +103,9 @@ macro_rules! run_stub_case {
     }};
 }
 
-#[test]
-fn shell_stub_reports_not_implemented_hang_free() {
-    preflight_or_fail();
-    run_stub_case!(
-        "shell_stub",
-        include_str!("fixtures/shell_stub.hs"),
-        ShellHandler,
-        (),
-        "Pattern.Shell",
-        "not implemented",
-    );
-}
+// shell_stub_reports_not_implemented_hang_free was removed in Phase 3 Task 6.
+// ShellHandler is now a real implementation bound to SessionContext (no longer
+// a stub); the AC tests in tests/shell_handler.rs cover the shell surface.
 
 #[test]
 fn file_stub_reports_no_file_manager_hang_free() {

@@ -246,10 +246,15 @@ mod parity {
     #[test]
     fn shell_req_variants() {
         use super::ShellReq;
-        let _ = ShellReq::Execute(String::new());
+        // Execute carries (command, Option<timeout_secs>); None means "use
+        // SessionContext default". Spawn returns JSON {task_id, pid}. Kill takes
+        // an opaque task_id (UUID-prefix string), NOT an OS PID. Status takes no
+        // arg and returns JSON [TaskInfo, ...]. Matches the Haskell GADT in
+        // `haskell/Pattern/Shell.hs`.
+        let _ = ShellReq::Execute(String::new(), None);
         let _ = ShellReq::Spawn(String::new());
-        let _ = ShellReq::Kill(0);
-        let _ = ShellReq::Status(0);
+        let _ = ShellReq::Kill(String::new());
+        let _ = ShellReq::Status;
         assert_eq!(count("ShellReq"), 4);
     }
 

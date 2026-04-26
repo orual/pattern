@@ -22,7 +22,11 @@ test-hooks = []
 # builds used by downstream crates. Enable it in integration tests via
 # the dev-dependency self-ref below; enable it in any binary that needs
 # the test doubles (e.g. `pattern-test-cli`).
-test-support = []
+#
+# Also enables `pattern-memory/test-support` so that test-only helpers
+# on `LoroSyncedFile` (e.g. `clear_saved_frontier_for_test`) are
+# visible to integration tests in `tests/`.
+test-support = ["pattern-memory/test-support"]
 
 # Forward pattern-provider's subscription-oauth feature. When enabled,
 # the `pattern-test-cli` bin exposes the interactive PKCE flow and the
@@ -81,6 +85,19 @@ globset          = { workspace = true }
 dashmap          = { version = "6.1.0", features = ["serde"] }
 crossbeam-channel = "0.5"
 tokio-util       = { version = "0.7", features = ["rt"] }
+# v3-sandbox-io Phase 3 review fix: XDG cache dir resolution for ProcessLogger
+# default cache_dir (was $TMPDIR/pattern, now $XDG_CACHE_HOME/pattern).
+dirs             = { workspace = true }
+# v3-sandbox-io Phase 3: PTY-backed shell process manager (sync API only — no
+# `async` feature). The `async` feature was previously stale-included in
+# pattern_core; it is moved here where it is actually used.
+pty-process      = "0.5"
+strip-ansi-escapes = "0.2"
+uuid             = { workspace = true, features = ["v4"] }
+# v3-sandbox-io Phase 3 Task 3: poll(2) wrapper for sync PTY read-with-timeout.
+# nix is already in the workspace via pattern_server / pattern_cli (signal,
+# process); we use the `poll` feature here exclusively.
+nix              = { version = "0.29", features = ["poll"] }
 
 [dev-dependencies]
 tokio          = { workspace = true, features = ["rt-multi-thread", "test-util", "macros"] }

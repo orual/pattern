@@ -1,0 +1,12 @@
+---
+source: crates/pattern_provider/src/compose/render.rs
+expression: rendered
+---
+<system-reminder>
+shell task a1b2c3d4 @ 2025-04-18T18:13:20Z:
+```
+hello world
+second line
+
+```
+</system-reminder>

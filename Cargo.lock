@@ -6513,7 +6513,6 @@ dependencies = [
  "pretty_assertions",
  "proc-macro2-diagnostics",
  "proptest",
- "pty-process",
  "rand 0.9.2",
  "regex",
  "reqwest 0.12.28",
@@ -6532,7 +6531,6 @@ dependencies = [
  "similar",
  "smallvec",
  "smol_str",
- "strip-ansi-escapes",
  "tempfile",
  "thiserror 1.0.69",
  "tokenizers",
@@ -6670,6 +6668,7 @@ dependencies = [
  "clap",
  "crossbeam-channel",
  "dashmap",
+ "dirs 5.0.1",
  "dotenvy",
  "frunk",
  "futures",
@@ -6682,12 +6681,14 @@ dependencies = [
  "loro",
  "metrics",
  "miette 7.6.0",
+ "nix",
  "pattern-core",
  "pattern-db",
  "pattern-memory",
  "pattern-provider",
  "pattern-runtime",
  "proptest",
+ "pty-process",
  "regex",
  "rusqlite",
  "rustyline-async",
@@ -6695,6 +6696,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smol_str",
+ "strip-ansi-escapes",
  "tempfile",
  "thiserror 1.0.69",
  "tidepool-bridge",
@@ -6710,6 +6712,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tracing-test",
+ "uuid",
  "which 8.0.2",
 ]
 
@@ -7223,7 +7226,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "71cec9e2670207c5ebb9e477763c74436af3b9091dd550b9fb3c1bec7f3ea266"
 dependencies = [
  "rustix",
- "tokio",
 ]
 
 [[package]]

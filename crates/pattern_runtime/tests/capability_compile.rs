@@ -101,7 +101,7 @@ async fn excluded_effect_fails_at_tidepool_compile() {
     let body = r#"
 agent :: Eff M ()
 agent = do
-  _ <- Shell.execute "echo hi"
+  _ <- Shell.execute "echo hi" 0
   pure ()
 "#;
     let source = format!("{preamble}{body}");

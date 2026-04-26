@@ -28,6 +28,7 @@ use pattern_core::types::snapshot::{PersonaSnapshot, SessionSnapshot};
 use pattern_core::types::turn::{StepReply, TurnInput};
 
 use crate::agent_loop::EvalWorker;
+use crate::process_manager::ProcessManager;
 
 /// Compose the session's effective [`pattern_core::PolicySet`] from
 /// runtime defaults plus the persona's KDL-loaded rules.
@@ -186,6 +187,25 @@ pub struct SessionContext {
     /// Per-session file manager. `None` until session open constructs it
     /// from the mount config's file-policy.
     file_manager: Option<Arc<crate::file_manager::FileManager>>,
+    /// Per-session shell process manager. Owns a `LocalPtyBackend` shell
+    /// session (lazily initialised on first command). Arc-shared so the
+    /// spawn-output bridge thread (Task 7) can hold a reference for its
+    /// lifetime while the session context is borrowed elsewhere.
+    ///
+    /// Per the Q4 resolution (Amendment 2026-04-26), this is per-session
+    /// rather than runtime-global: session A's `cd /tmp` must not affect
+    /// session B's `pwd`. The initial cwd is the process cwd at session-open
+    /// time; per-session cwd from persona config is a Phase 4+ concern.
+    process_manager: Arc<ProcessManager>,
+    /// Default timeout for `Shell.Execute` when the caller passes `None`
+    /// (or a non-positive value) for `TimeoutSecs`. Exposed as the
+    /// session-level source of truth rather than a private const in the
+    /// handler module so tests and future per-session configuration can
+    /// override it without patching the handler.
+    ///
+    /// Default: 30 s (mirrors AC3.1's literal example
+    /// `Shell.Execute("echo hello", 30)`).
+    shell_default_timeout: std::time::Duration,
 }
 
 /// Handlers call this to decide whether to short-circuit on soft-cancel.
@@ -372,6 +392,28 @@ impl SessionContext {
             current_dispatch_origin: Arc::new(std::sync::RwLock::new(None)),
             async_reminder_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
             file_manager: None,
+            // Construct the per-session process manager with the process's
+            // current working directory as the initial cwd. If the cwd query
+            // fails (unusual on POSIX; possible if the cwd was deleted), fall
+            // back to "/" so the shell still opens in a valid directory.
+            // Per-session cwd from persona config is a Phase 4+ concern.
+            //
+            // Cache dir for process logs (Task 8 / AC3.10): prefer the
+            // platform XDG cache directory (Linux: $XDG_CACHE_HOME or
+            // ~/.cache; macOS: ~/Library/Caches; Windows: %LocalAppData%)
+            // so logs persist across `tmpwatch` / `systemd-tmpfiles` cleans
+            // and live next to other per-user pattern state. Fall back to
+            // $TMPDIR/pattern in the unlikely event the cache dir cannot be
+            // resolved — better an ephemeral log than no log. Phase 4+ may
+            // plumb a proper per-session cache root through the persona
+            // config; until then this is the runtime-wide default.
+            process_manager: Arc::new(ProcessManager::new(
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+                dirs::cache_dir()
+                    .unwrap_or_else(std::env::temp_dir)
+                    .join("pattern"),
+            )),
+            shell_default_timeout: std::time::Duration::from_secs(30),
         }
     }
 
@@ -676,6 +718,43 @@ impl SessionContext {
     #[must_use]
     pub fn with_file_manager(mut self, fm: Arc<crate::file_manager::FileManager>) -> Self {
         self.file_manager = Some(fm);
+        self
+    }
+
+    /// Per-session shell process manager. Arc-shared so the spawn-output
+    /// bridge thread (Task 7) can hold a reference for its lifetime.
+    ///
+    /// Capability gating (`CapabilitySet::has_shell()`) is NOT enforced here;
+    /// it is the handler's responsibility (Phase 3 Task 6).
+    pub fn process_manager(&self) -> &Arc<ProcessManager> {
+        &self.process_manager
+    }
+
+    /// Builder-style: replace the process manager. Used in integration tests
+    /// to inject a `ProcessManager` constructed with a controlled `cache_dir`
+    /// (needed for AC3.10 log-file verification) without changing the
+    /// production `from_persona` construction path.
+    #[must_use]
+    pub fn with_process_manager(mut self, pm: Arc<ProcessManager>) -> Self {
+        self.process_manager = pm;
+        self
+    }
+
+    /// Default timeout for `Shell.Execute` when the caller passes `None`
+    /// (or a non-positive `TimeoutSecs`). Session-level source of truth
+    /// per the Phase 3 design; overridable via
+    /// [`Self::with_shell_default_timeout`] for tests or future per-session
+    /// configuration.
+    pub fn shell_default_timeout(&self) -> std::time::Duration {
+        self.shell_default_timeout
+    }
+
+    /// Builder-style: override the default execute timeout. Useful in tests
+    /// that need a faster or slower timeout without touching the real handler
+    /// constant, and for future per-persona shell-timeout configuration.
+    #[must_use]
+    pub fn with_shell_default_timeout(mut self, d: std::time::Duration) -> Self {
+        self.shell_default_timeout = d;
         self
     }
 }
@@ -1081,10 +1160,10 @@ impl Session for TidepoolSession {
         // canonicalized paths keyed in its DashMap; we snapshot them here
         // verbatim — LoroDoc state is deliberately NOT captured (loro docs
         // are ephemeral per design; restore gives each file a fresh doc).
-        if let Some(persona) = snapshot.personas.first_mut() {
-            if let Some(fm) = self.ctx.file_manager() {
-                persona.open_files = fm.open_paths();
-            }
+        if let Some(persona) = snapshot.personas.first_mut()
+            && let Some(fm) = self.ctx.file_manager()
+        {
+            persona.open_files = fm.open_paths();
         }
 
         Ok(snapshot)
@@ -1109,16 +1188,16 @@ impl Session for TidepoolSession {
         // gives each path a fresh LoroDoc — no CRDT state persists across
         // snapshot boundaries. Missing files (deleted between snapshot and
         // restore) are logged and skipped; they do not abort the restore.
-        if let Some(persona) = snapshot.personas.first() {
-            if let Some(fm) = self.ctx.file_manager() {
-                for path in &persona.open_files {
-                    if let Err(e) = fm.open(path) {
-                        tracing::warn!(
-                            path = ?path,
-                            error = %e,
-                            "failed to re-open file from snapshot; skipping"
-                        );
-                    }
+        if let Some(persona) = snapshot.personas.first()
+            && let Some(fm) = self.ctx.file_manager()
+        {
+            for path in &persona.open_files {
+                if let Err(e) = fm.open(path) {
+                    tracing::warn!(
+                        path = ?path,
+                        error = %e,
+                        "failed to re-open file from snapshot; skipping"
+                    );
                 }
             }
         }
@@ -1665,7 +1744,6 @@ mod tests {
         use crate::sdk::requests::ShellReq;
         use pattern_core::{EffectCategory, PolicyAction, PolicyMatcher, PolicyRule, Precedence};
         use tidepool_effect::EffectHandler;
-        use tidepool_repr::DataConTable;
 
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
         let provider: Arc<dyn ProviderClient> = Arc::new(MockProviderClient::with_turns(vec![]));
@@ -1696,26 +1774,39 @@ mod tests {
             }
         });
 
+        // ShellHandler is now a real implementation (Task 6) — it will
+        // actually run the command through the PTY. `git push origin main`
+        // is likely to fail with a git error (no remote configured in CI),
+        // but the point of this test is that the broker is NOT called when
+        // an Allow rule matches. We accept either Ok (rare: git works) or
+        // Err (common: git fails), but either way the error must NOT contain
+        // "GateApproved" or "capability denied".
         let result = tokio::task::spawn_blocking(move || {
             let mut h = ShellHandler;
-            let table = DataConTable::new();
+            // Use standard_datacon_table so cx.respond() can encode the
+            // result without "Unknown DataCon name: Text".
+            let table = crate::testing::standard_datacon_table();
             let cx_eff = tidepool_effect::EffectContext::with_user(&table, &ctx);
-            h.handle(ShellReq::Execute("git push origin main".into()), &cx_eff)
+            h.handle(
+                ShellReq::Execute("git push origin main".into(), None),
+                &cx_eff,
+            )
         })
         .await
-        .expect("blocking task")
-        .expect_err("Phase 1 stub always errors");
-        let msg = result.to_string();
-        // Allow path: stub error WITHOUT GateApproved marker (gate did
-        // not fire because policy returned Allow before any broker call).
-        assert!(
-            msg.contains("Pattern.Shell.Execute is not implemented"),
-            "expected plain stub error, got: {msg}"
-        );
-        assert!(
-            !msg.contains("GateApproved:"),
-            "Allow path must not carry GateApproved marker — gate should be skipped, got: {msg}"
-        );
+        .expect("blocking task");
+        // Allow path: broker NOT invoked — confirm no GateApproved marker if
+        // the handler errored. (For Ok, the command ran; that's fine too.)
+        if let Err(ref err) = result {
+            let msg = err.to_string();
+            assert!(
+                !msg.contains("GateApproved:"),
+                "Allow path must not carry GateApproved marker — gate should be skipped, got: {msg}"
+            );
+            assert!(
+                !msg.contains("capability denied"),
+                "Allow path must not capability-deny, got: {msg}"
+            );
+        }
 
         // Allow watcher a beat to record any broker traffic.
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;

@@ -27,7 +27,9 @@
 use genai::chat::ChatMessage;
 use pattern_core::types::block::{BlockWrite, BlockWriteKind};
 use pattern_core::types::memory_types::SkillTrustTier;
-use pattern_core::types::message::{FileEditKind, MessageAttachment, SnapshotKind};
+use pattern_core::types::message::{
+    FileEditKind, MessageAttachment, ShellOutputKind, SnapshotKind,
+};
 use pattern_core::types::origin::Author;
 
 use crate::shaper::wrap_system_reminder;
@@ -61,6 +63,21 @@ pub fn render_block_write_attachment(writes: &[BlockWrite]) -> Option<String> {
     }
     let bodies: Vec<String> = writes.iter().map(render_block_write_body).collect();
     Some(wrap_system_reminder(&bodies.join("\n\n")))
+}
+
+/// Render a `MessageAttachment::ShellOutput` as a `<system-reminder>` string.
+///
+/// Each variant renders as a distinct framing:
+/// - `Output`: fenced code block with the raw text.
+/// - `Exit`: one-line status line.
+/// - `Backgrounded`: multi-line notice with captured output (forward-compat,
+///   not currently enqueued under v2 semantics — see phase_03.md amendment).
+pub fn render_shell_output_attachment(
+    task_id: &str,
+    kind: &ShellOutputKind,
+    at: jiff::Timestamp,
+) -> String {
+    wrap_system_reminder(&render_shell_output_body(task_id, kind, at))
 }
 
 // ---- Composite renderers ---------------------------------------------------
@@ -148,6 +165,9 @@ pub fn render_attachment_content(attachment: &MessageAttachment) -> String {
             }
             let bodies: Vec<String> = writes.iter().map(render_block_write_body).collect();
             bodies.join("\n\n")
+        }
+        MessageAttachment::ShellOutput { task_id, kind, at } => {
+            render_shell_output_body(task_id, kind, *at)
         }
         // Future variants — skip gracefully.
         _ => String::new(),
@@ -373,6 +393,36 @@ fn render_file_edit_body(
         body.push_str("\n```");
     }
     body
+}
+
+/// `ShellOutput` body WITHOUT `<system-reminder>` wrap (for grouping when
+/// multiple attachments land on the same message).
+fn render_shell_output_body(task_id: &str, kind: &ShellOutputKind, at: jiff::Timestamp) -> String {
+    match kind {
+        ShellOutputKind::Output(text) => {
+            format!("shell task {task_id} @ {at}:\n```\n{text}\n```")
+        }
+        ShellOutputKind::Exit { code, duration_ms } => {
+            // Render exit code as `exit=N` for a clean numeric form, or
+            // `exit=signal` when the process was killed by a signal (no
+            // exit code). Using Rust's Debug format (`code=Some(0)`) was
+            // the original but exposes implementation details to the model.
+            let code_str = match code {
+                Some(c) => format!("exit={c}"),
+                None => "exit=signal".to_string(),
+            };
+            format!("shell task {task_id} @ {at}: [exited {code_str} duration_ms={duration_ms}]")
+        }
+        ShellOutputKind::Backgrounded { partial_output } => {
+            // Forward-compat: no current code path enqueues this variant under v2
+            // timeout semantics. See phase_03.md AC3.7 amendment (2026-04-26).
+            format!(
+                "Shell.Execute timed out; backgrounded as task {task_id} @ {at}.\n\
+                 Output captured before backgrounding (more will follow as it arrives):\n\
+                 ```\n{partial_output}\n```"
+            )
+        }
+    }
 }
 
 /// FileConflict body WITHOUT `<system-reminder>` wrap (for grouping).
@@ -748,6 +798,110 @@ mod tests {
         assert!(
             !text.contains("<system-reminder>"),
             "must not wrap in system-reminder"
+        );
+    }
+
+    // ---- ShellOutput attachment rendering ----------------------------------
+
+    fn shell_at() -> jiff::Timestamp {
+        // Fixed timestamp for snapshot stability.
+        jiff::Timestamp::from_second(1_745_000_000).unwrap()
+    }
+
+    #[test]
+    fn render_shell_output_output_chunk_snapshot() {
+        let at = shell_at();
+        let rendered = render_shell_output_attachment(
+            "a1b2c3d4",
+            &ShellOutputKind::Output("hello world\nsecond line\n".to_string()),
+            at,
+        );
+        insta::assert_snapshot!(rendered);
+    }
+
+    #[test]
+    fn render_shell_output_exit_snapshot() {
+        let at = shell_at();
+        let rendered = render_shell_output_attachment(
+            "a1b2c3d4",
+            &ShellOutputKind::Exit {
+                code: Some(0),
+                duration_ms: 1234,
+            },
+            at,
+        );
+        insta::assert_snapshot!(rendered);
+    }
+
+    #[test]
+    fn render_shell_output_exit_killed_snapshot() {
+        let at = shell_at();
+        let rendered = render_shell_output_attachment(
+            "a1b2c3d4",
+            &ShellOutputKind::Exit {
+                code: None,
+                duration_ms: 500,
+            },
+            at,
+        );
+        insta::assert_snapshot!(rendered);
+    }
+
+    #[test]
+    fn render_shell_output_backgrounded_snapshot() {
+        let at = shell_at();
+        let rendered = render_shell_output_attachment(
+            "a1b2c3d4",
+            &ShellOutputKind::Backgrounded {
+                partial_output: "partial output before timeout".to_string(),
+            },
+            at,
+        );
+        insta::assert_snapshot!(rendered);
+    }
+
+    /// Verify ShellOutput attachment renders through render_attachment_content
+    /// (the path Segment2Pass uses).
+    #[test]
+    fn shell_output_renders_through_render_attachment_content() {
+        let at = shell_at();
+        let attachment = MessageAttachment::ShellOutput {
+            task_id: "tid1".to_string(),
+            kind: ShellOutputKind::Output("ls output".to_string()),
+            at,
+        };
+        let content = render_attachment_content(&attachment);
+        assert!(
+            content.contains("shell task tid1"),
+            "missing task id in content: {content}"
+        );
+        assert!(
+            content.contains("ls output"),
+            "missing output text in content: {content}"
+        );
+    }
+
+    /// Verify ShellOutput exit renders through render_attachment_content.
+    #[test]
+    fn shell_output_exit_renders_through_render_attachment_content() {
+        let at = shell_at();
+        let attachment = MessageAttachment::ShellOutput {
+            task_id: "tid2".to_string(),
+            kind: ShellOutputKind::Exit {
+                code: Some(1),
+                duration_ms: 2000,
+            },
+            at,
+        };
+        let content = render_attachment_content(&attachment);
+        assert!(content.contains("tid2"), "missing task id: {content}");
+        assert!(
+            content.contains("exited"),
+            "missing 'exited' in exit render: {content}"
+        );
+        assert!(
+            content.contains("2000"),
+            "missing duration_ms in exit render: {content}"
         );
     }
 

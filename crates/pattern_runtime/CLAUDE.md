@@ -4,7 +4,7 @@ Agent runtime for Pattern v3. Houses Tidepool (Haskell-in-Rust) embedding, the
 agent turn loop, `freer-simple` effect handlers, and turn-level checkpoint
 machinery. Depends only on `pattern_core` trait definitions.
 
-Last verified: 2026-04-24 (post v3-multi-agent Phase 1)
+Last verified: 2026-04-26 (post v3-sandbox-io Phase 3 Tasks 5-9)
 
 v3-TUI integration note: the runtime is consumed by `pattern_server`'s actor
 via `TidepoolSession`, `MultiplexSink`, and per-batch `TurnSinkBridge`. The
@@ -775,3 +775,102 @@ Decoded into `PersonaSnapshot.capabilities` (`Option<CapabilitySet>`)
 and `PersonaSnapshot.policy_rules` (`Vec<PolicyRule>` with
 `Precedence::KdlConfig`). `merge_policies(persona)` layers the rules
 over `rust_defaults()` at session open.
+
+## Shell subsystem (Phase 3 Tasks 1-9)
+
+### Architecture overview
+
+The shell subsystem is layered: `LocalPtyBackend` → `ProcessManager` →
+`ShellHandler`. Each layer is independently testable.
+
+- **`LocalPtyBackend`** (`process_manager/local_pty.rs`) — sync PTY driver.
+  Allocates a pty pair, forks a shell (`$SHELL` → `/bin/bash` fallback),
+  writes command strings, reads until `PROMPT_MARKER` (injected via
+  `PROMPT_COMMAND`), strips ANSI, returns trimmed output. Stateful: the
+  backend owns the shell process for the lifetime of the session and
+  environment is preserved between `execute()` calls.
+
+- **`ProcessManager`** (`process_manager/manager.rs`) — per-session wrapper.
+  Owns one `LocalPtyBackend` for interactive shell execution plus a
+  `ProcessLogger` for process-log persistence. `spawn()` forks background
+  tasks via `std::thread::spawn` with a bounded output queue; `execute()`
+  forwards synchronously to the backend. `kill()` / `status()` manage the
+  background task registry. Every `SessionContext` owns exactly one
+  `ProcessManager` — no runtime-global singleton.
+
+- **`ProcessLogger`** (`process_manager/logger.rs`) — append-only log of
+  completed shell executions. Each entry records timestamp, command,
+  output, exit status, and duration. Persists to a `process_log.ndjson`
+  file in the session's cache dir.
+
+- **`ShellHandler`** (`sdk/handlers/shell.rs`) — maps `ShellReq` variants
+  to `ProcessManager` calls. Handles `Execute`, `Spawn`, `Kill`, `Status`,
+  `Cwd`, and `Env`. Enforces the Phase 1 policy gate (Allow / Deny /
+  RequireApproval) before delegating. Pushes `ShellOutput` attachments
+  (output chunks, exit events, kill events) to the session's
+  `SystemCommunicationsQueue` for asynchronous delivery to agents.
+
+### `ShellOutput` attachments
+
+Background spawns stream output via `MessageAttachment::ShellOutput`
+pushed to `SessionContext.system_comms_queue`. The bridge thread
+(`spawn_output_bridge`) runs on `std::thread::spawn` (not a tokio task)
+and drains the pty output queue, pushing attachments until an `Exit` or
+`Killed` terminal event is observed. Tests poll the queue with
+`wait_for_queue` / `drain_shell_outputs` helpers (condition-based, no
+arbitrary `sleep`).
+
+### `SessionContext.with_process_manager`
+
+Builder method added for test fixture control:
+
+```rust
+ctx.with_process_manager(Arc::new(ProcessManager::new(cwd, cache_dir)))
+```
+
+Replaces the default manager (constructed at session open with the
+persona's cache dir) with an injected one. Only needed in integration tests
+that need to inspect the process log path or inject a controlled cache dir.
+
+### Kill handler
+
+`ShellReq::Kill(TaskId)` takes the opaque handle string returned by `Spawn`'s
+JSON response (`{"task_id":"...","pid":N}`). Recycle-safe: lookup goes
+through the running map, the actual SIGTERM dispatch uses the reader thread's
+owned `Child` handle. PID recycling cannot misroute kills to unrelated
+processes.
+
+The integration test `kill_via_handler_terminates_running_process` (AC3.4)
+exercises the full honest path: Spawn → parse task_id from JSON → Kill(task_id)
+→ Status confirms removal.
+
+### AC3 integration tests (`tests/shell_handler.rs`)
+
+Eighteen handler-level integration tests covering AC3.1–AC3.10 plus
+capability-denial and policy-gate paths (including a wired-broker test
+that observes the `ToolExecution` scope shape):
+
+| Test | AC | What it verifies |
+|------|----|-----------------|
+| `execute_via_handler_returns_output_and_exit_code` | AC3.1 | Execute dispatches and returns JSON ExecuteResult |
+| `execute_via_handler_persists_session_state` | AC3.2 | cd then pwd; same handler/context |
+| `spawn_streams_output_via_attachments` | AC3.3 | Background spawn pushes ShellOutput attachments |
+| `kill_via_handler_terminates_running_process` | AC3.4 | Spawn → Kill(task_id) via handler → Status confirms removal |
+| `status_via_handler_lists_running_tasks` | AC3.5 | Status returns both task IDs from two Spawns |
+| `cwd_persists_across_handler_executions` | AC3.6 | pm.cwd() reflects `cd /tmp` after Execute |
+| `execute_via_handler_timeout_kills_and_surfaces_error` | AC3.7 | Timeout → Err; session recovers |
+| `kill_unknown_task_via_handler_returns_error` | AC3.8 | Kill(bogus) → Err with "not found" |
+| `exit_marker_resists_command_output_injection` | AC3.9 | Spurious marker in output; exit_code correct |
+| `spawn_output_logged_to_file` | AC3.10 | ProcessLogger writes OUT/EXIT lines to ndjson |
+| `execute_via_handler_denied_without_shell_capability` | cap | Restricted caps → PERMISSION_DENIED_PREFIX |
+| `spawn_via_handler_denied_without_shell_capability` | cap | Restricted caps deny Spawn |
+| `kill_via_handler_denied_without_shell_capability` | cap | Restricted caps deny Kill |
+| `status_via_handler_denied_without_shell_capability` | cap | Restricted caps deny Status |
+| `execute_via_handler_denies_when_policy_denies` | policy | Deny rule → PERMISSION_DENIED_PREFIX before PM |
+| `execute_via_handler_escalates_to_broker_on_require_approval` | policy | rm -rf* rule → broker consulted |
+| `spawn_via_handler_also_gates_on_policy` | policy | Deny rule also fires on Spawn |
+
+Tests use `#[tokio::test]` for context construction (async DB) then invoke
+the handler synchronously. `tidepool_testing::gen::standard_datacon_table()`
+provides the Haskell constructor table (NOT `pattern_runtime::testing`,
+which is `#[cfg(test)]`-gated and unavailable from integration test files).
