@@ -30,10 +30,15 @@
 
 use std::sync::Arc;
 
-use pattern_core::types::ids::PersonaId;
+use pattern_core::types::ids::{AgentId, PersonaId};
 use pattern_core::types::message::Message;
 use pattern_core::types::origin::MessageOrigin;
+use pattern_core::types::turn::TurnInput;
 use tokio::sync::{Mutex, mpsc};
+
+use crate::agent_loop::{EvalDispatcher, drive_step};
+use crate::memory::TurnHistory;
+use crate::session::SessionContext;
 
 /// A single activation enqueued into a session's mailbox.
 ///
@@ -123,6 +128,134 @@ impl std::fmt::Debug for Mailbox {
     }
 }
 
+/// Build a [`TurnInput`] from a single inbound mailbox activation.
+///
+/// The carrier is uniformly `(MessageOrigin, Message)` (see
+/// [`MailboxInput`]). The synthesised TurnInput uses the activating
+/// origin verbatim — wake events declare themselves via
+/// [`pattern_core::SystemReason`] variants on `from.author` so the
+/// agent can branch on activation cause.
+fn build_turn_input(input: MailboxInput, ctx: &SessionContext) -> TurnInput {
+    use pattern_core::types::ids::new_snowflake_id;
+    let _ = ctx;
+    let id = new_snowflake_id();
+    TurnInput {
+        turn_id: id.clone(),
+        batch_id: pattern_core::types::ids::BatchId::from(id),
+        origin: input.from,
+        messages: vec![input.msg],
+    }
+}
+
+/// Spawn the per-session mailbox-drain task on the supplied
+/// [`tokio::task::JoinSet`].
+///
+/// The task pulls activations from the session's mailbox and calls
+/// [`drive_step`] when the session is idle. It exits when:
+///
+/// 1. The session's [`crate::timeout::CancelState`] fires — explicit
+///    shutdown signal.
+/// 2. The mailbox's last sender is dropped (channel closed) — natural
+///    termination when the session and all peer registry entries are
+///    gone.
+/// 3. The `JoinSet` is dropped — the JoinSet's `Drop` aborts every
+///    task it tracks. This is the cleanup path when
+///    [`crate::session::TidepoolSession`] itself is dropped.
+///
+/// The task watches `is_in_turn` + `turn_done` to deliver inbound
+/// activations only between turns; activations that arrive while the
+/// session is busy queue in the mailbox and drain on the next idle
+/// edge (FIFO).
+pub fn spawn_mailbox_task(
+    tasks: &mut tokio::task::JoinSet<()>,
+    ctx: Arc<SessionContext>,
+    turn_history: Arc<std::sync::Mutex<TurnHistory>>,
+    dispatcher: Arc<dyn EvalDispatcher>,
+    preamble: Arc<str>,
+    cache_profile: pattern_provider::compose::CacheProfile,
+) {
+    tasks.spawn(mailbox_task_body(
+        ctx,
+        turn_history,
+        dispatcher,
+        preamble,
+        cache_profile,
+    ));
+}
+
+async fn mailbox_task_body(
+    ctx: Arc<SessionContext>,
+    turn_history: Arc<std::sync::Mutex<TurnHistory>>,
+    dispatcher: Arc<dyn EvalDispatcher>,
+    preamble: Arc<str>,
+    cache_profile: pattern_provider::compose::CacheProfile,
+) {
+    use std::sync::atomic::Ordering;
+
+    let mailbox = ctx.mailbox().clone();
+    let cancel = ctx.cancel_state();
+    let agent_id = AgentId::from(ctx.agent_id());
+    let _ = agent_id; // reserved for future structured-logging fields.
+
+    loop {
+        // Phase 1: park while busy. Re-arm `notified()` BEFORE
+        // re-checking the busy flag so `notify_waiters()` calls that
+        // happen between the load and the await don't get lost.
+        loop {
+            if cancel.is_cancelled() {
+                return;
+            }
+            if !ctx.is_in_turn().load(Ordering::SeqCst) {
+                break;
+            }
+            let notified = ctx.turn_done().notified();
+            tokio::pin!(notified);
+            // Re-check after arming: turn may have ended in the gap.
+            if !ctx.is_in_turn().load(Ordering::SeqCst) {
+                break;
+            }
+            let cancel_wait = cancel.wait_for_cancel();
+            tokio::pin!(cancel_wait);
+            tokio::select! {
+                _ = notified.as_mut() => continue,
+                _ = cancel_wait => return,
+            }
+        }
+
+        // Phase 2: receive next input, racing against cancel.
+        let input = {
+            let mut rx = mailbox.lock_rx().await;
+            let cancel_wait = cancel.wait_for_cancel();
+            tokio::pin!(cancel_wait);
+            tokio::select! {
+                msg = rx.recv() => msg,
+                _ = cancel_wait => return,
+            }
+        };
+        let Some(input) = input else {
+            // All senders dropped — channel closed. Natural termination.
+            return;
+        };
+
+        // Phase 3: dispatch. drive_step manages its own busy flag via
+        // BusyFlagGuard; we don't set is_in_turn ourselves here.
+        let turn_input = build_turn_input(input, &ctx);
+        if let Err(err) = drive_step(
+            turn_input,
+            ctx.clone(),
+            turn_history.clone(),
+            cache_profile.clone(),
+            dispatcher.as_ref(),
+            &preamble,
+            None,
+        )
+        .await
+        {
+            tracing::warn!(error = ?err, "mailbox-triggered drive_step failed");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,5 +317,117 @@ mod tests {
     async fn persona_id_is_preserved() {
         let (mbx, _tx) = Mailbox::new(PersonaId::from("anchor"));
         assert_eq!(mbx.persona_id().as_str(), "anchor");
+    }
+
+    /// Drive the spawn/drain loop end-to-end: send a MailboxInput,
+    /// observe drive_step run via a counting dispatcher, then trip
+    /// cancel_state and assert the task exits.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spawn_and_cancel_drives_one_turn_then_exits() {
+        use crate::agent_loop::EvalDispatcher;
+        use crate::testing::{InMemoryMemoryStore, MockProviderClient};
+        use async_trait::async_trait;
+        use pattern_core::traits::MemoryStore;
+        use pattern_core::types::provider::{ToolCall, ToolOutcome};
+        use pattern_core::types::snapshot::PersonaSnapshot;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Counting dispatcher — never called for a pure-text turn but
+        // available so the EvalDispatcher type is satisfied.
+        #[derive(Default)]
+        struct CountDispatcher(AtomicUsize);
+        #[async_trait]
+        impl EvalDispatcher for CountDispatcher {
+            async fn dispatch(&self, _: ToolCall, _: &str) -> ToolOutcome {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                ToolOutcome::Error("unused".into())
+            }
+        }
+
+        let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
+        let provider: Arc<dyn pattern_core::ProviderClient> =
+            Arc::new(MockProviderClient::with_turns(vec![
+                MockProviderClient::text_turn("ack"),
+            ]));
+        let db = crate::testing::test_db().await;
+        // Seed the FK row drive_step's persistence path needs.
+        let agent_row = pattern_db::models::Agent {
+            id: "agent-mbx".to_string(),
+            name: "Test".to_string(),
+            description: None,
+            model_provider: "test".to_string(),
+            model_name: "test-model".to_string(),
+            system_prompt: "test".to_string(),
+            config: pattern_db::Json(serde_json::json!({})),
+            enabled_tools: pattern_db::Json(vec![]),
+            tool_rules: None,
+            status: pattern_db::models::AgentStatus::Active,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        pattern_db::queries::create_agent(&db.get().unwrap(), &agent_row).unwrap();
+
+        let persona = PersonaSnapshot::new("agent-mbx", "Mailbox Test");
+        let ctx = Arc::new(SessionContext::from_persona(
+            &persona,
+            store,
+            provider,
+            db,
+            tokio::runtime::Handle::current(),
+        ));
+
+        let dispatcher: Arc<dyn EvalDispatcher> = Arc::new(CountDispatcher::default());
+        let preamble: Arc<str> = Arc::from("");
+        let turn_history = Arc::new(std::sync::Mutex::new(crate::memory::TurnHistory::empty()));
+
+        let mut tasks = tokio::task::JoinSet::new();
+        spawn_mailbox_task(
+            &mut tasks,
+            ctx.clone(),
+            turn_history.clone(),
+            dispatcher,
+            preamble,
+            pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
+        );
+
+        // Hand the mailbox a single Message activation.
+        let sender = ctx.mailbox().sender();
+        let body = test_message("hello mailbox");
+        sender
+            .send(MailboxInput {
+                from: MessageOrigin::new(
+                    Author::Agent(pattern_core::types::origin::AgentAuthor {
+                        agent_id: "agent-peer".into(),
+                    }),
+                    Sphere::Internal,
+                ),
+                msg: body,
+            })
+            .unwrap();
+
+        // Wait for drive_step to run + complete by polling turn_history.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let len = turn_history.lock().unwrap().active_len();
+            if len > 0 {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("mailbox-driven turn did not record into history within 5s");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        // Trip cancel — task should exit promptly.
+        ctx.cancel_state().request_cancel();
+
+        // Wait for the task to finish.
+        let join_result =
+            tokio::time::timeout(std::time::Duration::from_secs(2), tasks.join_next())
+                .await
+                .expect("mailbox task did not exit within 2s of cancel")
+                .expect("JoinSet had no task")
+                .expect("task panicked");
+        let _ = join_result;
     }
 }
