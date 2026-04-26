@@ -37,7 +37,9 @@
 
 pub mod base_instructions;
 pub mod capability;
+pub mod constellation;
 pub mod error;
+pub mod fronting;
 pub mod memory;
 // `memory_acl` module removed: MemoryOp, MemoryGate, and check() are
 // canonical in types::memory_types::core_types (as methods on MemoryGate).
@@ -119,4 +121,16 @@ pub use types::provider::{
     CacheControl, ChatMessage, ChatOptions, ChatRequest, ChatStreamEvent, CompletionRequest,
     ProviderCredential, ReasoningEffort, StreamEnd, SystemBlock, TokenCount, Tool, ToolCall,
     ToolResponse, Usage,
+};
+
+// ── Constellation + fronting types ───────────────────────────────────────────
+
+pub use constellation::{
+    ConstellationRegistry, EdgeDirection, PersonaRecord, PersonaStatus, RegistryError,
+    RegistryScope, RelationshipEdge,
+};
+
+pub use fronting::{
+    FrontingLoadError, FrontingResolver, FrontingSet, MessagePattern, ResolveOutcome, RoutingRule,
+    RoutingTable, parse_direct_address,
 };
