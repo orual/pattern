@@ -33,6 +33,7 @@
 //! - `rust_primitives` — `tokio::time`-based evaluators for
 //!   `TaskTimeout` and `Interval`.
 
+pub mod block_changed;
 pub mod registry;
 pub mod rust_primitives;
 

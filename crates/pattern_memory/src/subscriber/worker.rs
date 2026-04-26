@@ -204,6 +204,10 @@ pub(crate) struct WorkerConfig {
     pub pause_complete: Arc<(Mutex<bool>, Condvar)>,
     /// Worker waits on this for the resume signal from `resume_subscribers`.
     pub resume_signal: Arc<(Mutex<bool>, Condvar)>,
+    /// Fan-out for block-change callbacks. Fired after each
+    /// successful render (real data change, not a self-echo). Cheap
+    /// callback shape — typically a channel send to a tokio task.
+    pub block_change_notifier: crate::subscriber::notifier::BlockChangeNotifier,
 }
 
 /// Debounce window: accumulate events for this long before acting.
@@ -231,6 +235,7 @@ pub(crate) fn run_subscriber(config: WorkerConfig) {
         paused,
         pause_complete,
         resume_signal,
+        block_change_notifier,
     } = config;
 
     let mut last_emitted_hash: Option<[u8; 32]> = None;
@@ -322,7 +327,7 @@ pub(crate) fn run_subscriber(config: WorkerConfig) {
         // heartbeat. Centralised in render_cycle so every event path —
         // normal loop, quiesce pause-flush, and post-resume — runs the same
         // code; no path can silently skip the TaskList reconcile.
-        render_cycle(
+        let render_changed = render_cycle(
             &block_id,
             &schema,
             &disk_doc,
@@ -334,6 +339,19 @@ pub(crate) fn run_subscriber(config: WorkerConfig) {
             &heartbeat_tx,
             &mut last_emitted_hash,
         );
+
+        // Phase 4 T8: fire BlockChanged notifier callbacks AFTER a
+        // successful render (real data change, not a self-echo).
+        // Callbacks are cheap (typically a channel send to a wake
+        // evaluator); they run on this worker thread so they must
+        // not block.
+        if render_changed {
+            let block_ref = pattern_core::types::block_ref::BlockRef::new(
+                doc.metadata().label.as_str(),
+                &block_id,
+            );
+            block_change_notifier.fire(&block_id, &block_ref);
+        }
     }
 }
 
@@ -345,6 +363,12 @@ pub(crate) fn run_subscriber(config: WorkerConfig) {
 /// and post-resume — runs the same code and cannot silently skip the TaskList
 /// reconcile. Calling `render_cycle` is the single place that advances
 /// persistent state after a content change.
+///
+/// Returns `true` when the rendered canonical bytes differ from the
+/// previously-emitted hash (a real content change), `false` when the
+/// hash matches (self-echo / no-op). Callers use the return to gate
+/// downstream notifications (Phase 4 T8 BlockChanged fan-out) on
+/// real changes only.
 #[allow(clippy::too_many_arguments)]
 fn render_cycle(
     block_id: &str,
@@ -357,7 +381,7 @@ fn render_cycle(
     reembed_tx: &tokio::sync::mpsc::UnboundedSender<ReembedRequest>,
     heartbeat_tx: &crossbeam_channel::Sender<Heartbeat>,
     last_emitted_hash: &mut Option<[u8; 32]>,
-) {
+) -> bool {
     let (ext, canonical_bytes) = match render_canonical_from_disk_doc(disk_doc, schema) {
         Ok(pair) => pair,
         Err(e) => {
@@ -366,7 +390,7 @@ fn render_cycle(
                 block_id = %block_id, error = %e,
                 "canonical render failed during render_cycle"
             );
-            return;
+            return false;
         }
     };
     let new_hash: [u8; 32] = blake3::hash(&canonical_bytes).into();
@@ -376,14 +400,14 @@ fn render_cycle(
             block_id: block_id.to_string(),
             at: Instant::now(),
         });
-        return;
+        return false;
     }
 
     let file_path = mount_path.join(format!("{}.{}", block_id, ext));
     if let Err(e) = crate::fs::atomic_write(&file_path, &canonical_bytes) {
         metrics::counter!("memory.subscriber.fs_write_failed").increment(1);
         tracing::error!(path = ?file_path, error = %e, "atomic_write failed");
-        return;
+        return false;
     }
 
     if let Ok(metadata) = std::fs::metadata(&file_path)
@@ -499,6 +523,7 @@ fn render_cycle(
         block_id: block_id.to_string(),
         at: Instant::now(),
     });
+    true
 }
 
 /// Handle a pause request: flush in-flight work, render, park, then reconcile
@@ -811,6 +836,7 @@ mod tests {
                 paused,
                 pause_complete,
                 resume_signal,
+                block_change_notifier: crate::subscriber::BlockChangeNotifier::new(),
             });
         });
 
@@ -1074,6 +1100,7 @@ mod tests {
                 paused,
                 pause_complete,
                 resume_signal,
+                block_change_notifier: crate::subscriber::BlockChangeNotifier::new(),
             });
         });
 
@@ -1111,6 +1138,7 @@ mod tests {
                 paused,
                 pause_complete,
                 resume_signal,
+                block_change_notifier: crate::subscriber::BlockChangeNotifier::new(),
             });
         });
 
@@ -1202,6 +1230,7 @@ mod tests {
                 paused,
                 pause_complete,
                 resume_signal,
+                block_change_notifier: crate::subscriber::BlockChangeNotifier::new(),
             });
         });
 
@@ -1312,6 +1341,7 @@ mod tests {
                 paused,
                 pause_complete,
                 resume_signal,
+                block_change_notifier: crate::subscriber::BlockChangeNotifier::new(),
             });
         });
 
@@ -1505,6 +1535,7 @@ mod tests {
                 paused: paused_worker,
                 pause_complete: pc_worker,
                 resume_signal: rs_worker,
+                block_change_notifier: crate::subscriber::BlockChangeNotifier::new(),
             });
         });
 
@@ -1620,6 +1651,7 @@ mod tests {
                 paused: paused_worker,
                 pause_complete: pc_worker,
                 resume_signal: rs_worker,
+                block_change_notifier: crate::subscriber::BlockChangeNotifier::new(),
             });
         });
 
@@ -2039,6 +2071,7 @@ mod tests {
                 paused: paused_worker,
                 pause_complete: pc_worker,
                 resume_signal: rs_worker,
+                block_change_notifier: crate::subscriber::BlockChangeNotifier::new(),
             });
         });
 

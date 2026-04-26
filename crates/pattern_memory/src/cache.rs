@@ -104,6 +104,14 @@ pub struct MemoryCache {
 
     /// Join handle for the supervisor tokio task, if spawned.
     supervisor_task: Option<tokio::task::JoinHandle<()>>,
+
+    /// Fan-out registry for block-change notifications. Subscriber
+    /// workers fire callbacks here after a successful render; the
+    /// `pattern_runtime::wake` module's `BlockChanged` and
+    /// `TaskDependencyResolved` evaluators subscribe via
+    /// [`Self::block_change_notifier`] and push wake activations onto
+    /// the agent's mailbox in response.
+    block_change_notifier: crate::subscriber::BlockChangeNotifier,
 }
 
 /// Outcome of [`MemoryCache::pause_subscribers`].
@@ -131,6 +139,7 @@ impl MemoryCache {
             supervisor_cancel: CancellationToken::new(),
             supervisor_state: Arc::new(SupervisorState::new()),
             supervisor_task: None,
+            block_change_notifier: crate::subscriber::BlockChangeNotifier::new(),
         }
     }
 
@@ -152,7 +161,18 @@ impl MemoryCache {
             supervisor_cancel: CancellationToken::new(),
             supervisor_state: Arc::new(SupervisorState::new()),
             supervisor_task: None,
+            block_change_notifier: crate::subscriber::BlockChangeNotifier::new(),
         }
+    }
+
+    /// The cache's block-change notifier. Subscriber workers fire
+    /// callbacks here after each successful render; consumers
+    /// (typically `pattern_runtime::wake` evaluators) register
+    /// callbacks via [`crate::subscriber::BlockChangeNotifier::subscribe`]
+    /// and receive a [`crate::subscriber::Subscription`] guard whose
+    /// `Drop` unsubscribes.
+    pub fn block_change_notifier(&self) -> &crate::subscriber::BlockChangeNotifier {
+        &self.block_change_notifier
     }
 
     /// Set a custom default character limit for new memory blocks
@@ -209,6 +229,7 @@ impl MemoryCache {
                 );
                 let respawn_reembed_tx = reembed_tx;
                 let respawn_heartbeat_tx = heartbeat_tx;
+                let respawn_block_change_notifier = self.block_change_notifier.clone();
 
                 let respawn_fn: Arc<dyn Fn(&str) + Send + Sync> =
                     Arc::new(move |block_id: &str| {
@@ -246,6 +267,7 @@ impl MemoryCache {
                             Arc::clone(&respawn_mount_path),
                             Arc::clone(&respawn_db),
                             Arc::clone(&respawn_subscribers),
+                            respawn_block_change_notifier.clone(),
                         );
                     });
 
@@ -786,6 +808,7 @@ impl MemoryCache {
             mount_path,
             Arc::clone(&self.db),
             Arc::clone(&self.subscribers),
+            self.block_change_notifier.clone(),
         );
     }
 
@@ -1476,6 +1499,7 @@ pub(crate) fn spawn_subscriber_for_block(
     mount_path: Arc<PathBuf>,
     db: Arc<ConstellationDb>,
     subscribers: Arc<DashMap<String, SubscriberHandle>>,
+    block_change_notifier: crate::subscriber::BlockChangeNotifier,
 ) {
     // Don't double-spawn.
     if subscribers.contains_key(block_id) {
@@ -1531,6 +1555,7 @@ pub(crate) fn spawn_subscriber_for_block(
         paused: Arc::clone(&paused),
         pause_complete: Arc::clone(&pause_complete),
         resume_signal: Arc::clone(&resume_signal),
+        block_change_notifier: block_change_notifier.clone(),
     };
 
     let thread = match std::thread::Builder::new()
@@ -3534,6 +3559,8 @@ mod tests {
         let schema = BlockSchema::text();
         let doc = StructuredDocument::new_text();
 
+        let notifier = crate::subscriber::BlockChangeNotifier::new();
+
         // Step 1: Spawn the initial subscriber.
         spawn_subscriber_for_block(
             block_id,
@@ -3544,6 +3571,7 @@ mod tests {
             Arc::clone(&mount_path),
             Arc::clone(&db),
             Arc::clone(&subscribers),
+            notifier.clone(),
         );
         assert!(
             subscribers.contains_key(block_id),
@@ -3577,6 +3605,7 @@ mod tests {
             Arc::clone(&mount_path),
             Arc::clone(&db),
             Arc::clone(&subscribers),
+            notifier,
         );
         assert!(
             subscribers.contains_key(block_id),
@@ -3801,6 +3830,7 @@ mod tests {
             Arc::clone(&mount_path),
             Arc::clone(&db),
             Arc::clone(&subscribers),
+            crate::subscriber::BlockChangeNotifier::new(),
         );
 
         // The MemoryCache needs a populated `blocks` map for `apply_external_edit`
@@ -3931,6 +3961,7 @@ mod tests {
             Arc::clone(&mount_path),
             Arc::clone(&db),
             Arc::clone(&subscribers),
+            crate::subscriber::BlockChangeNotifier::new(),
         );
 
         // Build the cache with both mount_path (so apply_external_edit reconstructs

@@ -100,6 +100,15 @@ pub enum WakeError {
     /// Custom condition see this error.
     #[error("custom wake-condition evaluator not configured (Phase 7 Task 6)")]
     CustomEvaluatorNotConfigured,
+    /// Returned when the registry was constructed without a
+    /// `BlockChangeNotifier` (i.e. no `MemoryCache` is wired) and
+    /// the caller tried to register a [`WakeCondition::BlockChanged`]
+    /// or [`WakeCondition::TaskDependencyResolved`].
+    #[error(
+        "block-change subscriber not configured on this registry; \
+         BlockChanged and TaskDependencyResolved require a MemoryCache"
+    )]
+    SubscriberNotConfigured,
 }
 
 /// One registered wake condition, holding the evaluator task that
@@ -124,6 +133,12 @@ struct RegisteredCondition {
 ///
 /// Constructed via [`WakeRegistry::new`] with the session's mailbox
 /// sender; evaluator tasks deliver activations through that sender.
+///
+/// To enable [`WakeCondition::BlockChanged`], wire a
+/// [`pattern_memory::subscriber::BlockChangeNotifier`] via
+/// [`Self::with_block_change_notifier`] — typically from
+/// `MemoryCache::block_change_notifier`. Without it, BlockChanged
+/// registrations return [`WakeError::SubscriberNotConfigured`].
 pub struct WakeRegistry {
     conditions: Mutex<Vec<RegisteredCondition>>,
     mailbox_tx: mpsc::UnboundedSender<MailboxInput>,
@@ -131,6 +146,11 @@ pub struct WakeRegistry {
     /// 1 second; tuned via [`Self::with_min_period`] (test path only —
     /// production callers use the default).
     min_period: jiff::Span,
+    /// Optional block-change notifier. Required for
+    /// [`WakeCondition::BlockChanged`] (and Phase 4 Task 9's
+    /// [`WakeCondition::TaskDependencyResolved`]). Cheap to clone —
+    /// internally `Arc`-shared.
+    block_change_notifier: Option<pattern_memory::subscriber::BlockChangeNotifier>,
 }
 
 impl WakeRegistry {
@@ -141,6 +161,7 @@ impl WakeRegistry {
             conditions: Mutex::new(Vec::new()),
             mailbox_tx,
             min_period: jiff::Span::new().seconds(1),
+            block_change_notifier: None,
         }
     }
 
@@ -149,6 +170,20 @@ impl WakeRegistry {
     #[must_use]
     pub fn with_min_period(mut self, min_period: jiff::Span) -> Self {
         self.min_period = min_period;
+        self
+    }
+
+    /// Builder-style: wire a [`pattern_memory::subscriber::BlockChangeNotifier`]
+    /// so [`WakeCondition::BlockChanged`] (and Phase 4 Task 9's
+    /// [`WakeCondition::TaskDependencyResolved`]) can register
+    /// callbacks. Production callers pass
+    /// `cache.block_change_notifier().clone()`.
+    #[must_use]
+    pub fn with_block_change_notifier(
+        mut self,
+        notifier: pattern_memory::subscriber::BlockChangeNotifier,
+    ) -> Self {
+        self.block_change_notifier = Some(notifier);
         self
     }
 
@@ -187,11 +222,22 @@ impl WakeRegistry {
                     self.mailbox_tx.clone(),
                 )?
             }
-            WakeCondition::BlockChanged { .. } | WakeCondition::TaskDependencyResolved { .. } => {
-                // T8/T9 wire these through the loro subscriber
-                // fan-out. Until they land, the registry returns
-                // `CustomEvaluatorNotConfigured` rather than
-                // silently storing a no-op task.
+            WakeCondition::BlockChanged { block } => {
+                let notifier = self
+                    .block_change_notifier
+                    .as_ref()
+                    .ok_or(WakeError::SubscriberNotConfigured)?;
+                super::block_changed::spawn_block_changed(
+                    block.clone(),
+                    notifier.clone(),
+                    self.mailbox_tx.clone(),
+                )
+            }
+            WakeCondition::TaskDependencyResolved { .. } => {
+                // T9 wires this on top of the BlockChanged subscriber:
+                // re-reads the task's status on the parent block's
+                // change events. Until T9 lands, surface a clear
+                // error rather than silently spawning a no-op task.
                 return Err(WakeError::CustomEvaluatorNotConfigured);
             }
             WakeCondition::Custom { .. } => {

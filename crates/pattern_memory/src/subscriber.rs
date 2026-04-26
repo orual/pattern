@@ -26,11 +26,13 @@
 //! subscriber and restarts workers that fail or become unresponsive.
 
 pub mod event;
+pub mod notifier;
 pub mod supervisor;
 pub mod task;
 pub mod worker;
 
 pub use event::{CommitEvent, Heartbeat, ReembedRequest};
+pub use notifier::{BlockChangeCallback, BlockChangeNotifier, Subscription};
 
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Condvar, Mutex};
