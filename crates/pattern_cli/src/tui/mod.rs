@@ -6,6 +6,7 @@
 pub mod app;
 pub mod autocomplete;
 pub mod commands;
+pub mod constellation_view;
 pub mod conversation;
 pub mod input;
 pub mod layout;

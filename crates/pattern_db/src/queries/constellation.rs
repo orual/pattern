@@ -216,10 +216,7 @@ fn load_group_memberships_for(
     Ok(out)
 }
 
-fn load_group_members(
-    conn: &Connection,
-    group_id: &str,
-) -> Result<Vec<PersonaId>, RegistryError> {
+fn load_group_members(conn: &Connection, group_id: &str) -> Result<Vec<PersonaId>, RegistryError> {
     let mut stmt = conn
         .prepare("SELECT persona_id FROM persona_group_members WHERE group_id = ?1")
         .map_err(map_sqlite_err)?;
@@ -298,11 +295,7 @@ impl ConstellationRegistry for ConstellationRegistryDb {
         })?
     }
 
-    async fn set_status(
-        &self,
-        id: &PersonaId,
-        status: PersonaStatus,
-    ) -> Result<(), RegistryError> {
+    async fn set_status(&self, id: &PersonaId, status: PersonaStatus) -> Result<(), RegistryError> {
         let db = self.db.clone();
         let id_str = id.as_str().to_string();
         let id_owned = id.clone();
@@ -359,7 +352,7 @@ impl ConstellationRegistry for ConstellationRegistryDb {
         })?
     }
 
-    async fn add_relationship(&self, edge: RelationshipSpec) -> Result<(), RegistryError> {
+    async fn add_relationship(&self, edge: RelationshipSpec) -> Result<bool, RegistryError> {
         let db = self.db.clone();
         tokio::task::spawn_blocking(move || {
             let mut conn = db.get().map_err(map_db_err)?;
@@ -446,10 +439,7 @@ fn list_blocking(
         .collect()
 }
 
-fn get_blocking(
-    conn: &Connection,
-    id: &str,
-) -> Result<Option<PersonaRecord>, RegistryError> {
+fn get_blocking(conn: &Connection, id: &str) -> Result<Option<PersonaRecord>, RegistryError> {
     let slim = conn
         .query_row(
             &format!("{PERSONA_SELECT} WHERE id = ?1"),
@@ -470,9 +460,10 @@ fn find_blocking(
     kind: Option<RelationshipKind>,
 ) -> Result<Vec<PersonaRecord>, RegistryError> {
     // Build SQL dynamically. AND together project + kind filters.
-    let mut sql =
-        format!("SELECT DISTINCT a.id, a.name, a.persona_status, a.config_path, a.project_attachments
-                 FROM agents a");
+    let mut sql = format!(
+        "SELECT DISTINCT a.id, a.name, a.persona_status, a.config_path, a.project_attachments
+                 FROM agents a"
+    );
     let mut where_clauses: Vec<String> = Vec::new();
     let mut bound: Vec<String> = Vec::new();
 
@@ -495,12 +486,13 @@ fn find_blocking(
     sql.push_str(" ORDER BY a.name");
 
     let mut stmt = conn.prepare(&sql).map_err(map_sqlite_err)?;
-    let bound_refs: Vec<&dyn rusqlite::ToSql> = bound
-        .iter()
-        .map(|s| s as &dyn rusqlite::ToSql)
-        .collect();
+    let bound_refs: Vec<&dyn rusqlite::ToSql> =
+        bound.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
     let rows = stmt
-        .query_map(rusqlite::params_from_iter(bound_refs), PersonaRowSlim::from_row)
+        .query_map(
+            rusqlite::params_from_iter(bound_refs),
+            PersonaRowSlim::from_row,
+        )
         .map_err(map_sqlite_err)?;
     let slims: Vec<_> = rows
         .collect::<Result<Vec<_>, _>>()
@@ -512,10 +504,7 @@ fn find_blocking(
         .collect()
 }
 
-fn register_blocking(
-    conn: &mut Connection,
-    record: PersonaRecord,
-) -> Result<(), RegistryError> {
+fn register_blocking(conn: &mut Connection, record: PersonaRecord) -> Result<(), RegistryError> {
     // Check duplicate first for a clean error.
     let exists: bool = conn
         .query_row(
@@ -568,7 +557,12 @@ fn register_blocking(
             "INSERT INTO persona_relationships (id, from_persona, to_persona, kind, created_at)
              VALUES (?1, ?2, ?3, ?4, datetime('now'))
              ON CONFLICT(from_persona, to_persona, kind) DO NOTHING",
-            params![new_id().as_str(), from, to, relationship_kind_to_str(edge.kind)],
+            params![
+                new_id().as_str(),
+                from,
+                to,
+                relationship_kind_to_str(edge.kind)
+            ],
         )
         .map_err(map_sqlite_err)?;
     }
@@ -580,15 +574,13 @@ fn register_blocking(
 fn add_relationship_blocking(
     conn: &mut Connection,
     edge: RelationshipSpec,
-) -> Result<(), RegistryError> {
+) -> Result<bool, RegistryError> {
     // Validate endpoints exist before insert (cleaner error than FK violation).
     for id in [edge.from.as_str(), edge.to.as_str()] {
         let exists: bool = conn
-            .query_row(
-                "SELECT 1 FROM agents WHERE id = ?1",
-                params![id],
-                |_| Ok(true),
-            )
+            .query_row("SELECT 1 FROM agents WHERE id = ?1", params![id], |_| {
+                Ok(true)
+            })
             .optional()
             .map_err(map_sqlite_err)?
             .unwrap_or(false);
@@ -597,19 +589,23 @@ fn add_relationship_blocking(
         }
     }
 
-    conn.execute(
-        "INSERT INTO persona_relationships (id, from_persona, to_persona, kind, created_at)
-         VALUES (?1, ?2, ?3, ?4, datetime('now'))
-         ON CONFLICT(from_persona, to_persona, kind) DO NOTHING",
-        params![
-            new_id().as_str(),
-            edge.from.as_str(),
-            edge.to.as_str(),
-            relationship_kind_to_str(edge.kind),
-        ],
-    )
-    .map_err(map_sqlite_err)?;
-    Ok(())
+    // `ON CONFLICT DO NOTHING` returns 0 rows affected when the edge already
+    // exists; 1 when a new row was inserted. We surface this to the caller so
+    // event-emitting decorators can skip no-op insertions.
+    let rows_affected = conn
+        .execute(
+            "INSERT INTO persona_relationships (id, from_persona, to_persona, kind, created_at)
+             VALUES (?1, ?2, ?3, ?4, datetime('now'))
+             ON CONFLICT(from_persona, to_persona, kind) DO NOTHING",
+            params![
+                new_id().as_str(),
+                edge.from.as_str(),
+                edge.to.as_str(),
+                relationship_kind_to_str(edge.kind),
+            ],
+        )
+        .map_err(map_sqlite_err)?;
+    Ok(rows_affected > 0)
 }
 
 fn groups_blocking(
@@ -700,7 +696,11 @@ fn create_group_blocking(
     )
     .map_err(map_sqlite_err)?;
 
-    Ok(PersonaGroup::new(GroupId::new(id.as_str()), name, project_id))
+    Ok(PersonaGroup::new(
+        GroupId::new(id.as_str()),
+        name,
+        project_id,
+    ))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -795,7 +795,10 @@ mod tests {
             .list(RegistryScope::Project(PathBuf::from("/nowhere")))
             .await
             .unwrap();
-        assert!(unknown.is_empty(), "unknown project must return empty vec, not error");
+        assert!(
+            unknown.is_empty(),
+            "unknown project must return empty vec, not error"
+        );
     }
 
     #[tokio::test]
@@ -922,8 +925,14 @@ mod tests {
         }
         let reg = ConstellationRegistryDb::new(db.clone());
         let spec = RelationshipSpec::new("alice", "bob", RelationshipKind::PeerWith);
-        reg.add_relationship(spec.clone()).await.unwrap();
-        reg.add_relationship(spec).await.unwrap();
+        let first = reg.add_relationship(spec.clone()).await.unwrap();
+        let second = reg.add_relationship(spec).await.unwrap();
+
+        assert!(first, "first insert must return true (row was inserted)");
+        assert!(
+            !second,
+            "second insert must return false (no-op; edge already existed)"
+        );
 
         let count: i64 = db
             .get()

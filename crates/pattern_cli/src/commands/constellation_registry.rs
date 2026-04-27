@@ -28,8 +28,8 @@ async fn connect_and_init() -> MietteResult<DaemonClient> {
     // Mount the current directory's project so the daemon's `current_mount`
     // is populated. The daemon ignores agent_id when `default_agent` does
     // not resolve — registry RPCs do not require an agent to be open.
-    let cwd = std::env::current_dir()
-        .map_err(|e| miette!("failed to read current directory: {e}"))?;
+    let cwd =
+        std::env::current_dir().map_err(|e| miette!("failed to read current directory: {e}"))?;
     let info = client
         .init_session(cwd, "default".into())
         .await
@@ -131,10 +131,7 @@ pub async fn cmd_groups_list(project: Option<String>) -> MietteResult<()> {
 }
 
 /// `pattern constellation groups create <NAME> [--project-id ID]`.
-pub async fn cmd_groups_create(
-    name: String,
-    project_id: Option<String>,
-) -> MietteResult<()> {
+pub async fn cmd_groups_create(name: String, project_id: Option<String>) -> MietteResult<()> {
     let client = connect_and_init().await?;
     let resp = client
         .create_group(name.clone(), project_id.clone())

@@ -497,8 +497,7 @@ pub struct SessionContext {
     /// `with_constellation_registry`; the `Pattern.Constellation` handler
     /// reads from it. `None` for test sessions that don't need agent
     /// program access to persona records.
-    constellation_registry:
-        Option<Arc<dyn pattern_core::ConstellationRegistry>>,
+    constellation_registry: Option<Arc<dyn pattern_core::ConstellationRegistry>>,
     /// Owns the canonical [`pattern_core::fronting::FrontingSet`] lock
     /// AND the synchronous commit path for SDK-driven `Pattern.Fronting`
     /// mutations. Read-only access (the `Current` handler) goes through
@@ -513,8 +512,7 @@ pub struct SessionContext {
     /// `InMemoryFrontingCommitter` (no-op persist + no event emission).
     /// `None` leaves the `Pattern.Fronting` effect unwired entirely; the
     /// handler returns a `FRONTING_NOT_WIRED_PREFIX`-marked error.
-    fronting_committer:
-        Option<Arc<dyn crate::sdk::handlers::fronting::FrontingCommitter>>,
+    fronting_committer: Option<Arc<dyn crate::sdk::handlers::fronting::FrontingCommitter>>,
 }
 
 /// Handlers call this to decide whether to short-circuit on soft-cancel.
@@ -1516,9 +1514,7 @@ impl SessionContext {
     pub fn fronting_set(
         &self,
     ) -> Option<&Arc<std::sync::RwLock<pattern_core::fronting::FrontingSet>>> {
-        self.fronting_committer
-            .as_ref()
-            .map(|c| c.fronting_set())
+        self.fronting_committer.as_ref().map(|c| c.fronting_set())
     }
 
     /// Constellation registry handle, if wired.
@@ -1526,9 +1522,7 @@ impl SessionContext {
     /// The `Pattern.Constellation` handler returns
     /// `EffectError::Handler` with a "registry not wired" prefix when this
     /// is `None` (test sessions, single-agent sessions).
-    pub fn constellation_registry(
-        &self,
-    ) -> Option<&Arc<dyn pattern_core::ConstellationRegistry>> {
+    pub fn constellation_registry(&self) -> Option<&Arc<dyn pattern_core::ConstellationRegistry>> {
         self.constellation_registry.as_ref()
     }
 
@@ -1628,13 +1622,11 @@ pub struct SessionRegistries {
     /// v3-multi-agent Phase 6 T5b. Replaces the prior split between
     /// `fronting_set` and `fronting_committer` — bundling them eliminates
     /// the possibility of read/write-lock drift.
-    pub fronting_committer:
-        Option<Arc<dyn crate::sdk::handlers::fronting::FrontingCommitter>>,
+    pub fronting_committer: Option<Arc<dyn crate::sdk::handlers::fronting::FrontingCommitter>>,
     /// Optional constellation persona registry (Phase 6). Wired onto the
     /// `SessionContext` so the `Pattern.Constellation` SDK and sibling
     /// auto-registration both see the same per-mount handle.
-    pub constellation_registry:
-        Option<Arc<dyn pattern_core::ConstellationRegistry>>,
+    pub constellation_registry: Option<Arc<dyn pattern_core::ConstellationRegistry>>,
 }
 
 /// Extras required to construct a [`crate::wake::WakeRegistry`] inside

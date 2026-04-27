@@ -202,7 +202,11 @@ pub struct RelationshipSpec {
 
 impl RelationshipSpec {
     /// Construct a new relationship spec.
-    pub fn new(from: impl Into<PersonaId>, to: impl Into<PersonaId>, kind: RelationshipKind) -> Self {
+    pub fn new(
+        from: impl Into<PersonaId>,
+        to: impl Into<PersonaId>,
+        kind: RelationshipKind,
+    ) -> Self {
         Self {
             from: from.into(),
             to: to.into(),
@@ -304,11 +308,7 @@ pub trait ConstellationRegistry: Send + Sync + std::fmt::Debug {
     ///
     /// Returns `RegistryError::PersonaNotFound` if no persona with the given id
     /// exists.
-    async fn set_status(
-        &self,
-        id: &PersonaId,
-        status: PersonaStatus,
-    ) -> Result<(), RegistryError>;
+    async fn set_status(&self, id: &PersonaId, status: PersonaStatus) -> Result<(), RegistryError>;
 
     /// Update the on-disk KDL path for an existing persona.
     ///
@@ -327,11 +327,13 @@ pub trait ConstellationRegistry: Send + Sync + std::fmt::Debug {
 
     /// Add a relationship edge between two personas.
     ///
-    /// Returns `RegistryError::PersonaNotFound` if either endpoint is missing.
+    /// Returns `Ok(true)` when a new edge was inserted, `Ok(false)` when the
+    /// edge already existed (idempotent no-op). Returns
+    /// `RegistryError::PersonaNotFound` if either endpoint is missing.
     /// Implementations are expected to dedupe edges with the same
     /// `(from, to, kind)` triple (DB-backed impls rely on the UNIQUE constraint
     /// from migration 0015).
-    async fn add_relationship(&self, edge: RelationshipSpec) -> Result<(), RegistryError>;
+    async fn add_relationship(&self, edge: RelationshipSpec) -> Result<bool, RegistryError>;
 
     /// List all groups matching `scope`.
     ///
@@ -352,19 +354,21 @@ pub trait ConstellationRegistry: Send + Sync + std::fmt::Debug {
     ) -> Result<PersonaGroup, RegistryError>;
 }
 
-/// Always-empty `ConstellationRegistry` used as a Phase 5 placeholder
-/// until the Phase 6 `pattern_db`-backed implementation lands.
+/// Always-empty `ConstellationRegistry` used for testing and as a stub when
+/// no real registry backend is available.
 ///
-/// `list` returns `Ok(vec![])` and `get` returns `Ok(None)` for every
-/// id. Daemon callers wire this into `FrontingState` so the
-/// empty-fronting path falls through to
-/// `ResolveOutcome::SystemDefault` (the documented "no fronting
-/// configured" behaviour). Phase 6 will replace this with a real
-/// registry that loads persona records from the project's
-/// `pattern_db`.
+/// `list` returns `Ok(vec![])` and `get` returns `Ok(None)` for every id.
+/// Mutation methods return `Err(RegistryError::BackendUnavailable)`.
+///
+/// Gated behind `#[cfg(test)]` because no production code path uses it after
+/// Phase 6: all live mounts use the DB-backed `ConstellationRegistryDb`.
+/// External test crates that need an always-empty registry can use
+/// `pattern_runtime::testing::InMemoryConstellationRegistry` instead.
+#[cfg(test)]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct EmptyConstellationRegistry;
 
+#[cfg(test)]
 #[async_trait]
 impl ConstellationRegistry for EmptyConstellationRegistry {
     async fn list(&self, _scope: RegistryScope) -> Result<Vec<PersonaRecord>, RegistryError> {
@@ -403,7 +407,7 @@ impl ConstellationRegistry for EmptyConstellationRegistry {
         Err(RegistryError::BackendUnavailable)
     }
 
-    async fn add_relationship(&self, _edge: RelationshipSpec) -> Result<(), RegistryError> {
+    async fn add_relationship(&self, _edge: RelationshipSpec) -> Result<bool, RegistryError> {
         Err(RegistryError::BackendUnavailable)
     }
 

@@ -329,6 +329,12 @@ pub struct WirePersonaSummary {
     pub status: String,
     pub config_path: Option<String>,
     pub project_attachments: Vec<String>,
+    /// Phase 6 T8: outgoing relationship edges for this persona, used by
+    /// the TUI's constellation panel. Each entry is `(other_persona_id,
+    /// kind_snake_case)`. Only outgoing edges are listed (incoming is
+    /// derivable from the other persona's outgoing).
+    #[serde(default)]
+    pub outgoing_relationships: Vec<(String, String)>,
 }
 
 /// Response to [`PatternProtocol::ListPersonas`].
@@ -724,8 +730,6 @@ pub enum PatternProtocol {
     /// Returns the active personas, fallback, and routing rules as a
     /// [`FrontingGetResponse`]. If no project is mounted, returns an empty
     /// `WireFrontingSet`.
-    ///
-    /// Phase 5 (v3-multi-agent) introduces this variant.
     #[rpc(tx = oneshot::Sender<FrontingGetResponse>)]
     GetFronting(FrontingGetRequest),
 
@@ -735,8 +739,6 @@ pub enum PatternProtocol {
     /// The mutation is persisted to the mount's DB via
     /// [`crate::server::ProjectMount::update_fronting`]. On success, fans out
     /// a [`WireTurnEvent::FrontingChanged`] to all subscribers.
-    ///
-    /// Phase 5 (v3-multi-agent) introduces this variant.
     #[rpc(tx = oneshot::Sender<FrontingSetResponse>)]
     SetFronting(FrontingSetRequest),
 
@@ -746,8 +748,6 @@ pub enum PatternProtocol {
     /// patterns are rejected and the existing rules are left unchanged.
     /// On success, fans out a [`WireTurnEvent::FrontingChanged`] to all
     /// subscribers.
-    ///
-    /// Phase 5 (v3-multi-agent) introduces this variant.
     #[rpc(tx = oneshot::Sender<UpdateRoutingResponse>)]
     UpdateRouting(UpdateRoutingRequest),
 
@@ -757,8 +757,6 @@ pub enum PatternProtocol {
     /// the normal session-open path (which calls `AgentRegistry::register_active`
     /// and auto-drains any messages queued against the draft), and flips
     /// the persona registry status to `Active`.
-    ///
-    /// Phase 6 (v3-multi-agent) introduces this variant.
     #[rpc(tx = oneshot::Sender<PromoteDraftResponse>)]
     PromoteDraft(PromoteDraftRequest),
 

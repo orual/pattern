@@ -526,7 +526,7 @@ mod tests {
         async fn add_relationship(
             &self,
             _edge: crate::constellation::RelationshipSpec,
-        ) -> Result<(), RegistryError> {
+        ) -> Result<bool, RegistryError> {
             Err(RegistryError::BackendUnavailable)
         }
         async fn groups(

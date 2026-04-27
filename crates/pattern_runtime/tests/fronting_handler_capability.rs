@@ -70,8 +70,7 @@ async fn build_session_opts(
         tokio::runtime::Handle::current(),
     );
     let ctx = if let Some(fs) = fronting_set {
-        let committer: Arc<dyn FrontingCommitter> =
-            Arc::new(InMemoryFrontingCommitter::new(fs));
+        let committer: Arc<dyn FrontingCommitter> = Arc::new(InMemoryFrontingCommitter::new(fs));
         ctx.with_fronting_committer(committer)
     } else {
         ctx

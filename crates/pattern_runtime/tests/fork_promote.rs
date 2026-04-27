@@ -198,14 +198,13 @@ fn promote_lightweight_with_flag_creates_draft() {
     // Phase 6 T6 followup: a `manifest.json` must accompany the snapshots so
     // promote can reconstruct the (label, schema, block_type) tuple required
     // by `MemoryCache::insert_from_snapshot`.
-    use pattern_runtime::spawn::fork::{SeedCacheManifest, SEED_CACHE_MANIFEST_VERSION};
+    use pattern_runtime::spawn::fork::{SEED_CACHE_MANIFEST_VERSION, SeedCacheManifest};
     let manifest_path = cache_dir.join("manifest.json");
     assert!(
         manifest_path.exists(),
         "seed cache must include manifest.json (Phase 6 T6 promote-time migration depends on it)"
     );
-    let manifest_bytes =
-        std::fs::read(&manifest_path).expect("read seed cache manifest.json");
+    let manifest_bytes = std::fs::read(&manifest_path).expect("read seed cache manifest.json");
     let manifest: SeedCacheManifest = serde_json::from_slice(&manifest_bytes)
         .expect("manifest.json must be valid SeedCacheManifest JSON");
     assert_eq!(manifest.version, SEED_CACHE_MANIFEST_VERSION);

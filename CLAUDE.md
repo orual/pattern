@@ -93,9 +93,9 @@ Each crate has its own `CLAUDE.md` with specific implementation guidelines.
 
 ### Module Organization
 
-- Use `mod.rs` to re-export public items only.
-- No nontrivial logic in `mod.rs`—use `imp.rs` or specific submodules.
-- Keep module boundaries strict with restricted visibility.
+- Module root file is `<name>.rs` adjacent to a `<name>/` directory (Rust 2018+ style). Do NOT use `mod.rs`. Example: `spawn.rs` + `spawn/registry.rs` + `spawn/ephemeral.rs`.
+- The module root file (`<name>.rs`) re-exports public items and declares submodules. No nontrivial logic in the module root — put logic in named submodules (`spawn/registry.rs`, `spawn/fork.rs`, etc.).
+- Keep module boundaries strict with restricted visibility (`pub(crate)`, `pub(super)` by default).
 - Platform-specific code in separate files: `unix.rs`, `windows.rs`.
 
 ### Documentation

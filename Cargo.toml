@@ -203,6 +203,11 @@ which = "8.0"
 # Fuzzy matching
 nucleo = "0.5"
 
+# Unicode-aware case-insensitive comparison (already a transitive dep via
+# mime_guess + pulldown-cmark; adding directly for explicit use in
+# constellation handle resolution and sibling slug comparison).
+unicase = "2"
+
 # Glob pattern matching for FilePolicy (v3-sandbox-io Phase 2).
 globset = "0.4"
 

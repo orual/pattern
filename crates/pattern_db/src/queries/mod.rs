@@ -20,9 +20,9 @@ pub mod task_row;
 
 pub use agent::*;
 pub use atproto_endpoints::*;
+pub use constellation::ConstellationRegistryDb;
 pub use event::*;
 pub use folder::*;
-pub use constellation::ConstellationRegistryDb;
 pub use fronting::{clear_fronting_set, load_fronting_set, save_fronting_set};
 pub use memory::*;
 pub use message::*;

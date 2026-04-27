@@ -59,9 +59,8 @@ use pattern_core::types::ids::PersonaId;
 /// The committer applies the mutator under the write lock, then persists
 /// and fans out a `FrontingChanged` event. Failure paths (mutator rejection,
 /// DB save failure) revert the in-memory state to its pre-mutation snapshot.
-pub type FrontingMutator = Box<
-    dyn FnOnce(&mut FrontingSet) -> Result<(), FrontingLoadError> + Send + 'static,
->;
+pub type FrontingMutator =
+    Box<dyn FnOnce(&mut FrontingSet) -> Result<(), FrontingLoadError> + Send + 'static>;
 
 /// Synchronous commit boundary for SDK-driven `FrontingSet` mutations.
 ///
@@ -92,10 +91,7 @@ pub trait FrontingCommitter: Send + Sync + std::fmt::Debug {
 
     /// Apply `mutator` synchronously. Returns the post-mutation snapshot on
     /// success.
-    fn commit_sync(
-        &self,
-        mutator: FrontingMutator,
-    ) -> Result<FrontingSet, EffectError>;
+    fn commit_sync(&self, mutator: FrontingMutator) -> Result<FrontingSet, EffectError>;
 }
 
 /// In-memory `FrontingCommitter` for test sessions: wraps a lock with no-op
@@ -127,10 +123,7 @@ impl FrontingCommitter for InMemoryFrontingCommitter {
         &self.fronting
     }
 
-    fn commit_sync(
-        &self,
-        mutator: FrontingMutator,
-    ) -> Result<FrontingSet, EffectError> {
+    fn commit_sync(&self, mutator: FrontingMutator) -> Result<FrontingSet, EffectError> {
         let mut guard = self
             .fronting
             .write()
@@ -265,9 +258,7 @@ impl EffectHandler<SessionContext> for FrontingHandler {
             FrontingReq::Set(active, fallback) => {
                 handle_set(active, fallback, committer.as_ref(), cx)
             }
-            FrontingReq::Route(wire_rules) => {
-                handle_route(wire_rules, committer.as_ref(), cx)
-            }
+            FrontingReq::Route(wire_rules) => handle_route(wire_rules, committer.as_ref(), cx),
             FrontingReq::Clear => handle_clear(committer.as_ref(), cx),
         }
     }

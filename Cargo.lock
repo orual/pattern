@@ -6398,6 +6398,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "tui-markdown",
+ "unicase",
  "unicode-width 0.2.0",
  "which 8.0.2",
 ]

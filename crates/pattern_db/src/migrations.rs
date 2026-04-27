@@ -42,18 +42,14 @@ static MEMORY_MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
             "../migrations/memory/0012_skill_usage_stats.sql"
         )),
         M::up(include_str!("../migrations/memory/0013_fronting.sql")),
-        M::up(include_str!(
-            "../migrations/memory/0014_agents_extend.sql"
-        )),
+        M::up(include_str!("../migrations/memory/0014_agents_extend.sql")),
         M::up(include_str!(
             "../migrations/memory/0015_persona_relationships.sql"
         )),
         M::up(include_str!(
             "../migrations/memory/0016_drop_legacy_coordination.sql"
         )),
-        M::up(include_str!(
-            "../migrations/memory/0017_persona_status.sql"
-        )),
+        M::up(include_str!("../migrations/memory/0017_persona_status.sql")),
     ])
 });
 
@@ -182,7 +178,10 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
 
-        assert!(cols.contains(&"config_path".to_string()), "missing config_path; cols = {cols:?}");
+        assert!(
+            cols.contains(&"config_path".to_string()),
+            "missing config_path; cols = {cols:?}"
+        );
         assert!(
             cols.contains(&"project_attachments".to_string()),
             "missing project_attachments; cols = {cols:?}"
@@ -203,7 +202,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(pa, "[]", "project_attachments default should be empty JSON array");
+        assert_eq!(
+            pa, "[]",
+            "project_attachments default should be empty JSON array"
+        );
     }
 
     #[test]
@@ -233,7 +235,10 @@ mod tests {
              VALUES ('e2', 'alice', 'bob', 'supervisor_of', '2026-04-26T00:00:00Z')",
             [],
         );
-        assert!(dup.is_err(), "UNIQUE(from_persona, to_persona, kind) must reject duplicate edge");
+        assert!(
+            dup.is_err(),
+            "UNIQUE(from_persona, to_persona, kind) must reject duplicate edge"
+        );
 
         // Different `kind` between the same pair is allowed.
         conn.execute(
@@ -276,7 +281,8 @@ mod tests {
         )
         .unwrap();
 
-        conn.execute("DELETE FROM agents WHERE id = 'alice'", []).unwrap();
+        conn.execute("DELETE FROM agents WHERE id = 'alice'", [])
+            .unwrap();
 
         let edge_count: i64 = conn
             .query_row(
@@ -285,7 +291,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(edge_count, 0, "relationship edges should cascade-delete with persona");
+        assert_eq!(
+            edge_count, 0,
+            "relationship edges should cascade-delete with persona"
+        );
 
         let mem_count: i64 = conn
             .query_row(
@@ -294,7 +303,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(mem_count, 0, "group memberships should cascade-delete with persona");
+        assert_eq!(
+            mem_count, 0,
+            "group memberships should cascade-delete with persona"
+        );
     }
 
     #[test]

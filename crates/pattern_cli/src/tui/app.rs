@@ -28,8 +28,8 @@ use pattern_server::protocol::{Recipient, TaggedTurnEvent, WireTurnEvent};
 
 use super::autocomplete::{AutocompleteState, AutocompleteWidget};
 use super::commands::{
-    CMD_AGENT, CMD_AGENTS, CMD_CANCEL, CMD_CLEAR, CMD_FLOAT, CMD_FRONT, CMD_PANE, CMD_PANEL, CMD_QUIT,
-    CMD_SHUTDOWN, CMD_STATUS, CommandRegistry,
+    CMD_AGENT, CMD_AGENTS, CMD_CANCEL, CMD_CLEAR, CMD_FLOAT, CMD_FRONT, CMD_PANE, CMD_PANEL,
+    CMD_PROMOTE, CMD_QUIT, CMD_RELATE, CMD_SHUTDOWN, CMD_STATUS, CommandRegistry,
 };
 use super::conversation::{ConversationState, ConversationView};
 use super::input::{InputAction, InputHandler};
@@ -121,6 +121,15 @@ pub struct App {
     ///
     /// Phase 6 T8.
     pending_one_shot: Option<SmolStr>,
+    /// Cached constellation registry view used by the constellation panel.
+    /// Populated on session init; refreshed on every
+    /// `WireTurnEvent::ConstellationChanged` notification.
+    ///
+    /// Phase 6 T8.
+    constellation_view: super::constellation_view::ConstellationView,
+    /// Latest known routing rules from the daemon's fronting set. Updated
+    /// on every `FrontingChanged` event; used by the constellation panel.
+    fronting_rules: Vec<pattern_server::protocol::WireRoutingRule>,
     /// Stable identity for this TUI session. Minted once at startup and used
     /// to construct `Author::Partner` origins on outbound messages. A fresh
     /// id is minted per-process so that concurrent TUI sessions are
@@ -203,6 +212,8 @@ impl App {
             fronting_fallback: None,
             route_lock: None,
             pending_one_shot: None,
+            constellation_view: super::constellation_view::ConstellationView::default(),
+            fronting_rules: Vec::new(),
             // Mint a stable partner identity for this TUI process. The daemon no
             // longer generates partner IDs — each client owns its own. Using
             // `new_id()` (UUID-v4) guarantees this TUI session is distinguishable
@@ -276,16 +287,45 @@ impl App {
     /// Live updates after this come via `WireTurnEvent::FrontingChanged`
     /// events on the all-mount stream; this is the initial state at startup
     /// so the status bar renders correctly before the first event arrives.
-    pub fn set_fronting_snapshot(
-        &mut self,
-        snapshot: pattern_server::protocol::FrontingSnapshot,
-    ) {
-        self.fronting_active = snapshot
-            .active
-            .into_iter()
-            .map(SmolStr::from)
-            .collect();
+    pub fn set_fronting_snapshot(&mut self, snapshot: pattern_server::protocol::FrontingSnapshot) {
+        self.fronting_active = snapshot.active.into_iter().map(SmolStr::from).collect();
         self.fronting_fallback = snapshot.fallback.map(SmolStr::from);
+        self.fronting_rules = snapshot.rules;
+    }
+
+    /// Phase 6 T8: kick off a background fetch of personas + groups from
+    /// the daemon. Updates `constellation_view` when the response arrives.
+    /// Called on session init and on every `ConstellationChanged` event.
+    pub fn refresh_constellation_view(&self) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let result_tx = self.result_tx.clone();
+        // We'd write to constellation_view here, but the App is `&self` from
+        // the spawned context. Instead, deliver the result through the existing
+        // result_tx channel as a tagged variant the App's main loop applies.
+        //
+        // To keep the channel string-based for now, encode it as a JSON blob
+        // and have the App parse it on receipt. This is a pragmatic stopgap
+        // — a typed result channel would be cleaner but is out of scope here.
+        tokio::spawn(async move {
+            let personas = client.list_personas(None).await;
+            let groups = client.list_groups(None).await;
+            // Encode both into a single result message the main loop
+            // recognises by prefix.
+            let personas_json = match personas {
+                Ok(r) if r.error.is_none() => serde_json::to_string(&r.personas).ok(),
+                _ => None,
+            };
+            let groups_json = match groups {
+                Ok(r) if r.error.is_none() => serde_json::to_string(&r.groups).ok(),
+                _ => None,
+            };
+            if let (Some(p), Some(g)) = (personas_json, groups_json) {
+                let payload = format!("__constellation_view\x1f{p}\x1f{g}");
+                let _ = result_tx.send(payload);
+            }
+        });
     }
 
     /// Update the zellij environment state.
@@ -391,6 +431,23 @@ impl App {
                     if let Some(status_str) = msg.strip_prefix("STATUS:") {
                         if let Ok(count) = status_str.parse::<usize>() {
                             self.agent_count = count;
+                        }
+                    } else if let Some(payload) = msg.strip_prefix("__constellation_view\x1f") {
+                        // Phase 6 T8: ConstellationView refresh result.
+                        // Body shape: "<personas-json>\x1f<groups-json>".
+                        if let Some((p_json, g_json)) = payload.split_once('\x1f') {
+                            if let (Ok(personas), Ok(groups)) = (
+                                serde_json::from_str::<
+                                    Vec<pattern_server::protocol::WirePersonaSummary>,
+                                >(p_json),
+                                serde_json::from_str::<
+                                    Vec<pattern_server::protocol::WireGroupSummary>,
+                                >(g_json),
+                            ) {
+                                self.constellation_view.personas = personas;
+                                self.constellation_view.groups = groups;
+                                self.constellation_view.loaded = true;
+                            }
                         }
                     } else {
                         self.push_system_message(msg);
@@ -712,6 +769,27 @@ impl App {
             return;
         }
 
+        // Global: Ctrl+L toggles the panel between its current content mode
+        // and the Constellation view. If the panel is hidden it becomes
+        // Visible (or Expanded on narrow terminals) at the same time.
+        // Phase 6 T8.
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('l') {
+            self.panel_state.content = match self.panel_state.content {
+                super::panel::PanelContent::Constellation => super::panel::PanelContent::Status,
+                _ => super::panel::PanelContent::Constellation,
+            };
+            // Make sure the panel is actually visible if the user just
+            // switched modes from a hidden panel.
+            if self.panel_visibility == PanelVisibility::Hidden {
+                self.panel_visibility = if self.terminal_width < MIN_PANEL_WIDTH {
+                    PanelVisibility::Expanded
+                } else {
+                    PanelVisibility::Visible
+                };
+            }
+            return;
+        }
+
         // Global: Alt+] increases panel width by 5%, clamped to MAX_PANEL_PCT.
         if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Char(']') {
             self.panel_pct = (self.panel_pct + 5).min(MAX_PANEL_PCT);
@@ -852,9 +930,7 @@ impl App {
                         Sphere::Private,
                     );
                     tokio::spawn(async move {
-                        tracing::debug!(
-                            "sending message batch={bid} recipient={recipient:?}"
-                        );
+                        tracing::debug!("sending message batch={bid} recipient={recipient:?}");
                         if let Err(e) = client
                             .send_message(bid.clone(), recipient, parts, origin)
                             .await
@@ -987,10 +1063,7 @@ impl App {
                 if let Some(handle) = args.first() {
                     let stripped = handle.trim_start_matches('@');
                     if !self.available_agents.is_empty()
-                        && !self
-                            .available_agents
-                            .iter()
-                            .any(|a| a.as_str() == stripped)
+                        && !self.available_agents.iter().any(|a| a.as_str() == stripped)
                     {
                         let list = self
                             .available_agents
@@ -1012,6 +1085,102 @@ impl App {
                         "/agent <id> sets a one-shot direct recipient for the next message"
                             .to_string(),
                     );
+                }
+            }
+            CMD_PROMOTE => {
+                // Phase 6 T8: /promote <id-or-name> → PromoteDraft RPC.
+                let Some(handle) = args.first() else {
+                    self.push_system_message(
+                        "/promote <id> flips a Draft persona to Active".to_string(),
+                    );
+                    return;
+                };
+                match self.constellation_view.resolve_handle(handle) {
+                    Err(e) => self.push_system_message(format!("/promote: {e}")),
+                    Ok(persona_id) => {
+                        if let Some(client) = &self.client {
+                            let client = client.clone();
+                            let result_tx = self.result_tx.clone();
+                            tokio::spawn(async move {
+                                match client.promote_draft(persona_id.to_string()).await {
+                                    Ok(resp) if resp.success => {
+                                        let _ = result_tx
+                                            .send(format!("promoted {persona_id} to Active"));
+                                    }
+                                    Ok(resp) => {
+                                        let _ = result_tx.send(format!(
+                                            "promote failed: {}",
+                                            resp.error.unwrap_or_default()
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        let _ = result_tx.send(format!("promote RPC failed: {e}"));
+                                    }
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+            CMD_RELATE => {
+                // Phase 6 T8: /relate <from> <to> <kind> → AddRelationship RPC.
+                let (from, to, kind) = match (args.first(), args.get(1), args.get(2)) {
+                    (Some(f), Some(t), Some(k)) => (f, t, k),
+                    _ => {
+                        self.push_system_message(
+                            "/relate <from> <to> <kind> adds a relationship edge".to_string(),
+                        );
+                        return;
+                    }
+                };
+                let from_id = match self.constellation_view.resolve_handle(from) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        self.push_system_message(format!("/relate from: {e}"));
+                        return;
+                    }
+                };
+                let to_id = match self.constellation_view.resolve_handle(to) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        self.push_system_message(format!("/relate to: {e}"));
+                        return;
+                    }
+                };
+                // Accept both snake_case ("peer_with") and prose
+                // ("peer with") at the call site; normalize to snake_case.
+                let kind_norm = kind.replace(' ', "_").to_lowercase();
+                if let Some(client) = &self.client {
+                    let client = client.clone();
+                    let result_tx = self.result_tx.clone();
+                    let from_id_clone = from_id.clone();
+                    let to_id_clone = to_id.clone();
+                    let kind_clone = kind_norm.clone();
+                    tokio::spawn(async move {
+                        match client
+                            .add_relationship(
+                                from_id_clone.to_string(),
+                                to_id_clone.to_string(),
+                                kind_clone.clone(),
+                            )
+                            .await
+                        {
+                            Ok(resp) if resp.success => {
+                                let _ = result_tx.send(format!(
+                                    "relate: {from_id_clone} -[{kind_clone}]-> {to_id_clone}"
+                                ));
+                            }
+                            Ok(resp) => {
+                                let _ = result_tx.send(format!(
+                                    "relate failed: {}",
+                                    resp.error.unwrap_or_default()
+                                ));
+                            }
+                            Err(e) => {
+                                let _ = result_tx.send(format!("relate RPC failed: {e}"));
+                            }
+                        }
+                    });
                 }
             }
             CMD_AGENTS => {
@@ -1242,9 +1411,8 @@ impl App {
             // Phase 6 T8: HistoricalBatch.agent_id labels each historical
             // batch with its responding agent, matching live batches tagged
             // from `TaggedTurnEvent.agent_id`.
-            let mut render_batch =
-                RenderBatch::new(batch.batch_id.clone(), batch.user_message)
-                    .with_agent(batch.agent_id.clone());
+            let mut render_batch = RenderBatch::new(batch.batch_id.clone(), batch.user_message)
+                .with_agent(batch.agent_id.clone());
             for event in &batch.events {
                 render_batch.push_event(event);
             }
@@ -1280,13 +1448,14 @@ impl App {
         // route to fronting / constellation state, not to any batch.
         match &tagged.event {
             WireTurnEvent::FrontingChanged {
-                active, fallback, ..
+                active,
+                fallback,
+                rules,
             } => {
                 let prev_active = self.fronting_active.clone();
-                self.fronting_active =
-                    active.iter().map(|s| SmolStr::from(s.as_str())).collect();
-                self.fronting_fallback =
-                    fallback.as_deref().map(SmolStr::from);
+                self.fronting_active = active.iter().map(|s| SmolStr::from(s.as_str())).collect();
+                self.fronting_fallback = fallback.as_deref().map(SmolStr::from);
+                self.fronting_rules = rules.clone();
                 // Surface a one-line system note in the conversation when the
                 // fronting set actually changed, so the user has context for
                 // the next response coming from a different agent.
@@ -1316,9 +1485,9 @@ impl App {
                 return;
             }
             WireTurnEvent::ConstellationChanged { .. } => {
-                // Constellation-panel re-fetch hook lands in commit 4
-                // (panel + ConstellationView state). For now this event is
-                // observed but not acted on.
+                // Phase 6 T8: re-fetch the registry. Cheaper than tracking
+                // per-mutation deltas; the registry list is small.
+                self.refresh_constellation_view();
                 return;
             }
             _ => {}
@@ -1403,6 +1572,18 @@ impl App {
 
         // Side panel (when visible or expanded).
         if let Some(panel_rect) = layout.panel {
+            // Phase 6 T8: pre-render the constellation panel content into
+            // owned `Text<'static>` so the StatefulWidget can borrow it.
+            if self.panel_state.content == super::panel::PanelContent::Constellation {
+                self.panel_state.constellation_text =
+                    super::constellation_view::render_constellation_panel(
+                        &self.constellation_view,
+                        &self.fronting_active,
+                        self.fronting_fallback.as_ref(),
+                        &self.fronting_rules,
+                        self.route_lock.as_ref(),
+                    );
+            }
             ratatui::widgets::StatefulWidget::render(
                 SidePanel,
                 panel_rect,

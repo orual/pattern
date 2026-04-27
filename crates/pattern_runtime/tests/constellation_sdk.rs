@@ -235,11 +235,6 @@ async fn groups_with_project_filter_dispatches() {
     let cx = EffectContext::with_user(&table, &*ctx);
 
     let mut h = ConstellationHandler;
-    let result = dispatch(|| {
-        h.handle(
-            ConstellationReq::Groups(Some("proj-a".to_string())),
-            &cx,
-        )
-    });
+    let result = dispatch(|| h.handle(ConstellationReq::Groups(Some("proj-a".to_string())), &cx));
     assert!(result.is_ok(), "Groups(proj-a) returned: {result:?}");
 }

@@ -29,7 +29,6 @@ use dashmap::DashMap;
 use irpc::{Client, WithChannels};
 use pattern_core::CapabilitySet;
 use pattern_core::ProviderClient;
-use pattern_core::constellation::ConstellationRegistry;
 use pattern_core::fronting::{FrontingResolver, ResolveOutcome};
 use pattern_core::traits::MemoryStore;
 use pattern_core::traits::turn_sink::{DisplayKind, TurnEvent, TurnSink};
@@ -308,8 +307,11 @@ pub enum FrontingUpdateError {
 ///
 /// Stored in a shared [`DashMap`] so spawned tasks can look up and insert
 /// sessions without going through the actor loop.
+///
+/// Visibility is `pub(crate)` to match the `DaemonHandle::sessions` field that
+/// holds `Arc<DashMap<AgentId, AgentSession>>` in test builds.
 #[derive(Clone)]
-struct AgentSession {
+pub(crate) struct AgentSession {
     session: Arc<TidepoolSession>,
     mux_sink: Arc<MultiplexSink>,
 }
@@ -387,6 +389,13 @@ pub struct DaemonServer {
     /// locate the correct session. Entries are inserted on `SendMessage` and
     /// removed when a `Stop` event arrives for the batch.
     batch_to_agent: Arc<DashMap<BatchId, AgentId>>,
+    /// Test-only: when `Some`, `get_or_mount_project` uses this registry
+    /// instead of building one from the DB. Lets tests inject a mock that
+    /// fails on specific methods (e.g. `set_status`) without requiring
+    /// database-level surgery. Gated behind `#[cfg(test)]` so it is
+    /// zero-cost in production builds.
+    #[cfg(test)]
+    constellation_registry_override: Option<Arc<dyn pattern_core::ConstellationRegistry>>,
 }
 
 /// Handle returned by [`DaemonServer::spawn`].
@@ -403,6 +412,16 @@ pub struct DaemonHandle {
     /// it cannot leak into normal use.
     #[cfg(test)]
     pub(crate) batch_to_agent: Arc<DashMap<BatchId, AgentId>>,
+    /// Test-only reference to the server's open sessions map, so tests can
+    /// verify session lifecycle (e.g. that failed PromoteDraft step-6 removes
+    /// the entry). Kept `pub(crate)` and `cfg(test)` — only unit tests in
+    /// this crate's `#[cfg(test)]` module access it.
+    #[cfg(test)]
+    pub(crate) sessions: Arc<DashMap<AgentId, AgentSession>>,
+    /// Test-only reference to the server's agent-to-mount mapping, so tests
+    /// can verify cleanup on PromoteDraft step-6 failure.
+    #[cfg(test)]
+    pub(crate) agent_to_mount: Arc<DashMap<AgentId, PathBuf>>,
 }
 
 impl DaemonServer {
@@ -422,34 +441,94 @@ impl DaemonServer {
         Self::spawn_inner(false, Some(Arc::new(config)))
     }
 
+    /// Test-only: spawn with real session infrastructure AND a registry
+    /// override. `get_or_mount_project` will use `registry` instead of
+    /// building one from the DB, allowing tests to inject a mock that
+    /// fails on specific methods (e.g. `set_status` for step-6 testing).
+    ///
+    /// The override registry is used for all mounts created by this daemon
+    /// instance. It replaces the normal `ConstellationRegistryDb` + wrapping
+    /// `EventEmittingRegistry` layer, so tests own the full registry logic.
+    ///
+    /// Marked `pub` (not `pub(crate)`) so integration tests in `tests/` can
+    /// call it. The `cfg(test)` gate ensures it never appears in production.
+    #[cfg(test)]
+    pub fn spawn_with_config_and_registry(
+        config: SessionConfig,
+        registry: Arc<dyn pattern_core::ConstellationRegistry>,
+    ) -> DaemonHandle {
+        let (msg_tx, msg_rx) = tokio::sync::mpsc::channel(64);
+        let (event_tx, event_rx) = new_event_channel();
+        let batch_to_agent = Arc::new(DashMap::new());
+        let sessions: Arc<DashMap<AgentId, AgentSession>> = Arc::new(DashMap::new());
+        let agent_to_mount: Arc<DashMap<AgentId, PathBuf>> = Arc::new(DashMap::new());
+        let mut server = Self {
+            recv: msg_rx,
+            event_rx,
+            event_tx,
+            subscribers: HashMap::new(),
+            mount_subscribers: HashMap::new(),
+            agent_to_mount: agent_to_mount.clone(),
+            started_at: Instant::now(),
+            echo: false,
+            session_config: Some(Arc::new(config)),
+            project_mounts: Arc::new(DashMap::new()),
+            current_mount: None,
+            sessions: sessions.clone(),
+            session_locks: Arc::new(DashMap::new()),
+            partner_id: new_id(),
+            available_agents: 0,
+            batch_to_agent: batch_to_agent.clone(),
+            constellation_registry_override: None,
+        };
+        server.constellation_registry_override = Some(registry);
+        tokio::spawn(server.run());
+        DaemonHandle {
+            client: Client::local(msg_tx),
+            batch_to_agent,
+            sessions,
+            agent_to_mount,
+        }
+    }
+
     /// Internal spawn helper.
     fn spawn_inner(echo: bool, session_config: Option<Arc<SessionConfig>>) -> DaemonHandle {
         let (msg_tx, msg_rx) = tokio::sync::mpsc::channel(64);
         let (event_tx, event_rx) = new_event_channel();
         let batch_to_agent = Arc::new(DashMap::new());
+        let sessions: Arc<DashMap<AgentId, AgentSession>> = Arc::new(DashMap::new());
+        let agent_to_mount: Arc<DashMap<AgentId, PathBuf>> = Arc::new(DashMap::new());
         let server = Self {
             recv: msg_rx,
             event_rx,
             event_tx,
             subscribers: HashMap::new(),
             mount_subscribers: HashMap::new(),
-            agent_to_mount: Arc::new(DashMap::new()),
+            agent_to_mount: agent_to_mount.clone(),
             started_at: Instant::now(),
             echo,
             session_config,
             project_mounts: Arc::new(DashMap::new()),
             current_mount: None,
-            sessions: Arc::new(DashMap::new()),
+            sessions: sessions.clone(),
             session_locks: Arc::new(DashMap::new()),
             partner_id: new_id(),
             available_agents: 0,
             batch_to_agent: batch_to_agent.clone(),
+            // Production builds always use None; test builds may override
+            // via `spawn_with_config_and_registry`.
+            #[cfg(test)]
+            constellation_registry_override: None,
         };
         tokio::spawn(server.run());
         DaemonHandle {
             client: Client::local(msg_tx),
             #[cfg(test)]
             batch_to_agent,
+            #[cfg(test)]
+            sessions,
+            #[cfg(test)]
+            agent_to_mount,
         }
     }
 
@@ -501,11 +580,8 @@ impl DaemonServer {
         // Resolve the mount path once (used for mount-scoped fan-out below).
         // Per-agent emitters leave mount_path None — look it up in
         // agent_to_mount. Daemon-level emitters set it explicitly.
-        let mount_key: Option<PathBuf> = event
-            .mount_path
-            .as_deref()
-            .map(PathBuf::from)
-            .or_else(|| {
+        let mount_key: Option<PathBuf> =
+            event.mount_path.as_deref().map(PathBuf::from).or_else(|| {
                 self.agent_to_mount
                     .get(&event.agent_id)
                     .map(|p| p.value().clone())
@@ -645,8 +721,6 @@ impl DaemonServer {
                                 return;
                             }
                         };
-                        let empty_registry: Arc<dyn ConstellationRegistry> =
-                            Arc::new(pattern_core::constellation::EmptyConstellationRegistry);
                         let body_text = inner
                             .parts
                             .iter()
@@ -656,7 +730,14 @@ impl DaemonServer {
                             })
                             .next()
                             .unwrap_or("");
-                        let resolver = FrontingResolver::new(set_snapshot, empty_registry);
+                        // Use the mount's real constellation registry so
+                        // Recipient::Auto can fall back to Active personas when
+                        // the fronting set is empty (e.g. on first use before
+                        // explicit fronting is configured).
+                        let resolver = FrontingResolver::new(
+                            set_snapshot,
+                            mount.constellation_registry.clone(),
+                        );
                         let outcome = resolver.resolve(body_text).await;
                         match outcome {
                             ResolveOutcome::Direct(id)
@@ -809,12 +890,9 @@ impl DaemonServer {
                     .mount_path
                     .canonicalize()
                     .unwrap_or_else(|_| inner.mount_path.clone());
-                let key = pattern_memory::mount::find_mount(&canonical)
-                    .unwrap_or_else(|_| canonical);
-                self.mount_subscribers
-                    .entry(key)
-                    .or_default()
-                    .push(tx);
+                let key =
+                    pattern_memory::mount::find_mount(&canonical).unwrap_or_else(|_| canonical);
+                self.mount_subscribers.entry(key).or_default().push(tx);
             }
             PatternMessage::ListAgents(req) => {
                 let WithChannels { tx, .. } = req;
@@ -1186,7 +1264,13 @@ impl DaemonServer {
                 let WithChannels { tx, inner, .. } = req;
 
                 if self.echo {
-                    // Echo mode: return synthetic session info.
+                    // Echo mode: still mount the project so that registry-level
+                    // RPCs (ListPersonas, AddRelationship, PromoteDraft, etc.)
+                    // can access the DB. The session response is synthetic — no
+                    // real LLM session is opened.
+                    if let Ok(mount) = self.get_or_mount_project(&inner.project_path) {
+                        self.current_mount = Some(mount);
+                    }
                     let _ = tx
                         .send(SessionInfo {
                             agent_id: inner.default_agent,
@@ -1405,14 +1489,33 @@ impl DaemonServer {
         // ConstellationChanged event to mount-scoped subscribers (Phase 6 T8).
         // Shared across every session opened against the mount AND used
         // directly by the daemon for PromoteDraft / draft-flip RPCs.
-        let raw_registry: Arc<dyn pattern_core::ConstellationRegistry> =
-            Arc::new(pattern_db::ConstellationRegistryDb::new(mounted.db.clone()));
+        //
+        // In test builds, a registry override from `spawn_with_config_and_registry`
+        // replaces both the DB-backed registry and the EventEmittingRegistry wrapper,
+        // giving tests full control over which methods succeed or fail.
+        #[cfg(test)]
         let constellation_registry: Arc<dyn pattern_core::ConstellationRegistry> =
+            if let Some(ref r) = self.constellation_registry_override {
+                r.clone()
+            } else {
+                let raw: Arc<dyn pattern_core::ConstellationRegistry> =
+                    Arc::new(pattern_db::ConstellationRegistryDb::new(mounted.db.clone()));
+                Arc::new(EventEmittingRegistry::new(
+                    raw,
+                    self.event_tx.clone(),
+                    mounted.mount_path.clone(),
+                ))
+            };
+        #[cfg(not(test))]
+        let constellation_registry: Arc<dyn pattern_core::ConstellationRegistry> = {
+            let raw: Arc<dyn pattern_core::ConstellationRegistry> =
+                Arc::new(pattern_db::ConstellationRegistryDb::new(mounted.db.clone()));
             Arc::new(EventEmittingRegistry::new(
-                raw_registry,
+                raw,
                 self.event_tx.clone(),
                 mounted.mount_path.clone(),
-            ));
+            ))
+        };
 
         // Resolve the partner display name from `.pattern.kdl`'s
         // `partner { display-name "..." }` block (Phase 6 T8). `None` when the
@@ -1520,6 +1623,10 @@ impl DaemonServer {
         // `<drafts_dir>/<persona_id>.cache/`. Import each block into the
         // mount's MemoryCache under the new persona's id, then persist so
         // it lands in the DB before the session opens.
+        //
+        // `migrate_seed_cache` is idempotent: blocks that already exist in
+        // the cache (from a prior partial import) are skipped at `create_block`
+        // and re-applied via `insert_from_snapshot`, so retries converge.
         let seed_cache_dir = draft_path
             .parent()
             .map(|p| p.join(format!("{persona_id}.cache")));
@@ -1547,26 +1654,19 @@ impl DaemonServer {
             }
         }
 
-        // 4: update registry config_path so subsequent reopens find the new
-        // location. (Failure here leaves the file moved but the row stale —
-        // caller can retry; future opens via discover_personas will still work
-        // because the file is in the discovery path.)
-        if let Err(e) = mount
-            .constellation_registry
-            .set_config_path(&persona_id, Some(promoted_path.clone()))
-            .await
-        {
-            tracing::warn!(
-                persona_id = %persona_id,
-                error = %e,
-                "registry set_config_path failed after file move; \
-                 persona still discoverable via mount/personas path"
-            );
-        }
+        // 4 (deferred): update registry config_path after the session opens
+        // successfully (step 5). The path the session loaded from is the
+        // source of truth — recording it before we know the session can open
+        // would be misleading on failure.
 
         // 5: load + open via the shared session-open helper.
-        let persona = pattern_runtime::persona_loader::load_persona(&promoted_path)
-            .map_err(|e| format!("failed to load persona from {}: {e}", promoted_path.display()))?;
+        let persona =
+            pattern_runtime::persona_loader::load_persona(&promoted_path).map_err(|e| {
+                format!(
+                    "failed to load persona from {}: {e}",
+                    promoted_path.display()
+                )
+            })?;
         let agent_id: pattern_core::types::ids::AgentId = persona.agent_id.as_str().into();
 
         // Per-agent lock + dedup — same shape as `get_or_open_session`.
@@ -1586,7 +1686,7 @@ impl DaemonServer {
                         .to_string()
                 })?
                 .clone();
-            let _agent_session = open_session_with_persona(
+            open_session_with_persona(
                 &agent_id,
                 persona,
                 &self.sessions,
@@ -1598,14 +1698,50 @@ impl DaemonServer {
             .await?;
         }
 
+        // 4 (now): session opened successfully — record the config_path.
+        // Failure is non-fatal: the file is in the discovery path and future
+        // opens via `discover_personas` will still work.
+        if let Err(e) = mount
+            .constellation_registry
+            .set_config_path(&persona_id, Some(promoted_path.clone()))
+            .await
+        {
+            tracing::warn!(
+                persona_id = %persona_id,
+                error = %e,
+                "registry set_config_path failed after file move; \
+                 persona still discoverable via mount/personas path"
+            );
+        }
+
         // 6: flip registry status to Active. After this, the persona is a
         // first-class member of the constellation and the queue (drained at
         // step 5 inside register_active) is in the live mailbox.
-        mount
+        //
+        // If this fails, the session is already open and registered in the
+        // agent mailbox. Clean up the session so a retry attempt can succeed
+        // without finding a stale open-but-Draft session.
+        if let Err(e) = mount
             .constellation_registry
             .set_status(&persona_id, PersonaStatus::Active)
             .await
-            .map_err(|e| format!("failed to update registry status: {e}"))?;
+        {
+            // Best-effort session cleanup. We remove the entry from both maps
+            // so a retry of PromoteDraft starts from a clean state. The
+            // TidepoolSession Drop impl unregisters from AgentRegistry.
+            self.sessions.remove(&agent_id);
+            self.agent_to_mount.remove(&agent_id);
+            tracing::warn!(
+                persona_id = %persona_id,
+                agent_id = %agent_id,
+                error = %e,
+                "set_status Active failed after session open; session removed for clean retry"
+            );
+            return Err(format!(
+                "failed to update registry status to Active after session open: {e}; \
+                 session has been closed — retry PromoteDraft to recover"
+            ));
+        }
 
         tracing::info!(
             persona_id = %persona_id,
@@ -1633,9 +1769,7 @@ impl DaemonServer {
             None => {
                 return crate::protocol::ListPersonasResponse {
                     personas: Vec::new(),
-                    error: Some(
-                        "no project mounted — send InitSession first".to_string(),
-                    ),
+                    error: Some("no project mounted — send InitSession first".to_string()),
                 };
             }
         };
@@ -1688,6 +1822,7 @@ impl DaemonServer {
             .constellation_registry
             .add_relationship(RelationshipSpec::new(req.from, req.to, kind))
             .await
+            .map(|_inserted| ()) // bool (was-inserted) is not surfaced in the wire response
             .map_err(|e| format!("registry add_relationship failed: {e}"))
     }
 
@@ -1704,9 +1839,7 @@ impl DaemonServer {
             None => {
                 return crate::protocol::ListGroupsResponse {
                     groups: Vec::new(),
-                    error: Some(
-                        "no project mounted — send InitSession first".to_string(),
-                    ),
+                    error: Some("no project mounted — send InitSession first".to_string()),
                 };
             }
         };
@@ -1749,9 +1882,7 @@ impl DaemonServer {
             None => {
                 return crate::protocol::CreateGroupResponse {
                     group: None,
-                    error: Some(
-                        "no project mounted — send InitSession first".to_string(),
-                    ),
+                    error: Some("no project mounted — send InitSession first".to_string()),
                 };
             }
         };
@@ -1783,7 +1914,22 @@ impl DaemonServer {
 fn persona_record_to_wire_summary(
     r: &pattern_core::constellation::PersonaRecord,
 ) -> crate::protocol::WirePersonaSummary {
-    use pattern_core::constellation::PersonaStatus;
+    use pattern_core::constellation::{EdgeDirection, PersonaStatus};
+    use pattern_core::spawn::RelationshipKind;
+    let outgoing_relationships = r
+        .relationships
+        .iter()
+        .filter(|e| e.direction == EdgeDirection::Outgoing)
+        .map(|e| {
+            let kind = match e.kind {
+                RelationshipKind::SupervisorOf => "supervisor_of",
+                RelationshipKind::SpecialistFor => "specialist_for",
+                RelationshipKind::PeerWith => "peer_with",
+                RelationshipKind::ObserverOf => "observer_of",
+            };
+            (e.other.to_string(), kind.to_string())
+        })
+        .collect();
     crate::protocol::WirePersonaSummary {
         id: r.id.to_string(),
         name: r.name.clone(),
@@ -1801,6 +1947,7 @@ fn persona_record_to_wire_summary(
             .iter()
             .map(|p| p.to_string_lossy().into_owned())
             .collect(),
+        outgoing_relationships,
     }
 }
 
@@ -1817,9 +1964,7 @@ async fn migrate_seed_cache(
     persona_id: &pattern_core::types::ids::PersonaId,
     cache: &pattern_memory::cache::MemoryCache,
 ) -> Result<u32, String> {
-    use pattern_runtime::spawn::fork::{
-        SEED_CACHE_MANIFEST_VERSION, SeedCacheManifest,
-    };
+    use pattern_runtime::spawn::fork::{SEED_CACHE_MANIFEST_VERSION, SeedCacheManifest};
 
     let manifest_path = cache_dir.join("manifest.json");
     let manifest_bytes = std::fs::read(&manifest_path)
@@ -1843,23 +1988,48 @@ async fn migrate_seed_cache(
 
     let agent_id = persona_id.as_str().to_string();
     let mut imported: u32 = 0;
+    let mut skipped: u32 = 0;
     for entry in manifest.entries {
         let snap_path = cache_dir.join(&entry.file);
         let snapshot = std::fs::read(&snap_path)
             .map_err(|e| format!("read seed snapshot {}: {e}", snap_path.display()))?;
 
-        // Create the block first so the DB row exists with the right
-        // schema + type. The empty content is immediately overwritten by
-        // `insert_from_snapshot`, which replaces the cached doc with the
-        // snapshot's CRDT state. Persist then commits the snapshot bytes.
-        let create = pattern_core::types::block::BlockCreate::new(
-            entry.label.clone(),
-            entry.block_type,
-            entry.schema.clone(),
-        );
-        pattern_core::MemoryStore::create_block(cache, &agent_id, create)
-            .map_err(|e| format!("create_block for {:?}: {e}", entry.label))?;
+        // Idempotency: check whether the block already exists before creating
+        // it. On a retry after partial failure the block may already be in the
+        // cache from a previous import attempt. Skipping `create_block` for
+        // existing blocks avoids a UNIQUE constraint violation while still
+        // re-applying `insert_from_snapshot` to ensure the block reaches the
+        // intended CRDT state. This makes retries converge correctly.
+        //
+        // `MemoryCache::get_block` returns `Err(MemoryError::NotFound)` (not
+        // `Ok(None)`) when the block does not exist in the DB yet. We treat
+        // that variant as "not found" rather than a hard failure so that the
+        // first import (where nothing exists yet) does not abort.
+        let already_exists =
+            match pattern_core::MemoryStore::get_block(cache, &agent_id, &entry.label) {
+                Ok(Some(_)) => true,
+                Ok(None) => false,
+                Err(pattern_core::error::MemoryError::NotFound { .. }) => false,
+                Err(e) => return Err(format!("get_block check for {:?}: {e}", entry.label)),
+            };
 
+        if !already_exists {
+            // Block is new: create the DB row with the correct schema + type.
+            // The empty content is overwritten by `insert_from_snapshot` below.
+            let create = pattern_core::types::block::BlockCreate::new(
+                entry.label.clone(),
+                entry.block_type,
+                entry.schema.clone(),
+            );
+            pattern_core::MemoryStore::create_block(cache, &agent_id, create)
+                .map_err(|e| format!("create_block for {:?}: {e}", entry.label))?;
+        } else {
+            skipped += 1;
+        }
+
+        // Always apply the snapshot — whether or not we just created the block.
+        // For existing blocks this re-applies the same CRDT state (idempotent);
+        // for new blocks this replaces the empty initial doc with the seed state.
         cache
             .insert_from_snapshot(
                 &agent_id,
@@ -1879,12 +2049,22 @@ async fn migrate_seed_cache(
         imported += 1;
     }
 
-    tracing::info!(
-        persona_id = %persona_id,
-        imported,
-        source = "pattern_server.promote_draft.seed_cache",
-        "seed cache imported into mount cache"
-    );
+    if skipped > 0 {
+        tracing::info!(
+            persona_id = %persona_id,
+            imported,
+            skipped,
+            source = "pattern_server.promote_draft.seed_cache",
+            "seed cache imported (some blocks already existed; snapshots re-applied)"
+        );
+    } else {
+        tracing::info!(
+            persona_id = %persona_id,
+            imported,
+            source = "pattern_server.promote_draft.seed_cache",
+            "seed cache imported into mount cache"
+        );
+    }
     Ok(imported)
 }
 
@@ -1904,17 +2084,44 @@ fn promote_persona_file(
         .map_err(|e| format!("create_dir_all {}: {e}", target_dir.display()))?;
     let target = target_dir.join("persona.kdl");
 
+    // Same-path idempotency: if draft_path and target resolve to the same
+    // file, this is a no-op retry (step-6 failed after a prior promote moved
+    // the file and updated config_path). `rename(A, A)` is a POSIX no-op but
+    // undefined on Windows — the copy+remove fallback would DELETE the file.
+    // Check via canonicalized paths to handle relative vs. absolute + symlinks.
+    let draft_canonical = draft_path
+        .canonicalize()
+        .unwrap_or_else(|_| draft_path.to_path_buf());
+    let target_canonical = target
+        .canonicalize()
+        .unwrap_or_else(|_| target.to_path_buf());
+    if draft_canonical == target_canonical && target.exists() {
+        tracing::debug!(
+            target = %target.display(),
+            "promote_persona_file: draft_path == target; treating as idempotent no-op"
+        );
+        return Ok(target);
+    }
+
+    // Idempotency: if the target already exists and the draft path is gone,
+    // a prior promote attempt already moved the file. Treat this as success
+    // so retries (e.g. after step-5/6 failure) converge rather than error
+    // on a missing source file.
+    if target.exists() && !draft_path.exists() {
+        tracing::debug!(
+            target = %target.display(),
+            "promote_persona_file: target already exists and draft is gone; treating as idempotent success"
+        );
+        return Ok(target);
+    }
+
     // Try a fast atomic rename first.
     match std::fs::rename(draft_path, &target) {
         Ok(()) => Ok(target),
         Err(_) => {
             // Cross-FS or other failure: fall back to copy + remove.
             std::fs::copy(draft_path, &target).map_err(|e| {
-                format!(
-                    "copy {} -> {}: {e}",
-                    draft_path.display(),
-                    target.display()
-                )
+                format!("copy {} -> {}: {e}", draft_path.display(), target.display())
             })?;
             // Best-effort cleanup of the source. Loud-log on failure but
             // don't fail the promote — the target now has the canonical
@@ -1977,9 +2184,7 @@ pub(crate) fn build_constellation_changed_event(
 }
 
 /// Convert a `FrontingSet`'s routing rules to the wire form.
-fn build_wire_routing_rules(
-    set: &pattern_core::fronting::FrontingSet,
-) -> Vec<WireRoutingRule> {
+fn build_wire_routing_rules(set: &pattern_core::fronting::FrontingSet) -> Vec<WireRoutingRule> {
     set.routing
         .rules
         .iter()
@@ -2047,12 +2252,10 @@ impl EventEmittingRegistry {
     }
 
     fn emit(&self, kind: &str) {
-        let _ = self
-            .event_tx
-            .send(build_constellation_changed_event(
-                kind,
-                Some(self.mount_path.clone()),
-            ));
+        let _ = self.event_tx.send(build_constellation_changed_event(
+            kind,
+            Some(self.mount_path.clone()),
+        ));
     }
 }
 
@@ -2127,9 +2330,11 @@ impl pattern_core::ConstellationRegistry for EventEmittingRegistry {
     async fn add_relationship(
         &self,
         edge: pattern_core::constellation::RelationshipSpec,
-    ) -> Result<(), pattern_core::constellation::RegistryError> {
+    ) -> Result<bool, pattern_core::constellation::RegistryError> {
         let result = self.inner.add_relationship(edge).await;
-        if result.is_ok() {
+        // Only emit when a row was actually inserted; `ON CONFLICT DO NOTHING`
+        // no-ops (false) do not change state so no event is needed.
+        if result.as_ref().is_ok_and(|&inserted| inserted) {
             self.emit("relationship_added");
         }
         result
@@ -2149,10 +2354,8 @@ impl pattern_core::ConstellationRegistry for EventEmittingRegistry {
         &self,
         name: String,
         project_id: Option<String>,
-    ) -> Result<
-        pattern_core::constellation::PersonaGroup,
-        pattern_core::constellation::RegistryError,
-    > {
+    ) -> Result<pattern_core::constellation::PersonaGroup, pattern_core::constellation::RegistryError>
+    {
         let result = self.inner.create_group(name, project_id).await;
         if result.is_ok() {
             self.emit("group_created");
@@ -2204,19 +2407,15 @@ impl DaemonFrontingCommitter {
 }
 
 impl pattern_runtime::sdk::handlers::fronting::FrontingCommitter for DaemonFrontingCommitter {
-    fn fronting_set(
-        &self,
-    ) -> &Arc<std::sync::RwLock<pattern_core::fronting::FrontingSet>> {
+    fn fronting_set(&self) -> &Arc<std::sync::RwLock<pattern_core::fronting::FrontingSet>> {
         &self.fronting
     }
 
     fn commit_sync(
         &self,
         mutator: pattern_runtime::sdk::handlers::fronting::FrontingMutator,
-    ) -> Result<
-        pattern_core::fronting::FrontingSet,
-        pattern_runtime::tidepool_effect::EffectError,
-    > {
+    ) -> Result<pattern_core::fronting::FrontingSet, pattern_runtime::tidepool_effect::EffectError>
+    {
         let fronting = self.fronting.clone();
         let db = self.db.clone();
         let new_set = self
@@ -2362,16 +2561,15 @@ async fn open_session_with_persona(
     let (cli_router, _cli_rx) = CliRouter::new();
     let mut router_reg = RouterRegistry::new().with_default_scheme("cli");
 
-    // Phase 5: AgentRouter gains fronting-aware dispatch. The
-    // FrontingState points at the mount's canonical FrontingSet lock
-    // and a placeholder ConstellationRegistry. Phase 6 will swap in a
-    // pattern_db-backed registry; for now an empty in-memory one means
-    // the empty-fronting path falls through to SystemDefault, which
-    // matches the documented "no fronting configured" behaviour.
+    // AgentRouter gains fronting-aware dispatch. The FrontingState points at
+    // the mount's canonical FrontingSet lock and the mount's real
+    // constellation registry. This allows the FrontingResolver to fall back
+    // to Active personas from the DB-backed registry when the fronting set is
+    // empty rather than always returning SystemDefault ("no fronting
+    // configured").
     let fronting_state = pattern_runtime::fronting_dispatch::FrontingState::new(
         project_mount.fronting.clone(),
-        Arc::new(pattern_core::constellation::EmptyConstellationRegistry)
-            as Arc<dyn pattern_core::constellation::ConstellationRegistry>,
+        project_mount.constellation_registry.clone(),
     );
     router_reg.register(Arc::new(
         AgentRouter::new(project_mount.agent_registry.clone()).with_fronting(fronting_state),
@@ -2389,15 +2587,14 @@ async fn open_session_with_persona(
     // The committer carries the project_mount's `fronting` Arc internally
     // — that's the same Arc the RPC `update_fronting` path mutates, so SDK
     // and RPC mutations end up in the same lock by construction.
-    let fronting_committer: Arc<
-        dyn pattern_runtime::sdk::handlers::fronting::FrontingCommitter,
-    > = Arc::new(DaemonFrontingCommitter::new(
-        project_mount.fronting.clone(),
-        project_mount.db.clone(),
-        event_tx.clone(),
-        tokio::runtime::Handle::current(),
-        Some(project_mount.mount_path.to_string_lossy().into_owned()),
-    ));
+    let fronting_committer: Arc<dyn pattern_runtime::sdk::handlers::fronting::FrontingCommitter> =
+        Arc::new(DaemonFrontingCommitter::new(
+            project_mount.fronting.clone(),
+            project_mount.db.clone(),
+            event_tx.clone(),
+            tokio::runtime::Handle::current(),
+            Some(project_mount.mount_path.to_string_lossy().into_owned()),
+        ));
 
     let registries = SessionRegistries {
         agent_registry: Some(project_mount.agent_registry.clone()),
@@ -2999,22 +3196,23 @@ mod tests {
         // Run on a blocking thread because commit_sync calls block_on.
         let committer_clone = committer.clone();
         let new_set = tokio::task::spawn_blocking(move || {
-            committer_clone.commit_sync(mutator).expect("commit must succeed")
+            committer_clone
+                .commit_sync(mutator)
+                .expect("commit must succeed")
         })
         .await
         .unwrap();
         assert_eq!(new_set.active.len(), 1);
         assert_eq!(new_set.active[0].as_str(), "alice");
 
-        // Verify in-memory state landed.
-        let after = fronting.read().unwrap();
-        assert_eq!(after.active.len(), 1);
-        assert_eq!(after.active[0].as_str(), "alice");
-        assert_eq!(
-            after.fallback.as_ref().map(|s| s.as_str()),
-            Some("alice")
-        );
-        drop(after);
+        // Verify in-memory state landed. The guard is scoped so it drops
+        // before the subsequent `.await` point (clippy::await_holding_lock).
+        {
+            let after = fronting.read().unwrap();
+            assert_eq!(after.active.len(), 1);
+            assert_eq!(after.active[0].as_str(), "alice");
+            assert_eq!(after.fallback.as_ref().map(|s| s.as_str()), Some("alice"));
+        }
 
         // Verify the row landed in the DB.
         let conn = db.get().unwrap();
@@ -3025,13 +3223,10 @@ mod tests {
         assert_eq!(loaded.active[0].as_str(), "alice");
 
         // Verify a FrontingChanged event was sent on the channel.
-        let event = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            event_rx.recv(),
-        )
-        .await
-        .expect("must receive event within timeout")
-        .expect("event channel must not be closed");
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("must receive event within timeout")
+            .expect("event channel must not be closed");
         assert_eq!(event.batch_id, "fronting");
         assert_eq!(event.agent_id, "daemon");
         match event.event {
@@ -3057,7 +3252,7 @@ mod tests {
         use pattern_core::types::ids::PersonaId;
         use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
         use pattern_runtime::spawn::fork::{
-            SeedCacheManifest, SeedCacheManifestEntry, SEED_CACHE_MANIFEST_VERSION,
+            SEED_CACHE_MANIFEST_VERSION, SeedCacheManifest, SeedCacheManifestEntry,
         };
 
         // Build a source cache, create one block, export its snapshot.
@@ -3070,9 +3265,7 @@ mod tests {
             MemoryBlockType::Working,
             BlockSchema::text(),
         );
-        let _doc =
-            pattern_core::MemoryStore::create_block(&src_cache, src_agent, create)
-                .unwrap();
+        let _doc = pattern_core::MemoryStore::create_block(&src_cache, src_agent, create).unwrap();
         // Persist so the cached doc is committed.
         pattern_core::MemoryStore::persist_block(&src_cache, src_agent, label).unwrap();
 
@@ -3114,10 +3307,9 @@ mod tests {
         assert_eq!(imported, 1);
 
         // The block should now be queryable under the new agent_id.
-        let loaded =
-            pattern_core::MemoryStore::get_block(&target_cache, persona_id_str, label)
-                .unwrap()
-                .expect("imported block must be retrievable");
+        let loaded = pattern_core::MemoryStore::get_block(&target_cache, persona_id_str, label)
+            .unwrap()
+            .expect("imported block must be retrievable");
         assert_eq!(loaded.label(), label);
         assert_eq!(loaded.agent_id(), persona_id_str);
     }
@@ -3148,6 +3340,386 @@ mod tests {
             .await
             .expect_err("future version must error");
         assert!(err.contains("version mismatch"), "got: {err}");
+    }
+
+    /// `promote_persona_file` must return `Ok(target)` without calling
+    /// `rename` or `copy`+`remove` when `draft_path == target` and the
+    /// file exists. This is the step-6-failure + retry scenario: after a
+    /// prior successful promote the registry's `config_path` points at the
+    /// moved file, so `draft_path` passed on retry equals `target`. Calling
+    /// `rename(A, A)` is a POSIX no-op but undefined on Windows; the
+    /// copy+remove fallback would DELETE the file. The early-return guard
+    /// prevents both.
+    #[test]
+    fn promote_persona_file_same_path_is_no_op() {
+        use pattern_core::types::ids::PersonaId;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let persona_id: PersonaId = "my-persona".into();
+
+        // Write the file at the already-promoted location.
+        let mount_path = tmp.path();
+        let target_dir = mount_path.join("personas").join("@my-persona");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        let target = target_dir.join("persona.kdl");
+        std::fs::write(&target, "name \"My Persona\"\n").unwrap();
+
+        // Call promote_persona_file with draft_path == target.
+        // Must succeed without touching the file content.
+        let result = super::promote_persona_file(mount_path, &persona_id, &target);
+        assert!(
+            result.is_ok(),
+            "same-path promote must succeed; got: {result:?}"
+        );
+        assert_eq!(result.unwrap(), target);
+
+        // File must still exist with original content.
+        let content = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(content, "name \"My Persona\"\n");
+    }
+
+    /// `migrate_seed_cache` must be idempotent: calling it twice on the
+    /// same input directory and target cache must succeed both times, and
+    /// the block must be in the expected final state after both calls.
+    ///
+    /// This verifies the "skip `create_block`, re-apply `insert_from_snapshot`"
+    /// logic described in the function comment: a partial-failure retry that
+    /// finds the block already in the cache must not abort on a UNIQUE
+    /// constraint violation.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn migrate_seed_cache_is_idempotent() {
+        use pattern_core::types::ids::PersonaId;
+        use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
+        use pattern_runtime::spawn::fork::{
+            SEED_CACHE_MANIFEST_VERSION, SeedCacheManifest, SeedCacheManifestEntry,
+        };
+
+        // Build a source block and export its snapshot.
+        let src_db = Arc::new(pattern_db::ConstellationDb::open_in_memory().unwrap());
+        let src_cache = pattern_memory::cache::MemoryCache::new(src_db);
+        let label = "idempotent-notes";
+        let create = pattern_core::types::block::BlockCreate::new(
+            label,
+            MemoryBlockType::Working,
+            BlockSchema::text(),
+        );
+        let _doc =
+            pattern_core::MemoryStore::create_block(&src_cache, "src-agent", create).unwrap();
+        pattern_core::MemoryStore::persist_block(&src_cache, "src-agent", label).unwrap();
+
+        let docs = src_cache.snapshot_cached_docs();
+        let snapshot = docs[0].export_snapshot().expect("export snapshot");
+
+        // Lay out the seed cache directory.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let persona_id_str = "idempotent-persona";
+        let cache_dir = tmp.path().join(format!("{persona_id_str}.cache"));
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::write(cache_dir.join(format!("{label}.loro")), &snapshot).unwrap();
+
+        let manifest = SeedCacheManifest {
+            version: SEED_CACHE_MANIFEST_VERSION,
+            persona_id: persona_id_str.to_string(),
+            entries: vec![SeedCacheManifestEntry {
+                file: format!("{label}.loro"),
+                label: label.to_string(),
+                schema: BlockSchema::text(),
+                block_type: MemoryBlockType::Working,
+            }],
+        };
+        std::fs::write(
+            cache_dir.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let target_db = Arc::new(pattern_db::ConstellationDb::open_in_memory().unwrap());
+        let target_cache = pattern_memory::cache::MemoryCache::new(target_db);
+        let persona_id: PersonaId = persona_id_str.into();
+
+        // First import.
+        let first = super::migrate_seed_cache(&cache_dir, &persona_id, &target_cache)
+            .await
+            .expect("first migrate_seed_cache must succeed");
+        assert_eq!(first, 1, "first import must import 1 block");
+
+        // Second import on the same input — must not fail on duplicate block.
+        let second = super::migrate_seed_cache(&cache_dir, &persona_id, &target_cache)
+            .await
+            .expect("second migrate_seed_cache must succeed (idempotency)");
+        assert_eq!(second, 1, "second import must report 1 block processed");
+
+        // Block must be accessible in the expected final state.
+        let loaded = pattern_core::MemoryStore::get_block(&target_cache, persona_id_str, label)
+            .unwrap()
+            .expect("block must be retrievable after idempotent import");
+        assert_eq!(loaded.label(), label);
+    }
+
+    // ── IMP-A: PromoteDraft step-6 (set_status Active) failure cleanup ─────────
+
+    /// A `ConstellationRegistry` wrapper that delegates all methods except
+    /// `set_status`, which always returns `Err(RegistryError::BackendUnavailable)`.
+    ///
+    /// Used by `promote_draft_step6_failure_cleans_up_sessions` to exercise
+    /// the cleanup path after step-6 fails, without needing to corrupt the DB.
+    #[derive(Debug)]
+    struct FailSetStatusRegistry {
+        inner: Arc<dyn pattern_core::ConstellationRegistry>,
+    }
+
+    #[async_trait::async_trait]
+    impl pattern_core::ConstellationRegistry for FailSetStatusRegistry {
+        async fn list(
+            &self,
+            scope: pattern_core::constellation::RegistryScope,
+        ) -> Result<
+            Vec<pattern_core::constellation::PersonaRecord>,
+            pattern_core::constellation::RegistryError,
+        > {
+            self.inner.list(scope).await
+        }
+
+        async fn get(
+            &self,
+            id: &pattern_core::PersonaId,
+        ) -> Result<
+            Option<pattern_core::constellation::PersonaRecord>,
+            pattern_core::constellation::RegistryError,
+        > {
+            self.inner.get(id).await
+        }
+
+        async fn find(
+            &self,
+            project: Option<&std::path::Path>,
+            kind: Option<pattern_core::spawn::RelationshipKind>,
+        ) -> Result<
+            Vec<pattern_core::constellation::PersonaRecord>,
+            pattern_core::constellation::RegistryError,
+        > {
+            self.inner.find(project, kind).await
+        }
+
+        async fn register(
+            &self,
+            record: pattern_core::constellation::PersonaRecord,
+        ) -> Result<(), pattern_core::constellation::RegistryError> {
+            self.inner.register(record).await
+        }
+
+        /// Always fails — simulates a transient registry backend failure
+        /// after the session has been successfully opened (step-6 failure path).
+        async fn set_status(
+            &self,
+            _id: &pattern_core::PersonaId,
+            _status: pattern_core::constellation::PersonaStatus,
+        ) -> Result<(), pattern_core::constellation::RegistryError> {
+            Err(pattern_core::constellation::RegistryError::BackendUnavailable)
+        }
+
+        async fn set_config_path(
+            &self,
+            id: &pattern_core::PersonaId,
+            config_path: Option<std::path::PathBuf>,
+        ) -> Result<(), pattern_core::constellation::RegistryError> {
+            self.inner.set_config_path(id, config_path).await
+        }
+
+        async fn add_relationship(
+            &self,
+            edge: pattern_core::constellation::RelationshipSpec,
+        ) -> Result<bool, pattern_core::constellation::RegistryError> {
+            self.inner.add_relationship(edge).await
+        }
+
+        async fn groups(
+            &self,
+            scope: pattern_core::constellation::RegistryScope,
+        ) -> Result<
+            Vec<pattern_core::constellation::PersonaGroup>,
+            pattern_core::constellation::RegistryError,
+        > {
+            self.inner.groups(scope).await
+        }
+
+        async fn create_group(
+            &self,
+            name: String,
+            project_id: Option<String>,
+        ) -> Result<
+            pattern_core::constellation::PersonaGroup,
+            pattern_core::constellation::RegistryError,
+        > {
+            self.inner.create_group(name, project_id).await
+        }
+    }
+
+    /// Verify that when step-6 (`set_status(Active)`) fails after a session is
+    /// successfully opened, `PromoteDraft` cleans up all session state:
+    ///
+    /// 1. `PromoteDraft` returns `Err` with the documented user-facing message.
+    /// 2. `self.sessions` no longer contains the agent_id.
+    /// 3. `self.agent_to_mount` no longer contains the agent_id.
+    /// 4. A second promote attempt (with a working registry) converges to Active.
+    ///
+    /// Requires tidepool-extract; skips when not available.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn promote_draft_step6_failure_cleans_up_sessions() {
+        // Tidepool-extract is required to open a real session.
+        if pattern_runtime::preflight::check().is_err() {
+            return;
+        }
+
+        use crate::client::DaemonClient;
+        use pattern_core::constellation::PersonaStatus;
+        use pattern_memory::modes::in_repo;
+
+        // Set up a real project mount.
+        let tmp = tempfile::TempDir::new().unwrap();
+        in_repo::init(tmp.path()).expect("in_repo::init must succeed");
+
+        let db = {
+            let mounted =
+                pattern_memory::mount::attach(tmp.path(), None).expect("test mount attach");
+            let db = mounted.db.clone();
+            drop(mounted);
+            db
+        };
+
+        // Seed a draft persona.
+        let agent_id = format!("step6-{}", new_id());
+        let persona_id_str = "step6-test-persona";
+        let drafts_dir = tmp.path().join("drafts");
+        std::fs::create_dir_all(&drafts_dir).unwrap();
+        let kdl_content = format!(
+            r#"name "step6-test-{agent_id}"
+agent-id "{agent_id}"
+system-prompt "Step-6 test persona."
+model provider="anthropic" model-id="claude-sonnet-4-6" {{
+    temperature 0.0
+    max-tokens 256
+}}
+context {{
+    compress-check-message-floor 100
+}}
+"#
+        );
+        let kdl_path = drafts_dir.join(format!("{persona_id_str}.kdl"));
+        std::fs::write(&kdl_path, kdl_content).unwrap();
+
+        let raw_registry: Arc<dyn pattern_core::ConstellationRegistry> =
+            Arc::new(pattern_db::ConstellationRegistryDb::new(db.clone()));
+        let mut record = pattern_core::constellation::PersonaRecord::new(
+            persona_id_str,
+            format!("step6-test-{persona_id_str}"),
+            PersonaStatus::Draft,
+        );
+        record.config_path = Some(kdl_path.clone());
+        raw_registry
+            .register(record)
+            .await
+            .expect("seed register must succeed");
+
+        // Wrap in FailSetStatusRegistry so step-6 fails after the session opens.
+        let failing_registry: Arc<dyn pattern_core::ConstellationRegistry> =
+            Arc::new(FailSetStatusRegistry {
+                inner: raw_registry.clone(),
+            });
+
+        let session_config = {
+            let port_registry = Arc::new(
+                pattern_runtime::port_registry::PortRegistryImpl::with_runtime_ports(
+                    &tokio::runtime::Handle::current(),
+                ),
+            );
+            SessionConfig {
+                sdk: pattern_runtime::SdkLocation::default(),
+                provider: Arc::new(pattern_runtime::NopProviderClient),
+                port_registry,
+            }
+        };
+
+        let handle = DaemonServer::spawn_with_config_and_registry(session_config, failing_registry);
+        let client = DaemonClient::from_local(handle.client.clone());
+
+        // InitSession to wire the mount.
+        let _ = client
+            .init_session(tmp.path().to_path_buf(), "default".into())
+            .await
+            .expect("InitSession must succeed");
+
+        // Promote — must fail with step-6 error.
+        let resp = client.promote_draft(persona_id_str.into()).await.unwrap();
+        assert!(
+            !resp.success,
+            "step-6 failure must surface as promote failure"
+        );
+        assert!(
+            resp.error
+                .as_deref()
+                .map(|e| e.contains("failed to update registry status to Active")
+                    || e.contains("session has been closed"))
+                .unwrap_or(false),
+            "expected step-6 error message; got: {:?}",
+            resp.error
+        );
+
+        // Give the cleanup a moment to propagate.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // `sessions` must not contain the agent_id after cleanup.
+        let agent_key: AgentId = agent_id.as_str().into();
+        assert!(
+            !handle.sessions.contains_key(&agent_key),
+            "sessions must be cleaned up after step-6 failure"
+        );
+
+        // `agent_to_mount` must not contain the agent_id after cleanup.
+        assert!(
+            !handle.agent_to_mount.contains_key(&agent_key),
+            "agent_to_mount must be cleaned up after step-6 failure"
+        );
+
+        // A second promote with a working registry must succeed.
+        let session_config2 = {
+            let port_registry = Arc::new(
+                pattern_runtime::port_registry::PortRegistryImpl::with_runtime_ports(
+                    &tokio::runtime::Handle::current(),
+                ),
+            );
+            SessionConfig {
+                sdk: pattern_runtime::SdkLocation::default(),
+                provider: Arc::new(pattern_runtime::NopProviderClient),
+                port_registry,
+            }
+        };
+        let handle2 =
+            DaemonServer::spawn_with_config_and_registry(session_config2, raw_registry.clone());
+        let client2 = DaemonClient::from_local(handle2.client);
+        let _ = client2
+            .init_session(tmp.path().to_path_buf(), "default".into())
+            .await
+            .expect("second InitSession must succeed");
+
+        let second = client2.promote_draft(persona_id_str.into()).await.unwrap();
+        assert!(
+            second.success,
+            "second promote with working registry must succeed; got: {:?}",
+            second.error
+        );
+
+        // Persona must be Active.
+        let after = raw_registry
+            .get(&persona_id_str.into())
+            .await
+            .unwrap()
+            .expect("persona must exist after successful retry");
+        assert_eq!(
+            after.status,
+            PersonaStatus::Active,
+            "persona must be Active after successful retry"
+        );
     }
 
     /// `fronting_set()` exposed by the committer is the SAME `Arc` it persists

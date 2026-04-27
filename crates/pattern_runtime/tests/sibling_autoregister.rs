@@ -182,11 +182,8 @@ async fn ac5_7_new_identity_without_flag_registers_as_draft() {
     let parent = build_parent_with_registry(registry_dyn, Some(caps)).await;
 
     let drafts = tempfile::TempDir::new().unwrap();
-    let persona_cfg = PersonaConfig::new(
-        "new-draft-sibling",
-        "system prompt",
-        CapabilitySet::empty(),
-    );
+    let persona_cfg =
+        PersonaConfig::new("new-draft-sibling", "system prompt", CapabilitySet::empty());
     let cfg = SiblingConfig::new(
         SiblingPersona::New(persona_cfg.clone()),
         RelationshipKind::SpecialistFor,
@@ -233,11 +230,7 @@ async fn no_registry_wired_spawn_still_succeeds() {
     ));
 
     let drafts = tempfile::TempDir::new().unwrap();
-    let persona_cfg = PersonaConfig::new(
-        "no-reg-sibling",
-        "system prompt",
-        CapabilitySet::empty(),
-    );
+    let persona_cfg = PersonaConfig::new("no-reg-sibling", "system prompt", CapabilitySet::empty());
     let cfg = SiblingConfig::new(
         SiblingPersona::New(persona_cfg.clone()),
         RelationshipKind::PeerWith,

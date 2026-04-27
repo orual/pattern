@@ -123,11 +123,7 @@ impl ConstellationRegistry for InMemoryConstellationRegistry {
         Ok(())
     }
 
-    async fn set_status(
-        &self,
-        id: &PersonaId,
-        status: PersonaStatus,
-    ) -> Result<(), RegistryError> {
+    async fn set_status(&self, id: &PersonaId, status: PersonaStatus) -> Result<(), RegistryError> {
         let mut entry = self
             .records
             .get_mut(id)
@@ -149,7 +145,7 @@ impl ConstellationRegistry for InMemoryConstellationRegistry {
         Ok(())
     }
 
-    async fn add_relationship(&self, edge: RelationshipSpec) -> Result<(), RegistryError> {
+    async fn add_relationship(&self, edge: RelationshipSpec) -> Result<bool, RegistryError> {
         if !self.records.contains_key(&edge.from) {
             return Err(RegistryError::PersonaNotFound(edge.from));
         }
@@ -158,26 +154,29 @@ impl ConstellationRegistry for InMemoryConstellationRegistry {
         }
 
         // Append outgoing edge to `from`, incoming to `to`. Dedupe on (other, kind, direction).
+        // Track whether the outgoing edge is new; that is the canonical insertion signal.
+        let mut inserted = false;
         if let Some(mut from_entry) = self.records.get_mut(&edge.from) {
             let rec = from_entry.value_mut();
-            let already = rec
-                .relationships
-                .iter()
-                .any(|e| e.other == edge.to && e.kind == edge.kind && e.direction == EdgeDirection::Outgoing);
+            let already = rec.relationships.iter().any(|e| {
+                e.other == edge.to && e.kind == edge.kind && e.direction == EdgeDirection::Outgoing
+            });
             if !already {
                 rec.relationships.push(RelationshipEdge {
                     other: edge.to.clone(),
                     kind: edge.kind,
                     direction: EdgeDirection::Outgoing,
                 });
+                inserted = true;
             }
         }
         if let Some(mut to_entry) = self.records.get_mut(&edge.to) {
             let rec = to_entry.value_mut();
-            let already = rec
-                .relationships
-                .iter()
-                .any(|e| e.other == edge.from && e.kind == edge.kind && e.direction == EdgeDirection::Incoming);
+            let already = rec.relationships.iter().any(|e| {
+                e.other == edge.from
+                    && e.kind == edge.kind
+                    && e.direction == EdgeDirection::Incoming
+            });
             if !already {
                 rec.relationships.push(RelationshipEdge {
                     other: edge.from.clone(),
@@ -186,7 +185,7 @@ impl ConstellationRegistry for InMemoryConstellationRegistry {
                 });
             }
         }
-        Ok(())
+        Ok(inserted)
     }
 
     async fn groups(&self, scope: RegistryScope) -> Result<Vec<PersonaGroup>, RegistryError> {
@@ -433,13 +432,15 @@ mod tests {
         reg.register(active_record("alice")).await.unwrap();
         reg.register(active_record("bob")).await.unwrap();
 
-        reg.add_relationship(RelationshipSpec::new(
-            "alice",
-            "bob",
-            RelationshipKind::SupervisorOf,
-        ))
-        .await
-        .unwrap();
+        let inserted = reg
+            .add_relationship(RelationshipSpec::new(
+                "alice",
+                "bob",
+                RelationshipKind::SupervisorOf,
+            ))
+            .await
+            .unwrap();
+        assert!(inserted, "first edge insert must return true");
 
         let alice = reg.get(&"alice".into()).await.unwrap().unwrap();
         let bob = reg.get(&"bob".into()).await.unwrap().unwrap();
@@ -462,13 +463,24 @@ mod tests {
         reg.register(active_record("bob")).await.unwrap();
 
         let spec = RelationshipSpec::new("alice", "bob", RelationshipKind::PeerWith);
-        reg.add_relationship(spec.clone()).await.unwrap();
-        reg.add_relationship(spec).await.unwrap();
+        let first = reg.add_relationship(spec.clone()).await.unwrap();
+        let second = reg.add_relationship(spec).await.unwrap();
+
+        assert!(first, "first insert must return true");
+        assert!(!second, "second insert must return false (no-op)");
 
         let alice = reg.get(&"alice".into()).await.unwrap().unwrap();
         let bob = reg.get(&"bob".into()).await.unwrap().unwrap();
-        assert_eq!(alice.relationships.len(), 1, "alice should have one outgoing edge after dedup");
-        assert_eq!(bob.relationships.len(), 1, "bob should have one incoming edge after dedup");
+        assert_eq!(
+            alice.relationships.len(),
+            1,
+            "alice should have one outgoing edge after dedup"
+        );
+        assert_eq!(
+            bob.relationships.len(),
+            1,
+            "bob should have one incoming edge after dedup"
+        );
     }
 
     #[tokio::test]
@@ -523,7 +535,10 @@ mod tests {
 
         // project + kind filter: alice (outgoing supervisor_of) and bob (incoming).
         let combined = reg
-            .find(Some(project.as_path()), Some(RelationshipKind::SupervisorOf))
+            .find(
+                Some(project.as_path()),
+                Some(RelationshipKind::SupervisorOf),
+            )
             .await
             .unwrap();
         assert_eq!(combined.len(), 2);

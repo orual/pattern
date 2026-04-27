@@ -332,10 +332,7 @@ impl DaemonClient {
     ) -> Result<irpc::channel::mpsc::Receiver<crate::protocol::TaggedTurnEvent>> {
         let rx = self
             .inner
-            .server_streaming(
-                crate::protocol::MountSubscription { mount_path },
-                32,
-            )
+            .server_streaming(crate::protocol::MountSubscription { mount_path }, 32)
             .await?;
         Ok(rx)
     }

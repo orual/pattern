@@ -150,9 +150,7 @@ impl From<PersonaRecord> for WirePersonaRecord {
             persona_id: r.id.to_string(),
             name: r.name,
             status: r.status.into(),
-            config_path: r
-                .config_path
-                .map(|p| p.to_string_lossy().into_owned()),
+            config_path: r.config_path.map(|p| p.to_string_lossy().into_owned()),
             project_attachments: r
                 .project_attachments
                 .into_iter()

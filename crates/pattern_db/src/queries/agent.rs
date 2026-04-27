@@ -211,4 +211,3 @@ pub fn update_agent(conn: &rusqlite::Connection, agent: &Agent) -> DbResult<()> 
     )?;
     Ok(())
 }
-

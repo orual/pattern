@@ -58,6 +58,10 @@ pub const CMD_AGENTS: &str = "agents";
 pub const CMD_STATUS: &str = "status";
 pub const CMD_SHUTDOWN: &str = "shutdown";
 pub const CMD_CANCEL: &str = "cancel";
+/// Phase 6 T8: promote a draft persona to Active.
+pub const CMD_PROMOTE: &str = "promote";
+/// Phase 6 T8: add a relationship edge between two personas.
+pub const CMD_RELATE: &str = "relate";
 
 /// All built-in commands.
 pub fn builtin_commands() -> &'static [CommandDef] {
@@ -89,6 +93,18 @@ pub fn builtin_commands() -> &'static [CommandDef] {
         CommandDef {
             name: CMD_AGENT,
             description: "One-shot direct override for the next outbound message",
+            target: CommandTarget::Runtime,
+            arg_hint: ArgHint::AgentName,
+        },
+        CommandDef {
+            name: CMD_PROMOTE,
+            description: "Promote a Draft persona to Active",
+            target: CommandTarget::Runtime,
+            arg_hint: ArgHint::AgentName,
+        },
+        CommandDef {
+            name: CMD_RELATE,
+            description: "Add a relationship edge between two personas",
             target: CommandTarget::Runtime,
             arg_hint: ArgHint::AgentName,
         },

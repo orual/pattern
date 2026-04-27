@@ -42,7 +42,10 @@ fn make_mount() -> tempfile::TempDir {
 /// Append a `partner { display-name "<name>" }` block to the mount's
 /// `.pattern.kdl` so the daemon picks up the display name.
 fn add_partner_block(mount_path: &std::path::Path, display_name: &str) {
-    let kdl_path = mount_path.join(".pattern").join("shared").join(".pattern.kdl");
+    let kdl_path = mount_path
+        .join(".pattern")
+        .join("shared")
+        .join(".pattern.kdl");
     let mut content = std::fs::read_to_string(&kdl_path).expect("read .pattern.kdl");
     content.push_str(&format!(
         "\npartner {{\n    display-name \"{}\"\n}}\n",
@@ -72,7 +75,7 @@ where
                     return Some(event);
                 }
             }
-            Ok(_) => return None, // channel closed
+            Ok(_) => return None,  // channel closed
             Err(_) => return None, // timeout
         }
     }
@@ -178,6 +181,85 @@ async fn subscribe_all_receives_constellation_changed_on_add_relationship() {
         }
         _ => unreachable!(),
     }
+}
+
+/// Verify that calling `AddRelationship` twice with the same `(from, to, kind)`
+/// triple emits exactly ONE `ConstellationChanged { kind: "relationship_added" }`
+/// event. The second call must be a no-op at the DB level (`ON CONFLICT DO
+/// NOTHING`) so `EventEmittingRegistry::add_relationship` skips the emit on
+/// `Ok(false)`.
+#[tokio::test]
+async fn add_relationship_duplicate_emits_exactly_one_event() {
+    use pattern_core::ConstellationRegistry;
+    use pattern_core::constellation::{PersonaRecord, PersonaStatus};
+
+    let tmp = make_mount();
+    let mounted = pattern_memory::mount::attach(tmp.path(), None).expect("attach");
+    let raw = pattern_db::ConstellationRegistryDb::new(mounted.db.clone());
+    raw.register(PersonaRecord::new("alice", "Alice", PersonaStatus::Active))
+        .await
+        .unwrap();
+    raw.register(PersonaRecord::new("bob", "Bob", PersonaStatus::Active))
+        .await
+        .unwrap();
+    drop(mounted);
+
+    let handle = DaemonServer::spawn_with_config(make_config());
+    let client = DaemonClient::from_local(handle.client);
+    let _info = client
+        .init_session(tmp.path().to_path_buf(), "default".into())
+        .await
+        .expect("InitSession");
+
+    let canonical = tmp
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| tmp.path().to_path_buf());
+    let mut rx = client.subscribe_all(canonical).await.expect("SubscribeAll");
+
+    // First call: must succeed and emit an event.
+    let first = client
+        .add_relationship("alice".into(), "bob".into(), "supervisor_of".into())
+        .await
+        .expect("first AddRelationship");
+    assert!(first.success, "first add_relationship must succeed");
+
+    let event = drain_until(
+        &mut rx,
+        |e| matches!(e.event, WireTurnEvent::ConstellationChanged { .. }),
+        std::time::Duration::from_secs(2),
+    )
+    .await
+    .expect("first ConstellationChanged event must arrive");
+    match &event.event {
+        WireTurnEvent::ConstellationChanged { kind } => {
+            assert_eq!(kind, "relationship_added");
+        }
+        _ => unreachable!(),
+    }
+
+    // Second call: same edge — must succeed (no error) but NOT emit a second event.
+    let second = client
+        .add_relationship("alice".into(), "bob".into(), "supervisor_of".into())
+        .await
+        .expect("second AddRelationship");
+    assert!(
+        second.success,
+        "duplicate add_relationship must not return an error; got: {:?}",
+        second.error
+    );
+
+    // Assert no second event arrives within the timeout.
+    let spurious = drain_until(
+        &mut rx,
+        |e| matches!(e.event, WireTurnEvent::ConstellationChanged { .. }),
+        std::time::Duration::from_millis(300),
+    )
+    .await;
+    assert!(
+        spurious.is_none(),
+        "duplicate add_relationship must not emit a second ConstellationChanged event; got: {spurious:?}"
+    );
 }
 
 // ── FrontingChanged via SetFronting ──────────────────────────────────────────

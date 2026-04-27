@@ -26,6 +26,9 @@ pub enum PanelContent {
     /// Placeholder for future memory/context view.
     #[allow(dead_code)]
     Context,
+    /// Constellation panel: fronting state + persona registry +
+    /// relationships + groups (Phase 6 T8).
+    Constellation,
 }
 
 // ---------------------------------------------------------------------------
@@ -45,6 +48,10 @@ pub struct PanelState {
     pub expanded_thinking: Option<String>,
     /// Maximum notes to keep before oldest are dropped.
     pub max_notes: usize,
+    /// Pre-rendered constellation panel content. Computed by App before
+    /// each frame when `content == Constellation`. Owned text avoids
+    /// lifetime gymnastics inside the widget impl. Phase 6 T8.
+    pub constellation_text: ratatui::text::Text<'static>,
 }
 
 impl Default for PanelState {
@@ -55,6 +62,7 @@ impl Default for PanelState {
             display_content: String::new(),
             expanded_thinking: None,
             max_notes: 3,
+            constellation_text: ratatui::text::Text::default(),
         }
     }
 }
@@ -131,8 +139,23 @@ impl StatefulWidget for SidePanel {
             PanelContent::Context => {
                 render_context_placeholder(content_area, buf);
             }
+            PanelContent::Constellation => {
+                render_constellation_text(content_area, buf, &state.constellation_text);
+            }
         }
     }
+}
+
+/// Render pre-built constellation panel text into the content area.
+fn render_constellation_text(
+    area: ratatui::layout::Rect,
+    buf: &mut ratatui::buffer::Buffer,
+    text: &ratatui::text::Text<'static>,
+) {
+    use ratatui::widgets::Paragraph;
+    Paragraph::new(text.clone())
+        .wrap(ratatui::widgets::Wrap { trim: false })
+        .render(area, buf);
 }
 
 // ---------------------------------------------------------------------------

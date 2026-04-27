@@ -826,13 +826,10 @@ impl ForkHandle {
             entries: manifest_entries,
         };
         let manifest_path = cache_dir.join("manifest.json");
-        let manifest_json = serde_json::to_vec_pretty(&manifest).map_err(|e| {
-            ForkError::Document(format!("serialize seed cache manifest: {e}"))
-        })?;
+        let manifest_json = serde_json::to_vec_pretty(&manifest)
+            .map_err(|e| ForkError::Document(format!("serialize seed cache manifest: {e}")))?;
         std::fs::write(&manifest_path, manifest_json).map_err(|e| {
-            ForkError::Document(format!(
-                "write seed cache manifest {manifest_path:?}: {e}"
-            ))
+            ForkError::Document(format!("write seed cache manifest {manifest_path:?}: {e}"))
         })?;
 
         tracing::info!(

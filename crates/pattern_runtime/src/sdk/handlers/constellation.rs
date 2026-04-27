@@ -54,8 +54,7 @@ impl DescribeEffect for ConstellationHandler {
     fn effect_decl() -> EffectDecl {
         EffectDecl {
             type_name: "Constellation",
-            description:
-                "Read persona records and groups from the constellation registry.",
+            description: "Read persona records and groups from the constellation registry.",
             constructors: &[
                 "List   :: Maybe Text -> Constellation [PersonaRecord]",
                 "Find   :: Maybe Text -> Maybe Text -> Constellation [PersonaRecord]",
@@ -100,10 +99,8 @@ impl EffectHandler<SessionContext> for ConstellationHandler {
             )));
         }
 
-        let registry: Arc<dyn ConstellationRegistry> = user
-            .constellation_registry()
-            .cloned()
-            .ok_or_else(|| {
+        let registry: Arc<dyn ConstellationRegistry> =
+            user.constellation_registry().cloned().ok_or_else(|| {
                 EffectError::Handler(format!(
                     "{CONSTELLATION_NOT_WIRED_PREFIX}Pattern.Constellation handler invoked \
                      but no ConstellationRegistry is wired on the SessionContext"
@@ -165,11 +162,7 @@ fn handle_find(
 
     let handle = cx.user().tokio_handle().clone();
     let records = handle
-        .block_on(async move {
-            registry
-                .find(proj_buf.as_deref(), parsed_kind)
-                .await
-        })
+        .block_on(async move { registry.find(proj_buf.as_deref(), parsed_kind).await })
         .map_err(map_registry_err)?;
     let wires: Vec<WirePersonaRecord> = records.into_iter().map(Into::into).collect();
     cx.respond(wires)

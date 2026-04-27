@@ -126,9 +126,14 @@ pub use types::provider::{
 // ── Constellation + fronting types ───────────────────────────────────────────
 
 pub use constellation::{
-    ConstellationRegistry, EdgeDirection, EmptyConstellationRegistry, PersonaGroup, PersonaRecord,
-    PersonaStatus, RegistryError, RegistryScope, RelationshipEdge, RelationshipSpec,
+    ConstellationRegistry, EdgeDirection, PersonaGroup, PersonaRecord, PersonaStatus,
+    RegistryError, RegistryScope, RelationshipEdge, RelationshipSpec,
 };
+// `EmptyConstellationRegistry` is test-only: no production path uses it after
+// Phase 6. External test crates needing a stub should use
+// `pattern_runtime::testing::InMemoryConstellationRegistry`.
+#[cfg(test)]
+pub use constellation::EmptyConstellationRegistry;
 
 pub use fronting::{
     FrontingLoadError, FrontingResolver, FrontingSet, MessagePattern, ResolveOutcome, RoutingRule,

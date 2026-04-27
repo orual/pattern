@@ -278,8 +278,7 @@ async fn main() -> MietteResult<()> {
                     commands::constellation_registry::cmd_groups_list(project).await?;
                 }
                 GroupsSub::Create { name, project_id } => {
-                    commands::constellation_registry::cmd_groups_create(name, project_id)
-                        .await?;
+                    commands::constellation_registry::cmd_groups_create(name, project_id).await?;
                 }
             },
         },
@@ -501,6 +500,11 @@ async fn run_chat(cmd: ChatCmd) -> MietteResult<()> {
         app.set_fronting_snapshot(snapshot);
     }
 
+    // Phase 6 T8: kick off the initial constellation fetch so the panel has
+    // data when the user toggles to it. Subsequent refreshes happen on
+    // ConstellationChanged events from the daemon.
+    app.refresh_constellation_view();
+
     // Populate the available agents list so /front can validate names.
     if !session.available_agents.is_empty() {
         app.set_available_agents(session.available_agents);
@@ -642,10 +646,7 @@ async fn init_session_and_subscribe(
             // Phase 6 T8: subscribe mount-wide so the TUI receives every
             // agent's events for the project plus daemon-level
             // FrontingChanged / ConstellationChanged notifications.
-            let rx = client
-                .subscribe_all(project_path.to_path_buf())
-                .await
-                .ok();
+            let rx = client.subscribe_all(project_path.to_path_buf()).await.ok();
             SessionResult {
                 client: Some(client.clone()),
                 event_rx: rx,
@@ -660,10 +661,7 @@ async fn init_session_and_subscribe(
         }
         Err(e) => {
             tracing::warn!("InitSession failed, falling back to default agent: {e}");
-            let rx = client
-                .subscribe_all(project_path.to_path_buf())
-                .await
-                .ok();
+            let rx = client.subscribe_all(project_path.to_path_buf()).await.ok();
             SessionResult {
                 client: Some(client.clone()),
                 event_rx: rx,

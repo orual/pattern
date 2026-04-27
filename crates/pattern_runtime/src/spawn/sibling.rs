@@ -128,23 +128,39 @@ impl SiblingPersonaResolver for StubSiblingResolver {
 
 // ── Registry auto-registration helpers (Phase 6 T6) ───────────────────────────
 
-/// Best-effort `register` that treats `DuplicatePersona` as success.
+/// Best-effort `register` that treats `DuplicatePersona` as success and
+/// updates the existing record's `config_path` to match the just-discovered
+/// file.
 ///
 /// Sibling spawn calls this after writing/loading the persona — the persona
-/// may already be in the registry from a prior session-open, and that's a
-/// fine state to land in (it's the same row).
+/// may already be in the registry from a prior session-open. On duplicate, we
+/// still call `set_config_path` so the registry row always reflects the
+/// current on-disk location of the persona file. This prevents stale paths
+/// from lingering after the persona file is moved (e.g. draft → promoted).
 async fn register_idempotent(
     registry: &dyn ConstellationRegistry,
     record: PersonaRecord,
 ) -> Result<(), SpawnError> {
-    match registry.register(record).await {
+    match registry.register(record.clone()).await {
         Ok(()) => Ok(()),
         Err(CoreRegistryError::DuplicatePersona(id)) => {
             tracing::debug!(
                 persona_id = %id,
                 source = "runtime.spawn.sibling",
-                "registry already has persona; treating as idempotent register"
+                "registry already has persona; updating config_path to current location"
             );
+            // Ensure the stored config_path is in sync with the file we just
+            // found. A stale path would cause future `load_persona` calls to
+            // fail even though the file is reachable. Non-fatal if this update
+            // itself fails — the session can still open via discovery.
+            if let Err(e) = registry.set_config_path(&id, record.config_path).await {
+                tracing::warn!(
+                    persona_id = %id,
+                    error = %e,
+                    source = "runtime.spawn.sibling",
+                    "set_config_path on duplicate register failed; non-fatal"
+                );
+            }
             Ok(())
         }
         Err(e) => Err(SpawnError::Runtime(format!(
@@ -162,6 +178,7 @@ async fn add_relationship_or_propagate(
     registry
         .add_relationship(spec)
         .await
+        .map(|_inserted| ()) // whether a new row was inserted is not load-bearing here
         .map_err(|e| SpawnError::Runtime(format!("constellation add_relationship failed: {e}")))
 }
 
@@ -352,8 +369,7 @@ pub async fn spawn_sibling_new(
             SiblingStatus::Active => PersonaStatus::Active,
             SiblingStatus::Draft => PersonaStatus::Draft,
         };
-        let mut record =
-            PersonaRecord::new(id.clone(), persona_cfg.name.clone(), persona_status);
+        let mut record = PersonaRecord::new(id.clone(), persona_cfg.name.clone(), persona_status);
         record.config_path = Some(kdl_path.clone());
         register_idempotent(&**registry, record).await?;
 
