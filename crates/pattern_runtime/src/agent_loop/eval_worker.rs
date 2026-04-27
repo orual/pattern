@@ -303,6 +303,7 @@ fn run_eval(
         WakeHandler,
         FrontingHandler,
         PortHandler,
+        crate::sdk::handlers::ConstellationHandler,
     ];
 
     // Coerce the owned PathBufs into the &[&Path] slice

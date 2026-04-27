@@ -56,6 +56,10 @@ pub enum EffectCategory {
     /// constellation's active fronting set and routing rules. v3-multi-agent
     /// Phase 5.
     Fronting,
+    /// The constellation registry effect (`Pattern.Constellation`) — read
+    /// persona records, find by relationship/project, list groups.
+    /// v3-multi-agent Phase 6.
+    Constellation,
 }
 
 impl EffectCategory {
@@ -81,6 +85,7 @@ impl EffectCategory {
         Self::Diagnostics,
         Self::Wake,
         Self::Fronting,
+        Self::Constellation,
     ];
 
     /// Canonical type name string. Matches `EffectDecl::type_name`
@@ -104,6 +109,7 @@ impl EffectCategory {
             Self::Diagnostics => "Diagnostics",
             Self::Wake => "Wake",
             Self::Fronting => "Fronting",
+            Self::Constellation => "Constellation",
         }
     }
 
@@ -497,6 +503,7 @@ mod tests {
             EffectCategory::Diagnostics,
             EffectCategory::Wake,
             EffectCategory::Fronting,
+            EffectCategory::Constellation,
         ] {
             // Force exhaustive coverage at compile time. If a new variant
             // is added, the match below stops compiling until it's listed.
@@ -517,7 +524,8 @@ mod tests {
                 | EffectCategory::Spawn
                 | EffectCategory::Diagnostics
                 | EffectCategory::Wake
-                | EffectCategory::Fronting => out.push(cat),
+                | EffectCategory::Fronting
+                | EffectCategory::Constellation => out.push(cat),
             }
         }
         out

@@ -344,6 +344,222 @@ fn populated_spawn_test_table_parity() {
         .expect("SiblingNewDraft must encode");
 }
 
+/// `Pattern.Constellation` parallel of [`populated_spawn_test_table`] —
+/// hand-curated `DataConTable` registration for every `ToCore` wire type
+/// in `sdk/requests/constellation.rs`. IDs in the 11_000 range avoid
+/// collisions with the spawn table (10_000s).
+///
+/// Long-term migration is the same as for `populated_spawn_test_table`: a
+/// proc-macro upgrade in `tidepool-bridge-derive` that auto-emits
+/// `register_in(&mut DataConTable)` per `ToCore` type would let us delete
+/// these hand-curated tables entirely.
+#[cfg(any(test, feature = "test-support"))]
+pub fn populated_constellation_test_table() -> tidepool_repr::DataConTable {
+    use tidepool_repr::{DataCon, DataConId, SrcBang};
+
+    let mut table = standard_datacon_table();
+
+    fn insert(
+        table: &mut tidepool_repr::DataConTable,
+        id: u64,
+        name: &str,
+        tag: u32,
+        rep_arity: u32,
+        qualified: &str,
+    ) {
+        let bangs: Vec<SrcBang> = (0..rep_arity).map(|_| SrcBang::NoSrcBang).collect();
+        table.insert(DataCon {
+            id: DataConId(id),
+            name: name.to_string(),
+            tag,
+            rep_arity,
+            field_bangs: bangs,
+            qualified_name: Some(qualified.to_string()),
+        });
+    }
+
+    // ── PersonaStatus (3 unit variants) ─────────────────────────────────────
+    insert(
+        &mut table,
+        11_001,
+        "PersonaActive",
+        1,
+        0,
+        "Pattern.Constellation.PersonaActive",
+    );
+    insert(
+        &mut table,
+        11_002,
+        "PersonaDraft",
+        2,
+        0,
+        "Pattern.Constellation.PersonaDraft",
+    );
+    insert(
+        &mut table,
+        11_003,
+        "PersonaInactive",
+        3,
+        0,
+        "Pattern.Constellation.PersonaInactive",
+    );
+
+    // ── RelationshipKind (4 unit variants) ──────────────────────────────────
+    insert(
+        &mut table,
+        11_010,
+        "RelSupervisorOf",
+        1,
+        0,
+        "Pattern.Constellation.RelSupervisorOf",
+    );
+    insert(
+        &mut table,
+        11_011,
+        "RelSpecialistFor",
+        2,
+        0,
+        "Pattern.Constellation.RelSpecialistFor",
+    );
+    insert(
+        &mut table,
+        11_012,
+        "RelPeerWith",
+        3,
+        0,
+        "Pattern.Constellation.RelPeerWith",
+    );
+    insert(
+        &mut table,
+        11_013,
+        "RelObserverOf",
+        4,
+        0,
+        "Pattern.Constellation.RelObserverOf",
+    );
+
+    // ── EdgeDirection (2 unit variants) ─────────────────────────────────────
+    insert(
+        &mut table,
+        11_020,
+        "DirOutgoing",
+        1,
+        0,
+        "Pattern.Constellation.DirOutgoing",
+    );
+    insert(
+        &mut table,
+        11_021,
+        "DirIncoming",
+        2,
+        0,
+        "Pattern.Constellation.DirIncoming",
+    );
+
+    // ── Struct types ────────────────────────────────────────────────────────
+    // RelationshipEdge { other, kind, direction } → arity 3.
+    insert(
+        &mut table,
+        11_030,
+        "RelationshipEdge",
+        1,
+        3,
+        "Pattern.Constellation.RelationshipEdge",
+    );
+
+    // PersonaRecord { personaId, name, status, configPath, projectAttachments,
+    //                 relationships, groupMemberships } → arity 7.
+    insert(
+        &mut table,
+        11_031,
+        "PersonaRecord",
+        1,
+        7,
+        "Pattern.Constellation.PersonaRecord",
+    );
+
+    // PersonaGroup { groupId, name, projectId, members } → arity 4.
+    insert(
+        &mut table,
+        11_032,
+        "PersonaGroup",
+        1,
+        4,
+        "Pattern.Constellation.PersonaGroup",
+    );
+
+    table
+}
+
+/// Parity test for [`populated_constellation_test_table`]: every `Wire*`
+/// type that derives `ToCore` must round-trip when encoded against the
+/// populated table.
+#[cfg(any(test, feature = "test-support"))]
+#[test]
+fn populated_constellation_test_table_parity() {
+    use tidepool_bridge::ToCore;
+
+    use crate::sdk::requests::constellation::{
+        WireEdgeDirection, WirePersonaGroup, WirePersonaRecord, WirePersonaStatus,
+        WireRelationshipEdge, WireRelationshipKind,
+    };
+
+    let table = populated_constellation_test_table();
+
+    for s in [
+        WirePersonaStatus::Active,
+        WirePersonaStatus::Draft,
+        WirePersonaStatus::Inactive,
+    ] {
+        s.to_value(&table)
+            .expect("WirePersonaStatus variant must encode");
+    }
+    for k in [
+        WireRelationshipKind::SupervisorOf,
+        WireRelationshipKind::SpecialistFor,
+        WireRelationshipKind::PeerWith,
+        WireRelationshipKind::ObserverOf,
+    ] {
+        k.to_value(&table)
+            .expect("WireRelationshipKind variant must encode");
+    }
+    for d in [WireEdgeDirection::Outgoing, WireEdgeDirection::Incoming] {
+        d.to_value(&table)
+            .expect("WireEdgeDirection variant must encode");
+    }
+
+    let edge = WireRelationshipEdge {
+        other: "bob".to_string(),
+        kind: WireRelationshipKind::SupervisorOf,
+        direction: WireEdgeDirection::Outgoing,
+    };
+    edge.to_value(&table)
+        .expect("WireRelationshipEdge must encode");
+
+    let record = WirePersonaRecord {
+        persona_id: "alice".to_string(),
+        name: "Alice".to_string(),
+        status: WirePersonaStatus::Active,
+        config_path: None,
+        project_attachments: vec!["/p1".to_string()],
+        relationships: vec![],
+        group_memberships: vec![],
+    };
+    record
+        .to_value(&table)
+        .expect("WirePersonaRecord must encode");
+
+    let group = WirePersonaGroup {
+        group_id: "g1".to_string(),
+        name: "alpha".to_string(),
+        project_id: Some("proj-a".to_string()),
+        members: vec!["alice".to_string()],
+    };
+    group
+        .to_value(&table)
+        .expect("WirePersonaGroup must encode");
+}
+
 /// Open a fresh in-memory [`pattern_db::ConstellationDb`] for test isolation.
 ///
 /// Each call creates a new SQLite in-memory database with all migrations

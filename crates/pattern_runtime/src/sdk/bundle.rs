@@ -30,9 +30,10 @@
 
 use crate::sdk::describe::CollectEffectDecls;
 use crate::sdk::handlers::{
-    DiagnosticsHandler, DisplayHandler, FileHandler, FrontingHandler, LogHandler, McpHandler,
-    MemoryHandler, MessageHandler, PortHandler, RecallHandler, SearchHandler, ShellHandler,
-    SkillsHandler, SpawnHandler, TasksHandler, TimeHandler, WakeHandler,
+    ConstellationHandler, DiagnosticsHandler, DisplayHandler, FileHandler, FrontingHandler,
+    LogHandler, McpHandler, MemoryHandler, MessageHandler, PortHandler, RecallHandler,
+    SearchHandler, ShellHandler, SkillsHandler, SpawnHandler, TasksHandler, TimeHandler,
+    WakeHandler,
 };
 
 /// The full 17-handler SDK bundle, typed as a `frunk::HList`.
@@ -65,6 +66,7 @@ pub type SdkBundle = frunk::HList![
     WakeHandler,
     FrontingHandler,
     PortHandler,
+    ConstellationHandler,
 ];
 
 /// Collect [`crate::sdk::describe::EffectDecl`] from every handler in
@@ -116,6 +118,7 @@ pub const CANONICAL_EFFECT_ROW: &[&str] = &[
     "Wake",
     "Fronting",
     "Port",
+    "Constellation",
 ];
 
 #[cfg(test)]
@@ -123,12 +126,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_decls_has_17_entries() {
+    fn canonical_decls_has_18_entries() {
         let decls = canonical_effect_decls();
         assert_eq!(
             decls.len(),
-            17,
-            "expected 17 handler decls, got {}",
+            18,
+            "expected 18 handler decls, got {}",
             decls.len()
         );
     }
@@ -301,15 +304,32 @@ mod tests {
         }
     }
 
-    /// Verify `Pattern.Port` registers at the last slot (tag 16).
+    /// Verify `Pattern.Port` still registers at slot 16 (Constellation now appended at 17).
     #[test]
-    fn port_effect_registers_at_last_tag() {
+    fn port_effect_registers_at_slot_16() {
         let decls = canonical_effect_decls();
         let (tag, _port) = decls
             .iter()
             .enumerate()
             .find(|(_, d)| d.type_name == "Port")
             .expect("Port must appear in canonical decls");
-        assert_eq!(tag, 16, "Port must be at the last slot (16)");
+        assert_eq!(tag, 16, "Port must be at slot 16");
+    }
+
+    /// Verify `Pattern.Constellation` registers at the last slot (tag 17).
+    #[test]
+    fn constellation_effect_registers_at_last_tag() {
+        let decls = canonical_effect_decls();
+        let (tag, c) = decls
+            .iter()
+            .enumerate()
+            .find(|(_, d)| d.type_name == "Constellation")
+            .expect("Constellation must appear in canonical decls");
+        assert_eq!(tag, 17, "Constellation must be at the last slot (17)");
+        assert_eq!(
+            c.constructors.len(),
+            3,
+            "Pattern.Constellation must enumerate 3 constructors (List, Find, Groups)"
+        );
     }
 }

@@ -6,6 +6,7 @@
 //! below matches the actual enum variants; drift here must be paired
 //! with the matching Haskell edit.
 
+pub mod constellation;
 pub mod diagnostics;
 pub mod display;
 pub mod file;
@@ -24,6 +25,7 @@ pub mod tasks;
 pub mod time;
 pub mod wake;
 
+pub use constellation::ConstellationReq;
 pub use diagnostics::DiagnosticsReq;
 pub use display::DisplayReq;
 pub use file::FileReq;
@@ -135,6 +137,7 @@ mod parity {
         ("WakeReq", &["Register", "Unregister"]),
         ("FrontingReq", &["Current", "Set", "Route", "Clear"]),
         ("PortReq", &["List", "Call", "Subscribe", "Unsubscribe"]),
+        ("ConstellationReq", &["List", "Find", "Groups"]),
     ];
 
     /// Sanity check: the table isn't empty and each entry lists at least
@@ -143,9 +146,10 @@ mod parity {
     fn parity_table_is_populated() {
         assert_eq!(
             EXPECTED.len(),
-            17,
-            "expected 17 SDK namespaces (Sources/Rpc retired in v3-sandbox-io \
-             Phase 4; Port + Wake + Fronting added; 14 originals + 3 new = 17); \
+            18,
+            "expected 18 SDK namespaces (Sources/Rpc retired in v3-sandbox-io \
+             Phase 4; Port + Wake + Fronting + Constellation added; \
+             14 originals + 4 new = 18); \
              update this test when adding/removing one"
         );
         for (enum_name, variants) in EXPECTED {
@@ -408,6 +412,15 @@ mod parity {
         }]);
         let _ = FrontingReq::Clear;
         assert_eq!(count("FrontingReq"), 4);
+    }
+
+    #[test]
+    fn constellation_req_variants() {
+        use super::ConstellationReq;
+        let _ = ConstellationReq::List(None);
+        let _ = ConstellationReq::Find(None, None);
+        let _ = ConstellationReq::Groups(None);
+        assert_eq!(count("ConstellationReq"), 3);
     }
 
     #[test]

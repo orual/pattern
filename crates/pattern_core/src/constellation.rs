@@ -271,7 +271,7 @@ pub enum RegistryError {
 /// Implementations must be `Send + Sync` so they can be held behind an `Arc`
 /// and shared across async tasks.
 #[async_trait]
-pub trait ConstellationRegistry: Send + Sync {
+pub trait ConstellationRegistry: Send + Sync + std::fmt::Debug {
     /// List all personas matching `scope`, in an unspecified but stable order.
     ///
     /// `RegistryScope::All` returns every persona. `RegistryScope::Project(p)`

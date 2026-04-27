@@ -458,6 +458,7 @@ mod tests {
 
     /// A minimal test registry backed by a HashMap.
     /// The full `InMemoryConstellationRegistry` lives in `pattern_runtime::testing`.
+    #[derive(Debug)]
     struct TestRegistry {
         records: Mutex<HashMap<PersonaId, PersonaRecord>>,
     }

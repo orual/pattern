@@ -6,6 +6,7 @@
 //! `EffectError::Handler("…not yet implemented…")`. `port` is a real Phase 4
 //! handler.
 
+pub mod constellation;
 pub mod diagnostics;
 pub mod display;
 pub mod file;
@@ -25,6 +26,7 @@ pub mod tasks;
 pub mod time;
 pub mod wake;
 
+pub use constellation::ConstellationHandler;
 pub use diagnostics::DiagnosticsHandler;
 pub use display::DisplayHandler;
 pub use file::FileHandler;

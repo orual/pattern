@@ -500,6 +500,12 @@ pub struct SessionContext {
     /// active fronting state. `None` for test sessions and sessions
     /// that do not participate in the fronting system.
     fronting_set: Option<Arc<std::sync::RwLock<pattern_core::fronting::FrontingSet>>>,
+    /// Constellation registry handle. Populated by daemon callers via
+    /// `with_constellation_registry`; the `Pattern.Constellation` handler
+    /// reads from it. `None` for test sessions that don't need agent
+    /// program access to persona records.
+    constellation_registry:
+        Option<Arc<dyn pattern_core::ConstellationRegistry>>,
 }
 
 /// Handlers call this to decide whether to short-circuit on soft-cancel.
@@ -742,6 +748,7 @@ impl SessionContext {
             agent_registry: None,
             wake_registry: None,
             fronting_set: None,
+            constellation_registry: None,
         }
     }
 
@@ -1126,6 +1133,9 @@ impl SessionContext {
             // Ephemeral children do not participate in the fronting system —
             // they are transient workers, not addressable fronting personas.
             fronting_set: None,
+            // Inherit the constellation registry so child sessions can
+            // observe the same persona graph as the parent.
+            constellation_registry: self.constellation_registry.clone(),
         };
         Arc::new(child)
     }
@@ -1503,6 +1513,31 @@ impl SessionContext {
         fronting: Arc<std::sync::RwLock<pattern_core::fronting::FrontingSet>>,
     ) -> Self {
         self.fronting_set = Some(fronting);
+        self
+    }
+
+    /// Constellation registry handle, if wired.
+    ///
+    /// The `Pattern.Constellation` handler returns
+    /// `EffectError::Handler` with a "registry not wired" prefix when this
+    /// is `None` (test sessions, single-agent sessions).
+    pub fn constellation_registry(
+        &self,
+    ) -> Option<&Arc<dyn pattern_core::ConstellationRegistry>> {
+        self.constellation_registry.as_ref()
+    }
+
+    /// Builder-style: attach a `ConstellationRegistry` to this session.
+    ///
+    /// Daemon callers wire the per-project registry (typically
+    /// `ConstellationRegistryDb`) here so agent programs can read persona
+    /// records via the `Pattern.Constellation` SDK.
+    #[must_use]
+    pub fn with_constellation_registry(
+        mut self,
+        registry: Arc<dyn pattern_core::ConstellationRegistry>,
+    ) -> Self {
+        self.constellation_registry = Some(registry);
         self
     }
 }
