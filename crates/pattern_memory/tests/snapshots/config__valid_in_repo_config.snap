@@ -18,3 +18,5 @@ project:
   name: pattern-dev
   created_at: "2026-04-19T12:00:00Z"
 backup: ~
+file_policy:
+  rules: []

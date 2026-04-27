@@ -73,6 +73,39 @@ pub struct Message {
     pub attachments: Vec<MessageAttachment>,
 }
 
+/// Output event from a spawned shell process, carried by
+/// [`MessageAttachment::ShellOutput`].
+///
+/// Defined next to `MessageAttachment` for locality. `Backgrounded` is
+/// forward-compat for the future per-execute subshell model where
+/// `Shell.Execute` timeout transitions to background rather than kill; it
+/// is **never enqueued** by any code path under the current v2-semantics
+/// decision (Amendment 2026-04-26, phase_03.md). Keep it defined so a future
+/// phase can emit it without a breaking schema change.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ShellOutputKind {
+    /// Streaming output chunk from a spawned process.
+    Output(String),
+    /// Process exited; final delivery on the bridge. Always the last chunk
+    /// for a given `task_id`.
+    Exit {
+        /// OS exit code. `None` if the process was killed or the code could
+        /// not be parsed.
+        code: Option<i32>,
+        /// Wall-clock elapsed since the process was spawned, in milliseconds.
+        duration_ms: u64,
+    },
+    /// Forward-compat sentinel for the future per-execute subshell model
+    /// where `Shell.Execute` timeout transitions to background. Currently
+    /// unused — no code path enqueues this variant under the v2-semantics
+    /// decision (phase_03.md AC3.7 amendment 2026-04-26). Until then, agents
+    /// that need long-running execution should use `Shell.Spawn`.
+    Backgrounded {
+        /// Output captured before the timeout fired.
+        partial_output: String,
+    },
+}
+
 /// Pattern-level metadata that renders as content onto the wire at compose-time
 /// but is not part of the stored `ChatMessage` structure. Exists so the
 /// conversational record stays uncontaminated by ephemeral context reminders,
@@ -84,6 +117,7 @@ pub struct Message {
 /// cache-stability story — a message's wire bytes stay stable across turns
 /// because the attachments don't mutate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum MessageAttachment {
     /// Memory snapshot attached to a batch-initiating user message
     /// (or to mid-batch tool_result messages when external memory
@@ -134,6 +168,98 @@ pub enum MessageAttachment {
         /// content. Caller handles all formatting.
         content: String,
     },
+    /// An external edit was detected on a file the agent has open or is
+    /// watching. Queued by file-manager listener threads into the
+    /// between-turn async-reminder buffer; the compose-time drain
+    /// splices it onto the next turn's first user message.
+    ///
+    /// The renderer (Task 8) converts this into a `<system-reminder>`
+    /// block showing the path and edit kind.
+    FileEdit {
+        /// Absolute path to the changed file.
+        path: std::path::PathBuf,
+        /// Whether the file was opened for editing or watched read-only.
+        kind: FileEditKind,
+        /// When the external edit was detected.
+        at: jiff::Timestamp,
+        /// Optional unified diff of the change. `None` for watch-only
+        /// files and until Task 8 wires the diff payload.
+        diff: Option<String>,
+    },
+    /// An external edit conflicted with the agent's unsaved CRDT state
+    /// under `RejectAndNotify` policy. The agent must call `File.Reload`
+    /// or `File.ForceWrite` to resolve.
+    ///
+    /// The renderer (Task 8) converts this into a `<system-reminder>`
+    /// block showing the path and conflict details.
+    FileConflict {
+        /// Absolute path to the conflicted file.
+        path: std::path::PathBuf,
+        /// When the conflict was detected.
+        at: jiff::Timestamp,
+    },
+    /// Memory block writes that occurred during a turn. Attached to the
+    /// message that executed the writes (typically the tool_result that
+    /// closed out the dispatch). Replaces the old pseudo-message path
+    /// where `Segment2Pass` rendered `BlockWrite`s as standalone
+    /// synthetic `ChatMessage`s.
+    ///
+    /// The compose-time renderer converts this into a
+    /// `<system-reminder>` block showing what changed, using the same
+    /// body format as the retired `render_change_events` pseudo-message
+    /// renderer.
+    BlockWriteNotifications {
+        /// The block writes that occurred. Rendered as a group into a
+        /// single `<system-reminder>` block at compose time.
+        writes: Vec<crate::types::block::BlockWrite>,
+    },
+    /// One shell output event from a spawned process. The bridge thread
+    /// (Task 7) enqueues one of these per `OutputChunk` arriving from the
+    /// PTY; the compose-time drain splices them onto the next turn's first
+    /// user message.
+    ///
+    /// `Output` chunks carry live stdout/stderr text. `Exit` is the final
+    /// chunk signalling process completion. `Backgrounded` is forward-compat
+    /// and is currently never enqueued (see [`ShellOutputKind`]).
+    ShellOutput {
+        /// Stable task identifier assigned at `Shell.Spawn` time.
+        task_id: String,
+        /// The event kind: streaming output, exit, or (future) background
+        /// sentinel.
+        kind: ShellOutputKind,
+        /// When this event was enqueued by the bridge thread.
+        at: jiff::Timestamp,
+    },
+
+    /// One subscription event delivered by a `Pattern.Port.Subscribe` stream
+    /// (Phase 4). The dispatcher actor's per-subscription drain task builds
+    /// these from the `BoxStream<PortEvent>` returned by the `Port` impl's
+    /// `subscribe()` and pushes them onto the session's async-reminder
+    /// buffer; compose-time drain on the next turn splices them onto the
+    /// first user message and `Segment2Pass` renders each one as a
+    /// `<system-reminder>` block.
+    ///
+    /// The `port_id` is the registered port handle (string form of
+    /// `pattern_core::types::port::PortId`) — not the raw event source's
+    /// internal id, in case those ever diverge.
+    PortEvent {
+        /// Registered port id (e.g. `"http"`, `"slack"`, `"weather-api"`).
+        port_id: String,
+        /// Opaque event payload. Interpretation is port-specific.
+        payload: serde_json::Value,
+        /// When the event was enqueued by the dispatcher's drain task.
+        at: jiff::Timestamp,
+    },
+}
+
+/// Whether an external edit notification is for a file the agent has
+/// opened for editing or is watching read-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FileEditKind {
+    /// File was opened via `File.Open` — agent has an active CRDT doc.
+    Open,
+    /// File was registered via `File.Watch` — read-only observation.
+    Watch,
 }
 
 /// Whether a [`MessageAttachment::BatchOpeningSnapshot`] is a full memory

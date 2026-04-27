@@ -1,10 +1,11 @@
-//! Bundle the full 16-handler SDK into a single `DispatchEffect`.
+//! Bundle the full 17-handler SDK into a single `DispatchEffect`.
 //!
 //! Handler position in the HList is the JIT effect tag: agent programs must
 //! declare `Eff '[...]` rows whose head prefix aligns with this order. The
 //! canonical order is: `Memory, Search, Recall, Tasks, Skills` (storage-adjacent),
 //! then `Message, Display, Time, Log` (Prelude-5 minus Memory), then rarer
-//! effects (`Shell, File, Sources, Mcp, Rpc, Spawn, Diagnostics`).
+//! effects (`Shell, File, Mcp, Spawn, Diagnostics`), then coordination
+//! (`Wake, Fronting`), then external services (`Port`).
 //!
 //! **Why Prelude-5-first (historical note):** originally this ordering was
 //! required to avoid DataCon name collisions: tidepool-bridge looked up
@@ -16,8 +17,13 @@
 //! `Read`/`Write`, so the remaining residual collisions (e.g. both
 //! `Memory.Get` and no `File.Get`) are handled entirely at the
 //! derive-layer disambiguation stage — agent programs can mix
-//! unqualified imports across all thirteen modules without ambiguity in
-//! current Pattern. Storage-adjacent grouping is kept for clarity.
+//! unqualified imports across all modules without ambiguity in current
+//! Pattern. Storage-adjacent grouping is kept for clarity.
+//!
+//! v3-sandbox-io Phase 4 retired `Sources` and `Rpc` in favor of the
+//! unified `Port` effect. v3-multi-agent Phase 4 added `Wake`; Phase 5
+//! added `Fronting`. The merged canonical row reflects both lines:
+//! Sources/Rpc are GONE, Wake + Fronting + Port are PRESENT.
 //!
 //! Individual handler structs remain available for ad-hoc bundles (see
 //! `crate::sdk::handlers`).
@@ -25,21 +31,22 @@
 use crate::sdk::describe::CollectEffectDecls;
 use crate::sdk::handlers::{
     DiagnosticsHandler, DisplayHandler, FileHandler, FrontingHandler, LogHandler, McpHandler,
-    MemoryHandler, MessageHandler, RecallHandler, RpcHandler, SearchHandler, ShellHandler,
-    SkillsHandler, SourcesHandler, SpawnHandler, TasksHandler, TimeHandler, WakeHandler,
+    MemoryHandler, MessageHandler, PortHandler, RecallHandler, SearchHandler, ShellHandler,
+    SkillsHandler, SpawnHandler, TasksHandler, TimeHandler, WakeHandler,
 };
 
-/// The full 18-handler SDK bundle, typed as a `frunk::HList`.
+/// The full 17-handler SDK bundle, typed as a `frunk::HList`.
 ///
 /// Order: `Memory, Search, Recall, Tasks, Skills, Message, Display, Time, Log,
-/// Shell, File, Sources, Mcp, Rpc, Spawn, Diagnostics, Wake, Fronting`.
+/// Shell, File, Mcp, Spawn, Diagnostics, Wake, Fronting, Port`.
 /// Search, Recall, Tasks, and Skills are placed immediately after Memory
 /// (storage-adjacent) so cross-agent search, archival, task-graph, and skill
 /// operations cluster together. Diagnostics is session-level introspection;
-/// Wake follows it as the second-to-last entry; Fronting is appended last
-/// as the newest effect — agent programs encode effect positions in their
-/// `Eff '[...]` row shapes, so adding to the end (rather than mid-list) keeps
-/// previously-compiled programs valid.
+/// Wake + Fronting follow it as coordination effects (v3-multi-agent
+/// Phase 4-5); Port is appended last (unified external-service port,
+/// v3-sandbox-io Phase 4) — agent programs encode effect positions in
+/// their `Eff '[...]` row shapes, so adding to the end (rather than
+/// mid-list) keeps previously-compiled programs valid.
 pub type SdkBundle = frunk::HList![
     MemoryHandler,
     SearchHandler,
@@ -52,13 +59,12 @@ pub type SdkBundle = frunk::HList![
     LogHandler,
     ShellHandler,
     FileHandler,
-    SourcesHandler,
     McpHandler,
-    RpcHandler,
     SpawnHandler,
     DiagnosticsHandler,
     WakeHandler,
     FrontingHandler,
+    PortHandler,
 ];
 
 /// Collect [`crate::sdk::describe::EffectDecl`] from every handler in
@@ -104,13 +110,12 @@ pub const CANONICAL_EFFECT_ROW: &[&str] = &[
     "Log",
     "Shell",
     "File",
-    "Sources",
     "Mcp",
-    "Rpc",
     "Spawn",
     "Diagnostics",
     "Wake",
     "Fronting",
+    "Port",
 ];
 
 #[cfg(test)]
@@ -118,12 +123,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_decls_has_18_entries() {
+    fn canonical_decls_has_17_entries() {
         let decls = canonical_effect_decls();
         assert_eq!(
             decls.len(),
-            18,
-            "expected 18 handler decls, got {}",
+            17,
+            "expected 17 handler decls, got {}",
             decls.len()
         );
     }
@@ -208,19 +213,12 @@ mod tests {
     /// Cross-check that every entry in `CANONICAL_EFFECT_ROW` resolves to
     /// an `EffectCategory` variant, and that every non-reserved
     /// `EffectCategory` variant has a matching entry in the row.
-    ///
-    /// Adding an 18th handler to `CANONICAL_EFFECT_ROW` without a matching
-    /// `EffectCategory` variant fails this test. Adding a new
-    /// `EffectCategory` variant without listing it in `RESERVED_NOT_IN_ROW`
-    /// also fails. After v3-multi-agent Phase 4, every `EffectCategory`
-    /// variant is live (no reservations).
     #[test]
     fn canonical_row_matches_effect_category_implemented_set() {
         use pattern_core::EffectCategory;
 
         const RESERVED_NOT_IN_ROW: &[EffectCategory] = &[];
 
-        // Every name in the row resolves to a category.
         for name in CANONICAL_EFFECT_ROW {
             let cat = EffectCategory::from_type_name(name).unwrap_or_else(|| {
                 panic!("CANONICAL_EFFECT_ROW entry {name:?} has no matching EffectCategory variant")
@@ -231,7 +229,6 @@ mod tests {
             );
         }
 
-        // Every non-reserved EffectCategory has a row entry.
         for cat in EffectCategory::ALL.iter().copied() {
             if RESERVED_NOT_IN_ROW.contains(&cat) {
                 continue;
@@ -244,17 +241,16 @@ mod tests {
         }
     }
 
-    /// Verify `Pattern.Fronting` registers with four constructors and appears
-    /// at slot 17 (0-indexed), the last entry in the canonical row.
+    /// Verify `Pattern.Fronting` registers with four constructors at slot 15.
     #[test]
-    fn fronting_effect_registers_with_four_methods_at_tag_17() {
+    fn fronting_effect_registers_with_four_methods_at_tag_15() {
         let decls = canonical_effect_decls();
         let (tag, fronting) = decls
             .iter()
             .enumerate()
             .find(|(_, d)| d.type_name == "Fronting")
             .expect("Fronting must appear in canonical decls");
-        assert_eq!(tag, 17, "Fronting must be at slot 17 (appended after Wake)");
+        assert_eq!(tag, 15, "Fronting must be at slot 15 (after Wake)");
         assert_eq!(
             fronting.constructors.len(),
             4,
@@ -274,7 +270,7 @@ mod tests {
     }
 
     /// Verify the Pattern.Skills effect registers all five expected methods
-    /// and appears immediately after Tasks (tag 4).
+    /// at tag 4.
     #[test]
     fn skills_effect_registers_with_five_methods_at_tag_4() {
         let decls = canonical_effect_decls();
@@ -303,5 +299,17 @@ mod tests {
                 "missing Pattern.Skills method {expected:?}, got {names:?}"
             );
         }
+    }
+
+    /// Verify `Pattern.Port` registers at the last slot (tag 16).
+    #[test]
+    fn port_effect_registers_at_last_tag() {
+        let decls = canonical_effect_decls();
+        let (tag, _port) = decls
+            .iter()
+            .enumerate()
+            .find(|(_, d)| d.type_name == "Port")
+            .expect("Port must appear in canonical decls");
+        assert_eq!(tag, 16, "Port must be at the last slot (16)");
     }
 }

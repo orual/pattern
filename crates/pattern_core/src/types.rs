@@ -13,6 +13,7 @@ pub mod ids;
 pub mod memory_types;
 pub mod message;
 pub mod origin;
+pub mod port;
 pub mod provider;
 pub mod search;
 pub mod snapshot;
@@ -30,6 +31,7 @@ pub use ids::{
 };
 pub use message::{Message, ResponseMeta};
 pub use origin::{AgentAuthor, Author, Human, MessageOrigin, Partner, Sphere, SystemReason};
+pub use port::{PortCapabilities, PortError, PortEvent, PortId, PortMetadata};
 pub use search::SearchScope;
 pub use snapshot::{PersonaSnapshot, SessionSnapshot};
 pub use turn::{StepReply, StopReason, TurnCacheMetrics, TurnId, TurnInput, TurnOutput};

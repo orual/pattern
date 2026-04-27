@@ -2,8 +2,9 @@
 //!
 //! Phase 3 wires `time`, `log`, and `display` to fully-implemented handlers;
 //! Phase 5 adds `search`, `recall`, and shared-block access on `memory`.
-//! `shell`, `file`, `sources`, `mcp`, `rpc`, and `spawn` are stubbed out to
-//! return an actionable `EffectError::Handler("…not yet implemented…")`.
+//! `file`, `mcp`, and `spawn` are stubbed out to return an actionable
+//! `EffectError::Handler("…not yet implemented…")`. `port` is a real Phase 4
+//! handler.
 
 pub mod diagnostics;
 pub mod display;
@@ -13,13 +14,12 @@ pub mod log;
 pub mod mcp;
 pub mod memory;
 pub mod message;
+pub mod port;
 pub mod recall;
-pub mod rpc;
 pub mod scope;
 pub mod search;
 pub mod shell;
 pub mod skills;
-pub mod sources;
 pub mod spawn;
 pub mod tasks;
 pub mod time;
@@ -33,12 +33,11 @@ pub use log::LogHandler;
 pub use mcp::McpHandler;
 pub use memory::MemoryHandler;
 pub use message::MessageHandler;
+pub use port::PortHandler;
 pub use recall::RecallHandler;
-pub use rpc::RpcHandler;
 pub use search::SearchHandler;
 pub use shell::ShellHandler;
 pub use skills::SkillsHandler;
-pub use sources::SourcesHandler;
 pub use spawn::SpawnHandler;
 pub use tasks::TasksHandler;
 pub use time::TimeHandler;

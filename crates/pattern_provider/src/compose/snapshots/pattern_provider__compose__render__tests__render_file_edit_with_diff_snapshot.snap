@@ -1,0 +1,15 @@
+---
+source: crates/pattern_provider/src/compose/render.rs
+assertion_line: 659
+expression: rendered
+---
+<system-reminder>
+External edit while you were thinking:
+- 2025-04-18T18:13:20Z /home/orual/notes.txt (you had open) changed:
+```
+--- before
+hello
++++ after
+hello world
+```
+</system-reminder>

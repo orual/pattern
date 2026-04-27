@@ -27,7 +27,6 @@ use pattern_db::Json;
 use serde_json::Value as JsonValue;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -842,8 +841,8 @@ impl MemoryCache {
         let doc = cached.doc.clone();
         drop(cached); // Release the DashMap lock before doing work.
 
-        // Get the subscriber's disk_doc. Without a subscriber there's no
-        // disk_doc to apply the external edit to.
+        // Get the subscriber's synced_doc. Without a subscriber there's no
+        // SyncedDoc pipeline to route the external edit through.
         let Some(subscriber) = self.subscribers.get(block_id) else {
             tracing::debug!(
                 block_id = %block_id,
@@ -852,114 +851,32 @@ impl MemoryCache {
             return;
         };
 
-        let disk_doc = Arc::clone(&subscriber.disk_doc);
+        // Hold an Arc to synced_doc so we can call apply_external_bytes after
+        // releasing the DashMap lock.
+        let synced_doc = Arc::clone(&subscriber.synced_doc);
         drop(subscriber); // Release the DashMap lock.
 
         let schema = doc.schema().clone();
 
-        // Capture disk_doc's version before applying the external edit,
-        // so we can export only the new operations afterward.
-        let disk_vv_before = disk_doc.oplog_vv();
-
-        let result: Result<(), String> = (|| {
-            match &schema {
-                pattern_core::types::memory_types::BlockSchema::Text { .. } => {
-                    // Text blocks: file content is the raw markdown, import as text.
-                    let text = String::from_utf8(content.to_vec())
-                        .map_err(|e| format!("UTF-8 decode failed: {e}"))?;
-                    let stripped = crate::fs::markdown::markdown_to_text(&text);
-                    let disk_text = disk_doc.get_text("content");
-                    disk_text
-                        .update(&stripped, Default::default())
-                        .map_err(|e| format!("disk_doc text update failed: {e}"))?;
-                    disk_doc.commit();
-                }
-                pattern_core::types::memory_types::BlockSchema::Map { .. }
-                | pattern_core::types::memory_types::BlockSchema::Composite { .. } => {
-                    // Map/Composite blocks: parse KDL with Map shape, import via JSON.
-                    let text = String::from_utf8(content.to_vec())
-                        .map_err(|e| format!("UTF-8 decode failed: {e}"))?;
-                    let kdl_doc = crate::fs::kdl::parse_kdl(&text)
-                        .map_err(|e| format!("KDL parse failed: {e}"))?;
-                    let loro_value =
-                        crate::fs::kdl::kdl_to_loro_value(&kdl_doc, crate::fs::kdl::TopShape::Map)
-                            .map_err(|e| format!("KDL→LoroValue failed: {e}"))?;
-                    let json = crate::fs::kdl::loro_value_to_json(&loro_value)
-                        .ok_or_else(|| "LoroValue→JSON conversion failed".to_string())?;
-                    // Apply to disk_doc via JSON import. Since disk_doc doesn't
-                    // have a StructuredDocument wrapper, we use the LoroDoc
-                    // JSON import mechanism directly.
-                    apply_json_to_loro_doc(&disk_doc, &json, &schema)
-                        .map_err(|e| format!("disk_doc JSON import failed: {e}"))?;
-                    disk_doc.commit();
-                }
-                pattern_core::types::memory_types::BlockSchema::List { .. } => {
-                    // List blocks: parse KDL with List shape, import via JSON.
-                    let text = String::from_utf8(content.to_vec())
-                        .map_err(|e| format!("UTF-8 decode failed: {e}"))?;
-                    let kdl_doc = crate::fs::kdl::parse_kdl(&text)
-                        .map_err(|e| format!("KDL parse failed: {e}"))?;
-                    let loro_value =
-                        crate::fs::kdl::kdl_to_loro_value(&kdl_doc, crate::fs::kdl::TopShape::List)
-                            .map_err(|e| format!("KDL→LoroValue failed: {e}"))?;
-                    let json = crate::fs::kdl::loro_value_to_json(&loro_value)
-                        .ok_or_else(|| "LoroValue→JSON conversion failed".to_string())?;
-                    apply_json_to_loro_doc(&disk_doc, &json, &schema)
-                        .map_err(|e| format!("disk_doc JSON import failed: {e}"))?;
-                    disk_doc.commit();
-                }
-                pattern_core::types::memory_types::BlockSchema::Log { .. } => {
-                    // Log blocks: parse JSONL entries and import.
-                    let text = String::from_utf8(content.to_vec())
-                        .map_err(|e| format!("UTF-8 decode failed: {e}"))?;
-                    let entries = crate::fs::jsonl::jsonl_to_log_entries(&text)
-                        .map_err(|e| format!("JSONL parse failed: {e}"))?;
-                    let arr = serde_json::Value::Array(entries);
-                    apply_json_to_loro_doc(&disk_doc, &arr, &schema)
-                        .map_err(|e| format!("disk_doc JSON import failed: {e}"))?;
-                    disk_doc.commit();
-                }
-                pattern_core::types::memory_types::BlockSchema::TaskList { .. } => {
-                    // TaskList blocks: parse KDL with TaskList shape, import via JSON.
-                    let text = String::from_utf8(content.to_vec())
-                        .map_err(|e| format!("UTF-8 decode failed: {e}"))?;
-                    let kdl_doc = crate::fs::kdl::parse_kdl(&text)
-                        .map_err(|e| format!("KDL parse failed: {e}"))?;
-                    let loro_value = crate::fs::kdl::kdl_to_loro_value(
-                        &kdl_doc,
-                        crate::fs::kdl::TopShape::TaskList,
-                    )
-                    .map_err(|e| format!("KDL→LoroValue failed: {e}"))?;
-                    let json = crate::fs::kdl::loro_value_to_json(&loro_value)
-                        .ok_or_else(|| "LoroValue→JSON conversion failed".to_string())?;
-                    apply_json_to_loro_doc(&disk_doc, &json, &schema)
-                        .map_err(|e| format!("disk_doc JSON import failed: {e}"))?;
-                    disk_doc.commit();
-                }
-                pattern_core::types::memory_types::BlockSchema::Skill { .. } => {
-                    // Skill blocks: parse YAML-frontmatter + markdown body, then
-                    // enforce the trust tier based on provenance, and mirror the
-                    // typed SkillMetadata, extras, and body into the disk_doc.
+        // For Skill blocks, enforce trust-tier from provenance BEFORE routing
+        // through synced_doc.apply_external_bytes. The bridge's apply_external
+        // cannot enforce trust because it lacks access to mount_path and
+        // first_party_skills_dir. We parse, adjust the tier, and re-emit to
+        // bytes so the standard SyncedDoc pipeline processes the corrected
+        // content (bridge call → disk_doc update → memory_doc CRDT import).
+        //
+        // For all other schemas, content is passed through unchanged.
+        let content_to_apply: std::borrow::Cow<[u8]> =
+            if matches!(schema, BlockSchema::Skill { .. }) {
+                match (|| -> Result<Vec<u8>, String> {
                     let mut skill_file = crate::fs::markdown_skill::parse(content)
                         .map_err(|e| format!("Skill parse failed: {e}"))?;
 
-                    // Enforce trust tier from provenance. The declared tier in
-                    // the YAML frontmatter is advisory only — authors cannot
-                    // self-promote a skill to FirstParty by writing it in the
-                    // file. `assign_trust_tier` enforces the policy and fires
-                    // the `skill.plugin_installed_tier_without_plugin_system`
-                    // metric when a PluginInstalled declaration is encountered.
-                    //
-                    // The file_path is reconstructed from mount_path + block_id
-                    // because `apply_external_edit` only receives raw bytes (no
-                    // path parameter). Skill blocks always use the .md extension.
-                    let file_path = self.mount_path.as_deref().map(|mp| {
-                        let mut p = mp.to_path_buf();
-                        p.push(format!("{block_id}.md"));
-                        p
-                    });
+                    let file_path = self
+                        .mount_path
+                        .as_deref()
+                        .map(|mp| mp.join(format!("{block_id}.md")));
                     let fp_ref = self.first_party_skills_dir.as_deref();
-                    // Collect mount paths into an owned Vec so we can take &[&Path] slices.
                     let mount_paths: Vec<PathBuf> = self
                         .mount_path
                         .as_deref()
@@ -976,154 +893,148 @@ impl MemoryCache {
                         skill_file.metadata.trust_tier = assign_trust_tier(&provenance);
                     }
 
-                    crate::fs::markdown_skill::write_skill_to_loro_doc(&skill_file, &disk_doc)
-                        .map_err(|e| format!("Skill write_skill_to_loro_doc failed: {e}"))?;
-                    disk_doc.commit();
-                }
-                // NOTE: `_ =>` covers future non_exhaustive additions beyond
-                // currently-known variants. Keep this list current.
-                _ => {
-                    return Err(format!("unsupported schema: {schema:?}"));
-                }
-            }
-            Ok(())
-        })();
-
-        match result {
-            Ok(()) => {
-                // Export the updates that disk_doc generated and import them
-                // into memory_doc. This is the CRDT merge: memory_doc will
-                // reconcile its own operations with the disk_doc operations.
-                match disk_doc.export(loro::ExportMode::updates(&disk_vv_before)) {
-                    Ok(update_bytes) if !update_bytes.is_empty() => {
-                        if let Err(e) = doc.inner().import(&update_bytes) {
-                            tracing::error!(
-                                block_id = %block_id,
-                                error = %e,
-                                "failed to import disk_doc updates into memory_doc"
-                            );
-                        }
-                    }
+                    // Re-emit with the corrected trust tier so synced_doc's bridge
+                    // processes trust-safe bytes — write_skill_to_loro_doc inside
+                    // the bridge will then record the correct tier in disk_doc.
+                    let corrected = crate::fs::markdown_skill::emit(
+                        &skill_file.metadata,
+                        &skill_file.extras,
+                        &skill_file.body,
+                    )
+                    .map_err(|e| format!("Skill emit failed after trust-tier correction: {e}"))?;
+                    Ok(corrected.into_bytes())
+                })() {
+                    Ok(bytes) => std::borrow::Cow::Owned(bytes),
                     Err(e) => {
                         tracing::error!(
                             block_id = %block_id,
                             error = %e,
-                            "failed to export disk_doc updates"
+                            "Skill trust-tier enforcement failed; skipping external edit"
                         );
+                        metrics::counter!("memory.external_edit.import_failed").increment(1);
+                        return;
                     }
-                    _ => {} // Empty update bytes — no-op.
                 }
+            } else {
+                std::borrow::Cow::Borrowed(content)
+            };
 
-                // Update the FTS5 preview column so external edits are
-                // visible to search. The worker does this on every subscriber
-                // cycle; we mirror that here for the external-edit path.
-                //
-                // For TaskList blocks, also run `reconcile_task_list` inside the
-                // same transaction so that the `tasks` and `task_edges` sqlite
-                // indexes reflect the external edit immediately — without waiting
-                // for the subscriber worker to receive a CommitEvent (which does
-                // not fire for imported CRDT updates via `subscribe_local_update`).
-                let preview = doc.render();
-                match self.db.get() {
-                    Ok(mut conn) => {
-                        let preview_str = if preview.is_empty() {
-                            None
-                        } else {
-                            Some(preview.as_str())
-                        };
+        // Route through synced_doc.apply_external_bytes. This is the single
+        // source of truth for the external-edit pipeline: bridge call →
+        // disk_doc update → memory_doc CRDT import → last_saved_frontier
+        // advance → external_subscribers fanout. (Echo-suppression state —
+        // last_written_mtime/hash — is intentionally NOT touched here; those
+        // track our own writes and updating them on external apply would
+        // suppress legitimate subsequent external edits.) The cache must not
+        // duplicate any of this logic (D1 fix: previously the cache reached
+        // directly into disk_doc and replicated the export/import steps here).
+        if let Err(e) = synced_doc.apply_external_bytes(&content_to_apply) {
+            tracing::error!(
+                block_id = %block_id,
+                error = %e,
+                "external edit import failed"
+            );
+            metrics::counter!("memory.external_edit.import_failed").increment(1);
+            return;
+        }
 
-                        if matches!(
-                            schema,
-                            pattern_core::types::memory_types::BlockSchema::TaskList { .. }
-                        ) {
-                            // TaskList: FTS + task reconcile in a single transaction
-                            // (mirrors render_cycle atomicity in the subscriber worker).
-                            match conn.transaction() {
-                                Ok(tx) => {
-                                    if let Err(e) = pattern_db::queries::update_block_preview(
-                                        &tx,
-                                        block_id,
-                                        preview_str,
-                                    ) {
-                                        metrics::counter!("memory.external_edit.fts_update_failed")
-                                            .increment(1);
-                                        tracing::error!(
-                                            block_id = %block_id, error = %e,
-                                            "FTS5 update failed in TaskList external-edit transaction; rolling back"
-                                        );
-                                        // tx drops without commit → implicit rollback.
-                                    } else if let Err(e) =
-                                        crate::subscriber::task::reconcile_task_list(
-                                            &tx, block_id, &disk_doc,
-                                        )
-                                    {
-                                        metrics::counter!("memory.external_edit.reconcile_failed")
-                                            .increment(1);
-                                        tracing::error!(
-                                            block_id = %block_id, error = %e,
-                                            "TaskList reconcile failed during external edit; transaction rolled back"
-                                        );
-                                        // tx drops without commit → both FTS and reconcile roll back.
-                                    } else if let Err(e) = tx.commit() {
-                                        metrics::counter!("memory.external_edit.reconcile_failed")
-                                            .increment(1);
-                                        tracing::error!(
-                                            block_id = %block_id, error = %e,
-                                            "TaskList external-edit transaction commit failed"
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::error!(
-                                        block_id = %block_id, error = %e,
-                                        "failed to open transaction for TaskList external-edit reconcile"
-                                    );
-                                }
-                            }
-                        } else {
-                            // Non-TaskList: standalone FTS update.
+        // Post-apply: update FTS5 and mark dirty. These are cache-level
+        // concerns that synced_doc does not own.
+        //
+        // For TaskList blocks, also run `reconcile_task_list` inside the same
+        // transaction so that the `tasks` and `task_edges` sqlite indexes
+        // reflect the external edit immediately — without waiting for the
+        // subscriber worker to receive a CommitEvent (which does not fire for
+        // CRDT updates imported via `subscribe_local_update`).
+        let preview = doc.render();
+        // disk_doc is needed for TaskList reconcile; get Arc ref via synced_doc.
+        let disk_doc = Arc::clone(synced_doc.disk_doc());
+
+        match self.db.get() {
+            Ok(mut conn) => {
+                let preview_str = if preview.is_empty() {
+                    None
+                } else {
+                    Some(preview.as_str())
+                };
+
+                if matches!(
+                    schema,
+                    pattern_core::types::memory_types::BlockSchema::TaskList { .. }
+                ) {
+                    // TaskList: FTS + task reconcile in a single transaction
+                    // (mirrors render_cycle atomicity in the subscriber worker).
+                    match conn.transaction() {
+                        Ok(tx) => {
                             if let Err(e) = pattern_db::queries::update_block_preview(
-                                &conn,
+                                &tx,
                                 block_id,
                                 preview_str,
                             ) {
                                 metrics::counter!("memory.external_edit.fts_update_failed")
                                     .increment(1);
                                 tracing::error!(
-                                    block_id = %block_id,
-                                    error = %e,
-                                    "FTS5 update failed after external edit merge"
+                                    block_id = %block_id, error = %e,
+                                    "FTS5 update failed in TaskList external-edit transaction; rolling back"
+                                );
+                                // tx drops without commit → implicit rollback.
+                            } else if let Err(e) = crate::subscriber::task::reconcile_task_list(
+                                &tx, block_id, &disk_doc,
+                            ) {
+                                metrics::counter!("memory.external_edit.reconcile_failed")
+                                    .increment(1);
+                                tracing::error!(
+                                    block_id = %block_id, error = %e,
+                                    "TaskList reconcile failed during external edit; transaction rolled back"
+                                );
+                                // tx drops without commit → both FTS and reconcile roll back.
+                            } else if let Err(e) = tx.commit() {
+                                metrics::counter!("memory.external_edit.reconcile_failed")
+                                    .increment(1);
+                                tracing::error!(
+                                    block_id = %block_id, error = %e,
+                                    "TaskList external-edit transaction commit failed"
                                 );
                             }
                         }
+                        Err(e) => {
+                            tracing::error!(
+                                block_id = %block_id, error = %e,
+                                "failed to open transaction for TaskList external-edit reconcile"
+                            );
+                        }
                     }
-                    Err(e) => {
+                } else {
+                    // Non-TaskList: standalone FTS update.
+                    if let Err(e) =
+                        pattern_db::queries::update_block_preview(&conn, block_id, preview_str)
+                    {
+                        metrics::counter!("memory.external_edit.fts_update_failed").increment(1);
                         tracing::error!(
+                            block_id = %block_id,
                             error = %e,
-                            "DB pool get failed during external edit FTS update"
+                            "FTS5 update failed after external edit merge"
                         );
                     }
                 }
-
-                // Mark the block dirty so the next persist stores the update.
-                if let Some(mut cached) = self.blocks.get_mut(block_id) {
-                    cached.dirty = true;
-                }
-                tracing::debug!(
-                    block_id = %block_id,
-                    "external edit imported via two-doc CRDT merge"
-                );
-                metrics::counter!("memory.external_edit.crdt_merged").increment(1);
             }
             Err(e) => {
                 tracing::error!(
-                    block_id = %block_id,
                     error = %e,
-                    "external edit import failed"
+                    "DB pool get failed during external edit FTS update"
                 );
-                metrics::counter!("memory.external_edit.import_failed").increment(1);
             }
         }
+
+        // Mark the block dirty so the next persist stores the update.
+        if let Some(mut cached) = self.blocks.get_mut(block_id) {
+            cached.dirty = true;
+        }
+        tracing::debug!(
+            block_id = %block_id,
+            "external edit imported via two-doc CRDT merge"
+        );
+        metrics::counter!("memory.external_edit.crdt_merged").increment(1);
     }
 
     /// Get a reference to a subscriber handle by block_id.
@@ -1509,21 +1420,66 @@ pub(crate) fn spawn_subscriber_for_block(
     let (event_tx, event_rx) = crossbeam_channel::bounded(64);
     let cancel = CancellationToken::new();
 
-    // Fork the memory_doc to create the disk_doc. The fork starts with
-    // the same state as memory_doc at this point in time.
-    let disk_doc = Arc::new(doc.inner().fork());
-    let last_written_mtime: Arc<Mutex<Option<SystemTime>>> = Arc::new(Mutex::new(None));
-
     // Shared pause state for flush-pause-resume quiesce.
     let paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let pause_complete = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
     let resume_signal = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+
+    // Determine the canonical file extension for this schema so we can compute
+    // the block file path for the SyncedDoc. The extension must match what
+    // render_canonical_from_disk_doc would return for this schema.
+    let ext = block_schema_extension(&schema);
+    let block_file_path = mount_path.join(format!("{block_id}.{ext}"));
+
+    // Build the SyncedDoc for this block. RouterOwned mode: no internal
+    // filesystem watcher (the mount-wide DirWatcher<BlockFanoutRouter> handles
+    // external edit routing) and no internal local-update subscription (the
+    // worker's CommitEvent channel handles that). The SyncedDoc owns disk_doc,
+    // echo-suppression state, atomic_write, and last_saved_frontier.
+    //
+    // LoroDoc::clone is a reference clone — it shares the same underlying
+    // state as doc.inner(). This means SyncedDoc's memory_doc IS the same
+    // Loro state as the StructuredDocument's doc, so apply_external_bytes
+    // correctly propagates external edits into the live memory_doc.
+    let memory_doc_arc = Arc::new(doc.inner().clone());
+    let bridge = Arc::new(crate::subscriber::bridge::BlockSchemaBridge::new(
+        schema.clone(),
+    ));
+    let synced_doc =
+        match crate::loro_sync::SyncedDoc::open_router_owned(crate::loro_sync::SyncedDocConfig {
+            path: block_file_path,
+            memory_doc: memory_doc_arc,
+            bridge,
+            event_channel_bound: 64,
+            // Block-subscriber path: external edits arrive via
+            // `apply_external_bytes` (which bypasses the watcher-based
+            // conflict check entirely), not through the watcher. AutoMerge
+            // here is explicit rather than implicit — the policy field is
+            // checked only for watcher-delivered events.
+            conflict_policy: crate::loro_sync::ConflictPolicy::AutoMerge,
+        }) {
+            Ok(d) => Arc::new(d),
+            Err(e) => {
+                tracing::error!(
+                    block_id = %block_id,
+                    error = %e,
+                    "failed to open SyncedDoc for block; file sync disabled"
+                );
+                metrics::counter!("memory.sync_worker.spawn_failed").increment(1);
+                return;
+            }
+        };
 
     // Wire subscribe_local_update on memory_doc: when the agent writes
     // to memory_doc, capture the raw Loro update bytes and forward them
     // to the worker thread for import into disk_doc and file rendering.
     // When paused, skip try_send — writes accumulate in memory_doc and
     // are reconciled via version-vector diff on resume.
+    //
+    // We subscribe on the StructuredDocument's inner LoroDoc directly
+    // (not synced_doc.memory_doc(), which is the same shared state).
+    // RouterOwned mode does not set up a local-update subscription inside
+    // SyncedDoc, so this is the only subscription on the memory_doc.
     let block_id_owned = block_id.to_string();
     let tx_clone = event_tx.clone();
     let paused_flag = Arc::clone(&paused);
@@ -1549,13 +1505,12 @@ pub(crate) fn spawn_subscriber_for_block(
         reembed_tx,
         heartbeat_tx,
         mount_path,
-        disk_doc: Arc::clone(&disk_doc),
         doc: doc.clone(),
-        last_written_mtime: Arc::clone(&last_written_mtime),
         paused: Arc::clone(&paused),
         pause_complete: Arc::clone(&pause_complete),
         resume_signal: Arc::clone(&resume_signal),
         block_change_notifier: block_change_notifier.clone(),
+        synced_doc: Arc::clone(&synced_doc),
     };
 
     let thread = match std::thread::Builder::new()
@@ -1586,13 +1541,28 @@ pub(crate) fn spawn_subscriber_for_block(
             thread,
             event_tx,
             _subscription: subscription,
-            disk_doc,
-            last_written_mtime,
             paused,
             pause_complete,
             resume_signal,
+            synced_doc,
         },
     );
+}
+
+/// Return the canonical file extension for a block schema.
+///
+/// Mirrors the extension returned by
+/// [`render_canonical_from_disk_doc`](crate::subscriber::worker::render_canonical_from_disk_doc).
+fn block_schema_extension(schema: &BlockSchema) -> &'static str {
+    match schema {
+        BlockSchema::Text { .. } | BlockSchema::Skill { .. } => "md",
+        BlockSchema::Map { .. }
+        | BlockSchema::Composite { .. }
+        | BlockSchema::List { .. }
+        | BlockSchema::TaskList { .. } => "kdl",
+        BlockSchema::Log { .. } => "jsonl",
+        _ => "dat",
+    }
 }
 
 /// Apply a JSON value to a raw LoroDoc (without StructuredDocument wrapper).
@@ -1640,7 +1610,7 @@ fn json_to_loro_value(value: &serde_json::Value) -> loro::LoroValue {
 /// - Composite: `"root"` (LoroMap)
 /// - List: `"items"` (LoroList)
 /// - Log: `"entries"` (LoroList)
-fn apply_json_to_loro_doc(
+pub(crate) fn apply_json_to_loro_doc(
     doc: &loro::LoroDoc,
     json: &serde_json::Value,
     schema: &pattern_core::types::memory_types::BlockSchema,
@@ -3870,9 +3840,10 @@ mod tests {
         // disk_doc updates into memory_doc synchronously, then queues a re-render).
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        // Verify the disk_doc (accessed via the subscriber) reflects the edit.
+        // Verify the disk_doc (accessed via the subscriber's synced_doc) reflects
+        // the edit.
         let sub = cache.subscribers.get(block_id).unwrap();
-        let disk_doc = Arc::clone(&sub.disk_doc);
+        let disk_doc = Arc::clone(sub.synced_doc.disk_doc());
         drop(sub);
 
         let deep = disk_doc.get_movable_list("items").get_deep_value();
@@ -3998,7 +3969,7 @@ mod tests {
         use crate::fs::markdown_skill::loro_bridge::project_metadata_from_loro;
 
         let sub = cache.subscribers.get(block_id).unwrap();
-        let disk_doc = Arc::clone(&sub.disk_doc);
+        let disk_doc = Arc::clone(sub.synced_doc.disk_doc());
         drop(sub);
 
         let deep = disk_doc.get_deep_value();

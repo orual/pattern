@@ -50,6 +50,9 @@ thiserror = { workspace = true }
 miette = { workspace = true, features = ["fancy"] }
 tracing = { workspace = true }
 
+# Zero-allocation file extension strings (bridge SmolStr::new_static constants).
+smol_str = { workspace = true }
+
 # Utilities inherited from the original pattern_core::memory surface
 dashmap = { version = "6.1.0", features = ["serde"] }
 chrono = { workspace = true }

@@ -26,6 +26,10 @@
 use std::path::Path;
 
 use knus::Decode;
+use knus::ast::{Literal, SpannedNode};
+use knus::decode::Context;
+use knus::errors::DecodeError;
+use knus::traits::{DecodeChildren, ErrorSpan};
 use serde::Serialize;
 
 use super::ConfigError;
@@ -89,6 +93,21 @@ pub struct MountConfig {
     /// ```
     #[knus(child)]
     pub backup: Option<BackupSection>,
+
+    /// `file-policy` block — ordered allow/deny rules for agent file access.
+    ///
+    /// Optional; when absent (or empty), all file access is denied by default.
+    /// Rules are evaluated in declaration order with last-match-wins semantics.
+    ///
+    /// KDL (optional):
+    /// ```text
+    /// file-policy {
+    ///     allow "/project/**"
+    ///     deny  "/project/.env"
+    /// }
+    /// ```
+    #[knus(child, default)]
+    pub file_policy: FilePolicySection,
 }
 
 // ---------------------------------------------------------------------------
@@ -450,6 +469,108 @@ pub fn parse_duration_str(s: &str) -> Result<std::time::Duration, String> {
 // ---------------------------------------------------------------------------
 // Loader
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// file-policy block
+// ---------------------------------------------------------------------------
+
+/// Rule direction for a single `file-policy` entry.
+///
+/// Used in [`FilePolicySection`] to carry allow/deny semantics through the
+/// KDL decode layer without introducing a dependency on `pattern_runtime`.
+/// `pattern_runtime::file_manager::policy::RuleMode` converts `From<FilePolicyMode>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum FilePolicyMode {
+    /// The matched path is allowed.
+    Allow,
+    /// The matched path is denied.
+    Deny,
+}
+
+/// Parsed `file-policy { allow "..."; deny "..." }` block.
+///
+/// Holds rules in **declaration order** — order is semantically significant
+/// because evaluation is last-match-wins (see `FilePolicy::check_access`).
+///
+/// `knus`'s standard `#[knus(children(name = "...")]` attribute would split
+/// `allow` and `deny` nodes into separate buckets, destroying their interleaved
+/// order. This type therefore implements [`knus::traits::DecodeChildren`]
+/// by hand, iterating over child nodes exactly once in document order.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct FilePolicySection {
+    /// Ordered list of `(mode, glob_pattern)` rules.
+    pub rules: Vec<(FilePolicyMode, String)>,
+}
+
+/// Hand-rolled `DecodeChildren` so `knus::parse::<FilePolicySection>` works
+/// for the test path (children provided as a flat document). This is the
+/// same impl used when knus processes the `file-policy { … }` node's children
+/// via `#[knus(child)]` on `MountConfig.file_policy`.
+impl<S: ErrorSpan> DecodeChildren<S> for FilePolicySection {
+    fn decode_children(
+        nodes: &[SpannedNode<S>],
+        ctx: &mut Context<S>,
+    ) -> Result<Self, DecodeError<S>> {
+        let mut rules = Vec::with_capacity(nodes.len());
+
+        for node in nodes {
+            let name = node.node_name.as_ref();
+            let mode = match name {
+                "allow" => FilePolicyMode::Allow,
+                "deny" => FilePolicyMode::Deny,
+                _ => {
+                    ctx.emit_error(DecodeError::unexpected(
+                        &node.node_name,
+                        "node",
+                        format!("expected `allow` or `deny` in file-policy, found `{name}`"),
+                    ));
+                    continue;
+                }
+            };
+
+            // Each rule has exactly one positional argument: the glob pattern.
+            let pattern = match node.arguments.first() {
+                Some(arg) => match &*arg.literal {
+                    Literal::String(s) => s.as_ref().to_owned(),
+                    _ => {
+                        ctx.emit_error(DecodeError::unexpected(
+                            &arg.literal,
+                            "literal",
+                            "file-policy rule argument must be a string glob pattern",
+                        ));
+                        continue;
+                    }
+                },
+                None => {
+                    ctx.emit_error(DecodeError::unexpected(
+                        &node.node_name,
+                        "node",
+                        format!("`{name}` rule requires a glob pattern argument"),
+                    ));
+                    continue;
+                }
+            };
+
+            rules.push((mode, pattern));
+        }
+
+        Ok(Self { rules })
+    }
+}
+
+/// `knus::Decode` wrapping for use as a `#[knus(child)]` field on `MountConfig`.
+///
+/// When knus processes `file-policy { allow "..."; deny "..." }` as a child
+/// node, it calls `Decode::decode_node`. We extract the node's children and
+/// delegate to `DecodeChildren::decode_children` so the two decode paths
+/// share the same logic.
+impl<S: ErrorSpan> knus::traits::Decode<S> for FilePolicySection {
+    fn decode_node(node: &SpannedNode<S>, ctx: &mut Context<S>) -> Result<Self, DecodeError<S>> {
+        let children: &[SpannedNode<S>] =
+            node.children.as_ref().map(|c| c.as_slice()).unwrap_or(&[]);
+        FilePolicySection::decode_children(children, ctx)
+    }
+}
 
 /// Load and parse a `.pattern.kdl` config from the given path.
 ///

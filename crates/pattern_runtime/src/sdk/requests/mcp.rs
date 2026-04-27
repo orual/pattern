@@ -4,8 +4,7 @@ use tidepool_bridge_derive::FromCore;
 
 /// Mirror of the Haskell `Mcp` GADT.
 ///
-/// `Use` rather than `Call` avoids colliding with `Pattern.Rpc.Call`
-/// (generic RPC) and matches AI-agent parlance — "the agent uses the
+/// `Use` is chosen to match AI-agent parlance — "the agent uses the
 /// search tool".
 #[derive(Debug, FromCore)]
 pub enum McpReq {

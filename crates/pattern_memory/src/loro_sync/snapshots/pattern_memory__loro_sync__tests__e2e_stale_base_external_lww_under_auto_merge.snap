@@ -1,0 +1,8 @@
+---
+source: crates/pattern_memory/src/loro_sync/tests.rs
+assertion_line: 540
+expression: content
+---
+line1
+line2
+line3-EDITED

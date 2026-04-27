@@ -30,6 +30,7 @@ use crate::sdk::bundle::canonical_effect_decls;
 /// Long by design: the LLM has to know what's callable BEFORE writing
 /// code; compile errors surface the info too late (after wasted cycles).
 fn build_code_tool_description() -> String {
+    use crate::sdk::preamble::{ImportStyle, import_style, type_m_entry};
     let mut s = String::with_capacity(8192);
 
     s.push_str(
@@ -40,31 +41,54 @@ fn build_code_tool_description() -> String {
          preamble handles everything else.\n\n",
     );
 
+    let decls = canonical_effect_decls();
+    let (terse, qualified): (Vec<&_>, Vec<&_>) = decls
+        .iter()
+        .partition(|d| matches!(import_style(d.type_name), ImportStyle::Dual));
+
+    // Effect-row line is rebuilt from the canonical decls so it cannot
+    // drift from the runtime bundle (was the v3-sandbox-io final-review
+    // critical: the static prose still mentioned the retired
+    // Sources/Rpc effects after the unified Port effect landed).
+    let row: Vec<String> = decls.iter().map(|d| type_m_entry(d.type_name)).collect();
+    s.push_str("=== Effect row ===\n");
+    s.push_str(&format!("`type M = '[{}]`\n", row.join(", ")));
     s.push_str(
-        "=== Effect row ===\n\
-         `type M = '[Memory.Memory, Search.Search, Recall.Recall, Message, \
-         Display, Time, Log.Log, Shell.Shell, File.File, Sources.Sources, \
-         Mcp.Mcp, Rpc.Rpc, Spawn]`\n\
-         Your snippet's final expression must have type `Eff M Value` (use \
+        "Your snippet's final expression must have type `Eff M Value` (use \
          `toJSON x` to return any JSON-serializable value; return unit with \
          `pure ()` — NOT `return unit`).\n\n",
     );
 
+    s.push_str("=== Import scheme ===\n");
+    let terse_names: Vec<&str> = terse.iter().map(|d| d.type_name).collect();
+    let qualified_names: Vec<&str> = qualified.iter().map(|d| d.type_name).collect();
+    s.push_str(&format!(
+        "{} module{} {} imported UNQUALIFIED (terse verbs): {}. Call them bare: \
+         `send \"agent:x\" \"hi\"`, `now`, `chunk \"msg\"`, `start spec`.\n",
+        terse_names.len(),
+        if terse_names.len() == 1 { "" } else { "s" },
+        if terse_names.len() == 1 { "is" } else { "are" },
+        terse_names.join(", "),
+    ));
+    s.push_str(&format!(
+        "{} module{} {} QUALIFIED-ONLY (generic verb names): {}. Always prefix: \
+         `Memory.put`, `File.read`, `Log.info`, `Search.messages`.\n",
+        qualified_names.len(),
+        if qualified_names.len() == 1 { "" } else { "s" },
+        if qualified_names.len() == 1 {
+            "is"
+        } else {
+            "are"
+        },
+        qualified_names.join(", "),
+    ));
     s.push_str(
-        "=== Import scheme ===\n\
-         Four modules are imported UNQUALIFIED (terse verbs): Message, Time, \
-         Display, Spawn. Call them bare: `send \"agent:x\" \"hi\"`, \
-         `now`, `chunk \"msg\"`, `start spec`.\n\
-         Nine modules are QUALIFIED-ONLY (generic verb names): Memory, File, \
-         Log, Sources, Shell, Rpc, Mcp, Search, Recall. Always prefix: \
-         `Memory.put`, `File.read`, `Log.info`, `Search.messages`.\n\
-         Every module is ALSO imported qualified, so you can use either \
+        "Every module is ALSO imported qualified, so you can use either \
          style for terse modules (`send` and `Message.send` both work).\n\n",
     );
 
     s.push_str("=== Available functions ===\n");
 
-    let decls = canonical_effect_decls();
     for eff in &decls {
         s.push_str(&format!(
             "\n--- {} ({}) ---\n",
@@ -93,9 +117,13 @@ fn build_code_tool_description() -> String {
          * `Memory.list` does not exist. To discover blocks, check the \
            `Available blocks:` list in the `[memory:current_state]` \
            system-reminder near the top of your context; that's the source \
-           of truth. If you need programmatic enumeration, ask the user or \
-           use `Sources.list` (which is a DIFFERENT thing — agent data \
-           sources, not memory blocks).\n\
+           of truth.\n\
+         * External services live behind `Pattern.Port`. Call them via \
+           `Port.call portId method jsonPayload` and subscribe to event \
+           streams via `Port.subscribe portId configJson`. The built-in \
+           `http` port also has typed helpers in `Pattern.Http` \
+           (`Http.httpGet`, `Http.httpPost`, etc.) — `import qualified \
+           Pattern.Http as Http` to use them.\n\
          * `Display.info` doesn't exist. Display has `chunk`/`final`/`note`; \
            for log-style output use `Log.info`/`Log.debug`/`Log.warn`/`Log.error`.\n\
          * Qualified-only modules: writing `memory.put` (lowercase) or \
@@ -247,6 +275,39 @@ mod tests {
             desc.contains("Pattern SDK") || desc.contains("effect stack"),
             "description should mention the SDK or effect stack"
         );
+    }
+
+    /// Locked-in invariant: the LLM-facing description must not name
+    /// retired effects (Sources, Rpc — replaced by the unified Port
+    /// effect during v3-sandbox-io Phase 4) and MUST mention Port,
+    /// otherwise agents read the description and write
+    /// `import Pattern.Sources` that fails at compile time. The
+    /// final-review caught a literal-string regression here; this
+    /// assertion prevents the same drift recurring.
+    #[test]
+    fn description_reflects_canonical_effect_row_no_retired_effects() {
+        let desc = CODE_TOOL.description.as_ref().expect("desc set");
+        for retired in &["Sources", "Rpc"] {
+            assert!(
+                !desc.contains(retired),
+                "code tool description must not mention retired effect {retired}; \
+                 got: {desc}"
+            );
+        }
+        assert!(
+            desc.contains("Port"),
+            "code tool description must mention the unified Port effect"
+        );
+        // Every canonical effect's type_name appears at least once
+        // (in the row line, the import-scheme listing, or the
+        // function block).
+        for d in canonical_effect_decls() {
+            assert!(
+                desc.contains(d.type_name),
+                "code tool description missing canonical effect {}; got: {desc}",
+                d.type_name
+            );
+        }
     }
 
     #[test]

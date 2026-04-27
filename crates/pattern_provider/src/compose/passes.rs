@@ -6,7 +6,7 @@
 //!
 //! 1. [`segment_1::Segment1Pass`] — system prompt + tool schemas.
 //! 2. [`segment_2::Segment2Pass`] — prior-turn history + summary-head +
-//!    memory-change pseudo-messages.
+//!    inline attachment rendering (block writes, file edits, snapshots).
 //! 3. [`segment_3::Segment3Pass`] — `[memory:current_state]` pseudo-turn.
 //!
 //! After all three passes, the caller appends fresh user input to
@@ -23,12 +23,20 @@
 //! type-level sequencing; tests verify the combined pipeline produces the
 //! correct marker count and placement.
 
+pub mod fresh_input;
 pub mod segment_1;
 pub mod segment_2;
 pub mod segment_3;
 
+pub use fresh_input::FreshInputPass;
 pub use segment_1::Segment1Pass;
 pub use segment_2::{Segment2Pass, synthesize_summary_message};
+
+// Attachment renderers live in `compose::render` but are re-exported here
+// for call-site convenience alongside the passes.
+pub use super::render::{
+    render_block_write_attachment, render_file_conflict_attachment, render_file_edit_attachment,
+};
 pub use segment_3::Segment3Pass;
 
 #[cfg(test)]
@@ -39,7 +47,9 @@ mod tests {
 
     use pattern_core::memory::StructuredDocument;
     use pattern_core::types::block::{BlockWrite, BlockWriteKind};
+    use pattern_core::types::ids::{new_id, new_snowflake_id};
     use pattern_core::types::memory_types::{BlockMetadata, BlockSchema, MemoryBlockType};
+    use pattern_core::types::message::{Message, MessageAttachment};
     use pattern_core::types::origin::{Author, SystemReason};
 
     use crate::compose::PartialRequest;
@@ -78,6 +88,21 @@ mod tests {
         }
     }
 
+    /// Build a Pattern `Message` from a `ChatMessage` with optional attachments.
+    fn make_pattern_message(chat: ChatMessage, attachments: Vec<MessageAttachment>) -> Message {
+        Message {
+            chat_message: chat,
+            id: new_id(),
+            position: new_snowflake_id(),
+            owner_id: SmolStr::new("agent-1"),
+            created_at: Timestamp::UNIX_EPOCH,
+            batch: new_snowflake_id(),
+            response_meta: None,
+            block_refs: vec![],
+            attachments,
+        }
+    }
+
     fn msg_text(msg: &ChatMessage) -> String {
         msg.content.joined_texts().unwrap_or_default()
     }
@@ -104,21 +129,21 @@ mod tests {
             SystemBlock::new("base instructions"),
             SystemBlock::new("persona"),
         ];
-        let prior_msgs = vec![
-            (SmolStr::new("msg-1"), ChatMessage::user("hello")),
-            (SmolStr::new("msg-2"), ChatMessage::assistant("hi there")),
-        ];
+        // Build prior messages with a BlockWriteNotifications attachment
+        // on the last message (replaces the old pseudo_messages path).
         let writes = vec![make_block_write("tasks")];
+        let prior_msgs = vec![
+            make_pattern_message(ChatMessage::user("hello"), vec![]),
+            make_pattern_message(
+                ChatMessage::assistant("hi there"),
+                vec![MessageAttachment::BlockWriteNotifications { writes }],
+            ),
+        ];
         let blocks = vec![make_doc("persona", "I am Sage.")];
 
         let passes: Vec<Box<dyn ComposerPass>> = vec![
             Box::new(Segment1Pass::new(system_blocks, vec![], profile.clone())),
-            Box::new(Segment2Pass::new(
-                vec![],
-                prior_msgs,
-                &writes,
-                profile.clone(),
-            )),
+            Box::new(Segment2Pass::new(vec![], prior_msgs, profile.clone())),
             Box::new(Segment3Pass::new(blocks, profile)),
         ];
 
@@ -163,11 +188,11 @@ mod tests {
     fn three_passes_place_exactly_3_breakpoints() {
         let profile = test_profile();
         let system_blocks = vec![SystemBlock::new("sys")];
-        let prior_msgs = vec![(SmolStr::new("msg-1"), ChatMessage::user("hello"))];
+        let prior_msgs = vec![make_pattern_message(ChatMessage::user("hello"), vec![])];
         let blocks = vec![make_doc("persona", "content")];
 
         let seg1 = Segment1Pass::new(system_blocks, vec![], profile.clone());
-        let seg2 = Segment2Pass::new(vec![], prior_msgs, &[], profile.clone());
+        let seg2 = Segment2Pass::new(vec![], prior_msgs, profile.clone());
         let seg3 = Segment3Pass::new(blocks, profile);
 
         let mut partial = PartialRequest::new("claude-opus-4-7");
@@ -212,8 +237,7 @@ mod tests {
             )),
             Box::new(Segment2Pass::new(
                 vec![],
-                vec![(SmolStr::new("msg-1"), ChatMessage::user("hello"))],
-                &[],
+                vec![make_pattern_message(ChatMessage::user("hello"), vec![])],
                 profile.clone(),
             )),
             Box::new(Segment3Pass::new(blocks, profile)),
@@ -236,13 +260,18 @@ mod tests {
         );
     }
 
-    // ---- AC8.3: [memory:updated] appears in segment 2 ----
+    // ---- AC8.3: [memory:updated] appears in segment 2 via BlockWriteNotifications ----
 
     #[test]
-    fn pipeline_contains_updated_pseudo_message_in_segment_2() {
+    fn pipeline_contains_updated_block_write_attachment_in_segment_2() {
         let profile = test_profile();
         let writes = vec![make_block_write("task_list")];
-        let prior = vec![(SmolStr::new("msg-1"), ChatMessage::user("msg"))];
+        // Attach block writes to the prior message as a
+        // BlockWriteNotifications attachment.
+        let prior = vec![make_pattern_message(
+            ChatMessage::user("msg"),
+            vec![MessageAttachment::BlockWriteNotifications { writes }],
+        )];
 
         let passes: Vec<Box<dyn ComposerPass>> = vec![
             Box::new(Segment1Pass::new(
@@ -250,21 +279,24 @@ mod tests {
                 vec![],
                 profile.clone(),
             )),
-            Box::new(Segment2Pass::new(vec![], prior, &writes, profile.clone())),
+            Box::new(Segment2Pass::new(vec![], prior, profile.clone())),
             Box::new(Segment3Pass::new(vec![], profile)),
         ];
 
         let output =
             compose(&passes, partial_with_beta("claude-opus-4-7")).expect("compose succeeds");
 
-        // Find a message containing [memory:updated] — should be in
-        // the segment 2 region (before the current_state message).
+        // Find a message containing [memory:updated] — should be
+        // rendered inline on the prior message via attachment rendering.
         let found = output
             .request
             .chat
             .messages
             .iter()
             .any(|m| msg_text(m).contains("[memory:updated]"));
-        assert!(found, "must contain a [memory:updated] pseudo-message");
+        assert!(
+            found,
+            "must contain [memory:updated] from BlockWriteNotifications attachment"
+        );
     }
 }

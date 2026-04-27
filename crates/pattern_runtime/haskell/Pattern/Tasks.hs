@@ -19,8 +19,8 @@
 -- > Tasks.create block specJson
 --
 -- 'List' is named as-is (no underscore suffix needed) because the
--- qualified import prevents collision with 'Prelude.list' or
--- 'Pattern.Sources.List'.  'QueryGraph' maps to @Tasks.queryGraph@.
+-- qualified import prevents collision with 'Prelude.list' or other
+-- effect modules' 'List' constructors.  'QueryGraph' maps to @Tasks.queryGraph@.
 module Pattern.Tasks where
 
 import Control.Monad.Freer (Eff, Member, send)

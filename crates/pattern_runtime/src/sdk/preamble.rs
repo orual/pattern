@@ -1,7 +1,7 @@
 //! Haskell preamble assembler for `code` tool eval source wrapping.
 //!
 //! Produces the static Haskell boilerplate shared by every `code` tool
-//! eval: language pragmas, module header, standard imports, the 16 SDK
+//! eval: language pragmas, module header, standard imports, the SDK
 //! effect module imports (hybrid qualified/unqualified scheme), the
 //! `type M` effect-row alias, and pagination support.
 //!
@@ -20,7 +20,7 @@ use crate::sdk::describe::EffectDecl;
 
 /// Import strategy for an SDK effect module in the agent prelude.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ImportStyle {
+pub(crate) enum ImportStyle {
     /// Dual import: unqualified (terse helpers like `send`, `now`) plus a
     /// qualified alias for explicit-attribution call sites. Used for the
     /// four modules whose helper names don't collide with Prelude or each
@@ -37,7 +37,7 @@ enum ImportStyle {
 /// Modules whose helper verbs are unambiguous get dual imports
 /// (`Pattern.<Name>` + `qualified Pattern.<Name> as <Name>`); the
 /// remainder are qualified-only.
-fn import_style(type_name: &str) -> ImportStyle {
+pub(crate) fn import_style(type_name: &str) -> ImportStyle {
     match type_name {
         "Message" | "Time" | "Display" | "Spawn" => ImportStyle::Dual,
         _ => ImportStyle::QualifiedOnly,
@@ -47,7 +47,7 @@ fn import_style(type_name: &str) -> ImportStyle {
 /// Render one entry of the `type M` effect-row alias for an effect
 /// module: `<Name>` for dual-imported modules whose type is in scope
 /// unqualified, `<Name>.<Name>` for qualified-only modules.
-fn type_m_entry(type_name: &str) -> String {
+pub(crate) fn type_m_entry(type_name: &str) -> String {
     match import_style(type_name) {
         ImportStyle::Dual => type_name.to_string(),
         ImportStyle::QualifiedOnly => format!("{type_name}.{type_name}"),
@@ -66,7 +66,9 @@ pub fn build_for(caps: &pattern_core::CapabilitySet) -> String {
     build(&decls)
 }
 
-/// Build the Haskell preamble string from an effect-decl slice.
+/// Build the Haskell preamble string from an effect-decl slice, optionally
+/// splicing per-port library source blocks between the SDK imports and the
+/// `type M` alias.
 ///
 /// The `decls` parameter (callers pass [`crate::sdk::bundle::canonical_effect_decls`]
 /// for unfiltered output, or [`crate::sdk::bundle::filtered_effect_decls`]
@@ -77,7 +79,15 @@ pub fn build_for(caps: &pattern_core::CapabilitySet) -> String {
 /// helper bodies are NOT inlined: the effect modules are imported
 /// directly. Tidepool's multi-module compilation works since the
 /// DataConTable/CoreExpr bug was fixed in our fork.
-pub fn build(decls: &[EffectDecl]) -> String {
+///
+/// `port_libraries` is a slice of `(PortId, library_source)` pairs.
+/// Each pair is spliced after the `default` line and error shim, before
+/// the `type M` alias, with a `-- Port library: <id>` comment header.
+/// An empty slice produces output identical to [`build`].
+pub fn build_with_libraries(
+    decls: &[EffectDecl],
+    port_libraries: &[(pattern_core::types::port::PortId, &str)],
+) -> String {
     let mut out = String::with_capacity(8192);
 
     // Language pragmas.
@@ -165,6 +175,20 @@ pub fn build(decls: &[EffectDecl]) -> String {
     out.push_str("error :: Text -> a\nerror = P.error . T.unpack\n");
     out.push('\n');
 
+    // Port library source blocks — spliced here (after SDK imports, before
+    // `type M`) so that library helpers are in scope for the agent program.
+    // Each port's library source is headed by a comment identifying its
+    // origin; the source is emitted verbatim (it is the port operator's
+    // responsibility to produce well-typed Haskell).
+    for (port_id, library_src) in port_libraries {
+        out.push_str(&format!("-- Port library: {port_id}\n"));
+        out.push_str(library_src);
+        if !library_src.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+
     // API documentation for the LLM — emit each effect's helper
     // signatures as comments so the LLM has a complete reference for
     // what operations exist on each module. The signatures come from
@@ -211,6 +235,14 @@ pub fn build(decls: &[EffectDecl]) -> String {
     emit_pagination_support(&mut out);
 
     out
+}
+
+/// Build the Haskell preamble string from an effect-decl slice.
+///
+/// Convenience wrapper over [`build_with_libraries`] with an empty
+/// `port_libraries` slice. See that function for full documentation.
+pub fn build(decls: &[EffectDecl]) -> String {
+    build_with_libraries(decls, &[])
 }
 
 /// Emit the pagination / truncation Haskell functions into the preamble.
@@ -302,11 +334,11 @@ fn emit_pagination_support(out: &mut String) {
 
 /// Build the effect stack type string using qualified names where required.
 ///
-/// Returns the canonical 16-effect row string matching the `type M` alias
+/// Returns the canonical 15-effect row string matching the `type M` alias
 /// in the preamble: `'[Memory.Memory, Search.Search, Recall.Recall,
 /// Tasks.Tasks, Skills.Skills, Message, Display, Time, Log.Log,
-/// Shell.Shell, File.File, Sources.Sources, Mcp.Mcp, Rpc.Rpc, Spawn,
-/// Diagnostics.Diagnostics]`.
+/// Shell.Shell, File.File, Mcp.Mcp, Spawn, Diagnostics.Diagnostics,
+/// Port.Port]`.
 ///
 /// Returns `'[]` when `decls` is empty (legacy / test use).
 pub fn build_effect_stack_type(decls: &[EffectDecl]) -> String {
@@ -319,8 +351,8 @@ pub fn build_effect_stack_type(decls: &[EffectDecl]) -> String {
     concat!(
         "'[Memory.Memory, Search.Search, Recall.Recall, Tasks.Tasks, Skills.Skills, ",
         "Message, Display, Time, Log.Log, Shell.Shell, ",
-        "File.File, Sources.Sources, Mcp.Mcp, Rpc.Rpc, Spawn, ",
-        "Diagnostics.Diagnostics, Wake.Wake, Fronting.Fronting]"
+        "File.File, Mcp.Mcp, Spawn, ",
+        "Diagnostics.Diagnostics, Wake.Wake, Fronting.Fronting, Port.Port]"
     )
     .to_string()
 }
@@ -377,19 +409,27 @@ mod tests {
             "import qualified Pattern.Memory as Memory",
             "import qualified Pattern.File as File",
             "import qualified Pattern.Log as Log",
-            "import qualified Pattern.Sources as Sources",
             "import qualified Pattern.Shell as Shell",
-            "import qualified Pattern.Rpc as Rpc",
             "import qualified Pattern.Mcp as Mcp",
             "import qualified Pattern.Search as Search",
             "import qualified Pattern.Recall as Recall",
             "import qualified Pattern.Tasks as Tasks",
             "import qualified Pattern.Skills as Skills",
             "import qualified Pattern.Diagnostics as Diagnostics",
+            "import qualified Pattern.Port as Port",
         ];
         for line in expected {
             assert!(preamble.contains(line), "missing: {line}");
         }
+        // Sources and Rpc are retired; verify they are absent.
+        assert!(
+            !preamble.contains("Pattern.Sources"),
+            "Sources import must not appear in preamble"
+        );
+        assert!(
+            !preamble.contains("Pattern.Rpc"),
+            "Rpc import must not appear in preamble"
+        );
     }
 
     #[test]
@@ -415,9 +455,18 @@ mod tests {
         );
         assert!(
             preamble.contains(
-                "File.File, Sources.Sources, Mcp.Mcp, Rpc.Rpc, Spawn, Diagnostics.Diagnostics, Wake.Wake, Fronting.Fronting]"
+                "File.File, Mcp.Mcp, Spawn, Diagnostics.Diagnostics, Wake.Wake, Fronting.Fronting, Port.Port]"
             ),
-            "missing File/Sources/Mcp/Rpc/Spawn/Diagnostics/Wake/Fronting in type M"
+            "missing File/Mcp/Spawn/Diagnostics/Wake/Fronting/Port in type M"
+        );
+        // Sources and Rpc are retired; verify they are absent from type M.
+        assert!(
+            !preamble.contains("Sources.Sources"),
+            "Sources must not appear in type M alias"
+        );
+        assert!(
+            !preamble.contains("Rpc.Rpc"),
+            "Rpc must not appear in type M alias"
         );
     }
 
@@ -517,8 +566,8 @@ mod tests {
             "expected qualified form with Skills after Tasks; got: {stack}"
         );
         assert!(
-            stack.ends_with("Fronting.Fronting]"),
-            "expected Fronting.Fronting] at end; got: {stack}"
+            stack.ends_with("Port.Port]"),
+            "expected Port.Port] at end (last in canonical row); got: {stack}"
         );
     }
 
@@ -656,8 +705,73 @@ mod tests {
             "type M must start in canonical order, got: {row}"
         );
         assert!(
-            row.ends_with("Spawn, Diagnostics.Diagnostics, Wake.Wake, Fronting.Fronting]"),
-            "type M must end with Spawn, Diagnostics.Diagnostics, Wake.Wake, Fronting.Fronting, got: {row}"
+            row.ends_with("Wake.Wake, Fronting.Fronting, Port.Port]"),
+            "type M must end with Wake/Fronting/Port (last in canonical row); got: {row}"
         );
+    }
+
+    // ── Port library splicing (Phase 4 Task 7) ──────────────────────────────
+
+    use pattern_core::types::port::PortId;
+
+    /// A single port library is appended after the SDK imports, before `type M`.
+    #[test]
+    fn library_appended_when_provided() {
+        let decls = canonical_effect_decls();
+        let port_id = PortId::new("http");
+        let library_src = "-- Http helpers\nhttpGet url = call \"http\" \"get\" url\n";
+        let preamble = build_with_libraries(&decls, &[(port_id, library_src)]);
+
+        assert!(
+            preamble.contains("-- Port library: http"),
+            "missing port library header: {preamble}"
+        );
+        assert!(
+            preamble.contains("httpGet url = call"),
+            "missing library source: {preamble}"
+        );
+
+        // Library must appear BEFORE `type M` in the preamble.
+        let lib_pos = preamble.find("-- Port library: http").expect("header");
+        let type_m_pos = preamble.find("type M = '").expect("type M");
+        assert!(
+            lib_pos < type_m_pos,
+            "library should appear before type M (lib_pos={lib_pos}, type_m_pos={type_m_pos})"
+        );
+    }
+
+    /// When no port libraries are supplied, the preamble is identical to
+    /// calling `build()` without the parameter (regression guard).
+    #[test]
+    fn no_library_block_when_empty() {
+        let decls = canonical_effect_decls();
+        let without = build(&decls);
+        let with_empty = build_with_libraries(&decls, &[]);
+        assert_eq!(
+            without, with_empty,
+            "build_with_libraries with empty slice must equal build()"
+        );
+    }
+
+    /// Two port libraries each get their own comment header.
+    #[test]
+    fn multiple_libraries_each_get_header() {
+        let decls = canonical_effect_decls();
+        let id1 = PortId::new("slack");
+        let id2 = PortId::new("weather");
+        let src1 = "slackSend = call \"slack\" \"send\"\n";
+        let src2 = "getWeather loc = call \"weather\" \"current\" loc\n";
+        let preamble = build_with_libraries(&decls, &[(id1, src1), (id2, src2)]);
+
+        assert!(
+            preamble.contains("-- Port library: slack"),
+            "missing slack header"
+        );
+        assert!(
+            preamble.contains("-- Port library: weather"),
+            "missing weather header"
+        );
+        assert!(preamble.contains(src1.trim()), "missing slack source");
+        assert!(preamble.contains(src2.trim()), "missing weather source");
     }
 }

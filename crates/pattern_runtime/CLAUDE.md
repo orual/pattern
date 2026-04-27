@@ -4,7 +4,7 @@ Agent runtime for Pattern v3. Houses Tidepool (Haskell-in-Rust) embedding, the
 agent turn loop, `freer-simple` effect handlers, and turn-level checkpoint
 machinery. Depends only on `pattern_core` trait definitions.
 
-Last verified: 2026-04-26 (post v3-multi-agent Phase 4)
+Last verified: 2026-04-26 (post v3-multi-agent Phase 4 + v3-sandbox-io Phases 1-5)
 
 v3-TUI integration note: the runtime is consumed by `pattern_server`'s actor
 via `TidepoolSession`, `MultiplexSink`, and per-batch `TurnSinkBridge`. The
@@ -294,7 +294,7 @@ Gains `snapshot_policy: SnapshotPolicy` field wrapping:
 Agent programs import from the `Pattern.*` SDK module tree (installed at
 `$PATTERN_SDK_DIR` or `crates/pattern_runtime/haskell/Pattern/` by default).
 `tidepool-extract` compiles agents with the SDK directory on its include
-path -- all 16 effect modules plus vendored utility modules are compiled
+path -- the SDK effect modules plus vendored utility modules are compiled
 and linked together.
 
 The SDK uses a hybrid qualified/unqualified import scheme. Modules with
@@ -307,10 +307,11 @@ import Pattern.Message
 import Pattern.Time
 import Pattern.Log   -- use qualified: Log.error avoids shadowing the error shim
 
--- Qualified: Memory, File, Log, Search, Recall, Sources, Shell, Rpc, Mcp
+-- Qualified: Memory, File, Log, Search, Recall, Shell, Mcp, Port
 import qualified Pattern.Memory as Memory
 import qualified Pattern.File as File
 import qualified Pattern.Log as Log
+import qualified Pattern.Port as Port
 
 agent = do
   Memory.put "notes" "hello"        -- Memory.Put
@@ -339,8 +340,8 @@ Collision-avoidance decisions on the Haskell side:
 - `File.read` renamed from `read_` — use qualified `File.read` to avoid
   shadowing `Prelude.read` in files without `NoImplicitPrelude`.
 - `Message.send` renamed from `send_`; `Log.error` renamed from `error_`.
-- `File.List` is `ListDir` — leaves `List` to `Sources`.
-- `Rpc.Call` (request/response) — leaves `Send` to `Message`.
+- `File.List` is `ListDir` — avoids ambiguity with generic `List`.
+- `Port.Call` (request/response to external services) — leaves `Send` to `Message`.
 
 Defense-in-depth at the host-runtime decode boundary is provided by the
 derive layer (arity disambiguation + `#[core(module = "Pattern.<Module>",
@@ -348,16 +349,20 @@ name = "...")]` on every SDK request variant).
 
 Effect-row ordering matters: handler position in the `SdkBundle` HList
 determines the JIT effect tag. The canonical order is storage-adjacent
-first (`Memory, Search, Recall`), then messaging/display (`Message,
-Display, Time, Log`), then rarer effects (`Shell, File, Sources, Mcp,
-Rpc, Spawn`):
+first (`Memory, Search, Recall, Tasks, Skills`), then messaging/display
+(`Message, Display, Time, Log`), then rarer effects (`Shell, File, Mcp,
+Spawn, Diagnostics`), then `Port` last (the unified external-service
+port from v3-sandbox-io Phase 4 — replaces the retired `Sources` and
+`Rpc` effects):
 
 ```
-Memory, Search, Recall, Tasks, Skills, Message, Display, Time, Log, Shell, File,
-Sources, Mcp, Rpc, Spawn, Diagnostics
+Memory, Search, Recall, Tasks, Skills, Message, Display, Time, Log,
+Shell, File, Mcp, Spawn, Diagnostics, Port
 ```
 
-Agent `Eff '[...]` rows must line up with this prefix.
+Agent `Eff '[...]` rows must line up with this prefix. The
+`canonical_decls_has_15_entries` test in `sdk/bundle.rs` is the source
+of truth for the ordering and entry count.
 
 ### Vendored utility modules
 
@@ -365,7 +370,7 @@ The SDK vendors several utility modules so agents are fully
 self-contained (no tidepool-mcp dependency):
 
 - `Pattern.Prelude` — curated prelude (Text-returning `show`, list/Map
-  helpers, Aeson construction). Does NOT re-export the 16 effect modules.
+  helpers, Aeson construction). Does NOT re-export the SDK effect modules.
 - `Pattern.Aeson`, `Pattern.Aeson.Value`, `Pattern.Aeson.KeyMap`,
   `Pattern.Aeson.Lens` — JSON construction + traversal.
 - `Pattern.Table` — tabular text formatting.
@@ -378,7 +383,7 @@ so agents can `show now` in log lines.
 
 The `code` tool's description (`sdk/code_tool.rs`) is ~6.4 KB and built
 once at process startup from `canonical_effect_decls()`. It contains:
-- Full API reference (every helper signature across all 16 effects).
+- Full API reference (every helper signature across the SDK effects).
 - Effect-row and import-scheme conventions.
 - Common gotchas section (e.g. `Memory.get` returns `Content` not
   `Maybe`, `pure ()` not `return unit`, `Show Instant` works,
@@ -1095,3 +1100,228 @@ sessions for the same project). `ProjectMount.cache` is stored as
 and passes them with `CapabilitySet::all()` (fail-closed: no partial capability
 grants from daemon sessions). The `WakeRegistry` is built inside
 `open_with_agent_loop` (needs the session's mailbox sender).
+
+## Shell subsystem (Phase 3 Tasks 1-9)
+
+### Architecture overview
+
+The shell subsystem is layered: `LocalPtyBackend` → `ProcessManager` →
+`ShellHandler`. Each layer is independently testable.
+
+- **`LocalPtyBackend`** (`process_manager/local_pty.rs`) — sync PTY driver.
+  Allocates a pty pair, forks a shell (`$SHELL` → `/bin/bash` fallback),
+  writes command strings, reads until `PROMPT_MARKER` (injected via
+  `PROMPT_COMMAND`), strips ANSI, returns trimmed output. Stateful: the
+  backend owns the shell process for the lifetime of the session and
+  environment is preserved between `execute()` calls.
+
+- **`ProcessManager`** (`process_manager/manager.rs`) — per-session wrapper.
+  Owns one `LocalPtyBackend` for interactive shell execution plus a
+  `ProcessLogger` for process-log persistence. `spawn()` forks background
+  tasks via `std::thread::spawn` with a bounded output queue; `execute()`
+  forwards synchronously to the backend. `kill()` / `status()` manage the
+  background task registry. Every `SessionContext` owns exactly one
+  `ProcessManager` — no runtime-global singleton.
+
+- **`ProcessLogger`** (`process_manager/logger.rs`) — append-only log of
+  completed shell executions. Each entry records timestamp, command,
+  output, exit status, and duration. Persists to a `process_log.ndjson`
+  file in the session's cache dir.
+
+- **`ShellHandler`** (`sdk/handlers/shell.rs`) — maps `ShellReq` variants
+  to `ProcessManager` calls. Handles `Execute`, `Spawn`, `Kill`, `Status`,
+  `Cwd`, and `Env`. Enforces the Phase 1 policy gate (Allow / Deny /
+  RequireApproval) before delegating. Pushes `ShellOutput` attachments
+  (output chunks, exit events, kill events) to the session's
+  `SystemCommunicationsQueue` for asynchronous delivery to agents.
+
+### `ShellOutput` attachments
+
+Background spawns stream output via `MessageAttachment::ShellOutput`
+pushed to `SessionContext.system_comms_queue`. The bridge thread
+(`spawn_output_bridge`) runs on `std::thread::spawn` (not a tokio task)
+and drains the pty output queue, pushing attachments until an `Exit` or
+`Killed` terminal event is observed. Tests poll the queue with
+`wait_for_queue` / `drain_shell_outputs` helpers (condition-based, no
+arbitrary `sleep`).
+
+### `SessionContext.with_process_manager`
+
+Builder method added for test fixture control:
+
+```rust
+ctx.with_process_manager(Arc::new(ProcessManager::new(cwd, cache_dir)))
+```
+
+Replaces the default manager (constructed at session open with the
+persona's cache dir) with an injected one. Only needed in integration tests
+that need to inspect the process log path or inject a controlled cache dir.
+
+### Kill handler
+
+`ShellReq::Kill(TaskId)` takes the opaque handle string returned by `Spawn`'s
+JSON response (`{"task_id":"...","pid":N}`). Recycle-safe: lookup goes
+through the running map, the actual SIGTERM dispatch uses the reader thread's
+owned `Child` handle. PID recycling cannot misroute kills to unrelated
+processes.
+
+The integration test `kill_via_handler_terminates_running_process` (AC3.4)
+exercises the full honest path: Spawn → parse task_id from JSON → Kill(task_id)
+→ Status confirms removal.
+
+### AC3 integration tests (`tests/shell_handler.rs`)
+
+Eighteen handler-level integration tests covering AC3.1–AC3.10 plus
+capability-denial and policy-gate paths (including a wired-broker test
+that observes the `ToolExecution` scope shape):
+
+| Test | AC | What it verifies |
+|------|----|-----------------|
+| `execute_via_handler_returns_output_and_exit_code` | AC3.1 | Execute dispatches and returns JSON ExecuteResult |
+| `execute_via_handler_persists_session_state` | AC3.2 | cd then pwd; same handler/context |
+| `spawn_streams_output_via_attachments` | AC3.3 | Background spawn pushes ShellOutput attachments |
+| `kill_via_handler_terminates_running_process` | AC3.4 | Spawn → Kill(task_id) via handler → Status confirms removal |
+| `status_via_handler_lists_running_tasks` | AC3.5 | Status returns both task IDs from two Spawns |
+| `cwd_persists_across_handler_executions` | AC3.6 | pm.cwd() reflects `cd /tmp` after Execute |
+| `execute_via_handler_timeout_kills_and_surfaces_error` | AC3.7 | Timeout → Err; session recovers |
+| `kill_unknown_task_via_handler_returns_error` | AC3.8 | Kill(bogus) → Err with "not found" |
+| `exit_marker_resists_command_output_injection` | AC3.9 | Spurious marker in output; exit_code correct |
+| `spawn_output_logged_to_file` | AC3.10 | ProcessLogger writes OUT/EXIT lines to ndjson |
+| `execute_via_handler_denied_without_shell_capability` | cap | Restricted caps → PERMISSION_DENIED_PREFIX |
+| `spawn_via_handler_denied_without_shell_capability` | cap | Restricted caps deny Spawn |
+| `kill_via_handler_denied_without_shell_capability` | cap | Restricted caps deny Kill |
+| `status_via_handler_denied_without_shell_capability` | cap | Restricted caps deny Status |
+| `execute_via_handler_denies_when_policy_denies` | policy | Deny rule → PERMISSION_DENIED_PREFIX before PM |
+| `execute_via_handler_escalates_to_broker_on_require_approval` | policy | rm -rf* rule → broker consulted |
+| `spawn_via_handler_also_gates_on_policy` | policy | Deny rule also fires on Spawn |
+
+Tests use `#[tokio::test]` for context construction (async DB) then invoke
+the handler synchronously. `tidepool_testing::gen::standard_datacon_table()`
+provides the Haskell constructor table (NOT `pattern_runtime::testing`,
+which is `#[cfg(test)]`-gated and unavailable from integration test files).
+
+## File subsystem (v3-sandbox-io Phase 2)
+
+### Architecture overview
+
+The file subsystem is layered: `LoroSyncedFile` (CRDT model from
+`pattern_memory::loro_sync`) → `FileManager` → `FileHandler`.
+
+- **`FileManager`** (`file_manager/manager.rs`) — per-session file lifecycle
+  manager. Owns a pooled `DirWatcher` (shared with other open files in the
+  same session), per-file `LoroSyncedFile` handles, and file-state tracking
+  (open, watched, closed). `open()` starts CRDT sync for a file;
+  `watch()` subscribes to external edits; `close()` tears down both.
+  Pushes `MessageAttachment::FileEdit` reminders to the session's
+  `async_reminder_queue` for delivery at the next turn boundary.
+
+- **`FilePolicy`** (`file_manager/policy.rs`) — default-deny access control
+  for file operations. Loaded from `.pattern.kdl`'s `file_policy {}` block
+  via `FilePolicySection` (in `pattern_memory::config`). Last-match-wins
+  rule evaluation via `check_access(path)`. `FilePolicy::from_section()`
+  converts the config representation; `FilePolicy::from_rules()` accepts
+  pre-built rules for test fixtures.
+
+- **`FileHandler`** (`sdk/handlers/file.rs`) — maps `FileReq` variants
+  (`Read`, `Write`, `Open`, `Watch`, `Close`, `List`) to `FileManager`
+  calls. The config-KDL shape guard fires before policy evaluation on
+  `Write`. `FilePolicy` deny fires before the permission broker.
+
+### `SessionContext.async_reminder_queue`
+
+A `Mutex<Vec<MessageAttachment>>` shared between the `FileManager`'s
+background watcher bridge and the agent loop. Background threads push
+`FileEdit` / `FileConflict` attachments; `drive_step` drains them at
+the start of each orchestrate iteration and splices them onto the
+current turn's messages.
+
+### `HasFileManager` trait
+
+`HasFileManager { fn file_manager() -> Option<&Arc<FileManager>> }` —
+implemented for `SessionContext` (returns the wired manager) and `()`
+(returns `None`). Handlers call this; the `()` shim provides a
+closed-by-default path for test doubles without a file subsystem.
+
+## Port subsystem (v3-sandbox-io Phases 4-5)
+
+### Architecture overview
+
+The unified Port subsystem replaces the retired `Sources` and `Rpc` effects.
+Three layers: `Port` trait (in `pattern_core`) → `PortRegistryImpl` + dispatcher
+actor (in this crate) → `PortHandler` (SDK handler).
+
+- **`Port` trait** (`pattern_core::traits::port`) — one `id()`, `metadata()`,
+  `capabilities()`, `call()`, `subscribe()`, `unsubscribe()`, plus
+  `library()` for optional Haskell wrapper code spliced into the agent's
+  prelude at session open.
+
+- **`PortRegistryImpl`** (`port_registry/registry.rs`) — concrete
+  `PortRegistry` impl. Owns a `DashMap<PortId, Arc<dyn Port>>` of
+  registered ports plus a tokio-spawned dispatcher actor
+  (`port_registry/dispatcher.rs`) that serialises `call()` and
+  `subscribe()` invocations. The dispatcher uses `mpsc` channels;
+  handlers send requests via `blocking_send` and wait via
+  `recv_timeout` (sync-safe from the eval worker thread).
+
+- **`PortRegistryImpl::with_runtime_ports(handle)`** — factory that
+  constructs a registry pre-loaded with runtime-provided ports (currently
+  `HttpPort`). Both `TidepoolRuntime::new` and `pattern_server::main` build
+  the registry through this helper so `HttpPort` is always registered.
+
+- **`HttpPort`** (`ports/http.rs`) — first concrete Port impl. Methods:
+  `get`, `post`, `put`, `patch`, `delete`, `head`, `options`. Backed by
+  a `reqwest::Client` with connection pooling.
+
+- **`PortHandler`** (`sdk/handlers/port.rs`) — maps `PortReq` variants
+  (`List`, `Call`, `Subscribe`, `Unsubscribe`) to dispatcher messages.
+  Per-port capability gating via `CapabilitySet::has_port(port_id)`.
+
+### Port library materialization (Phase 5)
+
+Ports can ship Haskell wrapper code via `Port::library()`. At session
+open, `open_with_agent_loop` materializes each registered port's library
+into a per-session tempdir. The tempdir path is added to the eval
+worker's include path so agents can `import qualified Pattern.Http as
+Http` (or any other port library). The source for runtime-provided port
+libraries lives at `crates/pattern_runtime/haskell/ports/` (NOT in the
+SDK include tree). `SessionContext._port_lib_tempdir` holds the tempdir
+handle to keep it alive for the session's lifetime.
+
+### `PortEvent` attachment streaming
+
+Ports that support subscriptions push `PortEvent`s on a `BoxStream`.
+The dispatcher bridges these onto `SessionContext.async_reminder_queue`
+as `MessageAttachment::PortEvent` attachments. Rendering goes through
+`pattern_provider::compose::render::render_port_event_attachment`.
+
+## `open_with_agent_loop` signature (current)
+
+```rust
+pub async fn open_with_agent_loop(
+    persona: PersonaSnapshot,
+    sdk: &SdkLocation,
+    memory_store: Arc<dyn MemoryStore>,
+    provider: Arc<dyn ProviderClient>,
+    db: Arc<ConstellationDb>,
+    turn_sink: Arc<dyn TurnSink>,
+    prelude_dir: Option<PathBuf>,
+    mount_path: Option<PathBuf>,
+    capabilities: Option<CapabilitySet>,
+    port_registry: Arc<PortRegistryImpl>,
+    file_policy: Option<FilePolicy>,
+) -> Result<Self, RuntimeError>
+```
+
+The `port_registry` and `file_policy` parameters were added in
+v3-sandbox-io. `file_policy`, when `Some`, causes a `FileManager` to be
+constructed and wired into the `SessionContext` before the eval worker
+spawns. Port library materialization and dispatcher start-up also happen
+in this function.
+
+## End-to-end sandbox-io smoke test (`tests/sandbox_io_smoke.rs`)
+
+Drives the real session machinery via scripted `MockProvider.tool_use_turn`
+calls: File.Read, File.Write (policy-allowed path), Shell.Execute,
+Port.List, Port.Call (HttpPort). Validates the full handler → manager →
+backend chain without needing `tidepool-extract` on PATH (mock provider
+injects tool_use turns directly). Runs as a single `#[tokio::test]`.

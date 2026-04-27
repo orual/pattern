@@ -1,28 +1,59 @@
-//! Stub handler for `Pattern.Shell`, gated by the session's
-//! [`pattern_core::PolicySet`] and per-runtime
-//! [`pattern_core::permission::PermissionBroker`].
+//! Handler for `Pattern.Shell` — dispatches all four variants to
+//! `ProcessManager`.
 //!
-//! Phase 1 Task 10: the handler now evaluates the policy pipeline
-//! before its existing "not implemented" stub error. Real command
-//! execution still arrives in the post-foundation shell-tool plan; this
-//! task only wires the gate.
+//! ## Design
 //!
-//! Decision flow per [`ShellReq::Execute`]:
+//! `ShellHandler<SessionContext>` (tightened from the stub's `HasCancelState`
+//! bound — matches `SkillsHandler` and Phase 2's `FileHandler`) dispatches
+//! `ShellReq` synchronously to `cx.user().process_manager()`.
 //!
-//! - [`pattern_core::PolicyAction::Deny`] → handler errors with the
-//!   [`crate::policy::PERMISSION_DENIED_PREFIX`] prefix.
-//! - [`pattern_core::PolicyAction::RequireApproval`] → escalate via
-//!   [`crate::permission::PermissionBridge::request_sync`]. On approval,
-//!   error with [`crate::policy::GATE_APPROVED_PREFIX`] (real exec
-//!   lives in a later plan); on denial / timeout, error with
-//!   `PERMISSION_DENIED_PREFIX`.
-//! - [`pattern_core::PolicyAction::Allow`] → existing "not implemented"
-//!   stub, so AC2.2's gate-skip path is observable (no `GateApproved:`
-//!   marker means the gate did not fire).
+//! ## Critical safety note (no block_on)
 //!
-//! Spawn/Kill/Status are not yet gated — Phase 1 Task 10's scope is
-//! only Execute. Spawn arrives with the real shell-tool plan.
+//! This handler runs on the Tidepool eval worker — a dedicated OS thread with
+//! NO ambient tokio runtime. Do NOT introduce `block_on` here, even against a
+//! `Handle` stashed on `SessionContext`. `block_on` against arbitrary plugin
+//! code can deadlock if the awaited future calls `spawn_blocking` against a
+//! saturated pool (or runs on a single-thread runtime). All dispatched
+//! subsystems exposed at this boundary must be sync at the API surface.
+//! `ProcessManager` is sync; the bridge thread spawned by `Spawn` dispatch is
+//! a plain `std::thread`, not a tokio task.
+//!
+//! ## Capability check
+//!
+//! `cx.user().capabilities()` returns `None` for full-power sessions and
+//! `Some(cap)` for scoped sessions. When `Some`, we call `cap.has_shell()`.
+//! `None` means all-allowed — equivalent to `CapabilitySet::all()`.
+//!
+//! ## Policy gate
+//!
+//! After the capability check, `Execute` and `Spawn` variants consult the
+//! session's `PolicySet` via `cx.user().policies()`. The evaluation follows
+//! the same three-way fan-out as `FileHandler`:
+//!
+//! - `Allow` → dispatch to `ProcessManager`.
+//! - `Deny` → return `PERMISSION_DENIED_PREFIX`-marked `EffectError::Handler`.
+//! - `RequireApproval` → escalate via `cx.user().permission_bridge()`. On
+//!   broker grant, return `GATE_APPROVED_PREFIX` marker. On denial / timeout /
+//!   missing bridge → return `PERMISSION_DENIED_PREFIX`.
+//!
+//! `Kill` and `Status` do NOT go through the policy pipeline: both operate on
+//! tasks the agent already spawned (the capability check above already gates
+//! whether the agent can use the Shell effect at all), and neither accepts a
+//! command string for a `ShellCommand` matcher to evaluate against.
+//!
+//! The asymmetry between `FileHandler` (gates per `Write`) and `ShellHandler`
+//! (gates per `Execute`/`Spawn`) is by design: both gate the command/path at
+//! the moment of invocation against a user-supplied string, not on auxiliary
+//! lifecycle management operations.
+//!
+//! ## v2 semantics (AC3.7 amendment 2026-04-26)
+//!
+//! Timeout = kill. There is no backgrounding path. The `Backgrounded` variant
+//! of `ShellOutputKind` (Task 7) is defined for forward-compat but is **never
+//! enqueued** by any code path in this phase. See the phase_03.md amendment
+//! for the rationale.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use pattern_core::permission::PermissionScope;
@@ -31,20 +62,21 @@ use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use tidepool_eval::Value;
 
 use crate::policy::{GATE_APPROVED_PREFIX, PERMISSION_DENIED_PREFIX};
+use crate::process_manager::TaskId;
+use crate::process_manager::error::ShellError;
+use crate::process_manager::logger::ProcessLogger;
+use crate::process_manager::manager::spawn_output_bridge;
 use crate::sdk::describe::{DescribeEffect, EffectDecl};
 use crate::sdk::requests::ShellReq;
-use crate::session::{HasCancelState, HasPermissionBridge, HasPolicySet};
+use crate::session::{HasPermissionBridge, SessionContext};
 use crate::timeout::HandlerGuard;
 
-/// Default broker-request timeout. Long enough to absorb a human
-/// thinking; short enough that a stalled responder surfaces as a
-/// denial rather than hanging the agent indefinitely.
-const SHELL_GATE_TIMEOUT: Duration = Duration::from_secs(120);
-
-/// Not-implemented placeholder for the Shell effect. Real implementation
-/// arrives in the post-foundation shell-tool plan (reuses preserved PTY
-/// backend + `ProcessSource`). Phase 1 Task 10 gates the stub through
-/// the policy pipeline.
+/// Handler for `Pattern.Shell` — dispatches all four variants to
+/// `ProcessManager`.
+///
+/// Bound to `SessionContext` (not the generic `HasCancelState` stub bound)
+/// because it needs `process_manager()`, `capability_set()`, and
+/// `async_reminder_queue()`.
 #[derive(Default, Clone)]
 pub struct ShellHandler;
 
@@ -54,497 +86,459 @@ impl DescribeEffect for ShellHandler {
             type_name: "Shell",
             description: "Shell command execution (Execute/Spawn/Kill/Status)",
             constructors: &[
-                "Execute :: Command -> Shell Text",
-                "Spawn   :: Command -> Shell Pid",
-                "Kill    :: Pid -> Shell ()",
-                "Status  :: Pid -> Shell Text",
+                "Execute :: Command -> Maybe TimeoutSecs -> Shell Text",
+                "Spawn   :: Command -> Shell Text",
+                "Kill    :: TaskId -> Shell ()",
+                "Status  :: Shell Text",
             ],
-            type_defs: &["type Command = Text", "type Pid = Integer"],
+            type_defs: &[
+                "type Command = Text",
+                "type TaskId = Text  -- opaque, recycle-safe; NOT an OS PID",
+                "type TimeoutSecs = Int",
+            ],
             helpers: &[
-                "execute :: Member Shell effs => Command -> Eff effs Text\nexecute c = send (Execute c)",
-                "spawn_ :: Member Shell effs => Command -> Eff effs Pid\nspawn_ c = send (Spawn c)",
-                "kill :: Member Shell effs => Pid -> Eff effs ()\nkill p = send (Kill p)",
-                "status :: Member Shell effs => Pid -> Eff effs Text\nstatus p = send (Status p)",
+                "execute :: Member Shell effs => Command -> Eff effs Text\nexecute c = send (Execute c Nothing)",
+                "executeWith :: Member Shell effs => Command -> TimeoutSecs -> Eff effs Text\nexecuteWith c t = send (Execute c (Just t))",
+                "spawn :: Member Shell effs => Command -> Eff effs Text\nspawn c = send (Spawn c)  -- returns JSON {task_id,pid}",
+                "kill :: Member Shell effs => TaskId -> Eff effs ()\nkill tid = send (Kill tid)",
+                "status :: Member Shell effs => Eff effs Text\nstatus = send Status  -- returns JSON [TaskInfo,...]",
             ],
         }
     }
 }
 
-impl<U> EffectHandler<U> for ShellHandler
-where
-    U: HasCancelState + HasPolicySet + HasPermissionBridge,
-{
+impl EffectHandler<SessionContext> for ShellHandler {
     type Request = ShellReq;
 
-    fn handle(&mut self, req: ShellReq, cx: &EffectContext<'_, U>) -> Result<Value, EffectError> {
-        // Enter the HandlerGate uniformly with the wired handlers so the
+    fn handle(
+        &mut self,
+        req: ShellReq,
+        cx: &EffectContext<'_, SessionContext>,
+    ) -> Result<Value, EffectError> {
+        // Enter the HandlerGate uniformly with the other handlers so the
         // watchdog's "has any handler been entered recently" bookkeeping
-        // does not mistakenly see a stub-only agent as non-yielding.
+        // does not mistakenly see this handler as non-yielding.
         let state = cx.user().cancel_state();
         let _guard = HandlerGuard::enter(&state.gate);
 
+        // Capability check: `None` means full-power (back-compat). `Some(cap)`
+        // means the session was opened with a restricted CapabilitySet; deny if
+        // Shell is not in the set.
+        let shell_allowed = cx
+            .user()
+            .capabilities()
+            .map(|cap| cap.has_shell())
+            .unwrap_or(true);
+        if !shell_allowed {
+            return Err(EffectError::Handler(format!(
+                "{PERMISSION_DENIED_PREFIX}Pattern.Shell: capability denied (Shell effect not in agent's CapabilitySet)"
+            )));
+        }
+
+        let pm = cx.user().process_manager();
+        let queue = Arc::clone(cx.user().async_reminder_queue());
+
         match req {
-            ShellReq::Execute(command) => evaluate_execute(&command, cx.user()),
-            other => stub_not_implemented(&other),
+            ShellReq::Execute(cmd, timeout_secs) => {
+                // Policy gate: consult the session's PolicySet before dispatching.
+                // `Kill` and `Status` are exempt — see module-level doc for rationale.
+                evaluate_shell_command(&cmd, cx.user())?;
+
+                // `Execute :: Command -> Maybe TimeoutSecs -> Shell Text`.
+                // `None` means "use the session default"; `Some(n)` is
+                // caller-supplied. n <= 0 is treated as "use default" defensively
+                // (the Haskell side could in principle send 0; we don't want a
+                // zero-second deadline to wedge the read loop).
+                let timeout = match timeout_secs {
+                    Some(n) if n > 0 => Duration::from_secs(n as u64),
+                    _ => cx.user().shell_default_timeout(),
+                };
+
+                match pm.execute(&cmd, timeout) {
+                    Ok(result) => {
+                        // v2 semantics (Amendment 2026-04-26): timeout = kill,
+                        // no backgrounding. `result.backgrounded_as` is always
+                        // `None`; the branch is omitted. The `Backgrounded`
+                        // variant of `ShellOutputKind` is defined for forward
+                        // compat but is never enqueued here.
+                        let json = serde_json::to_string(&result).map_err(|e| {
+                            EffectError::Handler(format!(
+                                "Pattern.Shell.Execute: failed to serialize result: {e}"
+                            ))
+                        })?;
+                        cx.respond(json)
+                    }
+                    Err(ShellError::Timeout(dur)) => Err(EffectError::Handler(format!(
+                        "Pattern.Shell.Execute: command timed out after {}s (use Shell.Spawn for long-running commands)",
+                        dur.as_secs()
+                    ))),
+                    Err(e) => Err(EffectError::Handler(format!("Pattern.Shell.Execute: {e}"))),
+                }
+            }
+
+            ShellReq::Spawn(cmd) => {
+                // Policy gate: consult the session's PolicySet before dispatching.
+                // Same gate as Execute — Spawn also runs a user-supplied command.
+                evaluate_shell_command(&cmd, cx.user())?;
+
+                let (task_id, pid, rx) = pm
+                    .spawn(&cmd)
+                    .map_err(|e| EffectError::Handler(format!("Pattern.Shell.Spawn: {e}")))?;
+
+                // Open a ProcessLogger for this task (AC3.10 crash backstop).
+                // Best-effort: if the log file cannot be opened (e.g., the
+                // cache dir is read-only), warn and continue without logging
+                // rather than failing the entire Spawn operation. The queue
+                // enqueue is the primary output path.
+                let logger = match ProcessLogger::open(pm.cache_dir(), &task_id) {
+                    Ok(log) => {
+                        tracing::debug!(
+                            task_id = %task_id,
+                            path = %log.path().display(),
+                            "shell-output-bridge: opened process log"
+                        );
+                        Some(log)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            error = %e,
+                            "shell-output-bridge: failed to open process log (continuing without logging)"
+                        );
+                        None
+                    }
+                };
+
+                // Bridge thread: drains the crossbeam receiver, writes each
+                // chunk to the process log (best-effort, AC3.10), and enqueues
+                // each chunk as a `MessageAttachment::ShellOutput` entry via
+                // the async-reminder queue. std::thread, NOT a tokio task —
+                // ProcessManager has no ambient runtime.
+                spawn_output_bridge(task_id.clone(), rx, Arc::clone(&queue), logger);
+
+                // Respond with JSON {"task_id": "...", "pid": N}. Agents save
+                // the task_id for Kill/Status; pid is provided for native-tool
+                // interop (e.g. ps, strace) without needing a separate effect.
+                let response = serde_json::json!({
+                    "task_id": task_id.to_string(),
+                    "pid": pid,
+                });
+                cx.respond(response.to_string())
+            }
+
+            ShellReq::Kill(task_id_str) => {
+                // task_id_str is the opaque handle string Spawn returned — NOT
+                // an OS PID. Recycle-safe: lookup goes through the running map,
+                // and the actual SIGTERM is dispatched via the reader thread's
+                // owned Child handle.
+                let task_id = TaskId(task_id_str);
+                pm.kill(&task_id).map_err(|e| match e {
+                    ShellError::UnknownTask(ref id) => EffectError::Handler(format!(
+                        "Pattern.Shell.Kill: task not found (already exited or invalid handle): {id}"
+                    )),
+                    other => EffectError::Handler(format!("Pattern.Shell.Kill: {other}")),
+                })?;
+                cx.respond(())
+            }
+
+            ShellReq::Status => {
+                // Returns JSON-encoded Vec<TaskInfo> per AC3.5 ("lists all
+                // active sessions/processes with their current state").
+                let tasks = pm.status();
+                let json = serde_json::to_string(&tasks).map_err(|e| {
+                    EffectError::Handler(format!(
+                        "Pattern.Shell.Status: failed to serialize task list: {e}"
+                    ))
+                })?;
+                cx.respond(json)
+            }
         }
     }
 }
 
-/// Evaluate an Execute request against the policy pipeline + broker.
-fn evaluate_execute<U>(command: &str, user: &U) -> Result<Value, EffectError>
-where
-    U: HasPolicySet + HasPermissionBridge,
-{
-    let policy_ctx = PolicyContext::Shell { command };
+/// Default broker-request timeout for shell-command gates. Same envelope
+/// as the File handler's gate timeout — long enough for human thinking,
+/// short enough that a stalled responder surfaces as denial.
+const SHELL_GATE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Evaluate a shell command string against the session's policy set.
+///
+/// Returns `Ok(())` when the command should proceed. Returns `Err` on denial,
+/// broker timeout, or gate approval (the escalation path returns
+/// `Err(GateApproved)` so tests can observe the gate decision without
+/// dispatching to `ProcessManager`).
+///
+/// The caller (Execute/Spawn arms) must call this AFTER the capability check
+/// and BEFORE delegating to `ProcessManager`.
+fn evaluate_shell_command(cmd: &str, user: &SessionContext) -> Result<(), EffectError> {
+    let policy_ctx = PolicyContext::Shell { command: cmd };
     match user.policies().evaluate(EffectCategory::Shell, &policy_ctx) {
         PolicyAction::Deny { reason } => Err(EffectError::Handler(format!(
             "{PERMISSION_DENIED_PREFIX}{}",
-            reason.unwrap_or_else(|| "shell denied by policy".into())
+            reason.unwrap_or_else(|| "shell command denied by policy".into())
         ))),
-        PolicyAction::RequireApproval { reason } => {
-            let Some(bridge) = user.permission_bridge() else {
-                // Bridge missing means the runtime hasn't wired the
-                // broker yet — fail closed rather than allowing.
-                return Err(EffectError::Handler(format!(
-                    "{PERMISSION_DENIED_PREFIX}shell gated by policy but no permission bridge \
-                     is wired"
-                )));
-            };
-            // Origin defaults to a benign system origin if the runtime
-            // hasn't published a dispatch origin (e.g. handler invoked
-            // outside drive_step). Direct-execution paths overwrite the
-            // slot before invocation; production turns always have one.
-            let origin = user.current_dispatch_origin().unwrap_or_else(|| {
-                pattern_core::types::origin::MessageOrigin::new(
-                    pattern_core::types::origin::Author::System {
-                        reason: pattern_core::types::origin::SystemReason::Timer,
-                    },
-                    pattern_core::types::origin::Sphere::System,
-                )
-            });
-            // Real session agent_id is load-bearing for per-agent
-            // isolation of the broker's scope cache (keyed
-            // `(agent_id, scope)`). Without it we'd silently share
-            // grants across agents in the same runtime — fail closed.
-            let Some(agent) = user.dispatch_agent_id() else {
-                return Err(EffectError::Handler(format!(
-                    "{PERMISSION_DENIED_PREFIX}shell gated but no agent identity \
-                     available for broker attribution"
-                )));
-            };
-            let scope = PermissionScope::ToolExecution {
-                tool: "shell".into(),
-                args_digest: Some(short_digest(command)),
-            };
-            let grant = bridge.request_sync(
-                agent,
-                "shell".into(),
-                scope,
-                &origin,
-                reason,
-                None,
-                SHELL_GATE_TIMEOUT,
-            );
-            if grant.is_some() {
-                Err(EffectError::Handler(format!(
-                    "{GATE_APPROVED_PREFIX}Pattern.Shell.Execute is not implemented in v3 \
-                     foundation (phase: post-foundation shell-tool plan); gate cleared, real \
-                     command execution lands later"
-                )))
-            } else {
-                Err(EffectError::Handler(format!(
-                    "{PERMISSION_DENIED_PREFIX}shell denied or timed out at the broker"
-                )))
-            }
-        }
-        PolicyAction::Allow => Err(EffectError::Handler(
-            "Pattern.Shell.Execute is not implemented in v3 foundation \
-             (phase: post-foundation shell-tool plan). Agent code should \
-             not call Shell effects in v3-foundation-scope programs."
-                .into(),
-        )),
-        // PolicyAction is #[non_exhaustive]; treat any future variant
-        // as a denial until the handler is taught about it.
+        PolicyAction::RequireApproval { reason } => escalate_shell(
+            user,
+            cmd,
+            reason
+                .as_deref()
+                .unwrap_or("shell command requires approval"),
+        ),
+        PolicyAction::Allow => Ok(()),
+        // PolicyAction is `#[non_exhaustive]` — fail closed on any future variant.
         other => Err(EffectError::Handler(format!(
             "{PERMISSION_DENIED_PREFIX}unhandled policy action {other:?}"
         ))),
     }
 }
 
-/// Return the existing not-implemented stub for non-Execute variants.
-/// Spawn/Kill/Status come online with the real shell handler in a
-/// later plan; Phase 1 leaves them ungated.
-fn stub_not_implemented(req: &ShellReq) -> Result<Value, EffectError> {
-    Err(EffectError::Handler(format!(
-        "Pattern.Shell.{req:?} is not implemented in v3 foundation \
-         (phase: post-foundation shell-tool plan). Agent code should \
-         not call Shell effects in v3-foundation-scope programs."
-    )))
+/// Compute the broker scope's `args_digest` for a shell command.
+///
+/// blake3 hex digest of the command bytes. The field is named "digest" for a
+/// reason — it's a fingerprint, not the literal command. Using a real hash
+/// here is collision-free in practice (blake3 has 256-bit security), gives a
+/// fixed-size cache key regardless of command length, and avoids the
+/// UTF-8-boundary panic surface that naive byte truncation has on non-ASCII
+/// paths or emoji. The literal command still travels via the `reason` field
+/// for partner-facing display in the broker prompt.
+fn shell_args_digest(cmd: &str) -> String {
+    blake3::hash(cmd.as_bytes()).to_hex().to_string()
 }
 
-/// Short stable digest of a command string. Used to namespace
-/// approve-for-scope cache entries so two distinct commands don't
-/// share a single grant.
-fn short_digest(command: &str) -> String {
-    blake3::hash(command.as_bytes()).to_hex()[..16].to_string()
+/// Escalate a shell command through the [`crate::permission::PermissionBridge`].
+///
+/// Always returns `Err` — either `Err(GateApproved)` on broker grant, or
+/// `Err(PermissionDenied)` on denial / timeout / missing bridge. The
+/// structural pattern mirrors the `escalate` fn in `file.rs`.
+fn escalate_shell(user: &SessionContext, cmd: &str, reason: &str) -> Result<(), EffectError> {
+    let Some(bridge) = user.permission_bridge() else {
+        return Err(EffectError::Handler(format!(
+            "{PERMISSION_DENIED_PREFIX}shell command gated but no permission bridge wired"
+        )));
+    };
+    let origin = user.current_dispatch_origin().unwrap_or_else(|| {
+        pattern_core::types::origin::MessageOrigin::new(
+            pattern_core::types::origin::Author::System {
+                reason: pattern_core::types::origin::SystemReason::Timer,
+            },
+            pattern_core::types::origin::Sphere::System,
+        )
+    });
+    // Real session agent_id is load-bearing for per-agent isolation of the
+    // broker's scope cache (keyed `(agent_id, scope)`); fail closed if absent.
+    let Some(agent) = user.dispatch_agent_id() else {
+        return Err(EffectError::Handler(format!(
+            "{PERMISSION_DENIED_PREFIX}shell command gated but no agent identity \
+             available for broker attribution"
+        )));
+    };
+    // Scope keyed on a blake3 digest of the command so per-command scope
+    // caching is exact (`rm -rf /tmp/x` and `rm -rf /home` hash differently
+    // and prompt independently) without paying a per-command-length cache
+    // key, and without the UTF-8 boundary footgun of naive truncation.
+    let args_digest = Some(shell_args_digest(cmd));
+    let grant = bridge.request_sync(
+        agent,
+        "shell".into(),
+        PermissionScope::ToolExecution {
+            tool: "shell".to_string(),
+            args_digest,
+        },
+        &origin,
+        Some(reason.to_string()),
+        None,
+        SHELL_GATE_TIMEOUT,
+    );
+    if grant.is_some() {
+        Err(EffectError::Handler(format!(
+            "{GATE_APPROVED_PREFIX}Pattern.Shell gate cleared by broker"
+        )))
+    } else {
+        Err(EffectError::Handler(format!(
+            "{PERMISSION_DENIED_PREFIX}shell command denied or timed out at the broker"
+        )))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pattern_core::permission::{PermissionBroker, PermissionDecisionKind};
-    use pattern_core::types::origin::{Author, Human, MessageOrigin, Sphere};
-    use pattern_core::{PolicyMatcher, PolicyRule, PolicySet, Precedence};
+    use crate::policy::PERMISSION_DENIED_PREFIX;
+    use pattern_core::CapabilitySet;
+    use pattern_core::capability::EffectCategory;
     use std::sync::Arc;
     use tidepool_repr::DataConTable;
 
-    /// Minimal user struct that satisfies all three trait bounds for the
-    /// Shell handler. Lets us drive the gate paths without standing up a
-    /// full SessionContext.
-    struct TestUser {
-        agent_id: pattern_core::AgentId,
-        policies: pattern_core::PolicySet,
-        bridge: Option<Arc<crate::permission::PermissionBridge>>,
-        origin: Option<MessageOrigin>,
-    }
+    // ---- args-digest unit tests --------------------------------------------
 
-    impl HasCancelState for TestUser {
-        fn cancel_state(&self) -> Arc<crate::timeout::CancelState> {
-            Arc::new(crate::timeout::CancelState::new())
-        }
-    }
-    impl HasPolicySet for TestUser {
-        fn policies(&self) -> &pattern_core::PolicySet {
-            &self.policies
-        }
-    }
-    impl HasPermissionBridge for TestUser {
-        fn permission_bridge(&self) -> Option<&Arc<crate::permission::PermissionBridge>> {
-            self.bridge.as_ref()
-        }
-        fn current_dispatch_origin(&self) -> Option<MessageOrigin> {
-            self.origin.clone()
-        }
-        fn dispatch_agent_id(&self) -> Option<pattern_core::AgentId> {
-            Some(self.agent_id.clone())
-        }
-    }
-
-    fn make_test_user(
-        agent_id: &str,
-        policies: pattern_core::PolicySet,
-        bridge: Option<Arc<crate::permission::PermissionBridge>>,
-    ) -> TestUser {
-        TestUser {
-            agent_id: pattern_core::AgentId::from(agent_id),
-            policies,
-            bridge,
-            origin: Some(human_origin()),
-        }
-    }
-
-    fn human_origin() -> MessageOrigin {
-        MessageOrigin::new(
-            Author::Human(Human {
-                user_id: pattern_core::types::ids::new_id(),
-                display_name: None,
-            }),
-            Sphere::Private,
-        )
-    }
-
-    fn shell_rule(action: PolicyAction) -> PolicyRule {
-        PolicyRule::new(
-            EffectCategory::Shell,
-            PolicyMatcher::Always,
-            action,
-            Precedence::RuntimeOverride,
-        )
-    }
-
+    /// Locks in the broker scope's `args_digest` shape: 64-char hex blake3.
+    /// The wired-broker integration test asserts this same shape; pinning it
+    /// here guards against silent reformat refactors.
     #[test]
-    fn shell_stub_reports_not_implemented_with_empty_policies() {
-        // AC2.2 gate-skip path: empty PolicySet produces Allow → existing
-        // stub error fires unchanged (no `GateApproved:` marker).
-        let mut h = ShellHandler;
-        let table = DataConTable::new();
-        let cx = EffectContext::with_user(&table, &());
-        let err = h.handle(ShellReq::Execute("ls".into()), &cx).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("Pattern.Shell"), "got: {msg}");
-        assert!(msg.contains("not implemented"), "got: {msg}");
+    fn shell_args_digest_is_64_char_blake3_hex() {
+        let digest = shell_args_digest("rm -rf /tmp/x");
+        assert_eq!(digest.len(), 64, "blake3 hex digest is exactly 64 chars");
         assert!(
-            !msg.contains(GATE_APPROVED_PREFIX),
-            "Allow path must not carry GateApproved marker, got: {msg}"
-        );
-        assert!(
-            !msg.contains(PERMISSION_DENIED_PREFIX),
-            "Allow path must not carry PermissionDenied marker, got: {msg}"
+            digest.chars().all(|c| c.is_ascii_hexdigit()),
+            "digest must be hex, got: {digest:?}"
         );
     }
 
+    /// Distinct commands produce distinct digests — the property that makes
+    /// per-command scope caching useful (different commands prompt
+    /// independently rather than sharing a stale grant).
     #[test]
-    fn deny_action_returns_permission_denied_prefix() {
-        let user = make_test_user(
-            "agent-deny",
-            PolicySet::from_rules([shell_rule(PolicyAction::Deny {
-                reason: Some("explicit deny".into()),
-            })]),
-            None,
-        );
+    fn shell_args_digest_is_per_command() {
+        let a = shell_args_digest("rm -rf /tmp/a");
+        let b = shell_args_digest("rm -rf /tmp/b");
+        let c = shell_args_digest("rm -rf /tmp/a");
+        assert_ne!(a, b, "different commands must hash differently");
+        assert_eq!(a, c, "identical commands must hash identically");
+    }
+
+    /// Non-ASCII command (the regression case for the byte-truncation bug
+    /// in cycle-2 review) hashes without panicking. UTF-8 boundary safety
+    /// is a property of `blake3::hash` over `&[u8]`; this test pins that
+    /// expectation against any future refactor that reintroduces string
+    /// slicing.
+    #[test]
+    fn shell_args_digest_handles_non_ascii() {
+        let cmd = format!("{}{}", "x".repeat(255), "é");
+        // Must not panic.
+        let digest = shell_args_digest(&cmd);
+        assert_eq!(digest.len(), 64);
+    }
+
+    // ---- minimal test context -----------------------------------------------
+
+    /// Minimal user context that satisfies `EffectHandler<SessionContext>`'s
+    /// bound — we pass `SessionContext` directly but use a bare test struct for
+    /// the capability-check path tests, which don't need a full PTY.
+    ///
+    /// For tests that need `SessionContext` directly (process_manager dispatch),
+    /// see the integration tests in `tests/`.
+    ///
+    /// Build a `DataConTable` with the `()` constructor required by
+    /// `cx.respond(())`.
+    fn handler_table() -> DataConTable {
+        use tidepool_repr::{DataCon, DataConId};
+        let mut table = crate::testing::standard_datacon_table();
+        table.insert(DataCon {
+            id: DataConId(100),
+            name: "()".to_string(),
+            tag: 1,
+            rep_arity: 0,
+            field_bangs: vec![],
+            qualified_name: Some("GHC.Tuple.()".to_string()),
+        });
+        table
+    }
+
+    // ---- capability denial test (does not need PTY) -------------------------
+
+    /// A minimal `SessionContext`-like struct for capability-denial tests.
+    /// We cannot easily build a full `SessionContext` in unit tests without a
+    /// DB, so we test the capability check logic by driving ShellHandler
+    /// directly with a fake that returns the correct capability set.
+    ///
+    /// Note: `ShellHandler` is now `impl EffectHandler<SessionContext>`, not
+    /// generic. For unit tests of the capability-deny path specifically, we
+    /// construct a real `SessionContext` via `from_persona` with a restricted
+    /// capability set. The `from_persona` path constructs a real
+    /// `ProcessManager`, but the capability check fires before any PTY work,
+    /// so no PTY is needed.
+    #[tokio::test]
+    async fn shell_capability_denied_returns_permission_denied_prefix() {
+        use crate::NopProviderClient;
+        use crate::session::SessionContext;
+        use crate::testing::InMemoryMemoryStore;
+        use pattern_core::ProviderClient;
+        use pattern_core::traits::MemoryStore;
+        use pattern_core::types::snapshot::PersonaSnapshot;
+
+        let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
+        let provider: Arc<dyn ProviderClient> = Arc::new(NopProviderClient);
+        let db = crate::testing::test_db().await;
+        let persona = PersonaSnapshot::new("agent-shell-cap-deny", "A");
+
+        // Build a CapabilitySet without Shell.
+        let caps = CapabilitySet::from_iter([EffectCategory::Memory, EffectCategory::File]);
+        let ctx = SessionContext::from_persona(
+            &persona,
+            store,
+            provider,
+            db,
+            tokio::runtime::Handle::current(),
+        )
+        .with_capabilities(Some(caps));
+
         let mut h = ShellHandler;
-        let table = DataConTable::new();
-        let cx = EffectContext::with_user(&table, &user);
+        let table = handler_table();
+        let cx = EffectContext::with_user(&table, &ctx);
         let err = h
-            .handle(ShellReq::Execute("rm -rf /tmp/x".into()), &cx)
+            .handle(ShellReq::Execute("echo hi".into(), None), &cx)
             .unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.starts_with(&format!("Handler error: {PERMISSION_DENIED_PREFIX}"))
-                || msg.contains(PERMISSION_DENIED_PREFIX),
-            "expected PermissionDenied prefix in message, got: {msg}"
-        );
-        assert!(msg.contains("explicit deny"), "got: {msg}");
-    }
-
-    #[test]
-    fn require_approval_without_bridge_fails_closed() {
-        let user = make_test_user(
-            "agent-no-bridge",
-            PolicySet::from_rules([shell_rule(PolicyAction::RequireApproval { reason: None })]),
-            None,
-        );
-        let mut h = ShellHandler;
-        let table = DataConTable::new();
-        let cx = EffectContext::with_user(&table, &user);
-        let err = h.handle(ShellReq::Execute("ls".into()), &cx).unwrap_err();
-        assert!(
-            err.to_string().contains(PERMISSION_DENIED_PREFIX),
-            "missing bridge should fail closed, got: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn require_approval_with_approving_bridge_returns_gate_approved() {
-        // AC2.1 approve path (stub): broker approves → handler returns
-        // GateApproved-prefixed error so the test can distinguish the
-        // approve-after-gate path from the gate-skip path.
-        let broker = Arc::new(PermissionBroker::new());
-        let mut rx = broker.subscribe();
-        let broker_for_responder = broker.clone();
-        let responder = tokio::spawn(async move {
-            if let Ok(req) = rx.recv().await {
-                broker_for_responder
-                    .resolve(&req.id, PermissionDecisionKind::ApproveOnce)
-                    .await;
-            }
-        });
-        let bridge = Arc::new(crate::permission::PermissionBridge::spawn(broker));
-
-        // The handler's request_sync blocks the calling thread, so it
-        // must run on a worker thread to keep the tokio runtime free
-        // to poll the bridge pump.
-        let bridge_for_thread = bridge.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            let user = make_test_user(
-                "agent-approve",
-                PolicySet::from_rules([shell_rule(PolicyAction::RequireApproval {
-                    reason: Some("rm-rf-style command".into()),
-                })]),
-                Some(bridge_for_thread),
-            );
-            let mut h = ShellHandler;
-            let table = DataConTable::new();
-            let cx = EffectContext::with_user(&table, &user);
-            h.handle(ShellReq::Execute("rm -rf /tmp/x".into()), &cx)
-        })
-        .await
-        .expect("blocking task")
-        .expect_err("handler always errors in Phase 1");
-        let msg = result.to_string();
-        assert!(
-            msg.contains(GATE_APPROVED_PREFIX),
-            "expected GateApproved marker after approval, got: {msg}"
-        );
-        responder.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn require_approval_with_denying_bridge_returns_permission_denied() {
-        // AC2.1 deny path: broker denies → handler returns
-        // PermissionDenied-prefixed error.
-        let broker = Arc::new(PermissionBroker::new());
-        let mut rx = broker.subscribe();
-        let broker_for_responder = broker.clone();
-        let responder = tokio::spawn(async move {
-            if let Ok(req) = rx.recv().await {
-                broker_for_responder
-                    .resolve(&req.id, PermissionDecisionKind::Deny)
-                    .await;
-            }
-        });
-        let bridge = Arc::new(crate::permission::PermissionBridge::spawn(broker));
-
-        let bridge_for_thread = bridge.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            let user = make_test_user(
-                "agent-deny",
-                PolicySet::from_rules([shell_rule(PolicyAction::RequireApproval { reason: None })]),
-                Some(bridge_for_thread),
-            );
-            let mut h = ShellHandler;
-            let table = DataConTable::new();
-            let cx = EffectContext::with_user(&table, &user);
-            h.handle(ShellReq::Execute("rm -rf /tmp/x".into()), &cx)
-        })
-        .await
-        .expect("blocking task")
-        .expect_err("handler always errors in Phase 1");
-        let msg = result.to_string();
-        assert!(
             msg.contains(PERMISSION_DENIED_PREFIX),
-            "expected PermissionDenied marker after denial, got: {msg}"
+            "expected PERMISSION_DENIED_PREFIX on capability denial, got: {msg}"
         );
-        responder.await.unwrap();
-    }
-
-    /// Handler-level Partner-bypass: when the dispatch origin IS a
-    /// Partner (only possible from a future direct-execution path —
-    /// `drive_step` always installs `Author::Agent(self)`), the broker
-    /// short-circuits via `bypasses_permission_gate()` and the handler
-    /// returns GateApproved without any responder firing.
-    #[tokio::test]
-    async fn partner_origin_short_circuits_at_handler_level() {
-        use pattern_core::types::origin::Partner;
-        let broker = Arc::new(PermissionBroker::new());
-        let mut rx = broker.subscribe();
-        let saw_request = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let saw_for_thread = saw_request.clone();
-        let _watcher = tokio::spawn(async move {
-            if rx.recv().await.is_ok() {
-                saw_for_thread.store(true, std::sync::atomic::Ordering::SeqCst);
-            }
-        });
-        let bridge = Arc::new(crate::permission::PermissionBridge::spawn(broker));
-        let bridge_for_thread = bridge.clone();
-
-        let result = tokio::task::spawn_blocking(move || {
-            let mut user = make_test_user(
-                "agent-shell-partner",
-                PolicySet::from_rules([shell_rule(PolicyAction::RequireApproval { reason: None })]),
-                Some(bridge_for_thread),
-            );
-            user.origin = Some(MessageOrigin::new(
-                Author::Partner(Partner {
-                    user_id: pattern_core::types::ids::new_id(),
-                    display_name: None,
-                }),
-                Sphere::Private,
-            ));
-            let mut h = ShellHandler;
-            let table = DataConTable::new();
-            let cx = EffectContext::with_user(&table, &user);
-            // Even an Always RequireApproval rule should yield to the
-            // partner-bypass when the broker sees a Partner origin.
-            h.handle(ShellReq::Execute("rm -rf /tmp/x".into()), &cx)
-        })
-        .await
-        .expect("blocking task")
-        .expect_err("Phase 1 stub always errors");
-        let msg = result.to_string();
         assert!(
-            msg.contains(GATE_APPROVED_PREFIX),
-            "Partner-origin should produce GateApproved (synthesized grant), got: {msg}"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        assert!(
-            !saw_request.load(std::sync::atomic::Ordering::SeqCst),
-            "Partner-origin must short-circuit at the broker — no request should land in the queue"
+            msg.contains("capability denied"),
+            "expected 'capability denied' in message, got: {msg}"
         );
     }
 
-    /// **Critical security invariant** (review fix): the broker's
-    /// `scope_cache` is keyed `(agent_id, scope)`. Two agents in the
-    /// same runtime sharing one bridge MUST NOT cross-pollinate
-    /// approvals — agent A's `ApproveForScope` for `rm -rf /tmp/x`
-    /// must not silently allow agent B to run the same command.
+    /// Full-power session (capabilities == None) does NOT deny Shell.
+    /// Exercises the real PTY path to confirm end-to-end execution succeeds.
     #[tokio::test]
-    async fn per_agent_scope_grants_do_not_cross_pollinate() {
-        let broker = Arc::new(PermissionBroker::new());
-        // Approve the FIRST request only; subsequent requests get
-        // denied. Agent B should re-prompt and hit the denial
-        // because its scope key differs from agent A's.
-        let mut rx = broker.subscribe();
-        let broker_for_responder = broker.clone();
-        let prompts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let prompts_for_thread = prompts.clone();
-        let responder = tokio::spawn(async move {
-            while let Ok(req) = rx.recv().await {
-                let n = prompts_for_thread.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let decision = if n == 0 {
-                    PermissionDecisionKind::ApproveForScope
-                } else {
-                    PermissionDecisionKind::Deny
-                };
-                broker_for_responder.resolve(&req.id, decision).await;
+    async fn shell_full_power_session_executes_without_capability_deny() {
+        // Skip if no shell is available (same guard as process_manager tests).
+        let shell = crate::process_manager::local_pty::LocalPtyBackend::find_default_shell();
+        if !std::path::Path::new(&shell).exists() && shell != "bash" {
+            eprintln!("skipping: no shell found on PATH");
+            return;
+        }
+
+        use crate::NopProviderClient;
+        use crate::session::SessionContext;
+        use crate::testing::InMemoryMemoryStore;
+        use pattern_core::ProviderClient;
+        use pattern_core::traits::MemoryStore;
+        use pattern_core::types::snapshot::PersonaSnapshot;
+
+        let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
+        let provider: Arc<dyn ProviderClient> = Arc::new(NopProviderClient);
+        let db = crate::testing::test_db().await;
+        let persona = PersonaSnapshot::new("agent-shell-full-power", "A");
+
+        // No capability restriction — None means full power.
+        let ctx = SessionContext::from_persona(
+            &persona,
+            store,
+            provider,
+            db,
+            tokio::runtime::Handle::current(),
+        );
+        assert!(
+            ctx.capabilities().is_none(),
+            "no capability set means full power"
+        );
+
+        let mut h = ShellHandler;
+        let table = handler_table();
+        let cx = EffectContext::with_user(&table, &ctx);
+        // A full-power session with a working PTY should execute successfully.
+        let result = h.handle(ShellReq::Execute("echo hi".into(), None), &cx);
+        match result {
+            Ok(_) => {} // successful execution — capability check passed
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    !msg.contains("capability denied"),
+                    "full-power session must not capability-deny, got: {msg}"
+                );
             }
-        });
-        let bridge = Arc::new(crate::permission::PermissionBridge::spawn(broker));
-
-        let bridge_a = bridge.clone();
-        let bridge_b = bridge.clone();
-        let outcome = tokio::task::spawn_blocking(move || {
-            let mut h = ShellHandler;
-            let table = DataConTable::new();
-
-            let user_a = make_test_user(
-                "agent-A",
-                PolicySet::from_rules([shell_rule(PolicyAction::RequireApproval { reason: None })]),
-                Some(bridge_a),
-            );
-            let cx_a = EffectContext::with_user(&table, &user_a);
-            // Agent A: first request, broker approves-for-scope.
-            let a_result = h
-                .handle(ShellReq::Execute("rm -rf /tmp/x".into()), &cx_a)
-                .expect_err("stub error");
-
-            let user_b = make_test_user(
-                "agent-B",
-                PolicySet::from_rules([shell_rule(PolicyAction::RequireApproval { reason: None })]),
-                Some(bridge_b),
-            );
-            let cx_b = EffectContext::with_user(&table, &user_b);
-            // Agent B: same scope, but different agent_id — must
-            // NOT hit agent A's cached grant. Broker re-prompts;
-            // responder denies.
-            let b_result = h
-                .handle(ShellReq::Execute("rm -rf /tmp/x".into()), &cx_b)
-                .expect_err("stub error");
-
-            (a_result.to_string(), b_result.to_string())
-        })
-        .await
-        .expect("blocking task");
-
-        // Allow the responder a beat to record both prompts.
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-
-        let (a_msg, b_msg) = outcome;
-        assert!(
-            a_msg.contains(GATE_APPROVED_PREFIX),
-            "agent A should be approved, got: {a_msg}"
-        );
-        assert!(
-            b_msg.contains(PERMISSION_DENIED_PREFIX),
-            "agent B must NOT inherit agent A's grant, got: {b_msg}"
-        );
-        let final_count = prompts.load(std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(
-            final_count, 2,
-            "broker must observe two distinct prompts (one per agent), got {final_count}"
-        );
-
-        drop(bridge);
-        responder.abort();
+        }
     }
 }

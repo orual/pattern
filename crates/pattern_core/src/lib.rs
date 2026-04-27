@@ -72,8 +72,8 @@ pub use error::{
 // Explicit (no wildcard) so the public surface is greppable.
 
 pub use traits::{
-    AgentRuntime, DataStream, EmbeddingProvider, Endpoint, EndpointRegistry, MemoryStore,
-    ProviderClient, Session, SourceManager,
+    AgentRuntime, EmbeddingProvider, Endpoint, EndpointRegistry, MemoryStore, ProviderClient,
+    Session,
 };
 
 // ── Type re-exports ──────────────────────────────────────────────────────────

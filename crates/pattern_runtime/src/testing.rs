@@ -368,6 +368,9 @@ pub use in_memory_store::InMemoryMemoryStore;
 pub mod in_memory_constellation_registry;
 pub use in_memory_constellation_registry::InMemoryConstellationRegistry;
 
+pub mod mock_port;
+pub use mock_port::MockPort;
+
 /// Minimal `ProviderClient` implementation that panics on any method call.
 ///
 /// Used in tests that construct `TidepoolRuntime` but never invoke the

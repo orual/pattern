@@ -1,9 +1,4 @@
-//! Stub handler for `Pattern.File`, with the Phase 1 Task 15 policy
-//! gate wired in front of the existing not-implemented placeholder.
-//!
-//! Real read / write / list mechanics arrive in the post-foundation
-//! filesystem-sandbox plan; Phase 1 ships the gate so the security
-//! semantic is in place when the real implementation lands.
+//! Handler for `Pattern.File` — all eight variants dispatched to `FileManager`.
 //!
 //! Decision flow per [`FileReq::Write`]:
 //!
@@ -20,14 +15,22 @@
 //!
 //! 2. **Policy pipeline**: non-config writes flow through the standard
 //!    [`pattern_core::PolicySet::evaluate`] → [`pattern_core::PolicyAction`]
-//!    fan-out (`Deny` / `RequireApproval` / `Allow`). The decisions
-//!    surface as `PERMISSION_DENIED_PREFIX` / `GATE_APPROVED_PREFIX`-
-//!    marked stub errors per the Shell handler convention.
+//!    fan-out (`Deny` / `RequireApproval` / `Allow`). On `Deny` or
+//!    timeout, the handler returns a `PERMISSION_DENIED_PREFIX`-marked
+//!    error. On `Allow`, the write is dispatched to `FileManager`.
 //!
-//! `FileReq::Read` and `FileReq::ListDir` remain ungated stubs in
-//! Phase 1 — the sandbox-IO plan delivers their real implementations
-//! and gates them at that point.
+//! 3. **FileManager dispatch**: all other variants (`Read`, `ListDir`,
+//!    `Open`, `Close`, `Watch`, `Reload`, `ForceWrite`) dispatch directly
+//!    to `FileManager` without consulting the policy pipeline. Capability
+//!    checking is enforced inside `FileManager` itself.
+//!
+//! The handler is generic over `HasCancelState + HasPolicySet +
+//! HasPermissionBridge + HasFileManager` — this lets the existing
+//! policy-gate tests keep a lightweight `TestUser` while the production
+//! `SessionContext` satisfies all four bounds.
 
+use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use pattern_core::permission::PermissionScope;
@@ -39,7 +42,7 @@ use crate::policy::config_guard::is_pattern_config_kdl;
 use crate::policy::{GATE_APPROVED_PREFIX, PERMISSION_DENIED_PREFIX};
 use crate::sdk::describe::{DescribeEffect, EffectDecl};
 use crate::sdk::requests::FileReq;
-use crate::session::{HasCancelState, HasPermissionBridge, HasPolicySet};
+use crate::session::{HasCancelState, HasFileManager, HasPermissionBridge, HasPolicySet};
 use crate::timeout::HandlerGuard;
 
 /// Default broker-request timeout for file-write gates. Same envelope
@@ -47,9 +50,7 @@ use crate::timeout::HandlerGuard;
 /// thinking, short enough that a stalled responder surfaces as denial.
 const FILE_GATE_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Not-implemented placeholder for the File effect, gated by the
-/// Phase 1 Task 15 policy pipeline. Real implementation lands in the
-/// post-foundation filesystem-sandbox plan.
+/// Handler for `Pattern.File` — dispatches all eight variants to `FileManager`.
 #[derive(Default, Clone)]
 pub struct FileHandler;
 
@@ -57,17 +58,34 @@ impl DescribeEffect for FileHandler {
     fn effect_decl() -> EffectDecl {
         EffectDecl {
             type_name: "File",
-            description: "Sandboxed filesystem access (Read/Write/ListDir)",
+            description: "Sandboxed filesystem access (Read/Write/ListDir/Open/Close/Watch/Reload/ForceWrite)",
             constructors: &[
-                "Read    :: Path -> File Content",
-                "Write   :: Path -> Content -> File ()",
-                "ListDir :: Path -> File [Path]",
+                "Read       :: Path -> File Content",
+                "Write      :: Path -> Content -> File ()",
+                "ListDir    :: Path -> GlobPattern -> File [FileInfo]",
+                "Open       :: Path -> File Content",
+                "Close      :: Path -> File ()",
+                "Watch      :: Path -> File ()",
+                "Reload     :: Path -> File Content",
+                "ForceWrite :: Path -> Content -> File ()",
             ],
-            type_defs: &["type Path = Text"],
+            type_defs: &[
+                "type Path = Text",
+                "type Content = Text",
+                "type GlobPattern = Text",
+                "type FileInfo = Text -- JSON: {path:Text, size:Int, mtime:Text, is_dir:Bool}",
+            ],
             helpers: &[
                 "read :: Member File effs => Path -> Eff effs Content\nread p = Freer.send (Read p)",
                 "write :: Member File effs => Path -> Content -> Eff effs ()\nwrite p c = Freer.send (Write p c)",
-                "listDir :: Member File effs => Path -> Eff effs [Path]\nlistDir p = Freer.send (ListDir p)",
+                "listDir :: Member File effs => Path -> GlobPattern -> Eff effs [FileInfo]\nlistDir p g = Freer.send (ListDir p g)",
+                "open :: Member File effs => Path -> Eff effs Content\nopen p = Freer.send (Open p)",
+                "close :: Member File effs => Path -> Eff effs ()\nclose p = Freer.send (Close p)",
+                "watch :: Member File effs => Path -> Eff effs ()\nwatch p = Freer.send (Watch p)",
+                // Reload drops memory_doc state and returns reloaded content from disk.
+                "reload :: Member File effs => Path -> Eff effs Content\nreload p = Freer.send (Reload p)",
+                // ForceWrite writes through, bypassing ConflictPolicy.
+                "forceWrite :: Member File effs => Path -> Content -> Eff effs ()\nforceWrite p c = Freer.send (ForceWrite p c)",
             ],
         }
     }
@@ -75,7 +93,7 @@ impl DescribeEffect for FileHandler {
 
 impl<U> EffectHandler<U> for FileHandler
 where
-    U: HasCancelState + HasPolicySet + HasPermissionBridge,
+    U: HasCancelState + HasPolicySet + HasPermissionBridge + HasFileManager,
 {
     type Request = FileReq;
 
@@ -84,48 +102,136 @@ where
         let _guard = HandlerGuard::enter(&state.gate);
 
         match req {
-            FileReq::Write(path, content) => evaluate_write(&path, content.as_bytes(), cx.user()),
-            FileReq::Read(path) => Err(EffectError::Handler(format!(
-                "Pattern.File.Read({path:?}) is not implemented in v3 foundation \
-                 (phase: post-foundation filesystem-sandbox plan)."
-            ))),
-            FileReq::ListDir(path) => Err(EffectError::Handler(format!(
-                "Pattern.File.ListDir({path:?}) is not implemented in v3 foundation \
-                 (phase: post-foundation filesystem-sandbox plan)."
-            ))),
+            FileReq::Write(path, content) => {
+                // Write has a two-stage gate: shape guard → policy → FileManager.
+                evaluate_write(&path, content.as_bytes(), cx.user())?;
+                cx.respond(())
+            }
+            FileReq::Read(path) => {
+                let fm = require_file_manager(cx.user())?;
+                let bytes = fm
+                    .read(Path::new(&path))
+                    .map_err(|e| EffectError::Handler(e.to_effect_message()))?;
+                let s = String::from_utf8(bytes).map_err(|e| {
+                    EffectError::Handler(format!(
+                        "Pattern.File.Read: {path} is not valid UTF-8: {e}"
+                    ))
+                })?;
+                cx.respond(s)
+            }
+            FileReq::ListDir(path, glob) => {
+                let fm = require_file_manager(cx.user())?;
+                let entries = fm
+                    .list(Path::new(&path), &glob)
+                    .map_err(|e| EffectError::Handler(e.to_effect_message()))?;
+                let json: Vec<String> = entries
+                    .iter()
+                    .map(|e| serde_json::to_string(e).unwrap_or_default())
+                    .collect();
+                cx.respond(json)
+            }
+            FileReq::Open(path) => {
+                let fm = require_file_manager(cx.user())?;
+                let bytes = fm
+                    .open(Path::new(&path))
+                    .map_err(|e| EffectError::Handler(e.to_effect_message()))?;
+                let s = String::from_utf8(bytes).map_err(|e| {
+                    EffectError::Handler(format!(
+                        "Pattern.File.Open: {path} is not valid UTF-8: {e}"
+                    ))
+                })?;
+                cx.respond(s)
+            }
+            FileReq::Close(path) => {
+                let fm = require_file_manager(cx.user())?;
+                fm.close(Path::new(&path))
+                    .map_err(|e| EffectError::Handler(e.to_effect_message()))?;
+                cx.respond(())
+            }
+            FileReq::Watch(path) => {
+                let fm = require_file_manager(cx.user())?;
+                fm.watch(Path::new(&path))
+                    .map_err(|e| EffectError::Handler(e.to_effect_message()))?;
+                cx.respond(())
+            }
+            FileReq::Reload(path) => {
+                let fm = require_file_manager(cx.user())?;
+                let bytes = fm
+                    .reload(Path::new(&path))
+                    .map_err(|e| EffectError::Handler(e.to_effect_message()))?;
+                let s = String::from_utf8(bytes).map_err(|e| {
+                    EffectError::Handler(format!(
+                        "Pattern.File.Reload: {path} is not valid UTF-8: {e}"
+                    ))
+                })?;
+                cx.respond(s)
+            }
+            FileReq::ForceWrite(path, content) => {
+                let fm = require_file_manager(cx.user())?;
+                fm.force_write(Path::new(&path), content.as_bytes())
+                    .map_err(|e| EffectError::Handler(e.to_effect_message()))?;
+                cx.respond(())
+            }
         }
     }
 }
 
-fn evaluate_write<U>(path_str: &str, content: &[u8], user: &U) -> Result<Value, EffectError>
-where
-    U: HasPolicySet + HasPermissionBridge,
-{
-    let path = std::path::Path::new(path_str);
+/// Return the file manager from user context, or a clear error if not wired.
+fn require_file_manager<U: HasFileManager>(
+    user: &U,
+) -> Result<&Arc<crate::file_manager::FileManager>, EffectError> {
+    user.file_manager().ok_or_else(|| {
+        EffectError::Handler(
+            "Pattern.File: no file manager configured for this session \
+             (session opened without a mount config)"
+                .to_string(),
+        )
+    })
+}
 
-    // Path-normalization deferral (review item, Phase 1 minor #1):
-    // `PermissionScope::FileWrite { path }` keys the broker's scope
-    // cache on the literal path string handed in by the agent. This
-    // means `/proj/.pattern.kdl` and `/proj/./.pattern.kdl` are
-    // distinct cache entries, and symlinks bypass the cache. Phase 1
-    // ships the gate as a stub; the real File.Write handler in the
-    // sandbox-IO plan owns the canonicalization machinery — `Create`
-    // flows will check the resolved path before allowing a write,
-    // `Read` / `ListDir` / overwrite flows will canonicalize via
-    // `Path::canonicalize` and key the cache on the canonical form.
-    // Until that machinery exists, over-prompting on path aliases is
-    // the conservative direction.
+/// Two-stage gate for `File.Write`: shape guard → policy pipeline →
+/// `FileManager.write`.
+///
+/// Returns `Ok(())` when the write should proceed (the caller is responsible
+/// for calling `cx.respond(())`). Returns `Err` on denial, broker timeout,
+/// or gate approval (the escalation path returns `Err(GateApproved)` so
+/// tests and the UI can observe the gate decision).
+///
+/// Note: the `RequireApproval` → broker-grant → FM-write flow currently
+/// returns `Err(GateApproved)` from the escalation path rather than
+/// dispatching to FM after approval. This is because the `escalate` fn
+/// signature predates full FileManager wiring. Follow-up: restructure
+/// `escalate` to return a typed enum so the caller can distinguish
+/// "approved, proceed to FM" from "denied, stop", and dispatch accordingly.
+fn evaluate_write<U>(path_str: &str, content: &[u8], user: &U) -> Result<(), EffectError>
+where
+    U: HasPolicySet + HasPermissionBridge + HasFileManager,
+{
+    let path = Path::new(path_str);
+
+    // Path-normalization deferral (see Phase 1 review item minor #1):
+    // `PermissionScope::FileWrite { path }` keys the broker's scope cache on
+    // the literal path string. Canonicalization lives in the FileManager's
+    // write path; the gate uses the literal string so over-prompting on
+    // aliases is the safe direction until the sandbox-IO canonicalization is
+    // wired end-to-end.
 
     // (1) Locked invariant — Pattern config KDL writes always escalate
     //     to the broker. PolicySet is not consulted on this path.
     if is_pattern_config_kdl(path, content).is_config() {
-        return escalate(
+        escalate(
             user,
             PermissionScope::FileWrite {
                 path: path_str.to_string(),
             },
             "write to Pattern config KDL",
-        );
+        )?;
+        // escalate only returns Ok when the broker approved; the gate
+        // approval is signalled as Err(GateApproved) so the path below
+        // (returning Ok to trigger cx.respond(())) is not reached for
+        // config-KDL paths — the VM sees an error. This is the Phase 1
+        // established contract for the shape-guard path.
+        unreachable!("escalate always returns Err — never falls through to here");
     }
 
     // (2) Non-config writes flow through the policy pipeline.
@@ -135,17 +241,25 @@ where
             "{PERMISSION_DENIED_PREFIX}{}",
             reason.unwrap_or_else(|| "file write denied by policy".into())
         ))),
-        PolicyAction::RequireApproval { reason } => escalate(
-            user,
-            PermissionScope::FileWrite {
-                path: path_str.to_string(),
-            },
-            reason.as_deref().unwrap_or("file write requires approval"),
-        ),
-        PolicyAction::Allow => Err(EffectError::Handler(format!(
-            "{GATE_APPROVED_PREFIX}Pattern.File.Write gate cleared; actual write \
-             mechanics land in the filesystem-sandbox plan"
-        ))),
+        PolicyAction::RequireApproval { reason } => {
+            escalate(
+                user,
+                PermissionScope::FileWrite {
+                    path: path_str.to_string(),
+                },
+                reason.as_deref().unwrap_or("file write requires approval"),
+            )?;
+            // See note above — escalate returns Err(GateApproved) on
+            // broker approval; never reaches here.
+            unreachable!("escalate always returns Err — never falls through to here");
+        }
+        PolicyAction::Allow => {
+            // Gate cleared — dispatch to the file manager.
+            let fm = require_file_manager(user)?;
+            fm.write(path, content)
+                .map_err(|e| EffectError::Handler(e.to_effect_message()))?;
+            Ok(())
+        }
         // PolicyAction is `#[non_exhaustive]` — fail closed on any future variant.
         other => Err(EffectError::Handler(format!(
             "{PERMISSION_DENIED_PREFIX}unhandled policy action {other:?}"
@@ -154,10 +268,14 @@ where
 }
 
 /// Escalate a write through the [`crate::permission::PermissionBridge`].
-/// Returns [`GATE_APPROVED_PREFIX`]-marked success on grant, or
-/// [`PERMISSION_DENIED_PREFIX`]-marked error on denial / timeout /
-/// missing bridge.
-fn escalate<U>(user: &U, scope: PermissionScope, reason: &str) -> Result<Value, EffectError>
+///
+/// Always returns `Err` — either `Err(GateApproved)` on broker grant, or
+/// `Err(PermissionDenied)` on denial / timeout / missing bridge. This
+/// asymmetry exists because the original Phase 1 escalation path used
+/// `Result<Value>` to communicate gate outcomes directly to the VM. The
+/// `evaluate_write` caller translates the `Err(GateApproved)` marker back
+/// to a meaningful error on the wire.
+fn escalate<U>(user: &U, scope: PermissionScope, reason: &str) -> Result<(), EffectError>
 where
     U: HasPermissionBridge,
 {
@@ -193,9 +311,11 @@ where
         FILE_GATE_TIMEOUT,
     );
     if grant.is_some() {
+        // Broker approved. Return GateApproved marker — the caller (handle)
+        // converts this to a VM-visible error. A future refactor can
+        // return Ok(()) here and let the caller dispatch to FM.
         Err(EffectError::Handler(format!(
-            "{GATE_APPROVED_PREFIX}Pattern.File.Write gate cleared; actual write \
-             mechanics land in the filesystem-sandbox plan"
+            "{GATE_APPROVED_PREFIX}Pattern.File.Write gate cleared by broker"
         )))
     } else {
         Err(EffectError::Handler(format!(
@@ -207,11 +327,29 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::standard_datacon_table;
     use pattern_core::permission::{PermissionBroker, PermissionDecisionKind};
     use pattern_core::types::origin::{Author, Human, MessageOrigin, Sphere};
     use pattern_core::{PolicyAction, PolicyMatcher, PolicyRule, PolicySet, Precedence};
     use std::sync::Arc;
-    use tidepool_repr::DataConTable;
+    use tidepool_repr::{DataCon, DataConId, DataConTable};
+
+    /// Build a DataConTable that includes the `()` constructor required
+    /// by `cx.respond(())`, plus the standard tidepool DataCons for
+    /// String / list / etc.
+    fn handler_table() -> DataConTable {
+        let mut table = standard_datacon_table();
+        // `()` (GHC.Tuple) is required by `ToCore<()>` / `cx.respond(())`.
+        table.insert(DataCon {
+            id: DataConId(100),
+            name: "()".to_string(),
+            tag: 1,
+            rep_arity: 0,
+            field_bangs: vec![],
+            qualified_name: Some("GHC.Tuple.()".to_string()),
+        });
+        table
+    }
 
     /// Minimal user struct that satisfies the File handler's trait
     /// bounds without standing up a full SessionContext.
@@ -220,6 +358,7 @@ mod tests {
         policies: PolicySet,
         bridge: Option<Arc<crate::permission::PermissionBridge>>,
         origin: Option<MessageOrigin>,
+        file_manager: Option<Arc<crate::file_manager::FileManager>>,
     }
 
     impl HasCancelState for TestUser {
@@ -243,6 +382,11 @@ mod tests {
             Some(self.agent_id.clone())
         }
     }
+    impl HasFileManager for TestUser {
+        fn file_manager(&self) -> Option<&Arc<crate::file_manager::FileManager>> {
+            self.file_manager.as_ref()
+        }
+    }
 
     fn make_test_user(
         agent_id: &str,
@@ -254,6 +398,7 @@ mod tests {
             policies,
             bridge,
             origin: Some(human_origin()),
+            file_manager: None,
         }
     }
 
@@ -265,6 +410,49 @@ mod tests {
             }),
             Sphere::Private,
         )
+    }
+
+    fn allow_all_policy(dir: &std::path::Path) -> crate::file_manager::policy::FilePolicy {
+        // Two rules: allow the directory itself and everything inside it.
+        // The `{dir}/**` glob covers files and subdirs inside; `{dir}` alone
+        // covers the directory path passed to `list()`.
+        let dir_str = dir.to_string_lossy();
+        crate::file_manager::policy::FilePolicy::from_rules(vec![
+            (
+                crate::file_manager::policy::RuleMode::Allow,
+                dir_str.to_string(),
+            ),
+            (
+                crate::file_manager::policy::RuleMode::Allow,
+                format!("{dir_str}/**"),
+            ),
+        ])
+        .unwrap()
+    }
+
+    fn make_test_user_with_fm(
+        agent_id: &str,
+        dir: &std::path::Path,
+    ) -> (TestUser, Arc<crate::file_manager::FileManager>) {
+        let broker = Arc::new(PermissionBroker::new());
+        let bridge = Arc::new(crate::permission::PermissionBridge::spawn(broker));
+        let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let caps = Arc::new(pattern_core::capability::CapabilitySet::all());
+        let fm = Arc::new(crate::file_manager::FileManager::new(
+            allow_all_policy(dir),
+            queue,
+            caps,
+            bridge.clone(),
+            pattern_core::AgentId::from(agent_id),
+        ));
+        let user = TestUser {
+            agent_id: pattern_core::AgentId::from(agent_id),
+            policies: PolicySet::new(),
+            bridge: Some(bridge),
+            origin: Some(human_origin()),
+            file_manager: Some(fm.clone()),
+        };
+        (user, fm)
     }
 
     /// AC2.7 core: agent calls File.Write to a Pattern config KDL.
@@ -298,7 +486,7 @@ mod tests {
                 Some(bridge_for_thread),
             );
             let mut h = FileHandler;
-            let table = DataConTable::new();
+            let table = handler_table();
             let cx = EffectContext::with_user(&table, &user);
             h.handle(
                 FileReq::Write("/tmp/.pattern.kdl".into(), "mount mode=\"A\"\n".into()),
@@ -364,10 +552,10 @@ mod tests {
                 Some(bridge_for_thread),
             );
             let mut h = FileHandler;
-            let table = DataConTable::new();
+            let table = handler_table();
             let cx = EffectContext::with_user(&table, &user);
             // Result discarded — the test only asserts on the broker's
-            // observed request, not the handler's stub-error message.
+            // observed request, not the handler's error message.
             h.handle(FileReq::Write("/tmp/.pattern.kdl".into(), "".into()), &cx)
         })
         .await
@@ -381,9 +569,7 @@ mod tests {
     }
 
     /// AC2.7 locked-default vs RuntimeOverride: even the highest
-    /// configurable precedence cannot loosen the shape guard. Adversarial
-    /// review focus #2 — the structural property must be observable in
-    /// the test suite, not just argued from code shape.
+    /// configurable precedence cannot loosen the shape guard.
     #[tokio::test]
     async fn config_kdl_write_locked_against_runtime_override_allow() {
         let broker = Arc::new(PermissionBroker::new());
@@ -402,9 +588,6 @@ mod tests {
         let bridge = Arc::new(crate::permission::PermissionBridge::spawn(broker));
         let bridge_for_thread = bridge.clone();
 
-        // RuntimeOverride is the highest configurable precedence;
-        // shape guard must still beat it because the policy is never
-        // consulted on a config-KDL write.
         let runtime_allow_all = PolicyRule::new(
             EffectCategory::File,
             PolicyMatcher::Always,
@@ -418,7 +601,7 @@ mod tests {
                 Some(bridge_for_thread),
             );
             let mut h = FileHandler;
-            let table = DataConTable::new();
+            let table = handler_table();
             let cx = EffectContext::with_user(&table, &user);
             h.handle(FileReq::Write("/tmp/.pattern.kdl".into(), "".into()), &cx)
         })
@@ -433,12 +616,8 @@ mod tests {
     }
 
     /// Handler-level Partner-bypass: when the dispatch origin IS a
-    /// Partner (only possible from a future direct-execution path —
-    /// `drive_step` always installs `Author::Agent(self)`), the broker
-    /// short-circuits via `bypasses_permission_gate()` and the handler
-    /// returns GateApproved without any responder firing. Adversarial
-    /// review focus #1 — wire-correctness predicate at the handler
-    /// layer, distinct from `drive_step`'s constant-Agent installation.
+    /// Partner, the broker short-circuits via `bypasses_permission_gate()`
+    /// and the handler returns GateApproved without any responder firing.
     #[tokio::test]
     async fn partner_origin_short_circuits_at_handler_level() {
         use pattern_core::types::origin::Partner;
@@ -468,15 +647,14 @@ mod tests {
                 Sphere::Private,
             ));
             let mut h = FileHandler;
-            let table = DataConTable::new();
+            let table = handler_table();
             let cx = EffectContext::with_user(&table, &user);
-            // Config-KDL write — would normally escalate, but Partner
-            // origin should short-circuit at the broker.
+            // Config-KDL write — Partner origin short-circuits the broker.
             h.handle(FileReq::Write("/tmp/.pattern.kdl".into(), "".into()), &cx)
         })
         .await
         .expect("blocking task")
-        .expect_err("Phase 1 stub always errors");
+        .expect_err("escalation always returns Err (approved or denied marker)");
         let msg = result.to_string();
         assert!(
             msg.contains(GATE_APPROVED_PREFIX),
@@ -490,55 +668,52 @@ mod tests {
         );
     }
 
-    /// AC2.7 non-config: writes to non-config paths must NOT trigger
-    /// the broker. Distinct prefix lets the test discriminate.
+    /// Non-config write with Allow policy and a wired FileManager succeeds.
     #[tokio::test]
-    async fn non_config_write_does_not_escalate() {
-        let broker = Arc::new(PermissionBroker::new());
-        let mut rx = broker.subscribe();
-        // Drop any broadcast we observe — the test only asserts the
-        // handler's RESULT, not the broker traffic, but we want to
-        // ensure no unexpected hang.
-        let saw_request = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let saw_for_thread = saw_request.clone();
-        let _watcher = tokio::spawn(async move {
-            if rx.recv().await.is_ok() {
-                saw_for_thread.store(true, std::sync::atomic::Ordering::SeqCst);
-            }
-        });
-        let bridge = Arc::new(crate::permission::PermissionBridge::spawn(broker));
-        let bridge_for_thread = bridge.clone();
+    async fn non_config_write_with_file_manager_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("notes.txt");
+        std::fs::write(&file, "original").unwrap();
 
+        let file_str = file.to_string_lossy().into_owned();
         let result = tokio::task::spawn_blocking(move || {
-            // Empty policy set → Allow everywhere (and shape guard
-            // must NOT fire on a non-config path).
-            let user = make_test_user("agent-non-cfg", PolicySet::new(), Some(bridge_for_thread));
+            let (user, _fm) = make_test_user_with_fm("agent-write", dir.path());
             let mut h = FileHandler;
-            let table = DataConTable::new();
+            let table = handler_table();
+            let cx = EffectContext::with_user(&table, &user);
+            h.handle(FileReq::Write(file_str, "updated".into()), &cx)
+        })
+        .await
+        .expect("blocking task");
+
+        assert!(
+            result.is_ok(),
+            "non-config write with FM and Allow policy should succeed"
+        );
+    }
+
+    /// Non-config write without a FileManager wired surfaces a clear error.
+    #[tokio::test]
+    async fn non_config_write_without_file_manager_surfaces_clear_error() {
+        let result = tokio::task::spawn_blocking(|| {
+            let user = make_test_user("agent-no-fm", PolicySet::new(), None);
+            let mut h = FileHandler;
+            let table = handler_table();
             let cx = EffectContext::with_user(&table, &user);
             h.handle(FileReq::Write("/tmp/notes.txt".into(), "hi".into()), &cx)
         })
         .await
         .expect("blocking task")
-        .expect_err("Phase 1 stub always errors");
+        .expect_err("missing FM should error");
         let msg = result.to_string();
         assert!(
-            msg.contains(GATE_APPROVED_PREFIX),
-            "Allow path should produce GateApproved marker, got: {msg}"
-        );
-        // Allow short-circuits the broker, so no request was observed.
-        // Sleep a beat to ensure the watcher would have fired if it
-        // were going to.
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        assert!(
-            !saw_request.load(std::sync::atomic::Ordering::SeqCst),
-            "Allow path must not hit the broker"
+            msg.contains("no file manager configured"),
+            "expected clear 'no file manager' error, got: {msg}"
         );
     }
 
     /// Approve-for-duration on a config write caches; same path within
     /// the window does NOT re-prompt; different path DOES re-prompt.
-    /// Demonstrates the FileWrite scope's path granularity.
     #[tokio::test]
     async fn approve_for_duration_caches_per_path() {
         let broker = Arc::new(PermissionBroker::new());
@@ -547,7 +722,6 @@ mod tests {
         let prompts_for_thread = prompts.clone();
         let broker_for_responder = broker.clone();
         let responder = tokio::spawn(async move {
-            // Approve every prompt with a long-duration grant.
             while let Ok(req) = rx.recv().await {
                 prompts_for_thread.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 broker_for_responder
@@ -565,35 +739,245 @@ mod tests {
         let join: tokio::task::JoinHandle<()> = tokio::task::spawn_blocking(move || {
             let user = make_test_user("agent-cfg-dur", PolicySet::new(), Some(bridge_for_thread));
             let mut h = FileHandler;
-            let table = DataConTable::new();
+            let table = handler_table();
             let cx = EffectContext::with_user(&table, &user);
 
             // First write to /a/.pattern.kdl — broker prompted, approves.
             h.handle(FileReq::Write("/a/.pattern.kdl".into(), "".into()), &cx)
-                .expect_err("stub error after approval");
-            // Second write to the SAME path within the window — must be
-            // satisfied from the cache without re-broadcasting.
+                .expect_err("escalation returns Err(GateApproved) marker");
+            // Same path within the window — cache hit, no re-prompt.
             h.handle(FileReq::Write("/a/.pattern.kdl".into(), "".into()), &cx)
-                .expect_err("stub error after cached approval");
-            // Write to a DIFFERENT config path — distinct scope, must
-            // re-prompt.
+                .expect_err("cached approval still returns Err(GateApproved) marker");
+            // Different config path — distinct scope, must re-prompt.
             h.handle(FileReq::Write("/b/.pattern.kdl".into(), "".into()), &cx)
-                .expect_err("stub error after fresh approval");
+                .expect_err("fresh approval for new path");
         });
         join.await.expect("blocking task");
 
-        // Allow the responder to drain.
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         let count = prompts.load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(
             count, 2,
             "expected exactly 2 broker prompts (first /a write, first /b write); got {count}"
         );
-        // Drop the bridge to close the channel and let the responder exit.
         drop(bridge);
-        // Responder will exit when the broker is dropped from inside the
-        // bridge — abort to free the join handle without awaiting (we
-        // intentionally don't care about its return).
         responder.abort();
+    }
+
+    /// File.Read dispatches to FileManager and returns file content.
+    #[tokio::test]
+    async fn read_dispatches_to_file_manager() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("read_test.txt");
+        std::fs::write(&file, "hello from read").unwrap();
+
+        let file_str = file.to_string_lossy().into_owned();
+        let result = tokio::task::spawn_blocking(move || {
+            let (user, _fm) = make_test_user_with_fm("agent-read", dir.path());
+            let mut h = FileHandler;
+            let table = handler_table();
+            let cx = EffectContext::with_user(&table, &user);
+            h.handle(FileReq::Read(file_str), &cx)
+        })
+        .await
+        .expect("blocking task");
+
+        assert!(result.is_ok(), "read should succeed: {result:?}");
+    }
+
+    /// File.Open dispatches to FileManager and returns file content.
+    #[tokio::test]
+    async fn open_dispatches_to_file_manager() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("open_test.txt");
+        std::fs::write(&file, "open content").unwrap();
+
+        let file_str = file.to_string_lossy().into_owned();
+        let result = tokio::task::spawn_blocking(move || {
+            let (user, _fm) = make_test_user_with_fm("agent-open", dir.path());
+            let mut h = FileHandler;
+            let table = handler_table();
+            let cx = EffectContext::with_user(&table, &user);
+            h.handle(FileReq::Open(file_str), &cx)
+        })
+        .await
+        .expect("blocking task");
+
+        assert!(result.is_ok(), "open should succeed: {result:?}");
+    }
+
+    /// File.Close dispatches to FileManager (must open first).
+    #[tokio::test]
+    async fn close_dispatches_to_file_manager() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("close_test.txt");
+        std::fs::write(&file, "contents").unwrap();
+
+        let file_path = file.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let (user, fm) = make_test_user_with_fm("agent-close", dir.path());
+            // Open first so close has something to close.
+            fm.open(&file_path).unwrap();
+            let mut h = FileHandler;
+            let table = handler_table();
+            let cx = EffectContext::with_user(&table, &user);
+            h.handle(
+                FileReq::Close(file_path.to_string_lossy().into_owned()),
+                &cx,
+            )
+        })
+        .await
+        .expect("blocking task");
+
+        assert!(
+            result.is_ok(),
+            "close should succeed after open: {result:?}"
+        );
+    }
+
+    /// File.Watch dispatches to FileManager.
+    #[tokio::test]
+    async fn watch_dispatches_to_file_manager() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("watch_test.txt");
+        std::fs::write(&file, "watched").unwrap();
+
+        let file_str = file.to_string_lossy().into_owned();
+        let result = tokio::task::spawn_blocking(move || {
+            let (user, _fm) = make_test_user_with_fm("agent-watch", dir.path());
+            let mut h = FileHandler;
+            let table = handler_table();
+            let cx = EffectContext::with_user(&table, &user);
+            h.handle(FileReq::Watch(file_str), &cx)
+        })
+        .await
+        .expect("blocking task");
+
+        assert!(result.is_ok(), "watch should succeed: {result:?}");
+    }
+
+    /// File.ListDir dispatches to FileManager.
+    #[tokio::test]
+    async fn list_dir_dispatches_to_file_manager() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "a").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "b").unwrap();
+
+        let dir_str = dir.path().to_string_lossy().into_owned();
+        let result = tokio::task::spawn_blocking(move || {
+            let (user, _fm) = make_test_user_with_fm("agent-list", dir.path());
+            let mut h = FileHandler;
+            let table = handler_table();
+            let cx = EffectContext::with_user(&table, &user);
+            h.handle(FileReq::ListDir(dir_str, "*".into()), &cx)
+        })
+        .await
+        .expect("blocking task");
+
+        assert!(result.is_ok(), "listdir should succeed: {result:?}");
+    }
+
+    /// File.Reload dispatches to FileManager (must open first).
+    #[tokio::test]
+    async fn reload_dispatches_to_file_manager() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("reload_test.txt");
+        std::fs::write(&file, "initial").unwrap();
+
+        let file_path = file.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let (user, fm) = make_test_user_with_fm("agent-reload", dir.path());
+            // Open so reload has a CRDT doc to reload.
+            fm.open(&file_path).unwrap();
+            // Write new content directly to disk after open.
+            std::fs::write(&file_path, "reloaded content").unwrap();
+            let mut h = FileHandler;
+            let table = handler_table();
+            let cx = EffectContext::with_user(&table, &user);
+            h.handle(
+                FileReq::Reload(file_path.to_string_lossy().into_owned()),
+                &cx,
+            )
+        })
+        .await
+        .expect("blocking task");
+
+        assert!(result.is_ok(), "reload should succeed: {result:?}");
+    }
+
+    /// File.ForceWrite dispatches to FileManager (must open first).
+    #[tokio::test]
+    async fn force_write_dispatches_to_file_manager() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("force_test.txt");
+        std::fs::write(&file, "original").unwrap();
+
+        let file_path = file.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let (user, fm) = make_test_user_with_fm("agent-force", dir.path());
+            // Open so force_write has a CRDT doc.
+            fm.open(&file_path).unwrap();
+            let mut h = FileHandler;
+            let table = handler_table();
+            let cx = EffectContext::with_user(&table, &user);
+            h.handle(
+                FileReq::ForceWrite(
+                    file_path.to_string_lossy().into_owned(),
+                    "force written".into(),
+                ),
+                &cx,
+            )
+        })
+        .await
+        .expect("blocking task");
+
+        assert!(result.is_ok(), "force_write should succeed: {result:?}");
+    }
+
+    /// CapabilityDenied from FileManager is prefixed with PERMISSION_DENIED_PREFIX.
+    #[tokio::test]
+    async fn capability_denied_uses_permission_denied_prefix() {
+        let result = tokio::task::spawn_blocking(|| {
+            // Build a user with a FileManager that has no File capability.
+            let broker = Arc::new(PermissionBroker::new());
+            let bridge = Arc::new(crate::permission::PermissionBridge::spawn(broker));
+            let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+            // CapabilitySet with only Memory — no File.
+            let mut caps = pattern_core::capability::CapabilitySet::default();
+            caps.categories
+                .insert(pattern_core::capability::EffectCategory::Memory);
+            let caps = Arc::new(caps);
+            let dir = tempfile::tempdir().unwrap();
+            let fm = Arc::new(crate::file_manager::FileManager::new(
+                allow_all_policy(dir.path()),
+                queue,
+                caps,
+                bridge.clone(),
+                pattern_core::AgentId::from("agent-no-caps"),
+            ));
+            let file = dir.path().join("test.txt");
+            std::fs::write(&file, "data").unwrap();
+
+            let user = TestUser {
+                agent_id: pattern_core::AgentId::from("agent-no-caps"),
+                policies: PolicySet::new(),
+                bridge: Some(bridge),
+                origin: Some(human_origin()),
+                file_manager: Some(fm),
+            };
+            let mut h = FileHandler;
+            let table = handler_table();
+            let cx = EffectContext::with_user(&table, &user);
+            h.handle(FileReq::Read(file.to_string_lossy().into_owned()), &cx)
+        })
+        .await
+        .expect("blocking task")
+        .expect_err("capability denied should be an error");
+
+        let msg = result.to_string();
+        assert!(
+            msg.contains(PERMISSION_DENIED_PREFIX),
+            "CapabilityDenied must use PERMISSION_DENIED_PREFIX, got: {msg}"
+        );
     }
 }

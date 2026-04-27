@@ -1,0 +1,13 @@
+---
+source: crates/pattern_provider/src/compose/render.rs
+assertion_line: 667
+expression: rendered
+---
+<system-reminder>
+File modified externally; your last edit may have been overwritten:
+- 2025-04-18T18:13:20Z /home/orual/project/config.kdl (conflict)
+A different process wrote to this file in a way that doesn't include your last save. Choices:
+  - File.Reload(path) — take the disk version, discard your in-memory edits.
+  - File.ForceWrite(path, your_content) — overwrite disk with your version.
+  - File.Write(path, merged) — write a manually-merged version.
+</system-reminder>

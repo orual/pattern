@@ -52,6 +52,7 @@
 //!   story.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use genai::adapter::AdapterKind;
 use genai::chat::ChatOptions;
@@ -169,6 +170,16 @@ pub struct PersonaSnapshot {
     /// Should not be load-bearing for foundation code paths.
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub extra: serde_json::Value,
+
+    // -- Session-state serialization ------------------------------------
+    /// File paths the agent had open at snapshot time. On restore, these
+    /// are re-opened with fresh LoroDocs — no LoroDoc state persists
+    /// across snapshot boundaries (loro docs are ephemeral per design).
+    ///
+    /// Uses `#[serde(default)]` so old snapshots that pre-date this
+    /// field deserialize cleanly with an empty list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub open_files: Vec<PathBuf>,
 }
 
 fn default_schema_version() -> u32 {
@@ -196,6 +207,7 @@ impl PersonaSnapshot {
             capabilities: None,
             policy_rules: Vec::new(),
             extra: serde_json::Value::Null,
+            open_files: Vec::new(),
         }
     }
 
@@ -250,6 +262,15 @@ impl PersonaSnapshot {
     /// Attach free-form extra metadata.
     pub fn with_extra(mut self, extra: serde_json::Value) -> Self {
         self.extra = extra;
+        self
+    }
+
+    /// Set the open-file paths to restore when this snapshot is loaded.
+    ///
+    /// Each path will be re-opened via the session's `FileManager` on
+    /// restore. Files that no longer exist are skipped with a warning.
+    pub fn with_open_files(mut self, paths: Vec<PathBuf>) -> Self {
+        self.open_files = paths;
         self
     }
 
@@ -708,5 +729,52 @@ mod tests {
         );
         assert_eq!(parsed.memory_blocks.len(), 1);
         assert_eq!(parsed.budgets.wall_ms, Some(10_000));
+    }
+
+    /// Round-trip a `PersonaSnapshot` with `open_files` populated.
+    ///
+    /// Verifies AC2.11: the list of open file paths at snapshot time
+    /// survives a serde round-trip so restore can re-open them.
+    #[test]
+    fn open_files_round_trip_with_paths() {
+        use std::path::PathBuf;
+
+        let snap = PersonaSnapshot::new("orual", "Orual").with_open_files(vec![
+            PathBuf::from("/foo/bar.txt"),
+            PathBuf::from("/baz/qux.rs"),
+        ]);
+
+        let json = serde_json::to_string(&snap).unwrap();
+        let parsed: PersonaSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.open_files.len(), 2);
+        assert_eq!(parsed.open_files[0], PathBuf::from("/foo/bar.txt"));
+        assert_eq!(parsed.open_files[1], PathBuf::from("/baz/qux.rs"));
+    }
+
+    /// `open_files` defaults to an empty list when not present in serialized form.
+    ///
+    /// Ensures old snapshots that pre-date the field deserialize cleanly
+    /// (forward-compatibility via `#[serde(default)]`).
+    #[test]
+    fn open_files_defaults_to_empty_on_round_trip() {
+        // Construct a snapshot without `open_files` and verify the field is
+        // absent from the JSON (skip_serializing_if = empty), then verify
+        // a JSON payload without the field deserializes with an empty list.
+        let snap = PersonaSnapshot::new("orual", "Orual");
+        let json = serde_json::to_string(&snap).unwrap();
+
+        // JSON must NOT contain the "open_files" key when the vec is empty.
+        assert!(
+            !json.contains("open_files"),
+            "open_files should be absent from JSON when empty; json: {json}"
+        );
+
+        // Deserializing old JSON (no field) must give an empty vec.
+        let old_json = r#"{"agent_id":"orual","name":"Orual","captured_at":"2026-01-01T00:00:00Z","schema_version":1}"#;
+        let parsed: PersonaSnapshot = serde_json::from_str(old_json).unwrap();
+        assert!(
+            parsed.open_files.is_empty(),
+            "open_files should default to empty when absent from JSON"
+        );
     }
 }

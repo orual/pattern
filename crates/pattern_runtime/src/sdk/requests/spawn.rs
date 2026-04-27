@@ -78,12 +78,10 @@ pub enum WireEffectCategory {
     Shell,
     #[core(module = "Pattern.Spawn", name = "CatFile")]
     File,
-    #[core(module = "Pattern.Spawn", name = "CatSources")]
-    Sources,
     #[core(module = "Pattern.Spawn", name = "CatMcp")]
     Mcp,
-    #[core(module = "Pattern.Spawn", name = "CatRpc")]
-    Rpc,
+    #[core(module = "Pattern.Spawn", name = "CatPort")]
+    Port,
     #[core(module = "Pattern.Spawn", name = "CatSpawn")]
     Spawn,
     #[core(module = "Pattern.Spawn", name = "CatDiagnostics")]
@@ -108,9 +106,8 @@ impl From<WireEffectCategory> for EffectCategory {
             WireEffectCategory::Log => EffectCategory::Log,
             WireEffectCategory::Shell => EffectCategory::Shell,
             WireEffectCategory::File => EffectCategory::File,
-            WireEffectCategory::Sources => EffectCategory::Sources,
             WireEffectCategory::Mcp => EffectCategory::Mcp,
-            WireEffectCategory::Rpc => EffectCategory::Rpc,
+            WireEffectCategory::Port => EffectCategory::Port,
             WireEffectCategory::Spawn => EffectCategory::Spawn,
             WireEffectCategory::Diagnostics => EffectCategory::Diagnostics,
             WireEffectCategory::Wake => EffectCategory::Wake,

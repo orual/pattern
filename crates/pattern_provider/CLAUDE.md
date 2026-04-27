@@ -5,7 +5,7 @@ LLM provider integration for Pattern v3. Owns Anthropic authentication
 identification), per-provider rate limiting, provider-reported token counting,
 and the request composer that emits the three-segment cache layout.
 
-Last verified: 2026-04-19
+Last verified: 2026-04-26
 
 Absorbs the Anthropic-facing bits of the retired `pattern_auth` crate. Depends
 on `pattern_core` for trait definitions; carries its own rebased fork of
@@ -212,6 +212,32 @@ pseudo-messages are tagged with `None`. The parallel
 `PartialRequest.message_origins` vector is returned alongside the
 finalized request in `ComposeOutput.message_origins`, which the runtime
 uses for attachment splicing by MessageId lookup instead of index math.
+
+### `FreshInputPass` (v3-sandbox-io)
+
+`FreshInputPass` (`compose/passes/fresh_input.rs`) appends current-turn
+user messages with inline attachment rendering and places the segment-3
+cache marker. Attachments (`BatchOpeningSnapshot`, `FileEdit`,
+`ShellOutput`, `PortEvent`, `BlockWriteNotifications`) are rendered
+inline at compose time by calling `render_attachments_for_message` — no
+post-compose splice step is needed. Sits after the segment-2 cache
+boundary (uncached until the next turn promotes it into history).
+
+### Attachment rendering (`compose/render.rs`)
+
+All system-reminder-style rendering goes through `render.rs`. No
+standalone pseudo-message `ChatMessage`s are produced anywhere (the old
+`pseudo_messages.rs` was removed). Public surface:
+
+- `render_file_edit_attachment` — `FileEdit` -> `<system-reminder>` string.
+- `render_file_conflict_attachment` — `FileConflict` -> `<system-reminder>` string.
+- `render_block_write_attachment` — `BlockWriteNotifications` -> `<system-reminder>` string.
+- `render_port_event_attachment` — `PortEvent` -> `<system-reminder>` string.
+- `render_shell_output_attachment` — `ShellOutput` -> `<system-reminder>` string.
+- `render_attachments_for_message` — all attachments on a message -> wrapped text.
+- `splice_text_onto_message` — splice rendered text onto a `ChatMessage`.
+- `render_skill_loaded_text` — `[skill:loaded]` marker text for tool_result content.
+- `render_block_write_body` — single `BlockWrite` -> raw body text (no wrapper).
 
 ### CacheProfile latching
 

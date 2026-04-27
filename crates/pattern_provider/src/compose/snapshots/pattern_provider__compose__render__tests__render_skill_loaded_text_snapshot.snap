@@ -1,6 +1,6 @@
 ---
-source: crates/pattern_provider/src/compose/pseudo_messages.rs
-assertion_line: 728
+source: crates/pattern_provider/src/compose/render.rs
+assertion_line: 679
 expression: text
 ---
 [skill:loaded] name="fix-authentication" trust_tier="project-local"

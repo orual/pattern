@@ -51,7 +51,7 @@ pub mod partial_request;
 pub mod passes;
 pub mod pipeline;
 pub mod profile;
-pub mod pseudo_messages;
+pub mod render;
 
 // Convenience re-exports so call sites can type `compose::ComposerPass`
 // instead of `compose::pipeline::ComposerPass`.
@@ -61,4 +61,7 @@ pub use current_state::render_current_state;
 pub use partial_request::PartialRequest;
 pub use pipeline::{ComposeOutput, ComposerPass, compose, finalize};
 pub use profile::{CacheProfile, CacheStrategy};
-pub use pseudo_messages::{render_change_event, render_change_events};
+pub use render::{
+    render_attachments_for_message, render_block_write_attachment, render_block_write_body,
+    render_skill_loaded_text, splice_text_onto_message,
+};

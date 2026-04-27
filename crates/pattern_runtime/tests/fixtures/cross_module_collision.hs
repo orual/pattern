@@ -16,9 +16,9 @@
 -- expected). The test asserts no `UnknownDataCon*` error appears,
 -- guarding against decode-path regressions.
 --
--- Effect-row positions match SdkBundle:
+-- Effect-row positions match SdkBundle (post Phase 4 Task 8):
 --   0=Memory, 1=Search, 2=Recall, 3=Message, 4=Display, 5=Time, 6=Log,
---   7=Shell, 8=File, 9=Sources, 10=Mcp, 11=Rpc, 12=Spawn
+--   7=Shell, 8=File, 9=Mcp, 10=Spawn, 11=Port
 -- Qualified imports resolve Haskell-level ambiguity between modules.
 module CrossModuleCollision (agent) where
 
@@ -32,12 +32,11 @@ import Pattern.Display
 import Pattern.Time
 import Pattern.Log
 import Pattern.Shell
-import Pattern.Sources
 import Pattern.Mcp
-import Pattern.Rpc
 import Pattern.Spawn
+import qualified Pattern.Port as Port
 
-agent :: Eff '[M.Memory, Search, Recall, Message, Display, Time, Log, Shell, F.File, Sources, Mcp, Rpc, Spawn] ()
+agent :: Eff '[M.Memory, Search, Recall, Message, Display, Time, Log, Shell, F.File, Mcp, Spawn, Port.Port] ()
 agent = do
   -- Write to make sure Memory effect decode works (arity-3 variant — was
   -- already covered by the pre-module fix, retained for breadth).

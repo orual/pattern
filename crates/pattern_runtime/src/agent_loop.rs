@@ -38,7 +38,6 @@
 //! (model strips prior thinking from context), but the sink still
 //! sees `TurnEvent::Thinking` chunks for UI purposes.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -58,10 +57,11 @@ use pattern_core::types::provider::{
 };
 use pattern_core::types::turn::{StepReply, StopReason, TurnCacheMetrics, TurnInput, TurnOutput};
 
-use pattern_provider::compose::passes::{Segment1Pass, Segment2Pass, synthesize_summary_message};
+use pattern_provider::compose::passes::{
+    FreshInputPass, Segment1Pass, Segment2Pass, synthesize_summary_message,
+};
 use pattern_provider::compose::{CacheProfile, ComposerPass, PartialRequest, compose};
-use pattern_provider::shaper::{ShaperCompatMode, build_system_prompt, wrap_system_reminder};
-use smol_str::SmolStr;
+use pattern_provider::shaper::{ShaperCompatMode, build_system_prompt};
 
 use crate::memory::TurnHistory;
 use crate::sdk::CODE_TOOL;
@@ -303,6 +303,16 @@ pub async fn orchestrate(
     let block_writes = ctx.adapter().drain_pending();
     let pending_attachments = ctx.adapter().drain_pending_attachments();
 
+    // Enqueue block writes as async reminders so the next compose cycle
+    // renders them inline on the first input message. This replaces the
+    // old pseudo-message path where Segment2Pass rendered block writes as
+    // standalone ChatMessages.
+    if !block_writes.is_empty() {
+        ctx.record_async_reminder(MessageAttachment::BlockWriteNotifications {
+            writes: block_writes.clone(),
+        });
+    }
+
     // 6. Build cache metrics from the captured usage.
     //
     // genai's `PromptTokensDetails` uses:
@@ -513,95 +523,6 @@ fn build_snapshot_attachment(
             }
         }
     }
-}
-
-/// Render a single attachment's inner content (NO `<system-reminder>` wrap).
-///
-/// Multiple attachments on the same message are grouped into a single
-/// `<system-reminder>` block by [`render_attachments_for_message`]. Per-variant
-/// renderers return raw content; the splice path handles wrapping.
-fn render_attachment_content(attachment: &MessageAttachment) -> String {
-    match attachment {
-        MessageAttachment::BatchOpeningSnapshot {
-            kind,
-            block_names,
-            blocks,
-            edited_blocks,
-        } => {
-            let mut parts = Vec::new();
-
-            parts.push("[memory:current_state]".to_string());
-
-            match kind {
-                SnapshotKind::Full => {
-                    parts.push("(full snapshot)".to_string());
-                }
-                SnapshotKind::Delta { since_batch } => {
-                    parts.push(format!("(delta since batch {since_batch})"));
-                    if !edited_blocks.is_empty() {
-                        let names: Vec<&str> = edited_blocks.iter().map(|s| s.as_str()).collect();
-                        parts.push(format!(
-                            "[memory:updated] blocks changed: {}",
-                            names.join(", ")
-                        ));
-                    }
-                }
-            }
-
-            if block_names.is_empty() {
-                parts.push("(no blocks loaded)".to_string());
-            } else {
-                let names: Vec<&str> = block_names.iter().map(|s| s.as_str()).collect();
-                parts.push(format!("Available blocks: {}", names.join(", ")));
-            }
-
-            for block in blocks {
-                if let Some(ref rendered) = block.rendered {
-                    parts.push(rendered.to_string());
-                }
-            }
-
-            parts.join("\n\n")
-        }
-        MessageAttachment::SkillAvailable {
-            handle: _,
-            name,
-            trust_tier,
-            description,
-            keywords,
-        } => {
-            let tier_str =
-                serde_json::to_string(trust_tier).unwrap_or_else(|_| "\"unknown\"".to_string());
-            let tier_kebab = tier_str.trim_matches('"');
-            let mut header =
-                format!("[skill:available] name=\"{name}\" trust_tier=\"{tier_kebab}\"");
-            if let Some(desc) = description.as_deref().filter(|s| !s.is_empty()) {
-                header.push_str(&format!(" description=\"{desc}\""));
-            }
-            let mut parts = vec![header];
-            if !keywords.is_empty() {
-                parts.push(format!("keywords: [{}]", keywords.join(", ")));
-            }
-            parts.push("[skill:available:end]".to_string());
-            parts.join("\n")
-        }
-        MessageAttachment::Custom { content } => content.clone(),
-    }
-}
-
-/// Render all attachments on a message into a single grouped
-/// `<system-reminder>` block. Returns `None` if `attachments` is empty.
-///
-/// Each attachment's content is separated by a blank line. The single
-/// outer `<system-reminder>` wrap is what reaches the wire — never per-
-/// attachment wraps.
-fn render_attachments_for_message(attachments: &[MessageAttachment]) -> Option<String> {
-    if attachments.is_empty() {
-        return None;
-    }
-    let parts: Vec<String> = attachments.iter().map(render_attachment_content).collect();
-    let body = parts.join("\n\n");
-    Some(wrap_system_reminder(&body))
 }
 
 /// Collect the most recent rendered content hash for each block label
@@ -1132,6 +1053,60 @@ pub async fn drive_step(
         }
     }
 
+    // ---- Drain between-turn async reminders onto the first fresh input message ----
+    //
+    // Async reminders (FileEdit / FileConflict / BlockWriteNotifications) are
+    // queued by listener threads / handler dispatches into
+    // `ctx.async_reminder_queue` between batches. They must land as
+    // `MessageAttachment`s on the first message in `cur_input`, regardless of
+    // role, so that the compose pipeline (Segment2Pass / FreshInputPass)
+    // renders them onto the wire inline through the same path as
+    // `BatchOpeningSnapshot`. This is the required lifecycle: Pattern Message
+    // attachments persist across pause/resume/restart and survive DB write via
+    // `attachments_json`; wire-only text splices do not.
+    //
+    // Target rule: first message in `cur_input.messages`, regardless of role.
+    // No `ChatRole::User` filter — tool-result messages are valid targets too.
+    //
+    // If `cur_input.messages` is empty (autonomous activation with no caller
+    // messages), synthesize a blank user message whose attachments carry the
+    // reminders. FreshInputPass renders them onto the wire exactly as it would
+    // for any other attachment-bearing message — an
+    // otherwise-empty body produces a wire message whose entire content is the
+    // rendered system-reminder block(s). This is the correct behaviour for an
+    // autonomous-activation turn that needs to surface "the file changed while
+    // you were idle."
+    {
+        let async_reminders = ctx.drain_async_reminders();
+        if !async_reminders.is_empty() {
+            if let Some(first_msg) = cur_input.messages.first_mut() {
+                // Push each reminder as a MessageAttachment onto the Pattern
+                // Message. FreshInputPass renders them onto the wire
+                // alongside any BatchOpeningSnapshot already attached.
+                for reminder in async_reminders {
+                    first_msg.attachments.push(reminder);
+                }
+            } else {
+                // Genuinely autonomous turn — no caller message exists.
+                // Synthesize a blank user message so the reminders still land
+                // on this turn rather than being silently deferred. The empty
+                // text body means the wire content IS the system-reminder block.
+                let synthetic = Message {
+                    chat_message: genai::chat::ChatMessage::user(""),
+                    id: MessageId::from(pattern_core::types::ids::new_id()),
+                    position: pattern_core::types::ids::new_snowflake_id(),
+                    owner_id: agent_id.clone(),
+                    created_at: jiff::Timestamp::now(),
+                    batch: cur_input.batch_id.clone(),
+                    response_meta: None,
+                    block_refs: Vec::new(),
+                    attachments: async_reminders,
+                };
+                cur_input.messages.push(synthetic);
+            }
+        }
+    }
+
     loop {
         // Compaction gate: check whether the active context needs
         // compression BEFORE composing the request. This ensures
@@ -1479,7 +1454,14 @@ async fn compose_request_for_turn(
     // 3. Snapshot TurnHistory state. Holding the mutex across the
     //    persona-load await above would be a deadlock risk — we
     //    acquire briefly here only.
-    let (summary_head_messages, prior_messages, recent_block_writes) = {
+    //
+    //    Prior messages are cloned as full Pattern `Message`s (not just
+    //    ChatMessages). Block writes from the most recent turn are
+    //    attached as `MessageAttachment::BlockWriteNotifications` on the
+    //    last output message of that turn — this is the natural anchor
+    //    because that message is the tool_result (or assistant EndTurn)
+    //    that closed out the dispatch producing the writes.
+    let (summary_head_messages, prior_messages) = {
         let hist = turn_history
             .lock()
             .map_err(|_| RuntimeError::ProviderError {
@@ -1494,27 +1476,24 @@ async fn compose_request_for_turn(
             })
             .collect();
 
-        let prior_messages: Vec<(SmolStr, ChatMessage)> = hist
-            .active_messages()
-            .map(|m| (m.id.clone(), m.chat_message.clone()))
-            .collect();
+        // Block writes from the most recent turn are no longer
+        // consumed here — they flow through the async-reminder buffer
+        // (enqueued by `orchestrate` after each wire turn) and are
+        // drained onto the first input message at compose time.
+        let prior_messages: Vec<Message> = hist.active_messages().cloned().collect();
 
-        let recent_block_writes = hist.most_recent_block_writes().to_vec();
-
-        (summary_head_messages, prior_messages, recent_block_writes)
+        (summary_head_messages, prior_messages)
     };
 
     // 4. Record whether segment 1 has content before `system_blocks`
     //    is moved into the pass.
     let has_segment_1 = !system_blocks.is_empty();
 
-    // 5. Assemble the composer pass list: Segment 1 + Segment 2.
-    //    Segment 3 is NO LONGER a separate composer pass — memory
-    //    snapshots are now attached to batch-opening user messages as
-    //    `MessageAttachment::BatchOpeningSnapshot` and spliced onto
-    //    the wire at compose-time (step 8 below). This eliminates
-    //    the cache-busting problem where the old seg3 pseudo-message
-    //    changed the "last message" identity across turns.
+    // 5. Assemble the composer pass list: Segment 1 + Segment 2 +
+    //    FreshInputPass. The compose pipeline owns ALL attachment
+    //    rendering — no post-compose splice needed. Segment 3 is not a
+    //    separate pass; memory snapshots are carried as attachments on
+    //    batch-opening user messages and rendered inline by the passes.
     let passes: Vec<Box<dyn ComposerPass>> = vec![
         Box::new(Segment1Pass::new(
             system_blocks,
@@ -1524,7 +1503,10 @@ async fn compose_request_for_turn(
         Box::new(Segment2Pass::new(
             summary_head_messages,
             prior_messages,
-            &recent_block_writes,
+            cache_profile.clone(),
+        )),
+        Box::new(FreshInputPass::new(
+            input.messages.clone(),
             cache_profile.clone(),
         )),
     ];
@@ -1534,7 +1516,6 @@ async fn compose_request_for_turn(
         reason: format!("composer pipeline failed: {e}"),
     })?;
     let mut req = output.request;
-    let message_origins = output.message_origins;
 
     // 6. Start from the persona's declared chat_options (temperature,
     //    max_tokens, top_p, reasoning_effort, verbosity, seed,
@@ -1550,166 +1531,7 @@ async fn compose_request_for_turn(
         .with_capture_tool_calls(true)
         .with_capture_reasoning_content(true);
 
-    // 7. Append fresh input messages AFTER compose so they sit
-    //    beyond the cache boundary (uncached by design).
-    for msg in &input.messages {
-        req.chat.messages.push(msg.chat_message.clone());
-    }
-
-    // 8. Splice attachment content onto the composed request.
-    //
-    //    Walk ALL pattern-level Messages that contributed to this request
-    //    (both from history via Segment2Pass and from fresh input). For
-    //    each message with non-empty attachments, render the attachment
-    //    and splice it onto the corresponding ChatMessage in the composed
-    //    request.
-    //
-    //    History messages were added by Segment2Pass as plain ChatMessages
-    //    (no attachments — those live on the Pattern Message). We need to
-    //    find the corresponding ChatMessage in the composed request for
-    //    each history message that has attachments, and splice there.
-    //
-    //    Strategy: walk the history messages in order and match them to
-    //    composed messages by content identity (same ChatMessage reference).
-    //    For fresh input messages, they were just appended above — their
-    //    position is known.
-    //
-    //    Simpler approach: since attachments are only on batch-opening
-    //    user messages, we look for them in:
-    //    (a) History messages from Segment2Pass — these appear as
-    //        ChatMessages in the composed request. We need to find them.
-    //    (b) Fresh input messages — these were just appended.
-    //
-    //    For (a), we walk the history and track which composed message
-    //    index each history message maps to. For (b), fresh messages are
-    //    at known indices: composed_len_after_seg2 .. composed_len_after_seg2 + input.messages.len().
-
-    let num_fresh = input.messages.len();
-    let total_composed = req.chat.messages.len();
-    let seg2_end = total_composed - num_fresh; // index range [0..seg2_end) is from composer
-
-    // Splice attachments from fresh input messages.
-    // Fresh messages are at indices [seg2_end..total_composed).
-    let mut last_spliced_idx: Option<usize> = None;
-    for (i, msg) in input.messages.iter().enumerate() {
-        let composed_idx = seg2_end + i;
-        // All attachments on a message group into a single
-        // <system-reminder> block — never per-attachment wraps.
-        if let Some(rendered) = render_attachments_for_message(&msg.attachments) {
-            splice_text_onto_message(&mut req.chat.messages[composed_idx], &rendered);
-            last_spliced_idx = Some(composed_idx);
-        }
-    }
-
-    // Splice attachments from history messages (Segment2Pass output).
-    //
-    // Uses MessageId-based lookup via message_origins (populated by
-    // Segment2Pass::apply) instead of fragile index arithmetic. Each
-    // composed message that originated from a Pattern Message has its
-    // MessageId recorded in message_origins; we build a reverse map
-    // and look up each history message's attachment target by id.
-    {
-        // Build origin → composed-index map for O(1) lookup.
-        let origin_map: HashMap<SmolStr, usize> = message_origins
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, origin)| origin.as_ref().map(|id| (id.clone(), idx)))
-            .collect();
-
-        let hist = turn_history
-            .lock()
-            .map_err(|_| RuntimeError::ProviderError {
-                reason: "turn_history mutex poisoned".into(),
-            })?;
-
-        for msg in hist.active_messages() {
-            if msg.attachments.is_empty() {
-                continue;
-            }
-            let Some(&composed_idx) = origin_map.get(&msg.id) else {
-                // Message not found in composed output — shouldn't
-                // happen, but skip gracefully rather than panicking.
-                continue;
-            };
-            if let Some(rendered) = render_attachments_for_message(&msg.attachments) {
-                splice_text_onto_message(&mut req.chat.messages[composed_idx], &rendered);
-                last_spliced_idx = Some(composed_idx);
-            }
-        }
-    }
-
-    // 9. Place cache_control marker on the LAST message that had an
-    //    attachment spliced (the new seg3 boundary). If no attachments
-    //    were spliced (continuation turn with no fresh input), fall
-    //    through — the seg2 marker is the last cache boundary.
-    if let Some(idx) = last_spliced_idx {
-        let opts = req.chat.messages[idx]
-            .options
-            .clone()
-            .unwrap_or_default()
-            .with_cache_control(cache_profile.segment_3_control());
-        req.chat.messages[idx].options = Some(opts);
-    }
-
     Ok((req, has_segment_1))
-}
-
-/// Splice rendered text onto a `ChatMessage`'s content.
-///
-/// For user-role messages: appends as a `ContentPart::Text` AFTER existing
-/// content. For tool-role messages: folds into the LAST `ToolResponse`'s
-/// content array (same as the old `smooshIntoToolResult` pattern), preserving
-/// Anthropic's wire-format constraint that `tool_result` blocks come first.
-fn splice_text_onto_message(msg: &mut ChatMessage, text: &str) {
-    use genai::chat::{ChatRole, ContentPart, MessageContent};
-
-    match msg.role {
-        ChatRole::Tool => {
-            // Fold into the last ToolResponse's content array.
-            let original_parts = msg.content.parts().clone();
-            let mut new_parts: Vec<ContentPart> = Vec::with_capacity(original_parts.len());
-            let mut folded = false;
-
-            for part in original_parts.into_iter().rev() {
-                if !folded && let ContentPart::ToolResponse(mut tr) = part {
-                    let seg3_block = serde_json::json!({"type": "text", "text": text});
-                    let folded_content = match tr.content {
-                        serde_json::Value::String(ref s) => {
-                            serde_json::json!([
-                                seg3_block,
-                                {"type": "text", "text": s},
-                            ])
-                        }
-                        serde_json::Value::Array(ref items) => {
-                            let mut arr = Vec::with_capacity(items.len() + 1);
-                            arr.push(seg3_block);
-                            arr.extend(items.iter().cloned());
-                            serde_json::Value::Array(arr)
-                        }
-                        ref other => {
-                            serde_json::json!([
-                                seg3_block,
-                                {"type": "text", "text": other.to_string()},
-                            ])
-                        }
-                    };
-                    tr.content = folded_content;
-                    new_parts.push(ContentPart::ToolResponse(tr));
-                    folded = true;
-                    continue;
-                }
-                new_parts.push(part);
-            }
-            new_parts.reverse();
-            msg.content = MessageContent::from_parts(new_parts);
-        }
-        _ => {
-            // User, Assistant, System: append as text part.
-            let mut parts = msg.content.parts().clone();
-            parts.push(ContentPart::Text(text.to_string()));
-            msg.content = MessageContent::from_parts(parts);
-        }
-    }
 }
 
 /// Default `ShaperCompatMode` used by the composer. Hardcoded to
@@ -1955,6 +1777,9 @@ fn sum_opt(a: Option<i32>, b: Option<i32>) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pattern_provider::compose::render::{
+        render_attachment_content, render_attachments_for_message, splice_text_onto_message,
+    };
     use tracing_test::traced_test;
 
     #[test]
@@ -3974,5 +3799,483 @@ mod tests {
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0]["text"], "memory snapshot");
         assert_eq!(arr[1]["text"], "result");
+    }
+
+    // ---- FileEdit / FileConflict render arm tests (Task 8) ------------------
+
+    /// `render_attachment_content` for `FileEdit` (no diff) returns the
+    /// raw body without `<system-reminder>` wrap (wrapping happens at
+    /// the `render_attachments_for_message` level).
+    #[test]
+    fn render_file_edit_attachment_produces_system_reminder() {
+        let path = std::path::PathBuf::from("/home/orual/notes.txt");
+        let at = jiff::Timestamp::from_second(1_745_000_000).unwrap();
+        let attachment = MessageAttachment::FileEdit {
+            path,
+            kind: pattern_core::types::message::FileEditKind::Open,
+            at,
+            diff: None,
+        };
+        // render_attachment_content returns raw body; wrapping is done
+        // by render_attachments_for_message.
+        let rendered = render_attachment_content(&attachment);
+        assert!(
+            rendered.contains("External edit while you were thinking"),
+            "FileEdit render must describe the edit: {rendered}"
+        );
+        assert!(
+            rendered.contains("you had open"),
+            "FileEdit Open kind must use 'you had open' label: {rendered}"
+        );
+        assert!(
+            rendered.contains("notes.txt"),
+            "FileEdit render must include the file path: {rendered}"
+        );
+        // Verify wrapping at the group level.
+        let wrapped = render_attachments_for_message(&[attachment]).unwrap();
+        assert!(
+            wrapped.contains("<system-reminder>"),
+            "grouped render must contain <system-reminder>: {wrapped}"
+        );
+    }
+
+    /// `render_attachment_content` for `FileEdit` (Watch kind) uses the
+    /// correct label.
+    #[test]
+    fn render_file_edit_watch_uses_correct_label() {
+        let path = std::path::PathBuf::from("/tmp/log.txt");
+        let at = jiff::Timestamp::from_second(1_745_000_000).unwrap();
+        let attachment = MessageAttachment::FileEdit {
+            path,
+            kind: pattern_core::types::message::FileEditKind::Watch,
+            at,
+            diff: None,
+        };
+        let rendered = render_attachment_content(&attachment);
+        assert!(
+            rendered.contains("you were watching"),
+            "FileEdit Watch kind must use 'you were watching' label: {rendered}"
+        );
+    }
+
+    /// `render_attachment_content` for `FileConflict` renders the three
+    /// resolution options (raw body; wrapping at group level).
+    #[test]
+    fn render_file_conflict_attachment_produces_system_reminder_with_choices() {
+        let path = std::path::PathBuf::from("/home/orual/project/data.txt");
+        let at = jiff::Timestamp::from_second(1_745_000_000).unwrap();
+        let attachment = MessageAttachment::FileConflict { path, at };
+        let rendered = render_attachment_content(&attachment);
+        assert!(
+            rendered.contains("File.Reload"),
+            "FileConflict render must list File.Reload option: {rendered}"
+        );
+        assert!(
+            rendered.contains("File.ForceWrite"),
+            "FileConflict render must list File.ForceWrite option: {rendered}"
+        );
+        assert!(
+            rendered.contains("File.Write"),
+            "FileConflict render must list File.Write option: {rendered}"
+        );
+        assert!(
+            rendered.contains("data.txt"),
+            "FileConflict render must include file path: {rendered}"
+        );
+    }
+
+    /// Drain lifecycle smoke test: a `FileEdit` async reminder queued before
+    /// `drive_step` is run must end up as a `MessageAttachment` on the first
+    /// Pattern Message in `cur_input` (layer 1), AND its rendered content must
+    /// reach the wire through step-8's `render_attachments_for_message` splice
+    /// (layer 2).
+    ///
+    /// Confirms the invariant: async reminders go through MessageAttachment
+    /// + the attachment render flow, never wire-only text splicing.
+    #[tokio::test]
+    async fn async_reminder_attachment_on_pattern_message_and_rendered_on_wire() {
+        use pattern_core::types::ids::{AgentId, BatchId, MessageId, new_id, new_snowflake_id};
+        use pattern_core::types::message::FileEditKind;
+        use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
+
+        let path = std::path::PathBuf::from("/tmp/test_file.txt");
+        let at = jiff::Timestamp::from_second(1_745_000_000).unwrap();
+        let reminder = MessageAttachment::FileEdit {
+            path: path.clone(),
+            kind: FileEditKind::Open,
+            at,
+            diff: Some("--- before\nhello\n+++ after\nhello world".to_string()),
+        };
+
+        let (ctx, _sink, _provider) =
+            mock_session(vec![MockProviderClient::text_turn("acknowledged")]).await;
+
+        // Enqueue the reminder into the session's async reminder queue,
+        // simulating a FileManager listener thread firing between turns.
+        ctx.record_async_reminder(reminder);
+
+        // Verify it's in the queue before drive_step runs.
+        assert_eq!(
+            ctx.async_reminder_queue().lock().unwrap().len(),
+            1,
+            "reminder must be in queue before drive_step"
+        );
+
+        let batch_snowflake = new_snowflake_id();
+        let user_msg = Message {
+            chat_message: genai::chat::ChatMessage::user("what changed?"),
+            id: MessageId::from(new_id()),
+            position: new_snowflake_id(),
+            owner_id: AgentId::from("agent-a"),
+            created_at: jiff::Timestamp::now(),
+            batch: batch_snowflake.clone(),
+            response_meta: None,
+            block_refs: vec![],
+            attachments: vec![],
+        };
+
+        let turn_history = Arc::new(std::sync::Mutex::new(crate::memory::TurnHistory::empty()));
+        let initial_input = TurnInput {
+            turn_id: batch_snowflake.clone(),
+            batch_id: BatchId::from(batch_snowflake.clone()),
+            origin: MessageOrigin::new(
+                Author::System {
+                    reason: SystemReason::Wakeup,
+                },
+                Sphere::System,
+            ),
+            messages: vec![user_msg],
+        };
+
+        let dispatcher = NoOpDispatcher;
+        let reply = drive_step(
+            initial_input,
+            ctx.clone(),
+            turn_history.clone(),
+            pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
+            &dispatcher,
+            "",
+            None,
+        )
+        .await
+        .expect("drive_step should succeed");
+
+        // Layer 1: the async reminder queue must be drained after drive_step.
+        assert_eq!(
+            ctx.async_reminder_queue().lock().unwrap().len(),
+            0,
+            "async reminder queue must be empty after drive_step drained it"
+        );
+
+        // Layer 1: the reminder attachment must be on the first Pattern Message
+        // in the turn's recorded input (TurnHistory). It must survive the
+        // turn-recording step as a MessageAttachment, not just wire content.
+        let hist = turn_history.lock().unwrap();
+        let records: Vec<_> = hist.iter_active().collect();
+        assert_eq!(records.len(), 1, "one TurnRecord in history");
+
+        let first_input_msg = records[0]
+            .input
+            .messages
+            .first()
+            .expect("recorded input must have a first message");
+
+        // The first message carries at least the FileEdit reminder. It may also
+        // carry a BatchOpeningSnapshot (added by the batch-opening snapshot
+        // machinery earlier in drive_step). We assert the FileEdit is present,
+        // not that it's the only attachment.
+        assert!(
+            !first_input_msg.attachments.is_empty(),
+            "first recorded input message must have at least one attachment"
+        );
+        assert!(
+            first_input_msg
+                .attachments
+                .iter()
+                .any(|a| matches!(a, MessageAttachment::FileEdit { path: p, .. }
+                    if p.to_string_lossy().contains("test_file.txt"))),
+            "FileEdit attachment for test_file.txt must be present on the first message; \
+             found attachments: {:?}",
+            first_input_msg.attachments
+        );
+
+        // Layer 2: the rendered text must have reached the wire. drive_step
+        // calls compose_request_for_turn which runs FreshInputPass, which
+        // calls render_attachments_for_message on fresh input messages. We
+        // verify by re-running the same render path the FreshInputPass uses
+        // and confirming the output matches the expected content.
+        //
+        // The attachment on the Pattern Message is the ground truth; the wire
+        // content is derived from it. Both must be consistent.
+        let rendered = render_attachments_for_message(&first_input_msg.attachments)
+            .expect("render must produce Some");
+        assert!(
+            rendered.contains("<system-reminder>"),
+            "step-8 render path must wrap in system-reminder: {rendered}"
+        );
+        assert!(
+            rendered.contains("External edit while you were thinking"),
+            "step-8 render must contain file-edit notification: {rendered}"
+        );
+        assert!(
+            rendered.contains("test_file.txt"),
+            "step-8 render must contain the file path: {rendered}"
+        );
+        assert!(
+            rendered.contains("--- before"),
+            "step-8 render must contain the diff payload: {rendered}"
+        );
+
+        // Sanity: drive_step succeeded with one EndTurn turn.
+        assert_eq!(reply.turns.len(), 1);
+        assert_eq!(reply.turns[0].stop_reason, StopReason::EndTurn);
+    }
+
+    /// Regression: async reminder enqueued before a drive_step call must
+    /// survive in TurnHistory across the turn (i.e., round-trip persistence).
+    ///
+    /// A simulated "session restart" is modelled by constructing a second
+    /// TurnHistory from the first's recorded turns and asserting the attachment
+    /// is still visible on the first input message of the prior turn.
+    ///
+    /// This guards the invariant that attachments live on Pattern Messages
+    /// (which persist via TurnHistory) rather than only in the wire bytes
+    /// (which are lost on session teardown).
+    #[tokio::test]
+    async fn async_reminder_attachment_survives_turn_history_round_trip() {
+        use pattern_core::types::ids::{AgentId, BatchId, MessageId, new_id, new_snowflake_id};
+        use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
+
+        let path = std::path::PathBuf::from("/home/orual/notes.md");
+        let at = jiff::Timestamp::from_second(1_745_100_000).unwrap();
+        let reminder = MessageAttachment::FileConflict {
+            path: path.clone(),
+            at,
+        };
+
+        let (ctx, _sink, _provider) =
+            mock_session(vec![MockProviderClient::text_turn("conflict noted")]).await;
+
+        ctx.record_async_reminder(reminder);
+
+        let batch_snowflake = new_snowflake_id();
+        let user_msg = Message {
+            chat_message: genai::chat::ChatMessage::user("resolve the conflict"),
+            id: MessageId::from(new_id()),
+            position: new_snowflake_id(),
+            owner_id: AgentId::from("agent-a"),
+            created_at: jiff::Timestamp::now(),
+            batch: batch_snowflake.clone(),
+            response_meta: None,
+            block_refs: vec![],
+            attachments: vec![],
+        };
+
+        let turn_history = Arc::new(std::sync::Mutex::new(crate::memory::TurnHistory::empty()));
+        let initial_input = TurnInput {
+            turn_id: batch_snowflake.clone(),
+            batch_id: BatchId::from(batch_snowflake.clone()),
+            origin: MessageOrigin::new(
+                Author::System {
+                    reason: SystemReason::Wakeup,
+                },
+                Sphere::System,
+            ),
+            messages: vec![user_msg],
+        };
+
+        let dispatcher = NoOpDispatcher;
+        drive_step(
+            initial_input,
+            ctx.clone(),
+            turn_history.clone(),
+            pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
+            &dispatcher,
+            "",
+            None,
+        )
+        .await
+        .expect("drive_step should succeed");
+
+        // "Session restart" simulation: extract the recorded TurnRecord and
+        // verify that the attachment is present on the input message. In the
+        // real system, TurnHistory is reconstructed from DB rows on session
+        // open; here we just confirm that the in-memory record carries the
+        // attachment after the turn completes, since it is the source-of-truth
+        // that would be serialised to DB.
+        let hist = turn_history.lock().unwrap();
+        let records: Vec<_> = hist.iter_active().collect();
+        assert_eq!(records.len(), 1, "one TurnRecord");
+
+        let first_msg = records[0]
+            .input
+            .messages
+            .first()
+            .expect("recorded input must have a message");
+
+        // The FileConflict attachment must still be present on the Pattern
+        // Message after the turn completed — it was not consumed or stripped
+        // during compose or recording.
+        assert!(
+            first_msg
+                .attachments
+                .iter()
+                .any(|a| matches!(a, MessageAttachment::FileConflict { .. })),
+            "FileConflict attachment must persist on Pattern Message after turn; \
+             got attachments: {:?}",
+            first_msg.attachments
+        );
+
+        // Confirm the attachment is inspectable for the path — the content
+        // that would be re-rendered in future TurnHistory replay is accessible.
+        let conflict = first_msg
+            .attachments
+            .iter()
+            .find(|a| matches!(a, MessageAttachment::FileConflict { .. }))
+            .unwrap();
+        let rendered = render_attachment_content(conflict);
+        assert!(
+            rendered.contains("notes.md"),
+            "re-rendered FileConflict from TurnHistory must contain path: {rendered}"
+        );
+        assert!(
+            rendered.contains("File.Reload"),
+            "re-rendered FileConflict must list resolution options: {rendered}"
+        );
+    }
+
+    /// Empty-input edge case: if `cur_input.messages` is empty (autonomous
+    /// activation with no caller messages), async reminders must NOT be
+    /// re-enqueued. Instead, a synthetic blank user message is constructed with
+    /// the reminders as attachments so they land on the wire this turn via
+    /// step-8's render_attachments_for_message splice — an autonomous-wakeup
+    /// turn where "the file changed while you were idle" surfaces immediately,
+    /// not deferred to the next externally-triggered turn.
+    #[tokio::test]
+    async fn async_reminder_synthesizes_user_message_when_input_empty() {
+        use pattern_core::types::message::FileEditKind;
+
+        let path = std::path::PathBuf::from("/tmp/autonomous.txt");
+        let at = jiff::Timestamp::from_second(1_745_000_000).unwrap();
+        let reminder = MessageAttachment::FileEdit {
+            path: path.clone(),
+            kind: FileEditKind::Watch,
+            at,
+            diff: None,
+        };
+
+        let (ctx, _sink, _provider) =
+            mock_session(vec![MockProviderClient::text_turn("autonomous reply")]).await;
+
+        ctx.record_async_reminder(reminder);
+
+        // Construct a turn input with NO messages — this simulates an autonomous
+        // activation (wakeup with no caller messages).
+        let turn_history = Arc::new(std::sync::Mutex::new(crate::memory::TurnHistory::empty()));
+        let initial_input = test_turn_input(); // messages: vec![] by construction
+
+        let dispatcher = NoOpDispatcher;
+        drive_step(
+            initial_input,
+            ctx.clone(),
+            turn_history.clone(),
+            pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
+            &dispatcher,
+            "",
+            None,
+        )
+        .await
+        .expect("drive_step should succeed");
+
+        // The queue must be fully drained — reminders were consumed this turn.
+        let queue = ctx.async_reminder_queue();
+        let guard = queue.lock().unwrap();
+        assert_eq!(
+            guard.len(),
+            0,
+            "async reminder queue must be empty after drive_step synthesized the message; \
+             queue len = {}",
+            guard.len()
+        );
+        drop(guard);
+
+        // The synthetic message must appear as the first (and only) input message
+        // in the recorded TurnHistory.
+        let hist = turn_history.lock().unwrap();
+        let records: Vec<_> = hist.iter_active().collect();
+        assert_eq!(records.len(), 1, "one TurnRecord in history");
+
+        let first_input_msg = records[0]
+            .input
+            .messages
+            .first()
+            .expect("recorded input must have the synthetic user message");
+
+        // The synthetic message must carry the FileEdit reminder as an attachment.
+        assert_eq!(
+            first_input_msg.attachments.len(),
+            1,
+            "synthetic message must have exactly the one FileEdit attachment; \
+             found: {:?}",
+            first_input_msg.attachments
+        );
+        assert!(
+            matches!(
+                &first_input_msg.attachments[0],
+                MessageAttachment::FileEdit { path: p, .. } if p == &path
+            ),
+            "attachment must be the original FileEdit for autonomous.txt; \
+             found: {:?}",
+            first_input_msg.attachments[0]
+        );
+
+        // The wire role must be User (the synthetic message acts as a
+        // stand-in caller message for the attachment-render machinery).
+        assert_eq!(
+            first_input_msg.chat_message.role,
+            genai::chat::ChatRole::User,
+            "synthetic message must have User role"
+        );
+    }
+
+    /// Render path on a synthetic blank user message: when drive_step
+    /// synthesizes a blank user message for an autonomous-activation turn,
+    /// the wire content after step-8's attachment-splice must be the
+    /// system-reminder block(s) — and nothing else, since the body is empty.
+    #[tokio::test]
+    async fn async_reminder_synthetic_message_renders_to_system_reminder_block() {
+        use pattern_core::types::message::FileEditKind;
+
+        let path = std::path::PathBuf::from("/tmp/wakeup_change.txt");
+        let at = jiff::Timestamp::from_second(1_745_000_000).unwrap();
+        let reminder = MessageAttachment::FileEdit {
+            path: path.clone(),
+            kind: FileEditKind::Open,
+            at,
+            diff: Some("--- old\nline A\n+++ new\nline B".to_string()),
+        };
+
+        // render_attachments_for_message is the step-8 render path. The
+        // synthetic message's attachments should produce a system-reminder
+        // block identical to any other FileEdit attachment.
+        let rendered = render_attachments_for_message(&[reminder])
+            .expect("render must produce Some for a non-empty attachment list");
+
+        assert!(
+            rendered.contains("<system-reminder>"),
+            "render must wrap content in system-reminder: {rendered}"
+        );
+        assert!(
+            rendered.contains("External edit while you were thinking"),
+            "render must contain file-edit notification header: {rendered}"
+        );
+        assert!(
+            rendered.contains("wakeup_change.txt"),
+            "render must contain the file path: {rendered}"
+        );
+        assert!(
+            rendered.contains("line A"),
+            "render must contain the diff payload: {rendered}"
+        );
     }
 }

@@ -64,7 +64,7 @@ fn zero_blocks_emits_present_but_empty_segment_3() {
 
     let passes: Vec<Box<dyn ComposerPass>> = vec![
         Box::new(Segment1Pass::new(system_blocks(), vec![], profile.clone())),
-        Box::new(Segment2Pass::new(vec![], vec![], &[], profile.clone())),
+        Box::new(Segment2Pass::new(vec![], vec![], profile.clone())),
         Box::new(Segment3Pass::new(vec![], profile)),
     ];
 
@@ -106,7 +106,7 @@ fn zero_blocks_still_places_segment_3_cache_marker() {
 
     let passes: Vec<Box<dyn ComposerPass>> = vec![
         Box::new(Segment1Pass::new(system_blocks(), vec![], profile.clone())),
-        Box::new(Segment2Pass::new(vec![], vec![], &[], profile.clone())),
+        Box::new(Segment2Pass::new(vec![], vec![], profile.clone())),
         Box::new(Segment3Pass::new(vec![], profile)),
     ];
 
@@ -146,7 +146,7 @@ fn loading_a_block_changes_segment_3_body_not_marker_shape() {
             vec![],
             profile_a.clone(),
         )),
-        Box::new(Segment2Pass::new(vec![], vec![], &[], profile_a.clone())),
+        Box::new(Segment2Pass::new(vec![], vec![], profile_a.clone())),
         Box::new(Segment3Pass::new(vec![], profile_a)),
     ];
     let output_a = compose(&passes_a, initial_a).expect("turn A composes");
@@ -160,7 +160,7 @@ fn loading_a_block_changes_segment_3_body_not_marker_shape() {
             vec![],
             profile_b.clone(),
         )),
-        Box::new(Segment2Pass::new(vec![], vec![], &[], profile_b.clone())),
+        Box::new(Segment2Pass::new(vec![], vec![], profile_b.clone())),
         Box::new(Segment3Pass::new(vec![block], profile_b)),
     ];
     let output_b = compose(&passes_b, initial_b).expect("turn B composes");

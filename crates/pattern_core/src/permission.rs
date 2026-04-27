@@ -92,6 +92,16 @@ pub enum PermissionScope {
     FileWrite {
         path: String,
     },
+    /// Config-file write detected by shape analysis (filename fast-path
+    /// or KDL top-level reserved-key parse). Carries the matched keys so
+    /// the human reviewer sees exactly which Pattern-reserved identifiers
+    /// triggered the gate.
+    FileWriteConfig {
+        path: std::path::PathBuf,
+        /// Top-level KDL keys that triggered the config-write detection,
+        /// surfaced to the human for context (e.g. `["capabilities", "policy"]`).
+        matched_keys: Vec<String>,
+    },
 }
 
 /// A granted permission. Returned from [`PermissionBroker::request`]

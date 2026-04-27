@@ -14,12 +14,11 @@ pub mod log;
 pub mod mcp;
 pub mod memory;
 pub mod message;
+pub mod port;
 pub mod recall;
-pub mod rpc;
 pub mod search;
 pub mod shell;
 pub mod skills;
-pub mod sources;
 pub mod spawn;
 pub mod tasks;
 pub mod time;
@@ -33,12 +32,11 @@ pub use log::LogReq;
 pub use mcp::McpReq;
 pub use memory::MemoryReq;
 pub use message::MessageReq;
+pub use port::PortReq;
 pub use recall::RecallReq;
-pub use rpc::RpcReq;
 pub use search::SearchReq;
 pub use shell::ShellReq;
 pub use skills::SkillsReq;
-pub use sources::SourcesReq;
 pub use spawn::SpawnReq;
 pub use tasks::TasksReq;
 pub use time::TimeReq;
@@ -89,10 +87,21 @@ mod parity {
         ("RecallReq", &["RecallInsert", "RecallSearch", "RecallGet"]),
         ("MessageReq", &["Ask", "Send", "Reply", "Notify"]),
         ("ShellReq", &["Execute", "Spawn", "Kill", "Status"]),
-        ("FileReq", &["Read", "Write", "ListDir"]),
-        ("SourcesReq", &["Stream", "Subscribe", "List"]),
+        (
+            "FileReq",
+            &[
+                "Read",
+                "Write",
+                "ListDir",
+                "Open",
+                "Close",
+                "Watch",
+                "Reload",
+                "ForceWrite",
+            ],
+        ),
         ("McpReq", &["Use"]),
-        ("RpcReq", &["Call", "Recv"]),
+        // RpcReq retired in v3-sandbox-io Phase 4 (replaced by PortReq).
         (
             "SpawnReq",
             &[
@@ -125,6 +134,7 @@ mod parity {
         ),
         ("WakeReq", &["Register", "Unregister"]),
         ("FrontingReq", &["Current", "Set", "Route", "Clear"]),
+        ("PortReq", &["List", "Call", "Subscribe", "Unsubscribe"]),
     ];
 
     /// Sanity check: the table isn't empty and each entry lists at least
@@ -133,8 +143,10 @@ mod parity {
     fn parity_table_is_populated() {
         assert_eq!(
             EXPECTED.len(),
-            18,
-            "expected 18 SDK namespaces; update this test when adding/removing one"
+            17,
+            "expected 17 SDK namespaces (Sources/Rpc retired in v3-sandbox-io \
+             Phase 4; Port + Wake + Fronting added; 14 originals + 3 new = 17); \
+             update this test when adding/removing one"
         );
         for (enum_name, variants) in EXPECTED {
             assert!(
@@ -251,10 +263,15 @@ mod parity {
     #[test]
     fn shell_req_variants() {
         use super::ShellReq;
-        let _ = ShellReq::Execute(String::new());
+        // Execute carries (command, Option<timeout_secs>); None means "use
+        // SessionContext default". Spawn returns JSON {task_id, pid}. Kill takes
+        // an opaque task_id (UUID-prefix string), NOT an OS PID. Status takes no
+        // arg and returns JSON [TaskInfo, ...]. Matches the Haskell GADT in
+        // `haskell/Pattern/Shell.hs`.
+        let _ = ShellReq::Execute(String::new(), None);
         let _ = ShellReq::Spawn(String::new());
-        let _ = ShellReq::Kill(0);
-        let _ = ShellReq::Status(0);
+        let _ = ShellReq::Kill(String::new());
+        let _ = ShellReq::Status;
         assert_eq!(count("ShellReq"), 4);
     }
 
@@ -263,17 +280,13 @@ mod parity {
         use super::FileReq;
         let _ = FileReq::Read(String::new());
         let _ = FileReq::Write(String::new(), String::new());
-        let _ = FileReq::ListDir(String::new());
-        assert_eq!(count("FileReq"), 3);
-    }
-
-    #[test]
-    fn sources_req_variants() {
-        use super::SourcesReq;
-        let _ = SourcesReq::Stream(String::new());
-        let _ = SourcesReq::Subscribe(String::new(), String::new());
-        let _ = SourcesReq::List;
-        assert_eq!(count("SourcesReq"), 3);
+        let _ = FileReq::ListDir(String::new(), String::new());
+        let _ = FileReq::Open(String::new());
+        let _ = FileReq::Close(String::new());
+        let _ = FileReq::Watch(String::new());
+        let _ = FileReq::Reload(String::new());
+        let _ = FileReq::ForceWrite(String::new(), String::new());
+        assert_eq!(count("FileReq"), 8);
     }
 
     #[test]
@@ -281,14 +294,6 @@ mod parity {
         use super::McpReq;
         let _ = McpReq::Use(String::new(), String::new());
         assert_eq!(count("McpReq"), 1);
-    }
-
-    #[test]
-    fn rpc_req_variants() {
-        use super::RpcReq;
-        let _ = RpcReq::Call(String::new(), String::new());
-        let _ = RpcReq::Recv(String::new());
-        assert_eq!(count("RpcReq"), 2);
     }
 
     #[test]
@@ -403,6 +408,18 @@ mod parity {
         }]);
         let _ = FrontingReq::Clear;
         assert_eq!(count("FrontingReq"), 4);
+    }
+
+    #[test]
+    fn port_req_variants() {
+        use super::PortReq;
+        // Exhaustively construct every variant so a rename or added variant
+        // forces a compile error or count mismatch.
+        let _ = PortReq::List;
+        let _ = PortReq::Call(String::new(), String::new(), String::new());
+        let _ = PortReq::Subscribe(String::new(), String::new());
+        let _ = PortReq::Unsubscribe(String::new());
+        assert_eq!(count("PortReq"), 4);
     }
 
     /// Look up the expected variant count from the table.

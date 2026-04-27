@@ -65,6 +65,151 @@ pub struct MountInfo {
 /// `.pattern.kdl` policy and runtime overrides will layer in via
 /// follow-up phases without changing this composition site (just
 /// extend the iterator chain).
+/// Extract the module name from a Haskell source file. Looks past
+/// `--` line comments, `{-# … #-}` pragmas (single- and multi-line),
+/// and `{- … -}` block comments to find the `module Foo.Bar where`
+/// header.
+///
+/// Returns `None` only when no `module` keyword is found in the
+/// cleaned source. Used by `open_with_agent_loop`'s port-library
+/// materialization path to derive each port library's on-disk path
+/// from its module declaration.
+fn parse_module_name(src: &str) -> Option<String> {
+    let cleaned = strip_haskell_noise(src);
+    let mut tokens = cleaned.split_whitespace();
+    while let Some(tok) = tokens.next() {
+        if tok == "module" {
+            let raw = tokens.next()?;
+            let name: String = raw.chars().take_while(|c| *c != '(').collect();
+            let name = name.trim_end_matches(',').trim();
+            if name.is_empty() {
+                return None;
+            }
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
+/// Strip `--` line comments, `{-# … #-}` pragma blocks, and `{- … -}`
+/// block comments (with proper nesting per Haskell spec) from `src`.
+/// Newlines are preserved so downstream parsers' line numbers stay
+/// aligned with the original source.
+///
+/// Token markers (`--`, `{-`, `{-#`, `-}`, `#-}`) are pure ASCII so
+/// we look for them via byte-level comparisons; non-marker content is
+/// preserved by copying matching `&str` slices verbatim (never by
+/// casting individual bytes to `char`, which would Latin-1
+/// re-interpret UTF-8 continuation bytes).
+fn strip_haskell_noise(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut out = String::with_capacity(bytes.len());
+    let mut i = 0;
+    let mut run = 0;
+
+    while i < bytes.len() {
+        // `{-# … #-}` pragma — scan to matching `#-}`.
+        if i + 2 < bytes.len() && &bytes[i..i + 3] == b"{-#" {
+            out.push_str(&src[run..i]);
+            let mut j = i + 3;
+            while j + 2 < bytes.len() && &bytes[j..j + 3] != b"#-}" {
+                if bytes[j] == b'\n' {
+                    out.push('\n');
+                }
+                j += 1;
+            }
+            i = (j + 3).min(bytes.len());
+            run = i;
+            continue;
+        }
+        // `{- … -}` block comment with Haskell nesting.
+        if i + 1 < bytes.len() && &bytes[i..i + 2] == b"{-" {
+            out.push_str(&src[run..i]);
+            let mut depth = 1;
+            let mut j = i + 2;
+            while j + 1 < bytes.len() && depth > 0 {
+                if &bytes[j..j + 2] == b"{-" {
+                    depth += 1;
+                    j += 2;
+                } else if &bytes[j..j + 2] == b"-}" {
+                    depth -= 1;
+                    j += 2;
+                } else {
+                    if bytes[j] == b'\n' {
+                        out.push('\n');
+                    }
+                    j += 1;
+                }
+            }
+            i = j;
+            run = i;
+            continue;
+        }
+        // `--` line comment per Haskell 2010 §2.3: opens a comment
+        // iff NOT preceded by another symbol char (so `<--`, `--->`,
+        // `|--|` etc. remain operators, not comments).
+        if i + 1 < bytes.len() && &bytes[i..i + 2] == b"--" {
+            let prev_is_symbol = i > 0 && is_haskell_symbol_byte(bytes[i - 1]);
+            if !prev_is_symbol {
+                out.push_str(&src[run..i]);
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                run = i;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out.push_str(&src[run..]);
+    out
+}
+
+/// Convert a Haskell module name (`Pattern.Http`) to its on-disk relative
+/// path (`Pattern/Http.hs`). Used by `open_with_agent_loop`'s
+/// port-library materialization path.
+fn module_name_to_path(module_name: &str) -> std::path::PathBuf {
+    let mut p = std::path::PathBuf::new();
+    let mut parts = module_name.split('.').peekable();
+    while let Some(part) = parts.next() {
+        if parts.peek().is_none() {
+            p.push(format!("{part}.hs"));
+        } else {
+            p.push(part);
+        }
+    }
+    p
+}
+
+/// True iff `b` is one of the ASCII characters that participate in
+/// Haskell symbolic operators (Haskell 2010 §2.4 `symbol`). Used by
+/// `strip_haskell_noise` to disambiguate `--` line comments from
+/// operators like `<--` and `--->`.
+fn is_haskell_symbol_byte(b: u8) -> bool {
+    matches!(
+        b,
+        b'!' | b'#'
+            | b'$'
+            | b'%'
+            | b'&'
+            | b'*'
+            | b'+'
+            | b'.'
+            | b'/'
+            | b'<'
+            | b'='
+            | b'>'
+            | b'?'
+            | b'@'
+            | b'\\'
+            | b'^'
+            | b'|'
+            | b'-'
+            | b'~'
+            | b':'
+    )
+}
+
 fn merge_policies(persona: &PersonaSnapshot) -> pattern_core::PolicySet {
     let defaults = crate::policy::rust_defaults();
     let kdl = persona.policy_rules.iter().cloned();
@@ -183,10 +328,7 @@ pub struct SessionContext {
     /// by handlers (Task 10 Shell, Task 15 File) before each effect
     /// dispatch.
     policies: Arc<pattern_core::PolicySet>,
-    /// Per-runtime [`PermissionBroker`]. One broker per session — no
-    /// global singleton. Phase 1's policy-evaluation handlers escalate
-    /// to this broker via [`Self::permission_bridge`] when a
-    /// `RequireApproval` rule fires.
+    /// Per-runtime [`PermissionBroker`].
     permission_broker: Arc<pattern_core::permission::PermissionBroker>,
     /// Sync-to-async bridge for handlers running on the eval-worker
     /// thread. `None` until [`Self::with_permission_bridge`] is called
@@ -212,6 +354,42 @@ pub struct SessionContext {
     /// broker's partner-bypass actually fires. Phase 1 has none.
     current_dispatch_origin:
         Arc<std::sync::RwLock<Option<pattern_core::types::origin::MessageOrigin>>>,
+    /// Between-turn buffer for `MessageAttachment`s pushed by background
+    /// listener threads (FileManager external-edit watcher, ProcessManager
+    /// spawn-output bridge, PortRegistry subscription drain task). The
+    /// agent loop drains this at compose-time and splices the attachments
+    /// onto the next turn's first user message. Distinct from the
+    /// adapter's `record_attachment` buffer (which handles in-turn
+    /// handler-originated attachments at turn close).
+    async_reminder_queue:
+        Arc<std::sync::Mutex<Vec<pattern_core::types::message::MessageAttachment>>>,
+    /// Per-session file manager. `None` until session open constructs it
+    /// from the mount config's `file_policy`. Wired via
+    /// [`Self::with_file_manager`] inside [`TidepoolSession::open_with_agent_loop`]
+    /// when `SessionRegistries.file_policy` is `Some`.
+    file_manager: Option<Arc<crate::file_manager::FileManager>>,
+    /// Per-session process manager wrapping the local PTY backend.
+    /// Always present (never `None`); `from_persona` constructs a fresh
+    /// `ProcessManager` rooted at `current_dir`. Test fixtures override
+    /// via [`Self::with_process_manager`].
+    process_manager: Arc<crate::process_manager::ProcessManager>,
+    /// Per-session port registry. `None` for sessions opened without a
+    /// `SessionRegistries.port_registry` — the SDK preamble filters
+    /// `Pattern.Port` out of the agent's effect row in that case so
+    /// missing-registry errors surface at compile time, not at dispatch.
+    port_registry: Option<Arc<crate::port_registry::PortRegistryImpl>>,
+    /// Session-scoped UUID minted at open. Used by handlers that key
+    /// per-session state by stable id (e.g. `PortHandler` keys
+    /// subscription channels by session_id so multiple sessions don't
+    /// cross-talk). Mirrors the id held on `TidepoolSession` —
+    /// `TidepoolSession::open` aligns the two via `with_session_id`.
+    session_id: String,
+    /// Default timeout for `Shell.Execute` when the agent doesn't
+    /// supply one. Initialised to 30 seconds in `from_persona`;
+    /// overridable via `with_shell_default_timeout` for test fixtures
+    /// and future per-persona configuration.
+    shell_default_timeout: std::time::Duration,
+
     /// Registry tracking live child session handles spawned by this session.
     ///
     /// Enforces a per-parent concurrency limit on ephemeral children via a
@@ -232,12 +410,6 @@ pub struct SessionContext {
     /// Caller-supplied tokio runtime handle. Borrowed for sync handler
     /// paths (e.g. the eval-worker thread) that need to `block_on` an
     /// async future without magic-capturing via `Handle::current()`.
-    ///
-    /// First consumer: the v3-multi-agent spawn handler. Ephemeral /
-    /// AwaitSpawn / AwaitAll arms call `cx.user().tokio_handle().block_on`
-    /// against the registry's `Shared<BoxFuture<SpawnResult>>`. The
-    /// sandbox-io Phase 3 PortRegistry actor will reuse the same handle
-    /// when it lands.
     ///
     /// Note on existing bridges: `PermissionBridge` could later migrate
     /// to this approach (broker calls are well-bounded; no plugin code
@@ -327,10 +499,6 @@ pub struct SessionContext {
     /// session should have read/write access to the constellation's
     /// active fronting state. `None` for test sessions and sessions
     /// that do not participate in the fronting system.
-    ///
-    /// The `Pattern.Fronting` handler returns a
-    /// `FRONTING_NOT_WIRED_PREFIX`-marked error when this field is
-    /// `None` — wiring it is T3's responsibility.
     fronting_set: Option<Arc<std::sync::RwLock<pattern_core::fronting::FrontingSet>>>,
 }
 
@@ -475,6 +643,26 @@ impl HasSpawnRegistry for () {
     }
 }
 
+/// Handlers call this to access the session's file manager (when wired).
+///
+/// The `()` shim returns `None`, giving handlers a closed-by-default path
+/// for test doubles that don't construct a full mount + FileManager.
+pub trait HasFileManager {
+    fn file_manager(&self) -> Option<&Arc<crate::file_manager::FileManager>>;
+}
+
+impl HasFileManager for SessionContext {
+    fn file_manager(&self) -> Option<&Arc<crate::file_manager::FileManager>> {
+        SessionContext::file_manager(self)
+    }
+}
+
+impl HasFileManager for () {
+    fn file_manager(&self) -> Option<&Arc<crate::file_manager::FileManager>> {
+        None
+    }
+}
+
 impl SessionContext {
     /// Build a context from a persona + store handle. The store is wrapped
     /// in a [`MemoryStoreAdapter`] that records `BlockWrite` entries;
@@ -528,6 +716,18 @@ impl SessionContext {
             permission_broker: Arc::new(pattern_core::permission::PermissionBroker::new()),
             permission_bridge: None,
             current_dispatch_origin: Arc::new(std::sync::RwLock::new(None)),
+            // v3-sandbox-io I/O subsystems (Phases 2-5).
+            async_reminder_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
+            file_manager: None,
+            process_manager: Arc::new(crate::process_manager::ProcessManager::new(
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+                dirs::cache_dir()
+                    .unwrap_or_else(std::env::temp_dir)
+                    .join("pattern"),
+            )),
+            port_registry: None,
+            session_id: pattern_core::types::ids::new_id().to_string(),
+            shell_default_timeout: std::time::Duration::from_secs(30),
             spawn_registry,
             tokio_handle,
             include_paths: Arc::new(Vec::new()),
@@ -627,6 +827,114 @@ impl SessionContext {
         self.mount_info = Some(info);
         self
     }
+
+    // ─── v3-sandbox-io I/O accessors + builders (Phases 2-5) ────────────────
+
+    /// Per-session file manager, if wired. `None` when the session was
+    /// opened without a `file_policy` (test fixtures, sessions on
+    /// non-mount paths).
+    pub fn file_manager(&self) -> Option<&Arc<crate::file_manager::FileManager>> {
+        self.file_manager.as_ref()
+    }
+
+    /// Builder-style: replace the file manager. Used by
+    /// [`TidepoolSession::open_with_agent_loop`] when the caller passed
+    /// `Some(file_policy)` in `SessionRegistries`; tests inject mocks.
+    #[must_use]
+    pub fn with_file_manager(mut self, fm: Arc<crate::file_manager::FileManager>) -> Self {
+        self.file_manager = Some(fm);
+        self
+    }
+
+    /// Per-session process manager wrapping the local PTY backend.
+    /// Always present — `from_persona` constructs a default rooted at
+    /// `current_dir`.
+    pub fn process_manager(&self) -> &Arc<crate::process_manager::ProcessManager> {
+        &self.process_manager
+    }
+
+    /// Builder-style: replace the process manager. Test fixtures use
+    /// this to inject a manager rooted at a controlled cache dir; the
+    /// production path keeps the `from_persona` default.
+    #[must_use]
+    pub fn with_process_manager(mut self, pm: Arc<crate::process_manager::ProcessManager>) -> Self {
+        self.process_manager = pm;
+        self
+    }
+
+    /// Per-session port registry. `None` for sessions opened without
+    /// a `SessionRegistries.port_registry` — Pattern.Port is filtered
+    /// out of the agent's effect row at preamble-build time.
+    pub fn port_registry(&self) -> Option<&Arc<crate::port_registry::PortRegistryImpl>> {
+        self.port_registry.as_ref()
+    }
+
+    /// Builder-style: wire a shared port registry. Daemon paths build
+    /// the registry once via `PortRegistryImpl::with_runtime_ports` and
+    /// pass it through `SessionRegistries` to every session opened
+    /// against the mount.
+    #[must_use]
+    pub fn with_port_registry(
+        mut self,
+        registry: Arc<crate::port_registry::PortRegistryImpl>,
+    ) -> Self {
+        self.port_registry = Some(registry);
+        self
+    }
+
+    /// Shared handle to the between-turn async-reminder queue.
+    /// Sub-coordinators (FileManager external-edit watcher,
+    /// ProcessManager spawn-output bridge, port-subscription drain
+    /// task) clone this to push reminders from background threads.
+    pub fn async_reminder_queue(
+        &self,
+    ) -> &Arc<std::sync::Mutex<Vec<pattern_core::types::message::MessageAttachment>>> {
+        &self.async_reminder_queue
+    }
+
+    /// Drain all pending async reminders. Called by `compose_request_for_turn`
+    /// to splice attachments onto the next turn's first user message.
+    pub fn drain_async_reminders(&self) -> Vec<pattern_core::types::message::MessageAttachment> {
+        std::mem::take(&mut *self.async_reminder_queue.lock().unwrap())
+    }
+
+    /// Record an async reminder for delivery on the next turn. Used by
+    /// callers that already hold a `&SessionContext` rather than a clone
+    /// of the queue Arc.
+    pub fn record_async_reminder(
+        &self,
+        attachment: pattern_core::types::message::MessageAttachment,
+    ) {
+        self.async_reminder_queue.lock().unwrap().push(attachment);
+    }
+
+    /// Session-scoped UUID. Used by handlers that key per-session state by
+    /// stable id (e.g. `PortHandler` keys subscription channels by
+    /// session_id). Mirrors the id held on `TidepoolSession`.
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// Crate-internal: align the session id with `TidepoolSession::open`.
+    pub(crate) fn with_session_id(mut self, id: String) -> Self {
+        self.session_id = id;
+        self
+    }
+
+    /// Default timeout for `Shell.Execute` when the agent doesn't supply
+    /// one. Read by the shell handler; overridable for test fixtures.
+    pub fn shell_default_timeout(&self) -> std::time::Duration {
+        self.shell_default_timeout
+    }
+
+    /// Builder-style: override the default execute timeout.
+    #[must_use]
+    pub fn with_shell_default_timeout(mut self, d: std::time::Duration) -> Self {
+        self.shell_default_timeout = d;
+        self
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
 
     /// Replace the session's include-paths set. Called by
     /// [`TidepoolSession::open_with_agent_loop`] after lib-module
@@ -757,6 +1065,37 @@ impl SessionContext {
             // revisit).
             permission_bridge: None,
             current_dispatch_origin: Arc::new(std::sync::RwLock::new(None)),
+            // v3-sandbox-io I/O subsystems: ephemeral children inherit
+            // the parent's `file_manager` (same project files in scope)
+            // and `port_registry` (same external services available),
+            // but get a fresh `process_manager` so their shell state
+            // (cwd, env, running tasks) is isolated from the parent's.
+            //
+            // TODO(post-merge): wire per-effect permission scoping so
+            // that an ephemeral child whose `child_caps` excludes File
+            // or Port doesn't carry the parent's manager handle into
+            // scope. Right now the inherited manager is a hard
+            // reference; capability-driven access control happens at
+            // the handler level via the child's CapabilitySet, which
+            // is sufficient for current use but couples capability
+            // enforcement to per-handler checks. A cleaner design
+            // would be `Option<Arc<...>>` populated only when the
+            // child has the relevant capability.
+            async_reminder_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
+            file_manager: self.file_manager.clone(),
+            process_manager: Arc::new(crate::process_manager::ProcessManager::new(
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+                dirs::cache_dir()
+                    .unwrap_or_else(std::env::temp_dir)
+                    .join("pattern"),
+            )),
+            port_registry: self.port_registry.clone(),
+            // Each ephemeral child gets a fresh session_id (so its
+            // PortHandler subscription channels don't collide with the
+            // parent's). Inherit `shell_default_timeout` — children
+            // share the parent's shell config defaults.
+            session_id: pattern_core::types::ids::new_id().to_string(),
+            shell_default_timeout: self.shell_default_timeout,
             spawn_registry: child_registry,
             tokio_handle: self.tokio_handle.clone(),
             include_paths: child_include_paths,
@@ -1203,6 +1542,30 @@ pub struct SessionRegistries {
     /// `ProjectMount` and shares it with every session opened against
     /// that mount.
     pub fronting_set: Option<Arc<std::sync::RwLock<pattern_core::fronting::FrontingSet>>>,
+    /// Optional shared `PortRegistryImpl`. When set, the session's
+    /// `Pattern.Port` handler dispatches against this registry; agents
+    /// import port libraries (e.g. `Pattern.Http`) that the registry
+    /// materializes into the session's port-lib tempdir. `None` leaves
+    /// the Port effect unavailable and the SDK preamble filters it out
+    /// of the agent's effect row (so attempts to use Port at agent
+    /// level fail at compile time, not at dispatch).
+    ///
+    /// v3-sandbox-io Phase 4-5: the daemon builds the registry via
+    /// `PortRegistryImpl::with_runtime_ports(handle)` so `HttpPort`
+    /// (and any future runtime-provided ports) are always registered.
+    pub port_registry: Option<Arc<crate::port_registry::PortRegistryImpl>>,
+    /// Optional `FilePolicy` for `Pattern.File` access control. When
+    /// set, a `FileManager` is constructed and wired into the session
+    /// before the eval worker spawns. `None` leaves the File effect
+    /// unwired (sessions surface "no file manager configured" — used
+    /// for non-mount test fixtures only).
+    ///
+    /// v3-sandbox-io Phase 5 safe-default contract (daemon): every
+    /// daemon-mounted session passes `Some(policy)` even when the
+    /// `.pattern.kdl` `file_policy {}` block is empty (default-deny
+    /// via the policy module's "no matching rule") or malformed
+    /// (logged at error level + falls back to default-deny).
+    pub file_policy: Option<crate::file_manager::FilePolicy>,
 }
 
 /// Extras required to construct a [`crate::wake::WakeRegistry`] inside
@@ -1285,6 +1648,19 @@ pub struct TidepoolSession {
     /// lifecycle — the guard fires on `TidepoolSession::drop`, not on
     /// `SessionContext::drop` (which may be shared via `Arc`).
     _registry_guard: Option<crate::agent_registry::RegistryGuard>,
+    /// Per-session tempdir holding materialized port-library Haskell
+    /// modules. Each registered port whose [`pattern_core::traits::Port::library`]
+    /// returns `Some` writes its source here at session open under the
+    /// path implied by its `module X.Y.Z where` declaration; the
+    /// tempdir's path is added to the GHC include path so agent code
+    /// can `import qualified Pattern.Http as Http`. `None` for sessions
+    /// opened without a port registry.
+    ///
+    /// Load-bearing despite never being read after initialisation:
+    /// `tempfile::TempDir` removes the directory from disk on drop, so
+    /// the field's lifetime IS the directory's lifetime. Do not remove
+    /// or rename.
+    _port_lib_tempdir: Option<tempfile::TempDir>,
 }
 
 impl std::fmt::Debug for TidepoolSession {
@@ -1356,6 +1732,28 @@ impl TidepoolSession {
     /// Runs preflight so missing tidepool-extract produces an actionable error
     /// before any work happens. The session returned here is not wired for
     /// `step_with_agent_loop` — call `open_with_agent_loop` for that.
+    /// Construct a base `TidepoolSession` with a fully-wired
+    /// `SessionContext` (port registry included) but without the
+    /// agent-loop machinery (eval worker, mailbox drain task, port-lib
+    /// materialization, FileManager).
+    ///
+    /// Most production callers should use [`Self::open_with_agent_loop`]
+    /// — it sets up the rest of the session lifecycle and drives the
+    /// agent through `step_with_agent_loop`. The basic `open` is
+    /// retained for tests and the rare caller that wants to run a
+    /// session without an eval worker (e.g. for snapshot/restore
+    /// inspection).
+    ///
+    /// `port_registry` is wired into the `SessionContext` here so the
+    /// `Pattern.Port` SDK row is visible at the agent level. Pass the
+    /// runtime's port registry (typically built via
+    /// `PortRegistryImpl::with_runtime_ports`).
+    ///
+    /// **Deprecation note (post-merge follow-up):** the long-term
+    /// goal is to fold this into [`Self::open_with_agent_loop`] so
+    /// callers stop having to choose between two near-identical
+    /// constructors. Until then, treat this as the "minimal" path and
+    /// `open_with_agent_loop` as the "production" path.
     pub fn open(
         persona: PersonaSnapshot,
         sdk: &SdkLocation,
@@ -1363,6 +1761,7 @@ impl TidepoolSession {
         provider: Arc<dyn ProviderClient>,
         db: Arc<pattern_db::ConstellationDb>,
         tokio_handle: tokio::runtime::Handle,
+        port_registry: Arc<crate::port_registry::PortRegistryImpl>,
     ) -> Result<Self, RuntimeError> {
         crate::preflight::check()?;
         let _ = sdk; // sdk.resolve() is deferred to open_with_agent_loop
@@ -1384,7 +1783,9 @@ impl TidepoolSession {
                 db,
                 tokio_handle,
             )
-            .with_checkpoint_log(checkpoint_log.clone(), current_turn),
+            .with_checkpoint_log(checkpoint_log.clone(), current_turn)
+            .with_port_registry(port_registry)
+            .with_session_id(session_id.clone()),
         );
 
         let display = DisplayHandler::new();
@@ -1400,6 +1801,7 @@ impl TidepoolSession {
             tasks: tokio::task::JoinSet::new(),
             cache_profile: pattern_provider::compose::CacheProfile::default_anthropic_subscriber(),
             _registry_guard: None,
+            _port_lib_tempdir: None,
         })
     }
 
@@ -1457,8 +1859,32 @@ impl TidepoolSession {
         let memory_blocks_for_seed = persona.memory_blocks.clone();
         let store_for_seed = memory_store.clone();
 
-        // Initialise the base session (preflight, context, checkpoint log).
-        let mut session = Self::open(persona, sdk, memory_store, provider, db, tokio_handle)?;
+        // The basic `open` path now requires a port registry so the
+        // `SessionContext` is fully wired before the eval-worker /
+        // mailbox / FileManager add-ons land here. Pull it out of the
+        // caller's `registries` if present; otherwise build a fresh
+        // empty registry on the caller's tokio handle. The empty
+        // registry has no ports, so the SDK preamble filters
+        // `Pattern.Port` out of the agent's effect row — same fail-
+        // closed behaviour as before.
+        let port_registry_for_open = registries
+            .as_ref()
+            .and_then(|r| r.port_registry.clone())
+            .unwrap_or_else(|| {
+                Arc::new(crate::port_registry::PortRegistryImpl::new(&tokio_handle))
+            });
+
+        // Initialise the base session (preflight, context, checkpoint log,
+        // port registry wired into ctx).
+        let mut session = Self::open(
+            persona,
+            sdk,
+            memory_store,
+            provider,
+            db,
+            tokio_handle,
+            port_registry_for_open,
+        )?;
 
         // Seed persona-declared memory blocks into the store. Blocks that
         // already exist (e.g. restored from a persistent DB on re-spawn)
@@ -1483,7 +1909,7 @@ impl TidepoolSession {
         let ctx_with_sink_base = ctx_owned
             .with_turn_sink(turn_sink.clone())
             .with_capabilities(capabilities.clone())
-            .with_permission_bridge(bridge);
+            .with_permission_bridge(bridge.clone());
 
         // Wire inter-session registries if the caller supplied them (daemon
         // path). Test and ephemeral-child sessions pass `None`.
@@ -1523,8 +1949,43 @@ impl TidepoolSession {
 
             // Wire FrontingSet (Phase 5). Shared with the daemon's
             // canonical state; used by the Pattern.Fronting handler.
-            if let Some(fronting) = regs.fronting_set {
+            let ctx = if let Some(fronting) = regs.fronting_set {
                 ctx.with_fronting_set(fronting)
+            } else {
+                ctx
+            };
+
+            // Wire shared port registry (v3-sandbox-io Phase 4-5).
+            // The daemon builds the registry once via
+            // `PortRegistryImpl::with_runtime_ports` and shares it
+            // across every session opened against the mount.
+            let ctx = if let Some(port_reg) = regs.port_registry {
+                ctx.with_port_registry(port_reg)
+            } else {
+                ctx
+            };
+
+            // Construct the per-session FileManager when the caller
+            // supplied a FilePolicy (v3-sandbox-io Phase 5). FM hooks
+            // into `async_reminder_queue` (so external-edit watchers
+            // can splice FileEdit attachments) and the permission
+            // bridge (so config-KDL writes escalate correctly). FM
+            // construction MUST happen before the eval worker spawns
+            // so the worker observes the wired session context.
+            if let Some(policy) = regs.file_policy {
+                let fm_caps = Arc::new(
+                    capabilities
+                        .clone()
+                        .unwrap_or_else(pattern_core::CapabilitySet::all),
+                );
+                let fm = Arc::new(crate::file_manager::FileManager::new(
+                    policy,
+                    ctx.async_reminder_queue().clone(),
+                    fm_caps,
+                    bridge.clone(),
+                    pattern_core::AgentId::from(agent_id_for_seed.as_str()),
+                ));
+                ctx.with_file_manager(fm)
             } else {
                 ctx
             }
@@ -1608,6 +2069,67 @@ impl TidepoolSession {
             Vec::new()
         };
 
+        // Materialize port libraries (v3-sandbox-io Phase 5).
+        //
+        // Each registered port whose `Port::library()` returns `Some`
+        // ships Haskell wrapper code that the agent needs in scope.
+        // We write each library into a per-session tempdir at the path
+        // implied by its `module X.Y where` declaration (e.g.
+        // `Pattern.Http` → `Pattern/Http.hs`), then add the tempdir to
+        // the GHC include path so agent code can
+        // `import qualified Pattern.Http as Http`. The tempdir is held
+        // on the session for RAII cleanup on drop.
+        //
+        // This is the same delivery path a third-party plugin's port
+        // library uses — no special-case for runtime-provided ports.
+        let port_lib_tempdir = if let Some(ref registry) = ctx_with_scope.port_registry {
+            let libs = registry.port_libraries();
+            if libs.is_empty() {
+                None
+            } else {
+                let dir = tempfile::Builder::new()
+                    .prefix("pattern-port-libs-")
+                    .tempdir()
+                    .map_err(|e| RuntimeError::PortLibrarySetupFailed {
+                        port_id: "<tempdir>".to_string(),
+                        op: "create-tempdir".to_string(),
+                        cause: e.to_string(),
+                    })?;
+                for (port_id, src) in libs {
+                    let pid = port_id.as_str().to_string();
+                    let module_name = parse_module_name(src).ok_or_else(|| {
+                        RuntimeError::PortLibrarySetupFailed {
+                            port_id: pid.clone(),
+                            op: "parse-module-name".to_string(),
+                            cause: "no `module X where` header in library source".to_string(),
+                        }
+                    })?;
+                    let rel = module_name_to_path(&module_name);
+                    let abs = dir.path().join(&rel);
+                    if let Some(parent) = abs.parent() {
+                        std::fs::create_dir_all(parent).map_err(|e| {
+                            RuntimeError::PortLibrarySetupFailed {
+                                port_id: pid.clone(),
+                                op: "create-parent-dir".to_string(),
+                                cause: format!("{}: {e}", parent.display()),
+                            }
+                        })?;
+                    }
+                    std::fs::write(&abs, src).map_err(|e| {
+                        RuntimeError::PortLibrarySetupFailed {
+                            port_id: pid.clone(),
+                            op: "write-source".to_string(),
+                            cause: format!("{}: {e}", abs.display()),
+                        }
+                    })?;
+                }
+                include_paths.push(dir.path().to_path_buf());
+                Some(dir)
+            }
+        } else {
+            None
+        };
+
         // Persist the resolved include path on SessionContext BEFORE the
         // final Arc-wrap so child-session forks (Phase 2 spawn) can
         // inherit them. Stash diagnostics from any lib-compile failures
@@ -1657,6 +2179,10 @@ impl TidepoolSession {
         let preamble: Arc<str> = Arc::from(preamble.into_boxed_str());
         session.eval_worker = Some(worker.clone());
         session.preamble = Some(preamble.clone());
+        // Stash the port-library tempdir on the session for RAII
+        // cleanup. Drop order: when TidepoolSession drops, the tempdir
+        // is removed from disk via tempfile::TempDir's Drop impl.
+        session._port_lib_tempdir = port_lib_tempdir;
 
         // Spawn the per-session mailbox-drain task (Phase 4 T3). The
         // task is registered on `session.tasks` (a `JoinSet`) so it
@@ -1918,6 +2444,117 @@ mod tests {
     use pattern_core::types::snapshot::PersonaSnapshot;
     use pattern_core::types::turn::StopReason;
 
+    // ── parse_module_name / module_name_to_path (port-library helpers) ──
+
+    #[test]
+    fn parse_module_name_simple_header() {
+        assert_eq!(
+            parse_module_name("module Foo where\nfoo = 1\n"),
+            Some("Foo".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_module_name_dotted() {
+        assert_eq!(
+            parse_module_name("module Pattern.Http where\n"),
+            Some("Pattern.Http".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_module_name_with_export_list() {
+        assert_eq!(
+            parse_module_name("module Pattern.Http (httpGet, httpPost) where\n"),
+            Some("Pattern.Http".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_module_name_after_single_line_pragma() {
+        assert_eq!(
+            parse_module_name("{-# LANGUAGE OverloadedStrings #-}\nmodule Foo.Bar where\n"),
+            Some("Foo.Bar".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_module_name_after_multi_line_pragma() {
+        let src = "{-# LANGUAGE\n      OverloadedStrings,\n      FlexibleContexts\n  #-}\nmodule Foo where\n";
+        assert_eq!(parse_module_name(src), Some("Foo".to_string()));
+    }
+
+    #[test]
+    fn parse_module_name_after_block_comment() {
+        let src = "{- The grand description\n   spans many lines -}\nmodule Foo where\n";
+        assert_eq!(parse_module_name(src), Some("Foo".to_string()));
+    }
+
+    #[test]
+    fn parse_module_name_after_nested_block_comment() {
+        assert_eq!(
+            parse_module_name("{- outer {- inner -} still outer -}\nmodule Foo where\n"),
+            Some("Foo".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_module_name_after_line_comments() {
+        assert_eq!(
+            parse_module_name("-- header banner\n-- another line\nmodule Foo where\n"),
+            Some("Foo".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_module_name_after_operator_with_double_dash() {
+        // `<--` is a valid Haskell operator. The `--` rule must NOT
+        // eat it as a line comment per Haskell 2010 §2.3.
+        assert_eq!(
+            parse_module_name("infixl 4 <--\nmodule Foo where\n"),
+            Some("Foo".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_module_name_with_utf8_block_comment() {
+        // The cleaner uses string-slice copies, never byte-to-char
+        // casts — this pins the UTF-8 correctness contract.
+        assert_eq!(
+            parse_module_name("{- αβγ — header with non-ASCII -}\nmodule Foo where\n"),
+            Some("Foo".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_module_name_returns_none_when_missing() {
+        assert_eq!(parse_module_name("import Data.Text\nfoo = 1\n"), None);
+    }
+
+    #[test]
+    fn module_name_to_path_simple() {
+        assert_eq!(
+            module_name_to_path("Foo"),
+            std::path::PathBuf::from("Foo.hs")
+        );
+    }
+
+    #[test]
+    fn module_name_to_path_dotted() {
+        assert_eq!(
+            module_name_to_path("Pattern.Http"),
+            std::path::PathBuf::from("Pattern/Http.hs")
+        );
+    }
+
+    #[test]
+    fn module_name_to_path_deep() {
+        assert_eq!(
+            module_name_to_path("A.B.C.D"),
+            std::path::PathBuf::from("A/B/C/D.hs")
+        );
+    }
+
     fn test_turn_input() -> TurnInput {
         // Fresh batch start: turn_id == batch_id (first turn IS the batch).
         let id = new_snowflake_id();
@@ -1957,6 +2594,9 @@ mod tests {
             provider,
             db,
             tokio::runtime::Handle::current(),
+            Arc::new(crate::port_registry::PortRegistryImpl::new(
+                &tokio::runtime::Handle::current(),
+            )),
         )
         .expect("open should succeed when preflight passes");
 
@@ -2354,21 +2994,31 @@ mod tests {
             let mut h = ShellHandler;
             let table = DataConTable::new();
             let cx_eff = tidepool_effect::EffectContext::with_user(&table, &ctx);
-            h.handle(ShellReq::Execute("git push origin main".into()), &cx_eff)
+            h.handle(
+                ShellReq::Execute("git push origin main".into(), None),
+                &cx_eff,
+            )
         })
         .await
         .expect("blocking task")
         .expect_err("Phase 1 stub always errors");
         let msg = result.to_string();
-        // Allow path: stub error WITHOUT GateApproved marker (gate did
-        // not fire because policy returned Allow before any broker call).
-        assert!(
-            msg.contains("Pattern.Shell.Execute is not implemented"),
-            "expected plain stub error, got: {msg}"
-        );
+        // Allow path: post-gate error WITHOUT GateApproved marker (gate
+        // did not fire because policy returned Allow before any broker
+        // call). The exact post-gate error text is no longer "stub" since
+        // v3-sandbox-io Phase 3 wired the real ShellHandler — the empty
+        // DataConTable used here trips a Bridge decode error after the
+        // handler progressed past the gate. Either shape proves AC2.2's
+        // load-bearing claim: the gate routed Allow → handler without
+        // consulting the broker. The PermissionDenied / GateApproved
+        // markers are the discriminators we actually care about.
         assert!(
             !msg.contains("GateApproved:"),
             "Allow path must not carry GateApproved marker — gate should be skipped, got: {msg}"
+        );
+        assert!(
+            !msg.contains(crate::policy::PERMISSION_DENIED_PREFIX),
+            "Allow path must not carry PermissionDenied marker — gate said Allow, got: {msg}"
         );
 
         // Allow watcher a beat to record any broker traffic.

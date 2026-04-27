@@ -123,7 +123,8 @@ impl Router for AgentRouter {
                     // — the daemon's SendMessage handler emits a Display::Note
                     // for human-visible signal, but SDK callers don't have
                     // that surface available.
-                    let outcome = dispatch_to_mailboxes(&self.registry, state, sender, body).await?;
+                    let outcome =
+                        dispatch_to_mailboxes(&self.registry, state, sender, body).await?;
                     if matches!(
                         outcome,
                         crate::fronting_dispatch::DispatchOutcome::SystemDefault
@@ -179,10 +180,8 @@ impl Router for AgentRouter {
             // text and copy the rest of the Message verbatim.
             if let Some(text) = body.chat_message.content.first_text() {
                 let cleaned = strip_direct_address(text);
-                delivery_body.chat_message = genai::chat::ChatMessage::new(
-                    body.chat_message.role.clone(),
-                    cleaned,
-                );
+                delivery_body.chat_message =
+                    genai::chat::ChatMessage::new(body.chat_message.role.clone(), cleaned);
             }
             resolved
         } else {
