@@ -48,12 +48,16 @@ fn datacon_table_with_unit() -> tidepool_repr::DataConTable {
 
 /// Build a session with optional capabilities and an optional wired `FrontingSet`.
 ///
-/// When `fronting_set` is `Some(arc)`, the session has the set wired in.
-/// When `None`, the session has no fronting set (for missing-set tests).
+/// When `fronting_set` is `Some(arc)`, the session has the set wired via an
+/// in-memory committer (no persistence, no event emission). When `None`, the
+/// committer is unwired and the handler returns
+/// `FRONTING_NOT_WIRED_PREFIX`-marked errors.
 async fn build_session_opts(
     caps: Option<CapabilitySet>,
     fronting_set: Option<Arc<RwLock<FrontingSet>>>,
 ) -> Arc<SessionContext> {
+    use pattern_runtime::sdk::handlers::fronting::{FrontingCommitter, InMemoryFrontingCommitter};
+
     let store = Arc::new(InMemoryMemoryStore::new());
     let db = pattern_runtime::testing::test_db().await;
     let mut persona = PersonaSnapshot::new("agent-fronting-cap-test", "agent-fronting-cap-test");
@@ -66,7 +70,9 @@ async fn build_session_opts(
         tokio::runtime::Handle::current(),
     );
     let ctx = if let Some(fs) = fronting_set {
-        ctx.with_fronting_set(fs)
+        let committer: Arc<dyn FrontingCommitter> =
+            Arc::new(InMemoryFrontingCommitter::new(fs));
+        ctx.with_fronting_committer(committer)
     } else {
         ctx
     };

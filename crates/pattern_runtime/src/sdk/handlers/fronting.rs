@@ -49,8 +49,100 @@ use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use tidepool_eval::Value;
 
 use pattern_core::CapabilityFlag;
-use pattern_core::fronting::{FrontingSet, RoutingRule, RoutingTable};
+use pattern_core::fronting::{FrontingLoadError, FrontingSet, RoutingRule, RoutingTable};
 use pattern_core::types::ids::PersonaId;
+
+// ── FrontingCommitter (Phase 6 T5b) ───────────────────────────────────────────
+
+/// Closure shape accepted by [`FrontingCommitter::commit_sync`].
+///
+/// The committer applies the mutator under the write lock, then persists
+/// and fans out a `FrontingChanged` event. Failure paths (mutator rejection,
+/// DB save failure) revert the in-memory state to its pre-mutation snapshot.
+pub type FrontingMutator = Box<
+    dyn FnOnce(&mut FrontingSet) -> Result<(), FrontingLoadError> + Send + 'static,
+>;
+
+/// Synchronous commit boundary for SDK-driven `FrontingSet` mutations.
+///
+/// The Pattern.Fronting handler runs on the eval-worker thread (no ambient
+/// tokio runtime). When wired, it delegates `Set` / `Route` / `Clear` to a
+/// committer that:
+/// 1. Snapshots the current state.
+/// 2. Applies the mutator under the write lock.
+/// 3. Persists to the per-mount DB (rolls back on failure).
+/// 4. Fans out [`pattern_server::protocol::WireTurnEvent::FrontingChanged`]
+///    to subscribed clients.
+///
+/// Daemon-side implementations bridge through `tokio_handle.block_on(...)` to
+/// reuse the existing async three-phase commit; test sessions use
+/// [`InMemoryFrontingCommitter`] which wraps the same lock with no-op
+/// persistence and emission.
+///
+/// The committer **owns** the `Arc<RwLock<FrontingSet>>` it operates on and
+/// exposes it via [`Self::fronting_set`]. Read-only access (e.g. the handler's
+/// `Current` constructor) goes through this method so there is exactly one
+/// source of truth — the lock the committer mutates is the lock the handler
+/// reads, axiomatically.
+pub trait FrontingCommitter: Send + Sync + std::fmt::Debug {
+    /// Shared lock over the canonical fronting set. Read-only callers
+    /// (e.g. the `Current` handler) acquire a read guard; the committer
+    /// itself takes the write lock during `commit_sync`.
+    fn fronting_set(&self) -> &Arc<std::sync::RwLock<FrontingSet>>;
+
+    /// Apply `mutator` synchronously. Returns the post-mutation snapshot on
+    /// success.
+    fn commit_sync(
+        &self,
+        mutator: FrontingMutator,
+    ) -> Result<FrontingSet, EffectError>;
+}
+
+/// In-memory `FrontingCommitter` for test sessions: wraps a lock with no-op
+/// persistence and no event emission. Mutations land in the lock and stop
+/// there.
+///
+/// Use this in tests that need to exercise the SDK handler's read/write
+/// surface without a daemon, or to wire a session for fronting reads when
+/// the handler should only succeed on the [`crate::policy::CAPABILITY_DENIED_PREFIX`]
+/// path before reaching any commit.
+#[derive(Debug, Clone)]
+pub struct InMemoryFrontingCommitter {
+    fronting: Arc<std::sync::RwLock<FrontingSet>>,
+}
+
+impl InMemoryFrontingCommitter {
+    pub fn new(fronting: Arc<std::sync::RwLock<FrontingSet>>) -> Self {
+        Self { fronting }
+    }
+
+    /// Construct a committer wrapping a fresh, empty `FrontingSet`.
+    pub fn empty() -> Self {
+        Self::new(Arc::new(std::sync::RwLock::new(FrontingSet::default())))
+    }
+}
+
+impl FrontingCommitter for InMemoryFrontingCommitter {
+    fn fronting_set(&self) -> &Arc<std::sync::RwLock<FrontingSet>> {
+        &self.fronting
+    }
+
+    fn commit_sync(
+        &self,
+        mutator: FrontingMutator,
+    ) -> Result<FrontingSet, EffectError> {
+        let mut guard = self
+            .fronting
+            .write()
+            .map_err(|e| EffectError::Handler(format!("fronting lock poisoned: {e}")))?;
+        let snap = guard.clone();
+        if let Err(e) = mutator(&mut guard) {
+            *guard = snap;
+            return Err(EffectError::Handler(format!("mutator: {e}")));
+        }
+        Ok(guard.clone())
+    }
+}
 
 use crate::policy::{CAPABILITY_DENIED_PREFIX, FRONTING_NOT_WIRED_PREFIX};
 use crate::sdk::describe::{DescribeEffect, EffectDecl};
@@ -156,30 +248,37 @@ impl EffectHandler<SessionContext> for FrontingHandler {
             )));
         }
 
-        // Resolve the fronting set. Returns an error with FRONTING_NOT_WIRED_PREFIX
-        // if the daemon has not yet wired the set (T3 path not active, test session,
-        // or non-daemon session).
-        let fronting = user.fronting_set().cloned().ok_or_else(|| {
-            EffectError::Handler(format!(
-                "{FRONTING_NOT_WIRED_PREFIX}Pattern.Fronting handler invoked \
-                 but no FrontingSet is wired on the SessionContext"
-            ))
-        })?;
+        // Resolve the committer. Returns an error with FRONTING_NOT_WIRED_PREFIX
+        // if the daemon has not yet wired one (T3 path not active, test session,
+        // or non-daemon session). The committer owns the canonical `FrontingSet`
+        // lock — read-only and write paths both flow through it.
+        let committer: Arc<dyn FrontingCommitter> =
+            user.fronting_committer().cloned().ok_or_else(|| {
+                EffectError::Handler(format!(
+                    "{FRONTING_NOT_WIRED_PREFIX}Pattern.Fronting handler invoked \
+                     but no FrontingCommitter is wired on the SessionContext"
+                ))
+            })?;
 
         match req {
-            FrontingReq::Current => handle_current(&fronting, cx),
-            FrontingReq::Set(active, fallback) => handle_set(active, fallback, &fronting, cx),
-            FrontingReq::Route(wire_rules) => handle_route(wire_rules, &fronting, cx),
-            FrontingReq::Clear => handle_clear(&fronting, cx),
+            FrontingReq::Current => handle_current(committer.as_ref(), cx),
+            FrontingReq::Set(active, fallback) => {
+                handle_set(active, fallback, committer.as_ref(), cx)
+            }
+            FrontingReq::Route(wire_rules) => {
+                handle_route(wire_rules, committer.as_ref(), cx)
+            }
+            FrontingReq::Clear => handle_clear(committer.as_ref(), cx),
         }
     }
 }
 
 fn handle_current(
-    fronting: &Arc<std::sync::RwLock<FrontingSet>>,
+    committer: &dyn FrontingCommitter,
     cx: &EffectContext<'_, SessionContext>,
 ) -> Result<Value, EffectError> {
-    let set = fronting
+    let set = committer
+        .fronting_set()
         .read()
         .map_err(|e| EffectError::Handler(format!("fronting lock poisoned: {e}")))?;
 
@@ -212,50 +311,48 @@ fn handle_current(
 fn handle_set(
     active_ids: Vec<String>,
     fallback_id: Option<String>,
-    fronting: &Arc<std::sync::RwLock<FrontingSet>>,
+    committer: &dyn FrontingCommitter,
     cx: &EffectContext<'_, SessionContext>,
 ) -> Result<Value, EffectError> {
-    let mut set = fronting
-        .write()
-        .map_err(|e| EffectError::Handler(format!("fronting lock poisoned: {e}")))?;
-
-    set.active = active_ids
-        .into_iter()
-        .map(|s| PersonaId::new(s.as_str()))
-        .collect();
-    set.fallback = fallback_id.map(|s| PersonaId::new(s.as_str()));
-
+    let mutator: FrontingMutator = Box::new(move |set: &mut FrontingSet| {
+        set.active = active_ids
+            .into_iter()
+            .map(|s| PersonaId::new(s.as_str()))
+            .collect();
+        set.fallback = fallback_id.map(|s| PersonaId::new(s.as_str()));
+        Ok(())
+    });
+    committer.commit_sync(mutator)?;
     cx.respond(())
 }
 
 fn handle_route(
     wire_rules: Vec<WireRoutingRule>,
-    fronting: &Arc<std::sync::RwLock<FrontingSet>>,
+    committer: &dyn FrontingCommitter,
     cx: &EffectContext<'_, SessionContext>,
 ) -> Result<Value, EffectError> {
-    // Compile rules BEFORE acquiring the write lock so the existing rules
-    // are preserved if compilation fails.
+    // Compile rules BEFORE entering the committer's critical section so the
+    // existing rules are preserved on compile failure.
     let domain_rules: Vec<RoutingRule> = wire_rules.into_iter().map(RoutingRule::from).collect();
-
     let table = RoutingTable::try_from_rules(domain_rules)
         .map_err(|e| EffectError::Handler(format!("route compile failed: {e}")))?;
 
-    let mut set = fronting
-        .write()
-        .map_err(|e| EffectError::Handler(format!("fronting lock poisoned: {e}")))?;
-
-    set.routing = table;
+    let mutator: FrontingMutator = Box::new(move |set: &mut FrontingSet| {
+        set.routing = table;
+        Ok(())
+    });
+    committer.commit_sync(mutator)?;
     cx.respond(())
 }
 
 fn handle_clear(
-    fronting: &Arc<std::sync::RwLock<FrontingSet>>,
+    committer: &dyn FrontingCommitter,
     cx: &EffectContext<'_, SessionContext>,
 ) -> Result<Value, EffectError> {
-    let mut set = fronting
-        .write()
-        .map_err(|e| EffectError::Handler(format!("fronting lock poisoned: {e}")))?;
-
-    *set = FrontingSet::default();
+    let mutator: FrontingMutator = Box::new(|set: &mut FrontingSet| {
+        *set = FrontingSet::default();
+        Ok(())
+    });
+    committer.commit_sync(mutator)?;
     cx.respond(())
 }

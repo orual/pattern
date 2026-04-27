@@ -493,19 +493,28 @@ pub struct SessionContext {
     /// and unsubscribes the loro callbacks they hold. Eligible
     /// receivers for wake activations are this session's [`Mailbox`].
     wake_registry: Option<Arc<crate::wake::WakeRegistry>>,
-    /// Shared fronting set for the daemon-level routing configuration.
-    ///
-    /// Populated by daemon callers via `with_fronting_set` when the
-    /// session should have read/write access to the constellation's
-    /// active fronting state. `None` for test sessions and sessions
-    /// that do not participate in the fronting system.
-    fronting_set: Option<Arc<std::sync::RwLock<pattern_core::fronting::FrontingSet>>>,
     /// Constellation registry handle. Populated by daemon callers via
     /// `with_constellation_registry`; the `Pattern.Constellation` handler
     /// reads from it. `None` for test sessions that don't need agent
     /// program access to persona records.
     constellation_registry:
         Option<Arc<dyn pattern_core::ConstellationRegistry>>,
+    /// Owns the canonical [`pattern_core::fronting::FrontingSet`] lock
+    /// AND the synchronous commit path for SDK-driven `Pattern.Fronting`
+    /// mutations. Read-only access (the `Current` handler) goes through
+    /// `committer.fronting_set()`; mutations go through `commit_sync`.
+    ///
+    /// Bundling the lock and the commit path in one trait object means
+    /// the lock the handler reads is axiomatically the lock the daemon
+    /// persists — they cannot drift.
+    ///
+    /// Daemon sessions wire a `DaemonFrontingCommitter` (three-phase commit
+    /// + DB persist + `FrontingChanged` fan-out). Test sessions wire an
+    /// `InMemoryFrontingCommitter` (no-op persist + no event emission).
+    /// `None` leaves the `Pattern.Fronting` effect unwired entirely; the
+    /// handler returns a `FRONTING_NOT_WIRED_PREFIX`-marked error.
+    fronting_committer:
+        Option<Arc<dyn crate::sdk::handlers::fronting::FrontingCommitter>>,
 }
 
 /// Handlers call this to decide whether to short-circuit on soft-cancel.
@@ -747,8 +756,8 @@ impl SessionContext {
             turn_done: Arc::new(tokio::sync::Notify::new()),
             agent_registry: None,
             wake_registry: None,
-            fronting_set: None,
             constellation_registry: None,
+            fronting_committer: None,
         }
     }
 
@@ -1130,12 +1139,13 @@ impl SessionContext {
             // Ephemeral children do not get a wake registry — they are
             // transient and cannot register long-running wake conditions.
             wake_registry: None,
-            // Ephemeral children do not participate in the fronting system —
-            // they are transient workers, not addressable fronting personas.
-            fronting_set: None,
             // Inherit the constellation registry so child sessions can
             // observe the same persona graph as the parent.
             constellation_registry: self.constellation_registry.clone(),
+            // Children share the parent's fronting committer (which carries
+            // the shared lock) so any SDK-driven fronting mutation from a
+            // child also persists and fans out via the same path.
+            fronting_committer: self.fronting_committer.clone(),
         };
         Arc::new(child)
     }
@@ -1493,27 +1503,22 @@ impl SessionContext {
     /// `Pattern.Fronting` handler. `None` for sessions that have not
     /// been wired with one (test sessions, ephemeral children).
     ///
-    /// The `Pattern.Fronting` handler returns a
+    /// Read-only accessor for the canonical `FrontingSet` lock.
+    ///
+    /// Returns `None` when no `FrontingCommitter` is wired (test sessions
+    /// without fronting, or non-daemon paths). The `Pattern.Fronting`
+    /// handler returns
     /// [`crate::sdk::handlers::fronting::FRONTING_NOT_WIRED_PREFIX`]-marked
-    /// error when this is `None`.
+    /// errors on the same `None` path.
+    ///
+    /// The lock returned here is the same lock the committer mutates —
+    /// drift between read and write paths is structurally impossible.
     pub fn fronting_set(
         &self,
     ) -> Option<&Arc<std::sync::RwLock<pattern_core::fronting::FrontingSet>>> {
-        self.fronting_set.as_ref()
-    }
-
-    /// Builder-style: attach a shared `FrontingSet` lock to this session.
-    ///
-    /// Daemon callers wire the constellation-level `Arc<RwLock<FrontingSet>>`
-    /// here so the `Pattern.Fronting` handler can read and mutate it. T3
-    /// (`DaemonServer`) owns and wires the Arc.
-    #[must_use]
-    pub fn with_fronting_set(
-        mut self,
-        fronting: Arc<std::sync::RwLock<pattern_core::fronting::FrontingSet>>,
-    ) -> Self {
-        self.fronting_set = Some(fronting);
-        self
+        self.fronting_committer
+            .as_ref()
+            .map(|c| c.fronting_set())
     }
 
     /// Constellation registry handle, if wired.
@@ -1538,6 +1543,25 @@ impl SessionContext {
         registry: Arc<dyn pattern_core::ConstellationRegistry>,
     ) -> Self {
         self.constellation_registry = Some(registry);
+        self
+    }
+
+    /// Synchronous fronting committer, if wired.
+    pub fn fronting_committer(
+        &self,
+    ) -> Option<&Arc<dyn crate::sdk::handlers::fronting::FrontingCommitter>> {
+        self.fronting_committer.as_ref()
+    }
+
+    /// Builder-style: attach a `FrontingCommitter` so SDK-driven
+    /// `Pattern.Fronting.Set` / `Route` / `Clear` mutations go through the
+    /// daemon's three-phase commit (snapshot → mutate → persist → fan-out).
+    #[must_use]
+    pub fn with_fronting_committer(
+        mut self,
+        committer: Arc<dyn crate::sdk::handlers::fronting::FrontingCommitter>,
+    ) -> Self {
+        self.fronting_committer = Some(committer);
         self
     }
 }
@@ -1568,15 +1592,6 @@ pub struct SessionRegistries {
     /// with the session's own mailbox sender (not yet available at call-site).
     /// Pass `None` to leave wake support unwired.
     pub wake_registry_extras: Option<WakeRegistryExtras>,
-    /// Optional shared `FrontingSet` lock. When set, the session's
-    /// `Pattern.Fronting` handler reads/mutates this same value (the daemon's
-    /// canonical fronting state). `None` leaves fronting unwired and the
-    /// handler returns `FRONTING_NOT_WIRED_PREFIX`-marked errors.
-    ///
-    /// Phase 5 v3-multi-agent: the daemon constructs one Arc per
-    /// `ProjectMount` and shares it with every session opened against
-    /// that mount.
-    pub fronting_set: Option<Arc<std::sync::RwLock<pattern_core::fronting::FrontingSet>>>,
     /// Optional shared `PortRegistryImpl`. When set, the session's
     /// `Pattern.Port` handler dispatches against this registry; agents
     /// import port libraries (e.g. `Pattern.Http`) that the registry
@@ -1601,6 +1616,20 @@ pub struct SessionRegistries {
     /// via the policy module's "no matching rule") or malformed
     /// (logged at error level + falls back to default-deny).
     pub file_policy: Option<crate::file_manager::FilePolicy>,
+    /// Optional `FrontingCommitter`. The committer owns the canonical
+    /// `Arc<RwLock<FrontingSet>>` AND drives the synchronous commit path
+    /// for SDK-driven `Pattern.Fronting` mutations.
+    ///
+    /// Daemon sessions wire a `DaemonFrontingCommitter` (three-phase commit
+    /// + DB persist + `FrontingChanged` fan-out). Test sessions wire an
+    /// `InMemoryFrontingCommitter` (no-op persist + no event emission).
+    /// `None` leaves the `Pattern.Fronting` effect unwired entirely.
+    ///
+    /// v3-multi-agent Phase 6 T5b. Replaces the prior split between
+    /// `fronting_set` and `fronting_committer` — bundling them eliminates
+    /// the possibility of read/write-lock drift.
+    pub fronting_committer:
+        Option<Arc<dyn crate::sdk::handlers::fronting::FrontingCommitter>>,
 }
 
 /// Extras required to construct a [`crate::wake::WakeRegistry`] inside
@@ -1982,10 +2011,13 @@ impl TidepoolSession {
                 ctx
             };
 
-            // Wire FrontingSet (Phase 5). Shared with the daemon's
-            // canonical state; used by the Pattern.Fronting handler.
-            let ctx = if let Some(fronting) = regs.fronting_set {
-                ctx.with_fronting_set(fronting)
+            // Wire FrontingCommitter (Phase 6 T5b). The committer owns the
+            // canonical `FrontingSet` lock — read access via the handler's
+            // `Current` constructor and write access via `commit_sync` both
+            // route through the same trait object, so no drift between
+            // them is structurally possible.
+            let ctx = if let Some(committer) = regs.fronting_committer {
+                ctx.with_fronting_committer(committer)
             } else {
                 ctx
             };

@@ -59,9 +59,9 @@ async fn open_with_agent_loop_wires_session_registries() {
             block_change_notifier: None,
             memory_store: None,
         }),
-        fronting_set: None,
         port_registry: None,
         file_policy: None,
+        fronting_committer: None,
     };
 
     let store = Arc::new(InMemoryMemoryStore::new());

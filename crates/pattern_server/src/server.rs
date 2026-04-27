@@ -667,6 +667,7 @@ impl DaemonServer {
                         &session_locks,
                         &config,
                         &mount,
+                        &event_tx,
                     )
                     .await
                     {
@@ -1277,31 +1278,114 @@ impl DaemonServer {
     /// subscribers. Uses the `"fronting"` / `"daemon"` sentinel batch/agent IDs
     /// so TUI clients can distinguish fronting events from per-agent turn events.
     async fn fan_out_fronting_changed(&mut self, new_set: &pattern_core::fronting::FrontingSet) {
-        let rules = new_set
-            .routing
-            .rules
-            .iter()
-            .map(|r| {
-                let (pt, pv) = wire_pattern(&r.pattern);
-                WireRoutingRule {
-                    id: r.id.clone(),
-                    pattern_type: pt.to_string(),
-                    pattern_value: pv,
-                    target: r.target.to_string(),
-                    priority: r.priority,
-                }
-            })
-            .collect();
-        let event = TaggedTurnEvent {
-            batch_id: "fronting".into(),
-            agent_id: "daemon".into(),
-            event: WireTurnEvent::FrontingChanged {
-                active: new_set.active.iter().map(|id| id.to_string()).collect(),
-                fallback: new_set.fallback.as_ref().map(|id| id.to_string()),
-                rules,
-            },
-        };
+        let event = build_fronting_changed_event(new_set);
         self.fan_out(event).await;
+    }
+}
+
+/// Build a [`TaggedTurnEvent`] carrying [`WireTurnEvent::FrontingChanged`] for
+/// `new_set`. Shared between the actor's `fan_out_fronting_changed` and the
+/// SDK-side [`DaemonFrontingCommitter`] so the wire shape is identical no
+/// matter which path triggered the change.
+fn build_fronting_changed_event(
+    new_set: &pattern_core::fronting::FrontingSet,
+) -> TaggedTurnEvent {
+    let rules = new_set
+        .routing
+        .rules
+        .iter()
+        .map(|r| {
+            let (pt, pv) = wire_pattern(&r.pattern);
+            WireRoutingRule {
+                id: r.id.clone(),
+                pattern_type: pt.to_string(),
+                pattern_value: pv,
+                target: r.target.to_string(),
+                priority: r.priority,
+            }
+        })
+        .collect();
+    TaggedTurnEvent {
+        batch_id: "fronting".into(),
+        agent_id: "daemon".into(),
+        event: WireTurnEvent::FrontingChanged {
+            active: new_set.active.iter().map(|id| id.to_string()).collect(),
+            fallback: new_set.fallback.as_ref().map(|id| id.to_string()),
+            rules,
+        },
+    }
+}
+
+// ── DaemonFrontingCommitter (Phase 6 T5b) ─────────────────────────────────────
+
+/// Daemon-side [`FrontingCommitter`] for SDK-driven `Pattern.Fronting` mutations.
+///
+/// Wraps the same [`update_fronting_inner`] three-phase commit used by the
+/// `SetFronting` / `UpdateRouting` IRPCs, plus an event-channel send to fan
+/// out [`WireTurnEvent::FrontingChanged`] to subscribers.
+///
+/// The committer is wired into each `SessionContext` via
+/// `with_fronting_committer` from `get_or_open_session`. SDK-driven mutations
+/// then go through the same atomic snapshot → mutate → DB persist → rollback
+/// path as RPC-driven mutations.
+#[derive(Debug, Clone)]
+pub struct DaemonFrontingCommitter {
+    fronting: Arc<std::sync::RwLock<pattern_core::fronting::FrontingSet>>,
+    db: Arc<pattern_db::ConstellationDb>,
+    event_tx: crate::bridge::EventTx,
+    tokio_handle: tokio::runtime::Handle,
+}
+
+impl DaemonFrontingCommitter {
+    pub fn new(
+        fronting: Arc<std::sync::RwLock<pattern_core::fronting::FrontingSet>>,
+        db: Arc<pattern_db::ConstellationDb>,
+        event_tx: crate::bridge::EventTx,
+        tokio_handle: tokio::runtime::Handle,
+    ) -> Self {
+        Self {
+            fronting,
+            db,
+            event_tx,
+            tokio_handle,
+        }
+    }
+}
+
+impl pattern_runtime::sdk::handlers::fronting::FrontingCommitter for DaemonFrontingCommitter {
+    fn fronting_set(
+        &self,
+    ) -> &Arc<std::sync::RwLock<pattern_core::fronting::FrontingSet>> {
+        &self.fronting
+    }
+
+    fn commit_sync(
+        &self,
+        mutator: pattern_runtime::sdk::handlers::fronting::FrontingMutator,
+    ) -> Result<
+        pattern_core::fronting::FrontingSet,
+        pattern_runtime::tidepool_effect::EffectError,
+    > {
+        let fronting = self.fronting.clone();
+        let db = self.db.clone();
+        let new_set = self
+            .tokio_handle
+            .block_on(async move { update_fronting_inner(&fronting, &db, mutator).await })
+            .map_err(|e| {
+                pattern_runtime::tidepool_effect::EffectError::Handler(format!(
+                    "fronting commit failed: {e}"
+                ))
+            })?;
+
+        // Send through the actor's event channel; the actor loop fans it out
+        // to subscribers. Channel-closed (daemon shutting down) is not an
+        // error from the SDK handler's perspective — the mutation already
+        // landed in the DB and in-memory state.
+        let _ = self
+            .event_tx
+            .send(build_fronting_changed_event(&new_set));
+
+        Ok(new_set)
     }
 }
 
@@ -1363,6 +1447,7 @@ async fn get_or_open_session(
     session_locks: &DashMap<AgentId, Arc<tokio::sync::Mutex<()>>>,
     config: &SessionConfig,
     project_mount: &ProjectMount,
+    event_tx: &crate::bridge::EventTx,
 ) -> Result<AgentSession, String> {
     // Fast path: session already exists. Clone immediately, drop ref.
     if let Some(entry) = sessions.get(agent_id) {
@@ -1423,13 +1508,25 @@ async fn get_or_open_session(
         memory_store: Some(project_mount.cache.clone() as Arc<dyn MemoryStore>),
     };
 
+    // The committer carries the project_mount's `fronting` Arc internally
+    // — that's the same Arc the RPC `update_fronting` path mutates, so SDK
+    // and RPC mutations end up in the same lock by construction.
+    let fronting_committer: Arc<
+        dyn pattern_runtime::sdk::handlers::fronting::FrontingCommitter,
+    > = Arc::new(DaemonFrontingCommitter::new(
+        project_mount.fronting.clone(),
+        project_mount.db.clone(),
+        event_tx.clone(),
+        tokio::runtime::Handle::current(),
+    ));
+
     let registries = SessionRegistries {
         agent_registry: Some(project_mount.agent_registry.clone()),
         router_registry: Some(router_reg),
         wake_registry_extras: Some(wake_extras),
-        fronting_set: Some(project_mount.fronting.clone()),
         port_registry: Some(project_mount.port_registry.clone()),
         file_policy: project_mount.file_policy.clone(),
+        fronting_committer: Some(fronting_committer),
     };
     let session = TidepoolSession::open_with_agent_loop(
         persona,
@@ -1981,6 +2078,112 @@ mod tests {
         assert_eq!(
             after_failure.fallback, original.fallback,
             "in-memory fallback must revert to pre-mutation state after save failure"
+        );
+    }
+
+    // ── DaemonFrontingCommitter (Phase 6 T5b) ─────────────────────────────────
+
+    /// SDK-driven `Set` via `DaemonFrontingCommitter` persists to the DB AND
+    /// emits a `FrontingChanged` event on the actor's event channel. Verifies
+    /// AC8.* persistence + emission carryover from Phase 5.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn daemon_committer_persists_and_emits_on_set() {
+        use pattern_runtime::sdk::handlers::fronting::FrontingCommitter;
+
+        let db = Arc::new(pattern_db::ConstellationDb::open_in_memory().unwrap());
+        let fronting = Arc::new(std::sync::RwLock::new(
+            pattern_core::fronting::FrontingSet::default(),
+        ));
+        let (event_tx, mut event_rx) = crate::bridge::new_event_channel();
+
+        let committer = DaemonFrontingCommitter::new(
+            fronting.clone(),
+            db.clone(),
+            event_tx,
+            tokio::runtime::Handle::current(),
+        );
+
+        // Mutator: set active = [alice], fallback = Some(alice).
+        let mutator: pattern_runtime::sdk::handlers::fronting::FrontingMutator =
+            Box::new(|set: &mut pattern_core::fronting::FrontingSet| {
+                set.active = vec![pattern_core::types::ids::PersonaId::new("alice")];
+                set.fallback = Some(pattern_core::types::ids::PersonaId::new("alice"));
+                Ok(())
+            });
+
+        // Run on a blocking thread because commit_sync calls block_on.
+        let committer_clone = committer.clone();
+        let new_set = tokio::task::spawn_blocking(move || {
+            committer_clone.commit_sync(mutator).expect("commit must succeed")
+        })
+        .await
+        .unwrap();
+        assert_eq!(new_set.active.len(), 1);
+        assert_eq!(new_set.active[0].as_str(), "alice");
+
+        // Verify in-memory state landed.
+        let after = fronting.read().unwrap();
+        assert_eq!(after.active.len(), 1);
+        assert_eq!(after.active[0].as_str(), "alice");
+        assert_eq!(
+            after.fallback.as_ref().map(|s| s.as_str()),
+            Some("alice")
+        );
+        drop(after);
+
+        // Verify the row landed in the DB.
+        let conn = db.get().unwrap();
+        let loaded = pattern_db::queries::fronting::load_fronting_set(&conn)
+            .unwrap()
+            .expect("DB must have a saved fronting row after commit");
+        assert_eq!(loaded.active.len(), 1);
+        assert_eq!(loaded.active[0].as_str(), "alice");
+
+        // Verify a FrontingChanged event was sent on the channel.
+        let event = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            event_rx.recv(),
+        )
+        .await
+        .expect("must receive event within timeout")
+        .expect("event channel must not be closed");
+        assert_eq!(event.batch_id, "fronting");
+        assert_eq!(event.agent_id, "daemon");
+        match event.event {
+            crate::protocol::WireTurnEvent::FrontingChanged {
+                active, fallback, ..
+            } => {
+                assert_eq!(active, vec!["alice".to_string()]);
+                assert_eq!(fallback, Some("alice".to_string()));
+            }
+            other => panic!("expected FrontingChanged event, got: {other:?}"),
+        }
+    }
+
+    /// `fronting_set()` exposed by the committer is the SAME `Arc` it persists
+    /// against — read and write paths cannot drift.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn daemon_committer_exposes_same_arc_it_persists() {
+        use pattern_runtime::sdk::handlers::fronting::FrontingCommitter;
+
+        let db = Arc::new(pattern_db::ConstellationDb::open_in_memory().unwrap());
+        let fronting = Arc::new(std::sync::RwLock::new(
+            pattern_core::fronting::FrontingSet::default(),
+        ));
+        let (event_tx, _event_rx) = crate::bridge::new_event_channel();
+        let committer = DaemonFrontingCommitter::new(
+            fronting.clone(),
+            db,
+            event_tx,
+            tokio::runtime::Handle::current(),
+        );
+
+        // Pointer-equality on the Arc backing storage: the committer's
+        // `fronting_set()` accessor and the externally-held lock must be
+        // the SAME allocation.
+        assert!(
+            Arc::ptr_eq(committer.fronting_set(), &fronting),
+            "committer's fronting_set() must be the same Arc as the externally-held lock"
         );
     }
 }

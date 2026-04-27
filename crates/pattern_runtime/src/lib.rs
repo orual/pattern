@@ -36,6 +36,10 @@ pub use sdk::SdkLocation;
 pub use session::{SessionContext, TidepoolSession};
 pub use tidepool::CompiledProgram;
 
+// Re-export so downstream crates (e.g. pattern_server) implementing SDK
+// traits don't need a direct dep on the tidepool sub-crate.
+pub use tidepool_effect;
+
 /// Test fixtures re-exported from `tidepool_testing` under Rust-2024-safe
 /// paths, plus an in-memory [`pattern_core::traits::MemoryStore`] double
 /// (`testing::InMemoryMemoryStore`) and scripted [`testing::MockProviderClient`]
