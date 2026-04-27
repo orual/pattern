@@ -328,6 +328,37 @@ impl ConstellationRegistry for ConstellationRegistryDb {
         })?
     }
 
+    async fn set_config_path(
+        &self,
+        id: &PersonaId,
+        config_path: Option<std::path::PathBuf>,
+    ) -> Result<(), RegistryError> {
+        let db = self.db.clone();
+        let id_str = id.as_str().to_string();
+        let id_owned = id.clone();
+        let path_str = config_path.map(|p| p.to_string_lossy().into_owned());
+        tokio::task::spawn_blocking(move || {
+            let conn = db.get().map_err(map_db_err)?;
+            let updated = conn
+                .execute(
+                    "UPDATE agents SET config_path = ?1, updated_at = datetime('now')
+                     WHERE id = ?2",
+                    params![path_str, id_str],
+                )
+                .map_err(map_sqlite_err)?;
+            if updated == 0 {
+                Err(RegistryError::PersonaNotFound(id_owned))
+            } else {
+                Ok(())
+            }
+        })
+        .await
+        .map_err(|e| {
+            tracing::warn!(target: "pattern_db::constellation", error = %e, "set_config_path join error");
+            RegistryError::BackendUnavailable
+        })?
+    }
+
     async fn add_relationship(&self, edge: RelationshipSpec) -> Result<(), RegistryError> {
         let db = self.db.clone();
         tokio::task::spawn_blocking(move || {

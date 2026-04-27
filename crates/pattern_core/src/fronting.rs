@@ -516,6 +516,13 @@ mod tests {
         ) -> Result<(), RegistryError> {
             Err(RegistryError::BackendUnavailable)
         }
+        async fn set_config_path(
+            &self,
+            _id: &PersonaId,
+            _config_path: Option<std::path::PathBuf>,
+        ) -> Result<(), RegistryError> {
+            Err(RegistryError::BackendUnavailable)
+        }
         async fn add_relationship(
             &self,
             _edge: crate::constellation::RelationshipSpec,

@@ -151,6 +151,11 @@ pub(crate) struct ProjectMount {
     /// registered. Threaded through `SessionRegistries` to each session
     /// opened against the mount.
     pub port_registry: Arc<pattern_runtime::port_registry::PortRegistryImpl>,
+    /// Constellation persona registry backed by `pattern_db`. Built once at
+    /// mount time and shared with every session opened against the mount via
+    /// `SessionContext::with_constellation_registry`. The daemon also reaches
+    /// for it directly to handle the `PromoteDraft` RPC (Phase 6 T6).
+    pub constellation_registry: Arc<dyn pattern_core::ConstellationRegistry>,
     /// Keeps the `MountedStore` alive for RAII (watcher, backup scheduler).
     _mounted: pattern_memory::mount::MountedStore,
 }
@@ -1023,6 +1028,20 @@ impl DaemonServer {
                 };
                 let _ = tx.send(response).await;
             }
+            PatternMessage::PromoteDraft(req) => {
+                let WithChannels { tx, inner, .. } = req;
+                let response = match self.handle_promote_draft(inner).await {
+                    Ok(()) => PromoteDraftResponse {
+                        success: true,
+                        error: None,
+                    },
+                    Err(e) => PromoteDraftResponse {
+                        success: false,
+                        error: Some(e),
+                    },
+                };
+                let _ = tx.send(response).await;
+            }
             PatternMessage::GetClientCount(req) => {
                 let WithChannels { tx, .. } = req;
                 // Dead senders are only lazily pruned during fan_out. Since
@@ -1257,6 +1276,12 @@ impl DaemonServer {
             Some(policy)
         };
 
+        // Build the rusqlite-backed constellation registry for this mount.
+        // Shared across every session opened against the mount AND used
+        // directly by the daemon for `PromoteDraft` / draft-flip RPCs.
+        let constellation_registry: Arc<dyn pattern_core::ConstellationRegistry> =
+            Arc::new(pattern_db::ConstellationRegistryDb::new(mounted.db.clone()));
+
         let mount = Arc::new(ProjectMount {
             cache: mounted.cache.clone(),
             db: mounted.db.clone(),
@@ -1267,6 +1292,7 @@ impl DaemonServer {
             fronting: Arc::new(std::sync::RwLock::new(fronting_loaded)),
             file_policy,
             port_registry,
+            constellation_registry,
             _mounted: mounted,
         });
 
@@ -1280,6 +1306,293 @@ impl DaemonServer {
     async fn fan_out_fronting_changed(&mut self, new_set: &pattern_core::fronting::FrontingSet) {
         let event = build_fronting_changed_event(new_set);
         self.fan_out(event).await;
+    }
+
+    /// Phase 6 T6: handle a `PromoteDraft` RPC.
+    ///
+    /// Flow:
+    /// 1. Resolve the project mount (must be initialised).
+    /// 2. Fetch the persona record from the registry; verify Draft.
+    /// 3. Move the KDL file from the runtime's `drafts_dir` flat layout
+    ///    (`<drafts_dir>/<id>.kdl`) into the project mount's standard
+    ///    discovery layout (`<mount>/personas/@<id>/persona.kdl`). Future
+    ///    `discover_personas` calls find the persona via the normal path.
+    /// 4. Update `config_path` in the registry to the new location.
+    /// 5. Load the persona snapshot from the new path and open the session
+    ///    (which calls `register_active` and auto-drains the Phase 4 draft
+    ///    queue into the new mailbox).
+    /// 6. Flip persona registry status to `Active`.
+    ///
+    /// Seed-cache loading (fork-promote, Phase 3 Task 7) is a separate
+    /// follow-up: when the draft was created via `fork.promote()`, the
+    /// `<drafts_dir>/<persona_id>.cache/<label>.loro` files also need to
+    /// migrate (currently still tracked as a known gap).
+    async fn handle_promote_draft(
+        &self,
+        req: crate::protocol::PromoteDraftRequest,
+    ) -> Result<(), String> {
+        use pattern_core::constellation::PersonaStatus;
+        use pattern_core::types::ids::PersonaId;
+
+        let mount = self
+            .current_mount
+            .clone()
+            .ok_or_else(|| "no project mounted — send InitSession first".to_string())?;
+
+        let persona_id: PersonaId = req.persona_id.as_str().into();
+
+        // 1+2: fetch the registry record + status check.
+        let record = mount
+            .constellation_registry
+            .get(&persona_id)
+            .await
+            .map_err(|e| format!("registry lookup failed: {e}"))?
+            .ok_or_else(|| format!("persona {:?} not found in registry", persona_id))?;
+
+        if record.status != PersonaStatus::Draft {
+            return Err(format!(
+                "persona {:?} is not Draft (current status: {:?})",
+                persona_id, record.status
+            ));
+        }
+
+        let draft_path = record
+            .config_path
+            .ok_or_else(|| format!("draft persona {:?} has no config_path", persona_id))?;
+
+        // 3a: move the KDL into the mount's discovery layout. The convention
+        // is `<mount>/personas/@<id>/persona.kdl` — `discover_personas` finds
+        // it after the move via the project-scoped scan path.
+        let promoted_path = promote_persona_file(&mount.mount_path, &persona_id, &draft_path)
+            .map_err(|e| format!("failed to move draft persona: {e}"))?;
+
+        // 3b: migrate the fork-promote seed cache (if any). Drafts created
+        // via `fork.promote()` carry per-block memory state at
+        // `<drafts_dir>/<persona_id>.cache/`. Import each block into the
+        // mount's MemoryCache under the new persona's id, then persist so
+        // it lands in the DB before the session opens.
+        let seed_cache_dir = draft_path
+            .parent()
+            .map(|p| p.join(format!("{persona_id}.cache")));
+        if let Some(cache_dir) = seed_cache_dir.as_ref()
+            && cache_dir.is_dir()
+        {
+            if let Err(e) = migrate_seed_cache(cache_dir, &persona_id, &mount.cache).await {
+                tracing::warn!(
+                    persona_id = %persona_id,
+                    cache_dir = %cache_dir.display(),
+                    error = %e,
+                    "seed cache migration failed; promoted persona will start with empty memory"
+                );
+            } else {
+                // Best-effort cleanup of the seed cache directory after a
+                // successful import. The blocks now live in the mount's
+                // MemoryCache + DB.
+                if let Err(e) = std::fs::remove_dir_all(cache_dir) {
+                    tracing::warn!(
+                        cache_dir = %cache_dir.display(),
+                        error = %e,
+                        "failed to remove seed cache after import; non-fatal"
+                    );
+                }
+            }
+        }
+
+        // 4: update registry config_path so subsequent reopens find the new
+        // location. (Failure here leaves the file moved but the row stale —
+        // caller can retry; future opens via discover_personas will still work
+        // because the file is in the discovery path.)
+        if let Err(e) = mount
+            .constellation_registry
+            .set_config_path(&persona_id, Some(promoted_path.clone()))
+            .await
+        {
+            tracing::warn!(
+                persona_id = %persona_id,
+                error = %e,
+                "registry set_config_path failed after file move; \
+                 persona still discoverable via mount/personas path"
+            );
+        }
+
+        // 5: load + open via the shared session-open helper.
+        let persona = pattern_runtime::persona_loader::load_persona(&promoted_path)
+            .map_err(|e| format!("failed to load persona from {}: {e}", promoted_path.display()))?;
+        let agent_id: pattern_core::types::ids::AgentId = persona.agent_id.as_str().into();
+
+        // Per-agent lock + dedup — same shape as `get_or_open_session`.
+        let lock = self
+            .session_locks
+            .entry(agent_id.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _guard = lock.lock().await;
+
+        if !self.sessions.contains_key(&agent_id) {
+            let session_config = self
+                .session_config
+                .as_ref()
+                .ok_or_else(|| {
+                    "no SessionConfig — daemon was not spawned with real session infrastructure"
+                        .to_string()
+                })?
+                .clone();
+            let _agent_session = open_session_with_persona(
+                &agent_id,
+                persona,
+                &self.sessions,
+                &session_config,
+                &mount,
+                &self.event_tx,
+            )
+            .await?;
+        }
+
+        // 6: flip registry status to Active. After this, the persona is a
+        // first-class member of the constellation and the queue (drained at
+        // step 5 inside register_active) is in the live mailbox.
+        mount
+            .constellation_registry
+            .set_status(&persona_id, PersonaStatus::Active)
+            .await
+            .map_err(|e| format!("failed to update registry status: {e}"))?;
+
+        tracing::info!(
+            persona_id = %persona_id,
+            promoted_path = %promoted_path.display(),
+            source = "pattern_server.promote_draft",
+            "draft promoted to Active"
+        );
+
+        Ok(())
+    }
+}
+
+/// Phase 6 T6: import a fork-promote seed cache into the mount's
+/// `MemoryCache` under `persona_id`'s ownership.
+///
+/// The seed cache is a directory written by [`pattern_runtime::spawn::fork::ForkHandle::promote`]
+/// containing per-block `<label>.loro` snapshots and a `manifest.json` listing
+/// each block's schema and type. We read the manifest, load each snapshot,
+/// and call `MemoryCache::insert_from_snapshot` with the recorded metadata.
+/// Each block is then persisted so it survives session restart.
+async fn migrate_seed_cache(
+    cache_dir: &std::path::Path,
+    persona_id: &pattern_core::types::ids::PersonaId,
+    cache: &pattern_memory::cache::MemoryCache,
+) -> Result<u32, String> {
+    use pattern_runtime::spawn::fork::{
+        SEED_CACHE_MANIFEST_VERSION, SeedCacheManifest,
+    };
+
+    let manifest_path = cache_dir.join("manifest.json");
+    let manifest_bytes = std::fs::read(&manifest_path)
+        .map_err(|e| format!("read manifest {}: {e}", manifest_path.display()))?;
+    let manifest: SeedCacheManifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|e| format!("parse manifest {}: {e}", manifest_path.display()))?;
+
+    if manifest.version != SEED_CACHE_MANIFEST_VERSION {
+        return Err(format!(
+            "seed cache manifest version mismatch: expected {SEED_CACHE_MANIFEST_VERSION}, \
+             got {} — refusing to import incompatible format",
+            manifest.version
+        ));
+    }
+    if manifest.persona_id != persona_id.as_str() {
+        return Err(format!(
+            "seed cache manifest persona_id mismatch: expected {:?}, got {:?}",
+            persona_id, manifest.persona_id
+        ));
+    }
+
+    let agent_id = persona_id.as_str().to_string();
+    let mut imported: u32 = 0;
+    for entry in manifest.entries {
+        let snap_path = cache_dir.join(&entry.file);
+        let snapshot = std::fs::read(&snap_path)
+            .map_err(|e| format!("read seed snapshot {}: {e}", snap_path.display()))?;
+
+        // Create the block first so the DB row exists with the right
+        // schema + type. The empty content is immediately overwritten by
+        // `insert_from_snapshot`, which replaces the cached doc with the
+        // snapshot's CRDT state. Persist then commits the snapshot bytes.
+        let create = pattern_core::types::block::BlockCreate::new(
+            entry.label.clone(),
+            entry.block_type,
+            entry.schema.clone(),
+        );
+        pattern_core::MemoryStore::create_block(cache, &agent_id, create)
+            .map_err(|e| format!("create_block for {:?}: {e}", entry.label))?;
+
+        cache
+            .insert_from_snapshot(
+                &agent_id,
+                entry.label.clone(),
+                snapshot,
+                entry.schema,
+                entry.block_type,
+            )
+            .map_err(|e| format!("insert_from_snapshot for {:?}: {e}", entry.label))?;
+
+        // Persist immediately so the block lands in the DB. The cache's
+        // subscriber worker will pick up the new block; a synchronous
+        // persist guarantees the row is on disk before the session opens.
+        pattern_core::MemoryStore::persist_block(cache, &agent_id, &entry.label)
+            .map_err(|e| format!("persist seed block {:?}: {e}", entry.label))?;
+
+        imported += 1;
+    }
+
+    tracing::info!(
+        persona_id = %persona_id,
+        imported,
+        source = "pattern_server.promote_draft.seed_cache",
+        "seed cache imported into mount cache"
+    );
+    Ok(imported)
+}
+
+/// Move a draft persona KDL into the project mount's standard discovery
+/// layout. Returns the new on-disk path
+/// (`<mount>/personas/@<id>/persona.kdl`).
+///
+/// Falls back to copy + remove when `rename` fails (e.g. cross-filesystem
+/// drafts dir vs. project mount) so the move always lands.
+fn promote_persona_file(
+    mount_path: &std::path::Path,
+    persona_id: &pattern_core::types::ids::PersonaId,
+    draft_path: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    let target_dir = mount_path.join("personas").join(format!("@{persona_id}"));
+    std::fs::create_dir_all(&target_dir)
+        .map_err(|e| format!("create_dir_all {}: {e}", target_dir.display()))?;
+    let target = target_dir.join("persona.kdl");
+
+    // Try a fast atomic rename first.
+    match std::fs::rename(draft_path, &target) {
+        Ok(()) => Ok(target),
+        Err(_) => {
+            // Cross-FS or other failure: fall back to copy + remove.
+            std::fs::copy(draft_path, &target).map_err(|e| {
+                format!(
+                    "copy {} -> {}: {e}",
+                    draft_path.display(),
+                    target.display()
+                )
+            })?;
+            // Best-effort cleanup of the source. Loud-log on failure but
+            // don't fail the promote — the target now has the canonical
+            // copy, leaving the draft in place is non-fatal (the registry's
+            // config_path will point at the new location).
+            if let Err(e) = std::fs::remove_file(draft_path) {
+                tracing::warn!(
+                    draft_path = %draft_path.display(),
+                    error = %e,
+                    "failed to remove draft file after copy; manual cleanup may be needed"
+                );
+            }
+            Ok(target)
+        }
     }
 }
 
@@ -1466,8 +1779,31 @@ async fn get_or_open_session(
         return Ok(entry.clone());
     }
 
-    // Resolve persona and open session.
+    // Resolve persona by id, then delegate to the shared open path.
     let persona = resolve_persona(agent_id, Some(&project_mount.mount_path))?;
+    open_session_with_persona(
+        agent_id,
+        persona,
+        sessions,
+        config,
+        project_mount,
+        event_tx,
+    )
+    .await
+}
+
+/// Shared session-open implementation used by both `get_or_open_session`
+/// (which resolves the persona by id) and the `PromoteDraft` flow (which
+/// loads the persona from a draft KDL on disk). The caller is responsible
+/// for any pre-open de-dup / locking.
+async fn open_session_with_persona(
+    agent_id: &AgentId,
+    persona: PersonaSnapshot,
+    sessions: &DashMap<AgentId, AgentSession>,
+    config: &SessionConfig,
+    project_mount: &ProjectMount,
+    event_tx: &crate::bridge::EventTx,
+) -> Result<AgentSession, String> {
     let mux_sink = Arc::new(MultiplexSink::new());
     let sink_dyn: Arc<dyn TurnSink> = mux_sink.clone();
 
@@ -1527,6 +1863,7 @@ async fn get_or_open_session(
         port_registry: Some(project_mount.port_registry.clone()),
         file_policy: project_mount.file_policy.clone(),
         fronting_committer: Some(fronting_committer),
+        constellation_registry: Some(project_mount.constellation_registry.clone()),
     };
     let session = TidepoolSession::open_with_agent_loop(
         persona,
@@ -2158,6 +2495,111 @@ mod tests {
             }
             other => panic!("expected FrontingChanged event, got: {other:?}"),
         }
+    }
+
+    /// Phase 6 T6 followup — `migrate_seed_cache` ingests a fork-promote
+    /// seed cache (snapshots + manifest.json) into a fresh `MemoryCache`
+    /// under the new persona's id. Verifies:
+    /// - manifest.json is read + parsed
+    /// - each .loro snapshot lands as a block in the cache
+    /// - blocks are owned by `persona_id` and persist to the DB
+    /// - version mismatch surfaces a clear error
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn migrate_seed_cache_imports_blocks_and_metadata() {
+        use pattern_core::types::ids::PersonaId;
+        use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
+        use pattern_runtime::spawn::fork::{
+            SeedCacheManifest, SeedCacheManifestEntry, SEED_CACHE_MANIFEST_VERSION,
+        };
+
+        // Build a source cache, create one block, export its snapshot.
+        let src_db = Arc::new(pattern_db::ConstellationDb::open_in_memory().unwrap());
+        let src_cache = pattern_memory::cache::MemoryCache::new(src_db);
+        let src_agent = "fork-source";
+        let label = "notes";
+        let create = pattern_core::types::block::BlockCreate::new(
+            label,
+            MemoryBlockType::Working,
+            BlockSchema::text(),
+        );
+        let _doc =
+            pattern_core::MemoryStore::create_block(&src_cache, src_agent, create)
+                .unwrap();
+        // Persist so the cached doc is committed.
+        pattern_core::MemoryStore::persist_block(&src_cache, src_agent, label).unwrap();
+
+        let docs = src_cache.snapshot_cached_docs();
+        assert_eq!(docs.len(), 1, "source cache should have one block");
+        let snapshot = docs[0].export_snapshot().expect("export snapshot");
+
+        // Lay out the seed cache directory + manifest.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let persona_id_str = "promoted-persona";
+        let cache_dir = tmp.path().join(format!("{persona_id_str}.cache"));
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::write(cache_dir.join("notes.loro"), &snapshot).unwrap();
+
+        let manifest = SeedCacheManifest {
+            version: SEED_CACHE_MANIFEST_VERSION,
+            persona_id: persona_id_str.to_string(),
+            entries: vec![SeedCacheManifestEntry {
+                file: "notes.loro".to_string(),
+                label: label.to_string(),
+                schema: BlockSchema::text(),
+                block_type: MemoryBlockType::Working,
+            }],
+        };
+        std::fs::write(
+            cache_dir.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        // Target cache (mount cache).
+        let target_db = Arc::new(pattern_db::ConstellationDb::open_in_memory().unwrap());
+        let target_cache = pattern_memory::cache::MemoryCache::new(target_db);
+
+        let persona_id: PersonaId = persona_id_str.into();
+        let imported = super::migrate_seed_cache(&cache_dir, &persona_id, &target_cache)
+            .await
+            .expect("migrate_seed_cache must succeed");
+        assert_eq!(imported, 1);
+
+        // The block should now be queryable under the new agent_id.
+        let loaded =
+            pattern_core::MemoryStore::get_block(&target_cache, persona_id_str, label)
+                .unwrap()
+                .expect("imported block must be retrievable");
+        assert_eq!(loaded.label(), label);
+        assert_eq!(loaded.agent_id(), persona_id_str);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn migrate_seed_cache_rejects_version_mismatch() {
+        use pattern_core::types::ids::PersonaId;
+        use pattern_runtime::spawn::fork::SeedCacheManifest;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("p.cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let manifest = SeedCacheManifest {
+            version: 999, // future
+            persona_id: "p".to_string(),
+            entries: vec![],
+        };
+        std::fs::write(
+            cache_dir.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let target_db = Arc::new(pattern_db::ConstellationDb::open_in_memory().unwrap());
+        let target_cache = pattern_memory::cache::MemoryCache::new(target_db);
+        let persona_id: PersonaId = "p".into();
+        let err = super::migrate_seed_cache(&cache_dir, &persona_id, &target_cache)
+            .await
+            .expect_err("future version must error");
+        assert!(err.contains("version mismatch"), "got: {err}");
     }
 
     /// `fronting_set()` exposed by the committer is the SAME `Arc` it persists

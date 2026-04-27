@@ -304,6 +304,23 @@ impl DaemonClient {
         let response = self.inner.rpc(UpdateRoutingRequest { rules }).await?;
         Ok(response)
     }
+
+    /// Promote a `Draft` persona to `Active` (Phase 6 T6).
+    ///
+    /// Moves the persona's KDL into the project mount's standard discovery
+    /// layout, updates registry status, and opens its session — auto-draining
+    /// any messages queued against the draft via Phase 4's
+    /// `AgentRegistry::register_active`.
+    pub async fn promote_draft(
+        &self,
+        persona_id: String,
+    ) -> Result<crate::protocol::PromoteDraftResponse> {
+        let response = self
+            .inner
+            .rpc(crate::protocol::PromoteDraftRequest { persona_id })
+            .await?;
+        Ok(response)
+    }
 }
 
 #[cfg(test)]

@@ -261,6 +261,25 @@ pub struct UpdateRoutingResponse {
     pub error: Option<String>,
 }
 
+/// Request payload for [`PatternProtocol::PromoteDraft`].
+///
+/// Phase 6 T6: flip a draft persona to `Active`. The daemon loads the
+/// persona from `record.config_path`, opens its session via the normal
+/// path (which auto-drains any messages queued against the draft via
+/// `AgentRegistry::register_active`), and updates the registry status.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromoteDraftRequest {
+    /// The persona id to promote. Must currently be in `Draft` status.
+    pub persona_id: String,
+}
+
+/// Response to [`PatternProtocol::PromoteDraft`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromoteDraftResponse {
+    pub success: bool,
+    pub error: Option<String>,
+}
+
 impl WireTurnEvent {
     /// Convert from the internal `TurnEvent`.
     ///
@@ -574,6 +593,17 @@ pub enum PatternProtocol {
     /// Phase 5 (v3-multi-agent) introduces this variant.
     #[rpc(tx = oneshot::Sender<UpdateRoutingResponse>)]
     UpdateRouting(UpdateRoutingRequest),
+
+    /// Promote a `Draft` persona to `Active`.
+    ///
+    /// Loads the persona from its `config_path`, opens its session through
+    /// the normal session-open path (which calls `AgentRegistry::register_active`
+    /// and auto-drains any messages queued against the draft), and flips
+    /// the persona registry status to `Active`.
+    ///
+    /// Phase 6 (v3-multi-agent) introduces this variant.
+    #[rpc(tx = oneshot::Sender<PromoteDraftResponse>)]
+    PromoteDraft(PromoteDraftRequest),
 }
 
 #[cfg(test)]

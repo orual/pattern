@@ -1630,6 +1630,11 @@ pub struct SessionRegistries {
     /// the possibility of read/write-lock drift.
     pub fronting_committer:
         Option<Arc<dyn crate::sdk::handlers::fronting::FrontingCommitter>>,
+    /// Optional constellation persona registry (Phase 6). Wired onto the
+    /// `SessionContext` so the `Pattern.Constellation` SDK and sibling
+    /// auto-registration both see the same per-mount handle.
+    pub constellation_registry:
+        Option<Arc<dyn pattern_core::ConstellationRegistry>>,
 }
 
 /// Extras required to construct a [`crate::wake::WakeRegistry`] inside
@@ -2018,6 +2023,15 @@ impl TidepoolSession {
             // them is structurally possible.
             let ctx = if let Some(committer) = regs.fronting_committer {
                 ctx.with_fronting_committer(committer)
+            } else {
+                ctx
+            };
+
+            // Wire ConstellationRegistry (Phase 6). Used by the
+            // `Pattern.Constellation` SDK handler AND by sibling auto-
+            // registration in `spawn_sibling_*`.
+            let ctx = if let Some(reg) = regs.constellation_registry {
+                ctx.with_constellation_registry(reg)
             } else {
                 ctx
             };

@@ -31,6 +31,10 @@ use std::sync::Arc;
 
 use smol_str::SmolStr;
 
+use pattern_core::ConstellationRegistry;
+use pattern_core::constellation::{
+    PersonaRecord, PersonaStatus, RegistryError as CoreRegistryError, RelationshipSpec,
+};
 use pattern_core::spawn::{PersonaConfig, SiblingConfig};
 use pattern_core::types::ids::PersonaId;
 
@@ -122,6 +126,45 @@ impl SiblingPersonaResolver for StubSiblingResolver {
     }
 }
 
+// ── Registry auto-registration helpers (Phase 6 T6) ───────────────────────────
+
+/// Best-effort `register` that treats `DuplicatePersona` as success.
+///
+/// Sibling spawn calls this after writing/loading the persona — the persona
+/// may already be in the registry from a prior session-open, and that's a
+/// fine state to land in (it's the same row).
+async fn register_idempotent(
+    registry: &dyn ConstellationRegistry,
+    record: PersonaRecord,
+) -> Result<(), SpawnError> {
+    match registry.register(record).await {
+        Ok(()) => Ok(()),
+        Err(CoreRegistryError::DuplicatePersona(id)) => {
+            tracing::debug!(
+                persona_id = %id,
+                source = "runtime.spawn.sibling",
+                "registry already has persona; treating as idempotent register"
+            );
+            Ok(())
+        }
+        Err(e) => Err(SpawnError::Runtime(format!(
+            "constellation registry register failed: {e}"
+        ))),
+    }
+}
+
+/// Best-effort `add_relationship` that treats `PersonaNotFound` as a real
+/// error (the spawn path should have ensured both endpoints exist).
+async fn add_relationship_or_propagate(
+    registry: &dyn ConstellationRegistry,
+    spec: RelationshipSpec,
+) -> Result<(), SpawnError> {
+    registry
+        .add_relationship(spec)
+        .await
+        .map_err(|e| SpawnError::Runtime(format!("constellation add_relationship failed: {e}")))
+}
+
 // ── spawn_sibling_existing ────────────────────────────────────────────────────
 
 /// Typed outcome of a successful `spawn_sibling_existing` call.
@@ -166,8 +209,8 @@ pub struct SiblingExistingOutcome {
 /// Siblings are NOT registered in the parent's `SpawnRegistry` — they live
 /// independently of the parent's lifetime.
 pub async fn spawn_sibling_existing(
-    _parent: &SessionContext,
-    _cfg: &SiblingConfig,
+    parent: &SessionContext,
+    cfg: &SiblingConfig,
     persona_id: &PersonaId,
     resolver: Arc<dyn SiblingPersonaResolver>,
 ) -> Result<SiblingExistingOutcome, SpawnError> {
@@ -181,12 +224,33 @@ pub async fn spawn_sibling_existing(
     // own KDL config — AC5.4 verifies these are NOT inherited from the parent.
     let snap =
         persona_loader::load_persona(&path).map_err(|e| SpawnError::Runtime(e.to_string()))?;
+    let sibling_id: PersonaId = SmolStr::from(snap.agent_id.as_str());
 
-    // Step 3: return the persona's own agent_id and capabilities. The caller
-    // may cache the id to communicate with the sibling when Phase 6 opens
-    // the live session.
+    // Step 3 (Phase 6 T6 — AC5.5): when the parent has a constellation
+    // registry wired, ensure the sibling is registered as Active and add
+    // the parent→sibling relationship edge. `register` is idempotent
+    // (DuplicatePersona is treated as success); `add_relationship` is
+    // load-bearing for AC5.5 / AC9.4 — without it, `ctx.constellation`
+    // queries from peers won't see the new relationship.
+    if let Some(registry) = parent.constellation_registry() {
+        let mut record = PersonaRecord::new(
+            sibling_id.clone(),
+            snap.name.to_string(),
+            PersonaStatus::Active,
+        );
+        record.config_path = Some(path);
+        register_idempotent(&**registry, record).await?;
+
+        let parent_id = SmolStr::from(parent.agent_id());
+        add_relationship_or_propagate(
+            &**registry,
+            RelationshipSpec::new(parent_id, sibling_id.clone(), cfg.relationship),
+        )
+        .await?;
+    }
+
     Ok(SiblingExistingOutcome {
-        persona_id: SmolStr::from(snap.agent_id.as_str()),
+        persona_id: sibling_id,
         capabilities: snap.capabilities,
     })
 }
@@ -253,7 +317,7 @@ pub struct SiblingNewOutcome {
 /// created or the file cannot be written.
 pub async fn spawn_sibling_new(
     parent: &SessionContext,
-    _cfg: &SiblingConfig,
+    cfg: &SiblingConfig,
     persona_cfg: &PersonaConfig,
     drafts_dir: &std::path::Path,
 ) -> Result<SiblingNewOutcome, SpawnError> {
@@ -277,6 +341,29 @@ pub async fn spawn_sibling_new(
     } else {
         SiblingStatus::Draft
     };
+
+    // Phase 6 T6 — AC5.5 / AC5.7: register the new persona in the
+    // constellation registry. Active path becomes a live persona row;
+    // Draft path becomes a pending row that `PromoteDraft` later flips.
+    // The relationship edge is added regardless of status — the spawning
+    // intent (PeerWith / SupervisorOf / etc.) survives the draft phase.
+    if let Some(registry) = parent.constellation_registry() {
+        let persona_status = match status {
+            SiblingStatus::Active => PersonaStatus::Active,
+            SiblingStatus::Draft => PersonaStatus::Draft,
+        };
+        let mut record =
+            PersonaRecord::new(id.clone(), persona_cfg.name.clone(), persona_status);
+        record.config_path = Some(kdl_path.clone());
+        register_idempotent(&**registry, record).await?;
+
+        let parent_id = SmolStr::from(parent.agent_id());
+        add_relationship_or_propagate(
+            &**registry,
+            RelationshipSpec::new(parent_id, id.clone(), cfg.relationship),
+        )
+        .await?;
+    }
 
     match status {
         SiblingStatus::Active => tracing::info!(

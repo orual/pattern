@@ -441,6 +441,7 @@ async fn sandbox_io_smoke_end_to_end() {
             port_registry: Some(Arc::clone(&registry)),
             file_policy: Some(file_policy),
             fronting_committer: None,
+            constellation_registry: None,
         }),
     )
     .await
@@ -861,7 +862,8 @@ async fn sandbox_io_smoke_end_to_end() {
             wake_registry_extras: None,
             port_registry: Some(Arc::clone(&registry)),
             file_policy: None,
-            fronting_committer: None, // no file policy needed — denial program doesn't touch files
+            fronting_committer: None,
+            constellation_registry: None, // no file policy needed — denial program doesn't touch files
         }),
     )
     .await
@@ -958,6 +960,7 @@ async fn sandbox_io_smoke_end_to_end() {
             // deny_dir → default-deny fallthrough.
             file_policy: Some(allow_dir_policy(project_dir.path())),
             fronting_committer: None,
+            constellation_registry: None,
         }),
     )
     .await

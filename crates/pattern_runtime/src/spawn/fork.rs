@@ -30,15 +30,53 @@ use std::sync::{Arc, Weak};
 
 use pattern_core::spawn::PersonaConfig;
 use pattern_core::types::ids::PersonaId;
+use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
 use pattern_core::{CapabilityFlag, CapabilitySet};
 use pattern_memory::MemoryCache;
 use pattern_memory::jj::JjAdapter;
+use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 use tidepool_bridge_derive::ToCore;
 
 use crate::spawn::SpawnError;
 use crate::spawn::draft::RuntimeConfigWriter;
 use crate::timeout::CancelState;
+
+// ── Seed cache manifest (Phase 3 → Phase 6 bridge) ────────────────────────────
+
+/// Wire version of the seed cache manifest. Bumped when the on-disk shape
+/// changes incompatibly so promote can refuse to load older variants.
+pub const SEED_CACHE_MANIFEST_VERSION: u32 = 1;
+
+/// One entry per persisted block in a fork-promote seed cache.
+///
+/// Schema and block_type are captured here because they are NOT recoverable
+/// from the raw Loro snapshot bytes — `MemoryCache::insert_from_snapshot`
+/// requires both as explicit parameters.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SeedCacheManifestEntry {
+    /// Filename of the snapshot inside the seed cache directory
+    /// (e.g. `notes.loro`).
+    pub file: String,
+    /// Original block label (may differ from `file` when the label contains
+    /// `/`, which is sanitised in `file`).
+    pub label: String,
+    /// Block schema — required by `MemoryCache::insert_from_snapshot`.
+    pub schema: BlockSchema,
+    /// Block type — required by `MemoryCache::insert_from_snapshot`.
+    pub block_type: MemoryBlockType,
+}
+
+/// Seed cache manifest. Lives at `<drafts_dir>/<persona_id>.cache/manifest.json`.
+///
+/// Promotion (Phase 6 T6) reads this to migrate the seed cache into the
+/// project mount's `MemoryCache` before opening the new live session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SeedCacheManifest {
+    pub version: u32,
+    pub persona_id: String,
+    pub entries: Vec<SeedCacheManifestEntry>,
+}
 
 // ── ForkError ─────────────────────────────────────────────────────────────────
 
@@ -747,12 +785,18 @@ impl ForkHandle {
         // state survives this call. Each cached LoroDoc is exported as a
         // raw snapshot and written to
         //   <drafts_dir>/<persona_id>.cache/<label>.loro
-        // Phase 6's registry will re-load these files when wiring the
-        // new live session.
+        // alongside a `manifest.json` that lists every block's
+        // (label, schema, block_type) tuple. The manifest is what the
+        // promotion path (Phase 6 T6) reads to call
+        // `MemoryCache::insert_from_snapshot`, which needs the schema and
+        // block_type explicitly (they are NOT recoverable from the raw
+        // snapshot bytes).
         let cache_dir = drafts_dir.join(format!("{persona_id}.cache"));
         std::fs::create_dir_all(&cache_dir).map_err(|e| {
             ForkError::Document(format!("create seed cache dir {cache_dir:?}: {e}"))
         })?;
+
+        let mut manifest_entries: Vec<SeedCacheManifestEntry> = Vec::new();
         let mut docs_persisted: u32 = 0;
         for doc in seed_cache.snapshot_cached_docs() {
             let snapshot = doc
@@ -762,11 +806,34 @@ impl ForkHandle {
             // `BlockCreate` so they are safe for use as path components; we
             // still sanitise `/` in case of composite labels.
             let safe_label = doc.label().replace('/', "__");
-            let snap_path = cache_dir.join(format!("{safe_label}.loro"));
+            let file_name = format!("{safe_label}.loro");
+            let snap_path = cache_dir.join(&file_name);
             std::fs::write(&snap_path, &snapshot)
                 .map_err(|e| ForkError::Document(format!("write seed cache {snap_path:?}: {e}")))?;
+
+            manifest_entries.push(SeedCacheManifestEntry {
+                file: file_name,
+                label: doc.label().to_string(),
+                schema: doc.schema().clone(),
+                block_type: doc.block_type(),
+            });
             docs_persisted += 1;
         }
+
+        let manifest = SeedCacheManifest {
+            version: SEED_CACHE_MANIFEST_VERSION,
+            persona_id: persona_id.to_string(),
+            entries: manifest_entries,
+        };
+        let manifest_path = cache_dir.join("manifest.json");
+        let manifest_json = serde_json::to_vec_pretty(&manifest).map_err(|e| {
+            ForkError::Document(format!("serialize seed cache manifest: {e}"))
+        })?;
+        std::fs::write(&manifest_path, manifest_json).map_err(|e| {
+            ForkError::Document(format!(
+                "write seed cache manifest {manifest_path:?}: {e}"
+            ))
+        })?;
 
         tracing::info!(
             persona_id = %persona_id,

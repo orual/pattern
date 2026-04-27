@@ -136,6 +136,19 @@ impl ConstellationRegistry for InMemoryConstellationRegistry {
         Ok(())
     }
 
+    async fn set_config_path(
+        &self,
+        id: &PersonaId,
+        config_path: Option<std::path::PathBuf>,
+    ) -> Result<(), RegistryError> {
+        let mut entry = self
+            .records
+            .get_mut(id)
+            .ok_or_else(|| RegistryError::PersonaNotFound(id.clone()))?;
+        entry.value_mut().config_path = config_path;
+        Ok(())
+    }
+
     async fn add_relationship(&self, edge: RelationshipSpec) -> Result<(), RegistryError> {
         if !self.records.contains_key(&edge.from) {
             return Err(RegistryError::PersonaNotFound(edge.from));

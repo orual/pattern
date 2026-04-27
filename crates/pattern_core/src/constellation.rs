@@ -310,6 +310,21 @@ pub trait ConstellationRegistry: Send + Sync + std::fmt::Debug {
         status: PersonaStatus,
     ) -> Result<(), RegistryError>;
 
+    /// Update the on-disk KDL path for an existing persona.
+    ///
+    /// Used by Phase 6's `PromoteDraft` flow: when a draft is promoted, the
+    /// KDL file moves from the runtime's `drafts_dir` into the project mount's
+    /// `personas/@<id>/persona.kdl` so future `discover_personas` calls find
+    /// it via the normal path. The registry's `config_path` must follow.
+    ///
+    /// Returns `RegistryError::PersonaNotFound` if no persona with the given
+    /// id exists.
+    async fn set_config_path(
+        &self,
+        id: &PersonaId,
+        config_path: Option<std::path::PathBuf>,
+    ) -> Result<(), RegistryError>;
+
     /// Add a relationship edge between two personas.
     ///
     /// Returns `RegistryError::PersonaNotFound` if either endpoint is missing.
@@ -376,6 +391,14 @@ impl ConstellationRegistry for EmptyConstellationRegistry {
         &self,
         _id: &PersonaId,
         _status: PersonaStatus,
+    ) -> Result<(), RegistryError> {
+        Err(RegistryError::BackendUnavailable)
+    }
+
+    async fn set_config_path(
+        &self,
+        _id: &PersonaId,
+        _config_path: Option<std::path::PathBuf>,
     ) -> Result<(), RegistryError> {
         Err(RegistryError::BackendUnavailable)
     }
