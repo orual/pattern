@@ -322,6 +322,24 @@ impl DaemonClient {
         Ok(response)
     }
 
+    /// Phase 6 T8: subscribe to ALL events for a project mount.
+    ///
+    /// Receives every agent's `TaggedTurnEvent` for the mount, plus
+    /// daemon-level events (`FrontingChanged`, `ConstellationChanged`).
+    pub async fn subscribe_all(
+        &self,
+        mount_path: std::path::PathBuf,
+    ) -> Result<irpc::channel::mpsc::Receiver<crate::protocol::TaggedTurnEvent>> {
+        let rx = self
+            .inner
+            .server_streaming(
+                crate::protocol::MountSubscription { mount_path },
+                32,
+            )
+            .await?;
+        Ok(rx)
+    }
+
     // ── Phase 6 T7: constellation registry ops ────────────────────────────────
 
     /// List persona records in the constellation, optionally filtered by

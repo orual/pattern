@@ -465,7 +465,12 @@ fn render_file_conflict_body(path: &std::path::Path, at: jiff::Timestamp) -> Str
 
 fn render_author(author: &Author) -> String {
     match author {
-        Author::Partner(p) => format!("partner {}", p.user_id),
+        // Phase 6 T8: prefer the human-facing display name when set, fall
+        // back to user_id otherwise. The same priority applies to Human.
+        Author::Partner(p) => match &p.display_name {
+            Some(name) => format!("partner {name}"),
+            None => format!("partner {}", p.user_id),
+        },
         Author::Human(h) => match &h.display_name {
             Some(name) => format!("human {name}"),
             None => format!("human {}", h.user_id),
@@ -719,6 +724,32 @@ mod tests {
         assert!(
             body.contains("partner user123"),
             "missing attribution: {body}"
+        );
+    }
+
+    /// Phase 6 T8: when a Partner carries a display_name, render the name —
+    /// not the opaque user_id — so the agent sees the human-facing label.
+    #[test]
+    fn partner_author_uses_display_name_when_set() {
+        let event = make_event(
+            "block",
+            BlockWriteKind::Created,
+            "content",
+            None,
+            None,
+            Author::Partner(Partner {
+                user_id: SmolStr::new("user-opaque-id-abc"),
+                display_name: Some("orual".to_string()),
+            }),
+        );
+        let body = render_block_write_body(&event);
+        assert!(
+            body.contains("partner orual"),
+            "Partner with display_name should render the name; got: {body}"
+        );
+        assert!(
+            !body.contains("user-opaque-id-abc"),
+            "Partner with display_name must NOT leak the user_id; got: {body}"
         );
     }
 

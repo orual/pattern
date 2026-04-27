@@ -1,5 +1,6 @@
 ---
 source: crates/pattern_memory/tests/config.rs
+assertion_line: 121
 expression: config
 ---
 mount:
@@ -20,3 +21,4 @@ project:
 backup: ~
 file_policy:
   rules: []
+partner: ~

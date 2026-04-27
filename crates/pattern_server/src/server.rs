@@ -156,6 +156,14 @@ pub(crate) struct ProjectMount {
     /// `SessionContext::with_constellation_registry`. The daemon also reaches
     /// for it directly to handle the `PromoteDraft` RPC (Phase 6 T6).
     pub constellation_registry: Arc<dyn pattern_core::ConstellationRegistry>,
+    /// Optional human-readable display name for the partner using this mount.
+    ///
+    /// Loaded from `.pattern.kdl`'s `partner { display-name "..." }` block at
+    /// mount time. Surfaced via `SessionInfo.partner_display_name` so TUIs can
+    /// render the partner's name. `None` when the block is absent.
+    ///
+    /// Phase 6 T8.
+    pub partner_display_name: Option<String>,
     /// Keeps the `MountedStore` alive for RAII (watcher, backup scheduler).
     _mounted: pattern_memory::mount::MountedStore,
 }
@@ -323,6 +331,21 @@ pub struct DaemonServer {
     /// mpsc senders — the server-side half of the streaming RPC. Using a
     /// `HashMap` avoids the O(n) linear scan on every fan-out event.
     subscribers: HashMap<AgentId, Vec<irpc::channel::mpsc::Sender<TaggedTurnEvent>>>,
+    /// Mount-scoped subscribers keyed by canonical mount path.
+    ///
+    /// Phase 6 T8: the TUI subscribes via `SubscribeAll` to receive every
+    /// agent's events for a mount plus daemon-level events
+    /// (`FrontingChanged`, `ConstellationChanged`). Coexists with the
+    /// per-agent `subscribers` map; `fan_out` routes to both.
+    mount_subscribers: HashMap<PathBuf, Vec<irpc::channel::mpsc::Sender<TaggedTurnEvent>>>,
+    /// Maps `agent_id` → canonical mount path for events that arrive
+    /// without an explicit `mount_path` tag (the per-agent emit path
+    /// in `TurnSinkBridge` leaves it `None`). Populated on session open.
+    /// Shared with spawned tasks so `get_or_open_session` can register
+    /// the mapping without a round-trip to the actor.
+    ///
+    /// Phase 6 T8.
+    agent_to_mount: Arc<DashMap<AgentId, PathBuf>>,
     started_at: Instant,
     /// When true, messages are echoed back without invoking the LLM.
     echo: bool,
@@ -409,6 +432,8 @@ impl DaemonServer {
             event_rx,
             event_tx,
             subscribers: HashMap::new(),
+            mount_subscribers: HashMap::new(),
+            agent_to_mount: Arc::new(DashMap::new()),
             started_at: Instant::now(),
             echo,
             session_config,
@@ -447,10 +472,16 @@ impl DaemonServer {
         }
     }
 
-    /// Fan out a tagged event to all subscribers whose `agent_id` matches the
-    /// event's `agent_id`. Uses `try_send` so that a slow or full subscriber
-    /// does not block the actor loop. Subscribers that are full (buffer
-    /// backpressure) or disconnected are removed.
+    /// Fan out a tagged event to per-agent and per-mount subscribers.
+    ///
+    /// Routing rules:
+    /// - Per-agent subscribers (`SubscribeOutput`) keyed on `event.agent_id`.
+    /// - Per-mount subscribers (`SubscribeAll`) keyed on the event's mount.
+    ///   The mount is taken from `event.mount_path` if set, otherwise
+    ///   resolved by looking up `event.agent_id` in `agent_to_mount`.
+    ///
+    /// Uses `try_send` so a slow or full subscriber does not block the
+    /// actor loop. Full / disconnected subscribers are removed.
     async fn fan_out(&mut self, event: TaggedTurnEvent) {
         tracing::trace!(
             agent_id = %event.agent_id,
@@ -467,20 +498,46 @@ impl DaemonServer {
             self.batch_to_agent.remove(&event.batch_id);
         }
 
-        let Some(senders) = self.subscribers.get_mut(&event.agent_id) else {
-            return;
-        };
+        // Resolve the mount path once (used for mount-scoped fan-out below).
+        // Per-agent emitters leave mount_path None — look it up in
+        // agent_to_mount. Daemon-level emitters set it explicitly.
+        let mount_key: Option<PathBuf> = event
+            .mount_path
+            .as_deref()
+            .map(PathBuf::from)
+            .or_else(|| {
+                self.agent_to_mount
+                    .get(&event.agent_id)
+                    .map(|p| p.value().clone())
+            });
 
+        // Per-agent subscribers.
+        if let Some(senders) = self.subscribers.get_mut(&event.agent_id) {
+            Self::deliver_to(senders, &event).await;
+        }
+
+        // Per-mount subscribers.
+        if let Some(key) = mount_key
+            && let Some(senders) = self.mount_subscribers.get_mut(&key)
+        {
+            Self::deliver_to(senders, &event).await;
+        }
+    }
+
+    /// Deliver `event` to every sender in `senders`, removing slow or
+    /// disconnected subscribers in place.
+    async fn deliver_to(
+        senders: &mut Vec<irpc::channel::mpsc::Sender<TaggedTurnEvent>>,
+        event: &TaggedTurnEvent,
+    ) {
         let mut i = 0;
         while i < senders.len() {
             let tx = &senders[i];
             match tx.try_send(event.clone()).await {
                 Ok(true) => {
-                    // Delivered successfully.
                     i += 1;
                 }
                 Ok(false) => {
-                    // Subscriber's buffer is full — disconnect rather than block.
                     warn!(
                         agent_id = %event.agent_id,
                         "subscriber buffer full, removing slow subscriber"
@@ -488,7 +545,6 @@ impl DaemonServer {
                     senders.swap_remove(i);
                 }
                 Err(_) => {
-                    // Subscriber's receiver has been dropped.
                     warn!(
                         agent_id = %event.agent_id,
                         "subscriber disconnected, removing"
@@ -652,6 +708,7 @@ impl DaemonServer {
                 let config = self.session_config.clone().unwrap();
                 let event_tx = self.event_tx.clone();
                 let batch_to_agent = self.batch_to_agent.clone();
+                let agent_to_mount = self.agent_to_mount.clone();
                 let agent_id = resolved_agent_id;
 
                 tokio::spawn(async move {
@@ -673,6 +730,7 @@ impl DaemonServer {
                         &config,
                         &mount,
                         &event_tx,
+                        &agent_to_mount,
                     )
                     .await
                     {
@@ -738,6 +796,25 @@ impl DaemonServer {
                 // Register this subscriber. The actor's `fan_out()` method
                 // will forward matching events to this irpc mpsc sender.
                 self.subscribers.entry(inner.agent_id).or_default().push(tx);
+            }
+            PatternMessage::SubscribeAll(req) => {
+                let WithChannels { tx, inner, .. } = req;
+                // Resolve to the same mount-path the daemon uses internally.
+                // Subscribers may pass any path inside the project (e.g. the
+                // project root or the mount itself); we walk up via the same
+                // `find_mount` the InitSession path uses so the key matches
+                // what `EventEmittingRegistry` and `DaemonFrontingCommitter`
+                // emit on.
+                let canonical = inner
+                    .mount_path
+                    .canonicalize()
+                    .unwrap_or_else(|_| inner.mount_path.clone());
+                let key = pattern_memory::mount::find_mount(&canonical)
+                    .unwrap_or_else(|_| canonical);
+                self.mount_subscribers
+                    .entry(key)
+                    .or_default()
+                    .push(tx);
             }
             PatternMessage::ListAgents(req) => {
                 let WithChannels { tx, .. } = req;
@@ -956,7 +1033,8 @@ impl DaemonServer {
             }
             PatternMessage::SetFronting(req) => {
                 let WithChannels { tx, inner, .. } = req;
-                let response = if let Some(mount) = &self.current_mount {
+                let response = if let Some(mount) = self.current_mount.clone() {
+                    let mount_path_str = mount.mount_path.to_string_lossy().into_owned();
                     let active_ids = inner.active.clone();
                     let fallback_id = inner.fallback.clone();
                     let result = mount
@@ -972,7 +1050,8 @@ impl DaemonServer {
                         .await;
                     match result {
                         Ok(new_set) => {
-                            self.fan_out_fronting_changed(&new_set).await;
+                            self.fan_out_fronting_changed(&new_set, Some(mount_path_str))
+                                .await;
                             FrontingSetResponse {
                                 success: true,
                                 error: None,
@@ -993,7 +1072,8 @@ impl DaemonServer {
             }
             PatternMessage::UpdateRouting(req) => {
                 let WithChannels { tx, inner, .. } = req;
-                let response = if let Some(mount) = &self.current_mount {
+                let response = if let Some(mount) = self.current_mount.clone() {
+                    let mount_path_str = mount.mount_path.to_string_lossy().into_owned();
                     let wire_rules = inner.rules.clone();
                     let result = mount
                         .update_fronting(|set| {
@@ -1009,7 +1089,8 @@ impl DaemonServer {
                         .await;
                     match result {
                         Ok(new_set) => {
-                            self.fan_out_fronting_changed(&new_set).await;
+                            self.fan_out_fronting_changed(&new_set, Some(mount_path_str))
+                                .await;
                             UpdateRoutingResponse {
                                 success: true,
                                 error: None,
@@ -1112,6 +1193,7 @@ impl DaemonServer {
                             partner_id: self.partner_id.clone(),
                             // Phase 6: read from .pattern.kdl partner { display_name "..." }
                             partner_display_name: None,
+                            fronting_snapshot: None,
                             error: None,
                         })
                         .await;
@@ -1131,6 +1213,7 @@ impl DaemonServer {
                                 partner_id: self.partner_id.clone(),
                                 // Phase 6: read from .pattern.kdl partner { display_name "..." }
                                 partner_display_name: None,
+                                fronting_snapshot: None,
                                 error: Some(format!(
                                     "failed to mount project at {}: {e}",
                                     inner.project_path.display()
@@ -1176,14 +1259,24 @@ impl DaemonServer {
                     "session initialized"
                 );
 
+                // Snapshot the per-mount fronting set for the TUI's initial
+                // status bar + constellation panel render. Failure to snapshot
+                // (poisoned lock) yields None — the TUI falls back to its
+                // empty state.
+                let fronting_snapshot = mount
+                    .fronting
+                    .read()
+                    .ok()
+                    .map(|set| build_fronting_snapshot(&set));
+
                 let _ = tx
                     .send(SessionInfo {
                         agent_id,
                         persona_name,
                         available_agents: available,
                         partner_id: self.partner_id.clone(),
-                        // Phase 6: read from .pattern.kdl partner { display_name "..." }
-                        partner_display_name: None,
+                        partner_display_name: mount.partner_display_name.clone(),
+                        fronting_snapshot,
                         error: None,
                     })
                     .await;
@@ -1305,11 +1398,28 @@ impl DaemonServer {
             Some(policy)
         };
 
-        // Build the rusqlite-backed constellation registry for this mount.
+        // Build the rusqlite-backed constellation registry for this mount,
+        // wrapped in EventEmittingRegistry so every mutation broadcasts a
+        // ConstellationChanged event to mount-scoped subscribers (Phase 6 T8).
         // Shared across every session opened against the mount AND used
-        // directly by the daemon for `PromoteDraft` / draft-flip RPCs.
-        let constellation_registry: Arc<dyn pattern_core::ConstellationRegistry> =
+        // directly by the daemon for PromoteDraft / draft-flip RPCs.
+        let raw_registry: Arc<dyn pattern_core::ConstellationRegistry> =
             Arc::new(pattern_db::ConstellationRegistryDb::new(mounted.db.clone()));
+        let constellation_registry: Arc<dyn pattern_core::ConstellationRegistry> =
+            Arc::new(EventEmittingRegistry::new(
+                raw_registry,
+                self.event_tx.clone(),
+                mounted.mount_path.clone(),
+            ));
+
+        // Resolve the partner display name from `.pattern.kdl`'s
+        // `partner { display-name "..." }` block (Phase 6 T8). `None` when the
+        // block is absent or has no `display-name` child.
+        let partner_display_name = mounted
+            .config
+            .partner
+            .as_ref()
+            .and_then(|p| p.display_name.clone());
 
         let mount = Arc::new(ProjectMount {
             cache: mounted.cache.clone(),
@@ -1322,6 +1432,7 @@ impl DaemonServer {
             file_policy,
             port_registry,
             constellation_registry,
+            partner_display_name,
             _mounted: mounted,
         });
 
@@ -1332,8 +1443,15 @@ impl DaemonServer {
     /// Fan out a `FrontingChanged` event derived from `new_set` to all
     /// subscribers. Uses the `"fronting"` / `"daemon"` sentinel batch/agent IDs
     /// so TUI clients can distinguish fronting events from per-agent turn events.
-    async fn fan_out_fronting_changed(&mut self, new_set: &pattern_core::fronting::FrontingSet) {
-        let event = build_fronting_changed_event(new_set);
+    ///
+    /// `mount_path` is the canonical path of the mount this fronting belongs
+    /// to — used by mount-scoped subscribers to filter.
+    async fn fan_out_fronting_changed(
+        &mut self,
+        new_set: &pattern_core::fronting::FrontingSet,
+        mount_path: Option<String>,
+    ) {
+        let event = build_fronting_changed_event(new_set, mount_path);
         self.fan_out(event).await;
     }
 
@@ -1473,6 +1591,7 @@ impl DaemonServer {
                 &session_config,
                 &mount,
                 &self.event_tx,
+                &self.agent_to_mount,
             )
             .await?;
         }
@@ -1815,11 +1934,51 @@ fn promote_persona_file(
 /// `new_set`. Shared between the actor's `fan_out_fronting_changed` and the
 /// SDK-side [`DaemonFrontingCommitter`] so the wire shape is identical no
 /// matter which path triggered the change.
+///
+/// `mount_path` is the canonical path of the project mount this fronting
+/// state belongs to — used by mount-scoped subscribers ([`SubscribeAll`])
+/// to filter events.
 fn build_fronting_changed_event(
     new_set: &pattern_core::fronting::FrontingSet,
+    mount_path: Option<String>,
 ) -> TaggedTurnEvent {
-    let rules = new_set
-        .routing
+    let rules = build_wire_routing_rules(new_set);
+    TaggedTurnEvent {
+        batch_id: "fronting".into(),
+        agent_id: "daemon".into(),
+        event: WireTurnEvent::FrontingChanged {
+            active: new_set.active.iter().map(|id| id.to_string()).collect(),
+            fallback: new_set.fallback.as_ref().map(|id| id.to_string()),
+            rules,
+        },
+        mount_path,
+    }
+}
+
+/// Build a [`TaggedTurnEvent`] carrying [`WireTurnEvent::ConstellationChanged`].
+///
+/// Phase 6 T8: emitted by [`EventEmittingRegistry`] after each successful
+/// registry mutation. `kind` identifies the mutation type for tracing
+/// (TUI clients re-fetch on any kind).
+pub(crate) fn build_constellation_changed_event(
+    kind: &str,
+    mount_path: Option<String>,
+) -> TaggedTurnEvent {
+    TaggedTurnEvent {
+        batch_id: "constellation".into(),
+        agent_id: "daemon".into(),
+        event: WireTurnEvent::ConstellationChanged {
+            kind: kind.to_string(),
+        },
+        mount_path,
+    }
+}
+
+/// Convert a `FrontingSet`'s routing rules to the wire form.
+fn build_wire_routing_rules(
+    set: &pattern_core::fronting::FrontingSet,
+) -> Vec<WireRoutingRule> {
+    set.routing
         .rules
         .iter()
         .map(|r| {
@@ -1832,15 +1991,171 @@ fn build_fronting_changed_event(
                 priority: r.priority,
             }
         })
-        .collect();
-    TaggedTurnEvent {
-        batch_id: "fronting".into(),
-        agent_id: "daemon".into(),
-        event: WireTurnEvent::FrontingChanged {
-            active: new_set.active.iter().map(|id| id.to_string()).collect(),
-            fallback: new_set.fallback.as_ref().map(|id| id.to_string()),
-            rules,
-        },
+        .collect()
+}
+
+/// Build a wire snapshot of the given fronting set for use in
+/// [`SessionInfo::fronting_snapshot`].
+pub(crate) fn build_fronting_snapshot(
+    set: &pattern_core::fronting::FrontingSet,
+) -> crate::protocol::FrontingSnapshot {
+    crate::protocol::FrontingSnapshot {
+        active: set.active.iter().map(|id| id.to_string()).collect(),
+        fallback: set.fallback.as_ref().map(|id| id.to_string()),
+        rules: build_wire_routing_rules(set),
+    }
+}
+
+// ── EventEmittingRegistry (Phase 6 T8) ────────────────────────────────────────
+
+/// Wraps a [`ConstellationRegistry`](pattern_core::ConstellationRegistry) and
+/// emits a [`WireTurnEvent::ConstellationChanged`] event after each successful
+/// mutation. Read methods pass through verbatim.
+///
+/// Constructed once at mount time and used everywhere the daemon needs the
+/// registry — including the registry handed to each session via
+/// `SessionRegistries.constellation_registry`. Sibling auto-registration,
+/// PromoteDraft's status flip, AddRelationship RPC, CreateGroup RPC etc.
+/// all therefore broadcast `ConstellationChanged` to mount-scoped subscribers
+/// for free.
+///
+/// `kind` strings are stable identifiers describing what mutation happened
+/// (`"persona_registered"`, `"status_changed"`, `"config_path_changed"`,
+/// `"relationship_added"`, `"group_created"`). TUI clients re-fetch on any
+/// kind; `kind` is for tracing/diagnostics only.
+#[derive(Debug, Clone)]
+pub struct EventEmittingRegistry {
+    inner: Arc<dyn pattern_core::ConstellationRegistry>,
+    event_tx: crate::bridge::EventTx,
+    /// Canonical mount path tagged on every emitted event.
+    mount_path: String,
+}
+
+impl EventEmittingRegistry {
+    pub fn new(
+        inner: Arc<dyn pattern_core::ConstellationRegistry>,
+        event_tx: crate::bridge::EventTx,
+        mount_path: PathBuf,
+    ) -> Self {
+        Self {
+            inner,
+            event_tx,
+            mount_path: mount_path.to_string_lossy().into_owned(),
+        }
+    }
+
+    fn emit(&self, kind: &str) {
+        let _ = self
+            .event_tx
+            .send(build_constellation_changed_event(
+                kind,
+                Some(self.mount_path.clone()),
+            ));
+    }
+}
+
+#[async_trait::async_trait]
+impl pattern_core::ConstellationRegistry for EventEmittingRegistry {
+    async fn list(
+        &self,
+        scope: pattern_core::constellation::RegistryScope,
+    ) -> Result<
+        Vec<pattern_core::constellation::PersonaRecord>,
+        pattern_core::constellation::RegistryError,
+    > {
+        self.inner.list(scope).await
+    }
+
+    async fn get(
+        &self,
+        id: &pattern_core::PersonaId,
+    ) -> Result<
+        Option<pattern_core::constellation::PersonaRecord>,
+        pattern_core::constellation::RegistryError,
+    > {
+        self.inner.get(id).await
+    }
+
+    async fn find(
+        &self,
+        project: Option<&std::path::Path>,
+        kind: Option<pattern_core::spawn::RelationshipKind>,
+    ) -> Result<
+        Vec<pattern_core::constellation::PersonaRecord>,
+        pattern_core::constellation::RegistryError,
+    > {
+        self.inner.find(project, kind).await
+    }
+
+    async fn register(
+        &self,
+        record: pattern_core::constellation::PersonaRecord,
+    ) -> Result<(), pattern_core::constellation::RegistryError> {
+        let result = self.inner.register(record).await;
+        if result.is_ok() {
+            self.emit("persona_registered");
+        }
+        result
+    }
+
+    async fn set_status(
+        &self,
+        id: &pattern_core::PersonaId,
+        status: pattern_core::constellation::PersonaStatus,
+    ) -> Result<(), pattern_core::constellation::RegistryError> {
+        let result = self.inner.set_status(id, status).await;
+        if result.is_ok() {
+            self.emit("status_changed");
+        }
+        result
+    }
+
+    async fn set_config_path(
+        &self,
+        id: &pattern_core::PersonaId,
+        config_path: Option<PathBuf>,
+    ) -> Result<(), pattern_core::constellation::RegistryError> {
+        let result = self.inner.set_config_path(id, config_path).await;
+        if result.is_ok() {
+            self.emit("config_path_changed");
+        }
+        result
+    }
+
+    async fn add_relationship(
+        &self,
+        edge: pattern_core::constellation::RelationshipSpec,
+    ) -> Result<(), pattern_core::constellation::RegistryError> {
+        let result = self.inner.add_relationship(edge).await;
+        if result.is_ok() {
+            self.emit("relationship_added");
+        }
+        result
+    }
+
+    async fn groups(
+        &self,
+        scope: pattern_core::constellation::RegistryScope,
+    ) -> Result<
+        Vec<pattern_core::constellation::PersonaGroup>,
+        pattern_core::constellation::RegistryError,
+    > {
+        self.inner.groups(scope).await
+    }
+
+    async fn create_group(
+        &self,
+        name: String,
+        project_id: Option<String>,
+    ) -> Result<
+        pattern_core::constellation::PersonaGroup,
+        pattern_core::constellation::RegistryError,
+    > {
+        let result = self.inner.create_group(name, project_id).await;
+        if result.is_ok() {
+            self.emit("group_created");
+        }
+        result
     }
 }
 
@@ -1862,6 +2177,10 @@ pub struct DaemonFrontingCommitter {
     db: Arc<pattern_db::ConstellationDb>,
     event_tx: crate::bridge::EventTx,
     tokio_handle: tokio::runtime::Handle,
+    /// Canonical mount path this committer belongs to. Tagged on every
+    /// emitted `FrontingChanged` event so mount-scoped subscribers can
+    /// filter (Phase 6 T8).
+    mount_path: Option<String>,
 }
 
 impl DaemonFrontingCommitter {
@@ -1870,12 +2189,14 @@ impl DaemonFrontingCommitter {
         db: Arc<pattern_db::ConstellationDb>,
         event_tx: crate::bridge::EventTx,
         tokio_handle: tokio::runtime::Handle,
+        mount_path: Option<String>,
     ) -> Self {
         Self {
             fronting,
             db,
             event_tx,
             tokio_handle,
+            mount_path,
         }
     }
 }
@@ -1909,9 +2230,10 @@ impl pattern_runtime::sdk::handlers::fronting::FrontingCommitter for DaemonFront
         // to subscribers. Channel-closed (daemon shutting down) is not an
         // error from the SDK handler's perspective — the mutation already
         // landed in the DB and in-memory state.
-        let _ = self
-            .event_tx
-            .send(build_fronting_changed_event(&new_set));
+        let _ = self.event_tx.send(build_fronting_changed_event(
+            &new_set,
+            self.mount_path.clone(),
+        ));
 
         Ok(new_set)
     }
@@ -1976,6 +2298,7 @@ async fn get_or_open_session(
     config: &SessionConfig,
     project_mount: &ProjectMount,
     event_tx: &crate::bridge::EventTx,
+    agent_to_mount: &DashMap<AgentId, PathBuf>,
 ) -> Result<AgentSession, String> {
     // Fast path: session already exists. Clone immediately, drop ref.
     if let Some(entry) = sessions.get(agent_id) {
@@ -2003,6 +2326,7 @@ async fn get_or_open_session(
         config,
         project_mount,
         event_tx,
+        agent_to_mount,
     )
     .await
 }
@@ -2018,6 +2342,7 @@ async fn open_session_with_persona(
     config: &SessionConfig,
     project_mount: &ProjectMount,
     event_tx: &crate::bridge::EventTx,
+    agent_to_mount: &DashMap<AgentId, PathBuf>,
 ) -> Result<AgentSession, String> {
     let mux_sink = Arc::new(MultiplexSink::new());
     let sink_dyn: Arc<dyn TurnSink> = mux_sink.clone();
@@ -2069,6 +2394,7 @@ async fn open_session_with_persona(
         project_mount.db.clone(),
         event_tx.clone(),
         tokio::runtime::Handle::current(),
+        Some(project_mount.mount_path.to_string_lossy().into_owned()),
     ));
 
     let registries = SessionRegistries {
@@ -2105,6 +2431,9 @@ async fn open_session_with_persona(
     };
 
     sessions.insert(agent_id.clone(), agent_session.clone());
+    // Phase 6 T8: register the agent's mount so per-agent events without an
+    // explicit mount_path tag can be routed to mount-scoped subscribers.
+    agent_to_mount.insert(agent_id.clone(), project_mount.mount_path.clone());
     info!(agent_id = %agent_id, "opened new session");
 
     Ok(agent_session)
@@ -2320,9 +2649,10 @@ fn estimate_batch_tokens(user_message: &Option<String>, events: &[WireTurnEvent]
                 total_chars += body.len();
             }
             WireTurnEvent::Stop(_) => {}
-            // FrontingChanged is a notification event (no agent-side
-            // text); does not contribute to token estimates.
+            // FrontingChanged + ConstellationChanged are notification events
+            // (no agent-side text); do not contribute to token estimates.
             WireTurnEvent::FrontingChanged { .. } => {}
+            WireTurnEvent::ConstellationChanged { .. } => {}
         }
     }
 
@@ -2653,6 +2983,7 @@ mod tests {
             db.clone(),
             event_tx,
             tokio::runtime::Handle::current(),
+            None,
         );
 
         // Mutator: set active = [alice], fallback = Some(alice).
@@ -2833,6 +3164,7 @@ mod tests {
             db,
             event_tx,
             tokio::runtime::Handle::current(),
+            None,
         );
 
         // Pointer-equality on the Arc backing storage: the committer's

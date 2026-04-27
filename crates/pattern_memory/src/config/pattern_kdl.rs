@@ -108,6 +108,22 @@ pub struct MountConfig {
     /// ```
     #[knus(child, default)]
     pub file_policy: FilePolicySection,
+
+    /// `partner` block — identifies the human user this mount belongs to.
+    ///
+    /// Optional; when absent, the daemon returns `partner_display_name = None`
+    /// in `SessionInfo` and TUI clients fall back to an anonymous label.
+    ///
+    /// KDL (optional):
+    /// ```text
+    /// partner {
+    ///     display-name "orual"
+    /// }
+    /// ```
+    ///
+    /// Phase 6 T8.
+    #[knus(child)]
+    pub partner: Option<PartnerSection>,
 }
 
 // ---------------------------------------------------------------------------
@@ -331,6 +347,26 @@ pub struct ProjectSection {
     /// `created-at`).
     #[knus(property)]
     pub created_at: String,
+}
+
+/// The `partner` block: identifies the human user this mount belongs to.
+///
+/// KDL (optional):
+/// ```text
+/// partner {
+///     display-name "orual"
+/// }
+/// ```
+///
+/// Phase 6 T8: read by the daemon and surfaced as `SessionInfo.partner_display_name`
+/// so the TUI can render the partner's name in the conversation view.
+#[derive(Debug, Clone, Decode, Serialize)]
+pub struct PartnerSection {
+    /// Human-readable display name for the partner. Optional — when the
+    /// `display-name` child is absent, this remains `None` and TUIs render
+    /// an anonymous label (e.g. "you").
+    #[knus(child, unwrap(argument))]
+    pub display_name: Option<String>,
 }
 
 /// The `backup` node: snapshot scheduling and retention policy configuration.

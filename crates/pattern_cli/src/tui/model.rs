@@ -295,6 +295,11 @@ impl RenderBatch {
                 // intended consumer; the conversation view does not
                 // render this event as a section.
             }
+            WireTurnEvent::ConstellationChanged { .. } => {
+                // Phase 6 T8: registry-mutation notifications. Consumed
+                // by the constellation panel (re-fetches on receipt);
+                // not rendered in the conversation view.
+            }
         }
     }
 

@@ -106,6 +106,20 @@ pub struct AgentSubscription {
     pub agent_id: AgentId,
 }
 
+/// Request to subscribe to ALL events for a project mount.
+///
+/// Phase 6 T8: the TUI is now mount-scoped (not agent-scoped). Subscribing
+/// via `SubscribeAll` returns every `TaggedTurnEvent` for any agent in the
+/// mount, plus daemon-level events (`FrontingChanged`, `ConstellationChanged`)
+/// fanned out under the `"daemon"` agent_id sentinel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MountSubscription {
+    /// Canonical project mount path. Subscribers are matched on canonical
+    /// path so callers do not need to canonicalize before subscribing —
+    /// the daemon does it.
+    pub mount_path: std::path::PathBuf,
+}
+
 /// Wire-safe version of [`TurnEvent`].
 ///
 /// The internal `TurnEvent` contains genai types (`ToolCall`, `ToolResult`,
@@ -175,6 +189,22 @@ pub enum WireTurnEvent {
         fallback: Option<String>,
         /// Updated routing rules.
         rules: Vec<WireRoutingRule>,
+    },
+    /// The constellation persona registry changed.
+    ///
+    /// Emitted by [`EventEmittingRegistry`](crate::server::EventEmittingRegistry)
+    /// after a mutation lands. The `kind` field is a stable identifier
+    /// describing what changed (for tracing/diagnostics); TUI clients
+    /// generally treat any change as "re-fetch the registry" and ignore
+    /// the kind.
+    ///
+    /// Possible kind values: `"persona_registered"`, `"status_changed"`,
+    /// `"config_path_changed"`, `"relationship_added"`, `"group_created"`.
+    ///
+    /// Phase 6 T8 introduces this variant.
+    ConstellationChanged {
+        /// Identifier describing what changed (stable across versions).
+        kind: String,
     },
     /// Wire turn ended.
     Stop(StopReason),
@@ -407,6 +437,18 @@ pub struct TaggedTurnEvent {
     pub agent_id: AgentId,
     /// The wire-safe turn event.
     pub event: WireTurnEvent,
+    /// Optional mount path identifying which project mount this event
+    /// belongs to. Used by mount-scoped subscribers ([`SubscribeAll`])
+    /// to filter events; per-agent subscribers ignore it.
+    ///
+    /// `None` for legacy emitters (the daemon-side `fan_out` resolves
+    /// agent → mount via the `agent_to_mount` map for per-agent events).
+    /// `Some(path)` for daemon-level events (`FrontingChanged`,
+    /// `ConstellationChanged`) where the emitter knows the mount directly.
+    ///
+    /// Phase 6 T8 introduces this field.
+    #[serde(default)]
+    pub mount_path: Option<String>,
 }
 
 /// Static metadata about a running agent.
@@ -544,9 +586,29 @@ pub struct SessionInfo {
     /// Phase 6 will complete `.pattern.kdl` partner-config parsing; until
     /// then the daemon always returns `None`.
     pub partner_display_name: Option<String>,
+    /// Snapshot of the per-mount fronting state at InitSession time.
+    ///
+    /// Lets the TUI render the initial status bar + constellation panel
+    /// without an extra `GetFronting` round-trip. `None` only in echo mode
+    /// (no real mount).
+    ///
+    /// Phase 6 T8: TUI fronting integration.
+    pub fronting_snapshot: Option<FrontingSnapshot>,
     /// Set when session initialization failed. The session is in a degraded
     /// state — the TUI should surface this error to the user.
     pub error: Option<String>,
+}
+
+/// Snapshot of a [`FrontingSet`](pattern_core::fronting::FrontingSet) for the wire.
+///
+/// Returned in [`SessionInfo::fronting_snapshot`] (initial state) and emitted
+/// inside [`WireTurnEvent::FrontingChanged`] (live updates). Same shape both
+/// ways so the TUI consumes either through one render path.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FrontingSnapshot {
+    pub active: Vec<String>,
+    pub fallback: Option<String>,
+    pub rules: Vec<WireRoutingRule>,
 }
 
 /// A slash-command invocation forwarded from the TUI.
@@ -591,6 +653,15 @@ pub enum PatternProtocol {
     /// The server streams events until the client drops its receiver.
     #[rpc(tx = mpsc::Sender<TaggedTurnEvent>)]
     SubscribeOutput(AgentSubscription),
+
+    /// Subscribe to ALL events for a project mount (Phase 6 T8).
+    ///
+    /// The default subscription mode for the mount-scoped TUI: receives
+    /// every agent's events under one stream, plus daemon-level events
+    /// (`FrontingChanged`, `ConstellationChanged`) routed via the `"daemon"`
+    /// agent_id sentinel.
+    #[rpc(tx = mpsc::Sender<TaggedTurnEvent>)]
+    SubscribeAll(MountSubscription),
 
     /// List all agents currently registered with the daemon.
     #[rpc(tx = oneshot::Sender<Vec<AgentInfo>>)]
@@ -846,6 +917,7 @@ mod tests {
             batch_id: "batch-001".into(),
             agent_id: "agent-1".into(),
             event: WireTurnEvent::Text("hello world".into()),
+            mount_path: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         let decoded: TaggedTurnEvent = serde_json::from_str(&json).unwrap();
@@ -859,6 +931,7 @@ mod tests {
             batch_id: "batch-002".into(),
             agent_id: "agent-2".into(),
             event: WireTurnEvent::Stop(StopReason::EndTurn),
+            mount_path: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         let decoded: TaggedTurnEvent = serde_json::from_str(&json).unwrap();
@@ -916,6 +989,7 @@ mod tests {
             available_agents: vec!["pattern-default".into(), "supervisor".into()],
             partner_id: "test-partner-abc123".into(),
             partner_display_name: Some("orual".into()),
+            fronting_snapshot: None,
             error: None,
         };
         let json = serde_json::to_string(&info).unwrap();
@@ -979,6 +1053,7 @@ mod tests {
                 fallback: None,
                 rules: vec![],
             },
+            mount_path: Some("/path/to/mount".into()),
         };
         let bytes = postcard::to_allocvec(&event).unwrap();
         let decoded: TaggedTurnEvent = postcard::from_bytes(&bytes).unwrap();

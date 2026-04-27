@@ -91,6 +91,9 @@ impl TurnSink for TurnSinkBridge {
             batch_id: self.batch_id.clone(),
             agent_id: self.agent_id.clone(),
             event: wire_event,
+            // Per-agent emitters leave mount_path None; the actor's
+            // fan_out resolves agent → mount via `agent_to_mount`.
+            mount_path: None,
         };
         // Lock-free, unbounded, never blocks.
         // Failure means the daemon actor has been dropped — discard silently.

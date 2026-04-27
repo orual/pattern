@@ -19,6 +19,7 @@ pattern-memory = { path = "../pattern_memory" }
 pattern-provider = { path = "../pattern_provider" }
 
 tokio = { workspace = true, features = ["full"] }
+async-trait = { workspace = true }
 irpc = { workspace = true }
 noq = { workspace = true }
 n0-future = { workspace = true }

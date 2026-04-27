@@ -1335,6 +1335,7 @@ mod tests {
             batch_id: batch_id.into(),
             agent_id: SmolStr::new_static("test-agent"),
             event,
+            mount_path: None,
         }
     }
 
