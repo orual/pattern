@@ -1042,6 +1042,35 @@ impl DaemonServer {
                 };
                 let _ = tx.send(response).await;
             }
+            PatternMessage::ListPersonas(req) => {
+                let WithChannels { tx, inner, .. } = req;
+                let response = self.handle_list_personas(inner).await;
+                let _ = tx.send(response).await;
+            }
+            PatternMessage::AddRelationship(req) => {
+                let WithChannels { tx, inner, .. } = req;
+                let response = match self.handle_add_relationship(inner).await {
+                    Ok(()) => AddRelationshipResponse {
+                        success: true,
+                        error: None,
+                    },
+                    Err(e) => AddRelationshipResponse {
+                        success: false,
+                        error: Some(e),
+                    },
+                };
+                let _ = tx.send(response).await;
+            }
+            PatternMessage::ListGroups(req) => {
+                let WithChannels { tx, inner, .. } = req;
+                let response = self.handle_list_groups(inner).await;
+                let _ = tx.send(response).await;
+            }
+            PatternMessage::CreateGroup(req) => {
+                let WithChannels { tx, inner, .. } = req;
+                let response = self.handle_create_group(inner).await;
+                let _ = tx.send(response).await;
+            }
             PatternMessage::GetClientCount(req) => {
                 let WithChannels { tx, .. } = req;
                 // Dead senders are only lazily pruned during fan_out. Since
@@ -1465,6 +1494,192 @@ impl DaemonServer {
         );
 
         Ok(())
+    }
+
+    /// Phase 6 T7: handle a `ListPersonas` RPC.
+    ///
+    /// Filters by the optional project path; returns the slim wire summary
+    /// for each matching record.
+    async fn handle_list_personas(
+        &self,
+        req: crate::protocol::ListPersonasRequest,
+    ) -> crate::protocol::ListPersonasResponse {
+        use pattern_core::constellation::RegistryScope;
+        use std::path::PathBuf;
+
+        let mount = match self.current_mount.as_ref() {
+            Some(m) => m,
+            None => {
+                return crate::protocol::ListPersonasResponse {
+                    personas: Vec::new(),
+                    error: Some(
+                        "no project mounted — send InitSession first".to_string(),
+                    ),
+                };
+            }
+        };
+
+        let scope = match req.project {
+            None => RegistryScope::All,
+            Some(p) => RegistryScope::Project(PathBuf::from(p)),
+        };
+
+        match mount.constellation_registry.list(scope).await {
+            Ok(records) => {
+                let personas = records
+                    .into_iter()
+                    .map(|r| persona_record_to_wire_summary(&r))
+                    .collect();
+                crate::protocol::ListPersonasResponse {
+                    personas,
+                    error: None,
+                }
+            }
+            Err(e) => crate::protocol::ListPersonasResponse {
+                personas: Vec::new(),
+                error: Some(format!("registry list failed: {e}")),
+            },
+        }
+    }
+
+    /// Phase 6 T7: handle an `AddRelationship` RPC.
+    async fn handle_add_relationship(
+        &self,
+        req: crate::protocol::AddRelationshipRequest,
+    ) -> Result<(), String> {
+        use pattern_core::constellation::RelationshipSpec;
+        use pattern_runtime::sdk::requests::constellation::parse_relationship_kind;
+
+        let mount = self
+            .current_mount
+            .clone()
+            .ok_or_else(|| "no project mounted — send InitSession first".to_string())?;
+
+        let kind = parse_relationship_kind(&req.kind).ok_or_else(|| {
+            format!(
+                "unknown relationship kind {:?}; expected one of \
+                 supervisor_of, specialist_for, peer_with, observer_of",
+                req.kind
+            )
+        })?;
+
+        mount
+            .constellation_registry
+            .add_relationship(RelationshipSpec::new(req.from, req.to, kind))
+            .await
+            .map_err(|e| format!("registry add_relationship failed: {e}"))
+    }
+
+    /// Phase 6 T7: handle a `ListGroups` RPC.
+    async fn handle_list_groups(
+        &self,
+        req: crate::protocol::ListGroupsRequest,
+    ) -> crate::protocol::ListGroupsResponse {
+        use pattern_core::constellation::RegistryScope;
+        use std::path::PathBuf;
+
+        let mount = match self.current_mount.as_ref() {
+            Some(m) => m,
+            None => {
+                return crate::protocol::ListGroupsResponse {
+                    groups: Vec::new(),
+                    error: Some(
+                        "no project mounted — send InitSession first".to_string(),
+                    ),
+                };
+            }
+        };
+
+        let scope = match req.project {
+            None => RegistryScope::All,
+            Some(p) => RegistryScope::Project(PathBuf::from(p)),
+        };
+
+        match mount.constellation_registry.groups(scope).await {
+            Ok(groups) => {
+                let groups = groups
+                    .into_iter()
+                    .map(|g| crate::protocol::WireGroupSummary {
+                        id: g.id.to_string(),
+                        name: g.name,
+                        project_id: g.project_id,
+                        members: g.members.into_iter().map(|m| m.to_string()).collect(),
+                    })
+                    .collect();
+                crate::protocol::ListGroupsResponse {
+                    groups,
+                    error: None,
+                }
+            }
+            Err(e) => crate::protocol::ListGroupsResponse {
+                groups: Vec::new(),
+                error: Some(format!("registry groups failed: {e}")),
+            },
+        }
+    }
+
+    /// Phase 6 T7: handle a `CreateGroup` RPC.
+    async fn handle_create_group(
+        &self,
+        req: crate::protocol::CreateGroupRequest,
+    ) -> crate::protocol::CreateGroupResponse {
+        let mount = match self.current_mount.as_ref() {
+            Some(m) => m,
+            None => {
+                return crate::protocol::CreateGroupResponse {
+                    group: None,
+                    error: Some(
+                        "no project mounted — send InitSession first".to_string(),
+                    ),
+                };
+            }
+        };
+
+        match mount
+            .constellation_registry
+            .create_group(req.name, req.project_id)
+            .await
+        {
+            Ok(g) => crate::protocol::CreateGroupResponse {
+                group: Some(crate::protocol::WireGroupSummary {
+                    id: g.id.to_string(),
+                    name: g.name,
+                    project_id: g.project_id,
+                    members: g.members.into_iter().map(|m| m.to_string()).collect(),
+                }),
+                error: None,
+            },
+            Err(e) => crate::protocol::CreateGroupResponse {
+                group: None,
+                error: Some(format!("registry create_group failed: {e}")),
+            },
+        }
+    }
+}
+
+/// Phase 6 T7 helper: convert a domain `PersonaRecord` to the slim wire
+/// summary used by `ListPersonas`.
+fn persona_record_to_wire_summary(
+    r: &pattern_core::constellation::PersonaRecord,
+) -> crate::protocol::WirePersonaSummary {
+    use pattern_core::constellation::PersonaStatus;
+    crate::protocol::WirePersonaSummary {
+        id: r.id.to_string(),
+        name: r.name.clone(),
+        status: match r.status {
+            PersonaStatus::Active => "active".to_string(),
+            PersonaStatus::Draft => "draft".to_string(),
+            PersonaStatus::Inactive => "inactive".to_string(),
+        },
+        config_path: r
+            .config_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned()),
+        project_attachments: r
+            .project_attachments
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect(),
     }
 }
 

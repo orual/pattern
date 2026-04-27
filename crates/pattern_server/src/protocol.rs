@@ -280,6 +280,87 @@ pub struct PromoteDraftResponse {
     pub error: Option<String>,
 }
 
+// ── Phase 6 T7: constellation registry RPCs ──────────────────────────────────
+
+/// Request payload for [`PatternProtocol::ListPersonas`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ListPersonasRequest {
+    /// Optional project-path filter. `None` returns every persona; `Some(p)`
+    /// returns only those whose `project_attachments` include `p`.
+    pub project: Option<String>,
+}
+
+/// Slim wire representation of a persona record for listing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WirePersonaSummary {
+    pub id: String,
+    pub name: String,
+    /// "active" / "draft" / "inactive".
+    pub status: String,
+    pub config_path: Option<String>,
+    pub project_attachments: Vec<String>,
+}
+
+/// Response to [`PatternProtocol::ListPersonas`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListPersonasResponse {
+    pub personas: Vec<WirePersonaSummary>,
+    pub error: Option<String>,
+}
+
+/// Request payload for [`PatternProtocol::AddRelationship`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddRelationshipRequest {
+    pub from: String,
+    pub to: String,
+    /// snake_case relationship kind: `supervisor_of`, `specialist_for`,
+    /// `peer_with`, or `observer_of`.
+    pub kind: String,
+}
+
+/// Response to [`PatternProtocol::AddRelationship`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddRelationshipResponse {
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+/// Request payload for [`PatternProtocol::ListGroups`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ListGroupsRequest {
+    pub project: Option<String>,
+}
+
+/// Slim wire representation of a persona group for listing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireGroupSummary {
+    pub id: String,
+    pub name: String,
+    pub project_id: Option<String>,
+    pub members: Vec<String>,
+}
+
+/// Response to [`PatternProtocol::ListGroups`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListGroupsResponse {
+    pub groups: Vec<WireGroupSummary>,
+    pub error: Option<String>,
+}
+
+/// Request payload for [`PatternProtocol::CreateGroup`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateGroupRequest {
+    pub name: String,
+    pub project_id: Option<String>,
+}
+
+/// Response to [`PatternProtocol::CreateGroup`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateGroupResponse {
+    pub group: Option<WireGroupSummary>,
+    pub error: Option<String>,
+}
+
 impl WireTurnEvent {
     /// Convert from the internal `TurnEvent`.
     ///
@@ -604,6 +685,22 @@ pub enum PatternProtocol {
     /// Phase 6 (v3-multi-agent) introduces this variant.
     #[rpc(tx = oneshot::Sender<PromoteDraftResponse>)]
     PromoteDraft(PromoteDraftRequest),
+
+    /// List persona records, optionally filtered by project path.
+    #[rpc(tx = oneshot::Sender<ListPersonasResponse>)]
+    ListPersonas(ListPersonasRequest),
+
+    /// Add a relationship edge between two personas.
+    #[rpc(tx = oneshot::Sender<AddRelationshipResponse>)]
+    AddRelationship(AddRelationshipRequest),
+
+    /// List persona groups, optionally filtered by project path.
+    #[rpc(tx = oneshot::Sender<ListGroupsResponse>)]
+    ListGroups(ListGroupsRequest),
+
+    /// Create a new persona group.
+    #[rpc(tx = oneshot::Sender<CreateGroupResponse>)]
+    CreateGroup(CreateGroupRequest),
 }
 
 #[cfg(test)]

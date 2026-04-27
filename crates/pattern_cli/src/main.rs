@@ -44,11 +44,63 @@ enum Commands {
 
 #[derive(clap::Args)]
 struct ConstellationCmd {
-    /// Agents to include in the constellation (e.g., `@supervisor @writer`).
-    ///
-    /// If not provided, uses the full agent list from the project config.
-    #[arg(value_name = "AGENT")]
-    agents: Vec<String>,
+    #[command(subcommand)]
+    sub: ConstellationSub,
+}
+
+#[derive(Subcommand)]
+enum ConstellationSub {
+    /// Launch a multi-agent zellij layout (one pane per agent).
+    Launch {
+        /// Agents to include (e.g., `@supervisor @writer`).
+        #[arg(value_name = "AGENT")]
+        agents: Vec<String>,
+    },
+    /// List personas registered in the constellation.
+    List {
+        /// Optional project-path filter.
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Promote a `Draft` persona to `Active`.
+    Promote {
+        /// Persona id to promote.
+        #[arg(value_name = "ID")]
+        persona_id: String,
+    },
+    /// Add a relationship edge between two personas.
+    Relate {
+        /// Source persona id.
+        #[arg(value_name = "FROM")]
+        from: String,
+        /// Target persona id.
+        #[arg(value_name = "TO")]
+        to: String,
+        /// Relationship kind: `supervisor_of`, `specialist_for`, `peer_with`, `observer_of`.
+        #[arg(value_name = "KIND")]
+        kind: String,
+    },
+    /// Manage persona groups.
+    Groups {
+        #[command(subcommand)]
+        sub: GroupsSub,
+    },
+}
+
+#[derive(Subcommand)]
+enum GroupsSub {
+    /// List groups, optionally filtered by project.
+    List {
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Create a new group.
+    Create {
+        #[arg(value_name = "NAME")]
+        name: String,
+        #[arg(long)]
+        project_id: Option<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -202,16 +254,35 @@ async fn main() -> MietteResult<()> {
 
     match cli.command {
         Some(Commands::Chat(cmd)) => run_chat(cmd).await?,
-        Some(Commands::Constellation(cmd)) => {
-            use tui::zellij::detect::detect as detect_zellij;
-            let agents = cmd
-                .agents
-                .iter()
-                .map(|a| a.trim_start_matches('@').to_string())
-                .collect();
-            let zellij_state = detect_zellij();
-            commands::constellation::run_constellation(agents, &zellij_state)?;
-        }
+        Some(Commands::Constellation(cmd)) => match cmd.sub {
+            ConstellationSub::Launch { agents } => {
+                use tui::zellij::detect::detect as detect_zellij;
+                let agents = agents
+                    .iter()
+                    .map(|a| a.trim_start_matches('@').to_string())
+                    .collect();
+                let zellij_state = detect_zellij();
+                commands::constellation::run_constellation(agents, &zellij_state)?;
+            }
+            ConstellationSub::List { project } => {
+                commands::constellation_registry::cmd_list(project).await?;
+            }
+            ConstellationSub::Promote { persona_id } => {
+                commands::constellation_registry::cmd_promote(persona_id).await?;
+            }
+            ConstellationSub::Relate { from, to, kind } => {
+                commands::constellation_registry::cmd_relate(from, to, kind).await?;
+            }
+            ConstellationSub::Groups { sub } => match sub {
+                GroupsSub::List { project } => {
+                    commands::constellation_registry::cmd_groups_list(project).await?;
+                }
+                GroupsSub::Create { name, project_id } => {
+                    commands::constellation_registry::cmd_groups_create(name, project_id)
+                        .await?;
+                }
+            },
+        },
         Some(Commands::Mount(mount)) => match mount.sub {
             MountSub::Init {
                 mode,

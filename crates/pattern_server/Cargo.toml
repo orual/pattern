@@ -45,6 +45,9 @@ nix = { version = "0.29", features = ["signal", "process"] }
 postcard = { version = "1", features = ["alloc"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
+# Test fixtures (NopProviderClient, InMemoryMemoryStore, etc.) live behind
+# the `test-support` feature in pattern_runtime.
+pattern-runtime = { path = "../pattern_runtime", features = ["test-support"] }
 
 [lints]
 workspace = true

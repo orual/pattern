@@ -321,6 +321,60 @@ impl DaemonClient {
             .await?;
         Ok(response)
     }
+
+    // ── Phase 6 T7: constellation registry ops ────────────────────────────────
+
+    /// List persona records in the constellation, optionally filtered by
+    /// project path.
+    pub async fn list_personas(
+        &self,
+        project: Option<String>,
+    ) -> Result<crate::protocol::ListPersonasResponse> {
+        let response = self
+            .inner
+            .rpc(crate::protocol::ListPersonasRequest { project })
+            .await?;
+        Ok(response)
+    }
+
+    /// Add a relationship edge between two personas.
+    pub async fn add_relationship(
+        &self,
+        from: String,
+        to: String,
+        kind: String,
+    ) -> Result<crate::protocol::AddRelationshipResponse> {
+        let response = self
+            .inner
+            .rpc(crate::protocol::AddRelationshipRequest { from, to, kind })
+            .await?;
+        Ok(response)
+    }
+
+    /// List persona groups, optionally filtered by project path.
+    pub async fn list_groups(
+        &self,
+        project: Option<String>,
+    ) -> Result<crate::protocol::ListGroupsResponse> {
+        let response = self
+            .inner
+            .rpc(crate::protocol::ListGroupsRequest { project })
+            .await?;
+        Ok(response)
+    }
+
+    /// Create a new persona group.
+    pub async fn create_group(
+        &self,
+        name: String,
+        project_id: Option<String>,
+    ) -> Result<crate::protocol::CreateGroupResponse> {
+        let response = self
+            .inner
+            .rpc(crate::protocol::CreateGroupRequest { name, project_id })
+            .await?;
+        Ok(response)
+    }
 }
 
 #[cfg(test)]
