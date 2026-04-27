@@ -28,7 +28,7 @@ use pattern_server::protocol::{Recipient, TaggedTurnEvent, WireTurnEvent};
 
 use super::autocomplete::{AutocompleteState, AutocompleteWidget};
 use super::commands::{
-    CMD_AGENTS, CMD_CANCEL, CMD_CLEAR, CMD_FLOAT, CMD_FRONT, CMD_PANE, CMD_PANEL, CMD_QUIT,
+    CMD_AGENT, CMD_AGENTS, CMD_CANCEL, CMD_CLEAR, CMD_FLOAT, CMD_FRONT, CMD_PANE, CMD_PANEL, CMD_QUIT,
     CMD_SHUTDOWN, CMD_STATUS, CommandRegistry,
 };
 use super::conversation::{ConversationState, ConversationView};
@@ -100,8 +100,27 @@ pub struct App {
     focus: Focus,
     /// Connection to the daemon, if available.
     client: Option<DaemonClient>,
-    /// The agent currently receiving messages.
-    current_agent: SmolStr,
+    /// Active fronting persona ids (driven by `SessionInfo.fronting_snapshot`
+    /// at session init and `FrontingChanged` events thereafter).
+    ///
+    /// Phase 6 T8.
+    fronting_active: Vec<SmolStr>,
+    /// Optional fronting fallback persona id (same source as `fronting_active`).
+    fronting_fallback: Option<SmolStr>,
+    /// Persistent route lock set by `/front @<agent>`. When `Some`, every
+    /// outbound message is sent as `Recipient::Direct(id)`, bypassing the
+    /// fronting set. When `None` (default), sends use `Recipient::Auto` and
+    /// the daemon's fronting resolver picks the destination.
+    /// Cleared by bare `/front`.
+    ///
+    /// Phase 6 T8.
+    route_lock: Option<SmolStr>,
+    /// One-shot route override set by `/agent @<id>`. Used as
+    /// `Recipient::Direct(id)` for the next outbound message and then
+    /// cleared. Takes precedence over `route_lock` for that one send.
+    ///
+    /// Phase 6 T8.
+    pending_one_shot: Option<SmolStr>,
     /// Stable identity for this TUI session. Minted once at startup and used
     /// to construct `Author::Partner` origins on outbound messages. A fresh
     /// id is minted per-process so that concurrent TUI sessions are
@@ -156,12 +175,13 @@ pub struct App {
 }
 
 impl App {
-    /// Create a new application with the given default agent_id.
+    /// Create a new mount-scoped application.
     ///
-    /// The `agent_id` is the resolved persona identifier (e.g.
-    /// `"pattern-default"`), used for routing messages and displayed in
-    /// the status bar.
-    pub fn new(agent_id: SmolStr) -> Self {
+    /// Phase 6 T8: the TUI is mount-scoped, not agent-scoped. Routing is
+    /// driven by the daemon's fronting set; outbound messages default to
+    /// `Recipient::Auto`. Use `/front @<id>` to lock to a single agent,
+    /// or `/agent @<id>` for a one-shot direct override.
+    pub fn new() -> Self {
         // Create the result channel. The sender lives on the struct so
         // spawned tasks can clone it; the receiver is kept in `run()`.
         let (result_tx, _result_rx_placeholder) = tokio::sync::mpsc::unbounded_channel();
@@ -179,7 +199,10 @@ impl App {
             should_quit: false,
             focus: Focus::Input,
             client: None,
-            current_agent: agent_id,
+            fronting_active: Vec::new(),
+            fronting_fallback: None,
+            route_lock: None,
+            pending_one_shot: None,
             // Mint a stable partner identity for this TUI process. The daemon no
             // longer generates partner IDs — each client owns its own. Using
             // `new_id()` (UUID-v4) guarantees this TUI session is distinguishable
@@ -246,6 +269,23 @@ impl App {
     /// the agent's message history is human-readable.
     pub fn set_partner_display_name(&mut self, name: String) {
         self.partner_display_name = Some(name);
+    }
+
+    /// Phase 6 T8: seed the fronting state from `SessionInfo.fronting_snapshot`.
+    ///
+    /// Live updates after this come via `WireTurnEvent::FrontingChanged`
+    /// events on the all-mount stream; this is the initial state at startup
+    /// so the status bar renders correctly before the first event arrives.
+    pub fn set_fronting_snapshot(
+        &mut self,
+        snapshot: pattern_server::protocol::FrontingSnapshot,
+    ) {
+        self.fronting_active = snapshot
+            .active
+            .into_iter()
+            .map(SmolStr::from)
+            .collect();
+        self.fronting_fallback = snapshot.fallback.map(SmolStr::from);
     }
 
     /// Update the zellij environment state.
@@ -773,14 +813,29 @@ impl App {
                 // Add user message to conversation. Snowflake IDs are
                 // lex-sortable and safe for distributed minting — the daemon
                 // uses this exact ID to tag all TurnEvents for this exchange.
+                //
+                // Phase 6 T8: outbound batches no longer carry a pre-decided
+                // agent_name. The daemon's fronting resolver picks the
+                // recipient and tags every event in the response with its
+                // `TaggedTurnEvent.agent_id`; the conversation view sets the
+                // batch's agent_name from the first response event.
                 let batch_id = new_snowflake_id();
-                let batch = RenderBatch::new(batch_id.clone(), Some(user_text))
-                    .with_agent(self.current_agent.clone());
+                let batch = RenderBatch::new(batch_id.clone(), Some(user_text));
                 self.conversation.batches.push(batch);
 
                 // Send to daemon if connected.
                 if let Some(client) = &self.client {
-                    let agent_id = self.current_agent.clone();
+                    // Phase 6 T8 routing precedence:
+                    //   1. one-shot `/agent <id>` override (consumed here)
+                    //   2. persistent `/front @<id>` route lock
+                    //   3. default: Recipient::Auto (daemon's fronting resolver picks)
+                    let recipient = if let Some(id) = self.pending_one_shot.take() {
+                        Recipient::Direct(id)
+                    } else if let Some(id) = self.route_lock.clone() {
+                        Recipient::Direct(id)
+                    } else {
+                        Recipient::Auto
+                    };
                     let client = client.clone();
                     let bid = batch_id;
                     let result_tx = self.result_tx.clone();
@@ -797,12 +852,9 @@ impl App {
                         Sphere::Private,
                     );
                     tokio::spawn(async move {
-                        tracing::debug!("sending message batch={bid} agent={agent_id}");
-                        // TUI uses Recipient::Direct with the currently-active agent.
-                        // Fronting-aware routing (Recipient::Auto) is used when the
-                        // TUI has no preferred agent — direct addressing preserves the
-                        // explicit `/front @agent` selection made by the user.
-                        let recipient = Recipient::Direct(agent_id.clone());
+                        tracing::debug!(
+                            "sending message batch={bid} recipient={recipient:?}"
+                        );
                         if let Err(e) = client
                             .send_message(bid.clone(), recipient, parts, origin)
                             .await
@@ -891,15 +943,14 @@ impl App {
     fn dispatch_runtime_command(&mut self, name: &str, args: &[String]) {
         match name {
             CMD_FRONT => {
-                // TODO(multi-agent): /front is currently client-side only — the daemon has
-                // no persistent fronting state, so restarting the TUI resets to the default
-                // agent. When the multi-agent feature lands, add a `SetFront` RPC and
-                // persist the fronting choice server-side so reconnecting picks it up.
+                // Phase 6 T8: `/front @<id>` sets a client-side persistent
+                // route lock — every outbound message goes Direct(id) until
+                // cleared. Bare `/front` clears the lock; subsequent sends
+                // default to Recipient::Auto (daemon's fronting resolver
+                // picks the destination). The persistent fronting set on the
+                // daemon side is mutated via `SetFronting` RPC, not /front.
                 if let Some(agent_name) = args.first() {
                     let agent_name = agent_name.trim_start_matches('@');
-                    // Validate against the available agents list when populated.
-                    // When the list is empty (offline or not yet received), allow
-                    // the switch without validation.
                     if !self.available_agents.is_empty()
                         && !self
                             .available_agents
@@ -917,10 +968,50 @@ impl App {
                         ));
                         return;
                     }
-                    self.current_agent = SmolStr::from(agent_name);
-                    self.push_system_message(format!("switched to agent: {agent_name}"));
+                    self.route_lock = Some(SmolStr::from(agent_name));
+                    self.push_system_message(format!(
+                        "route locked to {agent_name}; clear with /front"
+                    ));
                 } else {
-                    self.push_system_message(format!("current agent: {}", self.current_agent));
+                    self.route_lock = None;
+                    self.push_system_message(
+                        "route lock cleared; outbound uses fronting resolver".to_string(),
+                    );
+                }
+            }
+            CMD_AGENT => {
+                // Phase 6 T8: one-shot Recipient::Direct override for the
+                // next outbound message. Cleared on use. Bare /agent is a
+                // no-op (we could clear pending here, but there's no obvious
+                // semantic for "clear an unfired one-shot").
+                if let Some(handle) = args.first() {
+                    let stripped = handle.trim_start_matches('@');
+                    if !self.available_agents.is_empty()
+                        && !self
+                            .available_agents
+                            .iter()
+                            .any(|a| a.as_str() == stripped)
+                    {
+                        let list = self
+                            .available_agents
+                            .iter()
+                            .map(|a| a.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        self.push_system_message(format!(
+                            "unknown agent '{stripped}'. available: {list}"
+                        ));
+                        return;
+                    }
+                    self.pending_one_shot = Some(SmolStr::from(stripped));
+                    self.push_system_message(format!(
+                        "next message will go directly to {stripped} (one-shot)"
+                    ));
+                } else {
+                    self.push_system_message(
+                        "/agent <id> sets a one-shot direct recipient for the next message"
+                            .to_string(),
+                    );
                 }
             }
             CMD_AGENTS => {
@@ -1097,6 +1188,38 @@ impl App {
     ///
     /// Called by `run_chat()` to surface session init errors and other
     /// notifications as the first message before the event loop starts.
+    /// Phase 6 T8: render the fronting state for the status bar.
+    ///
+    /// Precedence:
+    /// 1. `route_lock` → "→ <locked-id>" (route lock overrides everything)
+    /// 2. `fronting_active` non-empty → comma-joined names (with fallback in
+    ///    parentheses if set and distinct)
+    /// 3. `fronting_fallback` only → "fallback: <id>"
+    /// 4. nothing → "no fronting configured"
+    fn fronting_display_label(&self) -> String {
+        if let Some(ref locked) = self.route_lock {
+            return format!("→ {locked}");
+        }
+        if !self.fronting_active.is_empty() {
+            let active = self
+                .fronting_active
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return match self.fronting_fallback.as_ref() {
+                Some(fb) if !self.fronting_active.iter().any(|a| a == fb) => {
+                    format!("fronting: {active} (fallback: {fb})")
+                }
+                _ => format!("fronting: {active}"),
+            };
+        }
+        if let Some(ref fb) = self.fronting_fallback {
+            return format!("fallback: {fb}");
+        }
+        "no fronting configured".to_string()
+    }
+
     pub fn push_system_message(&mut self, text: String) {
         let batch_id: SmolStr = format!("sys-{}", self.conversation.batches.len()).into();
         let mut batch = RenderBatch::new(batch_id, None);
@@ -1116,8 +1239,12 @@ impl App {
         let mut total_tokens = 0;
         for batch in history {
             total_tokens += batch.tokens;
-            let mut render_batch = RenderBatch::new(batch.batch_id.clone(), batch.user_message)
-                .with_agent(self.current_agent.clone());
+            // Phase 6 T8: HistoricalBatch.agent_id labels each historical
+            // batch with its responding agent, matching live batches tagged
+            // from `TaggedTurnEvent.agent_id`.
+            let mut render_batch =
+                RenderBatch::new(batch.batch_id.clone(), batch.user_message)
+                    .with_agent(batch.agent_id.clone());
             for event in &batch.events {
                 render_batch.push_event(event);
             }
@@ -1149,6 +1276,54 @@ impl App {
     /// popups (when hidden) instead of the conversation. All other events
     /// are pushed into the conversation batch as before.
     fn handle_daemon_event(&mut self, tagged: TaggedTurnEvent) {
+        // Phase 6 T8: daemon-level notification events (agent_id="daemon")
+        // route to fronting / constellation state, not to any batch.
+        match &tagged.event {
+            WireTurnEvent::FrontingChanged {
+                active, fallback, ..
+            } => {
+                let prev_active = self.fronting_active.clone();
+                self.fronting_active =
+                    active.iter().map(|s| SmolStr::from(s.as_str())).collect();
+                self.fronting_fallback =
+                    fallback.as_deref().map(SmolStr::from);
+                // Surface a one-line system note in the conversation when the
+                // fronting set actually changed, so the user has context for
+                // the next response coming from a different agent.
+                if prev_active != self.fronting_active {
+                    let prev_label = if prev_active.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        prev_active
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    };
+                    let new_label = if self.fronting_active.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        self.fronting_active
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    };
+                    self.push_system_message(format!(
+                        "fronting changed: {prev_label} → {new_label}"
+                    ));
+                }
+                return;
+            }
+            WireTurnEvent::ConstellationChanged { .. } => {
+                // Constellation-panel re-fetch hook lands in commit 4
+                // (panel + ConstellationView state). For now this event is
+                // observed but not acted on.
+                return;
+            }
+            _ => {}
+        }
+
         // Route Display events to panel/toast instead of the conversation batch.
         if let WireTurnEvent::Display { kind, ref text } = tagged.event {
             if self.panel_visibility == PanelVisibility::Hidden {
@@ -1174,7 +1349,15 @@ impl App {
             .iter_mut()
             .find(|b| b.batch_id == tagged.batch_id)
         {
-            Some(b) => b,
+            Some(b) => {
+                // Phase 6 T8: outbound batches are created with no agent_name
+                // (the daemon picks the recipient via fronting). The first
+                // response event sets the attribution.
+                if b.agent_name.is_none() && tagged.agent_id != "daemon" {
+                    b.agent_name = Some(tagged.agent_id.clone());
+                }
+                b
+            }
             None => {
                 // New batch — create with no user message (the TUI set
                 // the user message when it sent, above). Clear any stale
@@ -1233,8 +1416,10 @@ impl App {
             render_input_area(layout.input, frame.buffer_mut(), self.focus, &self.input);
         }
 
-        // Status bar.
-        self.status_bar.persona_name = self.current_agent.to_string();
+        // Status bar — Phase 6 T8: shows current fronting state (active +
+        // fallback) instead of a single locked agent. `route_lock` overrides
+        // the display when set so users see who they've locked to.
+        self.status_bar.persona_name = self.fronting_display_label();
         self.status_bar.agent_count = self.agent_count;
         self.status_bar.context_tokens = Some(self.context_tokens);
         self.status_bar.connected = self.connected;
@@ -1341,14 +1526,14 @@ mod tests {
 
     #[test]
     fn app_renders_empty_state() {
-        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        let mut app = App::new();
         let output = render_app(&mut app, 60, 12);
         insta::assert_snapshot!(output);
     }
 
     #[test]
     fn app_renders_with_one_batch() {
-        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        let mut app = App::new();
 
         // Add a batch with a user message and text response.
         let mut batch = RenderBatch::new("batch-1".into(), Some("Hello agent".into()));
@@ -1362,7 +1547,7 @@ mod tests {
 
     #[test]
     fn clear_command_empties_conversation() {
-        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        let mut app = App::new();
 
         // Add some batches.
         app.conversation
@@ -1379,7 +1564,7 @@ mod tests {
 
     #[test]
     fn quit_command_sets_should_quit() {
-        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        let mut app = App::new();
         assert!(!app.should_quit);
 
         app.dispatch_command("quit", &[]);
@@ -1388,7 +1573,7 @@ mod tests {
 
     #[test]
     fn unknown_command_shows_error() {
-        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        let mut app = App::new();
         assert!(app.conversation.batches.is_empty());
 
         app.dispatch_command("nonexistent", &[]);
@@ -1410,7 +1595,7 @@ mod tests {
 
     #[test]
     fn submit_creates_batch_with_user_message() {
-        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        let mut app = App::new();
         assert!(app.conversation.batches.is_empty());
 
         // Simulate submitting text.
@@ -1427,20 +1612,31 @@ mod tests {
     }
 
     #[test]
-    fn front_command_updates_current_agent() {
-        let mut app = App::new(SmolStr::new_static("pattern-default"));
-        assert_eq!(app.current_agent.as_str(), "pattern-default");
+    fn front_command_sets_and_clears_route_lock() {
+        let mut app = App::new();
+        assert!(app.route_lock.is_none(), "default route_lock is None");
 
         app.dispatch_command("front", &["@supervisor".into()]);
-        assert_eq!(app.current_agent.as_str(), "supervisor");
+        assert_eq!(
+            app.route_lock.as_ref().map(|s| s.as_str()),
+            Some("supervisor"),
+            "/front @supervisor must set the route lock"
+        );
 
-        // Should also push a system message confirming the switch.
+        // Bare /front clears the lock.
+        app.dispatch_command("front", &[]);
+        assert!(
+            app.route_lock.is_none(),
+            "bare /front must clear the route lock"
+        );
+
+        // Should also push system messages confirming the changes.
         assert!(!app.conversation.batches.is_empty());
     }
 
     #[test]
     fn slash_command_from_input_dispatches() {
-        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        let mut app = App::new();
         assert!(!app.should_quit);
 
         // Simulate receiving a SlashCommand action from the input handler.
@@ -1457,7 +1653,7 @@ mod tests {
 
     #[test]
     fn panel_command_cycles_visibility() {
-        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        let mut app = App::new();
         assert_eq!(app.panel_visibility, PanelVisibility::Hidden);
 
         app.dispatch_command("panel", &[]);
@@ -1472,7 +1668,7 @@ mod tests {
 
     #[test]
     fn ctrl_p_cycles_panel_wide_terminal() {
-        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        let mut app = App::new();
         // Simulate a wide terminal so all three states are reachable.
         app.terminal_width = MIN_PANEL_WIDTH;
         assert_eq!(app.panel_visibility, PanelVisibility::Hidden);
@@ -1490,7 +1686,7 @@ mod tests {
 
     #[test]
     fn ctrl_p_skips_visible_on_narrow_terminal() {
-        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        let mut app = App::new();
         // terminal_width defaults to 0, which is < MIN_PANEL_WIDTH.
         assert_eq!(app.terminal_width, 0);
         assert_eq!(app.panel_visibility, PanelVisibility::Hidden);
@@ -1507,7 +1703,7 @@ mod tests {
 
     #[test]
     fn alt_bracket_adjusts_panel_pct() {
-        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        let mut app = App::new();
         assert_eq!(app.panel_pct, DEFAULT_PANEL_PCT); // 25
 
         let alt_right = KeyEvent::new(KeyCode::Char(']'), KeyModifiers::ALT);
@@ -1533,7 +1729,7 @@ mod tests {
 
     #[test]
     fn daemon_display_routes_to_toast_when_panel_hidden() {
-        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        let mut app = App::new();
         app.panel_visibility = PanelVisibility::Hidden;
 
         // Simulate a daemon Display::Note event.
@@ -1556,7 +1752,7 @@ mod tests {
 
     #[test]
     fn daemon_display_routes_to_panel_when_visible() {
-        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        let mut app = App::new();
         app.panel_visibility = PanelVisibility::Visible;
 
         // Note event.
@@ -1604,7 +1800,7 @@ mod tests {
 
     #[test]
     fn daemon_non_display_events_still_go_to_conversation() {
-        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        let mut app = App::new();
         app.panel_visibility = PanelVisibility::Visible;
 
         // Text event should go to conversation, not panel.
@@ -1621,7 +1817,7 @@ mod tests {
     fn push_system_message_still_goes_to_conversation() {
         // This is the critical test: push_system_message creates Display
         // events directly in a batch. They must NOT be rerouted.
-        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        let mut app = App::new();
         app.panel_visibility = PanelVisibility::Visible;
 
         app.push_system_message("a system note".into());
@@ -1634,7 +1830,7 @@ mod tests {
 
     #[test]
     fn thinking_expand_to_panel() {
-        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        let mut app = App::new();
 
         // Add a batch with thinking content.
         let mut batch = RenderBatch::new("batch-1".into(), Some("question".into()));
@@ -1666,7 +1862,7 @@ mod tests {
 
     #[test]
     fn full_app_with_panel_visible() {
-        let mut app = App::new(SmolStr::new_static("supervisor"));
+        let mut app = App::new();
         app.connected = true;
         app.panel_visibility = PanelVisibility::Visible;
         app.panel_pct = 30;
@@ -1688,7 +1884,7 @@ mod tests {
 
     #[test]
     fn full_app_with_panel_hidden() {
-        let mut app = App::new(SmolStr::new_static("supervisor"));
+        let mut app = App::new();
         app.connected = true;
         app.panel_visibility = PanelVisibility::Hidden;
 
@@ -1705,7 +1901,7 @@ mod tests {
 
     #[test]
     fn thinking_expanded_in_panel() {
-        let mut app = App::new(SmolStr::new_static("supervisor"));
+        let mut app = App::new();
         app.connected = true;
         app.panel_visibility = PanelVisibility::Visible;
         app.panel_pct = 30;
@@ -1733,7 +1929,7 @@ mod tests {
 
     #[test]
     fn display_note_as_toast_when_hidden() {
-        let mut app = App::new(SmolStr::new_static("supervisor"));
+        let mut app = App::new();
         app.connected = true;
         app.panel_visibility = PanelVisibility::Hidden;
 
@@ -1759,7 +1955,7 @@ mod tests {
 
     #[test]
     fn display_note_in_panel_when_visible() {
-        let mut app = App::new(SmolStr::new_static("supervisor"));
+        let mut app = App::new();
         app.connected = true;
         app.panel_visibility = PanelVisibility::Visible;
         app.panel_pct = 30;
@@ -1789,7 +1985,7 @@ mod tests {
 
     #[test]
     fn events_route_to_correct_batch() {
-        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        let mut app = App::new();
 
         // Pre-create two streaming batches.
         app.conversation
@@ -1851,7 +2047,7 @@ mod tests {
 
     #[test]
     fn no_cross_contamination_between_batches() {
-        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        let mut app = App::new();
 
         // Interleave events for two different batches.
         app.handle_daemon_event(tagged("batch-X", WireTurnEvent::Text("x1".into())));
@@ -1908,7 +2104,7 @@ mod tests {
 
     #[test]
     fn unknown_batch_id_creates_new_batch() {
-        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        let mut app = App::new();
         assert!(app.conversation.batches.is_empty());
 
         // Event arrives for a batch-id the TUI has never seen.
@@ -1925,7 +2121,7 @@ mod tests {
     /// `/agents` without a daemon connection surfaces "not connected" immediately.
     #[test]
     fn agents_command_without_client_shows_not_connected() {
-        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        let mut app = App::new();
         // No client set — dispatch_runtime_command should push a system message.
         app.dispatch_runtime_command("agents", &[]);
         assert_eq!(app.conversation.batches.len(), 1);
@@ -1939,7 +2135,7 @@ mod tests {
     /// `/status` without a daemon connection surfaces "not connected" immediately.
     #[test]
     fn status_command_without_client_shows_not_connected() {
-        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        let mut app = App::new();
         app.dispatch_runtime_command("status", &[]);
         assert_eq!(app.conversation.batches.len(), 1);
         let msg = app.last_conversation_message().unwrap_or("");
@@ -1964,7 +2160,7 @@ mod tests {
         // Replace the placeholder channel with a real one owned in this scope.
         let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
-        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        let mut app = App::new();
         app.client = Some(client);
         app.result_tx = result_tx;
 
@@ -1996,7 +2192,7 @@ mod tests {
 
         let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
-        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        let mut app = App::new();
         app.client = Some(client);
         app.result_tx = result_tx;
 
@@ -2026,7 +2222,7 @@ mod tests {
 
         let (result_tx, _result_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
-        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        let mut app = App::new();
         app.client = Some(client);
         app.result_tx = result_tx;
 
@@ -2041,7 +2237,7 @@ mod tests {
 
     #[test]
     fn cancel_command_with_no_streaming_batch() {
-        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        let mut app = App::new();
 
         // Add a non-streaming batch (already finished).
         let mut batch = RenderBatch::new("batch-1".into(), Some("hello".into()));
@@ -2068,7 +2264,7 @@ mod tests {
 
     #[test]
     fn cancel_command_targets_most_recent_streaming_batch() {
-        let mut app = App::new(SmolStr::new_static("pattern-default"));
+        let mut app = App::new();
         // No client, so the cancel path hits the "not connected" branch.
         // We just verify it finds the correct streaming batch.
 

@@ -1,5 +1,6 @@
 ---
 source: crates/pattern_cli/src/tui/app.rs
+assertion_line: 1882
 expression: output
 ---
 [you] Hello agent                                                                   agent started
@@ -17,4 +18,4 @@ The answer is 42.                                                               
 
 ❯
 
- @supervisor │ 0 agents │ 0 ctx │ ● connected │ panel: visible
+ no fronting configured │ 0 agents │ 0 ctx │ ● connected │ panel: visible

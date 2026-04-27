@@ -521,6 +521,11 @@ pub struct GetHistoryRequest {
 pub struct HistoricalBatch {
     /// Batch ID (snowflake).
     pub batch_id: BatchId,
+    /// Agent that emitted this batch's response events. Phase 6 T8: the
+    /// TUI is mount-scoped and uses this to label each historical batch
+    /// with its responding agent (matching live batches tagged from
+    /// `TaggedTurnEvent.agent_id`).
+    pub agent_id: AgentId,
     /// User's message that initiated this batch, if any.
     pub user_message: Option<String>,
     /// Agent response events as they were emitted during processing.

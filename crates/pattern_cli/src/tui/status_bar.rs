@@ -130,9 +130,13 @@ impl Widget for StatusBar<'_> {
 
         let mut spans = Vec::new();
 
-        // Persona name segment.
+        // Persona / fronting segment. Phase 6 T8: this no longer always
+        // names a single agent — it may be a fronting summary
+        // ("fronting: alice, bob") or an empty-state notice
+        // ("no fronting configured"). The label decides its own form, so
+        // no `@` prefix is added here.
         spans.push(Span::styled(
-            format!(" @{}", self.state.persona_name),
+            format!(" {}", self.state.persona_name),
             Style::default()
                 .fg(Color::White)
                 .bg(bar_bg)

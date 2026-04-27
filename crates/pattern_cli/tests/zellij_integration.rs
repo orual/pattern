@@ -150,7 +150,7 @@ fn constellation_layout_includes_agent_args() {
 fn pane_command_outside_zellij_shows_system_error() {
     use pattern_cli::tui::app::App;
 
-    let mut app = App::new(smol_str::SmolStr::new_static("pattern-default"));
+    let mut app = App::new();
     app.set_zellij_state(ZellijState::NotAvailable);
 
     // No messages before dispatch.

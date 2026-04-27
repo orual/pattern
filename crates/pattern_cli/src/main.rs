@@ -459,10 +459,10 @@ async fn run_chat(cmd: ChatCmd) -> MietteResult<()> {
                     Ok(client) => {
                         init_session_and_subscribe(&client, &project_path, &agent_id).await
                     }
-                    Err(_) => SessionResult::offline(agent_id.clone()),
+                    Err(_) => SessionResult::offline(),
                 }
             }
-            Err(_) => SessionResult::offline(agent_id.clone()),
+            Err(_) => SessionResult::offline(),
         },
     };
 
@@ -480,7 +480,7 @@ async fn run_chat(cmd: ChatCmd) -> MietteResult<()> {
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture).ok();
 
     let mut terminal = ratatui::init();
-    let mut app = tui::app::App::new(smol_str::SmolStr::from(session.resolved_agent.as_str()));
+    let mut app = tui::app::App::new();
 
     // Wire up the zellij state so /pane and /float know whether they can act.
     app.set_zellij_state(zellij_state);
@@ -494,6 +494,11 @@ async fn run_chat(cmd: ChatCmd) -> MietteResult<()> {
     // Wire the optional display name for Author::Partner attribution rendering.
     if let Some(name) = session.partner_display_name {
         app.set_partner_display_name(name);
+    }
+
+    // Phase 6 T8: seed fronting state for the status bar / panel.
+    if let Some(snapshot) = session.fronting_snapshot {
+        app.set_fronting_snapshot(snapshot);
     }
 
     // Populate the available agents list so /front can validate names.
@@ -557,7 +562,6 @@ async fn run_chat(cmd: ChatCmd) -> MietteResult<()> {
 struct SessionResult {
     client: Option<pattern_server::client::DaemonClient>,
     event_rx: Option<tui::app::DaemonEventReceiver>,
-    resolved_agent: String,
     error: Option<String>,
     available_agents: Vec<smol_str::SmolStr>,
     history: Vec<pattern_server::protocol::HistoricalBatch>,
@@ -568,24 +572,26 @@ struct SessionResult {
     /// this and passes it as `user_id` in every `SendMessage`.
     partner_id: Option<smol_str::SmolStr>,
     /// Optional human-readable display name for the partner from the daemon.
-    /// Sourced from `SessionInfo.partner_display_name` (Phase 6 wires
-    /// `.pattern.kdl` partner config; `None` until then).
+    /// Sourced from `SessionInfo.partner_display_name`.
     partner_display_name: Option<String>,
+    /// Initial fronting snapshot from `SessionInfo.fronting_snapshot`. None
+    /// in echo mode or when the mount has no fronting state. Phase 6 T8.
+    fronting_snapshot: Option<pattern_server::protocol::FrontingSnapshot>,
 }
 
 impl SessionResult {
     /// Construct an offline (no daemon) session result.
-    fn offline(agent_id: String) -> Self {
+    fn offline() -> Self {
         Self {
             client: None,
             event_rx: None,
-            resolved_agent: agent_id,
             error: None,
             available_agents: vec![],
             history: vec![],
             daemon_commands: vec![],
             partner_id: None,
             partner_display_name: None,
+            fronting_snapshot: None,
         }
     }
 }
@@ -633,32 +639,41 @@ async fn init_session_and_subscribe(
                 },
             );
 
-            let rx = client.subscribe_output(resolved.clone()).await.ok();
+            // Phase 6 T8: subscribe mount-wide so the TUI receives every
+            // agent's events for the project plus daemon-level
+            // FrontingChanged / ConstellationChanged notifications.
+            let rx = client
+                .subscribe_all(project_path.to_path_buf())
+                .await
+                .ok();
             SessionResult {
                 client: Some(client.clone()),
                 event_rx: rx,
-                resolved_agent: resolved.to_string(),
                 error: info.error,
                 available_agents: info.available_agents,
                 history,
                 daemon_commands,
                 partner_id: Some(info.partner_id),
                 partner_display_name: info.partner_display_name,
+                fronting_snapshot: info.fronting_snapshot,
             }
         }
         Err(e) => {
             tracing::warn!("InitSession failed, falling back to default agent: {e}");
-            let rx = client.subscribe_output(default_agent.into()).await.ok();
+            let rx = client
+                .subscribe_all(project_path.to_path_buf())
+                .await
+                .ok();
             SessionResult {
                 client: Some(client.clone()),
                 event_rx: rx,
-                resolved_agent: default_agent.to_string(),
                 error: Some(format!("session init failed: {e}")),
                 available_agents: vec![],
                 history: vec![],
                 daemon_commands: vec![],
                 partner_id: None,
                 partner_display_name: None,
+                fronting_snapshot: None,
             }
         }
     }

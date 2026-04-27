@@ -1,5 +1,6 @@
 ---
 source: crates/pattern_cli/src/tui/app.rs
+assertion_line: 1545
 expression: output
 ---
 [you] Hello agent
@@ -13,4 +14,4 @@ The answer is 42.
 
 ❯
 
- @pattern-default │ 0 agents │ 0 ctx │ ● disconnected
+ no fronting configured │ 0 agents │ 0 ctx │ ● disconnected

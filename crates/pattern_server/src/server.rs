@@ -856,6 +856,7 @@ impl DaemonServer {
                 let db = self.current_mount.as_ref().map(|m| m.db.clone());
                 let agent_id = inner.agent_id.clone();
 
+                let agent_id_for_batches = agent_id.clone();
                 tokio::spawn(async move {
                     let batches = tokio::task::spawn_blocking(move || -> Vec<HistoricalBatch> {
                         let Some(db) = db else {
@@ -915,6 +916,7 @@ impl DaemonServer {
 
                                 HistoricalBatch {
                                     batch_id: batch_id.into(),
+                                    agent_id: agent_id_for_batches.clone(),
                                     user_message,
                                     events,
                                     tokens,

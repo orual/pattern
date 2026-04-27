@@ -52,6 +52,8 @@ pub const CMD_FLOAT: &str = "float";
 
 // Runtime command names.
 pub const CMD_FRONT: &str = "front";
+/// Phase 6 T8: one-shot direct-recipient override for the next outbound message.
+pub const CMD_AGENT: &str = "agent";
 pub const CMD_AGENTS: &str = "agents";
 pub const CMD_STATUS: &str = "status";
 pub const CMD_SHUTDOWN: &str = "shutdown";
@@ -80,7 +82,13 @@ pub fn builtin_commands() -> &'static [CommandDef] {
         },
         CommandDef {
             name: CMD_FRONT,
-            description: "Switch fronting persona",
+            description: "Set or clear the route-lock for outbound messages",
+            target: CommandTarget::Runtime,
+            arg_hint: ArgHint::AgentName,
+        },
+        CommandDef {
+            name: CMD_AGENT,
+            description: "One-shot direct override for the next outbound message",
             target: CommandTarget::Runtime,
             arg_hint: ArgHint::AgentName,
         },

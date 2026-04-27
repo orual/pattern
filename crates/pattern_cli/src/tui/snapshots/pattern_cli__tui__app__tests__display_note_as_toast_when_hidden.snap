@@ -1,5 +1,6 @@
 ---
 source: crates/pattern_cli/src/tui/app.rs
+assertion_line: 1953
 expression: output
 ---
 [you] Hello                                           agent processing query...
@@ -13,4 +14,4 @@ World
 
 ❯
 
- @supervisor │ 0 agents │ 0 ctx │ ● connected
+ no fronting configured │ 0 agents │ 0 ctx │ ● connected

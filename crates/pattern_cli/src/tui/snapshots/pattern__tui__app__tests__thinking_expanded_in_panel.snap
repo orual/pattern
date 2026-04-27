@@ -1,5 +1,6 @@
 ---
 source: crates/pattern_cli/src/tui/app.rs
+assertion_line: 1927
 expression: output
 ---
 [you] Analyze this                                                                   thinking ──────────────────────────
@@ -17,4 +18,4 @@ I recommend option B.                                                           
 
 ❯
 
- @supervisor │ 0 agents │ 0 ctx │ ● connected │ panel: visible
+ no fronting configured │ 0 agents │ 0 ctx │ ● connected │ panel: visible

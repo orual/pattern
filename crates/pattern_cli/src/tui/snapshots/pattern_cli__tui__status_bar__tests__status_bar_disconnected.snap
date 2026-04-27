@@ -1,5 +1,6 @@
 ---
 source: crates/pattern_cli/src/tui/status_bar.rs
+assertion_line: 326
 expression: output
 ---
- @supervisor │ 0 agents │ ● disconnected
+ supervisor │ 0 agents │ ● disconnected
