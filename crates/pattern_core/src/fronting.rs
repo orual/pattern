@@ -365,67 +365,79 @@ impl FrontingResolver {
 
 // ── parse_direct_address ──────────────────────────────────────────────────────
 
-/// Parse a leading `@persona-id` direct-address from a message body.
+/// Scan `msg_body` for a `@<persona-id>` direct-address token.
 ///
-/// Returns the `PersonaId` when the body starts with `@` followed by at least
-/// one non-whitespace, non-colon character. The id ends at the first
-/// whitespace, colon, or end-of-string.
+/// Returns the first match's `PersonaId`. The body is NOT modified — agents
+/// receive the @-mention verbatim, just as in normal chat conventions.
 ///
 /// # Matching rules
 ///
-/// | Input            | Result                      |
-/// |------------------|-----------------------------|
-/// | `"@alice"`       | `Some("alice")`             |
-/// | `"@alice: msg"`  | `Some("alice")`             |
-/// | `"@alice msg"`   | `Some("alice")`             |
-/// | `"hello @alice"` | `None` (not a leading `@`)  |
-/// | `"@"`            | `None` (empty id)           |
-/// | `""`             | `None`                      |
+/// 1. The `@` must be at start-of-string or immediately preceded by whitespace
+///    (so email addresses like `me@example.com` do not match).
+/// 2. The id starts at the character after `@` and ends at the first
+///    whitespace, `:`, or end-of-string.
+/// 3. A `.` inside the would-be id is treated as a domain marker if it is
+///    followed by a non-whitespace character — the token is rejected. A `.`
+///    followed by whitespace or end-of-string is treated as sentence-ending
+///    and terminates the id (the `.` itself is excluded).
+/// 4. Empty ids (`@` followed immediately by whitespace, `:`, end, or a
+///    rejecting `.`) do not match.
+/// 5. The first valid match in the body wins; rejected `@` tokens cause the
+///    scan to advance and look for the next candidate.
 ///
-/// The `@` itself is stripped; the caller receives only the id portion.
+/// | Input                            | Result                  |
+/// |----------------------------------|-------------------------|
+/// | `"@alice"`                       | `Some("alice")`         |
+/// | `"@alice: msg"`                  | `Some("alice")`         |
+/// | `"hello @alice"`                 | `Some("alice")`         |
+/// | `"@alice and @bob"`              | `Some("alice")`         |
+/// | `"@pattern"`                     | `Some("pattern")`       |
+/// | `"@pattern. trailing"`           | `Some("pattern")`       |
+/// | `"@pattern.atproto.systems"`     | `None` (domain pattern) |
+/// | `"contact me@example.com"`       | `None` (not preceded by ws) |
+/// | `"@"`                            | `None` (empty id)       |
+/// | `""`                             | `None`                  |
 pub fn parse_direct_address(msg_body: &str) -> Option<PersonaId> {
-    let rest = msg_body.strip_prefix('@')?;
-
-    // Collect characters until whitespace or ':'.
-    let id: String = rest
-        .chars()
-        .take_while(|c| !c.is_whitespace() && *c != ':')
-        .collect();
-
-    if id.is_empty() {
-        return None;
+    let chars: Vec<(usize, char)> = msg_body.char_indices().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i].1 != '@' {
+            i += 1;
+            continue;
+        }
+        let preceded_ok = i == 0 || chars[i - 1].1.is_whitespace();
+        if !preceded_ok {
+            i += 1;
+            continue;
+        }
+        let mut end = i + 1;
+        let mut rejected = false;
+        while end < chars.len() {
+            let c = chars[end].1;
+            if c.is_whitespace() || c == ':' {
+                break;
+            }
+            if c == '.' {
+                let next = chars.get(end + 1).map(|p| p.1);
+                match next {
+                    None => break,
+                    Some(nc) if nc.is_whitespace() => break,
+                    _ => {
+                        rejected = true;
+                        break;
+                    }
+                }
+            }
+            end += 1;
+        }
+        if !rejected && end > i + 1 {
+            let start_byte = chars[i + 1].0;
+            let end_byte = chars.get(end).map(|p| p.0).unwrap_or(msg_body.len());
+            return Some(PersonaId::new(&msg_body[start_byte..end_byte]));
+        }
+        i += 1;
     }
-
-    Some(PersonaId::new(id.as_str()))
-}
-
-/// Strip a leading `@<persona-id>[:][ \t]+` direct-address marker from
-/// `msg_body` so the recipient sees a clean message after routing.
-///
-/// Returns the input verbatim when no leading `@<id>` is present.
-/// Mirrors [`parse_direct_address`]'s id-extraction rules: id ends at
-/// the first whitespace or `:`. The optional trailing `:` and any run
-/// of horizontal whitespace immediately after are also stripped, so
-/// `"@alice: hello"` → `"hello"` and `"@alice  hello"` → `"hello"`.
-pub fn strip_direct_address(msg_body: &str) -> String {
-    let Some(rest) = msg_body.strip_prefix('@') else {
-        return msg_body.to_string();
-    };
-    // Length of id portion (chars until whitespace or ':').
-    let id_len: usize = rest
-        .chars()
-        .take_while(|c| !c.is_whitespace() && *c != ':')
-        .map(char::len_utf8)
-        .sum();
-    if id_len == 0 {
-        // Bare `@` with no id — leave the body alone.
-        return msg_body.to_string();
-    }
-    let after_id = &rest[id_len..];
-    // Skip an optional trailing `:` and any run of whitespace.
-    let after_colon = after_id.strip_prefix(':').unwrap_or(after_id);
-    let cleaned = after_colon.trim_start();
-    cleaned.to_string()
+    None
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -521,8 +533,51 @@ mod tests {
     }
 
     #[test]
-    fn parse_direct_address_no_leading_at() {
-        assert!(parse_direct_address("hello @alice").is_none());
+    fn parse_direct_address_mid_message_with_leading_text() {
+        let id = parse_direct_address("hello @alice").expect("should parse mid-message");
+        assert_eq!(id.as_str(), "alice");
+    }
+
+    #[test]
+    fn parse_direct_address_first_match_wins() {
+        let id = parse_direct_address("@alice and @bob").expect("should parse");
+        assert_eq!(id.as_str(), "alice");
+    }
+
+    #[test]
+    fn parse_direct_address_email_does_not_match() {
+        assert!(
+            parse_direct_address("contact me@example.com please").is_none(),
+            "email-style @ (not preceded by whitespace) must not match"
+        );
+    }
+
+    #[test]
+    fn parse_direct_address_domain_like_rejected() {
+        assert!(
+            parse_direct_address("@pattern.atproto.systems").is_none(),
+            "domain-like @ (period followed by non-whitespace) must not match"
+        );
+    }
+
+    #[test]
+    fn parse_direct_address_period_at_end_terminates_id() {
+        let id = parse_direct_address("@pattern.").expect("should parse");
+        assert_eq!(id.as_str(), "pattern");
+    }
+
+    #[test]
+    fn parse_direct_address_period_then_space_terminates_id() {
+        let id = parse_direct_address("@pattern. continue").expect("should parse");
+        assert_eq!(id.as_str(), "pattern");
+    }
+
+    #[test]
+    fn parse_direct_address_skips_domain_finds_next() {
+        // First @ is domain-like and rejected; second @ is a real address.
+        let id = parse_direct_address("see admin@host.example then @alice")
+            .expect("should fall through to second @");
+        assert_eq!(id.as_str(), "alice");
     }
 
     #[test]

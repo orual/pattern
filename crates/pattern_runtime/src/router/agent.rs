@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use pattern_core::fronting::{parse_direct_address, strip_direct_address};
+use pattern_core::fronting::parse_direct_address;
 use pattern_core::types::ids::PersonaId;
 use pattern_core::types::message::Message;
 use pattern_core::types::origin::MessageOrigin;
@@ -148,49 +148,32 @@ impl Router for AgentRouter {
             };
         }
 
-        // (2) `@persona-name` direct addressing in the BODY (recipient
-        // string is just `agent:`, body says `@alice please…`). We've
-        // already handled the empty-target case above, so this branch
-        // fires when callers used `agent:@alice` (legacy / convenience
-        // form) — strip the `@` from the target and route direct.
-        //
-        // When the @-prefix is parsed FROM the body (target was a plain
-        // persona id but body opens with `@persona-id`), we also strip
-        // the prefix from the body before delivery so the recipient
-        // doesn't see the routing marker. This matches the plan's
-        // "@persona-name parsing" section: "Snip the prefix off the
-        // message body before delivery."
-        let mut delivery_body = body.clone();
+        // (2) `@persona-name` direct addressing. The recipient string may
+        // already carry the `@` prefix (`agent:@alice` legacy form), or
+        // the body itself may contain `@persona-id` anywhere — at the
+        // start, mid-sentence, or after preceding context. The body is
+        // delivered verbatim; @-mentions are conventional chat syntax,
+        // not a routing marker that needs to be hidden from the agent.
         let direct_id: PersonaId = if let Some(stripped) = target.strip_prefix('@') {
             PersonaId::from(stripped)
         } else if let Some(parsed) =
             parse_direct_address(body.chat_message.content.first_text().unwrap_or(""))
         {
-            // The recipient string is a literal persona id but the
-            // body opens with `@persona-id`. Honour the body's
-            // directive and override target.
-            let resolved = if parsed.as_str() == target {
+            // Body carries an @-mention. Honour it; if the parsed id matches
+            // the target string, use the target spelling (preserves caller
+            // intent for casing/aliasing).
+            if parsed.as_str() == target {
                 PersonaId::from(target)
             } else {
                 parsed
-            };
-            // Strip the leading `@<persona-id>[:[ ]]` token from the
-            // body's first text part so the recipient sees a clean
-            // message. We rebuild the ChatMessage with the cleaned
-            // text and copy the rest of the Message verbatim.
-            if let Some(text) = body.chat_message.content.first_text() {
-                let cleaned = strip_direct_address(text);
-                delivery_body.chat_message =
-                    genai::chat::ChatMessage::new(body.chat_message.role.clone(), cleaned);
             }
-            resolved
         } else {
             PersonaId::from(target)
         };
 
         let input = MailboxInput {
             from: sender.clone(),
-            msg: delivery_body,
+            msg: body.clone(),
         };
 
         // route_or_queue atomically checks status and delivers/queues.
@@ -497,13 +480,10 @@ mod tests {
         );
     }
 
-    /// When the message body opens with `@bob …`, the body-override logic
-    /// in the router honours the in-body direct address even when the
-    /// target string itself is a persona name (without the `@` prefix).
-    ///
-    /// This tests the "body says @bob, target says alice" override path at
-    /// agent.rs:135-148 which picks `bob` when body has `@bob` and target
-    /// does not match bob.
+    /// When the message body contains `@bob`, the body-mention overrides
+    /// the target string even when the target is a different persona name.
+    /// The body is delivered verbatim — @-mentions are conventional chat
+    /// syntax and the agent receives them as written.
     #[tokio::test]
     async fn at_prefix_in_body_overrides_target() {
         let reg = Arc::new(AgentRegistry::new());
@@ -521,17 +501,41 @@ mod tests {
             .recv()
             .await
             .expect("bob should receive body-directed message");
-        // The `@bob` prefix is stripped before delivery — the recipient
-        // sees a clean message body.
         assert_eq!(
             received.msg.chat_message.content.first_text().unwrap_or(""),
-            "please help",
-            "bob should receive the body with the leading `@bob` stripped"
+            "@bob please help",
+            "bob should receive the body verbatim with the @-mention preserved"
         );
         assert!(
             alice_rx.try_recv().is_err(),
-            "alice (target string) must not receive when body overrides to bob"
+            "alice (target string) must not receive when body mentions bob"
         );
+    }
+
+    /// @-mention can appear mid-message, not just at the start. The first
+    /// valid @-mention in the body wins.
+    #[tokio::test]
+    async fn at_mention_mid_message_routes_to_mentioned() {
+        let reg = Arc::new(AgentRegistry::new());
+        let (alice_tx, mut alice_rx) = mpsc::unbounded_channel::<MailboxInput>();
+        let (bob_tx, mut bob_rx) = mpsc::unbounded_channel::<MailboxInput>();
+        reg.register("alice".into(), alice_tx, SessionStatus::Active);
+        reg.register("bob".into(), bob_tx, SessionStatus::Active);
+
+        let router = AgentRouter::new(Arc::clone(&reg));
+        let msg = test_message("hey @bob got a sec?");
+        router.route(&test_sender(), "alice", &msg).await.unwrap();
+
+        let received = bob_rx
+            .recv()
+            .await
+            .expect("bob should receive mid-message @-mention");
+        assert_eq!(
+            received.msg.chat_message.content.first_text().unwrap_or(""),
+            "hey @bob got a sec?",
+            "body delivered verbatim"
+        );
+        assert!(alice_rx.try_recv().is_err());
     }
 
     /// Empty target with NO fronting configured returns
