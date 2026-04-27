@@ -6,7 +6,6 @@ use crate::error::DbResult;
 #[derive(Debug, Clone)]
 pub struct DbStats {
     pub agent_count: i64,
-    pub group_count: i64,
     pub message_count: i64,
     pub memory_block_count: i64,
     pub archival_entry_count: i64,
@@ -26,8 +25,6 @@ pub struct AgentActivity {
 pub fn get_stats(conn: &rusqlite::Connection) -> DbResult<DbStats> {
     let agent_count: i64 = conn.query_row("SELECT COUNT(*) FROM agents", [], |r| r.get(0))?;
 
-    let group_count: i64 = conn.query_row("SELECT COUNT(*) FROM agent_groups", [], |r| r.get(0))?;
-
     let message_count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM messages WHERE is_deleted = 0",
         [],
@@ -45,7 +42,6 @@ pub fn get_stats(conn: &rusqlite::Connection) -> DbResult<DbStats> {
 
     Ok(DbStats {
         agent_count,
-        group_count,
         message_count,
         memory_block_count,
         archival_entry_count,

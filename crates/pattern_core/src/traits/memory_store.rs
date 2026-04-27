@@ -194,12 +194,6 @@ pub trait MemoryStore: Send + Sync + fmt::Debug + 'static {
         Ok(false)
     }
 
-    /// Check whether `caller` and `target` are members of the same
-    /// agent group.
-    fn shares_group_with(&self, _caller: &str, _target: &str) -> MemoryResult<bool> {
-        Ok(false)
-    }
-
     /// List all agent IDs in the constellation. Used for
     /// `MemorySearchScope::Constellation` resolution.
     fn list_constellation_agent_ids(&self) -> MemoryResult<Vec<String>> {
@@ -314,10 +308,6 @@ impl MemoryStore for std::sync::Arc<dyn MemoryStore> {
 
     fn has_shared_blocks_with(&self, caller: &str, target: &str) -> MemoryResult<bool> {
         (**self).has_shared_blocks_with(caller, target)
-    }
-
-    fn shares_group_with(&self, caller: &str, target: &str) -> MemoryResult<bool> {
-        (**self).shares_group_with(caller, target)
     }
 
     fn list_constellation_agent_ids(&self) -> MemoryResult<Vec<String>> {

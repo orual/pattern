@@ -433,10 +433,6 @@ impl<S: MemoryStore> MemoryStore for MemoryScope<S> {
         self.inner.has_shared_blocks_with(caller, target)
     }
 
-    fn shares_group_with(&self, caller: &str, target: &str) -> MemoryResult<bool> {
-        self.inner.shares_group_with(caller, target)
-    }
-
     fn list_constellation_agent_ids(&self) -> MemoryResult<Vec<String>> {
         self.inner.list_constellation_agent_ids()
     }

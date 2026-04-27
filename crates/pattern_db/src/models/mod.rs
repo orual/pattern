@@ -14,8 +14,8 @@ mod source;
 mod task;
 
 pub use agent::{
-    Agent, AgentAtprotoEndpoint, AgentGroup, AgentStatus, ENDPOINT_TYPE_BLUESKY, GroupMember,
-    GroupMemberRole, ModelRoutingConfig, ModelRoutingRule, PatternType, RoutingCondition,
+    Agent, AgentAtprotoEndpoint, AgentStatus, ENDPOINT_TYPE_BLUESKY, ModelRoutingConfig,
+    ModelRoutingRule, RoutingCondition,
 };
 pub use event::{Event, EventOccurrence, OccurrenceStatus};
 pub use folder::{FilePassage, Folder, FolderAccess, FolderAttachment, FolderFile, FolderPathType};

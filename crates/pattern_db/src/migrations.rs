@@ -42,6 +42,15 @@ static MEMORY_MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
             "../migrations/memory/0012_skill_usage_stats.sql"
         )),
         M::up(include_str!("../migrations/memory/0013_fronting.sql")),
+        M::up(include_str!(
+            "../migrations/memory/0014_agents_extend.sql"
+        )),
+        M::up(include_str!(
+            "../migrations/memory/0015_persona_relationships.sql"
+        )),
+        M::up(include_str!(
+            "../migrations/memory/0016_drop_legacy_coordination.sql"
+        )),
     ])
 });
 
@@ -154,6 +163,165 @@ mod tests {
         assert_eq!(
             last_by, "agent-b",
             "last_used_by should be the latest agent"
+        );
+    }
+
+    #[test]
+    fn agents_extended_columns_exist_after_migration() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_memory_migrations(&mut conn).unwrap();
+
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(agents)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+
+        assert!(cols.contains(&"config_path".to_string()), "missing config_path; cols = {cols:?}");
+        assert!(
+            cols.contains(&"project_attachments".to_string()),
+            "missing project_attachments; cols = {cols:?}"
+        );
+
+        // Default value applies on insert without an explicit project_attachments.
+        conn.execute(
+            "INSERT INTO agents (id, name, model_provider, model_name, system_prompt, config, enabled_tools, status, created_at, updated_at)
+             VALUES ('p1', 'persona-one', 'anthropic', 'claude-sonnet-4-6', 'sys', '{}', '[]', 'active', '2026-04-26T00:00:00Z', '2026-04-26T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let pa: String = conn
+            .query_row(
+                "SELECT project_attachments FROM agents WHERE id = 'p1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pa, "[]", "project_attachments default should be empty JSON array");
+    }
+
+    #[test]
+    fn persona_relationships_unique_constraint_dedupes_edges() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_memory_migrations(&mut conn).unwrap();
+
+        // Seed two personas to satisfy the FK.
+        for id in ["alice", "bob"] {
+            conn.execute(
+                "INSERT INTO agents (id, name, model_provider, model_name, system_prompt, config, enabled_tools, status, created_at, updated_at)
+                 VALUES (?, ?, 'anthropic', 'claude-sonnet-4-6', 'sys', '{}', '[]', 'active', '2026-04-26T00:00:00Z', '2026-04-26T00:00:00Z')",
+                rusqlite::params![id, id],
+            ).unwrap();
+        }
+
+        conn.execute(
+            "INSERT INTO persona_relationships (id, from_persona, to_persona, kind, created_at)
+             VALUES ('e1', 'alice', 'bob', 'supervisor_of', '2026-04-26T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        // Duplicate edge with same (from, to, kind) must be rejected.
+        let dup = conn.execute(
+            "INSERT INTO persona_relationships (id, from_persona, to_persona, kind, created_at)
+             VALUES ('e2', 'alice', 'bob', 'supervisor_of', '2026-04-26T00:00:00Z')",
+            [],
+        );
+        assert!(dup.is_err(), "UNIQUE(from_persona, to_persona, kind) must reject duplicate edge");
+
+        // Different `kind` between the same pair is allowed.
+        conn.execute(
+            "INSERT INTO persona_relationships (id, from_persona, to_persona, kind, created_at)
+             VALUES ('e3', 'alice', 'bob', 'peer_with', '2026-04-26T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn persona_relationships_cascade_delete_on_persona_drop() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_memory_migrations(&mut conn).unwrap();
+        // Cascade requires foreign_keys ON.
+        conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
+
+        for id in ["alice", "bob"] {
+            conn.execute(
+                "INSERT INTO agents (id, name, model_provider, model_name, system_prompt, config, enabled_tools, status, created_at, updated_at)
+                 VALUES (?, ?, 'anthropic', 'claude-sonnet-4-6', 'sys', '{}', '[]', 'active', '2026-04-26T00:00:00Z', '2026-04-26T00:00:00Z')",
+                rusqlite::params![id, id],
+            ).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO persona_relationships (id, from_persona, to_persona, kind, created_at)
+             VALUES ('e1', 'alice', 'bob', 'supervisor_of', '2026-04-26T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO persona_groups (id, name, created_at) VALUES ('g1', 'core-team', '2026-04-26T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO persona_group_members (group_id, persona_id, joined_at)
+             VALUES ('g1', 'alice', '2026-04-26T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        conn.execute("DELETE FROM agents WHERE id = 'alice'", []).unwrap();
+
+        let edge_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM persona_relationships WHERE from_persona = 'alice' OR to_persona = 'alice'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(edge_count, 0, "relationship edges should cascade-delete with persona");
+
+        let mem_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM persona_group_members WHERE persona_id = 'alice'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(mem_count, 0, "group memberships should cascade-delete with persona");
+    }
+
+    #[test]
+    fn persona_groups_unique_per_project_scope() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_memory_migrations(&mut conn).unwrap();
+
+        // Same name in different projects is allowed.
+        conn.execute(
+            "INSERT INTO persona_groups (id, name, project_id, created_at)
+             VALUES ('g1', 'reviewers', 'proj-a', '2026-04-26T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO persona_groups (id, name, project_id, created_at)
+             VALUES ('g2', 'reviewers', 'proj-b', '2026-04-26T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        // Same name + same project is rejected.
+        let dup = conn.execute(
+            "INSERT INTO persona_groups (id, name, project_id, created_at)
+             VALUES ('g3', 'reviewers', 'proj-a', '2026-04-26T00:00:00Z')",
+            [],
+        );
+        assert!(
+            dup.is_err(),
+            "UNIQUE(name, project_id) must reject duplicate group within a project"
         );
     }
 

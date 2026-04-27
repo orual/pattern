@@ -142,37 +142,6 @@ impl std::str::FromStr for crate::models::AgentStatus {
 
 impl_text_sql_via_display!(crate::models::AgentStatus);
 
-impl std::fmt::Display for crate::models::PatternType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::RoundRobin => write!(f, "round_robin"),
-            Self::Dynamic => write!(f, "dynamic"),
-            Self::Pipeline => write!(f, "pipeline"),
-            Self::Supervisor => write!(f, "supervisor"),
-            Self::Voting => write!(f, "voting"),
-            Self::Sleeptime => write!(f, "sleeptime"),
-        }
-    }
-}
-
-impl std::str::FromStr for crate::models::PatternType {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "round_robin" => Ok(Self::RoundRobin),
-            "dynamic" => Ok(Self::Dynamic),
-            "pipeline" => Ok(Self::Pipeline),
-            "supervisor" => Ok(Self::Supervisor),
-            "voting" => Ok(Self::Voting),
-            "sleeptime" => Ok(Self::Sleeptime),
-            _ => Err(format!("unknown pattern type '{s}'")),
-        }
-    }
-}
-
-impl_text_sql_via_display!(crate::models::PatternType);
-
 // --- Event types ---
 impl std::fmt::Display for crate::models::OccurrenceStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -400,13 +369,6 @@ mod tests {
         round_trip(BatchType::AgentToAgent, "agent_to_agent");
         round_trip(BatchType::SystemTrigger, "system_trigger");
         round_trip(BatchType::Continuation, "continuation");
-    }
-
-    #[test]
-    fn pattern_type_round_trip() {
-        round_trip(PatternType::RoundRobin, "round_robin");
-        round_trip(PatternType::Dynamic, "dynamic");
-        round_trip(PatternType::Sleeptime, "sleeptime");
     }
 
     #[test]

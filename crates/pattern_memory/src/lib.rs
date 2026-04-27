@@ -18,8 +18,6 @@ pub mod backup;
 pub mod cache;
 pub mod config;
 pub mod db_bridge;
-#[cfg(feature = "export")]
-pub mod export;
 pub mod fs;
 pub mod jj;
 pub mod loro_sync;

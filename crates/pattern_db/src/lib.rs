@@ -50,12 +50,11 @@ pub use search::{
 
 // Re-export key model types for convenience.
 pub use models::{
-    Agent, AgentAtprotoEndpoint, AgentDataSource, AgentGroup, AgentStatus, ArchivalEntry,
-    ArchiveSummary, DataSource, ENDPOINT_TYPE_BLUESKY, EntityImport, Event, EventOccurrence,
-    FilePassage, Folder, FolderAccess, FolderAttachment, FolderFile, FolderPathType, GroupMember,
-    GroupMemberRole, IssueSeverity, MemoryBlock, MemoryBlockCheckpoint, MemoryBlockType,
-    MemoryGate, MemoryOp, MemoryPermission, Message, MessageRole, MessageSummary, MigrationAudit,
-    MigrationIssue, MigrationLog, MigrationStats, ModelRoutingConfig, ModelRoutingRule,
-    OccurrenceStatus, PatternType, RoutingCondition, SharedBlockAttachment, SourceType, Task,
-    UserTaskStatus,
+    Agent, AgentAtprotoEndpoint, AgentDataSource, AgentStatus, ArchivalEntry, ArchiveSummary,
+    DataSource, ENDPOINT_TYPE_BLUESKY, EntityImport, Event, EventOccurrence, FilePassage, Folder,
+    FolderAccess, FolderAttachment, FolderFile, FolderPathType, IssueSeverity, MemoryBlock,
+    MemoryBlockCheckpoint, MemoryBlockType, MemoryGate, MemoryOp, MemoryPermission, Message,
+    MessageRole, MessageSummary, MigrationAudit, MigrationIssue, MigrationLog, MigrationStats,
+    ModelRoutingConfig, ModelRoutingRule, OccurrenceStatus, RoutingCondition,
+    SharedBlockAttachment, SourceType, Task, UserTaskStatus,
 };

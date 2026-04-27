@@ -5,14 +5,18 @@
 //! All pre-v3 variants that do not belong to a sub-system (Runtime, Provider,
 //! Memory) are kept here: `AgentInitFailed`, `AgentProcessing`, `ToolNotFound`,
 //! `ToolExecutionFailed`, `InvalidToolParameters`, `SerializationError`,
-//! `ConfigurationError`, `CoordinationFailed`, `AgentGroupError`,
-//! `DataSourceError`, `DagCborEncodingError`, `DagCborDecodingError`,
-//! `CarError`, `IoError`, `SqliteError`, `AuthError`, `InvalidFormat`,
-//! `AgentNotFound`, `GroupNotFound`, `NoEndpointConfigured`, `RateLimited`,
+//! `ConfigurationError`, `DataSourceError`, `DagCborEncodingError`,
+//! `DagCborDecodingError`, `CarError`, `IoError`, `SqliteError`, `AuthError`,
+//! `InvalidFormat`, `AgentNotFound`, `NoEndpointConfigured`, `RateLimited`,
 //! `AlreadyStarted`, `ExportError`.
 //!
 //! Sub-system errors are wrapped via `#[from]` into `Runtime`, `Provider`,
 //! and `Memory` variants below.
+//!
+//! Retired in v3-multi-agent Phase 6 (legacy coordination cleanup):
+//! `CoordinationFailed`, `AgentGroupError`, `GroupNotFound`. The
+//! coordination/agent-group framing was pre-v3 and replaced by the
+//! constellation registry + persona relationships.
 
 use compact_str::CompactString;
 use miette::Diagnostic;
@@ -351,59 +355,6 @@ pub enum CoreError {
         cause: ConfigError,
     },
 
-    // ── Coordination ──────────────────────────────────────────────────────────
-    /// A multi-agent coordination pattern failed.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use pattern_core::error::CoreError;
-    ///
-    /// let err = CoreError::CoordinationFailed {
-    ///     group: "support-team".to_string(),
-    ///     pattern: "broadcast".to_string(),
-    ///     participating_agents: vec!["agent-a".to_string()],
-    ///     cause: "timeout".to_string(),
-    /// };
-    /// assert!(err.to_string().contains("coordination failed"));
-    /// ```
-    #[error("agent coordination failed")]
-    #[diagnostic(
-        code(pattern_core::coordination_failed),
-        help("coordination pattern '{pattern}' failed for group '{group}'")
-    )]
-    CoordinationFailed {
-        group: String,
-        pattern: String,
-        participating_agents: Vec<String>,
-        cause: String,
-    },
-
-    /// An operation on an agent group failed.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use pattern_core::error::CoreError;
-    ///
-    /// let err = CoreError::AgentGroupError {
-    ///     group_name: "support-team".to_string(),
-    ///     operation: "broadcast".to_string(),
-    ///     cause: "no members".to_string(),
-    /// };
-    /// assert!(err.to_string().contains("agent group error"));
-    /// ```
-    #[error("agent group error")]
-    #[diagnostic(
-        code(pattern_core::agent_group_error),
-        help("operation failed for agent group '{group_name}'")
-    )]
-    AgentGroupError {
-        group_name: String,
-        operation: String,
-        cause: String,
-    },
-
     // ── Data source ───────────────────────────────────────────────────────────
     /// A data source operation failed.
     ///
@@ -572,23 +523,6 @@ pub enum CoreError {
         help("no agent exists with identifier: {identifier}")
     )]
     AgentNotFound { identifier: String },
-
-    /// No group was found for the given identifier.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use pattern_core::error::CoreError;
-    ///
-    /// let err = CoreError::GroupNotFound { identifier: "ghost-group".to_string() };
-    /// assert!(err.to_string().contains("ghost-group"));
-    /// ```
-    #[error("group not found: {identifier}")]
-    #[diagnostic(
-        code(pattern_core::group_not_found),
-        help("no group exists with identifier: {identifier}")
-    )]
-    GroupNotFound { identifier: String },
 
     /// No message endpoint is configured for the given target type.
     ///

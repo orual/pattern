@@ -10,8 +10,7 @@
 //! - `CurrentAgent` → always `[caller]`.
 //! - `Agent(target)` → `[target]` if:
 //!   (a) target == caller, OR
-//!   (b) target has shared ≥1 block with caller, OR
-//!   (c) both are in the same agent_group.
+//!   (b) target has shared ≥1 block with caller.
 //!   Otherwise returns a permission-denied error.
 //! - `Agents(ids)` → per-id same check; filters out unpermitted without
 //!   erroring. Returns error only if the resulting set is empty.
@@ -19,11 +18,11 @@
 //!   constellation-wide-search permission (currently: always allowed if
 //!   there are agents). Future phases may add a trust-level gate.
 //!
-//! The ordering of checks is: self → shared-blocks → group-membership.
-//! This is intentional: shared-blocks is a stronger signal of
-//! cooperation than group membership (which may be broad), and
-//! short-circuiting on the cheaper self-check avoids unnecessary DB
-//! queries.
+//! Group membership no longer gates cross-agent search: the v3-multi-agent
+//! `persona_groups` schema (Phase 6) is organisational only, not a
+//! coordination/permission mechanism. Cross-agent permission relies on
+//! shared blocks; future phases may layer relationship-edge checks
+//! (`SupervisorOf` etc.) on top.
 
 use pattern_core::traits::MemoryStore;
 use pattern_core::types::SearchScope;
@@ -94,7 +93,7 @@ pub fn resolve_scope(
             } else {
                 Err(EffectError::Handler(format!(
                     "permission denied: agent {caller:?} cannot search agent {target_str:?} \
-                     (no shared blocks or group membership)"
+                     (no shared blocks)"
                 )))
             }
         }
@@ -144,26 +143,16 @@ pub fn resolve_scope(
 }
 
 /// Check whether `caller` has cross-agent permission to access
-/// `target`'s data. Checks shared-blocks first (stronger signal),
-/// then group membership.
+/// `target`'s data. Currently driven by shared-blocks alone; future
+/// phases may layer relationship-edge checks (`SupervisorOf` etc.).
 fn check_cross_agent_permission(
     caller: &str,
     target: &str,
     store: &dyn MemoryStore,
 ) -> Result<bool, EffectError> {
-    // Check shared blocks.
-    let shared = store
+    store
         .has_shared_blocks_with(caller, target)
-        .map_err(|e| EffectError::Handler(format!("shared-block check failed: {e}")))?;
-    if shared {
-        return Ok(true);
-    }
-
-    // Check group membership.
-    let in_group = store
-        .shares_group_with(caller, target)
-        .map_err(|e| EffectError::Handler(format!("group-membership check failed: {e}")))?;
-    Ok(in_group)
+        .map_err(|e| EffectError::Handler(format!("shared-block check failed: {e}")))
 }
 
 #[cfg(test)]
@@ -178,14 +167,12 @@ mod tests {
     use pattern_core::types::memory_types::*;
     use serde_json::Value as JsonValue;
 
-    /// Test double for scope resolution. Tracks shared-blocks and group
-    /// membership relationships without needing real DB queries.
+    /// Test double for scope resolution. Tracks shared-blocks
+    /// relationships without needing real DB queries.
     #[derive(Debug, Default)]
     struct ScopeTestStore {
         /// (caller, target) pairs where target has shared blocks with caller.
         shared_blocks: Mutex<HashSet<(String, String)>>,
-        /// (a, b) pairs where a and b share a group.
-        shared_groups: Mutex<HashSet<(String, String)>>,
         /// All agent ids in the constellation.
         constellation_agents: Mutex<Vec<String>>,
     }
@@ -202,12 +189,6 @@ mod tests {
                 .insert((caller.to_string(), target.to_string()));
         }
 
-        fn add_group_membership(&self, a: &str, b: &str) {
-            let mut groups = self.shared_groups.lock().unwrap();
-            groups.insert((a.to_string(), b.to_string()));
-            groups.insert((b.to_string(), a.to_string()));
-        }
-
         fn set_constellation_agents(&self, agents: Vec<&str>) {
             *self.constellation_agents.lock().unwrap() =
                 agents.into_iter().map(String::from).collect();
@@ -221,14 +202,6 @@ mod tests {
         fn has_shared_blocks_with(&self, caller: &str, target: &str) -> MemoryResult<bool> {
             Ok(self
                 .shared_blocks
-                .lock()
-                .unwrap()
-                .contains(&(caller.to_string(), target.to_string())))
-        }
-
-        fn shares_group_with(&self, caller: &str, target: &str) -> MemoryResult<bool> {
-            Ok(self
-                .shared_groups
                 .lock()
                 .unwrap()
                 .contains(&(caller.to_string(), target.to_string())))
@@ -395,14 +368,6 @@ mod tests {
     fn resolve_agent_allowed_via_shared_blocks() {
         let store = ScopeTestStore::new();
         store.add_shared_blocks("alice", "bob");
-        let result = resolve_scope(&SearchScope::Agent("bob".into()), "alice", &store).unwrap();
-        assert_eq!(result, vec!["bob"]);
-    }
-
-    #[test]
-    fn resolve_agent_allowed_via_group_membership() {
-        let store = ScopeTestStore::new();
-        store.add_group_membership("alice", "bob");
         let result = resolve_scope(&SearchScope::Agent("bob".into()), "alice", &store).unwrap();
         assert_eq!(result, vec!["bob"]);
     }
