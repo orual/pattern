@@ -495,6 +495,45 @@ mod tests {
         async fn get(&self, id: &PersonaId) -> Result<Option<PersonaRecord>, RegistryError> {
             Ok(self.records.lock().unwrap().get(id).cloned())
         }
+
+        // Phase 6 methods: not exercised by these fronting tests; stub to
+        // BackendUnavailable so the tests fail loudly if they ever call them.
+        async fn find(
+            &self,
+            _project: Option<&std::path::Path>,
+            _kind: Option<crate::spawn::RelationshipKind>,
+        ) -> Result<Vec<PersonaRecord>, RegistryError> {
+            Err(RegistryError::BackendUnavailable)
+        }
+        async fn register(&self, _record: PersonaRecord) -> Result<(), RegistryError> {
+            Err(RegistryError::BackendUnavailable)
+        }
+        async fn set_status(
+            &self,
+            _id: &PersonaId,
+            _status: PersonaStatus,
+        ) -> Result<(), RegistryError> {
+            Err(RegistryError::BackendUnavailable)
+        }
+        async fn add_relationship(
+            &self,
+            _edge: crate::constellation::RelationshipSpec,
+        ) -> Result<(), RegistryError> {
+            Err(RegistryError::BackendUnavailable)
+        }
+        async fn groups(
+            &self,
+            _scope: RegistryScope,
+        ) -> Result<Vec<crate::constellation::PersonaGroup>, RegistryError> {
+            Err(RegistryError::BackendUnavailable)
+        }
+        async fn create_group(
+            &self,
+            _name: String,
+            _project_id: Option<String>,
+        ) -> Result<crate::constellation::PersonaGroup, RegistryError> {
+            Err(RegistryError::BackendUnavailable)
+        }
     }
 
     fn active_record(id: &str) -> PersonaRecord {

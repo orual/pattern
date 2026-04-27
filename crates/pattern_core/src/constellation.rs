@@ -57,6 +57,28 @@ impl PersonaRecord {
             group_memberships: Vec::new(),
         }
     }
+
+    /// Construct a fully-populated `PersonaRecord`. Used by registry backends
+    /// that load all fields from storage in one pass.
+    pub fn from_parts(
+        id: PersonaId,
+        name: String,
+        status: PersonaStatus,
+        config_path: Option<std::path::PathBuf>,
+        project_attachments: Vec<std::path::PathBuf>,
+        relationships: Vec<RelationshipEdge>,
+        group_memberships: Vec<GroupId>,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            status,
+            config_path,
+            project_attachments,
+            relationships,
+            group_memberships,
+        }
+    }
 }
 
 // ── PersonaStatus ────────────────────────────────────────────────────────────
@@ -141,11 +163,21 @@ impl PersonaGroup {
         name: impl Into<String>,
         project_id: Option<String>,
     ) -> Self {
+        Self::with_members(id, name, project_id, Vec::new())
+    }
+
+    /// Construct a `PersonaGroup` with a pre-populated member list.
+    pub fn with_members(
+        id: impl Into<GroupId>,
+        name: impl Into<String>,
+        project_id: Option<String>,
+        members: Vec<PersonaId>,
+    ) -> Self {
         Self {
             id: id.into(),
             name: name.into(),
             project_id,
-            members: Vec::new(),
+            members,
         }
     }
 }

@@ -14,6 +14,7 @@ smol_str = { workspace = true }
 
 # Async runtime
 tokio = { workspace = true }
+async-trait = { workspace = true }
 
 # Database - rusqlite with bundled SQLite for consistent builds
 rusqlite = { version = "0.39", features = ["bundled-full", "load_extension", "serde_json"] }

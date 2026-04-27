@@ -36,6 +36,9 @@ pub use json_wrapper::Json;
 // Re-export the unified database statistics type.
 pub use queries::stats::DbStats;
 
+// Re-export the rusqlite-backed ConstellationRegistry implementation.
+pub use queries::constellation::ConstellationRegistryDb;
+
 // Re-export vector module types.
 pub use vector::{ContentType, DEFAULT_EMBEDDING_DIMENSIONS, EmbeddingStats, VectorSearchResult};
 

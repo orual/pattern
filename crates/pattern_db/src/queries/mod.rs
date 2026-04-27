@@ -5,6 +5,7 @@
 
 mod agent;
 mod atproto_endpoints;
+pub mod constellation;
 mod event;
 mod folder;
 pub mod fronting;
@@ -21,6 +22,7 @@ pub use agent::*;
 pub use atproto_endpoints::*;
 pub use event::*;
 pub use folder::*;
+pub use constellation::ConstellationRegistryDb;
 pub use fronting::{clear_fronting_set, load_fronting_set, save_fronting_set};
 pub use memory::*;
 pub use message::*;
