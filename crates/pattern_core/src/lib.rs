@@ -126,8 +126,8 @@ pub use types::provider::{
 // ── Constellation + fronting types ───────────────────────────────────────────
 
 pub use constellation::{
-    ConstellationRegistry, EdgeDirection, PersonaRecord, PersonaStatus, RegistryError,
-    RegistryScope, RelationshipEdge,
+    ConstellationRegistry, EdgeDirection, EmptyConstellationRegistry, PersonaGroup, PersonaRecord,
+    PersonaStatus, RegistryError, RegistryScope, RelationshipEdge, RelationshipSpec,
 };
 
 pub use fronting::{
