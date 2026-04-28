@@ -603,11 +603,22 @@ impl ForkHandle {
     /// For a `Lightweight` fork this is a pure in-memory teardown — the
     /// child cache Arc is dropped at end of scope.
     ///
-    /// For a `Persistent` fork this also runs a best-effort cleanup of the
-    /// jj workspace and bookmark via `workspace_forget` + `bookmark_delete`.
-    /// Both steps are attempted regardless of individual failures; any
-    /// errors are collected into `ForkError::DiscardCleanup` so the caller
-    /// can diagnose partial-cleanup state.
+    /// For a `Persistent` fork this is the path that releases jj's tracking:
+    /// `bookmark_delete` first, then `workspace_forget`. Cleanup runs in that
+    /// order so the cheap-to-orphan side fails first; both steps are attempted
+    /// regardless of individual failures and any errors are collected into
+    /// [`ForkError::DiscardCleanup`] so the caller can diagnose partial cleanup.
+    ///
+    /// **The workspace directory on disk is NOT deleted** — `jj workspace
+    /// forget` removes the workspace from jj's metadata but leaves the
+    /// underlying files in place. This is deliberate: if an agent discards a
+    /// fork in error, the work is recoverable by re-importing the directory.
+    /// If a partner wants the disk space back, they can `rm -rf` the path
+    /// manually, or the agent can request shell/file permission and do it
+    /// itself.
+    ///
+    /// Bare-drop / panic / session shutdown also preserve persistent state —
+    /// see [`Drop`] for the durability contract.
     ///
     /// Consumes `self` so it cannot be called twice (compile-time guarantee).
     /// `ForkError::AlreadyResolved` is reserved for a hypothetical future
@@ -665,12 +676,19 @@ impl ForkHandle {
                         ),
                     })?;
 
+                // Order: delete the bookmark first, then forget the
+                // workspace. The bookmark is the cheap-to-orphan side
+                // (a name in jj's bookmark list); the workspace is the
+                // heavy state (on-disk files + a working-copy commit).
+                // If bookmark_delete fails, we still want to attempt
+                // workspace_forget so the heavier on-disk artifact is
+                // reclaimed; both errors are collected.
                 let mut errs: Vec<String> = Vec::new();
-                if let Err(e) = adapter.workspace_forget(&repo_root, workspace_name) {
-                    errs.push(format!("workspace_forget({}): {}", workspace_name, e));
-                }
                 if let Err(e) = adapter.bookmark_delete(&repo_root, &bookmark_name) {
                     errs.push(format!("bookmark_delete({}): {}", bookmark_name, e));
+                }
+                if let Err(e) = adapter.workspace_forget(&repo_root, workspace_name) {
+                    errs.push(format!("workspace_forget({}): {}", workspace_name, e));
                 }
 
                 if errs.is_empty() {
@@ -680,10 +698,10 @@ impl ForkHandle {
                 }
             }
             ForkIsolationState::Resolved => {
-                // `mem::replace` already set this sentinel; `Drop` will see
-                // `Resolved` and skip. This arm is unreachable in correct
-                // usage but must be exhaustive.
-                unreachable!("discard called on an already-resolved ForkHandle")
+                // Idempotent: `discard` consumes `self` so the linear-flow
+                // double-call is impossible, but a future refactor that
+                // adopts `&mut self` would land here. Treat as a no-op.
+                Ok(())
             }
         }
     }
@@ -858,16 +876,29 @@ impl Drop for ForkHandle {
     /// `self.cancel_watcher.take().map(|h| h.abort())` before returning, so
     /// when `Drop` runs after them the field is already `None` and this abort
     /// call is a cheap no-op.
+    ///
+    /// # Durability of `Persistent` forks
+    ///
+    /// Bare-drop deliberately does NOT run `workspace_forget` /
+    /// `bookmark_delete`. `Persistent` forks are durable on-disk state
+    /// owned by the user — the workspace + bookmark must survive
+    /// session restart, panic, scope exit, or any other implicit drop
+    /// path. They are released from jj's tracking ONLY when the user
+    /// explicitly calls [`ForkHandle::discard`] (drop jj tracking;
+    /// on-disk files stay) or
+    /// [`ForkHandle::merge_back_persistent`] (fold work into parent).
+    /// Outstanding persistent forks at next startup are re-discoverable
+    /// via the jj workspace list. Reclaiming the workspace directory's
+    /// disk space is a manual `rm -rf` step (or an agent shell op
+    /// behind permission), never automatic.
+    ///
+    /// Lightweight forks have no on-disk footprint, so bare-drop just
+    /// releases the in-memory `Arc<MemoryCache>` and the cancel
+    /// state — no cleanup needed.
     fn drop(&mut self) {
         if let Some(handle) = self.cancel_watcher.take() {
             handle.abort();
         }
-        // isolation_state is NOT cleaned up here beyond its own Drop —
-        // for Persistent forks, the destructor intentionally does NOT
-        // run `workspace_forget` / `bookmark_delete` (that requires async
-        // I/O and a live jj adapter). Callers are expected to call `discard`
-        // explicitly for Persistent forks; bare-drop silently leaks the
-        // workspace, which is acceptable for the error/panic path.
     }
 }
 

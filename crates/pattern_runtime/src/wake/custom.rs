@@ -1,19 +1,35 @@
 //! Custom Haskell wake-condition evaluator (Phase 7 Task 6).
 //!
 //! Closes the Phase 4 Task 9 deferral: when a user registers a
-//! `WakeCondition::Custom { id, program }`, this module spawns a tokio
+//! `WakeCondition::Custom { id, program, period }`, this module spawns a tokio
 //! task that triggers the user's Haskell program periodically (or on
 //! block-change) and pokes the session mailbox when the result is
 //! `True`.
 //!
 //! # Security boundary
 //!
-//! The user's program runs against a **read-only restricted bundle**
-//! built from `CapabilitySet::all().with_classes([EffectClass::Observe])`.
-//! This means `Memory.Put`, `Shell.Execute`, `Message.Send`, `Spawn.*`,
-//! etc. are absent from the compiled prelude — the program cannot even
-//! express those effects. The `filtered_effect_decls` + `build_for`
-//! machinery (Phase 7 T0) enforces this at Tidepool compile time.
+//! The user's program runs against a **read-only restricted bundle** built
+//! from [`CapabilitySet::wake_evaluator_read_only()`]. This applies two
+//! independent restrictions:
+//!
+//! 1. **Category filter**: entire SDK modules are dropped (`Spawn`, `Shell`,
+//!    `Message`, `Mcp`, `Wake`, `Fronting`, `Constellation`, `File`, `Port`).
+//!    This is the load-bearing layer for `Skip`-classified constructors
+//!    (e.g. `Spawn.Ephemeral`, `Shell.Execute`, `Message.Send`,
+//!    `Wake.Register`) — they have no runtime `check_effect_class` gate, so
+//!    the only protection is that their entire module is absent from the
+//!    capability set and therefore absent from the Haskell prelude.
+//!
+//! 2. **Class filter**: surviving modules are further restricted to
+//!    `Observe`-class constructors. This removes mutating constructors from
+//!    kept modules (e.g. `Memory.Put`, `Tasks.Create`).
+//!
+//! Together: the prelude contains `(kept categories) ∩ (Observe class)`.
+//! The runtime `check_effect_class` gate provides defense-in-depth for
+//! `Enforce`-classified constructors in the surviving modules; it does NOT
+//! protect against `Skip`-classified constructors — the category filter
+//! is the only guard there. See `CapabilitySet::wake_evaluator_read_only()`
+//! for the complete kept/dropped category list and rationale.
 //!
 //! # Evaluation model
 //!
@@ -40,8 +56,8 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use pattern_core::CapabilitySet;
 use pattern_core::types::origin::SystemReason;
-use pattern_core::{CapabilitySet, EffectClass};
 
 use crate::mailbox::MailboxInput;
 use crate::sdk::bundle::filtered_effect_decls;
@@ -107,10 +123,17 @@ impl CustomEvaluator {
         tokio_handle: Handle,
         session_ctx: Arc<SessionContext>,
     ) -> Self {
-        // Build the read-only preamble once. The capability set restricts
-        // the effect row to Observe-only constructors — Memory.Put, Shell.*,
-        // Message.Send, Spawn.*, etc. are all absent.
-        let caps = CapabilitySet::all().with_classes([EffectClass::Observe]);
+        // Build the read-only preamble once using the dedicated wake-eval
+        // capability set. This drops entire SDK modules (Spawn, Shell,
+        // Message, Wake, Mcp, Fronting, Constellation, File, Port) so that
+        // even Skip-classified constructors — which bypass the runtime
+        // check_effect_class gate — are absent from the compiled prelude.
+        // The Observe-class filter then removes mutating constructors from
+        // the surviving modules (Memory.Put, Tasks.Create, etc.).
+        //
+        // See CapabilitySet::wake_evaluator_read_only() for the full
+        // rationale and the explicit list of kept/dropped categories.
+        let caps = CapabilitySet::wake_evaluator_read_only();
         let decls = filtered_effect_decls(&caps);
         let preamble_str = preamble::build(&decls);
 
@@ -163,7 +186,9 @@ impl CustomEvaluator {
                 ));
             }
             if tasks.contains_key(&id) {
-                return Err(format!("CustomWakeDuplicate: condition {id:?} already registered"));
+                return Err(format!(
+                    "CustomWakeDuplicate: condition {id:?} already registered"
+                ));
             }
         }
 
@@ -194,6 +219,21 @@ impl CustomEvaluator {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    // FUTURE WORK (Phase 8+, 2026-04-28): BlockChanged trigger support.
+    //
+    // The v3-multi-agent design plan calls for two trigger sources for custom
+    // wake conditions: `Interval(period)` and `BlockChanged(label)`. This
+    // implementation ships only the Interval path. A `register_block_changed`
+    // method would be the public API; the evaluator task would subscribe via
+    // `pattern_memory::subscriber::BlockChangeNotifier` and fire on matching
+    // label changes instead of on a timer.
+    //
+    // The BlockChanged path is deferred to Phase 8 to keep T6 focused on the
+    // Interval path and because the notifier fan-out plumbing (accessible via
+    // `WakeRegistryExtras::block_change_notifier`) needs to be threaded through
+    // `CustomEvaluator::new` first. The `WakeRegistry` already wires it for the
+    // built-in `BlockChangedCondition`; custom evaluators need the same handle.
 
     fn spawn_interval_task(
         &self,
@@ -231,13 +271,7 @@ impl CustomEvaluator {
 
                 let result = tokio::time::timeout(
                     EVAL_TIMEOUT,
-                    run_user_program(
-                        &program,
-                        &preamble,
-                        &include_paths,
-                        &ctx,
-                        &restricted_caps,
-                    ),
+                    run_user_program(&program, &preamble, &include_paths, &ctx, &restricted_caps),
                 )
                 .await;
 
@@ -339,7 +373,8 @@ async fn run_user_program(
         })
         .map_err(|e| format!("failed to spawn eval thread: {e}"))?;
 
-    rx.await.map_err(|_| "eval thread dropped reply channel".to_string())?
+    rx.await
+        .map_err(|_| "eval thread dropped reply channel".to_string())?
 }
 
 /// Build a Haskell source that evaluates a condition program to a Bool.
@@ -425,8 +460,7 @@ fn eval_condition(
         crate::sdk::handlers::ConstellationHandler,
     ];
 
-    let include_refs: Vec<&std::path::Path> =
-        include_paths.iter().map(|p| p.as_path()).collect();
+    let include_refs: Vec<&std::path::Path> = include_paths.iter().map(|p| p.as_path()).collect();
 
     match tidepool_runtime::compile_and_run(
         source,

@@ -308,6 +308,17 @@ pub struct PromoteDraftRequest {
 pub struct PromoteDraftResponse {
     pub success: bool,
     pub error: Option<String>,
+    /// Best-effort warning surfaced to the client when the promote
+    /// itself succeeded but a non-fatal sub-step failed. Currently the
+    /// only producer is seed-cache migration: if the draft carried a
+    /// seed memory cache and importing it into the mount's MemoryCache
+    /// fails (e.g. version mismatch on the on-disk Loro snapshots),
+    /// the persona is still promoted but starts with empty memory.
+    /// The TUI should surface this so partners notice memory loss
+    /// instead of discovering it later via missing context.
+    /// `None` when no warning applies.
+    #[serde(default)]
+    pub warning: Option<String>,
 }
 
 // ── Phase 6 T7: constellation registry RPCs ──────────────────────────────────

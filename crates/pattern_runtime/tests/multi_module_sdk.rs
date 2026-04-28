@@ -172,7 +172,9 @@ agent = do
 #[test]
 fn delegation_round_robin_module_compiles() {
     if pattern_runtime::preflight::check().is_err() {
-        eprintln!("delegation_round_robin_module_compiles: skipping (tidepool-extract not available)");
+        eprintln!(
+            "delegation_round_robin_module_compiles: skipping (tidepool-extract not available)"
+        );
         return;
     }
 
@@ -234,6 +236,149 @@ agent = do
     match &value {
         tidepool_eval::value::Value::Con(_, fields) if fields.is_empty() => {
             eprintln!("delegation_round_robin_module_compiles: got unit () as expected");
+        }
+        other => panic!("expected unit from agent, got: {other:?}"),
+    }
+}
+
+/// Test 4 (Important 1): `Pattern.Delegation.Pipeline` module compiles and
+/// exports `pipeline` with the correct polymorphic type.
+///
+/// The `_checkPipelineType` binding verifies the type signature at GHC level
+/// without calling the function. Same structure as `delegation_round_robin_module_compiles`.
+///
+/// Skips gracefully when `tidepool-extract` is not on PATH.
+#[test]
+fn delegation_pipeline_module_compiles() {
+    if pattern_runtime::preflight::check().is_err() {
+        eprintln!("delegation_pipeline_module_compiles: skipping (tidepool-extract not available)");
+        return;
+    }
+
+    let sdk_dir = pattern_runtime::SdkLocation::default()
+        .resolve()
+        .expect("SDK dir should exist");
+
+    let source = r#"{-# LANGUAGE DataKinds, TypeOperators, OverloadedStrings, FlexibleContexts #-}
+module Agent where
+
+import Control.Monad.Freer (Eff, Member)
+import qualified Pattern.Time as Time
+import qualified Pattern.Log as Log
+import qualified Pattern.Spawn as Spawn
+import qualified Pattern.Delegation.Pipeline as Pipeline
+
+-- Type-only alias: GHC verifies that Pipeline.pipeline has the expected signature.
+_checkPipelineType
+    :: Member Spawn.Spawn effs
+    => a
+    -> [(Spawn.EphemeralConfig, Spawn.SpawnResult -> a)]
+    -> (a -> Spawn.EphemeralConfig -> Spawn.EphemeralConfig)
+    -> Eff effs a
+_checkPipelineType = Pipeline.pipeline
+
+agent :: Eff '[Time.Time, Log.Log] ()
+agent = do
+  _t <- Time.now
+  Log.info "delegation/pipeline module import verified"
+"#;
+
+    let mut bundle: TimePlusLogBundle = frunk::hlist![TimeHandler, LogHandler::default()];
+
+    let result = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let include_path = sdk_dir;
+            tidepool_runtime::compile_and_run(
+                source,
+                "agent",
+                &[include_path.as_path()],
+                &mut bundle,
+                &(),
+            )
+        })
+        .expect("thread spawn should succeed")
+        .join()
+        .expect("thread should not panic");
+
+    let eval_result = result
+        .expect("compile_and_run should succeed: Pattern.Delegation.Pipeline must be importable");
+    let value = eval_result.into_value();
+
+    match &value {
+        tidepool_eval::value::Value::Con(_, fields) if fields.is_empty() => {
+            eprintln!("delegation_pipeline_module_compiles: got unit () as expected");
+        }
+        other => panic!("expected unit from agent, got: {other:?}"),
+    }
+}
+
+/// Test 5 (Important 1): `Pattern.Delegation.FanOut` module compiles and
+/// exports `fanOut` with the correct polymorphic type.
+///
+/// The `_checkFanOutType` binding verifies the type signature at GHC level.
+///
+/// Skips gracefully when `tidepool-extract` is not on PATH.
+#[test]
+fn delegation_fan_out_module_compiles() {
+    if pattern_runtime::preflight::check().is_err() {
+        eprintln!("delegation_fan_out_module_compiles: skipping (tidepool-extract not available)");
+        return;
+    }
+
+    let sdk_dir = pattern_runtime::SdkLocation::default()
+        .resolve()
+        .expect("SDK dir should exist");
+
+    let source = r#"{-# LANGUAGE DataKinds, TypeOperators, OverloadedStrings, FlexibleContexts #-}
+module Agent where
+
+import Control.Monad.Freer (Eff, Member)
+import qualified Pattern.Time as Time
+import qualified Pattern.Log as Log
+import qualified Pattern.Spawn as Spawn
+import qualified Pattern.Delegation.FanOut as FO
+
+-- Type-only alias: GHC verifies that FO.fanOut has the expected signature.
+_checkFanOutType
+    :: Member Spawn.Spawn effs
+    => [Spawn.EphemeralConfig]
+    -> task
+    -> (task -> Spawn.EphemeralConfig -> Spawn.EphemeralConfig)
+    -> Eff effs [Spawn.SpawnAwaitOutcome]
+_checkFanOutType = FO.fanOut
+
+agent :: Eff '[Time.Time, Log.Log] ()
+agent = do
+  _t <- Time.now
+  Log.info "delegation/fan-out module import verified"
+"#;
+
+    let mut bundle: TimePlusLogBundle = frunk::hlist![TimeHandler, LogHandler::default()];
+
+    let result = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let include_path = sdk_dir;
+            tidepool_runtime::compile_and_run(
+                source,
+                "agent",
+                &[include_path.as_path()],
+                &mut bundle,
+                &(),
+            )
+        })
+        .expect("thread spawn should succeed")
+        .join()
+        .expect("thread should not panic");
+
+    let eval_result = result
+        .expect("compile_and_run should succeed: Pattern.Delegation.FanOut must be importable");
+    let value = eval_result.into_value();
+
+    match &value {
+        tidepool_eval::value::Value::Con(_, fields) if fields.is_empty() => {
+            eprintln!("delegation_fan_out_module_compiles: got unit () as expected");
         }
         other => panic!("expected unit from agent, got: {other:?}"),
     }

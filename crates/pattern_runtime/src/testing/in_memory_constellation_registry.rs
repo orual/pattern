@@ -215,7 +215,7 @@ impl ConstellationRegistry for InMemoryConstellationRegistry {
         if collision {
             return Err(RegistryError::DuplicateGroup { name, project_id });
         }
-        let id: GroupId = new_id().into();
+        let id = new_id();
         let group = PersonaGroup::new(id.clone(), name, project_id);
         self.groups.insert(id, group.clone());
         Ok(group)

@@ -29,6 +29,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use smol_str::SmolStr;
 
 use pattern_core::ConstellationRegistry;
@@ -64,11 +65,17 @@ pub enum RegistryError {
 ///
 /// Phase 6 will supply a `pattern_db`-backed implementation that queries the
 /// persona registry table.
+#[async_trait]
 pub trait SiblingPersonaResolver: Send + Sync + std::fmt::Debug {
     /// Resolve `id` to its KDL file path.
     ///
+    /// Async because production resolvers query the
+    /// [`ConstellationRegistry`] (itself async). Stub/legacy resolvers
+    /// that only need a sync lookup just write `async fn` with no
+    /// awaits inside.
+    ///
     /// Returns [`RegistryError::PersonaNotFound`] if the id is unknown.
-    fn resolve_path(&self, id: &PersonaId) -> Result<PathBuf, RegistryError>;
+    async fn resolve_path(&self, id: &PersonaId) -> Result<PathBuf, RegistryError>;
 }
 
 // ── Production default ────────────────────────────────────────────────────────
@@ -82,9 +89,54 @@ pub trait SiblingPersonaResolver: Send + Sync + std::fmt::Debug {
 #[derive(Debug, Default)]
 pub struct UnconfiguredSiblingResolver;
 
+#[async_trait]
 impl SiblingPersonaResolver for UnconfiguredSiblingResolver {
-    fn resolve_path(&self, id: &PersonaId) -> Result<PathBuf, RegistryError> {
+    async fn resolve_path(&self, id: &PersonaId) -> Result<PathBuf, RegistryError> {
         Err(RegistryError::PersonaNotFound(id.clone()))
+    }
+}
+
+// ── ConstellationRegistry-backed resolver ────────────────────────────────────
+
+/// Production sibling resolver backed by a [`ConstellationRegistry`].
+///
+/// Resolves [`PersonaId`] → KDL path by querying the registry and
+/// reading [`PersonaRecord::config_path`].
+///
+/// Returns [`RegistryError::PersonaNotFound`] when:
+/// - the registry has no record for the given id, OR
+/// - the record's `config_path` is `None` (typically a draft persona
+///   awaiting promotion).
+#[derive(Debug)]
+pub struct ConstellationSiblingResolver {
+    registry: Arc<dyn ConstellationRegistry>,
+}
+
+impl ConstellationSiblingResolver {
+    /// Build a resolver backed by `registry`.
+    pub fn new(registry: Arc<dyn ConstellationRegistry>) -> Self {
+        Self { registry }
+    }
+}
+
+#[async_trait]
+impl SiblingPersonaResolver for ConstellationSiblingResolver {
+    async fn resolve_path(&self, id: &PersonaId) -> Result<PathBuf, RegistryError> {
+        match self.registry.get(id).await {
+            Ok(Some(record)) => record
+                .config_path
+                .ok_or_else(|| RegistryError::PersonaNotFound(id.clone())),
+            Ok(None) => Err(RegistryError::PersonaNotFound(id.clone())),
+            Err(e) => {
+                tracing::warn!(
+                    persona_id = %id,
+                    error = %e,
+                    source = "runtime.spawn.sibling.resolver",
+                    "ConstellationRegistry lookup failed; reporting as PersonaNotFound"
+                );
+                Err(RegistryError::PersonaNotFound(id.clone()))
+            }
+        }
     }
 }
 
@@ -116,8 +168,9 @@ impl StubSiblingResolver {
     }
 }
 
+#[async_trait]
 impl SiblingPersonaResolver for StubSiblingResolver {
-    fn resolve_path(&self, id: &PersonaId) -> Result<PathBuf, RegistryError> {
+    async fn resolve_path(&self, id: &PersonaId) -> Result<PathBuf, RegistryError> {
         self.entries
             .lock()
             .get(id)
@@ -232,7 +285,7 @@ pub async fn spawn_sibling_existing(
     resolver: Arc<dyn SiblingPersonaResolver>,
 ) -> Result<SiblingExistingOutcome, SpawnError> {
     // Step 1: resolve path via the resolver.
-    let path = resolver.resolve_path(persona_id).map_err(|e| match e {
+    let path = resolver.resolve_path(persona_id).await.map_err(|e| match e {
         RegistryError::PersonaNotFound(id) => SpawnError::PersonaNotFound { id },
     })?;
 

@@ -240,9 +240,22 @@ impl AgentRegistry {
     ///
     /// The status check and the send/queue are performed under the same
     /// DashMap shard read lock via the `Ref` returned by `get()`, closing
-    /// the TOCTOU race where a concurrent Draft→Active promotion could
-    /// cause a message to be silently lost (two-map design: status seen as
-    /// Draft, promotion completes, queue removed, then push finds no queue).
+    /// two distinct TOCTOU races:
+    ///
+    /// - **Draft→Active promotion** (the original concern of the cycle-3
+    ///   single-map fix): two-map design saw status as Draft, then the
+    ///   promotion completed and removed the queue, then the push found
+    ///   no queue and silently dropped. With the consolidated map and
+    ///   the held read guard, the promoter's write lock blocks until we
+    ///   release the read guard.
+    ///
+    /// - **Active→Active swap**: between the status read and the channel
+    ///   send, a concurrent `register_active` could replace the slot
+    ///   with a new session's `tx`. A previously-cloned `tx_old` would
+    ///   still be valid (the old session retains the receiver), so the
+    ///   message would land in the old session's mailbox — silent
+    ///   misroute. Holding the read guard across `tx.send` blocks the
+    ///   swap until the in-flight send completes.
     ///
     /// # Outcomes
     ///
@@ -258,11 +271,22 @@ impl AgentRegistry {
 
         match &*slot {
             AgentSlot::Active { tx } => {
-                // Clone the sender before dropping the entry guard so we do
-                // not hold the shard lock across the channel send (which is
-                // a cheap in-memory operation but conceptually unbounded).
-                let tx = tx.clone();
-                drop(slot);
+                // Hold the shard read guard across the channel send. This
+                // closes the Active→Active race: a concurrent
+                // `register_active` cannot acquire the shard write lock
+                // while we hold the read guard, so the slot cannot be
+                // swapped to a new session's `tx` between us reading the
+                // sender reference and pushing the message. Without this,
+                // a cloned `tx_old` would still be valid (the old session
+                // holds the receiver) and the message would land in the
+                // old session's mailbox — silent misroute.
+                //
+                // Safe under the same guarantees that justify holding the
+                // guard in the Draft branch: `mpsc::unbounded_channel::send`
+                // is strictly non-blocking (push onto an internally-locked
+                // deque), so the read guard is held for microseconds. Reader
+                // contention with other senders on the same shard is fine —
+                // shard read locks are reader-reader compatible.
                 tx.send(msg).map_err(|_| RouterError::MailboxClosed)
             }
             AgentSlot::Draft { queue } => {
@@ -626,5 +650,96 @@ mod tests {
         let received = rx.recv().await.unwrap();
         let text = received.msg.chat_message.content.first_text().unwrap();
         assert_eq!(text, "route-active");
+    }
+
+    /// I-4 regression: Active→Active swap concurrent with sends must
+    /// not silently misroute messages to the old session's mailbox.
+    ///
+    /// Senders racing with `register_active` either land their message
+    /// in the OLD receiver (if their `route_or_queue` ran fully before
+    /// the swap won the shard write lock) or in the NEW receiver (if
+    /// the swap completed first). With the prior implementation —
+    /// which dropped the slot guard before `tx.send` — a sender could
+    /// observe `tx_old`, the swap could complete, then `tx_old.send`
+    /// would still succeed and deliver to the old mailbox even though
+    /// the registry now points at the new session. The fix holds the
+    /// shard read guard across the send so the swap is serialized
+    /// after the send.
+    ///
+    /// Probe: spawn many concurrent senders, perform a swap once
+    /// midway, and assert that **no message is lost** — every send
+    /// lands in either old or new mailbox, none is dropped.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn route_or_queue_active_swap_does_not_lose_messages() {
+        const SENDS: usize = 4_096;
+
+        let reg = Arc::new(AgentRegistry::new());
+        let (tx_old, mut rx_old) = make_tx();
+        let (tx_new, mut rx_new) = make_tx();
+
+        // Initial registration: senders see tx_old.
+        reg.register("active-swap".into(), tx_old, SessionStatus::Active);
+
+        // Spawn N senders that all push concurrently.
+        let mut send_tasks = Vec::with_capacity(SENDS);
+        for i in 0..SENDS {
+            let reg = reg.clone();
+            send_tasks.push(tokio::spawn(async move {
+                let input = MailboxInput {
+                    from: test_origin(),
+                    msg: test_message(&format!("send-{i}")),
+                };
+                // route_or_queue is sync; small async wrapper just to
+                // give the scheduler interleaving opportunities.
+                tokio::task::yield_now().await;
+                reg.route_or_queue(&"active-swap".into(), input)
+            }));
+        }
+
+        // Mid-flight, swap to tx_new.
+        let swap_task = {
+            let reg = reg.clone();
+            tokio::spawn(async move {
+                // Yield enough times to let a chunk of sends fly first,
+                // but still race the rest.
+                for _ in 0..8 {
+                    tokio::task::yield_now().await;
+                }
+                reg.register_active("active-swap".into(), tx_new);
+            })
+        };
+
+        // Wait for senders + swap.
+        let mut send_ok = 0usize;
+        for t in send_tasks {
+            match t.await.expect("send task should not panic") {
+                Ok(()) => send_ok += 1,
+                Err(e) => panic!("route_or_queue must not return an error here: {e:?}"),
+            }
+        }
+        swap_task.await.expect("swap task should not panic");
+
+        // Drain both receivers and confirm the union covers every send.
+        let mut received_old = 0usize;
+        while rx_old.try_recv().is_ok() {
+            received_old += 1;
+        }
+        let mut received_new = 0usize;
+        while rx_new.try_recv().is_ok() {
+            received_new += 1;
+        }
+
+        let total = received_old + received_new;
+        assert_eq!(
+            total, send_ok,
+            "every successful send must land in exactly one mailbox; \
+             received_old={received_old}, received_new={received_new}, \
+             expected_total={send_ok}"
+        );
+        // Sanity: the swap actually happened (some sends went to new).
+        assert!(
+            received_new > 0,
+            "swap should have happened during the run; rx_new must be non-empty"
+        );
     }
 }

@@ -240,10 +240,13 @@ impl MemoryStore for InMemoryMemoryStore {
                 }
                 Ok(())
             }
-            None => Err(pattern_core::types::memory_types::MemoryError::NotFound {
-                agent_id: agent_id.to_string(),
-                label: label.to_string(),
-            }),
+            None => Err(
+                pattern_core::types::memory_types::MemoryError::WriteToMissingBlock {
+                    agent_id: agent_id.to_string(),
+                    label: label.to_string(),
+                    op: "update_block_metadata",
+                },
+            ),
         }
     }
 

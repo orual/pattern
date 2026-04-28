@@ -460,17 +460,17 @@ fn find_blocking(
     kind: Option<RelationshipKind>,
 ) -> Result<Vec<PersonaRecord>, RegistryError> {
     // Build SQL dynamically. AND together project + kind filters.
-    let mut sql = format!(
+    let mut sql = String::from(
         "SELECT DISTINCT a.id, a.name, a.persona_status, a.config_path, a.project_attachments
-                 FROM agents a"
+                 FROM agents a",
     );
     let mut where_clauses: Vec<String> = Vec::new();
     let mut bound: Vec<String> = Vec::new();
 
-    if kind.is_some() {
+    if let Some(k) = kind {
         sql.push_str(" JOIN persona_relationships r ON r.from_persona = a.id");
         where_clauses.push("r.kind = ?".to_string());
-        bound.push(relationship_kind_to_str(kind.unwrap()).to_string());
+        bound.push(relationship_kind_to_str(k).to_string());
     }
     if let Some(p) = project {
         where_clauses.push(
@@ -722,8 +722,7 @@ mod tests {
         status: PersonaStatus,
         projects: &[&str],
     ) {
-        let pa: Vec<&str> = projects.iter().copied().collect();
-        let pa_json = serde_json::to_string(&pa).unwrap();
+        let pa_json = serde_json::to_string(&projects.to_vec()).unwrap();
         conn.execute(
             "INSERT INTO agents (id, name, model_provider, model_name, system_prompt, config,
                                  enabled_tools, status, persona_status, config_path,

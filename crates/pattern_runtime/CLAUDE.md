@@ -4,7 +4,7 @@ Agent runtime for Pattern v3. Houses Tidepool (Haskell-in-Rust) embedding, the
 agent turn loop, `freer-simple` effect handlers, and turn-level checkpoint
 machinery. Depends only on `pattern_core` trait definitions.
 
-Last verified: 2026-04-26 (post v3-multi-agent Phase 4 + v3-sandbox-io Phases 1-5)
+Last verified: 2026-04-28 (post v3-multi-agent Phase 7 complete)
 
 v3-TUI integration note: the runtime is consumed by `pattern_server`'s actor
 via `TidepoolSession`, `MultiplexSink`, and per-batch `TurnSinkBridge`. The
@@ -164,6 +164,28 @@ The session drains the buffer at turn close to populate
 Design choice: the adapter does NOT intercept trait-method calls to
 auto-record writes. It is a simple, auditable passthrough plus a
 pending buffer.
+
+### Memory effect handler: read vs write missing-block semantics
+
+`Memory.Put`, `Memory.Append`, and `Memory.WriteToPersona` go through
+`pre_write_state` + `upsert_block_content` in `sdk/handlers/memory.rs`.
+Both helpers `?`-propagate the result of `store.get_block(...)`, which
+relies on the `MemoryStore` trait contract: **`get_block` returns
+`Ok(None)` for missing blocks**.
+
+`MemoryCache` (the production impl) honours that contract — `get` and
+`load_from_db` both return `Ok(None)` for missing blocks. Callers that
+need a hard error on missing-block use the dedicated mutation
+operations (`update_block_metadata`, `persist_block`, `delete_block`,
+`undo_redo`, `history_depth`), which return
+`MemoryError::WriteToMissingBlock { agent_id, label, op }` instead. The
+`op` field names which operation raised the error.
+
+The `WriteToMissingBlock` variant replaced the previous overloaded
+`MemoryError::NotFound` (which was used by both read and write paths
+inconsistently across impls). See
+`crates/pattern_core/src/error/memory.rs` for the variant doc and the
+read-vs-write split.
 
 ### TurnHistory (`memory/turn_history.rs`)
 
@@ -609,39 +631,94 @@ break-detection output (Phase 5 Task 11).
 - No cross-provider routing demo. Same provider per session.
 - No constellation / multi-agent paths. Foundation is single-agent.
 
-## Open work: CliRouter TUI integration (Phase 5+)
+## v3-multi-agent integration note (Phases 1-7 complete)
 
-**Status (post Phase 4):** `AgentRegistry`, `RouterRegistry`, and `WakeRegistry`
-are now wired in `pattern_server::get_or_open_session` via `SessionRegistries`.
-Agent-to-agent routing (`agent:` scheme) works end-to-end. The remaining gap is
-the `CliRouter` for surfacing agent-to-cli messages in the TUI.
+All seven v3-multi-agent phases have landed. Key additions to this crate:
 
-**Problem:** The `Router` trait (`router.rs`) does not carry origin information
-(who sent the message, from which session/batch). A correct `CliRouter` for the
-daemon needs origin metadata to tag outbound `WireTurnEvent::MessageSent` events
-for the TUI.
+- **CapabilitySet + EffectClass** — `CapabilitySet::allowed_classes` is used for
+  two-axis prelude filtering (`filtered_effect_decls`) AND per-handler runtime
+  `check_effect_class` gating. See "Effect-class security model" below.
+- **Spawn primitives** — `SpawnRegistry` (semaphore-bounded, cancel-on-drop),
+  `run_ephemeral`, fork lifecycle (`ForkHandle`, `ForkRegistry`), sibling spawn,
+  draft writer.
+- **Fork/merge** — lightweight (`LoroDoc::fork`) and persistent (jj workspace)
+  paths. `ForkOp` dispatch: `MergeBack | Discard | Promote`.
+- **Mailbox/wake** — `WakeRegistry`, `AgentRegistry` (single-map TOCTOU fix),
+  `SessionRegistries` + `WakeRegistryExtras` for daemon wiring. Custom Haskell
+  evaluator (`wake::custom::CustomEvaluator`) handles Interval triggers with
+  30s timeout and single-flight semantics.
+- **Fronting/routing** — `FrontingState`, `FrontingSet`, `RoutingTable`,
+  `dispatch_to_mailboxes`. `CliRouter` (cli: scheme) + `AgentRouter` (agent:
+  scheme) registered in daemon's `RouterRegistry` at session open.
+  `WireTurnEvent::MessageSent` carries origin metadata to the TUI.
+- **Constellation registry** — `ConstellationRegistry` trait + `InMemoryConstellationRegistry`.
+  `ConstellationHandler` for `Pattern.Constellation` effect.
+- **Haskell delegation patterns** — three delegation libraries installed at
+  `haskell/lib/Pattern/Delegation/{RoundRobin,Pipeline,FanOut}.hs`. Accessible
+  to agents via the standard lib include path.
 
-**Remaining required changes:**
+**Deferred-work state (as of Phase 7 completion, 2026-04-28):** zero `todo!()`
+or `unimplemented!()` macro calls in production code paths. Four items were
+deferred to Phase 8+; each is represented by a `// FUTURE WORK (Phase 8+,
+2026-04-28): ...` comment with explicit rationale rather than a panicking stub:
 
-1. **Fix Router trait**: `route()` should receive origin context — at minimum the
-   sender's agent_id. Design decision needed on whether this is a parameter, a
-   field on `Message`, or a wrapper struct.
+1. `wake/custom.rs` — `BlockChanged` trigger support for custom wake evaluators.
+2. `session.rs` — per-effect permission-broker escalation (wired as Allow-all pass-through).
+3. `process_manager/logger.rs` — GFS-style rotation for the process log.
+4. `tidepool/machine.rs` — `tidepool-effect` version cross-check at session open.
 
-2. **Add `WireTurnEvent::MessageSent`** variant to `protocol.rs`:
-   `MessageSent { recipient: String, body: String }`. This is a wire-only
-   concept — no internal `TurnEvent` variant needed.
+The `SdkLocation::Embedded` and `SdkLocation::Auto` variants (in `sdk/location.rs`)
+return `Err(RuntimeError::CompileInternal)` rather than panicking — intentional
+graceful-error pattern, not a missing stub.
 
-3. **Add `WireTurnEvent::Text` agent name prefix**: Text events should render
-   with `[agent-name]` prefix in the TUI. Thread agent name through `RenderBatch`.
+## Effect-class security model (two layers, BOTH required)
 
-4. **Implement `CliRouter`**: holds a channel to the daemon's event bus. On
-   `route()`, constructs `TaggedTurnEvent` with `MessageSent` and sends it.
-   Registered as the default scheme in the daemon's `RouterRegistry`.
+`EffectClass` enforcement uses two complementary layers. **Both are required.**
+Neither is sufficient alone.
 
-**Current state (Phase 4):** `RouterRegistry` is created per session in
-`get_or_open_session`. The `AgentRouter` (`agent:` scheme) is registered and
-routes to other agent mailboxes. No `CliRouter` registered yet — `Message.Send`
-to `"cli:..."` targets will return "no router found for scheme cli".
+**Layer 1 — compile-time prelude filter:**
+`filtered_effect_decls` strips GADT constructors from the preamble for classes
+absent from `CapabilitySet::allowed_classes`. A well-typed program cannot express
+the stripped constructors. This is enforced at Tidepool compile time (GHC rejects
+the source before any handler dispatch).
+
+**Why layer 1 is not sufficient:**
+Haskell module imports expose helper functions regardless of which GADT
+constructors appear in the preamble documentation. A program that writes
+`import qualified Pattern.Memory as Memory` can call `Memory.put` directly even
+if `MutateInternal` is absent from the compiled preamble — GHC resolves the name
+from the imported module. This is the import-bypass edge case.
+
+**Layer 2 — runtime `check_effect_class` gate:**
+Each handler calls `sdk::effect_classes::check_effect_class(constructor,
+&session_ctx)` before dispatch. If the constructor's class is absent from the
+session's `allowed_classes`, the handler returns a denial error without
+executing. This is the load-bearing enforcement layer that closes the
+import-bypass edge case.
+
+**Do NOT remove the runtime gate** on the grounds that the compile-time filter
+"already prevents out-of-class programs" — that claim is incorrect for the
+import-bypass path. See `pattern_core::capability` module doc for the formal
+statement.
+
+The `tests/capability_compile.rs` and the `wake::custom` evaluator both construct
+`SessionContext` instances with restricted `allowed_classes` so both layers fire.
+The smoke test step 5 exercises only the compile-time layer (it passes `&()` as
+the user context, which has no `allowed_classes`). Both test strategies are needed.
+
+## Custom wake conditions — BlockChanged trigger (Phase 8+)
+
+`wake::custom::CustomEvaluator` currently supports only `Interval` triggers
+(via `register_interval`). The design plan calls for a second trigger source:
+`BlockChanged(label)` — fire the Haskell evaluator when a memory block matching
+the given label changes.
+
+**Status:** Interval path is implemented and tested. BlockChanged is deferred to
+Phase 8 (see `// FUTURE WORK` comment in `wake/custom.rs`). The plumbing
+(`BlockChangeNotifier` from `WakeRegistryExtras`) is already threaded into the
+`WakeRegistry` for the built-in `BlockChangedCondition`; the `CustomEvaluator`
+needs a handle to the same notifier, added via a new `with_block_change_notifier`
+builder method when Phase 8 lands.
 
 ## Known flakes — historical note
 

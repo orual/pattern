@@ -78,8 +78,10 @@ data WakeCondition
   | WakeTaskDependencyResolved TaskEdgeRef
   -- | Fire when @program@ (a Haskell condition compiled by the
   --   runtime) returns @True@. Evaluated on a read-only restricted
-  --   bundle (Observe-class effects only).
-  | WakeCustom Text Text             -- ^ @WakeCustom id program@.
+  --   bundle (Observe-class effects only). @period_ms@ is the
+  --   interval between evaluations (minimum 1000ms; registry rejects
+  --   sub-second values).
+  | WakeCustom Text Text Int         -- ^ @WakeCustom id program period_ms@.
 
 -- | Effect algebra.
 data Wake a where

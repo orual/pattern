@@ -12,10 +12,25 @@
 //! # Pre-v3 CoreError variants replaced by this file
 //!
 //! - `MemoryNotFound` → [`MemoryError::BlockNotFound`] (typed
-//!   [`BlockHandle`]) or [`MemoryError::NotFound`] (string-keyed).
+//!   [`BlockHandle`]) or [`MemoryError::WriteToMissingBlock`]
+//!   (string-keyed write/mutation path).
 //! - `DataSourceError` (storage-related operations) →
 //!   [`MemoryError::StoreCorrupted`] where appropriate.
 //! - New: [`MemoryError::ConcurrentWriteConflict`] (no pre-v3 equivalent).
+//!
+//! # Read vs write missing-block semantics
+//!
+//! Read-style operations on the [`crate::traits::MemoryStore`] trait
+//! (`get_block`, `get_block_metadata`, `get_rendered_content`) all
+//! return `MemoryResult<Option<...>>` and signal "block does not exist"
+//! by returning `Ok(None)`. The trait contract is honoured by every
+//! impl including `pattern_memory::MemoryCache`.
+//!
+//! Write-style operations that have no `Option` return type
+//! (`update_block_metadata`, `persist_block`, `delete_block`,
+//! `mark_dirty`-equivalents) signal "block does not exist" by returning
+//! [`MemoryError::WriteToMissingBlock`]. This variant is exclusively a
+//! write-path error — read paths never produce it.
 
 use miette::Diagnostic;
 use thiserror::Error;
@@ -59,17 +74,41 @@ pub enum MemoryError {
         available: Vec<BlockHandle>,
     },
 
-    /// The requested memory block does not exist (string-keyed lookup).
+    /// A non-Option-returning operation targeted a block that does not
+    /// exist (string-keyed lookup, no auto-create path).
     ///
-    /// Used by `MemoryCache::get` and other call sites that identify blocks
-    /// by `(agent_id, label)` rather than a typed `BlockHandle`.
-    #[error("block not found: {agent_id}/{label}")]
-    #[diagnostic(code(pattern_core::memory::not_found))]
-    NotFound {
-        /// The agent that owns the missing block.
+    /// Read-style operations (`get_block`, `get_block_metadata`,
+    /// `get_rendered_content`) never produce this — they return
+    /// `Ok(None)` for missing blocks per their trait contract. This
+    /// variant fires on operations that have no `Option` return slot
+    /// for "missing": `update_block_metadata`, `persist_block`,
+    /// `delete_block`, `undo_redo`, `history_depth`, etc. The `op`
+    /// field names which operation raised the error so logs and
+    /// diagnostics can disambiguate.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pattern_core::error::MemoryError;
+    ///
+    /// let err = MemoryError::WriteToMissingBlock {
+    ///     agent_id: "agent-7".into(),
+    ///     label: "scratchpad".into(),
+    ///     op: "persist_block",
+    /// };
+    /// assert!(err.to_string().contains("persist_block"));
+    /// assert!(err.to_string().contains("scratchpad"));
+    /// ```
+    #[error("{op}: block does not exist: {agent_id}/{label}")]
+    #[diagnostic(code(pattern_core::memory::write_to_missing_block))]
+    WriteToMissingBlock {
+        /// The agent that owns the (missing) block.
         agent_id: String,
-        /// The label that was requested but not found.
+        /// The label that was targeted.
         label: String,
+        /// The mutating operation that raised the error
+        /// (e.g. `"persist_block"`, `"update_block_metadata"`).
+        op: &'static str,
     },
 
     /// The block is read-only and cannot be modified.

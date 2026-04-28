@@ -890,8 +890,7 @@ impl DaemonServer {
                     .mount_path
                     .canonicalize()
                     .unwrap_or_else(|_| inner.mount_path.clone());
-                let key =
-                    pattern_memory::mount::find_mount(&canonical).unwrap_or_else(|_| canonical);
+                let key = pattern_memory::mount::find_mount(&canonical).unwrap_or(canonical);
                 self.mount_subscribers.entry(key).or_default().push(tx);
             }
             PatternMessage::ListAgents(req) => {
@@ -1191,14 +1190,17 @@ impl DaemonServer {
             }
             PatternMessage::PromoteDraft(req) => {
                 let WithChannels { tx, inner, .. } = req;
-                let response = match self.handle_promote_draft(inner).await {
+                let mut warning: Option<String> = None;
+                let response = match self.handle_promote_draft(inner, &mut warning).await {
                     Ok(()) => PromoteDraftResponse {
                         success: true,
                         error: None,
+                        warning,
                     },
                     Err(e) => PromoteDraftResponse {
                         success: false,
                         error: Some(e),
+                        warning,
                     },
                 };
                 let _ = tx.send(response).await;
@@ -1579,9 +1581,17 @@ impl DaemonServer {
     /// follow-up: when the draft was created via `fork.promote()`, the
     /// `<drafts_dir>/<persona_id>.cache/<label>.loro` files also need to
     /// migrate (currently still tracked as a known gap).
+    /// Promote a draft persona to Active.
+    ///
+    /// `out_warning` is populated (regardless of return value) when a
+    /// non-fatal sub-step like seed-cache migration fails. Partners
+    /// care about memory loss whether the overall promote ultimately
+    /// succeeded or failed at a downstream step, so the warning is
+    /// surfaced via the RPC response on both branches.
     async fn handle_promote_draft(
         &self,
         req: crate::protocol::PromoteDraftRequest,
+        out_warning: &mut Option<String>,
     ) -> Result<(), String> {
         use pattern_core::constellation::PersonaStatus;
         use pattern_core::types::ids::PersonaId;
@@ -1634,12 +1644,19 @@ impl DaemonServer {
             && cache_dir.is_dir()
         {
             if let Err(e) = migrate_seed_cache(cache_dir, &persona_id, &mount.cache).await {
+                let msg = format!(
+                    "seed cache migration failed for persona {persona_id}: {e}; \
+                     promoted persona starts with empty memory \
+                     (cache dir: {})",
+                    cache_dir.display()
+                );
                 tracing::warn!(
                     persona_id = %persona_id,
                     cache_dir = %cache_dir.display(),
                     error = %e,
                     "seed cache migration failed; promoted persona will start with empty memory"
                 );
+                *out_warning = Some(msg);
             } else {
                 // Best-effort cleanup of the seed cache directory after a
                 // successful import. The blocks now live in the mount's
@@ -2000,16 +2017,10 @@ async fn migrate_seed_cache(
         // existing blocks avoids a UNIQUE constraint violation while still
         // re-applying `insert_from_snapshot` to ensure the block reaches the
         // intended CRDT state. This makes retries converge correctly.
-        //
-        // `MemoryCache::get_block` returns `Err(MemoryError::NotFound)` (not
-        // `Ok(None)`) when the block does not exist in the DB yet. We treat
-        // that variant as "not found" rather than a hard failure so that the
-        // first import (where nothing exists yet) does not abort.
         let already_exists =
             match pattern_core::MemoryStore::get_block(cache, &agent_id, &entry.label) {
                 Ok(Some(_)) => true,
                 Ok(None) => false,
-                Err(pattern_core::error::MemoryError::NotFound { .. }) => false,
                 Err(e) => return Err(format!("get_block check for {:?}: {e}", entry.label)),
             };
 
@@ -2596,6 +2607,15 @@ async fn open_session_with_persona(
             Some(project_mount.mount_path.to_string_lossy().into_owned()),
         ));
 
+    // Production sibling resolver: query the per-mount constellation registry
+    // for `agent:<id>` lookups. Without this, `ctx.spawn.sibling(Existing(id))`
+    // would always fail with `RegistryError::PersonaNotFound` because the
+    // default `UnconfiguredSiblingResolver` rejects every lookup.
+    let sibling_resolver: Arc<dyn pattern_runtime::spawn::sibling::SiblingPersonaResolver> =
+        Arc::new(pattern_runtime::spawn::sibling::ConstellationSiblingResolver::new(
+            project_mount.constellation_registry.clone(),
+        ));
+
     let registries = SessionRegistries {
         agent_registry: Some(project_mount.agent_registry.clone()),
         router_registry: Some(router_reg),
@@ -2604,6 +2624,7 @@ async fn open_session_with_persona(
         file_policy: project_mount.file_policy.clone(),
         fronting_committer: Some(fronting_committer),
         constellation_registry: Some(project_mount.constellation_registry.clone()),
+        sibling_resolver: Some(sibling_resolver),
     };
     let session = TidepoolSession::open_with_agent_loop(
         persona,

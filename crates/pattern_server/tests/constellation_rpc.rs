@@ -7,7 +7,7 @@
 //! - `AddRelationship` (success path + unknown-kind error)
 //! - `ListGroups` + `CreateGroup` (success + duplicate-collision error)
 //! - `PromoteDraft` (happy path, no-session-config failure, version-mismatch,
-//!    partial-failure retry)
+//!   partial-failure retry)
 //!
 //! Uses `DaemonServer::spawn_with_config` with a `NopProviderClient` so no
 //! LLM credentials are needed.
@@ -309,7 +309,7 @@ async fn make_draft_persona(
     let registry = pattern_db::ConstellationRegistryDb::new(db.clone());
     let mut record = pattern_core::constellation::PersonaRecord::new(
         persona_id,
-        &format!("test-promote-{persona_id}"),
+        format!("test-promote-{persona_id}"),
         pattern_core::constellation::PersonaStatus::Draft,
     );
     record.config_path = Some(kdl_path.clone());
@@ -452,6 +452,29 @@ async fn promote_draft_seed_cache_version_mismatch_is_best_effort() {
         "seed cache version mismatch should be best-effort; expected session-open error; \
          got: {:?}",
         resp.error
+    );
+
+    // M-1: the seed-cache migration failure MUST be surfaced via the
+    // response's `warning` field. Previous behaviour silently swallowed
+    // the failure (logged at warn-level only); partners would not learn
+    // about memory loss until they noticed it in agent context. Now the
+    // warning is carried alongside the (success or failure) response so
+    // the TUI can display it.
+    let warning = resp
+        .warning
+        .as_deref()
+        .expect("seed cache migration failure must populate the response warning field");
+    assert!(
+        warning.contains("seed cache migration failed"),
+        "warning must name the failing step; got: {warning:?}"
+    );
+    assert!(
+        warning.contains("seed-test"),
+        "warning must name the persona that failed; got: {warning:?}"
+    );
+    assert!(
+        warning.contains("empty memory"),
+        "warning must call out the memory-loss consequence; got: {warning:?}"
     );
 
     // The promote design moves the KDL file as step 3a before the session-open

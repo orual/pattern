@@ -12,6 +12,35 @@
 //! - Runtime gating: `pattern_runtime::policy::PolicySet` evaluates
 //!   `PolicyRule`s before each handler dispatch, escalating to the
 //!   `PermissionBroker` when human approval is required.
+//!
+//! ## Effect-class security model (two layers, BOTH required)
+//!
+//! The `EffectClass` axis (see below) is enforced by two complementary layers
+//! that are BOTH necessary. Neither is sufficient alone:
+//!
+//! 1. **Compile-time prelude filter** — `filtered_effect_decls` strips GADT
+//!    constructors for classes absent from `CapabilitySet::allowed_classes`.
+//!    This makes out-of-class constructors invisible to the agent's program,
+//!    so a well-typed program cannot express them. However, Haskell module
+//!    imports expose helper functions (e.g. `Memory.put`) regardless of which
+//!    GADT constructors appear in the preamble documentation. A program that
+//!    imports `Pattern.Memory` qualified can still call `Memory.put` even if
+//!    `MutateInternal` is filtered from the preamble — GHC resolves the name
+//!    from the imported module, not from the preamble string.
+//!
+//! 2. **Runtime `check_effect_class` gate** — each handler calls
+//!    `pattern_runtime::sdk::effect_classes::check_effect_class(constructor,
+//!    &session_ctx)` before dispatch. If the constructor's class is absent from
+//!    the session's `allowed_classes`, the handler returns a denial error
+//!    without executing. This is the load-bearing enforcement layer: it catches
+//!    the import-bypass edge case that the compile-time filter misses.
+//!
+//! Do NOT remove the runtime gate on the grounds that the compile-time filter
+//! already prevents out-of-class programs — that reasoning is incorrect. The
+//! Haskell module import path remains open as long as agents can write
+//! `import qualified Pattern.Memory as Memory`. See
+//! `crates/pattern_runtime/CLAUDE.md` §"Effect-class security model" for the
+//! full discussion.
 
 pub mod policy;
 
@@ -31,6 +60,18 @@ use smol_str::SmolStr;
 ///
 /// See `pattern_runtime::sdk::effect_classes::ALL_CLASSES` for the canonical
 /// table mapping every SDK constructor to its class.
+///
+/// ## Security model
+///
+/// `EffectClass` is enforced by two COMPLEMENTARY layers. The compile-time
+/// prelude filter (layer 1) strips GADT constructors from the preamble so
+/// out-of-class operations are invisible to a well-typed program. However,
+/// Haskell module imports still expose helper functions (e.g. `Memory.put`)
+/// regardless of which constructors appear in the preamble — so a program
+/// importing `Pattern.Memory` qualified can bypass layer 1. The runtime
+/// `check_effect_class` gate in each handler (layer 2) is therefore the
+/// load-bearing enforcement point. Both layers are required. See the module
+/// doc comment for the full rationale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum EffectClass {
@@ -279,6 +320,87 @@ impl CapabilitySet {
             flags: CapabilityFlag::ALL.iter().copied().collect(),
             resources: BTreeMap::new(),
             allowed_classes: BTreeSet::new(),
+        }
+    }
+
+    /// Capability set for custom wake-condition evaluation programs.
+    ///
+    /// Wake evaluators run Haskell programs that decide whether to poke the
+    /// session mailbox. They must be read-only: a periodic background program
+    /// that can spawn agents, send messages, or write files is a security
+    /// boundary violation, not a wake condition.
+    ///
+    /// # Security model
+    ///
+    /// Two axes of restriction are applied simultaneously and are BOTH required:
+    ///
+    /// 1. **`EffectCategory` filter** — drops entire SDK modules so that even
+    ///    `Skip`-classified constructors (which bypass the runtime
+    ///    `check_effect_class` gate) are absent from the Haskell prelude.
+    ///    Skip-classified constructors like `Spawn.Ephemeral`, `Shell.Execute`,
+    ///    `Message.Send`, and `Wake.Register` rely on this layer alone — they
+    ///    are invisible to the evaluator program because the entire `Spawn`,
+    ///    `Shell`, `Message`, and `Wake` modules are absent from the capset.
+    ///
+    /// 2. **`EffectClass` filter** — restricts surviving modules (Memory,
+    ///    Tasks, …) to `Observe`-only constructors. This catches
+    ///    `Enforce`-classified mutating constructors (Memory.Put,
+    ///    Tasks.Create, …) that would otherwise appear in the prelude for the
+    ///    kept categories.
+    ///
+    /// Together: `(allowed categories) ∩ (Observe class)`.
+    ///
+    /// # Kept categories (read-only access that is meaningful for wake logic)
+    ///
+    /// - `Time` — read the clock.
+    /// - `Log` — emit diagnostics.
+    /// - `Memory` — read session memory (combined with Observe class restriction,
+    ///   only Get/Search/Recall/GetShared survive).
+    /// - `Search` — read message/archival history.
+    /// - `Recall` — read archival entries.
+    /// - `Tasks` — read task graph (List/QueryGraph survive after Observe filter).
+    /// - `Skills` — read skill catalog (all Observe, no filter needed).
+    /// - `Display` — emit output (Chunk/Final/Note are Observe-classed).
+    /// - `Diagnostics` — read session diagnostics.
+    ///
+    /// # Dropped categories (mutation or coordination that must not fire)
+    ///
+    /// - `Spawn` — no spawning from a periodic eval.
+    /// - `Shell` — no shell execution.
+    /// - `Message` — no agent messaging (the wake mechanism itself pokes
+    ///   the mailbox; the program must not do so independently).
+    /// - `Mcp` — no MCP calls.
+    /// - `Wake` — no recursive wake-condition registration.
+    /// - `Fronting` — no fronting mutations.
+    /// - `Constellation` — no constellation mutations.
+    /// - `File` — no file I/O (the policy gate handles file reads if needed
+    ///   via FilePolicy; for wake evals, drop entirely for safety).
+    /// - `Port` — no external service calls.
+    ///
+    /// No flags are set — wake evaluators never need `SpawnNewIdentities`,
+    /// `WakeConditionRegistration`, or `FrontingControl`.
+    pub fn wake_evaluator_read_only() -> Self {
+        let categories = [
+            EffectCategory::Time,
+            EffectCategory::Log,
+            EffectCategory::Memory,
+            EffectCategory::Search,
+            EffectCategory::Recall,
+            EffectCategory::Tasks,
+            EffectCategory::Skills,
+            EffectCategory::Display,
+            EffectCategory::Diagnostics,
+        ]
+        .into_iter()
+        .collect();
+
+        Self {
+            categories,
+            flags: BTreeSet::new(),
+            resources: BTreeMap::new(),
+            // Observe-only: mutating constructors (Memory.Put, Tasks.Create,
+            // etc.) are filtered from the prelude even for kept categories.
+            allowed_classes: [EffectClass::Observe].into_iter().collect(),
         }
     }
 

@@ -116,11 +116,10 @@ impl<S: MemoryStore> MemoryScope<S> {
         // check both project and persona.
         if let Some(project_id) = &self.binding.project_id {
             // Check project scope first (project wins on collision).
-            // Handle both Ok(None) and Err(NotFound) as "not in project scope,
-            // fall through to persona."
+            // Missing block in project scope → fall through to persona.
             match self.inner.get_block(project_id, label) {
                 Ok(Some(doc)) => return Ok(Some(doc)),
-                Ok(None) | Err(MemoryError::NotFound { .. }) => {}
+                Ok(None) => {}
                 Err(e) => return Err(e),
             }
         }
@@ -172,12 +171,12 @@ impl<S: MemoryStore> MemoryStore for MemoryScope<S> {
             return self.inner.get_block_metadata(agent_id, label);
         }
 
-        // Same routing as get_block but for metadata. Handle both
-        // Ok(None) and Err(NotFound) as "not in project scope."
+        // Same routing as get_block but for metadata. Project miss
+        // (Ok(None)) falls through to persona scope.
         if let Some(project_id) = &self.binding.project_id {
             match self.inner.get_block_metadata(project_id, label) {
                 Ok(Some(meta)) => return Ok(Some(meta)),
-                Ok(None) | Err(MemoryError::NotFound { .. }) => {}
+                Ok(None) => {}
                 Err(e) => return Err(e),
             }
         }
@@ -256,7 +255,7 @@ impl<S: MemoryStore> MemoryStore for MemoryScope<S> {
         }
 
         // Same routing logic as get_block: project first, then persona.
-        // Handle both Ok(None) and Err(NotFound) as "not in project scope."
+        // Missing block in project scope — fall through to persona.
         if let Some(project_id) = &self.binding.project_id {
             let project_result = self.inner.get_rendered_content(project_id, label);
             tracing::trace!(
@@ -267,7 +266,7 @@ impl<S: MemoryStore> MemoryStore for MemoryScope<S> {
             );
             match project_result {
                 Ok(Some(content)) => return Ok(Some(content)),
-                Ok(None) | Err(MemoryError::NotFound { .. }) => {}
+                Ok(None) => {}
                 Err(e) => return Err(e),
             }
         }

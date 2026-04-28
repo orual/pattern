@@ -103,10 +103,11 @@ pub enum WireWakeCondition {
     /// transitions to `Completed`.
     #[core(module = "Pattern.Wake", name = "WakeTaskDependencyResolved")]
     TaskDependencyResolved(WireTaskEdgeRef),
-    /// `Custom id program`. Phase 4 stores the program but does not
-    /// run it; the evaluator ships in Phase 7 Task 6.
+    /// `Custom id program period_ms`. Evaluates the Haskell program
+    /// every `period_ms` milliseconds against a read-only restricted
+    /// bundle; pokes the mailbox when the result is `True`.
     #[core(module = "Pattern.Wake", name = "WakeCustom")]
-    Custom(String, String),
+    Custom(String, String, i64),
 }
 
 impl WireWakeCondition {
@@ -131,9 +132,12 @@ impl WireWakeCondition {
                 task: task.into(),
                 agent_id,
             },
-            Self::Custom(id, program) => WakeCondition::Custom {
+            Self::Custom(id, program, period_ms) => WakeCondition::Custom {
                 id: SmolStr::from(id),
                 program,
+                // Clamp negative or zero periods to the minimum; the registry
+                // validates and rejects them with WakeError::PeriodTooShort.
+                period: std::time::Duration::from_millis(period_ms.max(0) as u64),
             },
         }
     }

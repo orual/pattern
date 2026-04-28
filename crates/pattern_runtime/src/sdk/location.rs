@@ -39,13 +39,17 @@ pub enum SdkLocation {
     /// Extract embedded `.hs` files (via `include_str!`) to a temp dir at
     /// Session open. Self-contained distribution; no external files needed.
     ///
-    /// TODO(post-foundation / SDK-distribution): not yet implemented.
+    /// FUTURE WORK (SDK-distribution phase, 2026-04-28): not yet implemented.
+    /// Deferred until the SDK stabilises enough that embedding the `.hs` files
+    /// at compile time is worth the binary size cost. Use `Directory` in the
+    /// meantime.
     Embedded,
 
     /// Disk-first, embedded fallback. `strict: true` requires disk and
     /// embedded contents to match exactly, catching drift.
     ///
-    /// TODO(post-foundation / SDK-distribution): not yet implemented.
+    /// FUTURE WORK (SDK-distribution phase, 2026-04-28): not yet implemented.
+    /// Depends on `Embedded` variant being implemented first.
     Auto {
         /// Path to the on-disk SDK directory.
         directory: PathBuf,

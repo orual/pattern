@@ -3,7 +3,7 @@
 ⚠️ **CRITICAL WARNING**: DO NOT run `pattern` CLI or test agents during development!
 Production agents are running. CLI commands will disrupt active agents.
 
-Last verified: 2026-04-26
+Last verified: 2026-04-28
 
 Core agent framework, memory trait definitions, tools, and coordination system for Pattern's multi-agent ADHD support. The `MemoryStore` trait is defined here; the canonical implementation (`MemoryCache`) lives in `pattern_memory`.
 
@@ -20,6 +20,13 @@ Core agent framework, memory trait definitions, tools, and coordination system f
   IRPC via `WireTurnEvent`. The unified `MemoryError` variant set here is
   the canonical error type — duplicates were folded in during v3-TUI
   stabilisation.
+- v3-multi-agent complete (2026-04-28): `EffectClass` enum and
+  `CapabilitySet::allowed_classes` added to `capability.rs`. These are
+  used by `pattern_runtime` for two-axis effect gating: compile-time
+  prelude filtering (via `filtered_effect_decls`) AND runtime per-handler
+  `check_effect_class` gating. Both layers are required — see the
+  `capability.rs` module doc for the security model. `EffectCategory`,
+  `CapabilityFlag`, and all spawn/policy/permission types also live here.
 
 ## Tool System Architecture
 
@@ -122,6 +129,16 @@ Key types:
    - **Canonical implementation** (`MemoryCache`, `SharedBlockManager`) lives
      in `pattern_memory`. `pattern_core` must never depend on `pattern_memory`
      (enforced by trybuild compile-fail test).
+   - **Missing-block semantics, read vs write:**
+     `MemoryStore::get_block` / `get_block_metadata` / `get_rendered_content`
+     all return `MemoryResult<Option<...>>` and signal "block does not exist"
+     by returning `Ok(None)`. Both `InMemoryMemoryStore` and `MemoryCache`
+     honour this contract. Mutation operations
+     (`update_block_metadata`, `persist_block`, `delete_block`, `undo_redo`,
+     `history_depth`) have no `Option` return slot and raise
+     `MemoryError::WriteToMissingBlock { agent_id, label, op }` for missing
+     blocks — see `pattern_core::error::MemoryError` for the variant doc
+     and the read-vs-write split.
 
 3. **Tool System** (`tool/`)
    - Type-safe `AiTool<Input, Output>` trait

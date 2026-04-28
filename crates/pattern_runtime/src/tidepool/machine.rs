@@ -117,9 +117,11 @@ impl SessionMachine {
 /// variants (Eval / Bridge / Unhandled / etc.) we fall back to
 /// `handler = "unknown"` and use the `Display` as the full reason.
 ///
-/// TODO(post-foundation): once `tidepool-effect` surfaces a dedicated
-/// handler-id on `EffectError`, thread it through here and drop the
-/// string parse.
+/// FUTURE WORK (Phase 8+, 2026-04-28): once `tidepool-effect` surfaces a
+/// dedicated handler-id on `EffectError`, thread it through here and drop
+/// the string parse. This is blocked on the upstream tidepool-effect library
+/// adding an id field to its `EffectError` type — Pattern cannot add it
+/// unilaterally without forking that crate.
 fn sdk_failure_parts(sdk: &crate::tidepool::error_map::SdkError) -> (String, String) {
     use tidepool_effect::EffectError;
     match &sdk.0 {

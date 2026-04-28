@@ -99,17 +99,11 @@ pub fn supervisor_routing_exchange(specialist_id: &str) -> Vec<Vec<ChatStreamEve
     let program = format!(
         "_ <- Log.info \"supervisor: routing task to specialist\"\n\
          Memory.put \"delegation-log\" \"delegated: compute 2+2\"\n\
-         send \"{specialist_id}\" \"compute 2+2\""
+         send \"agent:{specialist_id}\" \"compute 2+2\""
     );
     vec![
-        MockProviderClient::tool_use_turn(
-            "toolu_sup_01_route",
-            "code",
-            json!({ "code": program }),
-        ),
-        MockProviderClient::text_turn(
-            "I have delegated the computation task to the specialist.",
-        ),
+        MockProviderClient::tool_use_turn("toolu_sup_01_route", "code", json!({ "code": program })),
+        MockProviderClient::text_turn("I have delegated the computation task to the specialist."),
     ]
 }
 
@@ -147,9 +141,7 @@ pub fn supervisor_summary_exchange() -> Vec<Vec<ChatStreamEvent>> {
             "code",
             json!({ "code": program }),
         ),
-        MockProviderClient::text_turn(
-            "The specialist computed the answer: 4. Task complete.",
-        ),
+        MockProviderClient::text_turn("The specialist computed the answer: 4. Task complete."),
     ]
 }
 
@@ -191,7 +183,7 @@ pub fn specialist_task_exchange(supervisor_id: &str) -> Vec<Vec<ChatStreamEvent>
     let program = format!(
         "_ <- Log.info \"specialist: executing computation task\"\n\
          Memory.put \"specialist-result\" \"4\"\n\
-         send \"{supervisor_id}\" \"result: 4\""
+         send \"agent:{supervisor_id}\" \"result: 4\""
     );
     vec![
         MockProviderClient::tool_use_turn(

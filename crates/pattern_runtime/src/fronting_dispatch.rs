@@ -308,6 +308,106 @@ mod tests {
         let _ = EdgeDirection::Outgoing; // keep the type referenced
     }
 
+    /// AC8.8: routing rule updates apply mid-flight.
+    ///
+    /// First send: rule `prefix("!math") → math` routes to math.
+    /// Then update the fronting set so the rule's target becomes
+    /// `chat` instead. Second send: must land in chat, NOT math.
+    /// The architectural claim is "FrontingState reads via short
+    /// read-lock per call; dispatch evaluates the routing snapshot
+    /// at call time" — this test pins that as a behavioural
+    /// invariant rather than relying on it by construction.
+    #[tokio::test]
+    async fn rule_update_applies_to_subsequent_dispatches() {
+        let agent_reg = AgentRegistry::new();
+        let (math_tx, mut math_rx) = mpsc::unbounded_channel();
+        let (chat_tx, mut chat_rx) = mpsc::unbounded_channel();
+        agent_reg.register("math".into(), math_tx, SessionStatus::Active);
+        agent_reg.register("chat".into(), chat_tx, SessionStatus::Active);
+
+        // Initial rule: !math → math.
+        let initial_rules = vec![RoutingRule::new(
+            "math-rule".to_string(),
+            MessagePattern::Prefix("!math".to_string()),
+            SmolStr::from("math"),
+            10,
+        )];
+        let initial_table = RoutingTable::try_from_rules(initial_rules).unwrap();
+        let fronting_set =
+            FrontingSet::from_parts(Vec::new(), Some(SmolStr::from("chat")), initial_table);
+        let set_lock = Arc::new(RwLock::new(fronting_set));
+
+        let registry: Arc<dyn ConstellationRegistry> =
+            Arc::new(InMemoryConstellationRegistry::new());
+        let state = FrontingState::new(set_lock.clone(), registry);
+
+        // First dispatch: must land in math.
+        dispatch_to_mailboxes(&agent_reg, &state, &test_origin(), &test_msg("!math 2+2"))
+            .await
+            .unwrap();
+        let received_first = math_rx.recv().await.expect("math should receive first send");
+        assert_eq!(
+            received_first
+                .msg
+                .chat_message
+                .content
+                .first_text()
+                .unwrap_or(""),
+            "!math 2+2"
+        );
+        assert!(
+            chat_rx.try_recv().is_err(),
+            "chat must not receive the first message"
+        );
+
+        // Mutate the fronting set: same prefix, different target.
+        // Production callers use `update_fronting` (RPC) which writes
+        // through the same lock; here we go through the RwLock directly
+        // to keep the test free-standing.
+        let updated_rules = vec![RoutingRule::new(
+            "math-rule".to_string(),
+            MessagePattern::Prefix("!math".to_string()),
+            SmolStr::from("chat"),
+            10,
+        )];
+        let updated_table = RoutingTable::try_from_rules(updated_rules).unwrap();
+        {
+            let mut set = set_lock.write().expect("fronting set rwlock poisoned");
+            *set = FrontingSet::from_parts(
+                Vec::new(),
+                Some(SmolStr::from("chat")),
+                updated_table,
+            );
+        }
+
+        // Second dispatch: must land in chat under the new rule.
+        dispatch_to_mailboxes(
+            &agent_reg,
+            &state,
+            &test_origin(),
+            &test_msg("!math 3+3"),
+        )
+        .await
+        .unwrap();
+        let received_second = chat_rx
+            .recv()
+            .await
+            .expect("chat should receive second send after rule update");
+        assert_eq!(
+            received_second
+                .msg
+                .chat_message
+                .content
+                .first_text()
+                .unwrap_or(""),
+            "!math 3+3"
+        );
+        assert!(
+            math_rx.try_recv().is_err(),
+            "math must not receive the second message — rule was updated to target chat"
+        );
+    }
+
     /// AC8.5: co-fronting fan-out — both active personas receive a copy
     /// when no rule matches and no fallback is set.
     #[tokio::test]

@@ -323,40 +323,45 @@ fn ac9_5_sdk_location_bad_path_names_the_missing_directory() {
 // ────────────────────────────── 5. Memory write to unknown handle ────────────
 
 #[test]
-fn ac9_5_memory_write_to_unknown_label_returns_not_found() {
+fn ac9_5_memory_write_to_unknown_label_returns_write_to_missing_block() {
     let store = InMemoryMemoryStore::new();
     let agent_id = "test-agent-ac9-5";
     let missing_label = "nonexistent-block";
 
-    // `update_block_metadata` on a non-existent label returns `MemoryError::NotFound`
-    // with the agent_id and label populated — giving a specific, actionable error.
+    // `update_block_metadata` on a non-existent label returns
+    // `MemoryError::WriteToMissingBlock` with agent_id, label, and op
+    // populated — giving a specific, actionable error.
     let err = store
         .update_block_metadata(
             agent_id,
             missing_label,
             pattern_core::types::memory_types::BlockMetadataPatch::default().pinned(true),
         )
-        .expect_err("write to unknown label must return NotFound");
+        .expect_err("write to unknown label must return WriteToMissingBlock");
 
-    // Assert the correct error variant with populated context fields.
     match &err {
-        pattern_core::types::memory_types::MemoryError::NotFound {
+        pattern_core::types::memory_types::MemoryError::WriteToMissingBlock {
             agent_id: got_agent,
             label: got_label,
+            op,
         } => {
             assert_eq!(
                 got_agent, agent_id,
-                "NotFound must carry the agent_id that was requested"
+                "WriteToMissingBlock must carry the agent_id that was requested"
             );
             assert_eq!(
                 got_label, missing_label,
-                "NotFound must carry the label that was not found"
+                "WriteToMissingBlock must carry the label that was not found"
+            );
+            assert_eq!(
+                *op, "update_block_metadata",
+                "WriteToMissingBlock op must name the failing operation"
             );
         }
-        other => panic!("expected MemoryError::NotFound, got: {other:?}"),
+        other => panic!("expected MemoryError::WriteToMissingBlock, got: {other:?}"),
     }
 
-    // Assert the Display is actionable — mentions both the agent and block.
+    // Display is actionable — mentions both the agent and block.
     let display = err.to_string();
     assert!(
         display.contains(agent_id) || display.contains(missing_label),
@@ -365,7 +370,7 @@ fn ac9_5_memory_write_to_unknown_label_returns_not_found() {
 }
 
 #[test]
-fn ac9_5_memory_update_description_unknown_label_returns_not_found() {
+fn ac9_5_memory_update_description_unknown_label_returns_write_to_missing_block() {
     let store = InMemoryMemoryStore::new();
     let agent_id = "test-agent-ac9-5-desc";
     let missing_label = "nonexistent-block-desc";
@@ -377,19 +382,20 @@ fn ac9_5_memory_update_description_unknown_label_returns_not_found() {
             pattern_core::types::memory_types::BlockMetadataPatch::default()
                 .description("new description"),
         )
-        .expect_err("update_block_metadata on unknown label must return NotFound");
+        .expect_err("update_block_metadata on unknown label must return WriteToMissingBlock");
 
     match &err {
-        pattern_core::types::memory_types::MemoryError::NotFound {
+        pattern_core::types::memory_types::MemoryError::WriteToMissingBlock {
             agent_id: got_agent,
             label: got_label,
+            ..
         } => {
             assert!(
                 got_agent == agent_id || got_label == missing_label,
-                "NotFound context must match the requested (agent, label) pair"
+                "WriteToMissingBlock context must match the requested (agent, label) pair"
             );
         }
-        other => panic!("expected MemoryError::NotFound, got: {other:?}"),
+        other => panic!("expected MemoryError::WriteToMissingBlock, got: {other:?}"),
     }
 }
 

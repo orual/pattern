@@ -41,9 +41,11 @@
 //! loss (the canonical output path is the agent's async-reminder queue, not
 //! this log).
 //!
-//! TODO(future): GFS-style rotation hook (plan Q5). When this lands, the
-//! `open` path is the natural place to wire age-based cleanup of stale logs
-//! before opening a fresh one.
+//! FUTURE WORK (Phase 8+, 2026-04-28): GFS-style rotation hook (plan Q5).
+//! When this lands, the `open` path is the natural place to wire age-based
+//! cleanup of stale logs before opening a fresh one. Deferred because the
+//! log is scratch-space (canonical output is the async-reminder queue) and
+//! unbounded log growth is not yet a production concern.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;

@@ -66,13 +66,17 @@ pub enum WakeCondition {
         agent_id: SmolStr,
     },
     /// Fire when a Haskell-registered condition program returns
-    /// `True`. Phase 4 stores the program but the evaluator that
-    /// runs it on its trigger is scheduled for Phase 7 Task 6.
+    /// `True`. The program is evaluated at `period` intervals on a
+    /// read-only restricted bundle.
     Custom {
         /// User-supplied identifier from `ctx.wake.register`.
         id: SmolStr,
         /// Source code of the condition program (Haskell).
         program: String,
+        /// How often to evaluate the condition. The registry enforces
+        /// a minimum of 1 second; sub-second values are rejected at
+        /// registration with [`WakeError::PeriodTooShort`].
+        period: std::time::Duration,
     },
 }
 
@@ -298,10 +302,7 @@ impl WakeRegistry {
     /// custom conditions. Without this, Custom registrations fall back
     /// to a parked task that never fires (Phase 4 behaviour).
     #[must_use]
-    pub fn with_custom_evaluator(
-        mut self,
-        evaluator: Arc<super::custom::CustomEvaluator>,
-    ) -> Self {
+    pub fn with_custom_evaluator(mut self, evaluator: Arc<super::custom::CustomEvaluator>) -> Self {
         *self.custom_evaluator.get_mut() = Some(evaluator);
         self
     }
@@ -395,26 +396,30 @@ impl WakeRegistry {
                     &self.tokio_handle,
                 )
             }
-            WakeCondition::Custom { id: custom_id, program } => {
+            WakeCondition::Custom {
+                id: custom_id,
+                program,
+                period,
+            } => {
                 // Phase 7 Task 6: delegate to the CustomEvaluator if wired.
-                // Falls back to a parked task (Phase 4 behaviour) when no
-                // evaluator is available (e.g. test sessions without SDK dir).
+                // Falls back to a parked task when no evaluator is available
+                // (e.g. test sessions without SDK dir). The parked sentinel
+                // NEVER fires; the real task lives in CustomEvaluator::tasks.
+                //
+                // IMPORTANT: we do NOT store the period in the WakeRegistry's
+                // own sentinel handle — the period is owned by the CustomEvaluator.
+                // On unregister, we delegate to the CustomEvaluator so it can
+                // abort its own task (not the sentinel). See unregister() below.
                 let maybe_evaluator = self.custom_evaluator.lock().clone();
                 if let Some(evaluator) = maybe_evaluator {
-                    // Custom conditions currently only support Interval triggers.
-                    // The interval period is encoded implicitly: custom conditions
-                    // evaluate once per second by default. Future work will add
-                    // BlockChanged triggers for custom conditions.
                     evaluator
-                        .register_interval(
-                            custom_id.clone(),
-                            program.clone(),
-                            std::time::Duration::from_secs(1),
-                        )
+                        .register_interval(custom_id.clone(), program.clone(), *period)
                         .map_err(WakeError::CustomEvaluatorError)?;
-                    // The evaluator owns the task; we still need a JoinHandle
-                    // for the registry's lifecycle management. Spawn a waiter
-                    // that completes when the evaluator's task is unregistered.
+                    // The evaluator owns the real task. Store a no-op sentinel
+                    // handle so the registry can track the id and enforce the
+                    // duplicate-id check. The sentinel is aborted harmlessly on
+                    // registry drop; the real task is aborted via
+                    // CustomEvaluator::unregister in WakeRegistry::unregister.
                     self.tokio_handle
                         .spawn(async move { std::future::pending::<()>().await })
                 } else {
@@ -441,11 +446,31 @@ impl WakeRegistry {
 
     /// Unregister a wake condition by id. Aborts its evaluator task.
     /// Returns `true` if the id was registered, `false` otherwise.
+    ///
+    /// For [`WakeCondition::Custom`] conditions, this delegates to the
+    /// `CustomEvaluator` (which owns the real evaluator task) in addition
+    /// to removing the sentinel from the registry. Without this delegation,
+    /// unregistering a custom condition would only abort the no-op sentinel
+    /// and leave the real evaluator task running — leaking tasks across
+    /// register/unregister cycles and eventually exhausting the 32-condition cap.
     pub fn unregister(&self, id: &SmolStr) -> bool {
         let mut conds = self.conditions.lock();
         if let Some(idx) = conds.iter().position(|c| &c.id == id) {
             let removed = conds.remove(idx);
+            // Abort the registry-side handle (real task for most conditions;
+            // no-op sentinel for Custom conditions — see register()).
             removed.handle.abort();
+            // For Custom conditions: also delegate to the CustomEvaluator so
+            // it can abort the real evaluator task and free the condition slot.
+            // The evaluator is held behind a Mutex so we take a snapshot here
+            // and release the conditions lock before calling into it, avoiding
+            // a potential lock-order inversion.
+            if matches!(removed.condition, WakeCondition::Custom { .. }) {
+                let maybe_evaluator = self.custom_evaluator.lock().clone();
+                if let Some(evaluator) = maybe_evaluator {
+                    evaluator.unregister(id);
+                }
+            }
             true
         } else {
             false
@@ -644,6 +669,7 @@ mod tests {
                 WakeCondition::Custom {
                     id: SmolStr::new("user-id"),
                     program: "pure True".to_string(),
+                    period: std::time::Duration::from_secs(1),
                 },
             )
             .expect("custom registration should succeed in Phase 4");

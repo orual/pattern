@@ -23,7 +23,6 @@ use async_trait::async_trait;
 use pattern_core::ProviderClient;
 use pattern_core::error::RuntimeError;
 use pattern_core::traits::{MemoryStore, NoOpSink, Session, TurnSink};
-use pattern_core::types::memory_types::MemoryError;
 use pattern_core::types::snapshot::{PersonaSnapshot, SessionSnapshot};
 use pattern_core::types::turn::{StepReply, TurnInput};
 
@@ -508,10 +507,10 @@ pub struct SessionContext {
     /// persists — they cannot drift.
     ///
     /// Daemon sessions wire a `DaemonFrontingCommitter` (three-phase commit
-    /// + DB persist + `FrontingChanged` fan-out). Test sessions wire an
-    /// `InMemoryFrontingCommitter` (no-op persist + no event emission).
-    /// `None` leaves the `Pattern.Fronting` effect unwired entirely; the
-    /// handler returns a `FRONTING_NOT_WIRED_PREFIX`-marked error.
+    /// plus DB persist plus `FrontingChanged` fan-out). Test sessions wire an
+    /// `InMemoryFrontingCommitter` (no-op persist, no event emission). When
+    /// `None`, the `Pattern.Fronting` effect is unwired entirely; the handler
+    /// returns a `FRONTING_NOT_WIRED_PREFIX`-marked error.
     fronting_committer: Option<Arc<dyn crate::sdk::handlers::fronting::FrontingCommitter>>,
 }
 
@@ -1105,16 +1104,15 @@ impl SessionContext {
             // but get a fresh `process_manager` so their shell state
             // (cwd, env, running tasks) is isolated from the parent's.
             //
-            // TODO(post-merge): wire per-effect permission scoping so
-            // that an ephemeral child whose `child_caps` excludes File
-            // or Port doesn't carry the parent's manager handle into
-            // scope. Right now the inherited manager is a hard
-            // reference; capability-driven access control happens at
-            // the handler level via the child's CapabilitySet, which
-            // is sufficient for current use but couples capability
-            // enforcement to per-handler checks. A cleaner design
-            // would be `Option<Arc<...>>` populated only when the
-            // child has the relevant capability.
+            // FUTURE WORK (Phase 8+, 2026-04-28): wire per-effect permission
+            // scoping so that an ephemeral child whose `child_caps` excludes
+            // File or Port doesn't carry the parent's manager handle into
+            // scope. Right now the inherited manager is a hard reference;
+            // capability-driven access control happens at the handler level
+            // via the child's CapabilitySet, which is sufficient for current
+            // use but couples capability enforcement to per-handler checks.
+            // A cleaner design would be `Option<Arc<...>>` populated only
+            // when the child has the relevant capability.
             async_reminder_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
             file_manager: self.file_manager.clone(),
             process_manager: Arc::new(crate::process_manager::ProcessManager::new(
@@ -1635,9 +1633,9 @@ pub struct SessionRegistries {
     /// for SDK-driven `Pattern.Fronting` mutations.
     ///
     /// Daemon sessions wire a `DaemonFrontingCommitter` (three-phase commit
-    /// + DB persist + `FrontingChanged` fan-out). Test sessions wire an
-    /// `InMemoryFrontingCommitter` (no-op persist + no event emission).
-    /// `None` leaves the `Pattern.Fronting` effect unwired entirely.
+    /// plus DB persist plus `FrontingChanged` fan-out). Test sessions wire an
+    /// `InMemoryFrontingCommitter` (no-op persist, no event emission). When
+    /// `None`, the `Pattern.Fronting` effect is unwired entirely.
     ///
     /// v3-multi-agent Phase 6 T5b. Replaces the prior split between
     /// `fronting_set` and `fronting_committer` — bundling them eliminates
@@ -1647,6 +1645,13 @@ pub struct SessionRegistries {
     /// `SessionContext` so the `Pattern.Constellation` SDK and sibling
     /// auto-registration both see the same per-mount handle.
     pub constellation_registry: Option<Arc<dyn pattern_core::ConstellationRegistry>>,
+    /// Optional sibling persona resolver. When `None`, the session uses the
+    /// default `UnconfiguredSiblingResolver` and every
+    /// `ctx.spawn.sibling(Existing(id))` call fails with `PersonaNotFound`.
+    /// Production daemons should pass
+    /// `ConstellationSiblingResolver::new(constellation_registry)`
+    /// so siblings can be resolved against the persona registry.
+    pub sibling_resolver: Option<Arc<dyn crate::spawn::sibling::SiblingPersonaResolver>>,
 }
 
 /// Extras required to construct a [`crate::wake::WakeRegistry`] inside
@@ -2044,6 +2049,16 @@ impl TidepoolSession {
             // registration in `spawn_sibling_*`.
             let ctx = if let Some(reg) = regs.constellation_registry {
                 ctx.with_constellation_registry(reg)
+            } else {
+                ctx
+            };
+
+            // Wire SiblingPersonaResolver (production: the daemon passes a
+            // `ConstellationSiblingResolver` backed by the per-mount registry;
+            // tests pass `StubSiblingResolver`; if `None`, the default
+            // `UnconfiguredSiblingResolver` makes every sibling lookup fail).
+            let ctx = if let Some(resolver) = regs.sibling_resolver {
+                ctx.with_sibling_resolver(resolver)
             } else {
                 ctx
             };
@@ -2464,12 +2479,10 @@ fn seed_persona_memory_blocks(
         }
 
         // Don't clobber existing blocks — persona is INITIAL intent.
-        // The store may return Err(NotFound) or Ok(None) for missing blocks
-        // depending on the implementation. Both mean "create it".
+        // Missing blocks return Ok(None) per the trait contract.
         match store.get_block(agent_id, label.as_str()) {
             Ok(Some(_)) => continue, // Already exists — preserve live state.
             Ok(None) => {}           // Doesn't exist — create below.
-            Err(MemoryError::NotFound { .. }) => {} // Store returns Err for missing — treat as "create."
             Err(e) => {
                 return Err(RuntimeError::MemorySeedFailed {
                     label: label.to_string(),

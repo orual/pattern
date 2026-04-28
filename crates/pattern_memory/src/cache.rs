@@ -339,12 +339,11 @@ impl MemoryCache {
         );
         let (block_id, permission) = match access_result {
             Some((id, perm)) => (id, perm),
-            None => {
-                return Err(MemoryError::NotFound {
-                    agent_id: agent_id.to_string(),
-                    label: label.to_string(),
-                });
-            } // Block doesn't exist or no access.
+            // Block doesn't exist or caller has no access. The trait
+            // contract for `MemoryStore::get_block` is `Ok(None)` for
+            // missing — see `pattern_core::error::memory` module doc
+            // for the read/write missing-block split.
+            None => return Ok(None),
         };
 
         // 2. Check cache using block_id.
@@ -410,12 +409,10 @@ impl MemoryCache {
 
         let block = match block {
             Some(b) if b.is_active => b,
-            _ => {
-                return Err(MemoryError::NotFound {
-                    agent_id: agent_id.to_string(),
-                    label: label.to_string(),
-                });
-            }
+            // Missing or soft-deleted: read-path → Ok(None). Mirrors
+            // the contract of `get_block`/`get_block_metadata` — see
+            // `pattern_core::error::memory` module doc.
+            _ => return Ok(None),
         };
 
         // Build BlockMetadata from DB block.
@@ -464,9 +461,10 @@ impl MemoryCache {
         let block_id = match block {
             Some(b) => b.id,
             None => {
-                return Err(MemoryError::NotFound {
+                return Err(MemoryError::WriteToMissingBlock {
                     agent_id: agent_id.to_string(),
                     label: label.to_string(),
+                    op: "persist_block",
                 });
             }
         };
@@ -474,9 +472,10 @@ impl MemoryCache {
         let entry = self
             .blocks
             .get(&block_id)
-            .ok_or_else(|| MemoryError::NotFound {
+            .ok_or_else(|| MemoryError::WriteToMissingBlock {
                 agent_id: agent_id.to_string(),
                 label: label.to_string(),
+                op: "persist_block",
             })?;
 
         // Extract data we need before releasing the entry lock.
@@ -544,9 +543,10 @@ impl MemoryCache {
         let mut entry = self
             .blocks
             .get_mut(&block_id)
-            .ok_or_else(|| MemoryError::NotFound {
+            .ok_or_else(|| MemoryError::WriteToMissingBlock {
                 agent_id: agent_id.to_string(),
                 label: label.to_string(),
+                op: "persist_block",
             })?;
 
         if let Some(seq) = new_seq {
@@ -2221,9 +2221,10 @@ impl MemoryStore for MemoryCache {
             pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, agent_id, label)
                 .mem()?;
 
-        let block = block.ok_or_else(|| MemoryError::NotFound {
+        let block = block.ok_or_else(|| MemoryError::WriteToMissingBlock {
             agent_id: agent_id.to_string(),
             label: label.to_string(),
+            op: "update_block_metadata",
         })?;
 
         // Apply pinned update.
@@ -2316,9 +2317,10 @@ impl MemoryStore for MemoryCache {
             pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, agent_id, label)
                 .mem()?;
 
-        let block = block.ok_or_else(|| MemoryError::NotFound {
+        let block = block.ok_or_else(|| MemoryError::WriteToMissingBlock {
             agent_id: agent_id.to_string(),
             label: label.to_string(),
+            op: "undo_redo",
         })?;
 
         match op {
@@ -2401,9 +2403,10 @@ impl MemoryStore for MemoryCache {
             pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, agent_id, label)
                 .mem()?;
 
-        let block = block.ok_or_else(|| MemoryError::NotFound {
+        let block = block.ok_or_else(|| MemoryError::WriteToMissingBlock {
             agent_id: agent_id.to_string(),
             label: label.to_string(),
+            op: "history_depth",
         })?;
 
         let undo = pattern_db::queries::count_undo_steps(&*self.db.get().mem()?, &block.id).mem()?
@@ -2495,8 +2498,9 @@ mod tests {
         let (_dir, dbs) = test_dbs();
         let cache = MemoryCache::new(dbs);
 
-        let doc = cache.get("agent_1", "nonexistent");
-        assert!(doc.is_err());
+        // Missing block: read path returns Ok(None) per the trait contract.
+        let doc = cache.get("agent_1", "nonexistent").unwrap();
+        assert!(doc.is_none());
     }
 
     #[test]
@@ -2751,9 +2755,9 @@ mod tests {
         // Delete it.
         cache.delete_block("agent_1", "to_delete").unwrap();
 
-        // Verify it's gone (soft delete, so get_block returns error).
-        let doc = cache.get_block("agent_1", "to_delete");
-        assert!(doc.is_err());
+        // Verify it's gone (soft delete → get_block returns Ok(None)).
+        let doc = cache.get_block("agent_1", "to_delete").unwrap();
+        assert!(doc.is_none());
 
         // List should not include deleted block.
         let blocks = cache.list_blocks(BlockFilter::by_agent("agent_1")).unwrap();
