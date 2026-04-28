@@ -164,7 +164,7 @@ agent = do
 /// The agent source imports the module qualified and defines `_checkRoundRobinType`
 /// as a type-only alias for `roundRobin`. GHC checks that the alias typechecks —
 /// proving the import resolves and the type signature is consistent — even though
-/// the binding is never called.  The `agent` entrypoint is a plain `Time`-only
+/// the binding is never called.  The `agent` entrypoint is a plain `Time + Log`
 /// program so the test can reuse the existing `TimePlusLogBundle` and `()` context.
 ///
 /// Skips gracefully when `tidepool-extract` is not on PATH (same policy as
@@ -180,7 +180,7 @@ fn delegation_round_robin_module_compiles() {
         .resolve()
         .expect("SDK dir should exist");
 
-    // The agent's `agent` binding uses only `Time` so `TimePlusLogBundle`
+    // The agent's `agent` binding uses only `Time` and `Log` so `TimePlusLogBundle`
     // satisfies the effect row.  `_checkRoundRobinType` is a top-level
     // type-alias binding that GHC checks even though it is never called —
     // this is the compile-time import verification for AC10.4.
