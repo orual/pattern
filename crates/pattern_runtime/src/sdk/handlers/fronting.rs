@@ -193,24 +193,24 @@ impl DescribeEffect for FrontingHandler {
         EffectDecl {
             type_name: "Fronting",
             description: "Read and mutate the constellation's active fronting set and routing rules",
-            constructors: &[
+            constructors: std::borrow::Cow::Borrowed(&[
                 "Current :: Fronting Text",
                 "Set     :: [PersonaId] -> Maybe PersonaId -> Fronting ()",
                 "Route   :: [RoutingRule] -> Fronting ()",
                 "Clear   :: Fronting ()",
-            ],
-            type_defs: &[
+            ]),
+            type_defs: std::borrow::Cow::Borrowed(&[
                 "type PersonaId = Text",
                 // RoutingRule is a record: (id, pattern, target, priority).
                 "data RoutingRule = RoutingRule Text MessagePattern Text Word32",
                 "data MessagePattern = PatternPrefix Text | PatternContains Text | PatternTopicTag Text | PatternRegex Text",
-            ],
-            helpers: &[
+            ]),
+            helpers: std::borrow::Cow::Borrowed(&[
                 "current :: Member Fronting effs => Eff effs Text\ncurrent = send Current",
                 "set :: Member Fronting effs => [PersonaId] -> Maybe PersonaId -> Eff effs ()\nset personas fb = send (Set personas fb)",
                 "route :: Member Fronting effs => [RoutingRule] -> Eff effs ()\nroute rules = send (Route rules)",
                 "clear :: Member Fronting effs => Eff effs ()\nclear = send Clear",
-            ],
+            ]),
         }
     }
 }
@@ -224,6 +224,21 @@ impl EffectHandler<SessionContext> for FrontingHandler {
         cx: &EffectContext<'_, SessionContext>,
     ) -> Result<Value, EffectError> {
         let user: &SessionContext = cx.user();
+
+        // Effect-class runtime guard. Runs BEFORE the FrontingControl flag check.
+        // All Fronting constructors are Coordinate/Skip, so this returns Ok(())
+        // immediately; defensive for future reclassification.
+        let constructor_name = match &req {
+            FrontingReq::Current => "Current",
+            FrontingReq::Set(_, _) => "Set",
+            FrontingReq::Route(_) => "Route",
+            FrontingReq::Clear => "Clear",
+        };
+        crate::sdk::effect_classes::check_effect_class(
+            user.capabilities(),
+            "Fronting",
+            constructor_name,
+        )?;
 
         // Capability gate — fail-closed: `None` capabilities means the session
         // has no explicit capability set configured. The daemon always opens

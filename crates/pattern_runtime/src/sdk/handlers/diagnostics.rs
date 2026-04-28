@@ -12,6 +12,7 @@ use tidepool_eval::Value;
 use crate::sdk::describe::{DescribeEffect, EffectDecl};
 use crate::sdk::lib_modules::LibCompileFailure;
 use crate::sdk::requests::DiagnosticsReq;
+use crate::session::HasCapabilities;
 
 // ---------------------------------------------------------------------------
 // DiagnosticEvent type
@@ -81,16 +82,19 @@ impl DescribeEffect for DiagnosticsHandler {
         EffectDecl {
             type_name: "Diagnostics",
             description: "Query session diagnostic events (compile failures, warnings) as JSON",
-            constructors: &["GetDiagnostics :: Diagnostics Text"],
-            type_defs: &[],
-            helpers: &[
+            constructors: std::borrow::Cow::Borrowed(&["GetDiagnostics :: Diagnostics Text"]),
+            type_defs: std::borrow::Cow::Borrowed(&[]),
+            helpers: std::borrow::Cow::Borrowed(&[
                 "diagnostics :: Member Diagnostics effs => Eff effs Text\ndiagnostics = Freer.send GetDiagnostics",
-            ],
+            ]),
         }
     }
 }
 
-impl<U> EffectHandler<U> for DiagnosticsHandler {
+impl<U> EffectHandler<U> for DiagnosticsHandler
+where
+    U: HasCapabilities,
+{
     type Request = DiagnosticsReq;
 
     fn handle(
@@ -98,6 +102,16 @@ impl<U> EffectHandler<U> for DiagnosticsHandler {
         req: DiagnosticsReq,
         cx: &EffectContext<'_, U>,
     ) -> Result<Value, EffectError> {
+        // Effect-class runtime guard. GetDiagnostics is Observe/Enforce.
+        let constructor_name = match &req {
+            DiagnosticsReq::GetDiagnostics => "GetDiagnostics",
+        };
+        crate::sdk::effect_classes::check_effect_class(
+            cx.user().capabilities(),
+            "Diagnostics",
+            constructor_name,
+        )?;
+
         match req {
             DiagnosticsReq::GetDiagnostics => {
                 let diags = self

@@ -49,7 +49,7 @@ impl DescribeEffect for TasksHandler {
         EffectDecl {
             type_name: "Tasks",
             description: "Task-graph operations: create, update, transition, link, unlink, list, query, comment",
-            constructors: &[
+            constructors: std::borrow::Cow::Borrowed(&[
                 "Create         :: BlockHandle -> TaskSpec -> Tasks TaskItemId",
                 "Update         :: TaskEdgeRef -> TaskPatch -> Tasks ()",
                 "Transition     :: TaskEdgeRef -> TaskStatus -> Tasks ()",
@@ -58,8 +58,8 @@ impl DescribeEffect for TasksHandler {
                 "List           :: Maybe BlockHandle -> TaskFilter -> Tasks [TaskView]",
                 "QueryGraph     :: TaskEdgeRef -> GraphQuery -> Tasks GraphSlice",
                 "AddComment     :: TaskEdgeRef -> Text -> Tasks ()",
-            ],
-            type_defs: &[
+            ]),
+            type_defs: std::borrow::Cow::Borrowed(&[
                 "type BlockHandle = Text",
                 "type TaskItemId = Text  -- snowflake, base32-encoded",
                 "type TaskEdgeRef = Text  -- \"block-handle#item-id\" (item form) or \"block-handle\" (block form)",
@@ -75,8 +75,8 @@ impl DescribeEffect for TasksHandler {
                 "type GraphQuery = Text  -- JSON: {direction:Direction-kebab, depth?:Int, max_nodes?:Int}",
                 "type Direction = Text  -- kebab-case: \"forward\"|\"reverse\"|\"both\"",
                 "type GraphSlice = Text  -- JSON: {nodes:[TaskEdgeRef], edges:[[TaskEdgeRef,TaskEdgeRef]], truncated:Bool}",
-            ],
-            helpers: &[
+            ]),
+            helpers: std::borrow::Cow::Borrowed(&[
                 "create :: Member Tasks effs => BlockHandle -> TaskSpec -> Eff effs TaskItemId\ncreate block spec = send (Create block spec)",
                 "update :: Member Tasks effs => TaskEdgeRef -> TaskPatch -> Eff effs ()\nupdate ref patch = send (Update ref patch)",
                 "transition :: Member Tasks effs => TaskEdgeRef -> TaskStatus -> Eff effs ()\ntransition ref status = send (Transition ref status)",
@@ -85,7 +85,7 @@ impl DescribeEffect for TasksHandler {
                 "list :: Member Tasks effs => Maybe BlockHandle -> TaskFilter -> Eff effs [TaskView]\nlist block filt = send (List block filt)",
                 "queryGraph :: Member Tasks effs => TaskEdgeRef -> GraphQuery -> Eff effs GraphSlice\nqueryGraph root query = send (QueryGraph root query)",
                 "addComment :: Member Tasks effs => TaskEdgeRef -> Text -> Eff effs ()\naddComment ref txt = send (AddComment ref txt)",
-            ],
+            ]),
         }
     }
 }
@@ -98,6 +98,23 @@ impl EffectHandler<SessionContext> for TasksHandler {
         req: TasksReq,
         cx: &EffectContext<'_, SessionContext>,
     ) -> Result<Value, EffectError> {
+        // Effect-class runtime guard. All Tasks constructors are Enforce.
+        let constructor_name = match &req {
+            TasksReq::Create(_, _) => "Create",
+            TasksReq::Update(_, _) => "Update",
+            TasksReq::Transition(_, _) => "Transition",
+            TasksReq::AddComment(_, _) => "AddComment",
+            TasksReq::Link(_, _) => "Link",
+            TasksReq::Unlink(_, _) => "Unlink",
+            TasksReq::List(_, _) => "List",
+            TasksReq::QueryGraph(_, _) => "QueryGraph",
+        };
+        crate::sdk::effect_classes::check_effect_class(
+            cx.user().capabilities(),
+            "Tasks",
+            constructor_name,
+        )?;
+
         let agent_id = cx.user().agent_id().to_string();
         let adapter = cx.user().adapter().clone();
         let store = cx.user().memory_store();

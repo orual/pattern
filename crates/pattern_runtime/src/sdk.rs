@@ -12,6 +12,7 @@
 pub mod bundle;
 pub mod code_tool;
 pub mod describe;
+pub mod effect_classes;
 pub mod handlers;
 pub mod lib_modules;
 pub mod location;

@@ -10,6 +10,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::sdk::describe::{DescribeEffect, EffectDecl};
 use crate::sdk::requests::LogReq;
+use crate::session::HasCapabilities;
 
 /// Handler for `Pattern.Log`. Holds an optional session identifier so
 /// correlated turns can be grouped in log output. Set by the `Session`
@@ -34,26 +35,26 @@ impl DescribeEffect for LogHandler {
         EffectDecl {
             type_name: "Log",
             description: "Structured agent logging at debug/info/warn/error levels",
-            constructors: &[
+            constructors: std::borrow::Cow::Borrowed(&[
                 "Debug :: Text -> Log ()",
                 "Info  :: Text -> Log ()",
                 "Warn  :: Text -> Log ()",
                 "Error :: Text -> Log ()",
-            ],
-            type_defs: &[],
-            helpers: &[
+            ]),
+            type_defs: std::borrow::Cow::Borrowed(&[]),
+            helpers: std::borrow::Cow::Borrowed(&[
                 "debug :: Member Log effs => Text -> Eff effs ()\ndebug msg = Freer.send (Debug msg)",
                 "info :: Member Log effs => Text -> Eff effs ()\ninfo msg = Freer.send (Info msg)",
                 "warn :: Member Log effs => Text -> Eff effs ()\nwarn msg = Freer.send (Warn msg)",
                 "error :: Member Log effs => Text -> Eff effs ()\nerror msg = Freer.send (Error msg)",
-            ],
+            ]),
         }
     }
 }
 
 impl<U> EffectHandler<U> for LogHandler
 where
-    U: crate::session::HasCancelState,
+    U: crate::session::HasCancelState + HasCapabilities,
 {
     type Request = LogReq;
 
@@ -70,6 +71,19 @@ where
                 crate::timeout::CANCELLED_SENTINEL,
             )));
         }
+        // Effect-class runtime guard. All Log constructors are Observe/Enforce.
+        let constructor_name = match &req {
+            LogReq::Debug(_) => "Debug",
+            LogReq::Info(_) => "Info",
+            LogReq::Warn(_) => "Warn",
+            LogReq::Error(_) => "Error",
+        };
+        crate::sdk::effect_classes::check_effect_class(
+            cx.user().capabilities(),
+            "Log",
+            constructor_name,
+        )?;
+
         let sid = self.session_id.as_deref().unwrap_or("unknown");
         match req {
             LogReq::Debug(msg) => debug!(session = sid, source = "agent", "{msg}"),

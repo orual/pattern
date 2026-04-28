@@ -85,24 +85,24 @@ impl DescribeEffect for ShellHandler {
         EffectDecl {
             type_name: "Shell",
             description: "Shell command execution (Execute/Spawn/Kill/Status)",
-            constructors: &[
+            constructors: std::borrow::Cow::Borrowed(&[
                 "Execute :: Command -> Maybe TimeoutSecs -> Shell Text",
                 "Spawn   :: Command -> Shell Text",
                 "Kill    :: TaskId -> Shell ()",
                 "Status  :: Shell Text",
-            ],
-            type_defs: &[
+            ]),
+            type_defs: std::borrow::Cow::Borrowed(&[
                 "type Command = Text",
                 "type TaskId = Text  -- opaque, recycle-safe; NOT an OS PID",
                 "type TimeoutSecs = Int",
-            ],
-            helpers: &[
+            ]),
+            helpers: std::borrow::Cow::Borrowed(&[
                 "execute :: Member Shell effs => Command -> Eff effs Text\nexecute c = send (Execute c Nothing)",
                 "executeWith :: Member Shell effs => Command -> TimeoutSecs -> Eff effs Text\nexecuteWith c t = send (Execute c (Just t))",
                 "spawn :: Member Shell effs => Command -> Eff effs Text\nspawn c = send (Spawn c)  -- returns JSON {task_id,pid}",
                 "kill :: Member Shell effs => TaskId -> Eff effs ()\nkill tid = send (Kill tid)",
                 "status :: Member Shell effs => Eff effs Text\nstatus = send Status  -- returns JSON [TaskInfo,...]",
-            ],
+            ]),
         }
     }
 }
@@ -134,6 +134,23 @@ impl EffectHandler<SessionContext> for ShellHandler {
                 "{PERMISSION_DENIED_PREFIX}Pattern.Shell: capability denied (Shell effect not in agent's CapabilitySet)"
             )));
         }
+
+        // Effect-class runtime guard. Runs BEFORE the policy/broker pipeline.
+        // All Shell constructors are RuntimeClassCheck::Skip (the policy
+        // pipeline is the authoritative gate for shell commands); this guard
+        // is defensive — any future reclassification to Enforce is
+        // automatically picked up here.
+        let constructor_name = match &req {
+            ShellReq::Execute(_, _) => "Execute",
+            ShellReq::Spawn(_) => "Spawn",
+            ShellReq::Kill(_) => "Kill",
+            ShellReq::Status => "Status",
+        };
+        crate::sdk::effect_classes::check_effect_class(
+            cx.user().capabilities(),
+            "Shell",
+            constructor_name,
+        )?;
 
         let pm = cx.user().process_manager();
         let queue = Arc::clone(cx.user().async_reminder_queue());

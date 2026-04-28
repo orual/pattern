@@ -65,7 +65,7 @@ impl DescribeEffect for MemoryHandler {
         EffectDecl {
             type_name: "Memory",
             description: "Persistent memory-block operations (Get/Put/Create/Append/Replace/Search/Recall/Archive/GetShared/WriteToPersona)",
-            constructors: &[
+            constructors: std::borrow::Cow::Borrowed(&[
                 "Get            :: BlockHandle -> Memory Content",
                 "Put            :: BlockHandle -> Content -> Maybe Text -> Memory ()",
                 "Create         :: BlockHandle -> Text -> MemoryBlockType -> SchemaKind -> Maybe Int -> Content -> Memory ()",
@@ -76,16 +76,16 @@ impl DescribeEffect for MemoryHandler {
                 "Archive        :: BlockHandle -> Memory ()",
                 "GetShared      :: Owner -> BlockHandle -> Memory Content",
                 "WriteToPersona :: BlockHandle -> Content -> Memory ()",
-            ],
-            type_defs: &[
+            ]),
+            type_defs: std::borrow::Cow::Borrowed(&[
                 "type BlockHandle = Text",
                 "type Content = Text",
                 "type Query = Text",
                 "type Owner = Text",
                 "data MemoryBlockType = BlockCore | BlockWorking | BlockArchival | BlockLog",
                 "data SchemaKind = SchemaText | SchemaMap | SchemaList | SchemaLog",
-            ],
-            helpers: &[
+            ]),
+            helpers: std::borrow::Cow::Borrowed(&[
                 "get :: Member Memory effs => BlockHandle -> Eff effs Content\nget h = send (Get h)",
                 "put :: Member Memory effs => BlockHandle -> Content -> Eff effs ()\nput h c = send (Put h c Nothing)",
                 "putWithDesc :: Member Memory effs => BlockHandle -> Content -> Text -> Eff effs ()\nputWithDesc h c d = send (Put h c (Just d))",
@@ -97,7 +97,7 @@ impl DescribeEffect for MemoryHandler {
                 "archive :: Member Memory effs => BlockHandle -> Eff effs ()\narchive h = send (Archive h)",
                 "getShared :: Member Memory effs => Owner -> BlockHandle -> Eff effs Content\ngetShared o h = send (GetShared o h)",
                 "writeToPersona :: Member Memory effs => BlockHandle -> Content -> Eff effs ()\nwriteToPersona h c = send (WriteToPersona h c)",
-            ],
+            ]),
         }
     }
 }
@@ -122,6 +122,29 @@ impl EffectHandler<SessionContext> for MemoryHandler {
         // Gate entry: pauses the watchdog's budget accumulation while we
         // do I/O-bound work. RAII guarantees exit on error / panic.
         let _guard = HandlerGuard::enter(&state.gate);
+
+        // Effect-class runtime guard. Maps the request variant to its
+        // constructor name and delegates to the classification table.
+        // `RuntimeClassCheck::Skip` constructors return Ok immediately;
+        // `Enforce` constructors are checked against the agent's
+        // `allowed_classes`. `None` capabilities means full access.
+        let constructor_name = match &req {
+            MemoryReq::Get(_) => "Get",
+            MemoryReq::Put(_, _, _) => "Put",
+            MemoryReq::Create(_, _, _, _, _, _) => "Create",
+            MemoryReq::Append(_, _) => "Append",
+            MemoryReq::Replace(_, _, _) => "Replace",
+            MemoryReq::Search(_) => "Search",
+            MemoryReq::Recall(_) => "Recall",
+            MemoryReq::Archive(_) => "Archive",
+            MemoryReq::GetShared(_, _) => "GetShared",
+            MemoryReq::WriteToPersona(_, _) => "WriteToPersona",
+        };
+        crate::sdk::effect_classes::check_effect_class(
+            cx.user().capabilities(),
+            "Memory",
+            constructor_name,
+        )?;
 
         let agent_id = cx.user().agent_id().to_string();
 

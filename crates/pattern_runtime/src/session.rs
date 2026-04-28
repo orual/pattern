@@ -539,6 +539,26 @@ impl HasCancelState for SessionContext {
 /// returns an always-empty set so unit tests using `&()` see every
 /// effect as [`pattern_core::PolicyAction::Allow`] (i.e. they fall
 /// straight through to the handler's existing "no gate" path).
+/// Handlers call this to perform per-constructor effect-class checks.
+///
+/// `SessionContext` provides the live `CapabilitySet`; the no-op `()` impl
+/// returns `None` (no restrictions — backwards-compatible full access).
+pub trait HasCapabilities {
+    fn capabilities(&self) -> Option<&pattern_core::CapabilitySet>;
+}
+
+impl HasCapabilities for SessionContext {
+    fn capabilities(&self) -> Option<&pattern_core::CapabilitySet> {
+        SessionContext::capabilities(self)
+    }
+}
+
+impl HasCapabilities for () {
+    fn capabilities(&self) -> Option<&pattern_core::CapabilitySet> {
+        None
+    }
+}
+
 pub trait HasPolicySet {
     fn policies(&self) -> &pattern_core::PolicySet;
 }

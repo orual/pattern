@@ -57,7 +57,8 @@ pub mod test_helpers;
 pub use base_instructions::DEFAULT_BASE_INSTRUCTIONS;
 pub use capability::{
     CapabilityError, CapabilityFlag, CapabilityParseError, CapabilitySet, EffectCategory,
-    PolicyAction, PolicyContext, PolicyMatcher, PolicyRule, PolicySet, Precedence,
+    EffectClass, PolicyAction, PolicyContext, PolicyMatcher, PolicyRule, PolicySet, Precedence,
+    RuntimeClassCheck,
 };
 
 /// Reserved memory-block label for the agent's persona content.

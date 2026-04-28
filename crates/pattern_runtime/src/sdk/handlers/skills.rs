@@ -43,26 +43,26 @@ impl DescribeEffect for SkillsHandler {
         EffectDecl {
             type_name: "Skills",
             description: "Skill-block operations: list, get_metadata, load, search, get_usage_stats",
-            constructors: &[
+            constructors: std::borrow::Cow::Borrowed(&[
                 "List          :: Skills Text",
                 "GetMetadata   :: BlockHandle -> Skills Text",
                 "Load          :: BlockHandle -> Skills Text",
                 "Search        :: Text -> Skills Text",
                 "GetUsageStats :: BlockHandle -> Skills Text",
-            ],
-            type_defs: &[
+            ]),
+            type_defs: std::borrow::Cow::Borrowed(&[
                 "type BlockHandle = Text",
                 "type SkillInfo = Text       -- JSON: {handle:BlockHandle, name:Text, description?:Text, trust_tier:Text, keywords:[Text], last_used?:Text}",
                 "type SkillMetadata = Text   -- JSON: {name:Text, description?:Text, version?:Text, trust_tier:Text, keywords:[Text], hooks:Value}",
                 "type SkillUsageStats = Text -- JSON: {handle:BlockHandle, use_count:Int, last_used?:Text, last_used_by?:Text}",
-            ],
-            helpers: &[
+            ]),
+            helpers: std::borrow::Cow::Borrowed(&[
                 "listSkills :: Member Skills effs => Eff effs Text\nlistSkills = send List",
                 "getSkillMetadata :: Member Skills effs => BlockHandle -> Eff effs Text\ngetSkillMetadata h = send (GetMetadata h)",
                 "loadSkill :: Member Skills effs => BlockHandle -> Eff effs Text\nloadSkill h = send (Load h)",
                 "searchSkills :: Member Skills effs => Text -> Eff effs Text\nsearchSkills q = send (Search q)",
                 "getSkillUsageStats :: Member Skills effs => BlockHandle -> Eff effs Text\ngetSkillUsageStats h = send (GetUsageStats h)",
-            ],
+            ]),
         }
     }
 }
@@ -85,6 +85,20 @@ impl EffectHandler<SessionContext> for SkillsHandler {
         let store = cx.user().memory_store();
         let state = cx.user().cancel_state();
         let _guard = HandlerGuard::enter(&state.gate);
+
+        // Effect-class runtime guard. All Skills constructors are Observe/Enforce.
+        let constructor_name = match &req {
+            SkillsReq::List => "List",
+            SkillsReq::GetMetadata(_) => "GetMetadata",
+            SkillsReq::Load(_) => "Load",
+            SkillsReq::Search(_) => "Search",
+            SkillsReq::GetUsageStats(_) => "GetUsageStats",
+        };
+        crate::sdk::effect_classes::check_effect_class(
+            cx.user().capabilities(),
+            "Skills",
+            constructor_name,
+        )?;
 
         match req {
             SkillsReq::List => {

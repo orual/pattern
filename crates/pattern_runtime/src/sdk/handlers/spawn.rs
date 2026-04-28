@@ -45,7 +45,7 @@ impl DescribeEffect for SpawnHandler {
         EffectDecl {
             type_name: "Spawn",
             description: "Subagent / child-agent lifecycle: ephemeral workers, forks, sibling personas, await + stop",
-            constructors: &[
+            constructors: std::borrow::Cow::Borrowed(&[
                 "Ephemeral  :: EphemeralConfig -> Spawn EphemeralSpawn",
                 "AwaitSpawn :: SpawnId -> Spawn SpawnResult",
                 "AwaitAll   :: [SpawnId] -> Spawn [SpawnAwaitOutcome]",
@@ -53,8 +53,8 @@ impl DescribeEffect for SpawnHandler {
                 "Sibling    :: SiblingConfig -> Spawn SiblingSpawn",
                 "Stop       :: SpawnId -> Spawn ()",
                 "ForkOp     :: SpawnId -> ForkOpKind -> Spawn ForkOpResult",
-            ],
-            type_defs: &[
+            ]),
+            type_defs: std::borrow::Cow::Borrowed(&[
                 "type SpawnId   = Text",
                 "type PersonaId = Text",
                 // Typed records — full field definitions live in Pattern.Spawn.hs.
@@ -71,8 +71,8 @@ impl DescribeEffect for SpawnHandler {
                 // running sessions; there is nothing to await.
                 "data ForkOpKind = ForkOpMergeBack | ForkOpDiscard | ForkOpPromote PersonaConfig",
                 "data ForkOpResult = ForkOpUnit | ForkOpMergeReport Text | ForkOpPersonaId PersonaId",
-            ],
-            helpers: &[
+            ]),
+            helpers: std::borrow::Cow::Borrowed(&[
                 "ephemeral :: Member Spawn effs => EphemeralConfig -> Eff effs EphemeralSpawn\nephemeral cfg = send (Ephemeral cfg)",
                 "awaitSpawn :: Member Spawn effs => SpawnId -> Eff effs SpawnResult\nawaitSpawn sid = send (AwaitSpawn sid)",
                 "awaitAll :: Member Spawn effs => [SpawnId] -> Eff effs [SpawnAwaitOutcome]\nawaitAll ids = send (AwaitAll ids)",
@@ -82,7 +82,7 @@ impl DescribeEffect for SpawnHandler {
                 "mergeBack :: Member Spawn effs => SpawnId -> Eff effs ForkOpResult\nmergeBack fid = send (ForkOp fid ForkOpMergeBack)",
                 "discardFork :: Member Spawn effs => SpawnId -> Eff effs ForkOpResult\ndiscardFork fid = send (ForkOp fid ForkOpDiscard)",
                 "promoteFork :: Member Spawn effs => SpawnId -> PersonaConfig -> Eff effs ForkOpResult\npromoteFork fid cfg = send (ForkOp fid (ForkOpPromote cfg))",
-            ],
+            ]),
         }
     }
 }
@@ -98,6 +98,23 @@ impl EffectHandler<SessionContext> for SpawnHandler {
         // Uniform HandlerGate entry — see ShellHandler for the rationale.
         let state = cx.user().cancel_state();
         let _guard = HandlerGuard::enter(&state.gate);
+
+        // Effect-class runtime guard. Ephemeral/Fork/Sibling/Stop/ForkOp are
+        // Coordinate/Skip; AwaitSpawn/AwaitAll are Observe/Enforce.
+        let constructor_name = match &req {
+            SpawnReq::Ephemeral(_) => "Ephemeral",
+            SpawnReq::AwaitSpawn(_) => "AwaitSpawn",
+            SpawnReq::AwaitAll(_) => "AwaitAll",
+            SpawnReq::Stop(_) => "Stop",
+            SpawnReq::Fork(_) => "Fork",
+            SpawnReq::Sibling(_) => "Sibling",
+            SpawnReq::ForkOp(_, _) => "ForkOp",
+        };
+        crate::sdk::effect_classes::check_effect_class(
+            cx.user().capabilities(),
+            "Spawn",
+            constructor_name,
+        )?;
 
         match req {
             SpawnReq::Ephemeral(wire_cfg) => handle_ephemeral(wire_cfg, cx),

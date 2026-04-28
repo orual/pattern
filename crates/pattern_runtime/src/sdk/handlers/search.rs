@@ -47,21 +47,21 @@ impl DescribeEffect for SearchHandler {
         EffectDecl {
             type_name: "Search",
             description: "Scoped search across message history and archival entries (SearchMessages/SearchArchival/SearchAll)",
-            constructors: &[
+            constructors: std::borrow::Cow::Borrowed(&[
                 "SearchMessages :: SearchQuery -> Maybe Scope -> Search [SearchHit]",
                 "SearchArchival :: SearchQuery -> Maybe Scope -> Search [SearchHit]",
                 "SearchAll      :: SearchQuery -> Maybe Scope -> Search [SearchHit]",
-            ],
-            type_defs: &[
+            ]),
+            type_defs: std::borrow::Cow::Borrowed(&[
                 "type SearchQuery = Text",
                 "type Scope = Text",
                 "type SearchHit = Text",
-            ],
-            helpers: &[
+            ]),
+            helpers: std::borrow::Cow::Borrowed(&[
                 "messages :: Member Search effs => SearchQuery -> Maybe Scope -> Eff effs [SearchHit]\nmessages q s = send (SearchMessages q s)",
                 "archival :: Member Search effs => SearchQuery -> Maybe Scope -> Eff effs [SearchHit]\narchival q s = send (SearchArchival q s)",
                 "all_ :: Member Search effs => SearchQuery -> Maybe Scope -> Eff effs [SearchHit]\nall_ q s = send (SearchAll q s)",
-            ],
+            ]),
         }
     }
 }
@@ -82,6 +82,20 @@ impl EffectHandler<SessionContext> for SearchHandler {
         }
 
         let _guard = HandlerGuard::enter(&state.gate);
+
+        // Effect-class runtime guard. All Search constructors are Skip
+        // (short-circuits to Ok immediately), but we call it defensively.
+        let constructor_name = match &req {
+            SearchReq::SearchMessages(_, _) => "SearchMessages",
+            SearchReq::SearchArchival(_, _) => "SearchArchival",
+            SearchReq::SearchAll(_, _) => "SearchAll",
+        };
+        crate::sdk::effect_classes::check_effect_class(
+            cx.user().capabilities(),
+            "Search",
+            constructor_name,
+        )?;
+
         let agent_id = cx.user().agent_id().to_string();
         let store = self.store.clone();
         let request_repr = format!("{req:?}");

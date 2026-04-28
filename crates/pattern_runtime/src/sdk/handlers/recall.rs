@@ -46,23 +46,23 @@ impl DescribeEffect for RecallHandler {
         EffectDecl {
             type_name: "Recall",
             description: "Archival-entry CRUD with optional scope (RecallInsert/RecallSearch/RecallGet)",
-            constructors: &[
+            constructors: std::borrow::Cow::Borrowed(&[
                 "RecallInsert :: ArchivalContent -> Recall EntryId",
                 "RecallSearch :: RecallQuery -> Maybe Scope -> Recall [ArchivalHit]",
                 "RecallGet    :: EntryId -> Recall ArchivalContent",
-            ],
-            type_defs: &[
+            ]),
+            type_defs: std::borrow::Cow::Borrowed(&[
                 "type ArchivalContent = Text",
                 "type EntryId = Text",
                 "type RecallQuery = Text",
                 "type Scope = Text",
                 "type ArchivalHit = Text",
-            ],
-            helpers: &[
+            ]),
+            helpers: std::borrow::Cow::Borrowed(&[
                 "insert :: Member Recall effs => ArchivalContent -> Eff effs EntryId\ninsert c = send (RecallInsert c)",
                 "search :: Member Recall effs => RecallQuery -> Maybe Scope -> Eff effs [ArchivalHit]\nsearch q s = send (RecallSearch q s)",
                 "get :: Member Recall effs => EntryId -> Eff effs ArchivalContent\nget i = send (RecallGet i)",
-            ],
+            ]),
         }
     }
 }
@@ -83,6 +83,21 @@ impl EffectHandler<SessionContext> for RecallHandler {
         }
 
         let _guard = HandlerGuard::enter(&state.gate);
+
+        // Effect-class runtime guard.
+        // RecallInsert=MutateInternal/Enforce; RecallSearch=Observe/Skip;
+        // RecallGet=Observe/Enforce.
+        let constructor_name = match &req {
+            RecallReq::Insert(_) => "RecallInsert",
+            RecallReq::Search(_, _) => "RecallSearch",
+            RecallReq::Get(_) => "RecallGet",
+        };
+        crate::sdk::effect_classes::check_effect_class(
+            cx.user().capabilities(),
+            "Recall",
+            constructor_name,
+        )?;
+
         let agent_id = cx.user().agent_id().to_string();
         let store = self.store.clone();
         let request_repr = format!("{req:?}");

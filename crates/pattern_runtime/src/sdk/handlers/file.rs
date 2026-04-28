@@ -42,7 +42,9 @@ use crate::policy::config_guard::is_pattern_config_kdl;
 use crate::policy::{GATE_APPROVED_PREFIX, PERMISSION_DENIED_PREFIX};
 use crate::sdk::describe::{DescribeEffect, EffectDecl};
 use crate::sdk::requests::FileReq;
-use crate::session::{HasCancelState, HasFileManager, HasPermissionBridge, HasPolicySet};
+use crate::session::{
+    HasCancelState, HasCapabilities, HasFileManager, HasPermissionBridge, HasPolicySet,
+};
 use crate::timeout::HandlerGuard;
 
 /// Default broker-request timeout for file-write gates. Same envelope
@@ -59,7 +61,7 @@ impl DescribeEffect for FileHandler {
         EffectDecl {
             type_name: "File",
             description: "Sandboxed filesystem access (Read/Write/ListDir/Open/Close/Watch/Reload/ForceWrite)",
-            constructors: &[
+            constructors: std::borrow::Cow::Borrowed(&[
                 "Read       :: Path -> File Content",
                 "Write      :: Path -> Content -> File ()",
                 "ListDir    :: Path -> GlobPattern -> File [FileInfo]",
@@ -68,14 +70,14 @@ impl DescribeEffect for FileHandler {
                 "Watch      :: Path -> File ()",
                 "Reload     :: Path -> File Content",
                 "ForceWrite :: Path -> Content -> File ()",
-            ],
-            type_defs: &[
+            ]),
+            type_defs: std::borrow::Cow::Borrowed(&[
                 "type Path = Text",
                 "type Content = Text",
                 "type GlobPattern = Text",
                 "type FileInfo = Text -- JSON: {path:Text, size:Int, mtime:Text, is_dir:Bool}",
-            ],
-            helpers: &[
+            ]),
+            helpers: std::borrow::Cow::Borrowed(&[
                 "read :: Member File effs => Path -> Eff effs Content\nread p = Freer.send (Read p)",
                 "write :: Member File effs => Path -> Content -> Eff effs ()\nwrite p c = Freer.send (Write p c)",
                 "listDir :: Member File effs => Path -> GlobPattern -> Eff effs [FileInfo]\nlistDir p g = Freer.send (ListDir p g)",
@@ -86,20 +88,40 @@ impl DescribeEffect for FileHandler {
                 "reload :: Member File effs => Path -> Eff effs Content\nreload p = Freer.send (Reload p)",
                 // ForceWrite writes through, bypassing ConflictPolicy.
                 "forceWrite :: Member File effs => Path -> Content -> Eff effs ()\nforceWrite p c = Freer.send (ForceWrite p c)",
-            ],
+            ]),
         }
     }
 }
 
 impl<U> EffectHandler<U> for FileHandler
 where
-    U: HasCancelState + HasPolicySet + HasPermissionBridge + HasFileManager,
+    U: HasCancelState + HasCapabilities + HasPolicySet + HasPermissionBridge + HasFileManager,
 {
     type Request = FileReq;
 
     fn handle(&mut self, req: FileReq, cx: &EffectContext<'_, U>) -> Result<Value, EffectError> {
         let state = cx.user().cancel_state();
         let _guard = HandlerGuard::enter(&state.gate);
+
+        // Effect-class runtime guard. Runs BEFORE the shape guard and policy
+        // pipeline. Write/ForceWrite are MutateExternal/Skip (the shape guard
+        // is the authoritative gate); other constructors are Observe or
+        // MutateInternal with Enforce semantics.
+        let constructor_name = match &req {
+            FileReq::Read(_) => "Read",
+            FileReq::Write(_, _) => "Write",
+            FileReq::ListDir(_, _) => "ListDir",
+            FileReq::Open(_) => "Open",
+            FileReq::Close(_) => "Close",
+            FileReq::Watch(_) => "Watch",
+            FileReq::Reload(_) => "Reload",
+            FileReq::ForceWrite(_, _) => "ForceWrite",
+        };
+        crate::sdk::effect_classes::check_effect_class(
+            cx.user().capabilities(),
+            "File",
+            constructor_name,
+        )?;
 
         match req {
             FileReq::Write(path, content) => {
@@ -385,6 +407,12 @@ mod tests {
     impl HasFileManager for TestUser {
         fn file_manager(&self) -> Option<&Arc<crate::file_manager::FileManager>> {
             self.file_manager.as_ref()
+        }
+    }
+    impl HasCapabilities for TestUser {
+        fn capabilities(&self) -> Option<&pattern_core::CapabilitySet> {
+            // Test sessions have full access (no class filtering).
+            None
         }
     }
 

@@ -7,13 +7,27 @@
 //! `tidepool-mcp` (which pulls in rmcp, schemars, etc.) outweighs the
 //! cost of a local copy.
 
+use std::borrow::Cow;
+
 /// Static metadata describing a Haskell effect type.
 ///
 /// Each handler implements [`DescribeEffect`] to provide its Haskell-side
 /// GADT declaration, supporting types, and thin curried helpers. The
 /// preamble assembler walks a `Vec<EffectDecl>` to produce the Haskell
 /// boilerplate shared by every `code` tool eval.
-#[derive(Debug, Clone, Copy)]
+///
+/// The `constructors`, `type_defs`, and `helpers` fields use
+/// `Cow<'static, [&'static str]>` so that the per-capability filter in
+/// `bundle::filtered_effect_decls` can produce owned filtered slices
+/// without allocating when the static slices are used unfiltered. Each
+/// handler's `effect_decl()` returns `Cow::Borrowed(&[...])` for the
+/// static slices; the filter produces `Cow::Owned(Vec<...>)` after
+/// removing out-of-class constructors.
+///
+/// `Copy` is intentionally **not** derived: `Cow` does not implement
+/// `Copy`. Callers that previously received by-value copies must
+/// `.clone()` or borrow instead.
+#[derive(Debug, Clone)]
 pub struct EffectDecl {
     /// Haskell GADT type name, e.g. `"Memory"`.
     pub type_name: &'static str,
@@ -21,15 +35,15 @@ pub struct EffectDecl {
     pub description: &'static str,
     /// Haskell GADT constructor declarations (one per line inside
     /// `data T a where`).
-    pub constructors: &'static [&'static str],
+    pub constructors: Cow<'static, [&'static str]>,
     /// Extra Haskell type/function definitions emitted before the GADT.
     /// Use for supporting types (e.g. `data MemoryBlockType = ...`) and
     /// type aliases.
-    pub type_defs: &'static [&'static str],
+    pub type_defs: Cow<'static, [&'static str]>,
     /// Thin curried helper definitions emitted after the `type M` alias.
     /// Each string is one or more lines of Haskell (signature +
     /// definition).
-    pub helpers: &'static [&'static str],
+    pub helpers: Cow<'static, [&'static str]>,
 }
 
 /// Parsed constructor info extracted from an EffectDecl constructor

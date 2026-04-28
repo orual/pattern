@@ -11,6 +11,7 @@ use tidepool_eval::Value;
 
 use crate::sdk::describe::{DescribeEffect, EffectDecl};
 use crate::sdk::requests::TimeReq;
+use crate::session::HasCapabilities;
 
 /// Maximum in-handler sleep duration. Longer sleeps should use a
 /// scheduler effect (future work) to avoid blocking the JIT loop for
@@ -26,19 +27,22 @@ impl DescribeEffect for TimeHandler {
         EffectDecl {
             type_name: "Time",
             description: "Wall-clock time and bounded sleep (Now/Sleep)",
-            constructors: &["Now   :: Time Int", "Sleep :: Int -> Time ()"],
-            type_defs: &[],
-            helpers: &[
+            constructors: std::borrow::Cow::Borrowed(&[
+                "Now   :: Time Int",
+                "Sleep :: Int -> Time ()",
+            ]),
+            type_defs: std::borrow::Cow::Borrowed(&[]),
+            helpers: std::borrow::Cow::Borrowed(&[
                 "now :: Member Time effs => Eff effs Int\nnow = send Now",
                 "sleep :: Member Time effs => Int -> Eff effs ()\nsleep ns = send (Sleep ns)",
-            ],
+            ]),
         }
     }
 }
 
 impl<U> EffectHandler<U> for TimeHandler
 where
-    U: crate::session::HasCancelState,
+    U: crate::session::HasCancelState + HasCapabilities,
 {
     type Request = TimeReq;
 
@@ -58,6 +62,19 @@ where
                 crate::timeout::CANCELLED_SENTINEL,
             )));
         }
+
+        // Effect-class runtime guard.
+        // Now=Observe/Enforce; Sleep=MutateInternal/Enforce.
+        let constructor_name = match &req {
+            TimeReq::Now => "Now",
+            TimeReq::Sleep(_) => "Sleep",
+        };
+        crate::sdk::effect_classes::check_effect_class(
+            cx.user().capabilities(),
+            "Time",
+            constructor_name,
+        )?;
+
         match req {
             TimeReq::Now => {
                 // jiff::Timestamp is an explicit UTC instant with nanosecond precision.

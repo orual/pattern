@@ -55,24 +55,24 @@ impl DescribeEffect for ConstellationHandler {
         EffectDecl {
             type_name: "Constellation",
             description: "Read persona records and groups from the constellation registry.",
-            constructors: &[
+            constructors: std::borrow::Cow::Borrowed(&[
                 "List   :: Maybe Text -> Constellation [PersonaRecord]",
                 "Find   :: Maybe Text -> Maybe Text -> Constellation [PersonaRecord]",
                 "Groups :: Maybe Text -> Constellation [PersonaGroup]",
-            ],
-            type_defs: &[
+            ]),
+            type_defs: std::borrow::Cow::Borrowed(&[
                 "data PersonaStatus = PersonaActive | PersonaDraft | PersonaInactive",
                 "data RelationshipKind = RelSupervisorOf | RelSpecialistFor | RelPeerWith | RelObserverOf",
                 "data EdgeDirection = DirOutgoing | DirIncoming",
                 "data RelationshipEdge = RelationshipEdge { other :: Text, kind :: RelationshipKind, direction :: EdgeDirection }",
                 "data PersonaRecord = PersonaRecord { personaId :: Text, name :: Text, status :: PersonaStatus, configPath :: Maybe Text, projectAttachments :: [Text], relationships :: [RelationshipEdge], groupMemberships :: [Text] }",
                 "data PersonaGroup = PersonaGroup { groupId :: Text, name :: Text, projectId :: Maybe Text, members :: [Text] }",
-            ],
-            helpers: &[
+            ]),
+            helpers: std::borrow::Cow::Borrowed(&[
                 "list :: Member Constellation effs => Maybe Text -> Eff effs [PersonaRecord]\nlist scope = send (List scope)",
                 "find :: Member Constellation effs => Maybe Text -> Maybe Text -> Eff effs [PersonaRecord]\nfind project kind = send (Find project kind)",
                 "groups :: Member Constellation effs => Maybe Text -> Eff effs [PersonaGroup]\ngroups scope = send (Groups scope)",
-            ],
+            ]),
         }
     }
 }
@@ -86,6 +86,19 @@ impl EffectHandler<SessionContext> for ConstellationHandler {
         cx: &EffectContext<'_, SessionContext>,
     ) -> Result<Value, EffectError> {
         let user: &SessionContext = cx.user();
+
+        // Effect-class runtime guard. Runs BEFORE the category capability gate.
+        // All Constellation constructors are Observe/Enforce.
+        let constructor_name = match &req {
+            ConstellationReq::List(_) => "List",
+            ConstellationReq::Find(_, _) => "Find",
+            ConstellationReq::Groups(_) => "Groups",
+        };
+        crate::sdk::effect_classes::check_effect_class(
+            user.capabilities(),
+            "Constellation",
+            constructor_name,
+        )?;
 
         // Capability gate. `None` capabilities is fail-closed.
         let allowed = user

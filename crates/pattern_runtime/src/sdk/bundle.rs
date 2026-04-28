@@ -79,21 +79,97 @@ pub fn canonical_effect_decls() -> Vec<crate::sdk::describe::EffectDecl> {
 /// Filter [`canonical_effect_decls`] down to the effects an agent's
 /// capability set permits.
 ///
-/// Decls whose `type_name` doesn't resolve to a known
-/// [`pattern_core::EffectCategory`] are excluded — this protects against
-/// drift where a new handler is added to `CANONICAL_EFFECT_ROW` before
-/// `EffectCategory` has a matching variant (the
-/// `canonical_row_matches_effect_category_implemented_set` test catches
-/// this in CI; this filter fails closed at runtime).
+/// Filtering is two-level:
+///
+/// 1. **Category-level**: decls whose `type_name` doesn't resolve to a
+///    permitted [`pattern_core::EffectCategory`] are dropped entirely.
+///    Decls with no matching `EffectCategory` variant are also dropped
+///    (guards against drift where a new handler is added before
+///    `EffectCategory` has a matching variant; the
+///    `canonical_row_matches_effect_category_implemented_set` test catches
+///    this in CI; this filter fails closed at runtime).
+///
+/// 2. **Per-constructor class-level**: when
+///    [`pattern_core::CapabilitySet::allowed_classes`] is non-empty, each
+///    constructor is checked against the classification table in
+///    [`crate::sdk::effect_classes`]. Constructors whose class is not in
+///    `allowed_classes` are dropped. If all constructors of a module are
+///    dropped the module is removed entirely.
+///
+///    When `allowed_classes` is empty the constructor list is preserved
+///    unchanged (backwards-compatible full access; see
+///    [`pattern_core::CapabilitySet::effective_allowed_classes`]).
 pub fn filtered_effect_decls(
     caps: &pattern_core::CapabilitySet,
 ) -> Vec<crate::sdk::describe::EffectDecl> {
+    use crate::sdk::describe::EffectDecl;
+    use crate::sdk::describe::parse_constructor;
+    use crate::sdk::effect_classes::lookup;
+    use std::borrow::Cow;
+
+    let allowed_classes = caps.effective_allowed_classes();
+    let filter_by_class = !allowed_classes.is_empty();
+
     canonical_effect_decls()
         .into_iter()
-        .filter(|decl| {
-            pattern_core::EffectCategory::from_type_name(decl.type_name)
+        .filter_map(|decl| {
+            // Category-level filter.
+            let cat_ok = pattern_core::EffectCategory::from_type_name(decl.type_name)
                 .map(|cat| caps.contains(cat))
-                .unwrap_or(false)
+                .unwrap_or(false);
+            if !cat_ok {
+                return None;
+            }
+
+            // Per-constructor class-level filter.
+            // When allowed_classes is empty, skip filtering (full access).
+            if !filter_by_class {
+                return Some(decl);
+            }
+
+            let kept: Vec<&'static str> = decl
+                .constructors
+                .iter()
+                .filter(|sig| {
+                    let name = match parse_constructor(sig) {
+                        Ok(p) => p.name,
+                        Err(e) => {
+                            tracing::warn!(
+                                module = decl.type_name,
+                                sig = sig,
+                                error = %e,
+                                "filtered_effect_decls: unparseable constructor signature — dropping"
+                            );
+                            return false;
+                        }
+                    };
+                    match lookup(decl.type_name, &name) {
+                        Some(cc) => allowed_classes.contains(&cc.class),
+                        None => {
+                            // Constructor is not in the class table — this is
+                            // drift; treat as dropped so the agent can't invoke
+                            // an unclassified constructor.
+                            tracing::warn!(
+                                module = decl.type_name,
+                                constructor = %name,
+                                "filtered_effect_decls: constructor missing from class table (drift) — dropping"
+                            );
+                            false
+                        }
+                    }
+                })
+                .copied()
+                .collect();
+
+            if kept.is_empty() {
+                // All constructors filtered — drop the module entirely.
+                None
+            } else {
+                Some(EffectDecl {
+                    constructors: Cow::Owned(kept),
+                    ..decl
+                })
+            }
         })
         .collect()
 }
@@ -158,7 +234,7 @@ mod tests {
     fn every_constructor_parses() {
         use crate::sdk::describe::parse_constructor;
         for decl in canonical_effect_decls() {
-            for ctor in decl.constructors {
+            for ctor in decl.constructors.iter() {
                 let parsed = parse_constructor(ctor);
                 assert!(
                     parsed.is_ok(),
@@ -331,5 +407,194 @@ mod tests {
             3,
             "Pattern.Constellation must enumerate 3 constructors (List, Find, Groups)"
         );
+    }
+
+    // ── Drift-detection tests ────────────────────────────────────────────────
+
+    /// Every constructor in `canonical_effect_decls()` must have a
+    /// classification entry in `ALL_CLASSES`. If this fails, a new
+    /// constructor was added to a handler's `effect_decl()` but not to
+    /// the classification table — add the entry to keep the runtime
+    /// guard complete.
+    #[test]
+    fn every_canonical_constructor_has_class_entry() {
+        use crate::sdk::describe::parse_constructor;
+        use crate::sdk::effect_classes::lookup;
+        let decls = canonical_effect_decls();
+        let mut missing = vec![];
+        for decl in &decls {
+            for sig in decl.constructors.iter() {
+                let name = parse_constructor(sig).expect("constructor must parse").name;
+                if lookup(decl.type_name, &name).is_none() {
+                    missing.push(format!("{}::{}", decl.type_name, name));
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "constructors missing from ALL_CLASSES: {missing:?}"
+        );
+    }
+
+    /// Every entry in `ALL_CLASSES` must correspond to a constructor in
+    /// `canonical_effect_decls()`. If this fails, a handler was removed
+    /// or its constructor was renamed without updating the class table —
+    /// orphaned entries are a sign of stale configuration.
+    #[test]
+    fn no_orphan_classifications() {
+        use crate::sdk::describe::parse_constructor;
+        use crate::sdk::effect_classes::ALL_CLASSES;
+        let decls = canonical_effect_decls();
+        let mut orphans = vec![];
+        for entry in ALL_CLASSES {
+            let in_canonical = decls.iter().any(|d| {
+                d.type_name == entry.module
+                    && d.constructors.iter().any(|sig| {
+                        parse_constructor(sig)
+                            .map(|p| p.name)
+                            .as_deref()
+                            .map(|n| n == entry.constructor)
+                            .unwrap_or(false)
+                    })
+            });
+            if !in_canonical {
+                orphans.push(format!("{}::{}", entry.module, entry.constructor));
+            }
+        }
+        assert!(
+            orphans.is_empty(),
+            "ALL_CLASSES entries with no canonical constructor: {orphans:?}"
+        );
+    }
+
+    /// Pin the exact size of the classification table. Update this test
+    /// whenever a new constructor is added or removed. The count is 77:
+    /// 18 modules × varying constructor counts (Memory=10, Search=3,
+    /// Recall=3, Tasks=8, Skills=5, Message=5, Display=3, Time=2, Log=4,
+    /// Shell=4, File=8, Mcp=1, Spawn=7, Diagnostics=1, Wake=2, Fronting=4,
+    /// Port=4, Constellation=3). The reference enumeration doc said "73"
+    /// but was written before Fronting (4) and Constellation (3) were
+    /// finalised; the canonical count is 77.
+    #[test]
+    fn classification_table_has_77_entries() {
+        use crate::sdk::effect_classes::ALL_CLASSES;
+        assert_eq!(ALL_CLASSES.len(), 77);
+    }
+
+    // ── Behavior tests ───────────────────────────────────────────────────────
+
+    /// With `allowed_classes = {Observe}`, Memory.Get (Observe) must survive
+    /// but Memory.Put (MutateInternal) must be filtered from the rendered prelude.
+    #[test]
+    fn observe_only_capset_drops_mutateinternal_constructors() {
+        use pattern_core::{CapabilitySet, EffectClass};
+        let caps = CapabilitySet::all().with_classes([EffectClass::Observe]);
+        let decls = filtered_effect_decls(&caps);
+        let memory = decls
+            .iter()
+            .find(|d| d.type_name == "Memory")
+            .expect("Memory module must survive (it has Observe constructors)");
+        let mem_ctors: Vec<&&str> = memory.constructors.iter().collect();
+        // Get is Observe → should be present.
+        assert!(
+            mem_ctors.iter().any(|s| s.starts_with("Get ")),
+            "Memory.Get must remain: {mem_ctors:?}"
+        );
+        // Put is MutateInternal → should be filtered.
+        assert!(
+            !mem_ctors.iter().any(|s| s.starts_with("Put ")),
+            "Memory.Put must be filtered: {mem_ctors:?}"
+        );
+    }
+
+    /// With `allowed_classes = {Observe}`, modules with no Observe constructors
+    /// must be dropped entirely (e.g. Shell has only Escape constructors).
+    #[test]
+    fn observe_only_capset_drops_modules_with_no_observe_constructors() {
+        use pattern_core::{CapabilitySet, EffectClass};
+        let caps = CapabilitySet::all().with_classes([EffectClass::Observe]);
+        let decls = filtered_effect_decls(&caps);
+        // Shell has only Escape constructors → must be dropped.
+        assert!(
+            !decls.iter().any(|d| d.type_name == "Shell"),
+            "Shell must be filtered out of Observe-only prelude"
+        );
+        // Log has Observe constructors → must survive.
+        assert!(
+            decls.iter().any(|d| d.type_name == "Log"),
+            "Log must survive in Observe-only prelude (all Log constructors are Observe)"
+        );
+    }
+
+    /// When `allowed_classes` is empty (the default for `CapabilitySet::all()`),
+    /// all modules and constructors are preserved unchanged.
+    #[test]
+    fn empty_allowed_classes_is_full_access_for_backwards_compat() {
+        use pattern_core::CapabilitySet;
+        // `CapabilitySet::all()` has empty allowed_classes by default.
+        let caps = CapabilitySet::all();
+        let decls = filtered_effect_decls(&caps);
+        let canonical = canonical_effect_decls();
+        assert_eq!(
+            decls.len(),
+            canonical.len(),
+            "empty allowed_classes must preserve all modules"
+        );
+        for (d, c) in decls.iter().zip(canonical.iter()) {
+            assert_eq!(
+                d.constructors.len(),
+                c.constructors.len(),
+                "empty allowed_classes must preserve all constructors of {}",
+                d.type_name
+            );
+        }
+    }
+
+    // ── Runtime guard tests ──────────────────────────────────────────────────
+
+    /// `check_effect_class` must refuse an Enforce constructor whose class is
+    /// not in the agent's allowed set.
+    #[test]
+    fn runtime_guard_refuses_out_of_class_constructor() {
+        use crate::sdk::effect_classes::check_effect_class;
+        use pattern_core::{CapabilitySet, EffectClass};
+        let caps = CapabilitySet::all().with_classes([EffectClass::Observe]);
+        // Memory.Put is MutateInternal/Enforce — must be refused.
+        let result = check_effect_class(Some(&caps), "Memory", "Put");
+        assert!(
+            result.is_err(),
+            "Memory.Put must be refused with Observe-only caps"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Memory.Put"),
+            "error must identify the effect: {err_msg}"
+        );
+    }
+
+    /// `check_effect_class` must pass for constructors with `RuntimeClassCheck::Skip`
+    /// even when their class is not in `allowed_classes`. Skip means the class
+    /// axis is not authoritative for that constructor.
+    #[test]
+    fn runtime_guard_skips_skip_constructors() {
+        use crate::sdk::effect_classes::check_effect_class;
+        use pattern_core::{CapabilitySet, EffectClass};
+        let caps = CapabilitySet::all().with_classes([EffectClass::Observe]);
+        // Message.Send is Coordinate/Skip — class check bypassed for Skip.
+        let result = check_effect_class(Some(&caps), "Message", "Send");
+        assert!(
+            result.is_ok(),
+            "Skip constructors must not be class-checked"
+        );
+    }
+
+    /// When no capability set is configured (`None`), `check_effect_class`
+    /// returns `Ok(())` for all constructors (backwards-compatible full access).
+    #[test]
+    fn runtime_guard_passes_when_no_caps() {
+        use crate::sdk::effect_classes::check_effect_class;
+        // No capabilities: full access (backwards-compat).
+        let result = check_effect_class(None, "Memory", "Put");
+        assert!(result.is_ok(), "no caps means full access");
     }
 }

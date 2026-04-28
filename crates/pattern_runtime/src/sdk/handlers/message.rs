@@ -34,14 +34,14 @@ impl DescribeEffect for MessageHandler {
         EffectDecl {
             type_name: "Message",
             description: "Inter-agent and outbound messaging (Ask/Send/Reply/Notify/Delegate)",
-            constructors: &[
+            constructors: std::borrow::Cow::Borrowed(&[
                 "Ask      :: Request -> Message (MessageContent, Usage)",
                 "Send     :: Recipient -> Body -> Message ()",
                 "Reply    :: MessageId -> Body -> Message ()",
                 "Notify   :: ChannelId -> Body -> Message ()",
                 "Delegate :: DelegateReq -> Message ()",
-            ],
-            type_defs: &[
+            ]),
+            type_defs: std::borrow::Cow::Borrowed(&[
                 "type Request = Text",
                 "type MessageContent = Text",
                 "type Usage = Text",
@@ -52,14 +52,14 @@ impl DescribeEffect for MessageHandler {
                 "data DelegateReq = DelegateReq { delegateTaskLabel :: Text, \
                  delegateTaskBlockId :: Text, delegateTaskAgentId :: Text, \
                  delegateRecipient :: Text, delegateBody :: Text }",
-            ],
-            helpers: &[
+            ]),
+            helpers: std::borrow::Cow::Borrowed(&[
                 "ask :: Member Message effs => Request -> Eff effs (MessageContent, Usage)\nask r = Freer.send (Ask r)",
                 "send :: Member Message effs => Recipient -> Body -> Eff effs ()\nsend r b = Freer.send (Send r b)",
                 "reply :: Member Message effs => MessageId -> Body -> Eff effs ()\nreply m b = Freer.send (Reply m b)",
                 "notify :: Member Message effs => ChannelId -> Body -> Eff effs ()\nnotify c b = Freer.send (Notify c b)",
                 "delegate :: Member Message effs => DelegateReq -> Eff effs ()\ndelegate d = Freer.send (Delegate d)",
-            ],
+            ]),
         }
     }
 }
@@ -85,6 +85,22 @@ impl EffectHandler<SessionContext> for MessageHandler {
             )));
         }
         let _guard = HandlerGuard::enter(&state.gate);
+
+        // Effect-class runtime guard. All Message constructors are
+        // RuntimeClassCheck::Skip so this is defensive; it returns Ok(())
+        // immediately for all Skip entries regardless of the capset.
+        let constructor_name = match &req {
+            MessageReq::Ask(_) => "Ask",
+            MessageReq::Send(_, _) => "Send",
+            MessageReq::Reply(_, _) => "Reply",
+            MessageReq::Notify(_, _) => "Notify",
+            MessageReq::Delegate(_) => "Delegate",
+        };
+        crate::sdk::effect_classes::check_effect_class(
+            cx.user().capabilities(),
+            "Message",
+            constructor_name,
+        )?;
 
         let request_repr = format!("{req:?}");
 

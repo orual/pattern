@@ -204,7 +204,7 @@ pub fn build_with_libraries(
         for eff in decls {
             out.push_str("-- \n");
             out.push_str(&format!("-- {} ({}):\n", eff.type_name, eff.description));
-            for h in eff.helpers {
+            for h in eff.helpers.iter() {
                 // Helpers are emitted as "sig\nbody" strings — we want the
                 // signature line only (first line) for the docs.
                 if let Some(sig) = h.lines().next() {

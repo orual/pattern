@@ -94,7 +94,7 @@ fn build_code_tool_description() -> String {
             "\n--- {} ({}) ---\n",
             eff.type_name, eff.description
         ));
-        for h in eff.helpers {
+        for h in eff.helpers.iter() {
             // Each helper is "signature\nbody"; grab signature line only.
             if let Some(sig) = h.lines().next() {
                 s.push_str(sig);

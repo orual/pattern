@@ -6,7 +6,7 @@ use tidepool_eval::Value;
 
 use crate::sdk::describe::{DescribeEffect, EffectDecl};
 use crate::sdk::requests::McpReq;
-use crate::session::HasCancelState;
+use crate::session::{HasCancelState, HasCapabilities};
 use crate::timeout::HandlerGuard;
 
 /// Not-implemented placeholder for the MCP effect. Real implementation
@@ -19,18 +19,18 @@ impl DescribeEffect for McpHandler {
         EffectDecl {
             type_name: "Mcp",
             description: "Model-Context-Protocol tool calls (Use)",
-            constructors: &["Use :: Server -> Method -> Mcp ()"],
-            type_defs: &["type Server = Text", "type Method = Text"],
-            helpers: &[
+            constructors: std::borrow::Cow::Borrowed(&["Use :: Server -> Method -> Mcp ()"]),
+            type_defs: std::borrow::Cow::Borrowed(&["type Server = Text", "type Method = Text"]),
+            helpers: std::borrow::Cow::Borrowed(&[
                 "use_ :: Member Mcp effs => Server -> Method -> Eff effs ()\nuse_ s m = send (Use s m)",
-            ],
+            ]),
         }
     }
 }
 
 impl<U> EffectHandler<U> for McpHandler
 where
-    U: HasCancelState,
+    U: HasCancelState + HasCapabilities,
 {
     type Request = McpReq;
 
@@ -38,6 +38,17 @@ where
         // Uniform HandlerGate entry — see ShellHandler for the rationale.
         let state = cx.user().cancel_state();
         let _guard = HandlerGuard::enter(&state.gate);
+
+        // Effect-class runtime guard. Mcp.Use is Escape/Enforce.
+        let constructor_name = match &req {
+            McpReq::Use(_, _) => "Use",
+        };
+        crate::sdk::effect_classes::check_effect_class(
+            cx.user().capabilities(),
+            "Mcp",
+            constructor_name,
+        )?;
+
         Err(EffectError::Handler(format!(
             "Pattern.Mcp.{req:?} is not implemented in v3 foundation \
              (phase: post-foundation plugin-system plan). Agent code should \

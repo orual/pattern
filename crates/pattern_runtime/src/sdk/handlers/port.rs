@@ -51,25 +51,25 @@ impl DescribeEffect for PortHandler {
         EffectDecl {
             type_name: "Port",
             description: "External-service ports (List/Call/Subscribe/Unsubscribe)",
-            constructors: &[
+            constructors: std::borrow::Cow::Borrowed(&[
                 "List        :: Port [PortInfo]",
                 "Call        :: PortId -> Method -> Payload -> Port Payload",
                 "Subscribe   :: PortId -> ConfigJson -> Port ()",
                 "Unsubscribe :: PortId -> Port ()",
-            ],
-            type_defs: &[
+            ]),
+            type_defs: std::borrow::Cow::Borrowed(&[
                 "type PortId     = Text",
                 "type Method     = Text",
                 "type Payload    = Text  -- JSON",
                 "type ConfigJson = Text  -- JSON",
                 "type PortInfo   = Text  -- JSON: {id, description, version, methods, capabilities}",
-            ],
-            helpers: &[
+            ]),
+            helpers: std::borrow::Cow::Borrowed(&[
                 "listPorts :: Member Port effs => Eff effs [Text]\nlistPorts = send List",
                 "call :: Member Port effs => PortId -> Method -> Payload -> Eff effs Payload\ncall pid m p = send (Call pid m p)",
                 "subscribe :: Member Port effs => PortId -> ConfigJson -> Eff effs ()\nsubscribe pid c = send (Subscribe pid c)",
                 "unsubscribe :: Member Port effs => PortId -> Eff effs ()\nunsubscribe pid = send (Unsubscribe pid)",
-            ],
+            ]),
         }
     }
 }
@@ -92,6 +92,20 @@ impl EffectHandler<SessionContext> for PortHandler {
     ) -> Result<Value, EffectError> {
         let state = cx.user().cancel_state();
         let _guard = HandlerGuard::enter(&state.gate);
+
+        // Effect-class runtime guard. List=Observe/Skip; Call/Subscribe=Escape/Skip;
+        // Unsubscribe=MutateInternal/Skip. All Skip — short-circuits to Ok(()).
+        let constructor_name = match &req {
+            PortReq::List => "List",
+            PortReq::Call(_, _, _) => "Call",
+            PortReq::Subscribe(_, _) => "Subscribe",
+            PortReq::Unsubscribe(_) => "Unsubscribe",
+        };
+        crate::sdk::effect_classes::check_effect_class(
+            cx.user().capabilities(),
+            "Port",
+            constructor_name,
+        )?;
 
         // Fail closed if no registry is wired (test doubles, minimal sessions).
         let registry = cx

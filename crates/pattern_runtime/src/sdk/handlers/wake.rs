@@ -60,11 +60,11 @@ impl DescribeEffect for WakeHandler {
         EffectDecl {
             type_name: "Wake",
             description: "Register and unregister wake conditions (timers, block changes, task dependencies, custom programs)",
-            constructors: &[
+            constructors: std::borrow::Cow::Borrowed(&[
                 "Register   :: WakeCondition -> Wake WakeId",
                 "Unregister :: WakeId        -> Wake Bool",
-            ],
-            type_defs: &[
+            ]),
+            type_defs: std::borrow::Cow::Borrowed(&[
                 "type WakeId = Text",
                 // Typed records — full field definitions live in Pattern.Wake.hs.
                 "data BlockRef    = BlockRef    { blockRefLabel :: Text, blockRefBlockId :: Text, blockRefAgentId :: Text }",
@@ -78,11 +78,11 @@ impl DescribeEffect for WakeHandler {
                  | WakeBlockChanged BlockRef \
                  | WakeTaskDependencyResolved TaskEdgeRef \
                  | WakeCustom Text Text",
-            ],
-            helpers: &[
+            ]),
+            helpers: std::borrow::Cow::Borrowed(&[
                 "register :: Member Wake effs => WakeCondition -> Eff effs Text\nregister cond = send (Register cond)",
                 "unregister :: Member Wake effs => Text -> Eff effs Bool\nunregister wid = send (Unregister wid)",
-            ],
+            ]),
         }
     }
 }
@@ -96,6 +96,19 @@ impl EffectHandler<SessionContext> for WakeHandler {
         cx: &EffectContext<'_, SessionContext>,
     ) -> Result<Value, EffectError> {
         let user: &SessionContext = cx.user();
+
+        // Effect-class runtime guard. Runs BEFORE the WakeConditionRegistration
+        // flag check. Register/Unregister are both Coordinate/Skip, so this
+        // returns Ok(()) immediately, but it's defensive for future reclassification.
+        let constructor_name = match &req {
+            WakeReq::Register(_) => "Register",
+            WakeReq::Unregister(_) => "Unregister",
+        };
+        crate::sdk::effect_classes::check_effect_class(
+            user.capabilities(),
+            "Wake",
+            constructor_name,
+        )?;
 
         // Capability gate. Both register + unregister sit behind it —
         // unregister-without-the-flag is denied to keep the flag the

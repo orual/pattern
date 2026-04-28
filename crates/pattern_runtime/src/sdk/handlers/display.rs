@@ -19,6 +19,7 @@ use tidepool_eval::Value;
 
 use crate::sdk::describe::{DescribeEffect, EffectDecl};
 use crate::sdk::requests::DisplayReq;
+use crate::session::HasCapabilities;
 
 /// Subscriber to Display events. Implementors forward chunks / final /
 /// notes to output surfaces: CLI terminal, telemetry, test capture, etc.
@@ -116,25 +117,40 @@ impl DescribeEffect for DisplayHandler {
         EffectDecl {
             type_name: "Display",
             description: "One-way broadcast of observable agent output to UX surfaces (Chunk/Final/Note)",
-            constructors: &[
+            constructors: std::borrow::Cow::Borrowed(&[
                 "Chunk :: Text -> Display ()",
                 "Final :: Text -> Display ()",
                 "Note  :: Text -> Display ()",
-            ],
-            type_defs: &[],
-            helpers: &[
+            ]),
+            type_defs: std::borrow::Cow::Borrowed(&[]),
+            helpers: std::borrow::Cow::Borrowed(&[
                 "chunk :: Member Display effs => Text -> Eff effs ()\nchunk t = send (Chunk t)",
                 "final_ :: Member Display effs => Text -> Eff effs ()\nfinal_ t = send (Final t)",
                 "note :: Member Display effs => Text -> Eff effs ()\nnote t = send (Note t)",
-            ],
+            ]),
         }
     }
 }
 
-impl<U> EffectHandler<U> for DisplayHandler {
+impl<U> EffectHandler<U> for DisplayHandler
+where
+    U: HasCapabilities,
+{
     type Request = DisplayReq;
 
     fn handle(&mut self, req: DisplayReq, cx: &EffectContext<'_, U>) -> Result<Value, EffectError> {
+        // Effect-class runtime guard. All Display constructors are Observe/Enforce.
+        let constructor_name = match &req {
+            DisplayReq::Chunk(_) => "Chunk",
+            DisplayReq::Final(_) => "Final",
+            DisplayReq::Note(_) => "Note",
+        };
+        crate::sdk::effect_classes::check_effect_class(
+            cx.user().capabilities(),
+            "Display",
+            constructor_name,
+        )?;
+
         let event = match req {
             DisplayReq::Chunk(s) => DisplayEvent::Chunk(s),
             DisplayReq::Final(s) => DisplayEvent::Final(s),

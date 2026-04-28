@@ -22,6 +22,61 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
+/// Semantic classification of an effect constructor's role from the agent's POV.
+///
+/// This axis is parallel to [`EffectCategory`] (which is per-module).
+/// Together they form a two-axis gate: the prelude filter intersects the
+/// agent's `categories` with the canonical effect row, and the agent's
+/// `allowed_classes` with each surviving constructor's class.
+///
+/// See `pattern_runtime::sdk::effect_classes::ALL_CLASSES` for the canonical
+/// table mapping every SDK constructor to its class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum EffectClass {
+    /// Pure observation — agent reads state. Includes one-way pipelines
+    /// (CRDT sync, watchers) and emits to operator-controlled communication
+    /// sinks (Display, Log, Message-via-router).
+    Observe,
+    /// Agent mutates its own session-local state (memory blocks, task graph,
+    /// session timing, file-manager handle state, archival inserts).
+    MutateInternal,
+    /// Agent writes to filesystem within mount, visible to other tools/agents.
+    MutateExternal,
+    /// Agent affects other agents or constellation-level state (messaging,
+    /// spawn, fronting, registry mutations, wake registrations).
+    Coordinate,
+    /// Side effects that leave the runtime sandbox (shell, MCP, network ports,
+    /// LLM provider calls).
+    Escape,
+}
+
+impl EffectClass {
+    /// Every variant of `EffectClass`, in canonical order.
+    pub const ALL: &'static [Self] = &[
+        Self::Observe,
+        Self::MutateInternal,
+        Self::MutateExternal,
+        Self::Coordinate,
+        Self::Escape,
+    ];
+}
+
+/// Whether the EffectClass axis acts as a runtime gate at handler dispatch.
+///
+/// `Enforce` — handler MUST verify the constructor's class is in the agent's
+/// `allowed_classes` before dispatch.
+///
+/// `Skip` — handler delegates to the existing fine-grained system (router,
+/// broker, registry, capability flags) which is authoritative. The class is
+/// recorded for compile-time prelude visibility only; runtime enforcement
+/// stays with the existing system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RuntimeClassCheck {
+    Enforce,
+    Skip,
+}
+
 /// A category of agent-callable effect.
 ///
 /// Variants align with `pattern_runtime::sdk::bundle::CANONICAL_EFFECT_ROW`;
@@ -199,6 +254,12 @@ pub struct CapabilitySet {
     /// IDs are accessible. The same shape can carry Shell command allowlists,
     /// File path-prefix allowlists, etc. when those phases need it.
     resources: BTreeMap<EffectCategory, BTreeSet<SmolStr>>,
+    /// Effect classes this capability set permits at compile-time and runtime.
+    ///
+    /// If empty, defaults to ALL classes (preserves backwards-compatible
+    /// behaviour for existing capability sets that pre-date this axis).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub allowed_classes: BTreeSet<EffectClass>,
 }
 
 impl CapabilitySet {
@@ -217,7 +278,25 @@ impl CapabilitySet {
             categories: EffectCategory::ALL.iter().copied().collect(),
             flags: CapabilityFlag::ALL.iter().copied().collect(),
             resources: BTreeMap::new(),
+            allowed_classes: BTreeSet::new(),
         }
+    }
+
+    /// Returns the effective set of allowed classes. If `allowed_classes`
+    /// is empty, returns all classes (backwards-compatible default).
+    pub fn effective_allowed_classes(&self) -> BTreeSet<EffectClass> {
+        if self.allowed_classes.is_empty() {
+            EffectClass::ALL.iter().copied().collect()
+        } else {
+            self.allowed_classes.clone()
+        }
+    }
+
+    /// Builder: restrict to specific effect classes.
+    #[must_use]
+    pub fn with_classes(mut self, classes: impl IntoIterator<Item = EffectClass>) -> Self {
+        self.allowed_classes = classes.into_iter().collect();
+        self
     }
 
     /// Builder-style: replace the flag set.
@@ -320,6 +399,17 @@ impl CapabilitySet {
         if !self.flags.is_subset(&other.flags) {
             return false;
         }
+        // Check class constraints: if other has a non-empty allowed_classes,
+        // self must also have a non-empty subset.
+        if !other.allowed_classes.is_empty() {
+            if self.allowed_classes.is_empty() {
+                // Self is unrestricted while other is restricted — escalation.
+                return false;
+            }
+            if !self.allowed_classes.is_subset(&other.allowed_classes) {
+                return false;
+            }
+        }
         // Check resource constraints for every category self participates in.
         for cat in &self.categories {
             let other_entry = other.resources.get(cat);
@@ -409,12 +499,37 @@ impl CapabilitySet {
             }
         }
 
-        if !added_categories.is_empty() || !added_flags.is_empty() || !added_resources.is_empty() {
+        // Compute class escalations.
+        let added_classes: Vec<EffectClass> = if !parent.allowed_classes.is_empty() {
+            if self.allowed_classes.is_empty() {
+                // Self is unrestricted while parent is restricted.
+                EffectClass::ALL
+                    .iter()
+                    .copied()
+                    .filter(|c| !parent.allowed_classes.contains(c))
+                    .collect()
+            } else {
+                self.allowed_classes
+                    .difference(&parent.allowed_classes)
+                    .copied()
+                    .collect()
+            }
+        } else {
+            vec![]
+        };
+
+        if !added_categories.is_empty()
+            || !added_flags.is_empty()
+            || !added_resources.is_empty()
+            || !added_classes.is_empty()
+        {
             return Err(CapabilityError::Escalation {
                 added_categories,
                 added_flags,
+                added_classes,
                 parent_categories: parent.categories.iter().copied().collect(),
                 parent_flags: parent.flags.iter().copied().collect(),
+                parent_classes: parent.allowed_classes.iter().copied().collect(),
                 added_resources,
                 parent_resources: parent_resources_snapshot,
             });
@@ -432,6 +547,7 @@ impl FromIterator<EffectCategory> for CapabilitySet {
             categories: iter.into_iter().collect(),
             flags: BTreeSet::new(),
             resources: BTreeMap::new(),
+            allowed_classes: BTreeSet::new(),
         }
     }
 }
@@ -442,14 +558,20 @@ impl FromIterator<EffectCategory> for CapabilitySet {
 pub enum CapabilityError {
     #[error(
         "capability escalation: cannot add categories {added_categories:?} or flags \
-         {added_flags:?} or resources {added_resources:?} to a set restricted to categories \
-         {parent_categories:?} flags {parent_flags:?} resources {parent_resources:?}"
+         {added_flags:?} or classes {added_classes:?} or resources {added_resources:?} \
+         to a set restricted to categories {parent_categories:?} flags {parent_flags:?} \
+         classes {parent_classes:?} resources {parent_resources:?}"
     )]
     Escalation {
         added_categories: Vec<EffectCategory>,
         added_flags: Vec<CapabilityFlag>,
+        /// Effect classes the child claims that escalate beyond the parent's
+        /// allowed_classes set.
+        added_classes: Vec<EffectClass>,
         parent_categories: Vec<EffectCategory>,
         parent_flags: Vec<CapabilityFlag>,
+        /// The parent's allowed_classes at the time of the escalation check.
+        parent_classes: Vec<EffectClass>,
         /// Per-category resources the child claims that escalate beyond the parent's
         /// allowlist. An empty `Vec` for a category means the child is unrestricted
         /// while the parent has a non-empty allowlist (which is itself an escalation).
