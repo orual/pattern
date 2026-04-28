@@ -21,14 +21,10 @@
 -- @EffectError@ whose message starts with @\"CapabilityDenied: \"@
 -- — see @policy::CAPABILITY_DENIED_PREFIX@ on the Rust side.
 --
--- Phase 4 deferral
---
--- The 'WakeCustom' variant stores its program but the evaluator that
--- runs the program against its trigger ships in Phase 7 Task 6.
--- Until that lands, custom registrations succeed but never fire.
--- Other variants ('WakeInterval', 'WakeTaskTimeout',
--- 'WakeBlockChanged', 'WakeTaskDependencyResolved') deliver
--- activations as soon as their trigger fires.
+-- All condition variants deliver activations when their trigger fires.
+-- 'WakeCustom' runs a user-supplied Haskell program against a read-only
+-- restricted bundle (Observe-class effects only) and pokes the mailbox
+-- when the result is True.
 module Pattern.Wake where
 
 import Control.Monad.Freer (Eff, Member, send)
@@ -81,8 +77,8 @@ data WakeCondition
   --   refs are rejected.
   | WakeTaskDependencyResolved TaskEdgeRef
   -- | Fire when @program@ (a Haskell condition compiled by the
-  --   runtime) returns @True@. Phase 4 stores the program but the
-  --   evaluator ships in Phase 7 Task 6.
+  --   runtime) returns @True@. Evaluated on a read-only restricted
+  --   bundle (Observe-class effects only).
   | WakeCustom Text Text             -- ^ @WakeCustom id program@.
 
 -- | Effect algebra.

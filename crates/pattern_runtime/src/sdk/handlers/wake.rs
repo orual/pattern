@@ -14,14 +14,14 @@
 //! variant requires it, and delegates to the session's
 //! [`crate::wake::WakeRegistry`].
 //!
-//! # Phase 4 deferral
+//! # Custom conditions (Phase 7 Task 6)
 //!
-//! Custom wake-condition programs are stored but their evaluator is
-//! scheduled for Phase 7 Task 6 — the registry returns a parked task
-//! holding no subscriptions for that variant, so registrations
-//! succeed but never fire. Agents that depend on Custom wakes today
-//! see a successful registration with no activations until the
-//! evaluator lands.
+//! Custom wake-condition programs are evaluated by a
+//! [`crate::wake::CustomEvaluator`] on a read-only restricted bundle
+//! (Observe-class effects only). The evaluator runs the user's
+//! Haskell program on a dedicated 256 MiB OS thread with a 30s
+//! timeout. If the program returns `True`, a wake activation is
+//! delivered to the session's mailbox.
 
 use std::sync::Arc;
 

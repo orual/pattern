@@ -1006,8 +1006,10 @@ Four wake condition types implemented in `sdk/requests/wake.rs` and
 - **BlockChanged** — fires when any block matching a label/scope changes.
   Backed by `wake::block_changed::BlockChangedCondition`, which hooks into
   `pattern_memory::subscriber::BlockChangeNotifier`.
-- **Custom** — caller-defined predicate evaluated against a memory snapshot.
-  Backed by a parked evaluator in `WakeRegistry`.
+- **Custom** — caller-defined Haskell predicate evaluated on a read-only
+  restricted bundle (Observe-class effects only). Backed by
+  `wake::custom::CustomEvaluator` with 30s timeout and single-flight
+  per condition. Pokes the mailbox when the program returns `True`.
 
 `WAKE_REGISTRY_MISSING_PREFIX: &str = "WakeRegistryMissing: "` is the
 error prefix returned when `Pattern.Wake.Register` is invoked but no

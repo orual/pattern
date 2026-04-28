@@ -2243,6 +2243,19 @@ impl TidepoolSession {
 
         session.ctx = Arc::new(ctx_with_paths);
 
+        // Wire the CustomEvaluator onto the WakeRegistry now that
+        // include_paths and the Arc<SessionContext> are available.
+        // Phase 7 Task 6: custom Haskell wake conditions.
+        if let Some(wake_reg) = session.ctx.wake_registry() {
+            let evaluator = crate::wake::custom::CustomEvaluator::new(
+                session.ctx.mailbox().sender(),
+                include_paths.clone(),
+                session.ctx.tokio_handle().clone(),
+                session.ctx.clone(),
+            );
+            wake_reg.set_custom_evaluator(Arc::new(evaluator));
+        }
+
         // Register this session with the AgentRegistry (Phase 4 T4) if the
         // caller wired a registry via `SessionContext::with_agent_registry`.
         // The RAII guard is held on `TidepoolSession` so the unregistration

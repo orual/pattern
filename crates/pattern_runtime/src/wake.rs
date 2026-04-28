@@ -1,8 +1,8 @@
 //! Wake-condition machinery: registered conditions fire activations
 //! into a session's mailbox.
 //!
-//! v3-multi-agent Phase 4 introduces five wake primitives, four of
-//! which ship as Rust evaluators in this module:
+//! v3-multi-agent Phase 4 introduces five wake primitives, all of
+//! which now have live evaluators:
 //!
 //! - [`WakeCondition::TaskTimeout`] — one-shot timer.
 //! - [`WakeCondition::Interval`] — recurring periodic timer.
@@ -14,10 +14,9 @@
 //!   `BlockChanged` subscriber and re-reads task status on parent-
 //!   block change (T9).
 //! - [`WakeCondition::Custom`] — user-supplied Haskell condition.
-//!   Phase 4 ships only the registration path; the evaluator that
-//!   runs the user's program on its trigger is **scheduled in
-//!   Phase 7 Task 6** (see
-//!   `docs/implementation-plans/2026-04-19-v3-multi-agent/phase_07.md`).
+//!   Phase 7 Task 6 closed the Phase 4 deferral: custom conditions
+//!   are evaluated by [`custom::CustomEvaluator`] on a read-only
+//!   restricted bundle (Observe-class effects only).
 //!
 //! All evaluator tasks deliver wake activations as
 //! [`crate::mailbox::MailboxInput`] with an `Author::System { reason:
@@ -32,10 +31,14 @@
 //!   plus the internal `wake_mailbox_input` synthesiser.
 //! - `rust_primitives` — `tokio::time`-based evaluators for
 //!   `TaskTimeout` and `Interval`.
+//! - `custom` — [`CustomEvaluator`] for user-supplied Haskell
+//!   conditions (Phase 7 Task 6).
 
 pub mod block_changed;
+pub mod custom;
 pub mod registry;
 pub mod rust_primitives;
 pub mod task_dep;
 
+pub use custom::CustomEvaluator;
 pub use registry::{PeriodTooShortDetails, WakeCondition, WakeError, WakeRegistry};

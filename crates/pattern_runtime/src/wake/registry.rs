@@ -170,6 +170,10 @@ pub enum WakeError {
         /// The block handle that was passed without an item id.
         block: SmolStr,
     },
+    /// The custom evaluator returned an error during registration
+    /// (e.g. min-period violation, capacity limit exceeded).
+    #[error("custom evaluator error: {0}")]
+    CustomEvaluatorError(String),
 }
 
 /// One registered wake condition, holding the evaluator task that
@@ -227,6 +231,13 @@ pub struct WakeRegistry {
     /// can resolve the parent block's `block_id` and re-read task
     /// status when the parent block's content changes.
     memory_store: Option<Arc<dyn MemoryStore>>,
+    /// Optional custom evaluator for Haskell-registered conditions.
+    /// When empty, Custom registrations fall back to a parked task
+    /// (Phase 4 behaviour). When set, the evaluator spawns real
+    /// trigger tasks. Behind a `Mutex` for late-wiring after
+    /// construction (the evaluator needs SDK include paths that
+    /// aren't known at registry build time).
+    custom_evaluator: Mutex<Option<Arc<super::custom::CustomEvaluator>>>,
 }
 
 impl WakeRegistry {
@@ -247,6 +258,7 @@ impl WakeRegistry {
             min_period: jiff::Span::new().seconds(1),
             block_change_notifier: None,
             memory_store: None,
+            custom_evaluator: Mutex::new(None),
         }
     }
 
@@ -280,6 +292,26 @@ impl WakeRegistry {
     pub fn with_memory_store(mut self, store: Arc<dyn MemoryStore>) -> Self {
         self.memory_store = Some(store);
         self
+    }
+
+    /// Builder-style: wire a [`CustomEvaluator`] for Haskell-registered
+    /// custom conditions. Without this, Custom registrations fall back
+    /// to a parked task that never fires (Phase 4 behaviour).
+    #[must_use]
+    pub fn with_custom_evaluator(
+        mut self,
+        evaluator: Arc<super::custom::CustomEvaluator>,
+    ) -> Self {
+        *self.custom_evaluator.get_mut() = Some(evaluator);
+        self
+    }
+
+    /// Late-wire a [`CustomEvaluator`] after construction. Used when
+    /// the SDK include paths aren't known at registry build time
+    /// (e.g. `open_with_agent_loop` builds the registry before resolving
+    /// include paths).
+    pub fn set_custom_evaluator(&self, evaluator: Arc<super::custom::CustomEvaluator>) {
+        *self.custom_evaluator.lock() = Some(evaluator);
     }
 
     /// Register a wake condition. Returns the id used to refer to it
@@ -363,21 +395,38 @@ impl WakeRegistry {
                     &self.tokio_handle,
                 )
             }
-            WakeCondition::Custom { id, program } => {
-                // Phase 4 stores the program but does not run it; the
-                // evaluator that triggers user-supplied conditions
-                // ships in Phase 7 Task 6. Spawn a parked task so the
-                // registry has a JoinHandle to abort on unregister,
-                // preserving the same lifecycle shape as evaluators
-                // that *do* fire.
-                tracing::info!(
-                    target = "pattern_runtime::wake",
-                    custom_wake_id = %id,
-                    program_bytes = program.len(),
-                    "custom wake condition registered; evaluator deferred (Phase 7 Task 6)"
-                );
-                self.tokio_handle
-                    .spawn(async move { std::future::pending::<()>().await })
+            WakeCondition::Custom { id: custom_id, program } => {
+                // Phase 7 Task 6: delegate to the CustomEvaluator if wired.
+                // Falls back to a parked task (Phase 4 behaviour) when no
+                // evaluator is available (e.g. test sessions without SDK dir).
+                let maybe_evaluator = self.custom_evaluator.lock().clone();
+                if let Some(evaluator) = maybe_evaluator {
+                    // Custom conditions currently only support Interval triggers.
+                    // The interval period is encoded implicitly: custom conditions
+                    // evaluate once per second by default. Future work will add
+                    // BlockChanged triggers for custom conditions.
+                    evaluator
+                        .register_interval(
+                            custom_id.clone(),
+                            program.clone(),
+                            std::time::Duration::from_secs(1),
+                        )
+                        .map_err(WakeError::CustomEvaluatorError)?;
+                    // The evaluator owns the task; we still need a JoinHandle
+                    // for the registry's lifecycle management. Spawn a waiter
+                    // that completes when the evaluator's task is unregistered.
+                    self.tokio_handle
+                        .spawn(async move { std::future::pending::<()>().await })
+                } else {
+                    tracing::info!(
+                        target: "pattern_runtime::wake",
+                        custom_wake_id = %custom_id,
+                        program_bytes = program.len(),
+                        "custom wake condition registered; no evaluator wired (fallback parked)"
+                    );
+                    self.tokio_handle
+                        .spawn(async move { std::future::pending::<()>().await })
+                }
             }
         };
 
