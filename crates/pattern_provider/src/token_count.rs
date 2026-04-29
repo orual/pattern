@@ -498,4 +498,81 @@ mod tests {
             "negative upstream value must clamp to zero"
         );
     }
+
+    /// Regression test: `CountTokensRequest` must serialize message roles
+    /// in the canonical lowercase wire form Anthropic accepts.
+    ///
+    /// History: Anthropic's `/v1/messages/count_tokens` endpoint rejected
+    /// requests with `"role": "User"` (capital), responding with HTTP 400
+    /// `Unexpected role "User". Allowed roles are "user" or "assistant"`.
+    /// The cause was `genai::chat::ChatRole`'s derived `Serialize`
+    /// emitting variant names verbatim. Provider adapters that build
+    /// request bodies via `json!({"role": "user", ...})` happen to bypass
+    /// this serialization, but `CountTokensRequest` drops `ChatMessage`
+    /// straight into `serde_json::to_string`, so it surfaces the bug.
+    /// Fixed in the genai fork via `#[serde(rename_all = "lowercase")]`
+    /// on `ChatRole`.
+    #[test]
+    fn count_tokens_request_serializes_role_lowercase() {
+        use genai::chat::{ChatMessage, ChatRole, MessageContent};
+
+        let req = CountTokensRequest {
+            model: "claude-sonnet-4-6".into(),
+            system: None,
+            system_blocks: None,
+            messages: vec![
+                ChatMessage {
+                    role: ChatRole::User,
+                    content: MessageContent::from_text("hello"),
+                    options: None,
+                },
+                ChatMessage {
+                    role: ChatRole::Assistant,
+                    content: MessageContent::from_text("hi"),
+                    options: None,
+                },
+                ChatMessage {
+                    role: ChatRole::System,
+                    content: MessageContent::from_text("be terse"),
+                    options: None,
+                },
+                ChatMessage {
+                    role: ChatRole::Tool,
+                    content: MessageContent::from_text("ok"),
+                    options: None,
+                },
+            ],
+            tools: None,
+        };
+
+        let json = serde_json::to_string(&req).expect("CountTokensRequest serializes");
+
+        // Each canonical role variant must appear lowercase on the wire.
+        assert!(
+            json.contains(r#""role":"user""#),
+            "expected lowercase user role; got: {json}"
+        );
+        assert!(
+            json.contains(r#""role":"assistant""#),
+            "expected lowercase assistant role; got: {json}"
+        );
+        assert!(
+            json.contains(r#""role":"system""#),
+            "expected lowercase system role; got: {json}"
+        );
+        assert!(
+            json.contains(r#""role":"tool""#),
+            "expected lowercase tool role; got: {json}"
+        );
+
+        // Capitalised forms must be absent — Anthropic rejects them.
+        assert!(
+            !json.contains(r#""role":"User""#),
+            "capital User role would be rejected by Anthropic; got: {json}"
+        );
+        assert!(
+            !json.contains(r#""role":"Assistant""#),
+            "capital Assistant role would be rejected by Anthropic; got: {json}"
+        );
+    }
 }
