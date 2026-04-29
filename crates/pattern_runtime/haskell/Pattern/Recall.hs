@@ -6,7 +6,7 @@
 -- absent it defaults to the current agent's archival entries.
 --
 -- Constructor names use the @Recall@-prefix to avoid collisions with
--- @Pattern.Memory@ constructors (@Get@, @Search@, @Archive@).
+-- @Pattern.Memory@ constructors (@Get@, @Search@).
 --
 -- Note: @RecallDelete@ / @delete@ were removed in v3-memory-rework
 -- Phase 3 (AC4.9). 'MemoryStore::delete_archival' is retained on the

@@ -78,7 +78,6 @@ mod parity {
                 "Replace",
                 "Search",
                 "Recall",
-                "Archive",
                 "GetShared",
             ],
         ),
@@ -231,9 +230,8 @@ mod parity {
         let _ = MemoryReq::Replace(String::new(), String::new(), String::new());
         let _ = MemoryReq::Search(String::new());
         let _ = MemoryReq::Recall(String::new());
-        let _ = MemoryReq::Archive(String::new());
         let _ = MemoryReq::GetShared(String::new(), String::new());
-        assert_eq!(count("MemoryReq"), 9);
+        assert_eq!(count("MemoryReq"), 8);
     }
 
     #[test]

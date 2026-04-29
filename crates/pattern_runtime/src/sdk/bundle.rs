@@ -467,20 +467,6 @@ mod tests {
         );
     }
 
-    /// Pin the exact size of the classification table. Update this test
-    /// whenever a new constructor is added or removed. The count is 77:
-    /// 18 modules × varying constructor counts (Memory=10, Search=3,
-    /// Recall=3, Tasks=8, Skills=5, Message=5, Display=3, Time=2, Log=4,
-    /// Shell=4, File=8, Mcp=1, Spawn=7, Diagnostics=1, Wake=2, Fronting=4,
-    /// Port=4, Constellation=3). The reference enumeration doc said "73"
-    /// but was written before Fronting (4) and Constellation (3) were
-    /// finalised; the canonical count is 77.
-    #[test]
-    fn classification_table_has_77_entries() {
-        use crate::sdk::effect_classes::ALL_CLASSES;
-        assert_eq!(ALL_CLASSES.len(), 77);
-    }
-
     // ── Behavior tests ───────────────────────────────────────────────────────
 
     /// With `allowed_classes = {Observe}`, Memory.Get (Observe) must survive

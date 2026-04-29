@@ -67,7 +67,6 @@ data Memory a where
   Replace   :: BlockHandle -> Text -> Text -> Memory ()  -- label, old, new
   Search    :: Query -> Memory [BlockHandle]
   Recall    :: BlockHandle -> Memory Content
-  Archive   :: BlockHandle -> Memory ()
   GetShared      :: Owner -> BlockHandle -> Memory Content
   WriteToPersona :: BlockHandle -> Content -> Memory ()
 
@@ -104,9 +103,6 @@ search q = send (Search q)
 
 recall :: Member Memory effs => BlockHandle -> Eff effs Content
 recall h = send (Recall h)
-
-archive :: Member Memory effs => BlockHandle -> Eff effs ()
-archive h = send (Archive h)
 
 -- | Fetch a shared block's content by owner agent id and label.
 -- Errors if the block hasn't been shared with the caller.

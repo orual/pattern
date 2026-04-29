@@ -64,7 +64,7 @@ impl DescribeEffect for MemoryHandler {
     fn effect_decl() -> EffectDecl {
         EffectDecl {
             type_name: "Memory",
-            description: "Persistent memory-block operations (Get/Put/Create/Append/Replace/Search/Recall/Archive/GetShared/WriteToPersona)",
+            description: "Persistent memory-block operations (Get/Put/Create/Append/Replace/Search/Recall/GetShared/WriteToPersona)",
             constructors: std::borrow::Cow::Borrowed(&[
                 "Get            :: BlockHandle -> Memory Content",
                 "Put            :: BlockHandle -> Content -> Maybe Text -> Memory ()",
@@ -73,7 +73,6 @@ impl DescribeEffect for MemoryHandler {
                 "Replace        :: BlockHandle -> Text -> Text -> Memory ()",
                 "Search         :: Query -> Memory [BlockHandle]",
                 "Recall         :: BlockHandle -> Memory Content",
-                "Archive        :: BlockHandle -> Memory ()",
                 "GetShared      :: Owner -> BlockHandle -> Memory Content",
                 "WriteToPersona :: BlockHandle -> Content -> Memory ()",
             ]),
@@ -94,7 +93,6 @@ impl DescribeEffect for MemoryHandler {
                 "replace :: Member Memory effs => BlockHandle -> Text -> Text -> Eff effs ()\nreplace h old new = send (Replace h old new)",
                 "search :: Member Memory effs => Query -> Eff effs [BlockHandle]\nsearch q = send (Search q)",
                 "recall :: Member Memory effs => BlockHandle -> Eff effs Content\nrecall h = send (Recall h)",
-                "archive :: Member Memory effs => BlockHandle -> Eff effs ()\narchive h = send (Archive h)",
                 "getShared :: Member Memory effs => Owner -> BlockHandle -> Eff effs Content\ngetShared o h = send (GetShared o h)",
                 "writeToPersona :: Member Memory effs => BlockHandle -> Content -> Eff effs ()\nwriteToPersona h c = send (WriteToPersona h c)",
             ]),
@@ -136,7 +134,6 @@ impl EffectHandler<SessionContext> for MemoryHandler {
             MemoryReq::Replace(_, _, _) => "Replace",
             MemoryReq::Search(_) => "Search",
             MemoryReq::Recall(_) => "Recall",
-            MemoryReq::Archive(_) => "Archive",
             MemoryReq::GetShared(_, _) => "GetShared",
             MemoryReq::WriteToPersona(_, _) => "WriteToPersona",
         };
@@ -357,21 +354,6 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                         ))
                     })?;
                 cx.respond(content)
-            }
-            MemoryReq::Archive(label) => {
-                let doc = adapter
-                    .get_block(&agent_id, &label)
-                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Archive: {e}")))?
-                    .ok_or_else(|| {
-                        EffectError::Handler(format!(
-                            "Pattern.Memory.Archive: block {label:?} not found for agent {agent_id:?}"
-                        ))
-                    })?;
-                let content = doc.render();
-                adapter
-                    .insert_archival(&agent_id, &content, None)
-                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Archive: {e}")))?;
-                cx.respond(())
             }
             MemoryReq::GetShared(owner, label) => {
                 let doc = adapter

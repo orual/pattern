@@ -62,12 +62,6 @@ pub const ALL_CLASSES: &[ConstructorClass] = &[
     },
     ConstructorClass {
         module: "Memory",
-        constructor: "Archive",
-        class: EffectClass::MutateInternal,
-        runtime_check: RuntimeClassCheck::Enforce,
-    },
-    ConstructorClass {
-        module: "Memory",
         constructor: "GetShared",
         class: EffectClass::Observe,
         runtime_check: RuntimeClassCheck::Skip,
