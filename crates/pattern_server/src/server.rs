@@ -1278,6 +1278,7 @@ impl DaemonServer {
                             agent_id: inner.default_agent,
                             persona_name: "echo".into(),
                             available_agents: vec![],
+                            agent_aliases: vec![],
                             partner_id: self.partner_id.clone(),
                             // Phase 6: read from .pattern.kdl partner { display_name "..." }
                             partner_display_name: None,
@@ -1298,6 +1299,7 @@ impl DaemonServer {
                                 agent_id: inner.default_agent,
                                 persona_name: String::new(),
                                 available_agents: vec![],
+                                agent_aliases: vec![],
                                 partner_id: self.partner_id.clone(),
                                 // Phase 6: read from .pattern.kdl partner { display_name "..." }
                                 partner_display_name: None,
@@ -1324,17 +1326,36 @@ impl DaemonServer {
                     })
                     .unwrap_or_default();
 
-                // Resolve the requested agent.
-                let agent_id = inner.default_agent.clone();
-                let normalized = agent_id.trim_start_matches('@');
+                // Resolve the requested agent. The user may have addressed
+                // the agent by alias (persona `name` field); resolve to the
+                // canonical id and return that to the client so subsequent
+                // RPCs can use the canonical form.
+                let requested = inner.default_agent.clone();
+                let normalized = requested.trim_start_matches('@');
+                let canonical = personas
+                    .resolve(normalized)
+                    .map(|s| s.to_owned())
+                    .unwrap_or_else(|| normalized.to_owned());
+                let agent_id: AgentId = SmolStr::from(canonical.as_str());
+
                 let persona_name = personas
-                    .get(normalized)
+                    .path_for(normalized)
                     .and_then(|p| pattern_runtime::persona_loader::load_persona(p).ok())
                     .map(|p| p.name.to_string())
                     .unwrap_or_else(|| agent_id.to_string());
 
-                let available: Vec<AgentId> =
-                    personas.keys().map(|k| SmolStr::from(k.as_str())).collect();
+                let available: Vec<AgentId> = personas
+                    .canonical_ids()
+                    .map(|k| SmolStr::from(k))
+                    .collect();
+
+                let agent_aliases: Vec<crate::protocol::AgentAlias> = personas
+                    .iter_aliases()
+                    .map(|(alias, canonical)| crate::protocol::AgentAlias {
+                        alias: SmolStr::from(alias),
+                        canonical_id: SmolStr::from(canonical),
+                    })
+                    .collect();
 
                 // Update available agents count for GetStatus.
                 self.available_agents = available.len();
@@ -1362,6 +1383,7 @@ impl DaemonServer {
                         agent_id,
                         persona_name,
                         available_agents: available,
+                        agent_aliases,
                         partner_id: self.partner_id.clone(),
                         partner_display_name: mount.partner_display_name.clone(),
                         fronting_snapshot,
@@ -2680,8 +2702,9 @@ fn resolve_persona(
     // Normalize: strip leading '@' from the requested agent_id.
     let normalized = agent_id.trim_start_matches('@');
 
-    let persona_path = personas.get(normalized).ok_or_else(|| {
-        let available: Vec<_> = personas.keys().collect();
+    // path_for resolves both canonical agent_id and alias (persona name).
+    let persona_path = personas.path_for(normalized).ok_or_else(|| {
+        let available: Vec<_> = personas.canonical_ids().collect();
         format!("persona not found for agent_id '{normalized}'; available: {available:?}")
     })?;
 

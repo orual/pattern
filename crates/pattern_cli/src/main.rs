@@ -505,9 +505,13 @@ async fn run_chat(cmd: ChatCmd) -> MietteResult<()> {
     // ConstellationChanged events from the daemon.
     app.refresh_constellation_view();
 
-    // Populate the available agents list so /front can validate names.
+    // Populate the available agents list and alias index so /front can
+    // validate either canonical id or persona-name alias.
     if !session.available_agents.is_empty() {
         app.set_available_agents(session.available_agents);
+    }
+    if !session.agent_aliases.is_empty() {
+        app.set_agent_aliases(session.agent_aliases);
     }
 
     // Register any plugin commands the daemon reported on session init.
@@ -568,6 +572,9 @@ struct SessionResult {
     event_rx: Option<tui::app::DaemonEventReceiver>,
     error: Option<String>,
     available_agents: Vec<smol_str::SmolStr>,
+    /// Aliases (persona `name` fields) that resolve to canonical agent ids.
+    /// Used by autocomplete and command validation to accept either form.
+    agent_aliases: Vec<pattern_server::protocol::AgentAlias>,
     history: Vec<pattern_server::protocol::HistoricalBatch>,
     /// Plugin commands fetched from the daemon for autocomplete registration.
     daemon_commands: Vec<(String, String)>,
@@ -591,6 +598,7 @@ impl SessionResult {
             event_rx: None,
             error: None,
             available_agents: vec![],
+            agent_aliases: vec![],
             history: vec![],
             daemon_commands: vec![],
             partner_id: None,
@@ -652,6 +660,7 @@ async fn init_session_and_subscribe(
                 event_rx: rx,
                 error: info.error,
                 available_agents: info.available_agents,
+                agent_aliases: info.agent_aliases,
                 history,
                 daemon_commands,
                 partner_id: Some(info.partner_id),
@@ -667,6 +676,7 @@ async fn init_session_and_subscribe(
                 event_rx: rx,
                 error: Some(format!("session init failed: {e}")),
                 available_agents: vec![],
+                agent_aliases: vec![],
                 history: vec![],
                 daemon_commands: vec![],
                 partner_id: None,

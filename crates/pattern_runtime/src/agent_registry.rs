@@ -115,6 +115,18 @@ impl AgentSlot {
 /// is shared across all sessions that participate in the same runtime. For
 /// tests that do not need multi-session interaction, `Arc::new(AgentRegistry::new())`
 /// is sufficient.
+///
+/// # Aliases
+///
+/// In addition to the canonical-id slot map, the registry maintains a
+/// separate alias map (`alias → canonical_id`). Aliases let an agent be
+/// addressed by a non-canonical name (typically the persona's `name`
+/// field when it differs from `agent_id`). Lookups try the canonical
+/// slot map first; on miss they consult the alias map and retry.
+///
+/// Aliases are registered explicitly by callers that know the
+/// canonical/alias mapping (e.g. session open). Unregistering a canonical
+/// also removes any aliases pointing at it.
 #[derive(Debug, Default)]
 pub struct AgentRegistry {
     /// Single-map design: one entry per persona, status encoded in the slot
@@ -122,6 +134,13 @@ pub struct AgentRegistry {
     /// duration — no cross-shard windows where a second operation can observe
     /// a partially-updated state.
     slots: DashMap<PersonaId, AgentSlot>,
+
+    /// Alias index: `alias → canonical_id`. Lookup helpers consult this on
+    /// canonical miss to support addressing an agent by its persona `name`
+    /// when that differs from its `agent_id`. Registered via
+    /// [`AgentRegistry::register_alias`]; cleaned up on canonical
+    /// [`AgentRegistry::unregister`].
+    aliases: DashMap<PersonaId, PersonaId>,
 }
 
 impl AgentRegistry {
@@ -207,33 +226,102 @@ impl AgentRegistry {
     }
 
     /// Unregister a persona. If the persona was in `Draft` status, any
-    /// pending queued messages are discarded.
+    /// pending queued messages are discarded. Any aliases pointing at this
+    /// canonical id are also removed.
     ///
     /// No-op if the persona was not registered.
     ///
     /// Returns `true` if the persona was registered and has now been removed,
     /// `false` if the persona was not present.
     pub fn unregister(&self, id: &PersonaId) -> bool {
-        self.slots.remove(id).is_some()
+        let removed = self.slots.remove(id).is_some();
+        // Drop dangling aliases pointing at this canonical.
+        self.aliases.retain(|_alias, canonical| canonical != id);
+        removed
+    }
+
+    /// Register an alias that resolves to a canonical persona id.
+    ///
+    /// Returns an error if the alias would shadow a different canonical
+    /// agent already in the registry, or if the alias already resolves to
+    /// a different canonical id. Self-registration (alias == canonical) is
+    /// a no-op.
+    ///
+    /// Idempotent: registering the same `(alias, canonical)` pair twice
+    /// succeeds.
+    ///
+    /// Note: registering an alias for a canonical that is not yet in the
+    /// slot map is allowed — the canonical may be registered later. The
+    /// alias is removed when its canonical is `unregister`ed.
+    pub fn register_alias(
+        &self,
+        alias: PersonaId,
+        canonical: PersonaId,
+    ) -> Result<(), RouterError> {
+        if alias == canonical {
+            return Ok(());
+        }
+
+        // Refuse if the alias would shadow a different canonical id.
+        if self.slots.contains_key(&alias) {
+            return Err(RouterError::AliasCollision {
+                alias,
+                canonical,
+            });
+        }
+
+        // Idempotent: same target → ok. Different target → collision.
+        if let Some(existing) = self.aliases.get(&alias) {
+            if *existing != canonical {
+                return Err(RouterError::AliasCollision {
+                    alias,
+                    canonical,
+                });
+            }
+            return Ok(());
+        }
+
+        self.aliases.insert(alias, canonical);
+        Ok(())
+    }
+
+    /// Remove an alias entry. No-op if not present.
+    pub fn unregister_alias(&self, alias: &PersonaId) -> bool {
+        self.aliases.remove(alias).is_some()
+    }
+
+    /// Resolve an addressable id (canonical or alias) to its canonical
+    /// counterpart. Returns the input unchanged if it's already canonical
+    /// in the slot map; returns `None` if neither canonical nor a known
+    /// alias.
+    fn resolve_to_canonical(&self, id: &PersonaId) -> Option<PersonaId> {
+        if self.slots.contains_key(id) {
+            return Some(id.clone());
+        }
+        self.aliases.get(id).map(|r| r.clone())
     }
 
     /// Return a clone of the mailbox sender for an `Active` persona, or
     /// `None` if the persona is not registered or is in `Draft` status.
+    /// Resolves through the alias map on canonical miss.
     ///
     /// Callers route messages through the returned sender. Draft personas
     /// do not have a live receiving session; use [`Self::route_or_queue`]
     /// which handles both cases atomically.
     pub fn sender(&self, id: &PersonaId) -> Option<mpsc::UnboundedSender<MailboxInput>> {
-        let slot = self.slots.get(id)?;
+        let canonical = self.resolve_to_canonical(id)?;
+        let slot = self.slots.get(&canonical)?;
         match &*slot {
             AgentSlot::Active { tx } => Some(tx.clone()),
             AgentSlot::Draft { .. } => None,
         }
     }
 
-    /// Current status of a persona, or `None` if not registered.
+    /// Current status of a persona, or `None` if not registered. Resolves
+    /// through the alias map on canonical miss.
     pub fn status(&self, id: &PersonaId) -> Option<SessionStatus> {
-        self.slots.get(id).map(|s| s.status())
+        let canonical = self.resolve_to_canonical(id)?;
+        self.slots.get(&canonical).map(|s| s.status())
     }
 
     /// Route a message to the correct destination, atomically.
@@ -264,10 +352,27 @@ impl AgentRegistry {
     ///   promotion via [`Self::register_active`].
     /// - Not registered (vacant): returns `Err(RouterError::PersonaNotFound)`.
     pub fn route_or_queue(&self, id: &PersonaId, msg: MailboxInput) -> Result<(), RouterError> {
-        let slot = self
-            .slots
-            .get(id)
-            .ok_or_else(|| RouterError::PersonaNotFound(id.clone()))?;
+        // Acquire the slot guard via a single `get` so the canonical-only
+        // path preserves the TOCTOU guarantees described above. Only fall
+        // back to the alias map when the canonical lookup misses; the
+        // alias-resolved second `get` reacquires a fresh guard, but at
+        // that point the caller addressed an alias that doesn't have its
+        // own canonical slot, so the Active→Active swap concern doesn't
+        // apply (the alias points to a single canonical, and that
+        // canonical's own guard governs delivery).
+        let slot = match self.slots.get(id) {
+            Some(s) => s,
+            None => {
+                let canonical = self
+                    .aliases
+                    .get(id)
+                    .map(|r| r.clone())
+                    .ok_or_else(|| RouterError::PersonaNotFound(id.clone()))?;
+                self.slots
+                    .get(&canonical)
+                    .ok_or_else(|| RouterError::PersonaNotFound(id.clone()))?
+            }
+        };
 
         match &*slot {
             AgentSlot::Active { tx } => {
@@ -452,6 +557,18 @@ mod tests {
         mpsc::UnboundedReceiver<MailboxInput>,
     ) {
         mpsc::unbounded_channel()
+    }
+
+    /// Pull the chat-message body text out of a `MailboxInput` for
+    /// content-based assertions in the swap test.
+    fn text_of(input: &MailboxInput) -> String {
+        input
+            .msg
+            .chat_message
+            .content
+            .first_text()
+            .expect("test message has text content")
+            .to_string()
     }
 
     // --- AC6.1 / AC6.4 / AC6.5 groundwork ---
@@ -652,56 +769,79 @@ mod tests {
         assert_eq!(text, "route-active");
     }
 
-    /// I-4 regression: Active→Active swap concurrent with sends must
-    /// not silently misroute messages to the old session's mailbox.
+    /// I-4 regression: Active→Active swap correctness across pre-swap,
+    /// in-flight, and post-swap delivery.
     ///
-    /// Senders racing with `register_active` either land their message
-    /// in the OLD receiver (if their `route_or_queue` ran fully before
-    /// the swap won the shard write lock) or in the NEW receiver (if
-    /// the swap completed first). With the prior implementation —
-    /// which dropped the slot guard before `tx.send` — a sender could
-    /// observe `tx_old`, the swap could complete, then `tx_old.send`
-    /// would still succeed and deliver to the old mailbox even though
-    /// the registry now points at the new session. The fix holds the
-    /// shard read guard across the send so the swap is serialized
-    /// after the send.
+    /// The contract `route_or_queue` defends (per its doc comment):
+    /// 1. Senders that began before the swap go to `tx_old`.
+    /// 2. Senders that begin after the swap commits go to `tx_new`.
+    /// 3. Senders overlapping the swap go to *exactly one* mailbox
+    ///    (no loss, no duplication). Under the held-guard discipline,
+    ///    the swap is serialised after each in-flight `tx.send`.
     ///
-    /// Probe: spawn many concurrent senders, perform a swap once
-    /// midway, and assert that **no message is lost** — every send
-    /// lands in either old or new mailbox, none is dropped.
+    /// The earlier shape of this test asserted only "no loss in the
+    /// race" plus a brittle `received_new > 0` sanity check. That was
+    /// strictly weaker than the contract:
+    /// - Pre/post-swap delivery were never exercised.
+    /// - Silent misroute (a sender holding a stale `tx_old` reference
+    ///   after the swap) was invisible because `rx_old` stayed alive
+    ///   throughout — the message was counted as "delivered" even
+    ///   though it landed in the wrong place.
+    /// - The race-window check failed spuriously when scheduling
+    ///   serialised the senders before the swap fired.
+    ///
+    /// This three-phase rework verifies the full contract:
+    /// - **Phase A (pre-swap, deterministic):** synchronous sends. All
+    ///   must land in `rx_old`, none in `rx_new`.
+    /// - **Phase B (in-flight race, probabilistic-on-coverage but
+    ///   deterministic-on-correctness):** N concurrent senders + one
+    ///   swap task. Assert no loss.
+    /// - **Phase C (post-swap, deterministic):** drop `rx_old` to
+    ///   expose silent misroute, then synchronous sends. Each must
+    ///   succeed (i.e. resolve to `tx_new`). A failure here means the
+    ///   slot still points at the now-closed `tx_old`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn route_or_queue_active_swap_does_not_lose_messages() {
-        const SENDS: usize = 4_096;
+    async fn route_or_queue_active_swap_preserves_routing() {
+        const PRE_SENDS: usize = 50;
+        const RACE_SENDS: usize = 4_096;
+        const POST_SENDS: usize = 50;
 
         let reg = Arc::new(AgentRegistry::new());
         let (tx_old, mut rx_old) = make_tx();
         let (tx_new, mut rx_new) = make_tx();
 
-        // Initial registration: senders see tx_old.
         reg.register("active-swap".into(), tx_old, SessionStatus::Active);
 
-        // Spawn N senders that all push concurrently.
-        let mut send_tasks = Vec::with_capacity(SENDS);
-        for i in 0..SENDS {
+        // -------------------------------------------------------------
+        // Phase A — pre-swap delivery.
+        // -------------------------------------------------------------
+        for i in 0..PRE_SENDS {
+            let input = MailboxInput {
+                from: test_origin(),
+                msg: test_message(&format!("pre-{i}")),
+            };
+            reg.route_or_queue(&"active-swap".into(), input)
+                .expect("pre-swap route_or_queue must succeed");
+        }
+
+        // -------------------------------------------------------------
+        // Phase B — in-flight race.
+        // -------------------------------------------------------------
+        let mut send_tasks = Vec::with_capacity(RACE_SENDS);
+        for i in 0..RACE_SENDS {
             let reg = reg.clone();
             send_tasks.push(tokio::spawn(async move {
                 let input = MailboxInput {
                     from: test_origin(),
-                    msg: test_message(&format!("send-{i}")),
+                    msg: test_message(&format!("race-{i}")),
                 };
-                // route_or_queue is sync; small async wrapper just to
-                // give the scheduler interleaving opportunities.
                 tokio::task::yield_now().await;
                 reg.route_or_queue(&"active-swap".into(), input)
             }));
         }
-
-        // Mid-flight, swap to tx_new.
         let swap_task = {
             let reg = reg.clone();
             tokio::spawn(async move {
-                // Yield enough times to let a chunk of sends fly first,
-                // but still race the rest.
                 for _ in 0..8 {
                     tokio::task::yield_now().await;
                 }
@@ -709,37 +849,205 @@ mod tests {
             })
         };
 
-        // Wait for senders + swap.
-        let mut send_ok = 0usize;
+        let mut race_send_ok = 0usize;
         for t in send_tasks {
-            match t.await.expect("send task should not panic") {
-                Ok(()) => send_ok += 1,
-                Err(e) => panic!("route_or_queue must not return an error here: {e:?}"),
+            match t.await.expect("race send task should not panic") {
+                Ok(()) => race_send_ok += 1,
+                Err(e) => {
+                    panic!("route_or_queue must not return an error in race phase: {e:?}")
+                }
             }
         }
         swap_task.await.expect("swap task should not panic");
 
-        // Drain both receivers and confirm the union covers every send.
-        let mut received_old = 0usize;
-        while rx_old.try_recv().is_ok() {
-            received_old += 1;
+        // Drain both receivers post-race.
+        let mut old_msgs: Vec<String> = Vec::new();
+        while let Ok(m) = rx_old.try_recv() {
+            old_msgs.push(text_of(&m));
         }
-        let mut received_new = 0usize;
-        while rx_new.try_recv().is_ok() {
-            received_new += 1;
+        let mut new_msgs: Vec<String> = Vec::new();
+        while let Ok(m) = rx_new.try_recv() {
+            new_msgs.push(text_of(&m));
         }
 
-        let total = received_old + received_new;
+        // Phase A assertions: every pre-swap message must be in rx_old, none in rx_new.
+        for i in 0..PRE_SENDS {
+            let label = format!("pre-{i}");
+            assert!(
+                old_msgs.iter().any(|m| m == &label),
+                "pre-swap message {label} must be in rx_old"
+            );
+            assert!(
+                !new_msgs.iter().any(|m| m == &label),
+                "pre-swap message {label} must NOT be in rx_new"
+            );
+        }
+
+        // Phase B: race phase has no loss.
+        let race_in_old = old_msgs.iter().filter(|m| m.starts_with("race-")).count();
+        let race_in_new = new_msgs.iter().filter(|m| m.starts_with("race-")).count();
         assert_eq!(
-            total, send_ok,
-            "every successful send must land in exactly one mailbox; \
-             received_old={received_old}, received_new={received_new}, \
-             expected_total={send_ok}"
+            race_in_old + race_in_new,
+            race_send_ok,
+            "race phase: every successful send must land in exactly one mailbox; \
+             race_in_old={race_in_old}, race_in_new={race_in_new}, send_ok={race_send_ok}"
         );
-        // Sanity: the swap actually happened (some sends went to new).
-        assert!(
-            received_new > 0,
-            "swap should have happened during the run; rx_new must be non-empty"
-        );
+
+        // -------------------------------------------------------------
+        // Phase C — post-swap delivery.
+        //
+        // Drop rx_old before sending. Any send that resolves to a stale
+        // `tx_old` will fail with `MailboxClosed`; with the correct
+        // implementation, the slot now points at `tx_new` and sends
+        // succeed.
+        // -------------------------------------------------------------
+        drop(rx_old);
+
+        for i in 0..POST_SENDS {
+            let input = MailboxInput {
+                from: test_origin(),
+                msg: test_message(&format!("post-{i}")),
+            };
+            reg.route_or_queue(&"active-swap".into(), input).expect(
+                "post-swap route_or_queue must resolve to tx_new and succeed; \
+                 a MailboxClosed error here means the slot is still pointed at \
+                 the closed tx_old",
+            );
+        }
+
+        // Drain post-swap messages from rx_new and verify they all
+        // arrived. Existing race-phase messages were drained above so
+        // anything in rx_new now is post-* only.
+        let mut post_msgs: Vec<String> = Vec::new();
+        while let Ok(m) = rx_new.try_recv() {
+            post_msgs.push(text_of(&m));
+        }
+        for i in 0..POST_SENDS {
+            let label = format!("post-{i}");
+            assert!(
+                post_msgs.iter().any(|m| m == &label),
+                "post-swap message {label} must be in rx_new"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Alias resolution
+    // -----------------------------------------------------------------------
+
+    /// Registering an alias and resolving via `route_or_queue` delivers the
+    /// message to the canonical session's mailbox.
+    #[tokio::test]
+    async fn route_via_alias_delivers_to_canonical() {
+        let reg = Arc::new(AgentRegistry::new());
+        let (tx, mut rx) = make_tx();
+        reg.register("pattern-default".into(), tx, SessionStatus::Active);
+        reg.register_alias("pattern".into(), "pattern-default".into())
+            .expect("alias registration should succeed");
+
+        reg.route_or_queue(
+            &"pattern".into(),
+            crate::mailbox::MailboxInput {
+                from: test_origin(),
+                msg: test_message("via-alias"),
+            },
+        )
+        .expect("route via alias should succeed");
+
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received.msg.chat_message.content.first_text().unwrap(), "via-alias");
+    }
+
+    /// `sender()` resolves through the alias map.
+    #[test]
+    fn sender_resolves_through_alias() {
+        let reg = AgentRegistry::new();
+        let (tx, _rx) = make_tx();
+        reg.register("canonical-x".into(), tx, SessionStatus::Active);
+        reg.register_alias("alias-x".into(), "canonical-x".into())
+            .unwrap();
+
+        assert!(reg.sender(&"canonical-x".into()).is_some());
+        assert!(reg.sender(&"alias-x".into()).is_some(),
+            "alias should resolve to active sender");
+    }
+
+    /// `status()` resolves through the alias map.
+    #[test]
+    fn status_resolves_through_alias() {
+        let reg = AgentRegistry::new();
+        let (tx, _rx) = make_tx();
+        reg.register("canonical-y".into(), tx, SessionStatus::Active);
+        reg.register_alias("alias-y".into(), "canonical-y".into())
+            .unwrap();
+
+        assert_eq!(reg.status(&"alias-y".into()), Some(SessionStatus::Active));
+    }
+
+    /// Registering an alias that shadows a different canonical errors.
+    #[test]
+    fn alias_shadowing_canonical_errors() {
+        let reg = AgentRegistry::new();
+        let (tx_a, _rx_a) = make_tx();
+        let (tx_b, _rx_b) = make_tx();
+        reg.register("foo".into(), tx_a, SessionStatus::Active);
+        reg.register("bar".into(), tx_b, SessionStatus::Active);
+
+        // Cannot alias "foo" → "bar" because "foo" already names a
+        // different canonical persona.
+        let err = reg
+            .register_alias("foo".into(), "bar".into())
+            .expect_err("expected alias collision");
+        assert!(matches!(err, RouterError::AliasCollision { .. }));
+    }
+
+    /// Registering the same `(alias, canonical)` pair twice is idempotent.
+    #[test]
+    fn alias_registration_is_idempotent() {
+        let reg = AgentRegistry::new();
+        let (tx, _rx) = make_tx();
+        reg.register("canonical-z".into(), tx, SessionStatus::Active);
+
+        reg.register_alias("alias-z".into(), "canonical-z".into()).unwrap();
+        reg.register_alias("alias-z".into(), "canonical-z".into())
+            .expect("second identical registration should succeed");
+    }
+
+    /// Registering the same alias to a different canonical errors.
+    #[test]
+    fn conflicting_alias_targets_error() {
+        let reg = AgentRegistry::new();
+        let (tx_a, _rx_a) = make_tx();
+        let (tx_b, _rx_b) = make_tx();
+        reg.register("first".into(), tx_a, SessionStatus::Active);
+        reg.register("second".into(), tx_b, SessionStatus::Active);
+        reg.register_alias("shared".into(), "first".into()).unwrap();
+
+        let err = reg
+            .register_alias("shared".into(), "second".into())
+            .expect_err("expected alias collision on different canonical target");
+        assert!(matches!(err, RouterError::AliasCollision { .. }));
+    }
+
+    /// Self-aliasing (alias == canonical) is a no-op success.
+    #[test]
+    fn self_alias_is_noop() {
+        let reg = AgentRegistry::new();
+        reg.register_alias("self".into(), "self".into())
+            .expect("self-alias should be a no-op success");
+    }
+
+    /// Unregistering a canonical removes its dangling aliases.
+    #[test]
+    fn unregister_canonical_drops_aliases() {
+        let reg = AgentRegistry::new();
+        let (tx, _rx) = make_tx();
+        reg.register("alpha".into(), tx, SessionStatus::Active);
+        reg.register_alias("a".into(), "alpha".into()).unwrap();
+
+        reg.unregister(&"alpha".into());
+
+        assert!(reg.status(&"a".into()).is_none(),
+            "alias should resolve to None after canonical unregistered");
     }
 }

@@ -72,6 +72,17 @@ pub fn filter_candidates(pattern: &str, candidates: &[(String, String)]) -> Vec<
 // AutocompleteState
 // ---------------------------------------------------------------------------
 
+/// What kind of completion the popup is currently driving.
+/// Drives the accept-time replacement strategy: slash-command
+/// completions replace the whole input with `/<value> `; mention
+/// completions replace just the trailing `@<partial>` token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CompletionMode {
+    #[default]
+    Slash,
+    Mention,
+}
+
 /// Tracks the state of the autocomplete popup.
 pub struct AutocompleteState {
     /// Whether the popup is currently visible.
@@ -82,6 +93,8 @@ pub struct AutocompleteState {
     selected: usize,
     /// The current pattern being matched against.
     pattern: String,
+    /// What kind of completion is active.
+    mode: CompletionMode,
 }
 
 impl Default for AutocompleteState {
@@ -98,16 +111,23 @@ impl AutocompleteState {
             items: Vec::new(),
             selected: 0,
             pattern: String::new(),
+            mode: CompletionMode::Slash,
         }
     }
 
-    /// Update the autocomplete with a new pattern and candidate list.
+    /// Update the autocomplete with a new pattern, candidate list, and mode.
     ///
     /// Shows the popup if there are matches; hides it otherwise.
     /// If exactly one match and it equals the pattern, auto-dismisses
     /// (the user already typed the full command name).
-    pub fn update(&mut self, pattern: &str, candidates: &[(String, String)]) {
+    pub fn update(
+        &mut self,
+        pattern: &str,
+        candidates: &[(String, String)],
+        mode: CompletionMode,
+    ) {
         self.pattern = pattern.to_string();
+        self.mode = mode;
         self.items = filter_candidates(pattern, candidates);
 
         // Auto-dismiss when the only match is an exact match.
@@ -121,6 +141,11 @@ impl AutocompleteState {
         if self.selected >= self.items.len() {
             self.selected = 0;
         }
+    }
+
+    /// Active completion mode (set by [`Self::update`]).
+    pub fn mode(&self) -> CompletionMode {
+        self.mode
     }
 
     /// Hide the autocomplete popup.
@@ -321,7 +346,7 @@ mod tests {
     #[test]
     fn accept_returns_selected_value() {
         let mut state = AutocompleteState::new();
-        state.update("cl", &test_candidates());
+        state.update("cl", &test_candidates(), CompletionMode::Slash);
         assert!(state.is_visible());
 
         let accepted = state.accept();
@@ -331,7 +356,7 @@ mod tests {
     #[test]
     fn escape_dismisses() {
         let mut state = AutocompleteState::new();
-        state.update("cl", &test_candidates());
+        state.update("cl", &test_candidates(), CompletionMode::Slash);
         assert!(state.is_visible());
 
         state.hide();
@@ -343,7 +368,7 @@ mod tests {
     fn popup_snapshot() {
         // Render the autocomplete popup above a simulated input area.
         let mut state = AutocompleteState::new();
-        state.update("s", &test_candidates());
+        state.update("s", &test_candidates(), CompletionMode::Slash);
         assert!(state.is_visible());
 
         let backend = TestBackend::new(50, 10);

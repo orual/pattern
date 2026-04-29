@@ -244,10 +244,10 @@ fn discover_and_load_inner(
 ) -> Result<PersonaSnapshot, PersonaLoadError> {
     let personas = pattern_memory::persona::discover_personas(paths, project_mount)?;
     let path = personas
-        .get(name)
+        .path_for(name)
         .ok_or_else(|| PersonaLoadError::NotFound {
             name: name.to_owned(),
-            searched: personas.keys().cloned().collect(),
+            searched: personas.canonical_ids().map(|s| s.to_owned()).collect(),
         })?;
     load_persona_inner(path)
 }

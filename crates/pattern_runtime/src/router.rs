@@ -156,6 +156,17 @@ pub enum RouterError {
     /// end has since been dropped.
     #[error("persona mailbox is closed")]
     MailboxClosed,
+
+    /// Attempt to register an alias that would shadow a different
+    /// canonical persona, or that already resolves to a different
+    /// canonical id.
+    #[error("alias collision: alias {alias:?} cannot resolve to {canonical:?}")]
+    AliasCollision {
+        /// The alias being registered.
+        alias: pattern_core::types::ids::PersonaId,
+        /// The canonical id the alias was supposed to resolve to.
+        canonical: pattern_core::types::ids::PersonaId,
+    },
 }
 
 /// Well-known prefix attached to `EffectError::Handler` messages produced

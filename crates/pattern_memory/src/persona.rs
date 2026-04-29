@@ -11,4 +11,4 @@
 
 mod discover;
 
-pub use discover::{PersonaDiscoveryError, discover_personas};
+pub use discover::{PersonaDiscoveryError, PersonaIndex, discover_personas};

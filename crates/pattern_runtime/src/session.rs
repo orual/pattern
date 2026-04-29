@@ -1945,6 +1945,12 @@ impl TidepoolSession {
         let memory_blocks_for_seed = persona.memory_blocks.clone();
         let store_for_seed = memory_store.clone();
 
+        // Capture the alias mapping (display name → agent_id) for later
+        // registration with the AgentRegistry, when one is wired. Empty
+        // when name == agent_id.
+        let persona_alias_for_registry: Option<smol_str::SmolStr> =
+            (persona.name != persona.agent_id).then(|| persona.name.clone());
+
         // The basic `open` path now requires a port registry so the
         // `SessionContext` is fully wired before the eval-worker /
         // mailbox / FileManager add-ons land here. Pull it out of the
@@ -2279,6 +2285,25 @@ impl TidepoolSession {
         if let Some(registry) = session.ctx.agent_registry().cloned() {
             let persona_id: pattern_core::types::ids::PersonaId = session.ctx.agent_id().into();
             let mailbox_tx = session.ctx.mailbox().sender();
+
+            // Register the persona's display `name` as an alias when it
+            // differs from the canonical `agent_id`. This lets peer
+            // agents address the session by either form via
+            // `agent:<name>` or `agent:<agent_id>`. Collisions surface
+            // as a `RouterError::AliasCollision` and are logged; the
+            // session still opens (canonical addressing always works).
+            if let Some(alias_name) = persona_alias_for_registry.as_ref() {
+                let alias: pattern_core::types::ids::PersonaId = alias_name.clone().into();
+                if let Err(e) = registry.register_alias(alias, persona_id.clone()) {
+                    tracing::warn!(
+                        agent_id = %persona_id,
+                        name = %alias_name,
+                        error = %e,
+                        "failed to register persona name as alias; agent remains addressable by canonical id"
+                    );
+                }
+            }
+
             let guard = crate::agent_registry::RegistryGuard::register_active(
                 registry, persona_id, mailbox_tx,
             );

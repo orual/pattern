@@ -22,7 +22,7 @@ use pattern_server::state::DaemonState;
 
 /// Bundled default persona KDL, written to `~/.pattern/personas/@pattern-default/persona.kdl`
 /// on first run if no persona is found.
-const DEFAULT_PERSONA_KDL: &str = r#"name "pattern-default"
+const DEFAULT_PERSONA_KDL: &str = r#"name "pattern"
 agent-id "pattern-default"
 
 model provider="anthropic" model-id="claude-sonnet-4-6" {
@@ -318,8 +318,13 @@ fn resolve_default_persona(
     let personas = discover_personas(paths, mount_path.as_deref())
         .map_err(|e| miette!("persona discovery failed: {e}"))?;
 
-    if let Some(path) = personas.get(normalized) {
-        return Ok((path.clone(), normalized.to_string()));
+    // path_for resolves both canonical agent_id and alias (persona name).
+    if let Some(path) = personas.path_for(normalized) {
+        let canonical = personas
+            .resolve(normalized)
+            .expect("path_for hit implies resolve hit")
+            .to_string();
+        return Ok((path.to_path_buf(), canonical));
     }
 
     // Persona not found on disk — write the bundled default.
@@ -638,7 +643,7 @@ mod tests {
         let persona_dir = mount_path.join("personas/@pattern-default");
         std::fs::create_dir_all(&persona_dir).unwrap();
         let persona_path = persona_dir.join("persona.kdl");
-        std::fs::write(&persona_path, "name \"pattern-default\"\n").unwrap();
+        std::fs::write(&persona_path, "name \"pattern\"\n").unwrap();
 
         let (result_path, agent_id) = resolve_default_persona(project.path(), &paths).unwrap();
         assert_eq!(result_path, persona_path);
@@ -650,7 +655,7 @@ mod tests {
     /// applies. The persona character lives entirely in the `persona` memory block.
     #[test]
     fn default_persona_kdl_has_required_fields() {
-        assert!(DEFAULT_PERSONA_KDL.contains("name \"pattern-default\""));
+        assert!(DEFAULT_PERSONA_KDL.contains("name \"pattern\""));
         assert!(DEFAULT_PERSONA_KDL.contains("agent-id \"pattern-default\""));
         assert!(DEFAULT_PERSONA_KDL.contains("model provider="));
         assert!(DEFAULT_PERSONA_KDL.contains("memory {"));

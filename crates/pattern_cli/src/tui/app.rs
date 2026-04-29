@@ -4,6 +4,7 @@
 //! events ([`TaggedTurnEvent`]), and a periodic UI refresh tick using
 //! [`tokio::select!`]. The terminal is rendered each iteration via ratatui.
 
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -26,7 +27,7 @@ use pattern_core::types::origin::{Author, MessageOrigin, Partner, Sphere};
 use pattern_server::client::DaemonClient;
 use pattern_server::protocol::{Recipient, TaggedTurnEvent, WireTurnEvent};
 
-use super::autocomplete::{AutocompleteState, AutocompleteWidget};
+use super::autocomplete::{AutocompleteState, AutocompleteWidget, CompletionMode};
 use super::commands::{
     CMD_AGENT, CMD_AGENTS, CMD_CANCEL, CMD_CLEAR, CMD_FLOAT, CMD_FRONT, CMD_PANE, CMD_PANEL,
     CMD_PROMOTE, CMD_QUIT, CMD_RELATE, CMD_SHUTDOWN, CMD_STATUS, CommandRegistry,
@@ -155,6 +156,11 @@ pub struct App {
     /// Available agents discovered during InitSession. Used by /front to
     /// validate the requested agent name before switching.
     available_agents: Vec<SmolStr>,
+    /// Persona-name aliases (alias → canonical_id) discovered during
+    /// InitSession. Used by `/front` and `/agent` to accept either the
+    /// canonical id or the persona's display `name` and resolve to the
+    /// canonical form before storing or sending.
+    agent_aliases: HashMap<SmolStr, SmolStr>,
     /// Mutable state for the side panel (notes, display content, thinking).
     panel_state: PanelState,
     /// Active toast notifications (visible when panel is hidden).
@@ -226,6 +232,7 @@ impl App {
             last_viewport_height: 24,
             result_tx,
             available_agents: Vec::new(),
+            agent_aliases: HashMap::new(),
             panel_state: PanelState::default(),
             toast_state: ToastState::default(),
             panel_visibility: PanelVisibility::Hidden,
@@ -248,6 +255,46 @@ impl App {
     pub fn set_available_agents(&mut self, agents: Vec<SmolStr>) {
         self.agent_count = agents.len();
         self.available_agents = agents;
+    }
+
+    /// Set the persona-name alias map from the InitSession response.
+    /// Called after `set_available_agents`. Aliases let users address
+    /// agents by their persona `name` field; resolution to canonical
+    /// agent_id happens locally before any RPC.
+    pub fn set_agent_aliases(
+        &mut self,
+        aliases: Vec<pattern_server::protocol::AgentAlias>,
+    ) {
+        self.agent_aliases = aliases
+            .into_iter()
+            .map(|a| (a.alias, a.canonical_id))
+            .collect();
+    }
+
+    /// Resolve a user-supplied agent handle (canonical id or alias, with
+    /// or without leading `@`) to its canonical agent id. Returns `None`
+    /// if the handle matches neither.
+    fn resolve_agent_handle(&self, handle: &str) -> Option<SmolStr> {
+        let stripped = handle.trim_start_matches('@');
+        if self.available_agents.iter().any(|a| a.as_str() == stripped) {
+            return Some(SmolStr::from(stripped));
+        }
+        self.agent_aliases.get(stripped).cloned()
+    }
+
+    /// Format the available-agents list (canonical ids + aliases) for
+    /// error messages. Used by `/front` and `/agent` when the user types
+    /// an unknown handle.
+    fn format_addressable_agents(&self) -> String {
+        let mut parts: Vec<String> = self
+            .available_agents
+            .iter()
+            .map(|a| a.to_string())
+            .collect();
+        for (alias, canonical) in &self.agent_aliases {
+            parts.push(format!("{alias} → {canonical}"));
+        }
+        parts.join(", ")
     }
 
     /// Register plugin commands fetched from the daemon on session init.
@@ -849,9 +896,17 @@ impl App {
                             return;
                         }
                         KeyCode::Enter => {
-                            // Accept the selected completion.
+                            // Accept the selected completion. Replacement
+                            // strategy depends on completion mode.
                             if let Some(value) = self.autocomplete.accept() {
-                                let replacement = format!("/{value} ");
+                                let value = value.to_string();
+                                let replacement = match self.autocomplete.mode() {
+                                    CompletionMode::Slash => format!("/{value} "),
+                                    CompletionMode::Mention => {
+                                        let text = self.input.current_text();
+                                        replace_trailing_mention(&text, &value)
+                                    }
+                                };
                                 self.input.set_text(&replacement);
                             }
                             self.autocomplete.hide();
@@ -1025,28 +1080,23 @@ impl App {
                 // default to Recipient::Auto (daemon's fronting resolver
                 // picks the destination). The persistent fronting set on the
                 // daemon side is mutated via `SetFronting` RPC, not /front.
-                if let Some(agent_name) = args.first() {
-                    let agent_name = agent_name.trim_start_matches('@');
-                    if !self.available_agents.is_empty()
-                        && !self
-                            .available_agents
-                            .iter()
-                            .any(|a| a.as_str() == agent_name)
-                    {
-                        let list = self
-                            .available_agents
-                            .iter()
-                            .map(|a| a.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ");
+                if let Some(handle) = args.first() {
+                    let canonical = if self.available_agents.is_empty() {
+                        // No agent list cached (e.g. echo mode) — accept the
+                        // user's input as-is.
+                        SmolStr::from(handle.trim_start_matches('@'))
+                    } else if let Some(c) = self.resolve_agent_handle(handle) {
+                        c
+                    } else {
+                        let list = self.format_addressable_agents();
                         self.push_system_message(format!(
-                            "unknown agent '{agent_name}'. available: {list}"
+                            "unknown agent '{handle}'. available: {list}"
                         ));
                         return;
-                    }
-                    self.route_lock = Some(SmolStr::from(agent_name));
+                    };
+                    self.route_lock = Some(canonical.clone());
                     self.push_system_message(format!(
-                        "route locked to {agent_name}; clear with /front"
+                        "route locked to {canonical}; clear with /front"
                     ));
                 } else {
                     self.route_lock = None;
@@ -1061,25 +1111,21 @@ impl App {
                 // no-op (we could clear pending here, but there's no obvious
                 // semantic for "clear an unfired one-shot").
                 if let Some(handle) = args.first() {
-                    let stripped = handle.trim_start_matches('@');
-                    if !self.available_agents.is_empty()
-                        && !self.available_agents.iter().any(|a| a.as_str() == stripped)
-                    {
-                        let list = self
-                            .available_agents
-                            .iter()
-                            .map(|a| a.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ");
+                    let canonical = if self.available_agents.is_empty() {
+                        SmolStr::from(handle.trim_start_matches('@'))
+                    } else if let Some(c) = self.resolve_agent_handle(handle) {
+                        c
+                    } else {
+                        let list = self.format_addressable_agents();
                         self.push_system_message(format!(
-                            "unknown agent '{stripped}'. available: {list}"
+                            "unknown agent '{handle}'. available: {list}"
                         ));
                         return;
-                    }
-                    self.pending_one_shot = Some(SmolStr::from(stripped));
+                    };
                     self.push_system_message(format!(
-                        "next message will go directly to {stripped} (one-shot)"
+                        "next message will go directly to {canonical} (one-shot)"
                     ));
+                    self.pending_one_shot = Some(canonical);
                 } else {
                     self.push_system_message(
                         "/agent <id> sets a one-shot direct recipient for the next message"
@@ -1425,17 +1471,53 @@ impl App {
     }
 
     /// Update autocomplete based on current input text.
+    ///
+    /// Two trigger contexts:
+    /// 1. Input starts with `/` and no space follows — slash-command name
+    ///    completion. Replacement at accept replaces the whole input.
+    /// 2. Input contains a trailing `@<partial>` token (most recent
+    ///    `@` followed by characters matching a relaxed agent-handle
+    ///    shape, no whitespace inside) — agent-mention completion.
+    ///    Replacement at accept replaces just the trailing token.
     fn update_autocomplete(&mut self) {
         let text = self.input.current_text();
+
+        // Slash-command context.
         if let Some(without_slash) = text.strip_prefix('/')
             && !without_slash.contains(' ')
         {
-            // Completing a command name. Empty pattern shows all commands.
             let candidates = self.command_registry.candidates();
-            self.autocomplete.update(without_slash, candidates);
+            self.autocomplete
+                .update(without_slash, candidates, CompletionMode::Slash);
             return;
         }
+
+        // Agent-mention context.
+        if let Some(partial) = trailing_mention_partial(&text) {
+            let candidates = self.agent_completion_candidates();
+            if !candidates.is_empty() {
+                self.autocomplete
+                    .update(partial, &candidates, CompletionMode::Mention);
+                return;
+            }
+        }
+
         self.autocomplete.hide();
+    }
+
+    /// Build (value, description) pairs for agent-mention completion.
+    /// Includes both canonical agent ids and aliases. Aliases display
+    /// `→ canonical_id` in the description so the user sees the resolution.
+    fn agent_completion_candidates(&self) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = self
+            .available_agents
+            .iter()
+            .map(|id| (id.to_string(), "agent".to_string()))
+            .collect();
+        for (alias, canonical) in &self.agent_aliases {
+            out.push((alias.to_string(), format!("→ {canonical}")));
+        }
+        out
     }
 
     /// Handle a tagged turn event from the daemon.
@@ -1645,6 +1727,46 @@ fn text_from_parts(parts: &[pattern_core::types::provider::ContentPart]) -> Stri
         .join("")
 }
 
+/// If `text` ends with a token of the form `@<partial>` (the most recent
+/// `@` followed by characters that look like an agent handle, with no
+/// embedded whitespace), return the partial after the `@`. Otherwise
+/// return `None`.
+///
+/// Triggers anywhere in the input — start, after whitespace, or
+/// immediately after another delimiter character. Used to drive
+/// agent-mention autocomplete.
+fn trailing_mention_partial(text: &str) -> Option<&str> {
+    let last_at = text.rfind('@')?;
+    let after = &text[last_at + 1..];
+    if after.chars().any(|c| c.is_whitespace()) {
+        return None;
+    }
+    // Require either start-of-input or whitespace before the `@` so that
+    // tokens like `email@host` don't trigger.
+    if last_at > 0 {
+        let prev = text[..last_at].chars().next_back()?;
+        if !prev.is_whitespace() {
+            return None;
+        }
+    }
+    Some(after)
+}
+
+/// Replace the trailing `@<partial>` token in `text` with `@<value>`.
+/// If no trailing mention is present, appends `@<value>` to the input.
+fn replace_trailing_mention(text: &str, value: &str) -> String {
+    if let Some(idx) = text.rfind('@') {
+        let after = &text[idx + 1..];
+        if !after.chars().any(|c| c.is_whitespace()) {
+            let mut out = text[..idx].to_string();
+            out.push('@');
+            out.push_str(value);
+            return out;
+        }
+    }
+    format!("{text}@{value}")
+}
+
 // ---------------------------------------------------------------------------
 // Rendering helpers
 // ---------------------------------------------------------------------------
@@ -1686,6 +1808,53 @@ mod tests {
     use pattern_core::types::turn::StopReason;
     use pattern_server::protocol::WireTurnEvent;
     use ratatui::backend::TestBackend;
+
+    // -----------------------------------------------------------------------
+    // Trailing-mention parsing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn trailing_mention_at_start_of_input() {
+        assert_eq!(trailing_mention_partial("@pat"), Some("pat"));
+        assert_eq!(trailing_mention_partial("@"), Some(""));
+    }
+
+    #[test]
+    fn trailing_mention_after_space() {
+        assert_eq!(trailing_mention_partial("/front @pat"), Some("pat"));
+        assert_eq!(trailing_mention_partial("hello @bob"), Some("bob"));
+    }
+
+    #[test]
+    fn email_address_does_not_trigger_mention() {
+        assert_eq!(trailing_mention_partial("user@host"), None);
+    }
+
+    #[test]
+    fn trailing_whitespace_stops_mention_completion() {
+        assert_eq!(trailing_mention_partial("@pat "), None);
+        assert_eq!(trailing_mention_partial("@pat\n"), None);
+    }
+
+    #[test]
+    fn no_at_returns_none() {
+        assert_eq!(trailing_mention_partial("nothing here"), None);
+        assert_eq!(trailing_mention_partial(""), None);
+    }
+
+    #[test]
+    fn replace_trailing_mention_substitutes_partial() {
+        assert_eq!(
+            replace_trailing_mention("/front @pat", "pattern"),
+            "/front @pattern"
+        );
+        assert_eq!(replace_trailing_mention("@p", "pattern"), "@pattern");
+    }
+
+    #[test]
+    fn replace_trailing_mention_with_no_at_appends() {
+        assert_eq!(replace_trailing_mention("hi", "pattern"), "hi@pattern");
+    }
 
     /// Render the app into a TestBackend and return the buffer as a string.
     fn render_app(app: &mut App, width: u16, height: u16) -> String {

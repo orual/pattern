@@ -574,6 +574,18 @@ pub struct InitSessionRequest {
     pub default_agent: AgentId,
 }
 
+/// An addressable alias for an agent (persona `name` field) that resolves
+/// to a canonical agent id. Returned in [`SessionInfo::agent_aliases`] so
+/// clients can autocomplete by name and translate to canonical id before
+/// sending RPCs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentAlias {
+    /// The alias the user can address (e.g. the persona's `name` field).
+    pub alias: AgentId,
+    /// The canonical agent id this alias resolves to.
+    pub canonical_id: AgentId,
+}
+
 /// Response to [`InitSession`](PatternProtocol::InitSession).
 ///
 /// Contains the daemon-resolved agent identity and available personas for the
@@ -585,8 +597,13 @@ pub struct SessionInfo {
     pub agent_id: AgentId,
     /// Persona display name.
     pub persona_name: String,
-    /// All available personas discovered for this project.
+    /// Canonical agent ids for all available personas in this project.
     pub available_agents: Vec<AgentId>,
+    /// Aliases (persona `name` fields) that resolve to canonical agent ids.
+    /// Only includes aliases that differ from their canonical id.
+    /// Clients use this for autocomplete + name→id resolution before RPC.
+    #[serde(default)]
+    pub agent_aliases: Vec<AgentAlias>,
     /// Stable partner identity for this daemon session.
     ///
     /// Clients use this to construct `Author::Partner(Partner { user_id })`
@@ -1001,6 +1018,10 @@ mod tests {
             agent_id: "pattern-default".into(),
             persona_name: "Pattern Default".into(),
             available_agents: vec!["pattern-default".into(), "supervisor".into()],
+            agent_aliases: vec![AgentAlias {
+                alias: "pattern".into(),
+                canonical_id: "pattern-default".into(),
+            }],
             partner_id: "test-partner-abc123".into(),
             partner_display_name: Some("orual".into()),
             fronting_snapshot: None,
