@@ -332,10 +332,32 @@ impl Default for JjSection {
 
 /// The `project` node: stable project identity metadata.
 ///
-/// KDL: `project name="my-project" created-at="2026-04-19T12:00:00Z"`
+/// KDL: `project id="my-project" name="My Project" created-at="2026-04-19T12:00:00Z"`
+///
+/// The `id` field is the canonical addressing handle (slug-shaped: ASCII
+/// alphanumeric + hyphens). It's what `pattern mount link --to ID`,
+/// path resolution, and the projects registry all use.
+///
+/// The `name` field is a human-readable display label — free-form, may
+/// contain spaces, non-ASCII characters, etc. Surfaces in TUIs and logs.
+///
+/// Backward compat: when `id` is absent, `name` is treated as the id.
+/// Existing kdl files written before the `id` split predate the
+/// distinction; their `name` values are slug-shaped so they round-trip
+/// fine.
 #[derive(Debug, Clone, Decode, Serialize)]
 pub struct ProjectSection {
-    /// Human-readable project name used for path construction in Standalone mode.
+    /// Canonical project identifier. Slug-shaped, used for addressing
+    /// and registry lookup. Optional in the parser for backward
+    /// compatibility — when absent, the `name` field is used as the
+    /// id (see [`ProjectSection::id`]).
+    ///
+    /// KDL property: `id`
+    #[knus(property)]
+    pub id: Option<String>,
+
+    /// Human-readable project name. Used as a display label in TUIs
+    /// and logs. May be the same as `id` for slug-shaped projects.
     ///
     /// KDL property: `name`
     #[knus(property)]
@@ -347,6 +369,15 @@ pub struct ProjectSection {
     /// `created-at`).
     #[knus(property)]
     pub created_at: String,
+}
+
+impl ProjectSection {
+    /// Canonical project id. Returns the `id` field when present;
+    /// falls back to `name` for backward compatibility with kdl files
+    /// written before the `id`/`name` split.
+    pub fn id(&self) -> &str {
+        self.id.as_deref().unwrap_or(&self.name)
+    }
 }
 
 /// The `partner` block: identifies the human user this mount belongs to.

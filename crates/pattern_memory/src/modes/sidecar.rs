@@ -57,7 +57,11 @@ use crate::jj::JjAdapter;
 ///
 /// Returns [`ModeError::Io`] on any filesystem failure, [`ModeError::Jj`] if
 /// `jj git init` fails, or [`ModeError::Path`] if path resolution fails.
-pub fn init(project_root: &Path, jj_adapter: &JjAdapter) -> Result<StorageMode, ModeError> {
+pub fn init(
+    project_root: &Path,
+    project_id: &str,
+    jj_adapter: &JjAdapter,
+) -> Result<StorageMode, ModeError> {
     let mount_path = project_root.join(".pattern").join("shared");
 
     // Create the directory structure. `create_dir_all` is race-safe per std docs.
@@ -68,11 +72,13 @@ pub fn init(project_root: &Path, jj_adapter: &JjAdapter) -> Result<StorageMode, 
         })?;
     }
 
-    // Derive project name from the directory name.
+    // The id is the caller-resolved canonical handle. The display name
+    // is the raw directory basename so non-slug names (spaces,
+    // non-ASCII) round-trip into the kdl unchanged.
     let project_name = project_root
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or("pattern-project");
+        .unwrap_or(project_id);
     let now = Utc::now().to_rfc3339();
 
     // Scaffold .pattern.kdl with Sidecar mode defaults.
@@ -87,7 +93,7 @@ isolate-from-persona policy="none"
 
 jj enabled=true
 
-project name="{project_name}" created-at="{now}"
+project id="{project_id}" name="{project_name}" created-at="{now}"
 "#
     );
 
@@ -152,7 +158,7 @@ mod tests {
         };
 
         let tmp = TempDir::new().unwrap();
-        let mode = init(tmp.path(), &adapter).unwrap();
+        let mode = init(tmp.path(), "test", &adapter).unwrap();
 
         let mount_path = tmp.path().join(".pattern").join("shared");
         assert!(mount_path.join("blocks/core").is_dir());
@@ -178,7 +184,7 @@ mod tests {
         };
 
         let tmp = TempDir::new().unwrap();
-        init(tmp.path(), &adapter).unwrap();
+        init(tmp.path(), "test", &adapter).unwrap();
 
         let kdl_path = tmp.path().join(".pattern/shared/.pattern.kdl");
         let config = crate::config::load_mount_config(&kdl_path).unwrap();
@@ -194,7 +200,7 @@ mod tests {
         };
 
         let tmp = TempDir::new().unwrap();
-        init(tmp.path(), &adapter).unwrap();
+        init(tmp.path(), "test", &adapter).unwrap();
 
         let gitignore = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
         assert!(
@@ -222,7 +228,7 @@ mod tests {
         };
 
         let tmp = TempDir::new().unwrap();
-        init(tmp.path(), &adapter).unwrap();
+        init(tmp.path(), "test", &adapter).unwrap();
 
         // jj reads .gitignore files in the working-copy directories. The shared
         // .gitignore ensures WAL sidecars are excluded from jj commits.
@@ -245,9 +251,9 @@ mod tests {
         };
 
         let tmp = TempDir::new().unwrap();
-        init(tmp.path(), &adapter).unwrap();
+        init(tmp.path(), "test", &adapter).unwrap();
         // Re-init should not duplicate entries (though it will re-create .jj/).
-        init(tmp.path(), &adapter).unwrap();
+        init(tmp.path(), "test", &adapter).unwrap();
 
         let gitignore = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
         let count = gitignore

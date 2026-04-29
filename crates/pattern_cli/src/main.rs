@@ -195,22 +195,56 @@ enum MountSub {
         /// `standalone` (separate Pattern-owned jj repo),
         /// or `sidecar` (jj alongside host git in the same working copy).
         #[arg(value_enum, long)]
-        mode: ModeArg,
+        mode: Option<ModeArg>,
 
         /// Path to the project root (defaults to the current directory).
         #[arg(long)]
         path: Option<PathBuf>,
 
-        /// Project identifier (required for `--mode standalone`).
+        /// Project identifier. Optional for `--mode standalone`: when
+        /// omitted, an ID is derived from the project directory's
+        /// basename (slugified, with a numeric suffix on collision).
+        /// Ignored by `--mode in-repo` and `--mode sidecar`.
         #[arg(long)]
         project_id: Option<String>,
     },
 
-    /// Attach to a mount (smoke test — attaches then immediately detaches).
-    Attach {
+    /// Check attachment to a mount
+    Check {
         /// Path to start the walk-upward search from (defaults to the current directory).
         #[arg(value_name = "PATH")]
         path: Option<PathBuf>,
+    },
+
+    /// Link an existing directory to an existing project in the registry.
+    ///
+    /// Adds `PATH` (default: current directory) to the projects registry
+    /// under the project named by `--to`. After linking, future commands
+    /// launched from `PATH` (or any subdirectory) resolve to the same
+    /// standalone mount as the original project.
+    ///
+    /// `--to` accepts either a project ID (e.g. `--to my-project`) or
+    /// a path that already resolves to a registered project (e.g.
+    /// `--to ~/work/my-project`). Path resolution canonicalizes and
+    /// walks up — pointing at any subdirectory of a registered project
+    /// works.
+    ///
+    /// Useful for jj workspaces, persistent forks, or sister checkouts
+    /// of a standalone project that should share Pattern state with the
+    /// primary project root.
+    ///
+    /// Errors if `--to` matches neither a known project ID nor a path
+    /// resolving to one. Idempotent if the same `(PATH, ID)` pair is
+    /// already registered.
+    Link {
+        /// Directory to link (defaults to the current directory).
+        #[arg(value_name = "PATH")]
+        path: Option<PathBuf>,
+
+        /// Existing project to link the path to. Either a project ID
+        /// or a filesystem path that resolves to a registered project.
+        #[arg(long, value_name = "ID_OR_PATH")]
+        to: String,
     },
 }
 
@@ -218,11 +252,12 @@ enum MountSub {
 ///
 /// `ValueEnum` maps these to kebab-case CLI values: `in-repo`, `standalone`,
 /// `sidecar`.
-#[derive(Clone, Copy, ValueEnum)]
+#[derive(Clone, Copy, ValueEnum, Default)]
 enum ModeArg {
     /// In-repo storage; host VCS owns history.
     InRepo,
     /// Separate Pattern-owned jj repository.
+    #[default]
     Standalone,
     /// Sidecar jj alongside host git in the same working copy.
     Sidecar,
@@ -288,12 +323,17 @@ async fn main() -> MietteResult<()> {
                 path,
                 project_id,
             } => {
+                let mode = mode.unwrap_or_default();
                 let target = resolve_path(path)?;
                 cmd_mount_init(mode, target, project_id)?;
             }
-            MountSub::Attach { path } => {
+            MountSub::Check { path } => {
                 let target = resolve_path(path)?;
-                cmd_attach(&target)?;
+                cmd_mount_check(&target)?;
+            }
+            MountSub::Link { path, to } => {
+                let target = resolve_path(path)?;
+                cmd_mount_link(&target, &to)?;
             }
         },
         Some(Commands::Backup(backup)) => match backup.sub {
@@ -335,17 +375,31 @@ async fn main() -> MietteResult<()> {
 fn cmd_mount_init(mode: ModeArg, path: PathBuf, project_id: Option<String>) -> MietteResult<()> {
     match mode {
         ModeArg::InRepo => {
+            let paths = pattern_memory::paths::PatternPaths::default_paths()
+                .map_err(miette::Report::new)?;
+            let project_path = path.canonicalize().unwrap_or_else(|_| path.clone());
+
+            // Register first so the canonical id (slugified or explicit)
+            // is available to write into the kdl. The kdl ends up with
+            // matching id/registry values; the human-readable basename
+            // becomes the kdl `name` field.
+            let mut registry = pattern_memory::projects::ProjectRegistry::load(&paths)
+                .map_err(miette::Report::new)?;
+            let id = registry
+                .register_project(&project_path, project_id.as_deref())
+                .map_err(miette::Report::new)?;
+            registry.save(&paths).map_err(miette::Report::new)?;
+
             let result =
-                pattern_memory::modes::in_repo::init(&path).map_err(miette::Report::new)?;
+                pattern_memory::modes::in_repo::init(&path, &id).map_err(miette::Report::new)?;
+
             println!(
-                "Mount initialized (in-repo) at {}",
-                result.mount_path().display()
+                "Mount initialized (in-repo) at {} (project_id={id}, path={})",
+                result.mount_path().display(),
+                project_path.display()
             );
         }
         ModeArg::Standalone => {
-            let id = project_id.ok_or_else(|| {
-                miette::miette!("--project-id is required for `--mode standalone`")
-            })?;
             let adapter = pattern_memory::jj::JjAdapter::detect()
                 .map_err(miette::Report::new)?
                 .ok_or_else(|| {
@@ -353,11 +407,30 @@ fn cmd_mount_init(mode: ModeArg, path: PathBuf, project_id: Option<String>) -> M
                 })?;
             let paths = pattern_memory::paths::PatternPaths::default_paths()
                 .map_err(miette::Report::new)?;
+
+            // Canonicalize the project path. Standalone mode writes nothing
+            // into the project repo, so the only way later commands can
+            // resolve the mount from this path is via the projects
+            // registry — which keys on the canonical path.
+            let project_path = path.canonicalize().unwrap_or_else(|_| path.clone());
+
+            // Register the project before init so the resolved id is
+            // available for the standalone layout. Errors here include
+            // "this path is already registered under a different id"
+            // and surface as miette diagnostics.
+            let mut registry = pattern_memory::projects::ProjectRegistry::load(&paths)
+                .map_err(miette::Report::new)?;
+            let id = registry
+                .register_project(&project_path, project_id.as_deref())
+                .map_err(miette::Report::new)?;
+            registry.save(&paths).map_err(miette::Report::new)?;
+
             let result = pattern_memory::modes::standalone::init(&id, &adapter, &paths)
                 .map_err(miette::Report::new)?;
             println!(
-                "Mount initialized (standalone) at {}",
-                result.mount_path().display()
+                "Mount initialized (standalone) at {} (project_id={id}, path={})",
+                result.mount_path().display(),
+                project_path.display()
             );
         }
         ModeArg::Sidecar => {
@@ -366,18 +439,74 @@ fn cmd_mount_init(mode: ModeArg, path: PathBuf, project_id: Option<String>) -> M
                 .ok_or_else(|| {
                     miette::miette!("sidecar mode requires jj but it was not found on PATH")
                 })?;
-            let result = pattern_memory::modes::sidecar::init(&path, &adapter)
+            let paths = pattern_memory::paths::PatternPaths::default_paths()
                 .map_err(miette::Report::new)?;
+            let project_path = path.canonicalize().unwrap_or_else(|_| path.clone());
+
+            // Register first so the canonical id is written into the
+            // kdl as `id="..."`. The display `name` field gets the
+            // raw directory basename in init.
+            let mut registry = pattern_memory::projects::ProjectRegistry::load(&paths)
+                .map_err(miette::Report::new)?;
+            let id = registry
+                .register_project(&project_path, project_id.as_deref())
+                .map_err(miette::Report::new)?;
+            registry.save(&paths).map_err(miette::Report::new)?;
+
+            let result = pattern_memory::modes::sidecar::init(&path, &id, &adapter)
+                .map_err(miette::Report::new)?;
+
             println!(
-                "Mount initialized (sidecar) at {}",
-                result.mount_path().display()
+                "Mount initialized (sidecar) at {} (project_id={id}, path={})",
+                result.mount_path().display(),
+                project_path.display()
             );
         }
     }
     Ok(())
 }
 
-fn cmd_attach(path: &std::path::Path) -> MietteResult<()> {
+fn cmd_mount_link(path: &std::path::Path, to: &str) -> MietteResult<()> {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+
+    let paths = pattern_memory::PatternPaths::default_paths().map_err(miette::Report::new)?;
+    let mut registry =
+        pattern_memory::projects::ProjectRegistry::load(&paths).map_err(miette::Report::new)?;
+
+    // Resolve `to` to a canonical project id. Try id first (exact
+    // match); on miss, treat as a filesystem path and walk up to find
+    // a registered project. Slug-shaped strings can't appear as paths
+    // anyway, so id-first is unambiguous.
+    let project_id = if registry.contains_id(to) {
+        to.to_owned()
+    } else {
+        let to_path = std::path::Path::new(to);
+        let to_canonical = to_path
+            .canonicalize()
+            .unwrap_or_else(|_| to_path.to_path_buf());
+        match registry.project_id_for_path(&to_canonical) {
+            Some(id) => id.to_owned(),
+            None => {
+                let known: Vec<&str> = registry.project_ids().collect();
+                return Err(miette::miette!(
+                    "{to:?} is neither a known project id nor a path that resolves to one. \
+                     Known projects: {known:?}. \
+                     Run `pattern mount init --mode standalone` to create one."
+                ));
+            }
+        }
+    };
+
+    registry
+        .add_path(&project_id, &canonical)
+        .map_err(miette::Report::new)?;
+    registry.save(&paths).map_err(miette::Report::new)?;
+
+    println!("Linked {} to project {project_id}", canonical.display());
+    Ok(())
+}
+
+fn cmd_mount_check(path: &std::path::Path) -> MietteResult<()> {
     let store = pattern_memory::mount::attach(path, None).map_err(miette::Report::new)?;
     println!(
         "Attached: mode={:?} mount={}",

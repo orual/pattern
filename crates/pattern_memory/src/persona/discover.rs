@@ -159,7 +159,7 @@ impl PersonaIndex {
 /// Enumerate available personas across global and project scopes.
 ///
 /// Scans:
-/// 1. `<paths.base()>/personas/@<agent_id>/persona.kdl` — global personas.
+/// 1. `<data_root>/personas/@<agent_id>/persona.kdl` — global personas.
 /// 2. `<project_mount>/personas/@<agent_id>/persona.kdl` — project-scoped.
 ///
 /// Project-scoped personas overwrite globals on canonical-id collision.
@@ -180,7 +180,7 @@ pub fn discover_personas(
     let mut index = PersonaIndex::default();
 
     // 1. Global personas.
-    let global = paths.base().join("personas");
+    let global = paths.data_root().join("personas");
     if global.is_dir() {
         collect_personas(&global, &mut index)?;
     }
@@ -358,7 +358,7 @@ mod tests {
     fn discovers_canonical_id_from_directory_name() {
         let tmp = TempDir::new().unwrap();
         let paths = PatternPaths::with_base(tmp.path());
-        create_persona(tmp.path(), "@reviewer", "reviewer", Some("reviewer"));
+        create_persona(paths.data_root(), "@reviewer", "reviewer", Some("reviewer"));
 
         let index = discover_personas(&paths, None).unwrap();
         assert_eq!(index.len(), 1);
@@ -373,7 +373,7 @@ mod tests {
         let paths = PatternPaths::with_base(tmp.path());
         // Directory and agent-id are "pattern-default"; the display name is "pattern".
         create_persona(
-            tmp.path(),
+            paths.data_root(),
             "@pattern-default",
             "pattern",
             Some("pattern-default"),
@@ -391,7 +391,7 @@ mod tests {
     fn no_alias_registered_when_name_equals_id() {
         let tmp = TempDir::new().unwrap();
         let paths = PatternPaths::with_base(tmp.path());
-        create_persona(tmp.path(), "@solo", "solo", Some("solo"));
+        create_persona(paths.data_root(), "@solo", "solo", Some("solo"));
 
         let index = discover_personas(&paths, None).unwrap();
         assert_eq!(index.len(), 1);
@@ -404,7 +404,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let paths = PatternPaths::with_base(tmp.path());
         // Directory is "alpha" but agent-id is "beta" — should error.
-        create_persona(tmp.path(), "@alpha", "alpha", Some("beta"));
+        create_persona(paths.data_root(), "@alpha", "alpha", Some("beta"));
 
         let result = discover_personas(&paths, None);
         assert!(matches!(
@@ -418,7 +418,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let paths = PatternPaths::with_base(tmp.path());
         // No agent-id field; directory name is the canonical id.
-        create_persona(tmp.path(), "@helper", "helper", None);
+        create_persona(paths.data_root(), "@helper", "helper", None);
 
         let index = discover_personas(&paths, None).unwrap();
         assert_eq!(index.resolve("helper"), Some("helper"));
@@ -429,7 +429,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let paths = PatternPaths::with_base(tmp.path());
         create_persona(
-            tmp.path(),
+            paths.data_root(),
             "@pattern-default",
             "pattern",
             Some("pattern-default"),
@@ -446,10 +446,10 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let paths = PatternPaths::with_base(tmp.path());
         // Persona A: canonical id "foo".
-        create_persona(tmp.path(), "@foo", "foo", Some("foo"));
+        create_persona(paths.data_root(), "@foo", "foo", Some("foo"));
         // Persona B: canonical id "bar", with name "foo" — alias collides
         // with persona A's canonical id (different targets).
-        create_persona(tmp.path(), "@bar", "foo", Some("bar"));
+        create_persona(paths.data_root(), "@bar", "foo", Some("bar"));
 
         let result = discover_personas(&paths, None);
         assert!(matches!(
@@ -465,7 +465,7 @@ mod tests {
         let mount = TempDir::new().unwrap();
 
         create_persona(
-            tmp.path(),
+            paths.data_root(),
             "@reviewer",
             "global-reviewer",
             Some("reviewer"),
@@ -497,7 +497,7 @@ mod tests {
     fn directories_without_persona_kdl_are_skipped() {
         let tmp = TempDir::new().unwrap();
         let paths = PatternPaths::with_base(tmp.path());
-        let dir = tmp.path().join("personas").join("@incomplete");
+        let dir = paths.data_root().join("personas").join("@incomplete");
         std::fs::create_dir_all(&dir).unwrap();
         let index = discover_personas(&paths, None).unwrap();
         assert!(index.is_empty());
@@ -510,7 +510,7 @@ mod tests {
         let mount = TempDir::new().unwrap();
 
         create_persona(
-            tmp.path(),
+            paths.data_root(),
             "@global-only",
             "global-only",
             Some("global-only"),
@@ -532,7 +532,7 @@ mod tests {
     fn unknown_key_returns_none() {
         let tmp = TempDir::new().unwrap();
         let paths = PatternPaths::with_base(tmp.path());
-        create_persona(tmp.path(), "@solo", "solo", Some("solo"));
+        create_persona(paths.data_root(), "@solo", "solo", Some("solo"));
 
         let index = discover_personas(&paths, None).unwrap();
         assert!(index.resolve("unknown").is_none());

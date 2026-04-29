@@ -80,7 +80,7 @@ isolate-from-persona policy="none"
 
 jj enabled=true
 
-project name="{project_id}" created-at="{now}"
+project id="{project_id}" name="{project_id}" created-at="{now}"
 "#
     );
 

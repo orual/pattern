@@ -217,15 +217,15 @@ fn merge_policies(persona: &PersonaSnapshot) -> pattern_core::PolicySet {
 
 /// Compute the default draft persona directory.
 ///
-/// Resolves to `<XDG_DATA_HOME>/pattern/drafts` when `dirs::data_dir()`
-/// returns `Some`; falls back to `.pattern/drafts` relative to the current
-/// working directory for environments where `XDG_DATA_HOME` is unset
-/// (e.g. restricted CI containers).
+/// Routes through [`pattern_core::PatternRoots::default_paths`] so
+/// `$PATTERN_HOME` overrides apply uniformly across the system.
+/// Falls back to `.pattern/drafts` relative to the current working
+/// directory if root resolution fails (restricted CI containers
+/// without home / config / data dirs).
 fn default_drafts_dir() -> std::path::PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("pattern")
-        .join("drafts")
+    pattern_core::PatternRoots::default_paths()
+        .map(|r| r.data_root().join("drafts"))
+        .unwrap_or_else(|_| std::path::PathBuf::from(".").join("pattern").join("drafts"))
 }
 use crate::checkpoint::{CheckpointEvent, CheckpointLog};
 use crate::memory::{MemoryStoreAdapter, TurnHistory};

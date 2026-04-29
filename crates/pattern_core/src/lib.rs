@@ -43,6 +43,7 @@ pub mod fronting;
 pub mod memory;
 // `memory_acl` module removed: MemoryOp, MemoryGate, and check() are
 // canonical in types::memory_types::core_types (as methods on MemoryGate).
+pub mod paths;
 pub mod permission;
 pub mod spawn;
 pub mod traits;
@@ -55,6 +56,7 @@ pub mod test_helpers;
 // ── Common re-exports ────────────────────────────────────────────────────────
 
 pub use base_instructions::DEFAULT_BASE_INSTRUCTIONS;
+pub use paths::{PatternRoots, RootsError};
 pub use capability::{
     CapabilityError, CapabilityFlag, CapabilityParseError, CapabilitySet, EffectCategory,
     EffectClass, PolicyAction, PolicyContext, PolicyMatcher, PolicyRule, PolicySet, Precedence,

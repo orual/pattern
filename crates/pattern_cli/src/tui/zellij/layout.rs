@@ -144,17 +144,17 @@ impl PatternLayout {
         self
     }
 
-    /// Render the layout to `~/.pattern/daemon/layout.kdl` and return the path.
+    /// Render the layout to `<daemon_state_dir>/layout.kdl` and return
+    /// the path.
     ///
-    /// Writing to a deterministic path avoids races: zellij may read the file
-    /// asynchronously after the launch command returns, so a tempfile that
-    /// gets dropped immediately is unreliable.
+    /// Writing to a deterministic path avoids races: zellij may read
+    /// the file asynchronously after the launch command returns, so a
+    /// tempfile that gets dropped immediately is unreliable. The path
+    /// matches `DaemonState::state_dir()` so layout, state, cert, and
+    /// log all live together.
     pub fn write_layout(&self) -> std::io::Result<std::path::PathBuf> {
         let rendered = self.render().map_err(std::io::Error::other)?;
-        let dir = dirs::home_dir()
-            .ok_or_else(|| std::io::Error::other("home directory could not be determined"))?
-            .join(".pattern")
-            .join("daemon");
+        let dir = pattern_server::state::DaemonState::state_dir();
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("layout.kdl");
         std::fs::write(&path, rendered.as_bytes())?;

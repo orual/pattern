@@ -24,14 +24,19 @@ pub struct DaemonState {
 impl DaemonState {
     /// Directory where daemon state is stored.
     ///
-    /// Overridable via `PATTERN_STATE_DIR` env var for testing.
+    /// Resolution order:
+    /// 1. `$PATTERN_STATE_DIR` if set (test override).
+    /// 2. `<data_root>/daemon/` from
+    ///    [`pattern_core::PatternRoots::default_paths`]. The data
+    ///    root respects `$PATTERN_HOME` and falls back to
+    ///    `dirs::data_dir().join("pattern")`.
     pub fn state_dir() -> PathBuf {
         if let Ok(dir) = std::env::var("PATTERN_STATE_DIR") {
             return PathBuf::from(dir);
         }
-        dirs::home_dir()
-            .expect("home directory must exist")
-            .join(".pattern")
+        pattern_core::PatternRoots::default_paths()
+            .expect("pattern roots must resolve")
+            .data_root()
             .join("daemon")
     }
 

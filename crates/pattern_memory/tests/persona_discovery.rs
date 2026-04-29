@@ -72,7 +72,7 @@ fn global_persona_visible_across_projects() {
     let global = TempDir::new().unwrap();
     let paths = PatternPaths::with_base(global.path());
 
-    create_persona(global.path(), "@assistant", &valid_persona_kdl("assistant"));
+    create_persona(paths.data_root(), "@assistant", &valid_persona_kdl("assistant"));
 
     // No mount — global still visible.
     let result = discover_personas(&paths, None).unwrap();
@@ -100,7 +100,7 @@ fn discovery_finds_persona_without_name_field() {
     let paths = PatternPaths::with_base(global.path());
 
     // Persona file missing the optional `name` node — valid KDL, no alias.
-    create_persona(global.path(), "@broken", "description \"no name field\"\n");
+    create_persona(paths.data_root(), "@broken", "description \"no name field\"\n");
 
     let result = discover_personas(&paths, None).unwrap();
     assert!(
@@ -119,7 +119,7 @@ fn project_scoped_takes_precedence_on_collision() {
 
     // Global version.
     create_persona(
-        global.path(),
+        paths.data_root(),
         "@reviewer",
         &valid_persona_kdl("reviewer-global"),
     );

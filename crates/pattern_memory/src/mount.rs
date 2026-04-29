@@ -138,28 +138,80 @@ impl std::fmt::Debug for MountedStore {
 
 /// Walk upward from `start` looking for `.pattern/shared/.pattern.kdl`.
 ///
-/// Returns the mount path (the directory containing `.pattern.kdl`, i.e.
-/// `<project>/.pattern/shared/`) or [`MountError::NotFound`] if no mount
-/// is found before the filesystem root.
+/// On miss, consults the projects registry at
+/// `<PATTERN_HOME>/projects.kdl` to resolve a standalone-mode mount.
+///
+/// Returns the mount path (the directory containing `.pattern.kdl`) or
+/// [`MountError::NotFound`] if no mount can be resolved.
 pub fn find_mount(start: &Path) -> Result<PathBuf, MountError> {
-    let mut cur = start.to_owned();
-    loop {
-        let candidate = cur.join(".pattern").join("shared").join(".pattern.kdl");
-        if candidate.is_file() {
-            // mount_path is the directory containing .pattern.kdl.
-            return Ok(candidate
-                .parent()
-                .expect(".pattern.kdl has a parent directory")
-                .to_owned());
-        }
-        match cur.parent() {
-            Some(p) if p != cur => cur = p.to_owned(),
-            _ => break,
-        }
+    let paths = crate::PatternPaths::default_paths()?;
+    find_mount_with_paths(start, &paths)
+}
+
+/// Like [`find_mount`] but with an explicit [`PatternPaths`] for the
+/// registry lookup. Used by tests and by callers that need a custom
+/// `PATTERN_HOME` base.
+pub fn find_mount_with_paths(
+    start: &Path,
+    paths: &crate::PatternPaths,
+) -> Result<PathBuf, MountError> {
+    // 0. Direct mount: `start` IS a mount root (it contains `.pattern.kdl`
+    //    directly). Lets `attach()` accept standalone mount paths
+    //    handed to it directly — including the global fallback path
+    //    `<data_root>/projects/@global/shared/`.
+    if start.join(".pattern.kdl").is_file() {
+        return Ok(start.to_owned());
+    }
+    // 1. Walk up looking for an in-repo / sidecar `.pattern/shared/.pattern.kdl`
+    //    marker. Primary resolution for InRepo and Sidecar modes.
+    if let Some(p) = walk_up_for_in_repo_marker(start) {
+        return Ok(p);
+    }
+    // 2. Consult the projects registry for a standalone mount. Standalone
+    //    mode writes nothing into the project repo by design, so the only
+    //    way to resolve an arbitrary user path → standalone mount is via
+    //    the registry.
+    if let Some(p) = resolve_via_registry(start, paths) {
+        return Ok(p);
     }
     Err(MountError::NotFound {
         started_at: start.to_owned(),
     })
+}
+
+/// Walk upward from `start` for the in-repo / sidecar marker. Returns
+/// the mount directory (`<project>/.pattern/shared/`) on hit.
+fn walk_up_for_in_repo_marker(start: &Path) -> Option<PathBuf> {
+    let mut cur = start.to_owned();
+    loop {
+        let candidate = cur.join(".pattern").join("shared").join(".pattern.kdl");
+        if candidate.is_file() {
+            return Some(
+                candidate
+                    .parent()
+                    .expect(".pattern.kdl has a parent directory")
+                    .to_owned(),
+            );
+        }
+        match cur.parent() {
+            Some(p) if p != cur => cur = p.to_owned(),
+            _ => return None,
+        }
+    }
+}
+
+/// Consult the projects registry. If `start` (or any registered
+/// ancestor) maps to a project ID with an existing standalone mount,
+/// return the mount path.
+fn resolve_via_registry(start: &Path, paths: &crate::PatternPaths) -> Option<PathBuf> {
+    let registry = crate::projects::ProjectRegistry::load(paths).ok()?;
+    let project_id = registry.project_id_for_path(start)?;
+    let mount_path = paths.standalone_mount_path(project_id);
+    if mount_path.join(".pattern.kdl").is_file() {
+        Some(mount_path)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -170,7 +222,7 @@ mod tests {
 
     /// Create a minimal mount structure in a tempdir for testing.
     fn setup_in_repo_mount(tmp: &Path) {
-        crate::modes::in_repo::init(tmp).expect("InRepo mode init should succeed");
+        crate::modes::in_repo::init(tmp, "test").expect("InRepo mode init should succeed");
     }
 
     #[test]

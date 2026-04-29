@@ -118,7 +118,7 @@ fn sidecar_validation_spike() {
     // Setup: initialize Sidecar mode
     // -----------------------------------------------------------------------
 
-    let _mode = sidecar::init(root, &adapter).expect("sidecar::init failed");
+    let _mode = sidecar::init(root, "test", &adapter).expect("sidecar::init failed");
     assert!(
         mount_path.join(".jj").is_dir(),
         ".jj/ should exist after init"

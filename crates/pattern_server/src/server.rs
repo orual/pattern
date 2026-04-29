@@ -1396,33 +1396,98 @@ impl DaemonServer {
 
     /// Get or create a cached project mount for the given path.
     ///
-    /// If the project is already mounted, returns the cached handle. Otherwise,
-    /// canonicalizes the path, calls [`pattern_memory::mount::attach`], and
-    /// caches the result.
+    /// Resolution order:
+    /// 1. If the path is already cached, return the cached handle.
+    /// 2. Try [`pattern_memory::mount::attach`] on the canonical path.
+    ///    Hits InRepo / Sidecar markers via walk-up, or standalone
+    ///    mounts via the projects registry.
+    /// 3. On [`MountError::NotFound`](pattern_memory::mount::MountError),
+    ///    fall back to the global standalone mount at
+    ///    `<data_root>/projects/@global/shared/`. Lazy-initializes the
+    ///    mount on first use.
+    ///
+    /// The global fallback exists so `pattern chat` (and similar TUI
+    /// flows) launched from a non-project directory yields a working
+    /// session instead of erroring. Multiple non-project paths share
+    /// the same global mount Arc; cache entries under both the global
+    /// mount path and each calling canonical keep the lookup O(1) on
+    /// subsequent calls.
     fn get_or_mount_project(
         &self,
         project_path: &std::path::Path,
     ) -> Result<Arc<ProjectMount>, String> {
+        const GLOBAL_PROJECT_ID: &str = "@global";
+
         // Canonicalize for consistent cache keys.
         let canonical = project_path
             .canonicalize()
             .unwrap_or_else(|_| project_path.to_path_buf());
 
-        // Fast path: already mounted.
+        // Fast path: already mounted under this canonical.
         if let Some(entry) = self.project_mounts.get(&canonical) {
             return Ok(entry.clone());
         }
 
-        // Slow path: mount the project. Pass the first-party skill directory
-        // so skills under pattern_runtime's resources/skills/ are classified
-        // as FirstParty regardless of what their frontmatter declares.
-        let mounted = pattern_memory::mount::attach(
+        // Slow path: try to attach the project mount, falling through
+        // to the global mount on NotFound.
+        let first_party_skill_dir = std::path::PathBuf::from(
+            pattern_runtime::sdk::FIRST_PARTY_SKILL_DIR,
+        );
+
+        let (cache_key, mounted) = match pattern_memory::mount::attach(
             &canonical,
-            Some(std::path::PathBuf::from(
-                pattern_runtime::sdk::FIRST_PARTY_SKILL_DIR,
-            )),
-        )
-        .map_err(|e| format!("failed to attach mount at {}: {e}", canonical.display()))?;
+            Some(first_party_skill_dir.clone()),
+        ) {
+            Ok(m) => (canonical.clone(), m),
+            Err(pattern_memory::mount::MountError::NotFound { .. }) => {
+                let paths = pattern_memory::PatternPaths::default_paths()
+                    .map_err(|e| format!("failed to resolve pattern paths: {e}"))?;
+                let global_path = paths.standalone_mount_path(GLOBAL_PROJECT_ID);
+
+                // Cache hit on the shared global mount? Stash under the
+                // calling canonical so future calls from the same path
+                // skip straight to fast-path.
+                if let Some(entry) = self.project_mounts.get(&global_path) {
+                    self.project_mounts.insert(canonical, entry.clone());
+                    return Ok(entry.clone());
+                }
+
+                // Lazy-init the global standalone mount if it doesn't
+                // exist yet. Standalone mode requires jj — surface a
+                // clear error if jj isn't on PATH.
+                if !global_path.join(".pattern.kdl").is_file() {
+                    let jj = pattern_memory::jj::JjAdapter::detect()
+                        .map_err(|e| format!("jj detection failed: {e}"))?
+                        .ok_or_else(|| {
+                            "global fallback mount requires jj on PATH \
+                             (or run `pattern mount init` in a project directory)"
+                                .to_owned()
+                        })?;
+                    pattern_memory::modes::standalone::init(GLOBAL_PROJECT_ID, &jj, &paths)
+                        .map_err(|e| format!("global mount init failed: {e}"))?;
+                    tracing::info!(
+                        mount = %global_path.display(),
+                        "lazy-initialized global standalone mount for non-project session"
+                    );
+                }
+
+                let mounted = pattern_memory::mount::attach(
+                    &global_path,
+                    Some(first_party_skill_dir),
+                )
+                .map_err(|e| {
+                    format!("global mount attach failed at {}: {e}", global_path.display())
+                })?;
+
+                (global_path, mounted)
+            }
+            Err(other) => {
+                return Err(format!(
+                    "failed to attach mount at {}: {other}",
+                    canonical.display()
+                ));
+            }
+        };
 
         // Load the persisted FrontingSet for this constellation. A missing
         // row is fine (default-empty); a malformed row is logged and treated
@@ -1565,7 +1630,14 @@ impl DaemonServer {
             _mounted: mounted,
         });
 
-        self.project_mounts.insert(canonical, mount.clone());
+        // Cache under the resolved mount path (the canonical for project
+        // mounts, the global mount path for fallbacks). Deliberately do
+        // NOT also stash under the input canonical for the fallback case:
+        // if the user later runs `pattern mount init` in that directory,
+        // a stale cache entry pointing at the global mount would shadow
+        // the new project mount. The cost is one re-attach attempt per
+        // future call from the same non-project path; correctness wins.
+        self.project_mounts.insert(cache_key, mount.clone());
         Ok(mount)
     }
 
@@ -3621,7 +3693,7 @@ mod tests {
 
         // Set up a real project mount.
         let tmp = tempfile::TempDir::new().unwrap();
-        in_repo::init(tmp.path()).expect("in_repo::init must succeed");
+        in_repo::init(tmp.path(), "test").expect("in_repo::init must succeed");
 
         let db = {
             let mounted =

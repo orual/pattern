@@ -36,7 +36,7 @@ fn make_config() -> SessionConfig {
 /// `get_or_mount_project` walks up from this path and finds `.pattern/shared/.pattern.kdl`.
 fn make_mount() -> tempfile::TempDir {
     let tmp = tempfile::TempDir::new().expect("tempdir must succeed");
-    in_repo::init(tmp.path()).expect("in_repo::init must succeed");
+    in_repo::init(tmp.path(), "test").expect("in_repo::init must succeed");
     tmp
 }
 

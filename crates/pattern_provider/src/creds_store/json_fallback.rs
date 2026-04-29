@@ -113,8 +113,9 @@ impl CredsStore for JsonFallbackStore {
 // ---- helpers ----
 
 fn default_root() -> Result<PathBuf, ProviderError> {
-    let base = dirs::config_dir().ok_or(ProviderError::CredentialStoreUnavailable)?;
-    Ok(base.join("pattern").join("creds"))
+    let roots = pattern_core::PatternRoots::default_paths()
+        .map_err(|_| ProviderError::CredentialStoreUnavailable)?;
+    Ok(roots.config_root().join("creds"))
 }
 
 /// Classify an I/O error as "backend unreachable" vs "storage layer".

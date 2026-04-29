@@ -25,6 +25,7 @@ pub mod modes;
 pub mod mount;
 pub mod paths;
 pub mod persona;
+pub mod projects;
 pub mod quiesce;
 pub mod reembed;
 pub mod schema_templates;

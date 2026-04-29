@@ -43,7 +43,7 @@ use super::gitignore;
 /// # Errors
 ///
 /// Returns [`ModeError::Io`] on any filesystem failure.
-pub fn init(project_root: &Path) -> Result<StorageMode, ModeError> {
+pub fn init(project_root: &Path, project_id: &str) -> Result<StorageMode, ModeError> {
     let mount_path = project_root.join(".pattern").join("shared");
 
     // Create the directory structure. `create_dir_all` is race-safe per std docs.
@@ -54,11 +54,15 @@ pub fn init(project_root: &Path) -> Result<StorageMode, ModeError> {
         })?;
     }
 
-    // Derive project name from the directory name.
+    // The id is the caller-resolved canonical handle (passed by the
+    // CLI from the projects registry). The display name is the raw
+    // directory basename — preserves human-readable form for non-slug
+    // names (spaces, non-ASCII, etc.). Falls back to `id` if file_name
+    // is unreadable.
     let project_name = project_root
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or("pattern-project");
+        .unwrap_or(project_id);
     let now = Utc::now().to_rfc3339();
 
     // Scaffold .pattern.kdl with InRepo mode defaults.
@@ -73,7 +77,7 @@ isolate-from-persona policy="none"
 
 jj enabled=false
 
-project name="{project_name}" created-at="{now}"
+project id="{project_id}" name="{project_name}" created-at="{now}"
 "#
     );
 
@@ -105,7 +109,7 @@ mod tests {
     #[test]
     fn init_creates_mount_layout() {
         let tmp = TempDir::new().unwrap();
-        let mode = init(tmp.path()).unwrap();
+        let mode = init(tmp.path(), "test-mode").unwrap();
 
         let mount_path = tmp.path().join(".pattern").join("shared");
         assert!(mount_path.join("blocks/core").is_dir());
@@ -129,7 +133,7 @@ mod tests {
     #[test]
     fn init_writes_valid_kdl_config() {
         let tmp = TempDir::new().unwrap();
-        init(tmp.path()).unwrap();
+        init(tmp.path(), "test").unwrap();
 
         let kdl_path = tmp.path().join(".pattern/shared/.pattern.kdl");
         let content = std::fs::read_to_string(&kdl_path).unwrap();
@@ -138,13 +142,14 @@ mod tests {
         assert!(content.contains(r#"mode="in-repo""#));
         assert!(content.contains(r#"memory-db="memory.db""#));
         assert!(content.contains("jj enabled=false"));
-        assert!(content.contains("project name="));
+        assert!(content.contains(r#"project id="test""#));
+        assert!(content.contains("name="));
     }
 
     #[test]
     fn init_creates_gitignore_entry() {
         let tmp = TempDir::new().unwrap();
-        init(tmp.path()).unwrap();
+        init(tmp.path(), "test").unwrap();
 
         let gitignore = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
         assert!(
@@ -164,8 +169,8 @@ mod tests {
     #[test]
     fn init_idempotent_gitignore() {
         let tmp = TempDir::new().unwrap();
-        init(tmp.path()).unwrap();
-        init(tmp.path()).unwrap();
+        init(tmp.path(), "test").unwrap();
+        init(tmp.path(), "test").unwrap();
 
         let gitignore = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
         let count = gitignore
@@ -178,7 +183,7 @@ mod tests {
     #[test]
     fn init_kdl_parseable_by_config_loader() {
         let tmp = TempDir::new().unwrap();
-        init(tmp.path()).unwrap();
+        init(tmp.path(), "test").unwrap();
 
         let kdl_path = tmp.path().join(".pattern/shared/.pattern.kdl");
         let config = crate::config::load_mount_config(&kdl_path).unwrap();

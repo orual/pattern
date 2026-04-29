@@ -197,15 +197,18 @@ fn mount_init_standalone_requires_jj() {
         output.status.code()
     );
 
-    // The mount layout should exist under the PATTERN_HOME override.
+    // The mount layout should exist under PATTERN_HOME's data root
+    // (PATTERN_HOME=base maps data_root to <base>/data/, so projects/
+    // lives there).
     let mount_path = home_dir
         .path()
+        .join("data")
         .join("projects")
         .join(&project_id)
         .join("shared");
     assert!(
         mount_path.is_dir(),
-        "projects/<id>/shared/ should exist under PATTERN_HOME"
+        "data/projects/<id>/shared/ should exist under PATTERN_HOME"
     );
     assert!(
         mount_path.join(".pattern.kdl").is_file(),
@@ -221,7 +224,7 @@ fn mount_attach_no_mount_exits_nonzero() {
     let tmp = TempDir::new().expect("tempdir");
 
     let output = Command::new(&bin)
-        .args(["mount", "attach"])
+        .args(["mount", "check"])
         .arg(tmp.path())
         .output()
         .expect("failed to spawn pattern");
@@ -289,5 +292,83 @@ fn mount_attach_in_repo_exits_zero() {
     assert!(
         stdout.contains("Attached") || stdout.contains("mode"),
         "stdout should mention attachment; got: {stdout}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `pattern mount link` tests
+// ---------------------------------------------------------------------------
+
+/// `pattern mount link <path> --to nonexistent` should exit non-zero with an
+/// error message listing known projects.
+#[test]
+fn mount_link_unknown_id_exits_nonzero() {
+    let bin = skip_if_no_binary!();
+    let home_dir = TempDir::new().expect("tempdir for PATTERN_HOME");
+    let tmp = TempDir::new().expect("tempdir for link target");
+
+    let output = Command::new(&bin)
+        .args(["mount", "link"])
+        .arg(tmp.path())
+        .args(["--to", "definitely-not-a-real-project"])
+        .env("PATTERN_HOME", home_dir.path())
+        .output()
+        .expect("failed to spawn pattern");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "link to nonexistent project should fail, but it exited 0"
+    );
+    assert!(
+        stderr.contains("definitely-not-a-real-project") || stderr.contains("not a known project"),
+        "error should name the unknown project; stderr={stderr}"
+    );
+}
+
+/// In-repo init now registers in the projects registry; `pattern mount link`
+/// targeting that project's path (not its id) should succeed.
+#[test]
+fn mount_link_resolves_path_to_project() {
+    let bin = skip_if_no_binary!();
+    let home_dir = TempDir::new().expect("tempdir for PATTERN_HOME");
+
+    // Init an in-repo project; this writes to PATTERN_HOME's data root and
+    // registers the project under the project_root's basename.
+    let project = TempDir::new().expect("tempdir for in-repo project");
+    let init_output = Command::new(&bin)
+        .args(["mount", "init", "--mode", "in-repo", "--path"])
+        .arg(project.path())
+        .env("PATTERN_HOME", home_dir.path())
+        .output()
+        .expect("failed to spawn pattern for init");
+    assert!(
+        init_output.status.success(),
+        "in-repo init should succeed: stderr={}",
+        String::from_utf8_lossy(&init_output.stderr)
+    );
+
+    // Now link a sibling directory using the project ROOT PATH (not the id)
+    // as --to. The CLI should canonicalize and resolve via the registry.
+    let sibling = TempDir::new().expect("tempdir for sibling");
+    let link_output = Command::new(&bin)
+        .args(["mount", "link"])
+        .arg(sibling.path())
+        .arg("--to")
+        .arg(project.path())
+        .env("PATTERN_HOME", home_dir.path())
+        .output()
+        .expect("failed to spawn pattern for link");
+
+    let stdout = String::from_utf8_lossy(&link_output.stdout);
+    let stderr = String::from_utf8_lossy(&link_output.stderr);
+    assert!(
+        link_output.status.success(),
+        "link should succeed when --to is a path to a registered project; \
+         stdout={stdout}, stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("Linked") && stdout.contains("project "),
+        "stdout should report the link with the resolved project id; got: {stdout}"
     );
 }

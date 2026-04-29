@@ -59,7 +59,7 @@ pub fn attach_with_paths(
     paths: &PatternPaths,
     first_party_skills_dir: Option<PathBuf>,
 ) -> Result<MountedStore, MountError> {
-    let mount_path = super::find_mount(start)?;
+    let mount_path = super::find_mount_with_paths(start, paths)?;
     let config = load_mount_config(&mount_path.join(".pattern.kdl"))?;
 
     // Resolve DB paths per mode.

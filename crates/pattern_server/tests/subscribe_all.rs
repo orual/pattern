@@ -35,7 +35,7 @@ fn make_config() -> SessionConfig {
 
 fn make_mount() -> tempfile::TempDir {
     let tmp = tempfile::TempDir::new().expect("tempdir");
-    in_repo::init(tmp.path()).expect("in_repo::init");
+    in_repo::init(tmp.path(), "test").expect("in_repo::init");
     tmp
 }
 

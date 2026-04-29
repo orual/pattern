@@ -328,7 +328,7 @@ fn resolve_default_persona(
     }
 
     // Persona not found on disk — write the bundled default.
-    let persona_dir = paths.base().join("personas").join("@pattern-default");
+    let persona_dir = paths.data_root().join("personas").join("@pattern-default");
     std::fs::create_dir_all(&persona_dir)
         .into_diagnostic()
         .map_err(|e| miette!("failed to create default persona directory: {e}"))?;
@@ -583,7 +583,9 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         let (persona_path, agent_id) = resolve_default_persona(project.path(), &paths).unwrap();
 
-        let expected = home.path().join("personas/@pattern-default/persona.kdl");
+        let expected = paths
+            .data_root()
+            .join("personas/@pattern-default/persona.kdl");
         assert_eq!(persona_path, expected);
         assert_eq!(agent_id, "pattern-default");
         assert!(persona_path.is_file(), "persona.kdl should exist on disk");
@@ -609,7 +611,7 @@ mod tests {
         let paths = PatternPaths::with_base(home.path());
 
         // Pre-create a persona with custom content.
-        let persona_dir = home.path().join("personas/@pattern-default");
+        let persona_dir = paths.data_root().join("personas/@pattern-default");
         std::fs::create_dir_all(&persona_dir).unwrap();
         let persona_file = persona_dir.join("persona.kdl");
         std::fs::write(&persona_file, "name \"pattern-default\"\n").unwrap();
@@ -636,7 +638,7 @@ mod tests {
 
         // Set up a InRepo mode mount structure.
         let project = tempfile::tempdir().unwrap();
-        pattern_memory::modes::in_repo::init(project.path()).unwrap();
+        pattern_memory::modes::in_repo::init(project.path(), "test").unwrap();
 
         // Create a persona in the mount.
         let mount_path = project.path().join(".pattern/shared");

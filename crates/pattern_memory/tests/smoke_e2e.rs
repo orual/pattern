@@ -170,7 +170,7 @@ async fn smoke_e2e() {
 
     // --- Step 1: git init + InRepo mode project ---
     git_init(&project_root);
-    pattern_memory::modes::in_repo::init(&project_root).expect("InRepo mode init");
+    pattern_memory::modes::in_repo::init(&project_root, "test").expect("InRepo mode init");
     git_commit(&project_root, "baseline: init InRepo mode project");
 
     // --- Step 2: attach ---
