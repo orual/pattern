@@ -216,7 +216,7 @@ fn mount_init_standalone_requires_jj() {
     );
 }
 
-/// `pattern mount attach <path-with-no-mount>` should exit non-zero and
+/// `pattern mount check <path-with-no-mount>` should exit non-zero and
 /// print a useful error message to stderr.
 #[test]
 fn mount_attach_no_mount_exits_nonzero() {
@@ -236,7 +236,7 @@ fn mount_attach_no_mount_exits_nonzero() {
 
     assert!(
         !output.status.success(),
-        "pattern mount attach on a path with no mount should fail, but exited 0"
+        "pattern mount check on a path with no mount should fail, but exited 0"
     );
 
     // The error output should contain something useful — not just an exit code.
@@ -251,10 +251,11 @@ fn mount_attach_no_mount_exits_nonzero() {
     );
 }
 
-/// `pattern mount attach <path>` on a valid InRepo mode mount should exit 0.
+/// `pattern mount check <path>` on a valid InRepo mode mount should exit 0.
 ///
-/// This test creates a InRepo mode mount via `mount init` first, then attaches.
-/// It verifies the round-trip works end-to-end through the CLI.
+/// This test creates a InRepo mode mount via `mount init` first, then runs
+/// the smoke-test attach via `mount check`. Verifies the round-trip works
+/// end-to-end through the CLI.
 #[test]
 fn mount_attach_in_repo_exits_zero() {
     let bin = skip_if_no_binary!();
@@ -272,9 +273,9 @@ fn mount_attach_in_repo_exits_zero() {
         "mount init should succeed before attach test"
     );
 
-    // Now attach.
+    // Now attach via `mount check`.
     let attach_output = Command::new(&bin)
-        .args(["mount", "attach"])
+        .args(["mount", "check"])
         .arg(tmp.path())
         .output()
         .expect("failed to spawn pattern for attach");
@@ -286,7 +287,7 @@ fn mount_attach_in_repo_exits_zero() {
 
     assert!(
         attach_output.status.success(),
-        "pattern mount attach on a valid InRepo mode mount should exit 0, got {:?}: {stderr}",
+        "pattern mount check on a valid InRepo mode mount should exit 0, got {:?}: {stderr}",
         attach_output.status.code()
     );
     assert!(

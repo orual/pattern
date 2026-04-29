@@ -36,6 +36,8 @@ enum Commands {
     Backup(BackupCmd),
     /// Manage the Pattern daemon (start, stop, status).
     Daemon(commands::daemon::DaemonCmd),
+    /// Manage provider authentication (login, status, clear).
+    Auth(commands::auth::AuthCmd),
 }
 
 // ---------------------------------------------------------------------------
@@ -352,6 +354,9 @@ async fn main() -> MietteResult<()> {
         },
         Some(Commands::Daemon(daemon)) => {
             commands::daemon::cmd_daemon(daemon)?;
+        }
+        Some(Commands::Auth(auth)) => {
+            commands::auth::cmd_auth(auth).await?;
         }
         None => {
             // Default: enter chat mode with all defaults (auto-zellij enabled).

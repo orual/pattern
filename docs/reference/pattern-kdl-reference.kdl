@@ -1,0 +1,187 @@
+// Pattern mount config reference — exhaustive example.
+//
+// This file lives at `<mount>/.pattern.kdl` for a Pattern memory mount.
+// `pattern mount init --mode <mode>` writes a minimal version on first
+// run; you can edit it afterward.
+//
+// This reference exercises every supported section and field. Required
+// nodes are marked REQUIRED in the comments; everything else has a
+// documented default and can be omitted.
+//
+// The example shape below is a sidecar-mode mount because that mode
+// exercises the most options. For other modes:
+//
+//   - in-repo:    drop the `jj` block (or set `enabled=false`); host
+//                 VCS owns history.
+//   - standalone: same as sidecar but the mount lives at
+//                 `<XDG_DATA_HOME>/pattern/projects/<id>/shared/`
+//                 instead of inside the project repo.
+
+// ──────────────────────────────────────────────────────────────────────
+// mount — REQUIRED. Storage mode + memory-db filename.
+// ──────────────────────────────────────────────────────────────────────
+//
+// `mode` accepts the canonical names plus legacy single-letter aliases:
+//
+//   "in-repo"    | "A"  — host VCS owns history; no jj.
+//   "standalone" | "B"  — Pattern owns a separate jj repo under
+//                          <XDG_DATA_HOME>/pattern/projects/<id>/shared/
+//   "sidecar"    | "C"  — sidecar jj alongside host git in the same
+//                          working copy.
+//
+// `memory-db` is the relative path of the loro-backed memory database
+// from this mount root. Default convention: "memory.db".
+//
+// Cross-field constraint: standalone and sidecar modes both require
+// `jj enabled=true` (see the jj block below).
+mount mode="sidecar" memory-db="memory.db"
+
+// ──────────────────────────────────────────────────────────────────────
+// project — REQUIRED. Stable project identity.
+// ──────────────────────────────────────────────────────────────────────
+//
+// `id` is the canonical addressing handle. Slug-shaped: ASCII
+// alphanumeric and hyphens only. Used by:
+//   - the projects registry (~/.local/share/pattern/projects.kdl)
+//   - `pattern mount link --to <id>`
+//   - standalone messages-db path resolution
+//   - backup directory naming
+//
+// `name` is a human-readable display label. Free-form: spaces, mixed
+// case, non-ASCII all fine. Surfaces in TUIs and logs.
+//
+// Backward compat: when `id` is absent in older kdl files, `name`
+// is used as the id. New kdl files always emit both.
+//
+// `created-at` is an ISO 8601 timestamp recording when this mount
+// was initialized. Informational; no behaviour depends on it.
+project id="my-project" name="My Project" created-at="2026-04-29T18:00:00Z"
+
+// ──────────────────────────────────────────────────────────────────────
+// partner — OPTIONAL. The human user this mount belongs to.
+// ──────────────────────────────────────────────────────────────────────
+//
+// When present, `display-name` is surfaced as
+// `SessionInfo.partner_display_name` to TUI clients so the conversation
+// view can render the partner's name. When absent, TUIs fall back to
+// an anonymous label like "you".
+partner {
+    display-name "orual"
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// personas — OPTIONAL. Slot → persona handle bindings.
+// ──────────────────────────────────────────────────────────────────────
+//
+// Each child node's name is a slot identifier; its single argument is
+// the persona handle. Slots are resolution hints — the daemon uses
+// `default` to pick the agent for a fresh session when none is named
+// explicitly. Other slots are reserved for future plumbing (e.g.
+// "fronting" or "scheduler") and are recorded but not yet consumed.
+//
+// Persona handles point at directories under either:
+//   - <mount>/personas/@<id>/persona.kdl                (project-scoped)
+//   - <XDG_DATA_HOME>/pattern/personas/@<id>/persona.kdl (global)
+//
+// Project-scoped personas take precedence on canonical-id collision.
+personas {
+    default "@pattern-default"
+    focused "@pattern-focused"
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// isolate-from-persona — OPTIONAL. Persona/project memory routing.
+// ──────────────────────────────────────────────────────────────────────
+//
+// Controls how persona-scoped memory blocks are visible from project
+// context. Three policies:
+//
+//   "none"      — no isolation; persona blocks are read/write from
+//                 project context. Default.
+//   "core-only" — persona core blocks are read-only from project
+//                 context; working/log blocks are hidden.
+//   "full"      — persona memory is not carried into project context
+//                 at all.
+//
+// `Pattern.Memory.WriteToPersona` (the SDK effect) only succeeds under
+// `none`. Under `core-only` or `full` it returns IsolationDenied.
+isolate-from-persona policy="none"
+
+// ──────────────────────────────────────────────────────────────────────
+// jj — OPTIONAL. Pattern-managed jj integration.
+// ──────────────────────────────────────────────────────────────────────
+//
+// `enabled` toggles whether Pattern invokes `jj commit` for VCS
+// history. REQUIRED to be true for standalone and sidecar modes.
+// In-repo mode hands history to the host VCS and leaves this false.
+//
+// `max-new-file-size` is the upper bound on individual files Pattern
+// will track. Accepts size suffixes: KiB / MiB / GiB. Default "100MiB".
+// Files exceeding this size are skipped by jj operations.
+jj enabled=true max-new-file-size="100MiB"
+
+// ──────────────────────────────────────────────────────────────────────
+// backup — OPTIONAL. messages.db snapshot scheduling and retention.
+// ──────────────────────────────────────────────────────────────────────
+//
+// When this block is absent, no automatic snapshots are taken; users
+// can still create them manually with `pattern backup create`.
+//
+// `snapshot-interval` is how often the scheduler wakes and creates a
+// fresh snapshot. Accepts duration strings: "Xh" (hours), "Xm" (minutes),
+// "Xs" (seconds). Validated at config-load time so bad values surface
+// immediately rather than silently defaulting.
+//
+// Retention is GFS-style (grandfather-father-son):
+//
+//   `keep-recent`     — keep this many most-recent snapshots no matter
+//                        what. Default 24.
+//   `hourly-days`     — keep one snapshot per hour for this many days
+//                        back. Default 1.
+//   `daily-months`    — keep one snapshot per day for this many months
+//                        back (1 month ≈ 30 days). Default 1.
+//   `monthly-forever` — keep one snapshot per calendar month
+//                        indefinitely. Default true.
+//
+// Rotation runs after each successful snapshot.
+backup snapshot-interval="1h" {
+    keep-recent 24
+    hourly-days 7
+    daily-months 3
+    monthly-forever true
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// file-policy — OPTIONAL. Agent file-access allow/deny rules.
+// ──────────────────────────────────────────────────────────────────────
+//
+// Controls what filesystem paths agent `Pattern.File` effects may
+// read/write. When the block is absent or empty, the runtime applies
+// a default-deny policy and every file effect is rejected at the
+// policy gate.
+//
+// Children: `allow "<glob>"` / `deny "<glob>"`. Order is significant:
+// rules evaluate in declaration order with **last-match wins**. Place
+// broader rules first and narrower exceptions last.
+//
+// Patterns are full globset globs. The features you'll reach for most:
+//
+//   `*`      single path segment, never crosses `/`.
+//   `**`     recursive — matches across path separators.
+//   `?`      single non-separator character.
+//   `[abc]`  character class.
+//   `{a,b}`  alternation.
+//
+// So `/project/**` matches every file under `/project/` at any depth,
+// `/project/*` matches direct children only, `/project/*.{rs,md}`
+// matches Rust and markdown files in the project root, and so on.
+//
+// Pattern's own config (`.pattern.kdl`) is structurally protected:
+// writes are blocked at the File handler level before policy is even
+// consulted, so no allow/deny rule can be loosened to permit it.
+file-policy {
+    allow "/project/**"
+    deny  "/project/.env"
+    deny  "/project/secrets/**"
+    allow "/tmp/pattern-*"
+}

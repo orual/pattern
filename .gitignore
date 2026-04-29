@@ -28,3 +28,6 @@ mcp-wrapper.sh
 # Deciduous database (local)
 .deciduous/
 .pattern/transient/
+.pattern/shared/.jj/
+.pattern/shared/memory.db-wal
+.pattern/shared/memory.db-shm

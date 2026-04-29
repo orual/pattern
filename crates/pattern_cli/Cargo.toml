@@ -13,13 +13,14 @@ path = "src/main.rs"
 
 [features]
 default = ["oauth"]
-oauth = ["pattern-core/oauth"]
+oauth = ["pattern-core/oauth", "pattern-provider/subscription-oauth"]
 
 [dependencies]
 # Workspace dependencies
 pattern-core = { path = "../pattern_core" }
 pattern-db = { path = "../pattern_db"}
 pattern-memory = { path = "../pattern_memory" }
+pattern-provider = { path = "../pattern_provider" }
 pattern-server = { path = "../pattern_server" }
 nix = { version = "0.29", features = ["signal", "process"] }
 which = { workspace = true }
@@ -34,6 +35,7 @@ irpc = { workspace = true }
 async-trait = { workspace = true }
 
 jiff = { workspace = true }
+secrecy = { workspace = true }
 
 # CLI-specific dependencies
 indicatif = "0.17"
