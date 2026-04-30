@@ -1107,6 +1107,27 @@ pub async fn drive_step(
         }
     }
 
+    // ---- Persist the user's fresh input before any fallible step gate ----
+    //
+    // The end-of-iter persist only fires once `maybe_compact` and
+    // `orchestrate` have both succeeded. Persisting here makes the user's
+    // typed message durable across daemon restart even when count_tokens
+    // or compose fail. `upsert_message` keyed by id is safe to call again
+    // at end-of-iter; continuation iterations carry an empty `messages`
+    // vec and write nothing.
+    if !cur_input.messages.is_empty() {
+        let batch_type = infer_batch_type(&cur_input.origin);
+        persist_messages(
+            ctx.db(),
+            &cur_input.messages,
+            ctx.agent_id(),
+            batch_type,
+            &cur_input.origin,
+            "pre-loop input persist (durability before maybe_compact)",
+        )
+        .await?;
+    }
+
     loop {
         // Compaction gate: check whether the active context needs
         // compression BEFORE composing the request. This ensures
@@ -1312,9 +1333,9 @@ pub async fn drive_step(
         // ---- Persist messages to pattern_db ----
         //
         // Upsert every input + output message so the messages table has
-        // actual rows for compression to archive. Attachments are
-        // intentionally dropped (pattern_db has no attachment column;
-        // next session rebuilds snapshots from memory_blocks).
+        // actual rows for compression to archive. `to_db_message`
+        // serializes `Message.attachments` into the `attachments_json`
+        // column so snapshots survive restart for splice-time rendering.
         let batch_type = infer_batch_type(&recorded_input.origin);
         let db = ctx.db();
         let aid = ctx.agent_id();

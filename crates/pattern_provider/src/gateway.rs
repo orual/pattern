@@ -246,13 +246,8 @@ impl ProviderClient for PatternGatewayClient {
         let session = self.session_uuid.current();
         let ctx = self.shape_context(&session, &request.model, resolved.source);
 
-        let ct_req = CountTokensRequest {
-            model: request.model.clone(),
-            system: request.chat.system.clone(),
-            system_blocks: request.chat.system_blocks.clone(),
-            messages: request.chat.messages.clone(),
-            tools: request.chat.tools.clone(),
-        };
+        let ct_req =
+            CountTokensRequest::from_chat_request(request.model.clone(), request.chat.clone())?;
 
         let details = counter
             .count(&resolved, shaper.as_ref(), &ctx, &ct_req)

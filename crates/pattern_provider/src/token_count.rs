@@ -26,24 +26,49 @@ use crate::shaper::{RequestShaper, ShapeContext};
 
 /// Request payload for Anthropic's `/v1/messages/count_tokens`.
 ///
-/// Uses `genai::chat` types directly (per the phase plan's "no pattern_core
-/// mirror layer for config-shaped types" policy). `system_blocks` is the
-/// array variant from the fork's Task 3 patch; `system` is the legacy
-/// string variant for callers that don't need per-block cache_control.
+/// Carries pre-converted Anthropic-wire-shape JSON for `system`, `messages`,
+/// and `tools`. This is intentional: the count_tokens endpoint expects the
+/// SAME wire shape as `/v1/messages`, including Anthropic's role rewrites
+/// (notably `ChatRole::Tool` -> `"user"` with `tool_result` content blocks).
+/// Serializing `genai::chat::ChatMessage` directly via serde would emit
+/// `"role": "tool"`, which the endpoint rejects with HTTP 400.
+///
+/// Construct via [`CountTokensRequest::from_chat_request`], which routes
+/// through [`genai::adapter::AnthropicAdapter::into_anthropic_request_parts`]
+/// to perform the conversion once, in one place.
 #[derive(Debug, Clone, Serialize)]
 pub struct CountTokensRequest {
     pub model: String,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub system: Option<String>,
+    pub system: Option<serde_json::Value>,
+
+    pub messages: Vec<serde_json::Value>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub system_blocks: Option<Vec<genai::chat::SystemBlock>>,
+    pub tools: Option<Vec<serde_json::Value>>,
+}
 
-    pub messages: Vec<genai::chat::ChatMessage>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tools: Option<Vec<genai::chat::Tool>>,
+impl CountTokensRequest {
+    /// Build a `CountTokensRequest` from a model id and a `genai::chat::ChatRequest`,
+    /// running the Anthropic adapter's wire conversion so role rewrites and
+    /// system-block shaping match what `/v1/messages` would emit.
+    pub fn from_chat_request(
+        model: impl Into<String>,
+        chat: genai::chat::ChatRequest,
+    ) -> Result<Self, ProviderError> {
+        let parts = genai::adapter::AnthropicAdapter::into_anthropic_request_parts(chat).map_err(
+            |e| ProviderError::TokenCountFailed {
+                reason: format!("anthropic wire conversion failed: {e}"),
+            },
+        )?;
+        Ok(Self {
+            model: model.into(),
+            system: parts.system,
+            messages: parts.messages,
+            tools: parts.tools,
+        })
+    }
 }
 
 /// Detailed provider-reported token breakdown. `pattern_core`'s
@@ -303,13 +328,11 @@ mod tests {
     }
 
     fn sample_count_request() -> CountTokensRequest {
-        CountTokensRequest {
-            model: "claude-opus-4-7".into(),
-            system: None,
-            system_blocks: None,
-            messages: vec![genai::chat::ChatMessage::user("hello")],
-            tools: None,
-        }
+        CountTokensRequest::from_chat_request(
+            "claude-opus-4-7",
+            genai::chat::ChatRequest::from_user("hello"),
+        )
+        .expect("sample CountTokensRequest builds")
     }
 
     #[tokio::test]
@@ -499,80 +522,88 @@ mod tests {
         );
     }
 
-    /// Regression test: `CountTokensRequest` must serialize message roles
-    /// in the canonical lowercase wire form Anthropic accepts.
+    /// Regression test: messages with `ChatRole::Tool` must NOT appear on the
+    /// count_tokens wire as `"role": "tool"`. Anthropic's
+    /// `/v1/messages/count_tokens` endpoint accepts only `"user"` and
+    /// `"assistant"` (mirroring `/v1/messages`); a tool result must be
+    /// emitted as a user-role message whose content is a `tool_result`
+    /// block, not a top-level `"role": "tool"` message.
     ///
-    /// History: Anthropic's `/v1/messages/count_tokens` endpoint rejected
-    /// requests with `"role": "User"` (capital), responding with HTTP 400
-    /// `Unexpected role "User". Allowed roles are "user" or "assistant"`.
-    /// The cause was `genai::chat::ChatRole`'s derived `Serialize`
-    /// emitting variant names verbatim. Provider adapters that build
-    /// request bodies via `json!({"role": "user", ...})` happen to bypass
-    /// this serialization, but `CountTokensRequest` drops `ChatMessage`
-    /// straight into `serde_json::to_string`, so it surfaces the bug.
-    /// Fixed in the genai fork via `#[serde(rename_all = "lowercase")]`
-    /// on `ChatRole`.
+    /// History: an earlier shape serialized `Vec<genai::chat::ChatMessage>`
+    /// directly via serde, which (after `#[serde(rename_all = "lowercase")]`
+    /// landed on `ChatRole`) emitted `"role": "tool"`. Anthropic rejected
+    /// the request with HTTP 400 `Unexpected role "tool"`. Routing through
+    /// `AnthropicAdapter::into_anthropic_request_parts` performs the same
+    /// rewrite the live `/v1/messages` path does.
     #[test]
-    fn count_tokens_request_serializes_role_lowercase() {
-        use genai::chat::{ChatMessage, ChatRole, MessageContent};
+    fn count_tokens_request_rewrites_tool_role_to_user_with_tool_result() {
+        use genai::chat::{ChatMessage, ChatRequest, ContentPart, MessageContent, ToolCall, ToolResponse};
+        use serde_json::json;
 
-        let req = CountTokensRequest {
-            model: "claude-sonnet-4-6".into(),
-            system: None,
-            system_blocks: None,
-            messages: vec![
-                ChatMessage {
-                    role: ChatRole::User,
-                    content: MessageContent::from_text("hello"),
-                    options: None,
-                },
-                ChatMessage {
-                    role: ChatRole::Assistant,
-                    content: MessageContent::from_text("hi"),
-                    options: None,
-                },
-                ChatMessage {
-                    role: ChatRole::System,
-                    content: MessageContent::from_text("be terse"),
-                    options: None,
-                },
-                ChatMessage {
-                    role: ChatRole::Tool,
-                    content: MessageContent::from_text("ok"),
-                    options: None,
-                },
-            ],
-            tools: None,
-        };
+        // Build a complete tool-use round-trip: user prompt → assistant
+        // tool_use → tool result. The adapter emits the tool message as
+        // user-role with a tool_result block.
+        let assistant_msg = ChatMessage::assistant(MessageContent::from_parts(vec![
+            ContentPart::ToolCall(ToolCall {
+                call_id: "toolu_test".into(),
+                fn_name: "echo".into(),
+                fn_arguments: json!({"text": "hi"}),
+                thought_signatures: None,
+                thought_signatures_provenance: None,
+            }),
+        ]));
+        let tool_result_msg = ChatMessage::tool(ToolResponse::new("toolu_test", "hi"));
+
+        let chat = ChatRequest::new(vec![
+            ChatMessage::system("be terse"),
+            ChatMessage::user("say hi"),
+            assistant_msg,
+            tool_result_msg,
+        ]);
+
+        let req = CountTokensRequest::from_chat_request("claude-sonnet-4-6", chat)
+            .expect("CountTokensRequest builds from ChatRequest");
 
         let json = serde_json::to_string(&req).expect("CountTokensRequest serializes");
 
-        // Each canonical role variant must appear lowercase on the wire.
+        // Roles that appear MUST be lowercase user / assistant. No `"tool"`
+        // role, no capital variants.
         assert!(
             json.contains(r#""role":"user""#),
-            "expected lowercase user role; got: {json}"
+            "expected lowercase user role on the wire; got: {json}"
         );
         assert!(
             json.contains(r#""role":"assistant""#),
-            "expected lowercase assistant role; got: {json}"
+            "expected lowercase assistant role on the wire; got: {json}"
         );
         assert!(
-            json.contains(r#""role":"system""#),
-            "expected lowercase system role; got: {json}"
+            !json.contains(r#""role":"tool""#),
+            "ChatRole::Tool must be rewritten as user-with-tool_result, not emitted as a top-level role; got: {json}"
         );
         assert!(
-            json.contains(r#""role":"tool""#),
-            "expected lowercase tool role; got: {json}"
+            !json.contains(r#""role":"System""#) && !json.contains(r#""role":"Tool""#),
+            "no capitalised role names on the wire; got: {json}"
         );
 
-        // Capitalised forms must be absent — Anthropic rejects them.
+        // The tool result must surface as a tool_result block on a user message.
         assert!(
-            !json.contains(r#""role":"User""#),
-            "capital User role would be rejected by Anthropic; got: {json}"
+            json.contains(r#""type":"tool_result""#),
+            "tool result must be emitted as a tool_result content block; got: {json}"
         );
         assert!(
-            !json.contains(r#""role":"Assistant""#),
-            "capital Assistant role would be rejected by Anthropic; got: {json}"
+            json.contains(r#""tool_use_id":"toolu_test""#),
+            "tool_result block must reference the tool_use id; got: {json}"
+        );
+
+        // System messages get hoisted into the top-level `system` field, not
+        // emitted as a `"role":"system"` message.
+        assert!(
+            req.system.is_some(),
+            "system message must be hoisted into the top-level system field"
+        );
+        assert!(
+            !json.contains(r#""role":"system""#),
+            "system content must not appear as a role; got: {json}"
         );
     }
 }
