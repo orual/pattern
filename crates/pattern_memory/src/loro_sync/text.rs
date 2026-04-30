@@ -58,11 +58,71 @@ impl LoroDocBridge for TextBridge {
             path: path.to_owned(),
             source: e,
         })?;
+        eprintln!("applied ext edit: {}", s);
         disk_doc
             .get_text("content")
             .update_by_line(s, Default::default())
             .map_err(|e| BridgeError::Loro(format!("text.update failed: {e}")))?;
         Ok(())
+    }
+}
+
+use std::sync::Mutex as StdMutex;
+
+/// Cached mapping from line numbers to unicode character offsets.
+///
+/// Built lazily from the LoroText content. Invalidated on any edit;
+/// rebuilt on next access. `line_starts[i]` is the unicode char offset
+/// of the start of line `i` (0-indexed).
+#[derive(Debug, Clone)]
+pub struct LineIndex {
+    line_starts: Vec<usize>,
+}
+
+impl LineIndex {
+    /// Build a line index from a string, counting unicode scalar positions.
+    pub fn build(text: &str) -> Self {
+        let mut starts = vec![0usize];
+        let mut char_offset = 0usize;
+        for ch in text.chars() {
+            char_offset += 1;
+            if ch == '\n' {
+                starts.push(char_offset);
+                eprintln!("line start: {}", char_offset);
+            }
+        }
+        Self {
+            line_starts: starts,
+        }
+    }
+
+    /// Number of lines.
+    pub fn line_count(&self) -> usize {
+        self.line_starts.len()
+    }
+
+    /// Unicode char offset of the start of `line` (1-indexed).
+    /// Returns None if line is out of range.
+    pub fn line_start(&self, line: usize) -> Option<usize> {
+        if line == 0 || line > self.line_starts.len() {
+            None
+        } else {
+            Some(self.line_starts[line - 1])
+        }
+    }
+
+    /// Unicode char offset of the end of `line` (1-indexed).
+    /// End is the position just past the newline (or the end of text for the last line).
+    pub fn line_end(&self, line: usize, total_chars: usize) -> Option<usize> {
+        if line == 0 || line > self.line_starts.len() {
+            None
+        } else if line < self.line_starts.len() {
+            // Next line starts at this offset; the newline char is at offset - 1
+            Some(self.line_starts[line])
+        } else {
+            // Last line: end is total length
+            Some(total_chars)
+        }
     }
 }
 
@@ -73,6 +133,8 @@ impl LoroDocBridge for TextBridge {
 /// `FileHandler` signatures. Phase 2's `FileManager` consumes this.
 pub struct LoroSyncedFile {
     inner: SyncedDoc<TextBridge>,
+    /// Lazily-computed line index. `None` means needs rebuild.
+    line_index: Arc<StdMutex<Option<LineIndex>>>,
 }
 
 impl LoroSyncedFile {
@@ -100,7 +162,10 @@ impl LoroSyncedFile {
             },
             router,
         )?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            line_index: Arc::new(StdMutex::new(None)),
+        })
     }
 
     /// Open with a private per-file watcher (standalone / test usage).
@@ -120,7 +185,10 @@ impl LoroSyncedFile {
             // Tests that need AutoMerge semantics open SyncedDoc directly.
             conflict_policy: ConflictPolicy::RejectAndNotify,
         })?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            line_index: Arc::new(StdMutex::new(None)),
+        })
     }
 
     /// Direct reference to the underlying `LoroDoc` for CRDT-native edits.
@@ -149,6 +217,7 @@ impl LoroSyncedFile {
 
     /// Write UTF-8 content to the file.
     pub fn write(&self, content: &str) -> Result<(), LoroSyncError> {
+        self.invalidate_line_index();
         self.inner.write(content.as_bytes())
     }
 
@@ -188,6 +257,135 @@ impl LoroSyncedFile {
     /// local save (i.e., the agent has pending writes not yet rendered to disk).
     pub fn has_unsaved_edits(&self) -> bool {
         self.inner.has_unsaved_edits()
+    }
+
+    // ---- Line-level edit operations ----------------------------------------
+
+    /// Ensure the line index is built and return a clone.
+    fn ensure_line_index(&self) -> LineIndex {
+        let mut guard = self.line_index.lock().unwrap();
+        if let Some(ref idx) = *guard {
+            return idx.clone();
+        }
+        let text = self.inner.memory_doc().get_text("content").to_string();
+        eprintln!("ensure_line_index: text = {}", text);
+        let idx = LineIndex::build(&text);
+        eprintln!("line index built: {}", idx.line_count());
+        *guard = Some(idx.clone());
+        idx
+    }
+
+    /// Invalidate the cached line index (call after any edit).
+    fn invalidate_line_index(&self) {
+        *self.line_index.lock().unwrap() = None;
+    }
+
+    /// Insert content after line `after_line` (1-indexed).
+    /// Line 0 inserts at the very beginning of the file.
+    /// The content string may contain newlines.
+    pub fn insert_lines(&self, after_line: usize, content: &str) -> Result<(), LoroSyncError> {
+        let idx = self.ensure_line_index();
+        let text = self.inner.memory_doc().get_text("content");
+        let total_chars = text.len_unicode();
+
+        let insert_pos = if after_line == 0 {
+            0
+        } else if after_line >= idx.line_count() {
+            // After the last line: append at end
+            total_chars
+        } else {
+            // Insert at the start of the next line (= end of line after_line)
+            idx.line_end(after_line, total_chars).ok_or_else(|| {
+                LoroSyncError::Other(format!(
+                    "line {after_line} out of range (file has {} lines)",
+                    idx.line_count()
+                ))
+            })?
+        };
+
+        // If inserting in the middle, ensure we start on a new line
+        let to_insert = if after_line == 0 && total_chars > 0 {
+            // Inserting at top of non-empty file: add trailing newline
+            format!("{content}\n")
+        } else if after_line >= idx.line_count() && total_chars > 0 {
+            // Appending after last line: add leading newline
+            format!("\n{content}")
+        } else {
+            content.to_string()
+        };
+
+        text.insert(insert_pos, &to_insert)
+            .map_err(|e| LoroSyncError::Other(format!("insert failed: {e}")))?;
+        self.invalidate_line_index();
+        Ok(())
+    }
+
+    /// Replace lines `from`..`to` (1-indexed, inclusive) with new content.
+    /// The replacement may have a different number of lines.
+    pub fn replace_lines(
+        &self,
+        from: usize,
+        to: usize,
+        content: &str,
+    ) -> Result<(), LoroSyncError> {
+        if from < 1 || from > to {
+            return Err(LoroSyncError::Other(format!(
+                "invalid line range {from}..{to}"
+            )));
+        }
+        let idx = self.ensure_line_index();
+        if from > idx.line_count() {
+            return Err(LoroSyncError::Other(format!(
+                "line {from} out of range (file has {} lines)",
+                idx.line_count()
+            )));
+        }
+        let text = self.inner.memory_doc().get_text("content");
+        let total_chars = text.len_unicode();
+
+        let start_pos = idx
+            .line_start(from)
+            .ok_or_else(|| LoroSyncError::Other(format!("line {from} out of range")))?;
+        let end_pos = idx
+            .line_end(to.min(idx.line_count()), total_chars)
+            .ok_or_else(|| LoroSyncError::Other(format!("line {to} out of range")))?;
+        let delete_len = end_pos - start_pos;
+
+        text.splice(start_pos, delete_len, content)
+            .map_err(|e| LoroSyncError::Other(format!("splice failed: {e}")))?;
+        self.invalidate_line_index();
+        Ok(())
+    }
+
+    /// Delete lines `from`..`to` (1-indexed, inclusive).
+    pub fn delete_lines(&self, from: usize, to: usize) -> Result<(), LoroSyncError> {
+        if from < 1 || from > to {
+            return Err(LoroSyncError::Other(format!(
+                "invalid line range {from}..{to}"
+            )));
+        }
+        let idx = self.ensure_line_index();
+        if from > idx.line_count() {
+            return Err(LoroSyncError::Other(format!(
+                "line {from} out of range (file has {} lines)",
+                idx.line_count()
+            )));
+        }
+        let text = self.inner.memory_doc().get_text("content");
+        let total_chars = text.len_unicode();
+
+        let start_pos = idx
+            .line_start(from)
+            .ok_or_else(|| LoroSyncError::Other(format!("line {from} out of range")))?;
+        let end_pos = idx
+            .line_end(to.min(idx.line_count()), total_chars)
+            .ok_or_else(|| LoroSyncError::Other(format!("line {to} out of range")))?;
+        let delete_len = end_pos - start_pos;
+
+        text.splice(start_pos, delete_len, "")
+            .map_err(|e| LoroSyncError::Other(format!("splice failed: {e}")))?;
+        self.invalidate_line_index();
+        Ok(())
     }
 
     /// Close the file and stop the watcher. Optional — drop also cleans up.

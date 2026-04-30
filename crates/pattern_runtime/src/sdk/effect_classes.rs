@@ -352,6 +352,24 @@ pub const ALL_CLASSES: &[ConstructorClass] = &[
         class: EffectClass::MutateExternal,
         runtime_check: RuntimeClassCheck::Skip,
     },
+    ConstructorClass {
+        module: "File",
+        constructor: "InsertLines",
+        class: EffectClass::MutateExternal,
+        runtime_check: RuntimeClassCheck::Skip,
+    },
+    ConstructorClass {
+        module: "File",
+        constructor: "ReplaceLines",
+        class: EffectClass::MutateExternal,
+        runtime_check: RuntimeClassCheck::Skip,
+    },
+    ConstructorClass {
+        module: "File",
+        constructor: "DeleteLines",
+        class: EffectClass::MutateExternal,
+        runtime_check: RuntimeClassCheck::Skip,
+    },
     // ── Pattern.Mcp (1) ──────────────────────────────────────────────────
     ConstructorClass {
         module: "Mcp",

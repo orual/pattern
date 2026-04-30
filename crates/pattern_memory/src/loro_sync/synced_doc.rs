@@ -969,6 +969,7 @@ fn handle_local_update<B: LoroDocBridge>(
     bridge: &Arc<B>,
     shared: &Arc<SharedState>,
 ) {
+    eprintln!("writing local to: {}", path.display());
     // Import the update into the disk doc.
     if let Err(e) = disk_doc.import(bytes) {
         tracing::debug!(path = ?path, error = %e, "failed to import local update into disk_doc");
@@ -996,6 +997,10 @@ fn handle_sync_write<B: LoroDocBridge>(
         .apply_external(disk_doc, bytes, path)
         .map_err(SyncedDocError::Bridge)?;
     disk_doc.commit();
+    eprintln!(
+        "applied external bytes to disk_doc: {}",
+        String::from_utf8_lossy(bytes)
+    );
 
     // Export only the new ops and merge into memory_doc.
     let update = disk_doc

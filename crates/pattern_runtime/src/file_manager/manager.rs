@@ -212,6 +212,37 @@ impl FileManager {
         }
     }
 
+    /// Get an already-open file or auto-open it. Returns the Arc<LoroSyncedFile>
+    /// so callers can perform direct Loro operations (line edits, etc.).
+    ///
+    /// This is the entry point for line-level edit operations: the handler
+    /// calls `get_or_open`, then invokes `insert_lines`/`replace_lines`/
+    /// `delete_lines` on the returned `LoroSyncedFile`.
+    pub fn get_or_open(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<std::sync::Arc<pattern_memory::loro_sync::text::LoroSyncedFile>, FileError> {
+        self.check_capability()?;
+        self.policy.check_access(path)?;
+        let canonical = canonicalize_best(path);
+        eprintln!("get_or_open: canonical = `{}`", canonical.display());
+        // Return existing if open.
+        if let Some(sf) = self.open_files.get(&canonical) {
+            eprintln!("get_or_open: found existing open file");
+            return Ok(sf.value().clone());
+        }
+        // Not open yet — open it (which creates the LoroSyncedFile, watcher, etc.).
+        self.open(path)?;
+        // Now it should be in open_files.
+        self.open_files
+            .get(&canonical)
+            .map(|sf| sf.value().clone())
+            .ok_or_else(|| FileError::Io {
+                path: canonical,
+                source: std::io::Error::other("file disappeared from open_files after open()"),
+            })
+    }
+
     /// Open a file for CRDT-tracked editing. Returns the current content.
     /// Idempotent: re-opening a file returns its current content without
     /// creating a new watcher or listener.
@@ -246,6 +277,7 @@ impl FileManager {
                 self.ensure_dir_watcher(parent)?;
                 let sf = LoroSyncedFile::open_with_router(&canonical, &self.router)?;
                 let content = sf.read()?.into_bytes();
+                eprintln!("read content: {}", String::from_utf8_lossy(&content));
 
                 // Per-file cancel token for the listener. Signalled in close()
                 // BEFORE dropping the SyncedDoc's senders, preventing the

@@ -288,7 +288,10 @@ mod parity {
         let _ = FileReq::Watch(String::new());
         let _ = FileReq::Reload(String::new());
         let _ = FileReq::ForceWrite(String::new(), String::new());
-        assert_eq!(count("FileReq"), 8);
+        let _ = FileReq::InsertLines(String::new(), 0, String::new());
+        let _ = FileReq::ReplaceLines(String::new(), 0, 0, String::new());
+        let _ = FileReq::DeleteLines(String::new(), 0, 0);
+        assert_eq!(count("FileReq"), 11);
     }
 
     #[test]

@@ -39,4 +39,13 @@ pub enum FileReq {
     /// `FileConflict` reminder to overwrite with the agent's version.
     #[core(module = "Pattern.File", name = "ForceWrite")]
     ForceWrite(String, String),
+    /// Insert content after line `n` (1-indexed). Line 0 = insert at top.
+    #[core(module = "Pattern.File", name = "InsertLines")]
+    InsertLines(String, i64, String),
+    /// Replace lines `from`..`to` (1-indexed, inclusive) with new content.
+    #[core(module = "Pattern.File", name = "ReplaceLines")]
+    ReplaceLines(String, i64, i64, String),
+    /// Delete lines `from`..`to` (1-indexed, inclusive).
+    #[core(module = "Pattern.File", name = "DeleteLines")]
+    DeleteLines(String, i64, i64),
 }

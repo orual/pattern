@@ -39,4 +39,4 @@ pub use synced_doc::{
     ConflictPolicy, ExternalChangeEvent, SyncedDoc, SyncedDocConfig, SyncedDocConfigBuilder,
     WriteNotification,
 };
-pub use text::{LoroSyncedFile, TextBridge};
+pub use text::{LineIndex, LoroSyncedFile, TextBridge};

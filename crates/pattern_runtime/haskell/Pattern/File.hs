@@ -44,6 +44,12 @@ data File a where
   -- | Write through to disk, bypassing ConflictPolicy. Use after a
   -- FileConflict reminder to overwrite with the agent's version.
   ForceWrite :: Path -> Content -> File ()
+  -- | Insert content after line @n@ (1-indexed). Line 0 inserts at the top.
+  InsertLines :: Path -> Int -> Content -> File ()
+  -- | Replace lines @from@..@to@ (1-indexed, inclusive) with new content.
+  ReplaceLines :: Path -> Int -> Int -> Content -> File ()
+  -- | Delete lines @from@..@to@ (1-indexed, inclusive).
+  DeleteLines :: Path -> Int -> Int -> File ()
 
 read :: Member File effs => Path -> Eff effs Content
 read p = Freer.send (Read p)
@@ -75,3 +81,15 @@ reload p = Freer.send (Reload p)
 -- | Force-write content to disk, bypassing conflict policy.
 forceWrite :: Member File effs => Path -> Content -> Eff effs ()
 forceWrite p c = Freer.send (ForceWrite p c)
+
+-- | Insert content after line @n@ (1-indexed). Line 0 inserts at the top.
+insertLines :: Member File effs => Path -> Int -> Content -> Eff effs ()
+insertLines p n c = Freer.send (InsertLines p n c)
+
+-- | Replace lines @from@..@to@ (1-indexed, inclusive) with new content.
+replaceLines :: Member File effs => Path -> Int -> Int -> Content -> Eff effs ()
+replaceLines p from to c = Freer.send (ReplaceLines p from to c)
+
+-- | Delete lines @from@..@to@ (1-indexed, inclusive).
+deleteLines :: Member File effs => Path -> Int -> Int -> Eff effs ()
+deleteLines p from to = Freer.send (DeleteLines p from to)

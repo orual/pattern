@@ -70,6 +70,9 @@ impl DescribeEffect for FileHandler {
                 "Watch      :: Path -> File ()",
                 "Reload     :: Path -> File Content",
                 "ForceWrite :: Path -> Content -> File ()",
+                "InsertLines :: Path -> Int -> Content -> File ()",
+                "ReplaceLines :: Path -> Int -> Int -> Content -> File ()",
+                "DeleteLines :: Path -> Int -> Int -> File ()",
             ]),
             type_defs: std::borrow::Cow::Borrowed(&[
                 "type Path = Text",
@@ -88,6 +91,9 @@ impl DescribeEffect for FileHandler {
                 "reload :: Member File effs => Path -> Eff effs Content\nreload p = Freer.send (Reload p)",
                 // ForceWrite writes through, bypassing ConflictPolicy.
                 "forceWrite :: Member File effs => Path -> Content -> Eff effs ()\nforceWrite p c = Freer.send (ForceWrite p c)",
+                "insertLines :: Member File effs => Path -> Int -> Content -> Eff effs ()\ninsertLines p n c = Freer.send (InsertLines p n c)",
+                "replaceLines :: Member File effs => Path -> Int -> Int -> Content -> Eff effs ()\nreplaceLines p from to c = Freer.send (ReplaceLines p from to c)",
+                "deleteLines :: Member File effs => Path -> Int -> Int -> Eff effs ()\ndeleteLines p from to = Freer.send (DeleteLines p from to)",
             ]),
         }
     }
@@ -116,6 +122,9 @@ where
             FileReq::Watch(_) => "Watch",
             FileReq::Reload(_) => "Reload",
             FileReq::ForceWrite(_, _) => "ForceWrite",
+            FileReq::InsertLines(_, _, _) => "InsertLines",
+            FileReq::ReplaceLines(_, _, _, _) => "ReplaceLines",
+            FileReq::DeleteLines(_, _, _) => "DeleteLines",
         };
         crate::sdk::effect_classes::check_effect_class(
             cx.user().capabilities(),
@@ -124,22 +133,15 @@ where
         )?;
 
         match req {
-            FileReq::Write(path, content) => {
-                // Write has a two-stage gate: shape guard → policy → FileManager.
-                evaluate_write(&path, content.as_bytes(), cx.user())?;
-                cx.respond(())
-            }
             FileReq::Read(path) => {
                 let fm = require_file_manager(cx.user())?;
-                let bytes = fm
-                    .read(Path::new(&path))
+                let sf = fm
+                    .get_or_open(Path::new(&path))
                     .map_err(|e| EffectError::Handler(e.to_effect_message()))?;
-                let s = String::from_utf8(bytes).map_err(|e| {
-                    EffectError::Handler(format!(
-                        "Pattern.File.Read: {path} is not valid UTF-8: {e}"
-                    ))
-                })?;
-                cx.respond(s)
+                let content = sf
+                    .read()
+                    .map_err(|e| EffectError::Handler(format!("Pattern.File.Read: {e}")))?;
+                cx.respond(content)
             }
             FileReq::ListDir(path, glob) => {
                 let fm = require_file_manager(cx.user())?;
@@ -188,10 +190,49 @@ where
                 })?;
                 cx.respond(s)
             }
+            FileReq::Write(path, content) => {
+                let fm = require_file_manager(cx.user())?;
+                evaluate_write(&path, content.as_bytes(), cx.user())?;
+                fm.write(Path::new(&path), content.as_bytes())
+                    .map_err(|e| EffectError::Handler(e.to_effect_message()))?;
+                cx.respond(())
+            }
             FileReq::ForceWrite(path, content) => {
+                evaluate_write(&path, content.as_bytes(), cx.user())?;
                 let fm = require_file_manager(cx.user())?;
                 fm.force_write(Path::new(&path), content.as_bytes())
                     .map_err(|e| EffectError::Handler(e.to_effect_message()))?;
+                cx.respond(())
+            }
+            FileReq::InsertLines(path, after_line, new_content) => {
+                evaluate_write(&path, new_content.as_bytes(), cx.user())?;
+                let fm = require_file_manager(cx.user())?;
+                let sf = fm
+                    .get_or_open(Path::new(&path))
+                    .map_err(|e| EffectError::Handler(e.to_effect_message()))?;
+                sf.insert_lines(after_line as usize, &new_content)
+                    .map_err(|e| EffectError::Handler(format!("Pattern.File.InsertLines: {e}")))?;
+                cx.respond(())
+            }
+            FileReq::ReplaceLines(path, from, to, content) => {
+                evaluate_write(&path, content.as_bytes(), cx.user())?;
+                let fm = require_file_manager(cx.user())?;
+                let sf = fm
+                    .get_or_open(Path::new(&path))
+                    .map_err(|e| EffectError::Handler(e.to_effect_message()))?;
+                sf.replace_lines(from as usize, to as usize, &content)
+                    .map_err(|e| EffectError::Handler(format!("Pattern.File.ReplaceLines: {e}")))?;
+                cx.respond(())
+            }
+
+            FileReq::DeleteLines(path, from, to) => {
+                evaluate_write(&path, &[], cx.user())?;
+                let fm = require_file_manager(cx.user())?;
+                let sf = fm
+                    .get_or_open(Path::new(&path))
+                    .map_err(|e| EffectError::Handler(e.to_effect_message()))?;
+                sf.delete_lines(from as usize, to as usize)
+                    .map_err(|e| EffectError::Handler(format!("Pattern.File.DeleteLines: {e}")))?;
                 cx.respond(())
             }
         }
@@ -275,13 +316,7 @@ where
             // broker approval; never reaches here.
             unreachable!("escalate always returns Err — never falls through to here");
         }
-        PolicyAction::Allow => {
-            // Gate cleared — dispatch to the file manager.
-            let fm = require_file_manager(user)?;
-            fm.write(path, content)
-                .map_err(|e| EffectError::Handler(e.to_effect_message()))?;
-            Ok(())
-        }
+        PolicyAction::Allow => Ok(()),
         // PolicyAction is `#[non_exhaustive]` — fail closed on any future variant.
         other => Err(EffectError::Handler(format!(
             "{PERMISSION_DENIED_PREFIX}unhandled policy action {other:?}"
@@ -1007,5 +1042,175 @@ mod tests {
             msg.contains(PERMISSION_DENIED_PREFIX),
             "CapabilityDenied must use PERMISSION_DENIED_PREFIX, got: {msg}"
         );
+    }
+
+    #[tokio::test]
+    async fn insert_lines_at_beginning() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("insert_test.txt");
+        std::fs::write(&file, "line1\nline2\nline3").unwrap();
+
+        let file_str = file.to_string_lossy().into_owned();
+        let result = tokio::task::spawn_blocking(move || {
+            let (user, _fm) = make_test_user_with_fm("agent-insert", dir.path());
+            let mut h = FileHandler;
+            let table = handler_table();
+            let cx = EffectContext::with_user(&table, &user);
+            h.handle(FileReq::InsertLines(file_str, 0, "header".into()), &cx)
+        })
+        .await
+        .expect("blocking task");
+
+        assert!(result.is_ok(), "insert at 0 should succeed: {result:?}");
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(content, "header\nline1\nline2\nline3");
+    }
+
+    #[tokio::test]
+    async fn insert_lines_in_middle() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("insert_mid.txt");
+        std::fs::write(&file, "line1\nline2\nline3").unwrap();
+
+        let file_str = file.to_string_lossy().into_owned();
+        let result = tokio::task::spawn_blocking(move || {
+            let (user, _fm) = make_test_user_with_fm("agent-insert-mid", dir.path());
+            let mut h = FileHandler;
+            let table = handler_table();
+            let cx = EffectContext::with_user(&table, &user);
+            h.handle(FileReq::InsertLines(file_str, 1, "inserted".into()), &cx)
+        })
+        .await
+        .expect("blocking task");
+
+        assert!(
+            result.is_ok(),
+            "insert after line 1 should succeed: {result:?}"
+        );
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(content, "line1\ninserted\nline2\nline3");
+    }
+
+    #[tokio::test]
+    async fn insert_lines_multiline() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("insert_multi.txt");
+        std::fs::write(&file, "line1\nline2").unwrap();
+
+        let file_str = file.to_string_lossy().into_owned();
+        let result = tokio::task::spawn_blocking(move || {
+            let (user, _fm) = make_test_user_with_fm("agent-insert-multi", dir.path());
+            let mut h = FileHandler;
+            let table = handler_table();
+            let cx = EffectContext::with_user(&table, &user);
+            h.handle(FileReq::InsertLines(file_str, 1, "new1\nnew2".into()), &cx)
+        })
+        .await
+        .expect("blocking task");
+
+        assert!(result.is_ok());
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(content, "line1\nnew1\nnew2\nline2");
+    }
+
+    #[tokio::test]
+    async fn replace_lines_single() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("replace_test.txt");
+        std::fs::write(&file, "line1\nline2\nline3\nline4").unwrap();
+
+        let file_str = file.to_string_lossy().into_owned();
+        let result = tokio::task::spawn_blocking(move || {
+            let (user, _fm) = make_test_user_with_fm("agent-replace", dir.path());
+            let mut h = FileHandler;
+            let table = handler_table();
+            let cx = EffectContext::with_user(&table, &user);
+            h.handle(
+                FileReq::ReplaceLines(file_str, 2, 3, "replaced".into()),
+                &cx,
+            )
+        })
+        .await
+        .expect("blocking task");
+
+        assert!(result.is_ok(), "replace should succeed: {result:?}");
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(content, "line1\nreplaced\nline4");
+    }
+
+    #[tokio::test]
+    async fn replace_lines_with_multiline() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("replace_multi.txt");
+        std::fs::write(&file, "line1\nline2\nline3").unwrap();
+
+        let file_str = file.to_string_lossy().into_owned();
+        let result = tokio::task::spawn_blocking(move || {
+            let (user, _fm) = make_test_user_with_fm("agent-replace-multi", dir.path());
+            let mut h = FileHandler;
+            let table = handler_table();
+            let cx = EffectContext::with_user(&table, &user);
+            h.handle(
+                FileReq::ReplaceLines(file_str, 2, 2, "new2a\nnew2b".into()),
+                &cx,
+            )
+        })
+        .await
+        .expect("blocking task");
+
+        assert!(result.is_ok());
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(content, "line1\nnew2a\nnew2b\nline3");
+    }
+
+    #[tokio::test]
+    async fn delete_lines_middle() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("delete_test.txt");
+        std::fs::write(&file, "line1\nline2\nline3\nline4").unwrap();
+
+        let file_str = file.to_string_lossy().into_owned();
+        let file_read = file.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let (user, fm) = make_test_user_with_fm("agent-delete", dir.path());
+            let mut h = FileHandler;
+            let sf = fm.get_or_open(&file_read).unwrap();
+            let text = sf.memory_doc().get_text("content").to_string();
+            eprintln!("sf.get_text() = {}", text);
+            eprintln!(
+                "char comparison: {:?} vs {:?}",
+                '\n' as u32,
+                text.chars().nth(5).map(|c| c as u32)
+            );
+            let table = handler_table();
+            let cx = EffectContext::with_user(&table, &user);
+            h.handle(FileReq::DeleteLines(file_str, 2, 3), &cx)
+        })
+        .await
+        .expect("blocking task");
+
+        assert!(result.is_ok(), "delete should succeed: {result:?}");
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(content, "line1\nline4");
+    }
+
+    #[tokio::test]
+    async fn replace_lines_invalid_range_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("bad_range.txt");
+        std::fs::write(&file, "line1\nline2").unwrap();
+
+        let file_str = file.to_string_lossy().into_owned();
+        let result = tokio::task::spawn_blocking(move || {
+            let (user, _fm) = make_test_user_with_fm("agent-bad-range", dir.path());
+            let mut h = FileHandler;
+            let table = handler_table();
+            let cx = EffectContext::with_user(&table, &user);
+            h.handle(FileReq::ReplaceLines(file_str, 3, 1, "bad".into()), &cx)
+        })
+        .await
+        .expect("blocking task");
+
+        assert!(result.is_err(), "reversed range should error");
     }
 }

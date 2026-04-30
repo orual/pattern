@@ -28,6 +28,9 @@ pub enum SyncedDocError {
     /// A filesystem-layer error (atomic write, format conversion) from `FsError`.
     #[error("fs error: {0}")]
     Fs(#[from] crate::fs::FsError),
+    /// A generic operational error (e.g., line-range validation, Loro splice failure).
+    #[error("{0}")]
+    Other(String),
 }
 
 /// Type alias kept for call-site readability in `LoroSyncedFile` and other
