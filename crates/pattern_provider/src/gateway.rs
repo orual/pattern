@@ -142,12 +142,13 @@ impl PatternGatewayClient {
         session: &'a crate::session_uuid::PatternSessionUuid,
         model: &'a str,
         auth_tier: AuthTier,
+        persona_override: Option<&'a str>,
     ) -> ShapeContext<'a> {
         ShapeContext {
             session_uuid: session,
             model,
             auth_tier,
-            persona: &self.default_persona,
+            persona: persona_override.unwrap_or(&self.default_persona),
             system_instructions_override: None,
             extra_long_lived_blocks: &[],
         }
@@ -161,6 +162,7 @@ impl ProviderClient for PatternGatewayClient {
             model,
             chat,
             options,
+            persona,
         } = request;
         let mut chat = chat;
         let (provider, adapter) = self.provider_for_model(&model)?;
@@ -180,7 +182,7 @@ impl ProviderClient for PatternGatewayClient {
                 provider: provider.clone(),
             })?;
         let session = self.session_uuid.current();
-        let ctx = self.shape_context(&session, &model, resolved.source);
+        let ctx = self.shape_context(&session, &model, resolved.source, persona.as_deref());
         let ident_headers = shaper.shape(&mut chat, &ctx)?;
 
         // Compose the full outbound header set: shaper identification +
@@ -244,7 +246,12 @@ impl ProviderClient for PatternGatewayClient {
                 provider: provider.clone(),
             })?;
         let session = self.session_uuid.current();
-        let ctx = self.shape_context(&session, &request.model, resolved.source);
+        let ctx = self.shape_context(
+            &session,
+            &request.model,
+            resolved.source,
+            request.persona.as_deref(),
+        );
 
         let ct_req =
             CountTokensRequest::from_chat_request(request.model.clone(), request.chat.clone())?;

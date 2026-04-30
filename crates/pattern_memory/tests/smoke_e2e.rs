@@ -197,7 +197,6 @@ async fn smoke_e2e() {
             BlockCreate::new("notes", MemoryBlockType::Core, BlockSchema::text()),
         )
         .expect("create notes block");
-    let notes_block_id = text_doc.id().to_string();
     // Persist to spawn the subscriber.
     mount.cache.persist_block(agent_id, "notes").unwrap();
 
@@ -212,7 +211,6 @@ async fn smoke_e2e() {
             ),
         )
         .expect("create config block");
-    let config_block_id = map_doc.id().to_string();
     mount.cache.persist_block(agent_id, "config").unwrap();
 
     let log_doc = mount
@@ -233,7 +231,6 @@ async fn smoke_e2e() {
             ),
         )
         .expect("create events block");
-    let events_block_id = log_doc.id().to_string();
     mount.cache.persist_block(agent_id, "events").unwrap();
 
     // Brief sleep to let subscriber threads start.
@@ -263,7 +260,12 @@ async fn smoke_e2e() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Files are emitted as `<mount_path>/<block_id>.<ext>`.
-    let notes_md = mount.mount_path.join("blocks").join("@smoke-agent").join("core").join("notes.md");
+    let notes_md = mount
+        .mount_path
+        .join("blocks")
+        .join("@smoke-agent")
+        .join("core")
+        .join("notes.md");
     assert!(
         notes_md.exists(),
         "notes .md should exist at {}",
@@ -275,14 +277,24 @@ async fn smoke_e2e() {
         "notes .md should contain 'hello pattern', got: {md_content:?}"
     );
 
-    let config_kdl = mount.mount_path.join("blocks").join("@smoke-agent").join("working").join("config.kdl");
+    let config_kdl = mount
+        .mount_path
+        .join("blocks")
+        .join("@smoke-agent")
+        .join("working")
+        .join("config.kdl");
     assert!(
         config_kdl.exists(),
         "config .kdl should exist at {}",
         config_kdl.display()
     );
 
-    let events_jsonl = mount.mount_path.join("blocks").join("@smoke-agent").join("working").join("events.jsonl");
+    let events_jsonl = mount
+        .mount_path
+        .join("blocks")
+        .join("@smoke-agent")
+        .join("working")
+        .join("events.jsonl");
     assert!(
         events_jsonl.exists(),
         "events .jsonl should exist at {}",

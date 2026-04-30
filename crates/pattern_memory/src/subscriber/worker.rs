@@ -254,6 +254,33 @@ pub(crate) fn run_subscriber(config: WorkerConfig) {
 
     let mut last_emitted_hash: Option<[u8; 32]> = None;
 
+    // Initial render. `disk_doc` is forked from `memory_doc` at SyncedDoc
+    // open time, so it carries any content the agent imported BEFORE the
+    // subscriber was spawned (e.g. persona-seeded blocks set up via
+    // `create_block` + `import_from_json` + `persist_block`). The
+    // `subscribe_local_update` callback only fires for FUTURE updates, so
+    // without this call the seed content would never be rendered to disk
+    // until the agent edits the block.
+    //
+    // Gated on `disk_doc.oplog_vv()` having entries. An empty disk_doc
+    // (no ops applied) has nothing to render — skipping avoids creating
+    // empty files on disk for blocks that will receive content via the
+    // normal CommitEvent path immediately after spawn (the test fixtures
+    // for the worker exercise that path).
+    if !disk_doc.oplog_vv().is_empty() {
+        render_cycle(
+            &block_id,
+            &schema,
+            disk_doc,
+            &doc,
+            &synced_doc,
+            &db,
+            &reembed_tx,
+            &heartbeat_tx,
+            &mut last_emitted_hash,
+        );
+    }
+
     loop {
         if cancel.is_cancelled() {
             break;

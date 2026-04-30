@@ -210,6 +210,7 @@ pub fn finalize(partial: PartialRequest) -> Result<CompletionRequest, ProviderEr
         model,
         chat,
         options,
+        persona: None,
     })
 }
 

@@ -252,7 +252,6 @@ async fn quiesce_with_live_subscriber_full_path() {
         BlockSchema::text(),
     );
     let doc = cache.create_block(agent, create).unwrap();
-    let block_id = doc.id().to_string();
 
     cache.mark_dirty(agent, "live-sub-block");
     cache.persist_block(agent, "live-sub-block").unwrap();
@@ -269,7 +268,8 @@ async fn quiesce_with_live_subscriber_full_path() {
     cache.persist_block(agent, "live-sub-block").unwrap();
 
     // Wait for the subscriber worker to emit the file (debounce: 50 ms; budget: 2 s).
-    let expected_file = mount_dir.path()
+    let expected_file = mount_dir
+        .path()
         .join("blocks")
         .join(format!("@{agent}"))
         .join("working")

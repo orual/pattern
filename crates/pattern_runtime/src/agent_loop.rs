@@ -61,7 +61,7 @@ use pattern_provider::compose::passes::{
     FreshInputPass, Segment1Pass, Segment2Pass, synthesize_summary_message,
 };
 use pattern_provider::compose::{CacheProfile, ComposerPass, PartialRequest, compose};
-use pattern_provider::shaper::{ShaperCompatMode, build_system_prompt};
+use pattern_provider::shaper::{ShaperCompatMode, build_content_blocks};
 
 use crate::memory::TurnHistory;
 use crate::sdk::CODE_TOOL;
@@ -625,10 +625,13 @@ fn load_snapshot_blocks_with_visibility(
     let is_full = matches!(kind, SnapshotKind::Full);
     let mut blocks = Vec::new();
     for meta in block_list {
-        // Persona lives in segment 1 (system prompt); don't duplicate its
-        // content in segment 3. Still include its LABEL in the snapshot
-        // (as rendered=None) so the model sees the full block namespace
-        // and future delta checks can detect persona edits.
+        // Persona is loaded into segment 1 (system prompt) by
+        // `compose_request_for_turn`, which sets `request.persona` so
+        // the gateway's shaper rebuilds segment 1 with the persona
+        // text. Don't duplicate that content in segment 3. Still
+        // include its LABEL in the snapshot (as rendered=None) so the
+        // model sees the full block namespace and future delta checks
+        // can detect persona edits.
         let is_persona = meta.label == pattern_core::PERSONA_LABEL;
         if !is_persona && !selection.accepts(&meta.label, meta.block_type) {
             continue;
@@ -1462,15 +1465,18 @@ async fn compose_request_for_turn(
         .unwrap_or_default()
     };
 
-    // 2. Build system_blocks via the shaper. ShaperCompatMode is
-    //    hardcoded to SubscriptionRoutingShape today — see function
-    //    doc for the rationale. Persona's optional system_prompt
-    //    replaces DEFAULT_BASE_INSTRUCTIONS in slot[1] when set.
+    // 2. Build the content blocks (instructions + persona + extras). The
+    //    shaper's `prepend_routing_token` adds any mode-specific routing
+    //    wrappers at provider-call time, so we deliberately produce only
+    //    the agent-owned content here and let the shaper layer the
+    //    wire-shape on top. This keeps Segment1Pass's cache-control
+    //    marker (placed on the LAST block) attached to the persona block
+    //    even after the shaper prepends.
     let mode = default_shaper_mode();
     let base_instructions = ctx
         .system_prompt()
         .unwrap_or(pattern_core::DEFAULT_BASE_INSTRUCTIONS);
-    let system_blocks = build_system_prompt(mode, base_instructions, &persona_text, &[]);
+    let system_blocks = build_content_blocks(mode, base_instructions, &persona_text, &[]);
 
     // 3. Snapshot TurnHistory state. Holding the mutex across the
     //    persona-load await above would be a deadlock risk — we
@@ -1551,6 +1557,19 @@ async fn compose_request_for_turn(
         .with_capture_content(true)
         .with_capture_tool_calls(true)
         .with_capture_reasoning_content(true);
+
+    // 7. Thread the persona text onto the request so the gateway's shaper
+    //    rebuilds segment 1 with this agent's persona content. The shaper
+    //    overwrites `chat.system_blocks` at provider-call time, so any
+    //    persona text we baked into `system_blocks` above would be
+    //    clobbered. Setting `req.persona` is what survives the shaper
+    //    rebuild — see `pattern_provider::gateway::shape_context`.
+    //
+    //    Empty persona text leaves `persona = None` so the gateway falls
+    //    back to its `default_persona` (which the daemon leaves empty).
+    if !persona_text.is_empty() {
+        req.persona = Some(smol_str::SmolStr::from(persona_text.as_str()));
+    }
 
     Ok((req, has_segment_1))
 }

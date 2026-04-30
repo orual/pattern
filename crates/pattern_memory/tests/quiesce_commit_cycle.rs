@@ -321,8 +321,6 @@ async fn quiesce_commit_preserves_task_index() {
             BlockCreate::new(TEXT_LABEL, MemoryBlockType::Working, BlockSchema::text()),
         )
         .expect("create Text block");
-    let text_block_id = text_doc.id().to_string();
-
     cache
         .persist_block(AGENT, TEXT_LABEL)
         .expect("persist Text (spawn subscriber)");
@@ -363,9 +361,21 @@ async fn quiesce_commit_preserves_task_index() {
     );
 
     // Collect emitted canonical file paths for the quiesce fsync list.
-    let tl_kdl_path = root.join("blocks").join(format!("@{AGENT}")).join("working").join(format!("{TL_LABEL}.kdl"));
-    let skill_md_path = root.join("blocks").join(format!("@{AGENT}")).join("working").join(format!("{SKILL_LABEL}.md"));
-    let text_md_path = root.join("blocks").join(format!("@{AGENT}")).join("working").join(format!("{TEXT_LABEL}.md"));
+    let tl_kdl_path = root
+        .join("blocks")
+        .join(format!("@{AGENT}"))
+        .join("working")
+        .join(format!("{TL_LABEL}.kdl"));
+    let skill_md_path = root
+        .join("blocks")
+        .join(format!("@{AGENT}"))
+        .join("working")
+        .join(format!("{SKILL_LABEL}.md"));
+    let text_md_path = root
+        .join("blocks")
+        .join(format!("@{AGENT}"))
+        .join("working")
+        .join(format!("{TEXT_LABEL}.md"));
 
     assert!(
         tl_kdl_path.exists(),

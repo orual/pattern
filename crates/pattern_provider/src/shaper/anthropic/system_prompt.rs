@@ -33,15 +33,53 @@ pub(super) const CLAUDE_CODE_LITERAL: &str =
 #[cfg(feature = "subscription-oauth")]
 pub(super) const NEGATION_PREFIX: &str = "You are NOT Claude Code.";
 
-/// Build the system-prompt array per mode.
+/// Build the full system-prompt array per mode.
+///
+/// Convenience wrapper around [`build_content_blocks`] +
+/// [`prepend_routing_token`]. Use this when the caller is producing the
+/// entire system-block sequence in one shot (e.g. test fixtures and
+/// callers that don't run the runtime's compose pipeline).
+///
+/// In production the runtime's compose pipeline calls
+/// [`build_content_blocks`] directly to produce the content blocks
+/// (instructions + persona + extras), and the shaper layers the
+/// mode-specific routing token onto the front via
+/// [`prepend_routing_token`]. Splitting the two stages lets the shaper
+/// preserve the runtime's blocks (and any cache-control markers placed
+/// on them) instead of clobbering them.
 ///
 /// - `system_instructions` is the baseline instruction set. Callers pass
 ///   `DEFAULT_BASE_INSTRUCTIONS` by default, or a user-supplied override.
 /// - `persona` is the current persona's identity / behaviour block.
-/// - `extra_long_lived` are any additional blocks that belong in slot \[2\]+
-///   (e.g. frequently-read memory blocks the Phase 5 composer decides to
-///   co-locate with the persona). Phase 4 passes them through verbatim.
+/// - `extra_long_lived` are any additional blocks that belong alongside
+///   the persona (e.g. frequently-read memory blocks the composer
+///   decides to co-locate). Passed through verbatim.
 pub fn build_system_prompt(
+    mode: ShaperCompatMode,
+    system_instructions: &str,
+    persona: &str,
+    extra_long_lived: &[String],
+) -> Vec<SystemBlock> {
+    let mut blocks = build_content_blocks(mode, system_instructions, persona, extra_long_lived);
+    prepend_routing_token(&mut blocks, mode);
+    blocks
+}
+
+/// Build the agent's content blocks (instructions + persona + extras)
+/// without the mode-specific routing token.
+///
+/// Output layout per mode:
+/// - `HonestPattern` — single combined block, or empty `Vec` when all
+///   inputs are empty (Anthropic rejects empty-text blocks).
+/// - `SubscriptionRoutingShape` — `[negation+instructions, persona+extras?]`.
+///   The persona slot is omitted entirely when both `persona` and
+///   `extra_long_lived` are empty.
+///
+/// The `SubscriptionRoutingShape` variant emits TWO content blocks
+/// (negation+instructions, persona+extras) but does NOT prepend the
+/// slot \[0\] claude-code routing literal — that's the shaper's job at
+/// provider-call time. See [`prepend_routing_token`].
+pub fn build_content_blocks(
     mode: ShaperCompatMode,
     system_instructions: &str,
     persona: &str,
@@ -67,9 +105,6 @@ pub fn build_system_prompt(
             fragments.extend(extra_long_lived.iter().map(String::as_str));
             let text = join_non_empty(&fragments);
             if text.is_empty() {
-                // All inputs were empty — emit no system block at all
-                // rather than a block with empty text that Anthropic
-                // would reject.
                 Vec::new()
             } else {
                 vec![SystemBlock::new(text)]
@@ -78,30 +113,69 @@ pub fn build_system_prompt(
 
         #[cfg(feature = "subscription-oauth")]
         ShaperCompatMode::SubscriptionRoutingShape => {
-            let mut blocks = vec![
-                // Slot [0]: structural requirement (verbatim). Not an identity
-                // claim — see module-level docs.
-                SystemBlock::new(CLAUDE_CODE_LITERAL),
-                // Slot [1]: identity-override prefix + base instructions.
-                SystemBlock::new(format!("{NEGATION_PREFIX}\n\n{system_instructions}")),
-            ];
-            // Slot [2+]: persona + any long-lived content. Empty fragments
-            // drop out so we never emit an empty-text slot that Anthropic
-            // would 400 on.
+            // Negation-prefix + base instructions in one block. The
+            // routing literal that precedes this on the wire is added
+            // separately by `prepend_routing_token`.
+            let mut blocks = vec![SystemBlock::new(format!(
+                "{NEGATION_PREFIX}\n\n{system_instructions}"
+            ))];
             let mut fragments: Vec<&str> = vec![persona];
             fragments.extend(extra_long_lived.iter().map(String::as_str));
-            let slot2 = join_non_empty(&fragments);
-            if !slot2.is_empty() {
-                blocks.push(SystemBlock::new(slot2));
+            let persona_slot = join_non_empty(&fragments);
+            if !persona_slot.is_empty() {
+                blocks.push(SystemBlock::new(persona_slot));
             }
             blocks
         }
 
         #[cfg(feature = "subscription-oauth")]
         ShaperCompatMode::FullSurfaceImpersonation => {
-            // Phase: future plan. Shipping requires explicit sign-off per
-            // `pattern_provider/CLAUDE.md §ShaperCompatMode — empirical decision`.
-            // No AC number assigned; this variant exists for API stability only.
+            unimplemented!(
+                "ShaperCompatMode::FullSurfaceImpersonation not implemented; \
+                 requires explicit sign-off per pattern_provider/CLAUDE.md."
+            );
+        }
+    }
+}
+
+/// Prepend the mode-specific routing token to an existing content-block
+/// sequence. Idempotent: if `blocks[0]` is already the routing literal,
+/// returns without modifying. The shaper calls this on every request,
+/// including those whose caller already pre-populated `system_blocks`,
+/// so multiple invocations along the path must not stack tokens.
+///
+/// Modes:
+/// - `HonestPattern` — no routing token; this function is a no-op.
+/// - `SubscriptionRoutingShape` — prepends the verbatim claude-code
+///   identifier in slot \[0\]. Required by Anthropic's subscription
+///   router; see module docs for the honest-framing rationale.
+/// - `FullSurfaceImpersonation` — unimplemented; panics.
+pub fn prepend_routing_token(blocks: &mut Vec<SystemBlock>, mode: ShaperCompatMode) {
+    match mode {
+        ShaperCompatMode::HonestPattern => {
+            // No routing token in HonestPattern.
+        }
+
+        #[cfg(feature = "subscription-oauth")]
+        ShaperCompatMode::SubscriptionRoutingShape => {
+            // Idempotency: if the first block is already the routing
+            // literal, do nothing. Required because the runtime's
+            // compose pipeline historically called build_system_prompt
+            // (which emits the literal) and the shaper still calls this
+            // afterward — both legitimate, neither should produce
+            // duplicate tokens.
+            if blocks
+                .first()
+                .map(|b| b.text == CLAUDE_CODE_LITERAL)
+                .unwrap_or(false)
+            {
+                return;
+            }
+            blocks.insert(0, SystemBlock::new(CLAUDE_CODE_LITERAL));
+        }
+
+        #[cfg(feature = "subscription-oauth")]
+        ShaperCompatMode::FullSurfaceImpersonation => {
             unimplemented!(
                 "ShaperCompatMode::FullSurfaceImpersonation not implemented; \
                  requires explicit sign-off per pattern_provider/CLAUDE.md."

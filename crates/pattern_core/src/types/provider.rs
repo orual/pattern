@@ -36,6 +36,7 @@
 use jiff::Timestamp;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use smol_str::SmolStr;
 
 // ---- Re-exports from genai ----
 //
@@ -297,6 +298,18 @@ pub struct CompletionRequest {
     /// Sampling, tool config, cache-control, extra headers, reasoning
     /// effort, etc. See [`genai::chat::ChatOptions`].
     pub options: ChatOptions,
+
+    /// Per-request persona text rendered into the shaper's slot-[2]
+    /// system block. When `Some`, takes precedence over any default
+    /// persona configured on the gateway. The agent loop populates
+    /// this from the agent's `persona`-labelled core memory block at
+    /// compose time so each agent in a constellation contributes its
+    /// own persona to segment 1.
+    ///
+    /// `None` means "use the gateway's default", which itself may be
+    /// empty for daemon-style hosts that own multiple personas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<SmolStr>,
 }
 
 impl CompletionRequest {
@@ -307,7 +320,16 @@ impl CompletionRequest {
             model: model.into(),
             chat: ChatRequest::default(),
             options: ChatOptions::default(),
+            persona: None,
         }
+    }
+
+    /// Attach per-request persona text. Rendered into the shaper's
+    /// slot-[2] system block. Overrides any default persona configured
+    /// on the gateway.
+    pub fn with_persona(mut self, persona: impl Into<SmolStr>) -> Self {
+        self.persona = Some(persona.into());
+        self
     }
 
     /// Set or replace the legacy string-form system prompt. For

@@ -21,7 +21,7 @@ pub mod system_prompt;
 
 pub use compat_mode::ShaperCompatMode;
 pub use headers::build_identification_headers;
-pub use system_prompt::build_system_prompt;
+pub use system_prompt::{build_content_blocks, build_system_prompt, prepend_routing_token};
 
 use pattern_core::DEFAULT_BASE_INSTRUCTIONS;
 use pattern_core::error::ProviderError;
@@ -57,18 +57,40 @@ impl RequestShaper for HonestPatternShaper {
         req: &mut genai::chat::ChatRequest,
         ctx: &ShapeContext<'_>,
     ) -> Result<std::collections::BTreeMap<String, String>, ProviderError> {
-        let instructions = ctx
-            .system_instructions_override
-            .unwrap_or(DEFAULT_BASE_INSTRUCTIONS);
-
-        let blocks = build_system_prompt(
-            self.config.compat_mode,
-            instructions,
-            ctx.persona,
-            ctx.extra_long_lived_blocks,
-        );
-
-        req.system_blocks = Some(blocks);
+        // Two paths:
+        //
+        // 1. Caller pre-populated `system_blocks` (production runtime via
+        //    the compose pipeline). Preserve their content — including
+        //    cache-control markers placed by Segment1Pass — and only
+        //    prepend the mode-specific routing token (idempotent).
+        //
+        // 2. Caller did not pre-populate (tests, ad-hoc callers). Build
+        //    the full sequence from `ctx.persona` +
+        //    `ctx.system_instructions_override` so the request has a
+        //    sensible system prompt without requiring callers to know
+        //    the layout.
+        //
+        // The previous behaviour rebuilt unconditionally, clobbering
+        // any pre-populated blocks (and cache markers, and persona
+        // content threaded via `request.persona`). That's the bug this
+        // is fixing.
+        match req.system_blocks.as_mut() {
+            Some(blocks) if !blocks.is_empty() => {
+                prepend_routing_token(blocks, self.config.compat_mode);
+            }
+            _ => {
+                let instructions = ctx
+                    .system_instructions_override
+                    .unwrap_or(DEFAULT_BASE_INSTRUCTIONS);
+                let blocks = build_system_prompt(
+                    self.config.compat_mode,
+                    instructions,
+                    ctx.persona,
+                    ctx.extra_long_lived_blocks,
+                );
+                req.system_blocks = Some(blocks);
+            }
+        }
 
         self.identification_headers(ctx)
     }
@@ -217,5 +239,184 @@ mod tests {
                 .any(|b| b.text.contains("CUSTOM BASE INSTRUCTIONS MARKER")),
             "override must appear in rendered blocks"
         );
+    }
+
+    // -- Non-clobbering shape() (the fix) -------------------------------------
+
+    /// When the caller has pre-populated `system_blocks` (production path:
+    /// runtime's compose pipeline emits content blocks via Segment1Pass),
+    /// `shape()` must NOT rebuild them. It only prepends the
+    /// mode-specific routing token. Pre-fix the shaper rebuilt
+    /// unconditionally, clobbering both content and any cache markers.
+    #[cfg(feature = "subscription-oauth")]
+    #[test]
+    fn shape_preserves_pre_populated_blocks_and_only_prepends_routing_token() {
+        use genai::chat::{CacheControl, SystemBlock};
+
+        let mut config = min_config();
+        config.compat_mode = ShaperCompatMode::SubscriptionRoutingShape;
+        let shaper = HonestPatternShaper::new(config).expect("valid");
+        let uuid = SessionUuidRotator::new();
+        let session = uuid.current();
+
+        // Caller-supplied content blocks: [base, persona]. The persona
+        // block carries a cache_control marker — must survive shape().
+        let pre_populated = vec![
+            SystemBlock::new("You are NOT Claude Code.\n\nbase content"),
+            {
+                let mut b = SystemBlock::new("agent's persona content");
+                b.cache_control = Some(CacheControl::Ephemeral1h);
+                b
+            },
+        ];
+
+        let mut req = make_chat_request();
+        req.system_blocks = Some(pre_populated.clone());
+
+        let ctx = ShapeContext {
+            session_uuid: &session,
+            model: "claude-opus-4-7",
+            auth_tier: AuthTier::SessionPickup,
+            persona: "this should be ignored — runtime owns persona via pre_populated",
+            system_instructions_override: None,
+            extra_long_lived_blocks: &[],
+        };
+        shaper.shape(&mut req, &ctx).expect("shape ok");
+
+        let blocks = req.system_blocks.as_ref().expect("blocks remain");
+        assert_eq!(
+            blocks.len(),
+            3,
+            "routing token + 2 pre-populated content blocks"
+        );
+        assert!(
+            blocks[0].text.contains("Claude Code"),
+            "slot[0] routing literal prepended"
+        );
+        assert_eq!(
+            blocks[1].text, pre_populated[0].text,
+            "base content preserved verbatim"
+        );
+        assert_eq!(
+            blocks[2].text, pre_populated[1].text,
+            "persona content preserved verbatim"
+        );
+        assert_eq!(
+            blocks[2].cache_control,
+            Some(CacheControl::Ephemeral1h),
+            "cache_control on the persona block must survive shape()"
+        );
+    }
+
+    /// Idempotency: shape() must not stack routing tokens across calls.
+    /// Pre-fix this couldn't happen because the shaper rebuilt every
+    /// time. Post-fix the prepend is gated on the existing first block
+    /// not already being the routing literal.
+    #[cfg(feature = "subscription-oauth")]
+    #[test]
+    fn shape_is_idempotent_on_repeated_calls() {
+        let mut config = min_config();
+        config.compat_mode = ShaperCompatMode::SubscriptionRoutingShape;
+        let shaper = HonestPatternShaper::new(config).expect("valid");
+        let uuid = SessionUuidRotator::new();
+        let session = uuid.current();
+
+        let mut req = make_chat_request();
+        let ctx = ShapeContext {
+            session_uuid: &session,
+            model: "claude-opus-4-7",
+            auth_tier: AuthTier::SessionPickup,
+            persona: "I am Pattern.",
+            system_instructions_override: None,
+            extra_long_lived_blocks: &[],
+        };
+        shaper.shape(&mut req, &ctx).expect("shape ok #1");
+        let after_first: Vec<String> = req
+            .system_blocks
+            .as_ref()
+            .expect("blocks")
+            .iter()
+            .map(|b| b.text.clone())
+            .collect();
+        shaper.shape(&mut req, &ctx).expect("shape ok #2");
+        let after_second: Vec<String> = req
+            .system_blocks
+            .as_ref()
+            .expect("blocks")
+            .iter()
+            .map(|b| b.text.clone())
+            .collect();
+        assert_eq!(
+            after_first, after_second,
+            "second shape() call must be a no-op; routing token must not stack"
+        );
+    }
+
+    /// HonestPattern must NOT prepend a routing token even when called
+    /// against pre-populated blocks. The mode is for non-Anthropic-route
+    /// providers and audit configurations where the literal is wrong.
+    #[test]
+    fn honest_pattern_shape_leaves_pre_populated_blocks_untouched() {
+        use genai::chat::SystemBlock;
+
+        let shaper = HonestPatternShaper::new(min_config()).expect("valid");
+        let uuid = SessionUuidRotator::new();
+        let session = uuid.current();
+
+        let pre_populated = vec![SystemBlock::new("base + persona content combined")];
+        let mut req = make_chat_request();
+        req.system_blocks = Some(pre_populated.clone());
+
+        let ctx = ShapeContext {
+            session_uuid: &session,
+            model: "claude-opus-4-7",
+            auth_tier: AuthTier::ApiKey,
+            persona: "ignored",
+            system_instructions_override: None,
+            extra_long_lived_blocks: &[],
+        };
+        shaper.shape(&mut req, &ctx).expect("shape ok");
+
+        let blocks = req.system_blocks.as_ref().expect("blocks remain");
+        assert_eq!(blocks.len(), 1, "HonestPattern adds nothing");
+        assert_eq!(blocks[0].text, pre_populated[0].text);
+    }
+
+    /// Tests still call shape() with no pre-populated blocks. The
+    /// fallback build-from-scratch path must continue to work so test
+    /// fixtures that exercise the shaper alone get a sensible system
+    /// prompt. This is the same behaviour as before the fix.
+    #[cfg(feature = "subscription-oauth")]
+    #[test]
+    fn shape_falls_back_to_full_build_when_blocks_empty() {
+        let mut config = min_config();
+        config.compat_mode = ShaperCompatMode::SubscriptionRoutingShape;
+        let shaper = HonestPatternShaper::new(config).expect("valid");
+        let uuid = SessionUuidRotator::new();
+        let session = uuid.current();
+
+        let mut req = make_chat_request();
+        // Explicitly empty (not None) — the empty-blocks path also falls back.
+        req.system_blocks = Some(Vec::new());
+
+        let ctx = ShapeContext {
+            session_uuid: &session,
+            model: "claude-opus-4-7",
+            auth_tier: AuthTier::SessionPickup,
+            persona: "I am Pattern.",
+            system_instructions_override: None,
+            extra_long_lived_blocks: &[],
+        };
+        shaper.shape(&mut req, &ctx).expect("shape ok");
+
+        let blocks = req.system_blocks.as_ref().expect("blocks");
+        assert_eq!(
+            blocks.len(),
+            3,
+            "fallback build_system_prompt produces all 3 slots"
+        );
+        assert!(blocks[0].text.contains("Claude Code"));
+        assert!(blocks[1].text.contains("NOT Claude Code"));
+        assert!(blocks[2].text.contains("I am Pattern."));
     }
 }
