@@ -260,25 +260,41 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                 // Capture pre-write state.
                 let pre = pre_write_state(&*adapter, &agent_id, &label)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Append: {e}")))?;
-                let existing = pre
-                    .rendered_content
-                    .as_deref()
-                    .unwrap_or_default()
-                    .to_string();
-                let combined = if existing.is_empty() {
-                    content.clone()
-                } else {
-                    format!("{existing}{content}")
+
+                // Get or create the block document.
+                let doc = match adapter.get_block(&agent_id, &label)
+                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Append: {e}")))?                {
+                    Some(doc) => doc,
+                    None => {
+                        let create = pattern_core::types::block::BlockCreate::new(
+                            label.clone(),
+                            MemoryBlockType::Working,
+                            BlockSchema::text(),
+                        )
+                        .with_description(DEFAULT_AUTO_CREATE_DESCRIPTION)
+                        .with_char_limit(DEFAULT_CHAR_LIMIT);
+                        adapter.create_block(&agent_id, create)
+                            .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Append: {e}")))?                    }
                 };
-                upsert_block_content(&*adapter, &agent_id, &label, &combined, None)
+
+                // Append via the StructuredDocument — proper Loro insert-at-end
+                // operation that preserves CRDT history and checks Append permission.
+                doc.append(&content, false)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Append: {e}")))?;
 
+                // Mark dirty and persist so the subscriber picks up the change.
+                adapter.mark_dirty(&agent_id, &label);
+                adapter.persist_block(&agent_id, &label)
+                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Append: {e}")))?;
+
+                // Record the block write for the snapshot attachment.
+                let post_content = doc.text_content();
                 record_block_write(
                     RecordBlockWriteParams {
                         adapter: &adapter,
                         agent_id: &agent_id,
                         label: &label,
-                        post_content: &combined,
+                        post_content: &post_content,
                         kind: BlockWriteKind::Appended,
                         pre: &pre,
                     },
@@ -288,38 +304,44 @@ impl EffectHandler<SessionContext> for MemoryHandler {
             }
             MemoryReq::Replace(label, old, new) => {
                 // Capture pre-write state (also validates existence).
-                let existing = adapter
-                    .get_rendered_content(&agent_id, &label)
-                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Replace: {e}")))?
-                    .ok_or_else(|| {
-                        EffectError::Handler(format!(
-                            "Pattern.Memory.Replace: no block named {label:?} for agent {agent_id:?}"
-                        ))
-                    })?;
-                let pre_hash = content_hash(&existing);
-                let replaced = existing.replace(&old, &new);
-                upsert_block_content(&*adapter, &agent_id, &label, &replaced, None)
+                let pre = pre_write_state(&*adapter, &agent_id, &label)
+                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Replace: {e}")))?;
+                if !pre.existed {
+                    return Err(EffectError::Handler(format!(
+                        "Pattern.Memory.Replace: no block named {label:?} for agent {agent_id:?}"
+                    )));
+                }
+
+                // Get the block document.
+                let doc = adapter.get_block(&agent_id, &label)
+                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Replace: {e}")))?                    .ok_or_else(|| EffectError::Handler(format!(
+                        "Pattern.Memory.Replace: block {label:?} disappeared between pre_write_state and get_block"
+                    )))?;
+
+                // Surgical replace via StructuredDocument — proper Loro splice
+                // that preserves CRDT operation history.
+                let found = doc.replace_text(&old, &new, false)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Replace: {e}")))?;
 
-                // We already have the pre-content from the existence check.
-                let pre = PreWriteState {
-                    existed: true,
-                    rendered_content: Some(existing),
-                    content_hash: Some(pre_hash),
-                    memory_id: None,
-                    block_type: None,
-                };
-                record_block_write(
-                    RecordBlockWriteParams {
-                        adapter: &adapter,
-                        agent_id: &agent_id,
-                        label: &label,
-                        post_content: &replaced,
-                        kind: BlockWriteKind::Replaced,
-                        pre: &pre,
-                    },
-                    &*adapter,
-                );
+                if found {
+                    // Mark dirty and persist.
+                    adapter.mark_dirty(&agent_id, &label);
+                    adapter.persist_block(&agent_id, &label)
+                        .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Replace: {e}")))?;
+
+                    let post_content = doc.text_content();
+                    record_block_write(
+                        RecordBlockWriteParams {
+                            adapter: &adapter,
+                            agent_id: &agent_id,
+                            label: &label,
+                            post_content: &post_content,
+                            kind: BlockWriteKind::Replaced,
+                            pre: &pre,
+                        },
+                        &*adapter,
+                    );
+                }
                 cx.respond(())
             }
             MemoryReq::Search(query) => {
