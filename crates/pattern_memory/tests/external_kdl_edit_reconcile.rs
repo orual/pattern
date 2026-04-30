@@ -208,7 +208,11 @@ async fn external_kdl_edit_reconciles_task_index() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Verify the initial file was emitted.
-    let kdl_path = mount_path.join(format!("{block_id}.kdl"));
+    let kdl_path = mount_path
+        .join("blocks")
+        .join(format!("@{AGENT}"))
+        .join("working")
+        .join(format!("{LABEL}.kdl"));
     assert!(
         kdl_path.exists(),
         "initial .kdl file should exist at {}: subscriber may not have started yet",

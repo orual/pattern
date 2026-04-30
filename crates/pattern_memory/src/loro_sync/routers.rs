@@ -135,7 +135,12 @@ impl EventRouter for BlockFanoutRouter {
                     continue;
                 }
 
-                let Some(block_id) = block_id_from_path(path) else {
+                let block_id = if let Some(id) = self.cache.resolve_block_id_from_path(path) {
+                    id
+                } else if let Some(id) = block_id_from_path(path) {
+                    // Legacy fallback: flat files from before the agent-scoped layout.
+                    id
+                } else {
                     continue;
                 };
 

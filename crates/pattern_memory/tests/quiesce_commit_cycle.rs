@@ -363,9 +363,9 @@ async fn quiesce_commit_preserves_task_index() {
     );
 
     // Collect emitted canonical file paths for the quiesce fsync list.
-    let tl_kdl_path = root.join(format!("{tl_block_id}.kdl"));
-    let skill_md_path = root.join(format!("{skill_block_id}.md"));
-    let text_md_path = root.join(format!("{text_block_id}.md"));
+    let tl_kdl_path = root.join("blocks").join(format!("@{AGENT}")).join("working").join(format!("{TL_LABEL}.kdl"));
+    let skill_md_path = root.join("blocks").join(format!("@{AGENT}")).join("working").join(format!("{SKILL_LABEL}.md"));
+    let text_md_path = root.join("blocks").join(format!("@{AGENT}")).join("working").join(format!("{TEXT_LABEL}.md"));
 
     assert!(
         tl_kdl_path.exists(),

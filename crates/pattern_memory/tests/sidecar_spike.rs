@@ -142,9 +142,15 @@ fn sidecar_validation_spike() {
     // Phase A: basic pattern-jj ops (5 ops)
     // -----------------------------------------------------------------------
 
+    // Create agent block directories for the test.
+    std::fs::create_dir_all(mount_path.join("blocks/@spike/core"))
+        .expect("create core dir");
+    std::fs::create_dir_all(mount_path.join("blocks/@spike/working"))
+        .expect("create working dir");
+
     // Op 1: write a block file.
     std::fs::write(
-        mount_path.join("blocks/core/notes.md"),
+        mount_path.join("blocks/@spike/core/notes.md"),
         "# Notes\n\nFirst entry.\n",
     )
     .expect("write notes.md");
@@ -166,7 +172,7 @@ fn sidecar_validation_spike() {
 
     // Op 4: write another file.
     std::fs::write(
-        mount_path.join("blocks/working/scratch.md"),
+        mount_path.join("blocks/@spike/working/scratch.md"),
         "# Scratch\n\nWorking memory.\n",
     )
     .expect("write scratch.md");
@@ -189,13 +195,13 @@ fn sidecar_validation_spike() {
 
     // Op 8: modify a pattern file on the feature branch.
     std::fs::write(
-        mount_path.join("blocks/core/notes.md"),
+        mount_path.join("blocks/@spike/core/notes.md"),
         "# Notes\n\nFirst entry.\nFeature branch edit.\n",
     )
     .expect("write notes.md on feature branch");
 
     // Op 9: commit on feature branch.
-    git(root, &["add", ".pattern/shared/blocks/core/notes.md"]);
+    git(root, &["add", ".pattern/shared/blocks/@spike/core/notes.md"]);
     git(root, &["commit", "-m", "feature branch edit"]);
 
     // Op 10: switch back to main — notes.md reverts to pre-feature state.
@@ -211,7 +217,7 @@ fn sidecar_validation_spike() {
     git(root, &["checkout", main_branch]);
 
     // Verify notes.md is back to the pre-feature state.
-    let notes = std::fs::read_to_string(mount_path.join("blocks/core/notes.md"))
+    let notes = std::fs::read_to_string(mount_path.join("blocks/@spike/core/notes.md"))
         .expect("read notes.md after checkout main");
     assert!(
         !notes.contains("Feature branch edit"),
@@ -235,7 +241,7 @@ fn sidecar_validation_spike() {
     git(root, &["merge", "feature-branch", "-m", "merge feature"]);
 
     // Op 13: verify notes.md now has the feature content.
-    let notes_after_merge = std::fs::read_to_string(mount_path.join("blocks/core/notes.md"))
+    let notes_after_merge = std::fs::read_to_string(mount_path.join("blocks/@spike/core/notes.md"))
         .expect("read notes.md after merge");
     assert!(
         notes_after_merge.contains("Feature branch edit"),
@@ -263,7 +269,7 @@ fn sidecar_validation_spike() {
 
     // Op 15: write a new block file.
     std::fs::write(
-        mount_path.join("blocks/core/context.md"),
+        mount_path.join("blocks/@spike/core/context.md"),
         "# Context\n\nAdded after merge.\n",
     )
     .expect("write context.md");
@@ -319,9 +325,9 @@ fn sidecar_validation_spike() {
 
     // Op 23: write to a pattern file. The directory may have been removed by
     // git reset, so recreate it if needed.
-    std::fs::create_dir_all(mount_path.join("blocks/working")).expect("ensure blocks/working");
+    std::fs::create_dir_all(mount_path.join("blocks/@spike/working")).expect("ensure blocks/@spike/working");
     std::fs::write(
-        mount_path.join("blocks/working/scratch.md"),
+        mount_path.join("blocks/@spike/working/scratch.md"),
         "# Scratch\n\nUpdated concurrently.\n",
     )
     .expect("write scratch.md update");
@@ -498,8 +504,8 @@ fn sidecar_validation_spike() {
     // verify the filesystem state is consistent regardless).
     // -----------------------------------------------------------------------
 
-    // Op 32: direct write to blocks/core/notes.md (human-style external edit).
-    let notes_path = mount_path.join("blocks/core/notes.md");
+    // Op 32: direct write to blocks/@spike/core/notes.md (human-style external edit).
+    let notes_path = mount_path.join("blocks/@spike/core/notes.md");
     std::fs::write(
         &notes_path,
         "# Notes\n\nExternal edit 1: human added this line.\n",
@@ -507,7 +513,7 @@ fn sidecar_validation_spike() {
     .expect("external edit 1");
 
     // Op 33: direct write to a second file (simulating concurrent editor).
-    let context_path = mount_path.join("blocks/core/context.md");
+    let context_path = mount_path.join("blocks/@spike/core/context.md");
     std::fs::write(
         &context_path,
         "# Context\n\nExternal edit 2: context updated externally.\n",
@@ -515,7 +521,7 @@ fn sidecar_validation_spike() {
     .expect("external edit 2");
 
     // Op 34: direct write to a working block file.
-    let scratch_path = mount_path.join("blocks/working/scratch.md");
+    let scratch_path = mount_path.join("blocks/@spike/working/scratch.md");
     std::fs::write(
         &scratch_path,
         "# Scratch\n\nExternal edit 3: scratch updated externally.\n",

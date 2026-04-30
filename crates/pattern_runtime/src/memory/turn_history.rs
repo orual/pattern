@@ -106,8 +106,8 @@ impl TurnHistory {
         // Convert DB messages to core messages.
         let core_messages: Vec<Message> = db_messages
             .iter()
-            .map(db_message_to_core)
-            .collect::<Result<Vec<_>, _>>()?;
+            .filter_map(|m| db_message_to_core(m).ok())
+            .collect::<Vec<_>>();
 
         // Group by batch_id, maintaining position order within each batch.
         // Use a stable partition: walk messages in order, collecting into

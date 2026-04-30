@@ -22,8 +22,8 @@ use pattern_core::types::memory_types::{
     MemoryPermission, MemoryResult, MemorySearchResult, MemorySearchScope, SearchMode,
     SearchOptions, SharedBlockInfo, UndoRedoDepth, UndoRedoOp,
 };
-use pattern_db::ConstellationDb;
 use pattern_db::Json;
+use pattern_db::{ConstellationDb, MemoryBlockType};
 use serde_json::Value as JsonValue;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -111,6 +111,11 @@ pub struct MemoryCache {
     /// [`Self::block_change_notifier`] and push wake activations onto
     /// the agent's mailbox in response.
     block_change_notifier: crate::subscriber::BlockChangeNotifier,
+
+    /// Reverse mapping from canonical file path to block_id. Populated
+    /// when subscribers are spawned; used by `BlockFanoutRouter` to
+    /// resolve file-change events back to their block_id.
+    path_to_block_id: Arc<DashMap<PathBuf, String>>,
 }
 
 /// Outcome of [`MemoryCache::pause_subscribers`].
@@ -139,6 +144,7 @@ impl MemoryCache {
             supervisor_state: Arc::new(SupervisorState::new()),
             supervisor_task: None,
             block_change_notifier: crate::subscriber::BlockChangeNotifier::new(),
+            path_to_block_id: Arc::new(DashMap::new()),
         }
     }
 
@@ -161,6 +167,7 @@ impl MemoryCache {
             supervisor_state: Arc::new(SupervisorState::new()),
             supervisor_task: None,
             block_change_notifier: crate::subscriber::BlockChangeNotifier::new(),
+            path_to_block_id: Arc::new(DashMap::new()),
         }
     }
 
@@ -229,6 +236,7 @@ impl MemoryCache {
                 let respawn_reembed_tx = reembed_tx;
                 let respawn_heartbeat_tx = heartbeat_tx;
                 let respawn_block_change_notifier = self.block_change_notifier.clone();
+                let respawn_path_to_block_id = Arc::clone(&self.path_to_block_id);
 
                 let respawn_fn: Arc<dyn Fn(&str) + Send + Sync> =
                     Arc::new(move |block_id: &str| {
@@ -267,6 +275,7 @@ impl MemoryCache {
                             Arc::clone(&respawn_db),
                             Arc::clone(&respawn_subscribers),
                             respawn_block_change_notifier.clone(),
+                            Arc::clone(&respawn_path_to_block_id),
                         );
                     });
 
@@ -540,14 +549,14 @@ impl MemoryCache {
             .mem()?;
 
         // Now re-acquire the lock to update the cache entry.
-        let mut entry = self
-            .blocks
-            .get_mut(&block_id)
-            .ok_or_else(|| MemoryError::WriteToMissingBlock {
-                agent_id: agent_id.to_string(),
-                label: label.to_string(),
-                op: "persist_block",
-            })?;
+        let mut entry =
+            self.blocks
+                .get_mut(&block_id)
+                .ok_or_else(|| MemoryError::WriteToMissingBlock {
+                    agent_id: agent_id.to_string(),
+                    label: label.to_string(),
+                    op: "persist_block",
+                })?;
 
         if let Some(seq) = new_seq {
             entry.last_seq = seq;
@@ -808,6 +817,7 @@ impl MemoryCache {
             Arc::clone(&self.db),
             Arc::clone(&self.subscribers),
             self.block_change_notifier.clone(),
+            Arc::clone(&self.path_to_block_id),
         );
     }
 
@@ -1045,6 +1055,14 @@ impl MemoryCache {
         block_id: &str,
     ) -> Option<dashmap::mapref::one::Ref<'_, String, SubscriberHandle>> {
         self.subscribers.get(block_id)
+    }
+
+    /// Resolve a filesystem path back to its block_id.
+    ///
+    /// Used by `BlockFanoutRouter` to map file-change events from the
+    /// filesystem watcher to their corresponding block_id in the cache.
+    pub(crate) fn resolve_block_id_from_path(&self, path: &std::path::Path) -> Option<String> {
+        self.path_to_block_id.get(path).map(|e| e.value().clone())
     }
 
     /// Lazily spawn a subscriber for a cached block using the cache's own
@@ -1302,7 +1320,7 @@ impl MemoryCache {
         label: String,
         snapshot: Vec<u8>,
         schema: pattern_core::types::memory_types::BlockSchema,
-        block_type: pattern_core::types::memory_types::MemoryBlockType,
+        block_type: MemoryBlockType,
     ) -> Result<(), MemoryError> {
         use pattern_core::memory::StructuredDocument;
         use pattern_core::types::memory_types::BlockMetadata;
@@ -1401,6 +1419,68 @@ impl Drop for MemoryCache {
 /// Grouping them into a helper struct would add indirection without reducing
 /// the caller's need to supply each piece individually.
 #[allow(clippy::too_many_arguments)]
+// ---------------------------------------------------------------------------
+// Block file path helpers
+// ---------------------------------------------------------------------------
+
+/// Compute the canonical filesystem path for a block file.
+///
+/// Layout: `{mount}/blocks/@{agent_id}/{type_dir}/{label}.{ext}`
+///
+/// Agent subdirectories are created lazily by the caller; this function
+/// only computes the path.
+fn block_file_path(
+    mount_path: &std::path::Path,
+    agent_id: &str,
+    block_type: MemoryBlockType,
+    label: &str,
+    ext: &str,
+) -> PathBuf {
+    let type_dir = match block_type {
+        MemoryBlockType::Core => "core",
+        MemoryBlockType::Working => "working",
+        _ => "working", // Future block types default to working directory
+    };
+    let safe_label = sanitize_block_label(label);
+    mount_path
+        .join("blocks")
+        .join(format!("@{agent_id}"))
+        .join(type_dir)
+        .join(format!("{safe_label}.{ext}"))
+}
+
+/// Sanitize a block label for use as a filename.
+///
+/// Allows alphanumeric, hyphen, underscore, and dot. Everything else
+/// becomes a hyphen. Consecutive hyphens are collapsed.
+fn sanitize_block_label(label: &str) -> String {
+    let raw: String = label
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    // Collapse consecutive hyphens.
+    let mut result = String::with_capacity(raw.len());
+    let mut prev_hyphen = false;
+    for c in raw.chars() {
+        if c == '-' {
+            if !prev_hyphen {
+                result.push(c);
+            }
+            prev_hyphen = true;
+        } else {
+            result.push(c);
+            prev_hyphen = false;
+        }
+    }
+    result
+}
+
 pub(crate) fn spawn_subscriber_for_block(
     block_id: &str,
     schema: BlockSchema,
@@ -1411,6 +1491,7 @@ pub(crate) fn spawn_subscriber_for_block(
     db: Arc<ConstellationDb>,
     subscribers: Arc<DashMap<String, SubscriberHandle>>,
     block_change_notifier: crate::subscriber::BlockChangeNotifier,
+    path_to_block_id: Arc<DashMap<PathBuf, String>>,
 ) {
     // Don't double-spawn.
     if subscribers.contains_key(block_id) {
@@ -1429,7 +1510,27 @@ pub(crate) fn spawn_subscriber_for_block(
     // the block file path for the SyncedDoc. The extension must match what
     // render_canonical_from_disk_doc would return for this schema.
     let ext = block_schema_extension(&schema);
-    let block_file_path = mount_path.join(format!("{block_id}.{ext}"));
+    let file_path = block_file_path(
+        &mount_path,
+        doc.agent_id(),
+        doc.block_type(),
+        doc.label(),
+        &ext,
+    );
+    // Ensure the agent/type directory exists (lazy creation).
+    if let Some(parent) = file_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::warn!(
+                block_id = %block_id,
+                path = ?parent,
+                error = %e,
+                "failed to create block directory; file sync disabled for this block"
+            );
+            return;
+        }
+    }
+    // Register the reverse mapping (path -> block_id) for the filesystem watcher.
+    path_to_block_id.insert(file_path.clone(), block_id.to_string());
 
     // Build the SyncedDoc for this block. RouterOwned mode: no internal
     // filesystem watcher (the mount-wide DirWatcher<BlockFanoutRouter> handles
@@ -1447,7 +1548,7 @@ pub(crate) fn spawn_subscriber_for_block(
     ));
     let synced_doc =
         match crate::loro_sync::SyncedDoc::open_router_owned(crate::loro_sync::SyncedDocConfig {
-            path: block_file_path,
+            path: file_path,
             memory_doc: memory_doc_arc,
             bridge,
             event_channel_bound: 64,
@@ -2421,7 +2522,6 @@ impl MemoryStore for MemoryCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pattern_core::types::memory_types::MemoryBlockType;
     use pattern_db::models::MemoryBlock;
 
     fn test_dbs() -> (tempfile::TempDir, Arc<ConstellationDb>) {
@@ -3546,6 +3646,7 @@ mod tests {
             Arc::clone(&db),
             Arc::clone(&subscribers),
             notifier.clone(),
+            Arc::new(DashMap::new()),
         );
         assert!(
             subscribers.contains_key(block_id),
@@ -3580,6 +3681,7 @@ mod tests {
             Arc::clone(&db),
             Arc::clone(&subscribers),
             notifier,
+            Arc::new(DashMap::new()),
         );
         assert!(
             subscribers.contains_key(block_id),
@@ -3805,6 +3907,7 @@ mod tests {
             Arc::clone(&db),
             Arc::clone(&subscribers),
             crate::subscriber::BlockChangeNotifier::new(),
+            Arc::new(DashMap::new()),
         );
 
         // The MemoryCache needs a populated `blocks` map for `apply_external_edit`
@@ -3937,6 +4040,7 @@ mod tests {
             Arc::clone(&db),
             Arc::clone(&subscribers),
             crate::subscriber::BlockChangeNotifier::new(),
+            Arc::new(DashMap::new()),
         );
 
         // Build the cache with both mount_path (so apply_external_edit reconstructs
@@ -4184,7 +4288,7 @@ mod tests {
         // Create a block owned by the parent.
         let parent_bc = pattern_core::types::block::BlockCreate::new(
             "notes".to_string(),
-            pattern_core::types::memory_types::MemoryBlockType::Working,
+            MemoryBlockType::Working,
             pattern_core::types::memory_types::BlockSchema::text(),
         );
         cache.create_block(parent_id, parent_bc).unwrap();
@@ -4192,7 +4296,7 @@ mod tests {
         // Create a block owned by another agent — should NOT appear in fork.
         let other_bc = pattern_core::types::block::BlockCreate::new(
             "other-notes".to_string(),
-            pattern_core::types::memory_types::MemoryBlockType::Working,
+            MemoryBlockType::Working,
             pattern_core::types::memory_types::BlockSchema::text(),
         );
         cache.create_block(other_id, other_bc).unwrap();
@@ -4234,7 +4338,7 @@ mod tests {
 
         let bc = pattern_core::types::block::BlockCreate::new(
             "notes".to_string(),
-            pattern_core::types::memory_types::MemoryBlockType::Working,
+            MemoryBlockType::Working,
             pattern_core::types::memory_types::BlockSchema::text(),
         );
         cache.create_block(parent_id, bc).unwrap();

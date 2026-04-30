@@ -263,7 +263,7 @@ async fn smoke_e2e() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Files are emitted as `<mount_path>/<block_id>.<ext>`.
-    let notes_md = mount.mount_path.join(format!("{notes_block_id}.md"));
+    let notes_md = mount.mount_path.join("blocks").join("@smoke-agent").join("core").join("notes.md");
     assert!(
         notes_md.exists(),
         "notes .md should exist at {}",
@@ -275,14 +275,14 @@ async fn smoke_e2e() {
         "notes .md should contain 'hello pattern', got: {md_content:?}"
     );
 
-    let config_kdl = mount.mount_path.join(format!("{config_block_id}.kdl"));
+    let config_kdl = mount.mount_path.join("blocks").join("@smoke-agent").join("working").join("config.kdl");
     assert!(
         config_kdl.exists(),
         "config .kdl should exist at {}",
         config_kdl.display()
     );
 
-    let events_jsonl = mount.mount_path.join(format!("{events_block_id}.jsonl"));
+    let events_jsonl = mount.mount_path.join("blocks").join("@smoke-agent").join("working").join("events.jsonl");
     assert!(
         events_jsonl.exists(),
         "events .jsonl should exist at {}",

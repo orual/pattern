@@ -269,7 +269,11 @@ async fn quiesce_with_live_subscriber_full_path() {
     cache.persist_block(agent, "live-sub-block").unwrap();
 
     // Wait for the subscriber worker to emit the file (debounce: 50 ms; budget: 2 s).
-    let expected_file = mount_dir.path().join(format!("{block_id}.md"));
+    let expected_file = mount_dir.path()
+        .join("blocks")
+        .join(format!("@{agent}"))
+        .join("working")
+        .join("live-sub-block.md");
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while !expected_file.exists() && std::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(20)).await;

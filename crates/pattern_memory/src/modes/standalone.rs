@@ -13,9 +13,7 @@
 //! │   ├── .pattern.kdl
 //! │   ├── .jj/                   (created by jj git init)
 //! │   ├── memory.db              (created at attach time by ConstellationDb)
-//! │   ├── blocks/
-//! │   │   ├── core/
-//! │   │   └── working/
+//! │   ├── blocks/             ← @agent/{core,working}/ created lazily
 //! │   ├── personas/
 //! │   └── lib/
 //! └── messages/
@@ -50,7 +48,7 @@ pub fn init(
     let mount_path = paths.standalone_mount_path(project_id);
 
     // Create the directory structure.
-    for subdir in ["blocks/core", "blocks/working", "personas", "lib"] {
+    for subdir in ["blocks", "personas", "lib"] {
         std::fs::create_dir_all(mount_path.join(subdir)).map_err(|e| ModeError::Io {
             path: mount_path.join(subdir),
             source: e,
@@ -136,8 +134,7 @@ mod tests {
 
         let mode = init(&project_id, &adapter, &paths).unwrap();
 
-        assert!(mount_path.join("blocks/core").is_dir());
-        assert!(mount_path.join("blocks/working").is_dir());
+        assert!(mount_path.join("blocks").is_dir());
         assert!(mount_path.join("personas").is_dir());
         assert!(mount_path.join("lib").is_dir());
         assert!(mount_path.join(".pattern.kdl").is_file());

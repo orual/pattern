@@ -25,9 +25,7 @@
 //! │       ├── .pattern.kdl
 //! │       ├── .jj/             ← pattern-jj, gitignored by host
 //! │       ├── memory.db        (created at attach time by ConstellationDb)
-//! │       ├── blocks/
-//! │       │   ├── core/
-//! │       │   └── working/
+//! │       ├── blocks/             ← @agent/{core,working}/ created lazily
 //! │       ├── personas/
 //! │       └── lib/
 //! └── src/                     ← normal project files
@@ -65,7 +63,7 @@ pub fn init(
     let mount_path = project_root.join(".pattern").join("shared");
 
     // Create the directory structure. `create_dir_all` is race-safe per std docs.
-    for subdir in ["blocks/core", "blocks/working", "personas", "lib"] {
+    for subdir in ["blocks", "personas", "lib"] {
         std::fs::create_dir_all(mount_path.join(subdir)).map_err(|e| ModeError::Io {
             path: mount_path.join(subdir),
             source: e,
@@ -161,8 +159,7 @@ mod tests {
         let mode = init(tmp.path(), "test", &adapter).unwrap();
 
         let mount_path = tmp.path().join(".pattern").join("shared");
-        assert!(mount_path.join("blocks/core").is_dir());
-        assert!(mount_path.join("blocks/working").is_dir());
+        assert!(mount_path.join("blocks").is_dir());
         assert!(mount_path.join("personas").is_dir());
         assert!(mount_path.join("lib").is_dir());
         assert!(mount_path.join(".pattern.kdl").is_file());
