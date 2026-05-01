@@ -214,7 +214,15 @@ globset = "0.4"
 # Template rendering (zellij layout generation)
 askama = "0.15"
 
-# KDL parsing (zellij layout validation in tests)
+# KDL parsing — core to persona discovery, .pattern.kdl config, block file
+# storage, and zellij layout validation. `v1-fallback` is load-bearing:
+# knus (used by the persona loader) accepts KDL v1 syntax permissively, so
+# user-authored configs commonly use v1 idioms like bare `true`/`false`.
+# Without v1-fallback, the v6 parser strict-rejects those, and the daemon
+# silently fails persona discovery while CLI/tests pass via feature
+# unification. Every crate that depends on kdl MUST use `workspace = true`
+# so this feature attaches to its direct edge — do not declare a bare
+# `kdl = "6"` per-crate dep.
 kdl = { version = "6", features = ["v1-fallback"] }
 
 

@@ -49,7 +49,7 @@ use pattern_core::types::ids::PersonaId;
 use pattern_core::types::message::Message;
 use pattern_core::types::origin::MessageOrigin;
 use tokio::sync::mpsc;
-
+use crate::mailbox::{Mailbox, MailboxInput};
 use crate::mailbox::MailboxInput;
 use crate::router::RouterError;
 
@@ -81,8 +81,9 @@ pub enum SessionStatus {
 #[derive(Debug)]
 enum AgentSlot {
     /// Persona has a live session; messages are routed through the sender.
+    /// Persona has a live session; messages are routed through its mailbox.
     Active {
-        tx: mpsc::UnboundedSender<MailboxInput>,
+        mailbox: Arc<Mailbox>,
     },
     /// Persona is known but has no live session; messages are queued for
     /// future replay on promotion.

@@ -50,6 +50,8 @@ data File a where
   ReplaceLines :: Path -> Int -> Int -> Content -> File ()
   -- | Delete lines @from@..@to@ (1-indexed, inclusive).
   DeleteLines :: Path -> Int -> Int -> File ()
+  -- | Read lines @from@..@to@ (1-indexed, inclusive).
+  ReadLines  :: Path -> Int -> Int -> File Content
 
 read :: Member File effs => Path -> Eff effs Content
 read p = Freer.send (Read p)
@@ -93,3 +95,7 @@ replaceLines p from to c = Freer.send (ReplaceLines p from to c)
 -- | Delete lines @from@..@to@ (1-indexed, inclusive).
 deleteLines :: Member File effs => Path -> Int -> Int -> Eff effs ()
 deleteLines p from to = Freer.send (DeleteLines p from to)
+
+-- | Read lines @from@..@to@ (1-indexed, inclusive).
+readLines :: Member File effs => Path -> Int -> Int -> Eff effs Content
+readLines p from to = Freer.send (ReadLines p from to)

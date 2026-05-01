@@ -29,7 +29,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 # Serialization formats
-kdl = "6"
+kdl = { workspace = true }
 saphyr = { workspace = true }
 blake3 = { workspace = true }
 

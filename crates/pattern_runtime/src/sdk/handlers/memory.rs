@@ -59,7 +59,6 @@ impl DescribeEffect for MemoryHandler {
                 "Search         :: Query -> Memory [BlockHandle]",
                 "Recall         :: BlockHandle -> Memory Content",
                 "GetShared      :: Owner -> BlockHandle -> Memory Content",
-                "WriteToPersona :: BlockHandle -> Content -> Memory ()",
             ]),
             type_defs: std::borrow::Cow::Borrowed(&[
                 "type BlockHandle = Text",
@@ -79,7 +78,6 @@ impl DescribeEffect for MemoryHandler {
                 "search :: Member Memory effs => Query -> Eff effs [BlockHandle]\nsearch q = send (Search q)",
                 "recall :: Member Memory effs => BlockHandle -> Eff effs Content\nrecall h = send (Recall h)",
                 "getShared :: Member Memory effs => Owner -> BlockHandle -> Eff effs Content\ngetShared o h = send (GetShared o h)",
-                "writeToPersona :: Member Memory effs => BlockHandle -> Content -> Eff effs ()\nwriteToPersona h c = send (WriteToPersona h c)",
             ]),
         }
     }
@@ -111,7 +109,6 @@ impl EffectHandler<SessionContext> for MemoryHandler {
             MemoryReq::Search(_) => "Search",
             MemoryReq::Recall(_) => "Recall",
             MemoryReq::GetShared(_, _) => "GetShared",
-            MemoryReq::WriteToPersona(_, _) => "WriteToPersona",
         };
         crate::sdk::effect_classes::check_effect_class(
             cx.user().capabilities(),
@@ -151,14 +148,8 @@ impl EffectHandler<SessionContext> for MemoryHandler {
             MemoryReq::Put(label, content, description) => {
                 let pre = pre_write_state(&*adapter, &scope, &label)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Put: {e}")))?;
-                upsert_block_content(
-                    &*adapter,
-                    &scope,
-                    &label,
-                    &content,
-                    description.as_deref(),
-                )
-                .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Put: {e}")))?;
+                upsert_block_content(&*adapter, &scope, &label, &content, description.as_deref())
+                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Put: {e}")))?;
 
                 let kind = if pre.existed {
                     BlockWriteKind::Replaced
@@ -288,12 +279,12 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Replace: {e}")))?;
 
                 if found {
-                    adapter
-                        .mark_dirty(&scope, &label)
-                        .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Replace: {e}")))?;
-                    adapter
-                        .persist_block(&scope, &label)
-                        .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Replace: {e}")))?;
+                    adapter.mark_dirty(&scope, &label).map_err(|e| {
+                        EffectError::Handler(format!("Pattern.Memory.Replace: {e}"))
+                    })?;
+                    adapter.persist_block(&scope, &label).map_err(|e| {
+                        EffectError::Handler(format!("Pattern.Memory.Replace: {e}"))
+                    })?;
 
                     let post_content = doc.text_content();
                     record_block_write(
@@ -319,7 +310,7 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                     .search(&query, options, search_scope)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Search: {e}")))?;
                 let handles: Vec<String> = results.iter().map(|r| r.id.clone()).collect();
-                cx.respond(serde_json::to_string(&handles).unwrap_or_else(|_| "[]".to_string()))
+                cx.respond(handles)
             }
             MemoryReq::Recall(handle) => {
                 let entries = adapter
@@ -352,39 +343,6 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                         ))
                     })?;
                 cx.respond(doc.render())
-            }
-            MemoryReq::WriteToPersona(label, content) => {
-                // Explicit persona-scope write. The MemoryScope wrapper
-                // enforces policy — under CoreOnly/Full this returns
-                // IsolationDenied; under None it passes through.
-                let persona = cx.user().persona_scope();
-
-                let pre = pre_write_state(&*adapter, &persona, &label).map_err(|e| {
-                    EffectError::Handler(format!("Pattern.Memory.WriteToPersona: {e}"))
-                })?;
-
-                upsert_block_content(&*adapter, &persona, &label, &content, None).map_err(
-                    |e| EffectError::Handler(format!("Pattern.Memory.WriteToPersona: {e}")),
-                )?;
-
-                let kind = if pre.existed {
-                    BlockWriteKind::Replaced
-                } else {
-                    BlockWriteKind::Created
-                };
-                record_block_write(
-                    RecordBlockWriteParams {
-                        adapter: &adapter,
-                        scope: &persona,
-                        agent_id: &agent_id,
-                        label: &label,
-                        post_content: &content,
-                        kind,
-                        pre: &pre,
-                    },
-                    &*adapter,
-                );
-                cx.respond(())
             }
         })();
 

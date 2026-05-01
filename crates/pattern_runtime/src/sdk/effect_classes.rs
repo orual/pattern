@@ -66,12 +66,6 @@ pub const ALL_CLASSES: &[ConstructorClass] = &[
         class: EffectClass::Observe,
         runtime_check: RuntimeClassCheck::Skip,
     },
-    ConstructorClass {
-        module: "Memory",
-        constructor: "WriteToPersona",
-        class: EffectClass::MutateInternal,
-        runtime_check: RuntimeClassCheck::Enforce,
-    },
     // ── Pattern.Search (3) ───────────────────────────────────────────────
     ConstructorClass {
         module: "Search",
@@ -307,6 +301,12 @@ pub const ALL_CLASSES: &[ConstructorClass] = &[
     ConstructorClass {
         module: "File",
         constructor: "Read",
+        class: EffectClass::Observe,
+        runtime_check: RuntimeClassCheck::Enforce,
+    },
+    ConstructorClass {
+        module: "File",
+        constructor: "ReadLines",
         class: EffectClass::Observe,
         runtime_check: RuntimeClassCheck::Enforce,
     },

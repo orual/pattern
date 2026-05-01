@@ -15,7 +15,7 @@ pub enum FileReq {
     Read(String),
     #[core(module = "Pattern.File", name = "Write")]
     Write(String, String),
-    /// (path, glob) — empty glob is treated as `"*"` (match all).
+    /// (path, glob) - empty glob is treated as `"*"` (match all).
     #[core(module = "Pattern.File", name = "ListDir")]
     ListDir(String, String),
     /// Open a file, creating a `LoroSyncedFile` and auto-subscribing to
@@ -48,4 +48,9 @@ pub enum FileReq {
     /// Delete lines `from`..`to` (1-indexed, inclusive).
     #[core(module = "Pattern.File", name = "DeleteLines")]
     DeleteLines(String, i64, i64),
+    /// Read a line range from a file. `start` is 1-indexed, `count` is
+    /// how many lines to return. Response includes a header with line
+    /// numbers and total line count for navigation context.
+    #[core(module = "Pattern.File", name = "ReadLines")]
+    ReadLines(String, i64, i64),
 }

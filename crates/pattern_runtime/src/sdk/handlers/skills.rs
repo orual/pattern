@@ -111,7 +111,7 @@ impl EffectHandler<SessionContext> for SkillsHandler {
                     .iter()
                     .map(|info| serde_json::to_string(info).unwrap_or_default())
                     .collect();
-                cx.respond(items)
+                cx.respond(serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string()))
             }
             SkillsReq::GetMetadata(handle) => {
                 let result = handle_get_metadata(&*store, &scope, &handle)?;
@@ -137,7 +137,7 @@ impl EffectHandler<SessionContext> for SkillsHandler {
                     .iter()
                     .map(|info| serde_json::to_string(info).unwrap_or_default())
                     .collect();
-                cx.respond(items)
+                cx.respond(serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string()))
             }
             SkillsReq::GetUsageStats(handle) => {
                 let conn = cx.user().db().get().map_err(|e| {

@@ -439,6 +439,88 @@ impl LocalPtyBackend {
         }
     }
 
+    /// Read from the persistent PTY until the exit marker appears or `timeout`
+    /// expires. Unlike `read_until_prompt`, this scans for a per-call nonce
+    /// marker rather than `PROMPT_MARKER`, allowing newline-separated command
+    /// + echo to work (heredocs, multi-line constructs).
+    ///
+    /// After finding the marker, continues reading until `PROMPT_MARKER` to
+    /// drain the shell's prompt so it doesn't leak into the next operation.
+    fn read_until_exit_marker(
+        &self,
+        marker: &str,
+        timeout: Duration,
+    ) -> Result<String, ShellError> {
+        let deadline = Instant::now() + timeout;
+        let mut output = String::new();
+        let search_pattern = format!("{marker}:");
+
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(ShellError::Timeout(timeout));
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            let poll_ms =
+                i32::try_from(remaining.as_millis().min(i32::MAX as u128)).unwrap_or(i32::MAX);
+
+            let chunk_result = {
+                let mut guard = self.session.lock().unwrap();
+                let session = guard.as_mut().ok_or(ShellError::SessionNotInitialized)?;
+
+                let pollfd = PollFd::new(session.pty.as_fd(), PollFlags::POLLIN);
+                let mut fds = [pollfd];
+                let timeout_obj = PollTimeout::try_from(poll_ms).unwrap_or(PollTimeout::ZERO);
+                match poll(&mut fds, timeout_obj) {
+                    Ok(0) => return Err(ShellError::Timeout(timeout)),
+                    Ok(_) => {
+                        let mut buf = [0u8; 4096];
+                        match session.pty.read(&mut buf) {
+                            Ok(0) => PollOutcome::Eof,
+                            Ok(n) => {
+                                PollOutcome::Data(String::from_utf8_lossy(&buf[..n]).to_string())
+                            }
+                            Err(e) if e.raw_os_error() == Some(5) => PollOutcome::Eof,
+                            Err(e) => PollOutcome::Io(e),
+                        }
+                    }
+                    Err(Errno::EINTR) => {
+                        std::thread::sleep(Duration::from_millis(1));
+                        continue;
+                    }
+                    Err(e) => PollOutcome::PollError(e),
+                }
+            };
+
+            match chunk_result {
+                PollOutcome::Data(chunk) => {
+                    trace!(chunk_len = chunk.len(), "read chunk from PTY (marker mode)");
+                    output.push_str(&chunk);
+                    // Debug: log what we're seeing
+                    let has_marker = output.contains(&search_pattern);
+                    let has_prompt = output.contains(PROMPT_MARKER);
+                    eprintln!(
+                        "[read_until_exit_marker] chunk=`{}` output=`{:?}` len={} has_marker={} has_prompt={}",
+                        chunk,
+                        output.as_bytes(),
+                        output.len(),
+                        has_marker,
+                        has_prompt
+                    );
+                    if has_marker && has_prompt {
+                        let stripped = Self::strip_ansi(&output);
+                        return Ok(stripped);
+                    }
+                }
+                PollOutcome::Eof => return Err(ShellError::SessionDied),
+                PollOutcome::Io(e) => return Err(ShellError::Io(e)),
+                PollOutcome::PollError(e) => {
+                    return Err(ShellError::PtyError(format!("poll failed: {e}")));
+                }
+            }
+        }
+    }
+
     /// Drop and re-create the persistent session after a `SessionDied`.
     fn reinitialize_session(&self) -> Result<(), ShellError> {
         {
@@ -662,7 +744,18 @@ impl ShellBackend for LocalPtyBackend {
             .trim_start_matches('\n')
             .trim_start_matches('\r');
 
-        let (output, exit_code) = Self::parse_exit_code(output_after_echo, &exit_marker)?;
+        let (output, exit_code) = match Self::parse_exit_code(output_after_echo, &exit_marker) {
+            Ok(pair) => pair,
+            Err(e @ ShellError::ExitCodeParseFailed) => {
+                // The session is in an unknown state (e.g. a heredoc left the
+                // shell waiting for a delimiter). Reinitialize so subsequent
+                // commands don't fail too.
+                warn!("exit-code parse failed; reinitializing shell session");
+                let _ = self.reinitialize_session();
+                return Err(e);
+            }
+            Err(e) => return Err(e),
+        };
 
         if let Err(e) = self.refresh_cwd() {
             warn!(error = %e, "failed to refresh cwd after command");

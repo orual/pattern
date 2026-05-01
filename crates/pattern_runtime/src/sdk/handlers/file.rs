@@ -73,6 +73,7 @@ impl DescribeEffect for FileHandler {
                 "InsertLines :: Path -> Int -> Content -> File ()",
                 "ReplaceLines :: Path -> Int -> Int -> Content -> File ()",
                 "DeleteLines :: Path -> Int -> Int -> File ()",
+                "ReadLines  :: Path -> Int -> Int -> File Content",
             ]),
             type_defs: std::borrow::Cow::Borrowed(&[
                 "type Path = Text",
@@ -94,6 +95,7 @@ impl DescribeEffect for FileHandler {
                 "insertLines :: Member File effs => Path -> Int -> Content -> Eff effs ()\ninsertLines p n c = Freer.send (InsertLines p n c)",
                 "replaceLines :: Member File effs => Path -> Int -> Int -> Content -> Eff effs ()\nreplaceLines p from to c = Freer.send (ReplaceLines p from to c)",
                 "deleteLines :: Member File effs => Path -> Int -> Int -> Eff effs ()\ndeleteLines p from to = Freer.send (DeleteLines p from to)",
+                "readLines :: Member File effs => Path -> Int -> Int -> Eff effs Content\nreadLines p start count = Freer.send (ReadLines p start count)",
             ]),
         }
     }
@@ -125,6 +127,7 @@ where
             FileReq::InsertLines(_, _, _) => "InsertLines",
             FileReq::ReplaceLines(_, _, _, _) => "ReplaceLines",
             FileReq::DeleteLines(_, _, _) => "DeleteLines",
+            FileReq::ReadLines(_, _, _) => "ReadLines",
         };
         crate::sdk::effect_classes::check_effect_class(
             cx.user().capabilities(),
@@ -240,6 +243,27 @@ where
                 sf.delete_lines(from as usize, to as usize)
                     .map_err(|e| EffectError::Handler(format!("Pattern.File.DeleteLines: {e}")))?;
                 cx.respond(())
+            }
+            FileReq::ReadLines(path, start, count) => {
+                let fm = require_file_manager(cx.user())?;
+                let sf = fm
+                    .get_or_open(Path::new(&path))
+                    .map_err(|e| EffectError::Handler(e.to_effect_message()))?;
+                let content = sf
+                    .read()
+                    .map_err(|e| EffectError::Handler(format!("Pattern.File.ReadLines: {e}")))?;
+                let lines: Vec<&str> = content.lines().collect();
+                let total = lines.len();
+                let start_idx = (start.max(1) as usize).saturating_sub(1);
+                let count_usize = count.max(0) as usize;
+                let end_idx = (start_idx + count_usize).min(total);
+                let slice = if start_idx < total {
+                    lines[start_idx..end_idx].join("\n")
+                } else {
+                    String::new()
+                };
+                let header = format!("[lines {}-{} of {}]\n", start_idx + 1, end_idx, total,);
+                cx.respond(header + &slice)
             }
         }
     }

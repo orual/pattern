@@ -79,6 +79,10 @@ pub struct Mailbox {
     tx: mpsc::UnboundedSender<MailboxInput>,
     rx: Mutex<mpsc::UnboundedReceiver<MailboxInput>>,
     persona_id: PersonaId,
+    /// Number of messages enqueued but not yet consumed by the drain loop.
+    /// Checked by `drive_step` between continuation turns to allow partner
+    /// messages to interrupt long tool-call chains.
+    pending: std::sync::atomic::AtomicUsize,
 }
 
 impl Mailbox {
@@ -93,6 +97,7 @@ impl Mailbox {
             tx: tx.clone(),
             rx: Mutex::new(rx),
             persona_id,
+            pending: std::sync::atomic::AtomicUsize::new(0),
         });
         (mbx, tx)
     }
@@ -116,6 +121,40 @@ impl Mailbox {
         &self,
     ) -> tokio::sync::MutexGuard<'_, mpsc::UnboundedReceiver<MailboxInput>> {
         self.rx.lock().await
+    }
+
+    /// Enqueue an input and bump the pending counter.
+    /// Callers that bypass this (using the raw sender) must call
+    /// [`note_enqueued`] themselves.
+    pub fn send_input(
+        &self,
+        input: MailboxInput,
+    ) -> Result<(), mpsc::error::SendError<MailboxInput>> {
+        self.tx.send(input)?;
+        self.pending
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Decrement the pending counter after consuming a message from
+    /// the receiver. Called by the mailbox drain loop.
+    pub fn note_consumed(&self) {
+        self.pending
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Bump the pending counter (for callers that send via a raw sender
+    /// clone rather than [`send_input`]).
+    pub fn note_enqueued(&self) {
+        self.pending
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Check whether there are pending messages waiting to be drained.
+    /// Used by `drive_step` to break continuation loops when the partner
+    /// sends a message mid-turn.
+    pub fn has_pending(&self) -> bool {
+        self.pending.load(std::sync::atomic::Ordering::SeqCst) > 0
     }
 }
 
@@ -236,6 +275,7 @@ async fn mailbox_task_body(
             // All senders dropped — channel closed. Natural termination.
             return;
         };
+        mailbox.note_consumed();
 
         // Phase 3: dispatch. drive_step manages its own busy flag via
         // BusyFlagGuard; we don't set is_in_turn ourselves here.

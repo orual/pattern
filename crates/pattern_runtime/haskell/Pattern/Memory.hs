@@ -108,8 +108,3 @@ recall h = send (Recall h)
 -- Errors if the block hasn't been shared with the caller.
 getShared :: Member Memory effs => Owner -> BlockHandle -> Eff effs Content
 getShared o h = send (GetShared o h)
-
--- | Explicitly write content to the persona scope. Succeeds when the
--- isolation policy is @None@; returns an error under @CoreOnly@ or @Full@.
-writeToPersona :: Member Memory effs => BlockHandle -> Content -> Eff effs ()
-writeToPersona h c = send (WriteToPersona h c)

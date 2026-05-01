@@ -72,7 +72,7 @@ miette           = { workspace = true }
 serde            = { workspace = true }
 serde_json       = { workspace = true }
 knus             = "3.3"
-kdl              = "6"
+kdl              = { workspace = true }
 jiff             = { workspace = true }
 loro             = { version = "1.10", features = ["counter"] }
 rusqlite         = { version = "0.39", features = ["bundled-full"] }
