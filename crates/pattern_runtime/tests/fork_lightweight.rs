@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::BlockCreate;
-use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
+use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType, Scope};
 use pattern_db::ConstellationDb;
 use pattern_memory::MemoryCache;
 use pattern_runtime::spawn::fork::{ForkError, ForkHandle};
@@ -51,9 +51,9 @@ fn seed_text_block(cache: &MemoryCache, agent_id: &str, label: &str, content: &s
         MemoryBlockType::Working,
         BlockSchema::text(),
     );
-    cache.create_block(agent_id, bc).expect("create_block");
+    cache.create_block(&Scope::global(agent_id), bc).expect("create_block");
     let doc = cache
-        .get(agent_id, label)
+        .get(&Scope::global(agent_id).to_db_key(), label)
         .expect("get after create")
         .expect("block must exist after create");
     doc.set_text(content, true).expect("set_text");
@@ -70,19 +70,21 @@ fn seed_text_block(cache: &MemoryCache, agent_id: &str, label: &str, content: &s
 fn lightweight_fork_isolates_writes_ac4_1() {
     let parent_id = "ac4-1-parent";
     let child_id = "ac4-1-child";
+    let parent_key = Scope::global(parent_id).to_db_key();
+    let child_key = Scope::global(child_id).to_db_key();
 
     let parent_cache = open_cache_with_extra_agent(parent_id, child_id);
     seed_text_block(&parent_cache, parent_id, "notes", "initial");
 
     // Load the block into cache so fork sees it.
     let _doc = parent_cache
-        .get(parent_id, "notes")
+        .get(&parent_key, "notes")
         .expect("get")
         .expect("block present");
 
     let child_cache = Arc::new(
         parent_cache
-            .fork_for_child(parent_id, child_id)
+            .fork_for_child(&parent_key, &child_key)
             .expect("fork_for_child"),
     );
 
@@ -91,7 +93,7 @@ fn lightweight_fork_isolates_writes_ac4_1() {
         "fork-ac4-1".into(),
         child_id.into(),
         Arc::clone(&child_cache),
-        parent_id.into(),
+        parent_key.clone().into(),
         Arc::downgrade(&parent_cache),
         Arc::clone(&child_cancel),
     );
@@ -99,7 +101,7 @@ fn lightweight_fork_isolates_writes_ac4_1() {
     // Write divergent content on the child side.
     {
         let child_doc = child_cache
-            .get_cached_doc(child_id, "notes")
+            .get_cached_doc(&child_key, "notes")
             .expect("child must have a block named 'notes'");
         child_doc
             .set_text("fork-change", true)
@@ -109,7 +111,7 @@ fn lightweight_fork_isolates_writes_ac4_1() {
     // Write on the parent side.
     {
         let parent_doc = parent_cache
-            .get(parent_id, "notes")
+            .get(&parent_key, "notes")
             .expect("get")
             .expect("block present");
         parent_doc
@@ -120,7 +122,7 @@ fn lightweight_fork_isolates_writes_ac4_1() {
     // Assert isolation: parent sees "parent-change", child sees "fork-change".
     {
         let parent_doc = parent_cache
-            .get(parent_id, "notes")
+            .get(&parent_key, "notes")
             .expect("get")
             .expect("block present");
         assert_eq!(
@@ -131,7 +133,7 @@ fn lightweight_fork_isolates_writes_ac4_1() {
     }
     {
         let child_doc = child_cache
-            .get_cached_doc(child_id, "notes")
+            .get_cached_doc(&child_key, "notes")
             .expect("child must have a block named 'notes'");
         assert_eq!(
             child_doc.text_content(),
@@ -151,16 +153,18 @@ fn lightweight_fork_isolates_writes_ac4_1() {
 fn discard_drops_child_state_ac4_5() {
     let parent_id = "ac4-5-parent";
     let child_id = "ac4-5-child";
+    let parent_key = Scope::global(parent_id).to_db_key();
+    let child_key = Scope::global(child_id).to_db_key();
 
     let parent_cache = open_cache_with_extra_agent(parent_id, child_id);
     seed_text_block(&parent_cache, parent_id, "notes", "parent-only");
 
     // Ensure block is loaded into the cache before forking.
-    let _ = parent_cache.get(parent_id, "notes").unwrap().unwrap();
+    let _ = parent_cache.get(&parent_key, "notes").unwrap().unwrap();
 
     let child_cache = Arc::new(
         parent_cache
-            .fork_for_child(parent_id, child_id)
+            .fork_for_child(&parent_key, &child_key)
             .expect("fork_for_child"),
     );
 
@@ -169,7 +173,7 @@ fn discard_drops_child_state_ac4_5() {
         "fork-ac4-5".into(),
         child_id.into(),
         Arc::clone(&child_cache),
-        parent_id.into(),
+        parent_key.clone().into(),
         Arc::downgrade(&parent_cache),
         Arc::clone(&child_cancel),
     );
@@ -177,7 +181,7 @@ fn discard_drops_child_state_ac4_5() {
     // Write on fork side.
     {
         let entry = child_cache
-            .get_cached_doc(child_id, "notes")
+            .get_cached_doc(&child_key, "notes")
             .expect("child must have a block named 'notes'");
         entry
             .set_text("fork-only", true)
@@ -189,7 +193,7 @@ fn discard_drops_child_state_ac4_5() {
 
     // Parent should still read "parent-only".
     let parent_doc = parent_cache
-        .get(parent_id, "notes")
+        .get(&parent_key, "notes")
         .expect("get")
         .expect("block present");
     assert_eq!(

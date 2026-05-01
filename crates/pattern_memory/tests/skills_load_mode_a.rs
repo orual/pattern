@@ -29,7 +29,7 @@ use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::{BlockCreate, BlockHandle};
 use pattern_core::types::ids::AgentId;
 use pattern_core::types::memory_types::{
-    BlockSchema, MemoryBlockType, SkillMetadata, SkillTrustTier,
+    BlockSchema, MemoryBlockType, Scope, SkillMetadata, SkillTrustTier,
 };
 use pattern_db::ConstellationDb;
 use pattern_memory::MemoryCache;
@@ -198,9 +198,10 @@ fn load_does_not_dirty_mount() {
     let cache = MemoryCache::new(dbs.clone());
 
     // Create the Skill block in the cache (pure in-memory; no file emission).
+    let agent_scope = Scope::global(AGENT);
     cache
         .create_block(
-            AGENT,
+            &agent_scope,
             BlockCreate::new(
                 SKILL_LABEL,
                 MemoryBlockType::Working,
@@ -213,7 +214,7 @@ fn load_does_not_dirty_mount() {
 
     // Populate the LoroDoc with metadata + body.
     let doc = cache
-        .get_block(AGENT, SKILL_LABEL)
+        .get_block(&agent_scope, SKILL_LABEL)
         .expect("get_block failed")
         .expect("skill block must exist");
     let skill_file = SkillFile {
@@ -239,7 +240,7 @@ fn load_does_not_dirty_mount() {
     for i in 0..100u32 {
         // Read the block — this is the read path that handle_load uses.
         let fetched = cache
-            .get_block(AGENT, SKILL_LABEL)
+            .get_block(&agent_scope, SKILL_LABEL)
             .unwrap_or_else(|e| panic!("get_block at load {i} failed: {e}"))
             .unwrap_or_else(|| panic!("skill block missing at load {i}"));
 

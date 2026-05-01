@@ -191,8 +191,14 @@ where
                 cx.respond(s)
             }
             FileReq::Write(path, content) => {
-                let fm = require_file_manager(cx.user())?;
+                // Gate evaluation runs FIRST: the "locked-default"
+                // shape guard for Pattern config KDL writes must
+                // escalate to the broker even when no FileManager is
+                // wired (e.g. in unit tests, or before a session has
+                // a mount). Reaching `require_file_manager` first
+                // would shortcut the gate.
                 evaluate_write(&path, content.as_bytes(), cx.user())?;
+                let fm = require_file_manager(cx.user())?;
                 fm.write(Path::new(&path), content.as_bytes())
                     .map_err(|e| EffectError::Handler(e.to_effect_message()))?;
                 cx.respond(())
@@ -1044,6 +1050,24 @@ mod tests {
         );
     }
 
+    /// Subscribe to disk-write notifications BEFORE invoking a line edit
+    /// so the receiver doesn't race with the ingest thread. Returns the
+    /// receiver; tests then call `wait` after the handler returns.
+    fn subscribe_writes_before(
+        sf: &Arc<pattern_memory::loro_sync::text::LoroSyncedFile>,
+    ) -> crossbeam_channel::Receiver<pattern_memory::loro_sync::synced_doc::WriteNotification> {
+        sf.subscribe_writes()
+    }
+
+    /// Wait up to 2 s on a previously-subscribed write-notification rx.
+    fn wait_for_write(
+        rx: &crossbeam_channel::Receiver<pattern_memory::loro_sync::synced_doc::WriteNotification>,
+    ) -> Result<(), &'static str> {
+        rx.recv_timeout(std::time::Duration::from_secs(2))
+            .map(|_| ())
+            .map_err(|_| "no disk write within 2s")
+    }
+
     #[tokio::test]
     async fn insert_lines_at_beginning() {
         let dir = tempfile::tempdir().unwrap();
@@ -1051,12 +1075,18 @@ mod tests {
         std::fs::write(&file, "line1\nline2\nline3").unwrap();
 
         let file_str = file.to_string_lossy().into_owned();
+        let dir_path = dir.path().to_path_buf();
+        let file_read = file.clone();
         let result = tokio::task::spawn_blocking(move || {
-            let (user, _fm) = make_test_user_with_fm("agent-insert", dir.path());
+            let (user, fm) = make_test_user_with_fm("agent-insert", &dir_path);
+            let sf = fm.get_or_open(&file_read).unwrap();
+            let writes_rx = subscribe_writes_before(&sf);
             let mut h = FileHandler;
             let table = handler_table();
             let cx = EffectContext::with_user(&table, &user);
-            h.handle(FileReq::InsertLines(file_str, 0, "header".into()), &cx)
+            let r = h.handle(FileReq::InsertLines(file_str, 0, "header".into()), &cx);
+            wait_for_write(&writes_rx).expect("disk write must land");
+            r
         })
         .await
         .expect("blocking task");
@@ -1064,6 +1094,7 @@ mod tests {
         assert!(result.is_ok(), "insert at 0 should succeed: {result:?}");
         let content = std::fs::read_to_string(&file).unwrap();
         assert_eq!(content, "header\nline1\nline2\nline3");
+        drop(dir);
     }
 
     #[tokio::test]
@@ -1073,12 +1104,18 @@ mod tests {
         std::fs::write(&file, "line1\nline2\nline3").unwrap();
 
         let file_str = file.to_string_lossy().into_owned();
+        let dir_path = dir.path().to_path_buf();
+        let file_read = file.clone();
         let result = tokio::task::spawn_blocking(move || {
-            let (user, _fm) = make_test_user_with_fm("agent-insert-mid", dir.path());
+            let (user, fm) = make_test_user_with_fm("agent-insert-mid", &dir_path);
+            let sf = fm.get_or_open(&file_read).unwrap();
+            let writes_rx = subscribe_writes_before(&sf);
             let mut h = FileHandler;
             let table = handler_table();
             let cx = EffectContext::with_user(&table, &user);
-            h.handle(FileReq::InsertLines(file_str, 1, "inserted".into()), &cx)
+            let r = h.handle(FileReq::InsertLines(file_str, 1, "inserted".into()), &cx);
+            wait_for_write(&writes_rx).expect("disk write must land");
+            r
         })
         .await
         .expect("blocking task");
@@ -1089,6 +1126,7 @@ mod tests {
         );
         let content = std::fs::read_to_string(&file).unwrap();
         assert_eq!(content, "line1\ninserted\nline2\nline3");
+        drop(dir);
     }
 
     #[tokio::test]
@@ -1098,12 +1136,18 @@ mod tests {
         std::fs::write(&file, "line1\nline2").unwrap();
 
         let file_str = file.to_string_lossy().into_owned();
+        let dir_path = dir.path().to_path_buf();
+        let file_read = file.clone();
         let result = tokio::task::spawn_blocking(move || {
-            let (user, _fm) = make_test_user_with_fm("agent-insert-multi", dir.path());
+            let (user, fm) = make_test_user_with_fm("agent-insert-multi", &dir_path);
+            let sf = fm.get_or_open(&file_read).unwrap();
+            let writes_rx = subscribe_writes_before(&sf);
             let mut h = FileHandler;
             let table = handler_table();
             let cx = EffectContext::with_user(&table, &user);
-            h.handle(FileReq::InsertLines(file_str, 1, "new1\nnew2".into()), &cx)
+            let r = h.handle(FileReq::InsertLines(file_str, 1, "new1\nnew2".into()), &cx);
+            wait_for_write(&writes_rx).expect("disk write must land");
+            r
         })
         .await
         .expect("blocking task");
@@ -1111,6 +1155,7 @@ mod tests {
         assert!(result.is_ok());
         let content = std::fs::read_to_string(&file).unwrap();
         assert_eq!(content, "line1\nnew1\nnew2\nline2");
+        drop(dir);
     }
 
     #[tokio::test]
@@ -1120,15 +1165,21 @@ mod tests {
         std::fs::write(&file, "line1\nline2\nline3\nline4").unwrap();
 
         let file_str = file.to_string_lossy().into_owned();
+        let dir_path = dir.path().to_path_buf();
+        let file_read = file.clone();
         let result = tokio::task::spawn_blocking(move || {
-            let (user, _fm) = make_test_user_with_fm("agent-replace", dir.path());
+            let (user, fm) = make_test_user_with_fm("agent-replace", &dir_path);
+            let sf = fm.get_or_open(&file_read).unwrap();
+            let writes_rx = subscribe_writes_before(&sf);
             let mut h = FileHandler;
             let table = handler_table();
             let cx = EffectContext::with_user(&table, &user);
-            h.handle(
+            let r = h.handle(
                 FileReq::ReplaceLines(file_str, 2, 3, "replaced".into()),
                 &cx,
-            )
+            );
+            wait_for_write(&writes_rx).expect("disk write must land");
+            r
         })
         .await
         .expect("blocking task");
@@ -1136,6 +1187,7 @@ mod tests {
         assert!(result.is_ok(), "replace should succeed: {result:?}");
         let content = std::fs::read_to_string(&file).unwrap();
         assert_eq!(content, "line1\nreplaced\nline4");
+        drop(dir);
     }
 
     #[tokio::test]
@@ -1145,15 +1197,21 @@ mod tests {
         std::fs::write(&file, "line1\nline2\nline3").unwrap();
 
         let file_str = file.to_string_lossy().into_owned();
+        let dir_path = dir.path().to_path_buf();
+        let file_read = file.clone();
         let result = tokio::task::spawn_blocking(move || {
-            let (user, _fm) = make_test_user_with_fm("agent-replace-multi", dir.path());
+            let (user, fm) = make_test_user_with_fm("agent-replace-multi", &dir_path);
+            let sf = fm.get_or_open(&file_read).unwrap();
+            let writes_rx = subscribe_writes_before(&sf);
             let mut h = FileHandler;
             let table = handler_table();
             let cx = EffectContext::with_user(&table, &user);
-            h.handle(
+            let r = h.handle(
                 FileReq::ReplaceLines(file_str, 2, 2, "new2a\nnew2b".into()),
                 &cx,
-            )
+            );
+            wait_for_write(&writes_rx).expect("disk write must land");
+            r
         })
         .await
         .expect("blocking task");
@@ -1161,6 +1219,7 @@ mod tests {
         assert!(result.is_ok());
         let content = std::fs::read_to_string(&file).unwrap();
         assert_eq!(content, "line1\nnew2a\nnew2b\nline3");
+        drop(dir);
     }
 
     #[tokio::test]
@@ -1171,20 +1230,17 @@ mod tests {
 
         let file_str = file.to_string_lossy().into_owned();
         let file_read = file.clone();
+        let dir_path = dir.path().to_path_buf();
         let result = tokio::task::spawn_blocking(move || {
-            let (user, fm) = make_test_user_with_fm("agent-delete", dir.path());
+            let (user, fm) = make_test_user_with_fm("agent-delete", &dir_path);
             let mut h = FileHandler;
             let sf = fm.get_or_open(&file_read).unwrap();
-            let text = sf.memory_doc().get_text("content").to_string();
-            eprintln!("sf.get_text() = {}", text);
-            eprintln!(
-                "char comparison: {:?} vs {:?}",
-                '\n' as u32,
-                text.chars().nth(5).map(|c| c as u32)
-            );
+            let writes_rx = subscribe_writes_before(&sf);
             let table = handler_table();
             let cx = EffectContext::with_user(&table, &user);
-            h.handle(FileReq::DeleteLines(file_str, 2, 3), &cx)
+            let r = h.handle(FileReq::DeleteLines(file_str, 2, 3), &cx);
+            wait_for_write(&writes_rx).expect("disk write must land");
+            r
         })
         .await
         .expect("blocking task");
@@ -1192,6 +1248,7 @@ mod tests {
         assert!(result.is_ok(), "delete should succeed: {result:?}");
         let content = std::fs::read_to_string(&file).unwrap();
         assert_eq!(content, "line1\nline4");
+        drop(dir);
     }
 
     #[tokio::test]

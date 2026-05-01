@@ -226,6 +226,16 @@ impl LoroSyncedFile {
         self.inner.subscribe_external_changes()
     }
 
+    /// Subscribe to disk-write notifications. Each successful render +
+    /// `atomic_write` (whether triggered by a local CRDT update, a sync
+    /// write, or an external edit reconciled into disk_doc) fires one
+    /// `WriteNotification` per live subscriber. Used by callers (and
+    /// tests) that need to await the async ingest pipeline rather than
+    /// poll the file.
+    pub fn subscribe_writes(&self) -> Receiver<crate::loro_sync::synced_doc::WriteNotification> {
+        self.inner.subscribe_writes()
+    }
+
     /// Path to the file on disk.
     pub fn path(&self) -> &Path {
         self.inner.path()
@@ -303,19 +313,31 @@ impl LoroSyncedFile {
             })?
         };
 
-        // If inserting in the middle, ensure we start on a new line
+        // Wrap the inserted content with a separating newline so the
+        // surrounding lines stay distinct after the insert.
         let to_insert = if after_line == 0 && total_chars > 0 {
-            // Inserting at top of non-empty file: add trailing newline
+            // Inserting at top of non-empty file: trailing newline
+            // separates the inserted block from line 1.
             format!("{content}\n")
         } else if after_line >= idx.line_count() && total_chars > 0 {
-            // Appending after last line: add leading newline
+            // Appending past the last line: leading newline starts a
+            // fresh line after whatever the file ended with.
             format!("\n{content}")
         } else {
-            content.to_string()
+            // Mid-file insert at the start of `after_line + 1`: append
+            // a trailing newline so the inserted content gets its own
+            // line and doesn't merge with the next existing line.
+            format!("{content}\n")
         };
 
         text.insert(insert_pos, &to_insert)
             .map_err(|e| LoroSyncError::Other(format!("insert failed: {e}")))?;
+        // Commit so loro fires the local-update callback registered by
+        // `SyncedDoc::open_with_subscription` — that callback drives the
+        // ingest thread → disk_doc → atomic_write pipeline. Without an
+        // explicit commit here, the ops sit in the uncommitted buffer
+        // and the file on disk never updates.
+        self.inner.memory_doc().commit();
         self.invalidate_line_index();
         Ok(())
     }
@@ -351,8 +373,22 @@ impl LoroSyncedFile {
             .ok_or_else(|| LoroSyncError::Other(format!("line {to} out of range")))?;
         let delete_len = end_pos - start_pos;
 
-        text.splice(start_pos, delete_len, content)
+        // Mirror `insert_lines`: the deleted span typically ended with a
+        // newline (line N's terminator). Re-add one after the
+        // replacement so the line that follows stays separate, unless
+        // the replacement already ends with a newline, or we're
+        // replacing through the last line of the file (no trailing
+        // newline existed in the deleted span).
+        let replaced_through_last = to >= idx.line_count();
+        let replacement = if replaced_through_last || content.ends_with('\n') {
+            content.to_string()
+        } else {
+            format!("{content}\n")
+        };
+
+        text.splice(start_pos, delete_len, &replacement)
             .map_err(|e| LoroSyncError::Other(format!("splice failed: {e}")))?;
+        self.inner.memory_doc().commit();
         self.invalidate_line_index();
         Ok(())
     }
@@ -384,6 +420,7 @@ impl LoroSyncedFile {
 
         text.splice(start_pos, delete_len, "")
             .map_err(|e| LoroSyncError::Other(format!("splice failed: {e}")))?;
+        self.inner.memory_doc().commit();
         self.invalidate_line_index();
         Ok(())
     }

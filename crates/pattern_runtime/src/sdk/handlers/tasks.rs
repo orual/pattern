@@ -19,7 +19,7 @@ use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::{BlockWrite, BlockWriteKind};
 use pattern_core::types::ids::{TaskItemId, new_snowflake_id};
 use pattern_core::types::memory_types::{
-    BlockFilter, BlockSchema, MemoryError, TaskEdgeRef, TaskStatus,
+    BlockFilter, BlockSchema, MemoryError, Scope, TaskEdgeRef, TaskStatus,
     task_query::{GraphQuery, GraphSlice, TaskFilter, TaskPatch, TaskSpec, TaskView},
 };
 use pattern_core::types::origin::Author;
@@ -116,6 +116,7 @@ impl EffectHandler<SessionContext> for TasksHandler {
         )?;
 
         let agent_id = cx.user().agent_id().to_string();
+        let scope = cx.user().default_scope().clone();
         let adapter = cx.user().adapter().clone();
         let store = cx.user().memory_store();
 
@@ -123,47 +124,46 @@ impl EffectHandler<SessionContext> for TasksHandler {
         // pending-buffer so TurnOutput.block_writes reflects the change.
         // Called AFTER the mutation landed on the LoroDoc + persist_block.
         let record = |block: &str, kind: BlockWriteKind| -> Result<(), EffectError> {
-            record_task_write(&adapter, &agent_id, &*store, block, kind).map_err(EffectError::from)
+            record_task_write(&adapter, &scope, &agent_id, &*store, block, kind)
+                .map_err(EffectError::from)
         };
 
         match req {
             TasksReq::Create(block, spec_json) => {
-                let id = handle_create(&*store, &agent_id, &block, &spec_json)?;
-                // `Updated` kind: the block itself was already created
-                // upstream; we appended a new task item to its movable list.
+                let id = handle_create(&*store, &scope, &agent_id, &block, &spec_json)?;
                 record(&block, BlockWriteKind::Updated)?;
                 cx.respond(id.to_string())
             }
             TasksReq::Update(edge_ref, patch_json) => {
-                handle_update(&*store, &agent_id, &edge_ref, &patch_json)?;
+                handle_update(&*store, &scope, &agent_id, &edge_ref, &patch_json)?;
                 if let Ok((block, _)) = parse_item_ref(&edge_ref) {
                     record(&block, BlockWriteKind::Updated)?;
                 }
                 cx.respond(())
             }
             TasksReq::Transition(edge_ref, status_json) => {
-                handle_transition(&*store, &agent_id, &edge_ref, &status_json)?;
+                handle_transition(&*store, &scope, &agent_id, &edge_ref, &status_json)?;
                 if let Ok((block, _)) = parse_item_ref(&edge_ref) {
                     record(&block, BlockWriteKind::Updated)?;
                 }
                 cx.respond(())
             }
             TasksReq::AddComment(edge_ref, text) => {
-                handle_add_comment(&*store, &agent_id, &edge_ref, &text)?;
+                handle_add_comment(&*store, &scope, &agent_id, &edge_ref, &text)?;
                 if let Ok((block, _)) = parse_item_ref(&edge_ref) {
                     record(&block, BlockWriteKind::Updated)?;
                 }
                 cx.respond(())
             }
             TasksReq::Link(source_ref, target_ref) => {
-                handle_link(&*store, &agent_id, &source_ref, &target_ref)?;
+                handle_link(&*store, &scope, &agent_id, &source_ref, &target_ref)?;
                 if let Ok((block, _)) = parse_item_ref(&source_ref) {
                     record(&block, BlockWriteKind::Updated)?;
                 }
                 cx.respond(())
             }
             TasksReq::Unlink(source_ref, target_ref) => {
-                handle_unlink(&*store, &agent_id, &source_ref, &target_ref)?;
+                handle_unlink(&*store, &scope, &agent_id, &source_ref, &target_ref)?;
                 if let Ok((block, _)) = parse_item_ref(&source_ref) {
                     record(&block, BlockWriteKind::Updated)?;
                 }
@@ -176,12 +176,10 @@ impl EffectHandler<SessionContext> for TasksHandler {
                 let views = handle_list_tasks(
                     &*store,
                     &conn,
-                    &agent_id,
+                    &scope,
                     block_opt.as_deref(),
                     &filter_json,
                 )?;
-                // Haskell return type is [TaskView] where TaskView = Text:
-                // serialize each TaskView as JSON, pass as a list of strings.
                 let view_strs: Vec<String> = views
                     .iter()
                     .map(|v| serde_json::to_string(v).unwrap_or_default())
@@ -192,8 +190,8 @@ impl EffectHandler<SessionContext> for TasksHandler {
                 let conn = cx.user().db().get().map_err(|e| {
                     EffectError::Handler(format!("Pattern.Tasks::QueryGraph: db connection: {e}"))
                 })?;
-                let slice = handle_query_graph(&*store, &conn, &agent_id, &root_ref, &query_json)?;
-                // Return type is GraphSlice = Text (JSON-encoded).
+                let slice =
+                    handle_query_graph(&*store, &conn, &scope, &root_ref, &query_json)?;
                 cx.respond(serde_json::to_string(&slice).unwrap_or_default())
             }
         }
@@ -296,14 +294,14 @@ fn parse_edge_ref_any(ref_str: &str) -> Result<(String, Option<String>), TaskHan
 /// Fetch a block's StructuredDocument and verify its schema is TaskList.
 fn fetch_task_list(
     store: &dyn MemoryStore,
-    agent_id: &str,
+    scope: &Scope,
     block: &str,
 ) -> Result<StructuredDocument, TaskHandlerError> {
     let sdoc = store
-        .get_block(agent_id, block)
+        .get_block(scope, block)
         .map_err(|e| TaskHandlerError::Store(e.to_string()))?
         .ok_or_else(|| TaskHandlerError::BlockNotFound {
-            agent: agent_id.to_string(),
+            agent: scope.id().to_string(),
             block: block.to_string(),
         })?;
     if !matches!(sdoc.schema(), BlockSchema::TaskList { .. }) {
@@ -461,16 +459,17 @@ fn json_map_to_loro_value(map: serde_json::Map<String, JsonValue>) -> LoroValue 
 /// attachments. Phase 5 may refine this to a more compact rendering.
 fn record_task_write(
     adapter: &MemoryStoreAdapter,
+    scope: &Scope,
     agent_id: &str,
     store: &dyn MemoryStore,
     block_handle: &str,
     kind: BlockWriteKind,
 ) -> Result<(), TaskHandlerError> {
     let sdoc = store
-        .get_block(agent_id, block_handle)
+        .get_block(scope, block_handle)
         .map_err(|e| TaskHandlerError::Store(e.to_string()))?
         .ok_or_else(|| TaskHandlerError::BlockNotFound {
-            agent: agent_id.to_string(),
+            agent: scope.id().to_string(),
             block: block_handle.to_string(),
         })?;
     let memory_id = SmolStr::new(sdoc.id());
@@ -501,7 +500,8 @@ fn record_task_write(
 /// Create a new task item in the given block. Returns the minted item id.
 pub fn handle_create(
     store: &dyn MemoryStore,
-    agent_id: &str,
+    scope: &Scope,
+    _agent_id: &str,
     block: &str,
     spec_json: &str,
 ) -> Result<TaskItemId, TaskHandlerError> {
@@ -510,7 +510,7 @@ pub fn handle_create(
             what: "TaskSpec",
             source,
         })?;
-    let sdoc = fetch_task_list(store, agent_id, block)?;
+    let sdoc = fetch_task_list(store, scope, block)?;
 
     let item_id: TaskItemId = new_snowflake_id();
     let now = jiff::Timestamp::now();
@@ -563,9 +563,11 @@ pub fn handle_create(
 
     doc.commit();
 
-    store.mark_dirty(agent_id, block);
     store
-        .persist_block(agent_id, block)
+        .mark_dirty(scope, block)
+        .map_err(|e| TaskHandlerError::Store(e.to_string()))?;
+    store
+        .persist_block(scope, block)
         .map_err(|e| TaskHandlerError::Store(e.to_string()))?;
 
     Ok(item_id)
@@ -576,7 +578,8 @@ pub fn handle_create(
 /// different fields merge correctly.
 pub fn handle_update(
     store: &dyn MemoryStore,
-    agent_id: &str,
+    scope: &Scope,
+    _agent_id: &str,
     edge_ref: &str,
     patch_json: &str,
 ) -> Result<(), TaskHandlerError> {
@@ -586,7 +589,7 @@ pub fn handle_update(
             source,
         })?;
     let (block, item_id) = parse_item_ref(edge_ref)?;
-    let sdoc = fetch_task_list(store, agent_id, &block)?;
+    let sdoc = fetch_task_list(store, scope, &block)?;
 
     let doc = sdoc.inner();
     let index = find_item_index(doc, &item_id).ok_or_else(|| {
@@ -606,9 +609,11 @@ pub fn handle_update(
 
     doc.commit();
 
-    store.mark_dirty(agent_id, &block);
     store
-        .persist_block(agent_id, &block)
+        .mark_dirty(scope, &block)
+        .map_err(|e| TaskHandlerError::Store(e.to_string()))?;
+    store
+        .persist_block(scope, &block)
         .map_err(|e| TaskHandlerError::Store(e.to_string()))?;
 
     Ok(())
@@ -618,7 +623,8 @@ pub fn handle_update(
 /// moving to `Completed`.
 pub fn handle_transition(
     store: &dyn MemoryStore,
-    agent_id: &str,
+    scope: &Scope,
+    _agent_id: &str,
     edge_ref: &str,
     status_json: &str,
 ) -> Result<(), TaskHandlerError> {
@@ -628,7 +634,7 @@ pub fn handle_transition(
             source,
         })?;
     let (block, item_id) = parse_item_ref(edge_ref)?;
-    let sdoc = fetch_task_list(store, agent_id, &block)?;
+    let sdoc = fetch_task_list(store, scope, &block)?;
 
     let doc = sdoc.inner();
     let index = find_item_index(doc, &item_id).ok_or_else(|| {
@@ -665,9 +671,11 @@ pub fn handle_transition(
 
     doc.commit();
 
-    store.mark_dirty(agent_id, &block);
     store
-        .persist_block(agent_id, &block)
+        .mark_dirty(scope, &block)
+        .map_err(|e| TaskHandlerError::Store(e.to_string()))?;
+    store
+        .persist_block(scope, &block)
         .map_err(|e| TaskHandlerError::Store(e.to_string()))?;
 
     Ok(())
@@ -677,12 +685,13 @@ pub fn handle_transition(
 /// `timestamp` is captured at handler time.
 pub fn handle_add_comment(
     store: &dyn MemoryStore,
+    scope: &Scope,
     agent_id: &str,
     edge_ref: &str,
     text: &str,
 ) -> Result<(), TaskHandlerError> {
     let (block, item_id) = parse_item_ref(edge_ref)?;
-    let sdoc = fetch_task_list(store, agent_id, &block)?;
+    let sdoc = fetch_task_list(store, scope, &block)?;
 
     let doc = sdoc.inner();
     let index = find_item_index(doc, &item_id).ok_or_else(|| {
@@ -714,9 +723,11 @@ pub fn handle_add_comment(
 
     doc.commit();
 
-    store.mark_dirty(agent_id, &block);
     store
-        .persist_block(agent_id, &block)
+        .mark_dirty(scope, &block)
+        .map_err(|e| TaskHandlerError::Store(e.to_string()))?;
+    store
+        .persist_block(scope, &block)
         .map_err(|e| TaskHandlerError::Store(e.to_string()))?;
 
     Ok(())
@@ -730,14 +741,15 @@ pub fn handle_add_comment(
 /// canonical .kdl file tidy and prevents duplicate rows on reconcile).
 pub fn handle_link(
     store: &dyn MemoryStore,
-    agent_id: &str,
+    scope: &Scope,
+    _agent_id: &str,
     source_ref: &str,
     target_ref: &str,
 ) -> Result<(), TaskHandlerError> {
     let (src_block, src_item) = parse_item_ref(source_ref)?;
     let (tgt_block, tgt_item) = parse_edge_ref_any(target_ref)?;
 
-    let sdoc = fetch_task_list(store, agent_id, &src_block)?;
+    let sdoc = fetch_task_list(store, scope, &src_block)?;
     let doc = sdoc.inner();
     let index = find_item_index(doc, &src_item).ok_or_else(|| {
         TaskHandlerError::Memory(MemoryError::TaskNotFound {
@@ -774,9 +786,11 @@ pub fn handle_link(
 
     doc.commit();
 
-    store.mark_dirty(agent_id, &src_block);
     store
-        .persist_block(agent_id, &src_block)
+        .mark_dirty(scope, &src_block)
+        .map_err(|e| TaskHandlerError::Store(e.to_string()))?;
+    store
+        .persist_block(scope, &src_block)
         .map_err(|e| TaskHandlerError::Store(e.to_string()))?;
 
     Ok(())
@@ -786,14 +800,15 @@ pub fn handle_link(
 /// edge exists, this is a silent no-op (no LoroDoc mutation, no dirty mark).
 pub fn handle_unlink(
     store: &dyn MemoryStore,
-    agent_id: &str,
+    scope: &Scope,
+    _agent_id: &str,
     source_ref: &str,
     target_ref: &str,
 ) -> Result<(), TaskHandlerError> {
     let (src_block, src_item) = parse_item_ref(source_ref)?;
     let (tgt_block, tgt_item) = parse_edge_ref_any(target_ref)?;
 
-    let sdoc = fetch_task_list(store, agent_id, &src_block)?;
+    let sdoc = fetch_task_list(store, scope, &src_block)?;
     let doc = sdoc.inner();
     // Idempotent: if the source item doesn't exist, there's no edge to remove.
     // Matches the "no-op if edge doesn't exist" contract — generalized to the
@@ -841,9 +856,11 @@ pub fn handle_unlink(
 
     doc.commit();
 
-    store.mark_dirty(agent_id, &src_block);
     store
-        .persist_block(agent_id, &src_block)
+        .mark_dirty(scope, &src_block)
+        .map_err(|e| TaskHandlerError::Store(e.to_string()))?;
+    store
+        .persist_block(scope, &src_block)
         .map_err(|e| TaskHandlerError::Store(e.to_string()))?;
 
     Ok(())
@@ -900,7 +917,7 @@ fn build_edge_map(block: &str, item: Option<&str>) -> serde_json::Map<String, Js
 pub fn handle_list_tasks(
     store: &dyn MemoryStore,
     conn: &rusqlite::Connection,
-    agent_id: &str,
+    scope: &Scope,
     block: Option<&str>,
     filter_json: &str,
 ) -> Result<Vec<TaskView>, TaskHandlerError> {
@@ -913,7 +930,7 @@ pub fn handle_list_tasks(
     let visible_blocks: Vec<smol_str::SmolStr> = match block {
         Some(h) => {
             // Existence + schema enforcement.
-            fetch_task_list(store, agent_id, h)?;
+            fetch_task_list(store, scope, h)?;
             // Reject a self-contradictory request where the caller scopes
             // to block `h` but supplies a `filter.blocks` set that excludes it.
             if let Some(user_blocks) = &filter.blocks
@@ -927,8 +944,12 @@ pub fn handle_list_tasks(
             vec![smol_str::SmolStr::new(h)]
         }
         None => {
+            // Use an unscoped filter so that MemoryScope (if present) can
+            // apply its IsolatePolicy routing (Full → project-only,
+            // None/CoreOnly → persona + project). A scoped filter would
+            // bypass MemoryScope's routing at line 219 of scope/wrapper.rs.
             let metas = store
-                .list_blocks(BlockFilter::by_agent(agent_id))
+                .list_blocks(BlockFilter::default())
                 .map_err(|e| TaskHandlerError::Store(e.to_string()))?;
             metas
                 .into_iter()
@@ -971,7 +992,7 @@ pub fn handle_list_tasks(
 pub fn handle_query_graph(
     store: &dyn MemoryStore,
     conn: &rusqlite::Connection,
-    agent_id: &str,
+    scope: &Scope,
     root_ref: &str,
     query_json: &str,
 ) -> Result<GraphSlice, TaskHandlerError> {
@@ -989,7 +1010,7 @@ pub fn handle_query_graph(
         })?;
 
     // Scope-check: the root block must be accessible to the caller.
-    fetch_task_list(store, agent_id, root.block.as_str())?;
+    fetch_task_list(store, scope, root.block.as_str())?;
 
     let raw = pattern_db::queries::query_task_graph_bfs(conn, &root, &query)
         .map_err(|e| TaskHandlerError::Store(e.to_string()))?;
@@ -997,8 +1018,9 @@ pub fn handle_query_graph(
     // Compute the visible block set (TaskList-schema blocks owned by this
     // agent — MemoryScope handles IsolatePolicy routing upstream so this
     // already reflects the caller's persona/project visibility).
+    // Use an unscoped filter so MemoryScope can apply IsolatePolicy routing.
     let visible: std::collections::HashSet<smol_str::SmolStr> = store
-        .list_blocks(BlockFilter::by_agent(agent_id))
+        .list_blocks(BlockFilter::default())
         .map_err(|e| TaskHandlerError::Store(e.to_string()))?
         .into_iter()
         .filter(|m| matches!(m.schema, BlockSchema::TaskList { .. }))
@@ -1225,7 +1247,11 @@ mod tests {
         BlockSchema::Text { viewport: None }
     }
 
-    fn seed_task_list(store: &dyn MemoryStore, agent_id: &str, label: &str) -> StructuredDocument {
+    fn seed_task_list(
+        store: &dyn MemoryStore,
+        scope: &Scope,
+        label: &str,
+    ) -> StructuredDocument {
         let create = BlockCreate::new(
             label.to_string(),
             MemoryBlockType::Working,
@@ -1234,7 +1260,7 @@ mod tests {
         .with_description("test".to_string())
         .with_char_limit(4096);
         store
-            .create_block(agent_id, create)
+            .create_block(scope, create)
             .expect("create TaskList block")
     }
 
@@ -1253,13 +1279,15 @@ mod tests {
     #[test]
     fn create_pushes_item_into_movable_list() {
         let store = Arc::new(InMemoryMemoryStore::new());
-        seed_task_list(&*store, "agent-a", "tasks");
+        let scope = Scope::Global("agent-a".into());
+        seed_task_list(&*store, &scope, "tasks");
 
-        let item_id = handle_create(&*store, "agent-a", "tasks", &sample_spec("fix bug"))
-            .expect("create succeeds");
+        let item_id =
+            handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("fix bug"))
+                .expect("create succeeds");
 
         // Re-fetch and inspect the movable list.
-        let sdoc = store.get_block("agent-a", "tasks").unwrap().unwrap();
+        let sdoc = store.get_block(&scope, "tasks").unwrap().unwrap();
         let list = sdoc.inner().get_movable_list("items");
         assert_eq!(list.len(), 1, "one item pushed");
 
@@ -1280,13 +1308,14 @@ mod tests {
     #[test]
     fn create_on_non_tasklist_returns_not_a_task_list() {
         let store = Arc::new(InMemoryMemoryStore::new());
+        let scope = Scope::Global("agent-a".into());
         // Seed a Text-schema block with the same label.
         let create = BlockCreate::new("notes".to_string(), MemoryBlockType::Working, text_schema())
             .with_description("text".to_string())
             .with_char_limit(4096);
-        store.create_block("agent-a", create).unwrap();
+        store.create_block(&scope, create).unwrap();
 
-        let err = handle_create(&*store, "agent-a", "notes", &sample_spec("x"))
+        let err = handle_create(&*store, &scope, "agent-a", "notes", &sample_spec("x"))
             .expect_err("schema mismatch must fail");
         assert!(
             matches!(
@@ -1300,9 +1329,11 @@ mod tests {
     #[test]
     fn update_patches_specified_fields_only() {
         let store = Arc::new(InMemoryMemoryStore::new());
-        seed_task_list(&*store, "agent-a", "tasks");
+        let scope = Scope::Global("agent-a".into());
+        seed_task_list(&*store, &scope, "tasks");
         let item_id = handle_create(
             &*store,
+            &scope,
             "agent-a",
             "tasks",
             &sample_spec("original subject"),
@@ -1320,9 +1351,9 @@ mod tests {
         };
         let patch_json = serde_json::to_string(&patch).unwrap();
         let edge_ref = format!("tasks#{item_id}");
-        handle_update(&*store, "agent-a", &edge_ref, &patch_json).expect("update ok");
+        handle_update(&*store, &scope, "agent-a", &edge_ref, &patch_json).expect("update ok");
 
-        let sdoc = store.get_block("agent-a", "tasks").unwrap().unwrap();
+        let sdoc = store.get_block(&scope, "tasks").unwrap().unwrap();
         let item = read_item_as_json(sdoc.inner(), 0).unwrap();
         assert_eq!(
             item.get("subject").and_then(|v| v.as_str()),
@@ -1344,21 +1375,23 @@ mod tests {
         // LoroDoc state must match the new status — otherwise cross-peer
         // merge and KDL rendering carry a bogus completed_at.
         let store = Arc::new(InMemoryMemoryStore::new());
-        seed_task_list(&*store, "agent-a", "tasks");
-        let item_id = handle_create(&*store, "agent-a", "tasks", &sample_spec("task")).unwrap();
+        let scope = Scope::Global("agent-a".into());
+        seed_task_list(&*store, &scope, "tasks");
+        let item_id =
+            handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("task")).unwrap();
         let edge_ref = format!("tasks#{item_id}");
 
         // First complete it to populate completed_at.
         let completed = serde_json::to_string(&TaskStatus::Completed).unwrap();
-        handle_transition(&*store, "agent-a", &edge_ref, &completed).unwrap();
-        let sdoc = store.get_block("agent-a", "tasks").unwrap().unwrap();
+        handle_transition(&*store, &scope, "agent-a", &edge_ref, &completed).unwrap();
+        let sdoc = store.get_block(&scope, "tasks").unwrap().unwrap();
         let item = read_item_as_json(sdoc.inner(), 0).unwrap();
         assert!(item.get("completed_at").is_some());
 
         // Now reverse: go back to InProgress. completed_at must be gone.
         let in_progress = serde_json::to_string(&TaskStatus::InProgress).unwrap();
-        handle_transition(&*store, "agent-a", &edge_ref, &in_progress).unwrap();
-        let sdoc = store.get_block("agent-a", "tasks").unwrap().unwrap();
+        handle_transition(&*store, &scope, "agent-a", &edge_ref, &in_progress).unwrap();
+        let sdoc = store.get_block(&scope, "tasks").unwrap().unwrap();
         let item = read_item_as_json(sdoc.inner(), 0).unwrap();
         assert!(
             item.get("completed_at").is_none(),
@@ -1370,14 +1403,16 @@ mod tests {
     #[test]
     fn transition_to_completed_sets_completed_at() {
         let store = Arc::new(InMemoryMemoryStore::new());
-        seed_task_list(&*store, "agent-a", "tasks");
-        let item_id = handle_create(&*store, "agent-a", "tasks", &sample_spec("task")).unwrap();
+        let scope = Scope::Global("agent-a".into());
+        seed_task_list(&*store, &scope, "tasks");
+        let item_id =
+            handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("task")).unwrap();
         let edge_ref = format!("tasks#{item_id}");
 
         let status_json = serde_json::to_string(&TaskStatus::Completed).unwrap();
-        handle_transition(&*store, "agent-a", &edge_ref, &status_json).unwrap();
+        handle_transition(&*store, &scope, "agent-a", &edge_ref, &status_json).unwrap();
 
-        let sdoc = store.get_block("agent-a", "tasks").unwrap().unwrap();
+        let sdoc = store.get_block(&scope, "tasks").unwrap().unwrap();
         let item = read_item_as_json(sdoc.inner(), 0).unwrap();
         assert_eq!(
             item.get("status").and_then(|v| v.as_str()),
@@ -1392,15 +1427,17 @@ mod tests {
     #[test]
     fn add_comment_appends_in_order() {
         let store = Arc::new(InMemoryMemoryStore::new());
-        seed_task_list(&*store, "agent-a", "tasks");
-        let item_id = handle_create(&*store, "agent-a", "tasks", &sample_spec("t")).unwrap();
+        let scope = Scope::Global("agent-a".into());
+        seed_task_list(&*store, &scope, "tasks");
+        let item_id =
+            handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("t")).unwrap();
         let edge_ref = format!("tasks#{item_id}");
 
-        handle_add_comment(&*store, "agent-a", &edge_ref, "first").unwrap();
-        handle_add_comment(&*store, "agent-a", &edge_ref, "second").unwrap();
-        handle_add_comment(&*store, "agent-a", &edge_ref, "third").unwrap();
+        handle_add_comment(&*store, &scope, "agent-a", &edge_ref, "first").unwrap();
+        handle_add_comment(&*store, &scope, "agent-a", &edge_ref, "second").unwrap();
+        handle_add_comment(&*store, &scope, "agent-a", &edge_ref, "third").unwrap();
 
-        let sdoc = store.get_block("agent-a", "tasks").unwrap().unwrap();
+        let sdoc = store.get_block(&scope, "tasks").unwrap().unwrap();
         let item = read_item_as_json(sdoc.inner(), 0).unwrap();
         let comments = item
             .get("comments")
@@ -1432,7 +1469,8 @@ mod tests {
     #[test]
     fn update_on_missing_ref_returns_task_not_found() {
         let store = Arc::new(InMemoryMemoryStore::new());
-        seed_task_list(&*store, "agent-a", "tasks");
+        let scope = Scope::Global("agent-a".into());
+        seed_task_list(&*store, &scope, "tasks");
         // Well-formed edge ref but the item doesn't exist.
         let patch_json = serde_json::to_string(&TaskPatch {
             subject: Some("x".to_string()),
@@ -1443,8 +1481,9 @@ mod tests {
             metadata: None,
         })
         .unwrap();
-        let err = handle_update(&*store, "agent-a", "tasks#01HQZZZBOGUS01", &patch_json)
-            .expect_err("must fail on missing item");
+        let err =
+            handle_update(&*store, &scope, "agent-a", "tasks#01HQZZZBOGUS01", &patch_json)
+                .expect_err("must fail on missing item");
         assert!(
             matches!(
                 err,
@@ -1457,7 +1496,8 @@ mod tests {
     #[test]
     fn update_applies_owner_clear_via_double_option() {
         let store = Arc::new(InMemoryMemoryStore::new());
-        seed_task_list(&*store, "agent-a", "tasks");
+        let scope = Scope::Global("agent-a".into());
+        seed_task_list(&*store, &scope, "tasks");
         // Create with an owner.
         let spec = serde_json::to_string(&TaskSpec {
             subject: "t".to_string(),
@@ -1468,7 +1508,7 @@ mod tests {
             metadata: JsonValue::Null,
         })
         .unwrap();
-        let item_id = handle_create(&*store, "agent-a", "tasks", &spec).unwrap();
+        let item_id = handle_create(&*store, &scope, "agent-a", "tasks", &spec).unwrap();
         let edge_ref = format!("tasks#{item_id}");
 
         // Patch owner to Some(None) → clear.
@@ -1482,13 +1522,14 @@ mod tests {
         };
         handle_update(
             &*store,
+            &scope,
             "agent-a",
             &edge_ref,
             &serde_json::to_string(&patch).unwrap(),
         )
         .unwrap();
 
-        let sdoc = store.get_block("agent-a", "tasks").unwrap().unwrap();
+        let sdoc = store.get_block(&scope, "tasks").unwrap().unwrap();
         let item = read_item_as_json(sdoc.inner(), 0).unwrap();
         assert!(item.get("owner").is_none(), "owner must be cleared");
     }
@@ -1496,8 +1537,13 @@ mod tests {
     // region: link / unlink tests
 
     /// Helper: read the blocks edge list on the item at `index` in `block`.
-    fn edges_at(store: &dyn MemoryStore, agent: &str, block: &str, index: usize) -> Vec<JsonValue> {
-        let sdoc = store.get_block(agent, block).unwrap().unwrap();
+    fn edges_at(
+        store: &dyn MemoryStore,
+        scope: &Scope,
+        block: &str,
+        index: usize,
+    ) -> Vec<JsonValue> {
+        let sdoc = store.get_block(scope, block).unwrap().unwrap();
         let item = read_item_as_json(sdoc.inner(), index).unwrap();
         item.get("blocks")
             .and_then(|v| v.as_array())
@@ -1508,16 +1554,17 @@ mod tests {
     #[test]
     fn link_appends_edge_to_source_item_blocks() {
         let store = Arc::new(InMemoryMemoryStore::new());
-        seed_task_list(&*store, "agent-a", "tasks");
-        let a = handle_create(&*store, "agent-a", "tasks", &sample_spec("A")).unwrap();
-        let b = handle_create(&*store, "agent-a", "tasks", &sample_spec("B")).unwrap();
+        let scope = Scope::Global("agent-a".into());
+        seed_task_list(&*store, &scope, "tasks");
+        let a = handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("A")).unwrap();
+        let b = handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("B")).unwrap();
 
         let a_ref = format!("tasks#{a}");
         let b_ref = format!("tasks#{b}");
-        handle_link(&*store, "agent-a", &a_ref, &b_ref).unwrap();
+        handle_link(&*store, &scope, "agent-a", &a_ref, &b_ref).unwrap();
 
         // A's blocks list has exactly one edge pointing at B.
-        let edges = edges_at(&*store, "agent-a", "tasks", 0);
+        let edges = edges_at(&*store, &scope, "tasks", 0);
         assert_eq!(edges.len(), 1, "exactly one edge");
         assert_eq!(
             edges[0].get("block").and_then(|v| v.as_str()),
@@ -1532,29 +1579,31 @@ mod tests {
     #[test]
     fn link_twice_is_idempotent_dedup() {
         let store = Arc::new(InMemoryMemoryStore::new());
-        seed_task_list(&*store, "agent-a", "tasks");
-        let a = handle_create(&*store, "agent-a", "tasks", &sample_spec("A")).unwrap();
-        let b = handle_create(&*store, "agent-a", "tasks", &sample_spec("B")).unwrap();
+        let scope = Scope::Global("agent-a".into());
+        seed_task_list(&*store, &scope, "tasks");
+        let a = handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("A")).unwrap();
+        let b = handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("B")).unwrap();
 
         let a_ref = format!("tasks#{a}");
         let b_ref = format!("tasks#{b}");
-        handle_link(&*store, "agent-a", &a_ref, &b_ref).unwrap();
-        handle_link(&*store, "agent-a", &a_ref, &b_ref).unwrap();
+        handle_link(&*store, &scope, "agent-a", &a_ref, &b_ref).unwrap();
+        handle_link(&*store, &scope, "agent-a", &a_ref, &b_ref).unwrap();
 
-        let edges = edges_at(&*store, "agent-a", "tasks", 0);
+        let edges = edges_at(&*store, &scope, "tasks", 0);
         assert_eq!(edges.len(), 1, "dedup keeps a single entry");
     }
 
     #[test]
     fn self_edge_allowed() {
         let store = Arc::new(InMemoryMemoryStore::new());
-        seed_task_list(&*store, "agent-a", "tasks");
-        let a = handle_create(&*store, "agent-a", "tasks", &sample_spec("A")).unwrap();
+        let scope = Scope::Global("agent-a".into());
+        seed_task_list(&*store, &scope, "tasks");
+        let a = handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("A")).unwrap();
 
         let a_ref = format!("tasks#{a}");
-        handle_link(&*store, "agent-a", &a_ref, &a_ref).expect("self-edge allowed");
+        handle_link(&*store, &scope, "agent-a", &a_ref, &a_ref).expect("self-edge allowed");
 
-        let edges = edges_at(&*store, "agent-a", "tasks", 0);
+        let edges = edges_at(&*store, &scope, "tasks", 0);
         assert_eq!(edges.len(), 1);
         assert_eq!(
             edges[0].get("task_item").and_then(|v| v.as_str()),
@@ -1567,24 +1616,25 @@ mod tests {
     fn link_cross_block_does_not_touch_target_block_doc() {
         // Two distinct TaskList blocks. link(A@L1, B@L2) must only mutate L1.
         let store = Arc::new(InMemoryMemoryStore::new());
-        seed_task_list(&*store, "agent-a", "l1");
-        seed_task_list(&*store, "agent-a", "l2");
-        let a = handle_create(&*store, "agent-a", "l1", &sample_spec("A")).unwrap();
-        let b = handle_create(&*store, "agent-a", "l2", &sample_spec("B")).unwrap();
+        let scope = Scope::Global("agent-a".into());
+        seed_task_list(&*store, &scope, "l1");
+        seed_task_list(&*store, &scope, "l2");
+        let a = handle_create(&*store, &scope, "agent-a", "l1", &sample_spec("A")).unwrap();
+        let b = handle_create(&*store, &scope, "agent-a", "l2", &sample_spec("B")).unwrap();
 
         // Snapshot L2's frontier before the link.
         let l2_before = {
-            let sdoc = store.get_block("agent-a", "l2").unwrap().unwrap();
+            let sdoc = store.get_block(&scope, "l2").unwrap().unwrap();
             sdoc.inner().state_frontiers()
         };
 
         let a_ref = format!("l1#{a}");
         let b_ref = format!("l2#{b}");
-        handle_link(&*store, "agent-a", &a_ref, &b_ref).unwrap();
+        handle_link(&*store, &scope, "agent-a", &a_ref, &b_ref).unwrap();
 
         // L2's frontier unchanged — we never touched its LoroDoc.
         let l2_after = {
-            let sdoc = store.get_block("agent-a", "l2").unwrap().unwrap();
+            let sdoc = store.get_block(&scope, "l2").unwrap().unwrap();
             sdoc.inner().state_frontiers()
         };
         assert_eq!(
@@ -1593,7 +1643,7 @@ mod tests {
         );
 
         // And the edge IS in L1.
-        let l1_edges = edges_at(&*store, "agent-a", "l1", 0);
+        let l1_edges = edges_at(&*store, &scope, "l1", 0);
         assert_eq!(l1_edges.len(), 1);
         assert_eq!(
             l1_edges[0].get("block").and_then(|v| v.as_str()),
@@ -1608,18 +1658,19 @@ mod tests {
     #[test]
     fn unlink_removes_edge_from_blocks_list() {
         let store = Arc::new(InMemoryMemoryStore::new());
-        seed_task_list(&*store, "agent-a", "tasks");
-        let a = handle_create(&*store, "agent-a", "tasks", &sample_spec("A")).unwrap();
-        let b = handle_create(&*store, "agent-a", "tasks", &sample_spec("B")).unwrap();
+        let scope = Scope::Global("agent-a".into());
+        seed_task_list(&*store, &scope, "tasks");
+        let a = handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("A")).unwrap();
+        let b = handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("B")).unwrap();
 
         let a_ref = format!("tasks#{a}");
         let b_ref = format!("tasks#{b}");
-        handle_link(&*store, "agent-a", &a_ref, &b_ref).unwrap();
-        assert_eq!(edges_at(&*store, "agent-a", "tasks", 0).len(), 1);
+        handle_link(&*store, &scope, "agent-a", &a_ref, &b_ref).unwrap();
+        assert_eq!(edges_at(&*store, &scope, "tasks", 0).len(), 1);
 
-        handle_unlink(&*store, "agent-a", &a_ref, &b_ref).unwrap();
+        handle_unlink(&*store, &scope, "agent-a", &a_ref, &b_ref).unwrap();
         assert_eq!(
-            edges_at(&*store, "agent-a", "tasks", 0).len(),
+            edges_at(&*store, &scope, "tasks", 0).len(),
             0,
             "edge removed after unlink"
         );
@@ -1628,25 +1679,29 @@ mod tests {
     #[test]
     fn unlink_nonexistent_edge_is_noop() {
         let store = Arc::new(InMemoryMemoryStore::new());
-        seed_task_list(&*store, "agent-a", "tasks");
-        let a = handle_create(&*store, "agent-a", "tasks", &sample_spec("A")).unwrap();
-        let b = handle_create(&*store, "agent-a", "tasks", &sample_spec("B")).unwrap();
+        let scope = Scope::Global("agent-a".into());
+        seed_task_list(&*store, &scope, "tasks");
+        let a = handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("A")).unwrap();
+        let b = handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("B")).unwrap();
 
         let a_ref = format!("tasks#{a}");
         let b_ref = format!("tasks#{b}");
         // No prior link — unlink must succeed silently.
-        handle_unlink(&*store, "agent-a", &a_ref, &b_ref).expect("no-op unlink must not error");
+        handle_unlink(&*store, &scope, "agent-a", &a_ref, &b_ref)
+            .expect("no-op unlink must not error");
 
-        assert_eq!(edges_at(&*store, "agent-a", "tasks", 0).len(), 0);
+        assert_eq!(edges_at(&*store, &scope, "tasks", 0).len(), 0);
     }
 
     #[test]
     fn link_missing_source_item_returns_task_not_found() {
         let store = Arc::new(InMemoryMemoryStore::new());
-        seed_task_list(&*store, "agent-a", "tasks");
+        let scope = Scope::Global("agent-a".into());
+        seed_task_list(&*store, &scope, "tasks");
         // Bogus source item id.
         let err = handle_link(
             &*store,
+            &scope,
             "agent-a",
             "tasks#01HQZZZBOGUS01",
             "tasks#any-target",
@@ -1739,12 +1794,14 @@ mod tests {
         // pseudo-message emitter sees task-block changes.
         use std::sync::Arc;
         let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
-        seed_task_list(&*store, "agent-a", "tasks");
-        handle_create(&*store, "agent-a", "tasks", &sample_spec("T1")).unwrap();
+        let scope = Scope::Global("agent-a".into());
+        seed_task_list(&*store, &scope, "tasks");
+        handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("T1")).unwrap();
 
         let adapter = MemoryStoreAdapter::new(store.clone(), "agent-a");
         record_task_write(
             &adapter,
+            &scope,
             "agent-a",
             &*store,
             "tasks",
@@ -1774,9 +1831,11 @@ mod tests {
         // M3 contract: unlink is fully idempotent — silent on missing source
         // item AND missing edge. Matches "remove if present" semantics.
         let store = Arc::new(InMemoryMemoryStore::new());
-        seed_task_list(&*store, "agent-a", "tasks");
+        let scope = Scope::Global("agent-a".into());
+        seed_task_list(&*store, &scope, "tasks");
         handle_unlink(
             &*store,
+            &scope,
             "agent-a",
             "tasks#01HQZZZBOGUS01",
             "tasks#any-target",
@@ -1865,15 +1924,16 @@ mod tests {
     fn list_tasks_scoped_to_single_block_only_returns_that_block() {
         let store = Arc::new(InMemoryMemoryStore::new());
         let db = open_db();
-        seed_task_list(&*store, "agent-a", "l1");
-        seed_task_list(&*store, "agent-a", "l2");
+        let scope = Scope::Global("agent-a".into());
+        seed_task_list(&*store, &scope, "l1");
+        seed_task_list(&*store, &scope, "l2");
         seed_task_row(&db, "l1", "i1", "task 1", TaskStatus::Pending, None);
         seed_task_row(&db, "l1", "i2", "task 2", TaskStatus::InProgress, None);
         seed_task_row(&db, "l2", "i3", "task 3", TaskStatus::Pending, None);
 
         let conn = db.get().unwrap();
         let views =
-            handle_list_tasks(&*store, &conn, "agent-a", Some("l1"), "{}").expect("list ok");
+            handle_list_tasks(&*store, &conn, &scope, Some("l1"), "{}").expect("list ok");
         assert_eq!(views.len(), 2, "only l1's tasks");
         for v in &views {
             assert_eq!(v.block_ref.block.as_str(), "l1");
@@ -1884,8 +1944,9 @@ mod tests {
     fn list_tasks_no_block_enumerates_all_visible() {
         let store = Arc::new(InMemoryMemoryStore::new());
         let db = open_db();
-        seed_task_list(&*store, "agent-a", "l1");
-        seed_task_list(&*store, "agent-a", "l2");
+        let scope = Scope::Global("agent-a".into());
+        seed_task_list(&*store, &scope, "l1");
+        seed_task_list(&*store, &scope, "l2");
         seed_task_row(&db, "l1", "i1", "one", TaskStatus::Pending, None);
         seed_task_row(&db, "l2", "i2", "two", TaskStatus::Pending, None);
         // And a task row for a block the agent does NOT own — must be invisible.
@@ -1899,7 +1960,7 @@ mod tests {
         );
 
         let conn = db.get().unwrap();
-        let views = handle_list_tasks(&*store, &conn, "agent-a", None, "{}").unwrap();
+        let views = handle_list_tasks(&*store, &conn, &scope, None, "{}").unwrap();
         assert_eq!(views.len(), 2, "agent sees only their own blocks' tasks");
         let blocks: std::collections::HashSet<&str> =
             views.iter().map(|v| v.block_ref.block.as_str()).collect();
@@ -1911,7 +1972,8 @@ mod tests {
     fn list_tasks_status_filter_matches_subset() {
         let store = Arc::new(InMemoryMemoryStore::new());
         let db = open_db();
-        seed_task_list(&*store, "agent-a", "tasks");
+        let scope = Scope::Global("agent-a".into());
+        seed_task_list(&*store, &scope, "tasks");
         seed_task_row(&db, "tasks", "a", "a", TaskStatus::Pending, None);
         seed_task_row(&db, "tasks", "b", "b", TaskStatus::InProgress, None);
         seed_task_row(&db, "tasks", "c", "c", TaskStatus::Blocked, None);
@@ -1925,7 +1987,7 @@ mod tests {
         let filter_json = serde_json::to_string(&filter).unwrap();
 
         let conn = db.get().unwrap();
-        let views = handle_list_tasks(&*store, &conn, "agent-a", None, &filter_json).unwrap();
+        let views = handle_list_tasks(&*store, &conn, &scope, None, &filter_json).unwrap();
         assert_eq!(views.len(), 2);
         for v in &views {
             assert!(matches!(
@@ -1939,7 +2001,8 @@ mod tests {
     fn list_tasks_keyword_filter_matches_fts5() {
         let store = Arc::new(InMemoryMemoryStore::new());
         let db = open_db();
-        seed_task_list(&*store, "agent-a", "tasks");
+        let scope = Scope::Global("agent-a".into());
+        seed_task_list(&*store, &scope, "tasks");
         seed_task_row(
             &db,
             "tasks",
@@ -1965,7 +2028,7 @@ mod tests {
         let filter_json = serde_json::to_string(&filter).unwrap();
 
         let conn = db.get().unwrap();
-        let views = handle_list_tasks(&*store, &conn, "agent-a", None, &filter_json).unwrap();
+        let views = handle_list_tasks(&*store, &conn, &scope, None, &filter_json).unwrap();
         let subjects: std::collections::HashSet<&str> =
             views.iter().map(|v| v.subject.as_str()).collect();
         assert_eq!(views.len(), 2, "two matches for 'auth*'");
@@ -1977,7 +2040,8 @@ mod tests {
     fn list_tasks_has_blockers_filter() {
         let store = Arc::new(InMemoryMemoryStore::new());
         let db = open_db();
-        seed_task_list(&*store, "agent-a", "tasks");
+        let scope = Scope::Global("agent-a".into());
+        seed_task_list(&*store, &scope, "tasks");
         seed_task_row(&db, "tasks", "a", "a", TaskStatus::Pending, None);
         seed_task_row(&db, "tasks", "b", "b", TaskStatus::Pending, None);
         seed_task_row(&db, "tasks", "c", "c", TaskStatus::Pending, None);
@@ -1991,7 +2055,7 @@ mod tests {
         let filter_json = serde_json::to_string(&filter).unwrap();
 
         let conn = db.get().unwrap();
-        let views = handle_list_tasks(&*store, &conn, "agent-a", None, &filter_json).unwrap();
+        let views = handle_list_tasks(&*store, &conn, &scope, None, &filter_json).unwrap();
         assert_eq!(views.len(), 1);
         assert_eq!(
             views[0].block_ref.task_item.as_ref().map(|s| s.as_str()),
@@ -2003,7 +2067,8 @@ mod tests {
     fn list_tasks_projects_blocker_and_blocks_counts() {
         let store = Arc::new(InMemoryMemoryStore::new());
         let db = open_db();
-        seed_task_list(&*store, "agent-a", "tasks");
+        let scope = Scope::Global("agent-a".into());
+        seed_task_list(&*store, &scope, "tasks");
         seed_task_row(&db, "tasks", "a", "a", TaskStatus::Pending, None);
         seed_task_row(&db, "tasks", "b", "b", TaskStatus::Pending, None);
         seed_task_row(&db, "tasks", "c", "c", TaskStatus::Pending, None);
@@ -2013,7 +2078,8 @@ mod tests {
         // c gets incoming from a (blocker_count=1 for c).
 
         let conn = db.get().unwrap();
-        let views = handle_list_tasks(&*store, &conn, "agent-a", Some("tasks"), "{}").unwrap();
+        let views =
+            handle_list_tasks(&*store, &conn, &scope, Some("tasks"), "{}").unwrap();
         let by_item: std::collections::HashMap<&str, &TaskView> = views
             .iter()
             .filter_map(|v| v.block_ref.task_item.as_deref().map(|s| (s, v)))
@@ -2028,14 +2094,15 @@ mod tests {
     fn list_tasks_on_non_tasklist_returns_not_a_task_list() {
         let store = Arc::new(InMemoryMemoryStore::new());
         let db = open_db();
+        let scope = Scope::Global("agent-a".into());
         // Seed a Text block instead.
         let create = BlockCreate::new("notes".to_string(), MemoryBlockType::Working, text_schema())
             .with_description("notes".to_string())
             .with_char_limit(4096);
-        store.create_block("agent-a", create).unwrap();
+        store.create_block(&scope, create).unwrap();
 
         let conn = db.get().unwrap();
-        let err = handle_list_tasks(&*store, &conn, "agent-a", Some("notes"), "{}")
+        let err = handle_list_tasks(&*store, &conn, &scope, Some("notes"), "{}")
             .expect_err("must fail on non-TaskList block");
         assert!(matches!(
             err,
@@ -2051,8 +2118,9 @@ mod tests {
         // an empty result.
         let store = Arc::new(InMemoryMemoryStore::new());
         let db = open_db();
-        seed_task_list(&*store, "agent-a", "tasks");
-        seed_task_list(&*store, "agent-a", "other");
+        let scope = Scope::Global("agent-a".into());
+        seed_task_list(&*store, &scope, "tasks");
+        seed_task_list(&*store, &scope, "other");
 
         let filter = TaskFilter {
             blocks: Some(vec![smol_str::SmolStr::new("other")]),
@@ -2061,7 +2129,7 @@ mod tests {
         let filter_json = serde_json::to_string(&filter).unwrap();
 
         let conn = db.get().unwrap();
-        let err = handle_list_tasks(&*store, &conn, "agent-a", Some("tasks"), &filter_json)
+        let err = handle_list_tasks(&*store, &conn, &scope, Some("tasks"), &filter_json)
             .expect_err("must reject self-contradictory block+filter.blocks");
         assert!(
             matches!(err, TaskHandlerError::ConflictingBlockScope { .. }),
@@ -2074,7 +2142,8 @@ mod tests {
         // Caller redundantly specifies the same block via both — valid.
         let store = Arc::new(InMemoryMemoryStore::new());
         let db = open_db();
-        seed_task_list(&*store, "agent-a", "tasks");
+        let scope = Scope::Global("agent-a".into());
+        seed_task_list(&*store, &scope, "tasks");
         seed_task_row(&db, "tasks", "i1", "t1", TaskStatus::Pending, None);
 
         let filter = TaskFilter {
@@ -2084,7 +2153,7 @@ mod tests {
         let filter_json = serde_json::to_string(&filter).unwrap();
 
         let conn = db.get().unwrap();
-        let views = handle_list_tasks(&*store, &conn, "agent-a", Some("tasks"), &filter_json)
+        let views = handle_list_tasks(&*store, &conn, &scope, Some("tasks"), &filter_json)
             .expect("redundant but consistent scope is accepted");
         assert_eq!(views.len(), 1);
     }
@@ -2093,7 +2162,8 @@ mod tests {
     fn query_graph_forward_chain_of_5() {
         let store = Arc::new(InMemoryMemoryStore::new());
         let db = open_db();
-        seed_task_list(&*store, "agent-a", "tasks");
+        let scope = Scope::Global("agent-a".into());
+        seed_task_list(&*store, &scope, "tasks");
         for id in ["a", "b", "c", "d", "e"] {
             seed_task_row(&db, "tasks", id, id, TaskStatus::Pending, None);
         }
@@ -2116,7 +2186,7 @@ mod tests {
         let slice = handle_query_graph(
             &*store,
             &conn,
-            "agent-a",
+            &scope,
             &root.to_string(),
             &serde_json::to_string(&query).unwrap(),
         )
@@ -2144,7 +2214,8 @@ mod tests {
     fn query_graph_depth_zero_returns_root_only() {
         let store = Arc::new(InMemoryMemoryStore::new());
         let db = open_db();
-        seed_task_list(&*store, "agent-a", "tasks");
+        let scope = Scope::Global("agent-a".into());
+        seed_task_list(&*store, &scope, "tasks");
         seed_task_row(&db, "tasks", "a", "a", TaskStatus::Pending, None);
         seed_task_row(&db, "tasks", "b", "b", TaskStatus::Pending, None);
         seed_edge(&db, "tasks", "a", "tasks", Some("b"));
@@ -2162,7 +2233,7 @@ mod tests {
         let slice = handle_query_graph(
             &*store,
             &conn,
-            "agent-a",
+            &scope,
             &root.to_string(),
             &serde_json::to_string(&query).unwrap(),
         )
@@ -2176,7 +2247,8 @@ mod tests {
     fn query_graph_reverse_direction_walks_incoming_edges() {
         let store = Arc::new(InMemoryMemoryStore::new());
         let db = open_db();
-        seed_task_list(&*store, "agent-a", "tasks");
+        let scope = Scope::Global("agent-a".into());
+        seed_task_list(&*store, &scope, "tasks");
         seed_task_row(&db, "tasks", "a", "a", TaskStatus::Pending, None);
         seed_task_row(&db, "tasks", "b", "b", TaskStatus::Pending, None);
         // a → b, querying B with Reverse should find A.
@@ -2195,7 +2267,7 @@ mod tests {
         let slice = handle_query_graph(
             &*store,
             &conn,
-            "agent-a",
+            &scope,
             &root.to_string(),
             &serde_json::to_string(&query).unwrap(),
         )
@@ -2216,7 +2288,8 @@ mod tests {
     fn query_graph_cycle_terminates_within_depth() {
         let store = Arc::new(InMemoryMemoryStore::new());
         let db = open_db();
-        seed_task_list(&*store, "agent-a", "tasks");
+        let scope = Scope::Global("agent-a".into());
+        seed_task_list(&*store, &scope, "tasks");
         for id in ["a", "b", "c"] {
             seed_task_row(&db, "tasks", id, id, TaskStatus::Pending, None);
         }
@@ -2238,7 +2311,7 @@ mod tests {
         let slice = handle_query_graph(
             &*store,
             &conn,
-            "agent-a",
+            &scope,
             &root.to_string(),
             &serde_json::to_string(&query).unwrap(),
         )
@@ -2257,13 +2330,21 @@ mod tests {
         // not leak the target's TaskEdgeRef via BFS results. The filter
         // drops nodes + incident edges whose blocks are outside the
         // visible set.
+        //
+        // In production the visible set is determined by MemoryScope (which
+        // filters to the caller's scope). In this unit test we model the
+        // same invariant by only putting "visible" in the store — "hidden"
+        // exists in the DB (as the BFS target) but has no corresponding
+        // in-memory block. handle_query_graph therefore cannot find it in
+        // list_blocks(), correctly excluding it from the visible set.
         let store = Arc::new(InMemoryMemoryStore::new());
         let db = open_db();
 
         // agent-a owns "visible" block and can see it.
-        seed_task_list(&*store, "agent-a", "visible");
-        // agent-b owns "hidden" block. agent-a cannot see it.
-        seed_task_list(&*store, "agent-b", "hidden");
+        let scope_a = Scope::Global("agent-a".into());
+        seed_task_list(&*store, &scope_a, "visible");
+        // "hidden" block exists only in the DB (BFS target), NOT in the store.
+        // This simulates agent-b's block being outside the scope visible to agent-a.
 
         // Seed tasks + an edge crossing from agent-a's block to agent-b's.
         seed_task_row(&db, "visible", "v1", "v1", TaskStatus::Pending, None);
@@ -2283,7 +2364,7 @@ mod tests {
         let slice = handle_query_graph(
             &*store,
             &conn,
-            "agent-a",
+            &scope_a,
             &root.to_string(),
             &serde_json::to_string(&query).unwrap(),
         )
@@ -2317,7 +2398,8 @@ mod tests {
         // depth=16 cap — we want to verify the max_nodes truncation path.
         let store = Arc::new(InMemoryMemoryStore::new());
         let db = open_db();
-        seed_task_list(&*store, "agent-a", "tasks");
+        let scope = Scope::Global("agent-a".into());
+        seed_task_list(&*store, &scope, "tasks");
         seed_task_row(&db, "tasks", "root", "root", TaskStatus::Pending, None);
         for i in 0..100 {
             let id = format!("c{i:03}");
@@ -2338,7 +2420,7 @@ mod tests {
         let slice = handle_query_graph(
             &*store,
             &conn,
-            "agent-a",
+            &scope,
             &root.to_string(),
             &serde_json::to_string(&query).unwrap(),
         )
@@ -2375,8 +2457,14 @@ mod tests {
         let inner = InMemoryMemoryStore::new();
 
         // Seed tasks under three agents.
+        // scope_project uses Scope::Local because the project is registered as
+        // a Local (project-shared) scope in the ScopeBinding below.
+        // scope_persona and scope_rogue use Scope::Global (persona-owned).
         let db = open_db();
-        seed_task_list(&inner, "persona", "persona-tasks");
+        let scope_persona = Scope::Global("persona".into());
+        let scope_project = Scope::Local("project".into());
+        let scope_rogue = Scope::Global("rogue".into());
+        seed_task_list(&inner, &scope_persona, "persona-tasks");
         seed_task_row(
             &db,
             "persona-tasks",
@@ -2385,7 +2473,7 @@ mod tests {
             TaskStatus::Pending,
             None,
         );
-        seed_task_list(&inner, "project", "project-tasks");
+        seed_task_list(&inner, &scope_project, "project-tasks");
         seed_task_row(
             &db,
             "project-tasks",
@@ -2394,7 +2482,7 @@ mod tests {
             TaskStatus::Pending,
             None,
         );
-        seed_task_list(&inner, "rogue", "rogue-tasks");
+        seed_task_list(&inner, &scope_rogue, "rogue-tasks");
         seed_task_row(
             &db,
             "rogue-tasks",
@@ -2405,7 +2493,7 @@ mod tests {
         );
 
         // Wrap in MemoryScope with Full isolation.
-        let scope = MemoryScope::new(
+        let ms = MemoryScope::new(
             inner,
             ScopeBinding::with_project("persona", "project", IsolatePolicy::Full),
         );
@@ -2417,7 +2505,7 @@ mod tests {
         // This is the key assertion: the Full gate is what hides persona
         // from itself — a passthrough implementation would return the
         // persona's block here.
-        let views = handle_list_tasks(&scope, &conn, "persona", None, "{}")
+        let views = handle_list_tasks(&ms, &conn, &scope_persona, None, "{}")
             .expect("list_tasks under Full isolation (persona caller)");
         assert_eq!(
             views.len(),
@@ -2448,11 +2536,13 @@ mod tests {
         use pattern_memory::subscriber::task::reconcile_task_list;
 
         let store = Arc::new(InMemoryMemoryStore::new());
-        seed_task_list(&*store, "agent-a", "tasks");
-        let a = handle_create(&*store, "agent-a", "tasks", &sample_spec("A")).unwrap();
-        let b = handle_create(&*store, "agent-a", "tasks", &sample_spec("B")).unwrap();
+        let scope = Scope::Global("agent-a".into());
+        seed_task_list(&*store, &scope, "tasks");
+        let a = handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("A")).unwrap();
+        let b = handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("B")).unwrap();
         handle_link(
             &*store,
+            &scope,
             "agent-a",
             &format!("tasks#{a}"),
             &format!("tasks#{b}"),
@@ -2464,7 +2554,7 @@ mod tests {
         // any field rename on either side would be caught here.
         let db = open_db();
         let mut conn = db.get().unwrap();
-        let sdoc = store.get_block("agent-a", "tasks").unwrap().unwrap();
+        let sdoc = store.get_block(&scope, "tasks").unwrap().unwrap();
         {
             let tx = conn.transaction().unwrap();
             reconcile_task_list(&tx, "tasks", sdoc.inner())
@@ -2511,18 +2601,19 @@ mod tests {
         use pattern_memory::subscriber::task::reconcile_task_list;
 
         let store = Arc::new(InMemoryMemoryStore::new());
-        seed_task_list(&*store, "agent-a", "tasks");
-        let a = handle_create(&*store, "agent-a", "tasks", &sample_spec("A")).unwrap();
-        let b = handle_create(&*store, "agent-a", "tasks", &sample_spec("B")).unwrap();
+        let scope = Scope::Global("agent-a".into());
+        seed_task_list(&*store, &scope, "tasks");
+        let a = handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("A")).unwrap();
+        let b = handle_create(&*store, &scope, "agent-a", "tasks", &sample_spec("B")).unwrap();
         let a_ref = format!("tasks#{a}");
         let b_ref = format!("tasks#{b}");
 
-        handle_link(&*store, "agent-a", &a_ref, &b_ref).unwrap();
+        handle_link(&*store, &scope, "agent-a", &a_ref, &b_ref).unwrap();
 
         // First reconcile: edge appears.
         let db = open_db();
         let mut conn = db.get().unwrap();
-        let sdoc = store.get_block("agent-a", "tasks").unwrap().unwrap();
+        let sdoc = store.get_block(&scope, "tasks").unwrap().unwrap();
         {
             let tx = conn.transaction().unwrap();
             reconcile_task_list(&tx, "tasks", sdoc.inner()).unwrap();
@@ -2534,8 +2625,8 @@ mod tests {
         assert_eq!(pre, 1);
 
         // Unlink + re-reconcile: edge gone.
-        handle_unlink(&*store, "agent-a", &a_ref, &b_ref).unwrap();
-        let sdoc = store.get_block("agent-a", "tasks").unwrap().unwrap();
+        handle_unlink(&*store, &scope, "agent-a", &a_ref, &b_ref).unwrap();
+        let sdoc = store.get_block(&scope, "tasks").unwrap().unwrap();
         {
             let tx = conn.transaction().unwrap();
             reconcile_task_list(&tx, "tasks", sdoc.inner()).unwrap();

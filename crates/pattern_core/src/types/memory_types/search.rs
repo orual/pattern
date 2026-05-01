@@ -1,7 +1,6 @@
 //! Search-related types that appear in [`crate::traits::MemoryStore`]
 //! signatures.
 
-use crate::types::ids::AgentId;
 
 /// Search mode configuration
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,14 +107,15 @@ impl Default for SearchOptions {
 /// `Agents` variants resolved by the scope resolver before reaching
 /// the store.
 ///
-/// Phase 8's `MemoryScope` layers additional routing (persona + project)
-/// on top of this.
+/// `Scope(Scope)` searches a single ownership boundary (e.g. one
+/// project's blocks or one persona's blocks). `Constellation` searches
+/// across every scope visible to the caller.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MemorySearchScope {
-    /// Search only this agent's data.
-    Agent(AgentId),
-    /// Search all agents in the constellation.
+    /// Search a single scope's blocks.
+    Scope(super::Scope),
+    /// Search all scopes in the constellation.
     Constellation,
 }
 
@@ -138,9 +138,10 @@ mod tests {
 
     #[test]
     fn memory_search_scope_agent_variant() {
-        let scope = MemorySearchScope::Agent("agent-1".into());
-        assert_eq!(scope, MemorySearchScope::Agent("agent-1".into()));
-        assert_ne!(scope, MemorySearchScope::Constellation);
+        use crate::types::memory_types::Scope as Sc;
+        let s = MemorySearchScope::Scope(Sc::global("agent-1"));
+        assert_eq!(s, MemorySearchScope::Scope(Sc::global("agent-1")));
+        assert_ne!(s, MemorySearchScope::Constellation);
     }
 
     #[test]

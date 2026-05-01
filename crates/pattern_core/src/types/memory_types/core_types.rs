@@ -198,6 +198,17 @@ impl BlockFilter {
         }
     }
 
+    /// Filter to a single scope's blocks. The scope is encoded to its
+    /// stable DB-key form (`local:<id>` / `global:<id>`) so the
+    /// underlying [`agent_id`](Self::agent_id) match disambiguates
+    /// `Scope::Local("x")` from `Scope::Global("x")`.
+    pub fn by_scope(scope: &super::Scope) -> Self {
+        Self {
+            agent_id: Some(scope.to_db_key()),
+            ..Self::default()
+        }
+    }
+
     /// Filter to a single agent's blocks of a specific type.
     pub fn by_type(agent_id: impl Into<String>, block_type: MemoryBlockType) -> Self {
         Self {

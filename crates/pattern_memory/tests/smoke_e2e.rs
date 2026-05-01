@@ -26,7 +26,7 @@ use std::time::Duration;
 use jiff::Timestamp;
 use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::BlockCreate;
-use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
+use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType, Scope};
 use pattern_db::{ConstellationDb, Json, models};
 use pattern_memory::backup::restore::restore_snapshot;
 use pattern_memory::backup::snapshot::create_snapshot;
@@ -181,6 +181,11 @@ async fn smoke_e2e() {
         mount.mount_path.display()
     );
 
+    // The smoke test exercises the file-emission pipeline via the mount's
+    // project scope so blocks render at the canonical project layout
+    // (`<mount>/blocks/<type>/<label>.<ext>`). Global-scope blocks render
+    // under `<persona_state_dir>/@<id>/blocks/...` which is exercised
+    // separately by `scope_isolation` and the wrapper unit tests.
     let agent_id = "smoke-agent";
     seed_agent(&mount.db, agent_id);
 
@@ -190,20 +195,23 @@ async fn smoke_e2e() {
     // only fires for writes AFTER the subscriber exists, so we split creation
     // (which spawns the subscriber) from content writes (which trigger events).
 
+    let agent_scope = Scope::local(agent_id);
+    let agent_key = agent_scope.to_db_key();
+
     let text_doc = mount
         .cache
         .create_block(
-            agent_id,
+            &agent_scope,
             BlockCreate::new("notes", MemoryBlockType::Core, BlockSchema::text()),
         )
         .expect("create notes block");
     // Persist to spawn the subscriber.
-    mount.cache.persist_block(agent_id, "notes").unwrap();
+    mount.cache.persist_block(&agent_scope, "notes").unwrap();
 
     let map_doc = mount
         .cache
         .create_block(
-            agent_id,
+            &agent_scope,
             BlockCreate::new(
                 "config",
                 MemoryBlockType::Working,
@@ -211,12 +219,12 @@ async fn smoke_e2e() {
             ),
         )
         .expect("create config block");
-    mount.cache.persist_block(agent_id, "config").unwrap();
+    mount.cache.persist_block(&agent_scope, "config").unwrap();
 
     let log_doc = mount
         .cache
         .create_block(
-            agent_id,
+            &agent_scope,
             BlockCreate::new(
                 "events",
                 MemoryBlockType::Working,
@@ -231,7 +239,7 @@ async fn smoke_e2e() {
             ),
         )
         .expect("create events block");
-    mount.cache.persist_block(agent_id, "events").unwrap();
+    mount.cache.persist_block(&agent_scope, "events").unwrap();
 
     // Brief sleep to let subscriber threads start.
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -239,33 +247,32 @@ async fn smoke_e2e() {
     // Now write actual content — these writes trigger subscribe_local_update
     // callbacks that send CommitEvents to the subscriber workers.
     text_doc.set_text("hello pattern", false).unwrap();
-    mount.cache.mark_dirty(agent_id, "notes");
-    mount.cache.persist_block(agent_id, "notes").unwrap();
+    mount.cache.mark_dirty(&agent_key, "notes");
+    mount.cache.persist_block(&agent_scope, "notes").unwrap();
 
     map_doc
         .set_field("key1", serde_json::json!("value1"), false)
         .unwrap();
-    mount.cache.mark_dirty(agent_id, "config");
-    mount.cache.persist_block(agent_id, "config").unwrap();
+    mount.cache.mark_dirty(&agent_key, "config");
+    mount.cache.persist_block(&agent_scope, "config").unwrap();
 
     log_doc
         .append_log_entry(serde_json::json!({"event": "started"}), false)
         .unwrap();
-    mount.cache.mark_dirty(agent_id, "events");
-    mount.cache.persist_block(agent_id, "events").unwrap();
+    mount.cache.mark_dirty(&agent_key, "events");
+    mount.cache.persist_block(&agent_scope, "events").unwrap();
 
     // --- Step 4: wait for subscriber debounce + verify files ---
     // Subscribers are lazy-spawned on first persist when mount_path is set.
     // Give them time to emit canonical files.
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    // Files are emitted as `<mount_path>/<block_id>.<ext>`.
-    let notes_md = mount
-        .mount_path
-        .join("blocks")
-        .join("@smoke-agent")
-        .join("core")
-        .join("notes.md");
+    // Files emit at `<mount>/blocks/<type_dir>/<label>.<ext>` for
+    // `Scope::Local` blocks (project-shared layout — no per-agent
+    // subdir). `Scope::Global` blocks render to
+    // `<persona_state_dir>/@<id>/blocks/<type>/<label>.<ext>` which is
+    // tested separately.
+    let notes_md = mount.mount_path.join("blocks").join("core").join("notes.md");
     assert!(
         notes_md.exists(),
         "notes .md should exist at {}",
@@ -280,7 +287,6 @@ async fn smoke_e2e() {
     let config_kdl = mount
         .mount_path
         .join("blocks")
-        .join("@smoke-agent")
         .join("working")
         .join("config.kdl");
     assert!(
@@ -292,7 +298,6 @@ async fn smoke_e2e() {
     let events_jsonl = mount
         .mount_path
         .join("blocks")
-        .join("@smoke-agent")
         .join("working")
         .join("events.jsonl");
     assert!(
@@ -310,7 +315,7 @@ async fn smoke_e2e() {
     // --- Step 7: verify merged content ---
     let merged = mount
         .cache
-        .get_rendered_content(agent_id, "notes")
+        .get_rendered_content(&agent_scope, "notes")
         .expect("get merged content")
         .expect("notes should exist after merge");
     assert!(
@@ -319,8 +324,8 @@ async fn smoke_e2e() {
     );
 
     // Persist the merged state to DB so it survives detach/re-attach.
-    mount.cache.mark_dirty(agent_id, "notes");
-    mount.cache.persist_block(agent_id, "notes").unwrap();
+    mount.cache.mark_dirty(&agent_key, "notes");
+    mount.cache.persist_block(&agent_scope, "notes").unwrap();
 
     // --- Step 8: quiesce + git commit ---
     let emitted = collect_emitted_paths(&mount);
@@ -334,7 +339,7 @@ async fn smoke_e2e() {
     let mount2 = attach_with_paths(&project_root, &paths, None).expect("re-attach");
     let recovered = mount2
         .cache
-        .get_rendered_content(agent_id, "notes")
+        .get_rendered_content(&agent_scope, "notes")
         .expect("get after re-attach")
         .expect("notes should exist after re-attach");
     assert!(

@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 
 use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::BlockCreate;
-use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType, TaskEdgeRef};
+use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType, Scope, TaskEdgeRef};
 use pattern_core::types::origin::{Author, SystemReason};
 
 use pattern_runtime::sdk::handlers::tasks::{handle_create, handle_transition};
@@ -43,7 +43,7 @@ fn seed_block(store: &dyn MemoryStore, agent: &str, label: &str) -> String {
     .with_description("test".to_string())
     .with_char_limit(4096);
     let sdoc = store
-        .create_block(agent, create)
+        .create_block(&Scope::global(agent), create)
         .expect("create TaskList block");
     sdoc.metadata().id.clone()
 }
@@ -59,9 +59,10 @@ async fn task_dep_resolved_fires_on_completion() {
 
     let store: Arc<dyn MemoryStore> = Arc::new(InMemoryMemoryStore::new());
     let block_id = seed_block(&*store, agent, label);
+    let scope = Scope::global(agent);
 
     // Create a Pending task. handle_create returns the item id.
-    let item_id = handle_create(&*store, agent, label, &sample_spec("ship-it"))
+    let item_id = handle_create(&*store, &scope, agent, label, &sample_spec("ship-it"))
         .expect("create task")
         .to_string();
 
@@ -108,7 +109,7 @@ async fn task_dep_resolved_fires_on_completion() {
     // would normally announce the change.
     let edge_ref_str = format!("{label}#{item_id}");
     let completed_status = "\"completed\"".to_string();
-    handle_transition(&*store, agent, &edge_ref_str, &completed_status).expect("transition");
+    handle_transition(&*store, &scope, agent, &edge_ref_str, &completed_status).expect("transition");
 
     notifier.fire(&block_id, &bref);
 

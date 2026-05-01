@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::BlockCreate;
-use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
+use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType, Scope};
 use pattern_memory::MemoryCache;
 use pattern_runtime::spawn::fork::{ForkError, ForkHandle, ForkIsolationState};
 
@@ -52,9 +52,9 @@ fn seed_text_block(cache: &MemoryCache, agent_id: &str, label: &str, content: &s
         MemoryBlockType::Working,
         BlockSchema::text(),
     );
-    cache.create_block(agent_id, bc).expect("create_block");
+    cache.create_block(&Scope::global(agent_id), bc).expect("create_block");
     let doc = cache
-        .get(agent_id, label)
+        .get(&Scope::global(agent_id).to_db_key(), label)
         .expect("get after create")
         .expect("block must exist after create");
     doc.set_text(content, true).expect("set_text");
@@ -70,16 +70,18 @@ fn seed_text_block(cache: &MemoryCache, agent_id: &str, label: &str, content: &s
 fn discard_drops_child_state_does_not_propagate_ac4_5() {
     let parent_id = "fd-ac4-5-parent";
     let child_id = "fd-ac4-5-child";
+    let parent_key = Scope::global(parent_id).to_db_key();
+    let child_key = Scope::global(child_id).to_db_key();
 
     let parent_cache = open_cache(parent_id, child_id);
     seed_text_block(&parent_cache, parent_id, "notes", "parent-only");
 
     // Ensure block is loaded into cache before forking.
-    let _ = parent_cache.get(parent_id, "notes").unwrap().unwrap();
+    let _ = parent_cache.get(&parent_key, "notes").unwrap().unwrap();
 
     let child_cache = Arc::new(
         parent_cache
-            .fork_for_child(parent_id, child_id)
+            .fork_for_child(&parent_key, &child_key)
             .expect("fork_for_child"),
     );
 
@@ -88,7 +90,7 @@ fn discard_drops_child_state_does_not_propagate_ac4_5() {
         "fork-discard-ac4-5".into(),
         child_id.into(),
         Arc::clone(&child_cache),
-        parent_id.into(),
+        parent_key.clone().into(),
         Arc::downgrade(&parent_cache),
         Arc::clone(&cancel),
     );
@@ -96,7 +98,7 @@ fn discard_drops_child_state_does_not_propagate_ac4_5() {
     // Fork writes divergent content.
     {
         let child_doc = child_cache
-            .get_cached_doc(child_id, "notes")
+            .get_cached_doc(&child_key, "notes")
             .expect("child must have notes block");
         child_doc
             .set_text("fork-only", true)
@@ -108,7 +110,7 @@ fn discard_drops_child_state_does_not_propagate_ac4_5() {
 
     // Parent observes only its own content; fork's write is gone.
     let parent_doc = parent_cache
-        .get(parent_id, "notes")
+        .get(&parent_key, "notes")
         .expect("get")
         .expect("block present");
     assert_eq!(
@@ -128,14 +130,16 @@ fn discard_drops_child_state_does_not_propagate_ac4_5() {
 fn discard_signals_cancel_state() {
     let parent_id = "fd-cancel-parent";
     let child_id = "fd-cancel-child";
+    let parent_key = Scope::global(parent_id).to_db_key();
+    let child_key = Scope::global(child_id).to_db_key();
 
     let parent_cache = open_cache(parent_id, child_id);
     seed_text_block(&parent_cache, parent_id, "notes", "content");
-    let _ = parent_cache.get(parent_id, "notes").unwrap().unwrap();
+    let _ = parent_cache.get(&parent_key, "notes").unwrap().unwrap();
 
     let child_cache = Arc::new(
         parent_cache
-            .fork_for_child(parent_id, child_id)
+            .fork_for_child(&parent_key, &child_key)
             .expect("fork_for_child"),
     );
 
@@ -144,7 +148,7 @@ fn discard_signals_cancel_state() {
         "fork-cancel-signal".into(),
         child_id.into(),
         child_cache,
-        parent_id.into(),
+        parent_key.into(),
         Arc::downgrade(&parent_cache),
         Arc::clone(&cancel),
     );

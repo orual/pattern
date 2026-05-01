@@ -14,8 +14,8 @@ pub mod memory {
     use crate::types::block::BlockCreate;
     use crate::types::memory_types::{
         ArchivalEntry, BlockFilter, BlockMetadata, BlockMetadataPatch, BlockSchema,
-        MemoryBlockType, MemoryResult, MemorySearchResult, MemorySearchScope, SearchOptions,
-        SharedBlockInfo, UndoRedoDepth, UndoRedoOp,
+        MemoryBlockType, MemoryResult, MemorySearchResult, MemorySearchScope, Scope,
+        SearchOptions, SharedBlockInfo, UndoRedoDepth, UndoRedoOp,
     };
 
     /// Configurable mock MemoryStore for testing different block configurations.
@@ -48,7 +48,7 @@ pub mod memory {
     impl MemoryStore for MockMemoryStore {
         fn create_block(
             &self,
-            _agent_id: &str,
+            _scope: &Scope,
             create: BlockCreate,
         ) -> MemoryResult<StructuredDocument> {
             Ok(StructuredDocument::new(create.schema))
@@ -56,7 +56,7 @@ pub mod memory {
 
         fn get_block(
             &self,
-            _agent_id: &str,
+            _scope: &Scope,
             _label: &str,
         ) -> MemoryResult<Option<StructuredDocument>> {
             Ok(None)
@@ -64,7 +64,7 @@ pub mod memory {
 
         fn get_block_metadata(
             &self,
-            _agent_id: &str,
+            _scope: &Scope,
             _label: &str,
         ) -> MemoryResult<Option<BlockMetadata>> {
             Ok(None)
@@ -149,27 +149,29 @@ pub mod memory {
             }
         }
 
-        fn delete_block(&self, _agent_id: &str, _label: &str) -> MemoryResult<()> {
+        fn delete_block(&self, _scope: &Scope, _label: &str) -> MemoryResult<()> {
             Ok(())
         }
 
         fn get_rendered_content(
             &self,
-            _agent_id: &str,
+            _scope: &Scope,
             label: &str,
         ) -> MemoryResult<Option<String>> {
             Ok(Some(format!("Content for {}", label)))
         }
 
-        fn persist_block(&self, _agent_id: &str, _label: &str) -> MemoryResult<()> {
+        fn persist_block(&self, _scope: &Scope, _label: &str) -> MemoryResult<()> {
             Ok(())
         }
 
-        fn mark_dirty(&self, _agent_id: &str, _label: &str) {}
+        fn mark_dirty(&self, _scope: &Scope, _label: &str) -> MemoryResult<()> {
+            Ok(())
+        }
 
         fn insert_archival(
             &self,
-            _agent_id: &str,
+            _scope: &Scope,
             _content: &str,
             _metadata: Option<JsonValue>,
         ) -> MemoryResult<String> {
@@ -178,7 +180,7 @@ pub mod memory {
 
         fn search_archival(
             &self,
-            _agent_id: &str,
+            _scope: &Scope,
             _query: &str,
             _limit: usize,
         ) -> MemoryResult<Vec<ArchivalEntry>> {
@@ -198,14 +200,14 @@ pub mod memory {
             Ok(Vec::new())
         }
 
-        fn list_shared_blocks(&self, _agent_id: &str) -> MemoryResult<Vec<SharedBlockInfo>> {
+        fn list_shared_blocks(&self, _scope: &Scope) -> MemoryResult<Vec<SharedBlockInfo>> {
             Ok(Vec::new())
         }
 
         fn get_shared_block(
             &self,
-            _requester_agent_id: &str,
-            _owner_agent_id: &str,
+            _requester: &Scope,
+            _owner: &Scope,
             _label: &str,
         ) -> MemoryResult<Option<StructuredDocument>> {
             Ok(None)
@@ -213,18 +215,18 @@ pub mod memory {
 
         fn update_block_metadata(
             &self,
-            _agent_id: &str,
+            _scope: &Scope,
             _label: &str,
             _patch: BlockMetadataPatch,
         ) -> MemoryResult<()> {
             Ok(())
         }
 
-        fn undo_redo(&self, _agent_id: &str, _label: &str, _op: UndoRedoOp) -> MemoryResult<bool> {
+        fn undo_redo(&self, _scope: &Scope, _label: &str, _op: UndoRedoOp) -> MemoryResult<bool> {
             Ok(false)
         }
 
-        fn history_depth(&self, _agent_id: &str, _label: &str) -> MemoryResult<UndoRedoDepth> {
+        fn history_depth(&self, _scope: &Scope, _label: &str) -> MemoryResult<UndoRedoDepth> {
             Ok(UndoRedoDepth { undo: 0, redo: 0 })
         }
     }

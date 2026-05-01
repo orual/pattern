@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::BlockCreate;
-use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
+use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType, Scope};
 use pattern_memory::MemoryCache;
 use pattern_memory::quiesce::{QuiesceError, quiesce};
 
@@ -71,13 +71,14 @@ fn quiesce_with_blocks_no_subscribers() {
     let cache = MemoryCache::new(db);
 
     // Create some blocks.
+    let agent_scope = Scope::Global(agent.into());
     for i in 0..3 {
         let create = BlockCreate::new(
             format!("block-{i}"),
             MemoryBlockType::Working,
             BlockSchema::text(),
         );
-        cache.create_block(agent, create).unwrap();
+        cache.create_block(&agent_scope, create).unwrap();
     }
 
     // Quiesce with no emitted files — WAL checkpoint and drain are the operations.
@@ -246,15 +247,16 @@ async fn quiesce_with_live_subscriber_full_path() {
     // clone of the cached LoroDoc, so mutations on `doc` fire `subscribe_local_update`
     // on the same underlying document. Mark dirty and persist to spawn the subscriber
     // (which registers the `subscribe_local_update` callback).
+    let agent_scope = Scope::Global(agent.into());
     let create = BlockCreate::new(
         "live-sub-block",
         MemoryBlockType::Working,
         BlockSchema::text(),
     );
-    let doc = cache.create_block(agent, create).unwrap();
+    let doc = cache.create_block(&agent_scope, create).unwrap();
 
     cache.mark_dirty(agent, "live-sub-block");
-    cache.persist_block(agent, "live-sub-block").unwrap();
+    cache.persist_block(&agent_scope, "live-sub-block").unwrap();
 
     // Give the subscriber OS thread time to start and register the subscription.
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -265,7 +267,7 @@ async fn quiesce_with_live_subscriber_full_path() {
     doc.set_text("initial content for live subscriber test", true)
         .unwrap();
     cache.mark_dirty(agent, "live-sub-block");
-    cache.persist_block(agent, "live-sub-block").unwrap();
+    cache.persist_block(&agent_scope, "live-sub-block").unwrap();
 
     // Wait for the subscriber worker to emit the file (debounce: 50 ms; budget: 2 s).
     let expected_file = mount_dir
@@ -319,7 +321,7 @@ async fn quiesce_with_live_subscriber_full_path() {
 
     doc.set_text("third write after resume", true).unwrap();
     cache.mark_dirty(agent, "live-sub-block");
-    cache.persist_block(agent, "live-sub-block").unwrap();
+    cache.persist_block(&agent_scope, "live-sub-block").unwrap();
 
     // Poll until the file contains the third write (or 3 s elapses).
     let deadline = std::time::Instant::now() + Duration::from_secs(3);

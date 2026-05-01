@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::BlockCreate;
-use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
+use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType, Scope};
 use pattern_memory::MemoryCache;
 
 const AGENT: &str = "seed-render-agent";
@@ -92,14 +92,15 @@ async fn seeded_core_block_renders_to_disk_without_further_mutation() {
         hb_rx,
     );
 
+    let agent_scope = Scope::global(AGENT);
     let create = BlockCreate::new("persona", MemoryBlockType::Core, BlockSchema::text());
-    let doc = cache.create_block(AGENT, create).unwrap();
+    let doc = cache.create_block(&agent_scope, create).unwrap();
 
     let persona_text = "we/i are pattern. a constellation of processes.";
     doc.import_from_json(&serde_json::Value::String(persona_text.to_string()))
         .expect("import_from_json on Text schema");
 
-    cache.persist_block(AGENT, "persona").unwrap();
+    cache.persist_block(&agent_scope, "persona").unwrap();
 
     let expected = mount_dir
         .path()
@@ -142,14 +143,15 @@ async fn seeded_working_block_renders_to_disk_without_further_mutation() {
         hb_rx,
     );
 
+    let agent_scope = Scope::global(AGENT);
     let create = BlockCreate::new("scratchpad", MemoryBlockType::Working, BlockSchema::text());
-    let doc = cache.create_block(AGENT, create).unwrap();
+    let doc = cache.create_block(&agent_scope, create).unwrap();
 
     let initial = "working notes for the current session.";
     doc.import_from_json(&serde_json::Value::String(initial.to_string()))
         .expect("import_from_json on Text schema");
 
-    cache.persist_block(AGENT, "scratchpad").unwrap();
+    cache.persist_block(&agent_scope, "scratchpad").unwrap();
 
     let expected = mount_dir
         .path()

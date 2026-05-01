@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::BlockCreate;
-use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
+use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType, Scope};
 use pattern_memory::MemoryCache;
 use pattern_memory::jj::{JjAdapter, fork_bookmark_name};
 use pattern_runtime::spawn::fork::{ForkError, ForkHandle, ForkIsolationState};
@@ -65,9 +65,9 @@ fn seed_text_block(cache: &MemoryCache, agent_id: &str, label: &str, content: &s
         MemoryBlockType::Working,
         BlockSchema::text(),
     );
-    cache.create_block(agent_id, bc).expect("create_block");
+    cache.create_block(&Scope::global(agent_id), bc).expect("create_block");
     let doc = cache
-        .get(agent_id, label)
+        .get(&Scope::global(agent_id).to_db_key(), label)
         .expect("get after create")
         .expect("block must exist");
     doc.set_text(content, true).expect("set_text");
@@ -266,16 +266,18 @@ fn merge_back_persistent_reconciles_crdt_state_jj_gated() {
     // Build shared DB + caches.
     let db = open_db_with_agents(&[PARENT_ID, CHILD_ID]);
     let parent_cache = Arc::new(MemoryCache::new(Arc::clone(&db)));
+    let parent_key = Scope::global(PARENT_ID).to_db_key();
+    let child_key = Scope::global(CHILD_ID).to_db_key();
 
     // Write A: seed a block on the parent before forking.
     seed_text_block(&parent_cache, PARENT_ID, LABEL, "parent-initial");
     // Ensure it's in the cache before fork.
-    let _ = parent_cache.get(PARENT_ID, LABEL).unwrap().unwrap();
+    let _ = parent_cache.get(&parent_key, LABEL).unwrap().unwrap();
 
     // Fork the parent's cache for the child.
     let child_cache = Arc::new(
         parent_cache
-            .fork_for_child(PARENT_ID, CHILD_ID)
+            .fork_for_child(&parent_key, &child_key)
             .expect("fork_for_child"),
     );
 
@@ -302,7 +304,7 @@ fn merge_back_persistent_reconciles_crdt_state_jj_gated() {
     // Write B: fork writes divergent content into the child cache.
     {
         let child_doc = child_cache
-            .get_cached_doc(CHILD_ID, LABEL)
+            .get_cached_doc(&child_key, LABEL)
             .expect("child notes block must exist in child cache");
         child_doc
             .append_text(" child-write-b", true)
@@ -315,7 +317,7 @@ fn merge_back_persistent_reconciles_crdt_state_jj_gated() {
     // Loro CRDT convergence.
     {
         let parent_doc = parent_cache
-            .get(PARENT_ID, LABEL)
+            .get(&parent_key, LABEL)
             .expect("get parent doc")
             .expect("notes block must exist");
         parent_doc
@@ -332,7 +334,7 @@ fn merge_back_persistent_reconciles_crdt_state_jj_gated() {
         bookmark_name.clone(),
         repo_root.clone(),
         Arc::clone(&child_cache),
-        PARENT_ID.into(),
+        parent_key.clone().into(),
         Arc::downgrade(&parent_cache),
         cancel,
     );
@@ -344,7 +346,7 @@ fn merge_back_persistent_reconciles_crdt_state_jj_gated() {
     // Assertion 1: CRDT convergence — both B and C must appear in the
     // merged parent cache. Neither write must be silently discarded.
     let parent_doc = parent_cache
-        .get(PARENT_ID, LABEL)
+        .get(&parent_key, LABEL)
         .expect("get")
         .expect("notes block must be in parent cache");
     let text = parent_doc.text_content();

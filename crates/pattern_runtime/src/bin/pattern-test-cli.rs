@@ -636,7 +636,8 @@ async fn seed_anchor_blocks(
     agent_id: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use pattern_core::types::block::BlockCreate;
-    use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
+    use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType, Scope};
+    let scope = Scope::Global(agent_id.into());
 
     // (label, block_type, content, pinned)
     //
@@ -668,17 +669,17 @@ async fn seed_anchor_blocks(
     for (label, block_type, content, pinned) in &seeds {
         let create = BlockCreate::new(*label, *block_type, BlockSchema::text());
         let doc = store
-            .create_block(agent_id, create)
+            .create_block(&scope, create)
             .map_err(|e| format!("create_block({label}) failed: {e}"))?;
         doc.set_text(content, true)
             .map_err(|e| format!("set_text({label}) failed: {e:?}"))?;
         store
-            .persist_block(agent_id, label)
+            .persist_block(&scope, label)
             .map_err(|e| format!("persist_block({label}) failed: {e}"))?;
         if *pinned {
             store
                 .update_block_metadata(
-                    agent_id,
+                    &scope,
                     label,
                     pattern_core::types::memory_types::BlockMetadataPatch::default().pinned(true),
                 )
@@ -958,12 +959,14 @@ async fn cmd_cache_test(
          alert and present. slept 6.5 hours last night which is middling but acceptable.";
     {
         use pattern_core::traits::MemoryStore;
+        use pattern_core::types::memory_types::Scope;
+        let scope = Scope::Global(agent_id.into());
         let doc = memory_store
-            .get_block(agent_id, "current_human")?
+            .get_block(&scope, "current_human")?
             .ok_or("block 'current_human' missing after turn 2 (test setup invariant broken)")?;
         doc.set_text(updated_content, true)
             .map_err(|e| format!("set_text failed: {e:?}"))?;
-        memory_store.persist_block(agent_id, "current_human")?;
+        memory_store.persist_block(&scope, "current_human")?;
     }
     eprintln!("  new content: {} chars\n", updated_content.chars().count());
 
@@ -1327,7 +1330,10 @@ async fn cmd_spawn(
                             continue;
                         }
                     };
-                    match memory_store_for_repl.get_block(&persona_agent_id, label) {
+                    let repl_scope = pattern_core::types::memory_types::Scope::global(
+                        persona_agent_id.as_str(),
+                    );
+                    match memory_store_for_repl.get_block(&repl_scope, label) {
                         Ok(Some(doc)) => {
                             if let Err(e) = doc.set_text(content, true) {
                                 let Ok(mut out) = writer.lock() else {
@@ -1338,7 +1344,7 @@ async fn cmd_spawn(
                                 continue;
                             }
                             if let Err(e) =
-                                memory_store_for_repl.persist_block(&persona_agent_id, label)
+                                memory_store_for_repl.persist_block(&repl_scope, label)
                             {
                                 let Ok(mut out) = writer.lock() else {
                                     continue;

@@ -123,8 +123,10 @@ impl EffectHandler<SessionContext> for SearchHandler {
                     .search(
                         &query,
                         options.clone(),
-                        pattern_core::types::memory_types::MemorySearchScope::Agent(
-                            target_agent.as_str().into(),
+                        pattern_core::types::memory_types::MemorySearchScope::Scope(
+                            pattern_core::types::memory_types::Scope::Global(
+                                target_agent.as_str().into(),
+                            ),
                         ),
                     )
                     .map_err(|e| {

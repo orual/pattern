@@ -139,6 +139,17 @@ impl PatternPaths {
             .join("shared")
     }
 
+    /// Cross-mount persona-state directory for `Scope::Global` blocks.
+    ///
+    /// Returns `<data_root>/personas/`. `Scope::Global(persona_id)` blocks
+    /// render under `<data_root>/personas/@<persona_id>/blocks/...` so
+    /// persona memory follows the persona across project mounts. (When
+    /// XDG state-directory support lands in `pattern_core::paths`, this
+    /// will move to `state_root` to align with the XDG basedir spec.)
+    pub fn personas_state_dir(&self) -> PathBuf {
+        self.data_root().join("personas")
+    }
+
     /// Standalone `messages.db` for a given project ID.
     ///
     /// Returns `<data_root>/projects/<id>/messages/messages.db`.

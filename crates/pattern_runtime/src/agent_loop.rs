@@ -614,11 +614,13 @@ fn load_snapshot_blocks_with_visibility(
     block_refs: &[pattern_core::types::block_ref::BlockRef],
     shown_hashes: &std::collections::HashMap<String, u64>,
 ) -> Result<Vec<RenderedBlock>, RuntimeError> {
+    // Snapshot lists every block this session has read access to —
+    // the wrapper's `list_blocks` merges project (Local) + persona
+    // (Global) per `IsolatePolicy`. Passing `BlockFilter::all()` lets
+    // it do the merge; pinning a scope here would skip half the view.
     let block_list = ctx
         .memory_store()
-        .list_blocks(pattern_core::types::memory_types::BlockFilter::by_agent(
-            ctx.agent_id(),
-        ))
+        .list_blocks(pattern_core::types::memory_types::BlockFilter::all())
         .map_err(|e| RuntimeError::ProviderError {
             reason: format!("list_blocks failed: {e}"),
         })?;
@@ -638,7 +640,7 @@ fn load_snapshot_blocks_with_visibility(
         }
         if let Some(doc) = ctx
             .memory_store()
-            .get_block(ctx.agent_id(), &meta.label)
+            .get_block(ctx.default_scope(), &meta.label)
             .map_err(|e| RuntimeError::ProviderError {
                 reason: format!("get_block({}) failed: {e}", meta.label),
             })?
@@ -1454,8 +1456,11 @@ async fn compose_request_for_turn(
     let persona_text = {
         let ctx = ctx.clone();
         tokio::task::spawn_blocking(move || {
+            // Persona block always lives in Global scope; this read does
+            // not fall back to project scope.
+            let persona_scope = ctx.persona_scope();
             ctx.memory_store()
-                .get_block(ctx.agent_id(), pattern_core::PERSONA_LABEL)
+                .get_block(&persona_scope, pattern_core::PERSONA_LABEL)
                 .ok()
                 .flatten()
                 .map(|doc| doc.render())
@@ -3656,7 +3661,7 @@ mod tests {
         // Pre-create the Working block so it is visible to the snapshot scan.
         store_concrete
             .create_block(
-                "agent-a",
+                &pattern_core::types::memory_types::Scope::global("agent-a"),
                 BlockCreate::new(block_label, MemoryBlockType::Working, BlockSchema::text()),
             )
             .expect("pre-create block");

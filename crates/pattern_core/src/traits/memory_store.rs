@@ -17,38 +17,29 @@ use crate::memory::StructuredDocument;
 use crate::types::block::BlockCreate;
 use crate::types::memory_types::{
     ArchivalEntry, BlockFilter, BlockMetadata, BlockMetadataPatch, MemoryResult,
-    MemorySearchResult, MemorySearchScope, SearchOptions, SharedBlockInfo, UndoRedoDepth,
+    MemorySearchResult, MemorySearchScope, Scope, SearchOptions, SharedBlockInfo, UndoRedoDepth,
     UndoRedoOp,
 };
 
 /// Storage-agnostic contract for reading and writing memory blocks.
 ///
 /// Implementations persist [`StructuredDocument`] instances keyed by
-/// `(agent_id, label)` and expose search, archival, and shared-block
+/// `(scope, label)` and expose search, archival, and shared-block
 /// operations. All methods are synchronous — the underlying storage is
 /// rusqlite (Phase 2 port).
 ///
-/// # Method surface consolidation (v3-memory-rework Phase 3, 2026-04-19)
+/// # Scope semantics (Phase 1 redesign, 2026-04-30)
 ///
-/// Reduced from 28 methods to 19 via five consolidations:
-/// - `list_blocks`, `list_blocks_by_type`, `list_all_blocks_by_label_prefix`
-///   -> [`list_blocks(BlockFilter)`](MemoryStore::list_blocks)
-/// - `set_block_pinned`, `set_block_type`, `update_block_schema`,
-///   `update_block_description`
-///   -> [`update_block_metadata(BlockMetadataPatch)`](MemoryStore::update_block_metadata)
-/// - `undo_block`, `redo_block`
-///   -> [`undo_redo(UndoRedoOp)`](MemoryStore::undo_redo)
-/// - `undo_depth`, `redo_depth`
-///   -> [`history_depth`](MemoryStore::history_depth)
-/// - `search`, `search_all`
-///   -> [`search(MemorySearchScope)`](MemoryStore::search)
+/// Each block lives in exactly one [`Scope`]:
 ///
-/// All method signatures are sync (no `#[async_trait]`). The trait
-/// contract is driven by rusqlite under the hood (see pattern_db).
+/// - [`Scope::Local`] — project-scoped block, shared across all agents
+///   in a project mount.
+/// - [`Scope::Global`] — persona-scoped block, follows the persona
+///   across mounts.
 ///
-/// `delete_archival` is retained as a trait method for human-operator
-/// tooling (CLI curation, TUI); it is NOT reachable via any agent-facing
-/// SDK effect (see v3-memory-rework Phase 3 SDK removal).
+/// `Local("x")` and `Global("x")` are distinct keyspaces — the prior
+/// collision bug (project named "pattern" vs. persona named "@pattern"
+/// sharing a single keyspace) is resolved by the type system.
 pub trait MemoryStore: Send + Sync + fmt::Debug + 'static {
     // ========== Block CRUD ==========
 
@@ -57,44 +48,42 @@ pub trait MemoryStore: Send + Sync + fmt::Debug + 'static {
     /// The returned document includes all metadata and is already cached.
     /// Construction parameters are bundled in [`BlockCreate`] to prevent
     /// positional-argument transposition across the six scalar fields.
-    fn create_block(&self, agent_id: &str, create: BlockCreate)
+    fn create_block(&self, scope: &Scope, create: BlockCreate)
     -> MemoryResult<StructuredDocument>;
 
     /// Get a block's document for reading/writing.
-    fn get_block(&self, agent_id: &str, label: &str) -> MemoryResult<Option<StructuredDocument>>;
+    fn get_block(&self, scope: &Scope, label: &str) -> MemoryResult<Option<StructuredDocument>>;
 
     /// Get block metadata without loading the document.
     fn get_block_metadata(
         &self,
-        agent_id: &str,
+        scope: &Scope,
         label: &str,
     ) -> MemoryResult<Option<BlockMetadata>>;
 
     /// List blocks matching the given filter.
-    ///
-    /// Replaces the pre-Phase-3 `list_blocks`, `list_blocks_by_type`, and
-    /// `list_all_blocks_by_label_prefix` methods. Use [`BlockFilter`]
-    /// factory methods to construct common filter shapes:
-    ///
-    /// - `BlockFilter::by_agent(id)` — all blocks for one agent.
-    /// - `BlockFilter::by_type(id, bt)` — blocks of a specific type.
-    /// - `BlockFilter::by_prefix(pfx)` — label prefix scan (all agents).
-    /// - `BlockFilter::all()` — everything.
     fn list_blocks(&self, filter: BlockFilter) -> MemoryResult<Vec<BlockMetadata>>;
 
     /// Delete (deactivate) a block.
-    fn delete_block(&self, agent_id: &str, label: &str) -> MemoryResult<()>;
+    fn delete_block(&self, scope: &Scope, label: &str) -> MemoryResult<()>;
 
     // ========== Content Operations ==========
 
     /// Get rendered content for context (respects schema).
-    fn get_rendered_content(&self, agent_id: &str, label: &str) -> MemoryResult<Option<String>>;
+    fn get_rendered_content(&self, scope: &Scope, label: &str) -> MemoryResult<Option<String>>;
 
     /// Persist any pending changes for a block.
-    fn persist_block(&self, agent_id: &str, label: &str) -> MemoryResult<()>;
+    fn persist_block(&self, scope: &Scope, label: &str) -> MemoryResult<()>;
 
     /// Mark block as dirty (has unpersisted changes).
-    fn mark_dirty(&self, agent_id: &str, label: &str);
+    ///
+    /// Returns `Err(MemoryError::WriteToMissingBlock)` when the
+    /// `(scope, label)` pair does not match any cached block — failing
+    /// loud rather than silently no-opping. Pre-Phase-1 callers relied
+    /// on the `mark_dirty` no-op behavior to get persistence "for free"
+    /// after a block mutation; the new contract makes mis-routed writes
+    /// surface immediately.
+    fn mark_dirty(&self, scope: &Scope, label: &str) -> MemoryResult<()>;
 
     // ========== Archival Operations ==========
 
@@ -103,7 +92,7 @@ pub trait MemoryStore: Send + Sync + fmt::Debug + 'static {
     /// Returns the entry id.
     fn insert_archival(
         &self,
-        agent_id: &str,
+        scope: &Scope,
         content: &str,
         metadata: Option<JsonValue>,
     ) -> MemoryResult<String>;
@@ -111,23 +100,17 @@ pub trait MemoryStore: Send + Sync + fmt::Debug + 'static {
     /// Search archival memory.
     fn search_archival(
         &self,
-        agent_id: &str,
+        scope: &Scope,
         query: &str,
         limit: usize,
     ) -> MemoryResult<Vec<ArchivalEntry>>;
 
     /// Delete an archival entry.
-    ///
-    /// Retained for human-operator tooling (CLI, TUI). Not reachable via
-    /// any agent-facing SDK effect.
     fn delete_archival(&self, id: &str) -> MemoryResult<()>;
 
     // ========== Search Operations ==========
 
     /// Search across memory content, scoped by [`MemorySearchScope`].
-    ///
-    /// Replaces the pre-Phase-3 `search` (agent-scoped) and `search_all`
-    /// (constellation-scoped) methods.
     fn search(
         &self,
         query: &str,
@@ -137,28 +120,23 @@ pub trait MemoryStore: Send + Sync + fmt::Debug + 'static {
 
     // ========== Shared Block Operations ==========
 
-    /// List blocks shared with this agent (not owned by, but accessible to).
-    fn list_shared_blocks(&self, agent_id: &str) -> MemoryResult<Vec<SharedBlockInfo>>;
+    /// List blocks shared with this scope (not owned by, but accessible to).
+    fn list_shared_blocks(&self, scope: &Scope) -> MemoryResult<Vec<SharedBlockInfo>>;
 
     /// Get a shared block by owner and label (checks permission).
     fn get_shared_block(
         &self,
-        requester_agent_id: &str,
-        owner_agent_id: &str,
+        requester: &Scope,
+        owner: &Scope,
         label: &str,
     ) -> MemoryResult<Option<StructuredDocument>>;
 
     // ========== Block Configuration ==========
 
     /// Apply a metadata patch to a block.
-    ///
-    /// Replaces the pre-Phase-3 `set_block_pinned`, `set_block_type`,
-    /// `update_block_schema`, and `update_block_description` methods.
-    /// Each `Some(...)` field in the patch is applied; `None` fields
-    /// leave the stored value unchanged.
     fn update_block_metadata(
         &self,
-        agent_id: &str,
+        scope: &Scope,
         label: &str,
         patch: BlockMetadataPatch,
     ) -> MemoryResult<()>;
@@ -166,37 +144,21 @@ pub trait MemoryStore: Send + Sync + fmt::Debug + 'static {
     // ========== Undo/Redo Operations ==========
 
     /// Undo or redo the last persisted change to a block.
-    ///
-    /// Replaces the pre-Phase-3 separate `undo_block` and `redo_block`
-    /// methods. Returns `true` if the operation was performed, `false`
-    /// if no history is available in that direction.
-    fn undo_redo(&self, agent_id: &str, label: &str, op: UndoRedoOp) -> MemoryResult<bool>;
+    fn undo_redo(&self, scope: &Scope, label: &str, op: UndoRedoOp) -> MemoryResult<bool>;
 
     /// Get the number of available undo and redo steps for a block.
-    ///
-    /// Replaces the pre-Phase-3 separate `undo_depth` and `redo_depth`
-    /// methods.
-    fn history_depth(&self, agent_id: &str, label: &str) -> MemoryResult<UndoRedoDepth>;
+    fn history_depth(&self, scope: &Scope, label: &str) -> MemoryResult<UndoRedoDepth>;
 
     // ========== Scope Resolution Helpers ==========
-    //
-    // These methods support the scope resolver in `pattern_runtime`.
-    // Default implementations return conservative answers (no permission,
-    // no agents). Implementations backed by pattern_db override these
-    // with real DB queries.
 
     /// Check whether `target` has shared at least one block with `caller`.
-    ///
-    /// Used by the scope resolver to determine cross-agent search
-    /// permission: sharing a block is treated as a signal that two agents
-    /// cooperate.
-    fn has_shared_blocks_with(&self, _caller: &str, _target: &str) -> MemoryResult<bool> {
+    fn has_shared_blocks_with(&self, _caller: &Scope, _target: &Scope) -> MemoryResult<bool> {
         Ok(false)
     }
 
-    /// List all agent IDs in the constellation. Used for
+    /// List all scopes in the constellation. Used for
     /// `MemorySearchScope::Constellation` resolution.
-    fn list_constellation_agent_ids(&self) -> MemoryResult<Vec<String>> {
+    fn list_constellation_scopes(&self) -> MemoryResult<Vec<Scope>> {
         Ok(vec![])
     }
 }
@@ -207,60 +169,60 @@ pub trait MemoryStore: Send + Sync + fmt::Debug + 'static {
 impl MemoryStore for std::sync::Arc<dyn MemoryStore> {
     fn create_block(
         &self,
-        agent_id: &str,
+        scope: &Scope,
         create: BlockCreate,
     ) -> MemoryResult<StructuredDocument> {
-        (**self).create_block(agent_id, create)
+        (**self).create_block(scope, create)
     }
 
-    fn get_block(&self, agent_id: &str, label: &str) -> MemoryResult<Option<StructuredDocument>> {
-        (**self).get_block(agent_id, label)
+    fn get_block(&self, scope: &Scope, label: &str) -> MemoryResult<Option<StructuredDocument>> {
+        (**self).get_block(scope, label)
     }
 
     fn get_block_metadata(
         &self,
-        agent_id: &str,
+        scope: &Scope,
         label: &str,
     ) -> MemoryResult<Option<BlockMetadata>> {
-        (**self).get_block_metadata(agent_id, label)
+        (**self).get_block_metadata(scope, label)
     }
 
     fn list_blocks(&self, filter: BlockFilter) -> MemoryResult<Vec<BlockMetadata>> {
         (**self).list_blocks(filter)
     }
 
-    fn delete_block(&self, agent_id: &str, label: &str) -> MemoryResult<()> {
-        (**self).delete_block(agent_id, label)
+    fn delete_block(&self, scope: &Scope, label: &str) -> MemoryResult<()> {
+        (**self).delete_block(scope, label)
     }
 
-    fn get_rendered_content(&self, agent_id: &str, label: &str) -> MemoryResult<Option<String>> {
-        (**self).get_rendered_content(agent_id, label)
+    fn get_rendered_content(&self, scope: &Scope, label: &str) -> MemoryResult<Option<String>> {
+        (**self).get_rendered_content(scope, label)
     }
 
-    fn persist_block(&self, agent_id: &str, label: &str) -> MemoryResult<()> {
-        (**self).persist_block(agent_id, label)
+    fn persist_block(&self, scope: &Scope, label: &str) -> MemoryResult<()> {
+        (**self).persist_block(scope, label)
     }
 
-    fn mark_dirty(&self, agent_id: &str, label: &str) {
-        (**self).mark_dirty(agent_id, label);
+    fn mark_dirty(&self, scope: &Scope, label: &str) -> MemoryResult<()> {
+        (**self).mark_dirty(scope, label)
     }
 
     fn insert_archival(
         &self,
-        agent_id: &str,
+        scope: &Scope,
         content: &str,
         metadata: Option<JsonValue>,
     ) -> MemoryResult<String> {
-        (**self).insert_archival(agent_id, content, metadata)
+        (**self).insert_archival(scope, content, metadata)
     }
 
     fn search_archival(
         &self,
-        agent_id: &str,
+        scope: &Scope,
         query: &str,
         limit: usize,
     ) -> MemoryResult<Vec<ArchivalEntry>> {
-        (**self).search_archival(agent_id, query, limit)
+        (**self).search_archival(scope, query, limit)
     }
 
     fn delete_archival(&self, id: &str) -> MemoryResult<()> {
@@ -276,42 +238,42 @@ impl MemoryStore for std::sync::Arc<dyn MemoryStore> {
         (**self).search(query, options, scope)
     }
 
-    fn list_shared_blocks(&self, agent_id: &str) -> MemoryResult<Vec<SharedBlockInfo>> {
-        (**self).list_shared_blocks(agent_id)
+    fn list_shared_blocks(&self, scope: &Scope) -> MemoryResult<Vec<SharedBlockInfo>> {
+        (**self).list_shared_blocks(scope)
     }
 
     fn get_shared_block(
         &self,
-        requester_agent_id: &str,
-        owner_agent_id: &str,
+        requester: &Scope,
+        owner: &Scope,
         label: &str,
     ) -> MemoryResult<Option<StructuredDocument>> {
-        (**self).get_shared_block(requester_agent_id, owner_agent_id, label)
+        (**self).get_shared_block(requester, owner, label)
     }
 
     fn update_block_metadata(
         &self,
-        agent_id: &str,
+        scope: &Scope,
         label: &str,
         patch: BlockMetadataPatch,
     ) -> MemoryResult<()> {
-        (**self).update_block_metadata(agent_id, label, patch)
+        (**self).update_block_metadata(scope, label, patch)
     }
 
-    fn undo_redo(&self, agent_id: &str, label: &str, op: UndoRedoOp) -> MemoryResult<bool> {
-        (**self).undo_redo(agent_id, label, op)
+    fn undo_redo(&self, scope: &Scope, label: &str, op: UndoRedoOp) -> MemoryResult<bool> {
+        (**self).undo_redo(scope, label, op)
     }
 
-    fn history_depth(&self, agent_id: &str, label: &str) -> MemoryResult<UndoRedoDepth> {
-        (**self).history_depth(agent_id, label)
+    fn history_depth(&self, scope: &Scope, label: &str) -> MemoryResult<UndoRedoDepth> {
+        (**self).history_depth(scope, label)
     }
 
-    fn has_shared_blocks_with(&self, caller: &str, target: &str) -> MemoryResult<bool> {
+    fn has_shared_blocks_with(&self, caller: &Scope, target: &Scope) -> MemoryResult<bool> {
         (**self).has_shared_blocks_with(caller, target)
     }
 
-    fn list_constellation_agent_ids(&self) -> MemoryResult<Vec<String>> {
-        (**self).list_constellation_agent_ids()
+    fn list_constellation_scopes(&self) -> MemoryResult<Vec<Scope>> {
+        (**self).list_constellation_scopes()
     }
 }
 

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use pattern_core::memory::StructuredDocument;
 use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::BlockCreate;
-use pattern_core::types::memory_types::{BlockFilter, BlockSchema, MemoryBlockType};
+use pattern_core::types::memory_types::{BlockFilter, BlockSchema, MemoryBlockType, Scope};
 use pattern_memory::{MemoryCache, SharedBlockManager};
 
 /// Create a temporary on-disk ConstellationDb for testing.
@@ -46,22 +46,23 @@ fn memory_cache_create_get_list_round_trip() {
 
     // create_block — returns a StructuredDocument.
     let create = BlockCreate::new("notes", MemoryBlockType::Working, BlockSchema::text());
-    let doc: StructuredDocument = cache.create_block(agent, create).unwrap();
+    let scope = Scope::Global(agent.into());
+    let doc: StructuredDocument = cache.create_block(&scope, create).unwrap();
     assert_eq!(doc.label(), "notes");
     assert_eq!(doc.block_type(), MemoryBlockType::Working);
 
     // get_block — round-trips.
-    let fetched = cache.get_block(agent, "notes").unwrap();
+    let fetched = cache.get_block(&scope, "notes").unwrap();
     assert!(fetched.is_some());
 
     // list_blocks — includes the newly created block.
-    let all = cache.list_blocks(BlockFilter::by_agent(agent)).unwrap();
+    let all = cache.list_blocks(BlockFilter::by_scope(&scope)).unwrap();
     assert!(!all.is_empty());
     assert!(all.iter().any(|m| m.label == "notes"));
 
     // mark_dirty + persist_block — non-panicking.
     cache.mark_dirty(agent, "notes");
-    cache.persist_block(agent, "notes").unwrap();
+    cache.persist_block(&scope, "notes").unwrap();
 
     // default_char_limit accessor.
     let limit = cache.default_char_limit();

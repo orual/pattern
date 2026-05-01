@@ -49,7 +49,7 @@ use pattern_core::fronting::{FrontingSet, RoutingTable};
 use pattern_core::traits::{MemoryStore, TurnEvent, VecSink};
 use pattern_core::types::block::BlockCreate;
 use pattern_core::types::ids::{AgentId, BatchId, MessageId, new_id, new_snowflake_id};
-use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
+use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType, Scope};
 use pattern_core::types::message::Message;
 use pattern_core::types::origin::{
     AgentAuthor, Author, MessageOrigin, Partner, Sphere, SystemReason,
@@ -144,9 +144,9 @@ fn seed_text_block(cache: &MemoryCache, agent_id: &str, label: &str, content: &s
         MemoryBlockType::Working,
         BlockSchema::text(),
     );
-    cache.create_block(agent_id, bc).expect("create_block");
+    cache.create_block(&Scope::global(agent_id), bc).expect("create_block");
     let doc = cache
-        .get(agent_id, label)
+        .get(&Scope::global(agent_id).to_db_key(), label)
         .expect("get after create")
         .expect("block must exist after create");
     doc.set_text(content, true).expect("set_text");
@@ -394,10 +394,13 @@ async fn multi_agent_smoke() {
     // it via fork_for_child and writes to the same label.
     seed_text_block(&parent_cache, parent_id, "notes", "initial-notes");
 
+    let parent_key = Scope::global(parent_id).to_db_key();
+    let child_key = Scope::global(child_id).to_db_key();
+
     // Fork the parent cache for the child.
     let child_cache = Arc::new(
         parent_cache
-            .fork_for_child(parent_id, child_id)
+            .fork_for_child(&parent_key, &child_key)
             .expect("step 6: fork_for_child must succeed"),
     );
 
@@ -406,7 +409,7 @@ async fn multi_agent_smoke() {
         "smoke-fork".into(),
         child_id.into(),
         Arc::clone(&child_cache),
-        parent_id.into(),
+        parent_key.clone().into(),
         Arc::downgrade(&parent_cache),
         cancel,
     );
@@ -429,7 +432,7 @@ async fn multi_agent_smoke() {
 
     // Verify the parent sees the fork's write.
     let parent_notes = parent_cache
-        .get(parent_id, "notes")
+        .get(&Scope::global(parent_id).to_db_key(), "notes")
         .expect("step 6: parent get notes must succeed")
         .expect("step 6: parent notes block must exist after merge");
     let notes_content = parent_notes.text_content();
@@ -715,7 +718,7 @@ async fn wait_for_block_content(
     let start = std::time::Instant::now();
     let poll = std::time::Duration::from_millis(20);
     loop {
-        if let Ok(Some(doc)) = store.get_block(agent, label) {
+        if let Ok(Some(doc)) = store.get_block(&Scope::global(agent), label) {
             let content = doc.text_content();
             if content.contains(needle) {
                 return Ok(());
@@ -723,7 +726,7 @@ async fn wait_for_block_content(
         }
         if start.elapsed() >= timeout {
             let observed = store
-                .get_block(agent, label)
+                .get_block(&Scope::global(agent), label)
                 .ok()
                 .and_then(|opt| opt.map(|d| d.text_content()))
                 .unwrap_or_else(|| "<missing>".to_string());

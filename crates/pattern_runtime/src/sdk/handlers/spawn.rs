@@ -20,6 +20,7 @@ use tidepool_effect::{EffectContext, EffectError, EffectHandler};
 use tidepool_eval::Value;
 
 use pattern_core::types::ids::new_id;
+use pattern_core::types::memory_types::Scope;
 
 use crate::sdk::describe::{DescribeEffect, EffectDecl};
 use crate::sdk::requests::SpawnReq;
@@ -169,8 +170,13 @@ fn handle_ephemeral(
     // Create the constellation-scoped progress-log block synchronously
     // before the runner is spawned. The parent gets the label back as
     // part of EphemeralSpawn and may read the block immediately.
-    crate::spawn::create_progress_log_block(child_ctx.adapter(), progress_log_label.as_str())
-        .map_err(|e| EffectError::Handler(e.to_string()))?;
+    let progress_scope = crate::spawn::progress_log_scope(&child_ctx);
+    crate::spawn::create_progress_log_block(
+        child_ctx.adapter(),
+        progress_log_label.as_str(),
+        &progress_scope,
+    )
+    .map_err(|e| EffectError::Handler(e.to_string()))?;
 
     // Build the child's preamble from its restricted capability set.
     let child_caps_for_preamble = child_ctx
@@ -373,7 +379,12 @@ fn handle_fork(
 
     let fork_id: smol_str::SmolStr = pattern_core::types::ids::new_id();
     let child_id: smol_str::SmolStr = pattern_core::types::ids::new_id();
-    let parent_agent_id: smol_str::SmolStr = parent.agent_id().into();
+    // Use the encoded scope key so fork_for_child can match against blocks
+    // stored with `scope.to_db_key()` (e.g. "global:<id>" or "local:<id>").
+    let parent_scope_key: smol_str::SmolStr =
+        Scope::global(parent.agent_id()).to_db_key().into();
+    let child_scope_key: smol_str::SmolStr =
+        Scope::global(child_id.as_str()).to_db_key().into();
 
     // Allocate a fresh cancel state for the child. The child's cancel state
     // is NOT the parent's — calling `discard()` (which fires
@@ -421,14 +432,14 @@ fn handle_fork(
                 )
             })?;
             let forked = parent_cache
-                .fork_for_child(parent_agent_id.as_str(), child_id.as_str())
+                .fork_for_child(parent_scope_key.as_str(), child_scope_key.as_str())
                 .map_err(|e| EffectError::Handler(e.to_string()))?;
             let (child_cache, parent_weak) = (Arc::new(forked), Arc::downgrade(&parent_cache));
             crate::spawn::ForkHandle::new_lightweight(
                 fork_id.clone(),
                 child_id.clone(),
                 child_cache,
-                parent_agent_id.clone(),
+                parent_scope_key.clone(),
                 parent_weak,
                 child_cancel,
             )
@@ -439,7 +450,8 @@ fn handle_fork(
             parent,
             fork_id.clone(),
             child_id.clone(),
-            parent_agent_id.clone(),
+            parent_scope_key.clone(),
+            child_scope_key.clone(),
             child_cancel,
             spawner_caps,
             cfg.task_ref.as_ref(),
@@ -468,11 +480,15 @@ fn handle_fork(
 /// 3. Pre-check for bookmark collision.
 /// 4. Run `workspace_add` + `bookmark_set`. Cleanup on failure.
 /// 5. Fork the parent's memory cache. Cleanup on failure.
+/// `parent_scope_key` and `child_scope_key` are the encoded scope keys
+/// (`"global:<id>"` / `"local:<id>"`) used by `fork_for_child` to match
+/// blocks stored with `scope.to_db_key()`.
 fn handle_fork_persistent(
     parent: &SessionContext,
     fork_id: SmolStr,
     child_id: SmolStr,
-    parent_agent_id: SmolStr,
+    parent_scope_key: SmolStr,
+    child_scope_key: SmolStr,
     cancel_state: Arc<crate::timeout::CancelState>,
     spawner_caps: pattern_core::CapabilitySet,
     task_ref: Option<&pattern_core::BlockRef>,
@@ -505,7 +521,10 @@ fn handle_fork_persistent(
         })?
         .ok_or(ForkError::JjUnavailable)?;
 
-    let bookmark_name = fork_bookmark_name(&parent_agent_id, task_ref);
+    // Bookmark names use the raw agent id (not the encoded scope key) for
+    // human-readable jj bookmarks.
+    let raw_parent_agent_id = parent.agent_id();
+    let bookmark_name = fork_bookmark_name(raw_parent_agent_id, task_ref);
 
     // Pre-check for bookmark conflicts before mutating the workspace.
     let bookmarks = adapter
@@ -550,7 +569,7 @@ fn handle_fork_persistent(
 
     // Fork the parent's memory cache. Cleanup workspace + bookmark on
     // failure so the session doesn't leak persistent state.
-    let child_cache = match parent_cache.fork_for_child(parent_agent_id.as_str(), child_id.as_str())
+    let child_cache = match parent_cache.fork_for_child(parent_scope_key.as_str(), child_scope_key.as_str())
     {
         Ok(c) => Arc::new(c),
         Err(e) => {
@@ -571,7 +590,7 @@ fn handle_fork_persistent(
         bookmark_name,
         mount.repo_root.clone(),
         child_cache,
-        parent_agent_id,
+        parent_scope_key,
         Arc::downgrade(&parent_cache),
         cancel_state,
     )

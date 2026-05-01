@@ -20,8 +20,8 @@ use std::sync::Arc;
 use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::BlockCreate;
 use pattern_core::types::memory_types::{
-    BlockFilter, BlockSchema, IsolatePolicy, MemoryBlockType, MemorySearchScope, SearchContentType,
-    SearchMode, SearchOptions, SkillMetadata, SkillTrustTier, TaskStatus,
+    BlockFilter, BlockSchema, IsolatePolicy, MemoryBlockType, MemorySearchScope, Scope,
+    SearchContentType, SearchMode, SearchOptions, SkillMetadata, SkillTrustTier, TaskStatus,
 };
 use pattern_db::ConstellationDb;
 use pattern_memory::MemoryCache;
@@ -76,11 +76,16 @@ fn open_cache(agent_id: &str) -> (Arc<ConstellationDb>, Arc<MemoryCache>) {
     (db, cache)
 }
 
-/// Create a TaskList block in the store.
+/// Create a TaskList block in the store using a global scope.
 fn seed_task_list(store: &dyn MemoryStore, agent_id: &str, label: &str) {
+    seed_task_list_scoped(store, &Scope::global(agent_id), label);
+}
+
+/// Create a TaskList block in the store using an explicit scope.
+fn seed_task_list_scoped(store: &dyn MemoryStore, scope: &Scope, label: &str) {
     store
         .create_block(
-            agent_id,
+            scope,
             BlockCreate::new(
                 label,
                 MemoryBlockType::Working,
@@ -91,7 +96,7 @@ fn seed_task_list(store: &dyn MemoryStore, agent_id: &str, label: &str) {
                 },
             ),
         )
-        .unwrap_or_else(|e| panic!("seed_task_list: create must succeed for {label}: {e}"));
+        .unwrap_or_else(|e| panic!("seed_task_list_scoped: create must succeed for {label}: {e}"));
 }
 
 /// Build a `TaskSpec` JSON string with the given subject.
@@ -118,9 +123,10 @@ fn seed_skill_in_cache(
     metadata: SkillMetadata,
     body: &str,
 ) {
+    let agent_scope = Scope::global(agent_id);
     cache
         .create_block(
-            agent_id,
+            &agent_scope,
             BlockCreate::new(
                 label,
                 MemoryBlockType::Working,
@@ -132,7 +138,7 @@ fn seed_skill_in_cache(
         .unwrap_or_else(|e| panic!("seed_skill_in_cache: create failed for {label}: {e}"));
 
     let doc = cache
-        .get_block(agent_id, label)
+        .get_block(&agent_scope, label)
         .unwrap()
         .unwrap_or_else(|| panic!("seed_skill_in_cache: block {label} missing after create"));
 
@@ -146,9 +152,9 @@ fn seed_skill_in_cache(
     });
     doc.inner().commit();
 
-    cache.mark_dirty(agent_id, label);
+    cache.mark_dirty(&Scope::global(agent_id).to_db_key(), label);
     cache
-        .persist_block(agent_id, label)
+        .persist_block(&agent_scope, label)
         .unwrap_or_else(|e| panic!("seed_skill_in_cache: persist_block for {label}: {e}"));
 }
 
@@ -169,16 +175,20 @@ fn open_usage_conn() -> rusqlite::Connection {
 /// but the DB tables are only populated by the subscriber reconciler. In tests we
 /// drive reconciliation explicitly so the list/query surface has data to return.
 fn reconcile(store: &dyn MemoryStore, agent_id: &str, block: &str, db: &ConstellationDb) {
+    reconcile_scoped(store, &Scope::global(agent_id), block, db);
+}
+
+fn reconcile_scoped(store: &dyn MemoryStore, scope: &Scope, block: &str, db: &ConstellationDb) {
     let sdoc = store
-        .get_block(agent_id, block)
-        .expect("reconcile: get_block must succeed")
-        .unwrap_or_else(|| panic!("reconcile: block {block} must exist"));
+        .get_block(scope, block)
+        .expect("reconcile_scoped: get_block must succeed")
+        .unwrap_or_else(|| panic!("reconcile_scoped: block {block} must exist"));
     let loro_doc = sdoc.inner();
 
     let mut conn = db.get().unwrap();
     let tx = conn.transaction().unwrap();
     pattern_memory::subscriber::task::reconcile_task_list(&tx, block, loro_doc)
-        .unwrap_or_else(|e| panic!("reconcile: reconcile_task_list for {block}: {e}"));
+        .unwrap_or_else(|e| panic!("reconcile_scoped: reconcile_task_list for {block}: {e}"));
     tx.commit().unwrap();
 }
 
@@ -200,32 +210,33 @@ fn smoke_tasks_surface() {
 
     let store = Arc::new(InMemoryMemoryStore::new());
     let db = open_db();
+    let agent_scope = Scope::global(AGENT);
 
     // Seed the TaskList block.
     seed_task_list(&*store, AGENT, BLOCK);
 
     // --- create_task ---
 
-    let id_a = handle_create(&*store, AGENT, BLOCK, &task_spec("Fix auth flow"))
+    let id_a = handle_create(&*store, &agent_scope, AGENT, BLOCK, &task_spec("Fix auth flow"))
         .expect("smoke_tasks_surface[step:create_a]: create must succeed");
     assert!(
         !id_a.as_str().is_empty(),
         "smoke_tasks_surface[step:create_a]: new task id must be non-empty"
     );
 
-    let id_b = handle_create(&*store, AGENT, BLOCK, &task_spec("Write docs"))
+    let id_b = handle_create(&*store, &agent_scope, AGENT, BLOCK, &task_spec("Write docs"))
         .expect("smoke_tasks_surface[step:create_b]: create must succeed");
     assert_ne!(
         id_a, id_b,
         "smoke_tasks_surface[step:create_b]: two creates must produce distinct ids"
     );
 
-    let id_c = handle_create(&*store, AGENT, BLOCK, &task_spec("Deploy to staging"))
+    let id_c = handle_create(&*store, &agent_scope, AGENT, BLOCK, &task_spec("Deploy to staging"))
         .expect("smoke_tasks_surface[step:create_c]: create must succeed");
 
     // Verify LoroDoc has 3 items.
     {
-        let sdoc = store.get_block(AGENT, BLOCK).unwrap().unwrap();
+        let sdoc = store.get_block(&agent_scope, BLOCK).unwrap().unwrap();
         let items = sdoc.inner().get_movable_list("items");
         assert_eq!(
             items.len(),
@@ -239,6 +250,7 @@ fn smoke_tasks_surface() {
     let edge_a = format!("{BLOCK}#{}", id_a.as_str());
     handle_update(
         &*store,
+        &agent_scope,
         AGENT,
         &edge_a,
         &task_patch_subject("Fix OAuth2 flow"),
@@ -247,7 +259,7 @@ fn smoke_tasks_surface() {
 
     // Verify the LoroDoc reflects the updated subject.
     {
-        let sdoc = store.get_block(AGENT, BLOCK).unwrap().unwrap();
+        let sdoc = store.get_block(&agent_scope, BLOCK).unwrap().unwrap();
         let items = sdoc.inner().get_movable_list("items");
         let loro::LoroValue::List(list) = items.get_deep_value() else {
             panic!("smoke_tasks_surface[step:update]: items must be a list");
@@ -280,12 +292,12 @@ fn smoke_tasks_surface() {
     // --- transition_status ---
 
     let status_completed = serde_json::to_string(&"completed").unwrap();
-    handle_transition(&*store, AGENT, &edge_a, &status_completed)
+    handle_transition(&*store, &agent_scope, AGENT, &edge_a, &status_completed)
         .expect("smoke_tasks_surface[step:transition]: transition must succeed");
 
     // Verify LoroDoc item_a has status "completed".
     {
-        let sdoc = store.get_block(AGENT, BLOCK).unwrap().unwrap();
+        let sdoc = store.get_block(&agent_scope, BLOCK).unwrap().unwrap();
         let items = sdoc.inner().get_movable_list("items");
         let loro::LoroValue::List(list) = items.get_deep_value() else {
             panic!("smoke_tasks_surface[step:transition]: items must be a list");
@@ -319,7 +331,7 @@ fn smoke_tasks_surface() {
 
     let edge_b = format!("{BLOCK}#{}", id_b.as_str());
     let edge_c = format!("{BLOCK}#{}", id_c.as_str());
-    handle_link(&*store, AGENT, &edge_b, &edge_c)
+    handle_link(&*store, &agent_scope, AGENT, &edge_b, &edge_c)
         .expect("smoke_tasks_surface[step:link]: link must succeed");
 
     // --- list_tasks (via DB after reconcile) ---
@@ -327,7 +339,7 @@ fn smoke_tasks_surface() {
     reconcile(&*store, AGENT, BLOCK, &db);
 
     let conn = db.get().unwrap();
-    let views = handle_list_tasks(&*store, &conn, AGENT, Some(BLOCK), "{}")
+    let views = handle_list_tasks(&*store, &conn, &agent_scope, Some(BLOCK), "{}")
         .expect("smoke_tasks_surface[step:list_tasks]: list must succeed");
 
     assert_eq!(
@@ -370,7 +382,7 @@ fn smoke_tasks_surface() {
     }))
     .unwrap();
 
-    let slice = handle_query_graph(&*store, &conn, AGENT, &edge_b, &graph_query)
+    let slice = handle_query_graph(&*store, &conn, &agent_scope, &edge_b, &graph_query)
         .expect("smoke_tasks_surface[step:query_graph]: query_graph must succeed");
 
     assert!(
@@ -422,6 +434,7 @@ fn smoke_skills_surface() {
 
     let (db, cache) = open_cache(AGENT);
     let mut usage_conn = open_usage_conn();
+    let agent_scope = Scope::global(AGENT);
 
     let hooks_value = serde_json::json!({
         "on_turn_start": [{"inject_context": "Check the auth flow."}],
@@ -441,7 +454,7 @@ fn smoke_skills_surface() {
     // Also seed a decoy non-Skill block to verify list filtering.
     cache
         .create_block(
-            AGENT,
+            &agent_scope,
             BlockCreate::new(
                 "notes",
                 MemoryBlockType::Working,
@@ -454,7 +467,7 @@ fn smoke_skills_surface() {
 
     let conn = db.get().unwrap();
     let infos =
-        handle_list(&*cache, &conn, AGENT).expect("smoke_skills_surface[step:list]: must succeed");
+        handle_list(&*cache, &conn, &agent_scope).expect("smoke_skills_surface[step:list]: must succeed");
 
     assert_eq!(
         infos.len(),
@@ -483,7 +496,7 @@ fn smoke_skills_surface() {
 
     // --- get_metadata ---
 
-    let returned_meta = handle_get_metadata(&*cache, AGENT, "oauth2-helper")
+    let returned_meta = handle_get_metadata(&*cache, &agent_scope, "oauth2-helper")
         .expect("smoke_skills_surface[step:get_metadata]: must not error")
         .expect("smoke_skills_surface[step:get_metadata]: must return Some");
 
@@ -509,7 +522,7 @@ fn smoke_skills_surface() {
 
     // --- get_metadata on non-Skill returns None (AC8.3) ---
 
-    let none_result = handle_get_metadata(&*cache, AGENT, "notes")
+    let none_result = handle_get_metadata(&*cache, &agent_scope, "notes")
         .expect("smoke_skills_surface[step:get_metadata_text]: must not error");
     assert!(
         none_result.is_none(),
@@ -518,7 +531,7 @@ fn smoke_skills_surface() {
 
     // --- search ---
 
-    let search_results = handle_search(&*cache, &conn, AGENT, "oauth2")
+    let search_results = handle_search(&*cache, &conn, &agent_scope, "oauth2")
         .expect("smoke_skills_surface[step:search]: must succeed");
 
     assert!(
@@ -534,7 +547,7 @@ fn smoke_skills_surface() {
 
     let body_before = {
         let sdoc = cache
-            .get_block(AGENT, "oauth2-helper")
+            .get_block(&agent_scope, "oauth2-helper")
             .unwrap()
             .expect("smoke_skills_surface: block must exist before load");
         sdoc.inner().get_text("body").to_string()
@@ -545,7 +558,7 @@ fn smoke_skills_surface() {
     // handle_load returns the rendered [skill:loaded] text directly as the
     // tool_result body (AC9.1). Persistence across turns is structurally
     // guaranteed because tool_result messages flow through active_messages().
-    let rendered = handle_load(&*cache, &mut usage_conn, AGENT, "oauth2-helper")
+    let rendered = handle_load(&*cache, &mut usage_conn, &agent_scope, AGENT, "oauth2-helper")
         .expect("smoke_skills_surface[step:load]: load must succeed (AC9.1)");
 
     assert!(
@@ -574,7 +587,7 @@ fn smoke_skills_surface() {
 
     let body_after = {
         let sdoc = cache
-            .get_block(AGENT, "oauth2-helper")
+            .get_block(&agent_scope, "oauth2-helper")
             .unwrap()
             .expect("smoke_skills_surface: block must exist after load");
         sdoc.inner().get_text("body").to_string()
@@ -629,11 +642,12 @@ fn smoke_cross_schema_fts() {
     const AGENT: &str = "fts-smoke-agent";
 
     let (db, cache) = open_cache(AGENT);
+    let agent_scope = Scope::global(AGENT);
 
     // --- Text block ---
     cache
         .create_block(
-            AGENT,
+            &agent_scope,
             BlockCreate::new(
                 "text-hydration",
                 MemoryBlockType::Core,
@@ -643,16 +657,16 @@ fn smoke_cross_schema_fts() {
         .expect("smoke_cross_schema_fts: create text block");
 
     {
-        let sdoc = cache.get_block(AGENT, "text-hydration").unwrap().unwrap();
+        let sdoc = cache.get_block(&agent_scope, "text-hydration").unwrap().unwrap();
         sdoc.set_text(
             &format!("The {COMMON_KEYWORD} protocol keeps agents in sync."),
             false,
         )
         .expect("set_text");
     }
-    cache.mark_dirty(AGENT, "text-hydration");
+    cache.mark_dirty(&Scope::global(AGENT).to_db_key(), "text-hydration");
     cache
-        .persist_block(AGENT, "text-hydration")
+        .persist_block(&agent_scope, "text-hydration")
         .expect("smoke_cross_schema_fts: persist text block");
 
     // --- Skill block ---
@@ -673,7 +687,7 @@ fn smoke_cross_schema_fts() {
     // --- TaskList block (FTS5 indexed via persist_block on MemoryCache) ---
     cache
         .create_block(
-            AGENT,
+            &agent_scope,
             BlockCreate::new(
                 "tasks-hydration",
                 MemoryBlockType::Working,
@@ -689,7 +703,7 @@ fn smoke_cross_schema_fts() {
     // Write task item content mentioning COMMON_KEYWORD via LoroDoc directly so
     // the FTS index picks it up on persist_block.
     {
-        let sdoc = cache.get_block(AGENT, "tasks-hydration").unwrap().unwrap();
+        let sdoc = cache.get_block(&agent_scope, "tasks-hydration").unwrap().unwrap();
         let doc = sdoc.inner();
         let list = doc.get_movable_list("items");
         let item_map = list
@@ -709,9 +723,9 @@ fn smoke_cross_schema_fts() {
             .expect("smoke_cross_schema_fts: insert task status");
         doc.commit();
     }
-    cache.mark_dirty(AGENT, "tasks-hydration");
+    cache.mark_dirty(&Scope::global(AGENT).to_db_key(), "tasks-hydration");
     cache
-        .persist_block(AGENT, "tasks-hydration")
+        .persist_block(&agent_scope, "tasks-hydration")
         .expect("smoke_cross_schema_fts: persist task list block");
 
     // --- Search across all block types ---
@@ -722,7 +736,11 @@ fn smoke_cross_schema_fts() {
         limit: 50,
     };
     let results = cache
-        .search(COMMON_KEYWORD, opts, MemorySearchScope::Agent(AGENT.into()))
+        .search(
+            COMMON_KEYWORD,
+            opts,
+            MemorySearchScope::Scope(Scope::global(AGENT)),
+        )
         .expect("smoke_cross_schema_fts[step:search]: must succeed");
 
     // Verify at least 3 results (one per block type).
@@ -737,8 +755,10 @@ fn smoke_cross_schema_fts() {
     // All three blocks must appear in results (AC10.8).
     // MemorySearchResult.id is the memory_blocks DB UUID. To check which
     // block labels are present, we look up the block metadata by id via list_blocks.
+    // Use an encoded scope key so the filter matches blocks stored with
+    // agent_id = Scope::global(AGENT).to_db_key() (i.e. "global:<AGENT>").
     let all_metas = cache
-        .list_blocks(BlockFilter::by_agent(AGENT))
+        .list_blocks(BlockFilter::by_scope(&agent_scope))
         .expect("smoke_cross_schema_fts: list_blocks must succeed");
     let id_to_label: std::collections::HashMap<&str, &str> = all_metas
         .iter()
@@ -812,11 +832,17 @@ fn smoke_scope_enforcement() {
 
     let inner_store = InMemoryMemoryStore::new();
     let db = open_db();
+    // Project blocks are stored under Scope::local so that MemoryScope::list_blocks
+    // under Full isolation (which filters by Scope::Local(project_id).to_db_key())
+    // can find them.
+    let project_scope = Scope::local(PROJECT);
+    let persona_scope = Scope::global(PERSONA);
 
     // Seed a TaskList block under the project agent (project context).
-    seed_task_list(&inner_store, PROJECT, "project-tasks");
+    seed_task_list_scoped(&inner_store, &project_scope, "project-tasks");
     let project_task_id = handle_create(
         &inner_store,
+        &project_scope,
         PROJECT,
         "project-tasks",
         &task_spec("Project-scoped task"),
@@ -828,6 +854,7 @@ fn smoke_scope_enforcement() {
     seed_task_list(&inner_store, PERSONA, "persona-tasks");
     handle_create(
         &inner_store,
+        &persona_scope,
         PERSONA,
         "persona-tasks",
         &task_spec("Persona-scoped task (must be hidden)"),
@@ -835,13 +862,13 @@ fn smoke_scope_enforcement() {
     .expect("smoke_scope_enforcement: create persona task must succeed");
 
     // Reconcile both TaskLists into the DB.
-    reconcile(&inner_store, PROJECT, "project-tasks", &db);
+    reconcile_scoped(&inner_store, &project_scope, "project-tasks", &db);
     reconcile(&inner_store, PERSONA, "persona-tasks", &db);
 
     // Seed a Skill block under the project agent (visible under Full).
     inner_store
         .create_block(
-            PROJECT,
+            &project_scope,
             BlockCreate::new(
                 "project-skill",
                 MemoryBlockType::Working,
@@ -853,7 +880,7 @@ fn smoke_scope_enforcement() {
         .expect("smoke_scope_enforcement: create project skill block");
     {
         let sdoc = inner_store
-            .get_block(PROJECT, "project-skill")
+            .get_block(&project_scope, "project-skill")
             .unwrap()
             .unwrap();
         let skill_file = SkillFile {
@@ -875,7 +902,7 @@ fn smoke_scope_enforcement() {
     // Seed a Skill block under the persona agent (invisible under Full).
     inner_store
         .create_block(
-            PERSONA,
+            &persona_scope,
             BlockCreate::new(
                 "persona-skill",
                 MemoryBlockType::Working,
@@ -887,7 +914,7 @@ fn smoke_scope_enforcement() {
         .expect("smoke_scope_enforcement: create persona skill block");
     {
         let sdoc = inner_store
-            .get_block(PERSONA, "persona-skill")
+            .get_block(&persona_scope, "persona-skill")
             .unwrap()
             .unwrap();
         let skill_file = SkillFile {
@@ -920,7 +947,7 @@ fn smoke_scope_enforcement() {
     // --- Persona caller: list_tasks → sees ONLY project tasks (not persona tasks) ---
     // Under Full isolation the scope returns project TaskList blocks for any caller.
     // The persona's own TaskList is invisible; only project-tasks rows appear.
-    let persona_caller_tasks = handle_list_tasks(&scope, &db_conn, PERSONA, None, "{}")
+    let persona_caller_tasks = handle_list_tasks(&scope, &db_conn, &persona_scope, None, "{}")
         .expect("smoke_scope_enforcement[step:list_tasks_persona_caller]: must not error");
     assert_eq!(
         persona_caller_tasks.len(),
@@ -953,7 +980,7 @@ fn smoke_scope_enforcement() {
     );
 
     // --- Persona caller: skills.list → sees ONLY project skill (not persona skill) ---
-    let persona_caller_skills = handle_list(&scope, &db_conn, PERSONA)
+    let persona_caller_skills = handle_list(&scope, &db_conn, &persona_scope)
         .expect("smoke_scope_enforcement[step:list_skills_persona_caller]: must not error");
     assert_eq!(
         persona_caller_skills.len(),
@@ -969,7 +996,7 @@ fn smoke_scope_enforcement() {
     );
 
     // --- Project caller: list_tasks → sees project tasks (same as persona caller) ---
-    let project_caller_tasks = handle_list_tasks(&scope, &db_conn, PROJECT, None, "{}")
+    let project_caller_tasks = handle_list_tasks(&scope, &db_conn, &project_scope, None, "{}")
         .expect("smoke_scope_enforcement[step:list_tasks_project_caller]: must not error");
     assert_eq!(
         project_caller_tasks.len(),
@@ -983,7 +1010,7 @@ fn smoke_scope_enforcement() {
     );
 
     // --- Project caller: skills.list → sees project skill ---
-    let project_caller_skills = handle_list(&scope, &db_conn, PROJECT)
+    let project_caller_skills = handle_list(&scope, &db_conn, &project_scope)
         .expect("smoke_scope_enforcement[step:list_skills_project_caller]: must not error");
     assert_eq!(
         project_caller_skills.len(),
@@ -999,7 +1026,7 @@ fn smoke_scope_enforcement() {
     // --- Write isolation: persona caller cannot create blocks (IsolationDenied) ---
     // Under Full isolation, writing to the persona scope is denied.
     let write_result = scope.create_block(
-        PERSONA,
+        &persona_scope,
         BlockCreate::new(
             "new-persona-block",
             MemoryBlockType::Working,

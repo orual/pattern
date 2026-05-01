@@ -19,7 +19,7 @@ use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::BlockCreate;
 use pattern_core::types::memory_types::{
     ArchivalEntry, BlockFilter, BlockMetadata, BlockMetadataPatch, BlockSchema, MemoryError,
-    MemoryPermission, MemoryResult, MemorySearchResult, MemorySearchScope, SearchMode,
+    MemoryPermission, MemoryResult, MemorySearchResult, MemorySearchScope, Scope, SearchMode,
     SearchOptions, SharedBlockInfo, UndoRedoDepth, UndoRedoOp,
 };
 use pattern_db::Json;
@@ -72,6 +72,15 @@ pub struct MemoryCache {
     /// When `None`, the subscriber machinery is disabled (backward-compat for
     /// tests and embedded usage that don't need file emission).
     mount_path: Option<Arc<PathBuf>>,
+
+    /// Optional base path for `Scope::Global` blocks (persona-state).
+    /// When set, persona-scoped blocks render to
+    /// `<persona_state_dir>/@<persona_id>/blocks/<type>/<label>.<ext>`
+    /// — typically `$XDG_STATE_HOME/pattern/personas/`. When `None`,
+    /// persona blocks fall back to the in-mount path
+    /// `<mount>/blocks/@<persona_id>/<type>/<label>.<ext>` (back-compat
+    /// for unmounted dev sessions).
+    persona_state_dir: Option<Arc<PathBuf>>,
 
     /// Optional path to the first-party skill directory (e.g.
     /// `pattern_runtime/resources/skills`). When set, skills loaded from
@@ -137,6 +146,7 @@ impl MemoryCache {
             subscribers: Arc::new(DashMap::new()),
             default_char_limit: DEFAULT_MEMORY_CHAR_LIMIT,
             mount_path: None,
+            persona_state_dir: None,
             first_party_skills_dir: None,
             reembed_tx: None,
             heartbeat_tx: None,
@@ -160,6 +170,7 @@ impl MemoryCache {
             subscribers: Arc::new(DashMap::new()),
             default_char_limit: DEFAULT_MEMORY_CHAR_LIMIT,
             mount_path: None,
+            persona_state_dir: None,
             first_party_skills_dir: None,
             reembed_tx: None,
             heartbeat_tx: None,
@@ -202,6 +213,16 @@ impl MemoryCache {
     ///
     /// If `mount_path` is not called, no subscribers are spawned — this is the
     /// backward-compatible default for tests and embedded usage.
+    /// Enable cross-mount persona-state path layout for `Scope::Global`
+    /// blocks. When set, persona-scoped blocks render under
+    /// `<dir>/@<persona_id>/blocks/...` rather than the in-mount fallback
+    /// path. Production wiring sets this to `$XDG_STATE_HOME/pattern/personas/`.
+    #[must_use]
+    pub fn with_persona_state_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.persona_state_dir = Some(Arc::new(dir.into()));
+        self
+    }
+
     pub fn with_mount_path(
         mut self,
         path: impl Into<PathBuf>,
@@ -233,6 +254,7 @@ impl MemoryCache {
                         .as_ref()
                         .expect("mount_path is set just above"),
                 );
+                let respawn_persona_state_dir = self.persona_state_dir.clone();
                 let respawn_reembed_tx = reembed_tx;
                 let respawn_heartbeat_tx = heartbeat_tx;
                 let respawn_block_change_notifier = self.block_change_notifier.clone();
@@ -272,6 +294,7 @@ impl MemoryCache {
                             respawn_reembed_tx.clone(),
                             respawn_heartbeat_tx.clone(),
                             Arc::clone(&respawn_mount_path),
+                            respawn_persona_state_dir.clone(),
                             Arc::clone(&respawn_db),
                             Arc::clone(&respawn_subscribers),
                             respawn_block_change_notifier.clone(),
@@ -471,7 +494,8 @@ impl MemoryCache {
             Some(b) => b.id,
             None => {
                 return Err(MemoryError::WriteToMissingBlock {
-                    agent_id: agent_id.to_string(),
+                    scope: Scope::from_db_key(agent_id)
+                        .unwrap_or_else(|| Scope::Global(agent_id.into())),
                     label: label.to_string(),
                     op: "persist_block",
                 });
@@ -482,7 +506,8 @@ impl MemoryCache {
             .blocks
             .get(&block_id)
             .ok_or_else(|| MemoryError::WriteToMissingBlock {
-                agent_id: agent_id.to_string(),
+                scope: Scope::from_db_key(agent_id)
+                    .unwrap_or_else(|| Scope::Global(agent_id.into())),
                 label: label.to_string(),
                 op: "persist_block",
             })?;
@@ -553,7 +578,8 @@ impl MemoryCache {
             self.blocks
                 .get_mut(&block_id)
                 .ok_or_else(|| MemoryError::WriteToMissingBlock {
-                    agent_id: agent_id.to_string(),
+                    scope: Scope::from_db_key(agent_id)
+                        .unwrap_or_else(|| Scope::Global(agent_id.into())),
                     label: label.to_string(),
                     op: "persist_block",
                 })?;
@@ -585,19 +611,47 @@ impl MemoryCache {
     }
 
     /// Mark a block as dirty (has unpersisted changes).
+    ///
+    /// Pre-Phase-1 this method silently no-opped on misses. The new
+    /// [`MemoryStore::mark_dirty`] trait method returns `Result`; the
+    /// inner helper here is now [`Self::mark_dirty_checked`]. This
+    /// legacy entry point remains for backward compatibility within
+    /// the cache module's internal callers — it logs at debug on miss
+    /// rather than erroring.
     pub fn mark_dirty(&self, agent_id: &str, label: &str) {
-        // This is a synchronous method, so we can't query DB here.
-        // Instead, we'll iterate through cache to find the block.
+        let _ = self.mark_dirty_lookup(agent_id, label);
+    }
+
+    /// Inner lookup used by both the legacy [`Self::mark_dirty`] and the
+    /// `Result`-returning [`Self::mark_dirty_checked`]. Returns `Some(())`
+    /// when the dirty flag was set, `None` when no cached entry matched.
+    fn mark_dirty_lookup(&self, agent_id: &str, label: &str) -> Option<()> {
         let block_id = self
             .blocks
             .iter()
             .find(|entry| entry.doc.agent_id() == agent_id && entry.doc.label() == label)
-            .map(|entry| entry.doc.id().to_string());
+            .map(|entry| entry.doc.id().to_string())?;
+        let mut cached = self.blocks.get_mut(&block_id)?;
+        cached.dirty = true;
+        Some(())
+    }
 
-        if let Some(id) = block_id
-            && let Some(mut cached) = self.blocks.get_mut(&id)
-        {
-            cached.dirty = true;
+    /// `Result`-returning variant of [`Self::mark_dirty`]: returns
+    /// [`MemoryError::WriteToMissingBlock`] when the
+    /// `(agent_id, label)` pair does not match any cached entry.
+    pub fn mark_dirty_checked(
+        &self,
+        agent_id: &str,
+        label: &str,
+        scope: &Scope,
+    ) -> MemoryResult<()> {
+        match self.mark_dirty_lookup(agent_id, label) {
+            Some(()) => Ok(()),
+            None => Err(MemoryError::WriteToMissingBlock {
+                scope: scope.clone(),
+                label: label.to_string(),
+                op: "mark_dirty",
+            }),
         }
     }
 
@@ -814,6 +868,7 @@ impl MemoryCache {
             reembed_tx,
             heartbeat_tx,
             mount_path,
+            self.persona_state_dir.clone(),
             Arc::clone(&self.db),
             Arc::clone(&self.subscribers),
             self.block_change_notifier.clone(),
@@ -1425,13 +1480,23 @@ impl Drop for MemoryCache {
 
 /// Compute the canonical filesystem path for a block file.
 ///
-/// Layout: `{mount}/blocks/@{agent_id}/{type_dir}/{label}.{ext}`
+/// Path dispatch by [`Scope`]:
+///
+/// - `Scope::Local(_)`: `<mount>/blocks/<type_dir>/<label>.<ext>`. Project
+///   blocks live directly under the mount's `blocks/` dir without a per-
+///   agent subdir — they're shared workspace state across the constellation.
+/// - `Scope::Global(persona_id)`: when `persona_state_dir` is provided,
+///   `<persona_state_dir>/@<persona_id>/blocks/<type_dir>/<label>.<ext>`.
+///   When not provided (no XDG state available), falls back to the
+///   in-mount path `<mount>/blocks/@<persona_id>/<type_dir>/<label>.<ext>`
+///   for back-compat with unmounted dev sessions.
 ///
 /// Agent subdirectories are created lazily by the caller; this function
 /// only computes the path.
 fn block_file_path(
     mount_path: &std::path::Path,
-    agent_id: &str,
+    persona_state_dir: Option<&std::path::Path>,
+    scope: &Scope,
     block_type: MemoryBlockType,
     label: &str,
     ext: &str,
@@ -1442,11 +1507,28 @@ fn block_file_path(
         _ => "working", // Future block types default to working directory
     };
     let safe_label = sanitize_block_label(label);
-    mount_path
-        .join("blocks")
-        .join(format!("@{agent_id}"))
-        .join(type_dir)
-        .join(format!("{safe_label}.{ext}"))
+    match scope {
+        Scope::Local(_) => mount_path
+            .join("blocks")
+            .join(type_dir)
+            .join(format!("{safe_label}.{ext}")),
+        Scope::Global(persona_id) => {
+            let base = persona_state_dir
+                .map(|p| p.join(format!("@{persona_id}")))
+                .unwrap_or_else(|| mount_path.join("blocks").join(format!("@{persona_id}")));
+            // When using persona_state_dir, layout is
+            // `<base>/blocks/<type>/<label>.<ext>`. When falling back to
+            // the mount, the path is already `<mount>/blocks/@<id>/`, so
+            // we skip the extra `blocks/` segment for back-compat.
+            if persona_state_dir.is_some() {
+                base.join("blocks")
+                    .join(type_dir)
+                    .join(format!("{safe_label}.{ext}"))
+            } else {
+                base.join(type_dir).join(format!("{safe_label}.{ext}"))
+            }
+        }
+    }
 }
 
 /// Sanitize a block label for use as a filename.
@@ -1488,6 +1570,7 @@ pub(crate) fn spawn_subscriber_for_block(
     reembed_tx: tokio::sync::mpsc::UnboundedSender<ReembedRequest>,
     heartbeat_tx: crossbeam_channel::Sender<Heartbeat>,
     mount_path: Arc<PathBuf>,
+    persona_state_dir: Option<Arc<PathBuf>>,
     db: Arc<ConstellationDb>,
     subscribers: Arc<DashMap<String, SubscriberHandle>>,
     block_change_notifier: crate::subscriber::BlockChangeNotifier,
@@ -1506,13 +1589,20 @@ pub(crate) fn spawn_subscriber_for_block(
     let pause_complete = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
     let resume_signal = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
 
+    // Recover the doc's typed Scope from the encoded `agent_id` it carries.
+    // Pre-Phase-1 docs that haven't been migrated have a bare agent_id; we
+    // treat those as `Scope::Global(agent_id)` so they keep working.
+    let doc_scope = Scope::from_db_key(doc.agent_id())
+        .unwrap_or_else(|| Scope::Global(doc.agent_id().into()));
+
     // Determine the canonical file extension for this schema so we can compute
     // the block file path for the SyncedDoc. The extension must match what
     // render_canonical_from_disk_doc would return for this schema.
     let ext = block_schema_extension(&schema);
     let file_path = block_file_path(
         &mount_path,
-        doc.agent_id(),
+        persona_state_dir.as_deref().map(|p| p.as_path()),
+        &doc_scope,
         doc.block_type(),
         doc.label(),
         &ext,
@@ -1901,7 +1991,7 @@ fn db_archival_to_archival(entry: &pattern_db::models::ArchivalEntry) -> Archiva
 impl MemoryStore for MemoryCache {
     fn create_block(
         &self,
-        agent_id: &str,
+        scope: &Scope,
         create: BlockCreate,
     ) -> MemoryResult<StructuredDocument> {
         let BlockCreate {
@@ -1925,10 +2015,15 @@ impl MemoryStore for MemoryCache {
         let block_id = format!("mem_{}", Uuid::new_v4().simple());
         let now = Utc::now();
 
+        // Encode scope as prefixed string for DB storage. The cache's
+        // in-memory lookups also compare against this encoded form via
+        // `doc.agent_id()` so Local("x") and Global("x") never collide.
+        let agent_id = scope.to_db_key();
+
         // Build BlockMetadata.
         let block_metadata = BlockMetadata {
             id: block_id.clone(),
-            agent_id: agent_id.to_string(),
+            agent_id: agent_id.clone(),
             label: label.clone(),
             description: description.clone(),
             block_type,
@@ -1943,7 +2038,7 @@ impl MemoryStore for MemoryCache {
         // Create new StructuredDocument with metadata.
         let doc = StructuredDocument::new_with_metadata(
             block_metadata.clone(),
-            Some(agent_id.to_string()),
+            Some(agent_id.clone()),
         );
 
         // For Skill blocks, initialize the "metadata" and "extras" LoroMap
@@ -2017,7 +2112,7 @@ impl MemoryStore for MemoryCache {
         // Create MemoryBlock for DB.
         let db_block = pattern_db::models::MemoryBlock {
             id: block_id.clone(),
-            agent_id: agent_id.to_string(),
+            agent_id: agent_id.clone(),
             label,
             description,
             block_type,
@@ -2060,19 +2155,20 @@ impl MemoryStore for MemoryCache {
         Ok(doc)
     }
 
-    fn get_block(&self, agent_id: &str, label: &str) -> MemoryResult<Option<StructuredDocument>> {
-        // Delegate to existing get method.
-        self.get(agent_id, label)
+    fn get_block(&self, scope: &Scope, label: &str) -> MemoryResult<Option<StructuredDocument>> {
+        // Delegate to existing get method using the encoded db key.
+        self.get(&scope.to_db_key(), label)
     }
 
     fn get_block_metadata(
         &self,
-        agent_id: &str,
+        scope: &Scope,
         label: &str,
     ) -> MemoryResult<Option<BlockMetadata>> {
         // Query DB for block metadata without loading full document.
+        let key = scope.to_db_key();
         let block =
-            pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, agent_id, label)
+            pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, &key, label)
                 .mem()?;
 
         Ok(block.as_ref().map(db_block_to_metadata))
@@ -2116,16 +2212,17 @@ impl MemoryStore for MemoryCache {
         Ok(results)
     }
 
-    fn delete_block(&self, agent_id: &str, label: &str) -> MemoryResult<()> {
+    fn delete_block(&self, scope: &Scope, label: &str) -> MemoryResult<()> {
         // Get block ID first.
+        let key = scope.to_db_key();
         let block =
-            pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, agent_id, label)
+            pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, &key, label)
                 .mem()?;
 
         if let Some(block) = block {
             // Drop from cache first (will persist if dirty and cancel subscriber).
             if self.blocks.contains_key(&block.id) {
-                self.drop_doc(agent_id, label)?;
+                self.drop_doc(&key, label)?;
             }
 
             // Soft-delete in DB.
@@ -2135,25 +2232,27 @@ impl MemoryStore for MemoryCache {
         Ok(())
     }
 
-    fn get_rendered_content(&self, agent_id: &str, label: &str) -> MemoryResult<Option<String>> {
+    fn get_rendered_content(&self, scope: &Scope, label: &str) -> MemoryResult<Option<String>> {
         // Get doc, call doc.render().
-        let doc = self.get(agent_id, label)?;
+        let doc = self.get(&scope.to_db_key(), label)?;
         Ok(doc.map(|d| d.render()))
     }
 
-    fn persist_block(&self, agent_id: &str, label: &str) -> MemoryResult<()> {
+    fn persist_block(&self, scope: &Scope, label: &str) -> MemoryResult<()> {
         // Delegate to existing persist method.
-        self.persist(agent_id, label)
+        self.persist(&scope.to_db_key(), label)
     }
 
-    fn mark_dirty(&self, agent_id: &str, label: &str) {
-        // Delegate to existing method.
-        MemoryCache::mark_dirty(self, agent_id, label);
+    fn mark_dirty(&self, scope: &Scope, label: &str) -> MemoryResult<()> {
+        // Delegate to existing method, but propagate failure as a typed
+        // error rather than silently no-opping. Phase-1 redesign: callers
+        // routing the wrong scope no longer get a silent miss.
+        MemoryCache::mark_dirty_checked(self, &scope.to_db_key(), label, scope)
     }
 
     fn insert_archival(
         &self,
-        agent_id: &str,
+        scope: &Scope,
         content: &str,
         metadata: Option<JsonValue>,
     ) -> MemoryResult<String> {
@@ -2163,7 +2262,7 @@ impl MemoryStore for MemoryCache {
         // Create archival entry.
         let entry = pattern_db::models::ArchivalEntry {
             id: entry_id.clone(),
-            agent_id: agent_id.to_string(),
+            agent_id: scope.to_db_key(),
             content: content.to_string(),
             metadata: metadata.map(pattern_db::Json),
             chunk_index: 0,
@@ -2179,17 +2278,18 @@ impl MemoryStore for MemoryCache {
 
     fn search_archival(
         &self,
-        agent_id: &str,
+        scope: &Scope,
         query: &str,
         limit: usize,
     ) -> MemoryResult<Vec<ArchivalEntry>> {
         // Use rich search with FTS mode.
         let search_conn = self.db.get().mem()?;
+        let key = scope.to_db_key();
         let results = pattern_db::search::search(&search_conn)
             .text(query)
             .mode(pattern_db::search::SearchMode::FtsOnly)
             .limit(limit as i64)
-            .filter(pattern_db::search::ContentFilter::archival(Some(agent_id)))
+            .filter(pattern_db::search::ContentFilter::archival(Some(&key)))
             .execute()
             .mem()?;
 
@@ -2218,8 +2318,9 @@ impl MemoryStore for MemoryCache {
         scope: MemorySearchScope,
     ) -> MemoryResult<Vec<MemorySearchResult>> {
         match scope {
-            MemorySearchScope::Agent(ref agent_id) => {
-                self.search_impl(Some(agent_id.as_str()), query, options)
+            MemorySearchScope::Scope(ref s) => {
+                let key = s.to_db_key();
+                self.search_impl(Some(&key), query, options)
             }
             MemorySearchScope::Constellation => self.search_impl(None, query, options),
             _ => Err(MemoryError::Other(
@@ -2228,9 +2329,10 @@ impl MemoryStore for MemoryCache {
         }
     }
 
-    fn list_shared_blocks(&self, agent_id: &str) -> MemoryResult<Vec<SharedBlockInfo>> {
+    fn list_shared_blocks(&self, scope: &Scope) -> MemoryResult<Vec<SharedBlockInfo>> {
+        let key = scope.to_db_key();
         let shared =
-            pattern_db::queries::get_shared_blocks(&*self.db.get().mem()?, agent_id).mem()?;
+            pattern_db::queries::get_shared_blocks(&*self.db.get().mem()?, &key).mem()?;
 
         Ok(shared
             .into_iter()
@@ -2248,15 +2350,17 @@ impl MemoryStore for MemoryCache {
 
     fn get_shared_block(
         &self,
-        requester_agent_id: &str,
-        owner_agent_id: &str,
+        requester: &Scope,
+        owner: &Scope,
         label: &str,
     ) -> MemoryResult<Option<StructuredDocument>> {
         // 1. Check access FIRST - DB is source of truth.
+        let requester_key = requester.to_db_key();
+        let owner_key = owner.to_db_key();
         let access_result = pattern_db::queries::check_block_access(
             &*self.db.get().mem()?,
-            requester_agent_id,
-            owner_agent_id,
+            &requester_key,
+            &owner_key,
             label,
         )
         .mem()?;
@@ -2295,7 +2399,7 @@ impl MemoryStore for MemoryCache {
         }
 
         // 3. Load from DB with shared permission.
-        let block = self.load_from_db(owner_agent_id, label, shared_permission)?;
+        let block = self.load_from_db(&owner_key, label, shared_permission)?;
 
         match block {
             Some(cached) => {
@@ -2309,7 +2413,7 @@ impl MemoryStore for MemoryCache {
 
     fn update_block_metadata(
         &self,
-        agent_id: &str,
+        scope: &Scope,
         label: &str,
         patch: BlockMetadataPatch,
     ) -> MemoryResult<()> {
@@ -2318,12 +2422,13 @@ impl MemoryStore for MemoryCache {
         }
 
         // Get block from DB.
+        let key = scope.to_db_key();
         let block =
-            pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, agent_id, label)
+            pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, &key, label)
                 .mem()?;
 
         let block = block.ok_or_else(|| MemoryError::WriteToMissingBlock {
-            agent_id: agent_id.to_string(),
+            scope: scope.clone(),
             label: label.to_string(),
             op: "update_block_metadata",
         })?;
@@ -2412,14 +2517,15 @@ impl MemoryStore for MemoryCache {
         Ok(())
     }
 
-    fn undo_redo(&self, agent_id: &str, label: &str, op: UndoRedoOp) -> MemoryResult<bool> {
+    fn undo_redo(&self, scope: &Scope, label: &str, op: UndoRedoOp) -> MemoryResult<bool> {
         // Get block ID from DB.
+        let key = scope.to_db_key();
         let block =
-            pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, agent_id, label)
+            pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, &key, label)
                 .mem()?;
 
         let block = block.ok_or_else(|| MemoryError::WriteToMissingBlock {
-            agent_id: agent_id.to_string(),
+            scope: scope.clone(),
             label: label.to_string(),
             op: "undo_redo",
         })?;
@@ -2499,13 +2605,14 @@ impl MemoryStore for MemoryCache {
         }
     }
 
-    fn history_depth(&self, agent_id: &str, label: &str) -> MemoryResult<UndoRedoDepth> {
+    fn history_depth(&self, scope: &Scope, label: &str) -> MemoryResult<UndoRedoDepth> {
+        let key = scope.to_db_key();
         let block =
-            pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, agent_id, label)
+            pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, &key, label)
                 .mem()?;
 
         let block = block.ok_or_else(|| MemoryError::WriteToMissingBlock {
-            agent_id: agent_id.to_string(),
+            scope: scope.clone(),
             label: label.to_string(),
             op: "history_depth",
         })?;
@@ -2761,7 +2868,7 @@ mod tests {
         // Create a block using MemoryStore trait.
         let created_doc = cache
             .create_block(
-                "agent_1",
+                &Scope::global("agent_1"),
                 BlockCreate::new("test_block", MemoryBlockType::Working, BlockSchema::text())
                     .with_description("Test block description")
                     .with_char_limit(1000),
@@ -2771,7 +2878,7 @@ mod tests {
         assert!(created_doc.id().starts_with("mem_"));
 
         // Get the block back (should return same doc since it's cached).
-        let doc = cache.get_block("agent_1", "test_block").unwrap();
+        let doc = cache.get_block(&Scope::global("agent_1"), "test_block").unwrap();
         assert!(doc.is_some());
 
         // Verify content is initially empty.
@@ -2791,7 +2898,7 @@ mod tests {
         // Create multiple blocks.
         cache
             .create_block(
-                "agent_1",
+                &Scope::global("agent_1"),
                 BlockCreate::new("block1", MemoryBlockType::Core, BlockSchema::text())
                     .with_description("First block")
                     .with_char_limit(1000),
@@ -2800,7 +2907,7 @@ mod tests {
 
         cache
             .create_block(
-                "agent_1",
+                &Scope::global("agent_1"),
                 BlockCreate::new("block2", MemoryBlockType::Working, BlockSchema::text())
                     .with_description("Second block")
                     .with_char_limit(2000),
@@ -2809,7 +2916,7 @@ mod tests {
 
         cache
             .create_block(
-                "agent_1",
+                &Scope::global("agent_1"),
                 BlockCreate::new("block3", MemoryBlockType::Core, BlockSchema::text())
                     .with_description("Third block")
                     .with_char_limit(1500),
@@ -2817,17 +2924,25 @@ mod tests {
             .unwrap();
 
         // List all blocks.
-        let all_blocks = cache.list_blocks(BlockFilter::by_agent("agent_1")).unwrap();
+        let all_blocks = cache
+            .list_blocks(BlockFilter::by_agent(Scope::global("agent_1").to_db_key()))
+            .unwrap();
         assert_eq!(all_blocks.len(), 3);
 
         // List blocks by type.
         let core_blocks = cache
-            .list_blocks(BlockFilter::by_type("agent_1", MemoryBlockType::Core))
+            .list_blocks(BlockFilter::by_type(
+                Scope::global("agent_1").to_db_key(),
+                MemoryBlockType::Core,
+            ))
             .unwrap();
         assert_eq!(core_blocks.len(), 2);
 
         let working_blocks = cache
-            .list_blocks(BlockFilter::by_type("agent_1", MemoryBlockType::Working))
+            .list_blocks(BlockFilter::by_type(
+                Scope::global("agent_1").to_db_key(),
+                MemoryBlockType::Working,
+            ))
             .unwrap();
         assert_eq!(working_blocks.len(), 1);
         assert_eq!(working_blocks[0].label, "block2");
@@ -2841,7 +2956,7 @@ mod tests {
         // Create a block.
         cache
             .create_block(
-                "agent_1",
+                &Scope::global("agent_1"),
                 BlockCreate::new("to_delete", MemoryBlockType::Working, BlockSchema::text())
                     .with_description("Will be deleted")
                     .with_char_limit(1000),
@@ -2849,18 +2964,20 @@ mod tests {
             .unwrap();
 
         // Verify it exists.
-        let doc = cache.get_block("agent_1", "to_delete").unwrap();
+        let doc = cache.get_block(&Scope::global("agent_1"), "to_delete").unwrap();
         assert!(doc.is_some());
 
         // Delete it.
-        cache.delete_block("agent_1", "to_delete").unwrap();
+        cache.delete_block(&Scope::global("agent_1"), "to_delete").unwrap();
 
         // Verify it's gone (soft delete → get_block returns Ok(None)).
-        let doc = cache.get_block("agent_1", "to_delete").unwrap();
+        let doc = cache.get_block(&Scope::global("agent_1"), "to_delete").unwrap();
         assert!(doc.is_none());
 
         // List should not include deleted block.
-        let blocks = cache.list_blocks(BlockFilter::by_agent("agent_1")).unwrap();
+        let blocks = cache
+            .list_blocks(BlockFilter::by_agent(Scope::global("agent_1").to_db_key()))
+            .unwrap();
         assert_eq!(blocks.len(), 0);
     }
 
@@ -2872,7 +2989,7 @@ mod tests {
         // Create a block.
         cache
             .create_block(
-                "agent_1",
+                &Scope::global("agent_1"),
                 BlockCreate::new(
                     "content_test",
                     MemoryBlockType::Working,
@@ -2884,16 +3001,19 @@ mod tests {
             .unwrap();
 
         // Get and modify.
-        let doc = cache.get_block("agent_1", "content_test").unwrap().unwrap();
+        let doc = cache
+            .get_block(&Scope::global("agent_1"), "content_test")
+            .unwrap()
+            .unwrap();
         doc.set_text("Hello, world!", true).unwrap();
 
         // Mark dirty and persist.
-        cache.mark_dirty("agent_1", "content_test");
-        cache.persist_block("agent_1", "content_test").unwrap();
+        cache.mark_dirty(&Scope::global("agent_1").to_db_key(), "content_test");
+        cache.persist_block(&Scope::global("agent_1"), "content_test").unwrap();
 
         // Get rendered content.
         let content = cache
-            .get_rendered_content("agent_1", "content_test")
+            .get_rendered_content(&Scope::global("agent_1"), "content_test")
             .unwrap();
         assert_eq!(content, Some("Hello, world!".to_string()));
     }
@@ -2905,14 +3025,14 @@ mod tests {
 
         // Insert archival entries.
         let id1 = cache
-            .insert_archival("agent_1", "First archival entry", None)
+            .insert_archival(&Scope::global("agent_1"), "First archival entry", None)
             .unwrap();
         assert!(id1.starts_with("arch_"));
 
         let metadata = serde_json::json!({"source": "test", "importance": "high"});
         let id2 = cache
             .insert_archival(
-                "agent_1",
+                &Scope::global("agent_1"),
                 "Second archival entry with metadata",
                 Some(metadata),
             )
@@ -2920,10 +3040,14 @@ mod tests {
         assert!(id2.starts_with("arch_"));
 
         // Search archival (simple substring match).
-        let results = cache.search_archival("agent_1", "archival", 10).unwrap();
+        let results = cache
+            .search_archival(&Scope::global("agent_1"), "archival", 10)
+            .unwrap();
         assert_eq!(results.len(), 2);
 
-        let results = cache.search_archival("agent_1", "metadata", 10).unwrap();
+        let results = cache
+            .search_archival(&Scope::global("agent_1"), "metadata", 10)
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].metadata.is_some());
 
@@ -2931,11 +3055,15 @@ mod tests {
         cache.delete_archival(&id1).unwrap();
 
         // Verify deletion.
-        let results = cache.search_archival("agent_1", "First", 10).unwrap();
+        let results = cache
+            .search_archival(&Scope::global("agent_1"), "First", 10)
+            .unwrap();
         assert_eq!(results.len(), 0);
 
         // Second entry should still be there.
-        let results = cache.search_archival("agent_1", "Second", 10).unwrap();
+        let results = cache
+            .search_archival(&Scope::global("agent_1"), "Second", 10)
+            .unwrap();
         assert_eq!(results.len(), 1);
     }
 
@@ -2947,7 +3075,7 @@ mod tests {
         // Create a block.
         cache
             .create_block(
-                "agent_1",
+                &Scope::global("agent_1"),
                 BlockCreate::new("metadata_test", MemoryBlockType::Core, BlockSchema::text())
                     .with_description("Test metadata retrieval")
                     .with_char_limit(5000),
@@ -2956,7 +3084,7 @@ mod tests {
 
         // Get metadata without loading full document.
         let metadata = cache
-            .get_block_metadata("agent_1", "metadata_test")
+            .get_block_metadata(&Scope::global("agent_1"), "metadata_test")
             .unwrap();
 
         assert!(metadata.is_some());
@@ -2980,40 +3108,46 @@ mod tests {
         // Create blocks with searchable content.
         cache
             .create_block(
-                "agent_1",
+                &Scope::global("agent_1"),
                 BlockCreate::new("persona", MemoryBlockType::Core, BlockSchema::text())
                     .with_description("Agent personality")
                     .with_char_limit(1000),
             )
             .unwrap();
 
-        let doc = cache.get_block("agent_1", "persona").unwrap().unwrap();
+        let doc = cache
+            .get_block(&Scope::global("agent_1"), "persona")
+            .unwrap()
+            .unwrap();
         doc.set_text(
             "I am a helpful assistant specializing in Rust programming",
             true,
         )
         .unwrap();
-        cache.mark_dirty("agent_1", "persona");
-        cache.persist_block("agent_1", "persona").unwrap();
+        cache.mark_dirty(&Scope::global("agent_1").to_db_key(), "persona");
+        cache.persist_block(&Scope::global("agent_1"), "persona").unwrap();
 
         // Create another block.
         cache
             .create_block(
-                "agent_1",
+                &Scope::global("agent_1"),
                 BlockCreate::new("notes", MemoryBlockType::Working, BlockSchema::text())
                     .with_description("Working notes")
                     .with_char_limit(1000),
             )
             .unwrap();
 
-        let doc = cache.get_block("agent_1", "notes").unwrap().unwrap();
+        let doc = cache
+            .get_block(&Scope::global("agent_1"), "notes")
+            .unwrap()
+            .unwrap();
         doc.set_text(
             "Meeting scheduled for tomorrow about Python development",
             true,
         )
         .unwrap();
-        cache.mark_dirty("agent_1", "notes");
-        cache.persist_block("agent_1", "notes").unwrap();
+        cache.mark_dirty(&Scope::global("agent_1").to_db_key(), "notes");
+        cache.persist_block(&Scope::global("agent_1"), "notes").unwrap();
 
         // Search for "Rust" - should find persona block.
         let opts = SearchOptions {
@@ -3023,7 +3157,11 @@ mod tests {
         };
 
         let results = cache
-            .search("Rust", opts, MemorySearchScope::Agent("agent_1".into()))
+            .search(
+                "Rust",
+                opts,
+                MemorySearchScope::Scope(Scope::global("agent_1")),
+            )
             .unwrap();
         assert_eq!(results.len(), 1);
         assert!(
@@ -3042,7 +3180,11 @@ mod tests {
         };
 
         let results = cache
-            .search("Python", opts, MemorySearchScope::Agent("agent_1".into()))
+            .search(
+                "Python",
+                opts,
+                MemorySearchScope::Scope(Scope::global("agent_1")),
+            )
             .unwrap();
         assert_eq!(results.len(), 1);
         assert!(
@@ -3064,7 +3206,7 @@ mod tests {
             .search(
                 "development",
                 opts,
-                MemorySearchScope::Agent("agent_1".into()),
+                MemorySearchScope::Scope(Scope::global("agent_1")),
             )
             .unwrap();
         assert!(!results.is_empty());
@@ -3078,7 +3220,7 @@ mod tests {
         // Insert archival entries.
         cache
             .insert_archival(
-                "agent_1",
+                &Scope::global("agent_1"),
                 "Discussed project requirements for the new authentication system",
                 None,
             )
@@ -3086,7 +3228,7 @@ mod tests {
 
         cache
             .insert_archival(
-                "agent_1",
+                &Scope::global("agent_1"),
                 "Reviewed database schema design for user management",
                 None,
             )
@@ -3094,7 +3236,7 @@ mod tests {
 
         cache
             .insert_archival(
-                "agent_1",
+                &Scope::global("agent_1"),
                 "Implemented token-based authentication with JWT",
                 None,
             )
@@ -3111,7 +3253,7 @@ mod tests {
             .search(
                 "authentication",
                 opts,
-                MemorySearchScope::Agent("agent_1".into()),
+                MemorySearchScope::Scope(Scope::global("agent_1")),
             )
             .unwrap();
         assert_eq!(results.len(), 2);
@@ -3138,7 +3280,11 @@ mod tests {
         };
 
         let results = cache
-            .search("database", opts, MemorySearchScope::Agent("agent_1".into()))
+            .search(
+                "database",
+                opts,
+                MemorySearchScope::Scope(Scope::global("agent_1")),
+            )
             .unwrap();
         assert_eq!(results.len(), 1);
         assert!(
@@ -3158,23 +3304,26 @@ mod tests {
         // Create a memory block.
         cache
             .create_block(
-                "agent_1",
+                &Scope::global("agent_1"),
                 BlockCreate::new("persona", MemoryBlockType::Core, BlockSchema::text())
                     .with_description("Agent personality")
                     .with_char_limit(1000),
             )
             .unwrap();
 
-        let doc = cache.get_block("agent_1", "persona").unwrap().unwrap();
+        let doc = cache
+            .get_block(&Scope::global("agent_1"), "persona")
+            .unwrap()
+            .unwrap();
         doc.set_text("I specialize in Rust programming and system design", true)
             .unwrap();
-        cache.mark_dirty("agent_1", "persona");
-        cache.persist_block("agent_1", "persona").unwrap();
+        cache.mark_dirty(&Scope::global("agent_1").to_db_key(), "persona");
+        cache.persist_block(&Scope::global("agent_1"), "persona").unwrap();
 
         // Create an archival entry.
         cache
             .insert_archival(
-                "agent_1",
+                &Scope::global("agent_1"),
                 "Helped user debug a complex Rust lifetime issue",
                 None,
             )
@@ -3188,7 +3337,11 @@ mod tests {
         };
 
         let results = cache
-            .search("Rust", opts, MemorySearchScope::Agent("agent_1".into()))
+            .search(
+                "Rust",
+                opts,
+                MemorySearchScope::Scope(Scope::global("agent_1")),
+            )
             .unwrap();
         assert_eq!(results.len(), 2);
 
@@ -3210,12 +3363,12 @@ mod tests {
 
         // Insert archival for agent_1.
         cache
-            .insert_archival("agent_1", "Agent 1 secret information", None)
+            .insert_archival(&Scope::global("agent_1"), "Agent 1 secret information", None)
             .unwrap();
 
         // Insert archival for agent_2.
         cache
-            .insert_archival("agent_2", "Agent 2 secret information", None)
+            .insert_archival(&Scope::global("agent_2"), "Agent 2 secret information", None)
             .unwrap();
 
         // Search for agent_1 should only return agent_1's data.
@@ -3229,7 +3382,7 @@ mod tests {
             .search(
                 "secret",
                 opts.clone(),
-                MemorySearchScope::Agent("agent_1".into()),
+                MemorySearchScope::Scope(Scope::global("agent_1")),
             )
             .unwrap();
         assert_eq!(results.len(), 1);
@@ -3237,7 +3390,11 @@ mod tests {
 
         // Search for agent_2 should only return agent_2's data.
         let results = cache
-            .search("secret", opts, MemorySearchScope::Agent("agent_2".into()))
+            .search(
+                "secret",
+                opts,
+                MemorySearchScope::Scope(Scope::global("agent_2")),
+            )
             .unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].content.as_ref().unwrap().contains("Agent 2"));
@@ -3252,7 +3409,7 @@ mod tests {
         for i in 0..10 {
             cache
                 .insert_archival(
-                    "agent_1",
+                    &Scope::global("agent_1"),
                     &format!("Entry {} about testing functionality", i),
                     None,
                 )
@@ -3267,7 +3424,11 @@ mod tests {
         };
 
         let results = cache
-            .search("testing", opts, MemorySearchScope::Agent("agent_1".into()))
+            .search(
+                "testing",
+                opts,
+                MemorySearchScope::Scope(Scope::global("agent_1")),
+            )
             .unwrap();
         assert_eq!(results.len(), 3);
     }
@@ -3280,20 +3441,23 @@ mod tests {
         // Create data in both memory blocks and archival.
         cache
             .create_block(
-                "agent_1",
+                &Scope::global("agent_1"),
                 BlockCreate::new("test_block", MemoryBlockType::Working, BlockSchema::text())
                     .with_description("Test")
                     .with_char_limit(1000),
             )
             .unwrap();
 
-        let doc = cache.get_block("agent_1", "test_block").unwrap().unwrap();
+        let doc = cache
+            .get_block(&Scope::global("agent_1"), "test_block")
+            .unwrap()
+            .unwrap();
         doc.set_text("Searchable block content", true).unwrap();
-        cache.mark_dirty("agent_1", "test_block");
-        cache.persist_block("agent_1", "test_block").unwrap();
+        cache.mark_dirty(&Scope::global("agent_1").to_db_key(), "test_block");
+        cache.persist_block(&Scope::global("agent_1"), "test_block").unwrap();
 
         cache
-            .insert_archival("agent_1", "Searchable archival content", None)
+            .insert_archival(&Scope::global("agent_1"), "Searchable archival content", None)
             .unwrap();
 
         // Search with empty content_types - should search all types.
@@ -3307,7 +3471,7 @@ mod tests {
             .search(
                 "Searchable",
                 opts,
-                MemorySearchScope::Agent("agent_1".into()),
+                MemorySearchScope::Scope(Scope::global("agent_1")),
             )
             .unwrap();
         assert_eq!(results.len(), 2);
@@ -3320,7 +3484,7 @@ mod tests {
 
         // Insert archival entry.
         cache
-            .insert_archival("agent_1", "Test content for hybrid search", None)
+            .insert_archival(&Scope::global("agent_1"), "Test content for hybrid search", None)
             .unwrap();
 
         // Search with Hybrid mode (should gracefully fall back to FTS).
@@ -3331,7 +3495,11 @@ mod tests {
         };
 
         let results = cache
-            .search("hybrid", opts, MemorySearchScope::Agent("agent_1".into()))
+            .search(
+                "hybrid",
+                opts,
+                MemorySearchScope::Scope(Scope::global("agent_1")),
+            )
             .unwrap();
         assert_eq!(results.len(), 1);
         assert!(
@@ -3350,7 +3518,7 @@ mod tests {
 
         // Insert archival entry.
         cache
-            .insert_archival("agent_1", "Test content for vector search", None)
+            .insert_archival(&Scope::global("agent_1"), "Test content for vector search", None)
             .unwrap();
 
         // Search with Vector mode (should gracefully fall back to FTS).
@@ -3361,7 +3529,11 @@ mod tests {
         };
 
         let results = cache
-            .search("vector", opts, MemorySearchScope::Agent("agent_1".into()))
+            .search(
+                "vector",
+                opts,
+                MemorySearchScope::Scope(Scope::global("agent_1")),
+            )
             .unwrap();
         assert_eq!(results.len(), 1);
         assert!(
@@ -3380,7 +3552,11 @@ mod tests {
 
         // Insert archival entry.
         cache
-            .insert_archival("agent_1", "Constellation-wide searchable content", None)
+            .insert_archival(
+                &Scope::global("agent_1"),
+                "Constellation-wide searchable content",
+                None,
+            )
             .unwrap();
 
         // Search across constellation with Hybrid mode (should gracefully fall back to FTS).
@@ -3411,7 +3587,7 @@ mod tests {
         // Create a block with some initial content.
         let doc = cache
             .create_block(
-                "agent_1",
+                &Scope::global("agent_1"),
                 BlockCreate::new(
                     "test_replace",
                     MemoryBlockType::Working,
@@ -3424,8 +3600,8 @@ mod tests {
 
         // Set initial content.
         doc.set_text("Hello world, this is a test.", true).unwrap();
-        cache.mark_dirty("agent_1", "test_replace");
-        cache.persist("agent_1", "test_replace").unwrap();
+        cache.mark_dirty(&Scope::global("agent_1").to_db_key(), "test_replace");
+        cache.persist(&Scope::global("agent_1").to_db_key(), "test_replace").unwrap();
 
         // Get the version vector before replacement.
         let vv_before = doc.inner().oplog_vv();
@@ -3436,8 +3612,8 @@ mod tests {
         assert!(replaced, "Replacement should have occurred");
 
         // Persist the changes.
-        cache.mark_dirty("agent_1", "test_replace");
-        cache.persist("agent_1", "test_replace").unwrap();
+        cache.mark_dirty(&Scope::global("agent_1").to_db_key(), "test_replace");
+        cache.persist(&Scope::global("agent_1").to_db_key(), "test_replace").unwrap();
 
         // Verify the content is correct.
         assert_eq!(doc.text_content(), "Hello universe, this is a test.");
@@ -3459,7 +3635,7 @@ mod tests {
         // Create a block with some content.
         let doc = cache
             .create_block(
-                "agent_1",
+                &Scope::global("agent_1"),
                 BlockCreate::new(
                     "test_replace",
                     MemoryBlockType::Working,
@@ -3472,8 +3648,8 @@ mod tests {
 
         // Set initial content.
         doc.set_text("Hello world", true).unwrap();
-        cache.mark_dirty("agent_1", "test_replace");
-        cache.persist("agent_1", "test_replace").unwrap();
+        cache.mark_dirty(&Scope::global("agent_1").to_db_key(), "test_replace");
+        cache.persist(&Scope::global("agent_1").to_db_key(), "test_replace").unwrap();
 
         // Try to replace something that doesn't exist.
         let replaced = doc
@@ -3495,7 +3671,7 @@ mod tests {
         // Create a block for Unicode replacement testing.
         let doc = cache
             .create_block(
-                "agent_1",
+                &Scope::global("agent_1"),
                 BlockCreate::new(
                     "unicode_test",
                     MemoryBlockType::Working,
@@ -3643,6 +3819,7 @@ mod tests {
             reembed_tx.clone(),
             hb_tx.clone(),
             Arc::clone(&mount_path),
+            None,
             Arc::clone(&db),
             Arc::clone(&subscribers),
             notifier.clone(),
@@ -3678,6 +3855,7 @@ mod tests {
             reembed_tx,
             hb_tx,
             Arc::clone(&mount_path),
+            None,
             Arc::clone(&db),
             Arc::clone(&subscribers),
             notifier,
@@ -3904,6 +4082,7 @@ mod tests {
             reembed_tx,
             hb_tx,
             Arc::clone(&mount_path),
+            None,
             Arc::clone(&db),
             Arc::clone(&subscribers),
             crate::subscriber::BlockChangeNotifier::new(),
@@ -4037,6 +4216,7 @@ mod tests {
             reembed_tx,
             hb_tx,
             Arc::clone(&mount_path),
+            None,
             Arc::clone(&db),
             Arc::clone(&subscribers),
             crate::subscriber::BlockChangeNotifier::new(),
@@ -4278,6 +4458,11 @@ mod tests {
         let parent_id = "parent-agent";
         let other_id = "other-agent";
         let child_id = "child-agent";
+        // fork_for_child is an internal method that takes raw agent_id strings,
+        // so we must use the db_key form to match what create_block stores.
+        let parent_key = Scope::global(parent_id).to_db_key();
+        let other_key = Scope::global(other_id).to_db_key();
+        let child_key = Scope::global(child_id).to_db_key();
 
         create_test_agent(&db, parent_id);
         create_test_agent(&db, other_id);
@@ -4291,7 +4476,9 @@ mod tests {
             MemoryBlockType::Working,
             pattern_core::types::memory_types::BlockSchema::text(),
         );
-        cache.create_block(parent_id, parent_bc).unwrap();
+        cache
+            .create_block(&Scope::global(parent_id), parent_bc)
+            .unwrap();
 
         // Create a block owned by another agent — should NOT appear in fork.
         let other_bc = pattern_core::types::block::BlockCreate::new(
@@ -4299,10 +4486,12 @@ mod tests {
             MemoryBlockType::Working,
             pattern_core::types::memory_types::BlockSchema::text(),
         );
-        cache.create_block(other_id, other_bc).unwrap();
+        cache
+            .create_block(&Scope::global(other_id), other_bc)
+            .unwrap();
 
         let child_cache = cache
-            .fork_for_child(parent_id, child_id)
+            .fork_for_child(&parent_key, &child_key)
             .expect("fork_for_child must succeed");
 
         // The child cache has the parent's block retagged to child ownership.
@@ -4314,7 +4503,7 @@ mod tests {
         let child_block = child_cache.blocks.iter().next().unwrap();
         assert_eq!(
             child_block.value().doc.agent_id(),
-            child_id,
+            child_key,
             "forked block should be retagged with child agent id"
         );
         assert_eq!(
@@ -4322,6 +4511,8 @@ mod tests {
             "notes",
             "forked block label should match parent's block"
         );
+        // suppress unused variable warning
+        let _ = other_key;
     }
 
     /// Writes to a forked child cache do not affect the parent cache.
@@ -4330,6 +4521,10 @@ mod tests {
         let (_dir, db) = test_dbs();
         let parent_id = "isolate-parent";
         let child_id = "isolate-child";
+        // fork_for_child is an internal method that takes raw agent_id strings,
+        // so we must use the db_key form to match what create_block stores.
+        let parent_key = Scope::global(parent_id).to_db_key();
+        let child_key = Scope::global(child_id).to_db_key();
 
         create_test_agent(&db, parent_id);
         create_test_agent(&db, child_id);
@@ -4341,16 +4536,17 @@ mod tests {
             MemoryBlockType::Working,
             pattern_core::types::memory_types::BlockSchema::text(),
         );
-        cache.create_block(parent_id, bc).unwrap();
+        cache.create_block(&Scope::global(parent_id), bc).unwrap();
 
         // Write initial content to the parent.
         {
-            let doc = cache.get(parent_id, "notes").unwrap().unwrap();
+            // The internal get() uses the raw agent_id string stored in doc.
+            let doc = cache.get(&parent_key, "notes").unwrap().unwrap();
             doc.set_text("initial", true).unwrap();
         }
 
         let child_cache = cache
-            .fork_for_child(parent_id, child_id)
+            .fork_for_child(&parent_key, &child_key)
             .expect("fork_for_child must succeed");
 
         // Write different content in the child.
@@ -4365,7 +4561,7 @@ mod tests {
 
         // Parent should still read the initial value.
         {
-            let parent_doc = cache.get(parent_id, "notes").unwrap().unwrap();
+            let parent_doc = cache.get(&parent_key, "notes").unwrap().unwrap();
             assert_eq!(
                 parent_doc.text_content(),
                 "initial",

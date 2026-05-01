@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::BlockCreate;
-use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
+use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType, Scope};
 use pattern_memory::MemoryCache;
 use serde_json::json;
 
@@ -48,9 +48,11 @@ fn seed_content_survives_persist_and_get() {
     let agent = "seed-test-agent";
     seed_agent(&db, agent);
 
+    let agent_scope = Scope::global(agent);
+
     // Step 1: create_block (like seed_persona_memory_blocks does).
     let create = BlockCreate::new("persona", MemoryBlockType::Core, BlockSchema::text());
-    let doc = cache.create_block(agent, create).unwrap();
+    let doc = cache.create_block(&agent_scope, create).unwrap();
 
     // Step 2: import content (like seed_persona_memory_blocks does).
     let content = json!("I am a helpful ADHD support agent.");
@@ -64,11 +66,11 @@ fn seed_content_survives_persist_and_get() {
     );
 
     // Step 3: persist_block (like seed_persona_memory_blocks does).
-    cache.persist_block(agent, "persona").unwrap();
+    cache.persist_block(&agent_scope, "persona").unwrap();
 
     // Step 4: get_rendered_content (like the Memory.Get handler does).
     let rendered = cache
-        .get_rendered_content(agent, "persona")
+        .get_rendered_content(&agent_scope, "persona")
         .unwrap()
         .expect("block should exist");
 
@@ -86,15 +88,17 @@ fn cache_sees_imported_content_before_persist() {
     let agent = "cache-see-agent";
     seed_agent(&db, agent);
 
+    let agent_scope = Scope::global(agent);
+
     let create = BlockCreate::new("scratchpad", MemoryBlockType::Working, BlockSchema::text());
-    let doc = cache.create_block(agent, create).unwrap();
+    let doc = cache.create_block(&agent_scope, create).unwrap();
 
     doc.import_from_json(&json!("scratch content")).unwrap();
 
     // Get from cache before persist — should see the imported content
     // because LoroDoc clone shares internal state.
     let cached_doc = cache
-        .get_block(agent, "scratchpad")
+        .get_block(&agent_scope, "scratchpad")
         .unwrap()
         .expect("block should be in cache");
 
@@ -223,18 +227,20 @@ fn seed_content_survives_db_roundtrip() {
     let agent = "db-roundtrip-agent";
     seed_agent(&db, agent);
 
+    let agent_scope = Scope::global(agent);
+
     let create = BlockCreate::new("persona", MemoryBlockType::Core, BlockSchema::text());
-    let doc = cache.create_block(agent, create).unwrap();
+    let doc = cache.create_block(&agent_scope, create).unwrap();
     doc.import_from_json(&json!("persona description text"))
         .unwrap();
-    cache.persist_block(agent, "persona").unwrap();
+    cache.persist_block(&agent_scope, "persona").unwrap();
 
     // Drop the cache entirely and create a fresh one — forces DB reload.
     drop(cache);
     let cache2 = MemoryCache::new(db.clone());
 
     let rendered = cache2
-        .get_rendered_content(agent, "persona")
+        .get_rendered_content(&agent_scope, "persona")
         .unwrap()
         .expect("block should exist in DB");
 
@@ -256,12 +262,14 @@ fn persist_after_import_writes_to_db() {
     let agent = "persist-writes-agent";
     seed_agent(&db, agent);
 
+    let agent_scope = Scope::global(agent);
+
     let create = BlockCreate::new("notes", MemoryBlockType::Working, BlockSchema::text());
-    let doc = cache.create_block(agent, create).unwrap();
+    let doc = cache.create_block(&agent_scope, create).unwrap();
     let block_id = doc.id().to_string();
 
     doc.import_from_json(&json!("important notes")).unwrap();
-    cache.persist_block(agent, "notes").unwrap();
+    cache.persist_block(&agent_scope, "notes").unwrap();
 
     // Check the DB directly: there should be at least one update row.
     let conn = db.get().unwrap();
@@ -292,15 +300,17 @@ fn persist_empty_block_is_harmless() {
     let agent = "persist-empty-agent";
     seed_agent(&db, agent);
 
+    let agent_scope = Scope::global(agent);
+
     let create = BlockCreate::new("empty", MemoryBlockType::Working, BlockSchema::text());
-    let _doc = cache.create_block(agent, create).unwrap();
+    let _doc = cache.create_block(&agent_scope, create).unwrap();
 
     // Persist without any content changes. Should not error.
-    cache.persist_block(agent, "empty").unwrap();
+    cache.persist_block(&agent_scope, "empty").unwrap();
 
     // Content should be empty.
     let rendered = cache
-        .get_rendered_content(agent, "empty")
+        .get_rendered_content(&agent_scope, "empty")
         .unwrap()
         .expect("block should exist");
     assert_eq!(rendered, "", "empty block should render as empty string");

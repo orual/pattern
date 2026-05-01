@@ -21,6 +21,7 @@ use std::sync::Arc;
 use pattern_core::ProviderClient;
 use pattern_core::traits::{MemoryStore, Session, TurnSink, VecSink};
 use pattern_core::types::ids::{BatchId, new_snowflake_id};
+use pattern_core::types::memory_types::Scope;
 use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
 use pattern_core::types::snapshot::PersonaSnapshot;
 use pattern_core::types::turn::{StopReason, TurnInput};
@@ -120,14 +121,18 @@ async fn memory_round_trip_through_session() {
 
     // After open, the persona-declared block should be seeded into the store.
     let block = store
-        .get_block("agent-mem", "scratch")
+        .get_block(&Scope::global("agent-mem"), "scratch")
         .expect("get_block should succeed")
         .expect("scratch block should exist after session open");
 
     // Verify metadata was propagated from the persona spec.
     let meta = block.metadata();
     assert_eq!(meta.label, "scratch", "block label should match");
-    assert_eq!(meta.agent_id, "agent-mem", "agent_id should match");
+    assert_eq!(
+        meta.agent_id,
+        Scope::global("agent-mem").to_db_key(),
+        "agent_id should be the encoded scope key"
+    );
 
     // Run one step.
     let reply = session
@@ -144,7 +149,7 @@ async fn memory_round_trip_through_session() {
 
     // After the step, the memory block should still be accessible.
     let block_post = store
-        .get_block("agent-mem", "scratch")
+        .get_block(&Scope::global("agent-mem"), "scratch")
         .expect("get_block should succeed after step")
         .expect("scratch block should survive the step");
     assert_eq!(

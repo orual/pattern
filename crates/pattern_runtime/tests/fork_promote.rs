@@ -15,6 +15,7 @@ use std::sync::Arc;
 use pattern_core::spawn::PersonaConfig;
 use pattern_core::traits::MemoryStore;
 use pattern_core::types::ids::PersonaId;
+use pattern_core::types::memory_types::Scope;
 use pattern_core::{CapabilityFlag, CapabilitySet};
 use pattern_db::ConstellationDb;
 use pattern_memory::MemoryCache;
@@ -86,7 +87,7 @@ fn promote_lightweight_with_flag_creates_draft() {
     .expect("seed child agent");
     parent_cache
         .create_block(
-            "parent-agent",
+            &Scope::global("parent-agent"),
             BlockCreate::new(
                 "notes".to_string(),
                 MemoryBlockType::Working,
@@ -94,12 +95,14 @@ fn promote_lightweight_with_flag_creates_draft() {
             ),
         )
         .expect("create_block");
-    let parent_doc = parent_cache.get("parent-agent", "notes").unwrap().unwrap();
+    let parent_key = Scope::global("parent-agent").to_db_key();
+    let child_key = Scope::global("child-promote").to_db_key();
+    let parent_doc = parent_cache.get(&parent_key, "notes").unwrap().unwrap();
     parent_doc.set_text("seed-text", true).expect("set_text");
 
     let child_cache = Arc::new(
         parent_cache
-            .fork_for_child("parent-agent", "child-promote")
+            .fork_for_child(&parent_key, &child_key)
             .expect("fork_for_child"),
     );
     let cancel = Arc::new(CancelState::new());
@@ -107,7 +110,7 @@ fn promote_lightweight_with_flag_creates_draft() {
         "fork-promote".into(),
         "child-promote".into(),
         child_cache,
-        "parent-agent".into(),
+        parent_key.into(),
         Arc::downgrade(&parent_cache),
         cancel,
     )

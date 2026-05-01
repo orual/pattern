@@ -36,7 +36,7 @@ use miette::Diagnostic;
 use thiserror::Error;
 
 use crate::types::block::BlockHandle;
-use crate::types::memory_types::{DocumentError, IsolatePolicy};
+use crate::types::memory_types::{DocumentError, IsolatePolicy, Scope};
 
 /// Errors from the memory block store.
 ///
@@ -90,20 +90,21 @@ pub enum MemoryError {
     ///
     /// ```
     /// use pattern_core::error::MemoryError;
+    /// use pattern_core::types::memory_types::Scope;
     ///
     /// let err = MemoryError::WriteToMissingBlock {
-    ///     agent_id: "agent-7".into(),
+    ///     scope: Scope::global("agent-7"),
     ///     label: "scratchpad".into(),
     ///     op: "persist_block",
     /// };
     /// assert!(err.to_string().contains("persist_block"));
     /// assert!(err.to_string().contains("scratchpad"));
     /// ```
-    #[error("{op}: block does not exist: {agent_id}/{label}")]
+    #[error("{op}: block does not exist: {scope}/{label}")]
     #[diagnostic(code(pattern_core::memory::write_to_missing_block))]
     WriteToMissingBlock {
-        /// The agent that owns the (missing) block.
-        agent_id: String,
+        /// The scope that should have owned the (missing) block.
+        scope: Scope,
         /// The label that was targeted.
         label: String,
         /// The mutating operation that raised the error

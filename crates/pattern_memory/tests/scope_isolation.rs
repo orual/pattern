@@ -7,6 +7,7 @@ use pattern_core::MemoryStore;
 use pattern_core::types::block::BlockCreate;
 use pattern_core::types::memory_types::{
     BlockFilter, BlockMetadataPatch, BlockSchema, IsolatePolicy, MemoryBlockType, MemoryError,
+    Scope,
 };
 use pattern_memory::scope::{MemoryScope, ScopeBinding};
 use pattern_memory::testing::ScopeTestStore;
@@ -18,8 +19,8 @@ use pattern_memory::testing::ScopeTestStore;
 #[test]
 fn ac12_1_none_reads_merge_persona_and_project() {
     let store = ScopeTestStore::new();
-    store.seed("persona", "scratchpad", "persona scratchpad content");
-    store.seed("project", "notes", "project notes content");
+    store.seed(Scope::global("persona"), "scratchpad", "persona scratchpad content");
+    store.seed(Scope::global("project"), "notes", "project notes content");
 
     let scope = MemoryScope::new(
         store,
@@ -27,17 +28,17 @@ fn ac12_1_none_reads_merge_persona_and_project() {
     );
 
     // Both scopes' blocks are visible.
-    let scratch = scope.get_rendered_content("persona", "scratchpad").unwrap();
+    let scratch = scope.get_rendered_content(&Scope::global("persona"), "scratchpad").unwrap();
     assert_eq!(scratch.as_deref(), Some("persona scratchpad content"));
 
-    let notes = scope.get_rendered_content("project", "notes").unwrap();
+    let notes = scope.get_rendered_content(&Scope::global("project"), "notes").unwrap();
     assert_eq!(notes.as_deref(), Some("project notes content"));
 }
 
 #[test]
 fn ac12_1_none_write_to_persona_flows_through() {
     let store = ScopeTestStore::new();
-    store.seed("persona", "scratchpad", "original");
+    store.seed(Scope::global("persona"), "scratchpad", "original");
 
     let scope = MemoryScope::new(
         store,
@@ -47,7 +48,7 @@ fn ac12_1_none_write_to_persona_flows_through() {
     // Write to persona succeeds under None (bidirectional).
     scope
         .update_block_metadata(
-            "persona",
+            &Scope::global("persona"),
             "scratchpad",
             BlockMetadataPatch::default().pinned(true),
         )
@@ -61,23 +62,24 @@ fn ac12_1_none_write_to_persona_flows_through() {
 #[test]
 fn ac12_2_core_only_reads_persona_as_readonly() {
     let store = ScopeTestStore::new();
-    store.seed("persona", "scratchpad", "persona content");
-    store.seed("project", "readme", "project content");
+    store.seed(Scope::global("persona"), "scratchpad", "persona content");
+    store.seed(Scope::local("project"), "readme", "project content");
 
     let scope = MemoryScope::new(
         store,
         ScopeBinding::with_project("persona", "project", IsolatePolicy::CoreOnly),
     );
 
-    // Persona block visible but read-only.
-    let doc = scope.get_block("any", "scratchpad").unwrap().unwrap();
+    // Persona block visible but read-only: query at Local so the wrapper
+    // hits project first (miss), then falls back to persona and tags ReadOnly.
+    let doc = scope.get_block(&Scope::local("project"), "scratchpad").unwrap().unwrap();
     assert_eq!(
         doc.metadata().permission,
         pattern_core::types::memory_types::MemoryPermission::ReadOnly,
     );
 
-    // Project block is writable (default permission).
-    let project_doc = scope.get_block("any", "readme").unwrap().unwrap();
+    // Project block is writable (default permission): direct Local hit.
+    let project_doc = scope.get_block(&Scope::local("project"), "readme").unwrap().unwrap();
     assert_ne!(
         project_doc.metadata().permission,
         pattern_core::types::memory_types::MemoryPermission::ReadOnly,
@@ -87,7 +89,7 @@ fn ac12_2_core_only_reads_persona_as_readonly() {
 #[test]
 fn ac12_2_core_only_denies_persona_write() {
     let store = ScopeTestStore::new();
-    store.seed("persona", "scratchpad", "content");
+    store.seed(Scope::global("persona"), "scratchpad", "content");
 
     let scope = MemoryScope::new(
         store,
@@ -95,7 +97,7 @@ fn ac12_2_core_only_denies_persona_write() {
     );
 
     let result = scope.update_block_metadata(
-        "persona",
+        &Scope::global("persona"),
         "scratchpad",
         BlockMetadataPatch::default().pinned(true),
     );
@@ -115,26 +117,26 @@ fn ac12_2_core_only_denies_persona_write() {
 #[test]
 fn ac12_3_full_persona_blocks_invisible() {
     let store = ScopeTestStore::new();
-    store.seed("persona", "scratchpad", "persona content");
-    store.seed("project", "readme", "project content");
+    store.seed(Scope::global("persona"), "scratchpad", "persona content");
+    store.seed(Scope::local("project"), "readme", "project content");
 
     let scope = MemoryScope::new(
         store,
         ScopeBinding::with_project("persona", "project", IsolatePolicy::Full),
     );
 
-    // Persona block invisible.
+    // Persona block invisible: query at Local; under Full no fallback fires.
     assert!(
         scope
-            .get_rendered_content("any", "scratchpad")
+            .get_rendered_content(&Scope::local("project"), "scratchpad")
             .unwrap()
             .is_none()
     );
 
-    // Project block visible.
+    // Project block visible: direct Local hit.
     assert_eq!(
         scope
-            .get_rendered_content("any", "readme")
+            .get_rendered_content(&Scope::local("project"), "readme")
             .unwrap()
             .as_deref(),
         Some("project content")
@@ -144,8 +146,8 @@ fn ac12_3_full_persona_blocks_invisible() {
 #[test]
 fn ac12_3_full_search_is_project_only() {
     let store = ScopeTestStore::new();
-    store.seed("persona", "persona-block", "persona");
-    store.seed("project", "project-block", "project");
+    store.seed(Scope::global("persona"), "persona-block", "persona");
+    store.seed(Scope::local("project"), "project-block", "project");
 
     let scope = MemoryScope::new(
         store,
@@ -174,7 +176,7 @@ fn ac12_6_none_default_write_goes_to_project() {
     // Write to project-id (the default write target in the SDK handler).
     let doc = scope
         .create_block(
-            "project",
+            &Scope::global("project"),
             BlockCreate::new("task-list", MemoryBlockType::Working, BlockSchema::text()),
         )
         .expect("write to project should succeed");
@@ -185,7 +187,7 @@ fn ac12_6_none_default_write_goes_to_project() {
     // Reading back via the scope should find it.
     let inner = scope.inner();
     let fetched = inner
-        .get_block("project", "task-list")
+        .get_block(&Scope::global("project"), "task-list")
         .unwrap()
         .expect("block should exist in project scope");
     assert_eq!(fetched.metadata().agent_id, "project");
@@ -198,17 +200,17 @@ fn ac12_6_none_default_write_goes_to_project() {
 #[test]
 fn passthrough_no_project_is_transparent() {
     let store = ScopeTestStore::new();
-    store.seed("agent-1", "notes", "hello world");
+    store.seed(Scope::global("agent-1"), "notes", "hello world");
 
     let scope = MemoryScope::new(store, ScopeBinding::passthrough("agent-1"));
 
-    let content = scope.get_rendered_content("agent-1", "notes").unwrap();
+    let content = scope.get_rendered_content(&Scope::global("agent-1"), "notes").unwrap();
     assert_eq!(content.as_deref(), Some("hello world"));
 
     // Write also works.
     scope
         .create_block(
-            "agent-1",
+            &Scope::global("agent-1"),
             BlockCreate::new("new", MemoryBlockType::Core, BlockSchema::text()),
         )
         .expect("passthrough write should succeed");
@@ -230,28 +232,31 @@ fn search_archival_none_policy_merges_persona_and_project() {
     let store = ScopeTestStore::new();
 
     // Seed 2 archival entries under the persona agent_id.
-    store.seed_archival("persona", "p-entry-1", "persona note one");
-    store.seed_archival("persona", "p-entry-2", "persona note two");
+    store.seed_archival(Scope::global("persona"), "p-entry-1", "persona note one");
+    store.seed_archival(Scope::global("persona"), "p-entry-2", "persona note two");
 
-    // Seed 3 archival entries under the project agent_id.
-    store.seed_archival("project", "proj-entry-1", "project note alpha");
-    store.seed_archival("project", "proj-entry-2", "project note beta");
-    store.seed_archival("project", "proj-entry-3", "project note gamma");
+    // Seed 3 archival entries under the project agent_id (Local scope so the
+    // wrapper's project-scope lookup finds them).
+    store.seed_archival(Scope::local("project"), "proj-entry-1", "project note alpha");
+    store.seed_archival(Scope::local("project"), "proj-entry-2", "project note beta");
+    store.seed_archival(Scope::local("project"), "proj-entry-3", "project note gamma");
 
     let scope = MemoryScope::new(
         store,
         ScopeBinding::with_project("persona", "project", IsolatePolicy::None),
     );
 
-    // Full merge: limit=10 — expect all 5 entries (2 persona + 3 project).
+    // Full merge: pass Local scope so the wrapper queries project first then
+    // falls through to persona for the remainder (None policy, Local scope).
+    // Expect all 5 entries (3 project + 2 persona).
     let results = scope
-        .search_archival("persona", "note", 10)
+        .search_archival(&Scope::local("project"), "note", 10)
         .expect("search_archival should succeed under None policy");
 
     assert_eq!(
         results.len(),
         5,
-        "None policy should merge persona (2) + project (3) = 5 entries, got {}",
+        "None policy should merge project (3) + persona (2) = 5 entries, got {}",
         results.len()
     );
 
@@ -270,7 +275,7 @@ fn search_archival_none_policy_merges_persona_and_project() {
 
     // Limit enforcement: limit=3 should return at most 3 entries.
     let limited = scope
-        .search_archival("persona", "note", 3)
+        .search_archival(&Scope::local("project"), "note", 3)
         .expect("search_archival with limit=3 should succeed");
 
     assert!(
@@ -306,22 +311,24 @@ fn tasklist_block_invisible_to_persona_under_full_isolation() {
         // Seed a block under the project agent (simulates a TaskList block owned
         // by the project). ScopeTestStore::seed uses text schema, but MemoryScope
         // routing is schema-agnostic — it routes purely by agent_id.
+        // Must be Local scope so the wrapper's project-scope lookup finds it.
         store.seed(
-            "project-agent",
+            Scope::local("project-agent"),
             "sprint-tasks",
             "- [ ] write tests\n- [ ] deploy",
         );
         // Seed a separate block under the persona agent.
-        store.seed("persona-agent", "personal-notes", "my personal notes");
+        store.seed(Scope::global("persona-agent"), "personal-notes", "my personal notes");
 
         let scope = MemoryScope::new(
             store,
             ScopeBinding::with_project("persona-agent", "project-agent", IsolatePolicy::Full),
         );
 
-        // Project's block IS visible through the Full-isolation scope.
+        // Project's block IS visible through the Full-isolation scope: query at
+        // Local (direct hit on the project scope).
         let project_block = scope
-            .get_rendered_content("any", "sprint-tasks")
+            .get_rendered_content(&Scope::local("project-agent"), "sprint-tasks")
             .expect("get_rendered_content must not error");
         assert!(
             project_block.is_some(),
@@ -333,9 +340,10 @@ fn tasklist_block_invisible_to_persona_under_full_isolation() {
             "content must match what was seeded under project-agent"
         );
 
-        // Persona's block is INVISIBLE through Full isolation.
+        // Persona's block is INVISIBLE through Full isolation: query at Local,
+        // no fallback fires under Full policy.
         let persona_block = scope
-            .get_rendered_content("any", "personal-notes")
+            .get_rendered_content(&Scope::local("project-agent"), "personal-notes")
             .expect("must not error");
         assert!(
             persona_block.is_none(),
@@ -344,7 +352,7 @@ fn tasklist_block_invisible_to_persona_under_full_isolation() {
 
         // Writes targeting the persona agent are DENIED.
         let write_result = scope.create_block(
-            "persona-agent",
+            &Scope::global("persona-agent"),
             BlockCreate::new(
                 "new-persona-block",
                 MemoryBlockType::Working,
@@ -366,15 +374,15 @@ fn tasklist_block_invisible_to_persona_under_full_isolation() {
     // agent's block does not exist under the persona agent's namespace.
     {
         let store = ScopeTestStore::new();
-        store.seed("project-agent", "sprint-tasks", "project task content");
-        store.seed("persona-agent", "personal-notes", "persona content");
+        store.seed(Scope::global("project-agent"), "sprint-tasks", "project task content");
+        store.seed(Scope::global("persona-agent"), "personal-notes", "persona content");
 
         // Passthrough scope: the persona agent sees only its own blocks.
         let scope = MemoryScope::new(store, ScopeBinding::passthrough("persona-agent"));
 
         // Persona can see its own block.
         let persona_notes = scope
-            .get_rendered_content("persona-agent", "personal-notes")
+            .get_rendered_content(&Scope::global("persona-agent"), "personal-notes")
             .expect("must not error");
         assert!(
             persona_notes.is_some(),
@@ -385,7 +393,7 @@ fn tasklist_block_invisible_to_persona_under_full_isolation() {
         // delegates directly to the store with the caller's agent_id, and
         // "persona-agent" does not own "sprint-tasks".
         let project_block_via_persona = scope
-            .get_rendered_content("persona-agent", "sprint-tasks")
+            .get_rendered_content(&Scope::global("persona-agent"), "sprint-tasks")
             .expect("must not error");
         assert!(
             project_block_via_persona.is_none(),
@@ -400,17 +408,20 @@ fn tasklist_block_invisible_to_persona_under_full_isolation() {
 fn search_archival_full_policy_returns_project_only() {
     let store = ScopeTestStore::new();
 
-    store.seed_archival("persona", "p-1", "persona secret note");
-    store.seed_archival("project", "proj-1", "project note");
-    store.seed_archival("project", "proj-2", "another project note");
+    store.seed_archival(Scope::global("persona"), "p-1", "persona secret note");
+    // Project archival entries must be seeded under Local scope so the wrapper's
+    // project-scope lookup finds them.
+    store.seed_archival(Scope::local("project"), "proj-1", "project note");
+    store.seed_archival(Scope::local("project"), "proj-2", "another project note");
 
     let scope = MemoryScope::new(
         store,
         ScopeBinding::with_project("persona", "project", IsolatePolicy::Full),
     );
 
+    // Query at Local: under Full the wrapper returns only the project store results.
     let results = scope
-        .search_archival("persona", "note", 10)
+        .search_archival(&Scope::local("project"), "note", 10)
         .expect("search_archival should succeed under Full policy");
 
     // Under Full, only project entries are returned.
@@ -450,26 +461,27 @@ fn skill_block_in_project_scope_invisible_to_persona_under_full_isolation() {
     // Under Full isolation, the persona session cannot see either block from
     // the other scope.
     let store = ScopeTestStore::new();
-    store.seed("project", "my-skill", "# Skill body");
-    store.seed("persona", "scratch", "persona scratchpad");
+    // Project blocks must be seeded at Local scope so the wrapper finds them.
+    store.seed(Scope::local("project"), "my-skill", "# Skill body");
+    store.seed(Scope::global("persona"), "scratch", "persona scratchpad");
 
     let scope = MemoryScope::new(
         store,
         ScopeBinding::with_project("persona", "project", IsolatePolicy::Full),
     );
 
-    // Persona block ("scratch") is invisible under Full isolation.
+    // Persona block ("scratch") is invisible under Full isolation: query at
+    // Local so the wrapper hits project (miss), no fallback under Full.
     assert!(
         scope
-            .get_rendered_content("any", "scratch")
+            .get_rendered_content(&Scope::local("project"), "scratch")
             .unwrap()
             .is_none(),
         "persona 'scratch' block must be invisible to session under Full isolation"
     );
 
-    // Project Skill block ("my-skill") is visible because it belongs to the
-    // project agent_id which IS accessible under Full isolation.
-    let skill = scope.get_rendered_content("project", "my-skill").unwrap();
+    // Project Skill block ("my-skill") is visible: direct Local hit.
+    let skill = scope.get_rendered_content(&Scope::local("project"), "my-skill").unwrap();
     assert!(
         skill.is_some(),
         "project 'my-skill' block must be visible to session under Full isolation"
@@ -491,6 +503,7 @@ fn skill_block_with_real_schema_is_invisible_to_persona_under_full_isolation() {
     let store = ScopeTestStore::new();
 
     // Seed a genuine Skill block (BlockSchema::Skill) in the project scope.
+    // Must be Local so the wrapper's project-scope lookup finds it.
     let skill_meta = SkillMetadata {
         name: "my-real-skill".to_string(),
         trust_tier: SkillTrustTier::AdHoc,
@@ -499,33 +512,33 @@ fn skill_block_with_real_schema_is_invisible_to_persona_under_full_isolation() {
         hooks: serde_json::Value::Null,
     };
     store.seed_skill(
-        "project",
+        Scope::local("project"),
         "my-real-skill",
         skill_meta,
         "# Real Skill\nBody.\n",
     );
 
     // Seed a plain text block in the persona scope for contrast.
-    store.seed("persona", "scratch", "persona scratchpad");
+    store.seed(Scope::global("persona"), "scratch", "persona scratchpad");
 
     let scope = MemoryScope::new(
         store,
         ScopeBinding::with_project("persona", "project", IsolatePolicy::Full),
     );
 
-    // Persona block is invisible under Full isolation.
+    // Persona block is invisible under Full isolation: query at Local, no
+    // fallback fires under Full policy.
     assert!(
         scope
-            .get_rendered_content("any", "scratch")
+            .get_rendered_content(&Scope::local("project"), "scratch")
             .unwrap()
             .is_none(),
         "persona 'scratch' must be invisible under Full isolation"
     );
 
-    // Project Skill block is visible under Full isolation because it belongs
-    // to the project agent_id which is accessible.
+    // Project Skill block is visible under Full isolation: direct Local hit.
     let rendered = scope
-        .get_rendered_content("project", "my-real-skill")
+        .get_rendered_content(&Scope::local("project"), "my-real-skill")
         .unwrap();
     assert!(
         rendered.is_some(),

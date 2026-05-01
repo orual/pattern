@@ -99,13 +99,14 @@ impl EffectHandler<SessionContext> for RecallHandler {
         )?;
 
         let agent_id = cx.user().agent_id().to_string();
+        let session_scope = cx.user().default_scope().clone();
         let store = self.store.clone();
         let request_repr = format!("{req:?}");
 
         let result = (|| match req {
             RecallReq::Insert(content) => {
                 let id = store
-                    .insert_archival(&agent_id, &content, None)
+                    .insert_archival(&session_scope, &content, None)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Recall.Insert: {e}")))?;
                 cx.respond(id)
             }
@@ -116,8 +117,11 @@ impl EffectHandler<SessionContext> for RecallHandler {
 
                 let mut hits: Vec<String> = Vec::new();
                 for target_agent in &agents {
+                    // Cross-agent recall is persona-scoped (Global).
+                    let target_scope =
+                        pattern_core::types::memory_types::Scope::Global(target_agent.clone().into());
                     let results = store
-                        .search_archival(target_agent, &query, 10)
+                        .search_archival(&target_scope, &query, 10)
                         .map_err(|e| EffectError::Handler(format!("Pattern.Recall.Search: {e}")))?;
                     for r in results {
                         let hit = serde_json::json!({
@@ -135,7 +139,7 @@ impl EffectHandler<SessionContext> for RecallHandler {
 
             RecallReq::Get(id) => {
                 let results = store
-                    .search_archival(&agent_id, &id, 1)
+                    .search_archival(&session_scope, &id, 1)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Recall.Get: {e}")))?;
 
                 let entry = results.into_iter().find(|e| e.id == id).ok_or_else(|| {
@@ -196,7 +200,7 @@ mod tests {
     impl MemoryStore for RecallTestStore {
         fn insert_archival(
             &self,
-            agent_id: &str,
+            scope: &pattern_core::types::memory_types::Scope,
             content: &str,
             _metadata: Option<serde_json::Value>,
         ) -> pattern_core::types::memory_types::MemoryResult<String> {
@@ -210,7 +214,7 @@ mod tests {
                 .unwrap()
                 .push(pattern_core::types::memory_types::ArchivalEntry {
                     id: id.clone(),
-                    agent_id: agent_id.to_string(),
+                    agent_id: scope.id().to_string(),
                     content: content.to_string(),
                     metadata: None,
                     created_at: chrono::Utc::now(),
@@ -219,7 +223,7 @@ mod tests {
         }
         fn search_archival(
             &self,
-            agent_id: &str,
+            scope: &pattern_core::types::memory_types::Scope,
             query: &str,
             limit: usize,
         ) -> pattern_core::types::memory_types::MemoryResult<
@@ -228,7 +232,7 @@ mod tests {
             let guard = self.entries.lock().unwrap();
             Ok(guard
                 .iter()
-                .filter(|e| e.agent_id == agent_id && e.content.contains(query))
+                .filter(|e| e.agent_id == scope.id() && e.content.contains(query))
                 .take(limit)
                 .cloned()
                 .collect())
@@ -240,7 +244,7 @@ mod tests {
         // ---- Stubs ----
         fn create_block(
             &self,
-            _: &str,
+            _: &pattern_core::types::memory_types::Scope,
             _: pattern_core::types::block::BlockCreate,
         ) -> pattern_core::types::memory_types::MemoryResult<pattern_core::memory::StructuredDocument>
         {
@@ -248,7 +252,7 @@ mod tests {
         }
         fn get_block(
             &self,
-            _: &str,
+            _: &pattern_core::types::memory_types::Scope,
             _: &str,
         ) -> pattern_core::types::memory_types::MemoryResult<
             Option<pattern_core::memory::StructuredDocument>,
@@ -257,7 +261,7 @@ mod tests {
         }
         fn get_block_metadata(
             &self,
-            _: &str,
+            _: &pattern_core::types::memory_types::Scope,
             _: &str,
         ) -> pattern_core::types::memory_types::MemoryResult<
             Option<pattern_core::types::memory_types::BlockMetadata>,
@@ -274,26 +278,32 @@ mod tests {
         }
         fn delete_block(
             &self,
-            _: &str,
+            _: &pattern_core::types::memory_types::Scope,
             _: &str,
         ) -> pattern_core::types::memory_types::MemoryResult<()> {
             panic!()
         }
         fn get_rendered_content(
             &self,
-            _: &str,
+            _: &pattern_core::types::memory_types::Scope,
             _: &str,
         ) -> pattern_core::types::memory_types::MemoryResult<Option<String>> {
             panic!()
         }
         fn persist_block(
             &self,
-            _: &str,
+            _: &pattern_core::types::memory_types::Scope,
             _: &str,
         ) -> pattern_core::types::memory_types::MemoryResult<()> {
             panic!()
         }
-        fn mark_dirty(&self, _: &str, _: &str) {}
+        fn mark_dirty(
+            &self,
+            _: &pattern_core::types::memory_types::Scope,
+            _: &str,
+        ) -> pattern_core::types::memory_types::MemoryResult<()> {
+            Ok(())
+        }
         fn search(
             &self,
             _: &str,
@@ -306,7 +316,7 @@ mod tests {
         }
         fn list_shared_blocks(
             &self,
-            _: &str,
+            _: &pattern_core::types::memory_types::Scope,
         ) -> pattern_core::types::memory_types::MemoryResult<
             Vec<pattern_core::types::memory_types::SharedBlockInfo>,
         > {
@@ -314,8 +324,8 @@ mod tests {
         }
         fn get_shared_block(
             &self,
-            _: &str,
-            _: &str,
+            _: &pattern_core::types::memory_types::Scope,
+            _: &pattern_core::types::memory_types::Scope,
             _: &str,
         ) -> pattern_core::types::memory_types::MemoryResult<
             Option<pattern_core::memory::StructuredDocument>,
@@ -324,7 +334,7 @@ mod tests {
         }
         fn update_block_metadata(
             &self,
-            _: &str,
+            _: &pattern_core::types::memory_types::Scope,
             _: &str,
             _: pattern_core::types::memory_types::BlockMetadataPatch,
         ) -> pattern_core::types::memory_types::MemoryResult<()> {
@@ -332,7 +342,7 @@ mod tests {
         }
         fn undo_redo(
             &self,
-            _: &str,
+            _: &pattern_core::types::memory_types::Scope,
             _: &str,
             _: pattern_core::types::memory_types::UndoRedoOp,
         ) -> pattern_core::types::memory_types::MemoryResult<bool> {
@@ -340,7 +350,7 @@ mod tests {
         }
         fn history_depth(
             &self,
-            _: &str,
+            _: &pattern_core::types::memory_types::Scope,
             _: &str,
         ) -> pattern_core::types::memory_types::MemoryResult<
             pattern_core::types::memory_types::UndoRedoDepth,

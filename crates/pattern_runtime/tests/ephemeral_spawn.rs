@@ -116,16 +116,17 @@ async fn capability_subset_is_accepted() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_progress_log_block_creates_constellation_scoped_log() {
     use pattern_core::traits::MemoryStore;
-    use pattern_core::types::memory_types::{BlockSchema, CONSTELLATION_OWNER};
+    use pattern_core::types::memory_types::{BlockSchema, Scope, CONSTELLATION_OWNER};
 
     let parent = build_parent(None, None).await;
     let label = "spawn-log-test-progress";
+    let constellation_scope = Scope::global(CONSTELLATION_OWNER);
 
-    pattern_runtime::spawn::create_progress_log_block(parent.adapter(), label).unwrap();
+    pattern_runtime::spawn::create_progress_log_block(parent.adapter(), label, &constellation_scope).unwrap();
 
     let block = parent
         .adapter()
-        .get_block(CONSTELLATION_OWNER, label)
+        .get_block(&constellation_scope, label)
         .unwrap()
         .expect("block must exist after creation");
     let metadata = block.metadata();
@@ -246,7 +247,8 @@ async fn eval_worker_count_returns_to_baseline_after_ephemeral() {
     let child = parent.fork_for_ephemeral(&cfg, caps, Arc::new(includes.clone()));
     let child_id: smol_str::SmolStr = pattern_core::types::ids::new_id();
     let log_label: smol_str::SmolStr = format!("spawn-log-{child_id}").into();
-    pattern_runtime::spawn::create_progress_log_block(parent.adapter(), log_label.as_str())
+    let log_scope = pattern_runtime::spawn::progress_log_scope(&parent);
+    pattern_runtime::spawn::create_progress_log_block(parent.adapter(), log_label.as_str(), &log_scope)
         .unwrap();
     let preamble = pattern_runtime::sdk::preamble::build_for(
         &child
@@ -366,8 +368,9 @@ async fn ephemeral_success_returns_final_text_and_logs_progress() {
 
     let child_id: smol_str::SmolStr = pattern_core::types::ids::new_id();
     let log_label: smol_str::SmolStr = format!("spawn-log-{child_id}").into();
+    let log_scope = pattern_runtime::spawn::progress_log_scope(&parent);
 
-    pattern_runtime::spawn::create_progress_log_block(parent.adapter(), log_label.as_str())
+    pattern_runtime::spawn::create_progress_log_block(parent.adapter(), log_label.as_str(), &log_scope)
         .unwrap();
 
     let preamble = pattern_runtime::sdk::preamble::build_for(
@@ -399,10 +402,9 @@ async fn ephemeral_success_returns_final_text_and_logs_progress() {
 
     // Progress-log block should now contain at least one entry.
     use pattern_core::traits::MemoryStore;
-    use pattern_core::types::memory_types::CONSTELLATION_OWNER;
     let block = parent
         .adapter()
-        .get_block(CONSTELLATION_OWNER, log_label.as_str())
+        .get_block(&log_scope, log_label.as_str())
         .unwrap()
         .expect("progress-log block must exist after run");
     let entries = block.log_entries(None);
@@ -570,7 +572,8 @@ async fn ac3_4_timeout_fires_cancel_and_returns_timeout_error() {
 
     let child_id: smol_str::SmolStr = pattern_core::types::ids::new_id();
     let log_label: smol_str::SmolStr = format!("spawn-log-{child_id}").into();
-    pattern_runtime::spawn::create_progress_log_block(parent.adapter(), log_label.as_str())
+    let log_scope = pattern_runtime::spawn::progress_log_scope(&parent);
+    pattern_runtime::spawn::create_progress_log_block(parent.adapter(), log_label.as_str(), &log_scope)
         .unwrap();
     let preamble = pattern_runtime::sdk::preamble::build_for(
         &child

@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::BlockCreate;
-use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
+use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType, Scope};
 use pattern_memory::jj::JjAdapter;
 use pattern_memory::modes::sidecar;
 use pattern_memory::mount::attach;
@@ -358,49 +358,50 @@ fn sidecar_validation_spike() {
         // `create_block` stores the doc with dirty=false. `set_text` mutates
         // the LoroDoc in-place but does not set the dirty flag. `mark_dirty`
         // sets the flag, allowing `persist_block` to flush to the database.
+        let spike_scope = Scope::global("agent-spike");
         let doc1 = cache
             .create_block(
-                "agent-spike",
+                &spike_scope,
                 BlockCreate::new("persona", MemoryBlockType::Core, BlockSchema::text()),
             )
             .expect("create_block persona");
         doc1.set_text("Pattern agent persona.", true)
             .expect("set_text persona");
-        cache.mark_dirty("agent-spike", "persona");
+        cache.mark_dirty(&spike_scope.to_db_key(), "persona");
         cache
-            .persist_block("agent-spike", "persona")
+            .persist_block(&spike_scope, "persona")
             .expect("persist persona");
 
         let doc2 = cache
             .create_block(
-                "agent-spike",
+                &spike_scope,
                 BlockCreate::new("task_list", MemoryBlockType::Working, BlockSchema::text()),
             )
             .expect("create_block task_list");
         doc2.set_text("- Task one\n- Task two\n", true)
             .expect("set_text task_list");
-        cache.mark_dirty("agent-spike", "task_list");
+        cache.mark_dirty(&spike_scope.to_db_key(), "task_list");
         cache
-            .persist_block("agent-spike", "task_list")
+            .persist_block(&spike_scope, "task_list")
             .expect("persist task_list");
 
         let doc3 = cache
             .create_block(
-                "agent-spike",
+                &spike_scope,
                 BlockCreate::new("notes", MemoryBlockType::Core, BlockSchema::text()),
             )
             .expect("create_block notes");
         doc3.set_text("Core notes block.", true)
             .expect("set_text notes");
-        cache.mark_dirty("agent-spike", "notes");
+        cache.mark_dirty(&spike_scope.to_db_key(), "notes");
         cache
-            .persist_block("agent-spike", "notes")
+            .persist_block(&spike_scope, "notes")
             .expect("persist notes");
 
         // Verify blocks are readable through the store before detach.
         let meta_list = cache
             .list_blocks(pattern_core::types::memory_types::BlockFilter::by_agent(
-                "agent-spike",
+                spike_scope.to_db_key(),
             ))
             .expect("list_blocks after create");
         assert_eq!(
@@ -418,8 +419,9 @@ fn sidecar_validation_spike() {
         let store = attach(root, None).expect("attach cycle 2 failed");
         let cache = Arc::clone(&store.cache);
 
+        let spike_scope = Scope::global("agent-spike");
         let doc = cache
-            .get_block("agent-spike", "persona")
+            .get_block(&spike_scope, "persona")
             .expect("get_block persona on re-attach")
             .expect("persona block should exist after re-attach");
         let content = doc.render();
@@ -431,33 +433,33 @@ fn sidecar_validation_spike() {
         // Op 29: add two more blocks on the second attach.
         let doc4 = cache
             .create_block(
-                "agent-spike",
+                &spike_scope,
                 BlockCreate::new("context", MemoryBlockType::Core, BlockSchema::text()),
             )
             .expect("create_block context");
         doc4.set_text("Additional context block.", true)
             .expect("set_text context");
-        cache.mark_dirty("agent-spike", "context");
+        cache.mark_dirty(&spike_scope.to_db_key(), "context");
         cache
-            .persist_block("agent-spike", "context")
+            .persist_block(&spike_scope, "context")
             .expect("persist context");
 
         let doc5 = cache
             .create_block(
-                "agent-spike",
+                &spike_scope,
                 BlockCreate::new("scratch", MemoryBlockType::Working, BlockSchema::text()),
             )
             .expect("create_block scratch");
         doc5.set_text("Scratch working memory.", true)
             .expect("set_text scratch");
-        cache.mark_dirty("agent-spike", "scratch");
+        cache.mark_dirty(&spike_scope.to_db_key(), "scratch");
         cache
-            .persist_block("agent-spike", "scratch")
+            .persist_block(&spike_scope, "scratch")
             .expect("persist scratch");
 
         let meta_list = cache
             .list_blocks(pattern_core::types::memory_types::BlockFilter::by_agent(
-                "agent-spike",
+                spike_scope.to_db_key(),
             ))
             .expect("list_blocks after second create");
         assert_eq!(
@@ -479,10 +481,11 @@ fn sidecar_validation_spike() {
     {
         let store = attach(root, None).expect("attach cycle 3 failed");
         let cache = Arc::clone(&store.cache);
+        let spike_scope = Scope::global("agent-spike");
 
         let meta_list = cache
             .list_blocks(pattern_core::types::memory_types::BlockFilter::by_agent(
-                "agent-spike",
+                spike_scope.to_db_key(),
             ))
             .expect("list_blocks on third attach");
         assert_eq!(
@@ -585,8 +588,8 @@ fn sidecar_validation_spike() {
 
         let meta_list = store
             .cache
-            .list_blocks(pattern_core::types::memory_types::BlockFilter::by_agent(
-                "agent-spike",
+            .list_blocks(pattern_core::types::memory_types::BlockFilter::by_scope(
+                &Scope::global("agent-spike"),
             ))
             .expect("list_blocks after external edits");
         assert_eq!(

@@ -119,13 +119,13 @@ pub fn resolve_scope(
         }
 
         SearchScope::Constellation => {
-            let agents = store
-                .list_constellation_agent_ids()
+            let scopes = store
+                .list_constellation_scopes()
                 .map_err(|e| EffectError::Handler(format!("constellation lookup failed: {e}")))?;
-            if agents.is_empty() {
+            if scopes.is_empty() {
                 Ok(vec![caller.to_string()])
             } else {
-                Ok(agents)
+                Ok(scopes.into_iter().map(|s| s.id().to_string()).collect())
             }
         }
 
@@ -150,8 +150,11 @@ fn check_cross_agent_permission(
     target: &str,
     store: &dyn MemoryStore,
 ) -> Result<bool, EffectError> {
+    use pattern_core::types::memory_types::Scope;
+    let caller_scope = Scope::Global(caller.into());
+    let target_scope = Scope::Global(target.into());
     store
-        .has_shared_blocks_with(caller, target)
+        .has_shared_blocks_with(&caller_scope, &target_scope)
         .map_err(|e| EffectError::Handler(format!("shared-block check failed: {e}")))
 }
 
@@ -196,51 +199,62 @@ mod tests {
     }
 
     impl MemoryStore for ScopeTestStore {
-        // Scope resolution only uses the three default methods; everything
-        // else can panic.
-
-        fn has_shared_blocks_with(&self, caller: &str, target: &str) -> MemoryResult<bool> {
+        fn has_shared_blocks_with(&self, caller: &Scope, target: &Scope) -> MemoryResult<bool> {
             Ok(self
                 .shared_blocks
                 .lock()
                 .unwrap()
-                .contains(&(caller.to_string(), target.to_string())))
+                .contains(&(caller.id().to_string(), target.id().to_string())))
         }
 
-        fn list_constellation_agent_ids(&self) -> MemoryResult<Vec<String>> {
-            Ok(self.constellation_agents.lock().unwrap().clone())
+        fn list_constellation_scopes(&self) -> MemoryResult<Vec<Scope>> {
+            Ok(self
+                .constellation_agents
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|s| Scope::Global(s.clone().into()))
+                .collect())
         }
 
-        // ---- Stubs for the rest of MemoryStore ----
-
-        fn create_block(&self, _: &str, _: BlockCreate) -> MemoryResult<StructuredDocument> {
+        fn create_block(&self, _: &Scope, _: BlockCreate) -> MemoryResult<StructuredDocument> {
             panic!("not used in scope tests")
         }
-        fn get_block(&self, _: &str, _: &str) -> MemoryResult<Option<StructuredDocument>> {
+        fn get_block(&self, _: &Scope, _: &str) -> MemoryResult<Option<StructuredDocument>> {
             panic!("not used in scope tests")
         }
-        fn get_block_metadata(&self, _: &str, _: &str) -> MemoryResult<Option<BlockMetadata>> {
+        fn get_block_metadata(&self, _: &Scope, _: &str) -> MemoryResult<Option<BlockMetadata>> {
             panic!()
         }
         fn list_blocks(&self, _: BlockFilter) -> MemoryResult<Vec<BlockMetadata>> {
             panic!()
         }
-        fn delete_block(&self, _: &str, _: &str) -> MemoryResult<()> {
+        fn delete_block(&self, _: &Scope, _: &str) -> MemoryResult<()> {
             panic!()
         }
-        fn get_rendered_content(&self, _: &str, _: &str) -> MemoryResult<Option<String>> {
+        fn get_rendered_content(&self, _: &Scope, _: &str) -> MemoryResult<Option<String>> {
             panic!()
         }
-        fn persist_block(&self, _: &str, _: &str) -> MemoryResult<()> {
+        fn persist_block(&self, _: &Scope, _: &str) -> MemoryResult<()> {
             panic!()
         }
-        fn mark_dirty(&self, _: &str, _: &str) {
+        fn mark_dirty(&self, _: &Scope, _: &str) -> MemoryResult<()> {
             panic!()
         }
-        fn insert_archival(&self, _: &str, _: &str, _: Option<JsonValue>) -> MemoryResult<String> {
+        fn insert_archival(
+            &self,
+            _: &Scope,
+            _: &str,
+            _: Option<JsonValue>,
+        ) -> MemoryResult<String> {
             panic!()
         }
-        fn search_archival(&self, _: &str, _: &str, _: usize) -> MemoryResult<Vec<ArchivalEntry>> {
+        fn search_archival(
+            &self,
+            _: &Scope,
+            _: &str,
+            _: usize,
+        ) -> MemoryResult<Vec<ArchivalEntry>> {
             panic!()
         }
         fn delete_archival(&self, _: &str) -> MemoryResult<()> {
@@ -254,29 +268,29 @@ mod tests {
         ) -> MemoryResult<Vec<MemorySearchResult>> {
             panic!()
         }
-        fn list_shared_blocks(&self, _: &str) -> MemoryResult<Vec<SharedBlockInfo>> {
+        fn list_shared_blocks(&self, _: &Scope) -> MemoryResult<Vec<SharedBlockInfo>> {
             panic!()
         }
         fn get_shared_block(
             &self,
-            _: &str,
-            _: &str,
+            _: &Scope,
+            _: &Scope,
             _: &str,
         ) -> MemoryResult<Option<StructuredDocument>> {
             panic!()
         }
         fn update_block_metadata(
             &self,
-            _: &str,
+            _: &Scope,
             _: &str,
             _: BlockMetadataPatch,
         ) -> MemoryResult<()> {
             panic!()
         }
-        fn undo_redo(&self, _: &str, _: &str, _: UndoRedoOp) -> MemoryResult<bool> {
+        fn undo_redo(&self, _: &Scope, _: &str, _: UndoRedoOp) -> MemoryResult<bool> {
             panic!()
         }
-        fn history_depth(&self, _: &str, _: &str) -> MemoryResult<UndoRedoDepth> {
+        fn history_depth(&self, _: &Scope, _: &str) -> MemoryResult<UndoRedoDepth> {
             panic!()
         }
     }

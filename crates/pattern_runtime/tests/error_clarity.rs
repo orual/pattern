@@ -29,6 +29,7 @@ use std::sync::Arc;
 
 use pattern_core::error::{ProviderError, RuntimeError};
 use pattern_core::traits::MemoryStore;
+use pattern_core::types::memory_types::Scope;
 use pattern_core::types::snapshot::{PersonaSnapshot, SessionSnapshot};
 use pattern_provider::auth::AnthropicAuthChain;
 use pattern_provider::auth::resolver::CredentialChain;
@@ -333,7 +334,7 @@ fn ac9_5_memory_write_to_unknown_label_returns_write_to_missing_block() {
     // populated — giving a specific, actionable error.
     let err = store
         .update_block_metadata(
-            agent_id,
+            &Scope::global(agent_id),
             missing_label,
             pattern_core::types::memory_types::BlockMetadataPatch::default().pinned(true),
         )
@@ -341,12 +342,12 @@ fn ac9_5_memory_write_to_unknown_label_returns_write_to_missing_block() {
 
     match &err {
         pattern_core::types::memory_types::MemoryError::WriteToMissingBlock {
-            agent_id: got_agent,
+            scope: got_scope,
             label: got_label,
             op,
         } => {
             assert_eq!(
-                got_agent, agent_id,
+                got_scope.id(), agent_id,
                 "WriteToMissingBlock must carry the agent_id that was requested"
             );
             assert_eq!(
@@ -377,7 +378,7 @@ fn ac9_5_memory_update_description_unknown_label_returns_write_to_missing_block(
 
     let err = store
         .update_block_metadata(
-            agent_id,
+            &Scope::global(agent_id),
             missing_label,
             pattern_core::types::memory_types::BlockMetadataPatch::default()
                 .description("new description"),
@@ -386,12 +387,12 @@ fn ac9_5_memory_update_description_unknown_label_returns_write_to_missing_block(
 
     match &err {
         pattern_core::types::memory_types::MemoryError::WriteToMissingBlock {
-            agent_id: got_agent,
+            scope: got_scope,
             label: got_label,
             ..
         } => {
             assert!(
-                got_agent == agent_id || got_label == missing_label,
+                got_scope.id() == agent_id || got_label == missing_label,
                 "WriteToMissingBlock context must match the requested (agent, label) pair"
             );
         }

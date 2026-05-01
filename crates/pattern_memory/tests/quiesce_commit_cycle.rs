@@ -35,7 +35,7 @@ use pattern_core::MemoryStore;
 use pattern_core::types::block::BlockCreate;
 use pattern_core::types::ids::AgentId;
 use pattern_core::types::memory_types::{
-    BlockSchema, MemoryBlockType, SkillMetadata, SkillTrustTier,
+    BlockSchema, MemoryBlockType, Scope, SkillMetadata, SkillTrustTier,
 };
 use pattern_db::ConstellationDb;
 use pattern_memory::MemoryCache;
@@ -214,9 +214,10 @@ async fn quiesce_commit_preserves_task_index() {
 
     // Step 2: Seed TaskList block.
     // Create → persist (spawns subscriber) → write content → mark dirty → persist.
+    let agent_scope = Scope::Global(AGENT.into());
     let tl_doc = cache
         .create_block(
-            AGENT,
+            &agent_scope,
             BlockCreate::new(
                 TL_LABEL,
                 MemoryBlockType::Working,
@@ -232,7 +233,7 @@ async fn quiesce_commit_preserves_task_index() {
 
     // First persist spawns the subscriber.
     cache
-        .persist_block(AGENT, TL_LABEL)
+        .persist_block(&agent_scope, TL_LABEL)
         .expect("persist TaskList (spawn subscriber)");
 
     // Give the subscriber thread time to start.
@@ -265,9 +266,9 @@ async fn quiesce_commit_preserves_task_index() {
         }
         tl_doc.inner().commit();
     }
-    cache.mark_dirty(AGENT, TL_LABEL);
+    cache.mark_dirty(&agent_scope.to_db_key(), TL_LABEL);
     cache
-        .persist_block(AGENT, TL_LABEL)
+        .persist_block(&agent_scope, TL_LABEL)
         .expect("persist TaskList with tasks");
 
     // Wait for subscriber to emit the .kdl file and reconcile tasks.
@@ -276,7 +277,7 @@ async fn quiesce_commit_preserves_task_index() {
     // Step 2b: Seed Skill block.
     let skill_doc = cache
         .create_block(
-            AGENT,
+            &agent_scope,
             BlockCreate::new(
                 SKILL_LABEL,
                 MemoryBlockType::Working,
@@ -289,7 +290,7 @@ async fn quiesce_commit_preserves_task_index() {
     let skill_block_id = skill_doc.id().to_string();
 
     cache
-        .persist_block(AGENT, SKILL_LABEL)
+        .persist_block(&agent_scope, SKILL_LABEL)
         .expect("persist Skill (spawn subscriber)");
     tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -308,30 +309,30 @@ async fn quiesce_commit_preserves_task_index() {
     write_skill_to_loro_doc(&skill_file, skill_doc.inner()).expect("write_skill_to_loro_doc");
     skill_doc.inner().commit();
 
-    cache.mark_dirty(AGENT, SKILL_LABEL);
+    cache.mark_dirty(&agent_scope.to_db_key(), SKILL_LABEL);
     cache
-        .persist_block(AGENT, SKILL_LABEL)
+        .persist_block(&agent_scope, SKILL_LABEL)
         .expect("persist Skill with metadata");
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Step 2c: Seed Text block.
     let text_doc = cache
         .create_block(
-            AGENT,
+            &agent_scope,
             BlockCreate::new(TEXT_LABEL, MemoryBlockType::Working, BlockSchema::text()),
         )
         .expect("create Text block");
     cache
-        .persist_block(AGENT, TEXT_LABEL)
+        .persist_block(&agent_scope, TEXT_LABEL)
         .expect("persist Text (spawn subscriber)");
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     text_doc
         .set_text("quiesce commit cycle test text content", false)
         .unwrap();
-    cache.mark_dirty(AGENT, TEXT_LABEL);
+    cache.mark_dirty(&agent_scope.to_db_key(), TEXT_LABEL);
     cache
-        .persist_block(AGENT, TEXT_LABEL)
+        .persist_block(&agent_scope, TEXT_LABEL)
         .expect("persist Text with content");
     tokio::time::sleep(Duration::from_millis(200)).await;
 

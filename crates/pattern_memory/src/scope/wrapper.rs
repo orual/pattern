@@ -1,53 +1,44 @@
-//! [`MemoryScope`] — a policy-routing wrapper around any [`MemoryStore`].
-//!
-//! Sits between the caller (SessionContext / adapter) and the underlying
-//! store (MemoryCache). Every trait method is intercepted and routed based
-//! on the [`IsolatePolicy`] in the [`ScopeBinding`].
+//! [`MemoryScope`] — policy gate over a [`MemoryStore`] using typed
+//! [`Scope`] addresses.
 //!
 //! # Routing rules
 //!
-//! **Read path** (`get_block`, `get_block_metadata`, `get_rendered_content`,
-//! `list_blocks`, `search`):
+//! Reads (`get_block`, `get_block_metadata`, `get_rendered_content`):
 //!
-//! - `None`: check project scope first (if `project_id` is set); fall back to
-//!   persona scope. Project wins on label collision.
-//! - `CoreOnly`: same as `None` for reads, but persona results are returned
-//!   with their permission set to `ReadOnly`.
-//! - `Full`: project scope only. Persona blocks are invisible.
+//! | Caller scope | None / CoreOnly | Full |
+//! |---|---|---|
+//! | `Scope::Local(_)` | hit project; on miss fall back to `Scope::Global(binding.persona_id)`. CoreOnly tags persona docs ReadOnly. | hit project only; no fallback. |
+//! | `Scope::Global(_)` | pass through. CoreOnly tags ReadOnly. | return `None` (persona invisible). |
 //!
-//! **Write path** (`create_block`, `update_block_metadata`, `delete_block`,
-//! `persist_block`, `mark_dirty`):
+//! Writes (`create_block`, `update_block_metadata`, `delete_block`,
+//! `persist_block`, `mark_dirty`, `insert_archival`, `undo_redo`):
 //!
-//! - Default write target is the agent_id the caller passes in. The scope
-//!   layer only *denies* writes — it does not silently redirect.
-//! - Under `CoreOnly` or `Full`, writes targeting the `persona_id` return
-//!   `MemoryError::IsolationDenied`.
-//! - Under `None`, all writes pass through (bidirectional).
+//! | Caller scope | None | CoreOnly | Full |
+//! |---|---|---|---|
+//! | `Scope::Local(_)` | allow | allow | allow |
+//! | `Scope::Global(_)` | allow | `IsolationDenied` | `IsolationDenied` |
 //!
-//! **Explicit persona write** (`write_to_persona` SDK effect):
+//! Writes are exact-target — no fallback. Read fallback exists because
+//! agent ergonomics value forgiveness; write fallback would mask the
+//! "writes go to the wrong place" footgun this redesign was created to
+//! eliminate.
 //!
-//! The SDK handler calls the store with `agent_id = persona_id` directly.
-//! Under `None` this passes through. Under `CoreOnly`/`Full` the scope
-//! layer returns `IsolationDenied` — the SDK handler converts that to an
-//! effect error.
+//! When `binding.is_passthrough()` (no project mounted), the wrapper is
+//! a transparent delegation layer.
 
 use pattern_core::memory::StructuredDocument;
 use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::BlockCreate;
 use pattern_core::types::memory_types::{
     ArchivalEntry, BlockFilter, BlockMetadata, BlockMetadataPatch, IsolatePolicy, MemoryError,
-    MemoryResult, MemorySearchResult, MemorySearchScope, SearchOptions, SharedBlockInfo,
-    UndoRedoDepth, UndoRedoOp,
+    MemoryPermission, MemoryResult, MemorySearchResult, MemorySearchScope, Scope, SearchOptions,
+    SharedBlockInfo, UndoRedoDepth, UndoRedoOp,
 };
 use serde_json::Value as JsonValue;
 
 use super::ScopeBinding;
 
 /// Policy-routing wrapper around any [`MemoryStore`].
-///
-/// Generic over `S` so it can wrap `MemoryCache`, `InMemoryMemoryStore`, or
-/// any other test double. The wrapper is transparent when the binding has no
-/// project scope (passthrough mode).
 pub struct MemoryScope<S> {
     inner: S,
     binding: ScopeBinding,
@@ -63,30 +54,31 @@ impl<S: std::fmt::Debug> std::fmt::Debug for MemoryScope<S> {
 }
 
 impl<S> MemoryScope<S> {
-    /// Wrap a store with the given scope binding.
     pub fn new(inner: S, binding: ScopeBinding) -> Self {
         Self { inner, binding }
     }
 
-    /// Access the scope binding.
     pub fn binding(&self) -> &ScopeBinding {
         &self.binding
     }
 
-    /// Access the inner store.
     pub fn inner(&self) -> &S {
         &self.inner
     }
 }
 
 impl<S: MemoryStore> MemoryScope<S> {
-    /// Check whether a write targeting `agent_id` is denied by the current
-    /// isolation policy.
-    fn deny_persona_write(&self, agent_id: &str, operation: &str) -> MemoryResult<()> {
+    /// The session's persona scope (always `Scope::Global(persona_id)`).
+    fn persona_scope(&self) -> Scope {
+        Scope::Global(self.binding.persona_id.clone().into())
+    }
+
+    /// Deny this write if the policy disallows mutating Global blocks.
+    fn check_write(&self, scope: &Scope, operation: &str) -> MemoryResult<()> {
         if self.binding.is_passthrough() {
             return Ok(());
         }
-        if agent_id == self.binding.persona_id {
+        if scope.is_global() {
             match self.binding.policy {
                 IsolatePolicy::None => Ok(()),
                 IsolatePolicy::CoreOnly | IsolatePolicy::Full | _ => {
@@ -101,120 +93,157 @@ impl<S: MemoryStore> MemoryScope<S> {
         }
     }
 
-    /// Get a block with fallback semantics per policy.
+    /// Read fallback: when the caller asked for Local and the project
+    /// scope returned `Ok(None)`, retry under `Scope::Global(persona_id)`
+    /// (per policy). Returns the original result on first hit.
     ///
-    /// For `None` and `CoreOnly`: check project first, fall back to persona.
-    /// For `Full`: project only.
-    fn get_block_routed(
+    /// `tag_persona_readonly` mutates the returned doc's permission to
+    /// `ReadOnly` when the fallback fires under `CoreOnly`. The
+    /// type-erased `T` is one of `StructuredDocument`, `BlockMetadata`,
+    /// or `String` (rendered content) — see the helper variants below.
+    fn fallback_get<T, F>(
         &self,
+        scope: &Scope,
         label: &str,
-        mark_persona_readonly: bool,
-    ) -> MemoryResult<Option<StructuredDocument>> {
-        // No project scope → passthrough to inner with whatever agent_id
-        // the caller originally wanted. But this method is called from
-        // the trait impl which passes a specific agent_id — we need to
-        // check both project and persona.
-        if let Some(project_id) = &self.binding.project_id {
-            // Check project scope first (project wins on collision).
-            // Missing block in project scope → fall through to persona.
-            match self.inner.get_block(project_id, label) {
-                Ok(Some(doc)) => return Ok(Some(doc)),
-                Ok(None) => {}
-                Err(e) => return Err(e),
-            }
+        primary: MemoryResult<Option<T>>,
+        lookup_persona: F,
+        on_persona_hit: impl FnOnce(T) -> T,
+    ) -> MemoryResult<Option<T>>
+    where
+        F: FnOnce(&Scope, &str) -> MemoryResult<Option<T>>,
+    {
+        if self.binding.is_passthrough() {
+            return primary;
         }
-
-        match self.binding.policy {
-            IsolatePolicy::None | IsolatePolicy::CoreOnly => {
-                // Fall through to persona.
-                match self.inner.get_block(&self.binding.persona_id, label)? {
-                    Some(mut doc) if mark_persona_readonly => {
-                        doc.set_permission(
-                            pattern_core::types::memory_types::MemoryPermission::ReadOnly,
-                        );
-                        Ok(Some(doc))
+        // Caller asked for Local: fall back to Global on miss.
+        if scope.is_local() {
+            match primary {
+                Ok(Some(t)) => Ok(Some(t)),
+                Ok(None) => match self.binding.policy {
+                    IsolatePolicy::None | IsolatePolicy::CoreOnly => {
+                        let persona = self.persona_scope();
+                        match lookup_persona(&persona, label)? {
+                            Some(t) => Ok(Some(on_persona_hit(t))),
+                            None => Ok(None),
+                        }
                     }
-                    other => Ok(other),
-                }
+                    IsolatePolicy::Full | _ => Ok(None),
+                },
+                Err(e) => Err(e),
             }
-            // Full and any future unknown policies hide persona blocks.
-            IsolatePolicy::Full | _ => Ok(None),
+        } else {
+            // Caller asked for Global. Under Full, hide. Under CoreOnly,
+            // tag ReadOnly. Under None, pass through.
+            match self.binding.policy {
+                IsolatePolicy::None => primary,
+                IsolatePolicy::CoreOnly => match primary? {
+                    Some(t) => Ok(Some(on_persona_hit(t))),
+                    None => Ok(None),
+                },
+                IsolatePolicy::Full | _ => Ok(None),
+            }
         }
+    }
+
+    /// Should `tag_persona_readonly` apply? Only under CoreOnly when the
+    /// hit was at the persona scope.
+    fn core_only(&self) -> bool {
+        self.binding.policy == IsolatePolicy::CoreOnly
     }
 }
 
 impl<S: MemoryStore> MemoryStore for MemoryScope<S> {
     fn create_block(
         &self,
-        agent_id: &str,
+        scope: &Scope,
         create: BlockCreate,
     ) -> MemoryResult<StructuredDocument> {
-        self.deny_persona_write(agent_id, &format!("create_block(label={})", create.label))?;
-        self.inner.create_block(agent_id, create)
+        self.check_write(scope, &format!("create_block(label={})", create.label))?;
+        self.inner.create_block(scope, create)
     }
 
-    fn get_block(&self, agent_id: &str, label: &str) -> MemoryResult<Option<StructuredDocument>> {
-        if self.binding.is_passthrough() {
-            return self.inner.get_block(agent_id, label);
-        }
-
-        let mark_readonly = self.binding.policy == IsolatePolicy::CoreOnly;
-        self.get_block_routed(label, mark_readonly)
+    fn get_block(&self, scope: &Scope, label: &str) -> MemoryResult<Option<StructuredDocument>> {
+        let primary = self.inner.get_block(scope, label);
+        let core_only = self.core_only();
+        self.fallback_get(
+            scope,
+            label,
+            primary,
+            |s, l| self.inner.get_block(s, l),
+            move |mut doc| {
+                if core_only {
+                    doc.set_permission(MemoryPermission::ReadOnly);
+                }
+                doc
+            },
+        )
     }
 
     fn get_block_metadata(
         &self,
-        agent_id: &str,
+        scope: &Scope,
         label: &str,
     ) -> MemoryResult<Option<BlockMetadata>> {
-        if self.binding.is_passthrough() {
-            return self.inner.get_block_metadata(agent_id, label);
-        }
-
-        // Same routing as get_block but for metadata. Project miss
-        // (Ok(None)) falls through to persona scope.
-        if let Some(project_id) = &self.binding.project_id {
-            match self.inner.get_block_metadata(project_id, label) {
-                Ok(Some(meta)) => return Ok(Some(meta)),
-                Ok(None) => {}
-                Err(e) => return Err(e),
-            }
-        }
-
-        match self.binding.policy {
-            IsolatePolicy::None | IsolatePolicy::CoreOnly => self
-                .inner
-                .get_block_metadata(&self.binding.persona_id, label),
-            IsolatePolicy::Full | _ => Ok(None),
-        }
+        let primary = self.inner.get_block_metadata(scope, label);
+        let core_only = self.core_only();
+        self.fallback_get(
+            scope,
+            label,
+            primary,
+            |s, l| self.inner.get_block_metadata(s, l),
+            move |mut meta| {
+                if core_only {
+                    meta.permission = MemoryPermission::ReadOnly;
+                }
+                meta
+            },
+        )
     }
 
     fn list_blocks(&self, filter: BlockFilter) -> MemoryResult<Vec<BlockMetadata>> {
+        // Passthrough binding has no project: only the persona scope is
+        // visible. If the caller didn't pin a scope, default to the
+        // persona's `Scope::Global` so unmounted sessions don't leak rows
+        // owned by other agents in the same DB.
         if self.binding.is_passthrough() {
+            let mut f = filter;
+            if f.agent_id.is_none() {
+                f.agent_id = Some(self.persona_scope().to_db_key());
+            }
+            return self.inner.list_blocks(f);
+        }
+
+        // If the caller pinned a scope explicitly (via `BlockFilter::by_scope`),
+        // honour it — they want a single-scope view (e.g. enumerating skills
+        // within one scope). Skip the merge.
+        if filter.agent_id.is_some() {
             return self.inner.list_blocks(filter);
         }
 
+        // No explicit scope: enumerate every scope visible to this session.
+        // Merge project + persona under None/CoreOnly with project winning
+        // on label collision; project-only under Full.
         match self.binding.policy {
             IsolatePolicy::None | IsolatePolicy::CoreOnly => {
-                // Merge persona + project blocks. Project wins on label collision.
                 let mut results = Vec::new();
-                let mut seen_labels = std::collections::HashSet::new();
+                let mut seen = std::collections::HashSet::new();
 
-                // Project blocks first.
-                if let Some(project_id) = &self.binding.project_id {
-                    let mut project_filter = filter.clone();
-                    project_filter.agent_id = Some(project_id.clone());
-                    for meta in self.inner.list_blocks(project_filter)? {
-                        seen_labels.insert(meta.label.clone());
+                if let Some(ref project_id) = self.binding.project_id {
+                    let mut f = filter.clone();
+                    f.agent_id = Some(Scope::Local(project_id.clone().into()).to_db_key());
+                    for meta in self.inner.list_blocks(f)? {
+                        seen.insert(meta.label.clone());
                         results.push(meta);
                     }
                 }
 
-                // Persona blocks (skip labels already seen from project).
-                let mut persona_filter = filter;
-                persona_filter.agent_id = Some(self.binding.persona_id.clone());
-                for meta in self.inner.list_blocks(persona_filter)? {
-                    if !seen_labels.contains(&meta.label) {
+                let mut f = filter;
+                f.agent_id = Some(self.persona_scope().to_db_key());
+                for mut meta in self.inner.list_blocks(f)? {
+                    if !seen.contains(&meta.label) {
+                        if self.core_only() {
+                            meta.permission = MemoryPermission::ReadOnly;
+                        }
                         results.push(meta);
                     }
                 }
@@ -222,11 +251,10 @@ impl<S: MemoryStore> MemoryStore for MemoryScope<S> {
                 Ok(results)
             }
             IsolatePolicy::Full | _ => {
-                // Project only.
-                if let Some(project_id) = &self.binding.project_id {
-                    let mut project_filter = filter;
-                    project_filter.agent_id = Some(project_id.clone());
-                    self.inner.list_blocks(project_filter)
+                if let Some(ref project_id) = self.binding.project_id {
+                    let mut f = filter;
+                    f.agent_id = Some(Scope::Local(project_id.clone().into()).to_db_key());
+                    self.inner.list_blocks(f)
                 } else {
                     Ok(vec![])
                 }
@@ -234,115 +262,72 @@ impl<S: MemoryStore> MemoryStore for MemoryScope<S> {
         }
     }
 
-    fn delete_block(&self, agent_id: &str, label: &str) -> MemoryResult<()> {
-        self.deny_persona_write(agent_id, &format!("delete_block(label={label})"))?;
-        self.inner.delete_block(agent_id, label)
+    fn delete_block(&self, scope: &Scope, label: &str) -> MemoryResult<()> {
+        self.check_write(scope, &format!("delete_block(label={label})"))?;
+        self.inner.delete_block(scope, label)
     }
 
-    fn get_rendered_content(&self, agent_id: &str, label: &str) -> MemoryResult<Option<String>> {
-        tracing::trace!(
-            agent_id = %agent_id,
-            label = %label,
-            passthrough = self.binding.is_passthrough(),
-            persona_id = %self.binding.persona_id,
-            project_id = ?self.binding.project_id,
-            policy = ?self.binding.policy,
-            "scope::get_rendered_content called"
-        );
-
-        if self.binding.is_passthrough() {
-            return self.inner.get_rendered_content(agent_id, label);
-        }
-
-        // Same routing logic as get_block: project first, then persona.
-        // Missing block in project scope — fall through to persona.
-        if let Some(project_id) = &self.binding.project_id {
-            let project_result = self.inner.get_rendered_content(project_id, label);
-            tracing::trace!(
-                project_id = %project_id,
-                label = %label,
-                result = ?project_result.as_ref().map(|r| r.is_some()),
-                "scope: project lookup"
-            );
-            match project_result {
-                Ok(Some(content)) => return Ok(Some(content)),
-                Ok(None) => {}
-                Err(e) => return Err(e),
-            }
-        }
-
-        let persona_result = match self.binding.policy {
-            IsolatePolicy::None | IsolatePolicy::CoreOnly => self
-                .inner
-                .get_rendered_content(&self.binding.persona_id, label),
-            IsolatePolicy::Full | _ => Ok(None),
-        };
-        tracing::trace!(
-            persona_id = %self.binding.persona_id,
-            label = %label,
-            result = ?persona_result.as_ref().map(|r| r.as_ref().map(|s| s.len())),
-            "scope: persona lookup"
-        );
-        persona_result
+    fn get_rendered_content(&self, scope: &Scope, label: &str) -> MemoryResult<Option<String>> {
+        let primary = self.inner.get_rendered_content(scope, label);
+        // Rendered content has no permission field to mutate; pass-through identity.
+        self.fallback_get(
+            scope,
+            label,
+            primary,
+            |s, l| self.inner.get_rendered_content(s, l),
+            |s| s,
+        )
     }
 
-    fn persist_block(&self, agent_id: &str, label: &str) -> MemoryResult<()> {
-        self.deny_persona_write(agent_id, &format!("persist_block(label={label})"))?;
-        self.inner.persist_block(agent_id, label)
+    fn persist_block(&self, scope: &Scope, label: &str) -> MemoryResult<()> {
+        self.check_write(scope, &format!("persist_block(label={label})"))?;
+        self.inner.persist_block(scope, label)
     }
 
-    fn mark_dirty(&self, agent_id: &str, label: &str) {
-        // mark_dirty does not return a Result, so we cannot deny here.
-        // However, a write that was denied at create/update time will never
-        // reach mark_dirty for the persona scope. We still delegate to the
-        // inner store — if someone calls mark_dirty on a persona block under
-        // CoreOnly/Full, the subsequent persist_block will be denied.
-        self.inner.mark_dirty(agent_id, label);
+    fn mark_dirty(&self, scope: &Scope, label: &str) -> MemoryResult<()> {
+        self.check_write(scope, &format!("mark_dirty(label={label})"))?;
+        self.inner.mark_dirty(scope, label)
     }
 
     fn insert_archival(
         &self,
-        agent_id: &str,
+        scope: &Scope,
         content: &str,
         metadata: Option<JsonValue>,
     ) -> MemoryResult<String> {
-        self.deny_persona_write(agent_id, "insert_archival")?;
-        self.inner.insert_archival(agent_id, content, metadata)
+        self.check_write(scope, "insert_archival")?;
+        self.inner.insert_archival(scope, content, metadata)
     }
 
     fn search_archival(
         &self,
-        agent_id: &str,
+        scope: &Scope,
         query: &str,
         limit: usize,
     ) -> MemoryResult<Vec<ArchivalEntry>> {
         if self.binding.is_passthrough() {
-            return self.inner.search_archival(agent_id, query, limit);
+            return self.inner.search_archival(scope, query, limit);
         }
 
-        // Archival search follows the same read policy: merge under None,
-        // project-only under CoreOnly/Full.
+        // Same fallback shape as block reads: project first, persona on miss
+        // (under None/CoreOnly), else project-only under Full.
         match self.binding.policy {
-            IsolatePolicy::None => {
-                // Merge persona + project archival results.
+            IsolatePolicy::None | IsolatePolicy::CoreOnly => {
                 let mut results = Vec::new();
-                if let Some(project_id) = &self.binding.project_id {
-                    results.extend(self.inner.search_archival(project_id, query, limit)?);
+                if scope.is_local() {
+                    results.extend(self.inner.search_archival(scope, query, limit)?);
                 }
                 let remaining = limit.saturating_sub(results.len());
                 if remaining > 0 {
-                    results.extend(self.inner.search_archival(
-                        &self.binding.persona_id,
-                        query,
-                        remaining,
-                    )?);
+                    let persona = self.persona_scope();
+                    let target = if scope.is_local() { &persona } else { scope };
+                    results.extend(self.inner.search_archival(target, query, remaining)?);
                 }
                 Ok(results)
             }
-            IsolatePolicy::CoreOnly | IsolatePolicy::Full | _ => {
-                // Project only for archival search.
-                if let Some(project_id) = &self.binding.project_id {
-                    self.inner.search_archival(project_id, query, limit)
+            IsolatePolicy::Full | _ => {
+                if scope.is_local() {
+                    self.inner.search_archival(scope, query, limit)
                 } else {
                     Ok(vec![])
                 }
@@ -351,10 +336,7 @@ impl<S: MemoryStore> MemoryStore for MemoryScope<S> {
     }
 
     fn delete_archival(&self, id: &str) -> MemoryResult<()> {
-        // Archival deletion is by entry id, not agent_id. We cannot
-        // determine ownership from the id alone, so we delegate directly.
-        // This method is only reachable via human-operator tooling (CLI),
-        // not agent effects, so the isolation boundary is less critical.
+        // CLI-only entry point; scope layer does not gate.
         self.inner.delete_archival(id)
     }
 
@@ -369,18 +351,14 @@ impl<S: MemoryStore> MemoryStore for MemoryScope<S> {
         }
 
         match self.binding.policy {
-            IsolatePolicy::None => {
-                // Let the search through with the original scope. The
-                // underlying store handles merging across agents.
-                self.inner.search(query, options, scope)
-            }
+            IsolatePolicy::None => self.inner.search(query, options, scope),
             IsolatePolicy::CoreOnly | IsolatePolicy::Full | _ => {
-                // Restrict search to project scope.
-                if let Some(project_id) = &self.binding.project_id {
+                // Restrict to project scope.
+                if let Some(ref project_id) = self.binding.project_id {
                     self.inner.search(
                         query,
                         options,
-                        MemorySearchScope::Agent(project_id.clone().into()),
+                        MemorySearchScope::Scope(Scope::Local(project_id.clone().into())),
                     )
                 } else {
                     Ok(vec![])
@@ -389,51 +367,47 @@ impl<S: MemoryStore> MemoryStore for MemoryScope<S> {
         }
     }
 
-    fn list_shared_blocks(&self, agent_id: &str) -> MemoryResult<Vec<SharedBlockInfo>> {
-        // Shared blocks are a cross-agent concept. Delegate directly.
-        self.inner.list_shared_blocks(agent_id)
+    fn list_shared_blocks(&self, scope: &Scope) -> MemoryResult<Vec<SharedBlockInfo>> {
+        // Shared blocks are a cross-agent concept; pass through.
+        self.inner.list_shared_blocks(scope)
     }
 
     fn get_shared_block(
         &self,
-        requester_agent_id: &str,
-        owner_agent_id: &str,
+        requester: &Scope,
+        owner: &Scope,
         label: &str,
     ) -> MemoryResult<Option<StructuredDocument>> {
-        // Shared block access is already permission-checked by the store.
-        // The scope layer does not add additional restrictions — shared
-        // blocks are an explicit grant from the owner.
-        self.inner
-            .get_shared_block(requester_agent_id, owner_agent_id, label)
+        // Shared block access is permission-checked by the underlying
+        // store via explicit grants from the owner. Pass through.
+        self.inner.get_shared_block(requester, owner, label)
     }
 
     fn update_block_metadata(
         &self,
-        agent_id: &str,
+        scope: &Scope,
         label: &str,
         patch: BlockMetadataPatch,
     ) -> MemoryResult<()> {
-        self.deny_persona_write(agent_id, &format!("update_block_metadata(label={label})"))?;
-        self.inner.update_block_metadata(agent_id, label, patch)
+        self.check_write(scope, &format!("update_block_metadata(label={label})"))?;
+        self.inner.update_block_metadata(scope, label, patch)
     }
 
-    fn undo_redo(&self, agent_id: &str, label: &str, op: UndoRedoOp) -> MemoryResult<bool> {
-        // Undo/redo is a write operation.
-        self.deny_persona_write(agent_id, &format!("undo_redo(label={label})"))?;
-        self.inner.undo_redo(agent_id, label, op)
+    fn undo_redo(&self, scope: &Scope, label: &str, op: UndoRedoOp) -> MemoryResult<bool> {
+        self.check_write(scope, &format!("undo_redo(label={label})"))?;
+        self.inner.undo_redo(scope, label, op)
     }
 
-    fn history_depth(&self, agent_id: &str, label: &str) -> MemoryResult<UndoRedoDepth> {
-        // Read-only operation, delegate directly.
-        self.inner.history_depth(agent_id, label)
+    fn history_depth(&self, scope: &Scope, label: &str) -> MemoryResult<UndoRedoDepth> {
+        self.inner.history_depth(scope, label)
     }
 
-    fn has_shared_blocks_with(&self, caller: &str, target: &str) -> MemoryResult<bool> {
+    fn has_shared_blocks_with(&self, caller: &Scope, target: &Scope) -> MemoryResult<bool> {
         self.inner.has_shared_blocks_with(caller, target)
     }
 
-    fn list_constellation_agent_ids(&self) -> MemoryResult<Vec<String>> {
-        self.inner.list_constellation_agent_ids()
+    fn list_constellation_scopes(&self) -> MemoryResult<Vec<Scope>> {
+        self.inner.list_constellation_scopes()
     }
 }
 
@@ -443,217 +417,204 @@ mod tests {
     use crate::testing::ScopeTestStore;
     use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
 
-    // ---- AC12.1: IsolatePolicy::None merges both scopes ----
+    fn binding_none() -> ScopeBinding {
+        ScopeBinding::with_project("persona-1", "project-1", IsolatePolicy::None)
+    }
+    fn binding_core() -> ScopeBinding {
+        ScopeBinding::with_project("persona-1", "project-1", IsolatePolicy::CoreOnly)
+    }
+    fn binding_full() -> ScopeBinding {
+        ScopeBinding::with_project("persona-1", "project-1", IsolatePolicy::Full)
+    }
+
+    fn local() -> Scope {
+        Scope::Local("project-1".into())
+    }
+    fn global() -> Scope {
+        Scope::Global("persona-1".into())
+    }
+
+    // ---- read fallback ----
 
     #[test]
-    fn none_policy_reads_merge_persona_and_project() {
+    fn local_read_falls_back_to_global_under_none() {
         let store = ScopeTestStore::new();
-        store.seed("persona-1", "scratchpad", "persona notes");
-        store.seed("project-1", "readme", "project readme");
+        store.seed(global(), "scratchpad", "persona notes");
+        let scope = MemoryScope::new(store, binding_none());
 
-        let scope = MemoryScope::new(
-            store,
-            ScopeBinding::with_project("persona-1", "project-1", IsolatePolicy::None),
-        );
-
-        // Both blocks are visible.
-        let scratch = scope
-            .get_rendered_content("persona-1", "scratchpad")
-            .unwrap();
-        assert_eq!(scratch.as_deref(), Some("persona notes"));
-
-        let readme = scope.get_rendered_content("project-1", "readme").unwrap();
-        assert_eq!(readme.as_deref(), Some("project readme"));
+        let content = scope.get_rendered_content(&local(), "scratchpad").unwrap();
+        assert_eq!(content.as_deref(), Some("persona notes"));
     }
 
     #[test]
-    fn none_policy_project_wins_on_label_collision() {
+    fn local_read_hits_local_first_when_present() {
         let store = ScopeTestStore::new();
-        store.seed("persona-1", "notes", "persona version");
-        store.seed("project-1", "notes", "project version");
+        store.seed(global(), "notes", "persona version");
+        store.seed(local(), "notes", "project version");
+        let scope = MemoryScope::new(store, binding_none());
 
-        let scope = MemoryScope::new(
-            store,
-            ScopeBinding::with_project("persona-1", "project-1", IsolatePolicy::None),
-        );
-
-        // Project wins on collision.
-        let notes = scope.get_rendered_content("any", "notes").unwrap();
-        assert_eq!(notes.as_deref(), Some("project version"));
-    }
-
-    // ---- AC12.2: IsolatePolicy::CoreOnly — persona read-only ----
-
-    #[test]
-    fn core_only_persona_blocks_marked_readonly() {
-        let store = ScopeTestStore::new();
-        store.seed("persona-1", "scratchpad", "persona notes");
-
-        let scope = MemoryScope::new(
-            store,
-            ScopeBinding::with_project("persona-1", "project-1", IsolatePolicy::CoreOnly),
-        );
-
-        let doc = scope.get_block("any", "scratchpad").unwrap().unwrap();
-        assert_eq!(
-            doc.metadata().permission,
-            pattern_core::types::memory_types::MemoryPermission::ReadOnly
-        );
+        let content = scope.get_rendered_content(&local(), "notes").unwrap();
+        assert_eq!(content.as_deref(), Some("project version"));
     }
 
     #[test]
-    fn core_only_denies_persona_write() {
+    fn local_read_under_full_does_not_fall_back() {
         let store = ScopeTestStore::new();
-        store.seed("persona-1", "scratchpad", "persona notes");
+        store.seed(global(), "scratchpad", "persona notes");
+        let scope = MemoryScope::new(store, binding_full());
 
-        let scope = MemoryScope::new(
-            store,
-            ScopeBinding::with_project("persona-1", "project-1", IsolatePolicy::CoreOnly),
-        );
-
-        let result = scope.update_block_metadata(
-            "persona-1",
-            "scratchpad",
-            BlockMetadataPatch::default().pinned(true),
-        );
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            matches!(err, MemoryError::IsolationDenied { .. }),
-            "expected IsolationDenied, got: {err:?}"
-        );
-    }
-
-    // ---- AC12.3: IsolatePolicy::Full — persona invisible ----
-
-    #[test]
-    fn full_policy_persona_blocks_invisible() {
-        let store = ScopeTestStore::new();
-        store.seed("persona-1", "scratchpad", "persona notes");
-        store.seed("project-1", "readme", "project readme");
-
-        let scope = MemoryScope::new(
-            store,
-            ScopeBinding::with_project("persona-1", "project-1", IsolatePolicy::Full),
-        );
-
-        // Persona block invisible.
-        let scratch = scope.get_rendered_content("any", "scratchpad").unwrap();
-        assert!(scratch.is_none());
-
-        // Project block visible.
-        let readme = scope.get_rendered_content("any", "readme").unwrap();
-        assert_eq!(readme.as_deref(), Some("project readme"));
+        let content = scope.get_rendered_content(&local(), "scratchpad").unwrap();
+        assert!(content.is_none());
     }
 
     #[test]
-    fn full_policy_denies_persona_write() {
+    fn global_read_under_full_returns_none() {
         let store = ScopeTestStore::new();
+        store.seed(global(), "scratchpad", "persona notes");
+        let scope = MemoryScope::new(store, binding_full());
 
-        let scope = MemoryScope::new(
-            store,
-            ScopeBinding::with_project("persona-1", "project-1", IsolatePolicy::Full),
-        );
+        let content = scope.get_rendered_content(&global(), "scratchpad").unwrap();
+        assert!(content.is_none());
+    }
+
+    #[test]
+    fn global_read_under_core_only_tags_readonly() {
+        let store = ScopeTestStore::new();
+        store.seed(global(), "scratchpad", "persona notes");
+        let scope = MemoryScope::new(store, binding_core());
+
+        let doc = scope.get_block(&global(), "scratchpad").unwrap().unwrap();
+        assert_eq!(doc.metadata().permission, MemoryPermission::ReadOnly);
+    }
+
+    #[test]
+    fn local_fallback_to_global_under_core_only_tags_readonly() {
+        let store = ScopeTestStore::new();
+        store.seed(global(), "scratchpad", "persona notes");
+        let scope = MemoryScope::new(store, binding_core());
+
+        let doc = scope.get_block(&local(), "scratchpad").unwrap().unwrap();
+        assert_eq!(doc.metadata().permission, MemoryPermission::ReadOnly);
+    }
+
+    // ---- write enforcement ----
+
+    #[test]
+    fn local_writes_allowed_under_all_policies() {
+        for policy in [
+            IsolatePolicy::None,
+            IsolatePolicy::CoreOnly,
+            IsolatePolicy::Full,
+        ] {
+            let store = ScopeTestStore::new();
+            let binding =
+                ScopeBinding::with_project("persona-1", "project-1", policy);
+            let scope = MemoryScope::new(store, binding);
+
+            let result = scope.create_block(
+                &local(),
+                BlockCreate::new("task-list", MemoryBlockType::Working, BlockSchema::text()),
+            );
+            assert!(result.is_ok(), "Local write under {policy:?} should be allowed");
+        }
+    }
+
+    #[test]
+    fn global_write_allowed_under_none() {
+        let store = ScopeTestStore::new();
+        let scope = MemoryScope::new(store, binding_none());
 
         let result = scope.create_block(
-            "persona-1",
-            BlockCreate::new("new-block", MemoryBlockType::Working, BlockSchema::text()),
-        );
-        assert!(matches!(
-            result.unwrap_err(),
-            MemoryError::IsolationDenied { .. }
-        ));
-    }
-
-    // ---- AC12.6: Default writes go to project scope ----
-
-    #[test]
-    fn none_policy_write_to_project_succeeds() {
-        let store = ScopeTestStore::new();
-
-        let scope = MemoryScope::new(
-            store,
-            ScopeBinding::with_project("persona-1", "project-1", IsolatePolicy::None),
-        );
-
-        // Write to project-1 (not persona-1) succeeds under None.
-        let result = scope.create_block(
-            "project-1",
-            BlockCreate::new("task-list", MemoryBlockType::Working, BlockSchema::text()),
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn none_policy_write_to_persona_succeeds() {
-        let store = ScopeTestStore::new();
-
-        let scope = MemoryScope::new(
-            store,
-            ScopeBinding::with_project("persona-1", "project-1", IsolatePolicy::None),
-        );
-
-        // Under None, writes to persona are also allowed (bidirectional).
-        let result = scope.create_block(
-            "persona-1",
+            &global(),
             BlockCreate::new("personal-notes", MemoryBlockType::Core, BlockSchema::text()),
         );
         assert!(result.is_ok());
     }
 
-    // ---- Passthrough (no project) ----
-
     #[test]
-    fn passthrough_delegates_directly() {
+    fn global_create_denied_under_core_only() {
         let store = ScopeTestStore::new();
-        store.seed("agent-1", "notes", "hello");
+        let scope = MemoryScope::new(store, binding_core());
 
-        let scope = MemoryScope::new(store, ScopeBinding::passthrough("agent-1"));
-
-        let content = scope.get_rendered_content("agent-1", "notes").unwrap();
-        assert_eq!(content.as_deref(), Some("hello"));
+        let err = scope
+            .create_block(
+                &global(),
+                BlockCreate::new("notes", MemoryBlockType::Core, BlockSchema::text()),
+            )
+            .unwrap_err();
+        assert!(matches!(err, MemoryError::IsolationDenied { .. }));
     }
 
-    // ---- list_blocks merging ----
+    #[test]
+    fn global_update_denied_under_full() {
+        let store = ScopeTestStore::new();
+        store.seed(global(), "scratchpad", "persona notes");
+        let scope = MemoryScope::new(store, binding_full());
+
+        let err = scope
+            .update_block_metadata(
+                &global(),
+                "scratchpad",
+                BlockMetadataPatch::default().pinned(true),
+            )
+            .unwrap_err();
+        assert!(matches!(err, MemoryError::IsolationDenied { .. }));
+    }
 
     #[test]
-    fn none_policy_list_blocks_merges_deduplicating_by_label() {
+    fn global_mark_dirty_denied_under_core_only() {
         let store = ScopeTestStore::new();
-        store.seed("persona-1", "shared-label", "persona version");
-        store.seed("project-1", "shared-label", "project version");
-        store.seed("persona-1", "persona-only", "only in persona");
-        store.seed("project-1", "project-only", "only in project");
+        let scope = MemoryScope::new(store, binding_core());
 
-        let scope = MemoryScope::new(
-            store,
-            ScopeBinding::with_project("persona-1", "project-1", IsolatePolicy::None),
-        );
+        let err = scope.mark_dirty(&global(), "any").unwrap_err();
+        assert!(matches!(err, MemoryError::IsolationDenied { .. }));
+    }
+
+    // ---- list_blocks ----
+
+    #[test]
+    fn list_blocks_merges_under_none() {
+        let store = ScopeTestStore::new();
+        store.seed(global(), "shared-label", "persona version");
+        store.seed(local(), "shared-label", "project version");
+        store.seed(global(), "persona-only", "p");
+        store.seed(local(), "project-only", "j");
+        let scope = MemoryScope::new(store, binding_none());
 
         let blocks = scope.list_blocks(BlockFilter::all()).unwrap();
         let labels: Vec<&str> = blocks.iter().map(|b| b.label.as_str()).collect();
 
-        // shared-label appears only once (from project).
+        // shared-label appears once (project wins).
         assert_eq!(labels.iter().filter(|l| **l == "shared-label").count(), 1);
-        // Both unique labels present.
         assert!(labels.contains(&"persona-only"));
         assert!(labels.contains(&"project-only"));
     }
 
     #[test]
-    fn full_policy_list_blocks_project_only() {
+    fn list_blocks_under_full_is_project_only() {
         let store = ScopeTestStore::new();
-        store.seed("persona-1", "persona-block", "content");
-        store.seed("project-1", "project-block", "content");
-
-        let scope = MemoryScope::new(
-            store,
-            ScopeBinding::with_project("persona-1", "project-1", IsolatePolicy::Full),
-        );
+        store.seed(global(), "persona-block", "p");
+        store.seed(local(), "project-block", "j");
+        let scope = MemoryScope::new(store, binding_full());
 
         let blocks = scope.list_blocks(BlockFilter::all()).unwrap();
         let labels: Vec<&str> = blocks.iter().map(|b| b.label.as_str()).collect();
 
         assert!(labels.contains(&"project-block"));
         assert!(!labels.contains(&"persona-block"));
+    }
+
+    // ---- passthrough ----
+
+    #[test]
+    fn passthrough_delegates_directly() {
+        let store = ScopeTestStore::new();
+        store.seed(Scope::Global("agent-1".into()), "notes", "hello");
+        let scope = MemoryScope::new(store, ScopeBinding::passthrough("agent-1"));
+
+        let content = scope
+            .get_rendered_content(&Scope::Global("agent-1".into()), "notes")
+            .unwrap();
+        assert_eq!(content.as_deref(), Some("hello"));
     }
 }

@@ -14,8 +14,8 @@ use tidepool_eval::Value;
 use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::BlockHandle;
 use pattern_core::types::memory_types::{
-    BlockFilter, BlockMetadata, BlockSchema, MemorySearchScope, SearchContentType, SearchMode,
-    SearchOptions, SkillError, SkillInfo, SkillMetadata, SkillUsageStats,
+    BlockFilter, BlockMetadata, BlockSchema, MemorySearchScope, Scope, SearchContentType,
+    SearchMode, SearchOptions, SkillError, SkillInfo, SkillMetadata, SkillUsageStats,
 };
 
 use crate::sdk::describe::{DescribeEffect, EffectDecl};
@@ -82,6 +82,7 @@ impl EffectHandler<SessionContext> for SkillsHandler {
         cx: &EffectContext<'_, SessionContext>,
     ) -> Result<Value, EffectError> {
         let agent_id = cx.user().agent_id().to_string();
+        let scope = cx.user().default_scope().clone();
         let store = cx.user().memory_store();
         let state = cx.user().cancel_state();
         let _guard = HandlerGuard::enter(&state.gate);
@@ -105,7 +106,7 @@ impl EffectHandler<SessionContext> for SkillsHandler {
                 let conn = cx.user().db().get().map_err(|e| {
                     EffectError::Handler(format!("Pattern.Skills::List: db connection: {e}"))
                 })?;
-                let infos = handle_list(&*store, &conn, &agent_id)?;
+                let infos = handle_list(&*store, &conn, &scope)?;
                 let items: Vec<String> = infos
                     .iter()
                     .map(|info| serde_json::to_string(info).unwrap_or_default())
@@ -113,7 +114,7 @@ impl EffectHandler<SessionContext> for SkillsHandler {
                 cx.respond(items)
             }
             SkillsReq::GetMetadata(handle) => {
-                let result = handle_get_metadata(&*store, &agent_id, &handle)?;
+                let result = handle_get_metadata(&*store, &scope, &handle)?;
                 cx.respond(
                     result
                         .map(|m| serde_json::to_string(&m).unwrap_or_default())
@@ -124,14 +125,14 @@ impl EffectHandler<SessionContext> for SkillsHandler {
                 let mut conn = cx.user().db().get().map_err(|e| {
                     EffectError::Handler(format!("Pattern.Skills::Load: db connection: {e}"))
                 })?;
-                let rendered = handle_load(&*store, &mut conn, &agent_id, &handle)?;
+                let rendered = handle_load(&*store, &mut conn, &scope, &agent_id, &handle)?;
                 cx.respond(rendered)
             }
             SkillsReq::Search(query) => {
                 let conn = cx.user().db().get().map_err(|e| {
                     EffectError::Handler(format!("Pattern.Skills::Search: db connection: {e}"))
                 })?;
-                let infos = handle_search(&*store, &conn, &agent_id, &query)?;
+                let infos = handle_search(&*store, &conn, &scope, &query)?;
                 let items: Vec<String> = infos
                     .iter()
                     .map(|info| serde_json::to_string(info).unwrap_or_default())
@@ -144,7 +145,7 @@ impl EffectHandler<SessionContext> for SkillsHandler {
                         "Pattern.Skills::GetUsageStats: db connection: {e}"
                     ))
                 })?;
-                let stats = handle_get_usage_stats(&*store, &conn, &agent_id, &handle)?;
+                let stats = handle_get_usage_stats(&*store, &conn, &scope, &handle)?;
                 cx.respond(serde_json::to_string(&stats).unwrap_or_default())
             }
         }
@@ -216,7 +217,7 @@ fn project_skill_metadata(
 
 // region: handlers
 
-/// List all Skill-schema blocks visible to `agent_id`.
+/// List all Skill-schema blocks visible to `scope`.
 ///
 /// Enumerates blocks via `store.list_blocks`, filters to `BlockSchema::Skill`,
 /// projects each block's LoroDoc into `SkillMetadata`, batch-fetches usage
@@ -225,10 +226,13 @@ fn project_skill_metadata(
 pub fn handle_list(
     store: &dyn MemoryStore,
     conn: &rusqlite::Connection,
-    agent_id: &str,
+    scope: &Scope,
 ) -> Result<Vec<SkillInfo>, SkillHandlerError> {
+    // Use an unscoped filter so that MemoryScope (if present) can apply its
+    // IsolatePolicy routing. A scoped filter would set filter.agent_id and bypass
+    // MemoryScope's routing at line 219 of scope/wrapper.rs.
     let all_meta = store
-        .list_blocks(BlockFilter::by_agent(agent_id))
+        .list_blocks(BlockFilter::default())
         .map_err(|e| SkillHandlerError::Store(e.to_string()))?;
 
     // Filter to Skill-schema blocks only.
@@ -254,11 +258,19 @@ pub fn handle_list(
     let mut infos = Vec::with_capacity(skill_meta.len());
     for meta in &skill_meta {
         let handle = BlockHandle::new(&meta.label);
+
+        // Reconstruct the block's own scope from its encoded agent_id (e.g.
+        // "local:project-a" or "global:persona-a"). This is necessary because
+        // MemoryScope returns project blocks from list_blocks(default()) under
+        // Full isolation, but get_block(caller_scope, …) returns None for a
+        // Global (persona) scope under Full isolation. Using the block's own
+        // scope bypasses that routing asymmetry and fetches the doc directly.
+        let block_scope = Scope::from_db_key(&meta.agent_id).unwrap_or_else(|| scope.clone());
         let sdoc = store
-            .get_block(agent_id, &meta.label)
+            .get_block(&block_scope, &meta.label)
             .map_err(|e| SkillHandlerError::Store(e.to_string()))?
             .ok_or_else(|| SkillHandlerError::BlockNotFound {
-                agent: agent_id.to_string(),
+                agent: block_scope.id().to_string(),
                 block: meta.label.clone(),
             })?;
 
@@ -285,14 +297,14 @@ pub fn handle_list(
 /// if the block doesn't exist.
 pub fn handle_get_metadata(
     store: &dyn MemoryStore,
-    agent_id: &str,
+    scope: &Scope,
     handle: &str,
 ) -> Result<Option<SkillMetadata>, SkillHandlerError> {
     let sdoc = store
-        .get_block(agent_id, handle)
+        .get_block(scope, handle)
         .map_err(|e| SkillHandlerError::Store(e.to_string()))?
         .ok_or_else(|| SkillHandlerError::BlockNotFound {
-            agent: agent_id.to_string(),
+            agent: scope.id().to_string(),
             block: handle.to_string(),
         })?;
 
@@ -313,15 +325,15 @@ pub fn handle_get_metadata(
 pub fn handle_get_usage_stats(
     store: &dyn MemoryStore,
     conn: &rusqlite::Connection,
-    agent_id: &str,
+    scope: &Scope,
     handle: &str,
 ) -> Result<SkillUsageStats, SkillHandlerError> {
-    // Verify the block exists and is visible to this agent.
+    // Verify the block exists and is visible to this scope.
     let sdoc = store
-        .get_block(agent_id, handle)
+        .get_block(scope, handle)
         .map_err(|e| SkillHandlerError::Store(e.to_string()))?
         .ok_or_else(|| SkillHandlerError::BlockNotFound {
-            agent: agent_id.to_string(),
+            agent: scope.id().to_string(),
             block: handle.to_string(),
         })?;
 
@@ -352,7 +364,7 @@ pub fn handle_get_usage_stats(
 pub fn handle_search(
     store: &dyn MemoryStore,
     conn: &rusqlite::Connection,
-    agent_id: &str,
+    scope: &Scope,
     query: &str,
 ) -> Result<Vec<SkillInfo>, SkillHandlerError> {
     let opts = SearchOptions {
@@ -362,7 +374,11 @@ pub fn handle_search(
     };
 
     let search_results = store
-        .search(query, opts, MemorySearchScope::Agent(agent_id.into()))
+        .search(
+            query,
+            opts,
+            MemorySearchScope::Scope(Scope::Global(scope.id().into())),
+        )
         .map_err(|e| SkillHandlerError::Store(e.to_string()))?;
 
     if search_results.is_empty() {
@@ -373,9 +389,11 @@ pub fn handle_search(
     // Results are already ordered by BM25 score (descending) from the store.
     let result_ids: Vec<&str> = search_results.iter().map(|r| r.id.as_str()).collect();
 
-    // Enumerate all Skill blocks for this agent to build a label↔id mapping.
+    // Enumerate all Skill blocks visible to this scope to build a label↔id mapping.
+    // Use an unscoped filter so that MemoryScope (if present) can apply its
+    // IsolatePolicy routing — same rationale as handle_list.
     let all_meta = store
-        .list_blocks(BlockFilter::by_agent(agent_id))
+        .list_blocks(BlockFilter::default())
         .map_err(|e| SkillHandlerError::Store(e.to_string()))?;
 
     // Build a map from memory_id → BlockMetadata for Skill blocks only.
@@ -387,31 +405,36 @@ pub fn handle_search(
         .collect();
 
     // Walk search results in BM25 order; keep only Skill hits.
-    let mut matched_labels: Vec<String> = Vec::new();
+    // Carry the block's own encoded agent_id so we can reconstruct the scope
+    // for get_block — necessary for project blocks under Full isolation (see
+    // handle_list for the same rationale).
+    let mut matched: Vec<(String, Scope)> = Vec::new();
     for id in &result_ids {
         if let Some(meta) = skill_by_id.get(*id) {
-            matched_labels.push(meta.label.clone());
+            let block_scope =
+                Scope::from_db_key(&meta.agent_id).unwrap_or_else(|| scope.clone());
+            matched.push((meta.label.clone(), block_scope));
         }
     }
 
-    if matched_labels.is_empty() {
+    if matched.is_empty() {
         return Ok(Vec::new());
     }
 
     // Batch-fetch usage stats for matched skill labels.
-    let handles: Vec<BlockHandle> = matched_labels.iter().map(BlockHandle::new).collect();
+    let handles: Vec<BlockHandle> = matched.iter().map(|(l, _)| BlockHandle::new(l)).collect();
     let usage_map = pattern_db::queries::skill_usage::get_usage_stats_batch(conn, &handles)
         .map_err(|e| SkillHandlerError::Sqlite(e.to_string()))?;
 
     // Project each matched skill into SkillInfo, preserving BM25 order.
-    let mut infos = Vec::with_capacity(matched_labels.len());
-    for label in &matched_labels {
+    let mut infos = Vec::with_capacity(matched.len());
+    for (label, block_scope) in &matched {
         let handle = BlockHandle::new(label);
         let sdoc = store
-            .get_block(agent_id, label)
+            .get_block(block_scope, label)
             .map_err(|e| SkillHandlerError::Store(e.to_string()))?
             .ok_or_else(|| SkillHandlerError::BlockNotFound {
-                agent: agent_id.to_string(),
+                agent: block_scope.id().to_string(),
                 block: label.clone(),
             })?;
 
@@ -449,15 +472,16 @@ pub fn handle_search(
 pub fn handle_load(
     store: &dyn MemoryStore,
     conn: &mut rusqlite::Connection,
+    scope: &Scope,
     agent_id: &str,
     handle: &str,
 ) -> Result<String, SkillHandlerError> {
     // 1. Fetch block.
     let sdoc = store
-        .get_block(agent_id, handle)
+        .get_block(scope, handle)
         .map_err(|e| SkillHandlerError::Store(e.to_string()))?
         .ok_or_else(|| SkillHandlerError::BlockNotFound {
-            agent: agent_id.to_string(),
+            agent: scope.id().to_string(),
             block: handle.to_string(),
         })?;
 
@@ -539,19 +563,19 @@ mod tests {
         }
     }
 
-    /// Seed a Skill block into `store` for `agent_id` at `label`, with `metadata`
+    /// Seed a Skill block into `store` for `scope` at `label`, with `metadata`
     /// and `body`. The LoroDoc is wired via `write_skill_to_loro_doc` so that
     /// `project_metadata_from_loro` returns valid data.
     fn seed_skill(
         store: &Arc<crate::testing::in_memory_store::InMemoryMemoryStore>,
-        agent_id: &str,
+        scope: &Scope,
         label: &str,
         metadata: SkillMetadata,
         body: &str,
     ) {
         let doc = store
             .create_block(
-                agent_id,
+                scope,
                 BlockCreate::new(label, MemoryBlockType::Working, skill_schema()),
             )
             .expect("create Skill block");
@@ -580,25 +604,25 @@ mod tests {
         // Seed 3 Skill blocks + 2 Text blocks. handle_list must return exactly 3.
         let store = Arc::new(crate::testing::in_memory_store::InMemoryMemoryStore::new());
         let conn = open_test_db();
-        let agent = "agent-test";
+        let scope = Scope::Global("agent-test".into());
 
         seed_skill(
             &store,
-            agent,
+            &scope,
             "skill-a",
             make_skill_metadata("skill-a"),
             "Body A.",
         );
         seed_skill(
             &store,
-            agent,
+            &scope,
             "skill-b",
             make_skill_metadata("skill-b"),
             "Body B.",
         );
         seed_skill(
             &store,
-            agent,
+            &scope,
             "skill-c",
             make_skill_metadata("skill-c"),
             "Body C.",
@@ -607,18 +631,18 @@ mod tests {
         // Seed two Text blocks (should not appear in list results).
         store
             .create_block(
-                agent,
+                &scope,
                 BlockCreate::new("note-1", MemoryBlockType::Working, text_schema()),
             )
             .unwrap();
         store
             .create_block(
-                agent,
+                &scope,
                 BlockCreate::new("note-2", MemoryBlockType::Working, text_schema()),
             )
             .unwrap();
 
-        let infos = handle_list(&*store, &conn, agent).expect("handle_list should succeed");
+        let infos = handle_list(&*store, &conn, &scope).expect("handle_list should succeed");
         assert_eq!(
             infos.len(),
             3,
@@ -641,18 +665,19 @@ mod tests {
         // handle_list must return Some(timestamp) for the loaded skill, None for the other.
         let store = Arc::new(crate::testing::in_memory_store::InMemoryMemoryStore::new());
         let mut conn = open_test_db();
+        let scope = Scope::Global("agent-test".into());
         let agent = "agent-test";
 
         seed_skill(
             &store,
-            agent,
+            &scope,
             "skill-loaded",
             make_skill_metadata("skill-loaded"),
             "body.",
         );
         seed_skill(
             &store,
-            agent,
+            &scope,
             "skill-fresh",
             make_skill_metadata("skill-fresh"),
             "body.",
@@ -667,7 +692,7 @@ mod tests {
             tx.commit().unwrap();
         }
 
-        let infos = handle_list(&*store, &conn, agent).expect("handle_list ok");
+        let infos = handle_list(&*store, &conn, &scope).expect("handle_list ok");
         assert_eq!(infos.len(), 2);
 
         let loaded = infos.iter().find(|i| i.name == "skill-loaded").unwrap();
@@ -690,7 +715,7 @@ mod tests {
     fn get_metadata_returns_typed_frontmatter() {
         // Seed a skill with nested hooks JSON. get_metadata must return the same JSON.
         let store = Arc::new(crate::testing::in_memory_store::InMemoryMemoryStore::new());
-        let agent = "agent-test";
+        let scope = Scope::Global("agent-test".into());
 
         let hooks_value = serde_json::json!({
             "on_turn_start": [{"inject_context": "Remember the checklist."}],
@@ -703,9 +728,9 @@ mod tests {
             keywords: vec!["hook".to_string(), "injection".to_string()],
             hooks: hooks_value.clone(),
         };
-        seed_skill(&store, agent, "hooked-skill", metadata, "The skill body.\n");
+        seed_skill(&store, &scope, "hooked-skill", metadata, "The skill body.\n");
 
-        let result = handle_get_metadata(&*store, agent, "hooked-skill")
+        let result = handle_get_metadata(&*store, &scope, "hooked-skill")
             .expect("get_metadata should succeed");
 
         let returned = result.expect("expected Some(SkillMetadata), got None");
@@ -725,16 +750,16 @@ mod tests {
     fn get_metadata_on_text_block_returns_none() {
         // A Text-schema block returns None from get_metadata (not an error).
         let store = Arc::new(crate::testing::in_memory_store::InMemoryMemoryStore::new());
-        let agent = "agent-test";
+        let scope = Scope::Global("agent-test".into());
 
         store
             .create_block(
-                agent,
+                &scope,
                 BlockCreate::new("my-note", MemoryBlockType::Working, text_schema()),
             )
             .unwrap();
 
-        let result = handle_get_metadata(&*store, agent, "my-note")
+        let result = handle_get_metadata(&*store, &scope, "my-note")
             .expect("get_metadata on text block should not error");
 
         assert!(
@@ -750,17 +775,17 @@ mod tests {
         // A skill that has never been loaded returns SkillUsageStats::default().
         let store = Arc::new(crate::testing::in_memory_store::InMemoryMemoryStore::new());
         let conn = open_test_db();
-        let agent = "agent-test";
+        let scope = Scope::Global("agent-test".into());
 
         seed_skill(
             &store,
-            agent,
+            &scope,
             "brand-new",
             make_skill_metadata("brand-new"),
             "body.",
         );
 
-        let stats = handle_get_usage_stats(&*store, &conn, agent, "brand-new")
+        let stats = handle_get_usage_stats(&*store, &conn, &scope, "brand-new")
             .expect("get_usage_stats should succeed for new skill");
 
         assert_eq!(
@@ -779,11 +804,12 @@ mod tests {
         // Call record_usage 3 times; handler must return use_count == 3.
         let store = Arc::new(crate::testing::in_memory_store::InMemoryMemoryStore::new());
         let mut conn = open_test_db();
+        let scope = Scope::Global("agent-test".into());
         let agent = "agent-test";
 
         seed_skill(
             &store,
-            agent,
+            &scope,
             "counted-skill",
             make_skill_metadata("counted-skill"),
             "body.",
@@ -801,7 +827,7 @@ mod tests {
             tx.commit().unwrap();
         }
 
-        let stats = handle_get_usage_stats(&*store, &conn, agent, "counted-skill")
+        let stats = handle_get_usage_stats(&*store, &conn, &scope, "counted-skill")
             .expect("get_usage_stats should succeed after loads");
 
         assert_eq!(
@@ -822,9 +848,10 @@ mod tests {
         // AC8.5: handle that doesn't exist returns BlockNotFound.
         let store = Arc::new(crate::testing::in_memory_store::InMemoryMemoryStore::new());
         let mut conn = open_test_db();
+        let scope = Scope::Global("agent-test".into());
         let agent = "agent-test";
 
-        let err = handle_load(&*store, &mut conn, agent, "no-such-skill")
+        let err = handle_load(&*store, &mut conn, &scope, agent, "no-such-skill")
             .expect_err("must error for missing block");
         assert!(
             matches!(err, SkillHandlerError::BlockNotFound { .. }),
@@ -837,16 +864,17 @@ mod tests {
         // AC8.6: handle on a Text block returns SkillError::NotASkill.
         let store = Arc::new(crate::testing::in_memory_store::InMemoryMemoryStore::new());
         let mut conn = open_test_db();
+        let scope = Scope::Global("agent-test".into());
         let agent = "agent-test";
 
         store
             .create_block(
-                agent,
+                &scope,
                 BlockCreate::new("notes", MemoryBlockType::Working, text_schema()),
             )
             .expect("create text block");
 
-        let err = handle_load(&*store, &mut conn, agent, "notes")
+        let err = handle_load(&*store, &mut conn, &scope, agent, "notes")
             .expect_err("must error for non-skill block");
         match err {
             SkillHandlerError::Skill(SkillError::NotASkill(h)) => {
@@ -862,18 +890,19 @@ mod tests {
         // (markers + frontmatter line + full body) as the tool_result content.
         let store = Arc::new(crate::testing::in_memory_store::InMemoryMemoryStore::new());
         let mut conn = open_test_db();
+        let scope = Scope::Global("agent-test".into());
         let agent = "agent-test";
 
         seed_skill(
             &store,
-            agent,
+            &scope,
             "fix-auth",
             make_skill_metadata("fix-auth"),
             "## Overview\n\nHandles OAuth2.\n",
         );
 
         let rendered =
-            handle_load(&*store, &mut conn, agent, "fix-auth").expect("load must succeed");
+            handle_load(&*store, &mut conn, &scope, agent, "fix-auth").expect("load must succeed");
 
         assert!(
             rendered.contains("[skill:loaded]"),
@@ -909,18 +938,19 @@ mod tests {
         // AC9.3: 5 loads → use_count == 5.
         let store = Arc::new(crate::testing::in_memory_store::InMemoryMemoryStore::new());
         let mut conn = open_test_db();
+        let scope = Scope::Global("agent-test".into());
         let agent = "agent-test";
 
         seed_skill(
             &store,
-            agent,
+            &scope,
             "skill-x",
             make_skill_metadata("skill-x"),
             "Body.",
         );
 
         for _ in 0..5 {
-            handle_load(&*store, &mut conn, agent, "skill-x").expect("load must succeed");
+            handle_load(&*store, &mut conn, &scope, agent, "skill-x").expect("load must succeed");
         }
 
         let bh = BlockHandle::new("skill-x");
@@ -940,11 +970,12 @@ mod tests {
         // canonical-file-on-disk invariant is covered by skills_load_mode_a.rs.
         let store = Arc::new(crate::testing::in_memory_store::InMemoryMemoryStore::new());
         let mut conn = open_test_db();
+        let scope = Scope::Global("agent-test".into());
         let agent = "agent-test";
 
         seed_skill(
             &store,
-            agent,
+            &scope,
             "skill-stable",
             make_skill_metadata("skill-stable"),
             "stable body content\n",
@@ -952,7 +983,7 @@ mod tests {
 
         let body_before = {
             let sdoc = store
-                .get_block(agent, "skill-stable")
+                .get_block(&scope, "skill-stable")
                 .unwrap()
                 .expect("block exists");
             sdoc.inner().get_text("body").to_string()
@@ -960,12 +991,13 @@ mod tests {
         let hash_before = blake3::hash(body_before.as_bytes());
 
         for _ in 0..100 {
-            handle_load(&*store, &mut conn, agent, "skill-stable").expect("load must succeed");
+            handle_load(&*store, &mut conn, &scope, agent, "skill-stable")
+                .expect("load must succeed");
         }
 
         let body_after = {
             let sdoc = store
-                .get_block(agent, "skill-stable")
+                .get_block(&scope, "skill-stable")
                 .unwrap()
                 .expect("block exists");
             sdoc.inner().get_text("body").to_string()
@@ -986,25 +1018,26 @@ mod tests {
         // each call's output goes to its own tool_result_msg in the wire turn.)
         let store = Arc::new(crate::testing::in_memory_store::InMemoryMemoryStore::new());
         let mut conn = open_test_db();
+        let scope = Scope::Global("agent-test".into());
         let agent = "agent-test";
 
         seed_skill(
             &store,
-            agent,
+            &scope,
             "skill-alpha",
             make_skill_metadata("skill-alpha"),
             "Alpha body.",
         );
         seed_skill(
             &store,
-            agent,
+            &scope,
             "skill-beta",
             make_skill_metadata("skill-beta"),
             "Beta body.",
         );
 
-        let alpha_text = handle_load(&*store, &mut conn, agent, "skill-alpha").unwrap();
-        let beta_text = handle_load(&*store, &mut conn, agent, "skill-beta").unwrap();
+        let alpha_text = handle_load(&*store, &mut conn, &scope, agent, "skill-alpha").unwrap();
+        let beta_text = handle_load(&*store, &mut conn, &scope, agent, "skill-beta").unwrap();
 
         assert!(alpha_text.contains("name=\"skill-alpha\""));
         assert!(alpha_text.contains("Alpha body."));
@@ -1020,18 +1053,19 @@ mod tests {
         // call returns its own text. use_count increments by 1 per call.
         let store = Arc::new(crate::testing::in_memory_store::InMemoryMemoryStore::new());
         let mut conn = open_test_db();
+        let scope = Scope::Global("agent-test".into());
         let agent = "agent-test";
 
         seed_skill(
             &store,
-            agent,
+            &scope,
             "skill-twice",
             make_skill_metadata("skill-twice"),
             "Body.",
         );
 
-        let first = handle_load(&*store, &mut conn, agent, "skill-twice").unwrap();
-        let second = handle_load(&*store, &mut conn, agent, "skill-twice").unwrap();
+        let first = handle_load(&*store, &mut conn, &scope, agent, "skill-twice").unwrap();
+        let second = handle_load(&*store, &mut conn, &scope, agent, "skill-twice").unwrap();
 
         assert!(first.contains("[skill:loaded]"));
         assert!(second.contains("[skill:loaded]"));
@@ -1060,16 +1094,18 @@ mod tests {
 
         let store = Arc::new(crate::testing::in_memory_store::InMemoryMemoryStore::new());
         let mut conn = open_test_db();
+        let scope = Scope::Global("agent-test".into());
         let agent = "agent-test";
 
         seed_skill(
             &store,
-            agent,
+            &scope,
             "skill-flow",
             make_skill_metadata("skill-flow"),
             "Flow body.",
         );
-        let rendered = handle_load(&*store, &mut conn, agent, "skill-flow").expect("load");
+        let rendered =
+            handle_load(&*store, &mut conn, &scope, agent, "skill-flow").expect("load");
 
         // Synthesize a Message wrapping a tool ChatMessage carrying the
         // rendered text. (Production code synthesizes this in agent_loop's
@@ -1203,9 +1239,10 @@ mod search_tests {
     /// Seed a Skill block into `cache`, wire the LoroDoc, then persist so
     /// the FTS5 index is updated.
     fn seed_and_persist(cache: &MemoryCache, label: &str, metadata: SkillMetadata, body: &str) {
+        let scope = Scope::Global(AGENT.into());
         cache
             .create_block(
-                AGENT,
+                &scope,
                 BlockCreate::new(
                     label,
                     MemoryBlockType::Working,
@@ -1217,7 +1254,7 @@ mod search_tests {
             .unwrap();
 
         let doc = cache
-            .get_block(AGENT, label)
+            .get_block(&scope, label)
             .unwrap()
             .expect("block must exist after create");
 
@@ -1229,8 +1266,8 @@ mod search_tests {
         write_skill_to_loro_doc(&skill_file, doc.inner()).unwrap();
         doc.inner().commit();
 
-        cache.mark_dirty(AGENT, label);
-        cache.persist_block(AGENT, label).unwrap();
+        cache.mark_dirty(&scope.to_db_key(), label);
+        cache.persist_block(&scope, label).unwrap();
     }
 
     // ---- search_matches_skill_name ---------------------------------------
@@ -1267,8 +1304,9 @@ mod search_tests {
             "Nothing here.\n",
         );
 
+        let scope = Scope::Global(AGENT.into());
         let results =
-            handle_search(&cache, &conn, AGENT, "authentication").expect("search should succeed");
+            handle_search(&cache, &conn, &scope, "authentication").expect("search should succeed");
 
         assert_eq!(
             results.len(),
@@ -1315,7 +1353,8 @@ mod search_tests {
             "File body.\n",
         );
 
-        let results = handle_search(&cache, &conn, AGENT, "token").expect("search should succeed");
+        let scope = Scope::Global(AGENT.into());
+        let results = handle_search(&cache, &conn, &scope, "token").expect("search should succeed");
 
         assert_eq!(
             results.len(),
@@ -1359,8 +1398,9 @@ mod search_tests {
             "Creates new user sessions.\n",
         );
 
+        let scope = Scope::Global(AGENT.into());
         let results =
-            handle_search(&cache, &conn, AGENT, "Revokes").expect("search should succeed");
+            handle_search(&cache, &conn, &scope, "Revokes").expect("search should succeed");
 
         assert_eq!(
             results.len(),
@@ -1421,8 +1461,9 @@ mod search_tests {
             "Automates certificate and API key security rotation.\n",
         );
 
+        let scope = Scope::Global(AGENT.into());
         let results =
-            handle_search(&cache, &conn, AGENT, "security").expect("search should succeed");
+            handle_search(&cache, &conn, &scope, "security").expect("search should succeed");
 
         assert_eq!(
             results.len(),

@@ -10,7 +10,9 @@ use std::time::Duration;
 
 use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::BlockCreate;
-use pattern_core::types::memory_types::{BlockFilter, BlockSchema, MemoryBlockType, MemoryError};
+use pattern_core::types::memory_types::{
+    BlockFilter, BlockSchema, MemoryBlockType, MemoryError, Scope,
+};
 use pattern_db::{ConstellationDb, Json, models};
 use pattern_memory::MemoryCache;
 
@@ -107,9 +109,10 @@ async fn concurrent_memory_cache_stress() {
                 // WAL mode allows only one writer at a time; under heavy
                 // concurrency the busy_timeout may be exhausted if many
                 // writers queue up simultaneously.
+                let scope = Scope::Global(agent_id.as_str().into());
                 let doc = retry_on_locked(|| {
                     cache_clone.create_block(
-                        &agent_id,
+                        &scope,
                         BlockCreate::new(&label, MemoryBlockType::Working, BlockSchema::text()),
                     )
                 })
@@ -119,7 +122,7 @@ async fn concurrent_memory_cache_stress() {
                     .unwrap_or_else(|e| panic!("set_text {label} failed: {e}"));
 
                 cache_clone.mark_dirty(&agent_id, &label);
-                retry_on_locked(|| cache_clone.persist_block(&agent_id, &label))
+                retry_on_locked(|| cache_clone.persist_block(&scope, &label))
                     .unwrap_or_else(|e| panic!("persist {label} failed after retries: {e}"));
             }
         });
@@ -154,8 +157,9 @@ async fn concurrent_memory_cache_stress() {
     // Spot-check: each agent should have exactly writes_per_agent blocks.
     for i in 0..n_agents {
         let agent_id = format!("stress-agent-{i}");
+        let scope = Scope::Global(agent_id.clone().into());
         let agent_blocks = cache
-            .list_blocks(BlockFilter::by_agent(&agent_id))
+            .list_blocks(BlockFilter::by_scope(&scope))
             .expect("list per agent");
         assert_eq!(
             agent_blocks.len(),
@@ -198,10 +202,11 @@ async fn concurrent_multi_cache_stress() {
             let agent_id = format!("stress-agent-{i}");
             for turn in 0..writes_per_cache {
                 let label = format!("mc-block-{i}-{turn}");
+                let scope = Scope::Global(agent_id.as_str().into());
 
                 let doc = retry_on_locked(|| {
                     cache.create_block(
-                        &agent_id,
+                        &scope,
                         BlockCreate::new(&label, MemoryBlockType::Working, BlockSchema::text()),
                     )
                 })
@@ -211,7 +216,7 @@ async fn concurrent_multi_cache_stress() {
                     .unwrap_or_else(|e| panic!("set_text {label} failed: {e}"));
 
                 cache.mark_dirty(&agent_id, &label);
-                retry_on_locked(|| cache.persist_block(&agent_id, &label))
+                retry_on_locked(|| cache.persist_block(&scope, &label))
                     .unwrap_or_else(|e| panic!("persist {label} failed: {e}"));
             }
         });
@@ -248,8 +253,9 @@ async fn concurrent_multi_cache_stress() {
     // Spot-check per-agent block count.
     for i in 0..n_caches {
         let agent_id = format!("stress-agent-{i}");
+        let scope = Scope::Global(agent_id.clone().into());
         let agent_blocks = verify_cache
-            .list_blocks(BlockFilter::by_agent(&agent_id))
+            .list_blocks(BlockFilter::by_scope(&scope))
             .expect("list per agent");
         assert_eq!(
             agent_blocks.len(),

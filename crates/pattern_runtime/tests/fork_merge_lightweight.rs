@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::BlockCreate;
-use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
+use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType, Scope};
 use pattern_memory::MemoryCache;
 use pattern_runtime::spawn::fork::{ForkError, ForkHandle};
 
@@ -54,24 +54,27 @@ fn seed_text_block(cache: &MemoryCache, agent_id: &str, label: &str, content: &s
         MemoryBlockType::Working,
         BlockSchema::text(),
     );
-    cache.create_block(agent_id, bc).expect("create_block");
+    cache.create_block(&Scope::global(agent_id), bc).expect("create_block");
     let doc = cache
-        .get(agent_id, label)
+        .get(&Scope::global(agent_id).to_db_key(), label)
         .expect("get after create")
         .expect("block must exist after create");
     doc.set_text(content, true).expect("set_text");
 }
 
 /// Build a lightweight ForkHandle for the given parent cache and child cache.
+///
+/// Takes encoded scope keys (`"global:..."`) for both parent and child.
 fn make_fork_handle(
     parent_cache: &Arc<MemoryCache>,
-    parent_id: &str,
+    parent_key: &str,
+    child_key: &str,
     child_id: &str,
 ) -> (Arc<MemoryCache>, ForkHandle) {
     // Ensure the block is in the parent cache before forking.
     let child_cache = Arc::new(
         parent_cache
-            .fork_for_child(parent_id, child_id)
+            .fork_for_child(parent_key, child_key)
             .expect("fork_for_child"),
     );
     let cancel = Arc::new(pattern_runtime::timeout::CancelState::new());
@@ -79,7 +82,7 @@ fn make_fork_handle(
         "fork-merge-test".into(),
         child_id.into(),
         Arc::clone(&child_cache),
-        parent_id.into(),
+        parent_key.into(),
         Arc::downgrade(parent_cache),
         cancel,
     );
@@ -96,19 +99,21 @@ fn make_fork_handle(
 fn merge_back_imports_fork_write_ac4_3() {
     let parent_id = "ac4-3-parent";
     let child_id = "ac4-3-child";
+    let parent_key = Scope::global(parent_id).to_db_key();
+    let child_key = Scope::global(child_id).to_db_key();
 
     let parent_cache = open_cache(parent_id, child_id);
     seed_text_block(&parent_cache, parent_id, "notes", "initial");
 
     // Load block into cache.
-    let _ = parent_cache.get(parent_id, "notes").unwrap().unwrap();
+    let _ = parent_cache.get(&parent_key, "notes").unwrap().unwrap();
 
-    let (child_cache, handle) = make_fork_handle(&parent_cache, parent_id, child_id);
+    let (child_cache, handle) = make_fork_handle(&parent_cache, &parent_key, &child_key, child_id);
 
     // Fork writes new content.
     {
         let child_doc = child_cache
-            .get_cached_doc(child_id, "notes")
+            .get_cached_doc(&child_key, "notes")
             .expect("child must have notes block");
         child_doc.set_text("fork-write", true).expect("set_text");
     }
@@ -125,7 +130,7 @@ fn merge_back_imports_fork_write_ac4_3() {
 
     // Parent now reflects the fork's content (merged via LoroDoc::import).
     let parent_doc = parent_cache
-        .get(parent_id, "notes")
+        .get(&parent_key, "notes")
         .expect("get")
         .expect("block present");
     let merged_content = parent_doc.text_content();
@@ -151,14 +156,16 @@ fn merge_back_imports_fork_write_ac4_3() {
 fn diamond_concurrent_edit_merges_both_sides_ac4_9() {
     let parent_id = "ac4-9-parent";
     let child_id = "ac4-9-child";
+    let parent_key = Scope::global(parent_id).to_db_key();
+    let child_key = Scope::global(child_id).to_db_key();
 
     let parent_cache = open_cache(parent_id, child_id);
     seed_text_block(&parent_cache, parent_id, "notes", "hello");
 
     // Load block into cache.
-    let _ = parent_cache.get(parent_id, "notes").unwrap().unwrap();
+    let _ = parent_cache.get(&parent_key, "notes").unwrap().unwrap();
 
-    let (child_cache, handle) = make_fork_handle(&parent_cache, parent_id, child_id);
+    let (child_cache, handle) = make_fork_handle(&parent_cache, &parent_key, &child_key, child_id);
 
     // Assign deterministic peer IDs so Loro's tie-breaking is stable across
     // test-suite runs regardless of parallel execution order.  Lower peer ID
@@ -166,14 +173,14 @@ fn diamond_concurrent_edit_merges_both_sides_ac4_9() {
     // the expected merge result is "hello world fork".
     {
         let parent_doc = parent_cache
-            .get(parent_id, "notes")
+            .get(&parent_key, "notes")
             .expect("get")
             .expect("block present for peer-id seeding");
         parent_doc.set_peer_id(1).expect("set parent peer_id");
     }
     {
         let child_doc = child_cache
-            .get_cached_doc(child_id, "notes")
+            .get_cached_doc(&child_key, "notes")
             .expect("child notes block for peer-id seeding");
         child_doc.set_peer_id(2).expect("set child peer_id");
     }
@@ -181,7 +188,7 @@ fn diamond_concurrent_edit_merges_both_sides_ac4_9() {
     // Parent writes AFTER fork.
     {
         let parent_doc = parent_cache
-            .get(parent_id, "notes")
+            .get(&parent_key, "notes")
             .expect("get")
             .expect("block present");
         parent_doc
@@ -192,7 +199,7 @@ fn diamond_concurrent_edit_merges_both_sides_ac4_9() {
     // Fork writes AFTER fork.
     {
         let child_doc = child_cache
-            .get_cached_doc(child_id, "notes")
+            .get_cached_doc(&child_key, "notes")
             .expect("child notes block");
         child_doc
             .append_text(" fork", true)
@@ -211,7 +218,7 @@ fn diamond_concurrent_edit_merges_both_sides_ac4_9() {
 
     // Get final merged content and snapshot it.
     let parent_doc = parent_cache
-        .get(parent_id, "notes")
+        .get(&parent_key, "notes")
         .expect("get")
         .expect("block present");
     let merged = parent_doc.text_content();
@@ -237,16 +244,18 @@ fn diamond_concurrent_edit_merges_both_sides_ac4_9() {
 fn merge_report_counts_are_accurate() {
     let parent_id = "mr-count-parent";
     let child_id = "mr-count-child";
+    let parent_key = Scope::global(parent_id).to_db_key();
+    let child_key = Scope::global(child_id).to_db_key();
 
     let parent_cache = open_cache(parent_id, child_id);
 
     // Create two blocks.
     for label in ["block-a", "block-b"] {
         seed_text_block(&parent_cache, parent_id, label, "initial");
-        let _ = parent_cache.get(parent_id, label).unwrap().unwrap();
+        let _ = parent_cache.get(&parent_key, label).unwrap().unwrap();
     }
 
-    let (_, handle) = make_fork_handle(&parent_cache, parent_id, child_id);
+    let (_, handle) = make_fork_handle(&parent_cache, &parent_key, &child_key, child_id);
 
     let report = handle.merge_back_lightweight().expect("merge must succeed");
 
@@ -297,14 +306,16 @@ fn merge_back_wrong_isolation_returns_error() {
 fn merge_back_dropped_parent_returns_error() {
     let parent_id = "pd-parent";
     let child_id = "pd-child";
+    let parent_key = Scope::global(parent_id).to_db_key();
+    let child_key = Scope::global(child_id).to_db_key();
 
     let parent_cache = open_cache(parent_id, child_id);
     seed_text_block(&parent_cache, parent_id, "notes", "content");
-    let _ = parent_cache.get(parent_id, "notes").unwrap().unwrap();
+    let _ = parent_cache.get(&parent_key, "notes").unwrap().unwrap();
 
     let child_cache = Arc::new(
         parent_cache
-            .fork_for_child(parent_id, child_id)
+            .fork_for_child(&parent_key, &child_key)
             .expect("fork_for_child"),
     );
     let cancel = Arc::new(pattern_runtime::timeout::CancelState::new());
@@ -313,7 +324,7 @@ fn merge_back_dropped_parent_returns_error() {
         "test".into(),
         child_id.into(),
         child_cache,
-        parent_id.into(),
+        parent_key.into(),
         weak_parent,
         cancel,
     );
@@ -383,12 +394,14 @@ proptest! {
         // Force the block into the cache before forking. Pin the parent peer
         // ID immediately after the seed write commits so subsequent appends
         // on this side are attributed to PARENT_PEER.
-        let parent_doc = parent_cache.get(parent_id, "notes").unwrap().unwrap();
+        let parent_key = Scope::global(parent_id).to_db_key();
+        let child_key = Scope::global(child_id).to_db_key();
+        let parent_doc = parent_cache.get(&parent_key, "notes").unwrap().unwrap();
         parent_doc.set_peer_id(PARENT_PEER).expect("set parent peer");
 
-        let (child_cache, handle) = make_fork_handle(&parent_cache, parent_id, child_id);
+        let (child_cache, handle) = make_fork_handle(&parent_cache, &parent_key, &child_key, child_id);
         let child_doc = child_cache
-            .get_cached_doc(child_id, "notes")
+            .get_cached_doc(&child_key, "notes")
             .expect("child notes block");
         child_doc.set_peer_id(CHILD_PEER).expect("set child peer");
 
@@ -413,7 +426,7 @@ proptest! {
         prop_assert_eq!(report.blocks_merged, 1, "exactly one block must be merged");
 
         let merged = parent_cache
-            .get(parent_id, "notes")
+            .get(&parent_key, "notes")
             .expect("get parent doc after merge")
             .expect("block must still be present after merge")
             .text_content();
@@ -456,18 +469,20 @@ proptest! {
         {
             let p2_id = "prop-parent-2";
             let c2_id = "prop-child-2";
+            let p2_key = Scope::global(p2_id).to_db_key();
+            let c2_key = Scope::global(c2_id).to_db_key();
             let parent_cache_2 = open_cache(p2_id, c2_id);
             seed_text_block(&parent_cache_2, p2_id, "notes", "seedword");
             // Force the block into the cache and pin peer IDs after the seed
             // commits. P2 plays the role of "side that authors fork_appends",
             // so it gets CHILD_PEER. F2 plays "side that authors parent_appends",
             // so it gets PARENT_PEER.
-            let p2_doc = parent_cache_2.get(p2_id, "notes").unwrap().unwrap();
+            let p2_doc = parent_cache_2.get(&p2_key, "notes").unwrap().unwrap();
             p2_doc.set_peer_id(CHILD_PEER).expect("set p2 peer");
 
-            let (child_cache_2, handle_2) = make_fork_handle(&parent_cache_2, p2_id, c2_id);
+            let (child_cache_2, handle_2) = make_fork_handle(&parent_cache_2, &p2_key, &c2_key, c2_id);
             let f2_doc = child_cache_2
-                .get_cached_doc(c2_id, "notes")
+                .get_cached_doc(&c2_key, "notes")
                 .expect("c2 notes block");
             f2_doc.set_peer_id(PARENT_PEER).expect("set f2 peer");
 
@@ -489,7 +504,7 @@ proptest! {
                 .expect("reversed merge must not fail");
 
             let merged_2 = parent_cache_2
-                .get(p2_id, "notes")
+                .get(&p2_key, "notes")
                 .expect("get p2 doc after merge")
                 .expect("p2 block must still be present after merge")
                 .text_content();

@@ -2097,7 +2097,9 @@ async fn migrate_seed_cache(
         ));
     }
 
-    let agent_id = persona_id.as_str().to_string();
+    // Seed-cache snapshots come from a persona's draft directory; they
+    // belong to that persona's Global scope.
+    let scope = pattern_core::types::memory_types::Scope::Global(persona_id.as_str().into());
     let mut imported: u32 = 0;
     let mut skipped: u32 = 0;
     for entry in manifest.entries {
@@ -2105,39 +2107,28 @@ async fn migrate_seed_cache(
         let snapshot = std::fs::read(&snap_path)
             .map_err(|e| format!("read seed snapshot {}: {e}", snap_path.display()))?;
 
-        // Idempotency: check whether the block already exists before creating
-        // it. On a retry after partial failure the block may already be in the
-        // cache from a previous import attempt. Skipping `create_block` for
-        // existing blocks avoids a UNIQUE constraint violation while still
-        // re-applying `insert_from_snapshot` to ensure the block reaches the
-        // intended CRDT state. This makes retries converge correctly.
         let already_exists =
-            match pattern_core::MemoryStore::get_block(cache, &agent_id, &entry.label) {
+            match pattern_core::MemoryStore::get_block(cache, &scope, &entry.label) {
                 Ok(Some(_)) => true,
                 Ok(None) => false,
                 Err(e) => return Err(format!("get_block check for {:?}: {e}", entry.label)),
             };
 
         if !already_exists {
-            // Block is new: create the DB row with the correct schema + type.
-            // The empty content is overwritten by `insert_from_snapshot` below.
             let create = pattern_core::types::block::BlockCreate::new(
                 entry.label.clone(),
                 entry.block_type,
                 entry.schema.clone(),
             );
-            pattern_core::MemoryStore::create_block(cache, &agent_id, create)
+            pattern_core::MemoryStore::create_block(cache, &scope, create)
                 .map_err(|e| format!("create_block for {:?}: {e}", entry.label))?;
         } else {
             skipped += 1;
         }
 
-        // Always apply the snapshot — whether or not we just created the block.
-        // For existing blocks this re-applies the same CRDT state (idempotent);
-        // for new blocks this replaces the empty initial doc with the seed state.
         cache
             .insert_from_snapshot(
-                &agent_id,
+                scope.id(),
                 entry.label.clone(),
                 snapshot,
                 entry.schema,
@@ -2145,10 +2136,7 @@ async fn migrate_seed_cache(
             )
             .map_err(|e| format!("insert_from_snapshot for {:?}: {e}", entry.label))?;
 
-        // Persist immediately so the block lands in the DB. The cache's
-        // subscriber worker will pick up the new block; a synchronous
-        // persist guarantees the row is on disk before the session opens.
-        pattern_core::MemoryStore::persist_block(cache, &agent_id, &entry.label)
+        pattern_core::MemoryStore::persist_block(cache, &scope, &entry.label)
             .map_err(|e| format!("persist seed block {:?}: {e}", entry.label))?;
 
         imported += 1;
@@ -3366,7 +3354,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn migrate_seed_cache_imports_blocks_and_metadata() {
         use pattern_core::types::ids::PersonaId;
-        use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
+        use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType, Scope};
         use pattern_runtime::spawn::fork::{
             SEED_CACHE_MANIFEST_VERSION, SeedCacheManifest, SeedCacheManifestEntry,
         };
@@ -3376,14 +3364,15 @@ mod tests {
         let src_cache = pattern_memory::cache::MemoryCache::new(src_db);
         let src_agent = "fork-source";
         let label = "notes";
+        let src_scope = Scope::global(src_agent);
         let create = pattern_core::types::block::BlockCreate::new(
             label,
             MemoryBlockType::Working,
             BlockSchema::text(),
         );
-        let _doc = pattern_core::MemoryStore::create_block(&src_cache, src_agent, create).unwrap();
+        let _doc = pattern_core::MemoryStore::create_block(&src_cache, &src_scope, create).unwrap();
         // Persist so the cached doc is committed.
-        pattern_core::MemoryStore::persist_block(&src_cache, src_agent, label).unwrap();
+        pattern_core::MemoryStore::persist_block(&src_cache, &src_scope, label).unwrap();
 
         let docs = src_cache.snapshot_cached_docs();
         assert_eq!(docs.len(), 1, "source cache should have one block");
@@ -3423,11 +3412,17 @@ mod tests {
         assert_eq!(imported, 1);
 
         // The block should now be queryable under the new agent_id.
-        let loaded = pattern_core::MemoryStore::get_block(&target_cache, persona_id_str, label)
-            .unwrap()
-            .expect("imported block must be retrievable");
+        let loaded = pattern_core::MemoryStore::get_block(
+            &target_cache,
+            &Scope::global(persona_id_str),
+            label,
+        )
+        .unwrap()
+        .expect("imported block must be retrievable");
         assert_eq!(loaded.label(), label);
-        assert_eq!(loaded.agent_id(), persona_id_str);
+        // Doc's stored agent_id is the encoded scope db_key
+        // (`global:<persona_id>`), per the Phase-1 Scope redesign.
+        assert_eq!(loaded.agent_id(), Scope::global(persona_id_str).to_db_key());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3505,7 +3500,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn migrate_seed_cache_is_idempotent() {
         use pattern_core::types::ids::PersonaId;
-        use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
+        use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType, Scope};
         use pattern_runtime::spawn::fork::{
             SEED_CACHE_MANIFEST_VERSION, SeedCacheManifest, SeedCacheManifestEntry,
         };
@@ -3514,14 +3509,15 @@ mod tests {
         let src_db = Arc::new(pattern_db::ConstellationDb::open_in_memory().unwrap());
         let src_cache = pattern_memory::cache::MemoryCache::new(src_db);
         let label = "idempotent-notes";
+        let src_scope = Scope::global("src-agent");
         let create = pattern_core::types::block::BlockCreate::new(
             label,
             MemoryBlockType::Working,
             BlockSchema::text(),
         );
         let _doc =
-            pattern_core::MemoryStore::create_block(&src_cache, "src-agent", create).unwrap();
-        pattern_core::MemoryStore::persist_block(&src_cache, "src-agent", label).unwrap();
+            pattern_core::MemoryStore::create_block(&src_cache, &src_scope, create).unwrap();
+        pattern_core::MemoryStore::persist_block(&src_cache, &src_scope, label).unwrap();
 
         let docs = src_cache.snapshot_cached_docs();
         let snapshot = docs[0].export_snapshot().expect("export snapshot");
@@ -3566,9 +3562,13 @@ mod tests {
         assert_eq!(second, 1, "second import must report 1 block processed");
 
         // Block must be accessible in the expected final state.
-        let loaded = pattern_core::MemoryStore::get_block(&target_cache, persona_id_str, label)
-            .unwrap()
-            .expect("block must be retrievable after idempotent import");
+        let loaded = pattern_core::MemoryStore::get_block(
+            &target_cache,
+            &Scope::global(persona_id_str),
+            label,
+        )
+        .unwrap()
+        .expect("block must be retrievable after idempotent import");
         assert_eq!(loaded.label(), label);
     }
 

@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use pattern_core::MemoryStore;
 use pattern_core::types::block::BlockCreate;
-use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
+use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType, Scope};
 use pattern_db::ConstellationDb;
 use pattern_memory::MemoryCache;
 use pattern_memory::fs::watcher::{MountWatcher, WatcherConfig};
@@ -141,9 +141,10 @@ async fn external_kdl_edit_reconciles_task_index() {
     // Step 1: Create a TaskList block. First persist spawns the subscriber but
     // has no content to emit yet (empty LoroDoc). Then write content and persist
     // again — this sends a CommitEvent that triggers file emission.
+    let agent_scope = Scope::Global(AGENT.into());
     let doc = cache
         .create_block(
-            AGENT,
+            &agent_scope,
             BlockCreate::new(
                 LABEL,
                 MemoryBlockType::Working,
@@ -161,7 +162,7 @@ async fn external_kdl_edit_reconciles_task_index() {
 
     // First persist: spawns the subscriber (no content yet).
     cache
-        .persist_block(AGENT, LABEL)
+        .persist_block(&agent_scope, LABEL)
         .expect("persist block (spawn subscriber)");
 
     // Give the subscriber OS thread a moment to start and register its
@@ -201,7 +202,7 @@ async fn external_kdl_edit_reconciles_task_index() {
     // Persist to write updates to DB (also triggers another CommitEvent).
     cache.mark_dirty(AGENT, LABEL);
     cache
-        .persist_block(AGENT, LABEL)
+        .persist_block(&agent_scope, LABEL)
         .expect("persist block with content");
 
     // Wait for subscriber debounce (50ms) + file emission.

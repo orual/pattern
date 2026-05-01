@@ -144,6 +144,7 @@ pub fn child_include_paths(parent: &SessionContext, lib_dir: Option<&TempDir>) -
 pub fn create_progress_log_block(
     adapter: &MemoryStoreAdapter,
     label: &str,
+    scope: &pattern_core::types::memory_types::Scope,
 ) -> Result<(), SpawnError> {
     let schema = BlockSchema::Log {
         display_limit: 50,
@@ -156,9 +157,23 @@ pub fn create_progress_log_block(
     let create = BlockCreate::new(label.to_string(), MemoryBlockType::Working, schema)
         .with_description(format!("Progress log for ephemeral spawn {label}"));
     adapter
-        .create_block(CONSTELLATION_OWNER, create)
+        .create_block(scope, create)
         .map(|_| ())
         .map_err(|e| SpawnError::Runtime(format!("create progress-log block: {e}")))
+}
+
+/// Pick the scope for an ephemeral spawn's progress-log block. Project's
+/// `Local` scope when the parent session has a project mount; otherwise
+/// the `CONSTELLATION_OWNER` synthetic Global identity (unmounted dev).
+pub fn progress_log_scope(
+    parent: &SessionContext,
+) -> pattern_core::types::memory_types::Scope {
+    let default = parent.default_scope();
+    if default.is_local() {
+        default.clone()
+    } else {
+        pattern_core::types::memory_types::Scope::Global(CONSTELLATION_OWNER.into())
+    }
 }
 
 /// Build a per-turn observer hook for the child's [`drive_step`] loop
@@ -171,6 +186,7 @@ pub fn create_progress_log_block(
 pub fn build_progress_log_observer(
     adapter: Arc<MemoryStoreAdapter>,
     label: SmolStr,
+    scope: pattern_core::types::memory_types::Scope,
 ) -> TurnObserver {
     use std::sync::atomic::{AtomicU32, Ordering};
     let turn_counter = Arc::new(AtomicU32::new(0));
@@ -179,7 +195,7 @@ pub fn build_progress_log_observer(
             .fetch_add(1, Ordering::SeqCst)
             .saturating_add(1);
         let entry = build_progress_entry(n, turn);
-        match adapter.get_block(CONSTELLATION_OWNER, label.as_str()) {
+        match adapter.get_block(&scope, label.as_str()) {
             Ok(Some(doc)) => {
                 if let Err(e) = doc.append_log_entry(entry, true) {
                     tracing::warn!(
@@ -321,9 +337,14 @@ pub async fn run_ephemeral(
     // Build the per-turn observer that appends to the spawn-log block.
     // Best-effort writes — failures get logged via tracing but never
     // fail the spawn.
+    // The progress-log block lives at the same scope it was created in
+    // (Local when the child has a project mount, Global(CONSTELLATION_OWNER)
+    // otherwise). Resolve once and pass to the observer.
+    let progress_scope = progress_log_scope(&child_ctx);
     let observer: Option<TurnObserver> = Some(build_progress_log_observer(
         child_ctx.adapter().clone(),
         progress_log_label.clone(),
+        progress_scope,
     ));
 
     let drive_fut = drive_step(

@@ -32,8 +32,8 @@ use std::sync::Arc;
 use pattern_core::MemoryStore;
 use pattern_core::types::block::BlockCreate;
 use pattern_core::types::memory_types::{
-    BlockSchema, MemoryBlockType, MemorySearchScope, SearchContentType, SearchMode, SearchOptions,
-    SkillMetadata, SkillTrustTier,
+    BlockSchema, MemoryBlockType, MemorySearchScope, Scope, SearchContentType, SearchMode,
+    SearchOptions, SkillMetadata, SkillTrustTier,
 };
 use pattern_db::ConstellationDb;
 use pattern_memory::MemoryCache;
@@ -73,15 +73,15 @@ fn setup() -> (Arc<ConstellationDb>, MemoryCache) {
 fn seed_text_block(cache: &MemoryCache, label: &str, content: &str) {
     let doc = cache
         .create_block(
-            AGENT,
+            &Scope::global(AGENT),
             BlockCreate::new(label, MemoryBlockType::Working, BlockSchema::text()),
         )
         .unwrap_or_else(|e| panic!("create text block '{label}': {e}"));
     doc.set_text(content, false)
         .unwrap_or_else(|e| panic!("set_text for '{label}': {e}"));
-    cache.mark_dirty(AGENT, label);
+    cache.mark_dirty(&Scope::global(AGENT).to_db_key(), label);
     cache
-        .persist_block(AGENT, label)
+        .persist_block(&Scope::global(AGENT), label)
         .unwrap_or_else(|e| panic!("persist text block '{label}': {e}"));
 }
 
@@ -89,7 +89,7 @@ fn seed_text_block(cache: &MemoryCache, label: &str, content: &str) {
 fn seed_task_list_block(cache: &MemoryCache, label: &str, subject: &str) {
     let doc = cache
         .create_block(
-            AGENT,
+            &Scope::global(AGENT),
             BlockCreate::new(
                 label,
                 MemoryBlockType::Working,
@@ -131,9 +131,9 @@ fn seed_task_list_block(cache: &MemoryCache, label: &str, subject: &str) {
         doc.inner().commit();
     }
 
-    cache.mark_dirty(AGENT, label);
+    cache.mark_dirty(&Scope::global(AGENT).to_db_key(), label);
     cache
-        .persist_block(AGENT, label)
+        .persist_block(&Scope::global(AGENT), label)
         .unwrap_or_else(|e| panic!("persist task list block '{label}': {e}"));
 }
 
@@ -141,7 +141,7 @@ fn seed_task_list_block(cache: &MemoryCache, label: &str, subject: &str) {
 fn seed_skill_block(cache: &MemoryCache, label: &str, keyword: &str) {
     cache
         .create_block(
-            AGENT,
+            &Scope::global(AGENT),
             BlockCreate::new(
                 label,
                 MemoryBlockType::Working,
@@ -154,7 +154,7 @@ fn seed_skill_block(cache: &MemoryCache, label: &str, keyword: &str) {
         .unwrap_or_else(|e| panic!("create skill block '{label}': {e}"));
 
     let doc = cache
-        .get_block(AGENT, label)
+        .get_block(&Scope::global(AGENT), label)
         .unwrap()
         .expect("skill block must exist");
 
@@ -173,9 +173,9 @@ fn seed_skill_block(cache: &MemoryCache, label: &str, keyword: &str) {
         .unwrap_or_else(|e| panic!("write_skill_to_loro_doc for '{label}': {e}"));
     doc.inner().commit();
 
-    cache.mark_dirty(AGENT, label);
+    cache.mark_dirty(&Scope::global(AGENT).to_db_key(), label);
     cache
-        .persist_block(AGENT, label)
+        .persist_block(&Scope::global(AGENT), label)
         .unwrap_or_else(|e| panic!("persist skill block '{label}': {e}"));
 }
 
@@ -190,7 +190,7 @@ fn fts_search(
         limit: 20,
     };
     cache
-        .search(query, opts, MemorySearchScope::Agent(AGENT.into()))
+        .search(query, opts, MemorySearchScope::Scope(Scope::global(AGENT)))
         .unwrap_or_else(|e| panic!("search failed: {e}"))
 }
 

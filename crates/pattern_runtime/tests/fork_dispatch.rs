@@ -25,7 +25,7 @@ use std::sync::Arc;
 use pattern_core::ProviderClient;
 use pattern_core::traits::MemoryStore;
 use pattern_core::types::block::BlockCreate;
-use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
+use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType, Scope};
 use pattern_core::types::snapshot::PersonaSnapshot;
 use pattern_db::ConstellationDb;
 use pattern_memory::MemoryCache;
@@ -70,7 +70,7 @@ async fn build_parent_with_cache() -> (Arc<SessionContext>, Arc<MemoryCache>) {
     // Seed a block on the cache; fork should pick it up.
     cache
         .create_block(
-            "fork-dispatch-parent",
+            &Scope::global("fork-dispatch-parent"),
             BlockCreate::new(
                 "notes".to_string(),
                 MemoryBlockType::Working,
@@ -79,7 +79,7 @@ async fn build_parent_with_cache() -> (Arc<SessionContext>, Arc<MemoryCache>) {
         )
         .expect("create_block");
     let doc = cache
-        .get("fork-dispatch-parent", "notes")
+        .get(&Scope::global("fork-dispatch-parent").to_db_key(), "notes")
         .expect("get")
         .expect("block must exist");
     doc.set_text("seed-content", true).expect("set_text");
@@ -136,13 +136,17 @@ async fn lightweight_fork_inserts_into_registry_and_forks_cache() {
         .expect("registered handle");
     let handle = handle_arc.lock();
     let child_id = handle.child_id.clone();
+    // The child docs are tagged with the encoded scope key (e.g.
+    // "global:<child_id>") by fork_for_child, so get_cached_doc must use
+    // the encoded form to find them.
+    let child_key = Scope::global(child_id.as_str()).to_db_key();
     match &handle.isolation_state {
         pattern_runtime::spawn::ForkIsolationState::Lightweight { child_cache, .. } => {
             // Child cache holds the forked block under the child session id.
             // ForkHandle.child_id is the authoritative child id; the redundant
             // child_session_id field was removed from ForkIsolationState::Lightweight (M2).
             let forked = child_cache
-                .get_cached_doc(&child_id, "notes")
+                .get_cached_doc(&child_key, "notes")
                 .expect("forked block present in child cache");
             // Snapshot to verify content travelled across the fork.
             let snapshot = forked.export_snapshot().expect("export_snapshot");

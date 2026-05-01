@@ -170,6 +170,11 @@ pub fn attach_with_paths(
         heartbeat_tx,
         heartbeat_rx,
     );
+    // Persona-state directory: `Scope::Global` blocks render under
+    // `<persona_state_dir>/@<persona_id>/blocks/...` so persona memory
+    // follows the persona across mounts. Production layout:
+    // `$XDG_STATE_HOME/pattern/personas/`.
+    mc = mc.with_persona_state_dir(paths.personas_state_dir());
     if let Some(fp_dir) = first_party_skills_dir {
         mc = mc.with_first_party_skills_dir(fp_dir);
     }

@@ -235,6 +235,12 @@ pub struct WakeRegistry {
     /// can resolve the parent block's `block_id` and re-read task
     /// status when the parent block's content changes.
     memory_store: Option<Arc<dyn MemoryStore>>,
+    /// Default block-storage scope for this session. Used by
+    /// [`WakeCondition::TaskDependencyResolved`] to look up the watched
+    /// task block under the session's project scope when bound. When
+    /// `None`, falls back to `Scope::Global(agent_id)` for the lookup
+    /// (matches pre-Phase-1 behaviour for unmounted sessions).
+    default_scope: Option<pattern_core::types::memory_types::Scope>,
     /// Optional custom evaluator for Haskell-registered conditions.
     /// When empty, Custom registrations fall back to a parked task
     /// (Phase 4 behaviour). When set, the evaluator spawns real
@@ -262,8 +268,21 @@ impl WakeRegistry {
             min_period: jiff::Span::new().seconds(1),
             block_change_notifier: None,
             memory_store: None,
+            default_scope: None,
             custom_evaluator: Mutex::new(None),
         }
+    }
+
+    /// Builder-style: wire the session's default block-storage scope so
+    /// task-dependency wakes look up watched blocks at the right scope.
+    /// Production callers pass `cx.user().default_scope().clone()`.
+    #[must_use]
+    pub fn with_default_scope(
+        mut self,
+        scope: pattern_core::types::memory_types::Scope,
+    ) -> Self {
+        self.default_scope = Some(scope);
+        self
     }
 
     /// Builder-style: lower the minimum interval period. Test-only
@@ -374,8 +393,16 @@ impl WakeRegistry {
                 // here surfaces a clear "no such block" error rather
                 // than silently subscribing to a non-existent key.
                 let parent_label = task.block.clone();
+                // Look up the watched block at the session's default
+                // scope (project-Local when bound, persona-Global
+                // otherwise). The condition's `agent_id` identifies
+                // who to wake, not who owns the block — tasks may live
+                // in project scope and be shared across agents.
+                let lookup_scope = self.default_scope.clone().unwrap_or_else(|| {
+                    pattern_core::types::memory_types::Scope::Global(agent_id.clone().into())
+                });
                 let metadata = store
-                    .get_block_metadata(agent_id, &parent_label)
+                    .get_block_metadata(&lookup_scope, &parent_label)
                     .map_err(|e| WakeError::ParentBlockResolveFailed {
                         label: parent_label.clone(),
                         agent_id: agent_id.clone(),
@@ -390,6 +417,7 @@ impl WakeRegistry {
                     parent_block,
                     task.clone(),
                     agent_id.clone(),
+                    lookup_scope,
                     store.clone(),
                     notifier.clone(),
                     self.mailbox_tx.clone(),

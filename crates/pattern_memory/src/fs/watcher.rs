@@ -203,7 +203,7 @@ mod tests {
         // Create a text block and persist it to trigger subscriber spawn.
         let doc = cache
             .create_block(
-                "agent_1",
+                &pattern_core::types::memory_types::Scope::global("agent_1"),
                 BlockCreate::new("test", MemoryBlockType::Working, BlockSchema::text())
                     .with_description("Test block")
                     .with_char_limit(1000),
@@ -213,8 +213,14 @@ mod tests {
 
         // Write initial content, persist to spawn subscriber.
         doc.set_text("initial", true).unwrap();
-        cache.mark_dirty("agent_1", "test");
-        cache.persist_block("agent_1", "test").unwrap();
+        // mark_dirty uses the internal &str method which still works with the db_key.
+        cache.mark_dirty(&pattern_core::types::memory_types::Scope::global("agent_1").to_db_key(), "test");
+        cache
+            .persist_block(
+                &pattern_core::types::memory_types::Scope::global("agent_1"),
+                "test",
+            )
+            .unwrap();
 
         // Give subscriber time to write the initial file.
         std::thread::sleep(Duration::from_millis(200));

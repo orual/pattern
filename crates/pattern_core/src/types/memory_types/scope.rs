@@ -59,6 +59,38 @@ impl Scope {
     pub fn is_global(&self) -> bool {
         matches!(self, Self::Global(_))
     }
+
+    /// Stable string encoding used as `BlockMetadata.agent_id` and
+    /// for any DB row that needs a single-column scope key.
+    ///
+    /// Format: `local:<id>` or `global:<id>` — identical to [`Display`].
+    /// Use this (not `Display`) at storage boundaries so the intent is
+    /// explicit at the call site.
+    pub fn to_db_key(&self) -> String {
+        self.to_string()
+    }
+
+    /// Inverse of [`to_db_key`]. Returns `None` if the encoding is
+    /// malformed (missing prefix, empty id, or unknown kind).
+    ///
+    /// [`to_db_key`]: Self::to_db_key
+    pub fn from_db_key(s: &str) -> Option<Self> {
+        if let Some(id) = s.strip_prefix("local:") {
+            if id.is_empty() {
+                None
+            } else {
+                Some(Self::Local(SmolStr::new(id)))
+            }
+        } else if let Some(id) = s.strip_prefix("global:") {
+            if id.is_empty() {
+                None
+            } else {
+                Some(Self::Global(SmolStr::new(id)))
+            }
+        } else {
+            None
+        }
+    }
 }
 
 impl fmt::Display for Scope {
@@ -99,6 +131,25 @@ mod tests {
     fn display_disambiguates_kinds() {
         assert_eq!(Scope::local("pattern").to_string(), "local:pattern");
         assert_eq!(Scope::global("pattern").to_string(), "global:pattern");
+    }
+
+    #[test]
+    fn to_db_key_round_trips_through_from_db_key() {
+        let cases = [Scope::local("project-a"), Scope::global("@persona")];
+        for scope in cases {
+            let key = scope.to_db_key();
+            let parsed = Scope::from_db_key(&key).expect("valid key");
+            assert_eq!(scope, parsed);
+        }
+    }
+
+    #[test]
+    fn from_db_key_rejects_malformed_input() {
+        assert!(Scope::from_db_key("").is_none());
+        assert!(Scope::from_db_key("local:").is_none());
+        assert!(Scope::from_db_key("global:").is_none());
+        assert!(Scope::from_db_key("bogus:x").is_none());
+        assert!(Scope::from_db_key("pattern").is_none());
     }
 
     #[test]

@@ -239,6 +239,16 @@ use crate::timeout::{Budget, CancelState};
 #[derive(Debug)]
 pub struct SessionContext {
     agent_id: String,
+    /// Default [`Scope`] for memory operations that don't carry an
+    /// explicit scope on the wire. Set by [`Self::with_scope_binding`]
+    /// to `Scope::Local(project_id)` when a project mount is present;
+    /// otherwise `Scope::Global(agent_id)` for unmounted sessions.
+    ///
+    /// Phase 1 redesign: SDK handlers route reads/writes through this
+    /// scope rather than synthesising a string from `agent_id`. Phase 2
+    /// will add an explicit `Maybe Scope` parameter to the wire shape;
+    /// callers that pass `Nothing` will fall back to this default.
+    default_scope: pattern_core::types::memory_types::Scope,
     /// Model identifier for provider completion requests (e.g.
     /// `"claude-opus-4-7"`). Threaded from `persona.model.choice.model_id`
     /// at session open. Use [`ModelSpec::default`] to get the workspace
@@ -711,6 +721,11 @@ impl SessionContext {
         tokio_handle: tokio::runtime::Handle,
     ) -> Self {
         let agent_id = persona.agent_id.to_string();
+        // Default scope without a mount is the persona's own Global scope.
+        // `with_scope_binding` overrides this to `Scope::Local(project_id)`
+        // when a project mount is wired.
+        let default_scope =
+            pattern_core::types::memory_types::Scope::Global(agent_id.clone().into());
         let budget = Budget::from_persona(persona);
         let adapter = Arc::new(MemoryStoreAdapter::new(memory_store, &agent_id));
         // Default concurrency limit of 8: a conservative starting point for
@@ -721,6 +736,7 @@ impl SessionContext {
         let spawn_registry = Arc::new(SpawnRegistry::new(agent_id.clone(), 8));
         Self {
             agent_id,
+            default_scope,
             // Thread the caller's declared model through so the composer's
             // `ctx.model_id()` matches the persona's intent. Callers that
             // want to override a persona's default at open time should
@@ -1062,6 +1078,7 @@ impl SessionContext {
 
         let child = SessionContext {
             agent_id: self.agent_id.clone(),
+            default_scope: self.default_scope.clone(),
             model_id: self.model_id.clone(),
             system_prompt,
             chat_options: self.chat_options.clone(),
@@ -1301,10 +1318,38 @@ impl SessionContext {
     #[must_use]
     pub fn with_scope_binding(mut self, binding: pattern_memory::scope::ScopeBinding) -> Self {
         use pattern_memory::scope::MemoryScope;
+        // Update default_scope: project-bound sessions default to the
+        // project's `Scope::Local`; passthrough sessions keep
+        // `Scope::Global(persona_id)`.
+        self.default_scope = match &binding.project_id {
+            Some(project_id) => pattern_core::types::memory_types::Scope::Local(
+                project_id.clone().into(),
+            ),
+            None => pattern_core::types::memory_types::Scope::Global(
+                binding.persona_id.clone().into(),
+            ),
+        };
         let old_inner = self.adapter.inner().clone();
         let scoped: Arc<dyn MemoryStore> = Arc::new(MemoryScope::new(old_inner, binding));
         self.adapter = Arc::new(MemoryStoreAdapter::new(scoped, &self.agent_id));
         self
+    }
+
+    /// Default [`Scope`] for memory operations on this session.
+    ///
+    /// Project-bound sessions (mount with a project_id) default to
+    /// `Scope::Local(project_id)` — agent reads/writes hit the shared
+    /// project workspace by default. Unmounted sessions default to
+    /// `Scope::Global(persona_id)`.
+    pub fn default_scope(&self) -> &pattern_core::types::memory_types::Scope {
+        &self.default_scope
+    }
+
+    /// Persona scope for this session (`Scope::Global(persona_id)`).
+    /// Used by handlers that explicitly target persona memory regardless
+    /// of the session's default routing.
+    pub fn persona_scope(&self) -> pattern_core::types::memory_types::Scope {
+        pattern_core::types::memory_types::Scope::Global(self.agent_id.clone().into())
     }
 
     /// Replace the default [`NoOpSink`] with a caller-provided sink.
@@ -2027,7 +2072,9 @@ impl TidepoolSession {
             let ctx = if let Some(extras) = regs.wake_registry_extras {
                 let mailbox_tx = ctx.mailbox().sender();
                 let tokio_handle = ctx.tokio_handle().clone();
-                let mut wake_reg = crate::wake::WakeRegistry::new(mailbox_tx, tokio_handle);
+                let default_scope_for_wake = ctx.default_scope().clone();
+                let mut wake_reg = crate::wake::WakeRegistry::new(mailbox_tx, tokio_handle)
+                    .with_default_scope(default_scope_for_wake);
                 if let Some(notifier) = extras.block_change_notifier {
                     wake_reg = wake_reg.with_block_change_notifier(notifier);
                 }
@@ -2489,7 +2536,10 @@ fn seed_persona_memory_blocks(
     >,
 ) -> Result<(), RuntimeError> {
     use pattern_core::types::block::BlockCreate;
-    use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType, MemoryType};
+    use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType, MemoryType, Scope};
+
+    // Persona-declared blocks seed into the persona's Global scope.
+    let scope = Scope::Global(agent_id.into());
 
     for (label, spec) in memory_blocks {
         // shared_id is a planned feature for constellation-level cross-agent
@@ -2505,7 +2555,7 @@ fn seed_persona_memory_blocks(
 
         // Don't clobber existing blocks — persona is INITIAL intent.
         // Missing blocks return Ok(None) per the trait contract.
-        match store.get_block(agent_id, label.as_str()) {
+        match store.get_block(&scope, label.as_str()) {
             Ok(Some(_)) => continue, // Already exists — preserve live state.
             Ok(None) => {}           // Doesn't exist — create below.
             Err(e) => {
@@ -2525,9 +2575,6 @@ fn seed_persona_memory_blocks(
         let schema = spec.schema.clone().unwrap_or_else(BlockSchema::text);
 
         let mut create = BlockCreate::new(label.as_str(), block_type, schema)
-            // Thread the persona-declared permission through to the store.
-            // Without this, BlockCreate defaults to ReadWrite, silently
-            // upgrading any persona-declared ReadOnly block.
             .with_permission(spec.permission);
         if let Some(desc) = &spec.description {
             create = create.with_description(desc.clone());
@@ -2538,7 +2585,7 @@ fn seed_persona_memory_blocks(
 
         let doc =
             store
-                .create_block(agent_id, create)
+                .create_block(&scope, create)
                 .map_err(|e| RuntimeError::MemorySeedFailed {
                     label: label.to_string(),
                     reason: format!("create_block failed: {e}"),
@@ -2554,7 +2601,7 @@ fn seed_persona_memory_blocks(
         if spec.pinned {
             store
                 .update_block_metadata(
-                    agent_id,
+                    &scope,
                     label.as_str(),
                     pattern_core::types::memory_types::BlockMetadataPatch::default().pinned(true),
                 )
@@ -2564,7 +2611,7 @@ fn seed_persona_memory_blocks(
                 })?;
         }
 
-        store.persist_block(agent_id, label.as_str()).map_err(|e| {
+        store.persist_block(&scope, label.as_str()).map_err(|e| {
             RuntimeError::MemorySeedFailed {
                 label: label.to_string(),
                 reason: format!("persist_block failed: {e}"),
@@ -2965,8 +3012,9 @@ mod tests {
             .expect("seed should succeed");
 
         // Check the read-only block — permission must be preserved.
+        let agent_scope = pattern_core::types::memory_types::Scope::global("agent-perm");
         let doc = store_dyn
-            .get_block("agent-perm", "persona")
+            .get_block(&agent_scope, "persona")
             .expect("get_block should succeed")
             .expect("persona block should exist");
         assert_eq!(
@@ -2977,7 +3025,7 @@ mod tests {
 
         // Check the read-write block — default must round-trip correctly.
         let doc2 = store_dyn
-            .get_block("agent-perm", "scratchpad")
+            .get_block(&agent_scope, "scratchpad")
             .expect("get_block should succeed")
             .expect("scratchpad block should exist");
         assert_eq!(

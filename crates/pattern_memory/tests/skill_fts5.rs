@@ -18,8 +18,8 @@ use std::sync::Arc;
 use pattern_core::MemoryStore;
 use pattern_core::types::block::BlockCreate;
 use pattern_core::types::memory_types::{
-    BlockSchema, MemoryBlockType, MemorySearchScope, SearchContentType, SearchMode, SearchOptions,
-    SkillMetadata, SkillTrustTier,
+    BlockSchema, MemoryBlockType, MemorySearchScope, Scope, SearchContentType, SearchMode,
+    SearchOptions, SkillMetadata, SkillTrustTier,
 };
 use pattern_db::ConstellationDb;
 use pattern_memory::MemoryCache;
@@ -66,7 +66,7 @@ fn setup() -> (tempfile::TempDir, Arc<ConstellationDb>, MemoryCache) {
 fn create_skill_block(cache: &MemoryCache, label: &str, metadata: SkillMetadata, body: &str) {
     cache
         .create_block(
-            "agent_1",
+            &Scope::global("agent_1"),
             BlockCreate::new(
                 label,
                 MemoryBlockType::Working,
@@ -79,7 +79,7 @@ fn create_skill_block(cache: &MemoryCache, label: &str, metadata: SkillMetadata,
         .unwrap();
 
     let doc = cache
-        .get_block("agent_1", label)
+        .get_block(&Scope::global("agent_1"), label)
         .unwrap()
         .expect("block should exist after create");
 
@@ -91,8 +91,8 @@ fn create_skill_block(cache: &MemoryCache, label: &str, metadata: SkillMetadata,
     write_skill_to_loro_doc(&skill_file, doc.inner()).unwrap();
     doc.inner().commit();
 
-    cache.mark_dirty("agent_1", label);
-    cache.persist_block("agent_1", label).unwrap();
+    cache.mark_dirty(&Scope::global("agent_1").to_db_key(), label);
+    cache.persist_block(&Scope::global("agent_1"), label).unwrap();
 }
 
 fn fts_search(
@@ -105,7 +105,11 @@ fn fts_search(
         limit: 20,
     };
     cache
-        .search(query, opts, MemorySearchScope::Agent("agent_1".into()))
+        .search(
+            query,
+            opts,
+            MemorySearchScope::Scope(Scope::global("agent_1")),
+        )
         .unwrap()
 }
 

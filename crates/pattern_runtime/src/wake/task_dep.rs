@@ -55,6 +55,7 @@ pub(super) fn spawn_task_dependency_resolved(
     parent_block: BlockRef,
     task: TaskEdgeRef,
     agent_id: SmolStr,
+    block_scope: pattern_core::types::memory_types::Scope,
     store: Arc<dyn MemoryStore>,
     notifier: pattern_memory::subscriber::BlockChangeNotifier,
     mailbox_tx: mpsc::UnboundedSender<MailboxInput>,
@@ -63,7 +64,8 @@ pub(super) fn spawn_task_dependency_resolved(
     let fired = Arc::new(AtomicBool::new(false));
     let fired_cb = fired.clone();
     let task_for_cb = task.clone();
-    let agent_for_cb = agent_id.clone();
+    let _agent_for_cb = agent_id.clone();
+    let scope_for_cb = block_scope.clone();
     let store_for_cb = store.clone();
     let mailbox_for_cb = mailbox_tx.clone();
     let parent_label = parent_block.label.clone();
@@ -78,7 +80,7 @@ pub(super) fn spawn_task_dependency_resolved(
             .as_ref()
             .expect("registry rejects block-level refs at register time");
 
-        match read_task_status(&*store_for_cb, &agent_for_cb, &parent_label, item_id) {
+        match read_task_status(&*store_for_cb, &scope_for_cb, &parent_label, item_id) {
             Ok(Some(TaskStatus::Completed)) => {
                 // Race: another concurrent fire might have flipped the
                 // flag after our load. swap returns the *prior* value;
@@ -122,12 +124,12 @@ pub(super) fn spawn_task_dependency_resolved(
 /// failures or schema corruption.
 fn read_task_status(
     store: &dyn MemoryStore,
-    agent_id: &str,
+    scope: &pattern_core::types::memory_types::Scope,
     block_label: &str,
     item_id: &str,
 ) -> Result<Option<TaskStatus>, ReadStatusError> {
     let sdoc = store
-        .get_block(agent_id, block_label)
+        .get_block(scope, block_label)
         .map_err(|e| ReadStatusError::Store(e.to_string()))?
         .ok_or(ReadStatusError::BlockMissing)?;
     let doc = sdoc.inner();
