@@ -62,8 +62,15 @@ pub(crate) fn type_m_entry(type_name: &str) -> String {
 /// row entries, so referencing them in agent code fails at Tidepool
 /// compile (AC1.2).
 pub fn build_for(caps: &pattern_core::CapabilitySet) -> String {
-    let decls = crate::sdk::bundle::filtered_effect_decls(caps);
-    build(&decls)
+    let all_decls = crate::sdk::bundle::canonical_effect_decls();
+    let visible_decls = crate::sdk::bundle::filtered_effect_decls(caps);
+    build_split(&all_decls, &visible_decls)
+}
+
+/// Like [`build`] but uses `all_decls` for imports and type M (tag alignment)
+/// and `visible_decls` for the API reference docs (capability filtering).
+fn build_split(all_decls: &[EffectDecl], visible_decls: &[EffectDecl]) -> String {
+    build_with_libraries(all_decls, &[], Some(visible_decls))
 }
 
 /// Build the Haskell preamble string from an effect-decl slice, optionally
@@ -87,6 +94,7 @@ pub fn build_for(caps: &pattern_core::CapabilitySet) -> String {
 pub fn build_with_libraries(
     decls: &[EffectDecl],
     port_libraries: &[(pattern_core::types::port::PortId, &str)],
+    visible_decls: Option<&[EffectDecl]>,
 ) -> String {
     let mut out = String::with_capacity(8192);
 
@@ -197,11 +205,12 @@ pub fn build_with_libraries(
     // in the source the LLM sees when errors quote file content. When
     // `decls` is empty (full capability filtering) the block is omitted —
     // there's nothing to document.
-    if !decls.is_empty() {
+    let api_decls = visible_decls.unwrap_or(decls);
+    if !api_decls.is_empty() {
         out.push_str("-- === Pattern SDK API reference ===\n");
         out.push_str("-- The effects below are available in the `M` row.\n");
         out.push_str("-- See each module's docs; signatures shown here for reference.\n");
-        for eff in decls {
+        for eff in api_decls {
             out.push_str("-- \n");
             out.push_str(&format!("-- {} ({}):\n", eff.type_name, eff.description));
             for h in eff.helpers.iter() {
@@ -242,7 +251,7 @@ pub fn build_with_libraries(
 /// Convenience wrapper over [`build_with_libraries`] with an empty
 /// `port_libraries` slice. See that function for full documentation.
 pub fn build(decls: &[EffectDecl]) -> String {
-    build_with_libraries(decls, &[])
+    build_with_libraries(decls, &[], None)
 }
 
 /// Emit the pagination / truncation Haskell functions into the preamble.
@@ -720,7 +729,7 @@ mod tests {
         let decls = canonical_effect_decls();
         let port_id = PortId::new("http");
         let library_src = "-- Http helpers\nhttpGet url = call \"http\" \"get\" url\n";
-        let preamble = build_with_libraries(&decls, &[(port_id, library_src)]);
+        let preamble = build_with_libraries(&decls, &[(port_id, library_src)], None);
 
         assert!(
             preamble.contains("-- Port library: http"),
@@ -746,7 +755,7 @@ mod tests {
     fn no_library_block_when_empty() {
         let decls = canonical_effect_decls();
         let without = build(&decls);
-        let with_empty = build_with_libraries(&decls, &[]);
+        let with_empty = build_with_libraries(&decls, &[], None);
         assert_eq!(
             without, with_empty,
             "build_with_libraries with empty slice must equal build()"
@@ -761,7 +770,7 @@ mod tests {
         let id2 = PortId::new("weather");
         let src1 = "slackSend = call \"slack\" \"send\"\n";
         let src2 = "getWeather loc = call \"weather\" \"current\" loc\n";
-        let preamble = build_with_libraries(&decls, &[(id1, src1), (id2, src2)]);
+        let preamble = build_with_libraries(&decls, &[(id1, src1), (id2, src2)], None);
 
         assert!(
             preamble.contains("-- Port library: slack"),

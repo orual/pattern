@@ -405,7 +405,7 @@ async fn port_library_appended_to_preamble_when_capable() {
         .collect();
 
     let decls = pattern_runtime::sdk::bundle::canonical_effect_decls();
-    let preamble_str = preamble::build_with_libraries(&decls, &libraries);
+    let preamble_str = preamble::build_with_libraries(&decls, &libraries, &decls);
 
     assert!(
         preamble_str.contains("-- Port library: lib-port"),
@@ -586,7 +586,7 @@ async fn port_library_excluded_when_not_capable() {
     );
 
     let decls = pattern_runtime::sdk::bundle::canonical_effect_decls();
-    let preamble_str = preamble::build_with_libraries(&decls, &libraries);
+    let preamble_str = preamble::build_with_libraries(&decls, &libraries, &decls);
 
     assert!(
         !preamble_str.contains("excludedHelper"),

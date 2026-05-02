@@ -178,7 +178,10 @@ fn handle_ephemeral(
     )
     .map_err(|e| EffectError::Handler(e.to_string()))?;
 
-    // Build the child's preamble from its restricted capability set.
+    // Build the child's preamble. build_for uses the full canonical
+    // effect set for imports + type M (tag alignment with the handler
+    // HList) and the child's filtered capabilities for the API docs
+    // (so the LLM only sees effects it's allowed to use).
     let child_caps_for_preamble = child_ctx
         .capabilities()
         .cloned()
