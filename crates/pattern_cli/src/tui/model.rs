@@ -12,8 +12,12 @@
 //! - Height caching uses `Option<u16>` — set to `None` when content
 //!   changes, computed lazily during render.
 
-use pattern_core::traits::turn_sink::DisplayKind;
-use pattern_server::protocol::WireTurnEvent;
+use pattern_core::{traits::turn_sink::DisplayKind, types::message::SnapshotKind};
+use pattern_provider::compose::{
+    render::{render_file_conflict_body, render_file_edit_body, render_shell_output_body},
+    render_block_write_body,
+};
+use pattern_server::protocol::{WireMessageAttachment, WireTurnEvent};
 use smol_str::SmolStr;
 
 use super::markdown;
@@ -53,7 +57,11 @@ pub enum SectionKind {
         content: String,
     },
     /// Agent display output (chunk, final, or note).
-    Display { kind: DisplayKind, text: String },
+    Display {
+        kind: DisplayKind,
+        text: String,
+    },
+    Attachments(Vec<String>),
 }
 
 /// One logical section within a [`RenderBatch`].
@@ -77,6 +85,7 @@ impl Section {
             SectionKind::Thinking(_)
                 | SectionKind::ToolCall { .. }
                 | SectionKind::ToolResult { .. }
+                | SectionKind::Attachments(_)
         );
         Self {
             kind,
@@ -89,11 +98,11 @@ impl Section {
     pub fn summary(&self) -> String {
         match &self.kind {
             SectionKind::Text(s) => {
-                let preview = truncate_preview(s, 60);
+                let preview = truncate_preview(s, 100);
                 format!("▸ text: {preview}")
             }
             SectionKind::Thinking(s) => {
-                let preview = truncate_preview(s, 60);
+                let preview = truncate_preview(s, 100);
                 format!("▸ thinking: {preview}")
             }
             SectionKind::ToolCall {
@@ -103,7 +112,7 @@ impl Section {
             } => {
                 // For the code tool, show first line of code. For others, show function name.
                 let preview = if function_name == "code" {
-                    extract_code_preview(arguments, 55)
+                    extract_code_preview(arguments, 100)
                 } else {
                     function_name.clone()
                 };
@@ -113,7 +122,7 @@ impl Section {
                 success, content, ..
             } => {
                 let status = if *success { "ok" } else { "err" };
-                let preview = extract_result_preview(content, 55);
+                let preview = extract_result_preview(content, 100);
                 format!("▸ result ({status}): {preview}")
             }
 
@@ -123,8 +132,13 @@ impl Section {
                     DisplayKind::Final => "final",
                     DisplayKind::Note => "note",
                 };
-                let preview = truncate_preview(text, 60);
+                let preview = truncate_preview(text, 100);
                 format!("▸ display ({label}): {preview}")
+            }
+            SectionKind::Attachments(a) => {
+                let s = a.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
+                let preview = truncate_preview(&s, 100);
+                format!("▸ attachments: {preview}")
             }
         }
     }
@@ -148,6 +162,7 @@ impl Section {
             SectionKind::Thinking(_)
                 | SectionKind::ToolCall { .. }
                 | SectionKind::ToolResult { .. }
+                | SectionKind::Attachments(_)
         )
     }
 }
@@ -412,6 +427,112 @@ impl RenderBatch {
                 // by the constellation panel (re-fetches on receipt);
                 // not rendered in the conversation view.
             }
+            WireTurnEvent::Attachments(a) => {
+                self.sections.push(Section::new(SectionKind::Attachments(
+                    a.into_iter()
+                        .map(|attachment| match attachment {
+                            WireMessageAttachment::BatchOpeningSnapshot {
+                                kind,
+                                block_names,
+                                blocks,
+                                edited_blocks,
+                            } => {
+                                let mut parts = Vec::new();
+                                parts.push("[memory:current_state]".to_string());
+
+                                match kind {
+                                    SnapshotKind::Full => {
+                                        parts.push("(full snapshot)".to_string());
+                                    }
+                                    SnapshotKind::Delta { since_batch } => {
+                                        parts.push(format!("(delta since batch {since_batch})"));
+                                        if !edited_blocks.is_empty() {
+                                            let names: Vec<&str> =
+                                                edited_blocks.iter().map(|s| s.as_str()).collect();
+                                            parts.push(format!(
+                                                "[memory:updated] blocks changed: {}",
+                                                names.join(", ")
+                                            ));
+                                        }
+                                    }
+                                }
+
+                                if block_names.is_empty() {
+                                    parts.push("(no blocks loaded)".to_string());
+                                } else {
+                                    let names: Vec<&str> =
+                                        block_names.iter().map(|s| s.as_str()).collect();
+                                    parts.push(format!("Available blocks: {}", names.join(", ")));
+                                }
+
+                                for block in blocks {
+                                    if let Some(ref rendered) = block.rendered {
+                                        parts.push(rendered.to_string());
+                                    }
+                                }
+
+                                parts.join("\n\n")
+                            }
+                            WireMessageAttachment::SkillAvailable {
+                                handle: _,
+                                name,
+                                trust_tier,
+                                description,
+                                keywords,
+                            } => {
+                                let tier_str = serde_json::to_string(trust_tier)
+                                    .unwrap_or_else(|_| "\"unknown\"".to_string());
+                                let tier_kebab = tier_str.trim_matches('"');
+                                let mut header = format!(
+                                    "[skill:available] name=\"{name}\" trust_tier=\"{tier_kebab}\""
+                                );
+                                if let Some(desc) = description.as_deref().filter(|s| !s.is_empty())
+                                {
+                                    header.push_str(&format!(" description=\"{desc}\""));
+                                }
+                                let mut parts = vec![header];
+                                if !keywords.is_empty() {
+                                    parts.push(format!("keywords: [{}]", keywords.join(", ")));
+                                }
+                                parts.push("[skill:available:end]".to_string());
+                                parts.join("\n")
+                            }
+                            WireMessageAttachment::Custom { content } => content.clone(),
+                            WireMessageAttachment::FileEdit {
+                                path,
+                                kind,
+                                at,
+                                diff,
+                            } => render_file_edit_body(path, *kind, *at, diff.as_deref()),
+                            WireMessageAttachment::FileConflict { path, at } => {
+                                render_file_conflict_body(path, *at)
+                            }
+                            WireMessageAttachment::BlockWriteNotifications { writes } => {
+                                if writes.is_empty() {
+                                    return String::new();
+                                }
+                                let bodies: Vec<String> =
+                                    writes.iter().map(render_block_write_body).collect();
+                                bodies.join("\n\n")
+                            }
+                            WireMessageAttachment::ShellOutput { task_id, kind, at } => {
+                                render_shell_output_body(task_id, kind, *at)
+                            }
+                            WireMessageAttachment::PortEvent {
+                                port_id,
+                                payload,
+                                at,
+                            } => {
+                                let port_id: &str = port_id;
+                                let at = *at;
+                                format!("[port:event] port=\"{port_id}\" at={at}\n{payload}")
+                            }
+                            // Future variants — skip gracefully.
+                            _ => String::new(),
+                        })
+                        .collect(),
+                )));
+            }
         }
     }
 
@@ -458,6 +579,9 @@ impl RenderBatch {
                     header_height.saturating_add(content_height)
                 }
                 SectionKind::Display { text, .. } => plain_text_height(text, width),
+                SectionKind::Attachments(a) => {
+                    a.iter().map(|s| plain_text_height(s, width)).sum::<u16>()
+                }
             };
             section.cached_height = Some(height.max(1));
         }

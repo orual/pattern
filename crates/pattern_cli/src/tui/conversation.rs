@@ -135,7 +135,7 @@ impl StatefulWidget for ConversationView {
             && last_batch.streaming
             && current_y < viewport_bottom
         {
-            let cursor_span = Span::styled("▍", Style::default().fg(Color::Cyan));
+            let cursor_span = Span::styled(" ▍", Style::default().fg(Color::Cyan));
             let cursor_line = Line::from(vec![cursor_span]);
             buf.set_line(area.x, current_y, &cursor_line, area.width);
         }
@@ -450,7 +450,30 @@ fn render_section(
                 let paragraph = Paragraph::new(text).wrap(Wrap { trim: true });
                 let inner = indented_area(area);
 
-                render_paragraph_lines(&paragraph, inner, buf, y, viewport_bottom, remaining_skip);
+                y = render_paragraph_lines(
+                    &paragraph,
+                    inner,
+                    buf,
+                    y,
+                    viewport_bottom,
+                    remaining_skip,
+                );
+            }
+            y
+        }
+        SectionKind::Attachments(a) => {
+            let mut y = current_y;
+            let style = Style::default().fg(Color::DarkGray);
+            let arrow = if section.collapsed { "▸" } else { "▾" };
+
+            let header = Line::from(format!(" {arrow} attachments"));
+            buf.set_line(area.x, y, &header, area.width);
+            y += 1;
+            for attachment in a {
+                let text = ratatui::text::Text::styled(attachment, style);
+                let paragraph = Paragraph::new(text).wrap(Wrap { trim: true });
+                let inner = indented_area(area);
+                y = render_paragraph_lines(&paragraph, inner, buf, y, viewport_bottom, skip_lines);
             }
             y
         }

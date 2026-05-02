@@ -52,7 +52,9 @@ fn seed_text_block(cache: &MemoryCache, agent_id: &str, label: &str, content: &s
         MemoryBlockType::Working,
         BlockSchema::text(),
     );
-    cache.create_block(&Scope::global(agent_id), bc).expect("create_block");
+    cache
+        .create_block(&Scope::global(agent_id), bc)
+        .expect("create_block");
     let doc = cache
         .get(&Scope::global(agent_id).to_db_key(), label)
         .expect("get after create")
@@ -197,6 +199,7 @@ fn discard_persistent_synthetic_handle_surfaces_typed_error() {
         },
         spawner_capabilities: pattern_core::CapabilitySet::all(),
         cancel_watcher: None,
+        cfg: None,
     };
 
     match handle.discard() {

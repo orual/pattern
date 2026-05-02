@@ -35,7 +35,7 @@ use pattern_core::traits::turn_sink::{DisplayKind, TurnEvent, TurnSink};
 use pattern_core::types::ids::{
     AgentId as CoreAgentId, BatchId as CoreBatchId, MessageId, new_id, new_snowflake_id,
 };
-use pattern_core::types::message::Message;
+use pattern_core::types::message::{Message, MessageAttachment, ShellOutputKind};
 use pattern_core::types::provider::{ChatMessage, ContentPart};
 use pattern_core::types::snapshot::PersonaSnapshot;
 use pattern_core::types::turn::{StopReason, TurnInput};
@@ -45,6 +45,7 @@ use pattern_runtime::router::agent::AgentRouter;
 use pattern_runtime::router::cli::CliRouter;
 use pattern_runtime::sdk::SdkLocation;
 use pattern_runtime::session::{SessionRegistries, TidepoolSession, WakeRegistryExtras};
+use serde_json::json;
 use smol_str::SmolStr;
 use tracing::{info, warn};
 
@@ -833,7 +834,12 @@ impl DaemonServer {
                         turn_input.messages.into_iter().next().unwrap(),
                     );
 
-                    if let Err(e) = agent_session.session.context().mailbox().send_input(mailbox_input) {
+                    if let Err(e) = agent_session
+                        .session
+                        .context()
+                        .mailbox()
+                        .send_input(mailbox_input)
+                    {
                         warn!(
                             agent_id = %agent_id,
                             batch_id = %batch_id,
@@ -964,6 +970,7 @@ impl DaemonServer {
 
                                 let events: Vec<WireTurnEvent> =
                                     msgs.into_iter().flat_map(message_to_wire_events).collect();
+                                tracing::trace!("{:?}", events);
 
                                 let tokens = estimate_batch_tokens(&user_message, &events);
 
@@ -979,13 +986,16 @@ impl DaemonServer {
 
                         // Sort batches by batch_id (snowflakes sort chronologically).
                         batches.sort_by(|a, b| a.batch_id.cmp(&b.batch_id));
+
                         batches
                     })
                     .await
                     .unwrap_or_default();
-
                     let response = HistoryResponse { batches };
-                    let _ = tx.send(response).await;
+                    let result = tx.send(response).await;
+                    if result.is_err() {
+                        tracing::error!("{:?}", result);
+                    }
                 });
             }
             PatternMessage::CancelBatch(req) => {
@@ -2820,6 +2830,17 @@ fn message_to_wire_events(
         return events;
     };
 
+    if let Ok(attachments) = serde_json::from_value::<Vec<MessageAttachment>>(
+        db_msg
+            .attachments_json
+            .unwrap_or(pattern_db::Json(json!({})))
+            .0,
+    ) {
+        events.push(WireTurnEvent::Attachments(attachments_to_wire(
+            &attachments,
+        )));
+    }
+
     // User messages are handled via the user_message field, not events.
     if db_msg.role == MessageRole::User {
         return events;
@@ -2930,6 +2951,41 @@ fn estimate_batch_tokens(user_message: &Option<String>, events: &[WireTurnEvent]
             // (no agent-side text); do not contribute to token estimates.
             WireTurnEvent::FrontingChanged { .. } => {}
             WireTurnEvent::ConstellationChanged { .. } => {}
+            WireTurnEvent::Attachments(a) => {
+                for attachment in a.iter() {
+                    total_chars += match attachment {
+                        WireMessageAttachment::BatchOpeningSnapshot { blocks, .. } => blocks
+                            .iter()
+                            .map(|b| b.rendered.as_deref().unwrap_or_default().len())
+                            .sum::<usize>(),
+                        WireMessageAttachment::SkillAvailable {
+                            name,
+                            description,
+                            keywords,
+                            ..
+                        } => {
+                            name.len()
+                                + description.as_deref().unwrap_or_default().len()
+                                + keywords.iter().map(|k| k.len()).sum::<usize>()
+                        }
+                        WireMessageAttachment::Custom { content } => content.len(),
+                        WireMessageAttachment::FileEdit { diff, .. } => {
+                            diff.as_deref().unwrap_or_default().len()
+                        }
+                        WireMessageAttachment::FileConflict { .. } => 5,
+                        WireMessageAttachment::BlockWriteNotifications { writes } => writes
+                            .iter()
+                            .map(|w| w.rendered_content.len())
+                            .sum::<usize>(),
+                        WireMessageAttachment::ShellOutput { kind, .. } => match kind {
+                            ShellOutputKind::Output(output) => output.len(),
+                            ShellOutputKind::Exit { .. } => 0,
+                            ShellOutputKind::Backgrounded { .. } => 0,
+                        },
+                        WireMessageAttachment::PortEvent { payload, .. } => payload.len(),
+                    }
+                }
+            }
         }
     }
 

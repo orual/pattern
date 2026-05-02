@@ -99,7 +99,7 @@ impl Default for ShaperConfig {
             compat_mode: ShaperCompatMode::default(),
             target_is_first_party: true,
             enable_interleaved_thinking: false,
-            enable_dev_full_thinking: false,
+            enable_dev_full_thinking: true,
             enable_context_management: false,
             enable_extended_cache_ttl: false,
             enable_1m_context: false,

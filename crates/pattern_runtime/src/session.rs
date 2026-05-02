@@ -1076,15 +1076,37 @@ impl SessionContext {
         });
         child_registry.install_watcher(watcher_handle);
 
+        // Child gets its own CancelState so that child-side cancellation
+        // (e.g. ephemeral timeout) does NOT propagate UP to the parent.
+        // A one-way watcher propagates parent cancel → child cancel.
+        // Uses Weak for the child so the closure doesn't prevent child drop.
+        // The JoinHandle is installed on child_registry so it's aborted when
+        // the registry drops (same pattern as the grandchild watcher above).
+        let child_cancel = Arc::new(CancelState::new());
+        let parent_cancel_for_child = self.cancel_state.clone();
+        let child_cancel_weak = Arc::downgrade(&child_cancel);
+        let cancel_watcher = self.tokio_handle.spawn(async move {
+            parent_cancel_for_child.wait_for_cancel().await;
+            if let Some(child_cs) = child_cancel_weak.upgrade() {
+                child_cs.request_cancel();
+            }
+        });
+        child_registry.install_watcher(cancel_watcher);
+
         let child = SessionContext {
             agent_id: self.agent_id.clone(),
             default_scope: self.default_scope.clone(),
-            model_id: self.model_id.clone(),
+            model_id: cfg
+                .model_id
+                .as_ref()
+                .map(|m| m.to_string())
+                .unwrap_or_else(|| self.model_id.clone()),
             system_prompt,
             chat_options: self.chat_options.clone(),
             budget: self.budget,
-            // Shared cancel state — parent cancel propagates to child.
-            cancel_state: self.cancel_state.clone(),
+            // Child's own cancel state — parent cancel propagates down
+            // via the watcher above, but child cancel doesn't propagate up.
+            cancel_state: child_cancel,
             // Shared adapter — child reads parent's memory. Write
             // restriction is enforced by the child's capability set
             // (the caller restricted it via restrict_to() before this
@@ -1109,11 +1131,11 @@ impl SessionContext {
             diagnostics: Arc::new(std::sync::Mutex::new(Vec::new())),
             capabilities: Some(child_caps),
             policies: self.policies.clone(),
-            permission_broker: Arc::new(pattern_core::permission::PermissionBroker::new()),
+            permission_broker: self.permission_broker.clone(),
             // Permission bridge is None; ephemerals don't currently
             // route gated effects through the broker (Phase 4+ may
             // revisit).
-            permission_bridge: None,
+            permission_bridge: self.permission_bridge.clone(),
             current_dispatch_origin: Arc::new(std::sync::RwLock::new(None)),
             // v3-sandbox-io I/O subsystems: ephemeral children inherit
             // the parent's `file_manager` (same project files in scope)

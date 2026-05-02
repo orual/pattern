@@ -238,15 +238,11 @@ pub struct SpawnRegistry {
     /// ceiling without re-deriving it from `Semaphore::available_permits`
     /// (which fluctuates as permits are acquired and released).
     limit: usize,
-    /// Optional watcher task handle. When `fork_for_ephemeral` installs a
-    /// cancel-propagation watcher on behalf of this child registry, the
-    /// handle is stored here so `Drop` can abort it.
-    ///
-    /// Without abortion the watcher would park on `notify.notified()` until
-    /// the parent's `Arc<CancelState>` reaches refcount 0. In a long-lived
-    /// parent that never cancels, that is effectively forever — a perpetual
-    /// task leak per ephemeral spawn.
-    watcher: Mutex<Option<JoinHandle<()>>>,
+    /// Watcher task handles. `fork_for_ephemeral` installs cancel-propagation
+    /// watchers on behalf of the child — one for grandchild cascading, one for
+    /// parent→child cancel forwarding. On `Drop`, every handle is aborted so
+    /// the watcher tasks release their `Arc<CancelState>` clones promptly.
+    watchers: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl SpawnRegistry {
@@ -261,18 +257,16 @@ impl SpawnRegistry {
             children: Mutex::new(Vec::new()),
             concurrent_ephemeral_limit: Arc::new(Semaphore::new(limit)),
             limit,
-            watcher: Mutex::new(None),
+            watchers: Mutex::new(Vec::new()),
         }
     }
 
     /// Install a cancel-propagation watcher task handle on this registry.
-    ///
-    /// Called by `fork_for_ephemeral` after spawning the watcher. Stores the
-    /// `JoinHandle<()>` so the registry's `Drop` can abort it. This prevents
-    /// the watcher from parking on `notify.notified()` for the lifetime of
-    /// the parent's `Arc<CancelState>` when the parent never cancels.
+    /// Install a cancel-propagation watcher task handle. Called by
+    /// `fork_for_ephemeral` after spawning each watcher. All handles are
+    /// aborted on registry drop.
     pub fn install_watcher(&self, handle: JoinHandle<()>) {
-        *self.watcher.lock() = Some(handle);
+        self.watchers.lock().push(handle);
     }
 
     /// Session id of the parent that owns this registry.
@@ -387,7 +381,7 @@ impl Drop for SpawnRegistry {
         // `notify.notified()` until the parent's `Arc<CancelState>` reaches
         // refcount 0 — effectively forever in a long-lived parent that never
         // cancels, causing one leaked tokio task per ephemeral spawn.
-        if let Some(handle) = self.watcher.lock().take() {
+        for handle in self.watchers.lock().drain(..) {
             handle.abort();
         }
     }

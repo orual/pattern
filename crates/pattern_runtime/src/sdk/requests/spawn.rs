@@ -145,24 +145,59 @@ impl From<WireCapabilityFlag> for CapabilityFlag {
 // ── CapabilitySet ────────────────────────────────────────────────────────────
 
 /// Wire mirror of [`pattern_core::CapabilitySet`].
-///
-/// `categories` and `flags` are lists on the wire; the conversion to the
-/// `BTreeSet`-backed domain type dedups silently.
+/// Wire mirror of `EffectClass` — controls which kinds of operations
+/// are permitted within allowed categories.
+#[derive(Debug, FromCore)]
+pub enum WireEffectClass {
+    #[core(module = "Pattern.Spawn", name = "ClassObserve")]
+    Observe,
+    #[core(module = "Pattern.Spawn", name = "ClassMutateInternal")]
+    MutateInternal,
+    #[core(module = "Pattern.Spawn", name = "ClassMutateExternal")]
+    MutateExternal,
+    #[core(module = "Pattern.Spawn", name = "ClassCoordinate")]
+    Coordinate,
+    #[core(module = "Pattern.Spawn", name = "ClassEscape")]
+    Escape,
+}
+
+impl From<WireEffectClass> for pattern_core::capability::EffectClass {
+    fn from(w: WireEffectClass) -> Self {
+        match w {
+            WireEffectClass::Observe => Self::Observe,
+            WireEffectClass::MutateInternal => Self::MutateInternal,
+            WireEffectClass::MutateExternal => Self::MutateExternal,
+            WireEffectClass::Coordinate => Self::Coordinate,
+            WireEffectClass::Escape => Self::Escape,
+        }
+    }
+}
+
+/// Wire mirror of `CapabilitySet`.
 #[derive(Debug, FromCore)]
 #[core(module = "Pattern.Spawn", name = "CapabilitySet")]
 pub struct WireCapabilitySet {
     pub categories: Vec<WireEffectCategory>,
     pub flags: Vec<WireCapabilityFlag>,
+    pub classes: Vec<WireEffectClass>,
 }
 
 impl From<WireCapabilitySet> for CapabilitySet {
     fn from(w: WireCapabilitySet) -> Self {
-        let set = w
+        let mut set = w
             .categories
             .into_iter()
             .map(EffectCategory::from)
             .collect::<CapabilitySet>();
-        set.with_flags(w.flags.into_iter().map(CapabilityFlag::from))
+        set = set.with_flags(w.flags.into_iter().map(CapabilityFlag::from));
+        // Wire allowed_classes into the set
+        let classes: std::collections::BTreeSet<pattern_core::capability::EffectClass> = w
+            .classes
+            .into_iter()
+            .map(pattern_core::capability::EffectClass::from)
+            .collect();
+        set.allowed_classes = classes;
+        set
     }
 }
 
@@ -218,11 +253,14 @@ pub struct WirePersonaConfig {
     pub name: String,
     pub system_prompt: String,
     pub capabilities: WireCapabilitySet,
+    pub model: Option<String>,
 }
 
 impl From<WirePersonaConfig> for PersonaConfig {
     fn from(w: WirePersonaConfig) -> Self {
-        PersonaConfig::new(w.name, w.system_prompt, w.capabilities.into())
+        let mut cfg = PersonaConfig::new(w.name, w.system_prompt, w.capabilities.into());
+        cfg.model_id = w.model.map(smol_str::SmolStr::from);
+        cfg
     }
 }
 
@@ -255,11 +293,9 @@ pub struct WireEphemeralConfig {
     pub program: String,
     pub costume: Option<String>,
     pub capabilities: Option<WireCapabilitySet>,
-    /// Timeout in milliseconds; converted to `jiff::Span` at the handler boundary.
     pub timeout_ms: Option<i64>,
-    /// Optional initial human-role prompt seeded into the child's first
-    /// turn input.
     pub prompt: Option<String>,
+    pub model: Option<String>,
 }
 
 impl From<WireEphemeralConfig> for EphemeralConfig {
@@ -277,6 +313,9 @@ impl From<WireEphemeralConfig> for EphemeralConfig {
         if let Some(p) = w.prompt {
             cfg = cfg.with_prompt(p);
         }
+        if let Some(m) = w.model {
+            cfg.model_id = Some(smol_str::SmolStr::from(m));
+        }
         cfg
     }
 }
@@ -291,6 +330,7 @@ pub struct WireForkConfig {
     pub capabilities: Option<WireCapabilitySet>,
     pub timeout_hint_ms: Option<i64>,
     pub task_ref: Option<WireBlockRef>,
+    pub model: Option<String>,
 }
 
 impl From<WireForkConfig> for ForkConfig {
@@ -305,6 +345,9 @@ impl From<WireForkConfig> for ForkConfig {
         }
         if let Some(r) = w.task_ref {
             cfg = cfg.with_task_ref(r.into());
+        }
+        if let Some(m) = w.model {
+            cfg.model_id = Some(smol_str::SmolStr::from(m));
         }
         cfg
     }

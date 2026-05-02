@@ -31,7 +31,7 @@ use std::sync::{Arc, Weak};
 use pattern_core::spawn::PersonaConfig;
 use pattern_core::types::ids::PersonaId;
 use pattern_core::types::memory_types::{BlockSchema, MemoryBlockType};
-use pattern_core::{CapabilityFlag, CapabilitySet};
+use pattern_core::{CapabilityFlag, CapabilitySet, ForkConfig};
 use pattern_memory::MemoryCache;
 use pattern_memory::jj::JjAdapter;
 use serde::{Deserialize, Serialize};
@@ -307,6 +307,7 @@ pub struct ForkHandle {
     /// `None` when the fork was constructed without a tokio runtime context
     /// (e.g. in unit tests that build `ForkHandle` directly).
     pub cancel_watcher: Option<tokio::task::JoinHandle<()>>,
+    pub cfg: Option<ForkConfig>,
 }
 
 impl ForkHandle {
@@ -343,6 +344,7 @@ impl ForkHandle {
             },
             spawner_capabilities: CapabilitySet::all(),
             cancel_watcher: None,
+            cfg: None,
         }
     }
 
@@ -369,6 +371,7 @@ impl ForkHandle {
             },
             spawner_capabilities: CapabilitySet::all(),
             cancel_watcher: None,
+            cfg: None,
         }
     }
 
@@ -401,6 +404,11 @@ impl ForkHandle {
     #[must_use]
     pub fn with_cancel_watcher(mut self, handle: tokio::task::JoinHandle<()>) -> Self {
         self.cancel_watcher = Some(handle);
+        self
+    }
+
+    pub fn with_cfg(mut self, cfg: ForkConfig) -> Self {
+        self.cfg = Some(cfg);
         self
     }
 

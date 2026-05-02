@@ -1,0 +1,9 @@
+---
+source: crates/pattern_cli/src/tui/conversation.rs
+assertion_line: 730
+expression: output
+---
+[you] Search for info
+
+ ▸ search: search
+Found results.

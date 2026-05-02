@@ -3,9 +3,10 @@
 //! Defines the [`PatternProtocol`] enum that the irpc `#[rpc_requests]` macro
 //! expands into a `PatternMessage` enum consumed by the daemon server actor.
 //!
-//! Transport serialization uses postcard (irpc's wire format). The test suite
-//! uses serde_json for round-trip validation — serde_json and postcard both
-//! honour the same `Serialize`/`Deserialize` impls, so this is correct.
+//! Transport serialization uses postcard (irpc's wire format). Round-trip
+//! tests use postcard directly — JSON round-trips are not a substitute, since
+//! postcard is non-self-describing and trips on attribute combinations that
+//! JSON tolerates (e.g. `skip_serializing_if` on `Option`, untagged enums).
 
 use std::path::PathBuf;
 
@@ -13,10 +14,23 @@ use irpc::{
     channel::{mpsc, oneshot},
     rpc_requests,
 };
-use pattern_core::traits::turn_sink::{DisplayKind, TurnEvent};
-use pattern_core::types::origin::{Author, MessageOrigin};
-use pattern_core::types::provider::{ContentPart, ToolOutcome};
-use pattern_core::types::turn::StopReason;
+use pattern_core::types::{
+    memory_types::SkillTrustTier,
+    message::{RenderedBlock, SnapshotKind},
+    origin::{Author, MessageOrigin},
+};
+use pattern_core::types::{
+    message::FileEditKind,
+    provider::{ContentPart, ToolOutcome},
+};
+use pattern_core::{
+    BlockWrite,
+    types::{message::ShellOutputKind, turn::StopReason},
+};
+use pattern_core::{
+    traits::turn_sink::{DisplayKind, TurnEvent},
+    types::message::MessageAttachment,
+};
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
@@ -208,6 +222,144 @@ pub enum WireTurnEvent {
     },
     /// Wire turn ended.
     Stop(StopReason),
+    /// Attachments associated with the request, if any.
+    Attachments(Vec<WireMessageAttachment>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum WireMessageAttachment {
+    /// Memory snapshot attached to a batch-initiating user message
+    /// (or to mid-batch tool_result messages when external memory
+    /// changes are detected).
+    BatchOpeningSnapshot {
+        /// Whether this is a full dump or a delta since a prior batch.
+        kind: SnapshotKind,
+        /// All blocks' labels currently available to this agent. Always
+        /// present in both Full and Delta so the model knows the
+        /// complete block namespace.
+        block_names: Vec<SmolStr>,
+        /// For Full: rendered content of ALL blocks.
+        /// For Delta: rendered content of blocks that changed since
+        /// prior batch.
+        blocks: Vec<RenderedBlock>,
+        /// For Delta: labels of blocks edited since prior batch. Empty
+        /// for Full.
+        edited_blocks: Vec<SmolStr>,
+    },
+    /// A skill became autonomously available to the agent (e.g. a plugin
+    /// auto-installed it). Renders as a `<system-reminder>`-wrapped
+    /// `[skill:available]` marker showing the frontmatter so the agent
+    /// learns it exists and can decide to call `Skills.Load`. Carries
+    /// metadata only — NOT the body — to keep wire bytes small and the
+    /// attachment cache-stable.
+    SkillAvailable {
+        /// The skill's block handle, used for subsequent `Skills.Load` calls.
+        handle: SmolStr,
+        /// Author-declared name from the skill's YAML frontmatter.
+        name: String,
+        /// Effective trust tier (post-policy enforcement, kebab-case
+        /// when rendered).
+        trust_tier: SkillTrustTier,
+        /// Optional one-line description from frontmatter.
+        description: Option<String>,
+        /// Keywords from frontmatter.
+        keywords: Vec<String>,
+    },
+    /// Caller-rendered text. The splice path inlines `content` verbatim
+    /// onto the host message; the caller is responsible for any wrapping
+    /// (e.g. `<system-reminder>` markers) it wants.
+    ///
+    /// Use this for one-off notifications that don't fit a typed variant.
+    /// New recurring patterns should get their own typed variant for
+    /// refactoring resistance and structured analytics.
+    Custom {
+        /// Pre-rendered text. Spliced verbatim into the host message's
+        /// content. Caller handles all formatting.
+        content: String,
+    },
+    /// An external edit was detected on a file the agent has open or is
+    /// watching. Queued by file-manager listener threads into the
+    /// between-turn async-reminder buffer; the compose-time drain
+    /// splices it onto the next turn's first user message.
+    ///
+    /// The renderer (Task 8) converts this into a `<system-reminder>`
+    /// block showing the path and edit kind.
+    FileEdit {
+        /// Absolute path to the changed file.
+        path: std::path::PathBuf,
+        /// Whether the file was opened for editing or watched read-only.
+        kind: FileEditKind,
+        /// When the external edit was detected.
+        at: jiff::Timestamp,
+        /// Optional unified diff of the change. `None` for watch-only
+        /// files and until Task 8 wires the diff payload.
+        diff: Option<String>,
+    },
+    /// An external edit conflicted with the agent's unsaved CRDT state
+    /// under `RejectAndNotify` policy. The agent must call `File.Reload`
+    /// or `File.ForceWrite` to resolve.
+    ///
+    /// The renderer (Task 8) converts this into a `<system-reminder>`
+    /// block showing the path and conflict details.
+    FileConflict {
+        /// Absolute path to the conflicted file.
+        path: std::path::PathBuf,
+        /// When the conflict was detected.
+        at: jiff::Timestamp,
+    },
+    /// Memory block writes that occurred during a turn. Attached to the
+    /// message that executed the writes (typically the tool_result that
+    /// closed out the dispatch). Replaces the old pseudo-message path
+    /// where `Segment2Pass` rendered `BlockWrite`s as standalone
+    /// synthetic `ChatMessage`s.
+    ///
+    /// The compose-time renderer converts this into a
+    /// `<system-reminder>` block showing what changed, using the same
+    /// body format as the retired `render_change_events` pseudo-message
+    /// renderer.
+    BlockWriteNotifications {
+        /// The block writes that occurred. Rendered as a group into a
+        /// single `<system-reminder>` block at compose time.
+        writes: Vec<BlockWrite>,
+    },
+    /// One shell output event from a spawned process. The bridge thread
+    /// (Task 7) enqueues one of these per `OutputChunk` arriving from the
+    /// PTY; the compose-time drain splices them onto the next turn's first
+    /// user message.
+    ///
+    /// `Output` chunks carry live stdout/stderr text. `Exit` is the final
+    /// chunk signalling process completion. `Backgrounded` is forward-compat
+    /// and is currently never enqueued (see [`ShellOutputKind`]).
+    ShellOutput {
+        /// Stable task identifier assigned at `Shell.Spawn` time.
+        task_id: String,
+        /// The event kind: streaming output, exit, or (future) background
+        /// sentinel.
+        kind: ShellOutputKind,
+        /// When this event was enqueued by the bridge thread.
+        at: jiff::Timestamp,
+    },
+
+    /// One subscription event delivered by a `Pattern.Port.Subscribe` stream
+    /// (Phase 4). The dispatcher actor's per-subscription drain task builds
+    /// these from the `BoxStream<PortEvent>` returned by the `Port` impl's
+    /// `subscribe()` and pushes them onto the session's async-reminder
+    /// buffer; compose-time drain on the next turn splices them onto the
+    /// first user message and `Segment2Pass` renders each one as a
+    /// `<system-reminder>` block.
+    ///
+    /// The `port_id` is the registered port handle (string form of
+    /// `pattern_core::types::port::PortId`) — not the raw event source's
+    /// internal id, in case those ever diverge.
+    PortEvent {
+        /// Registered port id (e.g. `"http"`, `"slack"`, `"weather-api"`).
+        port_id: String,
+        /// Opaque event payload. Interpretation is port-specific.
+        payload: String,
+        /// When the event was enqueued by the dispatcher's drain task.
+        at: jiff::Timestamp,
+    },
 }
 
 /// Wire mirror of a routing rule, used in [`WireTurnEvent::FrontingChanged`]
@@ -436,9 +588,87 @@ impl WireTurnEvent {
             }),
             TurnEvent::Stop(reason) => Some(Self::Stop(*reason)),
             TurnEvent::ComposedRequest(_) => None,
+            TurnEvent::Attachments(a) => Some(Self::Attachments(attachments_to_wire(a))),
             _ => None, // Forward-compat for future variants.
         }
     }
+}
+
+pub fn attachments_to_wire(attachments: &[MessageAttachment]) -> Vec<WireMessageAttachment> {
+    attachments
+        .iter()
+        .filter_map(|a| match a {
+            MessageAttachment::BatchOpeningSnapshot {
+                kind,
+                block_names,
+                blocks,
+                edited_blocks,
+            } => Some(WireMessageAttachment::BatchOpeningSnapshot {
+                kind: kind.clone(),
+                block_names: block_names.clone(),
+                blocks: blocks.clone(),
+                edited_blocks: edited_blocks.clone(),
+            }),
+            MessageAttachment::SkillAvailable {
+                handle,
+                name,
+                trust_tier,
+                description,
+                keywords,
+            } => Some(WireMessageAttachment::SkillAvailable {
+                handle: handle.clone(),
+                name: name.clone(),
+                trust_tier: trust_tier.clone(),
+                description: description.clone(),
+                keywords: keywords.clone(),
+            }),
+            MessageAttachment::Custom { content } => Some(WireMessageAttachment::Custom {
+                content: content.clone(),
+            }),
+            MessageAttachment::FileEdit {
+                path,
+                kind,
+                at,
+                diff,
+            } => Some(WireMessageAttachment::FileEdit {
+                path: path.clone(),
+                kind: kind.clone(),
+                at: at.clone(),
+                diff: diff.clone(),
+            }),
+            MessageAttachment::FileConflict { path, at } => {
+                Some(WireMessageAttachment::FileConflict {
+                    path: path.clone(),
+                    at: at.clone(),
+                })
+            }
+
+            MessageAttachment::BlockWriteNotifications { writes } => {
+                Some(WireMessageAttachment::BlockWriteNotifications {
+                    writes: writes.clone(),
+                })
+            }
+
+            MessageAttachment::ShellOutput { task_id, kind, at } => {
+                Some(WireMessageAttachment::ShellOutput {
+                    task_id: task_id.clone(),
+                    kind: kind.clone(),
+                    at: at.clone(),
+                })
+            }
+
+            MessageAttachment::PortEvent {
+                port_id,
+                payload,
+                at,
+            } => Some(WireMessageAttachment::PortEvent {
+                port_id: port_id.clone(),
+                payload: payload.to_string(),
+                at: at.clone(),
+            }),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
 }
 
 /// A turn event tagged with the batch and agent that produced it.
@@ -824,15 +1054,11 @@ mod tests {
     #[test]
     fn shutdown_request_roundtrip() {
         // Unit struct carries no payload; the roundtrip exercises that the
-        // `Serialize` + `Deserialize` derives exist and round-trip via both
-        // backends. postcard is the wire format used by irpc at runtime, so
-        // verifying it separately from serde_json catches cases where a type
-        // encodes fine as JSON but can't be represented in postcard's subset
-        // (e.g. `serde_json::Value`, untagged enums without a discriminant).
+        // `Serialize` + `Deserialize` derives exist and round-trip via the
+        // wire format. postcard is non-self-describing, so this catches
+        // attribute combinations that JSON tolerates but postcard can't
+        // (e.g. `skip_serializing_if` on `Option`, untagged enums).
         let req = ShutdownRequest;
-        let json = serde_json::to_string(&req).unwrap();
-        let _decoded: ShutdownRequest = serde_json::from_str(&json).unwrap();
-
         let bytes = postcard::to_allocvec(&req).unwrap();
         let _decoded: ShutdownRequest = postcard::from_bytes(&bytes).unwrap();
     }
@@ -840,15 +1066,12 @@ mod tests {
     #[test]
     fn shutdown_response_roundtrip() {
         let resp = ShutdownResponse;
-        let json = serde_json::to_string(&resp).unwrap();
-        let _decoded: ShutdownResponse = serde_json::from_str(&json).unwrap();
-
         let bytes = postcard::to_allocvec(&resp).unwrap();
         let _decoded: ShutdownResponse = postcard::from_bytes(&bytes).unwrap();
     }
 
     /// Verifies that `AgentMessage` with a Partner origin round-trips through
-    /// both JSON (serde) and postcard (IRPC wire format).
+    /// postcard (the IRPC wire format).
     #[test]
     fn agent_message_direct_roundtrip() {
         let msg = AgentMessage {
@@ -857,20 +1080,13 @@ mod tests {
             parts: vec![ContentPart::Text("hello".into())],
             origin: test_partner_origin(),
         };
-        let json = serde_json::to_string(&msg).unwrap();
-        let decoded: AgentMessage = serde_json::from_str(&json).unwrap();
+        let bytes = postcard::to_allocvec(&msg).unwrap();
+        let decoded: AgentMessage = postcard::from_bytes(&bytes).unwrap();
         assert!(
             matches!(&decoded.recipient, Recipient::Direct(id) if id == "agent-1"),
             "expected Direct recipient"
         );
         assert_eq!(decoded.batch_id, "batch-001");
-        // Also verify postcard round-trip (IRPC wire format).
-        let bytes = postcard::to_allocvec(&msg).unwrap();
-        let decoded2: AgentMessage = postcard::from_bytes(&bytes).unwrap();
-        assert!(
-            matches!(&decoded2.recipient, Recipient::Direct(id) if id == "agent-1"),
-            "postcard: expected Direct recipient"
-        );
     }
 
     #[test]
@@ -894,8 +1110,8 @@ mod tests {
             parts: vec![ContentPart::Text("@alice hi".into())],
             origin: test_partner_origin(),
         };
-        let json = serde_json::to_string(&msg).unwrap();
-        let decoded: AgentMessage = serde_json::from_str(&json).unwrap();
+        let bytes = postcard::to_allocvec(&msg).unwrap();
+        let decoded: AgentMessage = postcard::from_bytes(&bytes).unwrap();
         assert!(
             matches!(&decoded.recipient, Recipient::Address(id) if id == "alice"),
             "expected Address recipient"
@@ -913,8 +1129,8 @@ mod tests {
             ],
             origin: test_partner_origin(),
         };
-        let json = serde_json::to_string(&msg).unwrap();
-        let decoded: AgentMessage = serde_json::from_str(&json).unwrap();
+        let bytes = postcard::to_allocvec(&msg).unwrap();
+        let decoded: AgentMessage = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(decoded.parts.len(), 2);
     }
 
@@ -950,10 +1166,55 @@ mod tests {
             event: WireTurnEvent::Text("hello world".into()),
             mount_path: None,
         };
-        let json = serde_json::to_string(&event).unwrap();
-        let decoded: TaggedTurnEvent = serde_json::from_str(&json).unwrap();
+        let bytes = postcard::to_allocvec(&event).unwrap();
+        let decoded: TaggedTurnEvent = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(decoded.batch_id, "batch-001");
         assert!(matches!(decoded.event, WireTurnEvent::Text(ref s) if s == "hello world"));
+    }
+
+    #[test]
+    fn block_write_notifications_roundtrip() {
+        use pattern_core::types::block::{BlockWrite, BlockWriteKind};
+        use pattern_core::types::origin::{Author, SystemReason};
+        use pattern_db::MemoryBlockType;
+
+        let attachment = WireMessageAttachment::BlockWriteNotifications {
+            writes: vec![BlockWrite {
+                handle: "task_list".into(),
+                memory_id: "mem_test".into(),
+                block_type: MemoryBlockType::Working,
+                rendered_content: "after".to_string(),
+                kind: BlockWriteKind::Appended,
+                previous_content_hash: None,
+                previous_rendered_content: None,
+                at: jiff::Timestamp::now(),
+                author: Author::System {
+                    reason: SystemReason::ToolCall,
+                },
+            }],
+        };
+
+        let bytes = postcard::to_allocvec(&attachment).unwrap();
+        let _decoded: WireMessageAttachment = postcard::from_bytes(&bytes).unwrap();
+    }
+
+    #[test]
+    fn message_attachment_roundtrip() {
+        let content = "block content";
+        let attachment = WireMessageAttachment::BatchOpeningSnapshot {
+            kind: SnapshotKind::Full,
+            block_names: vec!["block".into()],
+            blocks: vec![RenderedBlock {
+                label: "block".into(),
+                block_type: pattern_db::MemoryBlockType::Core,
+                rendered: Some(content.into()),
+                content_hash: 0,
+            }],
+            edited_blocks: vec![],
+        };
+
+        let bytes = postcard::to_allocvec(&attachment).unwrap();
+        let _decoded: WireMessageAttachment = postcard::from_bytes(&bytes).unwrap();
     }
 
     #[test]
@@ -964,8 +1225,8 @@ mod tests {
             event: WireTurnEvent::Stop(StopReason::EndTurn),
             mount_path: None,
         };
-        let json = serde_json::to_string(&event).unwrap();
-        let decoded: TaggedTurnEvent = serde_json::from_str(&json).unwrap();
+        let bytes = postcard::to_allocvec(&event).unwrap();
+        let decoded: TaggedTurnEvent = postcard::from_bytes(&bytes).unwrap();
         assert!(matches!(
             decoded.event,
             WireTurnEvent::Stop(StopReason::EndTurn)
@@ -979,8 +1240,8 @@ mod tests {
             active_batch_count: 1,
             uptime_secs: 42,
         };
-        let json = serde_json::to_string(&status).unwrap();
-        let decoded: RuntimeStatus = serde_json::from_str(&json).unwrap();
+        let bytes = postcard::to_allocvec(&status).unwrap();
+        let decoded: RuntimeStatus = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(decoded.agent_count, 3);
         assert_eq!(decoded.uptime_secs, 42);
     }
@@ -991,8 +1252,8 @@ mod tests {
             command: "switch-persona".into(),
             args: vec!["orual".into()],
         };
-        let json = serde_json::to_string(&cmd).unwrap();
-        let decoded: SlashCommand = serde_json::from_str(&json).unwrap();
+        let bytes = postcard::to_allocvec(&cmd).unwrap();
+        let decoded: SlashCommand = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(decoded.command, "switch-persona");
         assert_eq!(decoded.args, ["orual"]);
     }
@@ -1003,8 +1264,8 @@ mod tests {
             project_path: std::path::PathBuf::from("/home/user/project"),
             default_agent: "pattern-default".into(),
         };
-        let json = serde_json::to_string(&req).unwrap();
-        let decoded: InitSessionRequest = serde_json::from_str(&json).unwrap();
+        let bytes = postcard::to_allocvec(&req).unwrap();
+        let decoded: InitSessionRequest = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(
             decoded.project_path,
             std::path::PathBuf::from("/home/user/project")
@@ -1027,8 +1288,8 @@ mod tests {
             fronting_snapshot: None,
             error: None,
         };
-        let json = serde_json::to_string(&info).unwrap();
-        let decoded: SessionInfo = serde_json::from_str(&json).unwrap();
+        let bytes = postcard::to_allocvec(&info).unwrap();
+        let decoded: SessionInfo = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(decoded.agent_id, "pattern-default");
         assert_eq!(decoded.persona_name, "Pattern Default");
         assert_eq!(decoded.available_agents.len(), 2);
@@ -1066,16 +1327,11 @@ mod tests {
                 priority: 10,
             }],
         };
-        let json = serde_json::to_string(&set).unwrap();
-        let decoded: WireFrontingSet = serde_json::from_str(&json).unwrap();
+        let bytes = postcard::to_allocvec(&set).unwrap();
+        let decoded: WireFrontingSet = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(decoded.active.len(), 2);
         assert_eq!(decoded.fallback.as_deref(), Some("charlie"));
         assert_eq!(decoded.rules.len(), 1);
-
-        // Also verify postcard round-trip.
-        let bytes = postcard::to_allocvec(&set).unwrap();
-        let decoded2: WireFrontingSet = postcard::from_bytes(&bytes).unwrap();
-        assert_eq!(decoded2.active, decoded.active);
     }
 
     #[test]

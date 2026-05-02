@@ -147,7 +147,7 @@ impl EvalDispatcher for NoOpDispatcher {
 /// to surface the unexpected cache miss for operator visibility.
 pub async fn orchestrate(
     req: CompletionRequest,
-    input: TurnInput,
+    input: &TurnInput,
     ctx: Arc<SessionContext>,
     dispatcher: &dyn EvalDispatcher,
     preamble: &str,
@@ -1131,6 +1131,10 @@ pub async fn drive_step(
             "pre-loop input persist (durability before maybe_compact)",
         )
         .await?;
+        for message in &cur_input.messages {
+            ctx.turn_sink()
+                .emit(TurnEvent::Attachments(message.attachments.clone()));
+        }
     }
 
     loop {
@@ -1155,11 +1159,6 @@ pub async fn drive_step(
         // onwards the server should have it cached.
         let expect_segment_1_hit = !is_first_wire_turn_in_session;
 
-        // Clone cur_input before moving it into orchestrate so we can pass it
-        // to hist.record after orchestrate completes. orchestrate takes
-        // ownership of TurnInput (it reads batch_id from it during the turn).
-        let recorded_input = cur_input.clone();
-
         // Build the dispatch origin once per iteration: the agent itself
         // is the immediate caller of every effect dispatched during this
         // orchestrate call (the model emits a tool_use → eval worker
@@ -1176,7 +1175,7 @@ pub async fn drive_step(
 
         let turn = orchestrate(
             req,
-            cur_input,
+            &cur_input,
             ctx.clone(),
             dispatcher,
             preamble,
@@ -1220,7 +1219,7 @@ pub async fn drive_step(
                 // build_snapshot_attachment's delta diff), but we include
                 // it for consistency.
                 let mid_kind = SnapshotKind::Delta {
-                    since_batch: recorded_input.batch_id.clone(),
+                    since_batch: cur_input.batch_id.clone(),
                 };
                 // Wrapped in spawn_blocking: hits DB via list_blocks + get_block.
                 let mid_blocks_result = {
@@ -1252,7 +1251,7 @@ pub async fn drive_step(
                         .lock()
                         .map(|h| collect_last_tracked_hashes(&h))
                         .unwrap_or_default();
-                    for msg in &recorded_input.messages {
+                    for msg in &cur_input.messages {
                         for att in &msg.attachments {
                             // Only BatchOpeningSnapshot carries block hashes;
                             // skip non-snapshot variants.
@@ -1323,7 +1322,7 @@ pub async fn drive_step(
         if let Ok(mut hist) = turn_history.lock() {
             hist.record(
                 pattern_core::types::ids::new_snowflake_id(),
-                recorded_input.clone(),
+                cur_input.clone(),
                 turn.clone(),
             );
         }
@@ -1341,7 +1340,7 @@ pub async fn drive_step(
         // actual rows for compression to archive. `to_db_message`
         // serializes `Message.attachments` into the `attachments_json`
         // column so snapshots survive restart for splice-time rendering.
-        let batch_type = infer_batch_type(&recorded_input.origin);
+        let batch_type = infer_batch_type(&cur_input.origin);
         let db = ctx.db();
         let aid = ctx.agent_id();
 
@@ -1350,10 +1349,10 @@ pub async fn drive_step(
         // Human, Agent, or System).
         persist_messages(
             db,
-            &recorded_input.messages,
+            &cur_input.messages,
             aid,
             batch_type,
-            &recorded_input.origin,
+            &cur_input.origin,
             "upsert input messages",
         )
         .await?;
@@ -1379,7 +1378,6 @@ pub async fn drive_step(
         if terminal {
             break;
         }
-
 
         // Interrupt check: if the partner (or another agent) sent a message
         // while we were running tool calls, break the continuation loop so
@@ -2120,7 +2118,7 @@ mod tests {
         let dispatcher = NoOpDispatcher;
         let out = orchestrate(
             simple_req(),
-            test_turn_input(),
+            &test_turn_input(),
             ctx,
             &dispatcher,
             "",
@@ -2162,7 +2160,7 @@ mod tests {
         let dispatcher = NoOpDispatcher;
         let out = orchestrate(
             simple_req(),
-            test_turn_input(),
+            &test_turn_input(),
             ctx,
             &dispatcher,
             "",
@@ -2222,7 +2220,7 @@ mod tests {
         let dispatcher = MockSuccessDispatcher::default();
         let out = orchestrate(
             simple_req(),
-            test_turn_input(),
+            &test_turn_input(),
             ctx,
             &dispatcher,
             "",
@@ -2453,7 +2451,7 @@ mod tests {
         let dispatcher = NoOpDispatcher;
         let out = orchestrate(
             simple_req(),
-            test_turn_input(),
+            &test_turn_input(),
             ctx,
             &dispatcher,
             "",
@@ -2502,7 +2500,7 @@ mod tests {
         let dispatcher = NoOpDispatcher;
         let out = orchestrate(
             simple_req(),
-            test_turn_input(),
+            &test_turn_input(),
             ctx,
             &dispatcher,
             "",
@@ -2540,7 +2538,7 @@ mod tests {
         let dispatcher = NoOpDispatcher;
         let out = orchestrate(
             simple_req(),
-            test_turn_input(),
+            &test_turn_input(),
             ctx,
             &dispatcher,
             "",
@@ -2585,7 +2583,7 @@ mod tests {
         let dispatcher = NoOpDispatcher;
         let out = orchestrate(
             simple_req(),
-            test_turn_input(),
+            &test_turn_input(),
             ctx,
             &dispatcher,
             "",
@@ -2631,7 +2629,7 @@ mod tests {
         let dispatcher = NoOpDispatcher;
         let _out = orchestrate(
             simple_req(),
-            test_turn_input(),
+            &test_turn_input(),
             ctx,
             &dispatcher,
             "",

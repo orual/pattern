@@ -391,7 +391,7 @@ fn render_unknown(event: &BlockWrite) -> String {
 // ---- Internal helpers ------------------------------------------------------
 
 /// FileEdit body WITHOUT `<system-reminder>` wrap (for grouping).
-fn render_file_edit_body(
+pub fn render_file_edit_body(
     path: &std::path::Path,
     kind: FileEditKind,
     at: jiff::Timestamp,
@@ -415,7 +415,11 @@ fn render_file_edit_body(
 
 /// `ShellOutput` body WITHOUT `<system-reminder>` wrap (for grouping when
 /// multiple attachments land on the same message).
-fn render_shell_output_body(task_id: &str, kind: &ShellOutputKind, at: jiff::Timestamp) -> String {
+pub fn render_shell_output_body(
+    task_id: &str,
+    kind: &ShellOutputKind,
+    at: jiff::Timestamp,
+) -> String {
     match kind {
         ShellOutputKind::Output(text) => {
             format!("shell task {task_id} @ {at}:\n```\n{text}\n```")
@@ -445,7 +449,7 @@ fn render_shell_output_body(task_id: &str, kind: &ShellOutputKind, at: jiff::Tim
 
 /// `PortEvent` body WITHOUT `<system-reminder>` wrap (for grouping when
 /// multiple attachments land on the same message).
-fn render_port_event_body(
+pub fn render_port_event_body(
     port_id: &str,
     payload: &serde_json::Value,
     at: jiff::Timestamp,
@@ -455,7 +459,7 @@ fn render_port_event_body(
 }
 
 /// FileConflict body WITHOUT `<system-reminder>` wrap (for grouping).
-fn render_file_conflict_body(path: &std::path::Path, at: jiff::Timestamp) -> String {
+pub fn render_file_conflict_body(path: &std::path::Path, at: jiff::Timestamp) -> String {
     format!(
         "File modified externally; your last edit may have been overwritten:\n- {at} {path} (conflict)\nA different process wrote to this file in a way that doesn't include your last save. Choices:\n  - File.Reload(path) \u{2014} take the disk version, discard your in-memory edits.\n  - File.ForceWrite(path, your_content) \u{2014} overwrite disk with your version.\n  - File.Write(path, merged) \u{2014} write a manually-merged version.",
         at = at,
@@ -463,7 +467,7 @@ fn render_file_conflict_body(path: &std::path::Path, at: jiff::Timestamp) -> Str
     )
 }
 
-fn render_author(author: &Author) -> String {
+pub fn render_author(author: &Author) -> String {
     match author {
         // Phase 6 T8: prefer the human-facing display name when set, fall
         // back to user_id otherwise. The same priority applies to Human.
@@ -481,12 +485,12 @@ fn render_author(author: &Author) -> String {
     }
 }
 
-fn render_local_timestamp(ts: jiff::Timestamp) -> String {
+pub fn render_local_timestamp(ts: jiff::Timestamp) -> String {
     let zoned = ts.to_zoned(jiff::tz::TimeZone::system());
     zoned.strftime("%Y-%m-%d %H:%M:%S %Z (%A)").to_string()
 }
 
-fn preview(content: &str, max_chars: usize) -> String {
+pub fn preview(content: &str, max_chars: usize) -> String {
     let count = content.chars().count();
     if count <= max_chars {
         return content.to_string();
@@ -496,7 +500,7 @@ fn preview(content: &str, max_chars: usize) -> String {
     format!("{head}… ({remaining} chars elided)")
 }
 
-fn render_diff(previous: &str, current: &str) -> String {
+pub fn render_diff(previous: &str, current: &str) -> String {
     let diff = similar::TextDiff::from_lines(previous, current);
     let mut out = String::new();
     for hunk in diff.unified_diff().context_radius(1).iter_hunks() {

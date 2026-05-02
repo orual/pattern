@@ -16,6 +16,7 @@
 //! without a major semver bump on downstream crates.
 
 use serde::{Deserialize, Serialize};
+use smol_str::SmolStr;
 
 use crate::types::ids::PersonaId;
 use crate::{BlockRef, CapabilitySet};
@@ -51,12 +52,12 @@ pub struct EphemeralConfig {
     /// the child opens on `costume`/system-prompt alone with no human
     /// turn.
     pub prompt: Option<String>,
+    /// Model override. When `Some`, the child uses this model instead of
+    /// inheriting the parent's. When `None`, inherits.
+    pub model_id: Option<smol_str::SmolStr>,
 }
 
 impl EphemeralConfig {
-    /// Construct an ephemeral config with sensible defaults.
-    ///
-    /// Sets `costume`, `capabilities`, `timeout`, and `prompt` to `None`.
     pub fn new(program: impl Into<String>) -> Self {
         Self {
             program: program.into(),
@@ -64,6 +65,7 @@ impl EphemeralConfig {
             capabilities: None,
             timeout: None,
             prompt: None,
+            model_id: None,
         }
     }
 
@@ -117,12 +119,11 @@ pub struct ForkConfig {
     /// Memory-block reference used for jj bookmark naming in Phase 3.
     /// No effect in Phase 2.
     pub task_ref: Option<BlockRef>,
+    /// Model override for the forked session.
+    pub model_id: Option<smol_str::SmolStr>,
 }
 
 impl ForkConfig {
-    /// Construct a fork config with lightweight isolation.
-    ///
-    /// Sets `capabilities`, `timeout_hint`, and `task_ref` to `None`.
     pub fn new(program: impl Into<String>) -> Self {
         Self {
             program: program.into(),
@@ -130,6 +131,7 @@ impl ForkConfig {
             capabilities: None,
             timeout_hint: None,
             task_ref: None,
+            model_id: None,
         }
     }
 
@@ -155,6 +157,12 @@ impl ForkConfig {
     /// Associate a memory block reference for jj bookmark naming.
     pub fn with_task_ref(mut self, block_ref: BlockRef) -> Self {
         self.task_ref = Some(block_ref);
+        self
+    }
+
+    /// Set the model ID for the forked session.
+    pub fn with_model(mut self, model: Option<SmolStr>) -> Self {
+        self.model_id = model;
         self
     }
 }
@@ -233,14 +241,13 @@ pub struct PersonaConfig {
     pub name: String,
     /// System prompt for the new persona.
     pub system_prompt: String,
-    /// Initial capability set. The spawner cannot grant capabilities it does
-    /// not itself hold (enforcement in Phase 2 Task 7 spawn handler).
+    /// Initial capability set.
     pub capabilities: CapabilitySet,
-    // Further fields deferred to Phase 6 registry work.
+    /// Model override for the new persona.
+    pub model_id: Option<smol_str::SmolStr>,
 }
 
 impl PersonaConfig {
-    /// Construct a persona config with the minimal required fields.
     pub fn new(
         name: impl Into<String>,
         system_prompt: impl Into<String>,
@@ -250,6 +257,7 @@ impl PersonaConfig {
             name: name.into(),
             system_prompt: system_prompt.into(),
             capabilities,
+            model_id: None,
         }
     }
 }
@@ -295,6 +303,7 @@ mod tests {
             capabilities: Some(sample_capability_set()),
             timeout: None,
             prompt: Some("hello".to_string()),
+            model_id: None,
         };
 
         let json = serde_json::to_string(&original).expect("serialise must succeed");
@@ -341,6 +350,7 @@ mod tests {
             capabilities: None,
             timeout_hint: None,
             task_ref: Some(BlockRef::new("planning", "block-abc")),
+            model_id: None,
         };
 
         let json = serde_json::to_string(&original).expect("serialise must succeed");
@@ -440,6 +450,7 @@ mod tests {
             name: "orual".to_string(),
             system_prompt: "you are an executive function assistant".to_string(),
             capabilities: sample_capability_set(),
+            model_id: None,
         };
 
         let json = serde_json::to_string(&original).expect("serialise must succeed");

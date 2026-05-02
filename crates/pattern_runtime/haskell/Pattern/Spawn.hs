@@ -68,11 +68,23 @@ data CapabilityFlag
   | FlagWakeConditionRegistration
   | FlagFrontingControl
 
--- | Capability set: which effect categories the holder may invoke and
---   which orthogonal flags it carries.
+-- | Effect class restriction. Controls which *kinds* of operations
+--   are permitted within an allowed category. E.g. a child with
+--   @[ClassObserve]@ can read memory but not write it.
+data EffectClassRestriction
+  = ClassObserve
+  | ClassMutateInternal
+  | ClassMutateExternal
+  | ClassCoordinate
+  | ClassEscape
+
+-- | Capability set: which effect categories the holder may invoke,
+--   which orthogonal flags it carries, and which effect classes
+--   are permitted. Empty @capabilityClasses@ means all classes allowed.
 data CapabilitySet = CapabilitySet
   { capabilityCategories :: [EffectCategory]
   , capabilityFlags      :: [CapabilityFlag]
+  , capabilityClasses    :: [EffectClassRestriction]
   }
 
 -- | Memory isolation mode for a forked session.
@@ -87,12 +99,12 @@ data RelationshipKind
   | PeerWith
   | ObserverOf
 
--- | Minimal seed for a new sibling identity. Phase 6 registry work
---   adds more fields; the wire shape stays additive.
+-- | Seed for a new sibling identity.
 data PersonaConfig = PersonaConfig
   { personaName         :: Text
   , personaSystemPrompt :: Text
   , personaCapabilities :: CapabilitySet
+  , personaModel        :: Maybe Text
   }
 
 -- | Discriminates whether the sibling uses an existing persona id or
@@ -110,10 +122,8 @@ data EphemeralConfig = EphemeralConfig
   , ephemeralCostume      :: Maybe Text
   , ephemeralCapabilities :: Maybe CapabilitySet
   , ephemeralTimeoutMs    :: Maybe Int
-    -- | Optional initial human-role prompt seeded into the child's first
-    --   turn. @Nothing@ leaves the child to open on @costume@/system-prompt
-    --   alone with no human turn.
   , ephemeralPrompt       :: Maybe Text
+  , ephemeralModel        :: Maybe Text
   }
 
 -- | Config for a forked child session.
@@ -127,6 +137,7 @@ data ForkConfig = ForkConfig
   , forkCapabilities  :: Maybe CapabilitySet
   , forkTimeoutHintMs :: Maybe Int
   , forkTaskRef       :: Maybe BlockRef
+  , forkModel         :: Maybe Text
   }
 
 -- | Config for a sibling spawn.

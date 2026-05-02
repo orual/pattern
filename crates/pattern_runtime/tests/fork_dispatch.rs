@@ -108,6 +108,7 @@ async fn lightweight_fork_inserts_into_registry_and_forks_cache() {
         capabilities: None,
         timeout_hint_ms: None,
         task_ref: None,
+        model: None,
     };
 
     let parent_for_blocking = parent.clone();
@@ -167,6 +168,7 @@ async fn persistent_fork_without_mount_info_typed_error() {
         capabilities: None,
         timeout_hint_ms: None,
         task_ref: None,
+        model: None,
     };
 
     let parent_for_blocking = parent.clone();
@@ -220,6 +222,7 @@ async fn lightweight_fork_without_memory_cache_returns_error_i4() {
         capabilities: None,
         timeout_hint_ms: None,
         task_ref: None,
+        model: None,
     };
 
     let parent_for_blocking = parent.clone();
@@ -256,6 +259,7 @@ async fn register_one_fork(parent: &Arc<SessionContext>) -> SmolStr {
         capabilities: None,
         timeout_hint_ms: None,
         task_ref: None,
+        model: None,
     };
 
     let parent_clone = parent.clone();
@@ -385,7 +389,9 @@ async fn fork_op_promote_without_capability() {
         capabilities: pattern_runtime::sdk::requests::spawn::WireCapabilitySet {
             categories: vec![],
             flags: vec![],
+            classes: vec![],
         },
+        model: None,
     };
 
     let parent_for_blocking = parent.clone();
@@ -435,6 +441,7 @@ async fn fork_discard_does_not_cancel_parent_session_c1_regression() {
         capabilities: None,
         timeout_hint_ms: None,
         task_ref: None,
+        model: None,
     };
 
     let parent_for_blocking = parent.clone();

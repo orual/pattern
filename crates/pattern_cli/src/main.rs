@@ -776,11 +776,11 @@ async fn init_session_and_subscribe(
             // Fetch history and daemon-registered commands in parallel.
             let (history, daemon_commands) = tokio::join!(
                 async {
-                    client
+                    let h = client
                         .get_history(resolved.clone())
                         .await
-                        .map(|resp| resp.batches)
-                        .unwrap_or_default()
+                        .map(|resp| resp.batches);
+                    h.unwrap_or_default()
                 },
                 async {
                     client

@@ -244,7 +244,14 @@ impl DaemonClient {
     /// Returns all non-archived message batches reconstructed from stored messages,
     /// with events in the same wire format as live subscription output.
     pub async fn get_history(&self, agent_id: SmolStr) -> Result<HistoryResponse> {
-        let response = self.inner.rpc(GetHistoryRequest { agent_id }).await?;
+        let response = self
+            .inner
+            .rpc(GetHistoryRequest { agent_id })
+            .await
+            .map_err(|e| {
+                tracing::error!("{:?}", e);
+                e
+            })?;
         Ok(response)
     }
 

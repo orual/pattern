@@ -634,6 +634,7 @@ async fn persistent_fork_without_mount_info_returns_persistent_not_available() {
         capabilities: None,
         timeout_hint_ms: None,
         task_ref: None,
+            model: None,
     };
 
     // Drive the handler from spawn_blocking (simulating eval-worker context).
@@ -710,6 +711,7 @@ async fn ac3_5_handler_side_concurrency_limit_returns_handler_error() {
             capabilities: None,
             timeout_ms: None,
             prompt: None,
+            model: None,
         };
 
         let r1 = handler.handle(SpawnReq::Ephemeral(mk()), &cx);

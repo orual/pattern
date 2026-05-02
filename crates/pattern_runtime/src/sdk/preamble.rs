@@ -619,81 +619,68 @@ mod tests {
 
     #[test]
     fn build_for_minimal_capability_set_excludes_filtered_imports() {
-        // AC1.1 / AC1.2: capability filtering removes effect imports +
-        // type M entries, so referencing the missing modules can't
-        // compile against this preamble.
+        // With the split preamble, build_for always includes full imports
+        // and type M (for tag alignment), but the API docs section is
+        // filtered to only show permitted effects.
         let caps = CapabilitySet::from_iter([EffectCategory::Memory, EffectCategory::Message]);
         let preamble = build_for(&caps);
 
-        // Allowed imports / row entries are present.
-        assert!(
-            preamble.contains("import Pattern.Message"),
-            "Message should be dual-imported"
-        );
+        // All imports are present (full preamble for tag alignment).
         assert!(
             preamble.contains("import qualified Pattern.Memory as Memory"),
-            "Memory should be qualified-imported"
+            "Memory should be imported"
         );
         assert!(
-            preamble.contains("type M = '[Memory.Memory, Message]"),
-            "type M row should contain only allowed effects, got: \
-             {preamble:?}",
+            preamble.contains("import qualified Pattern.Shell as Shell"),
+            "Shell should be imported (full preamble)"
         );
 
-        // Excluded effects must not appear in imports or type M.
-        for excluded in &["Shell", "File", "Spawn", "Diagnostics", "Tasks"] {
-            assert!(
-                !preamble.contains(&format!("import qualified Pattern.{excluded}")),
-                "preamble must not import excluded effect {excluded}"
-            );
-        }
+        // Type M contains all effects.
+        assert!(
+            preamble.contains("Memory.Memory"),
+            "type M should contain Memory"
+        );
+
+        // API docs show only allowed effects.
+        assert!(
+            preamble.contains("-- Memory"),
+            "API docs should include Memory"
+        );
+        assert!(
+            !preamble.contains("-- Shell") || !preamble.contains("execute ::"),
+            "API docs should not include Shell helpers"
+        );
     }
 
     #[test]
     fn build_for_empty_capability_set_produces_pure_computation_prelude() {
-        // AC1.6: an empty CapabilitySet yields a prelude with base types
-        // and `type M = '[]`, but no effect imports or constructors. A
-        // pure-computation agent program still compiles against it.
+        // With the split preamble, even empty caps produce full imports
+        // and type M (for tag alignment). Only the API docs are empty.
         let preamble = build_for(&CapabilitySet::empty());
 
         // Base imports always emit.
         assert!(preamble.contains("import Pattern.Prelude"));
         assert!(preamble.contains("import qualified Data.Text as T"));
 
-        // No SDK effect imports.
-        for sdk_module in &[
-            "Pattern.Memory",
-            "Pattern.Message",
-            "Pattern.Shell",
-            "Pattern.File",
-            "Pattern.Spawn",
-            "Pattern.Tasks",
-            "Pattern.Skills",
-            "Pattern.Diagnostics",
-        ] {
-            assert!(
-                !preamble.contains(&format!("import {sdk_module}")),
-                "empty caps must not emit '{sdk_module}' import"
-            );
-            assert!(
-                !preamble.contains(&format!("import qualified {sdk_module}")),
-                "empty caps must not emit qualified '{sdk_module}' import"
-            );
-        }
-
-        // type M row is empty.
+        // SDK imports ARE present (full preamble for tag alignment).
         assert!(
-            preamble.contains("type M = '[]"),
-            "empty caps must produce `type M = '[]`, got: {preamble}"
+            preamble.contains("import qualified Pattern.Memory as Memory"),
+            "empty caps should still import Memory (full preamble)"
         );
 
-        // No API reference block (it would be empty).
+        // type M is full (not empty).
+        assert!(
+            preamble.contains("Memory.Memory"),
+            "type M should contain effects even with empty caps"
+        );
+
+        // No API reference block (nothing to document).
         assert!(
             !preamble.contains("=== Pattern SDK API reference ==="),
             "empty caps must skip API reference block"
         );
 
-        // Pagination support still emits (pure Haskell, no effect deps).
+        // Pagination support still emits.
         assert!(preamble.contains("paginateResult"));
     }
 

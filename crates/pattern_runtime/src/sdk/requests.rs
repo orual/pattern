@@ -321,6 +321,7 @@ mod parity {
             capabilities: None,
             timeout_ms: None,
             prompt: None,
+            model: None,
         };
         let fork = WireForkConfig {
             program: String::new(),
@@ -328,6 +329,7 @@ mod parity {
             capabilities: None,
             timeout_hint_ms: None,
             task_ref: None,
+            model: None,
         };
         let sib = WireSiblingConfig {
             persona: WireSiblingPersona::Existing(String::new()),
@@ -340,7 +342,9 @@ mod parity {
             capabilities: WireCapabilitySet {
                 categories: Vec::new(),
                 flags: Vec::new(),
+                classes: Vec::new(),
             },
+            model: None,
         };
         let _ = SpawnReq::Ephemeral(eph);
         let _ = SpawnReq::AwaitSpawn(String::new());

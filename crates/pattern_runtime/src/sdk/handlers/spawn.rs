@@ -384,10 +384,8 @@ fn handle_fork(
     let child_id: smol_str::SmolStr = pattern_core::types::ids::new_id();
     // Use the encoded scope key so fork_for_child can match against blocks
     // stored with `scope.to_db_key()` (e.g. "global:<id>" or "local:<id>").
-    let parent_scope_key: smol_str::SmolStr =
-        Scope::global(parent.agent_id()).to_db_key().into();
-    let child_scope_key: smol_str::SmolStr =
-        Scope::global(child_id.as_str()).to_db_key().into();
+    let parent_scope_key: smol_str::SmolStr = Scope::global(parent.agent_id()).to_db_key().into();
+    let child_scope_key: smol_str::SmolStr = Scope::global(child_id.as_str()).to_db_key().into();
 
     // Allocate a fresh cancel state for the child. The child's cancel state
     // is NOT the parent's — calling `discard()` (which fires
@@ -448,6 +446,7 @@ fn handle_fork(
             )
             .with_spawner_capabilities(spawner_caps)
             .with_cancel_watcher(watcher)
+            .with_cfg(cfg.clone())
         }
         pattern_core::spawn::ForkIsolation::Persistent => handle_fork_persistent(
             parent,
@@ -458,6 +457,7 @@ fn handle_fork(
             child_cancel,
             spawner_caps,
             cfg.task_ref.as_ref(),
+            cfg.clone(),
         )
         .map_err(|e| EffectError::Handler(e.to_string()))?
         .with_cancel_watcher(watcher),
@@ -495,6 +495,7 @@ fn handle_fork_persistent(
     cancel_state: Arc<crate::timeout::CancelState>,
     spawner_caps: pattern_core::CapabilitySet,
     task_ref: Option<&pattern_core::BlockRef>,
+    cfg: pattern_core::ForkConfig,
 ) -> Result<crate::spawn::ForkHandle, crate::spawn::fork::ForkError> {
     use crate::spawn::fork::ForkError;
     use pattern_memory::jj::JjAdapter;
@@ -572,19 +573,19 @@ fn handle_fork_persistent(
 
     // Fork the parent's memory cache. Cleanup workspace + bookmark on
     // failure so the session doesn't leak persistent state.
-    let child_cache = match parent_cache.fork_for_child(parent_scope_key.as_str(), child_scope_key.as_str())
-    {
-        Ok(c) => Arc::new(c),
-        Err(e) => {
-            let workspace_name = workspace_path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("");
-            let _ = adapter.workspace_forget(&mount.repo_root, workspace_name);
-            let _ = adapter.bookmark_delete(&mount.repo_root, &bookmark_name);
-            return Err(ForkError::MemoryStore(e.to_string()));
-        }
-    };
+    let child_cache =
+        match parent_cache.fork_for_child(parent_scope_key.as_str(), child_scope_key.as_str()) {
+            Ok(c) => Arc::new(c),
+            Err(e) => {
+                let workspace_name = workspace_path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("");
+                let _ = adapter.workspace_forget(&mount.repo_root, workspace_name);
+                let _ = adapter.bookmark_delete(&mount.repo_root, &bookmark_name);
+                return Err(ForkError::MemoryStore(e.to_string()));
+            }
+        };
 
     Ok(crate::spawn::ForkHandle::new_persistent(
         fork_id,
@@ -597,7 +598,8 @@ fn handle_fork_persistent(
         Arc::downgrade(&parent_cache),
         cancel_state,
     )
-    .with_spawner_capabilities(spawner_caps))
+    .with_spawner_capabilities(spawner_caps)
+    .with_cfg(cfg))
 }
 
 fn handle_sibling(
@@ -660,6 +662,7 @@ mod tests {
             capabilities: None,
             timeout_ms: None,
             prompt: None,
+            model: None,
         }
     }
 
@@ -670,6 +673,7 @@ mod tests {
             capabilities: None,
             timeout_hint_ms: None,
             task_ref: None,
+            model: None,
         }
     }
 

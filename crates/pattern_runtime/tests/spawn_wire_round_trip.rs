@@ -62,7 +62,9 @@ agent = do
         , personaCapabilities = CapabilitySet
             { capabilityCategories = [CatMemory]
             , capabilityFlags      = []
+            , capabilityClasses    = []
             }
+        , personaModel        = Nothing
         }
   let cfg = SiblingConfig
         { siblingPersona      = NewPersona pcfg
@@ -75,7 +77,6 @@ agent = do
     SiblingNewActive _ _         -> T.pack "new-active"
     SiblingNewDraft _ _          -> T.pack "new-draft"
 "#;
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sibling_spawn_typed_record_round_trips_to_haskell() {
     if pattern_runtime::preflight::check().is_err() {

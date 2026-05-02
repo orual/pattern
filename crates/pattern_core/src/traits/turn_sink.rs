@@ -36,6 +36,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
+use crate::types::message::MessageAttachment;
 use crate::types::provider::{CompletionRequest, ToolCall, ToolResult};
 use crate::types::turn::StopReason;
 
@@ -193,6 +194,8 @@ pub enum TurnEvent {
     /// and noisy in CI. The sink-based tap is opt-in — only
     /// subscribers that care pay the clone cost.
     ComposedRequest(Box<CompletionRequest>),
+    /// Attachments associated with the request, if any.
+    Attachments(Vec<MessageAttachment>),
 }
 
 /// Destination for [`TurnEvent`]s emitted during a wire turn.

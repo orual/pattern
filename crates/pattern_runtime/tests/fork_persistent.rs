@@ -65,7 +65,9 @@ fn seed_text_block(cache: &MemoryCache, agent_id: &str, label: &str, content: &s
         MemoryBlockType::Working,
         BlockSchema::text(),
     );
-    cache.create_block(&Scope::global(agent_id), bc).expect("create_block");
+    cache
+        .create_block(&Scope::global(agent_id), bc)
+        .expect("create_block");
     let doc = cache
         .get(&Scope::global(agent_id).to_db_key(), label)
         .expect("get after create")
@@ -121,6 +123,7 @@ fn merge_back_persistent_synthetic_surfaces_typed_error() {
         },
         spawner_capabilities: pattern_core::CapabilitySet::all(),
         cancel_watcher: None,
+        cfg: None,
     };
     match handle.merge_back_persistent() {
         Err(ForkError::ParentDropped)
@@ -473,6 +476,7 @@ async fn handle_fork_returns_bookmark_conflict_when_bookmark_exists_i5() {
             block_id: "test-block-id".to_string(),
             agent_id: "_constellation_".to_string(),
         }),
+        model: None,
     };
 
     let parent_clone = parent.clone();
@@ -607,6 +611,7 @@ async fn persistent_fork_handler_cleanup_both_workspace_and_bookmark_i6() {
             block_id: "test-block-id".to_string(),
             agent_id: "_constellation_".to_string(),
         }),
+        model: None,
     };
     let parent_clone = parent.clone();
     tokio::task::spawn_blocking(move || {

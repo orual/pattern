@@ -39,7 +39,7 @@ pub struct PersonaRecord {
     pub project_attachments: Vec<PathBuf>,
     /// Relationship edges to other personas in the constellation.
     pub relationships: Vec<RelationshipEdge>,
-    /// Group memberships (populated once Phase 6 lands group schema).
+    /// Group memberships
     pub group_memberships: Vec<GroupId>,
 }
 

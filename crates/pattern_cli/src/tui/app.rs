@@ -261,10 +261,7 @@ impl App {
     /// Called after `set_available_agents`. Aliases let users address
     /// agents by their persona `name` field; resolution to canonical
     /// agent_id happens locally before any RPC.
-    pub fn set_agent_aliases(
-        &mut self,
-        aliases: Vec<pattern_server::protocol::AgentAlias>,
-    ) {
+    pub fn set_agent_aliases(&mut self, aliases: Vec<pattern_server::protocol::AgentAlias>) {
         self.agent_aliases = aliases
             .into_iter()
             .map(|a| (a.alias, a.canonical_id))
@@ -1638,7 +1635,12 @@ impl App {
     /// (which use `terminal.draw()` directly) can share the rendering logic.
     fn render_frame(&mut self, frame: &mut ratatui::Frame<'_>) {
         let input_lines = self.input.line_count() as u16;
-        let layout = compute_layout_with_panel(frame.area(), self.panel_visibility, self.panel_pct, input_lines);
+        let layout = compute_layout_with_panel(
+            frame.area(),
+            self.panel_visibility,
+            self.panel_pct,
+            input_lines,
+        );
 
         // Record terminal dimensions so key handlers can use the real size.
         self.last_viewport_height = layout.conversation.map(|r| r.height).unwrap_or(0);

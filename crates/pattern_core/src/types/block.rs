@@ -210,7 +210,6 @@ pub struct BlockWrite {
     /// Hash of the content before this write, when applicable. `None` for
     /// [`BlockWriteKind::Created`]; `Some(_)` for updates that carry a
     /// pre-write baseline.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_content_hash: Option<u64>,
     /// Rendered text content *before* this write. `None` for
     /// [`BlockWriteKind::Created`] (no prior state exists); `Some(_)` for
@@ -228,7 +227,6 @@ pub struct BlockWrite {
     /// message emission. If this becomes a concern, a future refactor can
     /// drop the field and query loro's history via `memory_id` at display
     /// time instead.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_rendered_content: Option<String>,
     /// Wall-clock time the write occurred (UTC instant via `jiff`).
     pub at: Timestamp,

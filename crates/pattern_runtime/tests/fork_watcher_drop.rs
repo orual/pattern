@@ -225,6 +225,7 @@ async fn watcher_aborted_on_bare_drop() {
         },
         spawner_capabilities: CapabilitySet::all(),
         cancel_watcher: None,
+        cfg: None,
     };
 
     let watcher = spawn_watcher(Arc::clone(&counter));
