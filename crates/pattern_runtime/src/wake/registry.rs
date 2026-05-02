@@ -569,7 +569,7 @@ pub(super) fn wake_mailbox_input(
         block_refs: vec![],
         attachments: vec![],
     };
-    MailboxInput { from, msg }
+    MailboxInput::new(from, msg).with_delivery(crate::mailbox::DeliveryMode::Queue)
 }
 
 #[cfg(test)]

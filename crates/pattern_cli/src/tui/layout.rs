@@ -90,7 +90,10 @@ pub fn compute_layout_with_panel(
     area: Rect,
     panel_visibility: PanelVisibility,
     panel_pct: u16,
+    input_lines: u16,
 ) -> TuiLayout {
+    // Input height: content lines + 1 for the prompt, clamped to max 12 rows
+    let input_height = (input_lines.max(1) + 1).min(12);
     // Clamp panel percentage.
     let panel_pct = panel_pct.clamp(MIN_PANEL_PCT, MAX_PANEL_PCT);
 
@@ -106,7 +109,7 @@ pub fn compute_layout_with_panel(
 
     // Three vertical regions: upper (Min(1)), input (Length(2)), status bar (Length(1)).
     // Input and status bar are always full width, regardless of panel state.
-    let main_chunks = vertical_split(area);
+    let main_chunks = vertical_split(area, input_height);
     let upper = main_chunks[0];
     let input = main_chunks[1];
     let status_bar = main_chunks[2];
@@ -159,13 +162,13 @@ pub fn compute_layout_with_panel(
 }
 
 /// Split an area vertically into conversation, input, and status bar.
-fn vertical_split(area: Rect) -> [Rect; 3] {
+fn vertical_split(area: Rect, input_height: u16) -> [Rect; 3] {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(1),    // conversation (grows)
-            Constraint::Length(2), // input area (fixed)
-            Constraint::Length(1), // status bar
+            Constraint::Min(1),               // conversation (grows)
+            Constraint::Length(input_height), // input area (dynamic)
+            Constraint::Length(1),            // status bar
         ])
         .split(area);
 
@@ -192,7 +195,7 @@ mod tests {
     #[test]
     fn layout_allocates_input_area() {
         let layout =
-            compute_layout_with_panel(area(80, 24), PanelVisibility::Hidden, DEFAULT_PANEL_PCT);
+            compute_layout_with_panel(area(80, 24), PanelVisibility::Hidden, DEFAULT_PANEL_PCT, 1);
         assert_eq!(layout.input.height, 2, "input area must be exactly 2 rows");
     }
 
@@ -203,6 +206,7 @@ mod tests {
             area(80, terminal_height),
             PanelVisibility::Hidden,
             DEFAULT_PANEL_PCT,
+            1,
         );
 
         let conv = layout
@@ -227,7 +231,7 @@ mod tests {
         // A terminal smaller than the fixed regions (4 rows total = 3 input + 1 status).
         // ratatui clamps rects to zero-height rather than panicking.
         let layout =
-            compute_layout_with_panel(area(40, 3), PanelVisibility::Hidden, DEFAULT_PANEL_PCT);
+            compute_layout_with_panel(area(40, 3), PanelVisibility::Hidden, DEFAULT_PANEL_PCT, 1);
 
         let conv = layout
             .conversation
@@ -254,7 +258,7 @@ mod tests {
     #[test]
     fn hidden_layout_no_panel() {
         let layout =
-            compute_layout_with_panel(area(120, 24), PanelVisibility::Hidden, DEFAULT_PANEL_PCT);
+            compute_layout_with_panel(area(120, 24), PanelVisibility::Hidden, DEFAULT_PANEL_PCT, 1);
         assert!(
             layout.panel.is_none(),
             "panel rect must be None when hidden"
@@ -272,8 +276,12 @@ mod tests {
 
     #[test]
     fn visible_layout_splits_horizontally() {
-        let layout =
-            compute_layout_with_panel(area(120, 24), PanelVisibility::Visible, DEFAULT_PANEL_PCT);
+        let layout = compute_layout_with_panel(
+            area(120, 24),
+            PanelVisibility::Visible,
+            DEFAULT_PANEL_PCT,
+            1,
+        );
         assert_eq!(layout.panel_visibility, PanelVisibility::Visible);
 
         let panel = layout.panel.expect("panel rect must be Some when visible");
@@ -300,8 +308,12 @@ mod tests {
 
     #[test]
     fn expanded_layout_full_panel() {
-        let layout =
-            compute_layout_with_panel(area(120, 24), PanelVisibility::Expanded, DEFAULT_PANEL_PCT);
+        let layout = compute_layout_with_panel(
+            area(120, 24),
+            PanelVisibility::Expanded,
+            DEFAULT_PANEL_PCT,
+            1,
+        );
         assert_eq!(layout.panel_visibility, PanelVisibility::Expanded);
 
         let panel = layout.panel.expect("panel rect must be Some when expanded");
@@ -329,7 +341,7 @@ mod tests {
         // Terminal width 80 is below MIN_PANEL_WIDTH (100), so panel should
         // be forced Hidden.
         let layout =
-            compute_layout_with_panel(area(80, 24), PanelVisibility::Visible, DEFAULT_PANEL_PCT);
+            compute_layout_with_panel(area(80, 24), PanelVisibility::Visible, DEFAULT_PANEL_PCT, 1);
         assert_eq!(
             layout.panel_visibility,
             PanelVisibility::Hidden,
@@ -349,8 +361,12 @@ mod tests {
     fn expanded_stays_expanded_on_narrow_terminal() {
         // Expanded takes the full upper area (no split), so it is valid at any
         // terminal width. Only Visible is auto-hidden on narrow terminals.
-        let layout =
-            compute_layout_with_panel(area(80, 24), PanelVisibility::Expanded, DEFAULT_PANEL_PCT);
+        let layout = compute_layout_with_panel(
+            area(80, 24),
+            PanelVisibility::Expanded,
+            DEFAULT_PANEL_PCT,
+            1,
+        );
         assert_eq!(
             layout.panel_visibility,
             PanelVisibility::Expanded,
@@ -377,7 +393,7 @@ mod tests {
     fn zero_chrome_when_hidden() {
         // AC4.9: conversation rect starts at x=0 and spans the full width.
         let layout =
-            compute_layout_with_panel(area(120, 24), PanelVisibility::Hidden, DEFAULT_PANEL_PCT);
+            compute_layout_with_panel(area(120, 24), PanelVisibility::Hidden, DEFAULT_PANEL_PCT, 1);
         let conv = layout
             .conversation
             .expect("conversation should be Some when hidden");
@@ -390,7 +406,7 @@ mod tests {
 
     #[test]
     fn panel_pct_affects_width() {
-        let layout = compute_layout_with_panel(area(200, 24), PanelVisibility::Visible, 40);
+        let layout = compute_layout_with_panel(area(200, 24), PanelVisibility::Visible, 40, 1);
         let panel = layout.panel.expect("panel must be present");
         let conv = layout
             .conversation
@@ -407,7 +423,7 @@ mod tests {
     #[test]
     fn panel_pct_clamped_to_bounds() {
         // Requesting 5% should be clamped to MIN_PANEL_PCT (15%).
-        let layout = compute_layout_with_panel(area(200, 24), PanelVisibility::Visible, 5);
+        let layout = compute_layout_with_panel(area(200, 24), PanelVisibility::Visible, 5, 1);
         let panel = layout.panel.expect("panel must be present");
         // 15% of 200 = 30.
         assert_eq!(
@@ -416,7 +432,7 @@ mod tests {
         );
 
         // Requesting 80% should be clamped to MAX_PANEL_PCT (50%).
-        let layout = compute_layout_with_panel(area(200, 24), PanelVisibility::Visible, 80);
+        let layout = compute_layout_with_panel(area(200, 24), PanelVisibility::Visible, 80, 1);
         let panel = layout.panel.expect("panel must be present");
         // 50% of 200 = 100.
         assert_eq!(
@@ -427,8 +443,12 @@ mod tests {
 
     #[test]
     fn expanded_keeps_status_bar() {
-        let layout =
-            compute_layout_with_panel(area(120, 24), PanelVisibility::Expanded, DEFAULT_PANEL_PCT);
+        let layout = compute_layout_with_panel(
+            area(120, 24),
+            PanelVisibility::Expanded,
+            DEFAULT_PANEL_PCT,
+            1,
+        );
         assert_eq!(
             layout.status_bar.height, 1,
             "status bar must still be 1 row in expanded mode"

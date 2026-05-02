@@ -42,7 +42,6 @@ use std::sync::{Arc, RwLock};
 
 use serde_json::json;
 use smol_str::SmolStr;
-use tokio::sync::mpsc;
 
 use pattern_core::constellation::ConstellationRegistry;
 use pattern_core::fronting::{FrontingSet, RoutingTable};
@@ -61,7 +60,7 @@ use pattern_memory::MemoryCache;
 use pattern_memory::scope::{MemoryScope, ScopeBinding};
 use pattern_runtime::agent_registry::{AgentRegistry, SessionStatus};
 use pattern_runtime::fronting_dispatch::{FrontingState, dispatch_to_mailboxes};
-use pattern_runtime::mailbox::MailboxInput;
+use pattern_runtime::mailbox::{DeliveryMode, Mailbox, MailboxInput};
 use pattern_runtime::persona_loader::load_persona;
 use pattern_runtime::spawn::fork::ForkHandle;
 use pattern_runtime::testing::{InMemoryConstellationRegistry, MockProviderClient};
@@ -144,7 +143,9 @@ fn seed_text_block(cache: &MemoryCache, agent_id: &str, label: &str, content: &s
         MemoryBlockType::Working,
         BlockSchema::text(),
     );
-    cache.create_block(&Scope::global(agent_id), bc).expect("create_block");
+    cache
+        .create_block(&Scope::global(agent_id), bc)
+        .expect("create_block");
     let doc = cache
         .get(&Scope::global(agent_id).to_db_key(), label)
         .expect("get after create")
@@ -690,16 +691,20 @@ async fn smoke_integrated_turn_loop(
         );
     }
 
-    wait_for_event_text(spec_sink.as_ref(), "compute 2+2", timeout).await.expect(
-        "specialist's sink must observe the routed body \
+    wait_for_event_text(spec_sink.as_ref(), "compute 2+2", timeout)
+        .await
+        .expect(
+            "specialist's sink must observe the routed body \
          (proves AgentRegistry → specialist mailbox → composer reached the specialist's wire turn)",
-    );
+        );
 
-    wait_for_event_text(sup_sink.as_ref(), "result: 4", timeout).await.expect(
-        "supervisor's sink must observe the specialist's reply body \
+    wait_for_event_text(sup_sink.as_ref(), "result: 4", timeout)
+        .await
+        .expect(
+            "supervisor's sink must observe the specialist's reply body \
          (proves the round trip — specialist's `send` → AgentRegistry → \
          supervisor mailbox → supervisor's autonomous ack turn)",
-    );
+        );
 
     eprintln!("integrated turn loop: delegated cascade verified end-to-end");
 }
@@ -793,11 +798,19 @@ fn event_contains_text(event: &TurnEvent, needle: &str) -> bool {
 async fn smoke_handler_level_fallback(supervisor_id: &str, specialist_id: &str) {
     let agent_reg = Arc::new(AgentRegistry::new());
 
-    let (sup_tx, mut sup_rx) = mpsc::unbounded_channel::<MailboxInput>();
-    let (spec_tx, mut spec_rx) = mpsc::unbounded_channel::<MailboxInput>();
+    let (sup_mailbox, _) = Mailbox::new(supervisor_id.into());
+    let (spec_mailbox, _) = Mailbox::new(specialist_id.into());
 
-    agent_reg.register(SmolStr::from(supervisor_id), sup_tx, SessionStatus::Active);
-    agent_reg.register(SmolStr::from(specialist_id), spec_tx, SessionStatus::Active);
+    agent_reg.register(
+        SmolStr::from(supervisor_id),
+        sup_mailbox.clone(),
+        SessionStatus::Active,
+    );
+    agent_reg.register(
+        SmolStr::from(specialist_id),
+        spec_mailbox.clone(),
+        SessionStatus::Active,
+    );
 
     // FrontingSet: active = [supervisor], fallback = supervisor.
     let fronting_set = FrontingSet::from_parts(
@@ -820,7 +833,9 @@ async fn smoke_handler_level_fallback(supervisor_id: &str, specialist_id: &str) 
     .expect("step 3: dispatch human message must succeed");
 
     // Step 3: supervisor receives the human message via fronting fallback.
-    let sup_msg = sup_rx
+    let sup_msg = sup_mailbox
+        .lock_rx()
+        .await
         .recv()
         .await
         .expect("step 3: supervisor must receive human message");
@@ -839,13 +854,16 @@ async fn smoke_handler_level_fallback(supervisor_id: &str, specialist_id: &str) 
             Sphere::Internal,
         ),
         msg: test_msg("compute 2+2"),
+        delivery: DeliveryMode::Queue,
     };
 
     agent_reg
         .route_or_queue(&SmolStr::from(specialist_id), delegation_msg)
         .expect("step 4: delegation routing must succeed");
 
-    let spec_msg = spec_rx
+    let spec_msg = spec_mailbox
+        .lock_rx()
+        .await
         .recv()
         .await
         .expect("step 4: specialist must receive delegation");
@@ -864,13 +882,16 @@ async fn smoke_handler_level_fallback(supervisor_id: &str, specialist_id: &str) 
             Sphere::Internal,
         ),
         msg: test_msg("result: 4"),
+        delivery: DeliveryMode::Queue,
     };
 
     agent_reg
         .route_or_queue(&SmolStr::from(supervisor_id), result_msg)
         .expect("step 7: result routing back to supervisor must succeed");
 
-    let result_received = sup_rx
+    let result_received = sup_mailbox
+        .lock_rx()
+        .await
         .recv()
         .await
         .expect("step 7: supervisor must receive specialist result");
@@ -882,11 +903,11 @@ async fn smoke_handler_level_fallback(supervisor_id: &str, specialist_id: &str) 
 
     // Verify no stray messages in either mailbox.
     assert!(
-        sup_rx.try_recv().is_err(),
+        sup_mailbox.lock_rx().await.try_recv().is_err(),
         "step 7: supervisor must have no additional stray messages"
     );
     assert!(
-        spec_rx.try_recv().is_err(),
+        spec_mailbox.lock_rx().await.try_recv().is_err(),
         "step 7: specialist must have no additional stray messages"
     );
 }

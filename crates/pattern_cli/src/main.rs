@@ -610,7 +610,12 @@ async fn run_chat(cmd: ChatCmd) -> MietteResult<()> {
     // Enable mouse capture so clicks can toggle collapsible sections and the
     // panel. Text selection is handled via Ctrl+S selection mode instead of
     // native terminal selection.
-    crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture).ok();
+    crossterm::execute!(
+        std::io::stdout(),
+        crossterm::event::EnableMouseCapture,
+        crossterm::event::EnableBracketedPaste
+    )
+    .ok();
 
     let mut terminal = ratatui::init();
     let mut app = tui::app::App::new();
@@ -679,7 +684,12 @@ async fn run_chat(cmd: ChatCmd) -> MietteResult<()> {
     // Disable mouse capture after restoring the terminal.
     crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture).ok();
 
-    // AC6.7: if --stop-daemon-on-exit was passed and we were the last client,
+    crossterm::execute!(
+        std::io::stdout(),
+        crossterm::event::DisableMouseCapture,
+        crossterm::event::DisableBracketedPaste
+    )
+    .ok();
     // send a shutdown request to the daemon so stale state does not persist.
     if let Some(client) = shutdown_client {
         match client.client_count().await {

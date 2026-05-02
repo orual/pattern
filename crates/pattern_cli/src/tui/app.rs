@@ -526,6 +526,14 @@ impl App {
                     }
                 }
             }
+            Event::Paste(text) => {
+                // Bracketed paste: insert the pasted text into the input
+                // textarea. This preserves newlines instead of treating
+                // each line as a separate Enter keypress.
+                if self.focus == Focus::Input {
+                    self.input.insert_text(&text);
+                }
+            }
             _ => {}
         }
     }
@@ -1629,7 +1637,8 @@ impl App {
     /// Extracted so that both `run()` (which owns the terminal) and tests
     /// (which use `terminal.draw()` directly) can share the rendering logic.
     fn render_frame(&mut self, frame: &mut ratatui::Frame<'_>) {
-        let layout = compute_layout_with_panel(frame.area(), self.panel_visibility, self.panel_pct);
+        let input_lines = self.input.line_count() as u16;
+        let layout = compute_layout_with_panel(frame.area(), self.panel_visibility, self.panel_pct, input_lines);
 
         // Record terminal dimensions so key handlers can use the real size.
         self.last_viewport_height = layout.conversation.map(|r| r.height).unwrap_or(0);

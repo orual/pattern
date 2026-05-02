@@ -190,10 +190,7 @@ fn deliver_one(
     body: &Message,
     id: PersonaId,
 ) -> Result<(), RouterError> {
-    let input = MailboxInput {
-        from: sender.clone(),
-        msg: body.clone(),
-    };
+    let input = MailboxInput::new(sender.clone(), body.clone());
     registry.route_or_queue(&id, input)
 }
 
@@ -201,6 +198,7 @@ fn deliver_one(
 mod tests {
     use super::*;
     use crate::agent_registry::SessionStatus;
+    use crate::mailbox::Mailbox;
     use crate::testing::InMemoryConstellationRegistry;
     use jiff::Timestamp;
     use pattern_core::PersonaRecord;
@@ -209,7 +207,6 @@ mod tests {
     use pattern_core::types::ids::{AgentId, BatchId, MessageId, new_id, new_snowflake_id};
     use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
     use smol_str::SmolStr;
-    use tokio::sync::mpsc;
 
     fn test_msg(text: &str) -> Message {
         Message {
@@ -249,8 +246,8 @@ mod tests {
     #[tokio::test]
     async fn fallback_receives_unmatched_message() {
         let agent_reg = AgentRegistry::new();
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        agent_reg.register("alice".into(), tx, SessionStatus::Active);
+        let (mailbox, _) = Mailbox::new("alice".into());
+        agent_reg.register("alice".into(), mailbox.clone(), SessionStatus::Active);
 
         let fronting_set = FrontingSet::from_parts(
             Vec::new(),
@@ -265,7 +262,12 @@ mod tests {
             .await
             .unwrap();
 
-        let received = rx.recv().await.expect("alice should receive");
+        let received = mailbox
+            .lock_rx()
+            .await
+            .recv()
+            .await
+            .expect("alice should receive");
         assert_eq!(
             received.msg.chat_message.content.first_text().unwrap_or(""),
             "hello"
@@ -276,10 +278,10 @@ mod tests {
     #[tokio::test]
     async fn rule_match_routes_to_target() {
         let agent_reg = AgentRegistry::new();
-        let (math_tx, mut math_rx) = mpsc::unbounded_channel();
-        let (chat_tx, mut chat_rx) = mpsc::unbounded_channel();
-        agent_reg.register("math".into(), math_tx, SessionStatus::Active);
-        agent_reg.register("chat".into(), chat_tx, SessionStatus::Active);
+        let (math_mailbox, _) = Mailbox::new("math".into());
+        let (chat_mailbox, _) = Mailbox::new("chat".into());
+        agent_reg.register("math".into(), math_mailbox.clone(), SessionStatus::Active);
+        agent_reg.register("chat".into(), chat_mailbox.clone(), SessionStatus::Active);
 
         let rules = vec![RoutingRule::new(
             "math-rule".to_string(),
@@ -297,13 +299,18 @@ mod tests {
             .await
             .unwrap();
 
-        let received = math_rx.recv().await.expect("math should receive");
+        let received = math_mailbox
+            .lock_rx()
+            .await
+            .recv()
+            .await
+            .expect("math should receive");
         assert_eq!(
             received.msg.chat_message.content.first_text().unwrap_or(""),
             "!math 2+2"
         );
         // Chat mailbox must NOT have received the message.
-        assert!(chat_rx.try_recv().is_err());
+        assert!(chat_mailbox.lock_rx().await.try_recv().is_err());
 
         let _ = EdgeDirection::Outgoing; // keep the type referenced
     }
@@ -320,10 +327,10 @@ mod tests {
     #[tokio::test]
     async fn rule_update_applies_to_subsequent_dispatches() {
         let agent_reg = AgentRegistry::new();
-        let (math_tx, mut math_rx) = mpsc::unbounded_channel();
-        let (chat_tx, mut chat_rx) = mpsc::unbounded_channel();
-        agent_reg.register("math".into(), math_tx, SessionStatus::Active);
-        agent_reg.register("chat".into(), chat_tx, SessionStatus::Active);
+        let (math_mailbox, _) = Mailbox::new("math".into());
+        let (chat_mailbox, _) = Mailbox::new("chat".into());
+        agent_reg.register("math".into(), math_mailbox.clone(), SessionStatus::Active);
+        agent_reg.register("chat".into(), chat_mailbox.clone(), SessionStatus::Active);
 
         // Initial rule: !math → math.
         let initial_rules = vec![RoutingRule::new(
@@ -345,7 +352,12 @@ mod tests {
         dispatch_to_mailboxes(&agent_reg, &state, &test_origin(), &test_msg("!math 2+2"))
             .await
             .unwrap();
-        let received_first = math_rx.recv().await.expect("math should receive first send");
+        let received_first = math_mailbox
+            .lock_rx()
+            .await
+            .recv()
+            .await
+            .expect("math should receive first send");
         assert_eq!(
             received_first
                 .msg
@@ -356,7 +368,7 @@ mod tests {
             "!math 2+2"
         );
         assert!(
-            chat_rx.try_recv().is_err(),
+            chat_mailbox.lock_rx().await.try_recv().is_err(),
             "chat must not receive the first message"
         );
 
@@ -373,23 +385,16 @@ mod tests {
         let updated_table = RoutingTable::try_from_rules(updated_rules).unwrap();
         {
             let mut set = set_lock.write().expect("fronting set rwlock poisoned");
-            *set = FrontingSet::from_parts(
-                Vec::new(),
-                Some(SmolStr::from("chat")),
-                updated_table,
-            );
+            *set = FrontingSet::from_parts(Vec::new(), Some(SmolStr::from("chat")), updated_table);
         }
 
         // Second dispatch: must land in chat under the new rule.
-        dispatch_to_mailboxes(
-            &agent_reg,
-            &state,
-            &test_origin(),
-            &test_msg("!math 3+3"),
-        )
-        .await
-        .unwrap();
-        let received_second = chat_rx
+        dispatch_to_mailboxes(&agent_reg, &state, &test_origin(), &test_msg("!math 3+3"))
+            .await
+            .unwrap();
+        let received_second = chat_mailbox
+            .lock_rx()
+            .await
             .recv()
             .await
             .expect("chat should receive second send after rule update");
@@ -403,7 +408,7 @@ mod tests {
             "!math 3+3"
         );
         assert!(
-            math_rx.try_recv().is_err(),
+            chat_mailbox.lock_rx().await.try_recv().is_err(),
             "math must not receive the second message — rule was updated to target chat"
         );
     }
@@ -413,10 +418,10 @@ mod tests {
     #[tokio::test]
     async fn fan_out_delivers_to_all_active() {
         let agent_reg = AgentRegistry::new();
-        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
-        let (b_tx, mut b_rx) = mpsc::unbounded_channel();
-        agent_reg.register("a".into(), a_tx, SessionStatus::Active);
-        agent_reg.register("b".into(), b_tx, SessionStatus::Active);
+        let (a_mailbox, _) = Mailbox::new("a".into());
+        let (b_mailbox, _) = Mailbox::new("b".into());
+        agent_reg.register("a".into(), a_mailbox.clone(), SessionStatus::Active);
+        agent_reg.register("b".into(), b_mailbox.clone(), SessionStatus::Active);
 
         let fronting_set = FrontingSet::from_parts(
             vec![SmolStr::from("a"), SmolStr::from("b")],
@@ -431,8 +436,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(a_rx.recv().await.is_some(), "a should receive");
-        assert!(b_rx.recv().await.is_some(), "b should receive");
+        assert!(
+            a_mailbox.lock_rx().await.recv().await.is_some(),
+            "a should receive"
+        );
+        assert!(
+            b_mailbox.lock_rx().await.recv().await.is_some(),
+            "b should receive"
+        );
     }
 
     /// Empty fronting + Active personas in the registry → DefaultPersona
@@ -440,10 +451,10 @@ mod tests {
     #[tokio::test]
     async fn empty_fronting_uses_default_persona() {
         let agent_reg = AgentRegistry::new();
-        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
-        let (b_tx, mut b_rx) = mpsc::unbounded_channel();
-        agent_reg.register("alpha".into(), a_tx, SessionStatus::Active);
-        agent_reg.register("beta".into(), b_tx, SessionStatus::Active);
+        let (a_mailbox, _) = Mailbox::new("alpha".into());
+        let (b_mailbox, _) = Mailbox::new("beta".into());
+        agent_reg.register("alpha".into(), a_mailbox.clone(), SessionStatus::Active);
+        agent_reg.register("beta".into(), b_mailbox.clone(), SessionStatus::Active);
 
         let constellation = InMemoryConstellationRegistry::new();
         seed_active(&constellation, "alpha");
@@ -456,10 +467,13 @@ mod tests {
             .unwrap();
 
         assert!(
-            a_rx.recv().await.is_some(),
+            a_mailbox.lock_rx().await.recv().await.is_some(),
             "alpha (lowest id) should receive"
         );
-        assert!(b_rx.try_recv().is_err(), "beta should NOT receive");
+        assert!(
+            b_mailbox.lock_rx().await.try_recv().is_err(),
+            "beta should NOT receive"
+        );
     }
 
     /// SystemDefault — empty fronting AND empty registry. No mailbox
@@ -520,10 +534,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn in_flight_routing_uses_snapshot_at_dispatch_time() {
         let agent_reg = Arc::new(AgentRegistry::new());
-        let (alice_tx, mut alice_rx) = mpsc::unbounded_channel();
-        let (bob_tx, mut bob_rx) = mpsc::unbounded_channel();
-        agent_reg.register("alice".into(), alice_tx, SessionStatus::Active);
-        agent_reg.register("bob".into(), bob_tx, SessionStatus::Active);
+        let (alice_mailbox, _) = Mailbox::new("alice".into());
+        let (bob_mailbox, _) = Mailbox::new("bob".into());
+        agent_reg.register("alice".into(), alice_mailbox.clone(), SessionStatus::Active);
+        agent_reg.register("bob".into(), bob_mailbox.clone(), SessionStatus::Active);
 
         let fronting_set = FrontingSet::from_parts(
             Vec::new(),
@@ -555,7 +569,9 @@ mod tests {
             .expect("second dispatch must succeed");
 
         // Step 5: assertions.
-        let alice_msg = alice_rx
+        let alice_msg = alice_mailbox
+            .lock_rx()
+            .await
             .recv()
             .await
             .expect("alice should have received 'first' — snapshot was taken before mutation");
@@ -570,11 +586,13 @@ mod tests {
             "alice must receive 'first': dispatch used pre-mutation snapshot"
         );
         assert!(
-            alice_rx.try_recv().is_err(),
+            alice_mailbox.lock_rx().await.try_recv().is_err(),
             "alice must NOT receive 'second': routing committed at dispatch time"
         );
 
-        let bob_msg = bob_rx
+        let bob_msg = bob_mailbox
+            .lock_rx()
+            .await
             .recv()
             .await
             .expect("bob should have received 'second' — post-mutation dispatch routes to bob");
@@ -584,7 +602,7 @@ mod tests {
             "bob must receive 'second': second dispatch sees mutated fronting state"
         );
         assert!(
-            bob_rx.try_recv().is_err(),
+            bob_mailbox.lock_rx().await.try_recv().is_err(),
             "bob must NOT receive 'first': pre-mutation dispatch already committed to alice"
         );
     }

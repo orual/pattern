@@ -302,6 +302,7 @@ fn dispatch_outbound(
 mod tests {
     use super::*;
     use crate::NopProviderClient;
+    use crate::mailbox::Mailbox;
     use crate::router::RouterRegistry;
     use crate::router::cli::CliRouter;
     use crate::testing::{InMemoryMemoryStore, standard_datacon_table};
@@ -500,12 +501,11 @@ mod tests {
     async fn delegate_pins_task_block_ref_in_message() {
         use crate::agent_registry::{AgentRegistry, SessionStatus};
         use crate::router::agent::AgentRouter;
-        use tokio::sync::mpsc;
 
         // Set up a shared registry with an "active" recipient persona.
         let reg = Arc::new(AgentRegistry::new());
-        let (tx, mut rx) = mpsc::unbounded_channel::<crate::mailbox::MailboxInput>();
-        reg.register("recipient-r".into(), tx, SessionStatus::Active);
+        let (mailbox, _) = Mailbox::new("recipient-r".into());
+        reg.register("recipient-r".into(), mailbox.clone(), SessionStatus::Active);
 
         let agent_router = Arc::new(AgentRouter::new(Arc::clone(&reg)));
         let mut registry = RouterRegistry::new();
@@ -535,7 +535,12 @@ mod tests {
         assert!(result.is_ok(), "Delegate should succeed; got: {result:?}");
 
         // Verify the recipient's mailbox got a message with the task's BlockRef.
-        let mailbox_input = rx.recv().await.expect("recipient should receive a message");
+        let mailbox_input = mailbox
+            .lock_rx()
+            .await
+            .recv()
+            .await
+            .expect("recipient should receive a message");
         let block_refs = &mailbox_input.msg.block_refs;
         assert_eq!(block_refs.len(), 1, "message should have 1 block_ref");
         assert_eq!(block_refs[0].block_id, "block-123");

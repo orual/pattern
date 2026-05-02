@@ -32,6 +32,7 @@ pub const TOOL_BODY_INDENT: u16 = 2;
 
 /// The kind of content a section holds.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum SectionKind {
     /// Streamed LLM text (the model's answer).
     Text(String),
@@ -95,15 +96,27 @@ impl Section {
                 let preview = truncate_preview(s, 60);
                 format!("▸ thinking: {preview}")
             }
-            SectionKind::ToolCall { function_name, .. } => {
-                format!("▸ tool: {function_name}")
+            SectionKind::ToolCall {
+                function_name,
+                arguments,
+                ..
+            } => {
+                // For the code tool, show first line of code. For others, show function name.
+                let preview = if function_name == "code" {
+                    extract_code_preview(arguments, 55)
+                } else {
+                    function_name.clone()
+                };
+                format!("▸ {function_name}: {preview}")
             }
             SectionKind::ToolResult {
-                call_id, success, ..
+                success, content, ..
             } => {
-                let status = if *success { "ok" } else { "error" };
-                format!("▸ result ({status}): {call_id}")
+                let status = if *success { "ok" } else { "err" };
+                let preview = extract_result_preview(content, 55);
+                format!("▸ result ({status}): {preview}")
             }
+
             SectionKind::Display { kind, text } => {
                 let label = match kind {
                     DisplayKind::Chunk => "chunk",
@@ -169,6 +182,103 @@ fn truncate_preview(s: &str, max_chars: usize) -> String {
     }
 }
 
+/// Extract the first meaningful line of code from tool arguments JSON.
+/// Parses the "code" field and returns its first non-empty line.
+pub(super) fn extract_code_preview(arguments_json: &str, max_chars: usize) -> String {
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(arguments_json) {
+        if let Some(code) = parsed.get("code").and_then(|v| v.as_str()) {
+            let first_line = code
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("(empty)");
+            return truncate_preview(first_line, max_chars);
+        }
+    }
+    truncate_preview(arguments_json, max_chars)
+}
+
+/// Extract a readable preview from tool result content.
+/// Tries to parse as JSON and show a meaningful summary;
+/// falls back to truncated raw text.
+pub(super) fn extract_result_preview(content: &str, max_chars: usize) -> String {
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(content) {
+        match &parsed {
+            serde_json::Value::String(s) => {
+                // Unwrapped string might be nested JSON — try to compact it
+                if let Ok(nested) = serde_json::from_str::<serde_json::Value>(s) {
+                    if let Ok(compact) = serde_json::to_string(&nested) {
+                        return truncate_preview(&compact, max_chars);
+                    }
+                }
+                truncate_preview(s, max_chars)
+            }
+            serde_json::Value::Null => "null".to_string(),
+            serde_json::Value::Bool(b) => b.to_string(),
+            serde_json::Value::Number(n) => n.to_string(),
+            _ => {
+                if let Ok(compact) = serde_json::to_string(&parsed) {
+                    truncate_preview(&compact, max_chars)
+                } else {
+                    truncate_preview(content, max_chars)
+                }
+            }
+        }
+    } else {
+        truncate_preview(content, max_chars)
+    }
+}
+
+/// Format tool result content for display. Unescapes the wire JSON encoding,
+/// tries to pretty-print nested JSON, and unescapes \n in string values.
+pub(super) fn format_result_content(content: &str) -> String {
+    let inner = match serde_json::from_str::<serde_json::Value>(content) {
+        Ok(serde_json::Value::String(s)) => s,
+        Ok(other) => {
+            return serde_json::to_string_pretty(&other).unwrap_or_else(|_| content.to_string());
+        }
+        Err(_) => return content.to_string(),
+    };
+    if let Ok(nested) = serde_json::from_str::<serde_json::Value>(&inner) {
+        let pretty = serde_json::to_string_pretty(&nested).unwrap_or_else(|_| inner.clone());
+        pretty.replace("\\n", "\n")
+    } else {
+        inner
+    }
+}
+
+/// Extract the display-ready code text from a code tool's arguments JSON.
+/// Returns the code (and optional helpers/imports) as a markdown fenced block.
+pub(super) fn render_code_tool_body(arguments: &str) -> String {
+    let code_str = if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(arguments) {
+        let mut parts = Vec::new();
+        if let Some(code) = parsed.get("code").and_then(|v| v.as_str()) {
+            parts.push(code.to_string());
+        }
+        if let Some(helpers) = parsed.get("helpers").and_then(|v| v.as_str()) {
+            if !helpers.is_empty() {
+                parts.push(format!("-- helpers:\n{helpers}"));
+            }
+        }
+        if let Some(imports) = parsed.get("imports").and_then(|v| v.as_str()) {
+            if !imports.is_empty() {
+                parts.push(format!("-- imports:\n{imports}"));
+            }
+        }
+        parts.join("\n\n")
+    } else {
+        arguments.to_string()
+    };
+    format!("```haskell\n{code_str}\n```")
+}
+
+/// Format a non-code tool's arguments for display as a markdown JSON block.
+pub(super) fn render_generic_tool_body(arguments: &str) -> String {
+    let json_str = serde_json::from_str::<serde_json::Value>(arguments)
+        .and_then(|v| serde_json::to_string_pretty(&v))
+        .unwrap_or_else(|_| arguments.to_string());
+    format!("```json\n{json_str}\n```")
+}
+
 // ---------------------------------------------------------------------------
 // RenderBatch
 // ---------------------------------------------------------------------------
@@ -180,6 +290,7 @@ pub struct RenderBatch {
     pub batch_id: SmolStr,
     /// The user's message that initiated this exchange, if any.
     pub user_message: Option<String>,
+    pub message_cached_height: Option<u16>,
     /// The agent that authored this batch's response, if known. When set, a
     /// `[name]` label is rendered inline with the first line of the
     /// agent's sections. System/notification batches leave this `None`.
@@ -196,6 +307,7 @@ impl RenderBatch {
         Self {
             batch_id,
             user_message,
+            message_cached_height: None,
             agent_name: None,
             sections: Vec::new(),
             streaming: true,
@@ -306,6 +418,11 @@ impl RenderBatch {
     /// Compute and cache heights for all sections that have `None` cached height.
     /// Uses markdown rendering for Text sections and plain line counting for others.
     pub fn compute_heights(&mut self, width: u16) {
+        if let Some(user_message) = &self.user_message
+            && self.message_cached_height.is_none()
+        {
+            self.message_cached_height = Some(plain_text_height(user_message, width));
+        }
         for section in &mut self.sections {
             if section.cached_height.is_some() {
                 continue;
@@ -319,22 +436,25 @@ impl RenderBatch {
                 SectionKind::Thinking(s) => plain_text_height(s, width),
                 SectionKind::ToolCall {
                     arguments,
-                    function_name: _,
+                    function_name,
                     ..
                 } => {
-                    // Header line + indented arguments. The inner width
-                    // must match the renderer's narrowed draw rect or the
-                    // cached height will under-count wrapped lines.
                     let header_height = 1u16;
                     let inner_width = width.saturating_sub(TOOL_BODY_INDENT);
-                    let args_height = plain_text_height(arguments, inner_width);
-                    header_height.saturating_add(args_height)
+                    let body_height = if function_name == "code" {
+                        let md = render_code_tool_body(arguments);
+                        markdown::markdown_height(&md, inner_width)
+                    } else {
+                        let md = render_generic_tool_body(arguments);
+                        markdown::markdown_height(&md, inner_width)
+                    };
+                    header_height.saturating_add(body_height)
                 }
                 SectionKind::ToolResult { content, .. } => {
-                    // Header line + indented content (see ToolCall note).
                     let header_height = 1u16;
                     let inner_width = width.saturating_sub(TOOL_BODY_INDENT);
-                    let content_height = plain_text_height(content, inner_width);
+                    let rendered = format_result_content(content);
+                    let content_height = plain_text_height(&rendered, inner_width);
                     header_height.saturating_add(content_height)
                 }
                 SectionKind::Display { text, .. } => plain_text_height(text, width),
@@ -349,7 +469,7 @@ impl RenderBatch {
     /// label is rendered inline with the first section's first line and
     /// does not occupy its own row.
     pub fn total_height(&self) -> u16 {
-        let user_msg_height: u16 = if self.user_message.is_some() { 1 } else { 0 };
+        let user_msg_height: u16 = self.message_cached_height.unwrap_or(1);
         let intra_gap: u16 = if self.user_message.is_some()
             && (self.agent_name.is_some() || !self.sections.is_empty())
         {

@@ -97,6 +97,12 @@ impl TurnSink for TurnSinkBridge {
         };
         // Lock-free, unbounded, never blocks.
         // Failure means the daemon actor has been dropped — discard silently.
+        tracing::trace!(
+            batch_id = %self.batch_id,
+            agent_id = %self.agent_id,
+            event = ?tagged.event,
+            "TurnSinkBridge::emit sending to event_tx"
+        );
         let _ = self.tx.send(tagged);
     }
 }

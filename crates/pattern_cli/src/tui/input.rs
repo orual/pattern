@@ -6,7 +6,7 @@
 //! textarea is a single empty line (or already browsing history), and Escape
 //! clears the input.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent};
 use pattern_core::types::provider::ContentPart;
 use ratatui::style::Style;
 use ratatui_textarea::TextArea;
@@ -59,6 +59,7 @@ impl InputHandler {
         // which looks noisy against the chat history. Reset it so only the
         // cursor glyph itself signals focus.
         textarea.set_cursor_line_style(Style::default());
+        textarea.set_wrap_mode(ratatui_textarea::WrapMode::Word);
         Self {
             textarea,
             history: Vec::new(),
@@ -70,19 +71,22 @@ impl InputHandler {
 
     /// Handle a key event, returning what action the app should take.
     pub fn handle_key(&mut self, key: KeyEvent) -> InputAction {
-        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-
         match key.code {
-            // Shift+Enter or Ctrl+Enter → insert newline.
-            KeyCode::Enter if shift || ctrl => {
-                self.textarea.insert_newline();
-                InputAction::Changed
+            // Enter: if the last line is empty (double-tap), submit.
+            // Otherwise insert a newline. This gives a natural multi-line
+            // editing experience — type normally with Enter for newlines,
+            // hit Enter on an empty line to send.
+            KeyCode::Enter => {
+                let lines = self.textarea.lines();
+                let last_empty = lines.last().is_some_and(|l| l.is_empty());
+                let is_slash = lines.first().is_some_and(|l| l.starts_with('/'));
+                if last_empty || is_slash {
+                    self.submit()
+                } else {
+                    self.textarea.insert_newline();
+                    InputAction::Changed
+                }
             }
-
-            // Plain Enter → submit.
-            KeyCode::Enter => self.submit(),
-
             // Up arrow → history if textarea is a single empty line or already
             // browsing history.
             KeyCode::Up if self.can_history_up() => {
@@ -116,6 +120,16 @@ impl InputHandler {
     /// Return the current text content of the textarea (all lines joined).
     pub fn current_text(&self) -> String {
         self.textarea.lines().join("\n")
+    }
+
+    /// Insert text at the cursor position. Used for bracketed paste.
+    pub fn insert_text(&mut self, text: &str) {
+        self.textarea.insert_str(text);
+    }
+
+    /// Number of lines in the textarea content. Used for dynamic input height.
+    pub fn line_count(&self) -> usize {
+        self.textarea.lines().len()
     }
 
     /// Borrow the underlying [`TextArea`] for rendering.
@@ -217,8 +231,7 @@ impl InputHandler {
 
     /// Replace the textarea content with the given string.
     fn set_textarea_content(&mut self, content: &str) {
-        self.textarea.select_all();
-        self.textarea.cut();
+        self.textarea.clear();
         self.textarea.insert_str(content);
     }
 }

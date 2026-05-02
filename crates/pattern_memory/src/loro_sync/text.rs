@@ -58,7 +58,6 @@ impl LoroDocBridge for TextBridge {
             path: path.to_owned(),
             source: e,
         })?;
-        eprintln!("applied ext edit: {}", s);
         disk_doc
             .get_text("content")
             .update_by_line(s, Default::default())
@@ -88,7 +87,6 @@ impl LineIndex {
             char_offset += 1;
             if ch == '\n' {
                 starts.push(char_offset);
-                eprintln!("line start: {}", char_offset);
             }
         }
         Self {
@@ -278,9 +276,7 @@ impl LoroSyncedFile {
             return idx.clone();
         }
         let text = self.inner.memory_doc().get_text("content").to_string();
-        eprintln!("ensure_line_index: text = {}", text);
         let idx = LineIndex::build(&text);
-        eprintln!("line index built: {}", idx.line_count());
         *guard = Some(idx.clone());
         idx
     }

@@ -33,7 +33,6 @@ use std::sync::{Arc, RwLock};
 
 use jiff::Timestamp;
 use smol_str::SmolStr;
-use tokio::sync::mpsc;
 
 use pattern_core::constellation::ConstellationRegistry;
 use pattern_core::fronting::{FrontingSet, MessagePattern, RoutingRule, RoutingTable};
@@ -43,7 +42,7 @@ use pattern_core::types::origin::{Author, MessageOrigin, Sphere, SystemReason};
 use pattern_db::queries::fronting::{load_fronting_set, save_fronting_set};
 use pattern_runtime::agent_registry::{AgentRegistry, SessionStatus};
 use pattern_runtime::fronting_dispatch::{FrontingState, dispatch_to_mailboxes};
-use pattern_runtime::mailbox::MailboxInput;
+use pattern_runtime::mailbox::{Mailbox, MailboxInput};
 use pattern_runtime::persona_loader::load_persona;
 use pattern_runtime::testing::InMemoryConstellationRegistry;
 
@@ -143,17 +142,29 @@ async fn supervisor_pattern_routes_messages_correctly() {
     // Step 2: set up agent registry + per-agent receivers.
     let agent_reg = Arc::new(AgentRegistry::new());
 
-    let (sup_tx, mut sup_rx) = mpsc::unbounded_channel::<MailboxInput>();
-    let (math_tx, mut math_rx) = mpsc::unbounded_channel::<MailboxInput>();
-    let (chat_tx, mut chat_rx) = mpsc::unbounded_channel::<MailboxInput>();
-
     let supervisor_id = supervisor.agent_id.as_str();
     let math_id = math.agent_id.as_str();
     let chat_id = chat.agent_id.as_str();
 
-    agent_reg.register(SmolStr::from(supervisor_id), sup_tx, SessionStatus::Active);
-    agent_reg.register(SmolStr::from(math_id), math_tx, SessionStatus::Active);
-    agent_reg.register(SmolStr::from(chat_id), chat_tx, SessionStatus::Active);
+    let (sup_mailbox, _) = Mailbox::new(SmolStr::from(supervisor_id));
+    let (math_mailbox, _) = Mailbox::new(SmolStr::from(math_id));
+    let (chat_mailbox, _) = Mailbox::new(SmolStr::from(chat_id));
+
+    agent_reg.register(
+        SmolStr::from(supervisor_id),
+        sup_mailbox.clone(),
+        SessionStatus::Active,
+    );
+    agent_reg.register(
+        SmolStr::from(math_id),
+        math_mailbox.clone(),
+        SessionStatus::Active,
+    );
+    agent_reg.register(
+        SmolStr::from(chat_id),
+        chat_mailbox.clone(),
+        SessionStatus::Active,
+    );
 
     // Step 3: build FrontingState with routing rules.
     let fronting = build_fronting_state(supervisor_id, math_id, chat_id);
@@ -188,7 +199,9 @@ async fn supervisor_pattern_routes_messages_correctly() {
     // Step 5: assert each mailbox received exactly the right message.
 
     // Supervisor: "hello" only.
-    let sup_msg = sup_rx
+    let sup_msg = sup_mailbox
+        .lock_rx()
+        .await
         .recv()
         .await
         .expect("supervisor must have received a message");
@@ -198,12 +211,14 @@ async fn supervisor_pattern_routes_messages_correctly() {
         "supervisor must receive 'hello' (fallback path)"
     );
     assert!(
-        sup_rx.try_recv().is_err(),
+        sup_mailbox.lock_rx().await.try_recv().is_err(),
         "supervisor must NOT have received additional messages"
     );
 
     // Math specialist: "!math 2+2" only.
-    let math_msg = math_rx
+    let math_msg = math_mailbox
+        .lock_rx()
+        .await
         .recv()
         .await
         .expect("math-specialist must have received a message");
@@ -213,12 +228,14 @@ async fn supervisor_pattern_routes_messages_correctly() {
         "math-specialist must receive '!math 2+2' (Prefix rule)"
     );
     assert!(
-        math_rx.try_recv().is_err(),
+        math_mailbox.lock_rx().await.try_recv().is_err(),
         "math-specialist must NOT have received additional messages"
     );
 
     // Chat specialist: "lets chat" only.
-    let chat_msg = chat_rx
+    let chat_msg = chat_mailbox
+        .lock_rx()
+        .await
         .recv()
         .await
         .expect("chat-specialist must have received a message");
@@ -228,7 +245,7 @@ async fn supervisor_pattern_routes_messages_correctly() {
         "chat-specialist must receive 'lets chat' (Contains rule)"
     );
     assert!(
-        chat_rx.try_recv().is_err(),
+        chat_mailbox.lock_rx().await.try_recv().is_err(),
         "chat-specialist must NOT have received additional messages"
     );
 }
@@ -318,13 +335,25 @@ async fn fronting_set_survives_restart() {
     let reloaded_state = FrontingState::new(Arc::new(RwLock::new(loaded)), reloaded_registry);
 
     let agent_reg = Arc::new(AgentRegistry::new());
-    let (sup_tx, mut sup_rx) = mpsc::unbounded_channel::<MailboxInput>();
-    let (math_tx, mut math_rx) = mpsc::unbounded_channel::<MailboxInput>();
-    let (chat_tx, mut chat_rx) = mpsc::unbounded_channel::<MailboxInput>();
+    let (sup_mailbox, _) = Mailbox::new(supervisor_id.into());
+    let (math_mailbox, _) = Mailbox::new(math_id.into());
+    let (chat_mailbox, _) = Mailbox::new(chat_id.into());
 
-    agent_reg.register(SmolStr::from(supervisor_id), sup_tx, SessionStatus::Active);
-    agent_reg.register(SmolStr::from(math_id), math_tx, SessionStatus::Active);
-    agent_reg.register(SmolStr::from(chat_id), chat_tx, SessionStatus::Active);
+    agent_reg.register(
+        SmolStr::from(supervisor_id),
+        sup_mailbox.clone(),
+        SessionStatus::Active,
+    );
+    agent_reg.register(
+        SmolStr::from(math_id),
+        math_mailbox.clone(),
+        SessionStatus::Active,
+    );
+    agent_reg.register(
+        SmolStr::from(chat_id),
+        chat_mailbox.clone(),
+        SessionStatus::Active,
+    );
 
     // "hello" → fallback → supervisor (same path as in the first test).
     dispatch_to_mailboxes(
@@ -336,7 +365,9 @@ async fn fronting_set_survives_restart() {
     .await
     .expect("dispatch after reload must succeed");
 
-    let sup_msg = sup_rx
+    let sup_msg = sup_mailbox
+        .lock_rx()
+        .await
         .recv()
         .await
         .expect("supervisor must receive 'hello' after reload");
@@ -345,8 +376,14 @@ async fn fronting_set_survives_restart() {
         "hello",
         "routing via reloaded FrontingState must still send 'hello' to supervisor"
     );
-    assert!(math_rx.try_recv().is_err(), "math must not receive 'hello'");
-    assert!(chat_rx.try_recv().is_err(), "chat must not receive 'hello'");
+    assert!(
+        math_mailbox.lock_rx().await.try_recv().is_err(),
+        "math must not receive 'hello'"
+    );
+    assert!(
+        chat_mailbox.lock_rx().await.try_recv().is_err(),
+        "chat must not receive 'hello'"
+    );
 
     // Re-verify the math rule is also still live after reload.
     dispatch_to_mailboxes(
@@ -358,7 +395,9 @@ async fn fronting_set_survives_restart() {
     .await
     .expect("math dispatch after reload must succeed");
 
-    let math_msg = math_rx
+    let math_msg = math_mailbox
+        .lock_rx()
+        .await
         .recv()
         .await
         .expect("math-specialist must receive '!math sqrt(9)' after reload");

@@ -40,26 +40,47 @@ use crate::agent_loop::{EvalDispatcher, drive_step};
 use crate::memory::TurnHistory;
 use crate::session::SessionContext;
 
+/// How a message should be delivered to the agent's turn loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DeliveryMode {
+    /// Break the agent's continuation loop between tool calls and deliver
+    /// on the next turn boundary. Default for partner/TUI messages.
+    #[default]
+    Interrupt,
+    /// Deliver after the current step completes naturally. The message
+    /// waits in the mailbox without triggering a continuation break.
+    Queue,
+    /// Spawn a concurrent batch alongside whatever is currently running.
+    /// Bypasses the `is_in_turn` serialization gate.
+    Parallel,
+}
+
 /// A single activation enqueued into a session's mailbox.
-///
-/// The carrier is uniformly `(Message, MessageOrigin)`. The origin's
-/// `author` field discriminates direct sends (`Agent` / `Partner` /
-/// `Human`) from system-emitted wakes (`System { reason: TaskTimeout
-/// { .. } }`, etc.). Task assignments are conveyed by populating the
-/// message's `block_refs` — the snapshot composer reads them without
-/// any mailbox-level branching.
 #[derive(Debug, Clone)]
 pub struct MailboxInput {
-    /// Sender attribution: who/what is activating the agent. Wake
-    /// sources synthesise an `Author::System { reason: ... }` origin
-    /// carrying the structured payload (block ref + elapsed span)
-    /// directly on the variant.
+    /// Sender attribution.
     pub from: MessageOrigin,
-    /// The message body to deliver as a turn input. Task-assignment
-    /// activations populate `msg.block_refs` so the snapshot composer
-    /// pins the assigned task into the recipient's working memory
-    /// for that turn.
+    /// The message body to deliver as a turn input.
     pub msg: Message,
+    /// How this message should be dispatched relative to any in-progress turn.
+    pub delivery: DeliveryMode,
+}
+
+impl MailboxInput {
+    /// Construct with default delivery mode (Interrupt).
+    pub fn new(from: MessageOrigin, msg: Message) -> Self {
+        Self {
+            from,
+            msg,
+            delivery: DeliveryMode::default(),
+        }
+    }
+
+    /// Set the delivery mode.
+    pub fn with_delivery(mut self, mode: DeliveryMode) -> Self {
+        self.delivery = mode;
+        self
+    }
 }
 
 /// Per-session inbox.
@@ -121,6 +142,12 @@ impl Mailbox {
         &self,
     ) -> tokio::sync::MutexGuard<'_, mpsc::UnboundedReceiver<MailboxInput>> {
         self.rx.lock().await
+    }
+
+    pub fn blocking_lock_rx(
+        &self,
+    ) -> tokio::sync::MutexGuard<'_, mpsc::UnboundedReceiver<MailboxInput>> {
+        self.rx.blocking_lock()
     }
 
     /// Enqueue an input and bump the pending counter.
@@ -359,11 +386,13 @@ mod tests {
         tx_a.send(MailboxInput {
             from: test_origin(),
             msg: test_message("from-a"),
+            delivery: DeliveryMode::Queue,
         })
         .unwrap();
         tx_b.send(MailboxInput {
             from: test_origin(),
             msg: test_message("from-b"),
+            delivery: DeliveryMode::Queue,
         })
         .unwrap();
 
@@ -464,6 +493,7 @@ mod tests {
                     Sphere::Internal,
                 ),
                 msg: body,
+                delivery: DeliveryMode::Queue,
             })
             .unwrap();
 
@@ -592,6 +622,7 @@ mod tests {
                     Sphere::System,
                 ),
                 msg: test_message("first: triggers panic"),
+                delivery: DeliveryMode::Queue,
             })
             .unwrap();
 
@@ -625,6 +656,7 @@ mod tests {
                     Sphere::System,
                 ),
                 msg: test_message("second: after panic"),
+                delivery: DeliveryMode::Queue,
             })
             .unwrap();
 

@@ -1380,6 +1380,17 @@ pub async fn drive_step(
             break;
         }
 
+
+        // Interrupt check: if the partner (or another agent) sent a message
+        // while we were running tool calls, break the continuation loop so
+        // the mailbox drain task can deliver it as a new activation. All
+        // tool_use/tool_result pairs are already recorded, so nothing is
+        // left unpaired.
+        if ctx.mailbox().has_pending() {
+            tracing::info!("pending mailbox message detected; breaking continuation loop");
+            break;
+        }
+
         // Build the next wire turn's continuation input. The tool_result
         // messages from THIS turn have been recorded into history via
         // hist.record above, so the continuation input contributes no fresh

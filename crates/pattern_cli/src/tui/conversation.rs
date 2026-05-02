@@ -164,20 +164,31 @@ fn render_batch(
 ) -> u16 {
     // Render user message line.
     if let Some(ref msg) = batch.user_message {
-        if skip_lines > 0 {
-            skip_lines -= 1;
-        } else if current_y < viewport_bottom {
-            let user_line = Line::from(vec![
-                Span::styled(
-                    "[you] ",
-                    Style::default()
-                        .fg(Color::Green)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(msg.as_str()),
-            ]);
-            buf.set_line(area.x, current_y, &user_line, area.width);
-            current_y += 1;
+        let prefix = Span::styled(
+            "[you] ",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        );
+        let mut text = ratatui::text::Text::raw(msg.as_str());
+        // Prepend the [you] prefix to the first line.
+        if let Some(first_line) = text.lines.first_mut() {
+            first_line.spans.insert(0, prefix);
+        }
+        let paragraph = Paragraph::new(text).wrap(Wrap { trim: true });
+        let msg_height = paragraph.line_count(area.width) as u16;
+        if skip_lines >= msg_height as usize {
+            skip_lines -= msg_height as usize;
+        } else {
+            current_y = render_paragraph_lines(
+                &paragraph,
+                area,
+                buf,
+                current_y,
+                viewport_bottom,
+                skip_lines,
+            );
+            skip_lines = 0;
         }
     }
 
@@ -348,26 +359,41 @@ fn render_section(
             } else if y < viewport_bottom {
                 let arrow = if section.collapsed { "▸" } else { "▾" };
                 let header_style = Style::default().fg(Color::DarkGray);
-                let mut spans = Vec::with_capacity(2);
+                let mut spans = Vec::with_capacity(3);
                 if let Some(p) = prefix.clone() {
                     spans.push(p);
                 }
+                // For code tool, show first line of code in header
+                let preview = if function_name == "code" {
+                    super::model::extract_code_preview(arguments, 60)
+                } else {
+                    function_name.clone()
+                };
                 spans.push(Span::styled(
-                    format!(" {arrow} tool: {function_name}"),
+                    format!(" {arrow} {function_name}: "),
                     header_style,
+                ));
+                spans.push(Span::styled(
+                    preview,
+                    Style::default().fg(Color::Rgb(130, 130, 180)),
                 ));
                 let header = Line::from(spans);
                 buf.set_line(area.x, y, &header, area.width);
                 y += 1;
             }
 
-            // Body (expanded only): arguments indented under the header via a
-            // narrower, rightward-shifted draw rect so wrapped lines stay
-            // aligned.
+            // Body (expanded only): for code tool, wrap in a fenced code
+            // block and render through the markdown renderer (gets syntax
+            // highlighting). For other tools, pretty-print JSON.
             if !section.collapsed && y < viewport_bottom {
-                let style = Style::default().fg(Color::DarkGray);
-                let text = ratatui::text::Text::styled(arguments.clone(), style);
-                let paragraph = Paragraph::new(text).wrap(Wrap { trim: true });
+                let text = if function_name == "code" {
+                    let md = super::model::render_code_tool_body(arguments);
+                    markdown::render_markdown(&md)
+                } else {
+                    let md = super::model::render_generic_tool_body(arguments);
+                    markdown::render_markdown(&md)
+                };
+                let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
                 let inner = indented_area(area);
                 y = render_paragraph_lines(
                     &paragraph,
@@ -381,7 +407,7 @@ fn render_section(
             y
         }
         SectionKind::ToolResult {
-            call_id,
+            call_id: _,
             success,
             content,
         } => {
@@ -397,33 +423,34 @@ fn render_section(
             } else if y < viewport_bottom {
                 let arrow = if section.collapsed { "▸" } else { "▾" };
                 let status_color = if *success { Color::Green } else { Color::Red };
-                let status = if *success { "ok" } else { "error" };
+                let status = if *success { "ok" } else { "err" };
                 let muted = Style::default().fg(Color::DarkGray);
+                let preview = super::model::extract_result_preview(content, 55);
                 let mut spans = Vec::with_capacity(5);
                 if let Some(p) = prefix.clone() {
                     spans.push(p);
                 }
                 spans.push(Span::styled(format!(" {arrow} result ("), muted));
                 spans.push(Span::styled(status, Style::default().fg(status_color)));
-                spans.push(Span::styled(format!("): {call_id}"), muted));
+                spans.push(Span::styled(format!("): {preview}"), muted));
                 let header = Line::from(spans);
                 buf.set_line(area.x, y, &header, area.width);
                 y += 1;
             }
 
-            // Body (expanded only): content indented under the header.
+            // Body (expanded only): pretty-print JSON, unescape strings.
             if !section.collapsed && y < viewport_bottom {
-                let text = ratatui::text::Text::from(content.clone());
+                let display_text = super::model::format_result_content(content);
+                let style = if *success {
+                    Style::default().fg(Color::Rgb(150, 180, 150))
+                } else {
+                    Style::default().fg(Color::Rgb(200, 130, 130))
+                };
+                let text = ratatui::text::Text::styled(display_text, style);
                 let paragraph = Paragraph::new(text).wrap(Wrap { trim: true });
                 let inner = indented_area(area);
-                y = render_paragraph_lines(
-                    &paragraph,
-                    inner,
-                    buf,
-                    y,
-                    viewport_bottom,
-                    remaining_skip,
-                );
+
+                render_paragraph_lines(&paragraph, inner, buf, y, viewport_bottom, remaining_skip);
             }
             y
         }
@@ -451,8 +478,9 @@ fn render_section(
     }
 }
 
-/// Render a paragraph's lines into the buffer, skipping `skip_lines`
-/// from the top. Returns the next Y position.
+/// Format tool result content for expanded display.
+/// Parses JSON, pretty-prints objects/arrays, unescapes strings,
+/// and renders newlines as actual line breaks.
 /// Return a sub-Rect shifted right by [`TOOL_BODY_INDENT`] columns, with
 /// `width` reduced by the same amount. Used for expanded tool call/result
 /// bodies so their content sits under the header and wraps at the visual
@@ -466,6 +494,8 @@ fn indented_area(area: Rect) -> Rect {
     }
 }
 
+/// Render a paragraph's lines into the buffer, skipping `skip_lines`
+/// from the top. Returns the next Y position.
 fn render_paragraph_lines(
     paragraph: &Paragraph<'_>,
     area: Rect,

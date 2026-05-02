@@ -1322,12 +1322,12 @@ impl SessionContext {
         // project's `Scope::Local`; passthrough sessions keep
         // `Scope::Global(persona_id)`.
         self.default_scope = match &binding.project_id {
-            Some(project_id) => pattern_core::types::memory_types::Scope::Local(
-                project_id.clone().into(),
-            ),
-            None => pattern_core::types::memory_types::Scope::Global(
-                binding.persona_id.clone().into(),
-            ),
+            Some(project_id) => {
+                pattern_core::types::memory_types::Scope::Local(project_id.clone().into())
+            }
+            None => {
+                pattern_core::types::memory_types::Scope::Global(binding.persona_id.clone().into())
+            }
         };
         let old_inner = self.adapter.inner().clone();
         let scoped: Arc<dyn MemoryStore> = Arc::new(MemoryScope::new(old_inner, binding));
@@ -2331,7 +2331,7 @@ impl TidepoolSession {
         // dropped (the ctx `Arc` may be shared after open).
         if let Some(registry) = session.ctx.agent_registry().cloned() {
             let persona_id: pattern_core::types::ids::PersonaId = session.ctx.agent_id().into();
-            let mailbox_tx = session.ctx.mailbox().sender();
+            let mailbox = session.ctx.mailbox().clone();
 
             // Register the persona's display `name` as an alias when it
             // differs from the canonical `agent_id`. This lets peer
@@ -2352,7 +2352,7 @@ impl TidepoolSession {
             }
 
             let guard = crate::agent_registry::RegistryGuard::register_active(
-                registry, persona_id, mailbox_tx,
+                registry, persona_id, mailbox,
             );
             session._registry_guard = Some(guard);
         }
@@ -2574,8 +2574,8 @@ fn seed_persona_memory_blocks(
         };
         let schema = spec.schema.clone().unwrap_or_else(BlockSchema::text);
 
-        let mut create = BlockCreate::new(label.as_str(), block_type, schema)
-            .with_permission(spec.permission);
+        let mut create =
+            BlockCreate::new(label.as_str(), block_type, schema).with_permission(spec.permission);
         if let Some(desc) = &spec.description {
             create = create.with_description(desc.clone());
         }

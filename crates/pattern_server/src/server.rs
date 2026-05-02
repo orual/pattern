@@ -788,21 +788,10 @@ impl DaemonServer {
                 let session_locks = self.session_locks.clone();
                 let config = self.session_config.clone().unwrap();
                 let event_tx = self.event_tx.clone();
-                let batch_to_agent = self.batch_to_agent.clone();
                 let agent_to_mount = self.agent_to_mount.clone();
                 let agent_id = resolved_agent_id;
 
                 tokio::spawn(async move {
-                    // Hold a guard for the lifetime of this task. If the task
-                    // exits early (error return) or panics, the guard's Drop
-                    // removes the batch → agent entry so the map doesn't leak.
-                    // The fan_out cleanup on Stop is left as a defensive
-                    // double-remove; DashMap::remove is a no-op when absent.
-                    let _batch_guard = BatchGuard {
-                        map: batch_to_agent,
-                        batch_id: batch_id.clone(),
-                    };
-
                     // 1. Get or open session (may block during compilation).
                     let agent_session = match get_or_open_session(
                         &agent_id,
@@ -828,17 +817,7 @@ impl DaemonServer {
                         }
                     };
 
-                    // 2. Acquire the per-agent serialization lock. This
-                    //    serializes set_inner + step so concurrent
-                    //    SendMessage calls for the same agent don't
-                    //    interleave bridge swaps.
-                    let agent_lock = session_locks
-                        .entry(agent_id.clone())
-                        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                        .clone();
-                    let _guard = agent_lock.lock().await;
-
-                    // 3. Build bridge and swap into mux sink.
+                    // 2. Set up event bridge on the mux sink.
                     let bridge = Arc::new(TurnSinkBridge::new(
                         batch_id.clone(),
                         agent_id.clone(),
@@ -846,29 +825,26 @@ impl DaemonServer {
                     ));
                     agent_session.mux_sink.set_inner(bridge.clone());
 
-                    // 4. Build turn input and drive step.
-                    // The caller-supplied origin is passed through unchanged;
-                    // the daemon does not override or default the author.
+                    // 3. Build message and deliver to mailbox.
                     let session_agent_id = agent_session.session.agent_id().to_string();
                     let turn_input = build_turn_input(&inner, &session_agent_id);
+                    let mailbox_input = pattern_runtime::mailbox::MailboxInput::new(
+                        turn_input.origin,
+                        turn_input.messages.into_iter().next().unwrap(),
+                    );
 
-                    match agent_session.session.step_with_agent_loop(turn_input).await {
-                        Ok(_reply) => {
-                            // Events already emitted via the bridge.
-                        }
-                        Err(e) => {
-                            warn!(
-                                agent_id = %agent_id,
-                                batch_id = %batch_id,
-                                error = %e,
-                                "step_with_agent_loop failed"
-                            );
-                            bridge.emit(TurnEvent::Display {
-                                kind: DisplayKind::Note,
-                                text: format!("error: {e}"),
-                            });
-                            bridge.emit(TurnEvent::Stop(StopReason::EndTurn));
-                        }
+                    if let Err(e) = agent_session.session.context().mailbox().send_input(mailbox_input) {
+                        warn!(
+                            agent_id = %agent_id,
+                            batch_id = %batch_id,
+                            error = %e,
+                            "failed to enqueue message in mailbox"
+                        );
+                        bridge.emit(TurnEvent::Display {
+                            kind: DisplayKind::Note,
+                            text: format!("error: {e}"),
+                        });
+                        bridge.emit(TurnEvent::Stop(StopReason::EndTurn));
                     }
                 });
             }
@@ -1344,10 +1320,8 @@ impl DaemonServer {
                     .map(|p| p.name.to_string())
                     .unwrap_or_else(|| agent_id.to_string());
 
-                let available: Vec<AgentId> = personas
-                    .canonical_ids()
-                    .map(|k| SmolStr::from(k))
-                    .collect();
+                let available: Vec<AgentId> =
+                    personas.canonical_ids().map(|k| SmolStr::from(k)).collect();
 
                 let agent_aliases: Vec<crate::protocol::AgentAlias> = personas
                     .iter_aliases()
@@ -1430,64 +1404,62 @@ impl DaemonServer {
 
         // Slow path: try to attach the project mount, falling through
         // to the global mount on NotFound.
-        let first_party_skill_dir = std::path::PathBuf::from(
-            pattern_runtime::sdk::FIRST_PARTY_SKILL_DIR,
-        );
+        let first_party_skill_dir =
+            std::path::PathBuf::from(pattern_runtime::sdk::FIRST_PARTY_SKILL_DIR);
 
-        let (cache_key, mounted) = match pattern_memory::mount::attach(
-            &canonical,
-            Some(first_party_skill_dir.clone()),
-        ) {
-            Ok(m) => (canonical.clone(), m),
-            Err(pattern_memory::mount::MountError::NotFound { .. }) => {
-                let paths = pattern_memory::PatternPaths::default_paths()
-                    .map_err(|e| format!("failed to resolve pattern paths: {e}"))?;
-                let global_path = paths.standalone_mount_path(GLOBAL_PROJECT_ID);
+        let (cache_key, mounted) =
+            match pattern_memory::mount::attach(&canonical, Some(first_party_skill_dir.clone())) {
+                Ok(m) => (canonical.clone(), m),
+                Err(pattern_memory::mount::MountError::NotFound { .. }) => {
+                    let paths = pattern_memory::PatternPaths::default_paths()
+                        .map_err(|e| format!("failed to resolve pattern paths: {e}"))?;
+                    let global_path = paths.standalone_mount_path(GLOBAL_PROJECT_ID);
 
-                // Cache hit on the shared global mount? Stash under the
-                // calling canonical so future calls from the same path
-                // skip straight to fast-path.
-                if let Some(entry) = self.project_mounts.get(&global_path) {
-                    self.project_mounts.insert(canonical, entry.clone());
-                    return Ok(entry.clone());
-                }
+                    // Cache hit on the shared global mount? Stash under the
+                    // calling canonical so future calls from the same path
+                    // skip straight to fast-path.
+                    if let Some(entry) = self.project_mounts.get(&global_path) {
+                        self.project_mounts.insert(canonical, entry.clone());
+                        return Ok(entry.clone());
+                    }
 
-                // Lazy-init the global standalone mount if it doesn't
-                // exist yet. Standalone mode requires jj — surface a
-                // clear error if jj isn't on PATH.
-                if !global_path.join(".pattern.kdl").is_file() {
-                    let jj = pattern_memory::jj::JjAdapter::detect()
-                        .map_err(|e| format!("jj detection failed: {e}"))?
-                        .ok_or_else(|| {
-                            "global fallback mount requires jj on PATH \
+                    // Lazy-init the global standalone mount if it doesn't
+                    // exist yet. Standalone mode requires jj — surface a
+                    // clear error if jj isn't on PATH.
+                    if !global_path.join(".pattern.kdl").is_file() {
+                        let jj = pattern_memory::jj::JjAdapter::detect()
+                            .map_err(|e| format!("jj detection failed: {e}"))?
+                            .ok_or_else(|| {
+                                "global fallback mount requires jj on PATH \
                              (or run `pattern mount init` in a project directory)"
-                                .to_owned()
-                        })?;
-                    pattern_memory::modes::standalone::init(GLOBAL_PROJECT_ID, &jj, &paths)
-                        .map_err(|e| format!("global mount init failed: {e}"))?;
-                    tracing::info!(
-                        mount = %global_path.display(),
-                        "lazy-initialized global standalone mount for non-project session"
-                    );
+                                    .to_owned()
+                            })?;
+                        pattern_memory::modes::standalone::init(GLOBAL_PROJECT_ID, &jj, &paths)
+                            .map_err(|e| format!("global mount init failed: {e}"))?;
+                        tracing::info!(
+                            mount = %global_path.display(),
+                            "lazy-initialized global standalone mount for non-project session"
+                        );
+                    }
+
+                    let mounted =
+                        pattern_memory::mount::attach(&global_path, Some(first_party_skill_dir))
+                            .map_err(|e| {
+                                format!(
+                                    "global mount attach failed at {}: {e}",
+                                    global_path.display()
+                                )
+                            })?;
+
+                    (global_path, mounted)
                 }
-
-                let mounted = pattern_memory::mount::attach(
-                    &global_path,
-                    Some(first_party_skill_dir),
-                )
-                .map_err(|e| {
-                    format!("global mount attach failed at {}: {e}", global_path.display())
-                })?;
-
-                (global_path, mounted)
-            }
-            Err(other) => {
-                return Err(format!(
-                    "failed to attach mount at {}: {other}",
-                    canonical.display()
-                ));
-            }
-        };
+                Err(other) => {
+                    return Err(format!(
+                        "failed to attach mount at {}: {other}",
+                        canonical.display()
+                    ));
+                }
+            };
 
         // Load the persisted FrontingSet for this constellation. A missing
         // row is fine (default-empty); a malformed row is logged and treated
@@ -2107,12 +2079,12 @@ async fn migrate_seed_cache(
         let snapshot = std::fs::read(&snap_path)
             .map_err(|e| format!("read seed snapshot {}: {e}", snap_path.display()))?;
 
-        let already_exists =
-            match pattern_core::MemoryStore::get_block(cache, &scope, &entry.label) {
-                Ok(Some(_)) => true,
-                Ok(None) => false,
-                Err(e) => return Err(format!("get_block check for {:?}: {e}", entry.label)),
-            };
+        let already_exists = match pattern_core::MemoryStore::get_block(cache, &scope, &entry.label)
+        {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(e) => return Err(format!("get_block check for {:?}: {e}", entry.label)),
+        };
 
         if !already_exists {
             let create = pattern_core::types::block::BlockCreate::new(
@@ -2694,9 +2666,11 @@ async fn open_session_with_persona(
     // would always fail with `RegistryError::PersonaNotFound` because the
     // default `UnconfiguredSiblingResolver` rejects every lookup.
     let sibling_resolver: Arc<dyn pattern_runtime::spawn::sibling::SiblingPersonaResolver> =
-        Arc::new(pattern_runtime::spawn::sibling::ConstellationSiblingResolver::new(
-            project_mount.constellation_registry.clone(),
-        ));
+        Arc::new(
+            pattern_runtime::spawn::sibling::ConstellationSiblingResolver::new(
+                project_mount.constellation_registry.clone(),
+            ),
+        );
 
     let registries = SessionRegistries {
         agent_registry: Some(project_mount.agent_registry.clone()),
@@ -3515,8 +3489,7 @@ mod tests {
             MemoryBlockType::Working,
             BlockSchema::text(),
         );
-        let _doc =
-            pattern_core::MemoryStore::create_block(&src_cache, &src_scope, create).unwrap();
+        let _doc = pattern_core::MemoryStore::create_block(&src_cache, &src_scope, create).unwrap();
         pattern_core::MemoryStore::persist_block(&src_cache, &src_scope, label).unwrap();
 
         let docs = src_cache.snapshot_cached_docs();
