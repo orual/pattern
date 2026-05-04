@@ -240,8 +240,18 @@ pub async fn orchestrate(
     let mut tool_results: Vec<ToolResult> = Vec::new();
     if stop_reason == StopReason::ToolUse && !tool_calls.is_empty() {
         for tc in &tool_calls {
+            ctx.hook_bus()
+                .emit(pattern_core::hooks::HookEvent::notification(
+                    pattern_core::hooks::tags::TOOL_BEFORE,
+                    serde_json::json!({ "call_id": tc.call_id, "function": tc.fn_name }),
+                ));
             sink.emit(TurnEvent::ToolCall(tc.clone()));
             let outcome = dispatcher.dispatch(tc.clone(), preamble).await;
+            ctx.hook_bus()
+                .emit(pattern_core::hooks::HookEvent::notification(
+                    pattern_core::hooks::tags::TOOL_AFTER,
+                    serde_json::json!({ "call_id": tc.call_id, "function": tc.fn_name }),
+                ));
             let result = ToolResult {
                 call_id: tc.call_id.clone(),
                 outcome,
@@ -359,6 +369,10 @@ pub async fn orchestrate(
     );
 
     // 7. Emit the Stop event and assemble TurnOutput.
+    ctx.hook_bus().emit(pattern_core::hooks::HookEvent::notification(
+        pattern_core::hooks::tags::TURN_STOP,
+        serde_json::json!({ "stop_reason": format!("{:?}", stop_reason) }),
+    ));
     sink.emit(TurnEvent::Stop(stop_reason));
 
     // Assemble messages in wire order: assistant message first (if any),
@@ -1173,6 +1187,12 @@ pub async fn drive_step(
         );
         let _dispatch_origin_guard = CurrentDispatchOriginGuard::enter(&ctx, &dispatch_origin);
 
+        // Hook: turn.before
+        ctx.hook_bus().emit(pattern_core::hooks::HookEvent::notification(
+            pattern_core::hooks::tags::TURN_BEFORE,
+            serde_json::json!({}),
+        ));
+
         let turn = orchestrate(
             req,
             &cur_input,
@@ -1186,6 +1206,12 @@ pub async fn drive_step(
 
         is_first_wire_turn_in_session = false;
         let terminal = turn.stop_reason.is_terminal();
+        if terminal {
+            ctx.hook_bus().emit(pattern_core::hooks::HookEvent::notification(
+                pattern_core::hooks::tags::TURN_AFTER_SUCCESS,
+                serde_json::json!({ "stop_reason": format!("{:?}", turn.stop_reason) }),
+            ));
+        }
 
         // ---- Mid-batch delta attachment ----
         //
