@@ -85,44 +85,81 @@ pub use pattern_core::types::compression::CompressionStrategy;
 /// Default *system* prompt for the recursive-summarization strategy
 /// when the persona's
 /// [`CompressionStrategy::RecursiveSummarization::summarization_prompt`]
-/// is `None`. Ported verbatim from v2's compression path (see
-/// `rewrite-staging/context/compression.rs` for the original).
+/// is `None`.
 ///
-/// Pairs with [`DEFAULT_SUMMARIZATION_DIRECTIVE`], which the driver
-/// appends as a user-message directive after the chunk-of-turns
-/// payload.
-pub const DEFAULT_SUMMARIZATION_SYSTEM_PROMPT: &str =
-    "You are a helpful assistant that creates concise summaries of conversations.";
+/// The summarizer is asked to write in the agent's own voice — Pattern's
+/// runtime additionally prepends the agent's persona block to this prompt
+/// so the model has a voice anchor. Voice + analytical scaffolding live
+/// here; the actual section structure lives in
+/// [`DEFAULT_SUMMARIZATION_DIRECTIVE`], which the driver appends as a
+/// user-message directive after the chunk-of-turns payload.
+pub const DEFAULT_SUMMARIZATION_SYSTEM_PROMPT: &str = "\
+You are summarizing a stretch of conversation between yourself and your \
+partner. Write the summary in your own voice — first person (singular or \
+plural as natural to you). Do not narrate from outside (\"the assistant \
+said...\"). Stay in character throughout.
+
+You are writing this so that a future you can pick up where this stretch \
+left off without re-reading the whole conversation. Prioritize what \
+next-you will need:
+
+  - what the partner brought, in their own words where it matters
+  - decisions and commitments either of you made, with any triggers or \
+    deadlines
+  - patterns you noticed (the partner's tells, recurring shapes, weather)
+  - memory writes you made (which blocks, what archival entries) and \
+    where to find them again
+  - threads you didn't close — things you said you'd come back to, or \
+    that you should come back to even if you didn't say so
+
+Before writing the summary, work through it inside <analysis> tags:
+
+  - walk the conversation chronologically; for each meaningful exchange, \
+    note what the partner brought and what you made of it
+  - identify decisions reached, commitments made, redirections from the \
+    partner
+  - identify recurring observations: tells, patterns, weather
+  - note memory writes (with labels) and any unresolved tool work
+
+The analysis is for your own reasoning. The summary that follows is what \
+next-you will read.";
 
 /// Default *user-message directive* appended to the summarization
-/// request after the chunk-of-turns payload. Ported verbatim from v2.
+/// request after the chunk-of-turns payload.
 ///
 /// The persona's `summarization_prompt` override (if any) replaces the
 /// system prompt only; the directive is always present so the
-/// summarizer has explicit preserve/condense/prioritize/remove
-/// guidance. Voice matches Pattern's agent-context use case
-/// (relationship-aware, crisis-aware, boundary-aware).
+/// summarizer has explicit section structure even when a persona ships
+/// its own voice prompt.
 pub const DEFAULT_SUMMARIZATION_DIRECTIVE: &str = "\
-Please summarize all the previous messages, focusing on key information, \
-decisions made, and important context.
+Write your summary now. Use these sections in this order:
 
-preserve: novel insights, unique terminology we've developed, \
-relationship evolution patterns, crisis response validations, \
-architectural discoveries
+## what we've been up to
+A paragraph or two in your voice — the through-line of this stretch.
 
-condense: repetitive status updates, routine sync confirmations, similar \
-conversations that don't add new dimensions
+## decisions and commitments
+Discrete items, each one a short line. Note who committed to what, and \
+any deadline or trigger attached.
 
-prioritize: things that would affect future interactions - social \
-calibration lessons learned, boundary discoveries, successful \
-collaboration patterns, failure modes identified
+## what we noticed
+Patterns, the partner's state, the weather. Things that should inform \
+how we show up next time.
 
-remove: duplicate information, overly detailed play-by-plays of routine \
-events
+## memory and archive
+Blocks we updated (with labels). Archival entries we wrote, with enough \
+hook that next-us can find them again.
 
-If there was a previous summary provided, build upon it, but don't \
-simply extend it. Maintain the conversational style and preserve \
-important details. Keep it as short as reasonable.";
+## threads still open
+Things we said we'd come back to. Things we should come back to even if \
+we didn't say so. Include enough context that next-us can re-enter \
+without re-reading the original conversation.
+
+## verbatim partner messages
+Every message the partner sent in this stretch, in order, exactly as \
+they sent them. This is the fidelity layer — do not paraphrase.
+
+If a previous summary was provided in the context, build on it without \
+simply extending it. Maintain your voice.";
 
 /// Output of a compression run.
 ///
@@ -212,17 +249,20 @@ impl Default for ImportanceScoringConfig {
 
 // ---- Gate ---------------------------------------------------------------
 
-/// Returns `true` when the provider-reported input token count for `turns`
-/// exceeds `budget_tokens`.
+/// Returns `true` when the provider-reported input token count for the
+/// composed `request` exceeds `budget_tokens`.
 ///
 /// This is the *only* place in the compression pipeline that calls the
 /// provider for a token count. Internal ranking heuristics in strategies
 /// like `ImportanceBased` use cheap char-based approximations; they never
 /// call this function.
 ///
-/// `model` must be the model string the agent is using (e.g.
-/// `"claude-opus-4-7"`). The request is built by concatenating all
-/// messages from `turns` in chronological order.
+/// The caller passes the actual composed `CompletionRequest` (with system
+/// prompt, tool schemas, prior messages, and any inline-rendered
+/// attachments already in place). Counting against this shape avoids the
+/// historical undercount where only the message bodies were sized while
+/// system + tools + snapshots silently inflated the wire request beyond
+/// the configured threshold.
 ///
 /// Budget policy: callers compute `budget_tokens` as
 /// `context_window - max_output - explicit_buffer`.
@@ -233,23 +273,13 @@ impl Default for ImportanceScoringConfig {
 /// call. Callers may choose to fall back to a heuristic rather than
 /// failing hard when the provider is unavailable; this function does
 /// not make that choice.
-#[instrument(skip(client, turns), fields(turn_count = turns.len(), budget_tokens))]
+#[instrument(skip(client, request), fields(model = %request.model, budget_tokens))]
 pub async fn should_compress(
     client: &dyn ProviderClient,
-    turns: &[TurnSlice],
-    model: &str,
+    request: &CompletionRequest,
     budget_tokens: u64,
 ) -> Result<(bool, TokenCount), ProviderError> {
-    // Build a minimal CompletionRequest whose messages are the
-    // concatenation of all active turns in chronological order.
-    let messages: Vec<ChatMessage> = turns
-        .iter()
-        .flat_map(|t| t.messages.iter().cloned())
-        .collect();
-
-    let request = CompletionRequest::new(model).with_messages(messages);
-
-    let count = client.count_tokens(&request).await?;
+    let count = client.count_tokens(request).await?;
     tracing::debug!(
         input_tokens = count.input_tokens,
         budget_tokens,
@@ -692,10 +722,9 @@ mod tests {
     #[tokio::test]
     async fn gate_returns_false_when_under_budget() {
         let client = MockTokenCounter::returning(100);
-        let turns = vec![make_turn(make_batch_id(), "t1")];
-        let (compress, count) = should_compress(client.as_ref(), &turns, "claude-opus-4-7", 200)
-            .await
-            .unwrap();
+        let req = CompletionRequest::new("claude-opus-4-7")
+            .with_messages(vec![ChatMessage::user("hello")]);
+        let (compress, count) = should_compress(client.as_ref(), &req, 200).await.unwrap();
         assert!(!compress, "100 tokens < 200 budget should not compress");
         assert_eq!(count.input_tokens, 100);
     }
@@ -703,37 +732,23 @@ mod tests {
     #[tokio::test]
     async fn gate_returns_true_when_over_budget() {
         let client = MockTokenCounter::returning(500);
-        let turns = vec![make_turn(make_batch_id(), "t1")];
-        let (compress, count) = should_compress(client.as_ref(), &turns, "claude-opus-4-7", 200)
-            .await
-            .unwrap();
+        let req = CompletionRequest::new("claude-opus-4-7")
+            .with_messages(vec![ChatMessage::user("hello")]);
+        let (compress, count) = should_compress(client.as_ref(), &req, 200).await.unwrap();
         assert!(compress, "500 tokens > 200 budget should compress");
         assert_eq!(count.input_tokens, 500);
     }
 
     #[tokio::test]
-    async fn gate_sends_all_messages_from_all_turns() {
-        // The mock returns a count equal to the message content length
-        // divided by something — but we just verify the function
-        // assembles and dispatches without panicking when multiple turns
-        // and messages are present.
+    async fn gate_passes_request_through_unchanged() {
+        // The mock is request-agnostic, so this just verifies dispatch
+        // succeeds when a multi-message request is provided.
         let client = MockTokenCounter::returning(1000);
-        let batch = make_batch_id();
-        let turns = vec![
-            make_turn_with_msg(
-                batch.clone(),
-                "t1",
-                ChatMessage::user("message one"),
-                Timestamp::now(),
-            ),
-            make_turn_with_msg(
-                make_batch_id(),
-                "t2",
-                ChatMessage::user("message two"),
-                Timestamp::now(),
-            ),
-        ];
-        let result = should_compress(client.as_ref(), &turns, "claude-opus-4-7", 500).await;
+        let req = CompletionRequest::new("claude-opus-4-7").with_messages(vec![
+            ChatMessage::user("message one"),
+            ChatMessage::user("message two"),
+        ]);
+        let result = should_compress(client.as_ref(), &req, 500).await;
         assert!(result.is_ok());
     }
 

@@ -47,6 +47,7 @@ use jiff::Timestamp;
 use pattern_core::error::RuntimeError;
 use pattern_core::types::compression::CompressionStrategy;
 use pattern_core::types::ids::new_snowflake_id;
+use pattern_core::types::provider::CompletionRequest;
 use pattern_core::types::snapshot::ContextPolicy;
 
 use pattern_provider::compose::compression::{
@@ -86,12 +87,23 @@ pub enum CompactionOutcome {
 
 /// Check the compression gate; apply the persona's strategy if it fires.
 ///
-/// Called from `drive_step` before each wire turn's compose step. No-ops
-/// silently when persona has no compression configured.
+/// Called from `drive_step` after composing the wire request for this turn.
+/// `composed_request` MUST be the actual `CompletionRequest` that would go
+/// out on the wire — the gate counts tokens against it so system prompt,
+/// tool schemas, snapshot attachments, and pseudo-messages are all sized
+/// alongside the message bodies. Counting against a turns-only synthesis
+/// undercounts the wire shape and lets the request blow past the configured
+/// threshold (this is the bug that motivated the parameter).
+///
+/// When the strategy fires, the caller is responsible for re-running
+/// `compose_request_for_turn` so the outbound wire request reflects the
+/// archived turns. No-ops silently when persona has no compression
+/// configured.
 pub async fn maybe_compact(
     ctx: &SessionContext,
     turn_history: &Arc<std::sync::Mutex<TurnHistory>>,
     context_policy: &ContextPolicy,
+    composed_request: &CompletionRequest,
 ) -> Result<CompactionOutcome, RuntimeError> {
     // 1. Short-circuit: compression disabled.
     let strategy = match &context_policy.compression {
@@ -119,10 +131,7 @@ pub async fn maybe_compact(
         });
     }
 
-    // 4. Build TurnSlice vector from the active history.
-    let turns = build_turn_slices(turn_history)?;
-
-    // 5. Compute token threshold.
+    // 4. Compute token threshold.
     let token_threshold = context_policy.compress_token_threshold.unwrap_or_else(|| {
         let max_tokens = ctx.chat_options().max_tokens.unwrap_or(8192) as usize;
         // Conservative fallback: 128k context window.
@@ -133,11 +142,12 @@ pub async fn maybe_compact(
             .saturating_sub(safety_buffer)
     });
 
-    // 6. Async gate: call count_tokens via the provider.
+    // 5. Async gate: call count_tokens against the actual composed request.
+    //    Counting the wire shape (system + tools + snapshots + messages)
+    //    rather than a turns-only synthesis is what keeps the gate honest.
     let (should_fire, token_count) = should_compress(
         ctx.provider().as_ref(),
-        &turns,
-        ctx.model_id(),
+        composed_request,
         token_threshold as u64,
     )
     .await
@@ -154,6 +164,9 @@ pub async fn maybe_compact(
     }
 
     let reported_tokens = token_count.input_tokens;
+
+    // 6. Build TurnSlice vector for the strategy dispatch (gate already passed).
+    let turns = build_turn_slices(turn_history)?;
 
     // 7. Strategy dispatch.
     let (result, strategy_name) = match strategy {
@@ -340,7 +353,33 @@ async fn generate_summary(
             .collect()
     };
 
-    let system = summarization_prompt.unwrap_or(DEFAULT_SUMMARIZATION_SYSTEM_PROMPT);
+    let summary_prompt = summarization_prompt.unwrap_or(DEFAULT_SUMMARIZATION_SYSTEM_PROMPT);
+
+    // Read the persona block (if any) and prepend it to the summarization
+    // system prompt so the summarizer model writes the summary in-character.
+    // No-op when the persona block is missing; uses spawn_blocking because
+    // MemoryStore::get_block hits the DB synchronously (matches the pattern
+    // in compose_request_for_turn).
+    let persona_text = {
+        let store = ctx.memory_store();
+        let scope = ctx.persona_scope();
+        tokio::task::spawn_blocking(move || {
+            store
+                .get_block(&scope, pattern_core::PERSONA_LABEL)
+                .ok()
+                .flatten()
+                .map(|doc| doc.render())
+                .unwrap_or_default()
+        })
+        .await
+        .unwrap_or_default()
+    };
+
+    let system = if persona_text.is_empty() {
+        summary_prompt.to_string()
+    } else {
+        format!("{persona_text}\n\n---\n\n{summary_prompt}")
+    };
 
     let mut messages = oldest_messages;
     messages.push(ChatMessage::user(
@@ -348,7 +387,7 @@ async fn generate_summary(
     ));
 
     let req = CompletionRequest::new(summarization_model)
-        .with_system(system)
+        .with_system(&system)
         .with_messages(messages);
 
     let mut stream =

@@ -1152,21 +1152,32 @@ pub async fn drive_step(
     }
 
     loop {
-        // Compaction gate: check whether the active context needs
-        // compression BEFORE composing the request. This ensures
-        // archived turns are removed from TurnHistory before the
-        // composer reads it for segment 2.
-        let compaction_outcome =
-            crate::compaction::maybe_compact(&ctx, &turn_history, ctx.context_policy()).await?;
-        tracing::debug!(?compaction_outcome, "compaction check");
-
         // Build the composed CompletionRequest for THIS wire turn:
         // segments 1 (system + persona + tools) / 2 (prior messages +
         // summary head + pseudo-messages) / 3 (current_state), then
         // fresh input messages appended AFTER compose so they stay
         // uncached (per the three-segment cache layout).
-        let (req, has_segment_1) =
+        //
+        // Compose BEFORE the compaction gate so the gate's count_tokens
+        // call sizes the real wire shape — not just the message bodies
+        // — and the threshold reflects what Anthropic will actually see.
+        let (mut req, mut has_segment_1) =
             compose_request_for_turn(&ctx, &turn_history, &cur_input, &cache_profile).await?;
+
+        // Compaction gate: count tokens against the composed request and,
+        // if the strategy fires, archive turns from TurnHistory and
+        // re-compose so the outbound request reflects the new active set.
+        let compaction_outcome =
+            crate::compaction::maybe_compact(&ctx, &turn_history, ctx.context_policy(), &req)
+                .await?;
+        tracing::debug!(?compaction_outcome, "compaction check");
+
+        if matches!(compaction_outcome, crate::compaction::CompactionOutcome::Fired { .. }) {
+            let (recomposed, has_seg_1) =
+                compose_request_for_turn(&ctx, &turn_history, &cur_input, &cache_profile).await?;
+            req = recomposed;
+            has_segment_1 = has_seg_1;
+        }
 
         // Expect a segment-1 cache hit on every wire turn AFTER the
         // very first in the session — seg1 is stable, so from turn 2

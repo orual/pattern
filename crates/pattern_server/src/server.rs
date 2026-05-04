@@ -990,6 +990,11 @@ impl DaemonServer {
                     })
                     .await
                     .unwrap_or_default();
+                    let response = HistoryResponse { batches };
+                    let result = tx.send(response).await; // The actual history needs to go back to the agent
+                    if result.is_err() {
+                        tracing::error!("{:?}", result);
+                    }
                 });
             }
             PatternMessage::CancelBatch(req) => {

@@ -274,7 +274,8 @@ async fn gate_skipped_below_message_floor() {
     // 3 turns: well below message_floor=100.
     let hist = populate_history(&db, "agent-a", 3).await;
 
-    let outcome = maybe_compact(&ctx, &hist, ctx.context_policy())
+    let req = pattern_core::types::provider::CompletionRequest::new(ctx.model_id());
+    let outcome = maybe_compact(&ctx, &hist, ctx.context_policy(), &req)
         .await
         .expect("maybe_compact failed");
 
@@ -299,7 +300,8 @@ async fn gate_skipped_compression_disabled() {
     let (ctx, db) = setup_with_persona(persona, provider).await;
     let hist = populate_history(&db, "agent-a", 5).await;
 
-    let outcome = maybe_compact(&ctx, &hist, ctx.context_policy())
+    let req = pattern_core::types::provider::CompletionRequest::new(ctx.model_id());
+    let outcome = maybe_compact(&ctx, &hist, ctx.context_policy(), &req)
         .await
         .expect("maybe_compact failed");
 
@@ -324,7 +326,8 @@ async fn gate_skipped_below_token_threshold() {
     let (ctx, db) = setup_with_persona(persona, provider).await;
     let hist = populate_history(&db, "agent-a", 200).await;
 
-    let outcome = maybe_compact(&ctx, &hist, ctx.context_policy())
+    let req = pattern_core::types::provider::CompletionRequest::new(ctx.model_id());
+    let outcome = maybe_compact(&ctx, &hist, ctx.context_policy(), &req)
         .await
         .expect("maybe_compact failed");
 
@@ -349,7 +352,8 @@ async fn truncate_strategy_fires_and_drops_old_turns() {
     let (ctx, db) = setup_with_persona(persona, provider).await;
     let hist = populate_history(&db, "agent-a", 200).await;
 
-    let outcome = maybe_compact(&ctx, &hist, ctx.context_policy())
+    let req = pattern_core::types::provider::CompletionRequest::new(ctx.model_id());
+    let outcome = maybe_compact(&ctx, &hist, ctx.context_policy(), &req)
         .await
         .expect("maybe_compact failed");
 
@@ -408,7 +412,8 @@ async fn recursive_summarization_fires_and_writes_summary() {
     let (ctx, db) = setup_with_persona(persona, provider).await;
     let hist = populate_history(&db, "agent-a", 200).await;
 
-    let outcome = maybe_compact(&ctx, &hist, ctx.context_policy())
+    let req = pattern_core::types::provider::CompletionRequest::new(ctx.model_id());
+    let outcome = maybe_compact(&ctx, &hist, ctx.context_policy(), &req)
         .await
         .expect("maybe_compact failed");
 
@@ -473,7 +478,8 @@ async fn importance_based_strategy_fires_and_drops_old_turns() {
     let (ctx, db) = setup_with_persona(persona, provider).await;
     let hist = populate_history(&db, "agent-a", 200).await;
 
-    let outcome = maybe_compact(&ctx, &hist, ctx.context_policy())
+    let req = pattern_core::types::provider::CompletionRequest::new(ctx.model_id());
+    let outcome = maybe_compact(&ctx, &hist, ctx.context_policy(), &req)
         .await
         .expect("maybe_compact failed");
 
@@ -547,7 +553,8 @@ async fn time_decay_strategy_fires_and_drops_old_turns() {
     let (ctx, db) = setup_with_persona(persona, provider).await;
     let hist = populate_history(&db, "agent-a", 200).await;
 
-    let outcome = maybe_compact(&ctx, &hist, ctx.context_policy())
+    let req = pattern_core::types::provider::CompletionRequest::new(ctx.model_id());
+    let outcome = maybe_compact(&ctx, &hist, ctx.context_policy(), &req)
         .await
         .expect("maybe_compact failed");
 
@@ -602,7 +609,8 @@ async fn archived_messages_marked_is_archived() {
         pattern_db::queries::get_messages(&db.get().unwrap(), "agent-a", i64::MAX).unwrap();
     assert_eq!(non_archived.len(), 20);
 
-    let outcome = maybe_compact(&ctx, &hist, ctx.context_policy())
+    let req = pattern_core::types::provider::CompletionRequest::new(ctx.model_id());
+    let outcome = maybe_compact(&ctx, &hist, ctx.context_policy(), &req)
         .await
         .expect("maybe_compact failed");
 
@@ -668,7 +676,8 @@ async fn compute_archive_boundary_empty_kept_turn_uses_fallback() {
 
     let (ctx, _db) = setup_with_persona(persona, provider).await;
     // Provide the already-constructed history so we control the exact shape.
-    let result = maybe_compact(&ctx, &hist, ctx.context_policy()).await;
+    let req = pattern_core::types::provider::CompletionRequest::new(ctx.model_id());
+    let result = maybe_compact(&ctx, &hist, ctx.context_policy(), &req).await;
 
     // The outcome must not be the silent-skip case: either it fired (fallback
     // boundary was non-empty so archive_messages ran) or it returned an
@@ -731,7 +740,8 @@ async fn compaction_fired_rotates_session_uuid() {
         "rotate_count must be 0 before compaction"
     );
 
-    let outcome = maybe_compact(&ctx, &hist, ctx.context_policy())
+    let req = pattern_core::types::provider::CompletionRequest::new(ctx.model_id());
+    let outcome = maybe_compact(&ctx, &hist, ctx.context_policy(), &req)
         .await
         .expect("maybe_compact failed");
 
