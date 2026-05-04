@@ -69,6 +69,17 @@ data Memory a where
   Recall    :: BlockHandle -> Memory Content
   GetShared      :: Owner -> BlockHandle -> Memory Content
   WriteToPersona :: BlockHandle -> Content -> Memory ()
+  -- | Toggle pinned status of a working block.
+  Pin        :: BlockHandle -> Memory ()
+  Unpin      :: BlockHandle -> Memory ()
+  -- | Get the schema kind of a block as a string ("text", "map", "list", "log", "composite").
+  GetSchema  :: BlockHandle -> Memory Text
+  -- | Get a field from a Map-schema block. Returns JSON-encoded value.
+  GetField   :: BlockHandle -> Text -> Memory (Maybe Text)
+  -- | Set a field in a Map-schema block. Value is JSON-encoded.
+  SetField   :: BlockHandle -> Text -> Text -> Memory ()
+  -- | Update the description of an existing block.
+  UpdateDesc :: BlockHandle -> Text -> Memory ()
 
 -- | Fetch a block's rendered content by label.
 get :: Member Memory effs => BlockHandle -> Eff effs Content
@@ -108,3 +119,27 @@ recall h = send (Recall h)
 -- Errors if the block hasn't been shared with the caller.
 getShared :: Member Memory effs => Owner -> BlockHandle -> Eff effs Content
 getShared o h = send (GetShared o h)
+
+-- | Pin a working block so it surfaces every turn.
+pin :: Member Memory effs => BlockHandle -> Eff effs ()
+pin h = send (Pin h)
+
+-- | Unpin a working block.
+unpin :: Member Memory effs => BlockHandle -> Eff effs ()
+unpin h = send (Unpin h)
+
+-- | Get the schema kind of a block.
+getSchema :: Member Memory effs => BlockHandle -> Eff effs Text
+getSchema h = send (GetSchema h)
+
+-- | Get a field from a Map-schema block (returns JSON value or Nothing).
+getField :: Member Memory effs => BlockHandle -> Text -> Eff effs (Maybe Text)
+getField h f = send (GetField h f)
+
+-- | Set a field in a Map-schema block (value is JSON-encoded).
+setField :: Member Memory effs => BlockHandle -> Text -> Text -> Eff effs ()
+setField h f v = send (SetField h f v)
+
+-- | Update a block's description.
+updateDesc :: Member Memory effs => BlockHandle -> Text -> Eff effs ()
+updateDesc h d = send (UpdateDesc h d)

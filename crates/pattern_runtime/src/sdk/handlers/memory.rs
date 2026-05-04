@@ -49,7 +49,7 @@ impl DescribeEffect for MemoryHandler {
     fn effect_decl() -> EffectDecl {
         EffectDecl {
             type_name: "Memory",
-            description: "Persistent memory-block operations (Get/Put/Create/Append/Replace/Search/Recall/GetShared/WriteToPersona)",
+            description: "Persistent memory-block operations (Get/Put/Create/Append/Replace/Search/Recall/GetShared/Pin/Unpin/GetSchema/GetField/SetField/UpdateDesc)",
             constructors: std::borrow::Cow::Borrowed(&[
                 "Get            :: BlockHandle -> Memory Content",
                 "Put            :: BlockHandle -> Content -> Maybe Text -> Memory ()",
@@ -59,6 +59,12 @@ impl DescribeEffect for MemoryHandler {
                 "Search         :: Query -> Memory [BlockHandle]",
                 "Recall         :: BlockHandle -> Memory Content",
                 "GetShared      :: Owner -> BlockHandle -> Memory Content",
+                "Pin            :: BlockHandle -> Memory ()",
+                "Unpin          :: BlockHandle -> Memory ()",
+                "GetSchema      :: BlockHandle -> Memory Text",
+                "GetField       :: BlockHandle -> Text -> Memory (Maybe Text)",
+                "SetField       :: BlockHandle -> Text -> Text -> Memory ()",
+                "UpdateDesc     :: BlockHandle -> Text -> Memory ()",
             ]),
             type_defs: std::borrow::Cow::Borrowed(&[
                 "type BlockHandle = Text",
@@ -78,6 +84,12 @@ impl DescribeEffect for MemoryHandler {
                 "search :: Member Memory effs => Query -> Eff effs [BlockHandle]\nsearch q = send (Search q)",
                 "recall :: Member Memory effs => BlockHandle -> Eff effs Content\nrecall h = send (Recall h)",
                 "getShared :: Member Memory effs => Owner -> BlockHandle -> Eff effs Content\ngetShared o h = send (GetShared o h)",
+                "pin :: Member Memory effs => BlockHandle -> Eff effs ()\npin h = send (Pin h)",
+                "unpin :: Member Memory effs => BlockHandle -> Eff effs ()\nunpin h = send (Unpin h)",
+                "getSchema :: Member Memory effs => BlockHandle -> Eff effs Text\ngetSchema h = send (GetSchema h)",
+                "getField :: Member Memory effs => BlockHandle -> Text -> Eff effs (Maybe Text)\ngetField h f = send (GetField h f)",
+                "setField :: Member Memory effs => BlockHandle -> Text -> Text -> Eff effs ()\nsetField h f v = send (SetField h f v)",
+                "updateDesc :: Member Memory effs => BlockHandle -> Text -> Eff effs ()\nupdateDesc h d = send (UpdateDesc h d)",
             ]),
         }
     }
@@ -109,6 +121,12 @@ impl EffectHandler<SessionContext> for MemoryHandler {
             MemoryReq::Search(_) => "Search",
             MemoryReq::Recall(_) => "Recall",
             MemoryReq::GetShared(_, _) => "GetShared",
+            MemoryReq::Pin(_) => "Pin",
+            MemoryReq::Unpin(_) => "Unpin",
+            MemoryReq::GetSchema(_) => "GetSchema",
+            MemoryReq::GetField(_, _) => "GetField",
+            MemoryReq::SetField(_, _, _) => "SetField",
+            MemoryReq::UpdateDesc(_, _) => "UpdateDesc",
         };
         crate::sdk::effect_classes::check_effect_class(
             cx.user().capabilities(),
@@ -343,6 +361,64 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                         ))
                     })?;
                 cx.respond(doc.render())
+            }
+            MemoryReq::Pin(label) => {
+                let patch = pattern_core::types::memory_types::BlockMetadataPatch::default().pinned(true);
+                adapter.update_block_metadata(&scope, &label, patch)
+                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Pin: {e}")))?;
+                cx.respond(())
+            }
+            MemoryReq::Unpin(label) => {
+                let patch = pattern_core::types::memory_types::BlockMetadataPatch::default().pinned(false);
+                adapter.update_block_metadata(&scope, &label, patch)
+                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Unpin: {e}")))?;
+                cx.respond(())
+            }
+            MemoryReq::GetSchema(label) => {
+                let doc = adapter
+                    .get_block(&scope, &label)
+                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.GetSchema: {e}")))?
+                    .ok_or_else(|| EffectError::Handler(format!("Pattern.Memory.GetSchema: no block {label:?}")))?;
+                let schema_name = match doc.schema() {
+                    pattern_core::types::memory_types::BlockSchema::Text { .. } => "text",
+                    pattern_core::types::memory_types::BlockSchema::Map { .. } => "map",
+                    pattern_core::types::memory_types::BlockSchema::List { .. } => "list",
+                    pattern_core::types::memory_types::BlockSchema::Log { .. } => "log",
+                    pattern_core::types::memory_types::BlockSchema::Composite { .. } => "composite",
+                    pattern_core::types::memory_types::BlockSchema::TaskList { .. } => "tasklist",
+                    pattern_core::types::memory_types::BlockSchema::Skill { .. } => "skill",
+                    _ => "unknown",
+                };
+                cx.respond(schema_name.to_string())
+            }
+            MemoryReq::GetField(label, field) => {
+                let doc = adapter
+                    .get_block(&scope, &label)
+                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.GetField: {e}")))?
+                    .ok_or_else(|| EffectError::Handler(format!("Pattern.Memory.GetField: no block {label:?}")))?;
+                let value = doc.get_field(&field)
+                    .map(|v| serde_json::to_string(&v).unwrap_or_default());
+                cx.respond(value)
+            }
+            MemoryReq::SetField(label, field, value_json) => {
+                let json_val: serde_json::Value = serde_json::from_str(&value_json)
+                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.SetField: invalid JSON: {e}")))?;
+                let doc = adapter
+                    .get_block(&scope, &label)
+                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.SetField: {e}")))?
+                    .ok_or_else(|| EffectError::Handler(format!("Pattern.Memory.SetField: no block {label:?}")))?;
+                doc.set_field(&field, json_val, false)
+                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.SetField: {e}")))?;
+                adapter.mark_dirty(&scope, &label)
+                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.SetField: {e}")))?;
+                cx.respond(())
+            }
+            MemoryReq::UpdateDesc(label, desc) => {
+                let patch = pattern_core::types::memory_types::BlockMetadataPatch::default()
+                    .description(desc);
+                adapter.update_block_metadata(&scope, &label, patch)
+                    .map_err(|e| EffectError::Handler(format!("Pattern.Memory.UpdateDesc: {e}")))?;
+                cx.respond(())
             }
         })();
 

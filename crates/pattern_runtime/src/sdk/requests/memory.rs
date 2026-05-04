@@ -141,4 +141,22 @@ pub enum MemoryReq {
     /// that has been shared with the caller.
     #[core(module = "Pattern.Memory", name = "GetShared")]
     GetShared(String, String),
+
+    #[core(module = "Pattern.Memory", name = "Pin")]
+    Pin(String),
+
+    #[core(module = "Pattern.Memory", name = "Unpin")]
+    Unpin(String),
+
+    #[core(module = "Pattern.Memory", name = "GetSchema")]
+    GetSchema(String),
+
+    #[core(module = "Pattern.Memory", name = "GetField")]
+    GetField(String, String),
+
+    #[core(module = "Pattern.Memory", name = "SetField")]
+    SetField(String, String, String),
+
+    #[core(module = "Pattern.Memory", name = "UpdateDesc")]
+    UpdateDesc(String, String),
 }

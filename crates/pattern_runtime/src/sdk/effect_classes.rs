@@ -66,6 +66,42 @@ pub const ALL_CLASSES: &[ConstructorClass] = &[
         class: EffectClass::Observe,
         runtime_check: RuntimeClassCheck::Skip,
     },
+    ConstructorClass {
+        module: "Memory",
+        constructor: "Pin",
+        class: EffectClass::MutateInternal,
+        runtime_check: RuntimeClassCheck::Enforce,
+    },
+    ConstructorClass {
+        module: "Memory",
+        constructor: "Unpin",
+        class: EffectClass::MutateInternal,
+        runtime_check: RuntimeClassCheck::Enforce,
+    },
+    ConstructorClass {
+        module: "Memory",
+        constructor: "GetSchema",
+        class: EffectClass::Observe,
+        runtime_check: RuntimeClassCheck::Enforce,
+    },
+    ConstructorClass {
+        module: "Memory",
+        constructor: "GetField",
+        class: EffectClass::Observe,
+        runtime_check: RuntimeClassCheck::Enforce,
+    },
+    ConstructorClass {
+        module: "Memory",
+        constructor: "SetField",
+        class: EffectClass::MutateInternal,
+        runtime_check: RuntimeClassCheck::Enforce,
+    },
+    ConstructorClass {
+        module: "Memory",
+        constructor: "UpdateDesc",
+        class: EffectClass::MutateInternal,
+        runtime_check: RuntimeClassCheck::Enforce,
+    },
     // ── Pattern.Search (3) ───────────────────────────────────────────────
     ConstructorClass {
         module: "Search",
@@ -308,6 +344,12 @@ pub const ALL_CLASSES: &[ConstructorClass] = &[
         module: "File",
         constructor: "ReadLines",
         class: EffectClass::Observe,
+        runtime_check: RuntimeClassCheck::Enforce,
+    },
+    ConstructorClass {
+        module: "File",
+        constructor: "Replace",
+        class: EffectClass::MutateExternal,
         runtime_check: RuntimeClassCheck::Enforce,
     },
     ConstructorClass {

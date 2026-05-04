@@ -53,4 +53,8 @@ pub enum FileReq {
     /// numbers and total line count for navigation context.
     #[core(module = "Pattern.File", name = "ReadLines")]
     ReadLines(String, i64, i64),
+    /// Find and replace a string in a file. Returns the number of
+    /// replacements made as a string (e.g. "2").
+    #[core(module = "Pattern.File", name = "Replace")]
+    Replace(String, String, String),
 }

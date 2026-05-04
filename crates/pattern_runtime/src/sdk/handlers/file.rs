@@ -74,6 +74,7 @@ impl DescribeEffect for FileHandler {
                 "ReplaceLines :: Path -> Int -> Int -> Content -> File ()",
                 "DeleteLines :: Path -> Int -> Int -> File ()",
                 "ReadLines  :: Path -> Int -> Int -> File Content",
+                "Replace    :: Path -> Text -> Text -> File Text",
             ]),
             type_defs: std::borrow::Cow::Borrowed(&[
                 "type Path = Text",
@@ -96,6 +97,7 @@ impl DescribeEffect for FileHandler {
                 "replaceLines :: Member File effs => Path -> Int -> Int -> Content -> Eff effs ()\nreplaceLines p from to c = Freer.send (ReplaceLines p from to c)",
                 "deleteLines :: Member File effs => Path -> Int -> Int -> Eff effs ()\ndeleteLines p from to = Freer.send (DeleteLines p from to)",
                 "readLines :: Member File effs => Path -> Int -> Int -> Eff effs Content\nreadLines p start count = Freer.send (ReadLines p start count)",
+                "replace :: Member File effs => Path -> Text -> Text -> Eff effs Text\nreplace p find repl = Freer.send (Replace p find repl)",
             ]),
         }
     }
@@ -128,6 +130,7 @@ where
             FileReq::ReplaceLines(_, _, _, _) => "ReplaceLines",
             FileReq::DeleteLines(_, _, _) => "DeleteLines",
             FileReq::ReadLines(_, _, _) => "ReadLines",
+            FileReq::Replace(_, _, _) => "Replace",
         };
         crate::sdk::effect_classes::check_effect_class(
             cx.user().capabilities(),
@@ -265,6 +268,24 @@ where
                 let header = format!("[lines {}-{} of {}]\n", start_idx + 1, end_idx, total,);
                 cx.respond(header + &slice)
             }
+            FileReq::Replace(path, find, replace_with) => {
+                evaluate_write(&path, replace_with.as_bytes(), cx.user())?;
+                let fm = require_file_manager(cx.user())?;
+                let sf = fm
+                    .get_or_open(Path::new(&path))
+                    .map_err(|e| EffectError::Handler(e.to_effect_message()))?;
+                let content = sf
+                    .read()
+                    .map_err(|e| EffectError::Handler(format!("Pattern.File.Replace: {e}")))?;
+                let count = content.matches(&find).count();
+                if count > 0 {
+                    let new_content = content.replace(&find, &replace_with);
+                    sf.write(&new_content)
+                        .map_err(|e| EffectError::Handler(format!("Pattern.File.Replace: {e}")))?;
+                }
+                cx.respond(count.to_string())
+            }
+
         }
     }
 }
