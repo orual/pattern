@@ -24,6 +24,7 @@ mcp-wrapper.sh
 **.surql
 **/**.output
 pattern-convert.json
+/docs/reading/*
 
 # Deciduous database (local)
 .deciduous/

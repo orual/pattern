@@ -1,0 +1,7 @@
+plugin "test-cache-plugin" {
+    source "/tmp/test-plugin-source"
+    installed-at "2026-05-01T00:00:00Z"
+    user-config {
+        threshold 8
+    }
+}
