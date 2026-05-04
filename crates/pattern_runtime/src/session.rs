@@ -387,9 +387,10 @@ pub struct SessionContext {
     /// `Pattern.Port` out of the agent's effect row in that case so
     /// missing-registry errors surface at compile time, not at dispatch.
     port_registry: Option<Arc<crate::port_registry::PortRegistryImpl>>,
-    /// Per-session hook event bus. Shared between the session and its
-    /// handlers for emitting lifecycle events.
+    /// Per-session hook event bus.
     hook_bus: Arc<pattern_core::hooks::HookBus>,
+    /// Bridge for sync handler → async hook dispatch.
+    hook_bridge: crate::hooks::HookBridge,
     /// Session-scoped UUID minted at open. Used by handlers that key
     /// per-session state by stable id (e.g. `PortHandler` keys
     /// subscription channels by session_id so multiple sessions don't
@@ -737,6 +738,8 @@ impl SessionContext {
         // stage; TidepoolSession::open will have the session_id but from_persona
         // does not — agent_id is stable and unambiguous as a parent label.
         let spawn_registry = Arc::new(SpawnRegistry::new(agent_id.clone(), 8));
+        let hook_bus__ = Arc::new(pattern_core::hooks::HookBus::new());
+        let hook_bridge__ = crate::hooks::HookBridge::spawn(hook_bus__.clone());
         Self {
             agent_id,
             default_scope,
@@ -777,7 +780,8 @@ impl SessionContext {
                     .join("pattern"),
             )),
             port_registry: None,
-            hook_bus: Arc::new(pattern_core::hooks::HookBus::new()),
+            hook_bus: hook_bus__.clone(),
+            hook_bridge: hook_bridge__,
             session_id: pattern_core::types::ids::new_id().to_string(),
             shell_default_timeout: std::time::Duration::from_secs(30),
             spawn_registry,
@@ -921,6 +925,11 @@ impl SessionContext {
     /// The session's hook event bus.
     pub fn hook_bus(&self) -> &Arc<pattern_core::hooks::HookBus> {
         &self.hook_bus
+    }
+
+    /// The hook bridge for sync handler → async dispatch.
+    pub fn hook_bridge(&self) -> &crate::hooks::HookBridge {
+        &self.hook_bridge
     }
 
     pub fn port_registry(&self) -> Option<&Arc<crate::port_registry::PortRegistryImpl>> {
@@ -1171,6 +1180,7 @@ impl SessionContext {
             )),
             port_registry: self.port_registry.clone(),
             hook_bus: self.hook_bus.clone(),
+            hook_bridge: self.hook_bridge.clone(),
             // Each ephemeral child gets a fresh session_id (so its
             // PortHandler subscription channels don't collide with the
             // parent's). Inherit `shell_default_timeout` — children
