@@ -147,6 +147,10 @@ where
                 let content = sf
                     .read()
                     .map_err(|e| EffectError::Handler(format!("Pattern.File.Read: {e}")))?;
+                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+                    pattern_core::hooks::tags::FILE_READ,
+                    serde_json::json!({ "path": path, "operation": "read" }),
+                ));
                 cx.respond(content)
             }
             FileReq::ListDir(path, glob) => {
@@ -170,6 +174,10 @@ where
                         "Pattern.File.Open: {path} is not valid UTF-8: {e}"
                     ))
                 })?;
+                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+                    pattern_core::hooks::tags::FILE_OPENED,
+                    serde_json::json!({ "path": path }),
+                ));
                 cx.respond(s)
             }
             FileReq::Close(path) => {
@@ -182,6 +190,10 @@ where
                 let fm = require_file_manager(cx.user())?;
                 fm.watch(Path::new(&path))
                     .map_err(|e| EffectError::Handler(e.to_effect_message()))?;
+                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+                    pattern_core::hooks::tags::FILE_WATCHED,
+                    serde_json::json!({ "path": path }),
+                ));
                 cx.respond(())
             }
             FileReq::Reload(path) => {
@@ -207,6 +219,10 @@ where
                 let fm = require_file_manager(cx.user())?;
                 fm.write(Path::new(&path), content.as_bytes())
                     .map_err(|e| EffectError::Handler(e.to_effect_message()))?;
+                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+                    pattern_core::hooks::tags::FILE_WRITE,
+                    serde_json::json!({ "path": path, "operation": "write" }),
+                ));
                 cx.respond(())
             }
             FileReq::ForceWrite(path, content) => {
@@ -283,6 +299,10 @@ where
                     sf.write(&new_content)
                         .map_err(|e| EffectError::Handler(format!("Pattern.File.Replace: {e}")))?;
                 }
+                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+                    pattern_core::hooks::tags::FILE_WRITE,
+                    serde_json::json!({ "path": path, "operation": "replace", "count": count }),
+                ));
                 cx.respond(count.to_string())
             }
 
