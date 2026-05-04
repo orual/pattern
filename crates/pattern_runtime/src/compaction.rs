@@ -452,9 +452,18 @@ async fn generate_summary(
         DEFAULT_SUMMARIZATION_DIRECTIVE.to_string(),
     ));
 
+    // Enable capture flags so we can surface diagnostic information when
+    // the response comes back empty or otherwise unexpected. Without these
+    // flags, `StreamEnd::captured_*` are all `None` and we fly blind.
+    let chat_options = pattern_core::types::provider::ChatOptions::default()
+        .with_capture_usage(true)
+        .with_capture_content(true)
+        .with_capture_reasoning_content(true);
+
     let req = CompletionRequest::new(summarization_model)
         .with_system(&system)
-        .with_messages(messages);
+        .with_messages(messages)
+        .with_options(chat_options);
 
     let mut stream =
         ctx.provider()
@@ -465,18 +474,36 @@ async fn generate_summary(
             })?;
 
     let mut summary_text = String::new();
+    let mut chunk_count: usize = 0;
+    let mut reasoning_chunk_count: usize = 0;
+    let mut captured_stop_reason: Option<String> = None;
+    let mut captured_reasoning_len: usize = 0;
+    let mut had_captured_content = false;
+
     while let Some(event) = stream.next().await {
         let event = event.map_err(|e| RuntimeError::ProviderError {
             reason: format!("summarization stream error: {e}"),
         })?;
         match event {
-            ChatStreamEvent::Chunk(c) => summary_text.push_str(&c.content),
+            ChatStreamEvent::Chunk(c) => {
+                chunk_count += 1;
+                summary_text.push_str(&c.content);
+            }
+            ChatStreamEvent::ReasoningChunk(_) => {
+                reasoning_chunk_count += 1;
+            }
             ChatStreamEvent::End(end) => {
-                // If captured_content is available, prefer it (complete text).
-                if let Some(content) = end.captured_content
-                    && let Some(text) = content.joined_texts()
-                {
-                    summary_text = text;
+                captured_stop_reason = end.captured_stop_reason.map(|sr| format!("{sr:?}"));
+                captured_reasoning_len = end
+                    .captured_reasoning_content
+                    .as_deref()
+                    .map(str::len)
+                    .unwrap_or(0);
+                if let Some(content) = end.captured_content {
+                    had_captured_content = true;
+                    if let Some(text) = content.joined_texts() {
+                        summary_text = text;
+                    }
                 }
             }
             ChatStreamEvent::ToolCallChunk(_) => {
@@ -486,14 +513,25 @@ async fn generate_summary(
                         .into(),
                 });
             }
-            // Ignore Start, ReasoningChunk, etc.
+            // Ignore Start, ThoughtSignatureChunk, etc.
             _ => {}
         }
     }
 
     if summary_text.is_empty() {
+        // Surface everything we know about the response so the failure is
+        // diagnosable. Common causes: model produced only reasoning blocks
+        // (no text), refused for content-policy reasons, or hit max_tokens
+        // partway through reasoning before emitting the summary.
         return Err(RuntimeError::ProviderError {
-            reason: "summarization model returned empty text".into(),
+            reason: format!(
+                "summarization model returned empty text \
+                 (chunks={chunk_count}, reasoning_chunks={reasoning_chunk_count}, \
+                 captured_reasoning_len={captured_reasoning_len}, \
+                 had_captured_content={had_captured_content}, \
+                 stop_reason={stop_reason})",
+                stop_reason = captured_stop_reason.as_deref().unwrap_or("none"),
+            ),
         });
     }
 

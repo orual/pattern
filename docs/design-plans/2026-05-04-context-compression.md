@@ -113,6 +113,42 @@ follow the same `open_stream_with_retry` pattern used for the
 chat-completion path (`gateway.rs`). This fix would benefit every
 auth-using path, not just compaction.
 
+### Tradeoff: tight threshold + soft-fail can cascade to overflow
+
+The soft-fail behaviour preserves history (nothing archived, nothing
+summarized) when the gate or strategy errors. That's the right
+default — no data loss. But it has a failure mode:
+
+If `compress_token_threshold` is set close to the actual wire ceiling
+(e.g., 950k on a 1M model), and compaction soft-fails repeatedly, each
+turn adds content while history stays unchanged. After N consecutive
+soft-fails the active context can cross the wire ceiling, after which
+every turn hard-fails at the API with no path to recovery.
+
+**Invariant for threshold sizing:** `compress_token_threshold` must
+leave enough headroom that several consecutive soft-failed compactions
+cannot cross the wire ceiling. For a 1M-context model with average
+~50k tokens added per turn, leaving at least 250k headroom (threshold
+≤ 750k) absorbs 5 consecutive soft-fails. Pattern's current
+`500000` threshold on opus-4-6 (1M) leaves 500k — comfortably safe.
+
+**Mitigations if (1) document-only is not enough:**
+
+- **Fallback strategy on summarizer failure.** Add a per-persona
+  `on_summarizer_failure: "truncate" | "skip"` knob to
+  `CompressionStrategy::RecursiveSummarization`. When set to
+  `truncate` and the summarizer call errors, drop the oldest
+  `chunk_size` turns via `apply_truncate` instead of bailing.
+  Sacrifices the summary text; bounds context size. Opt-in.
+
+- **Consecutive soft-fail counter.** Track soft-fail streaks on
+  `SessionContext` or `TurnHistory`. After N (say 3) consecutive
+  failures, escalate: force a non-summarizing strategy, or surface
+  a hard error to the agent so the user is told what's happening.
+  Belt-and-suspenders for paranoid configs.
+
+These are deferred unless someone actually hits the cascade.
+
 ## Landing now: prompt + persona injection
 
 Two small follow-on changes pair with the fix:

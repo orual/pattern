@@ -75,6 +75,10 @@ pub struct SkillMetadata {
     /// event→action map. See type-level doc for the intended shape.
     #[serde(default)]
     pub hooks: serde_json::Value,
+    /// Plugin that installed this skill. `None` for built-in or user-authored skills.
+    /// Set by Phase 3's CC skill translator when importing plugin skills.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_plugin_id: Option<smol_str::SmolStr>,
 }
 
 // endregion: SkillMetadata
