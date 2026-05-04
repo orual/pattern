@@ -560,6 +560,7 @@ mod tests {
             description: Some(format!("{name} description")),
             keywords: vec![name.to_string()],
             hooks: serde_json::Value::Null,
+            source_plugin_id: None,
         }
     }
 
@@ -727,6 +728,7 @@ mod tests {
             description: Some("A skill with hooks".to_string()),
             keywords: vec!["hook".to_string(), "injection".to_string()],
             hooks: hooks_value.clone(),
+            source_plugin_id: None,
         };
         seed_skill(&store, &scope, "hooked-skill", metadata, "The skill body.\n");
 
@@ -1288,6 +1290,7 @@ mod search_tests {
                 description: None,
                 keywords: vec![],
                 hooks: serde_json::Value::Null,
+                source_plugin_id: None,
             },
             "Generic skill body.\n",
         );
@@ -1300,6 +1303,7 @@ mod search_tests {
                 description: None,
                 keywords: vec![],
                 hooks: serde_json::Value::Null,
+                source_plugin_id: None,
             },
             "Nothing here.\n",
         );
@@ -1337,6 +1341,7 @@ mod search_tests {
                 description: Some("Handles token-refresh for expired sessions".to_string()),
                 keywords: vec![],
                 hooks: serde_json::Value::Null,
+                source_plugin_id: None,
             },
             "Generic body.\n",
         );
@@ -1349,6 +1354,7 @@ mod search_tests {
                 description: Some("Manages files on disk".to_string()),
                 keywords: vec![],
                 hooks: serde_json::Value::Null,
+                source_plugin_id: None,
             },
             "File body.\n",
         );
@@ -1382,6 +1388,7 @@ mod search_tests {
                 description: None,
                 keywords: vec![],
                 hooks: serde_json::Value::Null,
+                source_plugin_id: None,
             },
             "Revokes all active sessions gracefully.\n",
         );
@@ -1394,6 +1401,7 @@ mod search_tests {
                 description: None,
                 keywords: vec![],
                 hooks: serde_json::Value::Null,
+                source_plugin_id: None,
             },
             "Creates new user sessions.\n",
         );
@@ -1429,6 +1437,7 @@ mod search_tests {
                 description: Some("Runs a security audit on the codebase".to_string()),
                 keywords: vec!["security".to_string(), "audit".to_string()],
                 hooks: serde_json::Value::Null,
+                source_plugin_id: None,
             },
             "Checks for vulnerabilities and misconfigurations. security baseline.\n",
         );
@@ -1443,6 +1452,7 @@ mod search_tests {
                 description: None,
                 keywords: vec!["security".to_string(), "rbac".to_string()],
                 hooks: serde_json::Value::Null,
+                source_plugin_id: None,
             },
             "Manages role-based access control for security enforcement.\n",
         );
@@ -1457,6 +1467,7 @@ mod search_tests {
                 description: Some("Rotates credentials for security compliance".to_string()),
                 keywords: vec![],
                 hooks: serde_json::Value::Null,
+                source_plugin_id: None,
             },
             "Automates certificate and API key security rotation.\n",
         );

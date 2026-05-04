@@ -130,6 +130,7 @@ pub fn project_metadata_from_loro(root: &LoroMapValue) -> Result<SkillMetadata, 
         description,
         keywords,
         hooks,
+        source_plugin_id: None,
     })
 }
 

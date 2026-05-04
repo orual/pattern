@@ -216,6 +216,7 @@ fn visit_root(
         description,
         keywords,
         hooks,
+        source_plugin_id: None,
     };
     Ok((metadata, LoroValue::Map(extras.into())))
 }
