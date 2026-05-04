@@ -141,6 +141,8 @@ impl EffectHandler<SessionContext> for PortHandler {
             }
 
             PortReq::Call(port_id, method, payload_json) => {
+                let hook_port_id = port_id.clone();
+                let hook_method = method.clone();
                 let port_id = PortId::new(&port_id);
                 // Capability gate.
                 if cap.as_ref().is_some_and(|c| !c.has_port(port_id.as_str())) {
@@ -172,10 +174,15 @@ impl EffectHandler<SessionContext> for PortHandler {
                     EffectError::Handler("Pattern.Port.Call: dispatcher reply timeout".to_string())
                 })?;
                 let response = result.map_err(|e| EffectError::Handler(e.to_string()))?;
+                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+                    pattern_core::hooks::tags::PORT_CALL_AFTER,
+                    serde_json::json!({ "port_id": hook_port_id, "method": hook_method }),
+                ));
                 cx.respond(serde_json::to_string(&response).unwrap_or_default())
             }
 
             PortReq::Subscribe(port_id, config_json) => {
+                let hook_port_id = port_id.clone();
                 let port_id = PortId::new(&port_id);
                 // Capability gate.
                 if cap.as_ref().is_some_and(|c| !c.has_port(port_id.as_str())) {
@@ -207,6 +214,10 @@ impl EffectHandler<SessionContext> for PortHandler {
                     )
                 })?;
                 result.map_err(|e| EffectError::Handler(e.to_string()))?;
+                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+                    pattern_core::hooks::tags::PORT_SUBSCRIBED,
+                    serde_json::json!({ "port_id": hook_port_id }),
+                ));
                 cx.respond(())
             }
 

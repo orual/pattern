@@ -222,6 +222,10 @@ fn handle_ephemeral(
         _permit: Some(permit),
     });
 
+    cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+        pattern_core::hooks::tags::SPAWN_EPHEMERAL_START,
+        serde_json::json!({ "spawn_id": child_id.to_string() }),
+    ));
     let wire = WireEphemeralSpawn {
         spawn_id: child_id.into(),
         progress_log_label: progress_log_label.into(),
@@ -470,6 +474,10 @@ fn handle_fork(
         .insert(fork_id.clone(), handle)
         .map_err(|e| EffectError::Handler(e.to_string()))?;
 
+    cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+        pattern_core::hooks::tags::SPAWN_FORK,
+        serde_json::json!({ "fork_id": fork_id.to_string(), "child_id": child_id.to_string() }),
+    ));
     let wire = WireForkHandle {
         fork_id: fork_id.to_string(),
         child_id: child_id.to_string(),
@@ -644,6 +652,10 @@ fn handle_sibling(
 
     // Siblings are NOT added to the spawn registry — they live independently
     // of the parent session's lifetime.
+    cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+        pattern_core::hooks::tags::SPAWN_SIBLING,
+        serde_json::json!({ "kind": "sibling" }),
+    ));
     cx.respond(outcome)
 }
 

@@ -148,6 +148,10 @@ impl EffectHandler<SessionContext> for SearchHandler {
                 .iter()
                 .map(|h| serde_json::to_string(h).unwrap_or_default())
                 .collect();
+            cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+                pattern_core::hooks::tags::SEARCH_QUERY,
+                serde_json::json!({ "query": query, "result_count": items.len() }),
+            ));
             cx.respond(items)
         })();
 

@@ -117,6 +117,10 @@ impl EffectHandler<SessionContext> for MessageHandler {
             }
             MessageReq::Send(recipient, body) => {
                 let agent_id = cx.user().agent_id().to_string();
+                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+                    pattern_core::hooks::tags::MESSAGE_SENT,
+                    serde_json::json!({ "recipient": recipient, "kind": "send" }),
+                ));
                 dispatch_outbound(cx, &agent_id, &recipient, &body, "Send")
             }
             MessageReq::Reply(msg_id, body) => {

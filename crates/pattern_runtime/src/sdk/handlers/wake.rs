@@ -168,7 +168,13 @@ fn handle_register(
     let condition = wire_cond.into_condition(agent_id);
     let wake_id = SmolStr::from(new_id().to_string());
     match registry.register(wake_id.clone(), condition) {
-        Ok(returned) => cx.respond(returned.to_string()),
+        Ok(returned) => {
+            cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+                pattern_core::hooks::tags::WAKE_REGISTERED,
+                serde_json::json!({ "wake_id": returned.to_string() }),
+            ));
+            cx.respond(returned.to_string())
+        }
         Err(e) => Err(EffectError::Handler(format!(
             "wake registration failed: {e}"
         ))),
@@ -180,6 +186,12 @@ fn handle_unregister(
     registry: &Arc<WakeRegistry>,
     cx: &EffectContext<'_, SessionContext>,
 ) -> Result<Value, EffectError> {
-    let removed = registry.unregister(&SmolStr::from(id));
+    let removed = registry.unregister(&SmolStr::from(&id));
+    if removed {
+        cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+            pattern_core::hooks::tags::WAKE_UNREGISTERED,
+            serde_json::json!({ "wake_id": id }),
+        ));
+    }
     cx.respond(removed)
 }
