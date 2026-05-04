@@ -14,9 +14,9 @@ use smol_str::SmolStr;
 pub struct HookEvent {
     /// Hierarchical event tag (e.g. `turn.before`, `memory.write`).
     pub tag: SmolStr,
-    /// Event-specific payload. Subscribers deserialize lazily via
-    /// `try_payload::<T>()` after matching on `tag`.
-    pub payload: serde_json::Value,
+    /// Event-specific payload. Wire-safe (postcard-compatible).
+    /// Converts to/from serde_json::Value at adapter boundaries.
+    pub payload: super::payload_value::HookPayload,
     /// Contextual metadata: who, where, when.
     pub metadata: HookEventMetadata,
     /// Whether the emitter expects to wait for subscriber responses.
@@ -25,28 +25,32 @@ pub struct HookEvent {
 
 impl HookEvent {
     /// Construct a notification event (fire-and-forget).
-    pub fn notification(tag: impl Into<SmolStr>, payload: serde_json::Value) -> Self {
+    pub fn notification(tag: impl Into<SmolStr>, payload: impl Into<super::payload_value::HookPayload>) -> Self {
         Self {
             tag: tag.into(),
-            payload,
+            payload: payload.into(),
             metadata: HookEventMetadata::now(),
             semantics: HookSemantics::Notification,
         }
     }
 
     /// Construct a blocking event (emitter waits for responses).
-    pub fn blocking(tag: impl Into<SmolStr>, payload: serde_json::Value) -> Self {
+    pub fn blocking(tag: impl Into<SmolStr>, payload: impl Into<super::payload_value::HookPayload>) -> Self {
         Self {
             tag: tag.into(),
-            payload,
+            payload: payload.into(),
             metadata: HookEventMetadata::now(),
             semantics: HookSemantics::Blocking,
         }
     }
 
     /// Lazy typed-payload deserialization.
-    pub fn try_payload<'de, T: Deserialize<'de>>(&'de self) -> Result<T, serde_json::Error> {
-        T::deserialize(&self.payload)
+    /// Converts the HookPayload to serde_json::Value first, then deserializes.
+    pub fn try_payload<T: serde::de::DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
+        let json_val = serde_json::Value::from(
+            super::payload_value::PayloadValue::Map(self.payload.0.clone())
+        );
+        serde_json::from_value(json_val)
     }
 }
 
