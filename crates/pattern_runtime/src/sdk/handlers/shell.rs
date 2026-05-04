@@ -161,6 +161,17 @@ impl EffectHandler<SessionContext> for ShellHandler {
                 // `Kill` and `Status` are exempt — see module-level doc for rationale.
                 evaluate_shell_command(&cmd, cx.user())?;
 
+                // Hook gate: plugins can block shell commands.
+                let hook_resp = cx.user().hook_bridge().emit_blocking_sync(
+                    pattern_core::hooks::HookEvent::blocking(
+                        pattern_core::hooks::tags::SHELL_EXECUTE_BEFORE,
+                        serde_json::json!({ "command": cmd }),
+                    ),
+                );
+                if let pattern_core::hooks::event::HookResponse::Block { reason } = hook_resp {
+                    return Err(EffectError::Handler(format!("blocked by hook: {reason}")));
+                }
+
                 // `Execute :: Command -> Maybe TimeoutSecs -> Shell Text`.
                 // `None` means "use the session default"; `Some(n)` is
                 // caller-supplied. n <= 0 is treated as "use default" defensively
@@ -183,6 +194,14 @@ impl EffectHandler<SessionContext> for ShellHandler {
                                 "Pattern.Shell.Execute: failed to serialize result: {e}"
                             ))
                         })?;
+                        cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+                            pattern_core::hooks::tags::SHELL_EXECUTE_AFTER,
+                            serde_json::json!({
+                                "command": cmd,
+                                "exit_code": result.exit_code,
+                                "duration_ms": result.duration_ms,
+                            }),
+                        ));
                         cx.respond(json)
                     }
                     Err(ShellError::Timeout(dur)) => Err(EffectError::Handler(format!(
@@ -240,6 +259,14 @@ impl EffectHandler<SessionContext> for ShellHandler {
                     "task_id": task_id.to_string(),
                     "pid": pid,
                 });
+                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+                    pattern_core::hooks::tags::SHELL_SPAWN,
+                    serde_json::json!({
+                        "command": cmd,
+                        "task_id": task_id.to_string(),
+                        "pid": pid,
+                    }),
+                ));
                 cx.respond(response.to_string())
             }
 
@@ -255,6 +282,10 @@ impl EffectHandler<SessionContext> for ShellHandler {
                     )),
                     other => EffectError::Handler(format!("Pattern.Shell.Kill: {other}")),
                 })?;
+                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+                    pattern_core::hooks::tags::SHELL_KILL,
+                    serde_json::json!({ "task_id": task_id.0 }),
+                ));
                 cx.respond(())
             }
 
