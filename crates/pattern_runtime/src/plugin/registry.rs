@@ -342,17 +342,109 @@ impl PluginRegistry {
         };
 
         self.insert(lp.clone());
+        // Persist the installation to the registry KDL file for the scope.
+        self.persist_installation(&lp)?;
         Ok(lp)
     }
 
-    /// Uninstall a plugin by id. Removes from registry and optionally
-    /// cleans the cache directory.
+    /// Persist a plugin installation to the appropriate registry KDL file.
+    fn persist_installation(&self, plugin: &LoadedPlugin) -> Result<(), RegistryError> {
+        let reg_path = match plugin.scope {
+            PluginScope::Ambient => return Ok(()), // Ambient is discovery-only.
+            PluginScope::Global => self.paths.plugins_global_registry(),
+            PluginScope::Project { private } => {
+                let mp = self.mount_path.as_ref().ok_or(RegistryError::NoCacheDir)?;
+                pattern_memory::paths::project_plugin_registry(mp, private)
+            }
+            _ => return Ok(()), // Future scope variants: no-op for now.
+        };
+
+        // Read existing content (if any) and append the new entry.
+        let mut content = if reg_path.exists() {
+            std::fs::read_to_string(&reg_path).unwrap_or_default()
+        } else {
+            if let Some(parent) = reg_path.parent() {
+                std::fs::create_dir_all(parent).map_err(|source| RegistryError::Io {
+                    path: reg_path.clone(),
+                    source,
+                })?;
+            }
+            String::new()
+        };
+
+        // Append a plugin entry.
+        let ts = jiff::Timestamp::now();
+        content.push_str(&format!(
+            "\nplugin \"{}\" {{\n    source \"{}\"\n    installed-at \"{}\"\n}}\n",
+            plugin.id,
+            plugin.source_path.display(),
+            ts,
+        ));
+
+        std::fs::write(&reg_path, &content).map_err(|source| RegistryError::Io {
+            path: reg_path,
+            source,
+        })?;
+
+        Ok(())
+    }
+
+    /// Uninstall a plugin by id. Removes from registry, removes from
+    /// persisted KDL, and optionally cleans the cache directory.
     pub fn uninstall(&self, id: &str, clean_cache: bool) -> Result<(), RegistryError> {
         let removed = self.remove(id).ok_or_else(|| RegistryError::NotFound {
             id: id.into(),
         })?;
+        // Remove from persisted registry KDL.
+        self.remove_from_persisted_registry(id, removed.scope)?;
         if clean_cache && removed.source_path.exists() {
             let _ = std::fs::remove_dir_all(&removed.source_path);
+        }
+        Ok(())
+    }
+
+    /// Remove a plugin entry from the persisted registry KDL file.
+    fn remove_from_persisted_registry(
+        &self,
+        id: &str,
+        scope: PluginScope,
+    ) -> Result<(), RegistryError> {
+        let reg_path = match scope {
+            PluginScope::Ambient => return Ok(()),
+            PluginScope::Global => self.paths.plugins_global_registry(),
+            PluginScope::Project { private } => {
+                let mp = self.mount_path.as_ref().ok_or(RegistryError::NoCacheDir)?;
+                pattern_memory::paths::project_plugin_registry(mp, private)
+            }
+            _ => return Ok(()),
+        };
+        if !reg_path.exists() {
+            return Ok(());
+        }
+        // Read, filter out the plugin's entry, rewrite.
+        // Simple approach: parse with knus, filter, re-serialize.
+        // For now, use string-based removal (find the plugin block and remove it).
+        let content = std::fs::read_to_string(&reg_path).map_err(|source| RegistryError::Io {
+            path: reg_path.clone(),
+            source,
+        })?;
+        // Remove the block `plugin "<id>" { ... }`
+        let pattern = format!("plugin \"{}\" {{", id);
+        if let Some(start) = content.find(&pattern) {
+            // Find the matching closing brace.
+            let rest = &content[start..];
+            if let Some(end_offset) = rest.find("\n}\n") {
+                let end = start + end_offset + 3; // include the closing }\n
+                let mut new_content = String::new();
+                new_content.push_str(&content[..start]);
+                new_content.push_str(&content[end..]);
+                std::fs::write(&reg_path, new_content.trim()).map_err(|source| {
+                    RegistryError::Io {
+                        path: reg_path,
+                        source,
+                    }
+                })?;
+            }
         }
         Ok(())
     }
