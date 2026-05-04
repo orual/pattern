@@ -521,6 +521,8 @@ mod tests {
             Some(self.agent_id.clone())
         }
     }
+    use crate::session::{HasFileManager, HasCapabilities, HasPolicySet, HasPermissionBridge};
+
     impl HasFileManager for TestUser {
         fn file_manager(&self) -> Option<&Arc<crate::file_manager::FileManager>> {
             self.file_manager.as_ref()
