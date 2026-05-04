@@ -1,0 +1,4 @@
+name "test-plugin"
+version "0.1.0"
+description "A minimal test plugin"
+skills "skills/"

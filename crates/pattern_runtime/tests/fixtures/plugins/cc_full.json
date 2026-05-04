@@ -1,0 +1,12 @@
+{
+  "name": "cc-full-plugin",
+  "version": "2.0.0",
+  "description": "A full CC plugin for testing",
+  "skills": ["skills/summarize.md", "skills/analyze.md"],
+  "commands": ["bin/deploy"],
+  "hooks": [{ "event": "on_save", "command": "lint" }],
+  "mcpServers": { "my-server": { "command": "node", "args": ["server.js"] } },
+  "userConfig": { "apiKey": { "type": "string", "description": "API key" } },
+  "futureUnknownField": "preserved",
+  "anotherUnknown": { "nested": true }
+}

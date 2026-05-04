@@ -817,50 +817,6 @@ impl StructuredDocument {
         loro_to_json(&deep_value)
     }
 
-    /// Export the document state as a TOML string for editing.
-    ///
-    /// The format depends on the schema:
-    /// - Text: returns the raw text content
-    /// - Map/List/Log/Composite: returns TOML representation
-    pub fn export_for_editing(&self) -> String {
-        match &self.metadata.schema {
-            BlockSchema::Text { .. } => {
-                // For text, just return the rendered content
-                self.render()
-            }
-            _ => {
-                // For structured schemas, export as TOML
-                if let Some(json) = self.export_as_json() {
-                    // Convert JSON to TOML
-                    match toml::to_string_pretty(&json) {
-                        Ok(toml_str) => {
-                            // Add schema comment at top
-                            let schema_name = match &self.metadata.schema {
-                                BlockSchema::Text { .. } => "Text",
-                                BlockSchema::Map { .. } => "Map",
-                                BlockSchema::List { .. } => "List",
-                                BlockSchema::Log { .. } => "Log",
-                                BlockSchema::Composite { .. } => "Composite",
-                                BlockSchema::TaskList { .. } => "TaskList",
-                                BlockSchema::Skill { .. } => "Skill",
-                            };
-                            format!(
-                                "# Schema: {}\n# Edit the values below, then save.\n\n{}",
-                                schema_name, toml_str
-                            )
-                        }
-                        Err(_) => {
-                            // Fall back to JSON if TOML conversion fails
-                            serde_json::to_string_pretty(&json).unwrap_or_else(|_| self.render())
-                        }
-                    }
-                } else {
-                    self.render()
-                }
-            }
-        }
-    }
-
     /// Import content from a JSON value based on schema.
     ///
     /// For Text schema: expects a string value (or object with "content" key)
@@ -2417,16 +2373,6 @@ mod tests {
             "created_at": "2026-01-01T00:00:00Z",
             "updated_at": "2026-01-01T00:00:00Z"
         })
-    }
-
-    #[test]
-    fn test_task_list_export_for_editing_schema_name() {
-        let doc = StructuredDocument::new(make_task_list_schema());
-        let exported = doc.export_for_editing();
-        assert!(
-            exported.contains("# Schema: TaskList"),
-            "Expected TaskList schema header, got: {exported}"
-        );
     }
 
     #[test]

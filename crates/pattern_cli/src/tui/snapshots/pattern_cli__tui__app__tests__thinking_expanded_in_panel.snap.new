@@ -1,0 +1,21 @@
+---
+source: crates/pattern_cli/src/tui/app.rs
+assertion_line: 2288
+expression: output
+---
+[you] Analyze this                                                                   thinking ──────────────────────────
+                                                                                    Let me consider the options
+▸ thinking: Let me consider the options carefully... Option A is good. Option B is bcarefully...
+I recommend option B.                                                               Option A is good.
+                                                                                    Option B is better.
+
+
+
+
+
+
+
+
+❯
+
+ no fronting configured │ 0 agents │ 0 ctx │ ● connected │ panel: visible

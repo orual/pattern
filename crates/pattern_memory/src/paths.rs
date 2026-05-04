@@ -177,6 +177,28 @@ impl PatternPaths {
         let name = crate::backup::snapshot::format_snapshot_name(ts);
         self.backup_dir(project_id).join(format!("{name}.sqlite"))
     }
+
+    // ---- Plugin paths -------------------------------------------------------
+
+    /// Global plugin install root: `<config>/plugins`.
+    pub fn plugins_global_root(&self) -> PathBuf {
+        self.config_root().join("plugins")
+    }
+
+    /// Plugin cache root: `<config>/plugins/cache/`.
+    pub fn plugins_cache_root(&self) -> PathBuf {
+        self.plugins_global_root().join("cache")
+    }
+
+    /// Per-plugin cache directory: `<config>/plugins/cache/<id>/`.
+    pub fn plugin_cache_dir(&self, id: &str) -> PathBuf {
+        self.plugins_cache_root().join(id)
+    }
+
+    /// Global registry file: `<config>/plugins/registry.kdl`.
+    pub fn plugins_global_registry(&self) -> PathBuf {
+        self.plugins_global_root().join("registry.kdl")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -191,6 +213,14 @@ impl PatternPaths {
 /// # Errors
 ///
 /// Returns [`PathError::Canonicalize`] if `std::fs::canonicalize` fails.
+/// Project-scoped plugin registry file path.
+///
+/// `<mount>/.pattern/{shared,private}/plugins.kdl`
+pub fn project_plugin_registry(mount_path: &Path, private: bool) -> PathBuf {
+    let leaf = if private { "private" } else { "shared" };
+    mount_path.join(".pattern").join(leaf).join("plugins.kdl")
+}
+
 pub fn project_hash(project_root: &Path) -> Result<String, PathError> {
     let canonical = std::fs::canonicalize(project_root).map_err(|e| PathError::Canonicalize {
         path: project_root.to_owned(),

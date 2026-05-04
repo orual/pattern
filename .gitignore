@@ -18,12 +18,12 @@ mcp-wrapper.sh
 **.txt
 **.car
 **.log.**
-**.json
 !crates/*/tests/data/*.json
 **.sql
 !**/migrations/**/*.sql
 **.surql
 **/**.output
+pattern-convert.json
 
 # Deciduous database (local)
 .deciduous/

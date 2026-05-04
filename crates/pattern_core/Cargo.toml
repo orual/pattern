@@ -10,13 +10,10 @@ description = "Core agent framework and memory system for Pattern"
 
 [dependencies]
 tokio = { workspace = true }
-tokio-stream = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-toml = { workspace = true }
 miette = { workspace = true }
 thiserror = { workspace = true }
-anyhow = { workspace = true }
 tracing = { workspace = true }
 metrics = { workspace = true }
 async-trait = { workspace = true }
@@ -33,23 +30,7 @@ loro = { version = "1.10", features = ["counter"] }
 
 # AI/LLM
 genai = { workspace = true }
-
-# HTTP client (for embeddings and HomeAssistant)
-reqwest = { workspace = true }
-reqwest-middleware = { version = "0.4", optional = true }
 http = { version = "1.1", optional = true }
-
-# WebSocket support for HomeAssistant
-tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
-
-# Candle for local embeddings
-candle-core = { version = "0.9", optional = true }
-candle-nn = { version = "0.9", optional = true }
-candle-transformers = { version = "0.9", optional = true }
-hf-hub = { version = "0.4", default-features = false, features = [
-    "rustls-tls",
-    "tokio",
-], optional = true }
 tokenizers = { version = "0.21", optional = true }
 
 # Optional: SQLite type conversions (enabled by pattern-db)
@@ -60,42 +41,18 @@ schemars = { workspace = true }
 compact_str = { version = "0.9.0", features = ["serde", "markup", "smallvec"] }
 smol_str = { workspace = true }
 smallvec = { version = "1.15.1", features = ["serde"] }
-dashmap = { version = "6.1.0", features = ["serde"] }
 ferroid = { workspace = true }
 
 # Plugin registry
-inventory = "0.3"
 rand = "0.9.2"
 base64 = "0.22"
-sha2 = "0.10"
 url = "2.5"
-urlencoding = "2.1"
-serde_urlencoded = "0.7"
 value-ext = "0.1.2"
 
-
-minijinja = "2.11.0"
-rocketman = { version = "0.2", features = ["zstd"] }
-notify = { version = "7.0" }
-hickory-resolver = "0.24"
 jacquard.workspace = true
-# Glob pattern matching
-globset = "0.4"
-
-# Diff generation and patch parsing
-similar = "2.6"
-patch = "0.7"
 
 # Web tool dependencies
-html2md = "0.2"
-scraper = "0.22"
 regex = "1.11.1"
-
-# Calculator tool dependencies
-fend-core = "1.5.7"
-
-# Shell tool dependencies
-shellexpand = { version = "3.1.1", features = ["full"] }
 
 # Local crates (to be added later)
 # pattern-nd = { path = "../pattern-nd", optional = true }
@@ -112,23 +69,10 @@ miette = { workspace = true, features = ["fancy"] }
 proptest = "1"
 
 [features]
-default = [ "embed-cloud", "file-watch"]
-nd = []                                                                     # Enable neurodivergent features when pattern-nd is ready
-oauth = ["reqwest-middleware", "http"]                                      # OAuth authentication support
-file-watch = []                                                             # File watching for data sources (notify always included)
-
-# Database backends
-
-# Embedding backends
-embed-candle = [
-    "candle-core",
-    "candle-nn",
-    "candle-transformers",
-    "hf-hub",
-    "tokenizers",
-]
-embed-cloud = ["reqwest-middleware", "http"]
-embed-ollama = ["reqwest-middleware", "http"]
+default = [ "file-watch"]
+nd = []                    # Enable neurodivergent features when pattern-nd is ready
+oauth = [ "http"]          # OAuth authentication support
+file-watch = []            # File watching for data sources (notify always included)
 
 # Enable rusqlite FromSql/ToSql impls for domain enums
 sqlite = ["rusqlite"]

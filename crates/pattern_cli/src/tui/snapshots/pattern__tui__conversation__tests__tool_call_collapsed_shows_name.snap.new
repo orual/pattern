@@ -1,6 +1,6 @@
 ---
 source: crates/pattern_cli/src/tui/conversation.rs
-assertion_line: 730
+assertion_line: 753
 expression: output
 ---
 [you] Search for info

@@ -32,7 +32,7 @@ test-hooks = []
 # Also enables `pattern-memory/test-support` so that test-only helpers
 # on `LoroSyncedFile` (e.g. `clear_saved_frontier_for_test`) are
 # visible to integration tests in `tests/`.
-test-support = ["dep:tidepool-testing", "pattern-memory/test-support"]
+test-support = ["dep:tidepool-testing", "pattern-memory/test-support", "dep:tokio-stream"]
 
 # Forward pattern-provider's subscription-oauth feature. When enabled,
 # the `pattern-test-cli` bin exposes the interactive PKCE flow and the
@@ -60,11 +60,12 @@ tidepool-eval    = { workspace = true }
 # where dev-dependencies (including tidepool-testing) are not in scope.
 tidepool-testing = { workspace = true, optional = true }
 genai            = { workspace = true }
+
+tokio-stream     = { workspace = true, optional = true }
 frunk            = { workspace = true }
 which            = { workspace = true }
 async-trait      = { workspace = true }
 tokio            = { workspace = true, features = ["rt", "time", "sync", "macros"] }
-tokio-stream     = { workspace = true }
 tracing          = { workspace = true }
 metrics          = { workspace = true }
 thiserror        = { workspace = true }
@@ -78,38 +79,23 @@ loro             = { version = "1.10", features = ["counter"] }
 rusqlite         = { version = "0.39", features = ["bundled-full"] }
 smol_str         = { workspace = true }
 parking_lot      = { workspace = true }
-# v3-multi-agent Phase 4 T4: AgentRegistry uses DashMap for lock-free
-# concurrent persona → mailbox-sender resolution. Same version as pattern_memory.
 dashmap          = { version = "6.1.0", features = ["serde"] }
 regex            = { workspace = true }
 # Stable content hashing for snapshot delta detection.
 blake3           = { workspace = true }
 # jiff::Timestamp → chrono::DateTime<Utc> conversion for pattern_db persistence.
 chrono           = { workspace = true }
-# Bin-only deps (pattern-test-cli)
-clap             = { workspace = true }
 futures          = { workspace = true }
 secrecy          = { workspace = true }
-tracing-subscriber = { workspace = true }
-dotenvy          = { workspace = true }
-# Phase 6 Task 1: spawn subcommand REPL input.
-rustyline-async  = "0.4"
-# v3-sandbox-io Phase 2 Task 3: glob pattern matching for FilePolicy.
 globset          = { workspace = true }
 crossbeam-channel = "0.5"
 tokio-util       = { version = "0.7", features = ["rt"] }
-# v3-sandbox-io Phase 3 review fix + v3-multi-agent Phase 2: XDG dirs.
 dirs             = { workspace = true }
-# v3-sandbox-io Phase 3: PTY-backed shell process manager (sync API only).
 pty-process      = "0.5"
 strip-ansi-escapes = "0.2"
 uuid             = { workspace = true, features = ["v4"] }
-# v3-sandbox-io Phase 3 Task 3: poll(2) wrapper for sync PTY read-with-timeout.
 nix              = { version = "0.29", features = ["poll"] }
-# v3-sandbox-io Phase 5 Task 1: HttpPort.
 reqwest          = { workspace = true }
-# v3-multi-agent Phase 2 + v3-sandbox-io Phase 5: tempdir for spawn helpers
-# and port-library materialization.
 tempfile         = { workspace = true }
 
 [dev-dependencies]
@@ -127,8 +113,3 @@ wiremock       = { workspace = true }
 # library crate with the features enabled, while downstream users see
 # no feature turned on unless they opt in explicitly.
 pattern-runtime = { path = ".", features = ["test-hooks", "test-support"] }
-
-[[bin]]
-name = "pattern-test-cli"
-path = "src/bin/pattern-test-cli.rs"
-required-features = ["test-support"]
