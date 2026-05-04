@@ -132,6 +132,10 @@ impl EffectHandler<SessionContext> for TasksHandler {
             TasksReq::Create(block, spec_json) => {
                 let id = handle_create(&*store, &scope, &agent_id, &block, &spec_json)?;
                 record(&block, BlockWriteKind::Updated)?;
+                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+                    pattern_core::hooks::tags::TASK_CREATED,
+                    serde_json::json!({ "task_id": id.to_string(), "block": block }),
+                ));
                 cx.respond(id.to_string())
             }
             TasksReq::Update(edge_ref, patch_json) => {
@@ -139,6 +143,10 @@ impl EffectHandler<SessionContext> for TasksHandler {
                 if let Ok((block, _)) = parse_item_ref(&edge_ref) {
                     record(&block, BlockWriteKind::Updated)?;
                 }
+                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+                    pattern_core::hooks::tags::TASK_CREATED,
+                    serde_json::json!({ "task_id": edge_ref, "operation": "update" }),
+                ));
                 cx.respond(())
             }
             TasksReq::Transition(edge_ref, status_json) => {
@@ -146,6 +154,18 @@ impl EffectHandler<SessionContext> for TasksHandler {
                 if let Ok((block, _)) = parse_item_ref(&edge_ref) {
                     record(&block, BlockWriteKind::Updated)?;
                 }
+                // Emit the appropriate transition tag based on the target status.
+                let transition_tag = match status_json.trim_matches('"') {
+                    "completed" => pattern_core::hooks::tags::TASK_TRANSITIONED_DONE,
+                    "in-progress" => pattern_core::hooks::tags::TASK_TRANSITIONED_IN_PROGRESS,
+                    "blocked" => pattern_core::hooks::tags::TASK_TRANSITIONED_BLOCKED,
+                    "cancelled" => pattern_core::hooks::tags::TASK_TRANSITIONED_CANCELED,
+                    _ => pattern_core::hooks::tags::TASK_CREATED, // fallback for unknown
+                };
+                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+                    transition_tag,
+                    serde_json::json!({ "task_id": edge_ref, "status": status_json }),
+                ));
                 cx.respond(())
             }
             TasksReq::AddComment(edge_ref, text) => {
@@ -153,6 +173,10 @@ impl EffectHandler<SessionContext> for TasksHandler {
                 if let Ok((block, _)) = parse_item_ref(&edge_ref) {
                     record(&block, BlockWriteKind::Updated)?;
                 }
+                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+                    pattern_core::hooks::tags::TASK_COMMENTED,
+                    serde_json::json!({ "task_id": edge_ref }),
+                ));
                 cx.respond(())
             }
             TasksReq::Link(source_ref, target_ref) => {
@@ -160,6 +184,10 @@ impl EffectHandler<SessionContext> for TasksHandler {
                 if let Ok((block, _)) = parse_item_ref(&source_ref) {
                     record(&block, BlockWriteKind::Updated)?;
                 }
+                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+                    pattern_core::hooks::tags::TASK_LINKED,
+                    serde_json::json!({ "from": source_ref, "to": target_ref }),
+                ));
                 cx.respond(())
             }
             TasksReq::Unlink(source_ref, target_ref) => {
@@ -167,6 +195,10 @@ impl EffectHandler<SessionContext> for TasksHandler {
                 if let Ok((block, _)) = parse_item_ref(&source_ref) {
                     record(&block, BlockWriteKind::Updated)?;
                 }
+                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+                    pattern_core::hooks::tags::TASK_LINKED,
+                    serde_json::json!({ "from": source_ref, "to": target_ref, "operation": "unlink" }),
+                ));
                 cx.respond(())
             }
             TasksReq::List(block_opt, filter_json) => {
