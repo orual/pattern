@@ -83,6 +83,32 @@ pub enum CompactionOutcome {
         /// Number of active turns remaining after compaction.
         active_after: usize,
     },
+    /// The provider's `count_tokens` call failed (auth refresh, network,
+    /// server error, etc.). The gate is a safety check; a transient
+    /// failure should NOT take down the turn. We log loudly and let the
+    /// actual `complete()` call try its own auth path. If the failure is
+    /// not transient, `complete()` will surface a clear error of its own.
+    GateError {
+        /// The error from the provider's `count_tokens` call, formatted.
+        error: String,
+        /// Number of active turns at check time (for diagnostics).
+        active_turns: usize,
+    },
+    /// The gate fired and we tried to apply the strategy, but the strategy
+    /// itself errored (e.g. `RecursiveSummarization`'s summarizer call
+    /// failed: auth refresh, summarizer model unavailable, oversized
+    /// chunk). Same soft-fail rationale as `GateError`: we log and skip
+    /// this turn's compaction. Next turn will re-evaluate. If the agent
+    /// is genuinely past the wire limit, `complete()` will surface its
+    /// own clear error rather than us double-failing here.
+    StrategyError {
+        /// Name of the strategy that errored.
+        strategy_name: &'static str,
+        /// The error from the strategy dispatch, formatted.
+        error: String,
+        /// Number of active turns at error time (for diagnostics).
+        active_turns: usize,
+    },
 }
 
 /// Check the compression gate; apply the persona's strategy if it fires.
@@ -145,15 +171,34 @@ pub async fn maybe_compact(
     // 5. Async gate: call count_tokens against the actual composed request.
     //    Counting the wire shape (system + tools + snapshots + messages)
     //    rather than a turns-only synthesis is what keeps the gate honest.
-    let (should_fire, token_count) = should_compress(
+    //
+    //    Soft-fail on count_tokens errors: the gate is a safety check,
+    //    not load-bearing. A transient auth-refresh / network failure
+    //    should not take down the turn; let the actual complete() call
+    //    try its own auth path. Surface as `GateError` so the caller
+    //    can log distinctly from "gate cleanly skipped."
+    let (should_fire, token_count) = match should_compress(
         ctx.provider().as_ref(),
         composed_request,
         token_threshold as u64,
     )
     .await
-    .map_err(|e| RuntimeError::ProviderError {
-        reason: format!("compaction count_tokens failed: {e}"),
-    })?;
+    {
+        Ok(result) => result,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                active_turns = active_len,
+                "compaction count_tokens failed; skipping compaction this turn \
+                 and proceeding with composed request (the actual complete() \
+                 call will attempt its own auth refresh)",
+            );
+            return Ok(CompactionOutcome::GateError {
+                error: format!("{e}"),
+                active_turns: active_len,
+            });
+        }
+    };
 
     if !should_fire {
         return Ok(CompactionOutcome::Skipped {
@@ -206,15 +251,36 @@ pub async fn maybe_compact(
             ref summarization_model,
             ref summarization_prompt,
         } => {
-            // Generate summary via provider call.
-            let summary_text = generate_summary(
+            // Generate summary via provider call. Soft-fail on summarizer
+            // errors for the same reason as the gate: this is a safety
+            // path, and a transient summarizer failure shouldn't kill the
+            // turn. The agent can still send the un-compacted request;
+            // next turn will re-evaluate.
+            let summary_text = match generate_summary(
                 ctx,
                 turn_history,
                 chunk_size,
                 summarization_model,
                 summarization_prompt.as_deref(),
             )
-            .await?;
+            .await
+            {
+                Ok(text) => text,
+                Err(e) => {
+                    tracing::warn!(
+                        error = ?e,
+                        active_turns = active_len,
+                        summarization_model = %summarization_model,
+                        "compaction summarizer call failed; skipping compaction \
+                         this turn and proceeding with composed request",
+                    );
+                    return Ok(CompactionOutcome::StrategyError {
+                        strategy_name: "recursive_summarization",
+                        error: format!("{e:?}"),
+                        active_turns: active_len,
+                    });
+                }
+            };
 
             let r = apply_recursive_summarization(
                 turns,

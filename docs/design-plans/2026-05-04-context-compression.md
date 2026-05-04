@@ -82,6 +82,37 @@ safe to call twice.
 Tests: 10/10 in `crates/pattern_runtime/tests/compaction.rs`, 21/21 in
 `crates/pattern_provider/src/compose/compression.rs::tests`.
 
+## Soft-fail on count_tokens / summarizer errors (landed)
+
+Discovered immediately after the gate fix landed: a transient OAuth
+token-refresh failure (`error sending request for url
+https://console.anthropic.com/v1/oauth/token`) propagated up through
+`maybe_compact` and killed the turn. The gate is a *safety check*, not
+load-bearing — a transient failure should not take down the user's
+turn.
+
+Two new `CompactionOutcome` variants:
+
+- `GateError { error, active_turns }` — `count_tokens` failed (auth,
+  network, server). Logged at `warn!`; turn proceeds with the original
+  composed request. The actual `complete()` call attempts its own auth
+  refresh — if the failure is genuinely persistent, complete() surfaces
+  a clearer error of its own.
+- `StrategyError { strategy_name, error, active_turns }` — strategy
+  dispatch failed (most likely the `RecursiveSummarization` summarizer
+  call). Same soft-fail rationale; same logging shape.
+
+Tests updated to add catch-all panic arms for the new variants
+(mock provider doesn't produce them, so they're "unexpected" in the
+test suite).
+
+**Follow-up: OAuth refresh should retry.** The underlying issue is
+that `pattern_provider::auth::pkce::PkceAuthorizer::exchange` has zero
+retry logic — single HTTP failure → `AuthExchangeFailed`. Should
+follow the same `open_stream_with_retry` pattern used for the
+chat-completion path (`gateway.rs`). This fix would benefit every
+auth-using path, not just compaction.
+
 ## Landing now: prompt + persona injection
 
 Two small follow-on changes pair with the fix:

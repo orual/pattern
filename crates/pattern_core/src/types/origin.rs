@@ -203,6 +203,15 @@ pub enum Author {
     /// rate-limit, and attribution code can key off cause without adding
     /// another axis to [`Author`].
     System { reason: SystemReason },
+    /// A plugin acting on behalf of itself or the partner.
+    ///
+    /// `partner_authority` is true when the plugin was installed by the
+    /// partner and is acting with partner-level trust (bypasses permission
+    /// gates the same way `Author::Partner` does).
+    Plugin {
+        plugin_id: smol_str::SmolStr,
+        partner_authority: bool,
+    },
 }
 
 /// Why the system triggered a message.

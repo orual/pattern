@@ -10,6 +10,7 @@ pub mod embedding_provider;
 pub mod endpoint;
 pub mod endpoint_registry;
 pub mod memory_store;
+pub mod plugin;
 pub mod port;
 pub mod port_registry;
 pub mod provider_client;

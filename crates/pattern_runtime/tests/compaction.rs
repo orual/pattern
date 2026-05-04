@@ -289,6 +289,7 @@ async fn gate_skipped_below_message_floor() {
             assert_eq!(active_turns, 3);
         }
         CompactionOutcome::Fired { .. } => panic!("expected Skipped, got Fired"),
+        other => panic!("unexpected outcome: {other:?}"),
     }
 }
 
@@ -310,6 +311,7 @@ async fn gate_skipped_compression_disabled() {
             assert_eq!(reason, "compression disabled");
         }
         CompactionOutcome::Fired { .. } => panic!("expected Skipped, got Fired"),
+        other => panic!("unexpected outcome: {other:?}"),
     }
 }
 
@@ -336,6 +338,7 @@ async fn gate_skipped_below_token_threshold() {
             assert_eq!(reason, "below token threshold");
         }
         CompactionOutcome::Fired { .. } => panic!("expected Skipped, got Fired"),
+        other => panic!("unexpected outcome: {other:?}"),
     }
 }
 
@@ -372,6 +375,7 @@ async fn truncate_strategy_fires_and_drops_old_turns() {
         CompactionOutcome::Skipped { reason, .. } => {
             panic!("expected Fired, got Skipped: {reason}");
         }
+        other => panic!("unexpected outcome: {other:?}"),
     }
 
     // Verify TurnHistory was updated.
@@ -432,6 +436,7 @@ async fn recursive_summarization_fires_and_writes_summary() {
         CompactionOutcome::Skipped { reason, .. } => {
             panic!("expected Fired, got Skipped: {reason}");
         }
+        other => panic!("unexpected outcome: {other:?}"),
     }
 
     // Verify TurnHistory was updated.
@@ -501,6 +506,7 @@ async fn importance_based_strategy_fires_and_drops_old_turns() {
         CompactionOutcome::Skipped { reason, .. } => {
             panic!("expected Fired, got Skipped: {reason}");
         }
+        other => panic!("unexpected outcome: {other:?}"),
     }
 
     // Verify TurnHistory was updated.
@@ -574,6 +580,7 @@ async fn time_decay_strategy_fires_and_drops_old_turns() {
         CompactionOutcome::Skipped { reason, .. } => {
             panic!("expected Fired, got Skipped: {reason}");
         }
+        other => panic!("unexpected outcome: {other:?}"),
     }
 
     // Verify TurnHistory was updated.
@@ -704,6 +711,7 @@ async fn compute_archive_boundary_empty_kept_turn_uses_fallback() {
                  the empty-kept-turn bug would produce 'strategy archived zero turns'"
             );
         }
+        Ok(other) => panic!("unexpected outcome: {other:?}"),
         Err(e) => {
             panic!("unexpected error: {e:?}");
         }
