@@ -387,6 +387,9 @@ pub struct SessionContext {
     /// `Pattern.Port` out of the agent's effect row in that case so
     /// missing-registry errors surface at compile time, not at dispatch.
     port_registry: Option<Arc<crate::port_registry::PortRegistryImpl>>,
+    /// Per-session hook event bus. Shared between the session and its
+    /// handlers for emitting lifecycle events.
+    hook_bus: Arc<pattern_core::hooks::HookBus>,
     /// Session-scoped UUID minted at open. Used by handlers that key
     /// per-session state by stable id (e.g. `PortHandler` keys
     /// subscription channels by session_id so multiple sessions don't
@@ -774,6 +777,7 @@ impl SessionContext {
                     .join("pattern"),
             )),
             port_registry: None,
+            hook_bus: Arc::new(pattern_core::hooks::HookBus::new()),
             session_id: pattern_core::types::ids::new_id().to_string(),
             shell_default_timeout: std::time::Duration::from_secs(30),
             spawn_registry,
@@ -914,6 +918,11 @@ impl SessionContext {
     /// Per-session port registry. `None` for sessions opened without
     /// a `SessionRegistries.port_registry` — Pattern.Port is filtered
     /// out of the agent's effect row at preamble-build time.
+    /// The session's hook event bus.
+    pub fn hook_bus(&self) -> &Arc<pattern_core::hooks::HookBus> {
+        &self.hook_bus
+    }
+
     pub fn port_registry(&self) -> Option<&Arc<crate::port_registry::PortRegistryImpl>> {
         self.port_registry.as_ref()
     }
@@ -1161,6 +1170,7 @@ impl SessionContext {
                     .join("pattern"),
             )),
             port_registry: self.port_registry.clone(),
+            hook_bus: self.hook_bus.clone(),
             // Each ephemeral child gets a fresh session_id (so its
             // PortHandler subscription channels don't collide with the
             // parent's). Inherit `shell_default_timeout` — children
