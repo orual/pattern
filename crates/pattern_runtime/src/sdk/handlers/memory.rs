@@ -161,6 +161,10 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                             "Pattern.Memory.Get: no block named {label:?} for scope {scope}"
                         ))
                     })?;
+                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+                    pattern_core::hooks::tags::MEMORY_READ,
+                    serde_json::json!({ "label": label, "scope": scope.to_string() }),
+                ));
                 cx.respond(text)
             }
             MemoryReq::Put(label, content, description) => {
@@ -186,6 +190,10 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                     },
                     &*adapter,
                 );
+                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+                    pattern_core::hooks::tags::MEMORY_WRITE,
+                    serde_json::json!({ "label": label, "scope": scope.to_string(), "operation": "put" }),
+                ));
                 cx.respond(())
             }
             MemoryReq::Create(label, description, block_type, schema_kind, char_limit, initial) => {
@@ -224,6 +232,10 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                         agent_id: SmolStr::new(&agent_id),
                     }),
                 });
+                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+                    pattern_core::hooks::tags::MEMORY_WRITE,
+                    serde_json::json!({ "label": label, "scope": scope.to_string(), "operation": "create" }),
+                ));
                 cx.respond(())
             }
             MemoryReq::Append(label, content) => {
@@ -272,6 +284,10 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                     },
                     &*adapter,
                 );
+                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+                    pattern_core::hooks::tags::MEMORY_WRITE,
+                    serde_json::json!({ "label": label, "scope": scope.to_string(), "operation": "append" }),
+                ));
                 cx.respond(())
             }
             MemoryReq::Replace(label, old, new) => {
@@ -318,6 +334,10 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                         &*adapter,
                     );
                 }
+                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+                    pattern_core::hooks::tags::MEMORY_WRITE,
+                    serde_json::json!({ "label": label, "scope": scope.to_string(), "operation": "replace" }),
+                ));
                 cx.respond(())
             }
             MemoryReq::Search(query) => {
@@ -328,6 +348,10 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                     .search(&query, options, search_scope)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Search: {e}")))?;
                 let handles: Vec<String> = results.iter().map(|r| r.id.clone()).collect();
+                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+                    pattern_core::hooks::tags::MEMORY_READ,
+                    serde_json::json!({ "label": query, "scope": scope.to_string(), "operation": "search" }),
+                ));
                 cx.respond(handles)
             }
             MemoryReq::Recall(handle) => {
@@ -360,18 +384,30 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                              to scope={requester}"
                         ))
                     })?;
+                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+                    pattern_core::hooks::tags::MEMORY_SHARED_READ,
+                    serde_json::json!({ "label": label, "scope": scope.to_string(), "operation": "get_shared", "owner": owner }),
+                ));
                 cx.respond(doc.render())
             }
             MemoryReq::Pin(label) => {
                 let patch = pattern_core::types::memory_types::BlockMetadataPatch::default().pinned(true);
                 adapter.update_block_metadata(&scope, &label, patch)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Pin: {e}")))?;
+                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+                    pattern_core::hooks::tags::MEMORY_WRITE,
+                    serde_json::json!({ "label": label, "scope": scope.to_string(), "operation": "pin" }),
+                ));
                 cx.respond(())
             }
             MemoryReq::Unpin(label) => {
                 let patch = pattern_core::types::memory_types::BlockMetadataPatch::default().pinned(false);
                 adapter.update_block_metadata(&scope, &label, patch)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.Unpin: {e}")))?;
+                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+                    pattern_core::hooks::tags::MEMORY_WRITE,
+                    serde_json::json!({ "label": label, "scope": scope.to_string(), "operation": "unpin" }),
+                ));
                 cx.respond(())
             }
             MemoryReq::GetSchema(label) => {
@@ -411,6 +447,10 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.SetField: {e}")))?;
                 adapter.mark_dirty(&scope, &label)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.SetField: {e}")))?;
+                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+                    pattern_core::hooks::tags::MEMORY_WRITE,
+                    serde_json::json!({ "label": label, "scope": scope.to_string(), "operation": "set_field", "field": field }),
+                ));
                 cx.respond(())
             }
             MemoryReq::UpdateDesc(label, desc) => {
@@ -418,6 +458,10 @@ impl EffectHandler<SessionContext> for MemoryHandler {
                     .description(desc);
                 adapter.update_block_metadata(&scope, &label, patch)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Memory.UpdateDesc: {e}")))?;
+                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
+                    pattern_core::hooks::tags::MEMORY_WRITE,
+                    serde_json::json!({ "label": label, "scope": scope.to_string(), "operation": "update_desc" }),
+                ));
                 cx.respond(())
             }
         })();
