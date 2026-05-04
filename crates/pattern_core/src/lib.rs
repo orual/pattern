@@ -37,6 +37,7 @@
 
 pub mod base_instructions;
 pub mod capability;
+pub mod hooks;
 pub mod plugin;
 pub mod constellation;
 pub mod error;

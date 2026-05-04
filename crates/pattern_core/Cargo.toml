@@ -10,6 +10,7 @@ description = "Core agent framework and memory system for Pattern"
 
 [dependencies]
 tokio = { workspace = true }
+globset = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 miette = { workspace = true }

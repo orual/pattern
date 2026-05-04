@@ -5650,6 +5650,7 @@ dependencies = [
  "ferroid",
  "futures",
  "genai",
+ "globset",
  "http",
  "jacquard",
  "jiff",
