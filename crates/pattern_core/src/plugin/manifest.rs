@@ -14,7 +14,6 @@ use smol_str::SmolStr;
 /// Produced by either the Pattern KDL parser or the CC JSON translator.
 /// Both preserve unknown fields for forward compatibility.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[non_exhaustive]
 pub struct PluginManifest {
     pub name: SmolStr,
     pub version: Option<String>,
@@ -134,7 +133,6 @@ pub struct CapabilitiesBlock {
 
 /// Residue from CC `plugin.json` parsing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[non_exhaustive]
 pub struct Cc {
     /// Original source format identifier.
     pub source_format: SmolStr,

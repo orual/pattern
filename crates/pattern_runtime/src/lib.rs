@@ -25,6 +25,7 @@ pub mod preflight;
 pub mod process_manager;
 pub mod router;
 pub mod runtime;
+pub mod plugin;
 pub mod sdk;
 pub mod session;
 pub mod spawn;
