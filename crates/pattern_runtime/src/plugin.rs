@@ -4,6 +4,7 @@
 //! - KDL and CC JSON manifest parsers (file I/O + parsing)
 //! - `PluginRegistry` for discovery, install, uninstall
 
+pub mod cc_adapter;
 pub mod manifest;
 pub mod registry;
 
