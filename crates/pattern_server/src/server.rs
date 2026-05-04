@@ -986,16 +986,10 @@ impl DaemonServer {
 
                         // Sort batches by batch_id (snowflakes sort chronologically).
                         batches.sort_by(|a, b| a.batch_id.cmp(&b.batch_id));
-
                         batches
                     })
                     .await
                     .unwrap_or_default();
-                    let response = HistoryResponse { batches };
-                    let result = tx.send(response).await;
-                    if result.is_err() {
-                        tracing::error!("{:?}", result);
-                    }
                 });
             }
             PatternMessage::CancelBatch(req) => {

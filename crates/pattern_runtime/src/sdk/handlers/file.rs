@@ -42,9 +42,7 @@ use crate::policy::config_guard::is_pattern_config_kdl;
 use crate::policy::{GATE_APPROVED_PREFIX, PERMISSION_DENIED_PREFIX};
 use crate::sdk::describe::{DescribeEffect, EffectDecl};
 use crate::sdk::requests::FileReq;
-use crate::session::{
-    HasCancelState, HasCapabilities, HasFileManager, HasPermissionBridge, HasPolicySet,
-};
+use crate::session::{HasPermissionBridge, SessionContext};
 use crate::timeout::HandlerGuard;
 
 /// Default broker-request timeout for file-write gates. Same envelope
@@ -103,13 +101,14 @@ impl DescribeEffect for FileHandler {
     }
 }
 
-impl<U> EffectHandler<U> for FileHandler
-where
-    U: HasCancelState + HasCapabilities + HasPolicySet + HasPermissionBridge + HasFileManager,
-{
+impl EffectHandler<SessionContext> for FileHandler {
     type Request = FileReq;
 
-    fn handle(&mut self, req: FileReq, cx: &EffectContext<'_, U>) -> Result<Value, EffectError> {
+    fn handle(
+        &mut self,
+        req: FileReq,
+        cx: &EffectContext<'_, SessionContext>,
+    ) -> Result<Value, EffectError> {
         let state = cx.user().cancel_state();
         let _guard = HandlerGuard::enter(&state.gate);
 
@@ -147,10 +146,12 @@ where
                 let content = sf
                     .read()
                     .map_err(|e| EffectError::Handler(format!("Pattern.File.Read: {e}")))?;
-                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
-                    pattern_core::hooks::tags::FILE_READ,
-                    serde_json::json!({ "path": path, "operation": "read" }),
-                ));
+                cx.user()
+                    .hook_bridge()
+                    .emit(pattern_core::hooks::HookEvent::notification(
+                        pattern_core::hooks::tags::FILE_READ,
+                        serde_json::json!({ "path": path, "operation": "read" }),
+                    ));
                 cx.respond(content)
             }
             FileReq::ListDir(path, glob) => {
@@ -174,10 +175,12 @@ where
                         "Pattern.File.Open: {path} is not valid UTF-8: {e}"
                     ))
                 })?;
-                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
-                    pattern_core::hooks::tags::FILE_OPENED,
-                    serde_json::json!({ "path": path }),
-                ));
+                cx.user()
+                    .hook_bridge()
+                    .emit(pattern_core::hooks::HookEvent::notification(
+                        pattern_core::hooks::tags::FILE_OPENED,
+                        serde_json::json!({ "path": path }),
+                    ));
                 cx.respond(s)
             }
             FileReq::Close(path) => {
@@ -190,10 +193,12 @@ where
                 let fm = require_file_manager(cx.user())?;
                 fm.watch(Path::new(&path))
                     .map_err(|e| EffectError::Handler(e.to_effect_message()))?;
-                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
-                    pattern_core::hooks::tags::FILE_WATCHED,
-                    serde_json::json!({ "path": path }),
-                ));
+                cx.user()
+                    .hook_bridge()
+                    .emit(pattern_core::hooks::HookEvent::notification(
+                        pattern_core::hooks::tags::FILE_WATCHED,
+                        serde_json::json!({ "path": path }),
+                    ));
                 cx.respond(())
             }
             FileReq::Reload(path) => {
@@ -219,10 +224,12 @@ where
                 let fm = require_file_manager(cx.user())?;
                 fm.write(Path::new(&path), content.as_bytes())
                     .map_err(|e| EffectError::Handler(e.to_effect_message()))?;
-                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
-                    pattern_core::hooks::tags::FILE_WRITE,
-                    serde_json::json!({ "path": path, "operation": "write" }),
-                ));
+                cx.user()
+                    .hook_bridge()
+                    .emit(pattern_core::hooks::HookEvent::notification(
+                        pattern_core::hooks::tags::FILE_WRITE,
+                        serde_json::json!({ "path": path, "operation": "write" }),
+                    ));
                 cx.respond(())
             }
             FileReq::ForceWrite(path, content) => {
@@ -299,20 +306,21 @@ where
                     sf.write(&new_content)
                         .map_err(|e| EffectError::Handler(format!("Pattern.File.Replace: {e}")))?;
                 }
-                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
-                    pattern_core::hooks::tags::FILE_WRITE,
-                    serde_json::json!({ "path": path, "operation": "replace", "count": count }),
-                ));
+                cx.user()
+                    .hook_bridge()
+                    .emit(pattern_core::hooks::HookEvent::notification(
+                        pattern_core::hooks::tags::FILE_WRITE,
+                        serde_json::json!({ "path": path, "operation": "replace", "count": count }),
+                    ));
                 cx.respond(count.to_string())
             }
-
         }
     }
 }
 
 /// Return the file manager from user context, or a clear error if not wired.
-fn require_file_manager<U: HasFileManager>(
-    user: &U,
+fn require_file_manager(
+    user: &SessionContext,
 ) -> Result<&Arc<crate::file_manager::FileManager>, EffectError> {
     user.file_manager().ok_or_else(|| {
         EffectError::Handler(
@@ -337,10 +345,11 @@ fn require_file_manager<U: HasFileManager>(
 /// signature predates full FileManager wiring. Follow-up: restructure
 /// `escalate` to return a typed enum so the caller can distinguish
 /// "approved, proceed to FM" from "denied, stop", and dispatch accordingly.
-fn evaluate_write<U>(path_str: &str, content: &[u8], user: &U) -> Result<(), EffectError>
-where
-    U: HasPolicySet + HasPermissionBridge + HasFileManager,
-{
+fn evaluate_write(
+    path_str: &str,
+    content: &[u8],
+    user: &SessionContext,
+) -> Result<(), EffectError> {
     let path = Path::new(path_str);
 
     // Path-normalization deferral (see Phase 1 review item minor #1):
@@ -403,10 +412,11 @@ where
 /// `Result<Value>` to communicate gate outcomes directly to the VM. The
 /// `evaluate_write` caller translates the `Err(GateApproved)` marker back
 /// to a meaningful error on the wire.
-fn escalate<U>(user: &U, scope: PermissionScope, reason: &str) -> Result<(), EffectError>
-where
-    U: HasPermissionBridge,
-{
+fn escalate(
+    user: &SessionContext,
+    scope: PermissionScope,
+    reason: &str,
+) -> Result<(), EffectError> {
     let Some(bridge) = user.permission_bridge() else {
         return Err(EffectError::Handler(format!(
             "{PERMISSION_DENIED_PREFIX}file write gated but no permission bridge wired"
@@ -455,6 +465,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::HasCancelState;
     use crate::testing::standard_datacon_table;
     use pattern_core::permission::{PermissionBroker, PermissionDecisionKind};
     use pattern_core::types::origin::{Author, Human, MessageOrigin, Sphere};
