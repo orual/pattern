@@ -186,4 +186,290 @@ impl PluginRegistry {
         }
         removed
     }
+
+    /// Build the registry by discovering plugins across all three scopes.
+    /// Precedence: Project > Global > Ambient (last write wins).
+    pub fn load(
+        paths: Arc<pattern_memory::paths::PatternPaths>,
+        mount_path: Option<PathBuf>,
+    ) -> Result<Self, RegistryError> {
+        let mut combined: HashMap<PluginId, LoadedPlugin> = HashMap::new();
+
+        // 1. Ambient (lowest precedence): directories under <base>/plugins/
+        let global_root = paths.plugins_global_root();
+        if global_root.is_dir() {
+            for entry in scan_plugin_dirs(&global_root)? {
+                if let Ok(manifest) = load_manifest_from_dir(&entry) {
+                    let lp = LoadedPlugin {
+                        id: manifest.name.clone(),
+                        scope: PluginScope::Ambient,
+                        source_path: entry,
+                        manifest,
+                        user_config: serde_json::Value::Null,
+                        capability_overrides: None,
+                    };
+                    combined.insert(lp.id.clone(), lp);
+                }
+            }
+        }
+
+        // 2. Global pins: ~/.pattern/plugins/registry.kdl
+        if let Some(file) = Self::read_registry_file(&paths.plugins_global_registry())? {
+            for inst in file.plugins {
+                let plugin_dir = paths.plugin_cache_dir(&inst.id);
+                if let Ok(manifest) = load_manifest_from_dir(&plugin_dir) {
+                    let lp = build_loaded_from_installation(
+                        inst,
+                        manifest,
+                        PluginScope::Global,
+                        &plugin_dir,
+                    );
+                    if let Some(prev) = combined.insert(lp.id.clone(), lp) {
+                        tracing::warn!(
+                            plugin_id = %prev.id,
+                            prev_scope = ?prev.scope,
+                            new_scope = ?PluginScope::Global,
+                            "plugin override: global pin shadows ambient"
+                        );
+                    }
+                }
+            }
+        }
+
+        // 3. Project pins: shared then private.
+        if let Some(mp) = &mount_path {
+            for private in [false, true] {
+                let reg_path = pattern_memory::paths::project_plugin_registry(mp, private);
+                if let Some(file) = Self::read_registry_file(&reg_path)? {
+                    for inst in file.plugins {
+                        // Project plugins may live in the project dir or the cache.
+                        let plugin_dir = if let Some(ref src) = inst.source {
+                            PathBuf::from(src)
+                        } else {
+                            paths.plugin_cache_dir(&inst.id)
+                        };
+                        if let Ok(manifest) = load_manifest_from_dir(&plugin_dir) {
+                            let scope = PluginScope::Project { private };
+                            let lp = build_loaded_from_installation(
+                                inst, manifest, scope, &plugin_dir,
+                            );
+                            if let Some(prev) = combined.insert(lp.id.clone(), lp) {
+                                tracing::warn!(
+                                    plugin_id = %prev.id,
+                                    prev_scope = ?prev.scope,
+                                    new_scope = ?scope,
+                                    "plugin override: project pin shadows lower-precedence"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(Self {
+            paths,
+            mount_path,
+            inner: RwLock::new(combined),
+            hook_emit: Box::new(|_, _| {}),
+        })
+    }
+
+    /// Install a plugin from a local path or git URL into the given scope.
+    pub fn install(
+        &self,
+        source: InstallSource<'_>,
+        scope: PluginScope,
+    ) -> Result<LoadedPlugin, RegistryError> {
+        let dest = match &source {
+            InstallSource::LocalPath(path) => {
+                // Read the manifest from the source path directly.
+                let manifest = load_manifest_from_dir(path)
+                    .map_err(|e| RegistryError::Io {
+                        path: path.to_path_buf(),
+                        source: std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+                    })?;
+                let cache_dir = self.paths.plugin_cache_dir(&manifest.name);
+                if !cache_dir.exists() {
+                    // Copy the plugin directory to the cache.
+                    copy_dir_recursive(path, &cache_dir)?;
+                }
+                cache_dir
+            }
+            InstallSource::JjGitUrl(url) => {
+                // For now, use a simple git clone to the cache dir.
+                // TODO: wire through JjAdapter when available.
+                let temp_id = url.rsplit('/').next().unwrap_or("plugin");
+                let temp_id = temp_id.trim_end_matches(".git");
+                let cache_dir = self.paths.plugin_cache_dir(temp_id);
+                if cache_dir.exists() {
+                    return Err(RegistryError::DestinationExists(cache_dir));
+                }
+                // Shell out to git clone as a fallback.
+                let status = std::process::Command::new("git")
+                    .args(["clone", url, &cache_dir.to_string_lossy()])
+                    .status()
+                    .map_err(|e| RegistryError::Io {
+                        path: cache_dir.clone(),
+                        source: e,
+                    })?;
+                if !status.success() {
+                    return Err(RegistryError::Io {
+                        path: cache_dir.clone(),
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            "git clone failed",
+                        ),
+                    });
+                }
+                cache_dir
+            }
+        };
+
+        let manifest = load_manifest_from_dir(&dest)
+            .map_err(|e| RegistryError::Io {
+                path: dest.clone(),
+                source: std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+            })?;
+
+        let lp = LoadedPlugin {
+            id: manifest.name.clone(),
+            scope,
+            source_path: dest,
+            manifest,
+            user_config: serde_json::Value::Null,
+            capability_overrides: None,
+        };
+
+        self.insert(lp.clone());
+        Ok(lp)
+    }
+
+    /// Uninstall a plugin by id. Removes from registry and optionally
+    /// cleans the cache directory.
+    pub fn uninstall(&self, id: &str, clean_cache: bool) -> Result<(), RegistryError> {
+        let removed = self.remove(id).ok_or_else(|| RegistryError::NotFound {
+            id: id.into(),
+        })?;
+        if clean_cache && removed.source_path.exists() {
+            let _ = std::fs::remove_dir_all(&removed.source_path);
+        }
+        Ok(())
+    }
+}
+
+/// Source for plugin installation.
+pub enum InstallSource<'a> {
+    /// Install from a local directory path.
+    LocalPath(&'a Path),
+    /// Clone from a git URL (via jj or plain git).
+    JjGitUrl(&'a str),
+}
+
+// ---- Helper functions -------------------------------------------------------
+
+/// Scan a directory for plugin subdirectories that contain a manifest.
+fn scan_plugin_dirs(root: &Path) -> Result<Vec<PathBuf>, RegistryError> {
+    let mut dirs = Vec::new();
+    if !root.is_dir() {
+        return Ok(dirs);
+    }
+    let entries = std::fs::read_dir(root).map_err(|source| RegistryError::Io {
+        path: root.to_path_buf(),
+        source,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| RegistryError::Io {
+            path: root.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+        if path.is_dir() && has_manifest(&path) {
+            dirs.push(path);
+        }
+    }
+    Ok(dirs)
+}
+
+/// Check if a directory contains a plugin manifest.
+fn has_manifest(dir: &Path) -> bool {
+    dir.join("manifest.kdl").exists()
+        || dir.join(".claude-plugin").join("plugin.json").exists()
+}
+
+/// Load a manifest from a plugin directory.
+fn load_manifest_from_dir(dir: &Path) -> Result<PluginManifest, pattern_core::plugin::ManifestError> {
+    let kdl_path = dir.join("manifest.kdl");
+    if kdl_path.exists() {
+        return super::manifest::from_kdl_file(&kdl_path);
+    }
+    let cc_path = dir.join(".claude-plugin").join("plugin.json");
+    if cc_path.exists() {
+        return super::manifest::from_cc_json_file(&cc_path);
+    }
+    Err(pattern_core::plugin::ManifestError::Io {
+        path: dir.to_path_buf(),
+        source: std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no manifest.kdl or .claude-plugin/plugin.json found",
+        ),
+    })
+}
+
+/// Build a LoadedPlugin from a registry installation entry.
+fn build_loaded_from_installation(
+    inst: PluginInstallation,
+    manifest: PluginManifest,
+    scope: PluginScope,
+    source_path: &Path,
+) -> LoadedPlugin {
+    // Convert user_config entries to a JSON object.
+    let user_config = inst
+        .user_config
+        .map(|uc| {
+            let map: serde_json::Map<String, serde_json::Value> = uc
+                .entries
+                .into_iter()
+                .map(|e| (e.key.to_string(), serde_json::Value::String(e.value.to_string())))
+                .collect();
+            serde_json::Value::Object(map)
+        })
+        .unwrap_or(serde_json::Value::Null);
+
+    LoadedPlugin {
+        id: manifest.name.clone(),
+        scope,
+        source_path: source_path.to_path_buf(),
+        manifest,
+        user_config,
+        capability_overrides: None, // TODO: wire from inst.capability_override
+    }
+}
+
+/// Recursively copy a directory.
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), RegistryError> {
+    std::fs::create_dir_all(dst).map_err(|source| RegistryError::Io {
+        path: dst.to_path_buf(),
+        source,
+    })?;
+    for entry in std::fs::read_dir(src).map_err(|source| RegistryError::Io {
+        path: src.to_path_buf(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| RegistryError::Io {
+            path: src.to_path_buf(),
+            source,
+        })?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path).map_err(|source| RegistryError::Io {
+                path: src_path,
+                source,
+            })?;
+        }
+    }
+    Ok(())
 }
