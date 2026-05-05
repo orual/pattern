@@ -52,6 +52,12 @@ pub enum PluginError {
         message: String,
     },
 
+    #[error("hook handler failed for plugin {plugin_id}: {message}")]
+    HookHandlerFailed {
+        plugin_id: SmolStr,
+        message: String,
+    },
+
     #[error("{0}")]
     Other(String),
 }

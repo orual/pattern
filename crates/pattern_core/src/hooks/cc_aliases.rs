@@ -50,3 +50,13 @@ pub fn cc_alias_map() -> HashMap<&'static str, Vec<&'static str>> {
 
     map
 }
+
+/// Translate a CC event name to Pattern tag(s).
+/// Returns the first matching Pattern tag, or None if unknown.
+pub fn translate_cc(cc_event: &str) -> Option<&'static str> {
+    // Build once; in practice this would be lazy_static or similar,
+    // but for now we build per call (small map, infrequent calls).
+    let map = cc_alias_map();
+    map.get(cc_event).and_then(|tags| tags.first().copied())
+}
+
