@@ -61,11 +61,15 @@ impl PluginExtension for CcPluginAdapter {
         Vec::new()
     }
 
-    async fn on_install(&self, ctx: &PluginContext) -> Result<(), PluginError> {
-        skills::install_skills(&self.plugin_id, &self.plugin_root, &self.manifest, ctx).await
+    async fn on_install(&self, _ctx: &PluginContext) -> Result<(), PluginError> {
+        // Skills are loaded at on_enable (session context has memory store).
+        // Install just stages files.
+        Ok(())
     }
 
     async fn on_enable(&self, ctx: &PluginContext) -> Result<(), PluginError> {
+        // Load skills into memory (needs the session's memory store).
+        skills::install_skills(&self.plugin_id, &self.plugin_root, &self.manifest, ctx).await?;
         let tasks = hooks::wire_hook_subscriptions(self, ctx).await?;
         let mut state = self.state.write();
         state.hook_drain_tasks = tasks;

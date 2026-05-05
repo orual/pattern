@@ -46,7 +46,7 @@ enum Commands {
 // Plugin command handler
 // ---------------------------------------------------------------------------
 
-fn cmd_plugin(cmd: PluginCmd) -> MietteResult<()> {
+async fn cmd_plugin(cmd: PluginCmd) -> MietteResult<()> {
     use pattern_memory::paths::PatternPaths;
     use pattern_runtime::plugin::registry::{InstallSource, PluginRegistry};
     use std::sync::Arc;
@@ -112,10 +112,7 @@ fn cmd_plugin(cmd: PluginCmd) -> MietteResult<()> {
                     memory_store: None,
                     scope: None,
                 };
-                // on_install is async; use a throwaway runtime.
-                let rt = tokio::runtime::Runtime::new()
-                    .map_err(|e| miette::miette!("failed to create runtime: {e}"))?;
-                if let Err(e) = rt.block_on(ext.on_install(&ctx)) {
+                if let Err(e) = ext.on_install(&ctx).await {
                     eprintln!("Warning: on_install failed for {}: {e}", lp.id);
                 }
             }
@@ -148,11 +145,8 @@ fn cmd_plugin(cmd: PluginCmd) -> MietteResult<()> {
                                                 memory_store: None,
                                                 scope: None,
                                             };
-                                            let rt = tokio::runtime::Runtime::new().ok();
-                                            if let Some(rt) = rt {
-                                                if let Err(e) = rt.block_on(ext.on_install(&ctx)) {
-                                                    eprintln!("Warning: on_install for {}: {e}", lp.id);
-                                                }
+                                            if let Err(e) = ext.on_install(&ctx).await {
+                                                eprintln!("Warning: on_install for {}: {e}", lp.id);
                                             }
                                         }
                                         println!("Installed: {} (scope: {:?})", lp.id, lp.scope);
@@ -545,7 +539,7 @@ async fn main() -> MietteResult<()> {
             commands::auth::cmd_auth(auth).await?;
         }
         Some(Commands::Plugin(plugin)) => {
-            cmd_plugin(plugin)?;
+            cmd_plugin(plugin).await?;
         }
         None => {
             // Default: enter chat mode with all defaults (auto-zellij enabled).

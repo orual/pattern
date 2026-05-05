@@ -2404,8 +2404,8 @@ impl TidepoolSession {
                         plugin_id: lp.id.clone(),
                         hook_bus: hook_bus.clone(),
                         plugin_root: lp.source_path.clone(),
-                        memory_store: None,
-                        scope: None,
+                        memory_store: Some(session.ctx.memory_store()),
+                        scope: Some(session.ctx.default_scope().clone()),
                     };
                     let result = tokio::task::block_in_place(|| {
                         handle.block_on(ext.on_enable(&ctx))
