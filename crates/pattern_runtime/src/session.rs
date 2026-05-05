@@ -2430,8 +2430,13 @@ impl TidepoolSession {
                 "plugin enable: loaded plugin list"
             );
             let hook_bus = session.ctx.hook_bus().clone();
+            let mut pending_mcp_configs: Vec<(
+                smol_str::SmolStr,
+                Vec<pattern_core::mcp::McpServerConfig>,
+            )> = Vec::new();
             for lp in &plugins {
                 tracing::info!(plugin = %lp.id, has_ext = lp.extension.is_some(), "plugin enable: checking plugin");
+                // Collect MCP configs for background loading (don't block session open).
                 use crate::plugin::cc_adapter::mcp_config;
                 let mcp_json = lp
                     .manifest
@@ -2443,20 +2448,8 @@ impl TidepoolSession {
                     })
                     .unwrap_or(serde_json::Value::Null);
                 let configs = mcp_config::parse_mcp_servers(&lp.source_path, &mcp_json);
-
                 if !configs.is_empty() {
-                    let results = session.ctx.mcp_registry.load_servers(&configs).await;
-
-                    for (name, result) in &results {
-                        match result {
-                            Ok(()) => {
-                                tracing::info!(plugin = %lp.id, server = %name, "MCP server connected")
-                            }
-                            Err(e) => {
-                                tracing::warn!(plugin = %lp.id, server = %name, error = %e, "MCP server failed to connect")
-                            }
-                        }
-                    }
+                    pending_mcp_configs.push((lp.id.clone(), configs));
                 }
                 if let Some(ext) = &lp.extension {
                     let ctx = pattern_core::traits::plugin::PluginContext {
@@ -2474,6 +2467,26 @@ impl TidepoolSession {
                         );
                     }
                 }
+            }
+
+            // Spawn MCP server connections in background (don't block session open).
+            if !pending_mcp_configs.is_empty() {
+                let registry = session.ctx.mcp_registry.clone();
+                tokio::spawn(async move {
+                    for (plugin_id, configs) in pending_mcp_configs {
+                        let results = registry.load_servers(&configs).await;
+                        for (name, result) in &results {
+                            match result {
+                                Ok(()) => {
+                                    tracing::info!(plugin = %plugin_id, server = %name, "MCP server connected")
+                                }
+                                Err(e) => {
+                                    tracing::warn!(plugin = %plugin_id, server = %name, error = %e, "MCP server failed to connect")
+                                }
+                            }
+                        }
+                    }
+                });
             }
         }
 

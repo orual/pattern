@@ -18,11 +18,23 @@ impl DescribeEffect for McpHandler {
     fn effect_decl() -> EffectDecl {
         EffectDecl {
             type_name: "Mcp",
-            description: "Model-Context-Protocol tool calls (Use)",
-            constructors: std::borrow::Cow::Borrowed(&["Use :: Server -> Method -> Mcp ()"]),
-            type_defs: std::borrow::Cow::Borrowed(&["type Server = Text", "type Method = Text"]),
+            description: "Model-Context-Protocol tool calls (Call/Introspect/ListServers/Unload)",
+            constructors: std::borrow::Cow::Borrowed(&[
+                "Call :: Server -> Method -> Payload -> Mcp Value",
+                "Introspect :: Server -> Mcp Text",
+                "ListServers :: Mcp Text",
+                "Unload :: Server -> Mcp ()",
+            ]),
+            type_defs: std::borrow::Cow::Borrowed(&[
+                "type Server = Text",
+                "type Method = Text",
+                "type Payload = Text",
+            ]),
             helpers: std::borrow::Cow::Borrowed(&[
-                "use_ :: Member Mcp effs => Server -> Method -> Eff effs ()\nuse_ s m = send (Use s m)",
+                "call :: Member Mcp effs => Server -> Method -> Payload -> Eff effs Value\ncall s m args = send (Call s m args)",
+                "introspect :: Member Mcp effs => Server -> Eff effs Text\nintrospect s = send (Introspect s)",
+                "listServers :: Member Mcp effs => Eff effs Text\nlistServers = send ListServers",
+                "unload :: Member Mcp effs => Server -> Eff effs ()\nunload s = send (Unload s)",
             ]),
         }
     }
