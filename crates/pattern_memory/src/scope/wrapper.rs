@@ -262,6 +262,15 @@ impl<S: MemoryStore> MemoryStore for MemoryScope<S> {
         }
     }
 
+    fn create_or_replace_block(
+        &self,
+        scope: &Scope,
+        create: BlockCreate,
+    ) -> MemoryResult<StructuredDocument> {
+        self.check_write(scope, &format!("create_or_replace_block(label={})", create.label))?;
+        self.inner.create_or_replace_block(scope, create)
+    }
+
     fn delete_block(&self, scope: &Scope, label: &str) -> MemoryResult<()> {
         self.check_write(scope, &format!("delete_block(label={label})"))?;
         self.inner.delete_block(scope, label)

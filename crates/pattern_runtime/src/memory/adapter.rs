@@ -104,6 +104,14 @@ impl MemoryStore for MemoryStoreAdapter {
         self.inner.list_blocks(filter)
     }
 
+    fn create_or_replace_block(
+        &self,
+        scope: &Scope,
+        create: pattern_core::types::block::BlockCreate,
+    ) -> MemoryResult<StructuredDocument> {
+        self.inner.create_or_replace_block(scope, create)
+    }
+
     fn delete_block(&self, scope: &Scope, label: &str) -> MemoryResult<()> {
         self.inner.delete_block(scope, label)
     }
