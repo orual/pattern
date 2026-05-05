@@ -2212,6 +2212,26 @@ impl MemoryStore for MemoryCache {
         Ok(results)
     }
 
+    fn create_or_replace_block(
+        &self,
+        scope: &Scope,
+        create: pattern_core::types::block::BlockCreate,
+    ) -> MemoryResult<StructuredDocument> {
+        let key = scope.to_db_key();
+        // Hard-delete from DB (not soft-delete) so create_block succeeds.
+        let conn = self.db.get().mem()?;
+        conn.execute(
+            "DELETE FROM memory_blocks WHERE agent_id = ?1 AND label = ?2",
+            rusqlite::params![key, create.label],
+        ).map_err(|e| MemoryError::Other(format!("hard delete for replace: {e}")))?;
+        // Also remove from in-memory cache if present.
+        if let Ok(Some(block)) = pattern_db::queries::get_block_by_label(&*conn, &key, &create.label) {
+            self.blocks.remove(&block.id);
+        }
+        drop(conn);
+        self.create_block(scope, create)
+    }
+
     fn delete_block(&self, scope: &Scope, label: &str) -> MemoryResult<()> {
         // Get block ID first.
         let key = scope.to_db_key();
