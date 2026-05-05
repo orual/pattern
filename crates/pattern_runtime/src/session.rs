@@ -2395,10 +2395,13 @@ impl TidepoolSession {
         // wires its hook subscriptions to the session's HookBus.
         // Uses block_in_place because we're inside a tokio runtime.
         if let Some(plugin_reg) = session.ctx.plugin_registry() {
+            tracing::info!("plugin enable: registry found, checking plugins");
             let plugins = plugin_reg.list();
+            tracing::info!(plugin_count = plugins.len(), "plugin enable: loaded plugin list");
             let hook_bus = session.ctx.hook_bus().clone();
             let handle = session.ctx.tokio_handle().clone();
             for lp in &plugins {
+                tracing::info!(plugin = %lp.id, has_ext = lp.extension.is_some(), "plugin enable: checking plugin");
                 if let Some(ext) = &lp.extension {
                     let ctx = pattern_core::traits::plugin::PluginContext {
                         plugin_id: lp.id.clone(),
