@@ -562,7 +562,6 @@ impl HasMcpRegistry for SessionContext {
     }
 }
 
-
 impl HasMcpRegistry for () {
     fn mcp_registry(&self) -> &Arc<crate::mcp::McpRegistry> {
         static EMPTY: std::sync::LazyLock<Arc<crate::mcp::McpRegistry>> =
