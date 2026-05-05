@@ -68,9 +68,14 @@ pub async fn install_skills(
             let label = format!("skill-{}", parsed.metadata.name);
 
             // Try to get existing block first (handles cross-session persistence).
+            tracing::debug!(label = %label, scope = %scope, "skill: checking for existing block");
             let doc = match store.get_block(&scope, &label) {
-                Ok(Some(existing)) => existing,
+                Ok(Some(existing)) => {
+                    tracing::debug!(label = %label, "skill: found existing block, will update");
+                    existing
+                }
                 _ => {
+                    tracing::debug!(label = %label, "skill: block not found, using create_or_replace");
                     // Block might exist in DB from a previous session.
                     // Use create_or_replace to handle conflicts.
                     let create = pattern_core::types::block::BlockCreate::new(
