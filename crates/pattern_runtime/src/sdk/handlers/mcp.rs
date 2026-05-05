@@ -30,16 +30,17 @@ impl DescribeEffect for McpHandler {
 
 impl<U> EffectHandler<U> for McpHandler
 where
-    U: HasCancelState + HasCapabilities,
+    U: HasCancelState + HasCapabilities + crate::session::HasMcpRegistry,
 {
     type Request = McpReq;
 
     fn handle(&mut self, req: McpReq, cx: &EffectContext<'_, U>) -> Result<Value, EffectError> {
-        // Uniform HandlerGate entry — see ShellHandler for the rationale.
+        use std::time::Duration;
+
+        // Uniform HandlerGate entry.
         let state = cx.user().cancel_state();
         let _guard = HandlerGuard::enter(&state.gate);
 
-        // Effect-class runtime guard. Mcp.Use is Escape/Enforce.
         let constructor_name = match &req {
             McpReq::Call(..) => "Call",
             McpReq::Introspect(..) => "Introspect",
@@ -52,27 +53,81 @@ where
             constructor_name,
         )?;
 
-        Err(EffectError::Handler(format!(
-            "Pattern.Mcp.{constructor_name} is not yet connected to McpRegistry. \
-             MCP server connections will be wired in the next phase."
-        )))
+        let registry = cx.user().mcp_registry().clone();
+        let handle = tokio::runtime::Handle::current();
+        let timeout = Duration::from_secs(60);
+
+        match req {
+            McpReq::Call(server, tool, args_json) => {
+                let params: serde_json::Value = serde_json::from_str(&args_json)
+                    .map_err(|e| EffectError::Handler(format!("invalid JSON payload: {e}")))?;
+                let result = handle.block_on(async {
+                    tokio::time::timeout(timeout, registry.call_tool(&server, &tool, params)).await
+                });
+                match result {
+                    Ok(Ok(val)) => {
+                        let json_str = serde_json::to_string(&val)
+                            .map_err(|e| EffectError::Handler(format!("failed to serialize MCP result: {e}")))?;
+                        cx.respond(json_str)
+                    }
+                    Ok(Err(e)) => Err(EffectError::Handler(format!("MCP call failed: {e}"))),
+                    Err(_) => Err(EffectError::Handler(format!(
+                        "MCP server '{server}' did not respond within {timeout:?}"
+                    ))),
+                }
+            }
+            McpReq::Introspect(server) => {
+                let result = handle.block_on(async {
+                    tokio::time::timeout(timeout, registry.list_tools(&server)).await
+                });
+                match result {
+                    Ok(Ok(tools)) => {
+                        let json = serde_json::to_string(&tools
+                            .iter()
+                            .map(|t| serde_json::json!({
+                                "name": t.name,
+                                "description": t.description,
+                                "input_schema": t.input_schema,
+                            }))
+                            .collect::<Vec<_>>())
+                            .map_err(|e| EffectError::Handler(format!("serialize: {e}")))?;
+                        cx.respond(json)
+                    }
+                    Ok(Err(e)) => Err(EffectError::Handler(format!("MCP introspect failed: {e}"))),
+                    Err(_) => Err(EffectError::Handler(format!(
+                        "MCP server '{server}' did not respond within {timeout:?}"
+                    ))),
+                }
+            }
+            McpReq::ListServers => {
+                let result = handle.block_on(async {
+                    registry.list_connected().await
+                });
+                let json = serde_json::to_string(&result)
+                    .map_err(|e| EffectError::Handler(format!("serialize: {e}")))?;
+                cx.respond(json)
+            }
+            McpReq::Unload(server) => {
+                let removed = handle.block_on(async {
+                    registry.unload(&server).await
+                });
+                if removed {
+                    cx.respond(())
+                } else {
+                    Err(EffectError::Handler(format!("MCP server '{server}' not found")))
+                }
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidepool_repr::DataConTable;
 
     #[test]
-    fn mcp_handler_returns_not_connected() {
-        let mut h = McpHandler;
-        let table = DataConTable::new();
-        let cx = EffectContext::with_user(&table, &());
-        let err = h
-            .handle(McpReq::ListServers, &cx)
-            .unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("McpRegistry"), "got: {msg}");
+    fn effect_decl_has_four_constructors() {
+        let decl = McpHandler::effect_decl();
+        assert_eq!(decl.constructors.len(), 4);
     }
 }
