@@ -101,6 +101,18 @@ fn build_code_tool_description() -> String {
                 s.push('\n');
             }
         }
+        // Show ADT / type alias definitions so the agent knows constructor names.
+        if !eff.type_defs.is_empty() {
+            let non_alias: Vec<_> = eff.type_defs.iter()
+                .filter(|td| td.starts_with("data "))
+                .collect();
+            if !non_alias.is_empty() {
+                for td in non_alias {
+                    s.push_str(td);
+                    s.push('\n');
+                }
+            }
+        }
     }
 
     s.push_str(

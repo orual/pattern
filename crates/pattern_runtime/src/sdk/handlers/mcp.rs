@@ -9,10 +9,16 @@ use crate::sdk::requests::McpReq;
 use crate::session::{HasCancelState, HasCapabilities};
 use crate::timeout::HandlerGuard;
 
-/// Not-implemented placeholder for the MCP effect. Real implementation
-/// arrives in the post-foundation plugin-system plan.
-#[derive(Default, Clone)]
-pub struct McpHandler;
+#[derive(Clone)]
+pub struct McpHandler {
+    handle: tokio::runtime::Handle,
+}
+
+impl McpHandler {
+    pub fn new(handle: tokio::runtime::Handle) -> Self {
+        Self { handle }
+    }
+}
 
 impl DescribeEffect for McpHandler {
     fn effect_decl() -> EffectDecl {
@@ -66,20 +72,20 @@ where
         )?;
 
         let registry = cx.user().mcp_registry().clone();
-        let handle = tokio::runtime::Handle::current();
         let timeout = Duration::from_secs(60);
 
         match req {
             McpReq::Call(server, tool, args_json) => {
                 let params: serde_json::Value = serde_json::from_str(&args_json)
                     .map_err(|e| EffectError::Handler(format!("invalid JSON payload: {e}")))?;
-                let result = handle.block_on(async {
+                let result = self.handle.block_on(async {
                     tokio::time::timeout(timeout, registry.call_tool(&server, &tool, params)).await
                 });
                 match result {
                     Ok(Ok(val)) => {
-                        let json_str = serde_json::to_string(&val)
-                            .map_err(|e| EffectError::Handler(format!("failed to serialize MCP result: {e}")))?;
+                        let json_str = serde_json::to_string(&val).map_err(|e| {
+                            EffectError::Handler(format!("failed to serialize MCP result: {e}"))
+                        })?;
                         cx.respond(json_str)
                     }
                     Ok(Err(e)) => Err(EffectError::Handler(format!("MCP call failed: {e}"))),
@@ -89,20 +95,24 @@ where
                 }
             }
             McpReq::Introspect(server) => {
-                let result = handle.block_on(async {
+                let result = self.handle.block_on(async {
                     tokio::time::timeout(timeout, registry.list_tools(&server)).await
                 });
                 match result {
                     Ok(Ok(tools)) => {
-                        let json = serde_json::to_string(&tools
-                            .iter()
-                            .map(|t| serde_json::json!({
-                                "name": t.name,
-                                "description": t.description,
-                                "input_schema": t.input_schema,
-                            }))
-                            .collect::<Vec<_>>())
-                            .map_err(|e| EffectError::Handler(format!("serialize: {e}")))?;
+                        let json = serde_json::to_string(
+                            &tools
+                                .iter()
+                                .map(|t| {
+                                    serde_json::json!({
+                                        "name": t.name,
+                                        "description": t.description,
+                                        "input_schema": t.input_schema,
+                                    })
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                        .map_err(|e| EffectError::Handler(format!("serialize: {e}")))?;
                         cx.respond(json)
                     }
                     Ok(Err(e)) => Err(EffectError::Handler(format!("MCP introspect failed: {e}"))),
@@ -112,21 +122,23 @@ where
                 }
             }
             McpReq::ListServers => {
-                let result = handle.block_on(async {
-                    registry.list_connected().await
-                });
+                let result = self
+                    .handle
+                    .block_on(async { registry.list_connected().await });
                 let json = serde_json::to_string(&result)
                     .map_err(|e| EffectError::Handler(format!("serialize: {e}")))?;
                 cx.respond(json)
             }
             McpReq::Unload(server) => {
-                let removed = handle.block_on(async {
-                    registry.unload(&server).await
-                });
+                let removed = self
+                    .handle
+                    .block_on(async { registry.unload(&server).await });
                 if removed {
                     cx.respond(())
                 } else {
-                    Err(EffectError::Handler(format!("MCP server '{server}' not found")))
+                    Err(EffectError::Handler(format!(
+                        "MCP server '{server}' not found"
+                    )))
                 }
             }
         }

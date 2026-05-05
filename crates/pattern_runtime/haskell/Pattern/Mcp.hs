@@ -16,13 +16,13 @@ type Payload = Text
 
 -- | Effect algebra.
 data Mcp a where
-  Call        :: Server -> Method -> Payload -> Mcp Value
+  Call        :: Server -> Method -> Payload -> Mcp Text
   Introspect  :: Server -> Mcp Text
   ListServers :: Mcp Text
   Unload      :: Server -> Mcp ()
 
 -- | Call a tool on an MCP server. Args is a JSON string.
-call :: Member Mcp effs => Server -> Method -> Payload -> Eff effs Value
+call :: Member Mcp effs => Server -> Method -> Payload -> Eff effs Text
 call s m args = send (Call s m args)
 
 -- | Get tool metadata for a server (returns JSON text).

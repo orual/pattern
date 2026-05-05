@@ -26,7 +26,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use pattern_runtime::sdk::handlers::{file::FileHandler, mcp::McpHandler, message::MessageHandler};
+use pattern_runtime::sdk::handlers::message::MessageHandler;
 
 /// Shared per-namespace deadline. The first test across the binary
 /// absorbs GHC compile + JIT warm-up cost on a cold cache. Steady-state
@@ -99,51 +99,6 @@ macro_rules! run_stub_case {
         );
     }};
 }
-
-// shell_stub_reports_not_implemented_hang_free was removed in Phase 3 Task 6.
-// ShellHandler is now a real implementation bound to SessionContext (no longer
-// a stub); the AC tests in tests/shell_handler.rs cover the shell surface.
-//
-// sources_stub_reports_not_implemented_hang_free and
-// rpc_stub_reports_not_implemented_hang_free were removed in Phase 4 Task 8.
-// SourcesHandler and RpcHandler are retired; the Port handler replaces them.
-
-#[test]
-fn file_stub_reports_no_file_manager_hang_free() {
-    // TODO: FileHandler now requires SessionContext, not ().
-    // Need to construct a minimal SessionContext for this test.
-    // Commented out until migrated.
-    /*
-    preflight_or_fail();
-    run_stub_case!(
-        "file_stub",
-        include_str!("fixtures/file_read_stub.hs"),
-        FileHandler,
-        (),
-        "Pattern.File",
-        "no file manager configured",
-    );
-    */
-}
-
-#[test]
-fn mcp_stub_reports_not_implemented_hang_free() {
-    preflight_or_fail();
-    run_stub_case!(
-        "mcp_stub",
-        include_str!("fixtures/mcp_stub.hs"),
-        McpHandler,
-        (),
-        "Pattern.Mcp",
-        "not implemented",
-    );
-}
-
-// Spawn is no longer a stub — v3-multi-agent Phases 2-3 wired the
-// full SpawnHandler (Ephemeral, AwaitSpawn, AwaitAll, Fork, Sibling,
-// Stop, ForkOp). Sources and Rpc are retired entirely (replaced by
-// the unified Port effect in v3-sandbox-io Phase 4). The remaining
-// stubs are Mcp + a few Message variants (covered below).
 
 #[tokio::test]
 async fn message_stub_reports_ask_candidate_for_removal_hang_free() {

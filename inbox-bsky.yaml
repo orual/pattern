@@ -1,0 +1,28 @@
+notifications:
+  - id: at://did:plc:c62pi5xfmbsreh7wchdwv5dp/app.bsky.graph.follow/3mkxsbsxsvm2v
+    platform: bsky
+    type: follow
+    author: keybanger.bsky.social
+    authorId: did:plc:c62pi5xfmbsreh7wchdwv5dp
+    postId: at://did:plc:c62pi5xfmbsreh7wchdwv5dp/app.bsky.graph.follow/3mkxsbsxsvm2v
+    text: ""
+    timestamp: 2026-05-03T18:34:13.266Z
+    blocked: false
+    userContext: |
+      ---
+      description: User block for keybanger.bsky.social on BSKY
+      ---
+      # User: @keybanger.bsky.social
+
+      ## Interaction History
+      - **2026-05-03:** Profile initialized via automated sync discovery.
+_sync:
+  timestamp: 2026-05-05T19:39:06.398Z
+  platform: bsky
+  unreadOnly: true
+  newCount: 1
+  totalCount: 1
+  cursor: 2026-05-03T18:34:13.266Z
+  usersDir: ./.pattern/reference/sensemaker/users
+  usersMatched: 1
+  usersCreated: 1

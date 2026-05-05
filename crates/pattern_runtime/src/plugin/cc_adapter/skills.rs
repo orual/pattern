@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use smol_str::SmolStr;
 
 use pattern_core::plugin::manifest::{ComponentSpec, PluginManifest};
-use pattern_core::traits::plugin::{PluginContext, PluginError};
 use pattern_core::traits::MemoryStore;
+use pattern_core::traits::plugin::{PluginContext, PluginError};
 use pattern_core::types::memory_types::{MemoryBlockType, Scope, SkillTrustTier};
 
 /// Walk the plugin's skills directory and install each SKILL.md as a
@@ -71,9 +71,14 @@ pub async fn install_skills(
             let create = pattern_core::types::block::BlockCreate::new(
                 label.clone(),
                 MemoryBlockType::Working,
-                pattern_core::types::memory_types::BlockSchema::Skill { expected_keys: vec![] },
+                pattern_core::types::memory_types::BlockSchema::Skill {
+                    expected_keys: vec![],
+                },
             )
-            .with_description(format!("Skill: {} (plugin: {})", parsed.metadata.name, plugin_id));
+            .with_description(format!(
+                "Skill: {} (plugin: {})",
+                parsed.metadata.name, plugin_id
+            ));
 
             if let Err(e) = store.create_or_replace_block(&scope, create) {
                 tracing::warn!(skill = %parsed.metadata.name, error = %e, "failed to create skill block");
@@ -99,7 +104,7 @@ pub async fn install_skills(
                 tracing::warn!(skill = %parsed.metadata.name, error = %e, "commit_write failed");
             }
 
-            tracing::info!(skill = %parsed.metadata.name, plugin = %plugin_id, "skill loaded");
+            tracing::debug!(skill = %parsed.metadata.name, plugin = %plugin_id, "skill loaded");
         }
     }
     Ok(())

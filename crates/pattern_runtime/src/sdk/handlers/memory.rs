@@ -794,7 +794,7 @@ mod tests {
             panic!()
         }
 
-        fn commit_write(&self, scope: &Scope, label: &str) -> pattern_core::MemoryResult<()> {
+        fn commit_write(&self, _scope: &Scope, _label: &str) -> pattern_core::MemoryResult<()> {
             panic!()
         }
     }

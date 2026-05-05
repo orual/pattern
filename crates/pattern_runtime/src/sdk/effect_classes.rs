@@ -415,7 +415,25 @@ pub const ALL_CLASSES: &[ConstructorClass] = &[
     // ── Pattern.Mcp (1) ──────────────────────────────────────────────────
     ConstructorClass {
         module: "Mcp",
-        constructor: "Use",
+        constructor: "Call",
+        class: EffectClass::Escape,
+        runtime_check: RuntimeClassCheck::Enforce,
+    },
+    ConstructorClass {
+        module: "Mcp",
+        constructor: "Introspect",
+        class: EffectClass::Escape,
+        runtime_check: RuntimeClassCheck::Enforce,
+    },
+    ConstructorClass {
+        module: "Mcp",
+        constructor: "ListServers",
+        class: EffectClass::Escape,
+        runtime_check: RuntimeClassCheck::Enforce,
+    },
+    ConstructorClass {
+        module: "Mcp",
+        constructor: "Unload",
         class: EffectClass::Escape,
         runtime_check: RuntimeClassCheck::Enforce,
     },

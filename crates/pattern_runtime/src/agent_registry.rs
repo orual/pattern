@@ -524,18 +524,6 @@ mod tests {
         )
     }
 
-    /// Pull the chat-message body text out of a `MailboxInput` for
-    /// content-based assertions in the swap test.
-    fn text_of(input: &MailboxInput) -> String {
-        input
-            .msg
-            .chat_message
-            .content
-            .first_text()
-            .expect("test message has text content")
-            .to_string()
-    }
-
     // --- AC6.1 / AC6.4 / AC6.5 groundwork ---
 
     #[test]

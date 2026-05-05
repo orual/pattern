@@ -297,7 +297,7 @@ fn run_eval(
         LogHandler::for_session(session_id.to_string()),
         ShellHandler,
         FileHandler,
-        McpHandler,
+        McpHandler::new(ctx.tokio_handle().clone()),
         SpawnHandler,
         diagnostics_handler,
         WakeHandler,

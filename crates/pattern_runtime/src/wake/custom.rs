@@ -451,7 +451,7 @@ fn eval_condition(
         LogHandler::for_session("custom-wake".to_string()),
         ShellHandler,
         FileHandler,
-        McpHandler,
+        McpHandler::new(ctx.tokio_handle().clone()),
         SpawnHandler,
         diagnostics_handler,
         WakeHandler,

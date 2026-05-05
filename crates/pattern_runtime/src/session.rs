@@ -2423,12 +2423,8 @@ impl TidepoolSession {
         // wires its hook subscriptions to the session's HookBus.
         // Uses block_in_place because we're inside a tokio runtime.
         if let Some(plugin_reg) = session.ctx.plugin_registry() {
-            tracing::info!("plugin enable: registry found, checking plugins");
             let plugins = plugin_reg.list();
-            tracing::info!(
-                plugin_count = plugins.len(),
-                "plugin enable: loaded plugin list"
-            );
+
             let hook_bus = session.ctx.hook_bus().clone();
             let mut pending_mcp_configs: Vec<(
                 smol_str::SmolStr,
