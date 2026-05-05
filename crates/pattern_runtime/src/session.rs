@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use async_trait::async_trait;
 use pattern_core::ProviderClient;
 use pattern_core::error::RuntimeError;
+use pattern_core::plugin::manifest::ComponentSpec;
 use pattern_core::traits::{MemoryStore, NoOpSink, Session, TurnSink};
 use pattern_core::types::snapshot::{PersonaSnapshot, SessionSnapshot};
 use pattern_core::types::turn::{StepReply, TurnInput};
@@ -2429,9 +2430,34 @@ impl TidepoolSession {
                 "plugin enable: loaded plugin list"
             );
             let hook_bus = session.ctx.hook_bus().clone();
-            let handle = session.ctx.tokio_handle().clone();
             for lp in &plugins {
                 tracing::info!(plugin = %lp.id, has_ext = lp.extension.is_some(), "plugin enable: checking plugin");
+                use crate::plugin::cc_adapter::mcp_config;
+                let mcp_json = lp
+                    .manifest
+                    .mcp_servers
+                    .first()
+                    .and_then(|spec| match spec {
+                        ComponentSpec::Inline(json) => Some(json.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or(serde_json::Value::Null);
+                let configs = mcp_config::parse_mcp_servers(&lp.source_path, &mcp_json);
+
+                if !configs.is_empty() {
+                    let results = session.ctx.mcp_registry.load_servers(&configs).await;
+
+                    for (name, result) in &results {
+                        match result {
+                            Ok(()) => {
+                                tracing::info!(plugin = %lp.id, server = %name, "MCP server connected")
+                            }
+                            Err(e) => {
+                                tracing::warn!(plugin = %lp.id, server = %name, error = %e, "MCP server failed to connect")
+                            }
+                        }
+                    }
+                }
                 if let Some(ext) = &lp.extension {
                     let ctx = pattern_core::traits::plugin::PluginContext {
                         plugin_id: lp.id.clone(),
@@ -2440,17 +2466,7 @@ impl TidepoolSession {
                         memory_store: Some(session.ctx.memory_store()),
                         scope: Some(session.ctx.default_scope().clone()),
                     };
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        tokio::task::block_in_place(|| handle.block_on(ext.on_enable(&ctx)))
-                    }));
-                    let result = match result {
-                        Ok(inner) => inner,
-                        Err(_) => {
-                            tracing::error!(plugin = %lp.id, "plugin on_enable panicked");
-                            continue;
-                        }
-                    };
-                    if let Err(e) = result {
+                    if let Err(e) = ext.on_enable(&ctx).await {
                         tracing::warn!(
                             plugin = %lp.id,
                             error = %e,
