@@ -21,13 +21,21 @@ pub struct HookBridge {
 }
 
 impl HookBridge {
-    /// Spawn the bridge task. Safe to call with or without a tokio runtime.
-    /// If no runtime is active, the bridge is inert (events are dropped).
+    /// Spawn the bridge task. Uses the provided handle, or falls back to
+    /// the current runtime, or becomes inert if neither is available.
     pub fn spawn(bus: Arc<HookBus>) -> Self {
+        Self::spawn_with_handle(bus, tokio::runtime::Handle::try_current().ok())
+    }
+
+    /// Spawn with an explicit tokio handle.
+    pub fn spawn_on(bus: Arc<HookBus>, handle: tokio::runtime::Handle) -> Self {
+        Self::spawn_with_handle(bus, Some(handle))
+    }
+
+    fn spawn_with_handle(bus: Arc<HookBus>, handle: Option<tokio::runtime::Handle>) -> Self {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<HookBridgeRequest>();
 
-        // Spawn the drain task on the current runtime if available.
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        if let Some(handle) = handle {
             handle.spawn(async move {
                 while let Some(req) = rx.recv().await {
                     match req.event.semantics {

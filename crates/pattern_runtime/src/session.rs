@@ -741,7 +741,7 @@ impl SessionContext {
         // does not — agent_id is stable and unambiguous as a parent label.
         let spawn_registry = Arc::new(SpawnRegistry::new(agent_id.clone(), 8));
         let hook_bus__ = Arc::new(pattern_core::hooks::HookBus::new());
-        let hook_bridge__ = crate::hooks::HookBridge::spawn(hook_bus__.clone());
+        let hook_bridge__ = crate::hooks::HookBridge::spawn_on(hook_bus__.clone(), tokio_handle.clone());
         Self {
             plugin_registry: None,
             agent_id,
