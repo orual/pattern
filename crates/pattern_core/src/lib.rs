@@ -37,6 +37,9 @@
 
 pub mod base_instructions;
 pub mod capability;
+#[cfg(feature = "mcp-client")]
+#[cfg(feature = "mcp-client")]
+pub mod mcp;
 pub mod hooks;
 pub mod plugin;
 pub mod constellation;

@@ -31,11 +31,12 @@ loro = { version = "1.10", features = ["counter"] }
 
 # AI/LLM
 genai = { workspace = true }
-http = { version = "1.1", optional = true }
-tokenizers = { version = "0.21", optional = true }
 
 # Optional: SQLite type conversions (enabled by pattern-db)
 rusqlite = { version = "0.39", optional = true }
+
+# Optional: MCP client (Model Context Protocol)
+rmcp = { workspace = true, features = ["transport-child-process", "client", "transport-streamable-http-client-reqwest", "client-side-sse"], optional = true }
 
 # Schema generation
 schemars = { workspace = true }
@@ -70,13 +71,10 @@ miette = { workspace = true, features = ["fancy"] }
 proptest = "1"
 
 [features]
-default = [ "file-watch"]
-nd = []                    # Enable neurodivergent features when pattern-nd is ready
-oauth = [ "http"]          # OAuth authentication support
-file-watch = []            # File watching for data sources (notify always included)
 
 # Enable rusqlite FromSql/ToSql impls for domain enums
 sqlite = ["rusqlite"]
+mcp-client = ["dep:rmcp"]       # MCP client for tool invocation
 
 
 [lints]

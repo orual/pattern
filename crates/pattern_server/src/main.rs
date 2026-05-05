@@ -53,7 +53,10 @@ enum Command {
 async fn main() -> miette::Result<()> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "warn,pattern_server=info,pattern_runtime=info,pattern_provider=info,pattern_memory=info".into());
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    tracing_subscriber::fmt()
+        .json()
+        .with_env_filter(filter)
+        .init();
 
     let cli = Cli::parse();
 

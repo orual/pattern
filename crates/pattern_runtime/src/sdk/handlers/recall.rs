@@ -108,10 +108,12 @@ impl EffectHandler<SessionContext> for RecallHandler {
                 let id = store
                     .insert_archival(&session_scope, &content, None)
                     .map_err(|e| EffectError::Handler(format!("Pattern.Recall.Insert: {e}")))?;
-                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
-                    pattern_core::hooks::tags::RECALL_INSERTED,
-                    serde_json::json!({ "entry_id": id }),
-                ));
+                cx.user()
+                    .hook_bridge()
+                    .emit(pattern_core::hooks::HookEvent::notification(
+                        pattern_core::hooks::tags::RECALL_INSERTED,
+                        serde_json::json!({ "entry_id": id }),
+                    ));
                 cx.respond(id)
             }
 
@@ -122,8 +124,9 @@ impl EffectHandler<SessionContext> for RecallHandler {
                 let mut hits: Vec<String> = Vec::new();
                 for target_agent in &agents {
                     // Cross-agent recall is persona-scoped (Global).
-                    let target_scope =
-                        pattern_core::types::memory_types::Scope::Global(target_agent.clone().into());
+                    let target_scope = pattern_core::types::memory_types::Scope::Global(
+                        target_agent.clone().into(),
+                    );
                     let results = store
                         .search_archival(&target_scope, &query, 10)
                         .map_err(|e| EffectError::Handler(format!("Pattern.Recall.Search: {e}")))?;
@@ -138,10 +141,12 @@ impl EffectHandler<SessionContext> for RecallHandler {
                     }
                 }
 
-                cx.user().hook_bridge().emit(pattern_core::hooks::HookEvent::notification(
-                    pattern_core::hooks::tags::RECALL_SEARCH,
-                    serde_json::json!({ "query": query, "result_count": hits.len() }),
-                ));
+                cx.user()
+                    .hook_bridge()
+                    .emit(pattern_core::hooks::HookEvent::notification(
+                        pattern_core::hooks::tags::RECALL_SEARCH,
+                        serde_json::json!({ "query": query, "result_count": hits.len() }),
+                    ));
                 cx.respond(hits)
             }
 
