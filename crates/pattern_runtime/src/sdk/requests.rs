@@ -300,8 +300,11 @@ mod parity {
     #[test]
     fn mcp_req_variants() {
         use super::McpReq;
-        let _ = McpReq::Use(String::new(), String::new());
-        assert_eq!(count("McpReq"), 1);
+        let _ = McpReq::Call(String::new(), String::new(), String::new());
+        let _ = McpReq::Introspect(String::new());
+        let _ = McpReq::ListServers;
+        let _ = McpReq::Unload(String::new());
+        assert_eq!(count("McpReq"), 4);
     }
 
     #[test]

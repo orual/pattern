@@ -20,7 +20,6 @@ impl std::fmt::Debug for McpRegistry {
         f.debug_struct("McpRegistry").finish_non_exhaustive()
     }
 }
-}
 
 impl McpRegistry {
     /// Load a set of server configs, connecting to each.

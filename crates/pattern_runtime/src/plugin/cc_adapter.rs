@@ -6,6 +6,7 @@
 
 pub mod hooks;
 pub mod lifecycle;
+pub mod mcp_config;
 pub mod skills;
 
 use std::path::PathBuf;

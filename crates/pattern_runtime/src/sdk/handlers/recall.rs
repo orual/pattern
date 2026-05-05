@@ -378,7 +378,7 @@ mod tests {
         > {
             Ok(pattern_core::types::memory_types::UndoRedoDepth { undo: 0, redo: 0 })
         }
-        fn commit_write(&self, scope: &Scope, label: &str) -> pattern_core::MemoryResult<()> {
+        fn commit_write(&self, scope: &pattern_core::types::memory_types::Scope, label: &str) -> pattern_core::MemoryResult<()> {
             panic!()
         }
     }

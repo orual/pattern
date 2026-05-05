@@ -560,7 +560,16 @@ impl HasMcpRegistry for SessionContext {
     fn mcp_registry(&self) -> &Arc<crate::mcp::McpRegistry> {
         &self.mcp_registry
     }
+}
 
+
+impl HasMcpRegistry for () {
+    fn mcp_registry(&self) -> &Arc<crate::mcp::McpRegistry> {
+        static EMPTY: std::sync::LazyLock<Arc<crate::mcp::McpRegistry>> =
+            std::sync::LazyLock::new(|| Arc::new(crate::mcp::McpRegistry::default()));
+        &EMPTY
+    }
+}
 /// Handlers call this to read the active [`pattern_core::PolicySet`].
 ///
 /// `SessionContext` exposes the live, KDL-merged set; the `()` shim
@@ -816,6 +825,7 @@ impl SessionContext {
             wake_registry: None,
             constellation_registry: None,
             fronting_committer: None,
+            mcp_registry: Arc::new(crate::mcp::McpRegistry::default()),
         }
     }
 
@@ -1253,6 +1263,7 @@ impl SessionContext {
             // the shared lock) so any SDK-driven fronting mutation from a
             // child also persists and fans out via the same path.
             fronting_committer: self.fronting_committer.clone(),
+            mcp_registry: self.mcp_registry.clone(),
         };
         Arc::new(child)
     }
