@@ -78,15 +78,9 @@ pub async fn install_skills(
             if let (Some(store), Some(scope)) = (&ctx.memory_store, &ctx.scope) {
                 let label = format!("skill-{}", parsed.metadata.name);
                 // Check if skill block already exists (don't overwrite).
-                // Overwrite if exists — plugin cache is authoritative.
-                if let Ok(Some(existing)) = store.get_block(scope, &label) {
-                    if let Err(e) = existing.set_text(&parsed.body, false) {
-                        tracing::warn!(skill = %parsed.metadata.name, error = %e, "failed to update skill body");
-                    }
-                    if let Err(e) = store.persist_block(scope, &label) {
-                        tracing::warn!(skill = %parsed.metadata.name, error = %e, "failed to persist skill");
-                    }
-                    continue;
+                // Delete existing block if any — plugin cache is authoritative.
+                if let Ok(Some(_)) = store.get_block(scope, &label) {
+                    let _ = store.delete_block(scope, &label);
                 }
                 let create = pattern_core::types::block::BlockCreate::new(
                     label.clone(),
@@ -101,7 +95,7 @@ pub async fn install_skills(
                     Ok(doc) => {
                         // Write skill body into the standard 'content' container
                         // so Memory.get and Skills.loadSkill can see it.
-                        if let Err(e) = doc.set_text(&parsed.body, false) {
+                        if let Err(e) = doc.set_text(&parsed.body, true) {
                             tracing::warn!(skill = %parsed.metadata.name, error = %e, "set_text failed");
                         }
                         // Also write the full skill layout (metadata/extras/body).
