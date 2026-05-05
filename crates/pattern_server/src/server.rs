@@ -1018,15 +1018,10 @@ impl DaemonServer {
                 let _ = tx.send(()).await;
             }
             PatternMessage::RunCommand(req) => {
-                // RunCommand is the transport for plugin-namespaced slash commands
-                // (e.g. `/plugin-name:do-thing`). Built-in commands route through
-                // dedicated RPCs (ListAgents, GetStatus, Shutdown, ...) rather than
-                // here. The plugin system itself is future work; for now every
-                // command returns a "not implemented" error.
                 let WithChannels { tx, inner, .. } = req;
                 let result = CommandResult {
                     success: false,
-                    output: format!("plugin command not yet implemented: {}", inner.command),
+                    output: format!("command not yet implemented: {}", inner.command),
                 };
                 let _ = tx.send(result).await;
             }

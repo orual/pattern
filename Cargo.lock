@@ -5667,6 +5667,7 @@ dependencies = [
  "pattern-db",
  "pattern-memory",
  "pattern-provider",
+ "pattern-runtime",
  "pattern-server",
  "pretty_assertions",
  "ratatui",

@@ -38,6 +38,85 @@ enum Commands {
     Daemon(commands::daemon::DaemonCmd),
     /// Manage provider authentication (login, status, clear).
     Auth(commands::auth::AuthCmd),
+    /// Manage plugins (install, list, uninstall).
+    Plugin(PluginCmd),
+}
+
+// ---------------------------------------------------------------------------
+// Plugin command handler
+// ---------------------------------------------------------------------------
+
+fn cmd_plugin(cmd: PluginCmd) -> MietteResult<()> {
+    use pattern_memory::paths::PatternPaths;
+    use pattern_runtime::plugin::registry::{InstallSource, PluginRegistry};
+    use std::sync::Arc;
+
+    let paths = Arc::new(PatternPaths::default_paths()
+        .map_err(|e| miette::miette!("failed to resolve pattern paths: {e}"))?);
+    let project_dir = std::env::current_dir().ok();
+    let reg = PluginRegistry::load(paths, project_dir)
+        .map_err(|e| miette::miette!("failed to load plugin registry: {e}"))?;
+
+    match cmd.sub {
+        PluginSub::Install { path, scope } => {
+            let scope = match scope.as_str() {
+                "project" => pattern_core::plugin::PluginScope::Project { private: false },
+                _ => pattern_core::plugin::PluginScope::Global,
+            };
+            let lp = reg.install(InstallSource::LocalPath(&path), scope)
+                .map_err(|e| miette::miette!("install failed: {e}"))?;
+            println!("Installed plugin: {} (scope: {:?})", lp.id, lp.scope);
+        }
+        PluginSub::List => {
+            let plugins = reg.list();
+            if plugins.is_empty() {
+                println!("No plugins installed.");
+            } else {
+                for p in &plugins {
+                    println!("  {} (scope: {:?}, path: {})",
+                        p.id, p.scope, p.source_path.display());
+                }
+            }
+        }
+        PluginSub::Uninstall { id, clean } => {
+            reg.uninstall(&id, clean)
+                .map_err(|e| miette::miette!("uninstall failed: {e}"))?;
+            println!("Uninstalled plugin: {id}");
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Plugin subcommand types
+// ---------------------------------------------------------------------------
+
+#[derive(clap::Args)]
+struct PluginCmd {
+    #[command(subcommand)]
+    sub: PluginSub,
+}
+
+#[derive(Subcommand)]
+enum PluginSub {
+    /// Install a plugin from a local path.
+    Install {
+        /// Path to the plugin directory.
+        path: PathBuf,
+        /// Install scope (global or project).
+        #[arg(long, default_value = "global")]
+        scope: String,
+    },
+    /// List installed plugins.
+    List,
+    /// Uninstall a plugin by ID.
+    Uninstall {
+        /// Plugin identifier.
+        id: String,
+        /// Also remove cached files.
+        #[arg(long)]
+        clean: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -357,6 +436,9 @@ async fn main() -> MietteResult<()> {
         }
         Some(Commands::Auth(auth)) => {
             commands::auth::cmd_auth(auth).await?;
+        }
+        Some(Commands::Plugin(plugin)) => {
+            cmd_plugin(plugin)?;
         }
         None => {
             // Default: enter chat mode with all defaults (auto-zellij enabled).

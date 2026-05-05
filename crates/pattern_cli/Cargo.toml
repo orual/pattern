@@ -20,6 +20,7 @@ oauth = ["pattern-core/oauth", "pattern-provider/subscription-oauth"]
 pattern-core = { path = "../pattern_core" }
 pattern-db = { path = "../pattern_db"}
 pattern-memory = { path = "../pattern_memory" }
+pattern-runtime = { path = "../pattern_runtime" }
 pattern-provider = { path = "../pattern_provider" }
 pattern-server = { path = "../pattern_server" }
 nix = { version = "0.29", features = ["signal", "process"] }
