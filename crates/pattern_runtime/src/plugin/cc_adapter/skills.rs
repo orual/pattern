@@ -75,10 +75,15 @@ pub async fn install_skills(
             )
             .with_description(format!("Skill: {} (plugin: {})", parsed.metadata.name, plugin_id));
 
-            let doc = match store.create_or_replace_block(&scope, create) {
-                Ok(d) => d,
-                Err(e) => {
-                    tracing::warn!(skill = %parsed.metadata.name, error = %e, "failed to create skill block");
+            if let Err(e) = store.create_or_replace_block(&scope, create) {
+                tracing::warn!(skill = %parsed.metadata.name, error = %e, "failed to create skill block");
+                continue;
+            }
+            // Get the cached instance (create_or_replace returns a clone, not the cache entry).
+            let doc = match store.get_block(&scope, &label) {
+                Ok(Some(d)) => d,
+                _ => {
+                    tracing::warn!(skill = %parsed.metadata.name, "block created but not in cache");
                     continue;
                 }
             };
