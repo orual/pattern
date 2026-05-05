@@ -15,6 +15,13 @@ pub struct McpRegistry {
     servers: RwLock<HashMap<String, Arc<McpClient>>>,
 }
 
+impl std::fmt::Debug for McpRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpRegistry").finish_non_exhaustive()
+    }
+}
+}
+
 impl McpRegistry {
     /// Load a set of server configs, connecting to each.
     /// Returns results per-server (name, outcome).

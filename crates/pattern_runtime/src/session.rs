@@ -15,6 +15,7 @@
 //! worker for checkpoint-only use). See `runtime.rs` for the trait bridge.
 //!
 
+use std::fmt::Debug;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -528,6 +529,8 @@ pub struct SessionContext {
     /// `None`, the `Pattern.Fronting` effect is unwired entirely; the handler
     /// returns a `FRONTING_NOT_WIRED_PREFIX`-marked error.
     fronting_committer: Option<Arc<dyn crate::sdk::handlers::fronting::FrontingCommitter>>,
+    /// Per-session MCP server registry. Always present (may be empty).
+    mcp_registry: Arc<crate::mcp::McpRegistry>,
 }
 
 /// Handlers call this to decide whether to short-circuit on soft-cancel.
@@ -547,6 +550,16 @@ impl HasCancelState for SessionContext {
         SessionContext::cancel_state(self)
     }
 }
+
+/// Handlers that dispatch MCP calls need access to the per-session registry.
+pub trait HasMcpRegistry {
+    fn mcp_registry(&self) -> &Arc<crate::mcp::McpRegistry>;
+}
+
+impl HasMcpRegistry for SessionContext {
+    fn mcp_registry(&self) -> &Arc<crate::mcp::McpRegistry> {
+        &self.mcp_registry
+    }
 
 /// Handlers call this to read the active [`pattern_core::PolicySet`].
 ///
@@ -741,7 +754,8 @@ impl SessionContext {
         // does not — agent_id is stable and unambiguous as a parent label.
         let spawn_registry = Arc::new(SpawnRegistry::new(agent_id.clone(), 8));
         let hook_bus__ = Arc::new(pattern_core::hooks::HookBus::new());
-        let hook_bridge__ = crate::hooks::HookBridge::spawn_on(hook_bus__.clone(), tokio_handle.clone());
+        let hook_bridge__ =
+            crate::hooks::HookBridge::spawn_on(hook_bus__.clone(), tokio_handle.clone());
         Self {
             plugin_registry: None,
             agent_id,
@@ -941,7 +955,10 @@ impl SessionContext {
     }
 
     /// Set the plugin registry.
-    pub fn with_plugin_registry(mut self, reg: Arc<crate::plugin::registry::PluginRegistry>) -> Self {
+    pub fn with_plugin_registry(
+        mut self,
+        reg: Arc<crate::plugin::registry::PluginRegistry>,
+    ) -> Self {
         self.plugin_registry = Some(reg);
         self
     }
@@ -2397,7 +2414,10 @@ impl TidepoolSession {
         if let Some(plugin_reg) = session.ctx.plugin_registry() {
             tracing::info!("plugin enable: registry found, checking plugins");
             let plugins = plugin_reg.list();
-            tracing::info!(plugin_count = plugins.len(), "plugin enable: loaded plugin list");
+            tracing::info!(
+                plugin_count = plugins.len(),
+                "plugin enable: loaded plugin list"
+            );
             let hook_bus = session.ctx.hook_bus().clone();
             let handle = session.ctx.tokio_handle().clone();
             for lp in &plugins {
@@ -2411,9 +2431,7 @@ impl TidepoolSession {
                         scope: Some(session.ctx.default_scope().clone()),
                     };
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        tokio::task::block_in_place(|| {
-                            handle.block_on(ext.on_enable(&ctx))
-                        })
+                        tokio::task::block_in_place(|| handle.block_on(ext.on_enable(&ctx)))
                     }));
                     let result = match result {
                         Ok(inner) => inner,

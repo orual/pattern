@@ -378,6 +378,9 @@ mod tests {
         > {
             Ok(pattern_core::types::memory_types::UndoRedoDepth { undo: 0, redo: 0 })
         }
+        fn commit_write(&self, scope: &Scope, label: &str) -> pattern_core::MemoryResult<()> {
+            panic!()
+        }
     }
 
     fn sctx(store: Arc<dyn MemoryStore>, db: Arc<pattern_db::ConstellationDb>) -> SessionContext {
