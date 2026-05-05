@@ -1,9 +1,4 @@
 //! CC SKILL.md → Pattern skill block translator.
-//!
-//! Walks the plugin's skill directories, parses each SKILL.md via
-//! `pattern_memory::fs::markdown_skill::parse`, decorates with
-//! `PluginInstalled` trust tier and source attribution, then persists
-//! as Skill blocks in the memory store.
 
 use std::path::{Path, PathBuf};
 
@@ -11,10 +6,11 @@ use smol_str::SmolStr;
 
 use pattern_core::plugin::manifest::{ComponentSpec, PluginManifest};
 use pattern_core::traits::plugin::{PluginContext, PluginError};
-use pattern_core::types::memory_types::SkillTrustTier;
+use pattern_core::traits::MemoryStore;
+use pattern_core::types::memory_types::{MemoryBlockType, Scope, SkillTrustTier};
 
 /// Walk the plugin's skills directory and install each SKILL.md as a
-/// Pattern skill block with `trust_tier: PluginInstalled`.
+/// Pattern skill block.
 pub async fn install_skills(
     plugin_id: &SmolStr,
     plugin_root: &Path,
@@ -23,128 +19,102 @@ pub async fn install_skills(
 ) -> Result<(), PluginError> {
     let skill_dirs = resolve_skill_dirs(plugin_root, manifest);
 
+    let (store, scope) = match (&ctx.memory_store, &ctx.scope) {
+        (Some(s), Some(sc)) => (s.clone(), sc.clone()),
+        _ => {
+            tracing::debug!(plugin = %plugin_id, "no memory store, skills not persisted");
+            return Ok(());
+        }
+    };
+
     for skill_dir in skill_dirs {
         if !skill_dir.is_dir() {
-            tracing::debug!(
-                plugin_id = %plugin_id,
-                path = %skill_dir.display(),
-                "skill directory does not exist, skipping"
-            );
             continue;
         }
 
-        let entries = std::fs::read_dir(&skill_dir).map_err(|e| {
-            PluginError::Io(std::io::Error::new(
-                e.kind(),
-                format!("reading skill dir {}: {e}", skill_dir.display()),
-            ))
-        })?;
+        let entries = match std::fs::read_dir(&skill_dir) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(path = %skill_dir.display(), error = %e, "failed to read skill dir");
+                continue;
+            }
+        };
 
-        for entry in entries {
-            let entry = entry.map_err(|e| PluginError::Io(e))?;
+        for entry in entries.flatten() {
             let skill_md = entry.path().join("SKILL.md");
             if !skill_md.is_file() {
                 continue;
             }
 
-            let raw = std::fs::read(&skill_md).map_err(|e| {
-                PluginError::SkillTranslationFailed {
-                    plugin_id: plugin_id.clone(),
-                    path: skill_md.clone(),
-                    message: format!("failed to read: {e}"),
+            let raw = match std::fs::read(&skill_md) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(path = %skill_md.display(), error = %e, "failed to read SKILL.md");
+                    continue;
                 }
-            })?;
+            };
 
-            // Reuse the existing saphyr-backed parser.
-            let mut parsed = pattern_memory::fs::markdown_skill::parse::parse(&raw)
-                .map_err(|e| PluginError::SkillTranslationFailed {
-                    plugin_id: plugin_id.clone(),
-                    path: skill_md.clone(),
-                    message: e.to_string(),
-                })?;
+            let mut parsed = match pattern_memory::fs::markdown_skill::parse::parse(&raw) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(path = %skill_md.display(), error = %e, "failed to parse SKILL.md");
+                    continue;
+                }
+            };
 
-            // Decorate: PluginInstalled trust tier + source attribution.
             parsed.metadata.trust_tier = SkillTrustTier::PluginInstalled;
             parsed.metadata.source_plugin_id = Some(plugin_id.clone());
 
-            tracing::info!(
-                plugin_id = %plugin_id,
-                skill_name = %parsed.metadata.name,
-                path = %skill_md.display(),
-                "installing skill from CC plugin"
-            );
+            let label = format!("skill-{}", parsed.metadata.name);
 
-            // Persist as a Skill block in the memory store.
-            if let (Some(store), Some(scope)) = (&ctx.memory_store, &ctx.scope) {
-                let label = format!("skill-{}", parsed.metadata.name);
-                // Check if skill block already exists (don't overwrite).
-                // Delete existing block if any — plugin cache is authoritative.
-                if let Ok(Some(_)) = store.get_block(scope, &label) {
-                    let _ = store.delete_block(scope, &label);
-                }
-                let create = pattern_core::types::block::BlockCreate::new(
-                    label.clone(),
-                    pattern_core::types::memory_types::MemoryBlockType::Working,
-                    pattern_core::types::memory_types::BlockSchema::Skill { expected_keys: vec![] },
-                )
-                .with_description(format!(
-                    "Skill: {} (from plugin {})",
-                    parsed.metadata.name, plugin_id
-                ));
-                match store.create_block(scope, create) {
-                    Ok(doc) => {
-                        // Write skill body into the standard 'content' container
-                        // so Memory.get and Skills.loadSkill can see it.
-                        if let Err(e) = doc.set_text(&parsed.body, true) {
-                            tracing::warn!(skill = %parsed.metadata.name, error = %e, "set_text failed");
-                        }
-                        // Also write the full skill layout (metadata/extras/body).
-                        if let Err(e) = pattern_memory::fs::markdown_skill::loro_bridge::write_skill_to_loro_doc(
-                            &parsed, doc.inner(),
-                        ) {
+            // Try to get existing block first (handles cross-session persistence).
+            let doc = match store.get_block(&scope, &label) {
+                Ok(Some(existing)) => existing,
+                _ => {
+                    // Block doesn't exist in memory — try to create it.
+                    let create = pattern_core::types::block::BlockCreate::new(
+                        label.clone(),
+                        MemoryBlockType::Working,
+                        pattern_core::types::memory_types::BlockSchema::Skill { expected_keys: vec![] },
+                    )
+                    .with_description(format!("Skill: {} (plugin: {})", parsed.metadata.name, plugin_id));
+
+                    match store.create_block(&scope, create) {
+                        Ok(doc) => doc,
+                        Err(e) => {
                             tracing::warn!(
                                 skill = %parsed.metadata.name,
                                 error = %e,
-                                "failed to write skill LoroDoc content"
+                                "failed to create skill block"
                             );
+                            continue;
                         }
-                        if let Err(e) = store.persist_block(scope, &label) {
-                            tracing::warn!(
-                                skill = %parsed.metadata.name,
-                                error = %e,
-                                "failed to persist skill block"
-                            );
-                        }
-                        tracing::info!(
-                            skill = %parsed.metadata.name,
-                            plugin = %plugin_id,
-                            "skill block created"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            skill = %parsed.metadata.name,
-                            error = %e,
-                            "failed to create skill block"
-                        );
                     }
                 }
-            } else {
-                tracing::debug!(
-                    skill = %parsed.metadata.name,
-                    "no memory store available, skill not persisted"
-                );
+            };
+
+            // Write body content (authoritative from plugin cache).
+            if let Err(e) = doc.set_text(&parsed.body, true) {
+                tracing::warn!(skill = %parsed.metadata.name, error = %e, "set_text failed");
             }
+
+            // Persist to disk.
+            if let Err(e) = store.mark_dirty(&scope, &label) {
+                tracing::warn!(skill = %parsed.metadata.name, error = %e, "mark_dirty failed");
+            }
+            if let Err(e) = store.persist_block(&scope, &label) {
+                tracing::warn!(skill = %parsed.metadata.name, error = %e, "persist failed");
+            }
+
+            tracing::info!(skill = %parsed.metadata.name, plugin = %plugin_id, "skill loaded");
         }
     }
     Ok(())
 }
 
-/// Resolve the skill directories from the manifest's component specs.
-/// Falls back to `<plugin_root>/skills/` if no skills are declared.
+/// Resolve skill directories from the manifest.
 fn resolve_skill_dirs(plugin_root: &Path, manifest: &PluginManifest) -> Vec<PathBuf> {
     if manifest.skills.is_empty() {
-        // Default: look for a `skills/` subdirectory.
         let default = plugin_root.join("skills");
         if default.is_dir() {
             return vec![default];
@@ -164,17 +134,6 @@ fn resolve_skill_dirs(plugin_root: &Path, manifest: &PluginManifest) -> Vec<Path
                 };
                 Some(resolved)
             }
-            ComponentSpec::Paths(ps) => {
-                // Take the first path for directory resolution.
-                ps.first().map(|p| {
-                    if p.is_absolute() {
-                        p.clone()
-                    } else {
-                        plugin_root.join(p)
-                    }
-                })
-            }
-            ComponentSpec::Inline(_) => None, // Can't resolve inline specs to directories.
             _ => None,
         })
         .collect()

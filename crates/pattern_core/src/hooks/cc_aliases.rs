@@ -48,6 +48,10 @@ pub fn cc_alias_map() -> HashMap<&'static str, Vec<&'static str>> {
     map.insert("onMessageSent", vec![super::tags::MESSAGE_SENT]);
     map.insert("onMessageReceived", vec![super::tags::MESSAGE_RECEIVED]);
 
+    // Additional CC events not in the original map.
+    map.entry("PostToolUse").or_default().push(super::tags::TOOL_AFTER);
+    map.entry("SessionStart").or_default().push(super::tags::SESSION_OPENED);
+
     map
 }
 
