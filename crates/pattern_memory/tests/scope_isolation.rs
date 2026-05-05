@@ -510,6 +510,7 @@ fn skill_block_with_real_schema_is_invisible_to_persona_under_full_isolation() {
         description: Some("A test skill.".to_string()),
         keywords: vec!["test".to_string()],
         hooks: serde_json::Value::Null,
+        source_plugin_id: None,
     };
     store.seed_skill(
         Scope::local("project"),

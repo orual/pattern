@@ -165,6 +165,7 @@ fn seed_skill_block(cache: &MemoryCache, label: &str, keyword: &str) {
             description: None,
             keywords: vec![keyword.to_string()],
             hooks: serde_json::Value::Null,
+            source_plugin_id: None,
         },
         extras: loro::LoroValue::Map(Default::default()),
         body: "Skill body content without the search term.\n".to_string(),

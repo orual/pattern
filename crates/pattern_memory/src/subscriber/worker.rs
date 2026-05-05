@@ -149,10 +149,15 @@ pub(crate) fn render_canonical_from_disk_doc(
             let extras = crate::fs::markdown_skill::project_extras_from_loro(root_map)
                 .map_err(|e| format!("Skill extras projection failed: {e}"))?;
 
-            // Body text from the LoroText container, defaulting to empty.
-            let body = match root_map.get("body") {
-                Some(loro::LoroValue::String(s)) => s.as_ref().to_string(),
-                _ => String::new(),
+            // Body text from the LoroText container. Try "content" first
+            // (unified container for all blocks), fall back to "body" for
+            // legacy skill blocks.
+            let body = match root_map.get("content") {
+                Some(loro::LoroValue::String(s)) if !s.is_empty() => s.as_ref().to_string(),
+                _ => match root_map.get("body") {
+                    Some(loro::LoroValue::String(s)) => s.as_ref().to_string(),
+                    _ => String::new(),
+                },
             };
 
             let rendered = crate::fs::markdown_skill::emit(&metadata, &extras, &body)

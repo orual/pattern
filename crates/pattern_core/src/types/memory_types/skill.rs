@@ -250,6 +250,7 @@ mod tests {
             description: Some("A test skill".to_string()),
             keywords: vec!["test".to_string(), "example".to_string()],
             hooks: hooks_value.clone(),
+            source_plugin_id: None,
         };
 
         // Serialize to JSON.
@@ -299,6 +300,7 @@ mod tests {
             description: None,
             keywords: vec![],
             hooks: serde_json::Value::Null,
+            source_plugin_id: None,
         };
 
         // Serialize to JSON string.

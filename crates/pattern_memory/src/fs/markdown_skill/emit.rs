@@ -365,6 +365,7 @@ mod tests {
             description: None,
             keywords: Vec::new(),
             hooks: JsonValue::Null,
+            source_plugin_id: None,
         }
     }
 
@@ -381,6 +382,7 @@ mod tests {
                 "z_event": [{ "inner_b": 1, "inner_a": 2 }],
                 "a_event": [{ "log": "msg" }],
             }),
+            source_plugin_id: None,
         };
         let mut extras = HashMap::<String, LoroValue>::new();
         extras.insert("z_extra".to_string(), LoroValue::I64(1));
@@ -453,6 +455,7 @@ mod tests {
             description: Some("Fix the authentication bug.".to_string()),
             keywords: vec!["auth".to_string(), "bug".to_string(), "urgent".to_string()],
             hooks: JsonValue::Null,
+            source_plugin_id: None,
         };
         let out = emit(&meta, &empty_extras(), "Body.\n").unwrap();
         let parsed = parse(out.as_bytes()).unwrap();
@@ -479,6 +482,7 @@ mod tests {
                     {"log": "scratchpad-touched"}
                 ]
             }),
+            source_plugin_id: None,
         };
         let out = emit(&meta, &empty_extras(), "body\n").unwrap();
         let parsed = parse(out.as_bytes()).unwrap();
@@ -603,6 +607,7 @@ mod tests {
             description: None,
             keywords: vec!["0o0".to_string(), "0O777".to_string(), "normal".to_string()],
             hooks: serde_json::Value::Null,
+            source_plugin_id: None,
         };
         let out = emit(&meta, &empty_extras(), "body\n").unwrap();
 
@@ -668,6 +673,7 @@ mod tests {
             description: None,
             keywords: Vec::new(),
             hooks: json!({"threshold": 1.0, "offset": 0.0}),
+            source_plugin_id: None,
         };
         let out = emit(&meta, &empty_extras(), "b\n").unwrap();
         let parsed = parse(out.as_bytes()).unwrap();
@@ -696,6 +702,7 @@ mod tests {
             description: None,
             keywords: Vec::new(),
             hooks: json!({"big": u64::MAX}),
+            source_plugin_id: None,
         };
         let out = emit(&meta, &empty_extras(), "b\n").unwrap();
         // The value must appear in the output as the decimal string

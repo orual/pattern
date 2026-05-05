@@ -206,7 +206,14 @@ mod tests {
     }
 
     impl MemoryStore for RecallTestStore {
-        fn create_or_replace_block(&self, scope: &Scope, create: BlockCreate) -> MemoryResult<StructuredDocument> { self.create_block(scope, create) }
+        fn create_or_replace_block(
+            &self,
+            scope: &pattern_core::types::memory_types::Scope,
+            create: pattern_core::types::block::BlockCreate,
+        ) -> pattern_core::types::memory_types::MemoryResult<pattern_core::memory::StructuredDocument>
+        {
+            self.create_block(scope, create)
+        }
         fn insert_archival(
             &self,
             scope: &pattern_core::types::memory_types::Scope,

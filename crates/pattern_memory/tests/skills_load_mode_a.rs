@@ -154,6 +154,7 @@ fn load_does_not_dirty_mount() {
         description: Some("Mode A integration test skill".to_string()),
         keywords: vec!["integration".to_string(), "mode-a".to_string()],
         hooks: serde_json::Value::Null,
+        source_plugin_id: None,
     };
 
     // 1. Initialize a jj git repo in a TempDir.

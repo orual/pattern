@@ -117,6 +117,7 @@ fn skill_metadata_strategy() -> impl Strategy<Value = SkillMetadata> {
                 description,
                 keywords,
                 hooks,
+                source_plugin_id: None,
             },
         )
 }
@@ -253,6 +254,7 @@ proptest! {
             description: None,
             keywords: Vec::new(),
             hooks: serde_json::json!({"counter": big}),
+            source_plugin_id: None,
         };
         let extras = LoroValue::Map(HashMap::<String, LoroValue>::new().into());
 

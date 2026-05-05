@@ -133,6 +133,7 @@ fn fts5_skill_search_by_name() {
             description: None,
             keywords: vec![],
             hooks: serde_json::Value::Null,
+            source_plugin_id: None,
         },
         "No special body content.\n",
     );
@@ -147,6 +148,7 @@ fn fts5_skill_search_by_name() {
             description: None,
             keywords: vec![],
             hooks: serde_json::Value::Null,
+            source_plugin_id: None,
         },
         "Nothing relevant here.\n",
     );
@@ -185,6 +187,7 @@ fn fts5_skill_search_by_description() {
             description: Some("Handles token-refresh for expired sessions".to_string()),
             keywords: vec![],
             hooks: serde_json::Value::Null,
+            source_plugin_id: None,
         },
         "Generic body text.\n",
     );
@@ -199,6 +202,7 @@ fn fts5_skill_search_by_description() {
             description: Some("Nothing relevant".to_string()),
             keywords: vec![],
             hooks: serde_json::Value::Null,
+            source_plugin_id: None,
         },
         "Also irrelevant.\n",
     );
@@ -237,6 +241,7 @@ fn fts5_skill_search_by_keyword() {
             description: None,
             keywords: vec!["oauth2".to_string(), "auth".to_string()],
             hooks: serde_json::Value::Null,
+            source_plugin_id: None,
         },
         "Manages user sessions.\n",
     );
@@ -251,6 +256,7 @@ fn fts5_skill_search_by_keyword() {
             description: None,
             keywords: vec!["filesystem".to_string(), "io".to_string()],
             hooks: serde_json::Value::Null,
+            source_plugin_id: None,
         },
         "Manages files.\n",
     );
@@ -289,6 +295,7 @@ fn fts5_skill_search_by_body() {
             description: None,
             keywords: vec![],
             hooks: serde_json::Value::Null,
+            source_plugin_id: None,
         },
         "Revokes all active sessions gracefully.\n",
     );
@@ -303,6 +310,7 @@ fn fts5_skill_search_by_body() {
             description: None,
             keywords: vec![],
             hooks: serde_json::Value::Null,
+            source_plugin_id: None,
         },
         "Creates a new session for the user.\n",
     );
@@ -342,6 +350,7 @@ fn fts5_skill_content_snapshot() {
             description: Some("Runs a security audit on the codebase".to_string()),
             keywords: vec!["security".to_string(), "audit".to_string()],
             hooks: serde_json::Value::Null,
+            source_plugin_id: None,
         },
         "Checks for vulnerabilities and misconfigurations. security baseline.\n",
     );
@@ -356,6 +365,7 @@ fn fts5_skill_content_snapshot() {
             description: None,
             keywords: vec!["security".to_string(), "rbac".to_string()],
             hooks: serde_json::Value::Null,
+            source_plugin_id: None,
         },
         "Manages role-based access control for security enforcement.\n",
     );
@@ -370,6 +380,7 @@ fn fts5_skill_content_snapshot() {
             description: Some("Rotates credentials for security compliance".to_string()),
             keywords: vec![],
             hooks: serde_json::Value::Null,
+            source_plugin_id: None,
         },
         "Automates certificate and API key security rotation.\n",
     );

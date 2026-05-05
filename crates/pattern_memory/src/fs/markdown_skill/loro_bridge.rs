@@ -17,7 +17,7 @@
 //!   containers, which would require separate sub-container lifecycle management.
 //!   On projection, the JSON strings are decoded back to [`LoroValue`] before
 //!   being assembled into the `extras` map passed to [`super::emit`].
-//! - `"body"` — `LoroText` holding the raw markdown body.
+//! - `"content"` — `LoroText` holding the raw markdown body.
 //!
 //! # Why JSON strings?
 //!
@@ -44,7 +44,7 @@ use super::parse::SkillFile;
 /// Populates three root-level containers:
 /// - `"metadata"` — typed scalar fields from [`SkillMetadata`].
 /// - `"extras"` — unknown frontmatter keys, each encoded as a JSON string.
-/// - `"body"` — the raw markdown body text.
+/// - `"content"` — the raw markdown body text.
 ///
 /// Each call fully replaces the prior state; this function is suitable for the
 /// external-edit inbound path where a watcher has detected a file change and
@@ -56,10 +56,10 @@ pub fn write_skill_to_loro_doc(skill_file: &SkillFile, doc: &LoroDoc) -> Result<
     write_metadata_to_loro_map(doc, &skill_file.metadata).map_err(|e| e.to_string())?;
     write_extras_to_loro_map(doc, &skill_file.extras)?;
 
-    let body_text = doc.get_text("body");
+    let body_text = doc.get_text("content");
     body_text
         .update(&skill_file.body, Default::default())
-        .map_err(|e| format!("LoroText update for 'body' failed: {e}"))?;
+        .map_err(|e| format!("LoroText update for 'content' failed: {e}"))?;
 
     Ok(())
 }
@@ -380,6 +380,7 @@ mod tests {
                 description: None,
                 keywords: vec![],
                 hooks: JsonValue::Null,
+                source_plugin_id: None,
             },
             extras: LoroValue::Map(Default::default()),
             body: "body text\n".to_string(),
@@ -424,6 +425,7 @@ mod tests {
                 description: Some("A full skill.".to_string()),
                 keywords: vec!["a".to_string(), "b".to_string()],
                 hooks: serde_json::json!({"on_load": [{"log": "loaded"}]}),
+                source_plugin_id: None,
             },
             extras: LoroValue::Map(extras.into()),
             body: "# Title\n\nBody.\n".to_string(),
@@ -459,7 +461,7 @@ mod tests {
         assert!(matches!(emap.get("version"), Some(LoroValue::I64(3))));
 
         // Body text.
-        let body = match root.get("body") {
+        let body = match root.get("content") {
             Some(LoroValue::String(s)) => s.as_ref().to_string(),
             other => panic!("expected body string, got {other:?}"),
         };

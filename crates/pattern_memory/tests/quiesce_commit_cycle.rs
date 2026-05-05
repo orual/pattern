@@ -300,6 +300,7 @@ async fn quiesce_commit_preserves_task_index() {
         description: Some("A skill for the quiesce-commit-cycle test".to_string()),
         keywords: vec!["quiesce".to_string(), "test".to_string()],
         hooks: serde_json::Value::Null,
+        source_plugin_id: None,
     };
     let skill_file = SkillFile {
         metadata: skill_metadata.clone(),

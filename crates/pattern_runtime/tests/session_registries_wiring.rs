@@ -63,7 +63,8 @@ async fn open_with_agent_loop_wires_session_registries() {
         file_policy: None,
         fronting_committer: None,
         constellation_registry: None,
-            sibling_resolver: None,
+        sibling_resolver: None,
+        plugin_registry: None,
     };
 
     let store = Arc::new(InMemoryMemoryStore::new());

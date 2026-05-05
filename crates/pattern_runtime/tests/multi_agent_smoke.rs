@@ -568,6 +568,7 @@ async fn smoke_integrated_turn_loop(
             fronting_committer: None,
             constellation_registry: None,
             sibling_resolver: None,
+            plugin_registry: None,
         }),
     )
     .await
@@ -598,6 +599,7 @@ async fn smoke_integrated_turn_loop(
             fronting_committer: None,
             constellation_registry: None,
             sibling_resolver: None,
+            plugin_registry: None,
         }),
     )
     .await
