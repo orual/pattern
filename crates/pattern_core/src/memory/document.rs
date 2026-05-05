@@ -1031,7 +1031,7 @@ impl StructuredDocument {
                             .to_string(),
                     ));
                 };
-                let body_text = self.doc.get_text("body");
+                let body_text = self.doc.get_text("content");
                 body_text
                     .update(&text, Default::default())
                     .map_err(|e| DocumentError::Other(e.to_string()))?;
@@ -1094,7 +1094,7 @@ impl StructuredDocument {
             BlockSchema::TaskList { .. } => self.doc.get_movable_list("items").id(),
             // Skill blocks store the markdown body in a LoroText container named
             // "body", mirroring the Text variant's "content" container convention.
-            BlockSchema::Skill { .. } => self.doc.get_text("body").id(),
+            BlockSchema::Skill { .. } => self.doc.get_text("content").id(),
         };
         self.doc.subscribe(&container_id, callback)
     }
@@ -1508,8 +1508,16 @@ impl StructuredDocument {
                     }
                 }
 
-                // Body text.
-                let body = self.doc.get_text("body").to_string();
+                // Body text — read from "content" (unified container),
+                // falling back to "body" for legacy skill blocks.
+                let body = {
+                    let content = self.doc.get_text("content").to_string();
+                    if content.is_empty() {
+                        self.doc.get_text("body").to_string()
+                    } else {
+                        content
+                    }
+                };
                 if !body.is_empty() {
                     out.push('\n');
                     out.push_str(&body);
