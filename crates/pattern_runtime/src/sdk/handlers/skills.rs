@@ -494,7 +494,7 @@ pub fn handle_load(
 
     // 3. Project metadata + 4. read body.
     let metadata = project_skill_metadata(sdoc.inner(), handle)?;
-    let body = sdoc.inner().get_text("body").to_string();
+    let body = sdoc.text_content();
 
     // 5. Render markers + body. No <system-reminder> wrap — tool_result has
     //    its own role; the markers themselves are the framing the agent

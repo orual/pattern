@@ -75,24 +75,19 @@ pub async fn install_skills(
             )
             .with_description(format!("Skill: {} (plugin: {})", parsed.metadata.name, plugin_id));
 
-            if let Err(e) = store.create_or_replace_block(&scope, create) {
-                tracing::warn!(skill = %parsed.metadata.name, error = %e, "failed to create skill block");
-                continue;
-            }
-
-            // Now get the block from the cache (this is the live cached instance).
-            let doc = match store.get_block(&scope, &label) {
-                Ok(Some(d)) => d,
-                _ => {
-                    tracing::warn!(skill = %parsed.metadata.name, "block created but not found in cache");
+            let doc = match store.create_or_replace_block(&scope, create) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!(skill = %parsed.metadata.name, error = %e, "failed to create skill block");
                     continue;
                 }
             };
 
-            // Write body content to the CACHED doc.
+            // Write to "content" (the standard text container for all blocks).
             if let Err(e) = doc.set_text(&parsed.body, true) {
                 tracing::warn!(skill = %parsed.metadata.name, error = %e, "set_text failed");
             }
+            doc.inner().commit();
 
             // Persist to disk.
             if let Err(e) = store.mark_dirty(&scope, &label) {
