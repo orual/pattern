@@ -71,13 +71,69 @@ pub async fn install_skills(
                 plugin_id = %plugin_id,
                 skill_name = %parsed.metadata.name,
                 path = %skill_md.display(),
-                "installed skill from CC plugin"
+                "installing skill from CC plugin"
             );
 
-            // TODO: persist_skill_block — requires PluginContext.memory_store
-            // to be wired. For now, log the skill but don't persist.
-            // When memory_store is available:
-            //   persist_skill_block(ctx, parsed.metadata, parsed.extras, parsed.body).await?;
+            // Persist as a Skill block in the memory store.
+            if let (Some(store), Some(scope)) = (&ctx.memory_store, &ctx.scope) {
+                let label = format!("skill-{}", parsed.metadata.name);
+                // Check if skill block already exists (don't overwrite).
+                match store.get_block(scope, &label) {
+                    Ok(Some(_)) => {
+                        tracing::debug!(
+                            skill = %parsed.metadata.name,
+                            "skill block already exists, skipping"
+                        );
+                        continue;
+                    }
+                    _ => {}
+                }
+                let create = pattern_core::types::block::BlockCreate::new(
+                    label.clone(),
+                    pattern_core::types::memory_types::MemoryBlockType::Working,
+                    pattern_core::types::memory_types::BlockSchema::Skill { expected_keys: vec![] },
+                )
+                .with_description(format!(
+                    "Skill: {} (from plugin {})",
+                    parsed.metadata.name, plugin_id
+                ));
+                match store.create_block(scope, create) {
+                    Ok(doc) => {
+                        // Write the skill body as the block content.
+                        if let Err(e) = doc.set_text(&parsed.body, false) {
+                            tracing::warn!(
+                                skill = %parsed.metadata.name,
+                                error = %e,
+                                "failed to set skill body text"
+                            );
+                        }
+                        if let Err(e) = store.persist_block(scope, &label) {
+                            tracing::warn!(
+                                skill = %parsed.metadata.name,
+                                error = %e,
+                                "failed to persist skill block"
+                            );
+                        }
+                        tracing::info!(
+                            skill = %parsed.metadata.name,
+                            plugin = %plugin_id,
+                            "skill block created"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            skill = %parsed.metadata.name,
+                            error = %e,
+                            "failed to create skill block"
+                        );
+                    }
+                }
+            } else {
+                tracing::debug!(
+                    skill = %parsed.metadata.name,
+                    "no memory store available, skill not persisted"
+                );
+            }
         }
     }
     Ok(())
