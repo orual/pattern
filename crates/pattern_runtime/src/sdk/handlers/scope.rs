@@ -199,6 +199,7 @@ mod tests {
     }
 
     impl MemoryStore for ScopeTestStore {
+        fn commit_write(&self, scope: &Scope, label: &str) -> MemoryResult<()> { self.mark_dirty(scope, label)?; self.persist_block(scope, label) }
         fn create_or_replace_block(&self, scope: &Scope, create: BlockCreate) -> MemoryResult<StructuredDocument> { self.create_block(scope, create) }
         fn has_shared_blocks_with(&self, caller: &Scope, target: &Scope) -> MemoryResult<bool> {
             Ok(self

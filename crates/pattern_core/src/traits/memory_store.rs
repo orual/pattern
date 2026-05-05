@@ -74,6 +74,11 @@ pub trait MemoryStore: Send + Sync + fmt::Debug + 'static {
         create: BlockCreate,
     ) -> MemoryResult<StructuredDocument>;
 
+    /// Commit a block write: mark dirty, persist to DB, and trigger file sync.
+    /// This is the correct way to flush mutations to a block. Callers should
+    /// NOT call mark_dirty + persist_block separately.
+    fn commit_write(&self, scope: &Scope, label: &str) -> MemoryResult<()>;
+
     fn delete_block(&self, scope: &Scope, label: &str) -> MemoryResult<()>;
 
     // ========== Content Operations ==========
@@ -176,6 +181,10 @@ pub trait MemoryStore: Send + Sync + fmt::Debug + 'static {
 // `MemoryScope<Arc<dyn MemoryStore>>` can satisfy the `S: MemoryStore`
 // bound without a newtype shim.
 impl MemoryStore for std::sync::Arc<dyn MemoryStore> {
+    fn commit_write(&self, scope: &Scope, label: &str) -> MemoryResult<()> {
+        (**self).commit_write(scope, label)
+    }
+
     fn create_or_replace_block(
         &self,
         scope: &Scope,

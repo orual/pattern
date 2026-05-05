@@ -46,6 +46,7 @@ pub mod memory {
     }
 
     impl MemoryStore for MockMemoryStore {
+        fn commit_write(&self, _scope: &Scope, _label: &str) -> MemoryResult<()> { Ok(()) }
         fn create_or_replace_block(&self, scope: &Scope, create: BlockCreate) -> MemoryResult<StructuredDocument> { self.create_block(scope, create) }
         fn create_block(
             &self,

@@ -94,12 +94,9 @@ pub async fn install_skills(
             }
             doc.inner().commit();
 
-            // Persist to disk.
-            if let Err(e) = store.mark_dirty(&scope, &label) {
-                tracing::warn!(skill = %parsed.metadata.name, error = %e, "mark_dirty failed");
-            }
-            if let Err(e) = store.persist_block(&scope, &label) {
-                tracing::warn!(skill = %parsed.metadata.name, error = %e, "persist failed");
+            // Commit the write (mark dirty + persist + trigger file sync).
+            if let Err(e) = store.commit_write(&scope, &label) {
+                tracing::warn!(skill = %parsed.metadata.name, error = %e, "commit_write failed");
             }
 
             tracing::info!(skill = %parsed.metadata.name, plugin = %plugin_id, "skill loaded");

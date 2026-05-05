@@ -2263,6 +2263,16 @@ impl MemoryStore for MemoryCache {
         self.persist(&scope.to_db_key(), label)
     }
 
+    fn commit_write(&self, scope: &Scope, label: &str) -> MemoryResult<()> {
+        let key = scope.to_db_key();
+        MemoryCache::mark_dirty_checked(self, &key, label, scope)?;
+        self.persist(&key, label)?;
+        if let Ok(Some(block)) = pattern_db::queries::get_block_by_label(&*self.db.get().mem()?, &key, label) {
+            self.maybe_spawn_subscriber_for_block(&block.id);
+        }
+        Ok(())
+    }
+
     fn mark_dirty(&self, scope: &Scope, label: &str) -> MemoryResult<()> {
         // Delegate to existing method, but propagate failure as a typed
         // error rather than silently no-opping. Phase-1 redesign: callers

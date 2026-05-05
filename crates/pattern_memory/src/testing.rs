@@ -80,6 +80,11 @@ impl ScopeTestStore {
 }
 
 impl MemoryStore for ScopeTestStore {
+    fn commit_write(&self, scope: &Scope, label: &str) -> MemoryResult<()> {
+        self.mark_dirty(scope, label)?;
+        self.persist_block(scope, label)
+    }
+
     fn create_or_replace_block(
         &self,
         scope: &Scope,

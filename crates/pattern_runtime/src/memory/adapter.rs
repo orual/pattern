@@ -104,6 +104,10 @@ impl MemoryStore for MemoryStoreAdapter {
         self.inner.list_blocks(filter)
     }
 
+    fn commit_write(&self, scope: &Scope, label: &str) -> MemoryResult<()> {
+        self.inner.commit_write(scope, label)
+    }
+
     fn create_or_replace_block(
         &self,
         scope: &Scope,
