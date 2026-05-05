@@ -99,12 +99,19 @@ pub async fn install_skills(
                 ));
                 match store.create_block(scope, create) {
                     Ok(doc) => {
-                        // Write the skill body as the block content.
+                        // Write skill body into the standard 'content' container
+                        // so Memory.get and Skills.loadSkill can see it.
                         if let Err(e) = doc.set_text(&parsed.body, false) {
+                            tracing::warn!(skill = %parsed.metadata.name, error = %e, "set_text failed");
+                        }
+                        // Also write the full skill layout (metadata/extras/body).
+                        if let Err(e) = pattern_memory::fs::markdown_skill::loro_bridge::write_skill_to_loro_doc(
+                            &parsed, doc.inner(),
+                        ) {
                             tracing::warn!(
                                 skill = %parsed.metadata.name,
                                 error = %e,
-                                "failed to set skill body text"
+                                "failed to write skill LoroDoc content"
                             );
                         }
                         if let Err(e) = store.persist_block(scope, &label) {
