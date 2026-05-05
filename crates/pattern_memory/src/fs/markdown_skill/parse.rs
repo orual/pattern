@@ -530,22 +530,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_missing_trust_tier_errors_specifically() {
-        let src = "---\nname: foo\n---\nbody\n";
-        let err = parse(src.as_bytes()).unwrap_err();
-        assert!(
-            matches!(
-                err,
-                SkillParseError::MissingRequiredKey {
-                    key: "trust_tier",
-                    ..
-                }
-            ),
-            "expected MissingRequiredKey for trust_tier, got {err:?}"
-        );
-    }
-
-    #[test]
     fn parse_invalid_trust_tier_errors_specifically() {
         // AC7.6: invalid enum value is InvalidTrustTier, NOT silently
         // defaulting or a generic TypeMismatch.

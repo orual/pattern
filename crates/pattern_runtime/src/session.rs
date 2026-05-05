@@ -2410,9 +2410,18 @@ impl TidepoolSession {
                         memory_store: Some(session.ctx.memory_store()),
                         scope: Some(session.ctx.default_scope().clone()),
                     };
-                    let result = tokio::task::block_in_place(|| {
-                        handle.block_on(ext.on_enable(&ctx))
-                    });
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        tokio::task::block_in_place(|| {
+                            handle.block_on(ext.on_enable(&ctx))
+                        })
+                    }));
+                    let result = match result {
+                        Ok(inner) => inner,
+                        Err(_) => {
+                            tracing::error!(plugin = %lp.id, "plugin on_enable panicked");
+                            continue;
+                        }
+                    };
                     if let Err(e) = result {
                         tracing::warn!(
                             plugin = %lp.id,
