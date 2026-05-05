@@ -210,10 +210,117 @@ fn parse_cc_hook_declarations(
                 }
             }
             ComponentSpec::Path(path) => {
-                // TODO: read hooks from <plugin_root>/<path>/hooks.json
-                debug!(path = %path.display(), "path-based hook declarations not yet supported");
+                let hooks_json_path = if path.is_absolute() {
+                    path.join("hooks.json")
+                } else {
+                    _plugin_root.join(path).join("hooks.json")
+                };
+                if hooks_json_path.is_file() {
+                    if let Ok(raw) = std::fs::read_to_string(&hooks_json_path) {
+                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+                            // CC hooks.json: { "hooks": { "EventName": [{ matcher, hooks: [...] }] } }
+                            if let Some(hooks_obj) = value.get("hooks").and_then(|v| v.as_object()) {
+                                for (event_name, entries) in hooks_obj {
+                                    if let Some(entries_arr) = entries.as_array() {
+                                        for entry in entries_arr {
+                                            let matcher = entry.get("matcher")
+                                                .and_then(|v| v.as_str())
+                                                .map(|s| s.to_string());
+                                            if let Some(inner_hooks) = entry.get("hooks").and_then(|v| v.as_array()) {
+                                                for hook in inner_hooks {
+                                                    let hook_type = hook.get("type")
+                                                        .and_then(|v| v.as_str())
+                                                        .unwrap_or("command");
+                                                    let handler = match hook_type {
+                                                        "command" => {
+                                                            let command = hook.get("command")
+                                                                .and_then(|v| v.as_str())
+                                                                .unwrap_or("")
+                                                                .to_string();
+                                                            HookHandler::Command { command, env: BTreeMap::new() }
+                                                        }
+                                                        "http" => {
+                                                            let url = hook.get("url")
+                                                                .and_then(|v| v.as_str())
+                                                                .unwrap_or("")
+                                                                .to_string();
+                                                            HookHandler::Http { url, method: None }
+                                                        }
+                                                        other => HookHandler::Skipped {
+                                                            original_type: other.to_string(),
+                                                            reason: "not yet implemented".to_string(),
+                                                        },
+                                                    };
+                                                    decls.push(CcHookDecl {
+                                                        event: event_name.clone(),
+                                                        matcher: matcher.clone(),
+                                                        handler,
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
             _ => {}
+        }
+    }
+
+    // Auto-discover hooks/hooks.json if it exists and wasn't already parsed.
+    // CC plugins often put hooks in a hooks/ directory without referencing
+    // it in plugin.json.
+    if decls.is_empty() {
+        let auto_hooks = _plugin_root.join("hooks").join("hooks.json");
+        if auto_hooks.is_file() {
+            if let Ok(raw) = std::fs::read_to_string(&auto_hooks) {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    if let Some(hooks_obj) = value.get("hooks").and_then(|v| v.as_object()) {
+                        for (event_name, entries) in hooks_obj {
+                            if let Some(entries_arr) = entries.as_array() {
+                                for entry in entries_arr {
+                                    let matcher = entry.get("matcher")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string());
+                                    if let Some(inner_hooks) = entry.get("hooks").and_then(|v| v.as_array()) {
+                                        for hook in inner_hooks {
+                                            let hook_type = hook.get("type")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("command");
+                                            let handler = match hook_type {
+                                                "command" => HookHandler::Command {
+                                                    command: hook.get("command")
+                                                        .and_then(|v| v.as_str())
+                                                        .unwrap_or("").to_string(),
+                                                    env: BTreeMap::new(),
+                                                },
+                                                "http" => HookHandler::Http {
+                                                    url: hook.get("url")
+                                                        .and_then(|v| v.as_str())
+                                                        .unwrap_or("").to_string(),
+                                                    method: None,
+                                                },
+                                                other => HookHandler::Skipped {
+                                                    original_type: other.to_string(),
+                                                    reason: "not yet implemented".to_string(),
+                                                },
+                                            };
+                                            decls.push(CcHookDecl {
+                                                event: event_name.clone(),
+                                                matcher: matcher.clone(),
+                                                handler,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

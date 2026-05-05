@@ -103,7 +103,23 @@ fn cmd_plugin(cmd: PluginCmd) -> MietteResult<()> {
             // Try direct install first. If no manifest found, scan subdirectories.
             match reg.install(InstallSource::LocalPath(&path), scope.clone()) {
                 Ok(lp) => {
-                    println!("Installed plugin: {} (scope: {:?})", lp.id, lp.scope);
+                    // Call on_install for the extension (imports skills, etc.)
+            if let Some(ext) = &lp.extension {
+                let ctx = pattern_core::traits::plugin::PluginContext {
+                    plugin_id: lp.id.clone(),
+                    hook_bus: std::sync::Arc::new(pattern_core::hooks::HookBus::new()),
+                    plugin_root: lp.source_path.clone(),
+                    memory_store: None,
+                    scope: None,
+                };
+                // on_install is async; use a throwaway runtime.
+                let rt = tokio::runtime::Runtime::new()
+                    .map_err(|e| miette::miette!("failed to create runtime: {e}"))?;
+                if let Err(e) = rt.block_on(ext.on_install(&ctx)) {
+                    eprintln!("Warning: on_install failed for {}: {e}", lp.id);
+                }
+            }
+            println!("Installed plugin: {} (scope: {:?})", lp.id, lp.scope);
                 }
                 Err(_) => {
                     // Scan for plugin subdirectories (multi-plugin repos).
@@ -124,6 +140,21 @@ fn cmd_plugin(cmd: PluginCmd) -> MietteResult<()> {
                             {
                                 match reg.install(InstallSource::LocalPath(&sub), scope.clone()) {
                                     Ok(lp) => {
+                                        if let Some(ext) = &lp.extension {
+                                            let ctx = pattern_core::traits::plugin::PluginContext {
+                                                plugin_id: lp.id.clone(),
+                                                hook_bus: std::sync::Arc::new(pattern_core::hooks::HookBus::new()),
+                                                plugin_root: lp.source_path.clone(),
+                                                memory_store: None,
+                                                scope: None,
+                                            };
+                                            let rt = tokio::runtime::Runtime::new().ok();
+                                            if let Some(rt) = rt {
+                                                if let Err(e) = rt.block_on(ext.on_install(&ctx)) {
+                                                    eprintln!("Warning: on_install for {}: {e}", lp.id);
+                                                }
+                                            }
+                                        }
                                         println!("Installed: {} (scope: {:?})", lp.id, lp.scope);
                                         found = true;
                                     }
