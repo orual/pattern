@@ -40,7 +40,7 @@ test-support = ["dep:tidepool-testing", "pattern-memory/test-support", "dep:toki
 subscription-oauth = ["pattern-provider/subscription-oauth"]
 
 [dependencies]
-pattern-core   = { path = "../pattern_core" }
+pattern-core   = { path = "../pattern_core", features = ["mcp-client"] }
 pattern-db     = { path = "../pattern_db" }
 pattern-memory = { path = "../pattern_memory" }
 # pattern-provider: consumed by the `pattern-test-cli` bin for live-tier

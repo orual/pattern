@@ -15,6 +15,7 @@ pub mod compaction;
 pub mod file_manager;
 pub mod fronting_dispatch;
 pub mod mailbox;
+pub mod mcp;
 pub mod memory;
 pub mod permission;
 pub mod persona_loader;
