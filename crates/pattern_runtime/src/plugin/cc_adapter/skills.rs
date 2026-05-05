@@ -71,7 +71,9 @@ pub async fn install_skills(
             let doc = match store.get_block(&scope, &label) {
                 Ok(Some(existing)) => existing,
                 _ => {
-                    // Block doesn't exist in memory — try to create it.
+                    // Block might exist in DB from a previous session but not in memory.
+                    // Delete it to avoid unique constraint errors.
+                    let _ = store.delete_block(&scope, &label);
                     let create = pattern_core::types::block::BlockCreate::new(
                         label.clone(),
                         MemoryBlockType::Working,
