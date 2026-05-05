@@ -65,6 +65,18 @@ pub trait MemoryStore: Send + Sync + fmt::Debug + 'static {
     fn list_blocks(&self, filter: BlockFilter) -> MemoryResult<Vec<BlockMetadata>>;
 
     /// Delete (deactivate) a block.
+    /// Create or replace a block (system-level upsert).
+    /// Removes any existing block with the same label first.
+    /// Default: delete + create. Implementors can override with atomic ops.
+    fn create_or_replace_block(
+        &self,
+        scope: &Scope,
+        create: BlockCreate,
+    ) -> MemoryResult<StructuredDocument> {
+        let _ = self.delete_block(scope, &create.label);
+        self.create_block(scope, create)
+    }
+
     fn delete_block(&self, scope: &Scope, label: &str) -> MemoryResult<()>;
 
     // ========== Content Operations ==========

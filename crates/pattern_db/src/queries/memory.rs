@@ -256,6 +256,19 @@ pub fn create_block(conn: &rusqlite::Connection, block: &MemoryBlock) -> DbResul
     Ok(())
 }
 
+/// Create or replace a memory block by (agent_id, label).
+///
+/// If a block with the same (agent_id, label) exists, replaces it entirely.
+/// Used by plugin skill installation where the plugin cache is authoritative.
+pub fn create_or_replace_block(conn: &rusqlite::Connection, block: &MemoryBlock) -> DbResult<()> {
+    // Delete any existing block with same (agent_id, label) first.
+    conn.execute(
+        "DELETE FROM memory_blocks WHERE agent_id = ?1 AND label = ?2",
+        rusqlite::params![block.agent_id, block.label],
+    )?;
+    create_block(conn, block)
+}
+
 /// Create or update a memory block (upsert).
 ///
 /// If a block with the same ID exists, it will be updated in place.

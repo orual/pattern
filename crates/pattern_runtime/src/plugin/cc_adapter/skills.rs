@@ -71,9 +71,8 @@ pub async fn install_skills(
             let doc = match store.get_block(&scope, &label) {
                 Ok(Some(existing)) => existing,
                 _ => {
-                    // Block might exist in DB from a previous session but not in memory.
-                    // Delete it to avoid unique constraint errors.
-                    let _ = store.delete_block(&scope, &label);
+                    // Block might exist in DB from a previous session.
+                    // Use create_or_replace to handle conflicts.
                     let create = pattern_core::types::block::BlockCreate::new(
                         label.clone(),
                         MemoryBlockType::Working,
@@ -81,7 +80,7 @@ pub async fn install_skills(
                     )
                     .with_description(format!("Skill: {} (plugin: {})", parsed.metadata.name, plugin_id));
 
-                    match store.create_block(&scope, create) {
+                    match store.create_or_replace_block(&scope, create) {
                         Ok(doc) => doc,
                         Err(e) => {
                             tracing::warn!(
