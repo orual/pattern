@@ -32,6 +32,10 @@ pub struct LoadedPlugin {
     pub user_config: serde_json::Value,
     /// Capability overrides from the registry.
     pub capability_overrides: Option<CapabilitySet>,
+    /// The plugin's runtime-facing extension trait object.
+    pub extension: Option<std::sync::Arc<dyn pattern_core::traits::plugin::PluginExtension>>,
+    /// Plugin → runtime callback host. None for CC plugins (no callbacks).
+    pub host: Option<std::sync::Arc<dyn pattern_core::traits::plugin::PluginHost>>,
 }
 
 // ---- KDL persistence types (knus::Decode) -----------------------------------
@@ -207,6 +211,8 @@ impl PluginRegistry {
                         manifest,
                         user_config: serde_json::Value::Null,
                         capability_overrides: None,
+                        extension: None,
+                        host: None,
                     };
                     combined.insert(lp.id.clone(), lp);
                 }
@@ -335,10 +341,12 @@ impl PluginRegistry {
         let lp = LoadedPlugin {
             id: manifest.name.clone(),
             scope,
-            source_path: dest,
-            manifest,
+            source_path: dest.clone(),
+            manifest: manifest.clone(),
             user_config: serde_json::Value::Null,
             capability_overrides: None,
+            extension: build_extension(&manifest, &dest),
+            host: None,
         };
 
         self.insert(lp.clone());
@@ -450,6 +458,23 @@ impl PluginRegistry {
     }
 }
 
+/// Build the appropriate PluginExtension based on manifest source format.
+fn build_extension(
+    manifest: &pattern_core::plugin::manifest::PluginManifest,
+    source_path: &std::path::Path,
+) -> Option<std::sync::Arc<dyn pattern_core::traits::plugin::PluginExtension>> {
+    if manifest.cc.is_some() {
+        Some(super::cc_adapter::CcPluginAdapter::wrap(
+            manifest.name.clone(),
+            source_path.to_path_buf(),
+            manifest.clone(),
+        ))
+    } else {
+        // Native IRPC plugins get their extension in Phase 6.
+        None
+    }
+}
+
 /// Source for plugin installation.
 pub enum InstallSource<'a> {
     /// Install from a local directory path.
@@ -534,7 +559,9 @@ fn build_loaded_from_installation(
         source_path: source_path.to_path_buf(),
         manifest,
         user_config,
-        capability_overrides: None, // TODO: wire from inst.capability_override
+        capability_overrides: None,
+        extension: None,
+        host: None,
     }
 }
 
