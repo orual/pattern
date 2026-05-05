@@ -67,39 +67,29 @@ pub async fn install_skills(
 
             let label = format!("skill-{}", parsed.metadata.name);
 
-            // Try to get existing block first (handles cross-session persistence).
-            tracing::debug!(label = %label, scope = %scope, "skill: checking for existing block");
-            let doc = match store.get_block(&scope, &label) {
-                Ok(Some(existing)) => {
-                    tracing::debug!(label = %label, "skill: found existing block, will update");
-                    existing
-                }
-                _ => {
-                    tracing::debug!(label = %label, "skill: block not found, using create_or_replace");
-                    // Block might exist in DB from a previous session.
-                    // Use create_or_replace to handle conflicts.
-                    let create = pattern_core::types::block::BlockCreate::new(
-                        label.clone(),
-                        MemoryBlockType::Working,
-                        pattern_core::types::memory_types::BlockSchema::Skill { expected_keys: vec![] },
-                    )
-                    .with_description(format!("Skill: {} (plugin: {})", parsed.metadata.name, plugin_id));
+            // Create or replace the block.
+            let create = pattern_core::types::block::BlockCreate::new(
+                label.clone(),
+                MemoryBlockType::Working,
+                pattern_core::types::memory_types::BlockSchema::Skill { expected_keys: vec![] },
+            )
+            .with_description(format!("Skill: {} (plugin: {})", parsed.metadata.name, plugin_id));
 
-                    match store.create_or_replace_block(&scope, create) {
-                        Ok(doc) => doc,
-                        Err(e) => {
-                            tracing::warn!(
-                                skill = %parsed.metadata.name,
-                                error = %e,
-                                "failed to create skill block"
-                            );
-                            continue;
-                        }
-                    }
+            if let Err(e) = store.create_or_replace_block(&scope, create) {
+                tracing::warn!(skill = %parsed.metadata.name, error = %e, "failed to create skill block");
+                continue;
+            }
+
+            // Now get the block from the cache (this is the live cached instance).
+            let doc = match store.get_block(&scope, &label) {
+                Ok(Some(d)) => d,
+                _ => {
+                    tracing::warn!(skill = %parsed.metadata.name, "block created but not found in cache");
+                    continue;
                 }
             };
 
-            // Write body content (authoritative from plugin cache).
+            // Write body content to the CACHED doc.
             if let Err(e) = doc.set_text(&parsed.body, true) {
                 tracing::warn!(skill = %parsed.metadata.name, error = %e, "set_text failed");
             }
