@@ -2565,13 +2565,11 @@ mod tests {
             .expect("Skill import_from_json should accept {\"body\": \"...\"}");
         doc.commit();
         // The body text must match exactly what was written.
-        // Access via inner() since the "body" container is Skill-specific and
-        // not exposed through the StructuredDocument's text_content() helper
-        // (which reads from the generic "content" container used by Text schema).
+        // Skills now use the unified "content" container.
         assert_eq!(
-            doc.inner().get_text("body").to_string(),
+            doc.text_content(),
             "text content",
-            "body LoroText should contain the written string"
+            "content should contain the written string"
         );
     }
 
