@@ -2393,18 +2393,24 @@ impl TidepoolSession {
 
         // Enable loaded plugins (Phase 3). Each plugin's on_enable()
         // wires its hook subscriptions to the session's HookBus.
+        // Uses block_in_place because we're inside a tokio runtime.
         if let Some(plugin_reg) = session.ctx.plugin_registry() {
             let plugins = plugin_reg.list();
+            let hook_bus = session.ctx.hook_bus().clone();
+            let handle = session.ctx.tokio_handle().clone();
             for lp in &plugins {
                 if let Some(ext) = &lp.extension {
                     let ctx = pattern_core::traits::plugin::PluginContext {
                         plugin_id: lp.id.clone(),
-                        hook_bus: session.ctx.hook_bus().clone(),
+                        hook_bus: hook_bus.clone(),
                         plugin_root: lp.source_path.clone(),
-                        memory_store: None, // TODO: wire memory store for skill persistence
+                        memory_store: None,
                         scope: None,
                     };
-                    if let Err(e) = session.ctx.tokio_handle().block_on(ext.on_enable(&ctx)) {
+                    let result = tokio::task::block_in_place(|| {
+                        handle.block_on(ext.on_enable(&ctx))
+                    });
+                    if let Err(e) = result {
                         tracing::warn!(
                             plugin = %lp.id,
                             error = %e,
