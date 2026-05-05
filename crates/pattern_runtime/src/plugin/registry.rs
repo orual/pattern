@@ -204,6 +204,7 @@ impl PluginRegistry {
         if global_root.is_dir() {
             for entry in scan_plugin_dirs(&global_root)? {
                 if let Ok(manifest) = load_manifest_from_dir(&entry) {
+                    let ext = build_extension(&manifest, &entry);
                     let lp = LoadedPlugin {
                         id: manifest.name.clone(),
                         scope: PluginScope::Ambient,
@@ -211,7 +212,7 @@ impl PluginRegistry {
                         manifest,
                         user_config: serde_json::Value::Null,
                         capability_overrides: None,
-                        extension: None,
+                        extension: ext,
                         host: None,
                     };
                     combined.insert(lp.id.clone(), lp);
@@ -553,6 +554,7 @@ fn build_loaded_from_installation(
         })
         .unwrap_or(serde_json::Value::Null);
 
+    let ext = build_extension(&manifest, source_path);
     LoadedPlugin {
         id: manifest.name.clone(),
         scope,
@@ -560,7 +562,7 @@ fn build_loaded_from_installation(
         manifest,
         user_config,
         capability_overrides: None,
-        extension: None,
+        extension: ext,
         host: None,
     }
 }
