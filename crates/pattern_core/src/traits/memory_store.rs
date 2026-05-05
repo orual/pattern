@@ -67,15 +67,12 @@ pub trait MemoryStore: Send + Sync + fmt::Debug + 'static {
     /// Delete (deactivate) a block.
     /// Create or replace a block (system-level upsert).
     /// Removes any existing block with the same label first.
-    /// Default: delete + create. Implementors can override with atomic ops.
+    /// Implementors must provide an atomic delete+create.
     fn create_or_replace_block(
         &self,
         scope: &Scope,
         create: BlockCreate,
-    ) -> MemoryResult<StructuredDocument> {
-        let _ = self.delete_block(scope, &create.label);
-        self.create_block(scope, create)
-    }
+    ) -> MemoryResult<StructuredDocument>;
 
     fn delete_block(&self, scope: &Scope, label: &str) -> MemoryResult<()>;
 
@@ -179,6 +176,14 @@ pub trait MemoryStore: Send + Sync + fmt::Debug + 'static {
 // `MemoryScope<Arc<dyn MemoryStore>>` can satisfy the `S: MemoryStore`
 // bound without a newtype shim.
 impl MemoryStore for std::sync::Arc<dyn MemoryStore> {
+    fn create_or_replace_block(
+        &self,
+        scope: &Scope,
+        create: BlockCreate,
+    ) -> MemoryResult<StructuredDocument> {
+        (**self).create_or_replace_block(scope, create)
+    }
+
     fn create_block(
         &self,
         scope: &Scope,

@@ -80,6 +80,15 @@ impl ScopeTestStore {
 }
 
 impl MemoryStore for ScopeTestStore {
+    fn create_or_replace_block(
+        &self,
+        scope: &Scope,
+        create: BlockCreate,
+    ) -> MemoryResult<StructuredDocument> {
+        let _ = self.delete_block(scope, &create.label);
+        self.create_block(scope, create)
+    }
+
     fn create_block(
         &self,
         scope: &Scope,

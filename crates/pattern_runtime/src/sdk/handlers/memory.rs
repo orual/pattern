@@ -627,6 +627,7 @@ mod tests {
     struct NeverStore;
 
     impl MemoryStore for NeverStore {
+        fn create_or_replace_block(&self, _scope: &Scope, _create: BlockCreate) -> MemoryResult<StructuredDocument> { unreachable!() }
         fn create_block(
             &self,
             _s: &Scope,

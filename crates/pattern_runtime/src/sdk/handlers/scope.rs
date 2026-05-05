@@ -199,6 +199,7 @@ mod tests {
     }
 
     impl MemoryStore for ScopeTestStore {
+        fn create_or_replace_block(&self, scope: &Scope, create: BlockCreate) -> MemoryResult<StructuredDocument> { self.create_block(scope, create) }
         fn has_shared_blocks_with(&self, caller: &Scope, target: &Scope) -> MemoryResult<bool> {
             Ok(self
                 .shared_blocks
