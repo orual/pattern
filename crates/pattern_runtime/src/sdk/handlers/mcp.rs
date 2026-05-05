@@ -41,7 +41,10 @@ where
 
         // Effect-class runtime guard. Mcp.Use is Escape/Enforce.
         let constructor_name = match &req {
-            McpReq::Use(_, _) => "Use",
+            McpReq::Call(..) => "Call",
+            McpReq::Introspect(..) => "Introspect",
+            McpReq::ListServers => "ListServers",
+            McpReq::Unload(..) => "Unload",
         };
         crate::sdk::effect_classes::check_effect_class(
             cx.user().capabilities(),
@@ -50,9 +53,8 @@ where
         )?;
 
         Err(EffectError::Handler(format!(
-            "Pattern.Mcp.{req:?} is not implemented in v3 foundation \
-             (phase: post-foundation plugin-system plan). Agent code should \
-             not call MCP effects in v3-foundation-scope programs."
+            "Pattern.Mcp.{constructor_name} is not yet connected to McpRegistry. \
+             MCP server connections will be wired in the next phase."
         )))
     }
 }
@@ -63,16 +65,14 @@ mod tests {
     use tidepool_repr::DataConTable;
 
     #[test]
-    fn mcp_stub_reports_not_implemented() {
+    fn mcp_handler_returns_not_connected() {
         let mut h = McpHandler;
         let table = DataConTable::new();
         let cx = EffectContext::with_user(&table, &());
         let err = h
-            .handle(McpReq::Use("server".into(), "method".into()), &cx)
+            .handle(McpReq::ListServers, &cx)
             .unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("Pattern.Mcp"), "got: {msg}");
-        assert!(msg.contains("not implemented"), "got: {msg}");
-        assert!(msg.contains("plugin-system plan"), "got: {msg}");
+        assert!(msg.contains("McpRegistry"), "got: {msg}");
     }
 }

@@ -1,24 +1,38 @@
 {-# LANGUAGE GADTs #-}
 -- | Pattern.Mcp — Model-Context-Protocol tool calls.
 --
--- Stubbed in Phase 3. The runtime currently returns NotImplemented. Real
--- implementation lives in the post-foundation plugin-system plan.
---
--- @Use@ is chosen to match AI-agent parlance — "the agent uses the
--- search tool" — and to avoid a generic @Call@ constructor that could
--- collide with other effect modules.
+-- Four operations for interacting with MCP servers:
+-- Call (invoke a tool), Introspect (list tools on a server),
+-- ListServers (list connected servers), Unload (disconnect).
 module Pattern.Mcp where
 
 import Control.Monad.Freer (Eff, Member, send)
 import Data.Text (Text)
+import Pattern.Aeson (Value)
 
 type Server = Text
 type Method = Text
+type Payload = Text
 
 -- | Effect algebra.
 data Mcp a where
-  Use :: Server -> Method -> Mcp ()
+  Call        :: Server -> Method -> Payload -> Mcp Value
+  Introspect  :: Server -> Mcp Text
+  ListServers :: Mcp Text
+  Unload      :: Server -> Mcp ()
 
--- | Use a tool on an MCP server by name.
-use :: Member Mcp effs => Server -> Method -> Eff effs ()
-use s m = send (Use s m)
+-- | Call a tool on an MCP server. Args is a JSON string.
+call :: Member Mcp effs => Server -> Method -> Payload -> Eff effs Value
+call s m args = send (Call s m args)
+
+-- | Get tool metadata for a server (returns JSON text).
+introspect :: Member Mcp effs => Server -> Eff effs Text
+introspect s = send (Introspect s)
+
+-- | List all connected MCP servers (returns JSON text).
+listServers :: Member Mcp effs => Eff effs Text
+listServers = send ListServers
+
+-- | Disconnect an MCP server.
+unload :: Member Mcp effs => Server -> Eff effs ()
+unload s = send (Unload s)
