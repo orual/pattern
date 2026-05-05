@@ -48,9 +48,15 @@ pub fn cc_alias_map() -> HashMap<&'static str, Vec<&'static str>> {
     map.insert("onMessageSent", vec![super::tags::MESSAGE_SENT]);
     map.insert("onMessageReceived", vec![super::tags::MESSAGE_RECEIVED]);
 
-    // Additional CC events not in the original map.
+    // CC PascalCase event names (the actual format used in hooks.json).
+    map.entry("PreToolUse").or_default().push(super::tags::TOOL_BEFORE);
     map.entry("PostToolUse").or_default().push(super::tags::TOOL_AFTER);
     map.entry("SessionStart").or_default().push(super::tags::SESSION_OPENED);
+    map.entry("Stop").or_default().push(super::tags::TURN_STOP);
+    map.entry("ToolError").or_default().push(super::tags::TOOL_AFTER);
+    map.entry("SubagentStop").or_default().push(super::tags::SPAWN_EPHEMERAL_EXIT);
+    // Notification is a CC event for model output.
+    map.entry("Notification").or_default().push(super::tags::TURN_STOP);
 
     map
 }
