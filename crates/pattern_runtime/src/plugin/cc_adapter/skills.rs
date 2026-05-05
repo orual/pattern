@@ -78,15 +78,15 @@ pub async fn install_skills(
             if let (Some(store), Some(scope)) = (&ctx.memory_store, &ctx.scope) {
                 let label = format!("skill-{}", parsed.metadata.name);
                 // Check if skill block already exists (don't overwrite).
-                match store.get_block(scope, &label) {
-                    Ok(Some(_)) => {
-                        tracing::debug!(
-                            skill = %parsed.metadata.name,
-                            "skill block already exists, skipping"
-                        );
-                        continue;
+                // Overwrite if exists — plugin cache is authoritative.
+                if let Ok(Some(existing)) = store.get_block(scope, &label) {
+                    if let Err(e) = existing.set_text(&parsed.body, false) {
+                        tracing::warn!(skill = %parsed.metadata.name, error = %e, "failed to update skill body");
                     }
-                    _ => {}
+                    if let Err(e) = store.persist_block(scope, &label) {
+                        tracing::warn!(skill = %parsed.metadata.name, error = %e, "failed to persist skill");
+                    }
+                    continue;
                 }
                 let create = pattern_core::types::block::BlockCreate::new(
                     label.clone(),
