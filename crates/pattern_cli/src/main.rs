@@ -63,9 +63,48 @@ fn cmd_plugin(cmd: PluginCmd) -> MietteResult<()> {
                 "project" => pattern_core::plugin::PluginScope::Project { private: false },
                 _ => pattern_core::plugin::PluginScope::Global,
             };
-            let lp = reg.install(InstallSource::LocalPath(&path), scope)
-                .map_err(|e| miette::miette!("install failed: {e}"))?;
-            println!("Installed plugin: {} (scope: {:?})", lp.id, lp.scope);
+            // Try direct install first. If no manifest found, scan subdirectories.
+            match reg.install(InstallSource::LocalPath(&path), scope.clone()) {
+                Ok(lp) => {
+                    println!("Installed plugin: {} (scope: {:?})", lp.id, lp.scope);
+                }
+                Err(_) => {
+                    // Scan for plugin subdirectories (multi-plugin repos).
+                    let mut found = false;
+                    // Check plugins/ subdir first (CC convention).
+                    let scan_dir = if path.join("plugins").is_dir() {
+                        path.join("plugins")
+                    } else {
+                        path.clone()
+                    };
+                    if let Ok(entries) = std::fs::read_dir(&scan_dir) {
+                        for entry in entries.flatten() {
+                            let sub = entry.path();
+                            if !sub.is_dir() { continue; }
+                            // Check if this subdir has a manifest.
+                            if sub.join("manifest.kdl").exists()
+                                || sub.join(".claude-plugin").join("plugin.json").exists()
+                            {
+                                match reg.install(InstallSource::LocalPath(&sub), scope.clone()) {
+                                    Ok(lp) => {
+                                        println!("Installed: {} (scope: {:?})", lp.id, lp.scope);
+                                        found = true;
+                                    }
+                                    Err(e) => {
+                                        eprintln!("Failed to install {}: {e}", sub.display());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if !found {
+                        return Err(miette::miette!(
+                            "no plugins found at {} (checked for manifest.kdl or .claude-plugin/plugin.json)",
+                            path.display()
+                        ));
+                    }
+                }
+            }
         }
         PluginSub::List => {
             let plugins = reg.list();
