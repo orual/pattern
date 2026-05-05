@@ -2676,6 +2676,29 @@ async fn open_session_with_persona(
             ),
         );
 
+    // Load the global plugin registry.
+    let plugin_registry_for_session = pattern_memory::paths::PatternPaths::default_paths()
+        .ok()
+        .and_then(|paths| {
+            let paths = std::sync::Arc::new(paths);
+            match pattern_runtime::plugin::registry::PluginRegistry::load(
+                paths,
+                Some(project_mount.mount_path.clone()),
+            ) {
+                Ok(reg) => {
+                    let count = reg.list().len();
+                    if count > 0 {
+                        tracing::info!(plugin_count = count, "loaded plugin registry");
+                    }
+                    Some(std::sync::Arc::new(reg))
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to load plugin registry");
+                    None
+                }
+            }
+        });
+
     let registries = SessionRegistries {
         agent_registry: Some(project_mount.agent_registry.clone()),
         router_registry: Some(router_reg),
@@ -2685,7 +2708,7 @@ async fn open_session_with_persona(
         fronting_committer: Some(fronting_committer),
         constellation_registry: Some(project_mount.constellation_registry.clone()),
         sibling_resolver: Some(sibling_resolver),
-        plugin_registry: None, // TODO: wire from DaemonServer when plugin loading lands
+        plugin_registry: plugin_registry_for_session,
     };
     let session = TidepoolSession::open_with_agent_loop(
         persona,
