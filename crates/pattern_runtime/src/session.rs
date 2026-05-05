@@ -389,6 +389,8 @@ pub struct SessionContext {
     port_registry: Option<Arc<crate::port_registry::PortRegistryImpl>>,
     /// Per-session hook event bus.
     hook_bus: Arc<pattern_core::hooks::HookBus>,
+    /// Plugin registry (shared across sessions within a mount).
+    plugin_registry: Option<Arc<crate::plugin::registry::PluginRegistry>>,
     /// Bridge for sync handler → async hook dispatch.
     hook_bridge: crate::hooks::HookBridge,
     /// Session-scoped UUID minted at open. Used by handlers that key
@@ -741,6 +743,7 @@ impl SessionContext {
         let hook_bus__ = Arc::new(pattern_core::hooks::HookBus::new());
         let hook_bridge__ = crate::hooks::HookBridge::spawn(hook_bus__.clone());
         Self {
+            plugin_registry: None,
             agent_id,
             default_scope,
             // Thread the caller's declared model through so the composer's
@@ -930,6 +933,17 @@ impl SessionContext {
     /// The hook bridge for sync handler → async dispatch.
     pub fn hook_bridge(&self) -> &crate::hooks::HookBridge {
         &self.hook_bridge
+    }
+
+    /// The plugin registry.
+    pub fn plugin_registry(&self) -> Option<&Arc<crate::plugin::registry::PluginRegistry>> {
+        self.plugin_registry.as_ref()
+    }
+
+    /// Set the plugin registry.
+    pub fn with_plugin_registry(mut self, reg: Arc<crate::plugin::registry::PluginRegistry>) -> Self {
+        self.plugin_registry = Some(reg);
+        self
     }
 
     pub fn port_registry(&self) -> Option<&Arc<crate::port_registry::PortRegistryImpl>> {
@@ -1181,6 +1195,7 @@ impl SessionContext {
             port_registry: self.port_registry.clone(),
             hook_bus: self.hook_bus.clone(),
             hook_bridge: self.hook_bridge.clone(),
+            plugin_registry: self.plugin_registry.clone(),
             // Each ephemeral child gets a fresh session_id (so its
             // PortHandler subscription channels don't collide with the
             // parent's). Inherit `shell_default_timeout` — children
@@ -1739,6 +1754,9 @@ pub struct SessionRegistries {
     /// `ConstellationSiblingResolver::new(constellation_registry)`
     /// so siblings can be resolved against the persona registry.
     pub sibling_resolver: Option<Arc<dyn crate::spawn::sibling::SiblingPersonaResolver>>,
+    /// Optional plugin registry. When set, plugins are enabled at session open
+    /// and their hook subscriptions are wired to the session's HookBus.
+    pub plugin_registry: Option<Arc<crate::plugin::registry::PluginRegistry>>,
 }
 
 /// Extras required to construct a [`crate::wake::WakeRegistry`] inside
@@ -2175,6 +2193,13 @@ impl TidepoolSession {
             // bridge (so config-KDL writes escalate correctly). FM
             // construction MUST happen before the eval worker spawns
             // so the worker observes the wired session context.
+            // Wire PluginRegistry if supplied.
+            let ctx = if let Some(plugin_reg) = regs.plugin_registry {
+                ctx.with_plugin_registry(plugin_reg)
+            } else {
+                ctx
+            };
+
             if let Some(policy) = regs.file_policy {
                 let fm_caps = Arc::new(
                     capabilities
@@ -2364,6 +2389,30 @@ impl TidepoolSession {
                 session.ctx.clone(),
             );
             wake_reg.set_custom_evaluator(Arc::new(evaluator));
+        }
+
+        // Enable loaded plugins (Phase 3). Each plugin's on_enable()
+        // wires its hook subscriptions to the session's HookBus.
+        if let Some(plugin_reg) = session.ctx.plugin_registry() {
+            let plugins = plugin_reg.list();
+            for lp in &plugins {
+                if let Some(ext) = &lp.extension {
+                    let ctx = pattern_core::traits::plugin::PluginContext {
+                        plugin_id: lp.id.clone(),
+                        hook_bus: session.ctx.hook_bus().clone(),
+                        plugin_root: lp.source_path.clone(),
+                        memory_store: None, // TODO: wire memory store for skill persistence
+                        scope: None,
+                    };
+                    if let Err(e) = session.ctx.tokio_handle().block_on(ext.on_enable(&ctx)) {
+                        tracing::warn!(
+                            plugin = %lp.id,
+                            error = %e,
+                            "plugin on_enable failed"
+                        );
+                    }
+                }
+            }
         }
 
         // Register this session with the AgentRegistry (Phase 4 T4) if the

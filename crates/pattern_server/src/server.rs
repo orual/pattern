@@ -2690,6 +2690,7 @@ async fn open_session_with_persona(
         fronting_committer: Some(fronting_committer),
         constellation_registry: Some(project_mount.constellation_registry.clone()),
         sibling_resolver: Some(sibling_resolver),
+        plugin_registry: None, // TODO: wire from DaemonServer when plugin loading lands
     };
     let session = TidepoolSession::open_with_agent_loop(
         persona,
