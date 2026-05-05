@@ -204,11 +204,8 @@ fn visit_root(
             span: None,
         });
     }
-    let trust_tier = trust_tier.ok_or(SkillParseError::MissingRequiredKey {
-        key: "trust_tier",
-        source_text: source_text.to_string(),
-        span: None,
-    })?;
+    // Default to AdHoc when trust_tier is missing (CC SKILL.md compatibility).
+    let trust_tier = trust_tier.unwrap_or(SkillTrustTier::AdHoc);
 
     let metadata = SkillMetadata {
         name,

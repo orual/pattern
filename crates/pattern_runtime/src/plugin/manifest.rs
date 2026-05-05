@@ -135,12 +135,13 @@ pub fn from_cc_json_str(json: &str, path: &Path) -> Result<PluginManifest, Manif
         }
     }
 
-    if !cc_fields.is_empty() {
-        manifest.cc = Some(Cc {
-            source_format: "plugin.json".into(),
-            fields: cc_fields,
-        });
-    }
+    // Always set cc for CC-sourced manifests. The source_format
+    // indicates this is a CC plugin regardless of whether there are
+    // unknown fields to preserve.
+    manifest.cc = Some(Cc {
+        source_format: "plugin.json".into(),
+        fields: cc_fields,
+    });
 
     if manifest.name.is_empty() {
         return Err(ManifestError::MissingField {

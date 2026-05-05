@@ -446,6 +446,7 @@ fn smoke_skills_surface() {
         description: Some("Handles OAuth2 authorization code flow".to_string()),
         keywords: vec!["oauth2".to_string(), "auth".to_string()],
         hooks: hooks_value.clone(),
+        source_plugin_id: None,
     };
     let skill_body = "## OAuth2 Helper\n\nThis skill handles PKCE and token refresh.\n";
 
@@ -680,6 +681,7 @@ fn smoke_cross_schema_fts() {
             description: Some(format!("Monitors {COMMON_KEYWORD} levels")),
             keywords: vec![COMMON_KEYWORD.to_string()],
             hooks: serde_json::Value::Null,
+            source_plugin_id: None,
         },
         &format!("## {COMMON_KEYWORD} Monitor\n\nTracks fluid intake.\n"),
     );
@@ -890,6 +892,7 @@ fn smoke_scope_enforcement() {
                 description: Some("Visible only in project scope".to_string()),
                 keywords: vec!["scoped".to_string()],
                 hooks: serde_json::Value::Null,
+                source_plugin_id: None,
             },
             extras: loro::LoroValue::Map(Default::default()),
             body: "## Project Skill\n\nFor project use only.\n".to_string(),
@@ -924,6 +927,7 @@ fn smoke_scope_enforcement() {
                 description: Some("Must be hidden under Full isolation".to_string()),
                 keywords: vec!["persona".to_string()],
                 hooks: serde_json::Value::Null,
+                source_plugin_id: None,
             },
             extras: loro::LoroValue::Map(Default::default()),
             body: "## Persona Skill\n\nPersona-private.\n".to_string(),
